@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-abi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "clockwork's C ABI as Rust: the guest boundary (dsp_api.h), the client boundary (clockwork_client.h) and the event sinks (clockwork_event_sink.h), declared once and checked against the headers by a compiled probe, so a guest or a client written in Rust cannot drift from them silently."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]

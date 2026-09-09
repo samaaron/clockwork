@@ -1,0 +1,35 @@
+# Build trees. More than one is routine now that so much is optional —
+# CLOCKWORK_SCHEDULER, CLOCKWORK_DEVICE, CLOCKWORK_LINK and the sanitiser and
+# coverage builds each want their own — so the pattern earns its keep as much
+# as the plain name does.
+build/
+build-*/
+dist/
+
+# Cargo. Unanchored, unlike the `rust/target/` this replaces: a rule containing
+# a slash is pinned to the repo root, so that one covered the workspace here and
+# would have missed a crate added anywhere else.
+target/
+
+node_modules/
+*.o
+*.o.d
+
+test-results/
+playwright-report/
+
+# Archives. A zip of build metadata (the .git directories under build-*/_deps/)
+# has been swept in by `git add -A` twice: 6cd8481 untracked one and it came
+# back, because untracking without a rule only treats the symptom. Nothing here
+# ships as a zip, so the blanket rule costs nothing.
+*.zip
+
+# Editor, tool and OS noise — none of it ours to carry, and all of it arrives
+# uninvited in a tree other people will now clone.
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.log

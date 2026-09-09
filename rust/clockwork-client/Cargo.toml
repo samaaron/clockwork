@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The client boundary (clockwork_client.h) and the embed door (clockwork_embed.h) as safe Rust: a handle that closes itself, send and poll over slices, regions, metrics by name, the clock, scopes, and an engine booted or attached in this process. What a Rust host writes its playing against; the unsafe is here, once, with its reasons."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The shape of the boundary. This crate adds the safety; the symbols are
+# resolved by whoever links the engine — clockwork-sys in a Rust host.
+clockwork-abi = { path = "../clockwork-abi" }
+
+[dev-dependencies]
+# The tests are a Rust host: the engine in-process through clockwork-sys
+# (its CMake tree built with the dummy DSP, which answers /dummy/ping with
+# /dummy/pong and renders a pulse), the subsystems the engine calls back into
+# from clockwork-native as an rlib, and the OSC codec to speak to it.
+clockwork-sys = { path = "../clockwork-sys" }
+clockwork-native = { path = "../clockwork-native", features = ["host"] }
+clockwork-osc = { path = "../clockwork-osc" }

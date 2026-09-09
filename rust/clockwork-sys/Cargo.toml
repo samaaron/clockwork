@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-sys"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The engine as a cargo dependency: build.rs configures and builds clockwork's CMake tree (or a project's that embeds it) and links the C++ — clockwork, its DSP, the device layer — with the system libraries each platform needs. The Rust subsystems come as crates beside it, not as the umbrella staticlib; that is for C++ hosts."
+# One engine per binary. `links` is also what carries build.rs's metadata
+# (DEP_CLOCKWORK_INCLUDE, DEP_CLOCKWORK_DSP, ...) to a dependent's build script.
+links = "clockwork"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# The comms client library (clockwork_comms) beside the engine, for a host
+# that stands up command transports. Its Rust half is the clockwork-comms
+# crate, which such a host adds to its own dependencies.
+comms = []
+
+[dependencies]

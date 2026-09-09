@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+  <head><title>clockwork self-test</title></head>
+  <body>
+    <h1>clockwork self-test</h1>
+    <p>Driven by Playwright. The guest is dsp/dummy — it implements the whole
+       boundary and synthesises almost nothing, which is what makes it the right
+       device under test for a host.</p>
+
+    <script type="module">
+      import { Clockwork } from "../dist/clockwork.js";
+      window.Clockwork = Clockwork;
+      window.clockworkReady = true;
+    </script>
+  </body>
+</html>

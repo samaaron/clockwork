@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-bridge-native"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "Umbrella staticlib for the plugin bridge process: the port substrate and the timeline arithmetic. The bridge shares memory with the engine, not a binary, and links none of the engine's subsystems."
+
+[lints]
+workspace = true
+
+[lib]
+# The bridge is its own binary and so links its own single Rust staticlib.
+# `clockwork-native` would do, except that the archive CMake builds from it is bound
+# to clockwork by a link cycle; the bridge wants the ports and nothing else.
+crate-type = ["staticlib"]
+
+[dependencies]
+clockwork-ports = { path = "../clockwork-ports" }
+clockwork-clock = { path = "../clockwork-clock" }

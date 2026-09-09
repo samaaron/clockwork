@@ -1,0 +1,92 @@
+[package]
+name = "clockwork-native"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "Umbrella staticlib bundling the clockwork native Rust subsystems (MIDI, gamepad, OSC, heap, scope, ports, event sinks) into the single Rust staticlib a binary may link. CMake builds this; the C ABIs live in the subsystem crates."
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+
+[lints]
+workspace = true
+
+[lib]
+# Exactly one Rust staticlib can be linked into a binary (each carries its own
+# copy of std, so two collide at link time). This crate is that one staticlib;
+# the subsystems are rlib dependencies whose #[no_mangle] C ABIs it re-exports.
+#
+# And an rlib, for the other kind of host: a RUST binary that links the engine
+# through clockwork-sys names this crate as an ordinary dependency (with the
+# `host` feature below) and gets the same subsystems on rustc's own link line,
+# one std, no staticlib at all. clockwork-client's tests are such a host.
+crate-type = ["staticlib", "rlib"]
+# No unit tests here (nothing but re-exports), so no test harness: one would
+# link every subsystem without an engine, and under `cargo test --workspace`
+# cargo unifies `host` in from clockwork-client, which leaves the scope
+# crate's hostless defaults out of that link — LNK2019 for a binary that
+# tests nothing.
+test = false
+
+[features]
+default = ["midi", "gamepad", "osc", "schedule"]
+# Each also switches the matching event-sink endpoint: a build with no MIDI
+# subsystem must not drag midir in through the sinks, and a MIDI sink in such
+# a build refuses to open rather than accepting messages it cannot deliver.
+midi = ["dep:clockwork-midi", "clockwork-sinks/midi"]
+gamepad = ["dep:clockwork-gamepad"]
+osc = ["dep:clockwork-osc-net", "clockwork-sinks/osc"]
+# The command transports (clockwork-comms): a client library, carried in this
+# umbrella only so a host linking the comms library finds the symbols. An
+# engine-only build leaves it out and has no socket transport at all.
+comms = ["osc", "dep:clockwork-comms"]
+# Clockwork's timed-event store. OFF compiles no store: no slot pool, no data
+# pool, no heap, no compaction. CMake's CLOCKWORK_SCHEDULER drives this and
+# the C++ side is gated to match.
+#
+# What it does NOT switch off is clockwork-schedule's `parse` half, which is
+# an unconditional dependency below. A timestamped OSC bundle is the DSP's, not
+# clockwork's, so a build with no store must still read its timetag in order
+# to forward the message with its time intact instead of flattening it to
+# "now". That is the wire form, not the schedule.
+schedule = ["clockwork-schedule/store"]
+# NOTE: there is deliberately no `engine` feature here. The guest is not part
+# of clockwork, so no crate in this workspace can name it; a project that
+# embeds clockwork adds its own guest crate to its own umbrella.
+# Windows backend selector, forwarded to clockwork-midi (the gamepad crate
+# picks XInput on Windows by itself via a target-specific dependency).
+winrt = ["clockwork-midi/winrt"]
+# A RUST host: the engine is in the same binary (clockwork-sys) and defines
+# the host services itself, so the scope crate's hostless defaults are left
+# out of the link, where they would otherwise answer first. CMake's C++ hosts
+# never set this — the staticlib is linked into the engine, not beside it.
+host = ["clockwork-scope/host"]
+
+[dependencies]
+# Always present, not behind a feature: the heap, the scope plane and the node
+# mirror are clockwork's own, and whatever guest is attached allocates and
+# reports through them — so a build that turns every subsystem off still needs
+# them.
+clockwork-heap = { path = "../clockwork-heap" }
+# The port substrate and its disk endpoints. Not optional either: clockwork's
+# audio thread calls clockwork_port_read/clockwork_port_write unconditionally (they cost a
+# table scan over an empty table when nothing is bound), so the symbols must be
+# in the archive whatever else this build turned off.
+clockwork-ports = { path = "../clockwork-ports" }
+clockwork-ports-disk = { path = "../clockwork-ports-disk" }
+# The event-sink substrate, and not optional for the same reason ports is not:
+# DspHost hands every DSP a sink handle and a send, so the clockwork_sink_* symbols
+# must be in the archive whatever else this build turned off. Its ENDPOINTS
+# are optional and are switched by the midi/osc features above; with both off
+# it still opens, closes, lists and counts, and refuses every kind.
+clockwork-sinks = { path = "../clockwork-sinks", default-features = false }
+clockwork-scope = { path = "../clockwork-scope" }
+# The clock's value type and the MIDI follower registry. Not optional: every
+# /clockwork/clock verb answers from a Timeline, on every platform clockwork
+# builds for. An embedder that only reads the clock out of shared memory never
+# links this crate at all.
+clockwork-clock = { path = "../clockwork-clock" }
+clockwork-midi = { path = "../clockwork-midi", optional = true }
+clockwork-gamepad = { path = "../clockwork-gamepad", optional = true }
+clockwork-osc-net = { path = "../clockwork-osc-net", optional = true }
+clockwork-comms = { path = "../clockwork-comms", optional = true }
+# `parse` only by default; the `schedule` feature above adds `store`.
+clockwork-schedule = { path = "../clockwork-schedule", default-features = false, features = ["parse"] }

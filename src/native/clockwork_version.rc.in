@@ -1,0 +1,29 @@
+// Windows version resource for the clockwork server binary. Replaces the
+// resource juce_add_console_app used to generate: this is what firewall
+// consent prompts display as the program name / publisher.
+#include <winver.h>
+
+@CLOCKWORK_RC_ICON@
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     @CLOCKWORK_RC_VERSION_COMMAS@
+PRODUCTVERSION  @CLOCKWORK_RC_VERSION_COMMAS@
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName",      "@CLOCKWORK_COMPANY_NAME@\0"
+            VALUE "FileDescription",  "@CLOCKWORK_PRODUCT_NAME@\0"
+            VALUE "FileVersion",      "@PROJECT_VERSION@\0"
+            VALUE "ProductName",      "@CLOCKWORK_PRODUCT_NAME@\0"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1252
+    END
+END

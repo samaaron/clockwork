@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+// Copyright (c) 2025 Sam Aaron
+
+/**
+ * Control pointer offset constants for Clockwork.
+ *
+ * These byte offsets correspond to the ControlPointers struct in shared_memory.h.
+ * The struct layout is:
+ *
+ *   struct alignas(4) ControlPointers {
+ *       std::atomic<int32_t> in_head;        // offset 0
+ *       std::atomic<int32_t> in_tail;        // offset 4
+ *       std::atomic<int32_t> out_head;       // offset 8
+ *       std::atomic<int32_t> out_tail;       // offset 12
+ *       std::atomic<int32_t> nrt_out_head;     // offset 16
+ *       std::atomic<int32_t> nrt_out_tail;     // offset 20
+ *       std::atomic<int32_t> in_sequence;    // offset 24
+ *       std::atomic<int32_t> out_sequence;   // offset 28
+ *       std::atomic<int32_t> nrt_out_sequence; // offset 32
+ *       std::atomic<uint32_t> status_flags;  // offset 36
+ *       std::atomic<int32_t> in_write_lock;  // offset 40
+ *       int32_t _padding;              // offset 44
+ *   };
+ */
+
+// =============================================================================
+// Byte offsets within ControlPointers struct
+// =============================================================================
+
+// IN buffer (OSC messages from JS to the engine)
+export const IN_HEAD = 0;
+export const IN_TAIL = 4;
+
+// OUT buffer (OSC replies from the engine to JS)
+export const OUT_HEAD = 8;
+export const OUT_TAIL = 12;
+
+// NRT-out ring control (the NRT-thread egress ring)
+export const NRT_OUT_HEAD = 16;
+export const NRT_OUT_TAIL = 20;
+
+// Sequence counters (for detecting dropped messages)
+export const IN_SEQUENCE = 24;
+export const OUT_SEQUENCE = 28;
+export const NRT_OUT_SEQUENCE = 32;
+
+// Status and synchronization
+export const STATUS_FLAGS = 36;
+export const IN_WRITE_LOCK = 40;
+
+// =============================================================================
+// Helper functions
+// =============================================================================
+
+/**
+ * Calculate Int32Array indices for IN buffer control pointers.
+ * Used by: OscChannel, SABTransport, osc_out_log_sab_worker
+ *
+ * @param {number} ringBufferBase - Base offset of ring buffer region
+ * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @returns {Object} Object with IN_HEAD, IN_TAIL, IN_SEQUENCE, IN_WRITE_LOCK indices
+ */
+export function calculateInControlIndices(ringBufferBase, CONTROL_START) {
+    const base = ringBufferBase + CONTROL_START;
+    return {
+        IN_HEAD: (base + IN_HEAD) / 4,
+        IN_TAIL: (base + IN_TAIL) / 4,
+        IN_SEQUENCE: (base + IN_SEQUENCE) / 4,
+        IN_WRITE_LOCK: (base + IN_WRITE_LOCK) / 4,
+    };
+}
+
+/**
+ * Calculate Int32Array indices for OUT buffer control pointers.
+ * Used by: osc_in_worker
+ *
+ * @param {number} ringBufferBase - Base offset of ring buffer region
+ * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @returns {Object} Object with OUT_HEAD, OUT_TAIL indices
+ */
+export function calculateOutControlIndices(ringBufferBase, CONTROL_START) {
+    const base = ringBufferBase + CONTROL_START;
+    return {
+        OUT_HEAD: (base + OUT_HEAD) / 4,
+        OUT_TAIL: (base + OUT_TAIL) / 4,
+    };
+}
+
+/**
+ * Calculate Int32Array indices for all control pointers.
+ * Used by: clockwork_audio_worklet
+ *
+ * @param {number} ringBufferBase - Base offset of ring buffer region
+ * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @returns {Object} Object with all control pointer indices
+ */
+export function calculateAllControlIndices(ringBufferBase, CONTROL_START) {
+    const base = ringBufferBase + CONTROL_START;
+    return {
+        IN_HEAD: (base + IN_HEAD) / 4,
+        IN_TAIL: (base + IN_TAIL) / 4,
+        OUT_HEAD: (base + OUT_HEAD) / 4,
+        OUT_TAIL: (base + OUT_TAIL) / 4,
+        NRT_OUT_HEAD: (base + NRT_OUT_HEAD) / 4,
+        NRT_OUT_TAIL: (base + NRT_OUT_TAIL) / 4,
+        IN_SEQUENCE: (base + IN_SEQUENCE) / 4,
+        OUT_SEQUENCE: (base + OUT_SEQUENCE) / 4,
+        NRT_OUT_SEQUENCE: (base + NRT_OUT_SEQUENCE) / 4,
+        STATUS_FLAGS: (base + STATUS_FLAGS) / 4,
+        IN_WRITE_LOCK: (base + IN_WRITE_LOCK) / 4,
+    };
+}

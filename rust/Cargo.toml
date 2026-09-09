@@ -1,0 +1,99 @@
+# Rust workspace for the clockwork subsystems.
+#
+# Only clockwork-shaped crates live here: everything around the engine, and
+# nothing that synthesises. A guest's own crates belong to the project that
+# embeds clockwork, not to clockwork.
+#
+# * `clockwork-abi`     — the C ABI as Rust: dsp_api.h, clockwork_client.h and
+#                          clockwork_event_sink.h declared once, held to the
+#                          headers by a compiled probe. What a guest or a
+#                          client written in Rust depends on instead of
+#                          copying the structs by hand.
+# * `clockwork-osc`     — shared OSC codec (messages + bundles) + name normalisation.
+# * `clockwork-midi`    — midir-based MIDI subsystem.
+# * `clockwork-gamepad` — gilrs-based game-controller subsystem.
+# * `clockwork-osc-net` — std::net OSC networking (cue server + outbound send).
+# * `clockwork-schedule` — the timed-event store and the wire forms that carry
+#                          a time. The implementation of src/scheduler/*.
+# * `clockwork-heap`    — the growable pool the host suballocates from.
+# * `clockwork-scope`   — scope slot claim/release over the shared-memory plane.
+# * `clockwork-clock`  — a beat grid as a value (the Timeline snapshot) and the
+#                          MIDI-clock follower registry that produces them.
+# * `clockwork-slots`   — the stable-slot table: a generation-tagged handle,
+#                          one atomic word per slot, and closing without a lock
+#                          on the read path. Shared by the ports and the event
+#                          sinks, which are two disciplines standing on one
+#                          table.
+# * `clockwork-ports`   — the port substrate: a stable slot, an SPSC frame
+#                          ring, silence on underrun, drop on overrun. The
+#                          implementation of src/clockwork_ports.h.
+# * `clockwork-sinks`   — the event-sink substrate: a stable slot, a bounded
+#                          message queue that drops rather than blocks, and
+#                          delivery in time order to a MIDI port or an OSC
+#                          destination. The implementation of
+#                          src/clockwork_event_sink.h. The other discipline to ports:
+#                          variable-length payloads with a time attached.
+# * `clockwork-ports-disk` — WAV in and WAV out, as two endpoints ON that
+#                          substrate. A separate crate so the dependency can
+#                          only run one way: the substrate must mention no
+#                          endpoint, and cargo refuses the cycle that would
+#                          break the rule.
+# * `clockwork-native`  — umbrella staticlib bundling the above into the one
+#                          Rust staticlib a binary may link (CMake links this).
+# * `clockwork-bridge-native` — the umbrella for the OTHER binary: the plugin
+#                          bridge process, which links the ports and nothing
+#                          else. Two binaries, two staticlibs, one crate each.
+# * `clockwork-sys`     — the engine as a cargo dependency for a RUST host:
+#                          build.rs builds the CMake tree and links the C++
+#                          (clockwork, its DSP, the device layer, the system
+#                          libraries). Such a host takes the subsystem crates
+#                          above as dependencies and links no umbrella at all
+#                          — one std, rustc's own link line.
+# * `clockwork-client`  — the client boundary as SAFE Rust: a handle that
+#                          closes itself, send and poll over slices, regions,
+#                          metrics by name (generated from the schema), the
+#                          clock, scopes, and the embed door (boot or attach
+#                          an engine in this process). Built on clockwork-abi;
+#                          tested against a headless engine linked through
+#                          clockwork-sys with the dummy DSP.
+#
+# The midi/gamepad crates each also compile to a wasm-bindgen module (loaded by
+# the main-thread JS, where the Web MIDI / Gamepad APIs live).
+[workspace]
+resolver = "2"
+members = [
+    "clockwork-abi",
+    "clockwork-osc",
+    "clockwork-slots",
+    "clockwork-ports",
+    "clockwork-sinks",
+    "clockwork-ports-disk",
+    "clockwork-midi",
+    "clockwork-gamepad",
+    "clockwork-osc-net",
+    "clockwork-comms",
+    "clockwork-schedule",
+    "clockwork-native",
+    "clockwork-bridge-native",
+    "clockwork-heap",
+    "clockwork-scope",
+    "clockwork-clock",
+    "clockwork-sys",
+    "clockwork-client",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# One policy for unsafe across the workspace, applied by `[lints] workspace = true`
+# in every crate. Warnings, and CI runs clippy with -D warnings, so the count
+# cannot climb back: every unsafe block says why it is sound, contains one
+# operation, and every unsafe fn documents its contract.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+ptr_as_ptr = "warn"

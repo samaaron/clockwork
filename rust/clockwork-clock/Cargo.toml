@@ -1,0 +1,16 @@
+[package]
+name = "clockwork-clock"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "clockwork's timelines: the beat/time snapshot every reader answers from, and the MIDI-clock follower-timeline registry behind /clockwork/clock/midi:<port>/. Pure and clock-free: the host supplies every 'now'."
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]

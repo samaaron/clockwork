@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2025-2026 Sam Aaron
+[package]
+name = "clockwork-ports-disk"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "Disk endpoints for the port substrate: a worker that streams a WAV file into a source port, and one that drains a sink port to a WAV file. A user of clockwork-ports, not part of it."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
+# (Xtensa): real atomics where the ISA has them, a critical section where it
+# does not — which is only ever the device, where these counters are idle.
+portable-atomic = { version = "1", features = ["fallback"] }
+# The dependency runs this way and only this way. The substrate must not know
+# what a file is; this crate is what knows.
+clockwork-ports = { path = "../clockwork-ports" }

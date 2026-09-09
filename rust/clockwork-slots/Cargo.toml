@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2025-2026 Sam Aaron
+[package]
+name = "clockwork-slots"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The stable-slot table: a generation-tagged handle, one atomic word per slot, and closing without a lock on the read path. Shared by the frame ports and the event sinks, which are two disciplines standing on one table."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
+# (Xtensa): real atomics where the ISA has them, a critical section where it
+# does not — which is only ever the device, where these counters are idle.
+portable-atomic = { version = "1", features = ["fallback"] }

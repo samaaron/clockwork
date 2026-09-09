@@ -1,0 +1,24 @@
+{
+  "name": "clockwork",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A host for a DSP guest: audio device, clock, transports, scheduling and memory, with no opinion about what the guest synthesises.",
+  "license": "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial",
+  "scripts": {
+    "build:web": "./scripts/build-web.sh",
+    "test": "npm run test:node && npm run lint:js",
+    "test:node": "node --test test/*.test.mjs",
+    "test:web": "playwright test",
+    "test:rust": "cargo test --release --manifest-path rust/Cargo.toml",
+    "lint:js": "node scripts/check-js-imports.mjs",
+    "gen:metrics-header": "node scripts/gen-metrics-schema-header.mjs",
+    "build:web:subsystems": "./scripts/build-web-subsystems.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "@thi.ng/malloc": "^6.1.0"
+  }
+}

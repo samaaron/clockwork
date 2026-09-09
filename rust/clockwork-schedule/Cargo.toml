@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2025-2026 Sam Aaron
+[package]
+name = "clockwork-schedule"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "Clockwork's timed-event store and the wire forms that reach it: opaque payloads keyed by an int64 timetag, released in time order, cancellable by tag. Implements src/scheduler/Scheduler.h and src/scheduler/schedule_parse.h. Knows nothing of what an event means or who fires it."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+# Two features on one axis, because clockwork needs one half of this crate in
+# a build that has no use for the other. `store` is the timed-event store —
+# slot pool, data pool, heap, compaction — and it is what CMake's
+# CLOCKWORK_SCHEDULER switches off. `parse` is the wire forms, and it stays:
+# a timestamped OSC bundle is the DSP's, not clockwork's, and a build with no
+# store must still read its timetag in order to hand the message over with its
+# time intact rather than flattened to "now". Refusing "/clockwork/schedule"
+# needs no parser at all — only the address, which the caller already matched.
+[features]
+default = ["store", "parse"]
+store = []
+parse = []
+
+[dependencies]
+# For `clockwork_sys!`, the ONE place the reserved prefix is spelled in the Rust tree.
+# The schedule parser derives every byte offset from it, so the parser cannot
+# fall out of step with the prefix — the property the C++ parser was fixed to
+# have and that this port must not lose.
+clockwork-osc = { path = "../clockwork-osc" }

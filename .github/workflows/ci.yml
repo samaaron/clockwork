@@ -1,0 +1,370 @@
+# clockwork CI
+#
+# Runs clockwork's C++ tests, Rust tests, JavaScript tests and the
+# browser (wasm) tests on:
+#
+#   linux-x64, linux-arm64, linux-x86 (i686, in a 32-bit container),
+#   macos-arm64, macos-x64, windows-x64.
+#
+# fail-fast is off so one platform's failure does not hide the others,
+# `--parallel 2` for the test builds (hosted runners run out of memory above
+# that), and bash on every runner so the Windows steps share the Unix ones.
+#
+# The native matrix builds with Link OFF. The `configurations` job below is
+# where Link ON runs, in both its shapes.
+
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLOCKWORK_QUIET: '1'
+
+jobs:
+  # ---------------------------------------------------------------- native --
+  native:
+    name: native (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+          - os: windows-latest
+            platform: windows-x64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev \
+            libpipewire-0.3-dev
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Test
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            build/test/Release/clockwork_tests.exe
+            build/test/Release/clockwork_lanes_reserved_tests.exe
+            build/test/Release/clockwork_attach_tests.exe
+            build/test/Release/clockwork_engine_tests.exe
+          else
+            build/test/clockwork_tests
+            build/test/clockwork_lanes_reserved_tests
+            build/test/clockwork_attach_tests
+            build/test/clockwork_engine_tests
+          fi
+
+  # ------------------------------------------------- linux-x86 (i686, 32-bit) --
+  # Also where the Rust workspace's i686 tests run: it links ALSA and libudev,
+  # which the container has as native i386 packages and an x86_64 runner does
+  # not. Not a job-level `container:` because the runner injects an x86_64
+  # Node to execute JS actions, which an i386 rootfs cannot load.
+  native-linux-x86:
+    name: native (linux-x86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and test in an i386 container
+        run: |
+          docker run --rm --platform linux/386 \
+            -v "$PWD:/work" -w /work \
+            -e CLOCKWORK_QUIET=1 \
+            i386/debian:bookworm \
+            bash scripts/ci-linux-x86.sh all
+
+  # ---------------------------------------------------------- configurations --
+  # The build options the native matrix leaves at their defaults.
+  configurations:
+    name: config (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-scheduler
+            flags: -DCLOCKWORK_SCHEDULER=OFF
+            # clockwork_engine_tests pins what the scheduler fires; without a
+            # scheduler it is not built (test/CMakeLists.txt).
+            tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests
+          - name: link
+            flags: -DCLOCKWORK_LINK=ON
+            tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests build/test/clockwork_engine_tests
+          # The audio half is a separate flag. Without it LinkAudioBridge
+          # compiles to its no-op shape and the peer-audio cases never run.
+          - name: link-audio
+            flags: -DCLOCKWORK_LINK=ON -DCLOCKWORK_LINK_AUDIO=ON
+            tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests build/test/clockwork_engine_tests
+          # No smoothie/JUCE at all: the substrate a plugin, an AudioWorklet or
+          # an embedded target builds. PLUGINS and NIF are device hosts, so
+          # they come off with it — the configure refuses the combination
+          # rather than failing to link later.
+          - name: no-device
+            flags: -DCLOCKWORK_DEVICE=OFF -DCLOCKWORK_PLUGINS=OFF -DCLOCKWORK_NIF=OFF
+            tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ${{ matrix.flags }}
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: |
+          for t in ${{ matrix.tests }}; do "$t"; done
+
+  # ---------------------------------------------------------------- sanitize --
+  # Plugin hosting is off here: the in-tree test plugins would be built
+  # instrumented too, and ASan's runtime does not survive an instrumented
+  # dylib being dlopened, dlclosed and dlopened again (it crashes in
+  # __asan_register_globals on the second load). The bridge runs plugins out
+  # of process anyway; the native matrix covers those cases uninstrumented.
+  sanitize:
+    name: sanitize (asan+ubsan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON \
+            -DCLOCKWORK_PLUGINS=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          build/test/clockwork_tests
+          build/test/clockwork_lanes_reserved_tests
+          build/test/clockwork_attach_tests
+          build/test/clockwork_engine_tests
+
+  # -------------------------------------------------------------------- nif --
+  # The Erlang NIF build. Build-only: clockwork vendors the erl_nif headers,
+  # so this needs no BEAM on the runner.
+  nif:
+    name: nif (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+          - os: windows-latest
+            platform: windows-x64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
+            -DCLOCKWORK_NIF=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 2 --target clockwork_nif
+
+  # ------------------------------------------------------------------- rust --
+  rust:
+    name: rust (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+          - os: windows-latest
+            platform: windows-x64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The native job's list, not the crates' alone: clockwork-sys builds
+      # the engine from its build script, so the workspace now needs what
+      # the C++ needs — cmake, and JACK's and PipeWire's headers for the
+      # device layer.
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config             libasound2-dev libudev-dev libjack-jackd2-dev             libpipewire-0.3-dev
+      # Every unsafe block carries a SAFETY comment, every unsafe fn a
+      # `# Safety` section, and every unsafe operation inside an unsafe fn
+      # sits in its own block (rust/Cargo.toml, [workspace.lints]). Warnings
+      # are errors here so a new site cannot slip in unexplained.
+      # clockwork-client's tests link the engine through clockwork-sys, whose
+      # build script configures and builds the CMake tree (dummy DSP, device
+      # layer) into cargo's target directory. That is the second engine build
+      # on this runner, and clippy triggers it too (--all-targets checks the
+      # build script's consumers); the packages above are what it needs.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --manifest-path rust/Cargo.toml -- -D warnings
+      - name: Test
+        run: cargo test --release --manifest-path rust/Cargo.toml
+
+  # Miri interprets the unsafe crates' tests with aliasing and data-race
+  # checking. Twice now it has found undefined behaviour the native tests
+  # passed with: a pointer derived from one element of a slice and walked
+  # across the whole allocation, in the frame ring and again in the sink
+  # queue. The heavy tests shorten themselves under `cfg!(miri)`.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Install dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
+      - name: Miri
+        # Isolation off: the sink tests stamp messages with the wall clock.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: |
+          cargo miri setup
+          cargo miri test --manifest-path rust/Cargo.toml --lib \
+            -p clockwork-heap -p clockwork-ports -p clockwork-sinks \
+            -p clockwork-slots -p clockwork-schedule
+
+  rust-licences:
+    name: rust licences
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+          command: check licenses
+
+  # --------------------------------------------------------------------- js --
+  js:
+    name: js
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # -------------------------------------------------------------------- web --
+  # The wasm build and the in-browser tests (SharedArrayBuffer and
+  # postMessage transports, chromium).
+  web:
+    name: web (wasm + playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: npm
+      - uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 4.0.21
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: wasm32-unknown-emscripten
+      - run: npm ci
+      - name: Build wasm
+        run: bash scripts/build-web.sh
+      - name: Install chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser tests
+        run: npm run test:web
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report
+          if-no-files-found: ignore

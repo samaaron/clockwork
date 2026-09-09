@@ -1,0 +1,32 @@
+[package]
+name = "clockwork-comms"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "clockwork's command transports, as a client library: TCP/UDS stream servers, UDS datagram, the Windows named pipe, and the SHM command-plane peer. An engine has no sockets; the host that embeds one opens these. C ABI in src/comms/clockwork_comms_abi.h."
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+socket2 = "0.6.4"
+clockwork-osc = { path = "../clockwork-osc" }
+clockwork-osc-net = { path = "../clockwork-osc-net" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

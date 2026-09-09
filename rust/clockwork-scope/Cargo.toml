@@ -1,0 +1,28 @@
+[package]
+name = "clockwork-scope"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "ScopeOut2's shared-memory slot claim and release."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Linked into a real host: one that defines `clockwork_shm_base` and
+# `clockwork_scope_geometry` itself — the engine, through clockwork-sys — so
+# the hostless defaults build.rs makes stay out of the link. They must: they
+# are an archive that sits AHEAD of the engine's on rustc's line, and an
+# archive answers the first unresolved reference, so with both present the
+# defaults would win and the scope plane would quietly read from nowhere.
+host = []
+
+[dependencies]
+# AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
+# (Xtensa): real atomics where the ISA has them, a critical section where it
+# does not — which is only ever the device, where these counters are idle.
+portable-atomic = { version = "1", features = ["fallback"] }

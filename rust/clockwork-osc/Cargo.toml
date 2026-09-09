@@ -1,0 +1,18 @@
+[package]
+name = "clockwork-osc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "Shared std-only helpers for the clockwork Rust subsystems: a complete OSC 1.0 codec (all arg types, nested arrays, bundles) and OSC-safe device-name normalisation. Used by clockwork-midi/-gamepad/-osc-net on both native and wasm targets."
+# No GPL-derived code.
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["std"]
+std = []

@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2025-2026 Sam Aaron
+[package]
+name = "clockwork-sinks"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The event-sink substrate: variable-length messages with a time attached, leaving clockwork on a stable slot, delivered in time order to a MIDI port or an OSC destination. Implements src/clockwork_event_sink.h."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
+# (Xtensa): real atomics where the ISA has them, a critical section where it
+# does not — which is only ever the device, where these counters are idle.
+portable-atomic = { version = "1", features = ["fallback"] }
+# The stable-slot table, shared with clockwork-ports. Same rule, different
+# payload; see that crate for why it is not written twice.
+clockwork-slots = { path = "../clockwork-slots" }
+# The two endpoints. Optional and off by default for the same reason the
+# umbrella makes them optional: a build with no MIDI subsystem must not drag
+# midir in through the sinks, and a sink of a kind this build cannot reach
+# refuses to open rather than pretending.
+clockwork-midi = { path = "../clockwork-midi", optional = true }
+clockwork-osc-net = { path = "../clockwork-osc-net", optional = true }
+
+# The MIDI endpoint's integration test reaches midir directly to create a
+# virtual loopback destination, exactly as clockwork-midi's own does. Ignored
+# by default (it needs /dev/snd/seq or CoreMIDI); see tests/midi_endpoint.rs.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+midir = { path = "../../external/midir" }
+
+[features]
+# On by default so `cargo test -p clockwork-sinks` exercises the real
+# endpoints rather than only the capture one. The umbrella takes them off
+# again and forwards its own, which is how CMake's CLOCKWORK_MIDI /
+# _OSC reach this crate.
+default = ["midi", "osc"]
+midi = ["dep:clockwork-midi"]
+osc = ["dep:clockwork-osc-net"]

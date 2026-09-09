@@ -1,0 +1,31 @@
+ISC License
+
+Smoothie is a vendored fork of the ISC-licensed modules of the JUCE 7
+framework (juce_core, juce_events, juce_audio_basics, juce_audio_devices),
+taken from JUCE 7.0.12.
+
+Vendored module code:
+  Copyright (c) 2022 - Raw Material Software Limited
+
+Smoothie modifications and additions:
+  Copyright (c) 2026 - Sam Aaron
+
+Everything in this directory is ISC, including this fork's own build files
+and documentation and any wholly new source added here (juce_LiveObjectRegistry.h
+at the time of writing). One licence covers the tree so that no file in it has
+to be reasoned about separately; the rest of clockwork is AGPL-3.0-or-later OR commercial.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Third-party code contained in this tree:
+  - modules/juce_core/zip/zlib/ — zlib licence (Jean-loup Gailly, Mark Adler)

@@ -1,0 +1,57 @@
+clockwork
+Copyright (c) 2025-2026 Sam Aaron
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+If you would like to incorporate clockwork into a proprietary software
+application, please contact sam@sonic-pi.net.
+
+
+Third-party components, under their own licences:
+
+  smoothie/                                  ISC. A fork of four JUCE 7.0.12
+                                             modules, (c) Raw Material Software
+                                             Limited. See smoothie/LICENSE.
+
+  smoothie/modules/juce_core/zip/zlib/       Zlib licence, (c) Jean-loup Gailly
+                                             and Mark Adler.
+
+  src/vendor/oscpack/                        MIT, (c) Ross Bencina.
+
+  external/midir/                            MIT, (c) Patrick Reisert and the
+                                             RtMidi contributors.
+
+  src/vendor/dr_libs/                        Public domain or MIT-0, David Reid.
+
+  src/vendor/stb/stb_vorbis.c                Public domain or MIT, (c) Sean
+                                             Barrett.
+
+  external/erlang_headers/                   Apache-2.0, (c) Ericsson AB. The
+                                             OTP headers the NIF compiles
+                                             against.
+
+  external/ASIOSDK2.3.4/                     Steinberg ASIO SDK, (c) Steinberg
+                                             Media Technologies GmbH. Dual-
+                                             licensed, Steinberg's agreement OR
+                                             GPL-3.0; taken here under GPL-3.0.
+                                             Compiled only when CLOCKWORK_ASIO=ON.
+
+  src/native/vendor/LinkAudioInputRenderer.hpp
+                                             GPL-2.0-or-later, (c) Ableton AG.
+                                             Compiled only when CLOCKWORK_LINK=ON
+                                             and CLOCKWORK_LINK_AUDIO=ON.
+
+Some build options fetch dependencies that are not in this repository:
+
+  CLOCKWORK_LINK=ON            Ableton Link, GPL-2.0-or-later.
+  CLOCKWORK_PLUGINS=ON         CLAP and VST3 pluginterfaces, both MIT.
