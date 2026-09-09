@@ -289,6 +289,22 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
     set(_ss_fc_exclude EXCLUDE_FROM_ALL)
 endif()
 
+# ─── Position-independent code, for the NIF ──────────────────────────────────
+# A NIF is a shared object the BEAM dlopens, and on Linux a shared object
+# cannot swallow a static archive built without -fPIC. The audio path makes it
+# strict rather than advisable: `t_on_audio_thread` is a thread-local and its
+# TLS relocation (R_X86_64_TPOFF32) has no non-PIC form in a .so at all, so
+# the link fails outright instead of degrading.
+#
+# HERE, not beside the NIF target below, and that is the whole point: this
+# variable initialises a target's POSITION_INDEPENDENT_CODE as the target is
+# CREATED, so setting it after add_library(clockwork) reaches nothing already
+# defined. It read as correct beside the NIF and did nothing. macOS's
+# relocation model is indifferent, so only a Linux nif build ever said so.
+if(CLOCKWORK_NIF)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # ─── Smoothie: the audio device layer ───────────────────────────────────
 # The vendored ISC fork of the four permissive JUCE 7.0.12 modules. JUCE >= 8
 # is AGPL; vendoring also removes any way for a distro build to bind a system
@@ -606,8 +622,8 @@ if(WIN32 AND CLOCKWORK_ASIO)
 endif()
 
 if(CLOCKWORK_NIF)
-    # Position-independent everything: a NIF is a shared object the BEAM dlopens.
-    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    # (CMAKE_POSITION_INDEPENDENT_CODE is set far above, before the first
+    # add_library — see there for why it cannot live here.)
 
     set(_clockwork_erl_headers ${CMAKE_CURRENT_SOURCE_DIR}/external/erlang_headers)
     include(CheckTypeSize)

@@ -370,6 +370,14 @@ jobs:
           components: rust-src
           targets: wasm32-unknown-emscripten
       - run: npm ci
+      # build-web.sh calls build-web-subsystems.sh, which needs the wasm-bindgen
+      # CLI at exactly the version rust/Cargo.lock pins — the glue it writes and
+      # the ABI the crate compiled are one contract. Nothing installed it here,
+      # so the engine's wasm built and the subsystems step then refused.
+      - name: Install wasm-bindgen-cli at the version Cargo.lock pins
+        run: |
+          WANT="$(awk '/^name = "wasm-bindgen"$/{getline; sub(/version = /,""); gsub(/"/,""); print}' rust/Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$WANT" --locked --root rust/target/tools
       - name: Build wasm
         run: bash scripts/build-web.sh
       - name: Install chromium

@@ -550,11 +550,20 @@ static int callbacksOfEight(Engine& e, int callbacks, std::vector<float>& got) {
     e.perCallback = kPer;
     const uint64_t before = e.h->bridge_heartbeat.load();
     const auto t0 = std::chrono::steady_clock::now();
+    int64_t worstLateUs = 0;
     for (int c = 0; c < callbacks; ++c) {
         // The device's cadence, not the bridge's: the next callback comes
         // when the clock says, whether or not the bridge has finished.
-        std::this_thread::sleep_until(t0 + std::chrono::microseconds(
-            (int64_t) (c * 1e6 * kPer * kBlock / kRate)));
+        const auto due = t0 + std::chrono::microseconds(
+            (int64_t) (c * 1e6 * kPer * kBlock / kRate));
+        std::this_thread::sleep_until(due);
+        // How late this callback actually began. A real device is not this
+        // forgiving, and the number decides what a failure means: if the
+        // HARNESS cannot hold the cadence then the machine is what the run
+        // measured, not the bridge.
+        const int64_t lateUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - due).count();
+        if (lateUs > worstLateUs) worstLateUs = lateUs;
         for (uint32_t k = 0; k < kPer; ++k) {
             e.pushBlock(float(c * kPer + k + 1));
             e.pullBlock();
@@ -562,17 +571,35 @@ static int callbacksOfEight(Engine& e, int callbacks, std::vector<float>& got) {
             e.trimReturn();
         }
     }
+    const int64_t elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
     e.rendered(before + uint64_t(callbacks) * kPer, 500);
     const uint64_t renderedBlocks = e.h->bridge_heartbeat.load() - before;
     // Block n comes back at pull n + slack; before that, the prime's silence.
-    int wrong = 0;
+    int wrong = 0, silent = 0, firstWrong = -1;
     for (size_t i = 0; i < got.size(); ++i) {
         const float want = i < e.slack ? 0.0f : 0.5f * float(i + 1 - e.slack);
         if (std::fabs(got[i] - want) > 1e-4f) {
             if (wrong < 3) UNSCOPED_INFO("pull " << i << " carried block " << std::lround(got[i] * 2.0f) << ", due " << std::lround(want * 2.0f));
+            if (firstWrong < 0) firstWrong = int(i);
+            // Silence means the bridge had nothing ready in time; any other
+            // value means it answered with the wrong block, which is a
+            // different fault entirely (ordering or trim, not lateness).
+            if (std::fabs(got[i]) <= 1e-4f) ++silent;
             ++wrong;
         }
     }
+    // What a failure here is actually saying. Read the cadence line first: if
+    // the harness itself ran late, this machine could not present the test's
+    // premise and the bridge was never given its window.
+    const int64_t dueUs = (int64_t) (callbacks * 1e6 * kPer * kBlock / kRate);
+    UNSCOPED_INFO("the harness held the device cadence to within " << worstLateUs
+                  << " us at worst; " << callbacks << " callbacks took " << elapsedUs / 1000
+                  << " ms against " << dueUs / 1000 << " ms of device time");
+    if (wrong)
+        UNSCOPED_INFO("first wrong pull " << firstWrong << " of " << got.size() << "; "
+                      << silent << " of the " << wrong << " wrong were silence (nothing ready in time), "
+                      << (wrong - silent) << " carried some other block (an ordering fault, not lateness)");
     UNSCOPED_INFO("the bridge rendered " << renderedBlocks << " of " << got.size() << " blocks sent");
     {
         std::string seq;
