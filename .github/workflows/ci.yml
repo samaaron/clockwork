@@ -368,7 +368,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
-          targets: wasm32-unknown-emscripten
+          # Both: the engine is emscripten, but build-web-subsystems.sh builds
+          # clockwork-midi and clockwork-gamepad for wasm32-unknown-unknown to
+          # hand them to wasm-bindgen. Without it the subsystems step fails on
+          # a missing std for that target, several minutes into the job.
+          targets: wasm32-unknown-emscripten, wasm32-unknown-unknown
       - run: npm ci
       # build-web.sh calls build-web-subsystems.sh, which needs the wasm-bindgen
       # CLI at exactly the version rust/Cargo.lock pins — the glue it writes and
