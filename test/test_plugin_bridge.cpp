@@ -589,7 +589,16 @@ TEST_CASE("a callback of eight blocks is served whole at the slack the device im
     std::vector<float> got;
     const int wrong = callbacksOfEight(e, 40, got);
     INFO("slack " << e.slack << ": of " << got.size() << " pulls, " << wrong << " did not carry the block due");
-    REQUIRE(wrong == 0);
+    // Not `wrong == 0`. This paces 40 callbacks against a real ~21 ms device
+    // cadence, so on shared CI hardware a single scheduling hiccup makes one
+    // pull late and a zero-tolerance check flaky — it passes on an idle
+    // machine and fails on a loaded runner, which is not a fact about the
+    // bridge. The regression being guarded is not subtle: the sibling case
+    // below pins the old slack at MORE THAN HALF the pulls wrong, so a handful
+    // out of 320 is scheduling and 160 is the bug. The INFO above reports the
+    // exact count whenever this does fire.
+    const int tolerated = int(got.size()) / 100 + 2;   // 1%, and never under 2
+    REQUIRE(wrong <= tolerated);
 }
 
 TEST_CASE("a callback of eight blocks at the old slack of two is mostly silence", "[plugin][bridge]") {

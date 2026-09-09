@@ -333,6 +333,20 @@ jobs:
           node-version: 22.x
           cache: npm
       - run: npm ci
+      # test/gamepad_manager, midi_manager and host_front import dist/midi/ and
+      # dist/gamepad/ — the wasm-bindgen glue for the two subsystems that live
+      # on the browser's main thread. dist/ is build output and gitignored, so
+      # a clean checkout has none and those three fail on an import that
+      # resolves fine on any machine that has run a web build.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli at the version Cargo.lock pins
+        run: |
+          WANT="$(awk '/^name = "wasm-bindgen"$/{getline; sub(/version = /,""); gsub(/"/,""); print}' rust/Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$WANT" --locked --root rust/target/tools
+      - name: Build the main-thread subsystems
+        run: bash scripts/build-web-subsystems.sh
       - run: npm test
 
   # -------------------------------------------------------------------- web --

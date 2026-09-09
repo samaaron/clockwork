@@ -68,6 +68,8 @@ extern "C" {
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>   // va_list/va_start in log(): libc++ and MSVC pull this in
+                     // transitively, libstdc++ does not, so Linux would not build
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

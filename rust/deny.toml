@@ -16,9 +16,18 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.9
+# EVERY first-party crate needs an entry here — cargo-deny matches exact
+# names, with no globbing, and `private.ignore` will not do it either (only
+# 12 of the 18 set publish = false). A new crate that is not listed fails
+# this check and nothing else, so add it here when you add it to the
+# workspace: clockwork-client and clockwork-sys arrived without one, and
+# the first CI run to ever execute is what said so.
 exceptions = [
+    { crate = "clockwork-abi", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-bridge-native", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-client", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-clock", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-comms", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-gamepad", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-heap", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-midi", allow = ["AGPL-3.0-or-later"] },
@@ -31,6 +40,7 @@ exceptions = [
     { crate = "clockwork-scope", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-sinks", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-slots", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-sys", allow = ["AGPL-3.0-or-later"] },
 ]
 
 [bans]

@@ -25,6 +25,19 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
     REQUIRE(c != nullptr);
     CHECK(clockwork_embed_block_size(h) > 0);
 
+    // A machine with no audio driver — a CI runner, typically — boots the
+    // engine but never receives a callback, so nothing that depends on the
+    // device ticking can hold. Ask what actually opened rather than inferring
+    // it from a timeout: an empty device name with no callback frames is the
+    // honest answer for "none". Same stance clockwork-client's boot test takes
+    // for a build with no device layer (rust/clockwork-client/tests/boot.rs).
+    ClockworkEmbedDevice opened {};
+    opened.struct_bytes = sizeof opened;
+    const bool haveDevice = clockwork_embed_device(h, &opened) == CLOCKWORK_OK
+                            && opened.device[0] != '\0' && opened.buffer_frames > 0;
+    if (!haveDevice)
+        WARN("no audio device opened; the ticking and answering checks are skipped");
+
     // It ticks: the process count climbs with no render from us. Polled
     // rather than slept on a fixed window, because the first blocks of a
     // device start are warmup callbacks that emit silence without ticking
@@ -32,28 +45,32 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
     // to move is the hardware buffer's period times four — 43 ms on a
     // 512-frame device, 213 ms on the 2560-frame buffer Windows' DirectSound
     // default hands out, which a fixed 200 ms sleep loses to.
-    uint32_t m1[4] = {}, m2[4] = {};
-    REQUIRE(clockwork_client_metrics(c, m1, 4) >= 1);
-    for (int i = 0; i < 100; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        REQUIRE(clockwork_client_metrics(c, m2, 4) >= 1);
-        if (m2[0] > m1[0]) break;
+    if (haveDevice) {
+        uint32_t m1[4] = {}, m2[4] = {};
+        REQUIRE(clockwork_client_metrics(c, m1, 4) >= 1);
+        for (int i = 0; i < 100; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            REQUIRE(clockwork_client_metrics(c, m2, 4) >= 1);
+            if (m2[0] > m1[0]) break;
+        }
+        CHECK(m2[0] > m1[0]);
     }
-    CHECK(m2[0] > m1[0]);
     CHECK(clockwork_embed_render(h, nullptr, 0, nullptr, 0, 64) == 0);   // a device host renders itself
 
     // And it answers.
-    const auto ping = osc_test::message("/dummy/ping");
-    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) == CLOCKWORK_OK);
-    bool pong = false;
-    for (int i = 0; i < 50 && !pong; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        ClockworkClientMessage m[8];
-        const uint32_t n = clockwork_client_poll(c, m, 8);
-        for (uint32_t k = 0; k < n; ++k)
-            if (osc_test::parseAddress(m[k].bytes, m[k].length) == "/dummy/pong") pong = true;
+    if (haveDevice) {
+        const auto ping = osc_test::message("/dummy/ping");
+        REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) == CLOCKWORK_OK);
+        bool pong = false;
+        for (int i = 0; i < 50 && !pong; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ClockworkClientMessage m[8];
+            const uint32_t n = clockwork_client_poll(c, m, 8);
+            for (uint32_t k = 0; k < n; ++k)
+                if (osc_test::parseAddress(m[k].bytes, m[k].length) == "/dummy/pong") pong = true;
+        }
+        CHECK(pong);
     }
-    CHECK(pong);
 
     // A second boot while this one runs is refused; after close it is not.
     CHECK(clockwork_embed_boot(&cfg, &st) == nullptr);
