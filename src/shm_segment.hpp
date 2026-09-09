@@ -285,6 +285,15 @@ inline shm_handle shm_create_anonymous(size_t size) {
     h.fd = -1;
 #  if defined(__linux__)
     h.fd = ::memfd_create("clockwork-shm", MFD_CLOEXEC);
+    // memfd_create takes no mode argument: the file lands at 0777 & ~umask, so
+    // a caller with a permissive umask gets a group- and world-readable
+    // segment. The named path above states 0600 outright and the non-Linux
+    // fallback below does too; state it here rather than inherit whatever
+    // umask the host process happened to be started with.
+    if (h.fd >= 0 && ::fchmod(h.fd, 0600) != 0) {
+        ::close(h.fd);
+        throw std::runtime_error("fchmod(0600) failed for the anonymous segment");
+    }
 #  endif
     if (h.fd < 0) {
         // A name nobody can guess, alive for the few instructions between
