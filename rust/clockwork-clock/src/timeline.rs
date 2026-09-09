@@ -11,7 +11,13 @@
 //! hence `repr(C)`, the i32 booleans, and the pinned layout test.
 
 /// One beat grid. Times are NTP seconds (since 1900); beats are quarter notes.
-#[repr(C)]
+///
+/// `align(8)` is not decoration: the members are 52 bytes, and a 64-bit ABI
+/// rounds that to 56 while a 32-bit one leaves it at 52. Both the C++ size
+/// assertion and the cross-process mirror (which carries this as whole 64-bit
+/// words) require 56, so the alignment is stated on both sides rather than
+/// inherited from whichever ABI happens to be compiling.
+#[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Timeline {
     /// Beats per minute. Always >= 1.

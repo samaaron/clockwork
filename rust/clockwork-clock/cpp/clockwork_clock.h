@@ -19,13 +19,28 @@
 
 #include <stdint.h>
 
+/* 8-byte alignment, stated rather than inherited. ClockworkTimeline is 4
+ * doubles + 5 int32 = 52 bytes of members, and on a 64-bit ABI a double's
+ * alignment rounds that to 56. On i386 a double aligns to 4, so the struct
+ * would be 52 — which breaks BOTH of the things that depend on its size:
+ * Timeline.h pins it at 56, and timeline_mirror.h carries it across a process
+ * boundary "as whole 64-bit words", which 52 is not. This struct is carried
+ * as 64-bit words, so it aligns like one, everywhere. */
+#if defined(__cplusplus)
+#  define CLOCKWORK_ALIGN8 alignas(8)
+#elif defined(_MSC_VER)
+#  define CLOCKWORK_ALIGN8 __declspec(align(8))
+#else
+#  define CLOCKWORK_ALIGN8 _Alignas(8)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* One beat grid, copied out of its source at the moment of asking. Mirrors
  * clockwork_clock::Timeline field for field (repr(C)); both sides pin the size. */
-typedef struct ClockworkTimeline {
+typedef struct CLOCKWORK_ALIGN8 ClockworkTimeline {
     double  bpm;              /* >= 1 */
     double  anchor_beat;      /* anchor_beat is at anchor_ntp; bpm/60 per second either side */
     double  anchor_ntp;

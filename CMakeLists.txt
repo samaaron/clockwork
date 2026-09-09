@@ -641,6 +641,14 @@ if(CLOCKWORK_NIF)
         PREFIX ""
         # clockwork.erl resolves the library by this name; see load_nif there.
         OUTPUT_NAME "clockwork"
+        # ...but ONLY the runtime artefact. On Windows a SHARED target also
+        # emits an import library, and OUTPUT_NAME would name that clockwork.lib
+        # too — the exact path the static `clockwork` target already writes.
+        # link.exe refuses that outright: "LNK1149: output filename matches
+        # input filename". The .dll does not collide (it is redirected to the
+        # build root below); the .lib nobody redirected did. Unix has no import
+        # library, so this is inert there.
+        ARCHIVE_OUTPUT_NAME "clockwork_nif"
         # The build root on every platform and configuration, not Release/ or
         # Debug/, so erlang:load_nif finds it at one path.
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"

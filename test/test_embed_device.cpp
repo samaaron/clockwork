@@ -105,6 +105,19 @@ TEST_CASE("embed: boot reports the device it opened, and opens the driver it is 
     ClockworkEmbed* h = bootOn(nullptr, &st);
     REQUIRE(h != nullptr);
     const ClockworkEmbedDevice dflt = deviceOf(h);
+
+    // A machine with no audio device at all — a CI runner, typically — boots
+    // and reports that nothing opened. Every claim below is about WHICH device
+    // was chosen and whether a name resolves to it, so on such a host there is
+    // no question to answer: say so and stop, rather than assert against a
+    // device that is not there. The same stance rust/clockwork-client's boot
+    // test takes for a build with no device layer.
+    if (dflt.device[0] == 0 || dflt.buffer_frames == 0) {
+        WARN("no audio device opened here; the driver read-back is not tested");
+        clockwork_embed_close(h);
+        return;
+    }
+
     CHECK(dflt.driver[0] != 0);
     CHECK(dflt.device[0] != 0);
     CHECK(dflt.sample_rate > 0.0);
