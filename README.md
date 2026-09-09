@@ -1,14 +1,14 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial -->
 <!-- Copyright (c) 2025-2026 Sam Aaron -->
 # clockwork
-
+```
   ▄████▄ ██      ▄█████▄  ▄████▄ ██  ▄█▀ ██     ██ ▄█████▄ ██████▄ ██  ▄█▀
  ██   ▀▀ ██      ██   ██ ██   ▀▀ ██▄█▀   ██     ██ ██   ██ ██   ██ ██▄█▀
  ██      ██      ██   ██ ██      ███▄    ██ ▄█▄ ██ ██   ██ ██████▀ ███▄
  ██   ▄▄ ██      ██   ██ ██   ▄▄ ██ ▀█▄  ███▀ ▀███ ██   ██ ██ ▀█▄  ██ ▀█▄
   ▀████▀ ███████ ▀█████▀  ▀████▀ ██   ██ ██     ██ ▀█████▀ ██   ██ ██   ██
 
-
+```
 Clockwork-like infrastructure for hosting realtime DSP engines.
 
 Run your own DSP engine in a browser, natively, on embedded hardware, or in the
