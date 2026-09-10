@@ -42,6 +42,9 @@ pub struct MidiIo {
     // any newly-appeared ports so a re-plugged device resumes I/O on its own.
     want_all_in: bool,
     want_all_out: bool,
+    // Offer Windows' built-in software synth as an output. Off by default:
+    // see `is_software_synth`.
+    want_software_synths: bool,
 }
 
 /// A port list as `(normalized_name, is_open)` pairs.
@@ -58,9 +61,26 @@ impl MidiIo {
             out_ports: Vec::new(),
             want_all_in: false,
             want_all_out: false,
+            want_software_synths: false,
         };
         io.refresh();
         io
+    }
+
+    /// Offer, or hide, the software synths the OS advertises — see
+    /// `is_software_synth`. Hidden by default. Re-enumerates on a real change
+    /// so the next port list reflects it without waiting for a hotplug.
+    pub fn set_software_synths(&mut self, want: bool) {
+        if self.want_software_synths == want {
+            return;
+        }
+        self.want_software_synths = want;
+        self.refresh();
+    }
+
+    /// Whether software synths are currently offered.
+    pub fn software_synths(&self) -> bool {
+        self.want_software_synths
     }
 
     /// Re-enumerate available ports (call on hotplug / refresh). Connections to
@@ -77,6 +97,9 @@ impl MidiIo {
         if let Ok(mo) = MidiOutput::new(&self.client_name) {
             self.out_ports = normalize_ports(&port_names_out(&mo));
             self.out_ports.retain(|p| !is_own_port(&p.raw));
+            if !self.want_software_synths {
+                self.out_ports.retain(|p| !is_software_synth(&p.raw));
+            }
         }
         {
             let live_in: HashSet<&str> =
@@ -242,6 +265,32 @@ fn is_own_port(raw: &str) -> bool {
         // the I/O port names above don't cover it (its NO_EXPORT capability
         // doesn't help either — midir's filter only checks for WRITE|SUBS).
         || raw.contains(HOTSWAP_CLIENT_NAME)
+}
+
+/// True when a raw port name is a software synth the OS advertises rather than
+/// a device anyone patched in.
+///
+/// So far that means one thing: Microsoft's GS Wavetable Synth, which every
+/// Windows install carries. It is not hardware, it is not low latency (tens of
+/// milliseconds before a note sounds, which is the whole budget of a timing
+/// engine), and no pro audio host offers it as a real output. It being always
+/// present is the problem: it takes the first slot in every enumeration, so
+/// anything that picks "the first output port" picks a synth the user did not
+/// ask for and cannot rely on.
+///
+/// A CI runner shows the sharp edge of the same thing — the port is LISTED and
+/// then refuses to open, because the service context has no access to it.
+///
+/// Hidden by default, restored by `set_software_synths(true)` for anyone who
+/// does want it: on a bare Windows laptop with no interface, it is the only way
+/// to hear MIDI at all.
+fn is_software_synth(raw: &str) -> bool {
+    // Match on the distinctive middle rather than the whole string: the name
+    // carries an index prefix on some paths ("0: Microsoft GS Wavetable Synth")
+    // and has been spelled with and without "Microsoft " across Windows
+    // versions.
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("gs wavetable")
 }
 
 /// Linux/ALSA storage: all inputs share one sequencer client, all outputs share
@@ -571,7 +620,7 @@ mod per_port {
 
 #[cfg(test)]
 mod tests {
-    use super::is_own_port;
+    use super::{is_own_port, is_software_synth};
     use crate::normalize::normalize_ports;
 
     // Regression guard: enumeration must drop clockwork's own
@@ -603,5 +652,27 @@ mod tests {
         assert!(is_own_port("clockwork-midi-out")); // bare CoreMIDI-style name
         assert!(!is_own_port("clockwork:Launchpad MIDI 1 1:0")); // client-name collision, real device kept
         assert!(!is_own_port("nanoKONTROL2:nanoKONTROL2 MIDI 1 1:0"));
+    }
+
+    #[test]
+    fn the_windows_software_synth_is_recognised_however_it_is_spelled() {
+        // The name has carried an index prefix on some paths and has been
+        // written with and without "Microsoft " across Windows versions, so
+        // the match is on the distinctive middle.
+        assert!(is_software_synth("Microsoft GS Wavetable Synth"));
+        assert!(is_software_synth("0: Microsoft GS Wavetable Synth"));
+        assert!(is_software_synth("GS Wavetable Synth"));
+        assert!(is_software_synth("microsoft gs wavetable synth 0"));
+    }
+
+    #[test]
+    fn real_devices_are_not_mistaken_for_it() {
+        // Nothing here is Microsoft's synth, including names that share a word
+        // with it — a hardware wavetable synth is still hardware.
+        assert!(!is_software_synth("Launchpad MIDI 1"));
+        assert!(!is_software_synth("nanoKONTROL2"));
+        assert!(!is_software_synth("Waldorf Blofeld"));
+        assert!(!is_software_synth("Wavetable Explorer"));
+        assert!(!is_software_synth("IAC Driver Bus 1"));
     }
 }

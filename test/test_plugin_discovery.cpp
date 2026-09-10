@@ -12,6 +12,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>   // sort/unique: reached through <vector> on libstdc++ 13
+                       // and libc++, but not on the 12.2 the i386 job carries
 #include <cstring>
 #include <filesystem>
 #include <string>

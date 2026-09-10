@@ -12,7 +12,7 @@ extern crate clockwork_sys;
 
 use std::time::Duration;
 
-use clockwork_client::{Embed, EmbedConfig, Error};
+use clockwork_client::{Embed, EmbedConfig, Error, Metric};
 
 #[test]
 fn boot_ticks_itself_and_reports_the_device_it_opened() {
@@ -49,11 +49,27 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             // The device callback ticks the engine, so a ping is answered
             // with nobody rendering.
             e.drain();
+            let ticks_before = e.metrics().get(Metric::EngineProcessCount).unwrap_or(0);
             e.send(&clockwork_osc::encode("/dummy/ping", &[]), 0x424f_4f54).unwrap();
-            let got = e.poll_until(Duration::from_secs(5), |m| {
+            // 15s, not 5: the slowest CI runner takes three times as long as
+            // the fastest for the same job, and this waits on a device
+            // callback rather than on work we are driving.
+            let got = e.poll_until(Duration::from_secs(15), |m| {
                 (m.address() == "/dummy/pong").then_some(m.origin)
             });
-            assert_eq!(got, Some(0x424f_4f54));
+            let ticks_after = e.metrics().get(Metric::EngineProcessCount).unwrap_or(0);
+            // Say which of the two possible faults this is. The device
+            // callback is what ticks the engine and therefore what answers,
+            // so a tick count that did not move means the callback stopped —
+            // a different finding entirely from an answer that was merely slow.
+            assert_eq!(
+                got,
+                Some(0x424f_4f54),
+                "no pong within 15s; the engine ticked {} times while waiting \
+                 (process count {ticks_before} -> {ticks_after}). No movement means \
+                 the device callback stopped, not that the answer was late.",
+                ticks_after.wrapping_sub(ticks_before)
+            );
             let stats = e.native_stats().unwrap();
             assert_eq!(stats.overruns(), 0, "{stats:?}");
         }
