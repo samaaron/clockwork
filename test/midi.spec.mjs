@@ -150,7 +150,12 @@ test("a note the guest sends itself reaches the port stamped with its moment", a
     clockwork.send("/dummy/sink/send", { type: "int", value: sink },
       { type: "blob", value: Uint8Array.from([0x90, 0x3c, 0x64]) }, { type: "int", value: 300 });
     const got = await until(() => window.__fakeMidi.synth.sent.length === 1, 3000);
-    return { sink, got, sent: window.__fakeMidi.synth.sent, sentAt: window.__fakeMidi.synth.sentAt, duePerfMs };
+    // The audio path's own latency, for the budget below: a headless runner's
+    // output latency is nothing like a machine with an interface, and the gap
+    // this test measures is mostly made of it.
+    let audio = null;
+    try { audio = clockwork.getSystemReport()?.audio ?? null; } catch { /* report unavailable */ }
+    return { sink, got, sent: window.__fakeMidi.synth.sent, sentAt: window.__fakeMidi.synth.sentAt, duePerfMs, audio };
   });
   expect(r.sink, "the guest's sink did not open").toBeGreaterThan(0);
   expect(r.got, "the guest's note never reached the port").toBe(true);
@@ -159,7 +164,29 @@ test("a note the guest sends itself reaches the port stamped with its moment", a
   expect(timestamp, "the send carried no timestamp: the time was lost on the hop").toBeDefined();
   // The guest dated it from its block's start, which is within a block of
   // when the client sent; the browser is handed that moment.
-  expect(Math.abs(timestamp - r.duePerfMs), `stamped ${timestamp - r.duePerfMs} ms off`).toBeLessThan(40);
+  //
+  // The threshold stays at 40. It has been missed by fractions of a
+  // millisecond on a CI runner — 41.4 and 40.3 in consecutive runs — which
+  // looks like a systematic offset sitting on the limit rather than jitter
+  // scattering across it. The audio numbers below are reported so the NEXT
+  // failure says what that offset is made of: the stamp is on the output
+  // timeline, so if it is the audio path's own latency then baseLatency +
+  // outputLatency should account for most of it, and the budget could then be
+  // derived from them honestly. Until a run actually prints them that is a
+  // hypothesis, and widening the limit now would bury the evidence for it.
+  // Web Audio reports both latencies in SECONDS.
+  const audio = r.audio ?? {};
+  const latencyMs = ((audio.baseLatency ?? 0) + (audio.outputLatency ?? 0)) * 1000;
+  const blockMs = audio.sampleRate ? (128 / audio.sampleRate) * 1000 : 128 / 48;
+  expect(
+    Math.abs(timestamp - r.duePerfMs),
+    `stamped ${timestamp - r.duePerfMs} ms off. ` +
+      `baseLatency ${audio.baseLatency}s + outputLatency ${audio.outputLatency}s ` +
+      `= ${latencyMs.toFixed(2)} ms; block ${blockMs.toFixed(2)} ms at ${audio.sampleRate} Hz. ` +
+      `If that latency accounts for the offset, the limit is measuring the box's ` +
+      `output buffer rather than clockwork. Null or 0 means the browser would not ` +
+      `report them, which is its own finding.`,
+  ).toBeLessThan(40);
   expect(r.sentAt[0], "the send was made after its moment, not held to it").toBeLessThan(timestamp);
 });
 
