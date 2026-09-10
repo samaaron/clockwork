@@ -179,16 +179,46 @@ TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls
         // is unpublished, and the drain's validation never fired.
         REQUIRE(m.osc_in_corrupted.load(std::memory_order_relaxed) == 0);
 
-        // The engine (audio + gateway) is fully alive after each corpse.
+        // The corpse leaves its backlog behind, and it must drain now that
+        // nobody is writing. This is the stronger claim, and the one the ping
+        // below was standing in for badly: a peer dying mid-write leaves the
+        // ring full, and if the engine could not work through that it would sit
+        // there forever.
         //
-        // When this times out it has ten seconds of silence behind it, which is
-        // far too long to be a slow machine — so say what the engine was doing
-        // rather than only that it said nothing. Ticks moving means the audio
-        // thread survived the corpse; messages_processed moving means the drain
-        // is still consuming; a full ingress ring with neither moving is a
-        // stall, which is the failure this whole case exists to catch. It has
-        // fired intermittently on both macOS runners, and without these numbers
-        // there is nothing to tell a deadlock from a hiccup.
+        // It also has to happen BEFORE the ping. `spam` writes as fast as it
+        // can, and a failing run caught cycle 7 with the ingress ring at its
+        // 786,400-byte ceiling and 20,067 messages drained during the ten
+        // seconds the ping supposedly "went unanswered". The engine was never
+        // stalled — one ping was racing a flood, and its pong was one reply
+        // among twenty thousand. That measured the test's luck, not the
+        // engine's health.
+        const bool drained = fx.pollUntil([&] {
+            return m.in_buffer_used_bytes.load(std::memory_order_relaxed) == 0;
+        }, kEngineWaitMs);
+        if (!drained) {
+            UNSCOPED_INFO("kill cycle " << i << " of " << kKillCycles
+                          << ": the corpse's backlog never drained in " << kEngineWaitMs
+                          << " ms. ingress used "
+                          << m.in_buffer_used_bytes.load(std::memory_order_relaxed)
+                          << " peak " << m.in_buffer_peak_bytes.load(std::memory_order_relaxed)
+                          << "; messages_processed "
+                          << m.messages_processed.load(std::memory_order_relaxed)
+                          << "; ticks " << m.process_count.load(std::memory_order_relaxed)
+                          << ". Nobody is writing by now, so a ring that stays full is the "
+                             "engine failing to work through what the dead peer left.");
+        }
+        REQUIRE(drained);
+
+        // NOW the engine (audio + gateway) answering a new request means what
+        // it claims to: not that one message won a race, but that a client
+        // asking after a corpse is served.
+        //
+        // When this times out, say what the engine was doing rather than only
+        // that it said nothing. Ticks moving means the audio thread survived
+        // the corpse; messages_processed moving means the drain is consuming; a
+        // full ingress ring with neither moving is the stall this case exists
+        // to catch. Without these numbers there is nothing to tell a deadlock
+        // from a hiccup — which is how the flood above went unnoticed.
         OscReply reply;
         const uint32_t ticksBefore = m.process_count.load(std::memory_order_relaxed);
         const uint32_t procBefore  = m.messages_processed.load(std::memory_order_relaxed);

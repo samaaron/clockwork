@@ -450,3 +450,62 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
     CHECK(table.metrics_bytes       == k.metrics_bytes);
     CHECK(table.blob_size           == k.blob_size);
 }
+
+// ── A client's base, across a cold device swap ───────────────────────────────
+//
+// A client caches the arena base it was opened over (ClientImpl::base, from
+// clockwork_lanes_base()). A cold device switch runs rebuild_dsp -> init_memory
+// -> clockwork_lanes_reset_drains, and init_memory is what resolves that base.
+// So if a swap ever re-points the arena, every client opened before it is
+// writing into memory the audio thread has stopped reading — silently, because
+// the write still succeeds and the layouts are identical.
+//
+// The existing cold-swap coverage cannot see this: test_cold_swap_recovery.cpp
+// drives the engine through ingest(), which never goes near a client's cached
+// base. Nothing has tested a client across a swap at all.
+//
+// Not hypothetical. On a macOS x64 runner whose Null Audio Device produces no
+// callbacks, the engine recovers with exactly this forced cold switch — and
+// from that moment the embed's client sends land nowhere:
+//
+//     ticks 3760 (the callback is fine after recovery)
+//     engine_processed 0, in_ring_used 0, in_ring_peak 0  (nothing arrives)
+//     in_dropped 0, in_corrupted 0                        (nothing refused)
+//
+// arm64 opens its device first time, never recovers, and never sees this.
+//
+// NOTE, so nobody reads more into this case than it earns: it passes, and it
+// exercises a VOLUNTARY switchDevice. The CI failure comes in by another door —
+// a device that opens, produces no callbacks for 5 s, and is cold-switched by
+// the watchdog's recovery. Same function, different entry, and only the
+// recovery entry has ever failed. So this is a regression guard for coverage
+// that did not exist, not a reproduction of that bug.
+TEST_CASE("a client still reaches the engine after a cold device swap",
+          "[client][coldswap]") {
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(c != nullptr);
+
+    // The pattern the cases above prove works: send through the ABI, and let
+    // the fixture wait for the guest's answer.
+    const auto pingReaches = [&]() {
+        const auto ping = osc_test::message("/dummy/ping");
+        if (clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) != CLOCKWORK_OK) return false;
+        osc_test::ParsedReply r;
+        return e.reply("/dummy/pong", r);
+    };
+
+    REQUIRE(pingReaches());   // the harness itself works before anything is swapped
+
+    // The same call the recovery path makes when a device produces no callbacks.
+    const auto r = e.engine.switchDevice("", 44100);
+    INFO("switchDevice success=" << r.success);
+
+    // The base the client cached must still be the base the drain reads. If
+    // this fails, a client opened before a swap is deaf afterwards — and
+    // nothing about the send says so.
+    CHECK(pingReaches());     // and the client is not deaf afterwards
+
+    clockwork_client_close(c);
+}
