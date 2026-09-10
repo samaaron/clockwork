@@ -49,7 +49,26 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             // The device callback ticks the engine, so a ping is answered
             // with nobody rendering.
             e.drain();
-            let ticks_before = e.metrics().get(Metric::EngineProcessCount).unwrap_or(0);
+            // Where a missing pong died. The engine ticking (below) only says
+            // the device callback runs; these say how far the message got:
+            // in-received moving but out-sent not means it arrived and was not
+            // answered, out-sent moving means it was answered and the client
+            // never saw it, and dropped/corrupted moving means a ring refused
+            // it. Without them a failure is just "no pong", which is where
+            // this test sat while the timeout took the blame.
+            let counts = |e: &Embed| {
+                let m = e.metrics();
+                (
+                    m.get(Metric::EngineProcessCount).unwrap_or(0),
+                    m.get(Metric::OscInMessagesReceived).unwrap_or(0),
+                    m.get(Metric::EngineMessagesProcessed).unwrap_or(0),
+                    m.get(Metric::OscOutMessagesSent).unwrap_or(0),
+                    m.get(Metric::OscInMessagesDropped).unwrap_or(0),
+                    m.get(Metric::OscInCorrupted).unwrap_or(0),
+                )
+            };
+            let before = counts(&e);
+            let ticks_before = before.0;
             e.send(&clockwork_osc::encode("/dummy/ping", &[]), 0x424f_4f54).unwrap();
             // 15s, not 5: the slowest CI runner takes three times as long as
             // the fastest for the same job, and this waits on a device
@@ -57,7 +76,8 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             let got = e.poll_until(Duration::from_secs(15), |m| {
                 (m.address() == "/dummy/pong").then_some(m.origin)
             });
-            let ticks_after = e.metrics().get(Metric::EngineProcessCount).unwrap_or(0);
+            let after = counts(&e);
+            let ticks_after = after.0;
             // Say which of the two possible faults this is. The device
             // callback is what ticks the engine and therefore what answers,
             // so a tick count that did not move means the callback stopped —
@@ -65,10 +85,19 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             assert_eq!(
                 got,
                 Some(0x424f_4f54),
-                "no pong within 15s; the engine ticked {} times while waiting \
-                 (process count {ticks_before} -> {ticks_after}). No movement means \
-                 the device callback stopped, not that the answer was late.",
-                ticks_after.wrapping_sub(ticks_before)
+                "no pong within 15s. ticks {} (count {ticks_before} -> {ticks_after}); \
+                 osc_in_received {} -> {}; engine_processed {} -> {}; osc_out_sent {} -> {}; \
+                 in_dropped {} -> {}; in_corrupted {} -> {}. \
+                 Ticks moving means the device callback is fine, so read the rest: \
+                 in_received still means it never arrived, processed without out_sent \
+                 means the guest did not answer, out_sent means the answer was made and \
+                 the client never polled it.",
+                ticks_after.wrapping_sub(ticks_before),
+                before.1, after.1,
+                before.2, after.2,
+                before.3, after.3,
+                before.4, after.4,
+                before.5, after.5
             );
             let stats = e.native_stats().unwrap();
             assert_eq!(stats.overruns(), 0, "{stats:?}");

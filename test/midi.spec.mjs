@@ -178,6 +178,17 @@ test("a note the guest sends itself reaches the port stamped with its moment", a
   const audio = r.audio ?? {};
   const latencyMs = ((audio.baseLatency ?? 0) + (audio.outputLatency ?? 0)) * 1000;
   const blockMs = audio.sampleRate ? (128 / audio.sampleRate) * 1000 : 128 / 48;
+  // Printed on every run, pass or fail. The assertion message below only
+  // appears when the assertion fails, and this test has been landing within a
+  // millisecond of the limit — so waiting for a failure to learn the numbers
+  // makes the measurement hostage to a coin flip. Node-side, not inside the
+  // page callback: the browser's console is not surfaced by default.
+  console.log(
+    `[stamp-budget] off=${(timestamp - r.duePerfMs).toFixed(3)}ms limit=40ms ` +
+      `baseLatency=${audio.baseLatency}s outputLatency=${audio.outputLatency}s ` +
+      `latencySum=${latencyMs.toFixed(2)}ms block=${blockMs.toFixed(2)}ms ` +
+      `rate=${audio.sampleRate}Hz`,
+  );
   expect(
     Math.abs(timestamp - r.duePerfMs),
     `stamped ${timestamp - r.duePerfMs} ms off. ` +
