@@ -30,6 +30,8 @@
  */
 #pragma once
 
+#include <cstddef>   // size_t: used unqualified below, and <vector> happens
+                     // to drag it in on libc++ and MSVC but not on libstdc++
 #include <cstdint>
 #include <vector>
 
