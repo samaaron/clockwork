@@ -204,8 +204,25 @@ TEST_CASE("embed: a client send reaches the engine's ingress", "[embed][engine][
     };
     // Slot 1 is messages_processed, slot 0 the process count — the same two the
     // Rust test reads (shared_memory.h's metric order).
-    const uint32_t ticksBefore = metric(0);
-    const uint32_t procBefore  = metric(1);
+
+    // A runner with no audio boots a handle whose callback never fires, and
+    // everything below needs one: the ingress drain runs ON the audio thread,
+    // so with no ticks there is no drain and "the engine never saw the ping"
+    // would be true of any machine rather than a finding about this one. Wait
+    // for the callback to start and skip if it does not — which leaves the
+    // case biting exactly where it matters, since the macOS x64 runner this
+    // exists for ticks perfectly well (4108 times in 15s) and still loses the
+    // message.
+    uint32_t ticksBefore = metric(0);
+    for (int i = 0; i < 100 && metric(0) == ticksBefore; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (metric(0) == ticksBefore) {
+        WARN("no audio device is ticking here; the ingress path is not tested");
+        clockwork_embed_close(h);
+        return;
+    }
+    ticksBefore = metric(0);
+    const uint32_t procBefore = metric(1);
 
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) == CLOCKWORK_OK);
