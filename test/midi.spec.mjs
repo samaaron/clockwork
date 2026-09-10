@@ -329,7 +329,7 @@ test("the guest's own time runs true across several sends", async ({ page, clock
     clockwork.send("/dummy/sink/open", "fake_synth", { type: "int", value: 1 }, { type: "int", value: 0 });
     const opened = await waitFor("/dummy/sink/opened");
     const sink = opened?.[1] ?? 0;
-    const delays = [100, 200, 300, 400, 500];
+    const delays = [100, 300, 500, 700, 900];
     const t0 = performance.now();
     // A distinct note per delay, so a stamp is matched to its request by WHAT
     // was sent rather than by the order it came back in — a reordering fault
@@ -378,11 +378,21 @@ test("the guest's own time runs true across several sends", async ({ page, clock
       `latencySum=${latencyMs.toFixed(2)}ms block=${blockMs.toFixed(2)}ms rate=${audio.sampleRate}Hz`,
   );
 
-  // Tight, because a rate error is not subtle and this number owes nothing to
-  // the machine.
+  // The bound, from the noise rather than from optimism.
+  //
+  // A first run said 1% was wrong: one transport fit perfectly (slope 1.00000,
+  // residuals all zero) while the other carried residuals to +/-4.27 ms, and a
+  // line through points that scattered by that much over a 400 ms span has a
+  // slope uncertain by 2*4.27/400 ~= 2.1% — which is exactly the 1.02133 it
+  // reported. The slope was not wrong; the bound was, and it was a guess.
+  //
+  // So the span is now 800 ms rather than 400, which halves that uncertainty
+  // for free, and the bound is 3% — comfortably above a noise floor near 1%,
+  // and far below the thing worth catching: mistaking 44.1 kHz for 48 is an 8%
+  // error and would still be unmissable.
   expect(slope, `time ran at ${(slope * 100).toFixed(2)}% of rate; residuals [${residuals.map((v) => v.toFixed(2))}]`)
-    .toBeGreaterThan(0.99);
-  expect(slope).toBeLessThan(1.01);
+    .toBeGreaterThan(0.97);
+  expect(slope).toBeLessThan(1.03);
 
   // Deliberately generous on first introduction: no run has reported a
   // residual yet, and inventing a tight bound before seeing one is how the
