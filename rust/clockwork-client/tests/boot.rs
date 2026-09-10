@@ -65,6 +65,14 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
                     m.get(Metric::OscOutMessagesSent).unwrap_or(0),
                     m.get(Metric::OscInMessagesDropped).unwrap_or(0),
                     m.get(Metric::OscInCorrupted).unwrap_or(0),
+                    // The ingress ring itself, as the audio callback sees it.
+                    // engine_processed staying at 0 says the drain consumed
+                    // nothing; these say whether there was anything to consume.
+                    // A peak that never rises means the client's write never
+                    // landed in the ring the engine reads — a different fault
+                    // from a drain that will not run.
+                    m.get(Metric::InBufferUsedBytes).unwrap_or(0),
+                    m.get(Metric::InBufferPeakBytes).unwrap_or(0),
                 )
             };
             let before = counts(&e);
@@ -87,17 +95,22 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
                 Some(0x424f_4f54),
                 "no pong within 15s. ticks {} (count {ticks_before} -> {ticks_after}); \
                  osc_in_received {} -> {}; engine_processed {} -> {}; osc_out_sent {} -> {}; \
-                 in_dropped {} -> {}; in_corrupted {} -> {}. \
-                 Ticks moving means the device callback is fine, so read the rest: \
-                 in_received still means it never arrived, processed without out_sent \
-                 means the guest did not answer, out_sent means the answer was made and \
-                 the client never polled it.",
+                 in_dropped {} -> {}; in_corrupted {} -> {}; \
+                 in_ring_used {} -> {}; in_ring_peak {} -> {}. \
+                 Ticks moving means the device callback is fine. osc_in_received is \
+                 CLIENT-side (what this process polled FROM the engine), so it says \
+                 nothing about ingress. engine_processed is the engine's own ingress \
+                 drain: 0 means the ping was never seen. in_ring_peak then says which \
+                 fault that is — 0 means the write never landed in the ring, non-zero \
+                 means it landed and the drain did not consume it.",
                 ticks_after.wrapping_sub(ticks_before),
                 before.1, after.1,
                 before.2, after.2,
                 before.3, after.3,
                 before.4, after.4,
-                before.5, after.5
+                before.5, after.5,
+                before.6, after.6,
+                before.7, after.7
             );
             let stats = e.native_stats().unwrap();
             assert_eq!(stats.overruns(), 0, "{stats:?}");

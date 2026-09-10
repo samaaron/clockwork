@@ -403,3 +403,50 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
     // to put something in it.
     CHECK(std::string(clockwork_client_status_text(CLOCKWORK_E_TOO_BIG)).size() > 0);
 }
+
+// ── The two ways this engine says where its rings are ────────────────────────
+//
+// A client takes the layout FROM THE SEGMENT (ShmReaderLayout::from_arena, via
+// shm_segment_client): "the ENGINE's layout, not this build's", so a client
+// built separately still finds the rings. The audio thread does not — its drain
+// addresses them with compile-time constants:
+//
+//     clockwork_drain_ring(shared_memory + IN_BUFFER_START, IN_BUFFER_SIZE,
+//                          &control->in_head, &control->in_tail, ...)
+//
+// Two sources of truth for one address. They agree only while the table the
+// engine publishes matches the constants the engine compiled, and nothing
+// asserted that they do. If they ever diverge the failure is silent in the
+// worst way: a client's send lands where the drain never looks, so the ring the
+// engine reads stays empty forever. Nothing is dropped and nothing is
+// corrupted — there is simply never anything there — and the only visible
+// symptom is that messages are never answered.
+//
+// Asserted here rather than inferred from a timeout somewhere downstream.
+TEST_CASE("the arena's published layout is the one the audio thread compiled",
+          "[client][layout]") {
+    Engine e;   // boots the engine, which writes the arena header
+
+    ShmReaderLayout table{};
+    const char* why = nullptr;
+    REQUIRE(ShmReaderLayout::from_arena(shared_memory, TOTAL_BUFFER_SIZE, table, &why));
+    INFO("from_arena refused: " << (why ? why : "-"));
+
+    const ShmReaderLayout k = ShmReaderLayout::from_constants();
+
+    // The ingress path first: this is the one whose disagreement would strand a
+    // client's traffic where the drain cannot see it.
+    CHECK(table.control_offset == k.control_offset);
+    CHECK(table.control_bytes  == k.control_bytes);
+    CHECK(table.in_ring_offset == k.in_ring_offset);
+    CHECK(table.in_ring_size   == k.in_ring_size);
+
+    // And the rest of the boundary, for the same reason one step removed.
+    CHECK(table.out_ring_offset     == k.out_ring_offset);
+    CHECK(table.out_ring_size       == k.out_ring_size);
+    CHECK(table.nrt_out_ring_offset == k.nrt_out_ring_offset);
+    CHECK(table.nrt_out_ring_size   == k.nrt_out_ring_size);
+    CHECK(table.metrics_offset      == k.metrics_offset);
+    CHECK(table.metrics_bytes       == k.metrics_bytes);
+    CHECK(table.blob_size           == k.blob_size);
+}
