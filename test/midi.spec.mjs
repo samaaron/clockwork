@@ -162,42 +162,45 @@ test("a note the guest sends itself reaches the port stamped with its moment", a
   expect(r.sent[0].bytes).toEqual([0x90, 0x3c, 0x64]);
   const { timestamp } = r.sent[0];
   expect(timestamp, "the send carried no timestamp: the time was lost on the hop").toBeDefined();
-  // The guest dated it from its block's start, which is within a block of
-  // when the client sent; the browser is handed that moment.
+  // The guest dated it from its block's start, and the browser is handed that
+  // moment ON THE OUTPUT TIMELINE — so the gap between the two is the audio
+  // path's own latency, plus a block or so of placement. Derived from what the
+  // browser reports rather than named as a constant, because a constant here
+  // measures the machine's output buffer and nothing else.
   //
-  // The threshold stays at 40. It has been missed by fractions of a
-  // millisecond on a CI runner — 41.4 and 40.3 in consecutive runs — which
-  // looks like a systematic offset sitting on the limit rather than jitter
-  // scattering across it. The audio numbers below are reported so the NEXT
-  // failure says what that offset is made of: the stamp is on the output
-  // timeline, so if it is the audio path's own latency then baseLatency +
-  // outputLatency should account for most of it, and the budget could then be
-  // derived from them honestly. Until a run actually prints them that is a
-  // hypothesis, and widening the limit now would bury the evidence for it.
+  // The old flat 40 ms said so plainly once it met a headless runner, which
+  // reports baseLatency 10.02 ms + outputLatency 32.0 ms = 42.02 ms:
+  //
+  //     SAB      40.988   40.859     ~1.2 ms under the latency sum, both runs
+  //     non-SAB  33.601   36.796     5-8 ms under it
+  //
+  // Every sample sits below the sum, and the SAB path tracks it to within half
+  // a block — systematic, not jitter. A 40 ms limit was therefore guaranteed to
+  // fail on any box whose buffer exceeds 40 ms and to pass on any box below it,
+  // which is not a fact about clockwork.
+  //
+  // This is STRICTER than the old constant wherever the old one passed: an
+  // interface with 8 ms of latency now gets a ~18.7 ms budget, not 40.
   // Web Audio reports both latencies in SECONDS.
   const audio = r.audio ?? {};
   const latencyMs = ((audio.baseLatency ?? 0) + (audio.outputLatency ?? 0)) * 1000;
   const blockMs = audio.sampleRate ? (128 / audio.sampleRate) * 1000 : 128 / 48;
-  // Printed on every run, pass or fail. The assertion message below only
-  // appears when the assertion fails, and this test has been landing within a
-  // millisecond of the limit — so waiting for a failure to learn the numbers
-  // makes the measurement hostage to a coin flip. Node-side, not inside the
-  // page callback: the browser's console is not surfaced by default.
+  const budgetMs = latencyMs + 4 * blockMs;
   console.log(
-    `[stamp-budget] off=${(timestamp - r.duePerfMs).toFixed(3)}ms limit=40ms ` +
+    `[stamp-budget] off=${(timestamp - r.duePerfMs).toFixed(3)}ms budget=${budgetMs.toFixed(2)}ms ` +
       `baseLatency=${audio.baseLatency}s outputLatency=${audio.outputLatency}s ` +
       `latencySum=${latencyMs.toFixed(2)}ms block=${blockMs.toFixed(2)}ms ` +
       `rate=${audio.sampleRate}Hz`,
   );
   expect(
     Math.abs(timestamp - r.duePerfMs),
-    `stamped ${timestamp - r.duePerfMs} ms off. ` +
-      `baseLatency ${audio.baseLatency}s + outputLatency ${audio.outputLatency}s ` +
-      `= ${latencyMs.toFixed(2)} ms; block ${blockMs.toFixed(2)} ms at ${audio.sampleRate} Hz. ` +
-      `If that latency accounts for the offset, the limit is measuring the box's ` +
-      `output buffer rather than clockwork. Null or 0 means the browser would not ` +
-      `report them, which is its own finding.`,
-  ).toBeLessThan(40);
+    `stamped ${timestamp - r.duePerfMs} ms off, against a budget of ${budgetMs.toFixed(2)} ms ` +
+      `(baseLatency ${audio.baseLatency}s + outputLatency ${audio.outputLatency}s ` +
+      `= ${latencyMs.toFixed(2)} ms, plus 4 blocks of ${blockMs.toFixed(2)} ms). ` +
+      `An offset ABOVE the latency sum is the interesting failure: it means the stamp ` +
+      `left the output timeline. Latencies of 0 or null mean the browser would not ` +
+      `report them, and the budget is then 4 blocks, which will fail loudly.`,
+  ).toBeLessThan(budgetMs);
   expect(r.sentAt[0], "the send was made after its moment, not held to it").toBeLessThan(timestamp);
 });
 
@@ -297,4 +300,94 @@ test("ping is still answered on the audio thread, not by the host", async ({ pag
     return await waitFor("/clockwork/pong");
   });
   expect(r).toEqual(["/clockwork/pong", 9]);
+});
+
+test("the guest's own time runs true across several sends", async ({ page, clockworkConfig }) => {
+  // What the single-stamp case above cannot ask.
+  //
+  // Comparing ONE browser stamp against ONE client-side prediction compares two
+  // clocks with a constant offset between them — the audio path's output
+  // latency — so it can only pass by carrying a tolerance big enough to swallow
+  // a quantity the test does not control. That tolerance is a property of the
+  // machine, not of clockwork: a headless runner's 42 ms buffer failed a 40 ms
+  // limit that a laptop passes, and neither result says anything about whether
+  // the guest's time is carried faithfully.
+  //
+  // Several sends at known offsets answer it properly. Fit stamp = a + b*asked:
+  //
+  //   b (slope)      the guest's time base running at the right RATE. A sample
+  //                  rate confusion (44.1 for 48) is an 8% error here.
+  //   residuals      each message placed where it was asked for, independent of
+  //                  the others: rounding, block quantisation, a message taking
+  //                  a different path.
+  //   a (intercept)  the constant offset — which IS the output latency. Not a
+  //                  nuisance to be tolerated but a number to be read.
+  //
+  // Slope and residuals carry no latency term at all, so a runner with a 42 ms
+  // buffer and a laptop with 8 ms must produce the same answer.
+  const r = await run(page, clockworkConfig, async ({ clockwork, waitFor, until }) => {
+    clockwork.send("/dummy/sink/open", "fake_synth", { type: "int", value: 1 }, { type: "int", value: 0 });
+    const opened = await waitFor("/dummy/sink/opened");
+    const sink = opened?.[1] ?? 0;
+    const delays = [100, 200, 300, 400, 500];
+    const t0 = performance.now();
+    // A distinct note per delay, so a stamp is matched to its request by WHAT
+    // was sent rather than by the order it came back in — a reordering fault
+    // then shows up as a failure instead of being absorbed silently.
+    delays.forEach((ms, i) => {
+      clockwork.send("/dummy/sink/send", { type: "int", value: sink },
+        { type: "blob", value: Uint8Array.from([0x90, 0x40 + i, 0x64]) },
+        { type: "int", value: ms });
+    });
+    const got = await until(() => window.__fakeMidi.synth.sent.length === delays.length, 6000);
+    let audio = null;
+    try { audio = clockwork.getSystemReport()?.audio ?? null; } catch { /* report unavailable */ }
+    return { got, delays, t0, sent: window.__fakeMidi.synth.sent,
+             sentAt: window.__fakeMidi.synth.sentAt, audio };
+  });
+  expect(r.got, `only ${r.sent.length} of ${r.delays.length} notes reached the port`).toBe(true);
+
+  // Pair each request with its own stamp, by note number.
+  const pts = r.delays.map((asked, i) => {
+    const at = r.sent.findIndex((s) => s.bytes[1] === 0x40 + i);
+    expect(at, `the note for +${asked} ms never arrived`).toBeGreaterThanOrEqual(0);
+    expect(r.sent[at].timestamp, `+${asked} ms carried no timestamp: the time was lost on the hop`).toBeDefined();
+    // Handed over EARLY for the browser to hold — asserted for every point,
+    // not just the first.
+    expect(r.sentAt[at], `+${asked} ms was sent at its moment, not before it`).toBeLessThan(r.sent[at].timestamp);
+    return { asked, got: r.sent[at].timestamp - r.t0 };
+  });
+
+  // Least squares through the five points.
+  const n = pts.length;
+  const sx = pts.reduce((a, p) => a + p.asked, 0);
+  const sy = pts.reduce((a, p) => a + p.got, 0);
+  const sxx = pts.reduce((a, p) => a + p.asked * p.asked, 0);
+  const sxy = pts.reduce((a, p) => a + p.asked * p.got, 0);
+  const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  const intercept = (sy - slope * sx) / n;
+  const residuals = pts.map((p) => p.got - (intercept + slope * p.asked));
+  const worst = Math.max(...residuals.map(Math.abs));
+
+  const audio = r.audio ?? {};
+  const latencyMs = ((audio.baseLatency ?? 0) + (audio.outputLatency ?? 0)) * 1000;
+  const blockMs = audio.sampleRate ? (128 / audio.sampleRate) * 1000 : 128 / 48;
+  console.log(
+    `[time-fit] slope=${slope.toFixed(5)} intercept=${intercept.toFixed(2)}ms ` +
+      `worstResidual=${worst.toFixed(2)}ms residuals=[${residuals.map((v) => v.toFixed(2)).join(", ")}] ` +
+      `latencySum=${latencyMs.toFixed(2)}ms block=${blockMs.toFixed(2)}ms rate=${audio.sampleRate}Hz`,
+  );
+
+  // Tight, because a rate error is not subtle and this number owes nothing to
+  // the machine.
+  expect(slope, `time ran at ${(slope * 100).toFixed(2)}% of rate; residuals [${residuals.map((v) => v.toFixed(2))}]`)
+    .toBeGreaterThan(0.99);
+  expect(slope).toBeLessThan(1.01);
+
+  // Deliberately generous on first introduction: no run has reported a
+  // residual yet, and inventing a tight bound before seeing one is how the
+  // other timing tests here became flaky. The [time-fit] line above prints
+  // them every run — tighten this once there are numbers behind it.
+  expect(worst, `worst residual ${worst.toFixed(2)} ms, residuals [${residuals.map((v) => v.toFixed(2))}]`)
+    .toBeLessThan(4 * blockMs);
 });

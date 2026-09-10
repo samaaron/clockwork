@@ -180,9 +180,35 @@ TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls
         REQUIRE(m.osc_in_corrupted.load(std::memory_order_relaxed) == 0);
 
         // The engine (audio + gateway) is fully alive after each corpse.
+        //
+        // When this times out it has ten seconds of silence behind it, which is
+        // far too long to be a slow machine — so say what the engine was doing
+        // rather than only that it said nothing. Ticks moving means the audio
+        // thread survived the corpse; messages_processed moving means the drain
+        // is still consuming; a full ingress ring with neither moving is a
+        // stall, which is the failure this whole case exists to catch. It has
+        // fired intermittently on both macOS runners, and without these numbers
+        // there is nothing to tell a deadlock from a hiccup.
         OscReply reply;
+        const uint32_t ticksBefore = m.process_count.load(std::memory_order_relaxed);
+        const uint32_t procBefore  = m.messages_processed.load(std::memory_order_relaxed);
         fx.send(osc_test::message("/dummy/ping"));
-        REQUIRE(fx.waitForReply("/dummy/pong", reply, kEngineWaitMs));
+        const bool answered = fx.waitForReply("/dummy/pong", reply, kEngineWaitMs);
+        if (!answered) {
+            const uint32_t ticksAfter = m.process_count.load(std::memory_order_relaxed);
+            const uint32_t procAfter  = m.messages_processed.load(std::memory_order_relaxed);
+            UNSCOPED_INFO("kill cycle " << i << " of " << kKillCycles
+                          << ": no pong in " << kEngineWaitMs << " ms. ticks "
+                          << ticksBefore << " -> " << ticksAfter
+                          << " (audio thread " << (ticksAfter > ticksBefore ? "ALIVE" : "STOPPED")
+                          << "); messages_processed " << procBefore << " -> " << procAfter
+                          << " (drain " << (procAfter > procBefore ? "consuming" : "STALLED")
+                          << "); ingress used " << m.in_buffer_used_bytes.load(std::memory_order_relaxed)
+                          << " peak " << m.in_buffer_peak_bytes.load(std::memory_order_relaxed)
+                          << "; osc_out_sent " << m.osc_out_messages_sent.load(std::memory_order_relaxed)
+                          << "; osc_in_corrupted " << m.osc_in_corrupted.load(std::memory_order_relaxed));
+        }
+        REQUIRE(answered);
     }
 }
 #endif // !CLOCKWORK_TSAN

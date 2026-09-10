@@ -162,3 +162,72 @@ TEST_CASE("embed: boot reports the device it opened, and opens the driver it is 
     clockwork_embed_close(h);
 #endif
 }
+
+// ── The Rust boot test's path, in C++ where everything is reachable ──────────
+//
+// rust/clockwork-client/tests/boot.rs does exactly this — boot NO_INPUT, send
+// /dummy/ping through the embed's client, wait for the pong — and on macOS x64
+// it has never once succeeded, while arm64 passes every run. Its counters say:
+//
+//     ticks 4108 (0 -> 4108)        the device callback is fine
+//     engine_processed 0 -> 0       the drain consumed nothing
+//     in_ring_used/peak 0 -> 0      the engine's head never moved
+//     in_dropped 0, in_corrupted 0  nothing was refused
+//
+// So a client send returns OK while the ring the audio thread reads stays
+// empty. The published layout matches this build's constants (asserted in
+// test_client_abi.cpp), and clockwork_lanes_base() is the same global the
+// drain addresses — so by inspection the two should be the same memory, and
+// on one platform they behave as though they are not.
+//
+// Mirrored here because the native job runs on macOS x64 too, and a C++ case
+// can be stepped through, printed from, and read. If this fails there, the
+// fault is in the engine and Rust is merely the messenger; if it passes while
+// the Rust test fails, the difference is in the binding and that is where to
+// look. Either answer is worth one run.
+TEST_CASE("embed: a client send reaches the engine's ingress", "[embed][engine][ingress]") {
+    ClockworkEmbedConfig cfg {};
+    cfg.struct_bytes = sizeof cfg;
+    cfg.sample_rate  = 48000;
+    cfg.app_name     = "clockwork-embed-ingress";
+    cfg.flags        = CLOCKWORK_EMBED_NO_INPUT;   // as the Rust test boots
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_boot(&cfg, &st);
+    REQUIRE(h != nullptr);
+    ClockworkClient* c = clockwork_embed_client(h);
+    REQUIRE(c != nullptr);
+
+    uint32_t m[8] = {};
+    const auto metric = [&](uint32_t i) {
+        clockwork_client_metrics(c, m, 8);
+        return m[i];
+    };
+    // Slot 1 is messages_processed, slot 0 the process count — the same two the
+    // Rust test reads (shared_memory.h's metric order).
+    const uint32_t ticksBefore = metric(0);
+    const uint32_t procBefore  = metric(1);
+
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) == CLOCKWORK_OK);
+
+    bool pong = false;
+    for (int i = 0; i < 300 && !pong; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ClockworkClientMessage msg[8];
+        const uint32_t n = clockwork_client_poll(c, msg, 8);
+        for (uint32_t k = 0; k < n; ++k)
+            if (osc_test::parseAddress(msg[k].bytes, msg[k].length) == "/dummy/pong") pong = true;
+    }
+    const uint32_t ticksAfter = metric(0);
+    const uint32_t procAfter  = metric(1);
+
+    UNSCOPED_INFO("ticks " << ticksBefore << " -> " << ticksAfter
+                  << " (callback " << (ticksAfter > ticksBefore ? "running" : "STOPPED")
+                  << "); messages_processed " << procBefore << " -> " << procAfter
+                  << " (ingress drain " << (procAfter > procBefore ? "consuming" : "SAW NOTHING")
+                  << "). A send that returned OK with the drain seeing nothing means the "
+                     "write and the read are not addressing the same ring.");
+    CHECK(procAfter > procBefore);   // the engine saw the ping at all
+    CHECK(pong);                     // and answered it
+    clockwork_embed_close(h);
+}
