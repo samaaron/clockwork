@@ -10,7 +10,7 @@
 extern crate clockwork_native;
 extern crate clockwork_sys;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clockwork_client::{Embed, EmbedConfig, Error, Metric};
 
@@ -75,6 +75,34 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
                     m.get(Metric::InBufferPeakBytes).unwrap_or(0),
                 )
             };
+            // Wait for the callback to be live before sending. Boot waits 5s
+            // for a first tick and returns either way; a device that opened
+            // and never started (macos-15-intel's Null Audio Device at 128
+            // frames, every run) is then recovered by the watchdog with a
+            // cold swap, and a cold swap purges the ingress ring. A ping
+            // sent into that window is discarded, not delayed — the
+            // failure read engine_processed 0 and in_ring_peak 0 with the
+            // ticks moving — so the 15s below waited on nothing. The tick
+            // count moving is what this test's name asserts; ask for it
+            // first, then send into a ring nothing is about to purge.
+            let ticks_at_boot = counts(&e).0;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while counts(&e).0 == ticks_at_boot {
+                assert!(
+                    Instant::now() < deadline,
+                    "the device callback never ticked the engine within 15s of boot \
+                     (ticks stuck at {ticks_at_boot}); device {:?}",
+                    e.device()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The device the ticks come from: a recovery may have reopened
+            // it at another buffer size than boot reported.
+            let d = e.device().unwrap();
+            eprintln!("ticking on {} : {} at {} Hz, {}-frame callback", d.driver, d.device, d.sample_rate, d.buffer_frames);
+            assert_eq!(d.sample_rate, e.sample_rate());
+            assert_eq!(d.block_frames, e.block_size());
+            e.drain();
             let before = counts(&e);
             let ticks_before = before.0;
             e.send(&clockwork_osc::encode("/dummy/ping", &[]), 0x424f_4f54).unwrap();
