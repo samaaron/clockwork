@@ -33,3 +33,7 @@ playwright-report/
 *.swo
 *~
 *.log
+
+# The NIF suite's own mix output (test/nif).
+test/nif/_build/
+test/nif/deps/

@@ -224,6 +224,11 @@ endif()
 # thing this project keeps finding out the hard way.
 if(CLOCKWORK_SCHEDULER)
     target_sources(clockwork_tests PRIVATE test_scheduler.cpp)
+    # The standalone scheduler host's logic (src/host/host_scheduler.h): the
+    # control verbs parsed into the store, and due events dispatched through
+    # the host's own route table to its OSC and MIDI leaves. Nothing else
+    # compiles those headers, so this is also what keeps them compiling.
+    target_sources(clockwork_tests PRIVATE test_host_scheduler.cpp)
 else()
     target_sources(clockwork_tests PRIVATE test_scheduler_absent.cpp)
 endif()
