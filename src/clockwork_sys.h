@@ -8,25 +8,19 @@
  *     an address beginning "/clockwork/" is the Clockwork's and is answered here;
  *     ANYTHING ELSE is forwarded to the DSP untouched.
  *
- * The prefix is deliberately odd-looking because the whole point is that the
- * DSP keeps essentially the entire OSC namespace — one reserved string, and
- * nothing more. Match on the full "/clockwork/" INCLUDING the trailing slash:
- * "/clockwork-sys" and "/clockwork/" are different address components, so a DSP that owns
- * "/clockwork/..." is untouched by this, and "/clockwork-system-status" is not claimed
- * either.
+ * One reserved string, and nothing more: the DSP keeps essentially the entire
+ * OSC namespace. Match on the full "/clockwork/" INCLUDING the trailing slash:
+ * "/clockwork-status" and "/clockworks/..." are different address components
+ * and are forwarded to the DSP like anything else.
  *
- * TWO PREFIXES ARE RESERVED, and only one of them is routed here:
- *
- *   "/clockwork/"  Clockwork's. Claimed by clockwork_sys_claims() (clockwork_prefix.h) and
- *                answered here. This is the only string this file routes on.
- *   "/clockwork/"      the GUEST's, and reserved by convention rather than by code.
- *                Nothing in clockwork claims it — it is forwarded like any
- *                other address — but a guest should not squat on it, and a
- *                project embedding clockwork should not invent verbs there.
- *
- * The distinction matters: reserving "/clockwork/" in code would take it away from
- * the guest that uses it, which is the opposite of the intent. It is reserved
- * FOR a guest, not FROM one.
+ * ONE PREFIX IS RESERVED, and it is the same in every product that embeds
+ * clockwork: "/clockwork/", claimed by clockwork_sys_claims() (clockwork_prefix.h)
+ * and answered here. It is not configurable by the product or the guest, and
+ * that is a decision (2026-09-11), not an omission: keeping the string fixed
+ * keeps the split mechanical and keeps clockwork's verbs portable across
+ * products. A guest's own vocabulary lives under a prefix of its choosing —
+ * SuperSonic's scsynth uses "/supersonic/" — which clockwork never claims and
+ * reserves nothing about; to the product's client the two sit side by side.
  *
  * There is exactly ONE predicate, and it is clockwork_sys_claims() in clockwork_prefix.h.
  * Every clockwork verb lives under the prefix now -- the clock, MIDI, gamepad,
