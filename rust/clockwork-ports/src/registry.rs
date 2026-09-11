@@ -134,7 +134,7 @@ pub unsafe fn open_shared(
     if direction != DIR_SOURCE && direction != DIR_SINK { return 0; }
     if channels == 0 || channels > MAX_CHANNELS { return 0; }
     if capacity_frames != round_capacity(capacity_frames) { return 0; }
-    if storage.is_null() || !(storage as usize).is_multiple_of(64) { return 0; }
+    if storage.is_null() || (storage as usize) % 64 != 0 { return 0; }
     if storage_bytes < crate::ring::storage_bytes(capacity_frames, channels) { return 0; }
     let cname = CString::new(name).unwrap_or_else(|_| CString::new("").unwrap());
     // SAFETY: valid and mapped while open per the contract; aligned and big

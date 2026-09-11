@@ -172,7 +172,7 @@ impl FrameRing {
         assert!(cap.is_power_of_two(), "ring capacity must be a power of two");
         let ch = channels as usize;
         assert!(ch > 0, "a ring with no channels carries nothing");
-        assert!(!base.is_null() && (base as usize).is_multiple_of(64), "ring storage must be 64-byte aligned");
+        assert!(!base.is_null() && (base as usize) % 64 == 0, "ring storage must be 64-byte aligned");
         let counters = base.cast::<Counters>().cast_const();
         if reset {
             // SAFETY: `base` is valid and aligned per the contract above, and

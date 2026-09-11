@@ -42,7 +42,7 @@ fn main() {
                 false,
             );
             ticks += 1;
-            if ticks.is_multiple_of(10) {
+            if ticks % 10 == 0 {
                 // SAFETY: a class method with no preconditions; the run loop
                 // above pumps the main queue.
                 let pads = unsafe { GCController::controllers() }.to_vec();

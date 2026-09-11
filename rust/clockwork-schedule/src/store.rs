@@ -123,7 +123,7 @@ struct MetaArena {
 
 impl MetaArena {
     fn new(slot_count: usize, meta_size: usize, meta_align: usize) -> Option<Self> {
-        if meta_size == 0 || !meta_align.is_power_of_two() || !meta_size.is_multiple_of(meta_align) {
+        if meta_size == 0 || !meta_align.is_power_of_two() || meta_size % meta_align != 0 {
             return None;
         }
         let bytes = meta_size.checked_mul(slot_count)?;
@@ -273,7 +273,7 @@ impl Store {
             return None;
         }
         if meta_size == 0 || !(meta_align as usize).is_power_of_two()
-            || !meta_size.is_multiple_of(meta_align)
+            || meta_size % meta_align != 0
         {
             return None;
         }

@@ -206,12 +206,12 @@ fn slot_index_of(base: *mut u8, g: &Geometry, slot: *const SlotHeader) -> Option
     let p = slot as usize;
     let guest = base as usize + g.start + g.header_size;
     let off = p.wrapping_sub(guest);
-    if off < g.max_scopes * g.slot_size && off.is_multiple_of(g.slot_size) {
+    if off < g.max_scopes * g.slot_size && off % g.slot_size == 0 {
         return Some(off / g.slot_size);
     }
     let track = base as usize + g.track_start;
     let off = p.wrapping_sub(track);
-    if g.track_slots > 0 && off < g.track_slots * g.slot_size && off.is_multiple_of(g.slot_size) {
+    if g.track_slots > 0 && off < g.track_slots * g.slot_size && off % g.slot_size == 0 {
         return Some(g.max_scopes + off / g.slot_size);
     }
     None

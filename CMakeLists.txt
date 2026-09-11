@@ -288,10 +288,17 @@ int main() { return 0; }
         include(CheckCXXCompilerFlag)
         check_cxx_compiler_flag("-fexcess-precision=standard" CLOCKWORK_HAS_EXCESS_PRECISION)
         if(CLOCKWORK_HAS_EXCESS_PRECISION)
-            add_compile_options(-fexcess-precision=standard)
+            set(CLOCKWORK_FLOAT_FLAGS -fexcess-precision=standard)
         else()
-            add_compile_options(-ffloat-store)
+            set(CLOCKWORK_FLOAT_FLAGS -ffloat-store)
         endif()
+        # For this tree, here; for whoever links clockwork, as a PUBLIC option
+        # on the library targets below. An embedder's host and tests make the
+        # same exactness claims against the same arithmetic, and
+        # add_compile_options stops at this directory — an embedder's i386
+        # build compiled its own targets wide and failed on values that print
+        # identically on both sides of the ==.
+        add_compile_options(${CLOCKWORK_FLOAT_FLAGS})
     endif()
 endif()
 
@@ -576,6 +583,9 @@ add_library(clockwork STATIC
     ${OSCPACK_SOURCES})
 
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_INCLUDE_DIRS})
+if(CLOCKWORK_FLOAT_FLAGS)
+    target_compile_options(clockwork PUBLIC ${CLOCKWORK_FLOAT_FLAGS})
+endif()
 if(CLOCKWORK_SYSTEM_STB)
     target_compile_definitions(clockwork PRIVATE CLOCKWORK_SYSTEM_STB=1)
     target_link_libraries(clockwork PUBLIC PkgConfig::STB)
@@ -1060,6 +1070,9 @@ add_library(clockwork_comms STATIC
     ${CLOCKWORK_SRC}/comms/StreamOscTransport.cpp
     ${CLOCKWORK_SRC}/comms/UdsDgramOscTransport.cpp
     ${CLOCKWORK_SRC}/comms/ShmTransport.cpp)
+if(CLOCKWORK_FLOAT_FLAGS)
+    target_compile_options(clockwork_comms PUBLIC ${CLOCKWORK_FLOAT_FLAGS})
+endif()
 target_include_directories(clockwork_comms PUBLIC ${CLOCKWORK_SRC}/comms)
 target_link_libraries(clockwork_comms PUBLIC clockwork)
 set_target_properties(clockwork_comms PROPERTIES POSITION_INDEPENDENT_CODE ON)

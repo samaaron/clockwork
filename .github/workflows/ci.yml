@@ -293,6 +293,30 @@ jobs:
       - name: Test
         run: cargo test --release --manifest-path rust/Cargo.toml
 
+  # ------------------------------------------------------------------ msrv --
+  # The oldest Rust the crates must build with: 1.85, Debian trixie's rustc,
+  # because a distro build compiles them with the archive's compiler and
+  # `cargo vendor`, not with rustup. A newer std API (is_multiple_of is
+  # 1.87) is a Debian build failure, and this is where it shows first.
+  # clockwork-sys and clockwork-client are left out: their build script
+  # builds the engine, which the native job already covers; the crates a
+  # distro package compiles are the ones checked.
+  rust-msrv:
+    name: rust msrv (1.85)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libjack-jackd2-dev
+      - name: Check
+        run: cargo check --workspace --all-targets --exclude clockwork-sys --exclude clockwork-client --manifest-path rust/Cargo.toml
+
   # Miri interprets the unsafe crates' tests with aliasing and data-race
   # checking. Twice now it has found undefined behaviour the native tests
   # passed with: a pointer derived from one element of a slice and walked
@@ -376,8 +400,12 @@ jobs:
       - uses: emscripten-core/setup-emsdk@v16
         with:
           version: 4.0.21
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          # The pin build-web.sh and build-web-subsystems.sh prefer, so this
+          # job walks the path an embedder's CI does; a floating nightly is
+          # only their fallback.
+          toolchain: nightly-2026-07-02
           components: rust-src
           # Both: the engine is emscripten, but build-web-subsystems.sh builds
           # clockwork-midi and clockwork-gamepad for wasm32-unknown-unknown to

@@ -390,7 +390,7 @@ impl ShmPeer {
         // misaligned peer_offset would build misaligned atomic refs (UB). The
         // engine always 8-aligns it; reject anything else rather than trust a
         // valid-magic-but-corrupt segment.
-        if !plane.is_multiple_of(8) {
+        if plane % 8 != 0 {
             return Err(format!("peer plane offset {plane} is not 8-aligned"));
         }
         let end = plane

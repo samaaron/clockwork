@@ -95,7 +95,7 @@ pub enum OscPacket {
 // ── encoding ─────────────────────────────────────────────────────────────────
 
 fn pad4(out: &mut Vec<u8>) {
-    while !out.len().is_multiple_of(4) {
+    while out.len() % 4 != 0 {
         out.push(0);
     }
 }

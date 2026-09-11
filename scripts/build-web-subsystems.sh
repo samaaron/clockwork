@@ -54,8 +54,17 @@ fi
 # the same way (see there for why not `cargo +nightly`). Its rust-lld looks
 # for libLLVM.dylib one directory below where rustup puts it, so the
 # toolchain's lib/ is offered to the dynamic loader as a fallback.
+# The pinned nightly first (CLOCKWORK_RUST_NIGHTLY, the same pin build-web.sh
+# uses), then a floating `nightly`. Asking rustup for a toolchain it does not
+# have installs one — without the wasm32 target, and the build then dies on
+# "can't find crate for `core`" — so only a toolchain that already has the
+# target is taken.
 if [ -z "${CARGO_NIGHTLY_BIN:-}" ] && command -v rustup >/dev/null; then
-    CARGO_NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly cargo 2>/dev/null)")" || true
+    for tc in "${CLOCKWORK_RUST_NIGHTLY:-nightly-2026-07-02}" nightly; do
+        rustup toolchain list 2>/dev/null | grep -q "^$tc" || continue
+        rustup target list --installed --toolchain "$tc" 2>/dev/null | grep -qx "$TARGET" || continue
+        CARGO_NIGHTLY_BIN="$(dirname "$(rustup which --toolchain "$tc" cargo 2>/dev/null)")" && break
+    done
 fi
 if [ -n "${CARGO_NIGHTLY_BIN:-}" ] && [ -x "$CARGO_NIGHTLY_BIN/cargo" ]; then
     PATH="$CARGO_NIGHTLY_BIN:$PATH"

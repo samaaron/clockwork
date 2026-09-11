@@ -142,7 +142,7 @@ fn parsing_a_wire_message_allocates_nothing() {
     let mut m: Vec<u8> = Vec::new();
     m.extend_from_slice(clockwork_schedule::SCHEDULE_ADDR.as_bytes());
     m.push(0);
-    while !m.len().is_multiple_of(4) {
+    while m.len() % 4 != 0 {
         m.push(0);
     }
     m.extend_from_slice(b",hb\0");

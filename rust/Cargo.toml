@@ -94,6 +94,10 @@ lto = true
 unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
+# The MSRV is 1.85, Debian trixie's rustc (the distro build compiles these
+# crates with it; CI checks it as `rust msrv`). `x % n == 0` stays spelled
+# that way: `is_multiple_of` is 1.87.
+manual_is_multiple_of = "allow"
 undocumented_unsafe_blocks = "warn"
 missing_safety_doc = "warn"
 ptr_as_ptr = "warn"

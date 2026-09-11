@@ -121,7 +121,7 @@ impl GamepadIo {
         // the Retained<_> handles we keep hold their own retain and survive it.
         autoreleasepool(|_| {
             let mut out = Vec::new();
-            if self.tick.is_multiple_of(SYNC_EVERY) {
+            if self.tick % SYNC_EVERY == 0 {
                 self.sync_controllers(&mut out);
             }
             self.tick = self.tick.wrapping_add(1);
