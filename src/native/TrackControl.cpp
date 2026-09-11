@@ -360,20 +360,37 @@ std::string TrackControl::findBridge() const {
         if (*env && juce::File(env).existsAsFile()) return env;
     }
     const juce::File self = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    return findBridgeBeside(self.getParentDirectory().getFullPathName().toStdString());
+}
+
+std::string TrackControl::findBridgeBeside(const std::string& exeDir) {
+    const juce::File dir(exeDir);
 #if defined(_WIN32)
-    const juce::File sibling = self.getSiblingFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".exe");
+    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".exe");
 #elif defined(__APPLE__)
     // An app bundle beside the engine, so the process has a bundle identifier
     // (what OBS and ScreenCaptureKit select an application by). A bare binary
     // of the same name is still accepted, for a build that predates the bundle.
-    const juce::File bundled = self.getSiblingFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".app")
-                                   .getChildFile("Contents/MacOS/" CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    const juce::File bundled = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".app")
+                                  .getChildFile("Contents/MacOS/" CLOCKWORK_PLUGIN_BRIDGE_NAME);
     if (bundled.existsAsFile()) return bundled.getFullPathName().toStdString();
-    const juce::File sibling = self.getSiblingFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
 #else
-    const juce::File sibling = self.getSiblingFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
 #endif
     if (sibling.existsAsFile()) return sibling.getFullPathName().toStdString();
+#ifdef CLOCKWORK_PLUGIN_BRIDGE_DIR
+    // An installed layout: the bridge lives where the package put it
+    // (CLOCKWORK_PLUGIN_BRIDGE_DIR at configure time — /usr/libexec/<pkg>,
+    // say), not beside an engine that sits in /usr/bin.
+    const juce::File installed = juce::File(CLOCKWORK_PLUGIN_BRIDGE_DIR)
+                                     .getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME
+#if defined(_WIN32)
+                                                   ".exe"
+#endif
+                                                   );
+    if (installed.existsAsFile()) return installed.getFullPathName().toStdString();
+#endif
     return {};
 }
 
@@ -382,8 +399,12 @@ bool TrackControl::spawnBridge(bool restore) {
     if (mExe.empty()) {
         if (!mSpawnFailedReported) {
             mSpawnFailedReported = true;
-            clockwork_log("[tracks] no plugin bridge found beside the engine (looked for %s); "
-                    "set CLOCKWORK_PLUGIN_BRIDGE to its path", CLOCKWORK_PLUGIN_BRIDGE_NAME);
+            clockwork_log("[tracks] no plugin bridge found beside the engine"
+#ifdef CLOCKWORK_PLUGIN_BRIDGE_DIR
+                    " or in " CLOCKWORK_PLUGIN_BRIDGE_DIR
+#endif
+                    " (looked for %s); set CLOCKWORK_PLUGIN_BRIDGE to its path",
+                    CLOCKWORK_PLUGIN_BRIDGE_NAME);
         }
         return false;
     }

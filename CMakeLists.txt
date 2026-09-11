@@ -210,6 +210,12 @@ option(CLOCKWORK_CARGO_OFFLINE  "Build the Rust subsystems with --offline (requi
 # it): this sets JUCE_INCLUDE_ZLIB_CODE=0 and links ZLIB::ZLIB. See
 # smoothie/CMakeLists.txt.
 option(CLOCKWORK_SYSTEM_ZLIB    "Link the system zlib instead of the copy inside smoothie" OFF)
+# stb_vorbis is vendored unmodified (src/vendor/stb, v1.22). A distro build can
+# take the packaged one instead — Debian's libstb-dev ships the declarations as
+# <stb/stb_vorbis.h> and the implementation in libstb, with a pkg-config file —
+# so the copy here is not compiled and the system library is linked. The other
+# codecs (dr_wav, dr_flac, dr_mp3) have no distro package and stay vendored.
+option(CLOCKWORK_SYSTEM_STB     "Use the system stb (pkg-config: stb) for stb_vorbis instead of the vendored copy" OFF)
 
 # ── Plugin hosting ───────────────────────────────────────────────────────────
 # Clockwork as a HOST of plugins rather than as one — see src/plugin_host.h
@@ -234,6 +240,14 @@ option(CLOCKWORK_PLUGINS "Host CLAP and VST3 plugins (system SDK headers if inst
 # The engine finds it by this name beside its own executable.
 set(CLOCKWORK_PLUGIN_BRIDGE_NAME "clockwork-plugin-bridge" CACHE STRING
     "File name of the plugin-bridge executable, built beside the host binary")
+# Where an INSTALLED engine finds the bridge when it is not beside the
+# executable. The engine looks for CLOCKWORK_PLUGIN_BRIDGE_NAME as a sibling
+# of its own binary first (that is how a build tree and an app bundle are laid
+# out), then in this directory. A distribution that keeps helper programs out
+# of the user's PATH installs the bridge here — Debian's /usr/libexec/<pkg>,
+# say — and sets this to match. Empty means "beside the executable only".
+set(CLOCKWORK_PLUGIN_BRIDGE_DIR "" CACHE PATH
+    "Directory the engine also searches for the plugin bridge (an installed layout)")
 
 # The bridge's identity to macOS. On macOS the bridge is built as an app
 # bundle, <name>.app, because a bare executable has no bundle identifier and
@@ -535,10 +549,18 @@ endif()
 # the permissive single-file codecs decode and do not encode.
 set(CLOCKWORK_AUDIO_FILE_SOURCES
     ${CLOCKWORK_SRC}/clockwork_audio_file.cpp
-    ${CLOCKWORK_SRC}/flac_encoder.cpp
+    ${CLOCKWORK_SRC}/flac_encoder.cpp)
+if(CLOCKWORK_SYSTEM_STB)
+    # The system stb: declarations from <stb/stb_vorbis.h>, the decoder from
+    # libstb. clockwork_audio_file.cpp switches its include on the define.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(STB REQUIRED IMPORTED_TARGET stb)
+    message(STATUS "clockwork: system stb ${STB_VERSION} for stb_vorbis (CLOCKWORK_SYSTEM_STB)")
+else()
     # Compiled as its own translation unit: consumers include it with
     # STB_VORBIS_HEADER_ONLY and get the declarations alone.
-    ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c)
+    list(APPEND CLOCKWORK_AUDIO_FILE_SOURCES ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c)
+endif()
 
 # oscpack (MIT, Ross Bencina) — src/vendor/oscpack.
 set(OSCPACK_SOURCES
@@ -554,6 +576,10 @@ add_library(clockwork STATIC
     ${OSCPACK_SOURCES})
 
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_INCLUDE_DIRS})
+if(CLOCKWORK_SYSTEM_STB)
+    target_compile_definitions(clockwork PRIVATE CLOCKWORK_SYSTEM_STB=1)
+    target_link_libraries(clockwork PUBLIC PkgConfig::STB)
+endif()
 target_compile_definitions(clockwork PUBLIC ${CLOCKWORK_COMPILE_DEFS})
 
 # ─── The compile profile, as part of clockwork's interface ─────────────────────────
@@ -1114,6 +1140,10 @@ if(CLOCKWORK_PLUGINS)
     target_compile_definitions(clockwork PUBLIC
         CLOCKWORK_HAS_PLUGIN_TRACKS=1
         CLOCKWORK_PLUGIN_BRIDGE_NAME="${CLOCKWORK_PLUGIN_BRIDGE_NAME}")
+    if(CLOCKWORK_PLUGIN_BRIDGE_DIR)
+        target_compile_definitions(clockwork PUBLIC
+            CLOCKWORK_PLUGIN_BRIDGE_DIR="${CLOCKWORK_PLUGIN_BRIDGE_DIR}")
+    endif()
 
     if(NOT EMSCRIPTEN)
         # The bridge's own Rust staticlib: only the port substrate. It cannot

@@ -26,6 +26,7 @@
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
 #include "native/clockwork_process.h"
+#include "native/TrackControl.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
@@ -688,4 +689,40 @@ TEST_CASE("the cadence this machine can hold", "[.cadence][plugin][bridge]") {
     // The only claim: the run completed. Everything above is a number, not a
     // verdict — the verdict lives in the deterministic case at the top.
     CHECK(got.size() == size_t(kCallbacks) * kPer);
+}
+
+// ── Where the engine looks for the bridge ────────────────────────────────────
+// Beside its own executable first — a build tree, an app bundle — and only
+// then in CLOCKWORK_PLUGIN_BRIDGE_DIR, the directory an installed layout names
+// at configure time. A package that keeps helper programs out of PATH puts the
+// bridge there and the engine in /usr/bin, and the two still find each other.
+TEST_CASE("bridge lookup: beside the engine first, then the installed directory",
+          "[bridge][lookup]") {
+    namespace fs = std::filesystem;
+    const fs::path bridge = CLOCKWORK_PLUGIN_BRIDGE_EXE;
+    const std::string name = bridge.filename().string();   // the built name, .exe and all
+    const fs::path beside = fs::temp_directory_path() / ("clockwork-bridge-lookup-" + std::to_string(ownPid()));
+    fs::remove_all(beside);
+    fs::create_directories(beside);
+
+    // An empty directory beside the engine and nothing installed: not found.
+#ifndef CLOCKWORK_PLUGIN_BRIDGE_DIR
+    CHECK(TrackControl::findBridgeBeside(beside.string()).empty());
+#else
+    const fs::path installedDir = CLOCKWORK_PLUGIN_BRIDGE_DIR;
+    fs::create_directories(installedDir);
+    const fs::path installed = installedDir / name;
+    fs::copy_file(bridge, installed, fs::copy_options::overwrite_existing);
+    // Nothing beside the engine: the installed one.
+    CHECK(fs::path(TrackControl::findBridgeBeside(beside.string())) == installed);
+#endif
+
+    // A bridge beside the engine wins over the installed one.
+    fs::copy_file(bridge, beside / name, fs::copy_options::overwrite_existing);
+    CHECK(fs::path(TrackControl::findBridgeBeside(beside.string())) == beside / name);
+
+    fs::remove_all(beside);
+#ifdef CLOCKWORK_PLUGIN_BRIDGE_DIR
+    fs::remove(installed);
+#endif
 }

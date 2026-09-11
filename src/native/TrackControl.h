@@ -125,6 +125,11 @@ public:
     int  bridgePid() const { return mProcess.pid(); }
     uint32_t generation() const;
     std::string bridgeExecutable() const { return mExe; }
+    // Where the bridge is, given the directory the engine's executable is in:
+    // beside it first, then CLOCKWORK_PLUGIN_BRIDGE_DIR (an installed layout),
+    // else empty. What findBridge() does after CLOCKWORK_PLUGIN_BRIDGE (the
+    // environment override); split out so a test can hand it a directory.
+    static std::string findBridgeBeside(const std::string& exeDir);
     // Skip the spawn (a test that drives the segment itself).
     void setSpawnEnabled(bool on) { mSpawnEnabled = on; }
 

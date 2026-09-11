@@ -33,9 +33,15 @@
 #include "vendor/dr_libs/dr_mp3.h"
 
 // stb_vorbis is compiled as its own translation unit; this pulls in only its
-// declarations.
+// declarations — from the system stb when the build asked for it
+// (CLOCKWORK_SYSTEM_STB: Debian's libstb-dev names the file stb_vorbis.h and
+// puts the decoder in libstb), else from the vendored copy.
 #define STB_VORBIS_HEADER_ONLY
-#include "vendor/stb/stb_vorbis.c"
+#ifdef CLOCKWORK_SYSTEM_STB
+#  include <stb/stb_vorbis.h>
+#else
+#  include "vendor/stb/stb_vorbis.c"
+#endif
 
 #include <algorithm>
 #include <cmath>

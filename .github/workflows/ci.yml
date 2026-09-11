@@ -143,6 +143,14 @@ jobs:
           - name: no-device
             flags: -DCLOCKWORK_DEVICE=OFF -DCLOCKWORK_PLUGINS=OFF -DCLOCKWORK_NIF=OFF
             tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests
+          # What a distribution builds: the system zlib and stb instead of the
+          # vendored copies, and the plugin bridge installed out of PATH
+          # (CLOCKWORK_PLUGIN_BRIDGE_DIR). The bridge-lookup case in
+          # test_plugin_bridge.cpp exercises that directory.
+          - name: distro
+            flags: -DCLOCKWORK_SYSTEM_ZLIB=ON -DCLOCKWORK_SYSTEM_STB=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=${{ github.workspace }}/build/libexec
+            apt: zlib1g-dev libstb-dev
+            tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests build/test/clockwork_engine_tests
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -150,7 +158,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
-            libasound2-dev libudev-dev libjack-jackd2-dev
+            libasound2-dev libudev-dev libjack-jackd2-dev ${{ matrix.apt }}
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ${{ matrix.flags }}
       - name: Build

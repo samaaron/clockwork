@@ -55,6 +55,18 @@ engine's thread shows itself:
 CLOCKWORK_TEST_HOST_DRIVES_CONTROL=1 ./build/test/clockwork_engine_tests
 ```
 
+The BEAM NIF has a suite of its own, in Elixir, under `test/nif`. It drives
+the built library through `src/nif/clockwork.erl`, so build that first:
+
+```sh
+cmake -B build-nif -DCLOCKWORK_NIF=ON -DBUILD_TESTS=OFF .
+cmake --build build-nif --target clockwork_nif
+cd test/nif && CLOCKWORK_NIF_PATH=../../build-nif mix test
+```
+
+`CLOCKWORK_HEADLESS=1` boots without an audio device; `CLOCKWORK_QUIET=1`
+silences the per-boot lifecycle lines.
+
 ## Choosing a DSP
 
 `-DCLOCKWORK_DSP=<name>` selects a directory under `dsp/` holding a
@@ -84,6 +96,8 @@ attached. See [BOUNDARY.md](BOUNDARY.md#5-the-dummy-dsp).
 | `CLOCKWORK_CARGO_OFFLINE` | OFF | build the Rust subsystems with `--offline` (`--locked` is always passed) |
 | `CLOCKWORK_RUST` | ON | build the Rust subsystems' umbrella staticlib with cargo. OFF for a Rust embedder (`rust/clockwork-sys`), which takes the subsystem crates itself; the targets that link a binary here — `CLOCKWORK_STANDALONE`, `BUILD_TESTS`, `CLOCKWORK_PLUGINS`, `CLOCKWORK_NIF` — must be OFF with it |
 | `CLOCKWORK_SYSTEM_ZLIB` | OFF | link the system zlib instead of compiling the copy inside smoothie (distro builds) |
+| `CLOCKWORK_SYSTEM_STB` | OFF | take stb_vorbis from the system stb (pkg-config `stb`; Debian's `libstb-dev`) instead of the vendored copy (distro builds) |
+| `CLOCKWORK_PLUGIN_BRIDGE_DIR` | empty | a directory the engine also searches for the plugin bridge, after "beside its own executable" — for an installed layout that keeps the bridge out of PATH (`/usr/libexec/<pkg>`) |
 | `CLOCKWORK_LINK` | **OFF** | Ableton Link tempo, transport and peers — GPL-2.0-or-later, see below |
 | `CLOCKWORK_LINK_AUDIO` | **OFF** | Link peer audio in and publish out. Needs `CLOCKWORK_LINK` |
 | `CLOCKWORK_ASIO` | **OFF** | Windows ASIO from the vendored Steinberg SDK, taken under GPLv3 |
@@ -95,6 +109,39 @@ compiles the vendored Steinberg ASIO SDK, taken under GPLv3. Both OFF by
 default. Everything else
 clockwork links is permissive, the audio codecs included — see
 [LICENSE](../LICENSE).
+
+## Distro builds
+
+A distribution build wants the archive's libraries where one exists, no
+network at build time, and helper programs out of the user's PATH. The
+options for that, and what stays vendored and why:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCLOCKWORK_SYSTEM_ZLIB=ON -DCLOCKWORK_SYSTEM_STB=ON \
+      -DCLOCKWORK_CARGO_OFFLINE=ON \
+      -DCLOCKWORK_PLUGINS=OFF \
+      -DCLOCKWORK_PLUGIN_BRIDGE_DIR=/usr/libexec/<pkg> .
+```
+
+| in the tree | distro switch | if there is none, why not |
+|---|---|---|
+| zlib (inside smoothie) | `CLOCKWORK_SYSTEM_ZLIB` → `zlib1g-dev` | |
+| stb_vorbis (`src/vendor/stb`, v1.22 unmodified) | `CLOCKWORK_SYSTEM_STB` → `libstb-dev` | |
+| the Rust crates | `CLOCKWORK_CARGO_OFFLINE` with a `cargo vendor` tree, or the archive's `librust-*` packages | |
+| CLAP and VST3 SDKs | `CLOCKWORK_PLUGINS=OFF` | fetched at configure time; no distro packages them |
+| smoothie (`smoothie/`) | — | clockwork's own fork of four JUCE 7.0.12 modules, ISC; there is no packaged JUCE it could build against (JUCE 8 is AGPL and not taken). See `smoothie/README.md` |
+| oscpack (`src/vendor/oscpack`) | — | release 1.1.0 plus three fixes the packaged 1.1.0 lacks (64-bit detection on aarch64, malformed messages refused). See `src/vendor/oscpack/CLOCKWORK-CHANGES.md` |
+| midir (`external/midir`) | — | a fork: shared ALSA client, timestamped CoreMIDI send. See `external/midir/CLOCKWORK-CHANGES.md` |
+| dr_wav, dr_flac, dr_mp3 (`src/vendor/dr_libs`) | — | single-file, MIT-0/Unlicense; no distro packages them |
+| Ableton Link (`CLOCKWORK_LINK`) | `FETCHCONTENT_SOURCE_DIR_ABLETONLINK` pointing at a Link 4 tree with `external/link-*.patch` applied | Debian's `ableton-link-dev` is 3.x and lacks the patches |
+| the OTP NIF headers (`external/erlang_headers`) | — | only compiled with `CLOCKWORK_NIF`, which a distro build leaves off |
+
+The plugin bridge is a separate executable the engine spawns. It looks for it
+beside its own binary first, then in `CLOCKWORK_PLUGIN_BRIDGE_DIR`, then
+gives up (the `CLOCKWORK_PLUGIN_BRIDGE` environment variable overrides both).
+Install it there and the engine in `bin/` and they find each other. CI builds
+this shape as `config (distro)`.
 
 ## Building without a device layer
 
