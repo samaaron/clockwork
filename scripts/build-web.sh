@@ -88,8 +88,18 @@ FEATURE_ARG=""
 #
 # So put the whole toolchain's bin directory first and let cargo and rustc find
 # each other there. Set CARGO_NIGHTLY_BIN to override.
+# The pinned nightly first (CLOCKWORK_RUST_NIGHTLY; -Z build-std is unstable
+# surface and a green build should not depend on the day someone last ran
+# rustup update), then a floating `nightly`. Only a toolchain that is
+# installed AND has rust-src is taken: asking rustup for one it lacks installs
+# it bare, and build-std then fails several minutes in on the missing sources.
 if [ -z "${CARGO_NIGHTLY_BIN:-}" ] && command -v rustup >/dev/null; then
-    CARGO_NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly cargo 2>/dev/null)")" || true
+    for tc in "${CLOCKWORK_RUST_NIGHTLY:-nightly-2026-07-02}" nightly; do
+        rustup toolchain list 2>/dev/null | grep -q "^$tc" || continue
+        rustc_path="$(rustup which --toolchain "$tc" rustc 2>/dev/null)" || continue
+        [ -f "${rustc_path%/bin/rustc}/lib/rustlib/src/rust/library/Cargo.lock" ] || continue
+        CARGO_NIGHTLY_BIN="$(dirname "$(rustup which --toolchain "$tc" cargo 2>/dev/null)")" && break
+    done
 fi
 if [ -n "${CARGO_NIGHTLY_BIN:-}" ] && [ -x "$CARGO_NIGHTLY_BIN/cargo" ]; then
     PATH="$CARGO_NIGHTLY_BIN:$PATH"
