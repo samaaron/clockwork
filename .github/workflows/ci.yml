@@ -146,9 +146,12 @@ jobs:
           # What a distribution builds: the system zlib and stb instead of the
           # vendored copies, and the plugin bridge installed out of PATH
           # (CLOCKWORK_PLUGIN_BRIDGE_DIR). The bridge-lookup case in
-          # test_plugin_bridge.cpp exercises that directory.
+          # test_plugin_bridge.cpp exercises that directory. $GITHUB_WORKSPACE,
+          # not ${{ github.workspace }}: a matrix value is evaluated before the
+          # job has a workspace, and the expression came out empty — the shell
+          # in the Configure step expands the variable instead.
           - name: distro
-            flags: -DCLOCKWORK_SYSTEM_ZLIB=ON -DCLOCKWORK_SYSTEM_STB=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=${{ github.workspace }}/build/libexec
+            flags: -DCLOCKWORK_SYSTEM_ZLIB=ON -DCLOCKWORK_SYSTEM_STB=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=$GITHUB_WORKSPACE/build/libexec
             apt: zlib1g-dev libstb-dev
             tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests build/test/clockwork_engine_tests
     steps:
