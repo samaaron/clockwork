@@ -147,7 +147,7 @@ EXPORTS="['___wasm_call_ctors','_clockwork_init','_get_ring_buffer_base',\
 '_clockwork_tick','_process_audio','_get_audio_output_bus','_get_audio_input_bus',\
 '_get_audio_num_output_buses','_get_audio_num_input_buses','_get_audio_buffer_samples',\
 '_clockwork_clock_wasm_init','_set_time_offset','_get_time_offset',\
-'_get_clockwork_version_string','_clockwork_log','_clockwork_log_va','_clockwork_log_raw',\
+'_clockwork_log','_clockwork_log_va','_clockwork_log_raw',\
 '_get_process_count','_get_messages_processed','_get_messages_dropped','_get_status_flags',\
 '_clear_scheduler','_clockwork_host_forward','_clockwork_host_forwards','_malloc','_free',\
 '_clockwork_client_abi_version','_clockwork_client_status_text',\

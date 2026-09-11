@@ -144,7 +144,6 @@ static ClockworkClock& clockworkClock() {
 #include <cstdlib>
 #include <cmath>
 #include <limits>
-#include <sstream>
 #include <string>
 
 #ifdef __wasm_simd128__
@@ -2379,20 +2378,6 @@ extern "C" {
 #else
         return 0;
 #endif
-    }
-
-    // Clockwork's own version. A guest's protocol version is the guest's to
-    // claim.
-    EMSCRIPTEN_KEEPALIVE
-    const char* get_clockwork_version_string() {
-        static std::string version;
-        if (version.empty()) {
-            std::stringstream out;
-            out << CLOCKWORK_PRODUCT_NAME " " << CLOCKWORK_VERSION_MAJOR << "." << CLOCKWORK_VERSION_MINOR
-                << "." << CLOCKWORK_VERSION_PATCH;
-            version = out.str();
-        }
-        return version.c_str();
     }
 
     // Return the time conversion offset (NTP seconds when AudioContext was 0).

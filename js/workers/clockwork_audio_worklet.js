@@ -1104,28 +1104,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 return;
             }
 
-            if (data.type === 'getVersion') {
-                // Return the engine version string, if the build exports one
-                if (this.wasmInstance && this.wasmInstance.exports.get_clockwork_version_string) {
-                    const versionPtr = this.wasmInstance.exports.get_clockwork_version_string();
-                    const memory = new Uint8Array(this.wasmMemory.buffer);
-                    // Read null-terminated C string
-                    let version = '';
-                    for (let i = versionPtr; memory[i] !== 0; i++) {
-                        version += String.fromCharCode(memory[i]);
-                    }
-                    this.port.postMessage({
-                        type: 'version',
-                        version: version
-                    });
-                } else {
-                    this.port.postMessage({
-                        type: 'version',
-                        version: 'unknown'
-                    });
-                }
-            }
-
             if (data.type === 'getTimeOffset') {
                 // Return time offset (NTP seconds when AudioContext was at 0)
                 if (this.wasmInstance && this.wasmInstance.exports.get_time_offset) {

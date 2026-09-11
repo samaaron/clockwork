@@ -521,22 +521,6 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             mEgress->clearSubscribers();
             return true;
 
-        } else if (std::strcmp(addr, CLOCKWORK_SYS("summary")) == 0) {
-            // Build a one-shot summary of what this build was compiled with and
-            // what it's currently running with, and push it down the debug
-            // channel so the GUI shows it in its info pane. The GUI requests
-            // this once it is tailing the debug ring.
-            // Boot-banner shown in the GUI Info pane, under the ascii logo
-            // (which the GUI seeds): a single blank line then a
-            // "vMAJOR.MINOR Ready..." line. The leading \x01 byte marks this as
-            // a banner so the GUI renders it verbatim (no log timestamp).
-            std::string s = "\x01";   // banner sentinel (stripped by the GUI)
-            s += "\n";                // single blank line under the logo
-            s += "v" + std::to_string(CLOCKWORK_VERSION_MAJOR) + "."
-               + std::to_string(CLOCKWORK_VERSION_MINOR) + " Ready...";
-            mEgress->debug(s.c_str(), static_cast<uint32_t>(s.size()));
-            return true;
-
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/list")) == 0) {
             auto devices = mEngine->listDevices();
             for (auto& dev : devices) {
