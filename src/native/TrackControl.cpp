@@ -383,12 +383,18 @@ std::string TrackControl::findBridgeBeside(const std::string& exeDir) {
     // An installed layout: the bridge lives where the package put it
     // (CLOCKWORK_PLUGIN_BRIDGE_DIR at configure time — /usr/libexec/<pkg>,
     // say), not beside an engine that sits in /usr/bin.
-    const juce::File installed = juce::File(CLOCKWORK_PLUGIN_BRIDGE_DIR)
-                                     .getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME
-#if defined(_WIN32)
-                                                   ".exe"
+    const juce::File installDir(CLOCKWORK_PLUGIN_BRIDGE_DIR);
+#if defined(__APPLE__)
+    // The bundle shape, installed: what `cmake --install` puts there on macOS.
+    const juce::File installedBundle = installDir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".app")
+                                           .getChildFile("Contents/MacOS/" CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    if (installedBundle.existsAsFile()) return installedBundle.getFullPathName().toStdString();
 #endif
-                                                   );
+    const juce::File installed = installDir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME
+#if defined(_WIN32)
+                                                         ".exe"
+#endif
+                                                         );
     if (installed.existsAsFile()) return installed.getFullPathName().toStdString();
 #endif
     return {};

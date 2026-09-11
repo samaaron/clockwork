@@ -715,6 +715,16 @@ TEST_CASE("bridge lookup: beside the engine first, then the installed directory"
     fs::copy_file(bridge, installed, fs::copy_options::overwrite_existing);
     // Nothing beside the engine: the installed one.
     CHECK(fs::path(TrackControl::findBridgeBeside(beside.string())) == installed);
+#if defined(__APPLE__)
+    // Installed as the bundle `cmake --install` produces on macOS: found too,
+    // and preferred over a bare binary in the same directory.
+    const fs::path bundleExe = installedDir / (std::string(CLOCKWORK_PLUGIN_BRIDGE_NAME) + ".app")
+                             / "Contents" / "MacOS" / CLOCKWORK_PLUGIN_BRIDGE_NAME;
+    fs::create_directories(bundleExe.parent_path());
+    fs::copy_file(bridge, bundleExe, fs::copy_options::overwrite_existing);
+    CHECK(fs::path(TrackControl::findBridgeBeside(beside.string())) == bundleExe);
+    fs::remove_all(installedDir / (std::string(CLOCKWORK_PLUGIN_BRIDGE_NAME) + ".app"));
+#endif
 #endif
 
     // A bridge beside the engine wins over the installed one.
