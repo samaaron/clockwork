@@ -30,6 +30,7 @@ exceptions = [
     { crate = "clockwork-comms", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-gamepad", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-heap", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-log", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-midi", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-native", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-osc", allow = ["AGPL-3.0-or-later"] },
