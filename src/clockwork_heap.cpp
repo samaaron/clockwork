@@ -24,6 +24,7 @@
 
 #include "clockwork_heap.h"
 #include "memory_profile.h"
+#include "clockwork_config.h"   // clockwork_log
 
 // The body is compiled only where the audio path is (CLOCKWORK_SYNTH — see
 // CMakeLists.txt, which is explicit that the flag gates clockwork's engine
@@ -222,11 +223,11 @@ void clockwork_heap_init(size_t bytes) {
     // to Bulk ourselves. On desktop both tiers are malloc.
     g_heap_backing = clockwork::mem::alloc(clockwork::mem::Tier::Fast, total, /*allow_spill=*/false);
     if (!g_heap_backing) {
-        fprintf(stderr, "clockwork_heap_init: %zu bytes did not fit Fast, falling back to Bulk\n", total);
+        clockwork_log("clockwork_heap_init: %zu bytes did not fit Fast, falling back to Bulk", total);
         g_heap_backing = clockwork::mem::alloc(clockwork::mem::Tier::Bulk, total);
     }
     if (!g_heap_backing) {
-        fprintf(stderr, "clockwork_heap_init: failed to allocate %zu bytes\n", total);
+        clockwork_log("clockwork_heap_init: failed to allocate %zu bytes", total);
         return;
     }
 

@@ -407,7 +407,7 @@ mod imp {
             )
         };
         if first == INVALID_HANDLE_VALUE {
-            eprintln!("[osc] named pipe create {full} failed (name in use?)");
+            clockwork_log::log!("[osc] named pipe create {full} failed (name in use?)");
             return None;
         }
 

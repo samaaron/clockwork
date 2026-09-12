@@ -40,7 +40,7 @@ public:
         mPort = port;
         mBindAddress = bindAddress;
     }
-    void start();   // begin receiving (clockwork_osc ingress on mPort/mBindAddress)
+    bool start();   // begin receiving (clockwork_osc ingress on mPort/mBindAddress); false = bind failed
     void stop();    // stop receiving
 
     // ── IOscTransport ──────────────────────────────────────────────────────────

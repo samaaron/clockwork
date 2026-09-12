@@ -65,7 +65,7 @@ pub fn ensure_running() {
         Ok(_) => *running = true,
         // No thread. Sinks still accept and count; nothing is delivered, and
         // the numbers say so rather than the process pretending.
-        Err(e) => eprintln!("[sinks] could not start the drain thread: {e}"),
+        Err(e) => clockwork_log::log!("[sinks] could not start the drain thread: {e}"),
     }
 }
 

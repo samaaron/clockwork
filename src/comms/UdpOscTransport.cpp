@@ -25,14 +25,13 @@ UdpOscTransport::~UdpOscTransport() {
     if (mOsc) clockwork_osc_destroy(mOsc);
 }
 
-void UdpOscTransport::start() {
-    if (mIngress) return;
+bool UdpOscTransport::start() {
+    if (mIngress) return true;
     mIngress = clockwork_osc_ingress_start_with_src(
         this, &UdpOscTransport::onDatagram, mPort,
         reinterpret_cast<const uint8_t*>(mBindAddress.data()),
         static_cast<uint32_t>(mBindAddress.size()));
-    if (!mIngress)
-        fprintf(stderr, "[osc] failed to bind control port %d\n", mPort);
+    return mIngress != nullptr;
 }
 
 void UdpOscTransport::stop() {

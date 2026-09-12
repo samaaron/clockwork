@@ -10,7 +10,7 @@
 #import <Foundation/Foundation.h>
 #include <libproc.h>
 #include <unistd.h>
-#include <cstdio>
+#include "clockwork_config.h"   // clockwork_log
 
 // Private API from libsystem_secinit. Given a PID, returns the PID macOS
 // considers "responsible" for it (for TCC / LaunchServices attribution).
@@ -47,13 +47,12 @@ void logDiagnostics() {
     // Always-on: mic-permission diagnostics at boot are essential for
     // triaging "live_audio is silent" reports. 4 lines once per process,
     // negligible overhead, invaluable in user bug reports.
-    fprintf(stderr, "[tcc-diag] self.pid=%d self.path=%s\n", self, selfPath);
-    fprintf(stderr, "[tcc-diag] self.bundleID=%s self.bundlePath=%s\n",
+    clockwork_log("[tcc-diag] self.pid=%d self.path=%s", self, selfPath);
+    clockwork_log("[tcc-diag] self.bundleID=%s self.bundlePath=%s",
             bundleID ? bundleID : "(nil)", bundlePath ? bundlePath : "(nil)");
-    fprintf(stderr, "[tcc-diag] responsible.pid=%d responsible.path=%s\n",
+    clockwork_log("[tcc-diag] responsible.pid=%d responsible.path=%s",
             respPid, respPath[0] ? respPath : "(unknown)");
-    fprintf(stderr, "[tcc-diag] mic.status=%s\n", status().c_str());
-    fflush(stderr);
+    clockwork_log("[tcc-diag] mic.status=%s", status().c_str());
 }
 
 } // namespace MicPermission

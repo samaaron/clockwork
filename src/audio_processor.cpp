@@ -145,6 +145,8 @@ static ClockworkClock& clockworkClock() {
 #include <cmath>
 #include <limits>
 #include <string>
+#include <mutex>
+#include <vector>
 
 #ifdef __wasm_simd128__
 #include <wasm_simd128.h>
@@ -1296,6 +1298,11 @@ extern "C" {
         // concurrently, so don't store over it.
         if (!memory_initialized)
             memory_initialized = true;
+#ifndef __EMSCRIPTEN__
+        // The ring exists: whatever the boot logged before now goes onto it
+        // first, so the channel carries the boot in order.
+        clockwork_log_release();
+#endif
 
 #if CLOCKWORK_SHM_AUDIO_SECONDS != 1
         // Test-profile arena: capture rings are oversized, so every offset
@@ -2250,14 +2257,68 @@ extern "C" {
 #ifdef __EMSCRIPTEN__
         emscripten_console_error(buffer);
 #else
-        fprintf(stderr, "%s\n", buffer);
+        fprintf(stderr, "%s\n", buffer);   // stdio-ok: reporting a boot that produced no ring
 #endif
     }
 
+#ifndef __EMSCRIPTEN__
+    // Native pre-ring hold (see clockwork_log in clockwork_config.h). Lines
+    // logged while an engine is booting and the ring does not exist yet wait
+    // here; release() replays them onto the ring in order, or prints them to
+    // stderr when the boot never reached the ring. Bounded so a boot that
+    // logs in a loop cannot grow without limit — past the cap, lines go to
+    // stderr directly.
+    static std::mutex g_early_log_mutex;
+    static std::vector<std::string> g_early_log;
+    static bool g_early_log_holding = false;
+    static constexpr size_t kEarlyLogMaxLines = 256;
+
+    extern "C" void clockwork_log_hold(void) {
+        std::lock_guard<std::mutex> lk(g_early_log_mutex);
+        g_early_log_holding = true;
+    }
+
+    extern "C" void clockwork_log_release(void) {
+        std::vector<std::string> held;
+        {
+            std::lock_guard<std::mutex> lk(g_early_log_mutex);
+            g_early_log_holding = false;
+            held.swap(g_early_log);
+        }
+        for (auto& line : held) {
+            if (memory_initialized)
+                emit_debug_osc(line.data(), static_cast<uint32_t>(line.size()));
+            else
+                fprintf(stderr, "%s\n", line.c_str());   // stdio-ok: no ring came up for this boot
+        }
+        if (!memory_initialized && !held.empty()) fflush(stderr);   // stdio-ok
+    }
+
+    // A line with no ring to go to: held during a boot, otherwise stderr.
+    static void clockwork_log_no_ring(const char* text) {
+        {
+            std::lock_guard<std::mutex> lk(g_early_log_mutex);
+            if (g_early_log_holding && g_early_log.size() < kEarlyLogMaxLines) {
+                g_early_log.emplace_back(text);
+                return;
+            }
+        }
+        fprintf(stderr, "%s\n", text);   // stdio-ok: no engine ring exists
+        fflush(stderr);                   // stdio-ok
+    }
+#endif
+
     static int clockwork_log_impl(const char* fmt, va_list args) {
-        if (!memory_initialized) return 0;
         char buffer[1024];
         int result = vsnprintf(buffer, sizeof(buffer), fmt, args);
+        if (!memory_initialized) {
+#ifdef __EMSCRIPTEN__
+            emscripten_console_log(buffer);
+#else
+            clockwork_log_no_ring(buffer);
+#endif
+            return result;
+        }
         uint32_t len = 0;
         while (buffer[len] != '\0' && len < sizeof(buffer)) len++;
         emit_debug_osc(buffer, len);

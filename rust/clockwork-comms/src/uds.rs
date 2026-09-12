@@ -104,20 +104,20 @@ mod imp {
         let socket = match UnixDatagram::bind(&pb) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[osc] UDS dgram bind {path} failed: {e}");
+                clockwork_log::log!("[osc] UDS dgram bind {path} failed: {e}");
                 return None;
             }
         };
         // Owner-only. There is a bind→chmod window; the caller closes it by
         // placing the socket in a 0700 directory (a per-session directory).
         if let Err(e) = std::fs::set_permissions(&pb, std::fs::Permissions::from_mode(0o600)) {
-            eprintln!("[osc] UDS dgram chmod {path} failed: {e}");
+            clockwork_log::log!("[osc] UDS dgram chmod {path} failed: {e}");
             return None;
         }
         let sender = match socket.try_clone() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[osc] UDS dgram clone failed: {e}");
+                clockwork_log::log!("[osc] UDS dgram clone failed: {e}");
                 return None;
             }
         };

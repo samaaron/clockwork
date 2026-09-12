@@ -23,6 +23,8 @@ portable-atomic = { version = "1", features = ["fallback"] }
 # The stable-slot table, shared with clockwork-ports. Same rule, different
 # payload; see that crate for why it is not written twice.
 clockwork-slots = { path = "../clockwork-slots" }
+# The drain thread's one log line, through clockwork_log like everything else.
+clockwork-log = { path = "../clockwork-log" }
 # The two endpoints. Optional and off by default for the same reason the
 # umbrella makes them optional: a build with no MIDI subsystem must not drag
 # midir in through the sinks, and a sink of a kind this build cannot reach

@@ -80,6 +80,7 @@ members = [
     "clockwork-clock",
     "clockwork-sys",
     "clockwork-client",
+    "clockwork-log",
 ]
 
 [profile.release]

@@ -21,8 +21,6 @@ bool UdsDgramOscTransport::start() {
         this, &UdsDgramOscTransport::onDatagram,
         reinterpret_cast<const uint8_t*>(mPath.data()),
         static_cast<uint32_t>(mPath.size()));
-    if (!mServer)
-        fprintf(stderr, "[osc] failed to bind UDS dgram socket %s\n", mPath.c_str());
     return mServer != nullptr;
 }
 

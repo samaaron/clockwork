@@ -117,8 +117,8 @@ phase_build() {
 phase_test() {
     echo "=== test: Catch2 suites ==="
     setup_paths
-    CLOCKWORK_QUIET=1 "$BUILD_DIR/test/clockwork_tests"
-    CLOCKWORK_QUIET=1 "$BUILD_DIR/test/clockwork_engine_tests"
+    "$BUILD_DIR/test/clockwork_tests"
+    "$BUILD_DIR/test/clockwork_engine_tests"
 }
 
 phase_rust() {

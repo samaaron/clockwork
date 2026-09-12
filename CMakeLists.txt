@@ -754,6 +754,10 @@ endif()
 # each crate's cpp/ directory.
 if(CLOCKWORK_RUST)
     find_program(CARGO_EXECUTABLE cargo REQUIRED)
+    # The umbrella carries clockwork-log, so the engine can route the Rust
+    # subsystems' lines onto its debug ring (ClockworkEngine::init). An
+    # embedder that supplies the crates itself installs a sink from Rust.
+    target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
 else()
     # A binary linked here would need the umbrella; with CLOCKWORK_RUST=OFF
     # only the embedder's own cargo build supplies the Rust half, and only

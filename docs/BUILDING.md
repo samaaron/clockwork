@@ -64,8 +64,11 @@ cmake --build build-nif --target clockwork_nif
 cd test/nif && CLOCKWORK_NIF_PATH=../../build-nif mix test
 ```
 
-`CLOCKWORK_HEADLESS=1` boots without an audio device; `CLOCKWORK_QUIET=1`
-silences the per-boot lifecycle lines.
+`CLOCKWORK_HEADLESS=1` boots without an audio device. The engine logs through
+`clockwork_log` only (`clockwork_log::log!` on the Rust side), onto its debug
+ring: a host prints those lines (or not), the test fixture captures them and
+shows them when a test fails, and the engine itself writes nothing to stdio.
+`scripts/check-logging.sh` enforces that, and CI runs it.
 
 ## Choosing a DSP
 

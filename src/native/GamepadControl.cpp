@@ -82,8 +82,7 @@ static void logGamepadDevicesChange(const uint8_t* data, uint32_t len) {
             if (it != msg.ArgumentsEnd()) ++it;       // enabled flag
         }
     } catch (...) { return; }
-    fprintf(stderr, "[gamepad] devices: [%s]\n", names.c_str());
-    fflush(stderr);
+    clockwork_log("[gamepad] devices: [%s]", names.c_str());
 }
 
 // A reply goes to its caller. An event goes into the IN ring, to be answered

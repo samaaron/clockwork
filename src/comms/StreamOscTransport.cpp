@@ -39,21 +39,14 @@ bool StreamOscTransport::start() {
         mServer = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mPort,
                                    reinterpret_cast<const uint8_t*>(mBindAddress.data()),
                                    static_cast<uint32_t>(mBindAddress.size()), mMaxConns);
-        if (!mServer)
-            fprintf(stderr, "[osc] failed to bind TCP command port %d\n", mPort);
         break;
     case Kind::Uds:
         mServer = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
-        if (!mServer)
-            fprintf(stderr, "[osc] failed to bind UDS stream socket %s\n", mEndpoint.c_str());
         break;
     case Kind::Pipe:
         mServer = clockwork_osc_pipe_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
-        if (!mServer)
-            fprintf(stderr, "[osc] failed to create named pipe %s\n", mEndpoint.c_str());
         break;
     case Kind::None:
-        fprintf(stderr, "[osc] stream transport started without an endpoint\n");
         break;
     }
     return mServer != nullptr;

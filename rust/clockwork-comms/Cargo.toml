@@ -16,6 +16,7 @@ crate-type = ["rlib"]
 socket2 = "0.6.4"
 clockwork-osc = { path = "../clockwork-osc" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }
+clockwork-log = { path = "../clockwork-log" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

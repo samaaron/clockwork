@@ -272,8 +272,7 @@ static void logMidiPortsChange(const uint8_t* data, uint32_t len) {
         readList(ins);
         readList(outs);
     } catch (...) { return; }
-    fprintf(stderr, "[midi] ports: in=[%s] out=[%s]\n", ins.c_str(), outs.c_str());
-    fflush(stderr);
+    clockwork_log("[midi] ports: in=[%s] out=[%s]", ins.c_str(), outs.c_str());
 }
 
 // A reply goes to its caller. An EVENT — what a port sent, a ports change —

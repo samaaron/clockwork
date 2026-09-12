@@ -12,7 +12,7 @@
 #endif
 #include <windows.h>
 
-#include <cstdio>
+#include "clockwork_config.h"   // clockwork_log
 #include <mutex>
 #include <vector>
 
@@ -75,11 +75,10 @@ void logRejectionOnce(const std::string& name, const std::string& dll) {
     std::lock_guard<std::mutex> lock(mutex);
     if (!logged.insert(name).second)
         return;
-    fprintf(stderr,
+    clockwork_log(
             "[asio] hiding '%s': driver DLL is built for another architecture "
-            "and cannot load in this process (%s)\n",
+            "and cannot load in this process (%s)",
             name.c_str(), dll.c_str());
-    fflush(stderr);
 }
 
 } // namespace

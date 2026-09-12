@@ -175,11 +175,10 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
         mAccumPerChanCap = perChanNeeded;
     size_t neededSize = static_cast<size_t>(mAccumPerChanCap) * chans;
     if (mInputAccum.size() < neededSize) {
-        fprintf(stderr, "[juce] resizing input accum: %zu -> %zu floats "
-                "(perChanCap=%d chans=%d hwBuf=%d activeIn=%d mNumIn=%d)\n",
+        clockwork_log("[juce] resizing input accum: %zu -> %zu floats "
+                "(perChanCap=%d chans=%d hwBuf=%d activeIn=%d mNumIn=%d)",
                 mInputAccum.size(), neededSize, mAccumPerChanCap, chans,
                 hwBufSize, activeIn, mNumInputChannels);
-        fflush(stderr);
         mInputAccum.assign(neededSize, 0.0f);
     }
 
@@ -196,14 +195,13 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     {
         auto outNames = device->getOutputChannelNames();
         auto activeOut = device->getActiveOutputChannels();
-        fprintf(stderr, "[juce] output channels (%d total):\n", outNames.size());
+        clockwork_log("[juce] output channels (%d total):", outNames.size());
         for (int i = 0; i < outNames.size(); ++i) {
-            fprintf(stderr, "[juce]   [%d] %s%s\n", i,
+            clockwork_log("[juce]   [%d] %s%s", i,
                     outNames[i].toRawUTF8(), activeOut[i] ? " (active)" : "");
         }
-        fflush(stderr);
     }
-    fprintf(stderr, "[juce] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d\n",
+    clockwork_log("[juce] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
             device->getName().toRawUTF8(),
             device->getTypeName().toRawUTF8(),
             mSampleRate,
@@ -211,7 +209,6 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
             activeOutCount, activeIn,
             device->getOutputLatencyInSamples(),
             device->getInputLatencyInSamples());
-    fflush(stderr);
 
     mOutputLatencySamples = device->getOutputLatencyInSamples();
 
@@ -231,8 +228,7 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 }
 
 void JuceAudioCallback::audioDeviceStopped() {
-    fprintf(stderr, "[juce] audioDeviceStopped (callbackCount=%u)\n", mCallbackCount);
-    fflush(stderr);
+    clockwork_log("[juce] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
 }
@@ -283,14 +279,14 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
     int numSamples,
     const juce::AudioIODeviceCallbackContext& context)
 {
-    // One-shot per device start, straight to stderr: proves the device's IO
-    // thread actually reached us. Deliberately the first statement — if the
-    // process dies anywhere in this callback, the log still shows entry.
-    // Warmup-phase only, so the fprintf never lands on a steady-state block.
+    // One-shot per device start: proves the device's IO thread actually
+    // reached us. Deliberately the first statement — if the process dies
+    // later in this callback, the line is already on the ring for the gateway
+    // thread to surface. Warmup-phase only, so the log never lands on a
+    // steady-state block.
     if (!mFirstCallbackLogged.exchange(true, std::memory_order_relaxed)) {
-        fprintf(stderr, "[juce] first audio callback: numSamples=%d out=%d in=%d\n",
+        clockwork_log("[juce] first audio callback: numSamples=%d out=%d in=%d",
                 numSamples, numOutputChannels, numInputChannels);
-        fflush(stderr);
     }
 
     // Promote the audio thread to realtime once per device start. Done here
@@ -364,9 +360,8 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
     if (mLastCbTime.time_since_epoch().count() != 0) {
         double gapUs = std::chrono::duration<double, std::micro>(cbStart - mLastCbTime).count();
         if (gapUs > 2'000'000.0) {
-            fprintf(stderr, "  [wake] gap=%.0fs — re-anchoring NTP, purging stale messages\n",
+            clockwork_log("  [wake] gap=%.0fs — re-anchoring NTP, purging stale messages",
                     gapUs / 1e6);
-            fflush(stderr);
             clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate);
             if (onWake) onWake();
         } else if (gapUs > hardening::stallThresholdUs(numSamples, mSampleRate)) {
@@ -377,8 +372,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             // surfaces only as unexplained LATEs downstream. The threshold
             // scales with the callback period so a graph running us at a
             // huge quantum isn't misread as one stall per cycle.
-            fprintf(stderr, "  [gap] audio callback stalled %.0fms\n", gapUs / 1000.0);
-            fflush(stderr);
+            clockwork_log("  [gap] audio callback stalled %.0fms", gapUs / 1000.0);
         }
     }
     mLastCbTime = cbStart;

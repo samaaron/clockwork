@@ -145,7 +145,7 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, cues_on: Arc<AtomicB
                         // flood).
                         None => {
                             if MALFORMED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-                                eprintln!("[osc] dropped malformed inbound OSC from {} ({n} bytes)", src.ip());
+                                clockwork_log::log!("[osc] dropped malformed inbound OSC from {} ({n} bytes)", src.ip());
                             }
                         }
                     }
@@ -186,11 +186,11 @@ impl ClockworkOsc {
         let mut socks: Vec<(&str, UdpSocket)> = Vec::new();
         match UdpSocket::bind((v4ip, port)) {
             Ok(s) => socks.push(("IPv4", s)),
-            Err(e) => eprintln!("[osc] cue server IPv4 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!("[osc] cue server IPv4 bind on port {port} failed: {e}"),
         }
         match bind_v6(v6ip, port) {
             Ok(s) => socks.push(("IPv6", s)),
-            Err(e) => eprintln!("[osc] cue server IPv6 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!("[osc] cue server IPv6 bind on port {port} failed: {e}"),
         }
         if socks.is_empty() {
             return;
@@ -205,7 +205,7 @@ impl ClockworkOsc {
                 .spawn(move || run_cue_server(sock, t_stop, t_on, t_host))
             {
                 joins.push(j);
-                eprintln!("[osc] cue server listening on port {port} {fam} ({scope})");
+                clockwork_log::log!("[osc] cue server listening on port {port} {fam} ({scope})");
             }
         }
         cs.server = Some(CueServer { stop, joins });
@@ -262,11 +262,11 @@ fn start_ingress(host: Host, port: u16, loopback: bool) -> Option<ClockworkOscIn
     let mut socks: Vec<UdpSocket> = Vec::new();
     match UdpSocket::bind((v4ip, port)) {
         Ok(s) => socks.push(s),
-        Err(e) => eprintln!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
+        Err(e) => clockwork_log::log!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
     }
     match bind_v6(v6ip, port) {
         Ok(s) => socks.push(s),
-        Err(e) => eprintln!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
+        Err(e) => clockwork_log::log!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
     }
     if socks.is_empty() {
         return None;
@@ -336,11 +336,11 @@ fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
     if bind_addr.is_empty() {
         match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(s) => socks.push(s),
-            Err(e) => eprintln!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
         }
         match bind_v6(Ipv6Addr::UNSPECIFIED, port) {
             Ok(s) => socks.push(s),
-            Err(e) => eprintln!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
         }
     } else {
         let bound = match bind_addr.parse::<IpAddr>() {
@@ -349,7 +349,7 @@ fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
         };
         match bound {
             Ok(s) => socks.push(s),
-            Err(e) => eprintln!("[osc] ingress bind {bind_addr}:{port} failed: {e}"),
+            Err(e) => clockwork_log::log!("[osc] ingress bind {bind_addr}:{port} failed: {e}"),
         }
     }
     socks
@@ -383,7 +383,7 @@ pub extern "C" fn clockwork_osc_create(ctx: *mut c_void, emit: EmitFn) -> *mut C
     no_unwind(std::ptr::null_mut(), || {
         let out = crate::out::OscSender::new();
         if out.is_none() {
-            eprintln!("[osc] failed to open any outbound socket");
+            clockwork_log::log!("[osc] failed to open any outbound socket");
         }
         Box::into_raw(Box::new(ClockworkOsc {
             host: Host { ctx, emit },
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn loopback_scope_restricts_to_local() {
         let Some(ip) = primary_v4() else {
-            eprintln!("skip loopback_scope: no non-loopback IPv4 here");
+            clockwork_log::log!("skip loopback_scope: no non-loopback IPv4 here");
             return;
         };
         let collector = Box::new(Collector(Mutex::new(Vec::new())));

@@ -293,7 +293,7 @@ impl StreamServerImpl for SocketServer {
         // audience. The logged error kind says which: WouldBlock/TimedOut is a
         // client that went WRITE_TIMEOUT without reading, anything else failed
         // outright.
-        eprintln!("[osc] stream conn {conn_id} dropped — reply write failed: {err}");
+        clockwork_log::log!("[osc] stream conn {conn_id} dropped — reply write failed: {err}");
         if let Some(w) = self.shared.conns.lock().unwrap().remove(&conn_id) {
             w.lock().unwrap().shutdown_both();
         }
@@ -356,7 +356,7 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
     }
     if !shared.stop.load(Ordering::Relaxed) {
         if let Some(why) = why {
-            eprintln!("[osc] stream conn {id} dropped — {why}");
+            clockwork_log::log!("[osc] stream conn {id} dropped — {why}");
         }
         host.closed(id);
     }
@@ -478,7 +478,7 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
         let listener = match TcpListener::bind((addr, port as u16)) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("[osc] TCP bind {addr}:{port} failed: {e}");
+                clockwork_log::log!("[osc] TCP bind {addr}:{port} failed: {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -531,7 +531,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
             let listener = match UnixListener::bind(&pb) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[osc] UDS stream bind {path} failed: {e}");
+                    clockwork_log::log!("[osc] UDS stream bind {path} failed: {e}");
                     return std::ptr::null_mut();
                 }
             };

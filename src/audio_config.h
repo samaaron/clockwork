@@ -18,6 +18,7 @@
 #include <cstdlib>
 
 #include "memory_profile.h"
+#include "clockwork_config.h"   // clockwork_log, for DEV_LOG
 
 namespace clockwork {
 
@@ -58,7 +59,7 @@ inline constexpr int kMaxChannels = CLOCKWORK_MAX_CHANNELS;
 
 } // namespace clockwork
 
+// The runtime-gated line, on the funnel like every other: nothing here
+// writes to stdio. No trailing newline in fmt.
 #define DEV_LOG(fmt, ...) \
-    do { if (clockwork::devLogEnabled()) { \
-        fprintf(stderr, fmt, ##__VA_ARGS__); fflush(stderr); \
-    } } while (0)
+    do { if (clockwork::devLogEnabled()) clockwork_log(fmt, ##__VA_ARGS__); } while (0)

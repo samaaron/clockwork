@@ -354,6 +354,7 @@ add_executable(clockwork_engine_tests
     # no-device and fake-device boots, and the subsystems reached through
     # its ingress.
     test_engine_lifecycle.cpp
+    test_log_hold.cpp
     test_config_validation.cpp
     test_engine_state.cpp
     test_control_plane_liveness.cpp

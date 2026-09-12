@@ -20,6 +20,8 @@ crate-type = ["rlib"]
 socket2 = "0.6.4"
 # Complete OSC 1.0 codec (messages + bundles) + the shared C-ABI scaffolding.
 clockwork-osc = { path = "../clockwork-osc" }
+# Every line this crate logs goes through clockwork_log (see that crate).
+clockwork-log = { path = "../clockwork-log" }
 
 # shm.rs (the cross-process SHM peer test client) maps the server's segment
 # with shm_open/mmap; libc is already in the lockfile via socket2.

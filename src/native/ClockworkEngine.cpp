@@ -182,8 +182,7 @@ std::string ClockworkEngine::refuseWirelessMicAddition(
             std::string err = "can't add input '" + inputDeviceName
                             + "' — current output '" + curOut
                             + "' is wireless and can't be aggregated with a mic";
-            fprintf(stderr, "[switchDevice] %s\n", err.c_str());
-            fflush(stderr);
+            clockwork_log("[switchDevice] %s", err.c_str());
             return err;
         }
     }
@@ -295,10 +294,9 @@ void ClockworkEngine::clampAggregateBufferIfNeeded(int& bufferSize) {
                      && AggregateDeviceHelper::driftCompensationEnabled();
     const int clamped = clockwork::device::clampBufferForDriftComp(bufferSize, active);
     if (clamped != bufferSize) {
-        fprintf(stderr, "[device-setup] clamping aggregate buffer "
-                "%d -> %d (drift-comp minimum)\n",
+        clockwork_log("[device-setup] clamping aggregate buffer "
+                "%d -> %d (drift-comp minimum)",
                 bufferSize, clamped);
-        fflush(stderr);
         bufferSize = clamped;
         mCurrentConfig.bufferSize = clamped;
     }
@@ -312,24 +310,6 @@ int ClockworkEngine::aggregateInputChannelOffsetFor(
         if (d.name == outputDeviceName) return d.maxInputChannels;
     }
     return 0;
-}
-
-// Routine lifecycle logging, silenced by CLOCKWORK_QUIET=1. Warnings and errors
-// use fprintf(stderr) directly and are never gated.
-//
-// Not clockwork_log(): that frames /clockwork/debug onto the OUT ring and
-// no-ops until memory is initialised, so it would drop these early-boot lines.
-static void ssLifecycleLog(const char* fmt, ...) {
-    static const bool quiet = [] {
-        const char* v = std::getenv("CLOCKWORK_QUIET");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    if (quiet) return;
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-    fflush(stderr);
 }
 
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
@@ -364,7 +344,7 @@ void ClockworkEngine::setEngineState(EngineState state, const std::string& reaso
     if (prev == state) return;  // no transition
 
     const char* stateStr = engineStateToString(state);
-    ssLifecycleLog(CLOCKWORK_LOG_PREFIX "state: %s -> %s (%s)\n",
+    clockwork_log("[engine] state: %s -> %s (%s)",
                    engineStateToString(prev), stateStr,
                    reason.empty() ? "-" : reason.c_str());
 
@@ -404,6 +384,21 @@ ClockworkEngine::~ClockworkEngine() {
 
 void ClockworkEngine::init(const Config& cfg) {
     if (mRunning.load()) return;
+
+    // Nothing logged during boot is lost: lines land on the debug ring the
+    // moment init_memory has built it (see clockwork_log). The guard covers
+    // every way out of here, including a throw before the ring exists.
+    clockwork_log_hold();
+    struct ReleaseLog { ~ReleaseLog() { clockwork_log_release(); } } releaseLog;
+#if CLOCKWORK_RUST_LOG
+    // The Rust subsystems log onto the same ring from here on (a no-op after
+    // the first engine in the process; the sink forwards to whichever ring
+    // is up).
+    clockwork_rust_log_install([](const char* line, uint32_t len) {
+        clockwork_log("%.*s", static_cast<int>(len), line);
+    });
+#endif
+
     setEngineState(EngineState::Booting, "init");
 
     if (!cfg.appName.empty())
@@ -445,6 +440,12 @@ void ClockworkEngine::init(const Config& cfg) {
 // pairing, aggregate promotion, rate/buffer negotiation. No DSP, no rings, so
 // initEngine can assume whatever device (or none) this settled on.
 void ClockworkEngine::initAudioDevice(const Config& cfg) {
+#ifdef __APPLE__
+    // Mic-permission diagnostics, once per boot, on the log like the rest of
+    // device setup: essential for triaging "live_audio is silent" reports.
+    MicPermission::logDiagnostics();
+#endif
+
     // Map -1 (auto/max) to a large request count. JUCE/CoreAudio clamps the
     // bitmask to the device's real channel count, and the callback reads the
     // real count back later.
@@ -491,11 +492,10 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
 
     {
         auto& types = mDeviceManager->getAvailableDeviceTypes();
-        fprintf(stderr, "  Available drivers:");
+        std::string drivers;
         for (auto* t : types)
-            fprintf(stderr, " [%s]", t->getTypeName().toRawUTF8());
-        fprintf(stderr, "\n");
-        fflush(stderr);
+            drivers += " [" + t->getTypeName().toStdString() + "]";
+        clockwork_log("[device-setup] available drivers:%s", drivers.c_str());
     }
 
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
@@ -555,15 +555,14 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         auto choice = clockwork::device::resolveBootDriver(
             cfg.audioDriver, typeNames, hasDeviceRequest);
         if (!choice.warning.empty()) {
-            fprintf(stderr, "[device-setup] %s\n", choice.warning.c_str());
-            fflush(stderr);
+            clockwork_log("[device-setup] %s", choice.warning.c_str());
         }
         if (!choice.driver.empty()) {
             mDeviceManager->setCurrentAudioDeviceType(
                 juce::String(choice.driver), true);
             mBootDriver = choice.driver;
             bootDriverRequested = true;
-            ssLifecycleLog("[device-setup] boot driver: '%s'\n",
+            clockwork_log("[device-setup] boot driver: '%s'",
                            choice.driver.c_str());
         }
     }
@@ -620,12 +619,12 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             bootDriverRequested ? mBootDriver : std::string(),
             deviceTable);
         if (matched.empty()) {
-            fprintf(stderr,
+            clockwork_log(
                     "[device-setup] WARNING: requested output device '%s' not found. "
-                    "Falling back to system default. Available outputs:\n",
+                    "Falling back to system default. Available outputs:",
                     cfg.hardwareDevice.c_str());
             for (auto& e : entries)
-                fprintf(stderr, "    %s\n", e.combined.c_str());
+                clockwork_log("    %s", e.combined.c_str());
         } else {
             for (auto& e : entries) {
                 if (e.combined != matched) continue;
@@ -673,10 +672,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 // aggregate promotion below pairs an input normally.
                 if (initError.isNotEmpty()
                     && setup.inputDeviceName.isNotEmpty()) {
-                    fprintf(stderr, "[device-setup] -H full-duplex open of "
-                            "'%s' failed (%s) — retrying output-only\n",
+                    clockwork_log("[device-setup] -H full-duplex open of "
+                            "'%s' failed (%s) — retrying output-only",
                             e.devName.c_str(), initError.toRawUTF8());
-                    fflush(stderr);
                     setup.inputDeviceName = juce::String();
                     setup.useDefaultInputChannels = false;
                     initError = mDeviceManager->initialise(
@@ -685,11 +683,11 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 }
 
                 if (initError.isNotEmpty()) {
-                    fprintf(stderr, "[device-setup] -H '%s' matched '%s' but failed: %s\n",
+                    clockwork_log("[device-setup] -H '%s' matched '%s' but failed: %s",
                             cfg.hardwareDevice.c_str(), e.combined.c_str(),
                             initError.toRawUTF8());
                 } else {
-                    fprintf(stderr, "  -H '%s' -> %s\n",
+                    clockwork_log("  -H '%s' -> %s",
                             cfg.hardwareDevice.c_str(), e.combined.c_str());
                     mDeviceMode = e.devName;
                     mBootDriver = e.typeName;
@@ -760,17 +758,15 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                     bootFallback = clockwork::device::selectBootOutputDevice(
                         defaultName, defaultIsWireless, names, wirelessFlags);
                     if (!bootFallback.empty()) {
-                        fprintf(stderr, "[device-setup] boot: default '%s' "
-                                "is wireless; using non-wireless fallback '%s'\n",
+                        clockwork_log("[device-setup] boot: default '%s' "
+                                "is wireless; using non-wireless fallback '%s'",
                                 defaultName.c_str(), bootFallback.c_str());
-                        fflush(stderr);
                     } else {
-                        fprintf(stderr, "[device-setup] boot: default '%s' "
+                        clockwork_log("[device-setup] boot: default '%s' "
                                 "is wireless and no non-wireless fallback "
                                 "available — opening wireless default may "
-                                "silence audio for ~15 s during boot handshake\n",
+                                "silence audio for ~15 s during boot handshake",
                                 defaultName.c_str());
-                        fflush(stderr);
                     }
                 }
             }
@@ -788,7 +784,7 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 0, reqOut);
         }
         if (initError.isNotEmpty()) {
-            fprintf(stderr, "[device-setup] init with 0 in / %d out failed: %s\n",
+            clockwork_log("[device-setup] init with 0 in / %d out failed: %s",
                     reqOut, initError.toRawUTF8());
             initError = mDeviceManager->initialiseWithDefaultDevices(0, 0);
         }
@@ -798,19 +794,19 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         initError = mDeviceManager->initialiseWithDefaultDevices(
             reqIn, reqOut);
         if (initError.isNotEmpty()) {
-            fprintf(stderr, "[device-setup] init with %d in / %d out failed: %s\n",
+            clockwork_log("[device-setup] init with %d in / %d out failed: %s",
                     reqIn, reqOut,
                     initError.toRawUTF8());
             initError = mDeviceManager->initialiseWithDefaultDevices(0, 2);
         }
         if (initError.isNotEmpty()) {
-            fprintf(stderr, "[device-setup] init with 0 in / 2 out failed: %s\n",
+            clockwork_log("[device-setup] init with 0 in / 2 out failed: %s",
                     initError.toRawUTF8());
             initError = mDeviceManager->initialiseWithDefaultDevices(0, 0);
         }
 #endif
         if (initError.isNotEmpty()) {
-            fprintf(stderr, "[device-setup] all init attempts failed: %s\n",
+            clockwork_log("[device-setup] all init attempts failed: %s",
                     initError.toRawUTF8());
         }
     }
@@ -824,10 +820,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         && bootDriverRequested
         && !platformDefaultDriver.empty()
         && platformDefaultDriver != mBootDriver) {
-        fprintf(stderr, "[device-setup] requested driver '%s' opened no device "
-                "— falling back to '%s'\n",
+        clockwork_log("[device-setup] requested driver '%s' opened no device "
+                "— falling back to '%s'",
                 mBootDriver.c_str(), platformDefaultDriver.c_str());
-        fflush(stderr);
         mDeviceManager->setCurrentAudioDeviceType(
             juce::String(platformDefaultDriver), true);
         juce::String fbErr =
@@ -837,15 +832,14 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         if (fbErr.isEmpty() && mDeviceManager->getCurrentAudioDevice()) {
             mBootDriver = platformDefaultDriver;
             initError = juce::String();
-            fprintf(stderr, "[device-setup] fallback opened '%s' on '%s'\n",
+            clockwork_log("[device-setup] fallback opened '%s' on '%s'",
                     mDeviceManager->getCurrentAudioDevice()
                         ->getName().toRawUTF8(),
                     platformDefaultDriver.c_str());
         } else {
-            fprintf(stderr, "[device-setup] fallback to '%s' also failed: %s\n",
+            clockwork_log("[device-setup] fallback to '%s' also failed: %s",
                     platformDefaultDriver.c_str(), fbErr.toRawUTF8());
         }
-        fflush(stderr);
     }
 
 #ifdef __APPLE__
@@ -899,15 +893,13 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 outName, openedByHardwareFlag, mPreferredInputDevice,
                 inName, bootDevices);
             if (!plan.reason.empty()) {
-                fprintf(stderr, "[device-setup] boot: %s\n",
+                clockwork_log("[device-setup] boot: %s",
                         plan.reason.c_str());
-                fflush(stderr);
             }
             if (!plan.inputName.empty() && plan.inputName != inName) {
-                fprintf(stderr, "[device-setup] boot: pairing requested "
-                        "input '%s' (system default '%s')\n",
+                clockwork_log("[device-setup] boot: pairing requested "
+                        "input '%s' (system default '%s')",
                         plan.inputName.c_str(), inName.c_str());
-                fflush(stderr);
             }
             inName = plan.inputName;
             if (plan.action
@@ -942,12 +934,11 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                     inputBits.setRange(inOffset, reqIn, true);
                     setup.inputChannels = inputBits;
                     if (inOffset > 0) {
-                        fprintf(stderr, "[device-setup] aggregate input bits offset by %d "
+                        clockwork_log("[device-setup] aggregate input bits offset by %d "
                                 "(output sub-device '%s' contributes %d input channels) — "
-                                "active input range = [%d..%d]\n",
+                                "active input range = [%d..%d]",
                                 inOffset, outName.c_str(), inOffset,
                                 inOffset, inOffset + reqIn - 1);
-                        fflush(stderr);
                     }
                     auto aggErr = mDeviceManager->setAudioDeviceSetup(setup, true);
                     if (aggErr.isNotEmpty()) {
@@ -955,16 +946,16 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                         // default mic with the default output via its Combiner — the #3554 SIGSEGV
                         // (restartAsync into a torn-down Combiner) — and with a Bluetooth default both
                         // sides are BT. A boot without a mic beats one that crashes.
-                        fprintf(stderr, "[device-setup] aggregate setup failed: %s — "
-                                "booting output-only\n", aggErr.toRawUTF8());
+                        clockwork_log("[device-setup] aggregate setup failed: %s — "
+                                "booting output-only", aggErr.toRawUTF8());
                         AggregateDeviceHelper::destroy();
                         mRealOutputDeviceName.clear();
                         mRealInputDeviceName.clear();
                         mDeviceManager->initialiseWithDefaultDevices(
                             0, reqOut);
                     } else {
-                        fprintf(stderr, "[device-setup] booted with aggregate: "
-                                "out='%s' in='%s'\n", outName.c_str(), inName.c_str());
+                        clockwork_log("[device-setup] booted with aggregate: "
+                                "out='%s' in='%s'", outName.c_str(), inName.c_str());
                         // Suppress CFRunLoop until the client has finished
                         // re-initialising — queued audioDeviceListChanged
                         // messages would trigger a second cold swap, which
@@ -990,11 +981,10 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 if (initError.isNotEmpty()) {
                     // Output-only fallback — same no-Combiner rule as the
                     // aggregate failure path above.
-                    fprintf(stderr, "[device-setup] boot: full-duplex "
+                    clockwork_log("[device-setup] boot: full-duplex "
                             "reopen of '%s' failed: %s — booting "
-                            "output-only\n",
+                            "output-only",
                             outName.c_str(), initError.toRawUTF8());
-                    fflush(stderr);
                     initError = mDeviceManager->initialiseWithDefaultDevices(
                         0, reqOut);
                 }
@@ -1026,10 +1016,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         const std::string chosen = clockwork::device::chooseBootInputDevice(
             mPreferredInputDevice, currentIn, inputNames);
         if (!chosen.empty() && chosen != currentIn) {
-            fprintf(stderr, "[device-setup] boot: pairing requested input "
-                    "'%s' (default was '%s')\n",
+            clockwork_log("[device-setup] boot: pairing requested input "
+                    "'%s' (default was '%s')",
                     chosen.c_str(), currentIn.c_str());
-            fflush(stderr);
             setup.inputDeviceName = juce::String(chosen);
             setup.useDefaultInputChannels = false;
             // Clamp the bitmask to the device's real capacity — WASAPI
@@ -1051,18 +1040,16 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             const juce::String pairErr =
                 mDeviceManager->setAudioDeviceSetup(setup, true);
             if (pairErr.isNotEmpty()) {
-                fprintf(stderr, "[device-setup] boot input pairing failed: "
-                        "%s — keeping '%s'\n",
+                clockwork_log("[device-setup] boot input pairing failed: "
+                        "%s — keeping '%s'",
                         pairErr.toRawUTF8(), currentIn.c_str());
-                fflush(stderr);
                 if (!mDeviceManager->getCurrentAudioDevice()) {
                     const juce::String restoreErr =
                         mDeviceManager->setAudioDeviceSetup(previous, true);
-                    fprintf(stderr, "[device-setup] boot: restored output-only "
-                            "device after failed pairing%s%s\n",
+                    clockwork_log("[device-setup] boot: restored output-only "
+                            "device after failed pairing%s%s",
                             restoreErr.isEmpty() ? "" : " — FAILED: ",
                             restoreErr.isEmpty() ? "" : restoreErr.toRawUTF8());
-                    fflush(stderr);
                 }
             } else {
                 mLastInputDeviceName = chosen;
@@ -1104,8 +1091,8 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 setup.sampleRate = cfg.sampleRate;
                 changed = true;
             } else {
-                fprintf(stderr, "[device-setup] requested sr %d not supported, "
-                        "keeping %.0f\n", cfg.sampleRate, setup.sampleRate);
+                clockwork_log("[device-setup] requested sr %d not supported, "
+                        "keeping %.0f", cfg.sampleRate, setup.sampleRate);
             }
         }
 
@@ -1141,9 +1128,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         if (changed) {
             juce::String setupErr = mDeviceManager->setAudioDeviceSetup(setup, true);
             if (setupErr.isNotEmpty()) {
-                fprintf(stderr, "[device-setup] setAudioDeviceSetup error: %s\n",
+                clockwork_log("[device-setup] setAudioDeviceSetup error: %s",
                         setupErr.toRawUTF8());
-                fprintf(stderr, "[device-setup] recovering with device defaults\n");
+                clockwork_log("[device-setup] recovering with device defaults");
                 mDeviceManager->initialiseWithDefaultDevices(
                     reqIn, reqOut);
             }
@@ -1161,9 +1148,8 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         mCurrentConfig.numOutputChannels = dev->getOutputChannelNames().size();
         mCurrentConfig.numInputChannels  = dev->getInputChannelNames().size();
     } else {
-        fprintf(stderr, CLOCKWORK_LOG_PREFIX "warning: no audio device available\n");
+        clockwork_log("[engine] warning: no audio device available");
     }
-    fflush(stderr);
 
     // Arm the post-boot quiet window ONCE, here, against the change
     // notifications boot's own opens/aggregate work will deliver after
@@ -1195,8 +1181,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             // scope all live there, observable cross-process for free.
             g_external_segment = mShmemCreator->get_base();
         } catch (const std::exception& e) {
-            fprintf(stderr, CLOCKWORK_LOG_PREFIX "shared memory creation failed: %s\n", e.what());
-            fflush(stderr);
+            clockwork_log("[engine] shared memory creation failed: %s", e.what());
             mShmemCreator.reset();
             g_external_segment = nullptr;
         }
@@ -1224,7 +1209,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             hwBuf, clockwork::kDefaultBlockSize, 32,
             clockwork::kDefaultBlockSize);
     }
-    ssLifecycleLog(CLOCKWORK_LOG_PREFIX "DSP block size = %d samples\n", chosenBufLen);
+    clockwork_log("[engine] DSP block size = %d samples", chosenBufLen);
 
     // The arena is the public segment when one exists, so the whole
     // shared_memory.h blob lives cross-process; else the process-local
@@ -1312,7 +1297,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         guestOutbox,
         guestOutboxBytes
     );
-
     // Move the clock state into the shared arena's CLOCK_STATE region so
     // the native SHM has the same shape as web. Done before publish() below,
     // so a cross-process reader sees it populated.
@@ -1344,8 +1328,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         if (mShmemCreator) {
             mPeerPlane.store(mShmemCreator->get_peer_plane(), std::memory_order_release);
         } else {
-            fprintf(stderr, CLOCKWORK_LOG_PREFIX "WARNING: shmCommands requested but there is "
-                            "no SHM segment (udpPort == 0) — command plane disabled\n");
+            clockwork_log("[engine] WARNING: shmCommands requested but there is "
+                            "no SHM segment (udpPort == 0) — command plane disabled");
         }
     }
 
@@ -1546,11 +1530,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         ClockworkClock* expected = nullptr;
         if (!g_active_clockwork_clock.compare_exchange_strong(
                 expected, &mClockworkClock, std::memory_order_release)) {
-            fprintf(stderr,
-                CLOCKWORK_LOG_PREFIX "WARNING: another ClockworkEngine has already "
+            clockwork_log(
+                "[engine] WARNING: another ClockworkEngine has already "
                 "published a ClockworkClock; multi-engine native is not "
-                "supported. /clockwork/clock will reflect this engine.\n");
-            fflush(stderr);
+                "supported. /clockwork/clock will reflect this engine.");
             g_active_clockwork_clock.store(&mClockworkClock, std::memory_order_release);
         }
     }
@@ -1615,7 +1598,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // client's unanswered request is explained here rather than inferred from a
     // silence in the log.
     mNrtGateway.onSlowPass([this](uint32_t us) {
-        clockwork_log("[nrt] control drain blocked %.1fs%s%s\n", us / 1'000'000.0,
+        clockwork_log("[nrt] control drain blocked %.1fs%s%s", us / 1'000'000.0,
                mInFlightCommand[0] ? " handling " : "",
                mInFlightCommand[0] ? mInFlightCommand : "");
     });
@@ -1629,10 +1612,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // audio device" state (the default engine never falls back to a silent
     // driver — see desiredAudioSource).
     if (testForceNoCurrentDeviceAfterInit && mDeviceManager) {
-        fprintf(stderr,
-                CLOCKWORK_LOG_PREFIX "testForceNoCurrentDeviceAfterInit: closing device "
-                "to exercise the no-audio-device path\n");
-        fflush(stderr);
+        clockwork_log(
+                "[engine] testForceNoCurrentDeviceAfterInit: closing device "
+                "to exercise the no-audio-device path");
         mDeviceManager->closeAudioDevice();
     }
 
@@ -1667,8 +1649,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             int64_t prev = lastLogSec.load(std::memory_order_relaxed);
             if (nowSec != prev && lastLogSec.compare_exchange_strong(prev, nowSec)) {
-                fprintf(stderr, "[link] tempo -> %.2f bpm\n", bpm);
-                fflush(stderr);
+                clockwork_log("[link] tempo -> %.2f bpm", bpm);
             }
             char buf[64];
             osc::OutboundPacketStream s(buf, sizeof(buf));
@@ -1679,8 +1660,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         });
         mClockworkClock.setNumPeersChangedCallback([egr, alive](std::size_t n) {
             if (!alive->load(std::memory_order_acquire)) return;
-            fprintf(stderr, "[link] peers -> %zu\n", n);
-            fflush(stderr);
+            clockwork_log("[link] peers -> %zu", n);
             char buf[64];
             osc::OutboundPacketStream s(buf, sizeof(buf));
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers"))
@@ -1691,8 +1671,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         });
         mClockworkClock.setStartStopChangedCallback([egr, alive](bool playing, double atNtp) {
             if (!alive->load(std::memory_order_acquire)) return;
-            fprintf(stderr, "[link] transport -> %s\n", playing ? "playing" : "stopped");
-            fflush(stderr);
+            clockwork_log("[link] transport -> %s", playing ? "playing" : "stopped");
             char buf[64];
             osc::OutboundPacketStream s(buf, sizeof(buf));
             // Timestamp in NTP micros, like every other /clock wire time.
@@ -2010,7 +1989,7 @@ ClockworkClient* ClockworkEngine::ensureClient() {
         ClockworkStatus st = CLOCKWORK_OK;
         mClientHandle = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
         if (!mClientHandle)
-            fprintf(stderr, CLOCKWORK_LOG_PREFIX "client boundary unavailable: %s\n",
+            clockwork_log("[engine] client boundary unavailable: %s",
                     clockwork_client_status_text(st));
     }
     return mClientHandle;
@@ -2240,9 +2219,8 @@ void ClockworkEngine::executePendingSwitch() {
         return;
     }
 
-    fprintf(stderr, "[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d\n",
+    clockwork_log("[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d",
             devName.c_str(), inputDevName.c_str(), sr, bufSz);
-    fflush(stderr);
 
     // Explicit GUI switch → force device mode so changeListenerCallback
     // doesn't fight us by reinitialising to system defaults.
@@ -2260,9 +2238,8 @@ void ClockworkEngine::executePendingSwitch() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (!result.success) {
-        fprintf(stderr, "[device-setup] debounced switch failed after %d attempts: %s\n",
+        clockwork_log("[device-setup] debounced switch failed after %d attempts: %s",
                 attempts, result.error.c_str());
-        fflush(stderr);
     }
     // No sendDeviceReport() here — switchDevice's printDeviceList already
     // broadcasts. A second call can race with JUCE's post-switch device-list
@@ -2693,14 +2670,12 @@ void ClockworkEngine::sendDeviceReport() {
 
     // The flat lists (selection.outputs/inputs) arrive deduped by name,
     // active driver's entry winning — see selectReportedDevices step 6.
-    fprintf(stderr, "[device-list] outputs=%zu inputs=%zu currentIn='%s' currentOut='%s'\n",
+    clockwork_log("[device-list] outputs=%zu inputs=%zu currentIn='%s' currentOut='%s'",
             outputDevices.size(), inputDevices.size(),
             current.inputDeviceName.c_str(), current.name.c_str());
-    fflush(stderr);
     if (selection.suppressReport) {
-        fprintf(stderr, "[device-list] skipping: currentIn set but inputDevices list empty "
-                "(transient enumeration, probably mid-swap)\n");
-        fflush(stderr);
+        clockwork_log("[device-list] skipping: currentIn set but inputDevices list empty "
+                "(transient enumeration, probably mid-swap)");
         return;
     }
 
@@ -3499,10 +3474,9 @@ void ClockworkEngine::startAudioSource() {
         // Assert in debug so a regression fails loudly; log+return in
         // release so we don't crash a user session.
         jassertfalse;
-        fprintf(stderr,
-                CLOCKWORK_LOG_PREFIX "BUG: startAudioSource called while %s already active\n",
+        clockwork_log(
+                "[engine] BUG: startAudioSource called while %s already active",
                 mActiveSource.load() == AudioSource::RealCallback ? "RealCallback" : "Headless");
-        fflush(stderr);
         return;
     }
 
@@ -3511,10 +3485,9 @@ void ClockworkEngine::startAudioSource() {
     // concurrent callers — a data race on the whole engine state. mActiveSource stays
     // None so shutdown's stopAudioSource() no-ops.
     if (mCurrentConfig.manualAudioPump) {
-        fprintf(stderr,
-                CLOCKWORK_LOG_PREFIX "manual audio pump — no audio source started; "
-                "caller drives process_audio()\n");
-        fflush(stderr);
+        clockwork_log(
+                "[engine] manual audio pump — no audio source started; "
+                "caller drives process_audio()");
         mActiveSource.store(AudioSource::None, std::memory_order_release);
         return;
     }
@@ -3523,21 +3496,20 @@ void ClockworkEngine::startAudioSource() {
 
     const AudioSource desired = desiredAudioSource();
     if (desired == AudioSource::RealCallback) {
-        // Bracket the attach with always-on log lines: a silent process
-        // death in this window (seen in the wild on a virtual 8-out device)
-        // is only localisable if the log shows exactly how far we got —
-        // nothing after "attaching" = died inside the driver's start path;
-        // "attached" but no "[juce] first audio callback" = died before the
-        // device's IO thread reached our callback.
+        // Bracket the attach with log lines: a silent process death in this
+        // window (seen in the wild on a virtual 8-out device) is only
+        // localisable if the log shows exactly how far we got — nothing after
+        // "attaching" = died inside the driver's start path; "attached" but no
+        // "[juce] first audio callback" = died before the device's IO thread
+        // reached our callback. The gateway thread drains the ring on its own,
+        // so the lines reach the host even when this thread never returns.
         {
             auto* dev = mDeviceManager->getCurrentAudioDevice();
-            fprintf(stderr, CLOCKWORK_LOG_PREFIX "attaching audio callback to device '%s'\n",
+            clockwork_log("[engine] attaching audio callback to device '%s'",
                     dev ? dev->getName().toRawUTF8() : "(none)");
-            fflush(stderr);
         }
         mDeviceManager->addAudioCallback(&mAudioCallback);
-        fprintf(stderr, CLOCKWORK_LOG_PREFIX "audio callback attached — waiting for first tick\n");
-        fflush(stderr);
+        clockwork_log("[engine] audio callback attached — waiting for first tick");
         // addChangeListener is idempotent (JUCE's ListenerList dedupes), so
         // re-attaching across hot-plug / swap sequences is harmless.
         mDeviceManager->addChangeListener(this);
@@ -3560,7 +3532,7 @@ void ClockworkEngine::startAudioSource() {
         // in when one appears (plug in / wake). audioSource()==None with a live
         // device manager is the "waiting for audio device" state.
         mActiveSource.store(AudioSource::None, std::memory_order_release);
-        clockwork_log(CLOCKWORK_LOG_PREFIX "no audio device available — engine is idle and will "
+        clockwork_log("[engine] no audio device available — engine is idle and will "
                "recover when one appears");
         sendDeviceReport();   // GUI sees an empty current device
         return;               // nothing will tick; don't wait for a first block
@@ -3598,14 +3570,13 @@ void ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     }
     bool ticked = mAudioCallback.processCount.load(std::memory_order_acquire) != before;
     if (!ticked) {
-        fprintf(stderr,
-                CLOCKWORK_LOG_PREFIX "WARNING: audio callbacks not firing after %d ms, "
-                "engine is alive but the audio thread has not started\n", kTimeoutMs);
-        fflush(stderr);
+        clockwork_log(
+                "[engine] WARNING: audio callbacks not firing after %d ms, "
+                "engine is alive but the audio thread has not started", kTimeoutMs);
     } else {
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
-        ssLifecycleLog(CLOCKWORK_LOG_PREFIX "audio callbacks started (%lld ms)\n",
+        clockwork_log("[engine] audio callbacks started (%lld ms)",
                        static_cast<long long>(elapsedMs));
     }
 }
@@ -3629,9 +3600,8 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
             const std::string target =
                 (!mBootDriver.empty() && mBootDriver != "ASIO")
                     ? mBootDriver : std::string("DirectSound");
-            fprintf(stderr, "[device-setup] system default requested from ASIO "
-                    "— returning to %s first\n", target.c_str());
-            fflush(stderr);
+            clockwork_log("[device-setup] system default requested from ASIO "
+                    "— returning to %s first", target.c_str());
             mLastSelfTriggeredChange = std::chrono::steady_clock::now();
             mDeviceManager->setCurrentAudioDeviceType(
                 juce::String(target), true);
@@ -3699,23 +3669,20 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
                 auto err2 = mDeviceManager->setAudioDeviceSetup(setup, true);
                 if (err2.isEmpty()) {
                     forcedPrev = true;
-                    fprintf(stderr, "[device-setup] reinit: wireless device supports "
-                            "prev rate %d — forcing it (was %.0f)\n",
+                    clockwork_log("[device-setup] reinit: wireless device supports "
+                            "prev rate %d — forcing it (was %.0f)",
                             prevRate, dev->getCurrentSampleRate());
-                    fflush(stderr);
                 } else {
-                    fprintf(stderr, "[device-setup] reinit: setAudioDeviceSetup at "
-                            "prev rate %d failed on wireless (%s), keeping negotiated\n",
+                    clockwork_log("[device-setup] reinit: setAudioDeviceSetup at "
+                            "prev rate %d failed on wireless (%s), keeping negotiated",
                             prevRate, err2.toRawUTF8());
-                    fflush(stderr);
                 }
             }
         }
         if (!forcedPrev) {
-            fprintf(stderr, "[device-setup] reinit: keeping JUCE's negotiated rate=%.0f buf=%d "
-                    "for wireless device (prev rate=%d buf=%d)\n",
+            clockwork_log("[device-setup] reinit: keeping JUCE's negotiated rate=%.0f buf=%d "
+                    "for wireless device (prev rate=%d buf=%d)",
                     setup.sampleRate, setup.bufferSize, prevRate, prevBufSize);
-            fflush(stderr);
         }
     }
 
@@ -3767,8 +3734,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             deviceName, inputDeviceName, cur.name, cur.inputDeviceName,
             pipeWirePatchbayDeviceName(), pipeWireDefaultDeviceName());
         if (resolved.output != deviceName || resolved.input != inputDeviceName) {
-            fprintf(stderr,
-                    "[device-setup] exclusive-pair resolve: out '%s' -> '%s', in '%s' -> '%s'\n",
+            clockwork_log(
+                    "[device-setup] exclusive-pair resolve: out '%s' -> '%s', in '%s' -> '%s'",
                     deviceName.c_str(), resolved.output.c_str(),
                     inputDeviceName.c_str(), resolved.input.c_str());
             deviceName = resolved.output;
@@ -3832,8 +3799,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     if (auto err = refuseUnknownDeviceName(deviceName, inputDeviceName);
         !err.empty()) {
         result.error = err;
-        fprintf(stderr, "[switchDevice] refused: %s\n", err.c_str());
-        fflush(stderr);
+        clockwork_log("[switchDevice] refused: %s", err.c_str());
         return result;
     }
 
@@ -3927,39 +3893,34 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // Execute the plan's bookkeeping decisions + the logs the old inline
     // code emitted (provenance flags exist for exactly this).
     if (plan.abandonDriverIntent) {
-        fprintf(stderr,
+        clockwork_log(
             "[device-setup] abandoning pending driver intent '%s' "
-            "— picks resolve under '%s'\n",
+            "— picks resolve under '%s'",
             mIntendedDriver.c_str(), snap.juceCurrentType.c_str());
-        fflush(stderr);
         mIntendedDriver.clear();
     }
     clockwork::device::SwapScope scope = plan.scope;
     if (scope.crossDriver) {
-        fprintf(stderr,
-            "[device-setup] cross-driver: '%s' -> '%s' (device '%s')\n",
+        clockwork_log(
+            "[device-setup] cross-driver: '%s' -> '%s' (device '%s')",
             snap.juceCurrentType.c_str(), scope.targetDriver.c_str(),
             scope.targetDevice.c_str());
-        fflush(stderr);
     }
     if (plan.inputName != inputDeviceName) {
-        fprintf(stderr,
-            "[device-setup] ASIO full-duplex: mirroring '%s' to input\n",
+        clockwork_log(
+            "[device-setup] ASIO full-duplex: mirroring '%s' to input",
             plan.inputName.c_str());
-        fflush(stderr);
     }
     inputDeviceName = plan.inputName;
     if (plan.restoredPreWirelessRate) {
-        fprintf(stderr, "[device-setup] restoring pre-wireless rate %d "
-                "(current=%.0f)\n", mPreWirelessRate, snap.currentRate);
-        fflush(stderr);
+        clockwork_log("[device-setup] restoring pre-wireless rate %d "
+                "(current=%.0f)", mPreWirelessRate, snap.currentRate);
     }
     if (plan.rateAdjustedToNearest) {
-        fprintf(stderr,
+        clockwork_log(
             "[device-setup] current rate %.0f not supported "
-            "by the target device, will use %.0f (cold swap)\n",
+            "by the target device, will use %.0f (cold swap)",
             snap.currentRate, plan.sampleRate);
-        fflush(stderr);
     }
     sampleRate = plan.sampleRate;
 
@@ -3973,19 +3934,18 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         // we'll know TCC really is denying.
         std::string micStat = MicPermission::status();
         if (micStat != "authorized") {
-            fprintf(stderr, "[device-setup] mic permission status=%s (proceeding anyway; "
-                    "CoreAudio may still grant via GUI's responsible process)\n",
+            clockwork_log("[device-setup] mic permission status=%s (proceeding anyway; "
+                    "CoreAudio may still grant via GUI's responsible process)",
                     micStat.c_str());
-            fflush(stderr);
         }
 #endif
         if (plan.enableInputWidth != plan.enableInputRequested) {
-            fprintf(stderr, "[device-setup] auto-enabling %d input channels for '%s' "
-                    "(requested %d, device max %d)\n",
+            clockwork_log("[device-setup] auto-enabling %d input channels for '%s' "
+                    "(requested %d, device max %d)",
                     plan.enableInputWidth, inputDeviceName.c_str(),
                     plan.enableInputRequested, plan.enableInputProbed);
         } else {
-            fprintf(stderr, "[device-setup] auto-enabling %d input channels for '%s'\n",
+            clockwork_log("[device-setup] auto-enabling %d input channels for '%s'",
                     plan.enableInputWidth, inputDeviceName.c_str());
         }
         mCurrentConfig.numInputChannels = plan.enableInputWidth;
@@ -3994,12 +3954,11 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
 
     if (plan.coldForChannels) {
-        fprintf(stderr, "[device-setup] channel-count change detected "
+        clockwork_log("[device-setup] channel-count change detected "
                 "(probedOut=%d probedIn=%d currentOut=%d currentIn=%d) "
-                "— forcing cold swap so the DSP rebuilds at the new count\n",
+                "— forcing cold swap so the DSP rebuilds at the new count",
                 snap.probedTargetOut, snap.probedTargetIn,
                 snap.currentOutputChannels, snap.currentInputChannels);
-        fflush(stderr);
     }
 
     bool inputWasDropped = false;
@@ -4189,17 +4148,15 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 if (nameMatch && !dev.isSuitableForAggregate()) {
                     needsAggregate = false;
                     dropInput = true;
-                    fprintf(stderr, "[device-setup] skipping aggregate — '%s' is not "
-                            "aggregable (wireless or aggregate-class); input disabled\n",
+                    clockwork_log("[device-setup] skipping aggregate — '%s' is not "
+                            "aggregable (wireless or aggregate-class); input disabled",
                             dev.name.c_str());
-                    fflush(stderr);
                     break;
                 }
             }
             if (!matched) {
-                fprintf(stderr, "[agg-filter] WARNING: no device matched outName='%s' inName='%s' "
-                        "— filter never fired\n", outName.c_str(), inName.c_str());
-                fflush(stderr);
+                clockwork_log("[agg-filter] WARNING: no device matched outName='%s' inName='%s' "
+                        "— filter never fired", outName.c_str(), inName.c_str());
             }
         }
 
@@ -4246,12 +4203,11 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                         inputBits.setRange(inOffset,
                                            mCurrentConfig.numInputChannels, true);
                         setup.inputChannels = inputBits;
-                        fprintf(stderr, "[device-setup] aggregate input bits offset by %d "
+                        clockwork_log("[device-setup] aggregate input bits offset by %d "
                                 "(output sub-device '%s' contributes %d input channels) — "
-                                "active input range = [%d..%d]\n",
+                                "active input range = [%d..%d]",
                                 inOffset, mRealOutputDeviceName.c_str(), inOffset,
                                 inOffset, inOffset + mCurrentConfig.numInputChannels - 1);
-                        fflush(stderr);
                     }
                 }
 
@@ -4276,10 +4232,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             // our aggregate on wireless (both use AudioUnitRender under
             // the hood).
             if (dropInput && !setup.inputDeviceName.isEmpty()) {
-                fprintf(stderr, "[device-setup] clearing input (was '%s') because output "
-                        "can't be combined with it\n",
+                clockwork_log("[device-setup] clearing input (was '%s') because output "
+                        "can't be combined with it",
                         setup.inputDeviceName.toRawUTF8());
-                fflush(stderr);
                 mLastInputDeviceName = setup.inputDeviceName.toStdString();
                 setup.inputDeviceName = "";
                 setup.inputChannels.clear();
@@ -4299,15 +4254,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         // JUCE's setAudioDeviceSetup sees it as a different device and
         // reopens properly.
 
-        fprintf(stderr, "[device-setup] calling setAudioDeviceSetup: out='%s' in='%s' sr=%.0f buf=%d\n",
+        clockwork_log("[device-setup] calling setAudioDeviceSetup: out='%s' in='%s' sr=%.0f buf=%d",
                 setup.outputDeviceName.toRawUTF8(),
                 setup.inputDeviceName.toRawUTF8(),
                 setup.sampleRate, setup.bufferSize);
-        fflush(stderr);
         juce::String err = mDeviceManager->setAudioDeviceSetup(setup, true);
-        fprintf(stderr, "[device-setup] setAudioDeviceSetup returned: '%s'\n",
+        clockwork_log("[device-setup] setAudioDeviceSetup returned: '%s'",
                 err.isEmpty() ? "OK" : err.toRawUTF8());
-        fflush(stderr);
         if (err.isNotEmpty()) errStr = err.toStdString();
 
         // Input-fallback: the setup failed while an input was requested
@@ -4327,12 +4280,11 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             outOnly.inputDeviceName = juce::String();
             outOnly.useDefaultInputChannels = false;
             outOnly.inputChannels.clear();
-            fprintf(stderr,
+            clockwork_log(
                     "[device-setup] input '%s' failed when paired with output '%s' "
-                    "(%s) — retrying output-only\n",
+                    "(%s) — retrying output-only",
                     failedInputName.c_str(), pairedOutputName.c_str(),
                     firstError.c_str());
-            fflush(stderr);
             juce::String retryErr = mDeviceManager->setAudioDeviceSetup(outOnly, true);
             if (retryErr.isEmpty()) {
                 setup = outOnly;
@@ -4351,10 +4303,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 }
             } else {
                 errStr = retryErr.toStdString();
-                fprintf(stderr,
-                        "[device-setup] output-only retry also failed: %s\n",
+                clockwork_log(
+                        "[device-setup] output-only retry also failed: %s",
                         errStr.c_str());
-                fflush(stderr);
             }
         }
 
@@ -4407,19 +4358,17 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             // headless driver so the engine stays responsive (the client's /done
             // syncs return) instead of silently dead with the audio thread
             // never ticking.
-            fprintf(stderr,
-                    "[device-setup] swap failed (%s), restoring previous setup: out='%s' in='%s' sr=%.0f buf=%d\n",
+            clockwork_log(
+                    "[device-setup] swap failed (%s), restoring previous setup: out='%s' in='%s' sr=%.0f buf=%d",
                     errStr.c_str(),
                     prevSetup.outputDeviceName.toRawUTF8(),
                     prevSetup.inputDeviceName.toRawUTF8(),
                     prevSetup.sampleRate, prevSetup.bufferSize);
-            fflush(stderr);
             juce::String restoreErr = mDeviceManager->setAudioDeviceSetup(prevSetup, true);
             if (restoreErr.isNotEmpty()) {
-                fprintf(stderr,
-                        "[device-setup] WARNING: failed to restore previous setup: %s\n",
+                clockwork_log(
+                        "[device-setup] WARNING: failed to restore previous setup: %s",
                         restoreErr.toRawUTF8());
-                fflush(stderr);
                 // Last-resort recovery: try the system default with output-only.
                 // If even this fails, startAudioSource() will choose the headless
                 // fallback (no current device, so Headless) and the engine
@@ -4427,15 +4376,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 juce::String fallbackErr =
                     mDeviceManager->initialiseWithDefaultDevices(0, mCurrentConfig.numOutputChannels);
                 if (fallbackErr.isNotEmpty()) {
-                    fprintf(stderr,
+                    clockwork_log(
                             "[device-setup] WARNING: default-device fallback also failed: %s, "
-                            "engine will run via headless driver\n",
+                            "engine will run via headless driver",
                             fallbackErr.toRawUTF8());
-                    fflush(stderr);
                 } else {
-                    fprintf(stderr,
-                            "[device-setup] recovered to system default after rollback failure\n");
-                    fflush(stderr);
+                    clockwork_log(
+                            "[device-setup] recovered to system default after rollback failure");
                     // Clear aggregate-bookkeeping; we're on a single device now.
                     mRealOutputDeviceName.clear();
                     mRealInputDeviceName.clear();
@@ -4497,9 +4444,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             rebuild_dsp(newRate);
             mDspRebuilt = true;
         } catch (const std::exception& e) {
-            fprintf(stderr, CLOCKWORK_LOG_PREFIX "rebuild_dsp failed: %s — recovering with safe defaults\n",
+            clockwork_log("[engine] rebuild_dsp failed: %s — recovering with safe defaults",
                     e.what());
-            fflush(stderr);
 
             double safeRate = currentRate;
             int safeBuffer = 128;
@@ -4515,8 +4461,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 result.sampleRate = safeRate;
                 result.bufferSize = safeBuffer;
             } catch (const std::exception& e2) {
-                fprintf(stderr, CLOCKWORK_LOG_PREFIX "rebuild recovery ALSO failed: %s\n", e2.what());
-                fflush(stderr);
+                clockwork_log("[engine] rebuild recovery ALSO failed: %s", e2.what());
                 result.error = std::string("rebuild failed and recovery failed: ") + e2.what();
                 setEngineState(EngineState::Error, "rebuild-failed");
                 if (onSwapEvent) onSwapEvent("swap:failed", result);
@@ -4566,7 +4511,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 ? finalDev->getName().toStdString()
                 : mRealOutputDeviceName;
 
-            fprintf(stderr, "[device-setup] switched to %s: %s %.0fHz buf=%d %dch\n",
+            clockwork_log("[device-setup] switched to %s: %s %.0fHz buf=%d %dch",
                     finalDev->getTypeName().toRawUTF8(),
                     finalDev->getName().toRawUTF8(),
                     result.sampleRate, result.bufferSize,
@@ -4611,13 +4556,12 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     } else {
         if (onSwapEvent) onSwapEvent("swap:complete", result);
     }
-    fprintf(stderr, "[switchDevice] EXIT success=%d type=%s sr=%.0f buf=%d out=%d in=%d err='%s'\n",
+    clockwork_log("[switchDevice] EXIT success=%d type=%s sr=%.0f buf=%d out=%d in=%d err='%s'",
             result.success ? 1 : 0,
             (result.type == SwapType::Cold) ? "Cold" : "Hot",
             result.sampleRate, result.bufferSize,
             mCurrentConfig.numOutputChannels, mCurrentConfig.numInputChannels,
             result.error.c_str());
-    fflush(stderr);
     printDeviceList();
     return result;
 }
@@ -4787,11 +4731,10 @@ SwapResult ClockworkEngine::reopenCurrentDevice() {
                 && mDeviceManager->getCurrentAudioDevice()
                 && outName != mDeviceManager->getCurrentAudioDevice()
                                   ->getName().toStdString()) {
-                fprintf(stderr, "[reopen] retargeting pinned device '%s' "
-                        "(current is '%s')\n", outName.c_str(),
+                clockwork_log("[reopen] retargeting pinned device '%s' "
+                        "(current is '%s')", outName.c_str(),
                         mDeviceManager->getCurrentAudioDevice()
                             ->getName().toRawUTF8());
-                fflush(stderr);
             }
         }
     }
@@ -4803,10 +4746,9 @@ SwapResult ClockworkEngine::reopenCurrentDevice() {
         result.error = "no current output device to reopen";
         return result;
     }
-    fprintf(stderr, "[reopen] forceCold switch out='%s' in='%s' mode='%s'\n",
+    clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s'",
             outName.c_str(), inName.c_str(),
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str());
-    fflush(stderr);
     return switchDevice(outName, 0, 0, /*forceCold=*/true, inName,
                         SwapOrigin::Internal);
 }
@@ -4890,9 +4832,8 @@ SwapResult ClockworkEngine::enableInputChannels(int numChannels) {
                 result.error = "Cannot disable input on ASIO — ASIO drivers "
                                "are full-duplex by spec. Switch driver to "
                                "Windows Audio / DirectSound to run output-only.";
-                fprintf(stderr, "[enable-inputs] refusing disable on ASIO "
-                        "(would crash the driver)\n");
-                fflush(stderr);
+                clockwork_log("[enable-inputs] refusing disable on ASIO "
+                        "(would crash the driver)");
                 return result;
             }
         }
@@ -4906,9 +4847,8 @@ SwapResult ClockworkEngine::enableInputChannels(int numChannels) {
     clockwork_set_channel_ceilings(static_cast<uint32_t>(numChannels),
                              static_cast<uint32_t>(mCurrentConfig.numOutputChannels));
 
-    fprintf(stderr, "[enable-inputs] resolved input='%s' (source=%s) channels=%d\n",
+    clockwork_log("[enable-inputs] resolved input='%s' (source=%s) channels=%d",
             inputName.c_str(), inputSource, numChannels);
-    fflush(stderr);
     // For disable, pass __none__ sentinel so switchDevice takes the disable
     // path (clears setup.inputDeviceName + inputChannels) instead of trying
     // to treat an empty string as "re-enable with last known input".
@@ -5030,10 +4970,9 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
         //     path moves JUCE atomically.
         auto pref = mPreferredDeviceByDriver.find(driverName);
         if (pref != mPreferredDeviceByDriver.end() && !pref->second.empty()) {
-            fprintf(stderr, "[device-setup] switchDriver('%s'): delegating to "
-                    "switchDevice('%s') (saved preference)\n",
+            clockwork_log("[device-setup] switchDriver('%s'): delegating to "
+                    "switchDevice('%s') (saved preference)",
                     driverName.c_str(), pref->second.c_str());
-            fflush(stderr);
             mIntendedDriver = driverName;
             return switchDevice(pref->second);
         }
@@ -5053,10 +4992,9 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
                 int idx = type->getDefaultDeviceIndex(false);
                 if (idx < 0 || idx >= names.size()) idx = 0;
                 std::string defaultName = names[idx].toStdString();
-                fprintf(stderr, "[device-setup] switchDriver('%s'): no saved pref, "
-                        "auto-selecting default '%s'\n",
+                clockwork_log("[device-setup] switchDriver('%s'): no saved pref, "
+                        "auto-selecting default '%s'",
                         driverName.c_str(), defaultName.c_str());
-                fflush(stderr);
                 mIntendedDriver = driverName;
                 return switchDevice(defaultName);
             }
@@ -5072,10 +5010,9 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
         mIntendedDriver                 = driverName;
         result.success                  = true;
         result.requiresDeviceSelection  = true;
-        fprintf(stderr, "[device-setup] switchDriver('%s'): intent recorded, "
-                "no device opened — caller must follow with switchDevice\n",
+        clockwork_log("[device-setup] switchDriver('%s'): intent recorded, "
+                "no device opened — caller must follow with switchDevice",
                 driverName.c_str());
-        fflush(stderr);
         if (onSwapEvent) onSwapEvent("swap:complete", result);
         return result;
     }
@@ -5121,7 +5058,7 @@ void ClockworkEngine::changeListenerCallback(juce::ChangeBroadcaster* source) {
     // recovery's recreateDeviceManager() reset().
     std::unique_lock<std::recursive_mutex> gate;
     if (!tryAcquireSwapGate(gate, 1, 0)) {
-        DEV_LOG("[hotplug] changeListenerCallback skipped — swap in progress\n");
+        DEV_LOG("[hotplug] changeListenerCallback skipped — swap in progress");
         return;
     }
     if (source != mDeviceManager.get()) return;
@@ -5202,17 +5139,15 @@ void ClockworkEngine::changeListenerCallback(juce::ChangeBroadcaster* source) {
     if (schedulePreferredReattach) {
         std::string outName = pendingSwitchOutput;
         std::string inName  = pendingSwitchInput;
-        fprintf(stderr, "[hotplug] preferred output '%s' returned — scheduling switch "
-                "(preferred input='%s')\n", outName.c_str(), inName.c_str());
-        fflush(stderr);
+        clockwork_log("[hotplug] preferred output '%s' returned — scheduling switch "
+                "(preferred input='%s')", outName.c_str(), inName.c_str());
         postDeviceTask([this, outName, inName]() {
             switchDevice(outName, 0, 0, false, inName, SwapOrigin::Internal);
         });
     } else if (scheduleInputReattach) {
         std::string inName = pendingSwitchInput;
-        fprintf(stderr, "[hotplug] preferred input '%s' returned — scheduling input re-attach\n",
+        clockwork_log("[hotplug] preferred input '%s' returned — scheduling input re-attach",
                 inName.c_str());
-        fflush(stderr);
         postDeviceTask([this, inName]() {
             switchDevice("", 0, 0, false, inName, SwapOrigin::Internal);
         });
@@ -5225,7 +5160,7 @@ void ClockworkEngine::changeListenerCallback(juce::ChangeBroadcaster* source) {
 OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
     AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData)
 {
-    fprintf(stderr, "[default-output-listener] fired\n"); fflush(stderr);
+    clockwork_log("[default-output-listener] fired");
     auto* self = static_cast<ClockworkEngine*>(inClientData);
     // Straight to the device lane — not the message thread. The lane can
     // afford the bounded gate wait the handler needs; on the MM the
@@ -5233,7 +5168,7 @@ OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
     // reader briefly held the gate, which is why following the macOS
     // default was unreliable.
     self->postDeviceTask([self]() {
-        fprintf(stderr, "[default-output-listener] dispatched to handler\n"); fflush(stderr);
+        clockwork_log("[default-output-listener] dispatched to handler");
         self->handleSystemDefaultOutputChanged();
     });
     return noErr;
@@ -5253,37 +5188,34 @@ bool ClockworkEngine::waitForDeviceVisible(const std::string& name, int timeoutM
         for (auto& n : dt->getDeviceNames(false)) names.push_back(n.toStdString());
         if (clockwork::device::deviceNameVisible(name, names)) {
             if (waited > 0) {
-                fprintf(stderr, "[device-setup] aggregate '%s' visible after %d ms\n",
+                clockwork_log("[device-setup] aggregate '%s' visible after %d ms",
                         name.c_str(), waited);
-                fflush(stderr);
             }
             return true;
         }
         if (waited >= timeoutMs) break;
         juce::Thread::sleep(kStepMs);
     }
-    fprintf(stderr, "[device-setup] aggregate '%s' still not visible after %d ms — "
-            "aborting open\n", name.c_str(), timeoutMs);
-    fflush(stderr);
+    clockwork_log("[device-setup] aggregate '%s' still not visible after %d ms — "
+            "aborting open", name.c_str(), timeoutMs);
     return false;
 }
 
 void ClockworkEngine::handleSystemDefaultOutputChanged() {
     if (!mDeviceMode.empty()) {
-        fprintf(stderr, "[default-output-handler] bail: mDeviceMode='%s' (not empty — not in system mode)\n",
-                mDeviceMode.c_str()); fflush(stderr);
+        clockwork_log("[default-output-handler] bail: mDeviceMode='%s' (not empty — not in system mode)",
+                mDeviceMode.c_str());
         return;
     }
     if (!mRunning.load()) {
-        fprintf(stderr, "[default-output-handler] bail: not running\n"); fflush(stderr);
+        clockwork_log("[default-output-handler] bail: not running");
         return;
     }
     auto elapsed = std::chrono::steady_clock::now()
                    - mLastSelfTriggeredChange.load();
     if (elapsed < std::chrono::seconds(2)) {
-        fprintf(stderr, "[default-output-handler] bail: %lld ms since last self-triggered change (< 2 s)\n",
+        clockwork_log("[default-output-handler] bail: %lld ms since last self-triggered change (< 2 s)",
                 (long long)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-        fflush(stderr);
         return;
     }
 
@@ -5328,8 +5260,7 @@ void ClockworkEngine::handleSystemDefaultOutputChanged() {
         // dropping the event — a lost default-change never re-fires.
         std::unique_lock<std::recursive_mutex> guard;
         if (!tryAcquireSwapGate(guard, 30, 100)) {
-            fprintf(stderr, "[default-output-handler] bail: gate busy for 3s\n");
-            fflush(stderr);
+            clockwork_log("[default-output-handler] bail: gate busy for 3s");
             return;
         }
         if (!mDeviceManager) return;
@@ -5360,17 +5291,15 @@ void ClockworkEngine::handleSystemDefaultOutputChanged() {
     if (!clockwork::device::shouldFollowDefaultOutputChange(
             newDefault, currentOutput, newIsVirtual, sPublishedAppName,
             mPreferredOutputDevice)) {
-        fprintf(stderr, "[device-setup] system default → '%s' (virtual=%d, "
-                "pinned='%s'); not following (staying on '%s')\n",
+        clockwork_log("[device-setup] system default → '%s' (virtual=%d, "
+                "pinned='%s'); not following (staying on '%s')",
                 newDefault.c_str(), newIsVirtual ? 1 : 0,
                 mPreferredOutputDevice.c_str(), currentOutput.c_str());
-        fflush(stderr);
         return;
     }
 
-    fprintf(stderr, "[device-setup] system default output changed: '%s' -> '%s'\n",
+    clockwork_log("[device-setup] system default output changed: '%s' -> '%s'",
             currentOutput.c_str(), newDefault.c_str());
-    fflush(stderr);
     // Route through setDeviceMode("") so we get the wireless/non-wireless
     // branching: non-wireless defaults go via switchDevice (aggregate
     // preserved); wireless defaults go via reinitialiseWithDefaults
@@ -5400,7 +5329,7 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
         // System mode — switch to the current macOS default output while
         // keeping the input device (mic) so live_audio follows the output.
         if (mDeviceManager) {
-            fprintf(stderr, "[device-setup] switching to system default\n");
+            clockwork_log("[device-setup] switching to system default");
 #ifdef __APPLE__
             AudioDeviceID defaultID = kAudioObjectUnknown;
             AudioObjectPropertyAddress addr = {
@@ -5456,9 +5385,8 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
                 }
                 // Wireless default — fall through to the reinitialise
                 // path below.
-                fprintf(stderr, "[device-setup] system default '%s' is wireless; "
-                        "using JUCE default-device init\n", newDefault.c_str());
-                fflush(stderr);
+                clockwork_log("[device-setup] system default '%s' is wireless; "
+                        "using JUCE default-device init", newDefault.c_str());
             }
 #endif
             // Serialise against in-flight swaps. Without the gate this
@@ -5470,14 +5398,14 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
             // executePendingSwitch (~3 s).
             std::unique_lock<std::recursive_mutex> swapGate;
             if (!tryAcquireSwapGate(swapGate, 30, 100)) {
-                fprintf(stderr, "[device-setup] system mode init refused: "
-                        "swap already in progress\n");
+                clockwork_log("[device-setup] system mode init refused: "
+                        "swap already in progress");
                 return "swap already in progress";
             }
 
             auto err = reinitialiseWithDefaultsPreservingConfig();
             if (err.isNotEmpty()) {
-                fprintf(stderr, "[device-setup] system mode init failed: %s\n",
+                clockwork_log("[device-setup] system mode init failed: %s",
                         err.toRawUTF8());
                 // Never leave the engine with a stopped device and no
                 // replacement: restart the audio source (falls back to the
@@ -5506,9 +5434,9 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
             swapGate.unlock();
 
             if (newRate > 0 && static_cast<int>(newRate) != mCurrentConfig.sampleRate) {
-                fprintf(stderr,
+                clockwork_log(
                         "[device-setup] system default has different rate "
-                        "(%d -> %.0f Hz) — performing cold swap\n",
+                        "(%d -> %.0f Hz) — performing cold swap",
                         mCurrentConfig.sampleRate, newRate);
                 // Force cold even though JUCE is already at newRate (we
                 // just opened it via reinitialiseWithDefaultsPreservingConfig).
@@ -5536,9 +5464,9 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
                     if (static_cast<int>(r) == static_cast<int>(curRate))
                         rateOk = true;
                 if (!rateOk) {
-                    fprintf(stderr,
+                    clockwork_log(
                         "[device-setup] rejecting mode switch to %s: "
-                        "current rate %.0f not supported — restart required\n",
+                        "current rate %.0f not supported — restart required",
                         mDeviceMode.c_str(), curRate);
                     mDeviceMode = previousMode;
                     printDeviceList();
@@ -5568,7 +5496,7 @@ void ClockworkEngine::printDeviceList() {
     auto devices = listDevices(false);
     auto current = currentDevice();
 
-    fprintf(stderr, "[audio-devices-start]\n");
+    clockwork_log("[audio-devices-start]");
     for (auto& dev : devices) {
         char tt[5] = {};
         if (dev.transportType) {
@@ -5577,19 +5505,18 @@ void ClockworkEngine::printDeviceList() {
             tt[2] = (char)((dev.transportType >> 8) & 0xFF);
             tt[3] = (char)(dev.transportType & 0xFF);
         }
-        fprintf(stderr, "[audio-device-entry] %s|%s|%d|%d|%s\n",
+        clockwork_log("[audio-device-entry] %s|%s|%d|%d|%s",
                 dev.name.c_str(), dev.typeName.c_str(),
                 dev.maxOutputChannels, dev.maxInputChannels,
                 dev.transportType ? tt : "?");
     }
-    fprintf(stderr, "[audio-device-current] %s|%s|%.0f|%d|%d|%d\n",
+    clockwork_log("[audio-device-current] %s|%s|%.0f|%d|%d|%d",
             current.name.c_str(), current.typeName.c_str(),
             current.activeSampleRate, current.activeBufferSize,
             current.activeOutputChannels, current.activeInputChannels);
-    fprintf(stderr, "[audio-device-mode] %s\n",
+    clockwork_log("[audio-device-mode] %s",
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str());
-    fprintf(stderr, "[audio-devices-end]\n");
-    fflush(stderr);
+    clockwork_log("[audio-devices-end]");
 
     sendDeviceReport();
 }

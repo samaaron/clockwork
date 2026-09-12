@@ -4,7 +4,7 @@
  * RingReader.cpp — see RingReader.h.
  */
 #include "RingReader.h"
-#include <cstdio>
+#include "clockwork_config.h"   // clockwork_log
 
 void RingReader::start() {
     if (mThread.joinable()) return;
@@ -45,9 +45,8 @@ void RingReader::pause() {
     // (pre-pause) swap, not hang the device switch.
     for (int waited = 0; mParked.load(std::memory_order_acquire) == 0; ++waited) {
         if (waited >= 2000) {
-            fprintf(stderr, "[%s] pause: reader did not park within 2s — "
-                    "proceeding unparked\n", mName);
-            fflush(stderr);
+            clockwork_log("[%s] pause: reader did not park within 2s — "
+                    "proceeding unparked", mName);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
