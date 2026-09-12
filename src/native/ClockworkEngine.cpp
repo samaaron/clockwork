@@ -3842,6 +3842,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     std::unique_lock<std::recursive_mutex> guard;
     if (!tryAcquireSwapGate(guard, 1, 0)) {
         result.error = "swap already in progress";
+        clockwork_log("[switchDevice] refused: %s", result.error.c_str());
         return result;
     }
     PhaseGuard phase(mDevicePhase, DevicePhase::Swapping);
@@ -3915,6 +3916,11 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
     if (!plan.error.empty()) {
         result.error = plan.error;
+        // Every way out of here says why, through the funnel: the client's
+        // log pane sees it, and so does a test's captured debug stream. A swap
+        // that failed silently read as a flake on a CI runner, and was — until
+        // this line — indistinguishable from one.
+        clockwork_log("[switchDevice] refused: %s", result.error.c_str());
         return result;
     }
 
