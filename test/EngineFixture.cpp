@@ -9,6 +9,7 @@
  * thread and the wait primitives pump on the test thread instead.
  */
 #include "EngineFixture.h"
+#include "DebugTail.h"
 #include "JuceAudioCallback.h"
 #include "clockwork_event_sink.h"
 
@@ -64,6 +65,7 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg) {
         mReplyCv.notify_all();
     };
     mEngine.onDebug = [this](const std::string& msg) {
+        debug_tail::push(msg);
         std::lock_guard<std::mutex> lk(mDebugMutex);
         mDebugMessages.push_back(msg);
     };
@@ -191,5 +193,13 @@ void EngineFixture::stopHeadlessDriver() {
 }
 
 void EngineFixture::pumpBlock(uint32_t n) {
-    for (uint32_t i = 0; i < n; ++i) mEngine.pumpAudioBlock();
+    if (mManualPump) {
+        for (uint32_t i = 0; i < n; ++i) mEngine.pumpAudioBlock();
+        return;
+    }
+    // A driver thread is rendering: a block pumped here would be a second
+    // renderer, which the engine refuses. What a test means by "pump n" with
+    // a driver running is "let n blocks pass" — so wait for the driver's.
+    if (!waitForBlocks(n))
+        WARN("pumpBlock(" << n << "): the driver rendered no block within the wait");
 }

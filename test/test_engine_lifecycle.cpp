@@ -209,3 +209,18 @@ TEST_CASE("/clockwork/notify is acknowledged after boot", "[lifecycle]") {
     OscReply r;
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("notify.reply"), r));
 }
+
+TEST_CASE("Engine refuses a manual audio block while a driver is rendering", "[lifecycle][pump]") {
+    // The default fixture runs the headless driver on its own thread. A block
+    // pumped from here would be a second renderer — the engine must refuse it
+    // and say so, rather than race the driver across the whole engine state.
+    EngineFixture fix;
+    fix.engine().pumpAudioBlock();
+    const bool refused = fix.pollUntil([&] {
+        for (auto& m : fix.debugMessages())
+            if (m.find("pumpAudioBlock refused") != std::string::npos) return true;
+        return false;
+    });
+    INFO("engine log:" << fix.debugMessagesDump());
+    REQUIRE(refused);
+}

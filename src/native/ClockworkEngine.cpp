@@ -1939,6 +1939,19 @@ void ClockworkEngine::sendOSC(const uint8_t* data, uint32_t size) {
 }
 
 void ClockworkEngine::pumpAudioBlock() {
+    // One renderer at a time. With a source active — the device callback or
+    // the headless driver on its own thread — a block rendered here would be
+    // a second concurrent caller of process_audio, a data race across the
+    // whole engine. Refused and said; a caller that wants to pump stops the
+    // source first or boots with manualAudioPump.
+    const AudioSource active = mActiveSource.load(std::memory_order_acquire);
+    if (active != AudioSource::None) {
+        clockwork_log("[engine] pumpAudioBlock refused: the %s is rendering — stop it first, "
+                      "or boot with manualAudioPump",
+                      active == AudioSource::RealCallback ? "device callback" : "headless driver");
+        return;
+    }
+
     // Anchor the audio-thread clock on the first manual block (mirrors what
     // HeadlessDriver::run does at thread start). Safe to call after stopping the
     // HeadlessDriver — picks up rendering from a clean time base.

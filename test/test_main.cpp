@@ -15,6 +15,7 @@
  * to make an unrelated test red.
  */
 #include "rt_alloc.h"
+#include "DebugTail.h"
 
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_case_info.hpp>
@@ -58,6 +59,9 @@ struct RTAllocListener : Catch::EventListenerBase {
 CATCH_REGISTER_LISTENER(RTAllocListener)
 
 int main(int argc, char* argv[]) {
+    // A fatal signal prints the last engine debug lines and a backtrace
+    // (DebugTail.h); Catch2 reports first, then hands the signal back here.
+    debug_tail::installFatalHandlers();
 #if CLOCKWORK_DEVICE
     // Only the device layer needs a JUCE message loop. A deviceless build has
     // no JUCE at all, so there is nothing to initialise.
