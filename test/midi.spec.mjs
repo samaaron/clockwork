@@ -53,7 +53,10 @@ test.beforeEach(async ({ page }) => {
 // run `body` against it. Runs in the page.
 const IN_PAGE_HARNESS = `
   window.__harness = async (config, body) => {
-    const clockwork = new window.Clockwork({ ...config, midi: config.midi ?? true, gamepad: config.gamepad ?? true });
+    // A manager option that is a function cannot cross page.evaluate; a
+    // test that needs one names a window global holding it instead.
+    const midi = typeof config.midi === "string" ? window[config.midi] : (config.midi ?? true);
+    const clockwork = new window.Clockwork({ ...config, midi, gamepad: config.gamepad ?? true });
     const inbound = [];
     clockwork.on("in", (msg) => inbound.push(msg));
     const waitFor = (address, ms = 4000) => new Promise((resolve) => {
@@ -400,4 +403,25 @@ test("the guest's own time runs true across several sends", async ({ page, clock
   // them every run — tighten this once there are numbers behind it.
   expect(worst, `worst residual ${worst.toFixed(2)} ms, residuals [${residuals.map((v) => v.toFixed(2))}]`)
     .toBeLessThan(4 * blockMs);
+});
+
+test("a platform whose Web MIDI backend refuses still boots, without MIDI", async ({ page, clockworkConfig }) => {
+  // Headless Linux says exactly this (InvalidStateError) to requestMIDIAccess.
+  await page.addInitScript(() => {
+    window.__refusingMidi = { requestAccess: () => Promise.reject(new DOMException("Platform dependent initialization failed", "InvalidStateError")) };
+  });
+  const r = await run(page, { ...clockworkConfig, midi: "__refusingMidi" }, async ({ clockwork, waitFor }) => {
+    clockwork.send("/clockwork/gamepad/devices/list");
+    const gamepadReply = await waitFor("/clockwork/gamepad/devices.reply");
+    return {
+      midi: clockwork.midi !== null,
+      midiError: String(clockwork.midiError),
+      gamepad: clockwork.gamepad !== null,
+      gamepadListed: gamepadReply !== null,
+    };
+  });
+  expect(r.midi, "MIDI must be absent, not half-up").toBe(false);
+  expect(r.midiError).toContain("Platform dependent initialization failed");
+  expect(r.gamepad, "the gamepad subsystem is unaffected").toBe(true);
+  expect(r.gamepadListed, "the engine is up and answering").toBe(true);
 });

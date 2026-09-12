@@ -406,6 +406,11 @@ export class Clockwork {
    */
   get midi() { return this.#front?.midi ?? null; }
   get gamepad() { return this.#front?.gamepad ?? null; }
+  // Why `midi` / `gamepad` is null although it was asked for: the error its
+  // init threw (a platform with no Web MIDI backend, a missing wasm). Null
+  // when the subsystem is up or was never requested.
+  get midiError() { return this.#front?.midiError ?? null; }
+  get gamepadError() { return this.#front?.gamepadError ?? null; }
 
   /**
    * NTP time (seconds since 1900) when the AudioContext started.
@@ -1914,6 +1919,13 @@ export class Clockwork {
       // transport exists by now, and the client need not be 'initialized'
       // for a keyboard to be heard during boot.
       ingest: (bytes) => this.#sendPreparedOSC(this.#toUint8Array(bytes)),
+      // A subsystem that cannot come up is not a failed boot: the engine
+      // runs without it, the reason is on the console and the 'error'
+      // event, and `midiError` / `gamepadError` keeps it.
+      onUnavailable: (name, error) => {
+        console.warn(`[Clockwork] ${name} unavailable, booting without it:`, error);
+        this.#eventEmitter.emit('error', new Error(`${name} unavailable: ${error?.message ?? error}`));
+      },
     });
     await this.#front.init();
   }

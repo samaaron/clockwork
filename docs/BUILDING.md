@@ -260,7 +260,10 @@ and then speaks the same verbs a native client does: `/clockwork/midi/ports/list
 around any of them, `/clockwork/gamepad/notify/subscribe`. How a verb gets from
 the worklet back to the main thread is [SURFACE.md](SURFACE.md#whose-thread).
 Without the option, a MIDI or gamepad verb is refused by name with a reason that
-says which option to set. A guest's own sends — a self-directed engine's sink
+says which option to set. With it, a subsystem the platform cannot provide (a
+headless Linux Chromium has no Web MIDI backend) is absent rather than fatal:
+the client boots, `midi` / `gamepad` is null, and `midiError` / `gamepadError`
+says why. A guest's own sends — a self-directed engine's sink
 (`clockwork_event_sink.h`) — reach the same port the same way, and open it on
 demand; they need `midi: true` and nothing else. And what the keyboard plays
 goes the other way by one route too: into the engine, out to the clients that

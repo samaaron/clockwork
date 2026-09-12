@@ -70,21 +70,32 @@ export class HostFront {
    *   for the client, as if from the engine.
    * @param {(bytes: Uint8Array) => void} options.ingest an event for the
    *   engine, into ingress, as a subsystem's callback would write it.
+   * @param {(subsystem: "midi"|"gamepad", error: Error) => void} [options.onUnavailable]
+   *   a subsystem that was asked for but could not come up. The engine boots
+   *   without it: a page that wants MIDI on a platform whose Web MIDI
+   *   backend refuses (headless Linux says "Platform dependent
+   *   initialization failed") still gets its audio.
    */
-  constructor({ midi = false, gamepad = false, wasmBaseURL = null, deliver, ingest } = {}) {
+  constructor({ midi = false, gamepad = false, wasmBaseURL = null, deliver, ingest, onUnavailable } = {}) {
     this._midiOptions = midi;
     this._gamepadOptions = gamepad;
     this._wasmBaseURL = wasmBaseURL;
     this._deliver = deliver;
     this._ingest = ingest ?? deliver;
+    this._onUnavailable = onUnavailable ?? null;
     this._midi = null;
     this._gamepad = null;
+    this._midiError = null;
+    this._gamepadError = null;
     this._midiSubscribed = false;
     this._gamepadSubscribed = false;
   }
 
   get midi() { return this._midi; }
   get gamepad() { return this._gamepad; }
+  // Why a subsystem that was asked for is null: the error its init threw.
+  get midiError() { return this._midiError; }
+  get gamepadError() { return this._gamepadError; }
 
   async init() {
     if (this._midiOptions) {
@@ -92,26 +103,40 @@ export class HostFront {
       if (opts.wasm === undefined && this._wasmBaseURL)
         opts.wasm = this._wasmBaseURL + "clockwork_midi_bg.wasm";
       const { MidiManager } = await import("./midi_manager.js");
-      this._midi = new MidiManager(opts);
-      this._midi.onEvent((osc) => this._ingest(osc));
-      this._midi.onPorts((osc) => this._ingest(osc));
-      this._midi.onTempo((port, bpm) => {
+      const midi = new MidiManager(opts);
+      midi.onEvent((osc) => this._ingest(osc));
+      midi.onPorts((osc) => this._ingest(osc));
+      midi.onTempo((port, bpm) => {
         this._ingest(oscFast.copyEncoded(
           oscFast.encodeMessage(clockworkSys("midi/in/clock_bpm"), [port, { type: "float", value: bpm }])));
       });
-      await this._midi.init();
+      this._midi = await this._bringUp("midi", midi);
     }
     if (this._gamepadOptions) {
       const opts = typeof this._gamepadOptions === "object" ? { ...this._gamepadOptions } : {};
       if (opts.wasm === undefined && this._wasmBaseURL)
         opts.wasm = this._wasmBaseURL + "clockwork_gamepad_bg.wasm";
       const { GamepadManager } = await import("./gamepad_manager.js");
-      this._gamepad = new GamepadManager(opts);
-      this._gamepad.onEvent((osc) => this._ingest(osc));
-      this._gamepad.onDevices((osc) => this._ingest(osc));
-      await this._gamepad.init();
+      const gamepad = new GamepadManager(opts);
+      gamepad.onEvent((osc) => this._ingest(osc));
+      gamepad.onDevices((osc) => this._ingest(osc));
+      this._gamepad = await this._bringUp("gamepad", gamepad);
     }
     return this;
+  }
+
+  // init() a manager; on failure the subsystem is simply absent (null) with
+  // its reason kept, reported, and the boot goes on.
+  async _bringUp(name, manager) {
+    try {
+      await manager.init();
+      return manager;
+    } catch (error) {
+      manager.dispose();
+      this[`_${name}Error`] = error;
+      this._onUnavailable?.(name, error);
+      return null;
+    }
   }
 
   dispose() {
@@ -119,6 +144,8 @@ export class HostFront {
     this._gamepad?.dispose();
     this._midi = null;
     this._gamepad = null;
+    this._midiError = null;
+    this._gamepadError = null;
     this._midiSubscribed = false;
     this._gamepadSubscribed = false;
   }
