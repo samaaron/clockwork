@@ -142,11 +142,24 @@ SOURCES=(
     # Audio files (src/clockwork_audio_file.h). A browser tab decodes the same
     # formats a desktop does, from the same code — including AIFF, which the
     # platform's own decodeAudioData refuses.
-    "$SRC/clockwork_audio_file.cpp"
-    "$SRC/flac_encoder.cpp"
-    "$SRC/vendor/stb/stb_vorbis.c"
     "$ROOT/dsp/$DSP/${DSP}_dsp.cpp"
 )
+
+# The audio file codecs (dr_wav, dr_flac, dr_mp3, stb_vorbis, the FLAC
+# encoder) are a native concern: the sample loader and the recorder. On the
+# web, samples arrive already decoded through the browser's own decoder and
+# nothing records to a file, so nothing calls them — they were 200 kB of
+# wasm nobody reached. Opt in with CLOCKWORK_WEB_AUDIO_FILES=1 for a build
+# whose client decodes in the module.
+AUDIO_FILE_EXPORTS=""
+if [ "${CLOCKWORK_WEB_AUDIO_FILES:-0}" = "1" ]; then
+    SOURCES+=("$SRC/clockwork_audio_file.cpp" "$SRC/flac_encoder.cpp" "$SRC/vendor/stb/stb_vorbis.c")
+    AUDIO_FILE_EXPORTS=",'_clockwork_audio_probe_memory','_clockwork_audio_decode_memory',\
+'_clockwork_audio_free','_clockwork_audio_duration',\
+'_clockwork_audio_can_write','_clockwork_audio_writer_open_memory',\
+'_clockwork_audio_writer_write','_clockwork_audio_writer_frames',\
+'_clockwork_audio_writer_close'"
+fi
 
 INCLUDES=(-I"$ROOT" -I"$SRC" -I"$SRC/vendor/oscpack")
 for d in "$ROOT"/rust/*/cpp; do [ -d "$d" ] && INCLUDES+=(-I"$d"); done
@@ -171,12 +184,7 @@ EXPORTS="['___wasm_call_ctors','_clockwork_init','_get_ring_buffer_base',\
 '_clockwork_client_tap_open_in','_clockwork_client_tap_close',\
 '_clockwork_client_tap_poll','_clockwork_client_tap_missed',\
 '_clockwork_client_scope_open','_clockwork_client_scope_valid',\
-'_clockwork_client_scope_audible_end','_clockwork_client_scope_read',\
-'_clockwork_audio_probe_memory','_clockwork_audio_decode_memory',\
-'_clockwork_audio_free','_clockwork_audio_duration',\
-'_clockwork_audio_can_write','_clockwork_audio_writer_open_memory',\
-'_clockwork_audio_writer_write','_clockwork_audio_writer_frames',\
-'_clockwork_audio_writer_close']"
+'_clockwork_client_scope_audible_end','_clockwork_client_scope_read'"$AUDIO_FILE_EXPORTS"]"
 
 echo "compiling and linking..."
 emcc "${SOURCES[@]}" "${INCLUDES[@]}" "$RUST_LIB" \

@@ -37,8 +37,12 @@
 import { clockworkSys, isClockworkSys } from "./clockwork_sys.js";
 import * as oscFast from "./osc_fast.js";
 import { timetagToPerfMs } from "./timetag.js";
-import { MidiManager } from "./midi_manager.js";
-import { GamepadManager } from "./gamepad_manager.js";
+// The MIDI and gamepad managers, and the wasm-bindgen modules they drive, are
+// imported when a front is asked for them, not at load: a page that wants
+// neither should not download either. Under esbuild that needs code
+// splitting (--splitting, an esm outdir) for the import to stay a separate
+// chunk; without it the bundler inlines the modules and nothing is lost but
+// the saving.
 
 const MIDI_PREFIX = clockworkSys("midi/");
 const GAMEPAD_PREFIX = clockworkSys("gamepad/");
@@ -87,6 +91,7 @@ export class HostFront {
       const opts = typeof this._midiOptions === "object" ? { ...this._midiOptions } : {};
       if (opts.wasm === undefined && this._wasmBaseURL)
         opts.wasm = this._wasmBaseURL + "clockwork_midi_bg.wasm";
+      const { MidiManager } = await import("./midi_manager.js");
       this._midi = new MidiManager(opts);
       this._midi.onEvent((osc) => this._ingest(osc));
       this._midi.onPorts((osc) => this._ingest(osc));
@@ -100,6 +105,7 @@ export class HostFront {
       const opts = typeof this._gamepadOptions === "object" ? { ...this._gamepadOptions } : {};
       if (opts.wasm === undefined && this._wasmBaseURL)
         opts.wasm = this._wasmBaseURL + "clockwork_gamepad_bg.wasm";
+      const { GamepadManager } = await import("./gamepad_manager.js");
       this._gamepad = new GamepadManager(opts);
       this._gamepad.onEvent((osc) => this._ingest(osc));
       this._gamepad.onDevices((osc) => this._ingest(osc));
