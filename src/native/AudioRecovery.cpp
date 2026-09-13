@@ -93,11 +93,62 @@ void RateSkewMonitor::observe(uint64_t frames, double nominalFramesPerUnit,
     const double deviation = ratio < 1.0 ? 1.0 - ratio : ratio - 1.0;
     if (deviation > mTolerance) ++mBadStreak;
     else                        mBadStreak = 0;
+    ++mWindowsCompleted;
+    mLastWindowGood = deviation <= mTolerance;
 
     // Next window starts where this one ended — contiguous coverage, no
     // overlap, so badWindowsRequired windows means that much sustained skew.
     mStartFrames = frames;
     mStartTime   = now;
+}
+
+RateSkewPolicy::RateSkewPolicy(int maxRecoveries, double sameRatioTolerance)
+    : mMaxRecoveries(maxRecoveries < 1 ? 1 : maxRecoveries),
+      mTolerance(sameRatioTolerance) {}
+
+bool RateSkewPolicy::sameRatio(double a, double b) const {
+    const double d = a < b ? b - a : a - b;
+    return d <= mTolerance;
+}
+
+RateSkewAction RateSkewPolicy::next(double ratio) const {
+    switch (mPhase) {
+    case Phase::GaveUp:
+        return RateSkewAction::None;
+    case Phase::Adopted:
+        // Skewing at the rate it was measured delivering: no rate request
+        // corrects this device.
+        return RateSkewAction::GiveUp;
+    case Phase::Recovering:
+        break;
+    }
+    // A different ratio is a different fault: its streak starts at one.
+    const int streak = (mStreak > 0 && sameRatio(ratio, mLastRatio)) ? mStreak + 1 : 1;
+    return streak >= mMaxRecoveries ? RateSkewAction::AdoptMeasuredRate
+                                    : RateSkewAction::Recover;
+}
+
+void RateSkewPolicy::acted(double ratio) {
+    switch (next(ratio)) {
+    case RateSkewAction::None:
+        return;
+    case RateSkewAction::GiveUp:
+        mPhase = Phase::GaveUp;
+        return;
+    case RateSkewAction::AdoptMeasuredRate:
+        mPhase = Phase::Adopted;
+        break;
+    case RateSkewAction::Recover:
+        break;
+    }
+    mStreak    = (mStreak > 0 && sameRatio(ratio, mLastRatio)) ? mStreak + 1 : 1;
+    mLastRatio = ratio;
+}
+
+void RateSkewPolicy::healthy() {
+    if (mPhase == Phase::GaveUp) return;
+    mPhase  = Phase::Recovering;
+    mStreak = 0;
 }
 
 } // namespace clockwork::audio

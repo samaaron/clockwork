@@ -1837,6 +1837,25 @@ TEST_CASE("PlanSwap: wireless exit restores the pre-wireless rate",
     REQUIRE(plan.isCold);
 }
 
+// The rung a rate-skew recovery relies on. A device that reports 48k but
+// keeps time at 44.1k ADVERTISES 48k, so rung 3 (keep the session rate when
+// the target supports it) would reopen it at 48k forever. The recovery asks
+// explicitly, and an explicit request is not second-guessed by the probe.
+TEST_CASE("PlanSwap: an explicit rate request beats keep-current, even when "
+          "the target advertises the current rate", "[PlanSwap]") {
+    auto snap = snapTwoDevices();
+    snap.currentRate = 48000;
+    snap.outputDeviceRates = { 44100, 48000 };
+    SwapPlanRequest req;
+    req.outputName = "Interface";
+    req.sampleRate = 44100;
+    auto plan = planSwap(req, snap);
+    REQUIRE(plan.error.empty());
+    REQUIRE(plan.sampleRate == 44100);
+    REQUIRE_FALSE(plan.rateAdjustedToNearest);
+    REQUIRE(plan.isCold);   // a rate change rebuilds the DSP
+}
+
 TEST_CASE("PlanSwap: unsupported current rate resolves to target's nearest",
           "[PlanSwap]") {
     auto snap = snapTwoDevices();

@@ -360,6 +360,7 @@ add_executable(clockwork_engine_tests
     test_control_plane_liveness.cpp
     test_callback_watchdog.cpp
     test_cold_swap_recovery.cpp
+    test_rate_skew_recovery.cpp
     test_driver_switch.cpp
     test_device_selection.cpp
     test_no_audio_device.cpp

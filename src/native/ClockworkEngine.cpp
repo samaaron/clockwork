@@ -2309,6 +2309,19 @@ void ClockworkEngine::watchdogLoop() {
     // for many polls, and a silent gated detection would leave user logs with
     // no trace of WHY a later recovery fired.
     bool rateSkewLogged = false;
+    // What to do about a verdict. A reopen fixes a transient skew and is the
+    // wrong tool for a persistent one — a device clocked at 44.1k that reports
+    // 48k skews identically after every reopen, and reopening it every window
+    // is a storm that stops the client's jobs each time. The policy counts
+    // same-ratio verdicts, switches the remedy to "adopt the measured rate",
+    // and after that gives up for the session. Its streak is only advanced by
+    // recoveries that actually launched (acted), and cleared by a window that
+    // came back healthy (healthy) — see RateSkewPolicy.
+    clockwork::audio::RateSkewPolicy skewPolicy(
+        std::max(1, mCurrentConfig.watchdogRateMaxRecoveries),
+        mCurrentConfig.watchdogRateTolerance);
+    uint64_t skewWindowsSeen    = 0;
+    bool     skewGiveUpLogged   = false;
 
     auto nowMs = [] {
         return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2395,22 +2408,63 @@ void ClockworkEngine::watchdogLoop() {
                 const int nominal = mAudioCallback.nominalSampleRate();
                 rateSkew.observe(mClockworkClock.engineFrames(),
                                  static_cast<double>(nominal) / 1000.0, t);
+                // A completed window within tolerance ends the skew episode
+                // for the policy: a later verdict is a new fault, not the
+                // continuation of this one.
+                if (rateSkew.windowsCompleted() != skewWindowsSeen) {
+                    skewWindowsSeen = rateSkew.windowsCompleted();
+                    if (rateSkew.lastWindowGood()) skewPolicy.healthy();
+                }
                 if (rateSkew.skewed()) {
-                    if (!rateSkewLogged) {
-                        rateSkewLogged = true;
-                        clockwork_log("[watchdog] rate skew detected: device delivering "
-                               "%.2fx real-time (nominal %d Hz) — clock cannot "
-                               "converge, will recover with a cold swap",
-                               rateSkew.lastRatio(), nominal);
-                    }
-                    std::string reason;
-                    if (requestAudioRecovery(reason)) {
-                        mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
-                        mRateSkewRecoveries.fetch_add(1, std::memory_order_release);
-                        clockwork_log("[watchdog] rate skew: recovering with a cold swap "
-                               "(%.2fx real-time)", rateSkew.lastRatio());
-                        rateSkew.reset();
-                        rateSkewLogged = false;
+                    const double ratio    = rateSkew.lastRatio();
+                    const double measured = ratio * static_cast<double>(nominal);
+                    const auto   action   = skewPolicy.next(ratio);
+                    if (action == clockwork::audio::RateSkewAction::None) {
+                        // Given up this session: keep playing, keep quiet.
+                    } else if (action == clockwork::audio::RateSkewAction::GiveUp) {
+                        // Skewing at the very rate it was measured delivering:
+                        // no rate request corrects this device, and another
+                        // swap would only stop the client's jobs again.
+                        if (!skewGiveUpLogged) {
+                            skewGiveUpLogged = true;
+                            clockwork_log("[watchdog] rate skew persists at the adopted "
+                                   "rate (%.2fx of %d Hz) — no further recoveries this "
+                                   "session; playback continues at this rate",
+                                   ratio, nominal);
+                        }
+                        skewPolicy.acted(ratio);
+                    } else {
+                        const bool adopt =
+                            action == clockwork::audio::RateSkewAction::AdoptMeasuredRate;
+                        if (!rateSkewLogged) {
+                            rateSkewLogged = true;
+                            clockwork_log("[watchdog] rate skew detected: device delivering "
+                                   "%.2fx real-time (nominal %d Hz) — clock cannot "
+                                   "converge, will %s",
+                                   ratio, nominal,
+                                   adopt ? "adopt the measured rate with a cold swap"
+                                         : "recover with a cold swap");
+                        }
+                        RecoveryIntent intent;
+                        intent.nominalRate  = nominal;
+                        intent.measuredRate = measured;
+                        if (adopt) intent.adoptRate = measured;
+                        std::string reason;
+                        if (requestAudioRecovery(reason, intent)) {
+                            mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
+                            mRateSkewRecoveries.fetch_add(1, std::memory_order_release);
+                            skewPolicy.acted(ratio);
+                            if (adopt)
+                                clockwork_log("[watchdog] rate skew persisted through %d "
+                                       "recoveries: cold swap requesting the measured "
+                                       "rate, ~%.0f Hz (%.2fx of %d Hz)",
+                                       skewPolicy.streak() - 1, measured, ratio, nominal);
+                            else
+                                clockwork_log("[watchdog] rate skew: recovering with a cold "
+                                       "swap (%.2fx real-time)", ratio);
+                            rateSkew.reset();
+                            rateSkewLogged = false;
+                        }
                     }
                 } else {
                     rateSkewLogged = false;
@@ -2432,11 +2486,17 @@ void ClockworkEngine::watchdogLoop() {
 }
 
 bool ClockworkEngine::requestAudioRecovery(std::string& reason) {
+    return requestAudioRecovery(reason, RecoveryIntent{});
+}
+
+bool ClockworkEngine::requestAudioRecovery(std::string& reason,
+                                           const RecoveryIntent& intent) {
     // Space recoveries: the cooldown covers the client's re-init after a
     // successful promotion — it has to re-establish whatever state it was
     // holding in the DSP, which takes seconds, and a tighter cooldown would
-    // race a reinit still in progress.
-    constexpr int kRecoveryCooldownMs = 3000;
+    // race a reinit still in progress. Config, not a constant, so a test can
+    // walk a device through several recoveries in seconds rather than tens.
+    const int kRecoveryCooldownMs = std::max(0, mCurrentConfig.watchdogRecoveryCooldownMs);
 
     // Claim the in-flight slot atomically: the watchdog and the /reopen control
     // thread can both reach here, and a load-then-store would let both pass and
@@ -2466,12 +2526,12 @@ bool ClockworkEngine::requestAudioRecovery(std::string& reason) {
     // lane serialises recovery against every other deferred device mutation;
     // recoverAudio additionally holds the swap gate, which the message-thread device
     // handlers respect.
-    postDeviceTask([this]() { recoverAudio(); });
+    postDeviceTask([this, intent]() { recoverAudio(intent); });
     reason = "started";
     return true;
 }
 
-void ClockworkEngine::recoverAudio() {
+void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     // A recovery can still be queued/starting when shutdown begins; skip rather
     // than operate on a torn-down engine. shutdown() sets mRunning=false and
     // then joins the device task lane: a recovery already past this check
@@ -2511,9 +2571,25 @@ void ClockworkEngine::recoverAudio() {
             return;
         }
         try {
+            // The one message a user gets about a device that keeps time at a
+            // rate other than the one it reports. Said here, under the gate,
+            // where the device's name can be read; said once, because the
+            // policy adopts once — anything after this is a plain log line.
+            if (intent.adoptRate > 0) {
+                std::string name = mRealOutputDeviceName;
+                if (name.empty() && mDeviceManager)
+                    if (auto* dev = mDeviceManager->getCurrentAudioDevice())
+                        name = dev->getName().toStdString();
+                clockwork_log("[watchdog] '%s' reports %.0f Hz but is delivering "
+                       "~%.0f Hz. Playback continues at the measured rate; pitch "
+                       "and timing may be slightly off. This is a fault in the "
+                       "device or its driver, not in the engine.",
+                       name.empty() ? "audio device" : name.c_str(),
+                       intent.nominalRate, intent.measuredRate);
+            }
             stopAudioSource();                      // detach the dead callback
             err = recreateDeviceManager();
-            if (err.isEmpty()) swap = reopenCurrentDevice();
+            if (err.isEmpty()) swap = reopenCurrentDevice(intent.adoptRate);
             restored = err.isEmpty() && swap.success
                     && mActiveSource.load() == AudioSource::RealCallback;
         } catch (const std::exception& ex) {
@@ -2535,6 +2611,10 @@ void ClockworkEngine::recoverAudio() {
     clockwork_log("[recover] %s (err='%s')",
            restored ? "restored real audio" : "device down — watchdog will retry",
            err.toRawUTF8());
+    if (restored && intent.adoptRate > 0)
+        clockwork_log("[recover] session rate is now %.0f Hz (asked for the measured "
+               "~%.0f Hz; the device reported %.0f Hz)",
+               swap.sampleRate, intent.adoptRate, intent.nominalRate);
 
     // Report to the client/GUI over the reopen.done channel. On success a client runs
     // its cold-swap reinit; otherwise it's an informational failure. Report the
@@ -4715,7 +4795,7 @@ juce::String ClockworkEngine::recreateDeviceManager() {
     return {};
 }
 
-SwapResult ClockworkEngine::reopenCurrentDevice() {
+SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
     SwapResult result;
 
     if (!mDeviceManager) {
@@ -4762,10 +4842,32 @@ SwapResult ClockworkEngine::reopenCurrentDevice() {
         result.error = "no current output device to reopen";
         return result;
     }
-    clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s'",
+    // An explicit rate sits at the top of planSwap's precedence, above
+    // "keep the session rate when the target advertises it" — which is what
+    // a rate-skew recovery must get past: the device advertises the rate it
+    // cannot deliver. Snap to what it advertises rather than asking for a
+    // raw measurement (44,03x Hz), and log the list, because a driver can
+    // back-fill the nominal rate into it whether or not the device claimed
+    // it (JUCE 7's CoreAudio does).
+    if (sampleRate > 0) {
+        const auto rates = probeDeviceSampleRates(outName, false);
+        std::string advertised;
+        for (double r : rates) advertised += (advertised.empty() ? "" : ", ")
+                                          + std::to_string(static_cast<int>(r));
+        const double snapped = clockwork::device::resolveTargetRate(rates, sampleRate);
+        if (snapped != 0 && snapped != sampleRate) {
+            clockwork_log("[reopen] requested %.0f Hz snaps to %.0f Hz (device advertises: %s)",
+                    sampleRate, snapped, advertised.empty() ? "nothing" : advertised.c_str());
+            sampleRate = snapped;
+        } else {
+            clockwork_log("[reopen] requesting %.0f Hz (device advertises: %s)",
+                    sampleRate, advertised.empty() ? "nothing" : advertised.c_str());
+        }
+    }
+    clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s' rate=%.0f",
             outName.c_str(), inName.c_str(),
-            mDeviceMode.empty() ? "system" : mDeviceMode.c_str());
-    return switchDevice(outName, 0, 0, /*forceCold=*/true, inName,
+            mDeviceMode.empty() ? "system" : mDeviceMode.c_str(), sampleRate);
+    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, inName,
                         SwapOrigin::Internal);
 }
 

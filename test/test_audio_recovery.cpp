@@ -213,3 +213,137 @@ TEST_CASE("RateSkewMonitor: skewed clears on a good window or reset",
         CHECK_FALSE(mon.skewed());
     }
 }
+
+// The monitor reports each completed window and whether it was good, so a
+// caller can tell "healthy again" apart from "mid-window": skewed() is false
+// in both.
+TEST_CASE("RateSkewMonitor: completed windows are counted and judged",
+          "[AudioRecovery][RateSkew]") {
+    auto mon = standardMonitor();
+    CHECK(mon.windowsCompleted() == 0);
+    for (int64_t t = 0; t <= 1000; t += 100)
+        mon.observe(static_cast<uint64_t>(48 * t), 48.0, t);
+    CHECK(mon.windowsCompleted() == 1);
+    CHECK(mon.lastWindowGood());
+    for (int64_t t = 1100; t <= 2000; t += 100)
+        mon.observe(static_cast<uint64_t>(48 * 1000 + 24 * (t - 1000)), 48.0, t);  // 0.5x
+    CHECK(mon.windowsCompleted() == 2);
+    CHECK_FALSE(mon.lastWindowGood());
+    // reset() starts a new episode; the life count is not history to erase.
+    mon.reset();
+    CHECK(mon.windowsCompleted() == 2);
+}
+
+// ── RateSkewPolicy ───────────────────────────────────────────────────────────
+// The property that would have caught the storm as a design flaw: against a
+// PERSISTENT mismatch the old remedy was an action that reproduced the
+// mismatch, without limit. sonic-pi#3565: a mixer clocked at 44.1k reporting
+// 48k, 79 cold swaps in one session, each one stopping the client's jobs.
+
+using clockwork::audio::RateSkewAction;
+using clockwork::audio::RateSkewPolicy;
+
+TEST_CASE("RateSkewPolicy: a persistent same-ratio skew gets at most N recoveries, "
+          "the last of which adopts the measured rate, then it gives up",
+          "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(/*maxRecoveries*/3, /*sameRatioTolerance*/0.05);
+    const double ratio = 44100.0 / 48000.0;   // 0.919, forever
+
+    // Two plain recoveries...
+    REQUIRE(policy.next(ratio) == RateSkewAction::Recover);
+    policy.acted(ratio);
+    REQUIRE(policy.next(ratio) == RateSkewAction::Recover);
+    policy.acted(ratio);
+    // ...and the third asks for the rate the device is actually delivering.
+    REQUIRE(policy.next(ratio) == RateSkewAction::AdoptMeasuredRate);
+    policy.acted(ratio);
+    CHECK(policy.adopted());
+    CHECK(policy.streak() == 3);
+
+    // Still skewing at the adopted rate: the device is lying in a way no
+    // rate request corrects. Stop, once.
+    REQUIRE(policy.next(ratio) == RateSkewAction::GiveUp);
+    policy.acted(ratio);
+    CHECK(policy.gaveUp());
+    // And never again this session — no recoveries, no messages.
+    for (int i = 0; i < 100; ++i) {
+        REQUIRE(policy.next(ratio) == RateSkewAction::None);
+        policy.acted(ratio);
+    }
+    // A healthy window does not pardon a session that has given up.
+    policy.healthy();
+    CHECK(policy.gaveUp());
+    CHECK(policy.next(ratio) == RateSkewAction::None);
+}
+
+TEST_CASE("RateSkewPolicy: a refused recovery does not advance the streak",
+          "[AudioRecovery][RateSkew][Policy]") {
+    // requestAudioRecovery can refuse (in flight, cooling down) for many
+    // polls: the watchdog asks next() every poll and acts only when a
+    // recovery launched. Asking must be free of side effects.
+    RateSkewPolicy policy(3, 0.05);
+    for (int i = 0; i < 50; ++i)
+        REQUIRE(policy.next(0.919) == RateSkewAction::Recover);
+    CHECK(policy.streak() == 0);
+}
+
+TEST_CASE("RateSkewPolicy: a transient skew recovers as before, and a healthy "
+          "window restarts the count", "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(3, 0.05);
+    // Post-sleep free-run, one episode: recover, then the device runs clean.
+    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
+    policy.acted(0.3);
+    policy.healthy();
+    CHECK(policy.streak() == 0);
+    // An hour later, the same again: still a plain recovery, not the second
+    // step of a streak.
+    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
+    policy.acted(0.3);
+    policy.healthy();
+    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
+    policy.acted(0.3);
+    CHECK(policy.streak() == 1);
+    CHECK_FALSE(policy.adopted());
+}
+
+TEST_CASE("RateSkewPolicy: a different ratio is a different fault",
+          "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(3, 0.05);
+    policy.acted(0.919);
+    policy.acted(0.919);
+    CHECK(policy.streak() == 2);
+    // Not the mixer's 0.919 any more: a 0.3x free-run restarts the count, so
+    // two unrelated episodes cannot add up to "persistent".
+    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
+    policy.acted(0.3);
+    CHECK(policy.streak() == 1);
+    // Within tolerance of the last one IS the same fault.
+    REQUIRE(policy.next(0.32) == RateSkewAction::Recover);
+    policy.acted(0.32);
+    CHECK(policy.streak() == 2);
+}
+
+TEST_CASE("RateSkewPolicy: adoption that works ends the episode; a later skew "
+          "at the adopted rate starts a new one",
+          "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(2, 0.05);
+    policy.acted(0.919);
+    REQUIRE(policy.next(0.919) == RateSkewAction::AdoptMeasuredRate);
+    policy.acted(0.919);
+    REQUIRE(policy.adopted());
+    // The device keeps time at the adopted rate: healthy windows follow.
+    policy.healthy();
+    CHECK_FALSE(policy.adopted());
+    CHECK(policy.streak() == 0);
+    // Weeks later it skews again (a different cable, a different fault): the
+    // remedy starts from a plain recovery, not from "give up".
+    REQUIRE(policy.next(0.5) == RateSkewAction::Recover);
+}
+
+TEST_CASE("RateSkewPolicy: maxRecoveries of one adopts on the first verdict",
+          "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(1, 0.05);
+    REQUIRE(policy.next(0.919) == RateSkewAction::AdoptMeasuredRate);
+    RateSkewPolicy floor(0, 0.05);   // clamped to one, never zero
+    REQUIRE(floor.next(0.919) == RateSkewAction::AdoptMeasuredRate);
+}

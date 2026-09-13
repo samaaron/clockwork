@@ -81,6 +81,13 @@ public:
     bool   skewed()    const { return mBadStreak >= mBadWindowsRequired; }
     // delivered/nominal of the last completed window (1.0 before the first).
     double lastRatio() const { return mLastRatio; }
+    // Windows completed over the monitor's whole life (reset() does not
+    // clear it), and whether the latest of them was within tolerance. A
+    // caller watching for "the device has come back healthy" compares the
+    // count it last saw and asks about the newest window — the verdict
+    // alone cannot say that, since skewed() is also false mid-window.
+    uint64_t windowsCompleted() const { return mWindowsCompleted; }
+    bool     lastWindowGood()   const { return mLastWindowGood; }
     void   reset();
 
 private:
@@ -97,6 +104,67 @@ private:
     double   mRate        = 0.0; // nominal frames-per-unit the window was anchored with
     int      mBadStreak   = 0;
     double   mLastRatio   = 1.0;
+    uint64_t mWindowsCompleted = 0;
+    bool     mLastWindowGood   = true;
+};
+
+// What to do about a skew verdict that keeps coming back. The monitor above
+// measures; this decides the remedy, and it exists because the obvious
+// remedy — reopen the device — is the wrong tool for one whole class of
+// fault. A device clocked at 44.1 kHz that reports 48 kHz (a USB mixer
+// through Apple's class driver, sonic-pi#3565) delivers 0.919x real time
+// forever: reopening it at the nominal rate reproduces the exact condition
+// that triggered the reopen, and the watchdog measures it again ten seconds
+// later. Left alone that is a storm — 79 cold swaps in one session, each one
+// stopping the client's jobs and re-initialising its world.
+//
+// So: a skew that is TRANSIENT (a post-sleep timer free-run) is fixed by a
+// reopen, and gets one. A skew that comes back with the SAME ratio after
+// each reopen is a property of the device, and after `maxRecoveries` of them
+// the remedy changes: the next swap asks for the rate the device is actually
+// delivering (ratio x nominal), which is the only rate it can keep time at.
+// If it skews at that rate too, the device is lying in a way no rate request
+// corrects, and the policy gives up for the session: the engine keeps
+// playing, off-pitch, and says so once. Never another swap.
+enum class RateSkewAction {
+    Recover,            // reopen at the nominal rate, as for a transient skew
+    AdoptMeasuredRate,  // reopen asking for ratio x nominal
+    GiveUp,             // stop recovering; say so once
+    None,               // already given up: nothing to do
+};
+
+class RateSkewPolicy {
+public:
+    // maxRecoveries: consecutive same-ratio verdicts acted on before the
+    // fault is called persistent (the Nth is the adopt). sameRatioTolerance:
+    // two ratios closer than this are the same fault.
+    RateSkewPolicy(int maxRecoveries, double sameRatioTolerance);
+
+    // What acting on a verdict at `ratio` would do. Pure: the caller asks,
+    // attempts the action (a recovery can be refused — in flight, cooling
+    // down), and reports back with acted() only when it happened, so a
+    // refused attempt cannot advance the streak.
+    RateSkewAction next(double ratio) const;
+    // The action next(ratio) named was carried out.
+    void acted(double ratio);
+    // A window came back within tolerance after a recovery: whatever the
+    // fault was, it is gone, and the streak restarts from nothing. Not a
+    // pardon for a policy that has given up — that is for the session.
+    void healthy();
+
+    int  streak() const { return mStreak; }
+    bool adopted() const { return mPhase == Phase::Adopted; }
+    bool gaveUp()  const { return mPhase == Phase::GaveUp; }
+
+private:
+    enum class Phase { Recovering, Adopted, GaveUp };
+    bool sameRatio(double a, double b) const;
+
+    int    mMaxRecoveries;
+    double mTolerance;
+    Phase  mPhase     = Phase::Recovering;
+    int    mStreak    = 0;
+    double mLastRatio = 0.0;
 };
 
 } // namespace clockwork::audio

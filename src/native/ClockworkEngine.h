@@ -142,6 +142,21 @@ public:
         int    watchdogRateBadWindows   = 2;       // consecutive bad windows =>
                                                    // recovery (one window can be
                                                    // skewed by a transient stall)
+        int    watchdogRateMaxRecoveries = 3;      // consecutive same-ratio skew
+                                                   // recoveries before the fault
+                                                   // is persistent: the last of
+                                                   // them adopts the measured
+                                                   // rate, and skew at THAT rate
+                                                   // ends recovery for the
+                                                   // session (RateSkewPolicy).
+                                                   // A device clocked at 44.1k
+                                                   // that reports 48k otherwise
+                                                   // cold-swaps every window.
+        int    watchdogRecoveryCooldownMs = 3000;  // between recoveries: covers
+                                                   // the client's re-init after
+                                                   // a promotion (seconds), so a
+                                                   // second swap cannot land on
+                                                   // a reinit still in progress
         // The host drains the egress rings itself, through the client API
         // (clockwork_client_poll on egressClient()), and routes what it takes
         // to its transport — as the JavaScript client does on the web. The
@@ -351,11 +366,23 @@ public:
     void scheduleDeviceSwitch(const std::string& devName,
                               const std::string& inputDevName,
                               double sampleRate, int bufferSize);
+    // Why a recovery is being asked for beyond "the device stopped". The
+    // default is a plain reopen at the nominal rate. The watchdog's rate-skew
+    // policy fills adoptRate when a skew has proved persistent: the cold swap
+    // then REQUESTS that rate (snapped to what the device advertises) instead
+    // of keeping the session rate that the device cannot deliver. The other
+    // two fields are for the one message the user gets about it.
+    struct RecoveryIntent {
+        double adoptRate    = 0;   // > 0: the rate the swap asks for
+        double nominalRate  = 0;   // what the device reports
+        double measuredRate = 0;   // what it delivers
+    };
     // Accept-or-reject an audio-recovery attempt (in-flight + cooldown gated).
     // On accept, posts recoverAudio() to the device task lane and returns true; on
-    // reject fills `reason`. Called by the watchdog on a real-device stall and by
-    // the external /reopen OSC command.
-    bool requestAudioRecovery(std::string& reason);
+    // reject fills `reason`. Called by the watchdog on a real-device stall or a
+    // rate skew, and by the external /reopen OSC command.
+    bool requestAudioRecovery(std::string& reason, const RecoveryIntent& intent);
+    bool requestAudioRecovery(std::string& reason);   // a plain reopen
 
     // --- Engine lifecycle state ---
     EngineState engineState() const { return mEngineState.load(); }
@@ -422,8 +449,10 @@ public:
     // selection). Use when an external config change — e.g. a MOTU Pro
     // Audio Control "Computer" channel-count bump — needs to flow through
     // without a full engine restart. Preserves aggregate / system-
-    // default / manual mode semantics.
-    SwapResult               reopenCurrentDevice();
+    // default / manual mode semantics. sampleRate > 0 makes the reopen an
+    // explicit rate request (snapped to the device's advertised rates); 0
+    // keeps the session rate, as a reopen always did.
+    SwapResult               reopenCurrentDevice(double sampleRate = 0);
 
     // --- Input channel management ---
     // Enable/disable audio input. Triggers a cold swap (DSP rebuild).
@@ -921,8 +950,9 @@ private:
     // state. Runs on the device task lane (posted by requestAudioRecovery) so
     // it works on every platform: the Linux standalone loop never pumps the
     // JUCE message queue, and this keeps the multi-second swap off the
-    // message thread everywhere.
-    void recoverAudio();
+    // message thread everywhere. The intent says whether the reopen requests
+    // a rate (see RecoveryIntent).
+    void recoverAudio(RecoveryIntent intent);
 
     // ── Explicit device-mutation phase (enum declared public, above) ────
     std::atomic<DevicePhase>   mDevicePhase { DevicePhase::Idle };

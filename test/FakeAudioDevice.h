@@ -26,6 +26,7 @@
 
 #include "ClockworkEngine.h"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -46,6 +47,10 @@ struct FakeDeviceSpec {
     bool failOpen      = false;  // open() errors outright
     bool failInputOpen = false;  // open() errors iff input channels requested
     bool failStart     = false;  // open() succeeds but callbacks never tick
+    // A lying device: the rate its callbacks actually keep time at, whatever
+    // rate it was opened at and reports. 0 = honest (ticks at the open rate).
+    // sonic-pi#3565's mixer: reports 48000, delivers ~44100.
+    double deliveredRate = 0;
 };
 
 // The simulated machine: device types and their devices, shared between
@@ -193,14 +198,22 @@ private:
         for (auto& b : outBufs) outPtrs.push_back(b.data());
         for (auto& b : inBufs)  inPtrs.push_back(b.data());
 
+        // Tick on an absolute schedule, as hardware does: sleeping a fixed
+        // period AFTER each callback would add the callback's own duration
+        // to every period, and the watchdog's rate-skew check (5% tolerance
+        // by default) would read an honest device as slow.
+        const double tickRate = primary()->deliveredRate > 0 ? primary()->deliveredRate
+                                                              : mRate;
         const auto period = std::chrono::microseconds(
-            static_cast<int64_t>(1e6 * mBufferSize / mRate));
+            static_cast<int64_t>(1e6 * mBufferSize / tickRate));
+        auto next = std::chrono::steady_clock::now();
         while (mPlaying.load()) {
             if (mCallback)
                 mCallback->audioDeviceIOCallbackWithContext(
                     nIn > 0 ? inPtrs.data() : nullptr, nIn,
                     outPtrs.data(), nOut, mBufferSize, {});
-            std::this_thread::sleep_for(period);
+            next += period;
+            std::this_thread::sleep_until(next);
         }
     }
 
