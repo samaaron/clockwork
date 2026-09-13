@@ -34,9 +34,18 @@ TARGET=wasm32-unknown-unknown
 #
 #     cargo install wasm-bindgen-cli --version <lock version> --locked \
 #         --root rust/target/tools
+#
+# Looked for, in order: $WASM_BINDGEN (a path), the project-local install,
+# $CLOCKWORK_TOOLS/bin (one install shared by every checkout of clockwork
+# on the box — a second checkout should not need a second 20 MB build),
+# ~/.cargo/bin, then PATH. Only one whose version matches the lock is taken.
 WANT="$(awk '/^name = "wasm-bindgen"$/{getline; sub(/version = /,""); gsub(/"/,""); print}' "$ROOT/rust/Cargo.lock")"
+CANDIDATES=("${WASM_BINDGEN:-}" "$ROOT/rust/target/tools/bin/wasm-bindgen")
+[ -n "${CLOCKWORK_TOOLS:-}" ] && CANDIDATES+=("$CLOCKWORK_TOOLS/bin/wasm-bindgen")
+CANDIDATES+=("${CARGO_HOME:-$HOME/.cargo}/bin/wasm-bindgen" "$(command -v wasm-bindgen || true)")
 WASM_BINDGEN=""
-for cand in "$ROOT/rust/target/tools/bin/wasm-bindgen" "$(command -v wasm-bindgen || true)"; do
+for cand in "${CANDIDATES[@]}"; do
+    [ -n "$cand" ] || continue
     [ -x "$cand" ] || continue
     have="$("$cand" --version | awk '{print $2}')"
     if [ "$have" = "$WANT" ]; then WASM_BINDGEN="$cand"; break; fi

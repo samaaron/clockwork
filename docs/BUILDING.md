@@ -236,6 +236,15 @@ rustup run nightly cargo install wasm-bindgen-cli --version <lock version> --loc
 npm run build:web
 ```
 
+A second checkout of clockwork on the same box (every product carries one as
+a submodule) need not install a second copy: the build also looks in
+`$CLOCKWORK_TOOLS/bin`, `~/.cargo/bin` and on the path, and takes a
+`$WASM_BINDGEN` path outright — only a copy whose version matches the lock is
+used. And the two subsystems are optional: without a wasm-bindgen, or with
+`CLOCKWORK_WEB_SUBSYSTEMS=0`, the build stubs their glue so the client still
+bundles, and a page that asks for `midi: true` is told at init that the
+subsystem was not built (it boots without it, as below).
+
 ### MIDI and gamepad on the web
 
 The worklet cannot own a MIDI port or a game controller: Web MIDI and the

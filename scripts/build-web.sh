@@ -222,7 +222,36 @@ echo "built $OUT/clockwork.wasm ($(du -h "$OUT/clockwork.wasm" | cut -f1))"
 # exist on the main thread, so the client owns that I/O and drives the same
 # Rust cores compiled to wasm-bindgen modules. Built BEFORE the bundle below,
 # which imports their glue. See build-web-subsystems.sh.
-"$SCRIPT_DIR/build-web-subsystems.sh"
+#
+# Optional. A product that wants neither (CLOCKWORK_WEB_SUBSYSTEMS=0), or a
+# box without the pinned wasm-bindgen, still gets a client: the glue the
+# managers import is replaced by a stub whose every function throws, so the
+# bundle resolves, and a page that asks for `midi: true` is told at init
+# that the subsystem was not built (it boots without it — see host_front.js).
+if [ "${CLOCKWORK_WEB_SUBSYSTEMS:-1}" != "0" ] && "$SCRIPT_DIR/build-web-subsystems.sh"; then
+    :
+else
+    echo "the MIDI and gamepad subsystems are not built: stubbing their glue so the client still bundles"
+    for sub in midi gamepad; do
+        mkdir -p "$ROOT/dist/$sub"
+        "$NODE" - "$ROOT/js/lib/${sub}_manager.js" "$sub" > "$ROOT/dist/$sub/clockwork_${sub}.js" <<'JS'
+const fs = require("node:fs");
+const [, , manager, sub] = process.argv;
+const src = fs.readFileSync(manager, "utf8");
+const m = /import init,\s*\{([^}]*)\}\s*from\s*"[^"]*clockwork_[a-z]+\.js"/.exec(src);
+const names = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+const why = `clockwork: the ${sub} subsystem was not built (build-web-subsystems.sh did not run — no wasm-bindgen?)`;
+let out = `// A stub: the ${sub} subsystem was not built. Every call refuses.\n`;
+out += `export default async function init() { throw new Error(${JSON.stringify(why)}); }\n`;
+for (const n of names) {
+  out += /^[A-Z]/.test(n)
+    ? `export class ${n} { constructor() { throw new Error(${JSON.stringify(why)}); } }\n`
+    : `export function ${n}() { throw new Error(${JSON.stringify(why)}); }\n`;
+}
+process.stdout.write(out);
+JS
+    done
+fi
 
 # ── The client and the workers ───────────────────────────────────────────────
 #
