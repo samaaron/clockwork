@@ -348,6 +348,12 @@ rather than guessing a verb. A malformed one throws where it is supplied —
 wait forever on a reply nobody sends. `test/dsp_profile.test.mjs` exercises both
 vocabularies.
 
+`request(verb, args, { reply, error, match, timeoutMs })` is the
+request/reply shape every guest's verbs share (`/tau/spawn` → `/tau/spawned`,
+`/d_recv` → `/done`): it resolves with the decoded reply, rejects on a
+message at `error`, on a timeout, and narrows by `match(msg)` when several
+replies share an address.
+
 ## The namespace boundary: `/clockwork/`
 
 **An OSC address beginning `/clockwork/` belongs to clockwork; everything

@@ -1115,6 +1115,48 @@ export class Clockwork {
   // OSC MESSAGING API
   // ============================================================================
 
+  /**
+   * Send a message and wait for its reply — the request/reply shape every
+   * guest's verbs have (`/tau/spawn` → `/tau/spawned`, `/d_recv` → `/done`),
+   * which each product wrote for itself until 2026-09-13.
+   *
+   * Resolves with the decoded reply (`[address, ...args]`): the first
+   * inbound message at `reply`, or the first for which `match(msg)` is true
+   * when given. Rejects with the error message's args when a message at
+   * `error` arrives first (`/fail`, `/tau/error` — the engine's word, which
+   * a product's own request() can default), and on the timeout.
+   *
+   * @param {string} address the verb to send
+   * @param {any[]} [args=[]] its arguments
+   * @param {object} o
+   * @param {string} o.reply the address the answer comes on (required)
+   * @param {string|null} [o.error] the address a refusal comes on
+   * @param {(msg: any[]) => boolean} [o.match] narrows the reply, e.g. by an id
+   * @param {number} [o.timeoutMs=10000]
+   * @returns {Promise<any[]>}
+   */
+  request(address, args = [], { reply, error = null, match = null, timeoutMs = SYNC_TIMEOUT_MS } = {}) {
+    this.#ensureInitialized("request");
+    if (typeof reply !== "string" || !reply.startsWith("/")) {
+      throw new TypeError("request() needs the reply address: request(verb, args, { reply: '/some/reply' })");
+    }
+    return new Promise((resolve, reject) => {
+      const done = (fn) => (v) => { clearTimeout(timer); this.off('in', on); fn(v); };
+      const ok = done(resolve), fail = done(reject);
+      const timer = setTimeout(() => fail(new Error(`no ${reply} to ${address} within ${timeoutMs} ms`)), timeoutMs);
+      const on = (msg) => {
+        if (msg[0] === reply && (!match || match(msg))) ok(msg);
+        else if (error && msg[0] === error && (!match || match(msg))) {
+          const e = new Error(`${address} refused: ${msg.slice(1).map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}`);
+          e.reply = msg;
+          fail(e);
+        }
+      };
+      this.on('in', on);
+      try { this.send(address, ...args); } catch (e) { fail(e); }
+    });
+  }
+
   send(address, ...args) {
     this.#ensureInitialized("send OSC messages");
 

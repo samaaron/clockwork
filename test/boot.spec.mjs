@@ -373,3 +373,26 @@ test("with no mode given, the transport is SAB where the page is isolated and po
   }, clockworkConfig);
   expect(r.mode).toBe(r.isolated ? "sab" : "postMessage");
 });
+
+test("request() is one message and its reply; a refusal or a silence rejects", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const clockwork = new window.Clockwork(config);
+    await clockwork.init();
+    const pong = await clockwork.request("/dummy/ping", [], { reply: "/dummy/pong" });
+    let refused = null, silent = null;
+    // The pong arriving on the address named as the error is a refusal.
+    try { await clockwork.request("/dummy/ping", [], { reply: "/never", error: "/dummy/pong" }); }
+    catch (e) { refused = e.message; }
+    try { await clockwork.request("/dummy/ping", [], { reply: "/never", timeoutMs: 300 }); }
+    catch (e) { silent = e.message; }
+    let noReply = null;
+    try { clockwork.request("/dummy/ping"); } catch (e) { noReply = e.message; }
+    await clockwork.shutdown();
+    return { pong: pong[0], refused, silent, noReply };
+  }, clockworkConfig);
+  expect(r.pong).toBe("/dummy/pong");
+  expect(r.refused).toMatch(/refused/);
+  expect(r.silent).toMatch(/no \/never to \/dummy\/ping within 300 ms/);
+  expect(r.noReply).toMatch(/needs the reply address/);
+});
