@@ -258,7 +258,8 @@ node scripts/serve.mjs --root example --host 0.0.0.0 --https   # the LAN, over T
 
 `--https` makes a self-signed certificate once (in `~/.clockwork/cert`);
 accept it once in each browser. With no `mode` given, the client picks SAB on
-an isolated page and postMessage elsewhere.
+an isolated page and postMessage elsewhere. `sync()` needs nothing declared:
+the barrier is clockwork's own verb, answered for every guest.
 
 ### MIDI and gamepad on the web
 

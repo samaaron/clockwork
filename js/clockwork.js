@@ -1495,13 +1495,21 @@ export class Clockwork {
     });
   }
 
+  /**
+   * The barrier: resolves once everything sent before it has been handed to
+   * the guest, in order. Clockwork's own verb (`/clockwork/sync` →
+   * `/clockwork/synced`), answered on the audio thread at the point the
+   * message is reached in the drain — so it works for every guest, with
+   * nothing declared. Until 2026-09-13 it borrowed the guest's word
+   * (`/sync` for scsynth) through a profile.
+   */
   async sync(syncId = Math.floor(Math.random() * 2147483647), timeoutMs = SYNC_TIMEOUT_MS) {
     this.#ensureInitialized("sync");
 
     const syncPromise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#syncListeners?.delete(syncId);
-        reject(new Error(`Timeout waiting for ${this.#dsp.syncedVerb} response`));
+        reject(new Error(`Timeout waiting for ${clockworkSys("synced")} response`));
       }, timeoutMs);
 
       const messageHandler = () => {
@@ -1514,10 +1522,7 @@ export class Clockwork {
       this.#syncListeners.set(syncId, messageHandler);
     });
 
-    if (!this.#dsp.syncVerb) {
-      throw new Error("sync() needs a dsp profile: no DSP declares a sync verb.");
-    }
-    this.send(this.#dsp.syncVerb, syncId);
+    this.send(clockworkSys("sync"), syncId);
     await syncPromise;
 
     if (this.#config.mode === 'postMessage') {
@@ -2001,7 +2006,7 @@ export class Clockwork {
         if (eventMaxLen > 0 && text.length > eventMaxLen) text = text.slice(0, eventMaxLen) + '...';
         this.#eventEmitter.emit('debug', { text, sequence, timestamp });
         return;
-      } else if (address === this.#dsp.syncedVerb && args.length > 0) {
+      } else if (address === clockworkSys("synced") && args.length > 0) {
         const syncId = args[0];
         if (this.#syncListeners?.has(syncId)) {
           this.#syncListeners.get(syncId)(msg);

@@ -1452,6 +1452,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // boundary claimed goes to the NRT command ring.
     mAudioRoutes.add("ping", &clockwork_clockwork_sys_route, nullptr);
     mAudioRoutes.add("echo", &clockwork_clockwork_sys_route, nullptr);
+    // The barrier — on this thread, in the same drain as the guest's
+    // messages, or it would answer before what it answers for.
+    mAudioRoutes.add("sync", &clockwork_clockwork_sys_route, nullptr);
     mAudioRoutes.add("sched/flush", &ClockworkEngine::schedFlushSink, this);
     // The asset hand-off (dsp_api.h, "Assets"): audio-thread work everywhere.
     mAudioRoutes.add("asset/", &clockwork_asset_route, nullptr);

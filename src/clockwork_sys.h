@@ -155,6 +155,23 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             return ClockworkSysRt::Answered;
         }
 
+        // The barrier: `/clockwork/sync [i id]` answers `/clockwork/synced [i id]`
+        // once every message sent before it has been handed to the guest.
+        // That ordering is the ingress ring's, so the barrier is clockwork's
+        // to keep, on every host and for every guest — the same guarantee
+        // scsynth's own `/sync` gives, without the client having to know
+        // the guest's word for it. Answered on the audio thread, where the
+        // hand-off happens: an NRT hop would put it out of order.
+        if (std::strcmp(verb, "sync") == 0) {
+            osc::OutboundPacketStream ps(buf, sizeof(buf));
+            ps << osc::BeginMessage(CLOCKWORK_SYS("synced"));
+            ps << ((arg != end && arg->IsInt32()) ? arg->AsInt32Unchecked() : 0);
+            ps << osc::EndMessage;
+            emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+                 static_cast<uint32_t>(ps.Size()));
+            return ClockworkSysRt::Answered;
+        }
+
         // The whole clock, coherent, from the audio thread.
         //
         // ONE SNAPSHOT, NOT SIX GETTERS: bpm and beat origin only mean

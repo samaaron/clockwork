@@ -80,6 +80,19 @@ TEST_CASE("clockwork-sys: ping answers pong", "[clockwork_sys]") {
     REQUIRE(tagged[0].argInt(0) == 4242);
 }
 
+TEST_CASE("clockwork-sys: sync answers synced with the caller's id, on the spot", "[clockwork_sys]") {
+    // The barrier is clockwork's: answered at the point the message is
+    // reached in the drain, which is after everything sent before it.
+    auto r = answer(osc_test::message("/clockwork/sync", 77));
+    REQUIRE(r.size() == 1);
+    REQUIRE(r[0].address == "/clockwork/synced");
+    REQUIRE(r[0].argInt(0) == 77);
+    // With no id, the reply still carries one a client can match on.
+    auto bare = answer(osc_test::message("/clockwork/sync"));
+    REQUIRE(bare[0].address == "/clockwork/synced");
+    REQUIRE(bare[0].argInt(0) == 0);
+}
+
 TEST_CASE("clockwork-sys: echo returns what it was given", "[clockwork_sys]") {
     auto s = answer(osc_test::message("/clockwork/echo", "the pipe carries bytes"));
     REQUIRE(s.size() == 1);

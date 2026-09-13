@@ -396,3 +396,19 @@ test("request() is one message and its reply; a refusal or a silence rejects", a
   expect(r.silent).toMatch(/no \/never to \/dummy\/ping within 300 ms/);
   expect(r.noReply).toMatch(/needs the reply address/);
 });
+
+test("sync() is clockwork's own barrier: it answers for the placeholder guest, after what was sent before", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const clockwork = new window.Clockwork(config);
+    await clockwork.init();
+    const seen = [];
+    clockwork.on("in", (m) => seen.push(m[0]));
+    clockwork.send("/dummy/ping");
+    await clockwork.sync(4242);
+    const out = { pongBeforeSynced: seen.indexOf("/dummy/pong") >= 0 && seen.indexOf("/dummy/pong") < seen.indexOf("/clockwork/synced"), seen };
+    await clockwork.shutdown();
+    return out;
+  }, clockworkConfig);
+  expect(r.pongBeforeSynced, `the pong sent before the barrier came back before it: ${r.seen}`).toBe(true);
+});
