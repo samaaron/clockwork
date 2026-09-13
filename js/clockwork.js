@@ -271,7 +271,12 @@ export class Clockwork {
      * words, under `audio`: how many channels to open and how many to read.
      */
     const guestOptions = { ...options.guestOptions };
-    const mode = options.mode || 'postMessage';
+    // The transport, unless the caller says: SAB where the page is
+    // cross-origin isolated (the headers are there, so the lower-latency
+    // path is open), postMessage everywhere else. Until 2026-09-13 the
+    // default was postMessage even on an isolated page, and every product
+    // wrote this line itself.
+    const mode = options.mode || (globalThis.crossOriginIsolated ? 'sab' : 'postMessage');
 
     // The DSP's vocabulary — see js/lib/dsp_profile.js. Clockwork holds
     // no opinion about which engine is underneath; without a profile it
@@ -280,7 +285,7 @@ export class Clockwork {
     // After the profile is resolved, because the reader needs what this guest
     // says it exposes. None is a normal answer.
     this.#metricsReader = new MetricsReader({
-      mode: options.mode || 'postMessage',
+      mode,
       guestMetrics: this.#dsp?.metrics || {},
     });
 

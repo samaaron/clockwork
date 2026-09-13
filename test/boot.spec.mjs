@@ -360,3 +360,16 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
 
   expect(r.refused, "a range past the end of the inbox was accepted").toContain("outside the region");
 });
+
+test("with no mode given, the transport is SAB where the page is isolated and postMessage elsewhere", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const { mode: _given, ...rest } = config;
+    const clockwork = new window.Clockwork(rest);
+    await clockwork.init();
+    const out = { mode: clockwork.mode, isolated: window.crossOriginIsolated };
+    await clockwork.shutdown();
+    return out;
+  }, clockworkConfig);
+  expect(r.mode).toBe(r.isolated ? "sab" : "postMessage");
+});

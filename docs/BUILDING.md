@@ -257,7 +257,8 @@ node scripts/serve.mjs --root example --host 0.0.0.0 --https   # the LAN, over T
 ```
 
 `--https` makes a self-signed certificate once (in `~/.clockwork/cert`);
-accept it once in each browser.
+accept it once in each browser. With no `mode` given, the client picks SAB on
+an isolated page and postMessage elsewhere.
 
 ### MIDI and gamepad on the web
 
