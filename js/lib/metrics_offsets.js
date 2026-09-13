@@ -182,7 +182,7 @@ export const CTX_HAS_PLAYBACK_STATS = 68;    // 1 if Chrome playbackStats availa
  *
  * So the range is reserved and unnamed here, and a guest DECLARES what it
  * puts in it — name, slot, type, description — the same way it declares its
- * vocabulary in dsp_profile.js. Clockwork merges those declarations into
+ * declaration in guest_metrics.js. Clockwork merges those declarations into
  * the schema it reports and accepts values only for declared names; anything
  * undeclared is dropped rather than written somewhere arbitrary.
  *

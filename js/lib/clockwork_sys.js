@@ -8,7 +8,7 @@
  * `/clockwork/` is Clockwork's and is answered by it; ANYTHING else is forwarded
  * to the DSP untouched. The client sits on the outside of that boundary, so every
  * clockwork address it sends or matches must be built here rather than written
- * out — the DSP's own verbs (`dspProfile`) are the ones that stay opaque
+ * out — the DSP's own verbs are the ones that stay opaque
  * strings.
  *
  * THIS FILE IS THE ONLY PLACE THE STRING IS SPELLED in the JS tree. The C++ and

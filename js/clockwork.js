@@ -13,7 +13,7 @@ import { HostFront } from "./lib/host_front.js";
 
 export { OscChannel };
 import { AssetLoader } from "./lib/asset_loader.js";
-import { dspProfile, NO_DSP } from "./lib/dsp_profile.js";
+import { guestMetrics } from "./lib/guest_metrics.js";
 import { ENGINE_PROCESS_COUNT, GUEST_METRICS_BASE } from "./lib/metrics_offsets.js";
 import { EventEmitter } from "./lib/event_emitter.js";
 import { MetricsReader } from "./lib/metrics_reader.js";
@@ -160,7 +160,8 @@ export class Clockwork {
   #initPromise;
   #capabilities;
   #version;
-  #dsp = NO_DSP;
+  #guestMetrics = Object.freeze({});
+  #guestMetricsPanels = Object.freeze([]);
   #config;
 
   #eventEmitter;
@@ -279,15 +280,21 @@ export class Clockwork {
     // wrote this line itself.
     const mode = options.mode || (globalThis.crossOriginIsolated ? 'sab' : 'postMessage');
 
-    // The DSP's vocabulary — see js/lib/dsp_profile.js. Clockwork holds
-    // no opinion about which engine is underneath; without a profile it
-    // simply does not cache definitions and cannot sync.
-    this.#dsp = dspProfile(options.dsp);
-    // After the profile is resolved, because the reader needs what this guest
-    // says it exposes. None is a normal answer.
+    // What the guest declares about itself: its metrics (js/lib/guest_metrics.js).
+    // Nothing else — clockwork holds no opinion about which engine is
+    // underneath, and needs none: the sync barrier is its own verb.
+    if (options.dsp !== undefined) {
+      throw new TypeError("the `dsp` profile option is gone (2026-09-13): sync is clockwork's own "
+        + "(/clockwork/sync), declare metrics as `guestMetrics` / `guestMetricsPanels`, and refuse "
+        + "or name your engine's verbs in your own send() / request().");
+    }
+    this.#guestMetrics = guestMetrics(options.guestMetrics);
+    this.#guestMetricsPanels = Object.freeze([...(options.guestMetricsPanels ?? [])]);
+    // After the declaration is resolved, because the reader needs what this
+    // guest says it exposes. None is a normal answer.
     this.#metricsReader = new MetricsReader({
       mode,
-      guestMetrics: this.#dsp?.metrics || {},
+      guestMetrics: this.#guestMetrics,
     });
 
     this.#config = {
@@ -1159,13 +1166,6 @@ export class Clockwork {
 
   send(address, ...args) {
     this.#ensureInitialized("send OSC messages");
-
-    // Verbs the client refuses on the DSP's behalf.
-    const blocked = this.#dsp.blockedVerbs;
-
-    if (blocked[address]) {
-      throw new Error(`${address} is not supported in Clockwork. ${blocked[address]}`);
-    }
 
     // NOTHING IS INSPECTED HERE. What a product needs back after a reload is
     // the product's to remember, and it puts it back through
@@ -2209,7 +2209,7 @@ export class Clockwork {
    * a caller sees one list rather than clockwork's plus a product's.
    */
   getMetricsSchema() {
-    return Clockwork.mergeGuestMetrics(this.#dsp);
+    return Clockwork.mergeGuestMetrics(this.#guestMetrics, this.#guestMetricsPanels);
   }
 
   /**
@@ -2219,15 +2219,14 @@ export class Clockwork {
    * the same merge before any instance exists — a caller inspecting what a
    * product reports should not have to boot one to find out.
    */
-  static mergeGuestMetrics(dsp) {
-    const declared = dsp?.metrics || {};
+  static mergeGuestMetrics(declared = {}, panels = []) {
     const metrics = { ...METRICS_SCHEMA.metrics };
-    for (const [name, def] of Object.entries(declared)) {
+    for (const [name, def] of Object.entries(declared || {})) {
       metrics[name] = { ...def, offset: GUEST_METRICS_BASE + def.slot };
     }
     const layout = {
       ...METRICS_SCHEMA.layout,
-      panels: [...(METRICS_SCHEMA.layout?.panels || []), ...(dsp?.metricsPanels || [])],
+      panels: [...(METRICS_SCHEMA.layout?.panels || []), ...(panels || [])],
     };
     return { ...METRICS_SCHEMA, metrics, layout };
   }

@@ -315,38 +315,42 @@ than take opens a tap, which carries a cursor of its own and may be lapped.
 Nothing above that: no notion of a synth, a node, a sample or a track. Those
 belong to whatever guest is loaded.
 
-## The guest's vocabulary: the DSP profile
+## What the client knows about the guest: nothing but its metrics
 
-The JavaScript client needs two OSC addresses from the engine — a sync barrier
-and its reply — and a list of verbs it should refuse to send. Both differ
-between engines.
+The JavaScript client boots the engine, moves OSC in and out, and treats every
+message as opaque. It used to carry a **DSP profile** — the guest's word for a
+sync barrier (`/sync` for scsynth, `/tau/sync` for tau), the verbs to refuse
+on the guest's behalf, the address its refusals come on — so that `sync()`
+could work with any engine. That went on 2026-09-13, on the observation that
+the barrier was never the guest's fact to begin with:
 
-| what the client needs         | scsynth           | clockwork's own guest                 |
-|-------------------------------|-------------------|---------------------------------------|
-| sync barrier / its reply      | `/sync` `/synced` | `/clockwork/sync` `/clockwork/synced` |
-| verbs the client should block | —                 | `/clockwork/quit`                     |
+- **The barrier is clockwork's.** `sync()` means "everything I sent before this
+  has been handed to the guest, in order", and the order is the ingress
+  ring's. So the engine answers `/clockwork/sync [i id]` with
+  `/clockwork/synced [i id]` itself, on the audio thread, at the point the
+  message is reached in the drain — for every guest, on every host,
+  including the placeholder. A guest's own barrier verb, if it has one, is
+  just another verb to it.
+- **Refusing a guest's verbs is the product's business.** scsynth's `/quit`
+  would stop the audio thread; SuperSonic's `send()` refuses it. Clockwork
+  has no opinion.
+- **The address a refusal comes on is the guest's word**, and `request()`
+  takes it per call (`{ error: "/fail" }`); a product's own `request()` can
+  default it.
 
-It takes them as a **DSP profile** (`js/lib/dsp_profile.js`), a plain object:
+What remains is a declaration, not a vocabulary: the guest's metrics.
 
 ```js
-new Clockwork({ dsp: {
-  syncVerb:     "/clockwork/sync",
-  syncedVerb:   "/clockwork/synced",
-  blockedVerbs: { "/clockwork/quit": "Use destroy() to shut down." },
-}})
+new Clockwork({
+  guestMetrics: { bufferPoolGrowthCount: { slot: 3, type: "u32", description: "…" } },
+  guestMetricsPanels: [ /* the metrics UI's panel shape */ ],
+})
 ```
 
-scsynth would pass `/sync` and `/synced`.
-
-A guest may also supply `metrics` and `metricsPanels`, in the shape the metrics
-schema's layout uses, so its numbers appear in the metrics UI beside
-clockwork's.
-
-A missing profile is a working state: clockwork runs and refuses `sync()`
-rather than guessing a verb. A malformed one throws where it is supplied —
-`syncVerb` and `syncedVerb` come as a pair, and half a barrier would otherwise
-wait forever on a reply nobody sends. `test/dsp_profile.test.mjs` exercises both
-vocabularies.
+`slot` indexes the reserved guest range (js/lib/guest_metrics.js checks it
+where it is supplied); the client fills values from `clientMetrics()`, and
+`getMetricsSchema()` reports clockwork's schema with the guest's folded in.
+`test/guest_metrics.test.mjs` exercises the check.
 
 `request(verb, args, { reply, error, match, timeoutMs })` is the
 request/reply shape every guest's verbs share (`/tau/spawn` → `/tau/spawned`,
