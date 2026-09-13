@@ -255,15 +255,16 @@ export class Clockwork {
 
     if (!workerBaseURL || !wasmBaseURL) {
       throw new Error(
-        `Clockwork requires explicit URL configuration.\n\n` +
-        `For CDN usage:\n` +
-        `  import { Clockwork } from 'https://unpkg.com/clockwork@VERSION/dist/clockwork.js';\n` +
+        `Clockwork needs to be told where its files are.\n\n` +
+        `Clockwork is not a package of its own: it ships inside the product\n` +
+        `that carries it (its dist/ — clockwork.js, workers/, wasm/). Name it:\n` +
+        `  new Clockwork({ baseURL: '/path/to/that/dist/' })\n\n` +
+        `or each part, when the engine wasm lives elsewhere (a CDN package):\n` +
         `  new Clockwork({\n` +
-        `    baseURL: 'https://unpkg.com/clockwork@VERSION/dist/',\n` +
+        `    workerBaseURL: '.../dist/workers/',\n` +
+        `    coreBaseURL:   '.../<core package>/',   // wasm/ and the worklet under it\n` +
         `  })\n\n` +
-        `For local usage:\n` +
-        `  new Clockwork({ baseURL: '/path/to/clockwork/dist/' })\n\n` +
-        `See: docs/ in the clockwork repository`
+        `See docs/BUILDING.md in the clockwork repository.`
       );
     }
 
