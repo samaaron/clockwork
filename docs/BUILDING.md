@@ -245,6 +245,20 @@ used. And the two subsystems are optional: without a wasm-bindgen, or with
 bundles, and a page that asks for `midi: true` is told at init that the
 subsystem was not built (it boots without it, as below).
 
+### Serving it
+
+The page needs the two cross-origin isolation headers for the SAB transport,
+and a secure context for the AudioWorklet at all — plain http off localhost
+boots nothing. One server does both, for any product's directory:
+
+```sh
+node scripts/serve.mjs --root example                     # http://127.0.0.1:8000/
+node scripts/serve.mjs --root example --host 0.0.0.0 --https   # the LAN, over TLS
+```
+
+`--https` makes a self-signed certificate once (in `~/.clockwork/cert`);
+accept it once in each browser.
+
 ### MIDI and gamepad on the web
 
 The worklet cannot own a MIDI port or a game controller: Web MIDI and the
