@@ -338,7 +338,14 @@ fn an_osc_sink_puts_bytes_on_a_real_socket_without_being_pumped() {
     let mut buf = [0u8; 256];
     let n = listener.recv(&mut buf).expect("the drain thread delivered nothing");
     assert_eq!(&buf[..n], body, "the bytes arrived exactly as sent");
-    assert_eq!(stats_of(h), Stats { sent: 1, dropped: 0, late: 0, scheduled: 0, cancelled: 0 });
+    // The datagram can land before the drain thread has bumped its counter
+    // (seen on Windows CI): the bytes prove delivery, the count follows.
+    let want = Stats { sent: 1, dropped: 0, late: 0, scheduled: 0, cancelled: 0 };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while stats_of(h) != want && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(stats_of(h), want);
     clockwork_sink_close(h);
 }
 

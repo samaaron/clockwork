@@ -276,6 +276,25 @@ TEST_CASE("RateSkewPolicy: a persistent same-ratio skew gets at most N recoverie
     CHECK(policy.next(ratio) == RateSkewAction::None);
 }
 
+TEST_CASE("RateSkewPolicy: one fault measured with noise is still one fault",
+          "[AudioRecovery][RateSkew][Policy]") {
+    // The engine passes twice its skew tolerance here: a 0.919x device whose
+    // windows read 0.89, 0.94, 0.89 on a loaded machine must reach the adopt
+    // on the third verdict, not restart its streak at every wobble.
+    RateSkewPolicy policy(3, /*sameRatioTolerance*/0.10);
+    REQUIRE(policy.next(0.89) == RateSkewAction::Recover);
+    policy.acted(0.89);
+    REQUIRE(policy.next(0.94) == RateSkewAction::Recover);
+    policy.acted(0.94);
+    CHECK(policy.streak() == 2);
+    REQUIRE(policy.next(0.89) == RateSkewAction::AdoptMeasuredRate);
+    // A genuinely different fault still starts over: 0.5x is not 0.9x.
+    RateSkewPolicy other(3, 0.10);
+    other.acted(0.92);
+    other.acted(0.5);
+    CHECK(other.streak() == 1);
+}
+
 TEST_CASE("RateSkewPolicy: a refused recovery does not advance the streak",
           "[AudioRecovery][RateSkew][Policy]") {
     // requestAudioRecovery can refuse (in flight, cooling down) for many

@@ -2317,9 +2317,15 @@ void ClockworkEngine::watchdogLoop() {
     // and after that gives up for the session. Its streak is only advanced by
     // recoveries that actually launched (acted), and cleared by a window that
     // came back healthy (healthy) — see RateSkewPolicy.
+    // "The same fault" is judged with twice the skew tolerance: a verdict is
+    // one noisy measurement against 1.0, but two consecutive verdicts are two
+    // noisy measurements against each other, and a 0.919x device read as
+    // 0.89x then 0.94x on a loaded machine (macOS CI, 2026-09-13) is still
+    // one device — with the tolerance alone the streak restarted at every
+    // wobble and the adopt came after five plain reopens instead of two.
     clockwork::audio::RateSkewPolicy skewPolicy(
         std::max(1, mCurrentConfig.watchdogRateMaxRecoveries),
-        mCurrentConfig.watchdogRateTolerance);
+        2.0 * mCurrentConfig.watchdogRateTolerance);
     uint64_t skewWindowsSeen    = 0;
     bool     skewGiveUpLogged   = false;
 
