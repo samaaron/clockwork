@@ -39,6 +39,7 @@ extern "C" const char* clockwork_app_name();
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
@@ -48,6 +49,15 @@ extern "C" const char* clockwork_app_name();
 using clockwork::doubleToBits;
 
 namespace {
+
+// The quantum every beat<->time question of the session's timeline is asked
+// with: the bar the grids are held to when one is placed on the other.
+constexpr double kGridQuantum = 4.0;
+
+// How far the arena grid may sit from Link's before the tick moves it: a
+// couple of milliseconds at 120 bpm, above the jitter between the two "now"
+// readings, well below any move Link makes (a session realigns by phase).
+constexpr double kGridTolerance = 5e-3;
 
 inline std::atomic<bool>& linkLoopbackOnlyFlag() {
 #if defined(_WIN32)
@@ -126,13 +136,35 @@ struct LinkSession::Impl {
         if (!(bpm >= 1.0)) bpm = 1.0;
         auto st = link.captureAppSessionState();
         const auto now = link.clock().micros();
-        constexpr double kBeatOriginQuantum = 4.0;
-        const double currentBeat = st.beatAtTime(now, kBeatOriginQuantum);
+        const double currentBeat = st.beatAtTime(now, kGridQuantum);
         // Mirrored from Link's own beat, not re-derived from the mirror: the
         // grid Link converged on is the truth here.
         if (ClockworkClockState* s = clock.state())
             s->setTempo(bpm, clockwork::originFor(currentBeat, wallClockNTP(), bpm));
         if (appTempoCb) appTempoCb(bpm);
+    }
+
+    // Keep the arena grid on Link's. Link moves the session timeline on its
+    // own — joining a session adopts that session's grid, phase-aligned —
+    // and has no callback for it. The arena grid kept the old grid until the
+    // next tempo change snapped it across (applyTempoChange trusts Link's
+    // beat): two engines in one session sat 3.3 beats apart, and a nudge
+    // from 60 to 61 bpm moved every beat a client held by 687 ms. Runs off
+    // the worker's tick and on a peer change. A tempo change in flight (the
+    // mirror already at the new tempo, Link not yet) is applyTempoChange's
+    // to settle; an unanchored grid is the bind's to place.
+    void followSessionGrid() {
+        if (!link.isEnabled()) return;
+        ClockworkClockState* s = clock.state();
+        if (!s) return;
+        const ClockworkClockSnapshot mirror = readClockworkClock(s);
+        if (mirror.beat_origin_ntp == 0.0) return;
+        const auto st = link.captureAppSessionState();
+        if (std::fabs(st.tempo() - mirror.bpm) > 1e-6) return;
+        const double nowNtp   = wallClockNTP();
+        const double linkBeat = st.beatAtTime(link.clock().micros(), kGridQuantum);
+        if (std::fabs(linkBeat - mirror.beatAt(nowNtp)) < kGridTolerance) return;
+        s->setOrigin(clockwork::originFor(linkBeat, nowNtp, mirror.bpm));
     }
 
     explicit Impl(ClockworkClock& c, std::function<void()> tick)
@@ -179,6 +211,7 @@ void LinkSession::startWorker() {
                 }
             }
             if (impl->periodicTick) impl->periodicTick();
+            impl->followSessionGrid();
         }
     });
 }
@@ -390,6 +423,18 @@ void LinkSession::anchorToWallClockIfUnset() {
     const double now = wallClockNTP();
     s->setOrigin(now);
     s->setTransport(false, now);
+    // Link's own timeline was born with this clock — beat 0 at construction,
+    // which on a real boot is the better part of a second before the bind
+    // (the audio device comes up in between). Put its beat 0 at the bind as
+    // well, so the two grids agree from a client's first read. They did not:
+    // the first tempo change re-anchored this grid to Link's beat
+    // (applyTempoChange), and moved every beat a client held by the boot gap
+    // — 775 ms in a Sonic Pi session, and a thread thrown for being behind.
+    // Forced, not requested: nothing has joined yet (Link is enabled after
+    // the bind), so there is no session phase to keep.
+    auto st = mImpl->link.captureAppSessionState();
+    st.forceBeatAtTime(0.0, mImpl->link.clock().micros(), kGridQuantum);
+    mImpl->link.commitAppSessionState(st);
 }
 
 void LinkSession::setTempoChangedCallback(std::function<void(double)> cb) {
@@ -405,8 +450,14 @@ void LinkSession::setTempoChangedCallback(std::function<void(double)> cb) {
 }
 
 void LinkSession::setNumPeersChangedCallback(std::function<void(std::size_t)> cb) {
+    // A peer coming or going is when the session's grid may have moved under
+    // this clock; the worker's tick would catch it within 250 ms regardless.
+    auto* impl = mImpl.get();
     mImpl->link.setNumPeersCallback(
-        [cb = std::move(cb)](const std::size_t n) { if (cb) cb(n); });
+        [cb = std::move(cb), impl](const std::size_t n) {
+            impl->followSessionGrid();
+            if (cb) cb(n);
+        });
 }
 
 void LinkSession::setStartStopChangedCallback(std::function<void(bool, double)> cb) {

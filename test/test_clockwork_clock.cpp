@@ -25,6 +25,10 @@
 #else
 #include <ableton/platforms/posix/ScanIpIfAddrs.hpp>
 #endif
+// The session's own timeline, read straight from Link: the tests below hold
+// the arena grid against it.
+#include "clock/LinkSession.h"
+#include <ableton/LinkAudio.hpp>
 #endif  // CLOCKWORK_LINK
 
 namespace {
@@ -459,6 +463,74 @@ TEST_CASE("ClockworkClock: binding into the arena anchors the Link grid so beats
     std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let applyTempoChange land
     const double t = sc.timeAtBeat(beatNow, 4.0);
     CHECK(t == Catch::Approx(now).margin(0.5));
+}
+
+namespace {
+// Link's own beat at this instant, from the session state itself.
+double linkBeatNow(ClockworkClock& sc) {
+    auto& link = sc.linkSession().linkAudio();
+    return link.captureAppSessionState().beatAtTime(link.clock().micros(), 4.0);
+}
+}  // namespace
+
+TEST_CASE("ClockworkClock: the arena grid and Link's own grid agree from the bind, so the first tempo change moves no beat",
+          "[ClockworkClock][Link]") {
+    // Link's timeline is born with the clock: beat 0 at construction. The
+    // arena grid is anchored at the bind — after the engine has brought up
+    // its audio device, 0.8 s later on a laptop. Nothing reconciled the two,
+    // and the first tempo change did: applyTempoChange trusts Link's beat and
+    // re-anchored the arena grid to it, moving every beat a client held by
+    // the boot gap. A Sonic Pi thread sleeping on the shared clock saw its
+    // next beat land 775 ms in the past and was thrown for being behind. The
+    // test above never saw it: its gap is microseconds and its margin 0.5 s.
+    ClockworkClock sc;
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));   // the boot gap
+    ClockworkClockState region;
+    ClockworkClockState::initDefaults(region);
+    sc.bindStateToShm(&region);
+    const double bound = wallClockNTP();
+    const double beatAtBind = sc.beatAtTime(bound, 4.0);
+
+    // The two grids agree at the bind.
+    CHECK(beatAtBind == Catch::Approx(linkBeatNow(sc)).margin(0.01));
+
+    // And the beat playing at the bind is still there once a tempo change
+    // has been through Link's callback.
+    sc.setBpm(sc.getBpm() * 2.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(sc.timeAtBeat(beatAtBind, 4.0) == Catch::Approx(bound).margin(0.02));
+}
+
+TEST_CASE("ClockworkClock: when Link's session moves its grid under the clock, the arena grid follows",
+          "[ClockworkClock][Link]") {
+    // Joining a session realigns this peer's timeline to the session's grid.
+    // That is Link's doing, and Link has no callback for it: the arena grid
+    // kept the old grid until the next tempo change snapped it across (two
+    // engines in one session: 3.3 beats, 687 ms, on a nudge from 60 to 61).
+    // The worker's tick now keeps the arena grid on Link's, so the move
+    // lands when the session moves, not on some later tempo change.
+    ClockworkClock sc;
+    ClockworkClockState region;
+    ClockworkClockState::initDefaults(region);
+    sc.bindStateToShm(&region);
+    sc.setLinkEnabled(true);   // loopback-only: a session of one, but a session
+
+    // Move Link's timeline as a merge would — straight into Link, past the
+    // arena mirror: beat 7 is playing now.
+    auto& link = sc.linkSession().linkAudio();
+    auto st = link.captureAppSessionState();
+    st.forceBeatAtTime(7.0, link.clock().micros(), 4.0);
+    link.commitAppSessionState(st);
+
+    double gap = 1e9;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        gap = std::fabs(sc.beatAtTime(wallClockNTP(), 4.0) - linkBeatNow(sc));
+        if (gap < 0.01) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(gap < 0.01);
+    sc.setLinkEnabled(false);
 }
 #endif  // CLOCKWORK_LINK
 

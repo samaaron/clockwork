@@ -131,9 +131,9 @@ void ClockworkClock::bindStateToShm(ClockworkClockState* region) {
     mImpl->boundState = region;
 
     // Binding into the arena is the moment this clock starts answering real
-    // clients, so it is the moment it needs a real epoch. No-op on a Link
-    // build (Link owns the origin) and no-op if one is already set — see
-    // LinkSession::anchorToWallClockIfUnset.
+    // clients, so it is the moment it needs a real epoch: beat 0 at the bind,
+    // on a Link build for Link's own timeline as well, so the two grids agree.
+    // No-op if an origin is already set — see LinkSession::anchorToWallClockIfUnset.
     mImpl->linkSession.anchorToWallClockIfUnset();
 }
 
