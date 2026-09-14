@@ -76,7 +76,7 @@ The published regions, in order of the table:
 | channel map | clockwork | live channel widths — also handed to the guest |
 | audio taps | clockwork | what left for the device and what arrived, every tick |
 | track taps | clockwork | scope streams from plugin-track returns |
-| guest window | guest | whatever the guest publishes (SuperSonic: its node tree) |
+| guest window | guest | whatever the guest publishes (SuperSonic: its node tree); its identity is in the entry's geometry, see below |
 | scope streams | guest | the guest's scope slots |
 
 Everything else — the control block, the counter, the three rings, the client
@@ -92,6 +92,15 @@ with a ring cursor the audio thread bumps every block, and a memory-map tool
 colours the arena in two strokes. `clockwork_arena_check` refuses a table whose
 runs and audiences disagree: a published region past its run, an unpublished
 one inside it, a boundary outside its half.
+
+**The guest window's identity.** The window's layout is the guest's, not
+clockwork's, so the table cannot describe its inside. It can say whose it is:
+the guest declares a magic and a layout version (`DspInfo::window_magic`,
+`window_version`) and clockwork copies them into the window entry's geometry
+(`CLOCKWORK_GEOM_WINDOW_MAGIC`, `CLOCKWORK_GEOM_WINDOW_VERSION`) when the guest
+binds — the one thing in the table written after it is published. A client
+that reads the window by hand checks them before it casts a pointer; zeros
+mean the guest has not declared, or has not bound yet.
 
 ## The table
 

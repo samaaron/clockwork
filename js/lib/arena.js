@@ -44,6 +44,8 @@ export const GEOM = Object.freeze({
   TRACK_SLOTS: 0, TRACK_SLOT_BYTES: 1, TRACK_SLOT_HEADER: 2, TRACK_RING_FRAMES: 3, TRACK_CHANNELS: 4, TRACK_FIRST_INDEX: 5,
   SLOTS_COUNT: 0, SLOTS_SLOT_BYTES: 1, SLOTS_HEADER_BYTES: 2, SLOTS_STRUCTS_OFF: 3, SLOTS_STRUCTS_BYTES: 4,
   SLOTS_STACK_OFF: 5, SLOTS_STACK_BYTES: 6,
+  // the guest window: what the guest declared its window to be, 0 until it binds
+  WINDOW_MAGIC: 0, WINDOW_VERSION: 1,
   // EVERY region: the audience, in the last word (ENTRY_WORDS - 4 geometry words)
   AUDIENCE: 11,
 });

@@ -229,6 +229,7 @@ TEST_CASE("arena: the audience word is the last geometry word of every entry", "
     CHECK(CLOCKWORK_GEOM_TRACK_FIRST_INDEX < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_SCOPE_CHANNELS   < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_TAPS_SAMPLE_RATE < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_WINDOW_VERSION   < CLOCKWORK_GEOM_AUDIENCE);
 }
 
 TEST_CASE("arena: what a client may read by hand is published, and only that", "[arena][audience]") {
@@ -318,4 +319,19 @@ TEST_CASE("arena: the check refuses a table whose runs and audiences disagree", 
         CHECK(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
         CHECK_FALSE(clockwork_arena_published(h, CLOCKWORK_ARENA_METRICS));
     }
+}
+
+TEST_CASE("arena: the guest window's identity is unknown until a guest declares it", "[arena][audience]") {
+    auto a = arena();
+    const auto* w = entry(a, CLOCKWORK_ARENA_GUEST_WINDOW);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_MAGIC]   == 0);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_VERSION] == 0);
+    // The engine writes what dsp_describe() declares when it binds the guest.
+    arenaSetGuestWindowIdentity(a.data(), 0x44554D59u, 3u);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_MAGIC]   == 0x44554D59u);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_VERSION] == 3u);
+    // Nothing else moved: the table is still the same contract.
+    const char* why = "";
+    CHECK(clockwork_arena_check(arenaHeader(a.data()), TOTAL_BUFFER_SIZE, &why));
+    CHECK(w->geom[CLOCKWORK_GEOM_AUDIENCE] == CLOCKWORK_AUDIENCE_PUBLISHED);
 }

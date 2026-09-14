@@ -162,6 +162,10 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_RING_HEADER_BYTES   = 4,
     /* metrics */
     CLOCKWORK_GEOM_METRICS_FIELDS      = 0,
+    /* the guest window: what the guest says its window is (DspInfo::window_magic,
+     * window_version), written when the guest binds; 0 until then */
+    CLOCKWORK_GEOM_WINDOW_MAGIC        = 0,
+    CLOCKWORK_GEOM_WINDOW_VERSION      = 1,
     /* clock anchors: byte offsets within the region */
     CLOCKWORK_GEOM_ANCHOR_NTP_START    = 0,   /* f64 */
     CLOCKWORK_GEOM_ANCHOR_DRIFT        = 1,   /* i32, microseconds */

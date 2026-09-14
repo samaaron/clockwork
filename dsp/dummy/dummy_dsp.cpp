@@ -695,6 +695,10 @@ const DspInfo* dsp_describe(void) {
         // Hear the host's inbound events (a keyboard, a pad) as they arrive,
         // so the path a self-directed guest takes them by is exercised here.
         /* wants_events            */ 1,
+        // What this guest's window is, for a client reading it by hand:
+        // 'DUMY', layout 1. The arena table carries it once the guest binds.
+        /* window_magic            */ 0x44554D59u,
+        /* window_version          */ 1u,
     };
     return &info;
 }

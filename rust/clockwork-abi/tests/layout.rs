@@ -57,6 +57,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release });
     expect!(mine, DspInfo {
         name, version, holds_schedule, arena_bytes_wanted, arena_bulk_bytes_wanted, wants_events,
+        window_magic, window_version,
     });
     expect!(mine, ClockworkAsset {
         struct_bytes, id, kind, origin, bytes, byte_count, channels, frames, sample_rate,
@@ -90,10 +91,11 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_bytes, entry_count, entry_bytes, state, block_published_end, guest_published_end,
         reserved, entries,
     });
-    let consts: [(&str, i64); 26] = [
+    let consts: [(&str, i64); 27] = [
         ("CLOCKWORK_AUDIENCE_PUBLISHED", ClockworkArenaAudience::PUBLISHED.0 as i64),
         ("CLOCKWORK_AUDIENCE_TRANSPORT", ClockworkArenaAudience::TRANSPORT.0 as i64),
         ("CLOCKWORK_GEOM_AUDIENCE", geom::AUDIENCE as i64),
+        ("CLOCKWORK_GEOM_WINDOW_VERSION", geom::WINDOW_VERSION as i64),
         ("CLOCKWORK_E_NOMEM", ClockworkStatus::E_NOMEM.0 as i64),
         ("CLOCKWORK_REGION_EGRESS", ClockworkRegionId::EGRESS.0 as i64),
         ("CLOCKWORK_REGION_NATIVE_STATS", ClockworkRegionId::NATIVE_STATS.0 as i64),

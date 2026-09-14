@@ -1668,6 +1668,9 @@ extern "C" {
         if (const DspInfo* info = dsp_describe()) {
             g_dsp_holds_schedule = info->holds_schedule != 0;
             g_dsp_wants_events   = info->wants_events != 0;
+            // Which guest, and which window layout: into the table, for the
+            // readers of the window (shared_memory.h arenaSetGuestWindowIdentity).
+            arenaSetGuestWindowIdentity(shared_memory, info->window_magic, info->window_version);
             // The other declaration read here: the address this DSP wants to
             // Kept, not printed here. Who the guest is belongs with the rest of
             // the identity — the banner, the version, the rate — and that is

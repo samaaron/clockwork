@@ -124,6 +124,11 @@ pub struct DspInfo {
     /// to `dsp_osc` as they arrive, each with its arrival timetag as a
     /// trailing `t` argument when the host knows it.
     pub wants_events: i32,
+    /// What the window is: a magic naming the guest's window format and the
+    /// version of that format, copied into the arena table's window entry
+    /// when the guest binds. 0 and 0: undeclared.
+    pub window_magic: u32,
+    pub window_version: u32,
 }
 
 // SAFETY: a DspInfo is immutable static data — string pointers into

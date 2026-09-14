@@ -417,3 +417,25 @@ TEST_CASE("dsp boundary: what the DSP logs leaves as an addressed OSC message",
                                         static_cast<uint32_t>(line->data.size()));
     REQUIRE(r.argString(0) == "boundary log probe");
 }
+
+// ── The guest's window has a name once the guest binds ────────────────────
+// The arena table's window entry carries what dsp_describe() declares
+// (DspInfo::window_magic, window_version), written at bind, so a client that
+// reads the window by hand knows which guest and which layout it is looking
+// at before it casts a pointer. The dummy guest declares 'DUMY', layout 1.
+TEST_CASE("dsp boundary: the table names the guest's window once the guest binds",
+          "[dsp][arena][audience]") {
+    lanes_test::boot();
+    const ClockworkArenaHeader* h = clockwork_arena_header();
+    REQUIRE(h != nullptr);
+    const ClockworkArenaEntry* w = clockwork_arena_find(h, CLOCKWORK_ARENA_GUEST_WINDOW);
+    REQUIRE(w != nullptr);
+    const DspInfo* info = dsp_describe();
+    REQUIRE(info != nullptr);
+    CHECK(info->window_magic == 0x44554D59u);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_MAGIC]   == info->window_magic);
+    CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_VERSION] == info->window_version);
+    // And it is a published region, in the guest's published run.
+    CHECK(clockwork_arena_published(h, CLOCKWORK_ARENA_GUEST_WINDOW));
+    CHECK(w->offset + w->bytes <= h->guest_published_end);
+}

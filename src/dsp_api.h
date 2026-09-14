@@ -338,6 +338,18 @@ typedef struct DspInfo {
      * sides: a DSP that sets this never learns which host it is on. */
     int32_t wants_events;
 
+    /* WHAT THE WINDOW IS. shm_window is the guest's to lay out and clockwork
+       never interprets it, so a client that reads the window by hand has no
+       way to know which guest wrote it, or which layout, before it casts a
+       pointer. These two words say: a magic naming the guest's window format
+       and the version of that format. Clockwork copies them into the arena
+       table's window entry when the guest binds (CLOCKWORK_GEOM_WINDOW_MAGIC,
+       CLOCKWORK_GEOM_WINDOW_VERSION), where every reader of the table finds
+       them. 0 and 0: undeclared — a client reading the window is on its own,
+       as it always was. */
+    uint32_t window_magic;
+    uint32_t window_version;
+
 } DspInfo;
 
 /* Static: describable before any instance exists, so a host can report what it

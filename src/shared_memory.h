@@ -1140,7 +1140,9 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     put(CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
         { CLIENT_SLOT_COUNT, CLIENT_SLOT_SIZE, CLIENT_SLOTS_HEADER_SIZE, CLIENT_SLOT_STRUCTS_OFFSET,
           CLIENT_SLOT_STRUCTS_SIZE, CLIENT_SLOT_STACK_OFFSET, CLIENT_SLOT_STACK_SIZE });
-    // the guest region, the published run: what the guest shows its clients
+    // the guest region, the published run: what the guest shows its clients.
+    // The window's identity (magic, version) is the guest's to declare and is
+    // written when it binds — arenaSetGuestWindowIdentity — so it is 0 here.
     put(CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     kPublished);
     put(CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     kPublished,
         { SHM_SCOPE_MAX_SCOPES, SHM_SCOPE_HEADER_SIZE, SHM_SCOPE_SLOT_SIZE, SHM_SCOPE_SLOT_HEADER_SIZE,
@@ -1159,6 +1161,22 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
 // The header at the front of an arena.
 inline const ClockworkArenaHeader* arenaHeader(const void* base) {
     return reinterpret_cast<const ClockworkArenaHeader*>(base);
+}
+
+// What the guest says its window is (DspInfo::window_magic, window_version),
+// into the window entry's geometry, when the guest binds. The one thing in
+// the table written after it is published — so a client knows which guest,
+// and which layout, before it casts a pointer into the window. Two plain
+// word stores: a reader that took the table before the guest bound sees
+// zeros, which mean "not yet declared", and asks again.
+inline void arenaSetGuestWindowIdentity(uint8_t* base, uint32_t magic, uint32_t version) {
+    auto* h = reinterpret_cast<ClockworkArenaHeader*>(base);
+    auto* e = const_cast<ClockworkArenaEntry*>(clockwork_arena_find(h, CLOCKWORK_ARENA_GUEST_WINDOW));
+    if (!e) return;
+    reinterpret_cast<std::atomic<uint32_t>*>(&e->geom[CLOCKWORK_GEOM_WINDOW_VERSION])
+        ->store(version, std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint32_t>*>(&e->geom[CLOCKWORK_GEOM_WINDOW_MAGIC])
+        ->store(magic, std::memory_order_release);
 }
 
 // ─── SAB layout cross-language assertions ──────────────────────────────────

@@ -113,6 +113,10 @@ pub mod geom {
     pub const SLOTS_STRUCTS_BYTES: usize = 4;
     pub const SLOTS_STACK_OFF: usize = 5;
     pub const SLOTS_STACK_BYTES: usize = 6;
+    /// The guest window: what the guest declared its window to be
+    /// (`DspInfo::window_magic`, `window_version`), 0 until it binds.
+    pub const WINDOW_MAGIC: usize = 0;
+    pub const WINDOW_VERSION: usize = 1;
     /// EVERY region: the audience (`ClockworkArenaAudience` bits), in the
     /// last word. A region's own geometry stops short of it.
     pub const AUDIENCE: usize = super::CLOCKWORK_ARENA_GEOM_WORDS - 1;
@@ -123,6 +127,7 @@ pub mod geom {
 const _: () = assert!(geom::AUDIENCE == CLOCKWORK_ARENA_GEOM_WORDS - 1);
 const _: () = assert!(geom::SLOTS_STACK_BYTES < geom::AUDIENCE);
 const _: () = assert!(geom::TRACK_FIRST_INDEX < geom::AUDIENCE);
+const _: () = assert!(geom::WINDOW_VERSION < geom::AUDIENCE);
 
 /// One region. 64 bytes.
 #[repr(C)]

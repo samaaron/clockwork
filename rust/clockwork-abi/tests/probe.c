@@ -31,6 +31,7 @@ int main(void) {
     S(DspInfo);
     F(DspInfo, name); F(DspInfo, version); F(DspInfo, holds_schedule);
     F(DspInfo, arena_bytes_wanted); F(DspInfo, arena_bulk_bytes_wanted); F(DspInfo, wants_events);
+    F(DspInfo, window_magic); F(DspInfo, window_version);
 
     S(ClockworkAsset);
     F(ClockworkAsset, struct_bytes); F(ClockworkAsset, id); F(ClockworkAsset, kind);
@@ -72,6 +73,7 @@ int main(void) {
     printf("const CLOCKWORK_AUDIENCE_PUBLISHED %d\n", (int)CLOCKWORK_AUDIENCE_PUBLISHED);
     printf("const CLOCKWORK_AUDIENCE_TRANSPORT %d\n", (int)CLOCKWORK_AUDIENCE_TRANSPORT);
     printf("const CLOCKWORK_GEOM_AUDIENCE %d\n", (int)CLOCKWORK_GEOM_AUDIENCE);
+    printf("const CLOCKWORK_GEOM_WINDOW_VERSION %d\n", (int)CLOCKWORK_GEOM_WINDOW_VERSION);
     printf("const CLOCKWORK_REGION_EGRESS %d\n", (int)CLOCKWORK_REGION_EGRESS);
     printf("const CLOCKWORK_REGION_NATIVE_STATS %d\n", (int)CLOCKWORK_REGION_NATIVE_STATS);
     printf("const kClockworkSinkOsc %d\n", (int)kClockworkSinkOsc);
