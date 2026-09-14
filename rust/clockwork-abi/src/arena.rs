@@ -118,6 +118,12 @@ pub mod geom {
     pub const AUDIENCE: usize = super::CLOCKWORK_ARENA_GEOM_WORDS - 1;
 }
 
+// The audience word is the last geometry word, and no region's own geometry
+// reaches it. Pinned at compile time, where the C header pins the same.
+const _: () = assert!(geom::AUDIENCE == CLOCKWORK_ARENA_GEOM_WORDS - 1);
+const _: () = assert!(geom::SLOTS_STACK_BYTES < geom::AUDIENCE);
+const _: () = assert!(geom::TRACK_FIRST_INDEX < geom::AUDIENCE);
+
 /// One region. 64 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -177,7 +183,7 @@ impl ClockworkArenaHeader {
     /// client may read by hand. False for a region the arena lacks, one
     /// that is transport or private, and one from a writer that never said.
     pub fn published(&self, id: ClockworkArenaRegion) -> bool {
-        self.find(id).map_or(false, |e| e.published())
+        self.find(id).is_some_and(|e| e.published())
     }
 
     /// True when this is a published table of a version this crate knows,
@@ -305,10 +311,4 @@ mod tests {
         assert!(!h.published(ClockworkArenaRegion::METRICS));
     }
 
-    #[test]
-    fn the_audience_word_is_the_last_geometry_word() {
-        assert_eq!(geom::AUDIENCE, CLOCKWORK_ARENA_GEOM_WORDS - 1);
-        assert!(geom::SLOTS_STACK_BYTES < geom::AUDIENCE);
-        assert!(geom::TRACK_FIRST_INDEX < geom::AUDIENCE);
-    }
 }
