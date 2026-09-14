@@ -46,6 +46,22 @@
  * ownership is a matter of which pointers are handed out and what the table
  * says. A tool that colours a memory map by owner reads it from here.
  *
+ * ── Audiences ─────────────────────────────────────────────────────────────
+ * Every entry also names who it is FOR, in its last geometry word
+ * (CLOCKWORK_GEOM_AUDIENCE, a ClockworkArenaAudience bit set). Owner is one
+ * axis; this is the other. A region that is PUBLISHED is a data contract:
+ * stable, versioned by this table, read by hand by any reader in a client
+ * process — the metrics, the clocks, the taps, the guest's window. A region
+ * that is TRANSPORT is the command plane, touched through the client ABI and
+ * never parsed by anyone else. The rest is the guest's own, or the host's.
+ *
+ * Each half is laid out as two contiguous runs, published first, and the
+ * header says where each run ends (block_published_end, guest_published_end):
+ * a tool colours a map in two strokes, and nothing a client reads by hand
+ * shares a cache line with a ring cursor the audio thread bumps every block.
+ * A writer from before these words wrote zeros there, which a reader takes as
+ * "not stated" rather than as a refusal.
+ *
  * ── Lifetime ──────────────────────────────────────────────────────────────
  * Written by whoever creates the arena, before anything else is placed in it,
  * with `state` stored last (release). A reader checks magic and version,
@@ -88,6 +104,15 @@ enum ClockworkArenaOwner {
     CLOCKWORK_OWNER_GUEST     = 2,   /* the DSP, through the pointers it was handed */
     CLOCKWORK_OWNER_CLIENT    = 3,   /* a client, through the client ABI */
     CLOCKWORK_OWNER_HOST      = 4,   /* the host, once, at boot or device start */
+};
+
+/* Who READS a region: a bit set in the last geometry word of every entry
+ * (CLOCKWORK_GEOM_AUDIENCE). 0 is nobody but the owner. */
+enum ClockworkArenaAudience {
+    CLOCKWORK_AUDIENCE_PUBLISHED = 1,   /* a data contract for any reader in a client process */
+    CLOCKWORK_AUDIENCE_GUEST     = 2,   /* the guest, through a pointer clockwork hands it */
+    CLOCKWORK_AUDIENCE_HOST      = 4,   /* the host */
+    CLOCKWORK_AUDIENCE_TRANSPORT = 8,   /* the command plane: the client ABI only, never by hand */
 };
 
 /* The regions. Stable numbers: a reader looks these up, never a position.
@@ -170,6 +195,9 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_SLOTS_STRUCTS_BYTES = 4,
     CLOCKWORK_GEOM_SLOTS_STACK_OFF     = 5,
     CLOCKWORK_GEOM_SLOTS_STACK_BYTES   = 6,
+    /* EVERY region: the audience (ClockworkArenaAudience), in the last word.
+     * A region's own geometry stops short of it. */
+    CLOCKWORK_GEOM_AUDIENCE            = CLOCKWORK_ARENA_GEOM_WORDS - 1,
 };
 
 /* One region. 64 bytes. */
@@ -194,9 +222,19 @@ typedef struct ClockworkArenaHeader {
     uint32_t entry_count;
     uint32_t entry_bytes;    /* sizeof(ClockworkArenaEntry) */
     uint32_t state;          /* CLOCKWORK_ARENA_PUBLISHED once the table may be trusted */
-    uint32_t reserved[5];
+    uint32_t block_published_end;   /* the block's published run is [header_bytes, here);
+                                       the rest of the block is transport. 0: not stated */
+    uint32_t guest_published_end;   /* the guest's published run is [guest_offset, here);
+                                       the rest is the guest's own. 0: not stated */
+    uint32_t reserved[3];
     ClockworkArenaEntry entries[CLOCKWORK_ARENA_MAX_ENTRIES];
 } ClockworkArenaHeader;
+
+/* Who an entry is for (ClockworkArenaAudience bits); 0 from a writer that
+ * did not say. */
+static inline uint32_t clockwork_arena_audience(const ClockworkArenaEntry* e) {
+    return e ? e->geom[CLOCKWORK_GEOM_AUDIENCE] : 0u;
+}
 
 /* The entry for a region, or NULL if the arena has none. */
 static inline const ClockworkArenaEntry*
@@ -206,6 +244,14 @@ clockwork_arena_find(const ClockworkArenaHeader* h, uint32_t id) {
     for (i = 0; i < h->entry_count && i < CLOCKWORK_ARENA_MAX_ENTRIES; ++i)
         if (h->entries[i].id == id) return &h->entries[i];
     return (const ClockworkArenaEntry*)0;
+}
+
+/* True when the arena has region `id` and it is a data contract a client may
+ * read by hand. False for a region the arena lacks, one that is transport or
+ * private, and one from a writer that never said. */
+static inline int clockwork_arena_published(const ClockworkArenaHeader* h, uint32_t id) {
+    const ClockworkArenaEntry* e = clockwork_arena_find(h, id);
+    return e != 0 && (clockwork_arena_audience(e) & CLOCKWORK_AUDIENCE_PUBLISHED) != 0u;
 }
 
 /* True when the first `bytes` of `base` carry a header this reader can use:
@@ -232,6 +278,26 @@ static inline int clockwork_arena_check(const ClockworkArenaHeader* h, uint32_t 
         if (e->offset < h->header_bytes) CLOCKWORK_ARENA_FAIL("a region overlaps the header");
         if (e->offset > h->arena_bytes || e->bytes > h->arena_bytes - e->offset)
             CLOCKWORK_ARENA_FAIL("a region runs past the arena");
+    }
+    /* The published runs, when the writer stated them: each inside its half,
+     * every published region inside its run, everything else after it. A
+     * writer that stated nothing (both zero) is not judged. */
+    if (h->block_published_end != 0u || h->guest_published_end != 0u) {
+        if (h->block_published_end < h->header_bytes || h->block_published_end > h->block_bytes)
+            CLOCKWORK_ARENA_FAIL("the block's published run runs past the block");
+        if (h->guest_published_end < h->guest_offset
+            || h->guest_published_end > h->guest_offset + h->guest_bytes)
+            CLOCKWORK_ARENA_FAIL("the guest's published run is outside the guest region");
+        for (i = 0; i < h->entry_count; ++i) {
+            const ClockworkArenaEntry* e = &h->entries[i];
+            const int in_guest = e->offset >= h->guest_offset;
+            const uint32_t end = in_guest ? h->guest_published_end : h->block_published_end;
+            const int published = (clockwork_arena_audience(e) & CLOCKWORK_AUDIENCE_PUBLISHED) != 0u;
+            if (published && e->offset + e->bytes > end)
+                CLOCKWORK_ARENA_FAIL("a published region outside the published run");
+            if (!published && e->offset < end)
+                CLOCKWORK_ARENA_FAIL("an unpublished region inside the published run");
+        }
     }
 #undef CLOCKWORK_ARENA_FAIL
     return 1;

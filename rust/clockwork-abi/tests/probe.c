@@ -69,6 +69,9 @@ int main(void) {
 
     /* The enumerators, so a renumbering is caught as well as a reshaping. */
     printf("const CLOCKWORK_E_NOMEM %d\n", (int)CLOCKWORK_E_NOMEM);
+    printf("const CLOCKWORK_AUDIENCE_PUBLISHED %d\n", (int)CLOCKWORK_AUDIENCE_PUBLISHED);
+    printf("const CLOCKWORK_AUDIENCE_TRANSPORT %d\n", (int)CLOCKWORK_AUDIENCE_TRANSPORT);
+    printf("const CLOCKWORK_GEOM_AUDIENCE %d\n", (int)CLOCKWORK_GEOM_AUDIENCE);
     printf("const CLOCKWORK_REGION_EGRESS %d\n", (int)CLOCKWORK_REGION_EGRESS);
     printf("const CLOCKWORK_REGION_NATIVE_STATS %d\n", (int)CLOCKWORK_REGION_NATIVE_STATS);
     printf("const kClockworkSinkOsc %d\n", (int)kClockworkSinkOsc);
@@ -98,7 +101,8 @@ int main(void) {
     F(ClockworkArenaHeader, magic); F(ClockworkArenaHeader, version); F(ClockworkArenaHeader, header_bytes);
     F(ClockworkArenaHeader, instance_id); F(ClockworkArenaHeader, arena_bytes); F(ClockworkArenaHeader, block_bytes);
     F(ClockworkArenaHeader, guest_offset); F(ClockworkArenaHeader, guest_bytes); F(ClockworkArenaHeader, entry_count);
-    F(ClockworkArenaHeader, entry_bytes); F(ClockworkArenaHeader, state); F(ClockworkArenaHeader, reserved);
+    F(ClockworkArenaHeader, entry_bytes); F(ClockworkArenaHeader, state);
+    F(ClockworkArenaHeader, block_published_end); F(ClockworkArenaHeader, guest_published_end); F(ClockworkArenaHeader, reserved);
     F(ClockworkArenaHeader, entries);
     printf("const CLOCKWORK_ARENA_MAGIC %u\n", (unsigned)CLOCKWORK_ARENA_MAGIC);
     printf("const CLOCKWORK_ARENA_VERSION %d\n", (int)CLOCKWORK_ARENA_VERSION);

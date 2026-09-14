@@ -16,6 +16,23 @@ pub const CLOCKWORK_ARENA_GEOM_WORDS: usize = 12;
 pub const CLOCKWORK_ARENA_LAYING_OUT: u32 = 0;
 pub const CLOCKWORK_ARENA_PUBLISHED: u32 = 1;
 
+/// Who READS a region: a bit set in the last geometry word of every entry
+/// (`geom::AUDIENCE`). Owner says who writes; this says who it is for.
+/// 0 is nobody but the owner — or a writer from before the word existed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct ClockworkArenaAudience(pub u32);
+impl ClockworkArenaAudience {
+    /// A data contract for any reader in a client process, read by hand.
+    pub const PUBLISHED: Self = Self(1);
+    /// The guest, through a pointer clockwork hands it.
+    pub const GUEST: Self = Self(2);
+    /// The host.
+    pub const HOST: Self = Self(4);
+    /// The command plane: the client ABI only, never by hand.
+    pub const TRANSPORT: Self = Self(8);
+}
+
 /// Who writes a region.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -96,6 +113,9 @@ pub mod geom {
     pub const SLOTS_STRUCTS_BYTES: usize = 4;
     pub const SLOTS_STACK_OFF: usize = 5;
     pub const SLOTS_STACK_BYTES: usize = 6;
+    /// EVERY region: the audience (`ClockworkArenaAudience` bits), in the
+    /// last word. A region's own geometry stops short of it.
+    pub const AUDIENCE: usize = super::CLOCKWORK_ARENA_GEOM_WORDS - 1;
 }
 
 /// One region. 64 bytes.
@@ -107,6 +127,18 @@ pub struct ClockworkArenaEntry {
     pub bytes: u32,
     pub owner: u32,
     pub geom: [u32; CLOCKWORK_ARENA_GEOM_WORDS],
+}
+
+impl ClockworkArenaEntry {
+    /// Who this region is for (`ClockworkArenaAudience` bits); 0 from a
+    /// writer that did not say.
+    pub fn audience(&self) -> u32 {
+        self.geom[geom::AUDIENCE]
+    }
+    /// A data contract a client may read by hand.
+    pub fn published(&self) -> bool {
+        self.audience() & ClockworkArenaAudience::PUBLISHED.0 != 0
+    }
 }
 
 /// The header, at arena offset 0.
@@ -124,7 +156,13 @@ pub struct ClockworkArenaHeader {
     pub entry_count: u32,
     pub entry_bytes: u32,
     pub state: u32,
-    pub reserved: [u32; 5],
+    /// The block's published run is `[header_bytes, block_published_end)`;
+    /// the rest of the block is transport. 0: not stated by the writer.
+    pub block_published_end: u32,
+    /// The guest's published run is `[guest_offset, guest_published_end)`;
+    /// the rest is the guest's own. 0: not stated.
+    pub guest_published_end: u32,
+    pub reserved: [u32; 3],
     pub entries: [ClockworkArenaEntry; CLOCKWORK_ARENA_MAX_ENTRIES as usize],
 }
 
@@ -133,6 +171,13 @@ impl ClockworkArenaHeader {
     pub fn find(&self, id: ClockworkArenaRegion) -> Option<&ClockworkArenaEntry> {
         let n = (self.entry_count as usize).min(CLOCKWORK_ARENA_MAX_ENTRIES as usize);
         self.entries[..n].iter().find(|e| e.id == id.0)
+    }
+
+    /// True when the arena has region `id` and it is a data contract a
+    /// client may read by hand. False for a region the arena lacks, one
+    /// that is transport or private, and one from a writer that never said.
+    pub fn published(&self, id: ClockworkArenaRegion) -> bool {
+        self.find(id).map_or(false, |e| e.published())
     }
 
     /// True when this is a published table of a version this crate knows,
@@ -158,6 +203,112 @@ impl ClockworkArenaHeader {
                 return Err("a region runs past the arena");
             }
         }
+        // The published runs, when the writer stated them: each inside its
+        // half, every published region inside its run, everything else after.
+        if self.block_published_end != 0 || self.guest_published_end != 0 {
+            if self.block_published_end < self.header_bytes || self.block_published_end > self.block_bytes {
+                return Err("the block's published run runs past the block");
+            }
+            if self.guest_published_end < self.guest_offset
+                || self.guest_published_end > self.guest_offset + self.guest_bytes
+            {
+                return Err("the guest's published run is outside the guest region");
+            }
+            for e in &self.entries[..self.entry_count as usize] {
+                let end = if e.offset >= self.guest_offset { self.guest_published_end } else { self.block_published_end };
+                if e.published() && e.offset + e.bytes > end {
+                    return Err("a published region outside the published run");
+                }
+                if !e.published() && e.offset < end {
+                    return Err("an unpublished region inside the published run");
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: u32, offset: u32, bytes: u32, audience: u32) -> ClockworkArenaEntry {
+        let mut geom = [0u32; CLOCKWORK_ARENA_GEOM_WORDS];
+        geom[geom::AUDIENCE] = audience;
+        ClockworkArenaEntry { id, offset, bytes, owner: ClockworkArenaOwner::CLOCKWORK.0, geom }
+    }
+
+    // A small arena: header, a published run of two regions, a transport run
+    // of one; a guest half with one published and one private region.
+    fn header() -> ClockworkArenaHeader {
+        let mut h = ClockworkArenaHeader {
+            magic: CLOCKWORK_ARENA_MAGIC, version: CLOCKWORK_ARENA_VERSION,
+            header_bytes: CLOCKWORK_ARENA_HEADER_BYTES, instance_id: 0,
+            arena_bytes: 12288, block_bytes: 8192, guest_offset: 8192, guest_bytes: 4096,
+            entry_count: 5, entry_bytes: core::mem::size_of::<ClockworkArenaEntry>() as u32,
+            state: CLOCKWORK_ARENA_PUBLISHED,
+            block_published_end: 6144, guest_published_end: 10240, reserved: [0; 3],
+            entries: [entry(0, 0, 0, 0); CLOCKWORK_ARENA_MAX_ENTRIES as usize],
+        };
+        h.entries[0] = entry(ClockworkArenaRegion::METRICS.0, 4096, 1024, ClockworkArenaAudience::PUBLISHED.0);
+        h.entries[1] = entry(ClockworkArenaRegion::CLOCK_STATE.0, 5120, 1024,
+                             ClockworkArenaAudience::PUBLISHED.0 | ClockworkArenaAudience::GUEST.0);
+        h.entries[2] = entry(ClockworkArenaRegion::IN_RING.0, 6144, 2048, ClockworkArenaAudience::TRANSPORT.0);
+        h.entries[3] = entry(ClockworkArenaRegion::GUEST_WINDOW.0, 8192, 2048, ClockworkArenaAudience::PUBLISHED.0);
+        h.entries[4] = entry(ClockworkArenaRegion::GUEST_PERSIST.0, 10240, 2048, ClockworkArenaAudience::GUEST.0);
+        h
+    }
+
+    #[test]
+    fn a_well_laid_out_table_passes_and_says_who_is_published() {
+        let h = header();
+        assert_eq!(h.check(12288), Ok(()));
+        assert!(h.published(ClockworkArenaRegion::METRICS));
+        assert!(h.published(ClockworkArenaRegion::GUEST_WINDOW));
+        assert!(!h.published(ClockworkArenaRegion::IN_RING));
+        assert!(!h.published(ClockworkArenaRegion::GUEST_PERSIST));
+        assert!(!h.published(ClockworkArenaRegion::SCOPE)); // absent
+        assert_eq!(h.find(ClockworkArenaRegion::CLOCK_STATE).unwrap().audience() & ClockworkArenaAudience::GUEST.0, 2);
+    }
+
+    #[test]
+    fn a_published_region_past_its_run_is_refused() {
+        let mut h = header();
+        h.entries[2].geom[geom::AUDIENCE] = ClockworkArenaAudience::PUBLISHED.0;
+        assert_eq!(h.check(12288), Err("a published region outside the published run"));
+    }
+
+    #[test]
+    fn an_unpublished_region_inside_the_run_is_refused() {
+        let mut h = header();
+        h.entries[0].geom[geom::AUDIENCE] = ClockworkArenaAudience::TRANSPORT.0;
+        assert_eq!(h.check(12288), Err("an unpublished region inside the published run"));
+    }
+
+    #[test]
+    fn a_boundary_outside_its_half_is_refused() {
+        let mut h = header();
+        h.block_published_end = 8192 + 16;
+        assert_eq!(h.check(12288), Err("the block's published run runs past the block"));
+        let mut h = header();
+        h.guest_published_end = 8192 - 16;
+        assert_eq!(h.check(12288), Err("the guest's published run is outside the guest region"));
+    }
+
+    #[test]
+    fn a_writer_that_said_nothing_is_not_judged() {
+        let mut h = header();
+        h.block_published_end = 0;
+        h.guest_published_end = 0;
+        for e in h.entries.iter_mut() { e.geom[geom::AUDIENCE] = 0; }
+        assert_eq!(h.check(12288), Ok(()));
+        assert!(!h.published(ClockworkArenaRegion::METRICS));
+    }
+
+    #[test]
+    fn the_audience_word_is_the_last_geometry_word() {
+        assert_eq!(geom::AUDIENCE, CLOCKWORK_ARENA_GEOM_WORDS - 1);
+        assert!(geom::SLOTS_STACK_BYTES < geom::AUDIENCE);
+        assert!(geom::TRACK_FIRST_INDEX < geom::AUDIENCE);
     }
 }

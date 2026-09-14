@@ -22,6 +22,11 @@ const HEADER_WORDS = 16;                    // the fixed fields before the entri
 
 export const OWNER = Object.freeze({ CLOCKWORK: 1, GUEST: 2, CLIENT: 3, HOST: 4 });
 
+// Who READS a region: a bit set in the last geometry word of every entry
+// (GEOM.AUDIENCE). Owner says who writes; this says who it is for. 0 is
+// nobody but the owner, or a writer from before the word existed.
+export const AUDIENCE = Object.freeze({ PUBLISHED: 1, GUEST: 2, HOST: 4, TRANSPORT: 8 });
+
 export const REGION = Object.freeze({
   CONTROL: 1, METRICS: 2, NATIVE_STATS: 3, CLOCK_STATE: 4, CLOCK_ANCHORS: 5,
   SAMPLE_CLOCK: 6, CHANNEL_MAP: 7, NODE_ID_COUNTER: 8, IN_RING: 9, OUT_RING: 10,
@@ -39,6 +44,8 @@ export const GEOM = Object.freeze({
   TRACK_SLOTS: 0, TRACK_SLOT_BYTES: 1, TRACK_SLOT_HEADER: 2, TRACK_RING_FRAMES: 3, TRACK_CHANNELS: 4, TRACK_FIRST_INDEX: 5,
   SLOTS_COUNT: 0, SLOTS_SLOT_BYTES: 1, SLOTS_HEADER_BYTES: 2, SLOTS_STRUCTS_OFF: 3, SLOTS_STRUCTS_BYTES: 4,
   SLOTS_STACK_OFF: 5, SLOTS_STACK_BYTES: 6,
+  // EVERY region: the audience, in the last word (ENTRY_WORDS - 4 geometry words)
+  AUDIENCE: 11,
 });
 
 /**
@@ -53,7 +60,7 @@ export function readArena(buffer, base) {
   if (base % 4 !== 0) throw new Error(`arena base ${base} is not 4-byte aligned`);
   const words = new Uint32Array(buffer, base, HEADER_WORDS);
   const [magic, version, headerBytes, instanceId, arenaBytes, blockBytes, guestOffset, guestBytes,
-         entryCount, entryBytes, state] = words;
+         entryCount, entryBytes, state, blockPublishedEnd, guestPublishedEnd] = words;
   if (magic !== ARENA_MAGIC) throw new Error(`not a clockwork arena (magic ${magic.toString(16)})`);
   if (version !== ARENA_VERSION) throw new Error(`arena version ${version}, this reader knows ${ARENA_VERSION}`);
   if (state !== ARENA_PUBLISHED) throw new Error('arena not yet published');
@@ -67,20 +74,46 @@ export function readArena(buffer, base) {
     if (id === 0) throw new Error(`arena entry ${i} is empty`);
     const offset = table[at + 1], bytes = table[at + 2];
     if (offset < headerBytes || offset + bytes > arenaBytes) throw new Error(`arena region ${id} lies outside the arena`);
-    entries.set(id, { id, offset, bytes, owner: table[at + 3], geom: Array.from(table.subarray(at + 4, at + ENTRY_WORDS)) });
+    const geom = Array.from(table.subarray(at + 4, at + ENTRY_WORDS));
+    entries.set(id, { id, offset, bytes, owner: table[at + 3], geom, audience: geom[GEOM.AUDIENCE] });
+  }
+  // The published runs, when the writer stated them: each inside its half,
+  // every published region inside its run, everything else after it.
+  if (blockPublishedEnd !== 0 || guestPublishedEnd !== 0) {
+    if (blockPublishedEnd < headerBytes || blockPublishedEnd > blockBytes)
+      throw new Error("the block's published run runs past the block");
+    if (guestPublishedEnd < guestOffset || guestPublishedEnd > guestOffset + guestBytes)
+      throw new Error("the guest's published run is outside the guest region");
+    for (const e of entries.values()) {
+      const end = e.offset >= guestOffset ? guestPublishedEnd : blockPublishedEnd;
+      const published = (e.audience & AUDIENCE.PUBLISHED) !== 0;
+      if (published && e.offset + e.bytes > end) throw new Error(`arena region ${e.id} is published but outside the published run`);
+      if (!published && e.offset < end) throw new Error(`arena region ${e.id} is inside the published run but not published`);
+    }
   }
   const region = (id) => {
     const e = entries.get(id);
     if (!e) throw new Error(`arena has no region ${id}`);
     return e;
   };
+  // A data contract a client may read by hand: the region exists and says so.
+  const published = (id) => {
+    const e = entries.get(id);
+    return !!e && (e.audience & AUDIENCE.PUBLISHED) !== 0;
+  };
 
   return {
-    header: { magic, version, headerBytes, instanceId, arenaBytes, blockBytes, guestOffset, guestBytes, entryCount },
+    header: { magic, version, headerBytes, instanceId, arenaBytes, blockBytes, guestOffset, guestBytes, entryCount,
+              blockPublishedEnd, guestPublishedEnd },
     entries,
     region,
+    published,
     has: (id) => entries.has(id),
-    constants: constantsFrom(region, entries, { arenaBytes, blockBytes, guestOffset, guestBytes, version, instanceId }),
+    // The worklet's flat constants need every region the engine carves; a
+    // reader of some other arena (a test's, a partial one) may never ask.
+    get constants() {
+      return constantsFrom(region, entries, { arenaBytes, blockBytes, guestOffset, guestBytes, version, instanceId });
+    },
   };
 }
 

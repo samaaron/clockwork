@@ -12,23 +12,30 @@ are a table that says what it holds. This document is that table's contract.
 (Not to be confused with `DspConfig::arena`, the guest's own memory, which
 lives outside this span — see BOUNDARY.md. The word predates both uses.)
 
-## Two halves
+## Two halves, four runs
 
 ```
 0 ┌──────────────────────────────┐
   │ header: magic, version, table│  4 KB reserved
   ├──────────────────────────────┤
   │ THE CLOCKWORK BLOCK          │  what clockwork keeps for its hosts and clients
-  │   control · metrics · stats  │
+  │  published:                  │  ── data contracts, read by hand by any client
+  │   metrics · stats            │
   │   clock anchors · clock state│
   │   sample clock · channel map │
-  │   IN ring · OUT · NRT-OUT    │
   │   audio taps · track taps    │
+  ├ · · · · · · · · · · · · · · ·┤ block_published_end
+  │  transport:                  │  ── the command plane, through the client ABI only
+  │   control · node id counter  │
+  │   IN ring · OUT · NRT-OUT    │
   │   client slots               │
   ├──────────────────────────────┤ block_bytes == guest_offset
   │ THE GUEST REGION             │  what the guest is handed base and length to
-  │   guest config · window      │
-  │   scope streams · persist    │
+  │  published:                  │  ── what the guest shows its clients
+  │   window · scope streams     │
+  ├ · · · · · · · · · · · · · · ·┤ guest_published_end
+  │  the guest's own:            │  ── config (host → guest) · persist
+  │   guest config · persist     │
   └──────────────────────────────┘ arena_bytes
 ```
 
@@ -44,6 +51,48 @@ Every table entry names its **owner** — clockwork, the guest, a client, or
 the host (which writes once, at boot or device start). A tool that colours a
 memory map reads that from the table; so does a reviewer.
 
+## Audiences
+
+Owner is who writes a region. The **audience** is who it is for, and it is
+the other axis: the last geometry word of every entry (`CLOCKWORK_GEOM_AUDIENCE`)
+holds a `ClockworkArenaAudience` bit set.
+
+| audience | meaning |
+|---|---|
+| `PUBLISHED` | a data contract: stable, versioned by this table, read **by hand** by any reader in a client process — a GUI, a spider, the web client, a Rust host |
+| `TRANSPORT` | the command plane: written and read only through the client ABI, never parsed by anyone else |
+| `GUEST` | the guest reads it, through a pointer clockwork hands it |
+| `HOST` | the host reads it |
+
+The published regions, in order of the table:
+
+| region | who writes | what a client reads |
+|---|---|---|
+| metrics | clockwork | the counters the HUD shows, including the clock's display copy |
+| native stats | clockwork | DSP load, overruns, control-thread timings |
+| clock anchors | host | NTP start time, drift, global offset |
+| clock state | clockwork | the Link timeline: tempo, beat origin, transport, meter — also handed to the guest |
+| sample clock | clockwork | sample position to DAC time, seqlocked |
+| channel map | clockwork | live channel widths — also handed to the guest |
+| audio taps | clockwork | what left for the device and what arrived, every tick |
+| track taps | clockwork | scope streams from plugin-track returns |
+| guest window | guest | whatever the guest publishes (SuperSonic: its node tree) |
+| scope streams | guest | the guest's scope slots |
+
+Everything else — the control block, the counter, the three rings, the client
+slots, the guest's config and persistent bytes — is not for reading by hand.
+A reader that wants to know asks `clockwork_arena_published(h, id)` (C),
+`header.published(id)` (Rust) or `arena.published(id)` (JS), and refuses a
+region that is not; a reader from before this word treats 0 as "not stated".
+
+Each half is laid out as two contiguous runs, the published regions first, and
+the header says where each run ends (`block_published_end`,
+`guest_published_end`). Nothing a client reads by hand shares a cache line
+with a ring cursor the audio thread bumps every block, and a memory-map tool
+colours the arena in two strokes. `clockwork_arena_check` refuses a table whose
+runs and audiences disagree: a published region past its run, an unpublished
+one inside it, a boundary outside its half.
+
 ## The table
 
 `src/clockwork_arena.h` is pure C and is the definition. Its shape:
@@ -55,7 +104,8 @@ memory map reads that from the table; so does a reviewer.
 | `instance_id` | which engine, for a process that will one day hold more than one; 0 |
 | `arena_bytes`, `block_bytes`, `guest_offset`, `guest_bytes` | the halves |
 | `entry_count`, `entry_bytes`, `state` | the table, and whether it may be trusted |
-| `entries[]` | `{id, offset, bytes, owner, geom[12]}` per region |
+| `block_published_end`, `guest_published_end` | where each half's published run ends (see Audiences); 0 from a writer that did not say |
+| `entries[]` | `{id, offset, bytes, owner, geom[12]}` per region; `geom[11]` is the audience |
 
 Regions are looked up **by id** (`ClockworkArenaRegion`), never by position.
 

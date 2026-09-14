@@ -444,17 +444,20 @@ static_assert(CLIENT_SLOT_COUNT <= 32,
 // and its tests: readers take the table the header carries (writeArenaHeader
 // below), which is filled from these.
 //
-// The order is chosen, not accumulated. Small state that is read every block
-// sits together at the front; the rings follow; the large arrays last, each
-// 16-aligned because their slot structs are alignas(16).
+// The order is chosen, not accumulated. Each half is two contiguous runs
+// (clockwork_arena.h, "Audiences"): first what is PUBLISHED — the data
+// contracts a client reads by hand — then what is not: the block's transport
+// (the control block, the rings, the counter, the client slots), the guest's
+// own (its config, its persistent bytes). Within a run, small state sits
+// together at the front and the large arrays last, each 16-aligned because
+// their slot structs are alignas(16). The header carries where each run ends.
 constexpr uint32_t alignArena16(uint32_t v) { return (v + 15u) & ~15u; }
 constexpr uint32_t alignArena8 (uint32_t v) { return (v + 7u)  & ~7u;  }
 
-// ── the clockwork block ──
+// ── the clockwork block: the published run ──
 constexpr uint32_t ARENA_HEADER_START   = 0;
 constexpr uint32_t ARENA_HEADER_SIZE    = CLOCKWORK_ARENA_HEADER_BYTES;
-constexpr uint32_t CONTROL_START        = ARENA_HEADER_START + ARENA_HEADER_SIZE;
-constexpr uint32_t METRICS_START        = CONTROL_START + CONTROL_SIZE;
+constexpr uint32_t METRICS_START        = ARENA_HEADER_START + ARENA_HEADER_SIZE;
 constexpr uint32_t NATIVE_STATS_START   = METRICS_START + METRICS_SIZE;
 // The host's clock anchors, as one region: the NTP start time (f64) then the
 // two offsets. The three names below are what the code has always used.
@@ -465,22 +468,29 @@ constexpr uint32_t GLOBAL_OFFSET_START  = DRIFT_OFFSET_START + DRIFT_OFFSET_SIZE
 constexpr uint32_t CLOCK_ANCHORS_SIZE   = NTP_START_TIME_SIZE + DRIFT_OFFSET_SIZE + GLOBAL_OFFSET_SIZE;
 constexpr uint32_t CLOCK_STATE_START    = alignArena8(CLOCK_ANCHORS_START + CLOCK_ANCHORS_SIZE);
 constexpr uint32_t SAMPLE_CLOCK_START   = alignArena16(CLOCK_STATE_START + CLOCK_STATE_SIZE);
-constexpr uint32_t NODE_ID_COUNTER_START = SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE;
-constexpr uint32_t CHANNEL_MAP_START    = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
-constexpr uint32_t IN_BUFFER_START      = alignArena16(CHANNEL_MAP_START + CHANNEL_MAP_SIZE);
+constexpr uint32_t CHANNEL_MAP_START    = alignArena16(SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE);
+constexpr uint32_t SHM_AUDIO_START      = alignArena16(CHANNEL_MAP_START + CHANNEL_MAP_SIZE);
+constexpr uint32_t SHM_TRACK_TAPS_START = alignArena16(SHM_AUDIO_START + SHM_AUDIO_TOTAL_SIZE);
+constexpr uint32_t CLOCKWORK_BLOCK_PUBLISHED_END = alignArena16(SHM_TRACK_TAPS_START + SHM_TRACK_TAPS_SIZE);
+
+// ── the clockwork block: the transport run ──
+constexpr uint32_t CONTROL_START        = CLOCKWORK_BLOCK_PUBLISHED_END;
+constexpr uint32_t NODE_ID_COUNTER_START = CONTROL_START + CONTROL_SIZE;
+constexpr uint32_t IN_BUFFER_START      = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
 constexpr uint32_t OUT_BUFFER_START     = IN_BUFFER_START + IN_BUFFER_SIZE;
 constexpr uint32_t NRT_OUT_BUFFER_START = OUT_BUFFER_START + OUT_BUFFER_SIZE;
-constexpr uint32_t SHM_AUDIO_START      = alignArena16(NRT_OUT_BUFFER_START + NRT_OUT_BUFFER_SIZE);
-constexpr uint32_t SHM_TRACK_TAPS_START = alignArena16(SHM_AUDIO_START + SHM_AUDIO_TOTAL_SIZE);
-constexpr uint32_t CLIENT_SLOTS_START   = alignArena16(SHM_TRACK_TAPS_START + SHM_TRACK_TAPS_SIZE);
+constexpr uint32_t CLIENT_SLOTS_START   = alignArena16(NRT_OUT_BUFFER_START + NRT_OUT_BUFFER_SIZE);
 constexpr uint32_t CLOCKWORK_BLOCK_SIZE = alignArena16(CLIENT_SLOTS_START + CLIENT_SLOTS_SIZE);
 
-// ── the guest region ──
+// ── the guest region: the published run ──
 constexpr uint32_t GUEST_REGION_START   = CLOCKWORK_BLOCK_SIZE;
-constexpr uint32_t GUEST_CONFIG_START   = GUEST_REGION_START;
-constexpr uint32_t SHM_WINDOW_START     = GUEST_CONFIG_START + GUEST_CONFIG_SIZE;
+constexpr uint32_t SHM_WINDOW_START     = GUEST_REGION_START;
 constexpr uint32_t SHM_SCOPE_START      = alignArena16(SHM_WINDOW_START + SHM_WINDOW_SIZE);
-constexpr uint32_t GUEST_PERSIST_START  = alignArena16(SHM_SCOPE_START + SHM_SCOPE_TOTAL_SIZE);
+constexpr uint32_t GUEST_PUBLISHED_END  = alignArena16(SHM_SCOPE_START + SHM_SCOPE_TOTAL_SIZE);
+
+// ── the guest region: the guest's own ──
+constexpr uint32_t GUEST_CONFIG_START   = GUEST_PUBLISHED_END;
+constexpr uint32_t GUEST_PERSIST_START  = alignArena16(GUEST_CONFIG_START + GUEST_CONFIG_SIZE);
 constexpr uint32_t TOTAL_BUFFER_SIZE    = GUEST_PERSIST_START + GUEST_PERSIST_SIZE;
 constexpr uint32_t GUEST_REGION_SIZE    = TOTAL_BUFFER_SIZE - GUEST_REGION_START;
 
@@ -494,6 +504,11 @@ static_assert(SHM_AUDIO_START % 16 == 0,    "shm_audio_buffer is alignas(16)");
 static_assert(SHM_TRACK_TAPS_START % 16 == 0, "shm_scope_stream is alignas(16)");
 static_assert(CLIENT_SLOTS_START % 16 == 0, "client slots are 16-byte aligned");
 static_assert(GUEST_REGION_START % 16 == 0, "the guest region starts 16-aligned");
+static_assert(CLOCKWORK_BLOCK_PUBLISHED_END % 16 == 0 && CLOCKWORK_BLOCK_PUBLISHED_END <= CLOCKWORK_BLOCK_SIZE,
+              "the block's published run ends 16-aligned, inside the block");
+static_assert(GUEST_PUBLISHED_END % 16 == 0 && GUEST_PUBLISHED_END <= TOTAL_BUFFER_SIZE,
+              "the guest's published run ends 16-aligned, inside the arena");
+static_assert(SHM_WINDOW_START % 16 == 0,   "the guest window starts 16-aligned");
 static_assert((SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE) % 16 == 0,
               "scope slots must be 16-byte aligned for shm_scope_stream");
 static_assert(GUEST_PERSIST_START % 16 == 0, "the guest's persistent bytes start 16-aligned");
@@ -1079,45 +1094,62 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     h->guest_offset = GUEST_REGION_START;
     h->guest_bytes  = GUEST_REGION_SIZE;
     h->entry_bytes  = sizeof(ClockworkArenaEntry);
+    h->block_published_end = CLOCKWORK_BLOCK_PUBLISHED_END;
+    h->guest_published_end = GUEST_PUBLISHED_END;
     uint32_t n = 0;
-    const auto put = [&](uint32_t id, uint32_t offset, uint32_t bytes, uint32_t owner,
+    // id, where, who writes it, who it is for (the last geometry word), and
+    // the geometry a reader walks it by.
+    const auto put = [&](uint32_t id, uint32_t offset, uint32_t bytes, uint32_t owner, uint32_t audience,
                          std::initializer_list<uint32_t> geom = {}) {
         ClockworkArenaEntry& e = h->entries[n++];
         e.id = id; e.offset = offset; e.bytes = bytes; e.owner = owner;
         uint32_t i = 0;
         for (uint32_t g : geom) e.geom[i++] = g;
+        e.geom[CLOCKWORK_GEOM_AUDIENCE] = audience;
     };
-    put(CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, { METRICS_SIZE / 4u });
-    put(CLOCKWORK_ARENA_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,
+    constexpr uint32_t kPublished = CLOCKWORK_AUDIENCE_PUBLISHED;
+    constexpr uint32_t kTransport = CLOCKWORK_AUDIENCE_TRANSPORT;
+    // the block, the published run: the contracts
+    put(CLOCKWORK_ARENA_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublished,
+        { METRICS_SIZE / 4u });
+    put(CLOCKWORK_ARENA_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublished);
+    put(CLOCKWORK_ARENA_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublished,
         { NTP_START_TIME_START - CLOCK_ANCHORS_START, DRIFT_OFFSET_START - CLOCK_ANCHORS_START,
           GLOBAL_OFFSET_START - CLOCK_ANCHORS_START });
-    put(CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK);
-    put(CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK,
+    // The two the guest is handed read-only pointers to (DspConfig::clock, channel_map).
+    put(CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
+        kPublished | CLOCKWORK_AUDIENCE_GUEST);
+    put(CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublished);
+    put(CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
+        kPublished | CLOCKWORK_AUDIENCE_GUEST);
+    put(CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kPublished,
         { SHM_AUDIO_SLOTS, SHM_AUDIO_SLOT_SIZE, SHM_AUDIO_HEADER_SIZE, SHM_AUDIO_FRAMES,
           SHM_AUDIO_CHANNELS, SHM_AUDIO_SAMPLE_RATE });
-    put(CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK,
+    put(CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kPublished,
         { SHM_TRACK_TAPS_SLOTS, SHM_SCOPE_SLOT_SIZE, SHM_SCOPE_SLOT_HEADER_SIZE, SHM_SCOPE_RING_FRAMES,
           SHM_SCOPE_CHANNELS, SHM_SCOPE_TRACK_SLOT_BASE });
-    put(CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,
+    // the block, the transport run: the command plane
+    put(CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kTransport);
+    put(CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kTransport);
+    put(CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT,    kTransport,
+        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    put(CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    put(CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    put(CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
         { CLIENT_SLOT_COUNT, CLIENT_SLOT_SIZE, CLIENT_SLOTS_HEADER_SIZE, CLIENT_SLOT_STRUCTS_OFFSET,
           CLIENT_SLOT_STRUCTS_SIZE, CLIENT_SLOT_STACK_OFFSET, CLIENT_SLOT_STACK_SIZE });
-    put(CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST);
-    put(CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST);
-    put(CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,
+    // the guest region, the published run: what the guest shows its clients
+    put(CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     kPublished);
+    put(CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     kPublished,
         { SHM_SCOPE_MAX_SCOPES, SHM_SCOPE_HEADER_SIZE, SHM_SCOPE_SLOT_SIZE, SHM_SCOPE_SLOT_HEADER_SIZE,
           SHM_SCOPE_RING_FRAMES, SHM_SCOPE_CHANNELS });
-    put(CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST);
+    // the guest region, the guest's own
+    put(CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
+        CLOCKWORK_AUDIENCE_GUEST | CLOCKWORK_AUDIENCE_HOST);
+    put(CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,
+        CLOCKWORK_AUDIENCE_GUEST);
     h->entry_count = n;
     std::atomic_thread_fence(std::memory_order_release);
     reinterpret_cast<std::atomic<uint32_t>*>(&h->state)->store(CLOCKWORK_ARENA_PUBLISHED,

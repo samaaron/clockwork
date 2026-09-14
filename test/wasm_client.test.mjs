@@ -87,6 +87,17 @@ async function bootEngine() {
   assert.equal(bufferConstants.MESSAGE_MAGIC, 0xDEADBEEF, "the ring's frame magic is in the table");
   assert.equal(arena.header.blockBytes, arena.header.guestOffset, "the guest region starts where the block ends");
   assert.ok(arena.region(REGION.IN_RING).offset >= arena.header.headerBytes, "no region overlaps the header");
+  // Audiences: the contracts a client reads by hand are published and sit
+  // in each half's published run; the command plane is transport, after it.
+  assert.ok(arena.published(REGION.METRICS), "metrics are a published contract");
+  assert.ok(arena.published(REGION.CLOCK_STATE), "the clock state is a published contract");
+  assert.ok(arena.published(REGION.AUDIO_TAPS), "the audio taps are a published contract");
+  assert.ok(arena.published(REGION.GUEST_WINDOW), "the guest window is a published contract");
+  assert.ok(!arena.published(REGION.IN_RING), "the ingress ring is transport");
+  assert.ok(!arena.published(REGION.CONTROL), "the control block is transport");
+  assert.ok(arena.header.blockPublishedEnd > arena.header.headerBytes, "the block's published run is stated");
+  assert.ok(arena.region(REGION.METRICS).offset + arena.region(REGION.METRICS).bytes <= arena.header.blockPublishedEnd);
+  assert.ok(arena.region(REGION.CONTROL).offset >= arena.header.blockPublishedEnd);
 
   return { wasmModule, wasmMemory, engine, ringBufferBase, bufferConstants };
 }

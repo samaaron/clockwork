@@ -46,29 +46,40 @@ TEST_CASE("arena: the header is the front of the arena and says so", "[arena]") 
     CHECK(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
 }
 
+namespace {
+// Every region: where the constants put it, who writes it, and who it is for.
+struct Expect { uint32_t id, start, size, owner, audience; };
+constexpr uint32_t PUB = CLOCKWORK_AUDIENCE_PUBLISHED, GUEST = CLOCKWORK_AUDIENCE_GUEST,
+                   HOST = CLOCKWORK_AUDIENCE_HOST, TRANSPORT = CLOCKWORK_AUDIENCE_TRANSPORT;
+const Expect kExpect[] = {
+    // the block's published run: a data contract for any reader
+    { CLOCKWORK_ARENA_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    { CLOCKWORK_ARENA_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    { CLOCKWORK_ARENA_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      PUB },
+    { CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, PUB | GUEST },
+    { CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    { CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, PUB | GUEST },
+    { CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    { CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    // the block's transport run: the command plane, touched through the client ABI only
+    { CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
+    { CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
+    { CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT,    TRANSPORT },
+    { CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
+    { CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
+    { CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT },
+    // the guest's published run: what the guest shows its clients
+    { CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     PUB },
+    { CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     PUB },
+    // the guest's own: nobody else's business
+    { CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,      GUEST | HOST },
+    { CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,     GUEST },
+};
+} // namespace
+
 TEST_CASE("arena: every region is where the constants put it", "[arena]") {
     auto a = arena();
-    struct Expect { uint32_t id, start, size, owner; };
-    const Expect expect[] = {
-        { CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST },
-        { CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT },
-        { CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK },
-        { CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT },
-        { CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST },
-        { CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST },
-        { CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST },
-        { CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST },
-    };
+    const auto& expect = kExpect;
     const auto* h = arenaHeader(a.data());
     CHECK(h->entry_count == sizeof(expect) / sizeof(expect[0]));
     for (const auto& x : expect) {
@@ -78,6 +89,7 @@ TEST_CASE("arena: every region is where the constants put it", "[arena]") {
         CHECK(e->offset == x.start);
         CHECK(e->bytes  == x.size);
         CHECK(e->owner  == x.owner);
+        CHECK(clockwork_arena_audience(e) == x.audience);
         // Inside the arena, and never inside the header.
         CHECK(e->offset >= h->header_bytes);
         CHECK(e->offset + e->bytes <= h->arena_bytes);
@@ -187,7 +199,123 @@ TEST_CASE("arena: a reader refuses what it cannot use, and says why", "[arena]")
         CHECK(std::string(why) == "arena has no metrics");
     }
     SECTION("an id it does not know is not an error") {
-        h->entries[h->entry_count++] = ClockworkArenaEntry{ 999, h->header_bytes, 16, CLOCKWORK_OWNER_CLOCKWORK, {} };
+        // A region from a newer engine, in the published run and marked so:
+        // a reader that does not know the id walks past it.
+        ClockworkArenaEntry e{ 999, h->header_bytes, 16, CLOCKWORK_OWNER_CLOCKWORK, {} };
+        e.geom[CLOCKWORK_GEOM_AUDIENCE] = CLOCKWORK_AUDIENCE_PUBLISHED;
+        h->entries[h->entry_count++] = e;
         CHECK(ShmReaderLayout::from_arena(a.data(), a.size(), L, &why));
+    }
+}
+
+// ── Audiences ────────────────────────────────────────────────────────────────
+// Owner says who writes a region; the audience word says who it is FOR. Each
+// half is laid out as two runs — the published regions first, then the ones
+// that are transport or private — and the header names the boundary, so a
+// tool colours a map in two strokes and nothing a client reads by hand
+// shares a cache line with a ring cursor.
+
+TEST_CASE("arena: the audience word is the last geometry word of every entry", "[arena][audience]") {
+    auto a = arena();
+    const auto* h = arenaHeader(a.data());
+    CHECK(CLOCKWORK_GEOM_AUDIENCE == CLOCKWORK_ARENA_GEOM_WORDS - 1);
+    for (uint32_t i = 0; i < h->entry_count; ++i) {
+        INFO("region " << h->entries[i].id);
+        CHECK(h->entries[i].geom[CLOCKWORK_GEOM_AUDIENCE] != 0);   // nobody is for nobody
+        CHECK(clockwork_arena_audience(&h->entries[i]) == h->entries[i].geom[CLOCKWORK_GEOM_AUDIENCE]);
+    }
+    // A region's own geometry never reaches the audience word.
+    CHECK(CLOCKWORK_GEOM_SLOTS_STACK_BYTES < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_TRACK_FIRST_INDEX < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_SCOPE_CHANNELS   < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_TAPS_SAMPLE_RATE < CLOCKWORK_GEOM_AUDIENCE);
+}
+
+TEST_CASE("arena: what a client may read by hand is published, and only that", "[arena][audience]") {
+    auto a = arena();
+    // The data contracts: read by the GUI, a spider, the web client, by hand.
+    for (uint32_t id : { CLOCKWORK_ARENA_METRICS, CLOCKWORK_ARENA_NATIVE_STATS, CLOCKWORK_ARENA_CLOCK_ANCHORS,
+                         CLOCKWORK_ARENA_CLOCK_STATE, CLOCKWORK_ARENA_SAMPLE_CLOCK, CLOCKWORK_ARENA_CHANNEL_MAP,
+                         CLOCKWORK_ARENA_AUDIO_TAPS, CLOCKWORK_ARENA_TRACK_TAPS,
+                         CLOCKWORK_ARENA_GUEST_WINDOW, CLOCKWORK_ARENA_SCOPE }) {
+        INFO("region " << id);
+        CHECK(clockwork_arena_published(arenaHeader(a.data()), id));
+    }
+    // The command plane: only the client ABI touches it. The guest's own: only the guest.
+    for (uint32_t id : { CLOCKWORK_ARENA_CONTROL, CLOCKWORK_ARENA_NODE_ID_COUNTER, CLOCKWORK_ARENA_IN_RING,
+                         CLOCKWORK_ARENA_OUT_RING, CLOCKWORK_ARENA_NRT_OUT_RING, CLOCKWORK_ARENA_CLIENT_SLOTS,
+                         CLOCKWORK_ARENA_GUEST_CONFIG, CLOCKWORK_ARENA_GUEST_PERSIST }) {
+        INFO("region " << id);
+        CHECK_FALSE(clockwork_arena_published(arenaHeader(a.data()), id));
+    }
+    // What the guest is handed read-only pointers to says so.
+    CHECK(clockwork_arena_audience(entry(a, CLOCKWORK_ARENA_CLOCK_STATE)) & CLOCKWORK_AUDIENCE_GUEST);
+    CHECK(clockwork_arena_audience(entry(a, CLOCKWORK_ARENA_CHANNEL_MAP)) & CLOCKWORK_AUDIENCE_GUEST);
+    CHECK_FALSE(clockwork_arena_audience(entry(a, CLOCKWORK_ARENA_IN_RING)) & CLOCKWORK_AUDIENCE_GUEST);
+    // An id the arena has not got is not published.
+    CHECK_FALSE(clockwork_arena_published(arenaHeader(a.data()), 999));
+}
+
+TEST_CASE("arena: each half is two contiguous runs, published first, and the header says where", "[arena][audience]") {
+    auto a = arena();
+    const auto* h = arenaHeader(a.data());
+    REQUIRE(h->block_published_end != 0);
+    REQUIRE(h->guest_published_end != 0);
+    CHECK(h->block_published_end == CLOCKWORK_BLOCK_PUBLISHED_END);
+    CHECK(h->guest_published_end == GUEST_PUBLISHED_END);
+    CHECK(h->block_published_end >  h->header_bytes);
+    CHECK(h->block_published_end <= h->block_bytes);
+    CHECK(h->guest_published_end >  h->guest_offset);
+    CHECK(h->guest_published_end <= h->arena_bytes);
+    for (const auto& x : kExpect) {
+        INFO("region " << x.id);
+        const auto* e = entry(a, x.id);
+        REQUIRE(e != nullptr);
+        const bool published = (x.audience & CLOCKWORK_AUDIENCE_PUBLISHED) != 0;
+        const bool in_guest  = e->offset >= h->guest_offset;
+        const uint32_t end   = in_guest ? h->guest_published_end : h->block_published_end;
+        if (published) CHECK(e->offset + e->bytes <= end);   // inside its half's published run
+        else           CHECK(e->offset >= end);              // after it
+    }
+    // The published runs are the FRONT of each half: the first region of the
+    // block and the first of the guest region are both published.
+    CHECK(METRICS_START == h->header_bytes);
+    CHECK(SHM_WINDOW_START == h->guest_offset);
+}
+
+TEST_CASE("arena: the check refuses a table whose runs and audiences disagree", "[arena][audience]") {
+    auto a = arena();
+    auto* h = reinterpret_cast<ClockworkArenaHeader*>(a.data());
+    const char* why = "";
+    SECTION("a published region past the published run") {
+        // Mark a transport region as published without moving it.
+        const_cast<ClockworkArenaEntry*>(clockwork_arena_find(h, CLOCKWORK_ARENA_IN_RING))
+            ->geom[CLOCKWORK_GEOM_AUDIENCE] = CLOCKWORK_AUDIENCE_PUBLISHED;
+        CHECK_FALSE(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
+        CHECK(std::string(why) == "a published region outside the published run");
+    }
+    SECTION("an unpublished region inside the published run") {
+        const_cast<ClockworkArenaEntry*>(clockwork_arena_find(h, CLOCKWORK_ARENA_METRICS))
+            ->geom[CLOCKWORK_GEOM_AUDIENCE] = CLOCKWORK_AUDIENCE_TRANSPORT;
+        CHECK_FALSE(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
+        CHECK(std::string(why) == "an unpublished region inside the published run");
+    }
+    SECTION("a boundary outside its half") {
+        h->block_published_end = h->block_bytes + 16;
+        CHECK_FALSE(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
+        CHECK(std::string(why) == "the block's published run runs past the block");
+    }
+    SECTION("a guest boundary before the guest region") {
+        h->guest_published_end = h->guest_offset - 16;
+        CHECK_FALSE(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
+        CHECK(std::string(why) == "the guest's published run is outside the guest region");
+    }
+    SECTION("a writer that says nothing about runs is still readable") {
+        // An older table: zero boundaries, zero audiences. Not a refusal —
+        // the reader just cannot ask who a region is for.
+        h->block_published_end = h->guest_published_end = 0;
+        for (uint32_t i = 0; i < h->entry_count; ++i) h->entries[i].geom[CLOCKWORK_GEOM_AUDIENCE] = 0;
+        CHECK(clockwork_arena_check(h, TOTAL_BUFFER_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_published(h, CLOCKWORK_ARENA_METRICS));
     }
 }
