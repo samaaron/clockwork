@@ -1,5 +1,9 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial -->
 <!-- Copyright (c) 2025-2026 Sam Aaron -->
+
+> **Note: Still Alpha Status**: _Clockwork is in active development._ The ABI and memory layout are likely to fluctuate wildy during initial development. _Feedback and ideas are most welcome._
+
+
 # clockwork
 ```
   ▄████▄ ██      ▄█████▄  ▄████▄ ██  ▄█▀
