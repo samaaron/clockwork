@@ -43,7 +43,7 @@ export const SC_FLAG_LINK_AUDIO_PUBLISH = 1 << 2;
 // PM-mode worklet message types. The main thread posts these and the
 // worklet's onmessage handler dispatches on them.
 export const ClockworkClockMessageType = Object.freeze({
-  SET_SESSION_BPM:              'setSessionBpm',       // {bpm, nowNtp}: re-anchored at nowNtp
+  SET_SESSION_BPM:              'setSessionBpm',       // {bpm, nowNtp}: re-anchored at nowNtp, the instant it changes
   SET_SESSION_IS_PLAYING:       'setSessionIsPlaying',
   SET_SESSION_BEAT_ORIGIN_NTP:  'setSessionBeatOriginNtp',
   SET_SESSION_METER:            'setSessionMeter',      // {num, den}

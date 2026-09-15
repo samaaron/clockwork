@@ -236,9 +236,16 @@ void LinkSession::stopWorker() {
 
 // ─── Session mutators (mirror into the SAB) ──────────────────────────────────
 
-void LinkSession::setBpm(double bpm) {
+void LinkSession::setBpm(double bpm, double atNtpSeconds) {
+    // The instant it changes (0: now), placed on Link's clock by the offset
+    // between the two, sampled right now — as the start/stop callback places
+    // Link's transitions on the wall clock. Link holds the beat there.
+    const double nowNtp = wallClockNTP();
+    const auto   nowLink = mImpl->link.clock().micros();
+    const double at = atNtpSeconds > 0.0 ? atNtpSeconds : nowNtp;
+    const auto   atLink = nowLink + std::chrono::microseconds(static_cast<int64_t>((at - nowNtp) * 1e6));
     auto st = mImpl->link.captureAppSessionState();
-    st.setTempo(bpm, mImpl->link.clock().micros());
+    st.setTempo(bpm, atLink);
     mImpl->link.commitAppSessionState(st);
     // Mirror the input synchronously so getBpm() reflects it immediately. Link's
     // tempo callback (applyTempoChange) then re-syncs the mirror to Link's
@@ -250,7 +257,7 @@ void LinkSession::setBpm(double bpm) {
     // RE-ANCHOR WITH IT (ClockworkClockState::retempo): this write is synchronous
     // while the callback's re-anchor is not, so without it every local tempo
     // change opened a window where the mirror reported a jumped beat.
-    if (ClockworkClockState* s = mImpl->clock.state()) s->retempo(bpm, wallClockNTP());
+    if (ClockworkClockState* s = mImpl->clock.state()) s->retempo(bpm, at);
 }
 
 void LinkSession::setIsPlaying(bool playing, double atNtpSeconds) {

@@ -90,3 +90,18 @@ test("setIsPlaying stamps when the transport changed", () => {
   assert.equal(clock.isPlaying(), false);
   assert.equal(clock.getIsPlayingAtNtp(), 600.25);
 });
+
+// A scheduler working its schedule-ahead in front of the clock changes the
+// tempo where the change will be heard, and has already worked out the beats
+// up to there at the old tempo: the grid must hold the beat at that instant.
+test("setBpm at an instant holds the beat playing then, not now", () => {
+  const clock = headlessClock();
+  clock.setBpm(120);
+  clock.requestBeatAtTime(0, 1000, 4);           // beat 0 at t=1000
+  const now = 1010, at = 1010.5;                 // beat 20 now, 21 at the change
+  clock.setBpm(60, at, now);
+  assert.equal(clock.getBpm(), 60);
+  close(clock.beatAtTime(at, 4), 21, "the beat at the change held");
+  close(clock.timeAtBeat(22, 4), at + 1, "a beat a second from there");
+});
+

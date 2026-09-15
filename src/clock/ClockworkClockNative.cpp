@@ -247,10 +247,10 @@ void ClockworkClock::setTimelinesChangedCallback(std::function<void()> cb) {
 // sync (writes through Link + its callbacks on the Ableton path; direct SAB
 // writes on the session-of-one path).
 
-void ClockworkClock::setBpm(double bpm) {
+void ClockworkClock::setBpm(double bpm, double atNtpSeconds) {
     // Guard div-by-zero in beat math (timeAtBeat / requestBeatAtTime).
     if (!(bpm >= 1.0)) bpm = 1.0;
-    mImpl->linkSession.setBpm(bpm);
+    mImpl->linkSession.setBpm(bpm, atNtpSeconds);
 }
 
 void ClockworkClock::setIsPlaying(bool playing, double atNtpSeconds) {

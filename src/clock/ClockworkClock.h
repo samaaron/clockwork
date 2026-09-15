@@ -55,7 +55,14 @@ public:
 
     // ─── Session mutators (app-thread) ────────────────────────────────────
 
-    void setBpm(double bpm);
+    // The tempo, changing at atNtpSeconds (0: now) without moving the beat
+    // playing then. A scheduler that works ahead gives the instant its change
+    // will be heard — Sonic Pi's set_link_bpm! changes the tempo its
+    // schedule-ahead after now, and its beats from there on are worked out
+    // at the new tempo — so the grid agrees with what it has scheduled. Link
+    // keeps one timeline, not a pending change: beats before the instant
+    // move with it.
+    void setBpm(double bpm, double atNtpSeconds = 0.0);
     void setIsPlaying(bool playing, double atNtpSeconds);
     // The Link timeline's meter: how quarter-note beats group into bars
     // (timeline(0).meter_num / meter_den, and its barAt). Written straight

@@ -124,8 +124,14 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             auto it = msg.ArgumentsBegin();
             if (it == msg.ArgumentsEnd() || !it->IsFloat()) return true;
             const double bpm = it->AsFloatUnchecked();
+            // Optionally the instant it changes, as NTP micros (int64, like
+            // the rpc verbs' times; an int32 here is the reply token): the
+            // beat playing then is held. Without one, now.
+            double atNtp = 0.0;
+            if (++it != msg.ArgumentsEnd() && it->IsInt64())
+                atNtp = static_cast<double>(it->AsInt64Unchecked()) * 1e-6;
             if (id == 0) {
-                clock.setBpm(bpm);                      // Link timeline
+                clock.setBpm(bpm, atNtp);               // Link timeline
             } else {
                 // Manual set on a midi timeline (claim the slot if this port
                 // hasn't clocked yet). A live external clock pulse overrides it

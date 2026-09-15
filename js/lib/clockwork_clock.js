@@ -104,27 +104,31 @@ export class ClockworkClock {
   // ── Session mutators ───────────────────────────────────────────────────
 
   /**
-   * Change the tempo without moving the beat that is playing: the grid is
-   * re-anchored at `nowNtp` (clock_math.js retempoOrigin), which defaults to
-   * the audio thread's now. Before this, setBpm stored the tempo against the
-   * old origin and every web tempo change jumped the beat — the same defect
-   * the C++ sessions had (test_clock_tempo_change.cpp), on the path a page
+   * Change the tempo without moving the beat playing at the instant it
+   * changes: the grid is re-anchored there (clock_math.js retempoOrigin).
+   * That instant is `atNtpSeconds` when one is given — a scheduler changes
+   * the tempo where the change will be heard, its schedule-ahead after now,
+   * and the grid must agree with the beats it has already worked out — and
+   * otherwise now. Before this, setBpm stored the tempo against the old
+   * origin and every web tempo change jumped the beat — the same defect the
+   * C++ sessions had (test_clock_tempo_change.cpp), on the path a page
    * actually calls.
    *
    * @param {number} bpm
-   * @param {number} [atNtpSeconds=0] — honoured by a Link backing
-   * @param {number} [nowNtp] — the instant whose beat is held; tests pass one
+   * @param {number} [atNtpSeconds=0] — the instant the tempo changes; 0 is now
+   * @param {number} [nowNtp] — now, when no instant is given; tests pass one
    */
   setBpm(bpm, atNtpSeconds = 0, nowNtp = this.#nowForRetempo()) {
     bpm = clampBpm(bpm);
-    this.#localBeatOriginNtp = retempoOrigin(this.#localBeatOriginNtp, this.#localBpm, bpm, nowNtp);
+    const pivot = atNtpSeconds > 0 ? atNtpSeconds : nowNtp;
+    this.#localBeatOriginNtp = retempoOrigin(this.#localBeatOriginNtp, this.#localBpm, bpm, pivot);
     this.#localBpm = bpm;
     if (this.#sabViews) {
-      retempoClock(this.#sabViews, bpm, nowNtp);
+      retempoClock(this.#sabViews, bpm, pivot);
     } else if (this.#workletPort) {
       this.#workletPort.postMessage({
         type: ClockworkClockMessageType.SET_SESSION_BPM,
-        bpm, atNtpSeconds, nowNtp,
+        bpm, atNtpSeconds, nowNtp: pivot,
       });
     }
   }

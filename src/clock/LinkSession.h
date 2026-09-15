@@ -90,7 +90,7 @@ public:
     using PeerInfo       = ClockworkClock::PeerInfo;
 
     // ─── Session mutators (mirror into the SAB) ──────────────────────────────
-    void setBpm(double bpm);
+    void setBpm(double bpm, double atNtpSeconds = 0.0);
     void setIsPlaying(bool playing, double atNtpSeconds);
     void setStartStopSyncEnabled(bool enabled);
     void requestBeatAtTime(double beat, double atNtpSeconds, double quantum);
@@ -221,8 +221,12 @@ public:
     // GUI's change this way, and re-anchors its beat on it). This session once
     // dropped the callback on the floor, so a Link-less engine changed tempo
     // in silence and every other client kept the old one.
-    void setBpm(double bpm) {
-        if (ClockworkClockState* s = mClock.state()) s->retempo(bpm, wallClockNTP());
+    //
+    // The beat held is the one at atNtpSeconds, the instant the tempo changes
+    // (0: now) — ClockworkClock::setBpm says why a caller gives one.
+    void setBpm(double bpm, double atNtpSeconds = 0.0) {
+        const double at = atNtpSeconds > 0.0 ? atNtpSeconds : wallClockNTP();
+        if (ClockworkClockState* s = mClock.state()) s->retempo(bpm, at);
         if (mTempoCb) mTempoCb(bpm);
     }
     void setIsPlaying(bool playing, double atNtpSeconds) {

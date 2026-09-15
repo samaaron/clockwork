@@ -27,7 +27,9 @@
 #include "shared_memory.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -395,6 +397,41 @@ TEST_CASE("timeline: the session-of-one answers in the NTP domain once bound",
     CHECK(clock.state() != &region);
 }
 #endif  // !CLOCKWORK_LINK
+
+// On both compile shapes. A scheduler working its schedule-ahead in front of
+// the clock changes the tempo where the change will be heard, and has worked
+// out the beats up to there at the old tempo: the beat held is the one at
+// that instant, not the one playing now. With Link the instant is placed on
+// Link's clock and the mirror is re-anchored from Link's own beat a moment
+// later, so that shape is allowed a little slack.
+TEST_CASE("timeline: tempo/set with an instant holds the beat at that instant",
+          "[clock][timeline][osc][tempo]") {
+    ClockworkClock clock;
+    ClockworkClockState region;
+    ClockworkClockState::initDefaults(region);
+    clock.bindStateToShm(&region);
+    // One grid for the mirror and (with Link) Link's timeline: beat 0 now.
+    clock.forceBeatAtTime(0.0, wallClockNTP(), 4.0);
+#ifdef CLOCKWORK_LINK
+    constexpr double slack = 2e-3;
+#else
+    constexpr double slack = 1e-6;
+#endif
+
+    const double at = wallClockNTP() + 0.5;
+    const double beatThen = clock.beatAtTime(at, 4.0);
+    osc_test::Builder b;
+    b.begin("/clockwork/clock/tempo/set") << 60.0f << static_cast<osc::int64>(std::llround(at * 1e6));
+    ask(clock, b.end());
+#ifdef CLOCKWORK_LINK
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let Link's re-anchor land
+#endif
+
+    CHECK_THAT(clock.getBpm(), WithinAbs(60.0, 1e-9));
+    CHECK_THAT(clock.beatAtTime(at, 4.0), WithinAbs(beatThen, slack));
+    CHECK_THAT(clock.timeAtBeat(beatThen + 1.0, 4.0), WithinAbs(at + 1.0, slack));
+    clock.unbindStateFromShm();
+}
 
 TEST_CASE("timeline: a midi timeline's verbs answer from its own snapshot",
           "[clock][timeline][osc]") {
