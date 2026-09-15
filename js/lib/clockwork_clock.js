@@ -22,7 +22,7 @@ import {
   ClockworkClockMessageType,
   bitsToDouble, clampBpm, isValidMeter,
   retempoClock, writeClockOrigin, writeClockTransport,
-  readClockMeter, writeClockMeter,
+  readClockMeter, writeClockMeter, readClockGeneration,
 } from './clockwork_clock_protocol.js';
 import { beatAt, timeAtBeat, originFor, retempoOrigin, wrapPhase } from './clock_math.js';
 
@@ -43,6 +43,7 @@ export class ClockworkClock {
   #localIsPlaying = false;
   #localIsPlayingAtNtp = 0.0;
   #localMeter = { num: 4, den: 4 };
+  #localGeneration = 0;
 
   #ntp;
 
@@ -123,6 +124,7 @@ export class ClockworkClock {
     const pivot = atNtpSeconds > 0 ? atNtpSeconds : nowNtp;
     this.#localBeatOriginNtp = retempoOrigin(this.#localBeatOriginNtp, this.#localBpm, bpm, pivot);
     this.#localBpm = bpm;
+    this.#localGeneration++;
     if (this.#sabViews) {
       retempoClock(this.#sabViews, bpm, pivot);
     } else if (this.#workletPort) {
@@ -204,6 +206,7 @@ export class ClockworkClock {
   requestBeatAtTime(beat, atNtpSeconds, quantum) {
     const newOrigin = originFor(beat, atNtpSeconds, this.getBpm());
     this.#localBeatOriginNtp = newOrigin;
+    this.#localGeneration++;
     if (this.#sabViews) {
       writeClockOrigin(this.#sabViews, newOrigin);
     } else if (this.#workletPort) {
@@ -233,6 +236,18 @@ export class ClockworkClock {
   getBeatOriginNtp() {
     if (this.#sabBigInt) return bitsToDouble(Atomics.load(this.#sabBigInt, SC_BEAT_ORIGIN_NTP_I64));
     return this.#localBeatOriginNtp;
+  }
+
+  /**
+   * One more each time the grid moves (a tempo change, a new origin), from
+   * whichever writer moved it: this page, the worklet, a peer. A follower
+   * with its own copy of the grid reads this before the grid and reads the
+   * grid again when it has changed. In postMessage mode, only this clock's
+   * own changes count.
+   */
+  getGeneration() {
+    if (this.#sabViews) return readClockGeneration(this.#sabViews);
+    return this.#localGeneration;
   }
 
   getIsPlayingAtNtp() {

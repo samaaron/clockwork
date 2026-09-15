@@ -420,6 +420,7 @@ TEST_CASE("timeline: tempo/set with an instant holds the beat at that instant",
 
     const double at = wallClockNTP() + 0.5;
     const double beatThen = clock.beatAtTime(at, 4.0);
+    const uint32_t generation = readClockworkClock(clock.state()).generation;
     osc_test::Builder b;
     b.begin("/clockwork/clock/tempo/set") << 60.0f << static_cast<osc::int64>(std::llround(at * 1e6));
     ask(clock, b.end());
@@ -430,6 +431,7 @@ TEST_CASE("timeline: tempo/set with an instant holds the beat at that instant",
     CHECK_THAT(clock.getBpm(), WithinAbs(60.0, 1e-9));
     CHECK_THAT(clock.beatAtTime(at, 4.0), WithinAbs(beatThen, slack));
     CHECK_THAT(clock.timeAtBeat(beatThen + 1.0, 4.0), WithinAbs(at + 1.0, slack));
+    CHECK(readClockworkClock(clock.state()).generation > generation);
     clock.unbindStateFromShm();
 }
 

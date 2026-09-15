@@ -20,7 +20,7 @@
  *   [24-27] is_playing         (uint32: 0 or 1)
  *   [28-31] flags              (uint32: bit-packed SC_FLAG_*)
  *   [32-35] meter              (uint32: (num << 16) | den, see packMeter)
- *   [36-39] reserved           (alignment pad: the region is 8-byte)
+ *   [36-39] generation         (uint32: one more each time the grid moves — tempo or origin)
  */
 
 import { retempoOrigin } from './clock_math.js';
@@ -34,6 +34,7 @@ export const SC_IS_PLAYING_AT_NTP_I64  = 2;
 export const SC_IS_PLAYING_I32         = 6;   // byte 24
 export const SC_FLAGS_I32              = 7;   // byte 28
 export const SC_METER_I32              = 8;   // byte 32
+export const SC_GENERATION_I32         = 9;   // byte 36
 
 // Flag bit positions — must match src/shared_memory.h.
 export const SC_FLAG_LINK_ENABLED       = 1 << 0;
@@ -104,10 +105,21 @@ export function readClockOrigin(views) {
   return bitsToDouble(Atomics.load(views.bigInt, SC_BEAT_ORIGIN_NTP_I64));
 }
 
-/** Publish a grid: origin first, then the tempo. */
+/**
+ * The grid's generation: one more each time the tempo or the origin is
+ * written. A follower that keeps its own copy of the grid (a language
+ * runtime's beats, a MIDI clock) reads this first, then the grid, and reads
+ * the grid again when it has moved on. Twin of ClockworkClockSnapshot::generation.
+ */
+export function readClockGeneration(views) {
+  return Atomics.load(views.int32, SC_GENERATION_I32) >>> 0;
+}
+
+/** Publish a grid: origin first, then the tempo, then its generation. */
 export function writeClockTempo(views, bpm, originNtp) {
   Atomics.store(views.bigInt, SC_BEAT_ORIGIN_NTP_I64, doubleToBits(originNtp));
   Atomics.store(views.bigInt, SC_BPM_I64, doubleToBits(clampBpm(bpm)));
+  Atomics.add(views.int32, SC_GENERATION_I32, 1);
 }
 
 /**
@@ -124,6 +136,7 @@ export function retempoClock(views, bpm, nowNtp) {
 /** Move the grid under the current tempo. */
 export function writeClockOrigin(views, originNtp) {
   Atomics.store(views.bigInt, SC_BEAT_ORIGIN_NTP_I64, doubleToBits(originNtp));
+  Atomics.add(views.int32, SC_GENERATION_I32, 1);
 }
 
 /** Timestamp first, then the flag. */

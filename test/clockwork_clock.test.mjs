@@ -105,3 +105,14 @@ test("setBpm at an instant holds the beat playing then, not now", () => {
   close(clock.timeAtBeat(22, 4), at + 1, "a beat a second from there");
 });
 
+test("the generation moves with the grid, and only with the grid", () => {
+  const clock = headlessClock();
+  assert.equal(clock.getGeneration(), 0);
+  clock.setBpm(120);
+  assert.equal(clock.getGeneration(), 1, "a tempo change");
+  clock.requestBeatAtTime(0, 1000, 4);
+  assert.equal(clock.getGeneration(), 2, "a new origin");
+  clock.setMeter(3, 4);
+  clock.setIsPlaying(true, 1001);
+  assert.equal(clock.getGeneration(), 2, "the meter and the transport leave it");
+});

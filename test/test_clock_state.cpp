@@ -186,3 +186,28 @@ TEST_CASE("clock math: retempoOrigin is the origin that holds the beat",
     CHECK(clockwork::retempoOrigin(0.0, 120.0, 240.0, now) == 0.0);
     CHECK(clockwork::retempoOrigin(origin, 0.0, 240.0, now) == origin);
 }
+
+// A follower keeping its own copy of the grid (a language runtime's beats, a
+// MIDI clock) needs to know when to read it again, whoever moved it.
+TEST_CASE("clock state: the generation moves with the grid, and only with the grid",
+          "[clock][state]") {
+    ClockworkClockState s;
+    ClockworkClockState::initDefaults(s);
+    CHECK(readClockworkClock(&s).generation == 0u);
+    s.setTempo(120.0, 1000.0);
+    CHECK(readClockworkClock(&s).generation == 1u);
+    s.retempo(90.0, 1010.0);
+    CHECK(readClockworkClock(&s).generation == 2u);
+    s.setOrigin(1005.0);
+    CHECK(readClockworkClock(&s).generation == 3u);
+    s.setTransport(true, 1011.0);
+    s.setFlag(SC_FLAG_START_STOP_SYNC, true);
+    s.setMeter(7, 8);
+    CHECK(readClockworkClock(&s).generation == 3u);
+
+    // A mirror counts as its source does.
+    ClockworkClockState dst;
+    ClockworkClockState::initDefaults(dst);
+    dst.copyFrom(s);
+    CHECK(readClockworkClock(&dst).generation == 3u);
+}

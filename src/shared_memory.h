@@ -723,7 +723,7 @@ struct alignas(8) ClockworkClockState {
     std::atomic<uint32_t> is_playing{0};           // 24-27: 0 = stopped, 1 = playing
     std::atomic<uint32_t> flags{0};                // 28-31: bit-packed session flags
     std::atomic<uint32_t> meter{0};                // 32-35: (num << 16) | den, see packMeter
-    std::atomic<uint32_t> _clock_reserved{0};      // 36-39: alignment pad (the region is 8-byte)
+    std::atomic<uint32_t> generation{0};           // 36-39: one more each time the grid (tempo, origin) moves
 
     // The meter as one word, so the two halves are read together. Both
     // halves fit 16 bits with room to spare (a meter is small integers).
@@ -740,7 +740,7 @@ struct alignas(8) ClockworkClockState {
         s.is_playing.store(0u,                       std::memory_order_relaxed);
         s.flags.store(0u,                            std::memory_order_relaxed);
         s.meter.store(packMeter(4, 4),               std::memory_order_relaxed);
-        s._clock_reserved.store(0u,                  std::memory_order_relaxed);
+        s.generation.store(0u,                       std::memory_order_relaxed);
     }
 
     // ── The write protocol, once ──────────────────────────────────────────
@@ -749,10 +749,13 @@ struct alignas(8) ClockworkClockState {
     static double clampBpm(double bpm) { return bpm >= 1.0 ? bpm : 1.0; }
 
     // Publish a grid: origin first, then the tempo with release, so a reader
-    // that acquire-loads the tempo sees the origin anchored for it.
+    // that acquire-loads the tempo sees the origin anchored for it; then the
+    // generation, last, so a reader that loaded it first and sees it unchanged
+    // afterwards read no newer grid than it thinks.
     void setTempo(double bpmIn, double originNtp) {
         beat_origin_ntp.store(clockwork::doubleToBits(originNtp), std::memory_order_relaxed);
         bpm.store(clockwork::doubleToBits(clampBpm(bpmIn)), std::memory_order_release);
+        generation.fetch_add(1u, std::memory_order_release);
     }
 
     // Change the tempo without moving the beat playing at `nowNtp`
@@ -770,6 +773,7 @@ struct alignas(8) ClockworkClockState {
     // Move the grid under the current tempo (requestBeatAtTime and friends).
     void setOrigin(double originNtp) {
         beat_origin_ntp.store(clockwork::doubleToBits(originNtp), std::memory_order_relaxed);
+        generation.fetch_add(1u, std::memory_order_release);
     }
 
     // Timestamp first, then the flag with release — same shape as setTempo.
@@ -809,6 +813,11 @@ struct ClockworkClockSnapshot {
     uint32_t flags;              // SC_FLAG_*
     int32_t  meter_num;          // how quarter-note beats group into bars
     int32_t  meter_den;
+    // The grid's generation when this was read: one more each time the tempo
+    // or origin is written. A follower that keeps its own copy of the grid (a
+    // language runtime's beats, a MIDI clock) re-reads when it has moved on,
+    // rather than comparing doubles or waiting for a notification.
+    uint32_t generation;
 
     // The beat at an NTP instant, under this snapshot.
     double beatAt(double ntpSeconds) const {
@@ -824,6 +833,9 @@ inline ClockworkClockSnapshot readClockworkClock(const ClockworkClockState* s) {
         out.meter_den = 4;
         return out;
     }
+    // The generation before the grid: writers bump it after, so the grid read
+    // is never older than the generation says.
+    out.generation = s->generation.load(std::memory_order_acquire);
     // bpm is the key for beat_origin_ntp; is_playing is the key for its
     // timestamp. Acquire first, then the anchored value.
     out.bpm = clockwork::bitsToDouble(s->bpm.load(std::memory_order_acquire));
@@ -849,6 +861,7 @@ inline void ClockworkClockState::copyFrom(const ClockworkClockState& src) {
     setTransport(in.is_playing, in.is_playing_at_ntp);
     flags.store(in.flags, std::memory_order_relaxed);
     setMeter(in.meter_num, in.meter_den);
+    generation.store(in.generation, std::memory_order_release);   // a mirror counts as its source does
 }
 
 // Bit positions inside ClockworkClockState::flags. Single atomic uint32 so
@@ -1216,6 +1229,8 @@ CLOCKWORK_ASSERT_OFFSET(ClockworkClockState, flags,             28,
                  "js/lib/clockwork_clock_protocol.js SC_FLAGS_I32");
 CLOCKWORK_ASSERT_OFFSET(ClockworkClockState, meter,             32,
                  "js/lib/clockwork_clock_protocol.js SC_METER_I32");
+CLOCKWORK_ASSERT_OFFSET(ClockworkClockState, generation,        36,
+                 "js/lib/clockwork_clock_protocol.js SC_GENERATION_I32");
 
 // ControlPointers ↔ js/lib/control_offsets.js (JS exports byte offsets directly)
 CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_head,        0,  "js/lib/control_offsets.js IN_HEAD");
