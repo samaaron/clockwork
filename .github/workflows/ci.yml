@@ -97,6 +97,13 @@ jobs:
             build/test/Release/clockwork_lanes_reserved_tests.exe
             build/test/Release/clockwork_attach_tests.exe
             build/test/Release/clockwork_engine_tests.exe --durations yes
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            # Same binaries, but a hang prints every thread's stack first.
+            bash scripts/ci-run-tests-linux.sh \
+              build/test/clockwork_tests \
+              build/test/clockwork_lanes_reserved_tests \
+              build/test/clockwork_attach_tests \
+              build/test/clockwork_engine_tests
           else
             build/test/clockwork_tests
             build/test/clockwork_lanes_reserved_tests
