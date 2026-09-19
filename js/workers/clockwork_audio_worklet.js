@@ -1092,15 +1092,18 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 // Invoke a named export on the audio thread and post the result
                 // back. A guest calls its own exports here to reach the live
                 // engine (rerezzed stages its pipeline this way).
-                let result;
+                // A failure (no such export, or one that throws) goes back with
+                // the call, so the caller's promise rejects: in every build, not
+                // only a development one's console.
+                let result, error;
                 try {
                     const fn = this.wasmExports && this.wasmExports[data.name];
-                    result = fn ? fn(...(data.args || [])) : undefined;
+                    if (fn) result = fn(...(data.args || []));
+                    else error = `no export named ${data.name}`;
                 } catch (e) {
-                    if (__DEV__) console.error('[AudioWorklet] callExport', data.name, e);
-                    result = undefined;
+                    error = String(e && e.message ? e.message : e);
                 }
-                this.port.postMessage({ type: 'exportCalled', callId: data.callId, result });
+                this.port.postMessage({ type: 'exportCalled', callId: data.callId, result, error });
                 return;
             }
 

@@ -141,7 +141,7 @@ export function runSabWorker(config) {
                     stop();
                     break;
                 default:
-                    if (__DEV__) console.warn(`[${name}] Unknown message type:`, data.type);
+                    console.warn(`[${name}] Unknown message type:`, data.type);   // a mismatch between versions: said in every build
             }
         } catch (error) {
             console.error(`[${name}] Error:`, error);

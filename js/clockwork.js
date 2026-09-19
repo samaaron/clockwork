@@ -1220,7 +1220,7 @@ export class Clockwork {
       // timeout so purge()/resume()/recover() can't wedge and recover() falls
       // through to reload() instead of hanging forever.
       const timer = setTimeout(() => {
-        if (__DEV__) console.warn('[Dbg-Clockwork] purge() timed out waiting for clearSchedAck; worklet may be gone');
+        this.#warn('purge() timed out waiting for clearSchedAck: the audio worklet may be gone');
         finish();
       }, PURGE_ACK_TIMEOUT_MS);
       this.#workletNode.port.addEventListener('message', handler);
@@ -1370,6 +1370,7 @@ export class Clockwork {
       (d) => d.callId === callId,
       `call ${name}`,
     );
+    if (reply.error) throw new Error(`callExport ${name}: ${reply.error}`);
     return reply.result;
   }
 
@@ -1432,6 +1433,16 @@ export class Clockwork {
         `${what}: [${offset}, ${offset + len}) is outside the region `
         + `(0..${size})`);
     }
+  }
+
+  /**
+   * Something went wrong that a caller should hear of in every build, not only a
+   * development one's console: said there, and emitted as 'warning' ({ message })
+   * so a host can show it in its own log.
+   */
+  #warn(message) {
+    console.warn(`[Clockwork] ${message}`);
+    this.#eventEmitter.emit('warning', { message });
   }
 
   /**

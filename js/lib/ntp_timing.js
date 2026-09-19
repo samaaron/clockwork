@@ -70,6 +70,7 @@ export class NTPTiming {
 
   // Local storage (postMessage mode, or fallback)
   #initialNTPStartTime;
+  #loggedDriftUs;
   #localDriftMs = 0;
   #localClockOffsetMs = 0;
 
@@ -255,7 +256,10 @@ export class NTPTiming {
       });
     }
 
-    if (__DEV__) {
+    // said when it moves (a millisecond or more since last said), not every
+    // second: a steady offset is one line, a drifting clock a line per step
+    if (__DEV__ && (this.#loggedDriftUs === undefined || Math.abs(driftUs - this.#loggedDriftUs) >= 1000)) {
+      this.#loggedDriftUs = driftUs;
       console.log(
         `[Dbg-NTPTiming] Drift: ${(driftUs / 1000).toFixed(1)}ms ` +
         `(expected=${expectedContextTime.toFixed(3)}s, actual=${timestamp.contextTime.toFixed(3)}s)`
