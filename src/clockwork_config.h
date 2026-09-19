@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <stdint.h>   // uint32_t in the declarations below: this header is included on its own (clockwork_product.h)
+
 // ─── Version ─────────────────────────────────────────────────────────────────
 // Single source of truth for all builds (WASM, native exe, NIF).
 // Bumped by hand — nothing in this repository rewrites it.

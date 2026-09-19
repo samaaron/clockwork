@@ -59,11 +59,12 @@ set(CLOCKWORK_PRODUCT_HEADER "" CACHE FILEPATH
 set(CLOCKWORK_COMPANY_NAME "${CLOCKWORK_PRODUCT_NAME}" CACHE STRING
     "Company name in the Windows version resource")
 
-# The version stamped into the Windows resource. Defaults to clockwork's own,
-# which is right standalone and wrong when embedded — an executable should
-# carry the PRODUCT's version, and clockwork's project() version is not it.
+# The version stamped into the Windows resource and said under the boot
+# banner. Defaults to clockwork's own, which is right standalone and wrong
+# when embedded — an executable should carry the PRODUCT's version, and
+# clockwork's project() version is not it. See src/clockwork_product.h.
 set(CLOCKWORK_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
-    "Version stamped into OS-visible metadata")
+    "Version stamped into OS-visible metadata and the boot banner")
 
 option(BUILD_TESTS "Build the native Catch2 test suite" OFF)
 
@@ -426,6 +427,7 @@ endif()
 
 set(CLOCKWORK_COMPILE_DEFS
     CLOCKWORK_PRODUCT_NAME="${CLOCKWORK_PRODUCT_NAME}"
+    CLOCKWORK_PRODUCT_VERSION="${CLOCKWORK_PRODUCT_VERSION}"
     $<$<BOOL:${CLOCKWORK_PRODUCT_HEADER}>:CLOCKWORK_PRODUCT_HEADER="${CLOCKWORK_PRODUCT_HEADER}">
     NDEBUG=1
     NOMINMAX=1

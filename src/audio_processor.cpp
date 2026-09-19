@@ -1792,8 +1792,11 @@ extern "C" {
 
 #ifdef __EMSCRIPTEN__
         clockwork_log("\n" CLOCKWORK_PRODUCT_BANNER);
-        clockwork_log("v%d.%d.%d",
-                     CLOCKWORK_VERSION_MAJOR, CLOCKWORK_VERSION_MINOR, CLOCKWORK_VERSION_PATCH);
+        // the product introduces itself under its banner; the substrate it runs
+        // on follows, unless the product is clockwork itself
+        clockwork_log("%s v%s", CLOCKWORK_PRODUCT_NAME, CLOCKWORK_PRODUCT_VERSION);
+        if (std::strcmp(CLOCKWORK_PRODUCT_NAME, "clockwork") != 0)
+            clockwork_log("on Clockwork v" CLOCKWORK_VERSION_STRING);
         clockwork_log("%.0fkHz %dch", sample_rate / 1000, config.max_output_channels);
         clockwork_log("DSP: %s %s", dsp_name, dsp_version);
         clockwork_log("");

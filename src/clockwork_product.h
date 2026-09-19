@@ -27,6 +27,12 @@
  * CLOCKWORK_PRODUCT_BANNER; anything it leaves undefined keeps clockwork's
  * default, so a product may overlay only what it has an opinion on.
  *
+ * The version said under the banner is the product's too, as
+ * CLOCKWORK_PRODUCT_VERSION (a string; from CMake, the cache variable of that
+ * name, which the Windows version resource already carries). Clockwork's own
+ * standalone. The boot log names the substrate on its own line when the
+ * product is not clockwork itself.
+ *
  * NOT the same as --app-name. That is a RUNTIME override for the names
  * published to the OS audio and MIDI registries, so two copies of one product
  * can be told apart. This is what the product is called when nobody says
@@ -34,6 +40,8 @@
  */
 #ifndef CLOCKWORK_PRODUCT_H
 #define CLOCKWORK_PRODUCT_H
+
+#include "clockwork_config.h"
 
 #ifdef CLOCKWORK_PRODUCT_HEADER
 #include CLOCKWORK_PRODUCT_HEADER
@@ -49,6 +57,11 @@
     "░█▀▀░█░░░█▀█░█▀▀░█░█░█░█░█▀█░█▀▄░█░█\n" \
     "░█░░░█░░░█░█░█░░░█▀▄░█▄█░█░█░█▀▄░█▀▄\n" \
     "░▀▀▀░▀▀▀░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀░▀░▀░▀"
+#endif
+
+/* The product's version: clockwork's own unless the build says the product's. */
+#ifndef CLOCKWORK_PRODUCT_VERSION
+#define CLOCKWORK_PRODUCT_VERSION CLOCKWORK_VERSION_STRING
 #endif
 
 /* The prefix every diagnostic line carries. Written as a separate macro so the

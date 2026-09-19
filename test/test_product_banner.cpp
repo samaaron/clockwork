@@ -39,6 +39,7 @@ TEST_CASE("without a product header the banner is clockwork's own", "[product]")
           "░█░░░█░░░█░█░█░░░█▀▄░█▄█░█░█░█▀▄░█▀▄\n"
           "░▀▀▀░▀▀▀░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀░▀░▀░▀");
     CHECK(std::string(CLOCKWORK_PRODUCT_NAME) == "clockwork");
+    CHECK(std::string(CLOCKWORK_PRODUCT_VERSION) == CLOCKWORK_VERSION_STRING);
 }
 
 TEST_CASE("the banner is a rectangle of three lines", "[product]") {
