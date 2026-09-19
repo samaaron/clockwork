@@ -2327,6 +2327,8 @@ void ClockworkEngine::watchdogLoop() {
         std::max(1, mCurrentConfig.watchdogRateMaxRecoveries),
         2.0 * mCurrentConfig.watchdogRateTolerance);
     uint64_t skewWindowsSeen    = 0;
+    int      skewGoodWindows    = 0;   // consecutive, since the last bad one or recovery
+    const int skewGoodRequired  = std::max(1, mCurrentConfig.watchdogRateBadWindows);
     bool     skewGiveUpLogged   = false;
 
     auto nowMs = [] {
@@ -2414,12 +2416,18 @@ void ClockworkEngine::watchdogLoop() {
                 const int nominal = mAudioCallback.nominalSampleRate();
                 rateSkew.observe(mClockworkClock.engineFrames(),
                                  static_cast<double>(nominal) / 1000.0, t);
-                // A completed window within tolerance ends the skew episode
-                // for the policy: a later verdict is a new fault, not the
-                // continuation of this one.
+                // Windows within tolerance end the skew episode for the
+                // policy: a later verdict is a new fault, not the
+                // continuation of this one. As many good windows in a row as
+                // it takes bad ones to reach a verdict, for the same reason:
+                // one window can be a transient. A 0.919x device on a loaded
+                // macOS runner read one 300 ms window just after its reopen
+                // as healthy (2026-09-19), which restarted the streak and
+                // cost a fourth swap.
                 if (rateSkew.windowsCompleted() != skewWindowsSeen) {
                     skewWindowsSeen = rateSkew.windowsCompleted();
-                    if (rateSkew.lastWindowGood()) skewPolicy.healthy();
+                    skewGoodWindows = rateSkew.lastWindowGood() ? skewGoodWindows + 1 : 0;
+                    if (skewGoodWindows >= skewGoodRequired) skewPolicy.healthy();
                 }
                 if (rateSkew.skewed()) {
                     const double ratio    = rateSkew.lastRatio();
@@ -2469,6 +2477,7 @@ void ClockworkEngine::watchdogLoop() {
                                 clockwork_log("[watchdog] rate skew: recovering with a cold "
                                        "swap (%.2fx real-time)", ratio);
                             rateSkew.reset();
+                            skewGoodWindows = 0;
                             rateSkewLogged = false;
                         }
                     }
