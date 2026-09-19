@@ -62,6 +62,16 @@ enum class Tier { Fast = 0, Bulk = 1 };
 // No-op on tiered (ESP) builds, which have real regions to place into.
 void set_arena(void* base, size_t bytes);
 
+// Start the arena over on the span it already has: one free block, every
+// allocation forgotten. For a new engine booting over a mapping an earlier one
+// used (a web reload reuses the shared memory): nothing that engine placed here
+// is alive, since its thread is gone and the product re-sends what it held, and
+// an arena kept as it was leaks the dead engine's allocations on every reload
+// until one no longer fits. Whoever holds a pointer into the arena forgets it
+// first (clockwork_heap_abandon). No-op when no arena is set, and on tiered
+// builds.
+void reset_arena();
+
 // Bytes of the arena not currently handed out, including free space stranded
 // between live blocks; 0 when no arena is set. Coalescing means this is a
 // budget, not a promise — compare largest_free() before a single big request.

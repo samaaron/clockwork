@@ -24,6 +24,14 @@ void*  clockwork_heap_alloc(size_t bytes);
 void   clockwork_heap_free(void* ptr);
 void   clockwork_heap_destroy();
 /*
+ * Forget the pool without freeing anything: its backing, its growth areas and
+ * its spare were a dead engine's, placed in an arena about to be started over
+ * (clockwork::mem::reset_arena), so their memory is the arena's to hand out
+ * again. The next clockwork_heap_init builds a fresh pool. A heap on a region
+ * the host's layout reserved is kept (clockwork_heap_init resets it in place).
+ */
+void   clockwork_heap_abandon();
+/*
  * The first byte past the heap's initial backing block, or 0 before init.
  *
  * Clockwork's heap and the guest's region are adjacent

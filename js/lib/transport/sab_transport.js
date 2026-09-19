@@ -5,7 +5,7 @@ import { Transport } from './transport.js';
 import { createWorker } from '../worker_loader.js';
 import { OscChannel } from '../osc_channel.js';
 import { calculateInControlIndices } from '../control_offsets.js';
-import { WasmClient } from '../wasm_client.js';
+import { WasmClient, releaseClientSlot } from '../wasm_client.js';
 
 /**
  * SAB (SharedArrayBuffer) Transport
@@ -40,6 +40,9 @@ export class SABTransport extends Transport {
     // Workers
     #oscInWorker;
     #oscOutLogWorker;
+    // The client slots the workers claimed (they report them on 'initialized'):
+    // released on dispose, since a terminated worker cannot release its own.
+    #workerSlots = [];
     #workerBaseURL;
 
     // Lazily-created main-thread channel for the transport's own send()
@@ -122,7 +125,7 @@ export class SABTransport extends Transport {
         this.#setupWorkerHandlers();
 
         // Initialize workers with shared buffer
-        await Promise.all([
+        this.#workerSlots = await Promise.all([
             this.#initWorker(this.#oscInWorker, 'OSC IN'),
             this.#initWorker(this.#oscOutLogWorker, 'OSC OUT LOG'),
         ]);
@@ -245,6 +248,17 @@ export class SABTransport extends Transport {
             this.#oscOutLogWorker = null;
         }
 
+        // Give back every client slot this transport's contexts held. The SAB
+        // (and its slot bitmask) outlives a reload, and there are only a few
+        // slots: without this each reload leaked three — the two workers', and
+        // this thread's own client — and the second reload found none free.
+        for (const slot of this.#workerSlots) {
+            releaseClientSlot(this.#atomicView, this.#ringBufferBase, this.#bufferConstants, slot);
+        }
+        this.#workerSlots = [];
+        this.#wasmClient?.close();
+        this.#wasmClient = null;
+
         this.#initialized = false;
         super.dispose();
     }
@@ -271,10 +285,15 @@ export class SABTransport extends Transport {
             }, 5000);
 
             const handler = (event) => {
-                if (event.data.type === 'initialized') {
+                if (event.data.type === 'error') {
+                    // e.g. no client slot free: say so now rather than time out
                     clearTimeout(timeout);
                     worker.removeEventListener('message', handler);
-                    resolve();
+                    reject(new Error(`${name} worker failed to initialize: ${event.data.error}`));
+                } else if (event.data.type === 'initialized') {
+                    clearTimeout(timeout);
+                    worker.removeEventListener('message', handler);
+                    resolve(event.data.slot ?? -1);
                 }
             };
 

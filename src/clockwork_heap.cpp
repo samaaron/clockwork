@@ -325,6 +325,21 @@ void clockwork_heap_foreign_maintenance() {
     }
 }
 
+void clockwork_heap_abandon() {
+    if (g_prereserved) return;   // not in the arena: clockwork_heap_init resets it in place
+    g_heap_pool = nullptr;
+    g_heap_backing = nullptr;
+    g_pending_area = nullptr;
+    g_deferred_frees.store(nullptr, std::memory_order_relaxed);
+    g_system_frees.store(nullptr, std::memory_order_relaxed);
+    g_area_count.store(0, std::memory_order_relaxed);
+    g_spare_area.store(nullptr, std::memory_order_relaxed);
+    g_spare_wanted.store(false, std::memory_order_relaxed);
+    g_initial_size = 0;
+    g_total_allocated = 0;
+    g_growth_count = 0;
+}
+
 void clockwork_heap_destroy() {
     if (g_heap_pool) {
         clockwork_heap_pool_free(g_heap_pool);
@@ -375,6 +390,7 @@ size_t clockwork_heap_growth_count() {
 #else // !CLOCKWORK_SYNTH — inert stubs: no pool is created at all
 
 void   clockwork_heap_init(size_t)        {}
+void   clockwork_heap_abandon()           {}
 void*  clockwork_heap_alloc(size_t)       { return nullptr; }
 void   clockwork_heap_free(void*)         {}
 void   clockwork_heap_register_engine_thread() {}

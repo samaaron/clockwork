@@ -111,6 +111,7 @@ size_t spill_count() {
 // single host-owned span could improve, so the arena entry points do nothing
 // and report nothing. Callers stay identical across backends.
 void   set_arena(void*, size_t) { }
+void   reset_arena()            { }
 size_t arena_available()        { return 0; }
 size_t arena_size()             { return 0; }
 
@@ -211,6 +212,13 @@ void set_arena(void* base, size_t bytes) {
 }
 
 size_t arena_size() { return g_arena_size; }
+
+void reset_arena() {
+    if (!g_arena) return;
+    uint8_t* const base = g_arena;          // already aligned: set_arena loses nothing
+    const size_t bytes = g_arena_size;
+    set_arena(base, bytes);
+}
 
 size_t arena_available() {
     if (!g_head)

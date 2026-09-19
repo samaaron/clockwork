@@ -1580,6 +1580,30 @@ extern "C" {
                 clockwork_log("MEM ARENA: 0x%08x + %u MB",
                         (unsigned)(uintptr_t)arena,
                         (unsigned)(want / (1024 * 1024)));
+        } else {
+            /*
+             * A NEW ENGINE OVER A MAPPING AN EARLIER ONE USED. On the web a
+             * reload (Clockwork#reload) builds a fresh worklet over the same
+             * shared memory, and the arena's bookkeeping lives in that memory,
+             * so it comes back holding everything the dead engine placed in it
+             * — the guest's instance and its real-time pool (scsynth's is 8 MB)
+             * above all. Nothing ever frees them: the old worklet is gone, not
+             * torn down. The first reload still fit; the second asked for the
+             * pool, found half of it, and the engine came up with no DSP,
+             * processing silence with no error anywhere a page could see.
+             *
+             * Nothing of that engine is alive — its thread is gone, and the
+             * product re-sends what it held (restoreClientState) — so the arena
+             * starts over. Everything holding a pointer into it forgets it
+             * first: clockwork's heap (rebuilt by clockwork_heap_init below) and
+             * the dead instance.
+             */
+            clockwork_heap_abandon();
+            g_dsp = nullptr;
+            clockwork::mem::reset_arena();
+            if (verbosity > 0)
+                clockwork_log("MEM ARENA: started over for a new engine (%u MB)",
+                        (unsigned)(clockwork::mem::arena_size() / (1024 * 1024)));
         }
 #endif
 

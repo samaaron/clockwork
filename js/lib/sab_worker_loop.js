@@ -129,7 +129,10 @@ export function runSabWorker(config) {
                                              data.bufferConstants, data.wasmModule,
                                              data.wasmMemory);
                     }
-                    self.postMessage({ type: 'initialized' });
+                    // The slot this worker's client claimed: the transport releases it
+                    // when it terminates the worker (a worker blocked in Atomics.wait never
+                    // runs a 'stop', so it cannot give the slot back itself).
+                    self.postMessage({ type: 'initialized', slot: ctx.client?.slotIndex ?? -1 });
                     break;
                 case 'start':
                     if (ctx.sharedBuffer) start();
