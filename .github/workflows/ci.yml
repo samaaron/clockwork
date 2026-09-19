@@ -85,19 +85,23 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 2
 
+      # The engine suite hangs now and then on windows-x64. --durations prints
+      # each case as it ends, so a hang names the case after the last one
+      # printed, and the step timeout stops it well short of the job's.
       - name: Test
         shell: bash
+        timeout-minutes: 15
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             build/test/Release/clockwork_tests.exe
             build/test/Release/clockwork_lanes_reserved_tests.exe
             build/test/Release/clockwork_attach_tests.exe
-            build/test/Release/clockwork_engine_tests.exe
+            build/test/Release/clockwork_engine_tests.exe --durations yes
           else
             build/test/clockwork_tests
             build/test/clockwork_lanes_reserved_tests
             build/test/clockwork_attach_tests
-            build/test/clockwork_engine_tests
+            build/test/clockwork_engine_tests --durations yes
           fi
 
   # ------------------------------------------------- linux-x86 (i686, 32-bit) --
