@@ -616,11 +616,15 @@ TEST_CASE("a callback of eight blocks is served whole at the slack the device im
     REQUIRE(wrong == 0);
 }
 
-TEST_CASE("a callback of eight blocks at the old slack of two is mostly silence", "[plugin][bridge]") {
+TEST_CASE("a callback of eight blocks at the old slack of two is mostly silence", "[plugin][bridge][.]") {
     // The failure this guards against, kept as a fact rather than a memory:
     // the bridge cannot answer six pulls that are microseconds apart, so at
     // slack two most of every callback is the prime's silence and the late
     // render is trimmed away — heard as a 375 Hz buzz over the music.
+    //
+    // HIDDEN ([.]): it asserts the bridge is too slow, so a fast enough host
+    // fails it. A GitHub macOS arm64 runner kept up for 250 of 320 pulls and
+    // got 70 wrong against the 161 this needs. Run it by name to see it.
     Engine e(DEFAULT_SLACK);
     REQUIRE(e.spawn(false));
     e.trackWithGain();
