@@ -253,7 +253,8 @@ public:
 #ifdef _WIN32
         // Wake a blocked ConnectNamedPipe by connecting to it ourselves; the
         // loop sees the flag and leaves. A failed connect is fine: the
-        // thread was between instances and polls the flag anyway.
+        // thread was between instances, and checks the flag before it
+        // blocks on the next one.
         HANDLE h = CreateFileW(mPipeName.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         mThread.join();
@@ -286,6 +287,10 @@ private:
                 instance = make_instance(false);
                 if (instance == INVALID_HANDLE_VALUE) { Sleep(50); if (mStop.load()) break; continue; }
             }
+            // stop() wakes us by connecting to an instance, but it finds none
+            // while we are between one and the next. Look at the flag once the
+            // instance exists: if stop() came after this, its connect finds it.
+            if (mStop.load()) { CloseHandle(instance); break; }
             const BOOL connected = ConnectNamedPipe(instance, nullptr)
                                    || GetLastError() == ERROR_PIPE_CONNECTED;
             if (mStop.load()) { CloseHandle(instance); break; }

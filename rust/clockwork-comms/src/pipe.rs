@@ -204,7 +204,9 @@ mod imp {
 
     impl Drop for PipeServer {
         fn drop(&mut self) {
-            self.shared.stop.store(true, Ordering::Relaxed);
+            // SeqCst pairs with the accept loop's check after it creates an
+            // instance: either it sees the flag, or the connects below see it.
+            self.shared.stop.store(true, Ordering::SeqCst);
             // Close live connections (their readers wake within one poll tick)…
             for c in self.shared.conns.lock().unwrap().values() {
                 c.close();
@@ -340,6 +342,15 @@ mod imp {
                     h
                 }
             };
+
+            // Drop wakes us by connecting to an instance, but finds none while
+            // this one was being created. Look at the flag once it exists: a
+            // stop after this finds the instance and connects.
+            if shared.stop.load(Ordering::SeqCst) {
+                // SAFETY: the handle is this thread's and is not used again.
+                unsafe { CloseHandle(handle) };
+                return;
+            }
 
             // SAFETY: an instance handle this thread owns; synchronous, so no
             // OVERLAPPED is needed.
