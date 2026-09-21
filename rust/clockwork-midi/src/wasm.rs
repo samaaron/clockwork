@@ -59,28 +59,6 @@ pub fn midi_in_osc_at(port: &str, bytes: &[u8], when: u64) -> Option<Vec<u8>> {
     encode_in_at(port, &MidiMessage::parse(bytes)?, when)
 }
 
-/// Raw inbound bytes → a flat structured event `[kind, port, ...ints]` as a JS
-/// array, e.g. `["note_on", "kbd", 1, 60, 100]`. This is the main-thread fast
-/// path: a web consumer that just wants the fields skips the OSC encode here and
-/// the matching decode in JS that [`midi_in_osc`] would force. Returns `None`
-/// for clock pulses (the estimator handles those) and for unparseable bytes.
-#[wasm_bindgen]
-pub fn midi_in_fields(port: &str, bytes: &[u8]) -> Option<Vec<JsValue>> {
-    let msg = MidiMessage::parse(bytes)?;
-    if msg.is_clock_pulse() {
-        return None;
-    }
-    let mut nums = [0i32; 3];
-    let n = msg.data_args(&mut nums);
-    let mut out = Vec::with_capacity(2 + n);
-    out.push(JsValue::from_str(msg.kind()));
-    out.push(JsValue::from_str(port));
-    for &v in &nums[..n] {
-        out.push(JsValue::from_f64(v as f64));
-    }
-    Some(out)
-}
-
 /// A `/clockwork/midi/out/*` OSC packet → `[port_len:u8][port][raw midi bytes]` for the
 /// JS layer to hand to `MIDIOutput.send`. `None` for non-send verbs.
 #[wasm_bindgen]

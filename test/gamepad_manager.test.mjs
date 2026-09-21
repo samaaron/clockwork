@@ -103,18 +103,6 @@ maybe("an axis move is one event, and the deadzone swallows a twitch", async () 
   m.dispose();
 });
 
-maybe("the structured fast path carries the same fields", async () => {
-  const { m, pad } = await booted();
-  const fields = [];
-  m.onMessage((f) => fields.push(f));
-  pad.buttons[1].pressed = true; pad.buttons[1].value = 1;
-  m.poll();
-  assert.equal(fields.length, 1);
-  assert.equal(fields[0][0], "button");
-  assert.equal(fields[0][3], 1);
-  m.dispose();
-});
-
 maybe("a muted pad is diffed but not heard, and the mute shows in the devices push", async () => {
   const { m, pad } = await booted();
   const events = [];

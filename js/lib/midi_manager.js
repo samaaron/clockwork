@@ -23,7 +23,6 @@
 import { timetagToPerfMs, perfMsToTimetag } from "./timetag.js";
 import init, {
   midi_in_osc_at,
-  midi_in_fields,
   midi_out_decode,
   midi_ports_osc,
   midi_ports_reply_osc,
@@ -55,9 +54,10 @@ export class MidiManager {
     this._inEnabled = new Set(); // normalized names heard from
     this._outEnabled = new Set(); // normalized names sent to
     this._clockMuted = new Set(); // inputs whose clock is ignored (clock/sync 0)
+    this._inAll = false;          // "*" was opened: a port that appears later is open too
+    this._outAll = false;
     this._estimators = new Map(); // normalized name -> WasmClockEstimator
     this._onEvent = null; // (Uint8Array osc) => void  — /clockwork/midi/in/* OSC packet
-    this._onMessage = null; // (Array [kind, port, ...ints]) => void  — structured
     this._onPorts = null; // (Uint8Array osc) => void  — /clockwork/midi/ports push
     this._onTempo = null; // (port, bpm) => void  — clock-in
     this._lastPortsKey = null; // last emitted port list, to suppress no-op pushes
@@ -84,11 +84,10 @@ export class MidiManager {
     this._access = null;
   }
 
+  // Every message a device sends, as the event it becomes: a "/clockwork/midi/in/*" packet, which is how the
+  // host gateway puts it on the engine's ingress. A consumer that wants the fields decodes the event with
+  // midi_in_decode — the same call on a native host, because it starts from the event both hosts produce.
   onEvent(cb) { this._onEvent = cb; }
-  // Structured inbound events: cb receives a flat [kind, port, ...ints] array
-  // (e.g. ["note_on", "kbd", 1, 60, 100]) with no OSC encode/decode round-trip.
-  // Takes precedence over onEvent when both are set.
-  onMessage(cb) { this._onMessage = cb; }
   // A /clockwork/midi/ports push, as bytes: on a hotplug or an enable change.
   onPorts(cb) { this._onPorts = cb; }
   onTempo(cb) { this._onTempo = cb; }
@@ -123,6 +122,13 @@ export class MidiManager {
   enable(port, input, enabled) {
     const set = input ? this._inEnabled : this._outEnabled;
     const known = input ? this._inputs : this._outputs;
+    // "*" is a STANDING instruction, not a list taken once. A named port enabled before it is plugged in opens
+    // when it appears; "*" used to mean only the ports there happened to be, so a client had to send it again
+    // on every hotplug to keep the same promise. It is remembered here instead.
+    if (port === "*") {
+      if (input) this._inAll = enabled; else this._outAll = enabled;
+      if (!enabled) set.clear();
+    }
     const names = port === "*" ? [...known.keys()] : [normalize_name(port)];
     for (const name of names) {
       if (enabled) set.add(name); else set.delete(name);
@@ -164,6 +170,9 @@ export class MidiManager {
       const name = normalize_name(output.name || output.id);
       this._outputs.set(name, output);
     }
+    // what "*" promised, kept for whatever has just appeared
+    if (this._inAll) for (const n of this._inputs.keys()) this._inEnabled.add(n);
+    if (this._outAll) for (const n of this._outputs.keys()) this._outEnabled.add(n);
     // Web MIDI fires statechange for transient/duplicate transitions; only
     // push when the list actually changed, mirroring the native
     // clockwork_midi_refresh "broadcast only on change" behaviour.
@@ -192,20 +201,14 @@ export class MidiManager {
       if (bpm != null && this._onTempo) this._onTempo(port, bpm);
       return;
     }
-    // Prefer the structured fast path; fall back to OSC bytes for consumers
-    // (e.g. the native-shaped engine ingress) that want the wire form.
-    if (this._onMessage) {
-      const fields = midi_in_fields(port, bytes);
-      if (fields) this._onMessage(fields);
-      return;
-    }
+    if (!this._onEvent) return;
     // The wire form carries the moment the bytes arrived (the event's own
     // timestamp, in performance.now() terms) as a trailing timetag: a guest
     // placing the note on its own timeline wants when it was played, not when
     // it reached the audio thread. Both are the same shape natively.
     const when = perfMsToTimetag(event.timeStamp ?? this._now());
     const osc = midi_in_osc_at(port, bytes, when);
-    if (osc && this._onEvent) this._onEvent(osc);
+    if (osc) this._onEvent(osc);
   }
 
   // ── Sends ────────────────────────────────────────────────────────────────

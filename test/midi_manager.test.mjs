@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MidiManager } from "../js/lib/midi_manager.js";
+import { midiInDecode } from "../js/lib/midi_event.js";
 import * as oscFast from "../js/lib/osc_fast.js";
 import { clockworkSys } from "../js/lib/clockwork_sys.js";
 import { unixMsToTimetag, timetagToPerfMs } from "../js/lib/timetag.js";
@@ -73,13 +74,17 @@ maybe("an input is not heard from until it is enabled", async () => {
   assert.equal(events.length, 1, "a closed-again input was heard");
 });
 
-maybe("the structured fast path carries the same fields with no OSC round trip", async () => {
+maybe("an event decodes to its fields, and the arrival time is not one of them", async () => {
+  // The event is the one form MIDI takes inside clockwork, whichever host produced it, so this is the decode
+  // a consumer does on either. The trailing timetag says when it reached the host, not what the message said.
   const { m, kbd } = await booted();
-  const fields = [];
-  m.onMessage((f) => fields.push(f));
+  const wire = [];
+  m.onEvent((osc) => wire.push(osc));
   m.enable("*", true, true);
   kbd.receive([0xb0, 7, 127]);
-  assert.deepEqual(fields, [["control_change", "my_keyboard", 1, 7, 127]]);
+  assert.equal(wire.length, 1);
+  assert.deepEqual(midiInDecode(wire[0], decode), ["control_change", "my_keyboard", 1, 7, 127]);
+  assert.equal(midiInDecode(new Uint8Array([1, 2, 3]), decode), null, "not an event");
 });
 
 maybe("a send reaches only an open output, and '*' reaches every open one", async () => {
@@ -205,6 +210,20 @@ maybe("a port enabled before it is plugged in opens when it appears", async () =
   pad.receive([0x90, 36, 127]);
   assert.equal(events.length, 1);
   assert.equal(events[0][1], "pad_controller");
+});
+
+maybe("'*' opens a port that is plugged in afterwards", async () => {
+  // Otherwise "*" means "the ports there are this instant", and every client has to send it again on each
+  // hotplug to keep hearing everything — which is the promise "*" already makes for a port named early.
+  const { m, access } = await booted();
+  m.enable("*", true, true);
+  const later = new FakeMidiInput("Later Keyboard");
+  access.connect(later);
+  const wire = [];
+  m.onEvent((osc) => wire.push(osc));
+  later.receive([0x90, 64, 100]);
+  assert.equal(wire.length, 1, "a port plugged in after '*' was not open");
+  assert.deepEqual(m.portLists().ins.find((r) => r[0] === "later_keyboard"), ["later_keyboard", true]);
 });
 
 maybe("clock pulses feed the tempo estimate and never surface as events", async () => {

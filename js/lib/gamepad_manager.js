@@ -66,7 +66,6 @@ export class GamepadManager {
     this._pads = new Map(); // Gamepad.index -> { id, handle, enabled, state: WasmPadState, ... }
     this._defaultEnabled = true; // what a pad that connects later gets
     this._onEvent = null; // (Uint8Array osc) => void  — /clockwork/gamepad/in/* OSC packet
-    this._onMessage = null; // (Array [kind, pad, name, ...]) => void  — structured
     this._onDevices = null; // (Uint8Array osc) => void  — /clockwork/gamepad/devices push
     this._lastDevicesKey = null; // last emitted pad list, to suppress no-op pushes
     this._onChange = () => this._refresh(false);
@@ -96,7 +95,6 @@ export class GamepadManager {
   // Structured inbound events: cb receives ["button", pad, name, pressed01,
   // value] or ["axis", pad, name, value] with no OSC encode/decode round-trip.
   // Takes precedence over onEvent when both are set.
-  onMessage(cb) { this._onMessage = cb; }
   // A /clockwork/gamepad/devices push, as bytes: on a connect, disconnect or
   // enable change.
   onDevices(cb) { this._onDevices = cb; }
@@ -230,12 +228,6 @@ export class GamepadManager {
   }
 
   _emit(pad, kind, name, a, b) {
-    // Prefer the structured fast path; fall back to OSC bytes for consumers
-    // (e.g. the native-shaped engine ingress) that want the wire form.
-    if (this._onMessage) {
-      this._onMessage(kind === "button" ? [kind, pad, name, a, b] : [kind, pad, name, a]);
-      return;
-    }
     if (!this._onEvent) return;
     // The moment the change was seen, as a trailing timetag (see
     // MidiManager): the poll that saw it, which is as close as the API gets.

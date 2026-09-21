@@ -413,9 +413,10 @@ export class Clockwork {
   /*
    * The main-thread subsystems, when enabled (`midi: true`, `gamepad: true`):
    * the MidiManager and GamepadManager the front answers /clockwork/midi/ and
-   * /clockwork/gamepad/ with. Null when not enabled, and before init. A
-   * client that wants the structured fast path (onMessage) rather than OSC
-   * bytes reaches them here.
+   * /clockwork/gamepad/ with. Null when not enabled, and before init. A client
+   * reaches them here to open a port, list what is connected, or ask for a
+   * tempo — not to take its events, which come off the egress like every other
+   * event, and which midiInDecode turns into fields on either host.
    */
   get midi() { return this.#front?.midi ?? null; }
   get gamepad() { return this.#front?.gamepad ?? null; }
