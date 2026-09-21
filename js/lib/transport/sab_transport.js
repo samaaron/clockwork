@@ -39,11 +39,13 @@ export class SABTransport extends Transport {
 
     // Workers
     #oscInWorker;
+    #oscInIsOurs = true;   // false when the host named its own reader: it is not ours to terminate
     #oscOutLogWorker;
     // The client slots the workers claimed (they report them on 'initialized'):
     // released on dispose, since a terminated worker cannot release its own.
     #workerSlots = [];
     #workerBaseURL;
+    #oscInEndpoint;
 
     // Lazily-created main-thread channel for the transport's own send()
     #mainChannel = null;
@@ -81,6 +83,11 @@ export class SABTransport extends Transport {
         this.#ringBufferBase = config.ringBufferBase;
         this.#bufferConstants = config.bufferConstants;
         this.#workerBaseURL = config.workerBaseURL;
+        // A host may drain the egress itself, in a worker where it can act on the frames. It speaks the same
+        // init/start/stop protocol over this endpoint and posts the frames back as { type: 'messages' } — the
+        // ones it did not keep. The ring has one reader, so naming one here means the default pump is not
+        // spawned at all.
+        this.#oscInEndpoint = config.oscInEndpoint ?? null;
         this.#wasmMemory = config.wasmMemory;
         this.#wasmModule = config.wasmModule;
 
@@ -115,10 +122,12 @@ export class SABTransport extends Transport {
         // producer writes the IN ring directly (OscChannel); nothing sits in
         // between.
         const [oscInWorker, oscOutLogWorker] = await Promise.all([
-            createWorker(this.#workerBaseURL + 'osc_in_worker.js', { type: 'module' }),
+            this.#oscInEndpoint ?? createWorker(this.#workerBaseURL + 'osc_in_worker.js', { type: 'module' }),
             createWorker(this.#workerBaseURL + 'osc_out_log_sab_worker.js', { type: 'module' })
         ]);
         this.#oscInWorker = oscInWorker;
+        this.#oscInIsOurs = !this.#oscInEndpoint;
+        this.#oscInWorker.start?.();   // a MessagePort delivers nothing until it is started
         this.#oscOutLogWorker = oscOutLogWorker;
 
         // Set up message handlers
@@ -239,7 +248,7 @@ export class SABTransport extends Transport {
         // Stop and terminate workers
         if (this.#oscInWorker) {
             this.#oscInWorker.postMessage({ type: 'stop' });
-            this.#oscInWorker.terminate();
+            if (this.#oscInIsOurs) this.#oscInWorker.terminate();
             this.#oscInWorker = null;
         }
         if (this.#oscOutLogWorker) {

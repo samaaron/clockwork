@@ -306,6 +306,9 @@ export class Clockwork {
       workletUrl: options.workletUrl || (coreBaseURL ? `${coreBaseURL}workers/clockwork_audio_worklet.js` : workerBaseURL + "clockwork_audio_worklet.js"),
       workerBaseURL: workerBaseURL,
       audioContext: options.audioContext || null,
+      // Where the egress is drained, when the host wants it somewhere other than a worker of clockwork's own:
+      // a MessagePort (or Worker) speaking the reader protocol. See lib/osc_in_pump.js.
+      oscInEndpoint: options.oscInEndpoint ?? null,
       autoConnect: options.autoConnect !== false,
       audioContextOptions: {
         latencyHint: "interactive",
@@ -1850,6 +1853,9 @@ export class Clockwork {
     };
 
     if (mode === 'sab') {
+      // A host that drains the egress itself says so with a port: the pump worker is not spawned, and that
+      // endpoint speaks its protocol instead (lib/osc_in_pump.js runs the same reader wherever it is wanted).
+      if (this.#config.oscInEndpoint) transportConfig.oscInEndpoint = this.#config.oscInEndpoint;
       transportConfig.sharedBuffer = sharedBuffer;
       transportConfig.ringBufferBase = ringBufferBase;
       transportConfig.bufferConstants = bc;
