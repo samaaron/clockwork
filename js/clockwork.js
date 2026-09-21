@@ -57,6 +57,15 @@ function formatOscArg(a, maxLen) {
   return maxLen && str.length > maxLen ? str.slice(0, maxLen) + '...' : str;
 }
 
+// A packet as text: a message as `/address arg, arg`; a bundle as its messages, a line each (the time it is for is
+// the event's scheduledTime). A bundle used to throw here, which the caller swallowed, so nothing sent as a
+// bundle ever reached out:text.
+function formatOscText(decoded, maxLen) {
+  if (decoded?.packets) return decoded.packets.map((p) => formatOscText(p, maxLen)).join('\n');
+  const args = decoded.slice(1).map((a) => formatOscArg(a, maxLen)).join(', ');
+  return `${decoded[0]}${args ? ' ' + args : ''}`;
+}
+
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -1940,11 +1949,8 @@ export class Clockwork {
 
             if (this.#eventEmitter.hasListeners('out:text') || this.#config.debug || this.#config.debugOscOut) {
               const maxLen = this.#config.activityEvent.oscOutMaxLineLength ?? this.#config.activityEvent.maxLineLength;
-              const outAddr = msg[0];
-              const outArgs = msg.slice(1);
-              const argsStr = outArgs.map(a => formatOscArg(a, maxLen)).join(', ');
-              const text = `${outAddr}${argsStr ? ' ' + argsStr : ''}`;
-              this.#eventEmitter.emit('out:text', { text, sequence: entry.sequence, timestamp: entry.timestamp });
+              const text = formatOscText(msg, maxLen);
+              this.#eventEmitter.emit('out:text', { text, sequence: entry.sequence, timestamp: entry.timestamp, scheduledTime });
             }
 
             if (this.#eventEmitter.hasListeners('out:html')) {
