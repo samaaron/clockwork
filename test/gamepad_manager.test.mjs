@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { GamepadManager } from "../js/lib/gamepad_manager.js";
+import { GamepadManager, productName } from "../js/lib/gamepad_manager.js";
 import * as oscFast from "../js/lib/osc_fast.js";
 import { clockworkSys } from "../js/lib/clockwork_sys.js";
 import { FakeGamepads, fakeGamepad } from "./web_fakes.mjs";
@@ -47,6 +47,37 @@ async function booted() {
   await m.init();
   return { m, api, pad, tick: (ms) => { now += ms; } };
 }
+
+test("a pad is named for its product, as a native host names it: what the browser adds is left off", () => {
+  for (const [id, name] of [
+    ["Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)", "Xbox Wireless Controller"],   // Chrome, Edge
+    ["Xbox 360 Controller (XInput STANDARD GAMEPAD)", "Xbox 360 Controller"],                                 // Chrome on Windows
+    ["045e-0b13-Xbox Wireless Controller", "Xbox Wireless Controller"],                                       // Firefox
+    ["Controller (STANDARD GAMEPAD)", "Controller"],                                                          // Safari: no product given
+    ["Unknown Gamepad (Vendor: 2dc8 Product: 6006)", "Unknown Gamepad"],
+    ["8BitDo Pro 2", "8BitDo Pro 2"],
+    ["(STANDARD GAMEPAD)", "(STANDARD GAMEPAD)"],                                                             // nothing left: the id as it came
+  ]) assert.equal(productName(id), name, id);
+});
+
+maybe("a pad's handle is its product's name, the same address as natively", async () => {
+  const { m } = await booted();   // "Xbox Wireless Controller (Vendor: 045e)"
+  assert.equal(m.deviceRows()[0][0], "xbox_wireless_controller");
+  m.dispose();
+});
+
+maybe("with no pad connected it only looks now and then; a pad makes it read fast, and its leaving slows it again", async () => {
+  const api = new FakeGamepads();
+  const m = new GamepadManager({ getGamepads: () => api.getGamepads(), events: api.events, wasm: wasm(), pollIntervalMs: 8, idlePollIntervalMs: 250 });
+  await m.init();
+  assert.equal(m._timerEvery, 250, "polled fast with nothing to read");
+  api.connect(fakeGamepad(0, "Xbox Wireless Controller (Vendor: 045e)"));
+  assert.equal(m._timerEvery, 8, "a connected pad was not read at the fast rate");
+  api.disconnect(0);
+  assert.equal(m._timerEvery, 250, "still polling fast after the pad left");
+  m.dispose();
+  assert.equal(m._timer, null);
+});
 
 maybe("devices are listed in the native wire form, enabled by default", async () => {
   const { m } = await booted();

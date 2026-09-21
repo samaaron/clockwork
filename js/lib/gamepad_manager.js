@@ -34,10 +34,23 @@ import init, {
   WasmPadState,
 } from "../../dist/gamepad/clockwork_gamepad.js";
 
+// The product's name out of the browser's id for a pad, as a native host's controller library reports it: Chrome
+// and Edge add "(STANDARD GAMEPAD Vendor: 045e Product: 0b13)", or "(XInput STANDARD GAMEPAD)", and Firefox and
+// Safari put the vendor and product first ("045e-0b13-"). Named from the id as it came, the handle of the same pad
+// was a different address on web and native, and a long one (/gamepad:xbox_wireless_controller_(standard_…).
+export function productName(id) {
+  const name = String(id)
+    .replace(/\s*\([^()]*(?:STANDARD GAMEPAD|Vendor:)[^()]*\)\s*$/i, "")
+    .replace(/^[0-9a-f]{1,4}-[0-9a-f]{1,4}-/i, "")
+    .trim();
+  return name || String(id);
+}
+
 export class GamepadManager {
   /**
    * @param {object} [options]
-   * @param {number} [options.pollIntervalMs=8]
+   * @param {number} [options.pollIntervalMs=8] how often a connected pad is read
+   * @param {number} [options.idlePollIntervalMs=250] how often to look for one while none is connected
    * @param {number} [options.rumbleRefreshMs=4500] how often an active "until
    *   stopped" (or > 5 s) rumble is re-issued — the Gamepad API caps a single
    *   effect at 5 s, so the poll loop renews it just before expiry to match
@@ -52,6 +65,7 @@ export class GamepadManager {
    */
   constructor(options = {}) {
     this._pollIntervalMs = options.pollIntervalMs ?? 8;
+    this._idlePollIntervalMs = options.idlePollIntervalMs ?? 250;
     this._rumbleRefreshMs = options.rumbleRefreshMs ?? 4500;
     this._getGamepads = options.getGamepads
       ?? (() => {
@@ -63,6 +77,8 @@ export class GamepadManager {
     this._wasm = options.wasm;
     this._now = options.now ?? (() => performance.now());
     this._timer = null;
+    this._timerEvery = null; // the interval the timer runs at now (_pace)
+    this._running = false;
     this._pads = new Map(); // Gamepad.index -> { id, handle, enabled, state: WasmPadState, ... }
     this._defaultEnabled = true; // what a pad that connects later gets
     this._onEvent = null; // (Uint8Array osc) => void  — /clockwork/gamepad/in/* OSC packet
@@ -78,14 +94,32 @@ export class GamepadManager {
     await init(this._wasm !== undefined ? { module_or_path: this._wasm } : undefined);
     this._events?.addEventListener("gamepadconnected", this._onChange);
     this._events?.addEventListener("gamepaddisconnected", this._onChange);
+    this._running = true;
     this._refresh(false);
-    this._timer = setInterval(() => this.poll(), this._pollIntervalMs);
+    this._pace();
     return this;
   }
 
+  // How often to look: every pollIntervalMs while a pad is connected, to read
+  // its buttons and sticks, and only every idlePollIntervalMs while none is,
+  // to notice one arriving where a browser fires no gamepadconnected (the
+  // event itself is still heard at once). A host that turns gamepads on for
+  // everyone no longer runs a 125 Hz timer on the main thread of every page
+  // that has no pad.
+  _pace() {
+    if (!this._running) return;
+    const every = this._pads.size ? this._pollIntervalMs : this._idlePollIntervalMs;
+    if (every === this._timerEvery) return;
+    if (this._timer) clearInterval(this._timer);
+    this._timerEvery = every;
+    this._timer = setInterval(() => this.poll(), every);
+  }
+
   dispose() {
+    this._running = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
+    this._timerEvery = null;
     this._events?.removeEventListener("gamepadconnected", this._onChange);
     this._events?.removeEventListener("gamepaddisconnected", this._onChange);
     this._pads.clear();
@@ -150,7 +184,7 @@ export class GamepadManager {
     const taken = [...this._pads.values()].map((e) => e.handle);
     for (const pad of pads) {
       if (!pad || this._pads.has(pad.index)) continue;
-      const handle = assign_handle(pad.id, taken);
+      const handle = assign_handle(productName(pad.id), taken);
       taken.push(handle);
       this._pads.set(pad.index, {
         id: pad.id,
@@ -165,6 +199,7 @@ export class GamepadManager {
       });
     }
     this._push(force);
+    this._pace();   // a pad there or not: read it fast, or only look now and then
   }
 
   // Browsers can fire connect/disconnect for transient transitions; only
