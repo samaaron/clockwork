@@ -426,6 +426,24 @@ export class Clockwork {
   get midiError() { return this.#front?.midiError ?? null; }
   get gamepadError() { return this.#front?.gamepadError ?? null; }
 
+  /*
+   * Bring a main-thread subsystem up after init, for a host that asks for it
+   * when the player does rather than at boot. Web MIDI is asked for with a
+   * prompt on some browsers, and a page that never touches MIDI should never
+   * ask; a page that does should ask from the gesture that wanted it, not
+   * while the audio is starting. `opts` is what the constructor's `midi:`
+   * takes — true, or the MidiManager options (requestAccess, wasm).
+   *
+   * The front is rebuilt, so an enabled gamepad comes back up with it, and
+   * calling this again re-acquires MIDI. Resolves to the manager, or null
+   * when it could not come up, where `midiError` says why.
+   */
+  async enableMidi(opts = true) {
+    this.#config.midi = opts;
+    await this.#initializeFront();
+    return this.midi;
+  }
+
   /**
    * NTP time (seconds since 1900) when the AudioContext started.
    *
