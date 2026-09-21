@@ -20,6 +20,15 @@ export function runSabWorker(config) {
         initMetrics = true,
         onInit,             // optional (ctx) => void — runs after ring buffer setup
         extraHandlers,      // optional { [type]: (data, ctx) => void }
+        // Where the init/start/stop protocol is spoken. A worker's own global by default; a MessagePort when
+        // the reader is embedded in a worker that is already something else — the ring does not care which
+        // thread drains it, and a host may want the frames where it uses them rather than a hop away.
+        endpoint = self,
+        // Atomics.wait BLOCKS the thread it runs on. That is right for a worker whose whole job is this ring
+        // — it costs nothing and wakes instantly — and wrong for a reader embedded in a thread that is also
+        // something else, because nothing else on that thread ever runs again, not even its own messages.
+        // Embedded readers wait without blocking instead. Default: blocking when we own the thread.
+        blocking = !endpoint || endpoint === globalThis,
     } = config;
 
     // Mutable shared state — updated by initRingBuffer, read by callbacks via ctx
@@ -92,8 +101,46 @@ export function runSabWorker(config) {
                 }
             } catch (error) {
                 console.error(`[${name}] Error in wait loop:`, error);
-                self.postMessage({ type: 'error', error: error.message });
+                endpoint.postMessage({ type: 'error', error: error.message });
                 Atomics.wait(ctx.atomicView, 0, ctx.atomicView[0], 10);
+            }
+        }
+    }
+
+    // The same loop, yielding rather than blocking: Atomics.waitAsync hands back a promise instead of
+    // parking the thread, so the host's own work — its messages, its timers — keeps running between frames.
+    // Where it is missing, a short sleep stands in: slower to wake, but it still yields.
+    async function waitLoopAsync() {
+        const hIdx = headIndex(ctx.CONTROL_INDICES);
+        const tIdx = tailIndex ? tailIndex(ctx.CONTROL_INDICES) : -1;
+        let lastHead = -1;
+
+        while (running) {
+            try {
+                const currentHead = Atomics.load(ctx.atomicView, hIdx);
+                const idle = tIdx >= 0
+                    ? currentHead === Atomics.load(ctx.atomicView, tIdx)
+                    : currentHead === lastHead;
+
+                if (idle) {
+                    if (typeof Atomics.waitAsync === 'function') {
+                        const w = Atomics.waitAsync(ctx.atomicView, hIdx, currentHead);
+                        if (w.async) await w.value;
+                    } else {
+                        await new Promise((r) => setTimeout(r, 1));
+                    }
+                    if (!running) return;
+                }
+                lastHead = Atomics.load(ctx.atomicView, hIdx);
+
+                const results = readMessages(ctx);
+                if (results && results.length > 0) {
+                    postResults(results);
+                }
+            } catch (error) {
+                console.error(`[${name}] Error in wait loop:`, error);
+                endpoint.postMessage({ type: 'error', error: error.message });
+                await new Promise((r) => setTimeout(r, 10));
             }
         }
     }
@@ -108,14 +155,14 @@ export function runSabWorker(config) {
             return;
         }
         running = true;
-        waitLoop();
+        if (blocking) waitLoop(); else waitLoopAsync();
     }
 
     function stop() {
         running = false;
     }
 
-    self.addEventListener('message', async (event) => {
+    endpoint.addEventListener('message', async (event) => {
         const { data } = event;
         try {
             if (extraHandlers?.[data.type]) {
@@ -132,7 +179,7 @@ export function runSabWorker(config) {
                     // The slot this worker's client claimed: the transport releases it
                     // when it terminates the worker (a worker blocked in Atomics.wait never
                     // runs a 'stop', so it cannot give the slot back itself).
-                    self.postMessage({ type: 'initialized', slot: ctx.client?.slotIndex ?? -1 });
+                    endpoint.postMessage({ type: 'initialized', slot: ctx.client?.slotIndex ?? -1 });
                     break;
                 case 'start':
                     if (ctx.sharedBuffer) start();
@@ -145,9 +192,10 @@ export function runSabWorker(config) {
             }
         } catch (error) {
             console.error(`[${name}] Error:`, error);
-            self.postMessage({ type: 'error', error: error.message });
+            endpoint.postMessage({ type: 'error', error: error.message });
         }
     });
 
+    endpoint.start?.();   // a MessagePort delivers nothing until it is started
     if (__DEV__) console.log(`[${name}] Script loaded`);
 }
