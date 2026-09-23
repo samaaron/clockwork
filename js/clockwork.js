@@ -193,6 +193,9 @@ export class Clockwork {
   #nodeIdCounter = 1000;
 
   #previousAudioContextState = null;
+  // Whether the engine made its context (and so closes it), or the host handed it one (the host's to close)
+  #ownsAudioContext = false;
+  #onContextState = null;
 
   #cachedWasmBytes = null;
 
@@ -720,39 +723,44 @@ export class Clockwork {
    */
   async resume() {
     if (!this.#initialized || !this.#audioContext) return false;
+    const ctx = this.#audioContext;
 
-    // Clear stale messages before resuming so scheduled events from
-    // before the suspend (e.g. fade-outs) don't interfere with new work
+    // Already running: there is nothing to start, and nothing to throw away — a purge here would drop every bundle
+    // scheduled ahead, and the music with it. All a caller can want to know is whether the audio thread is alive.
+    if (ctx.state === 'running') return await this.#audioThreadAlive();
+
+    // Started first, and synchronously: resume() is called from a press, and a browser lets audio start only inside
+    // one. Everything awaited before this point is time the press has already run out of.
+    const starting = ctx.resume().catch(() => {});
+
+    // What queued while the engine slept (a fade-out, the next beat) belongs to a moment that has gone: dropped,
+    // rather than all played at once the instant the audio comes back
     await this.purge();
-
-    try {
-      await this.#audioContext.resume();
-    } catch (e) {
-    }
+    await starting;
 
     this.#clock?.startDriftTimer();
-
-    const count1 = this.#readProcessCount();
-    if (count1 === null) {
-      // No metrics available yet — check AudioContext state instead
-      const isRunning = this.#audioContext.state === 'running';
-      if (isRunning) {
-        this.#clock?.resync();
-        this.#eventEmitter.emit('resumed');
-      }
-      return isRunning;
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const count2 = this.#readProcessCount();
-
-    const isRunning = count2 !== null && count2 > count1;
-    if (isRunning) {
+    const alive = await this.#audioThreadAlive();
+    if (alive) {
       this.#clock?.resync();
       this.#eventEmitter.emit('resumed');
     }
+    return alive;
+  }
 
-    return isRunning;
+  // Whether the audio thread is running: its process count seen to move on. Watched for long enough to see it move on
+  // either transport — postMessage's count arrives in snapshots every snapshotIntervalMs, and a fixed 200 ms could see
+  // none of them and call a live engine dead (and send recover() into a reload it did not need).
+  async #audioThreadAlive() {
+    const first = this.#readProcessCount();
+    if (first === null) return this.#audioContext?.state === 'running';   // no metrics yet: the context is all there is to go on
+    const limit = Math.max(250, 3 * (this.#config.snapshotIntervalMs ?? 150));
+    const t0 = performance.now();
+    while (performance.now() - t0 < limit) {
+      await new Promise((r) => setTimeout(r, 25));
+      const n = this.#readProcessCount();
+      if (n !== null && n > first) return true;
+    }
+    return false;
   }
 
   /**
@@ -903,10 +911,7 @@ export class Clockwork {
       this.#workletNode = null;
     }
 
-    if (this.#audioContext) {
-      await this.#audioContext.close();
-      this.#audioContext = null;
-    }
+    await this.#releaseAudioContext();
 
     this.#initialized = false;
     this.#scopeViews = null;
@@ -1620,10 +1625,7 @@ export class Clockwork {
       this.#workletNode = null;
     }
 
-    if (this.#audioContext) {
-      await this.#audioContext.close();
-      this.#audioContext = null;
-    }
+    await this.#releaseAudioContext();
 
 
     this.#oscChannel = null;
@@ -1710,16 +1712,20 @@ export class Clockwork {
   }
 
   #initializeAudioContext() {
-    if (this.#config.audioContext) {
-      this.#audioContext = this.#config.audioContext;
-    } else {
-      this.#audioContext = new AudioContext(this.#config.audioContextOptions);
-    }
+    // A context the host made is the host's: used, never closed, and kept across a reload. One that has been closed
+    // is no use to anyone, so the engine makes its own in its place (and that one is the engine's to close).
+    const supplied = this.#config.audioContext;
+    this.#ownsAudioContext = !supplied || supplied.state === 'closed';
+    const ctx = this.#audioContext = this.#ownsAudioContext ? new AudioContext(this.#config.audioContextOptions) : supplied;
 
-    this.#audioContext.addEventListener('statechange', () => {
-      const state = this.#audioContext?.state;
-      if (!state) return;
+    // Started here, synchronously, before anything is awaited. init() and recover() are called from inside a press,
+    // and a browser lets audio start only within one: a context born suspended (iOS, a page's autoplay rules) would
+    // otherwise stay suspended, and the clock that waits on it would wait for nothing.
+    if (ctx.state !== 'running') ctx.resume().catch(() => {});
 
+    this.#previousAudioContextState = ctx.state;
+    this.#onContextState = () => {
+      const state = ctx.state;
       const previousState = this.#previousAudioContextState;
       this.#previousAudioContextState = state;
 
@@ -1738,9 +1744,23 @@ export class Clockwork {
         this.#eventEmitter.emit('audiocontext:interrupted');
         this.#audioHealthMonitor?.reset();
       }
-    });
+    };
+    ctx.addEventListener('statechange', this.#onContextState);
 
-    this.#audioHealthMonitor = new AudioHealthMonitor({ audioContext: this.#audioContext });
+    this.#audioHealthMonitor = new AudioHealthMonitor({ audioContext: ctx });
+  }
+
+  // The context let go of: its listener taken off (a reload would otherwise leave one on every context the engine has
+  // ever had), and closed only if the engine made it — a host's context stays open, for the host.
+  async #releaseAudioContext() {
+    const ctx = this.#audioContext;
+    if (!ctx) return;
+    this.#audioContext = null;
+    if (this.#onContextState) ctx.removeEventListener('statechange', this.#onContextState);
+    this.#onContextState = null;
+    if (this.#ownsAudioContext && ctx.state !== 'closed') {
+      try { await ctx.close(); } catch (e) { /* already closing */ }
+    }
   }
 
       async #loadWasm() {
@@ -2119,6 +2139,7 @@ export class Clockwork {
           this.#workletNode.port.removeEventListener("message", messageHandler);
 
           if (event.data.success) {
+           try {
             const ringBufferBase = event.data.ringBufferBase ?? 0;
             const bufferConstants = event.data.bufferConstants;
             const sharedBuffer = this.#config.mode === 'sab' ? this.#wasmMemory.buffer : null;
@@ -2150,6 +2171,11 @@ export class Clockwork {
             }
 
             resolve();
+           } catch (error) {
+            // This handler is async and its timeout is already cleared: a throw here (the clock waiting on a
+            // context that never started) was an unhandled rejection, and init() never settled at all.
+            reject(new Error(`the audio clock did not start (audio context ${this.#audioContext?.state ?? 'gone'}): ${error?.message ?? error}`));
+           }
           } else {
             reject(new Error(event.data.error || "AudioWorklet initialization failed"));
           }
