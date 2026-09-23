@@ -196,6 +196,11 @@ export class Clockwork {
   // Whether the engine made its context (and so closes it), or the host handed it one (the host's to close)
   #ownsAudioContext = false;
   #onContextState = null;
+  // A reload in progress: every caller asking for one while it runs gets the same one
+  #reloading = null;
+  // Counted up by every shutdown(): a boot that started before one sees the count move, and stops, rather than going
+  // on to build on what shutdown() took away (and to say 'ready' for an engine that is gone)
+  #lifeEpoch = 0;
 
   #cachedWasmBytes = null;
 
@@ -501,17 +506,26 @@ export class Clockwork {
   async #doInit() {
     this.#initializing = true;
     this.bootStats.initStartTime = performance.now();
+    const epoch = this.#lifeEpoch;
+    const stillWanted = () => { if (epoch !== this.#lifeEpoch) throw new Error("shut down while starting"); };
 
     try {
       this.#setAndValidateCapabilities();
       this.#initializeMemory();
       this.#initializeAudioContext();
       const wasmBytes = await this.#loadWasm();
+      stillWanted();
       await this.#initializeAudioWorklet(wasmBytes);
+      stillWanted();
       await this.#initializeOSC();
+      stillWanted();
       await this.#initializeFront();
+      stillWanted();
       await this.#finishInitialization();
     } catch (error) {
+      // What was built, taken down again: a context left running holds a phone's audio session, and a half-open
+      // transport its workers. The client is then as it was before init() — ready to be asked again.
+      try { await this.#partialShutdown(); } catch (e) { /* partly down already */ }
       this.#initializing = false;
       this.#initPromise = null;
       console.error("[Clockwork] Initialization failed:", error);
@@ -786,10 +800,30 @@ export class Clockwork {
    * @returns {Promise<boolean>} true if reload succeeded
    */
   async reload() {
+    // One at a time: recovery is asked for from several places at once (a press, a key, the tab coming back), and two
+    // teardowns racing two builds leave nothing working. Every caller gets the reload already under way.
+    if (this.#reloading) return this.#reloading;
     if (!this.#initialized) return false;
+    this.#reloading = this.#doReload().finally(() => { this.#reloading = null; });
+    return this.#reloading;
+  }
 
+  async #doReload() {
     this.#eventEmitter.emit('reload:start');
+    try {
+      return await this.#reloadSteps();
+    } catch (error) {
+      // Whatever the failed reload built, taken down (a context it made included), and the failure said. The answer
+      // is false, as recover()'s is: an exception thrown past a recovery path leaves its caller with no way back.
+      try { await this.#partialShutdown(); } catch (e) { /* partly down already */ }
+      console.error("[Clockwork] reload failed:", error);
+      this.#eventEmitter.emit('reload:failed', { error });
+      this.#eventEmitter.emit('reload:complete', { success: false, error });
+      return false;
+    }
+  }
 
+  async #reloadSteps() {
     await this.#partialShutdown();
     await this.#partialInit();
 
@@ -817,6 +851,10 @@ export class Clockwork {
     // reliable from roughly half a second in). Recovery code retries with
     // short timeouts instead of betting ten seconds on the first attempt.
     await this.#syncWithRetry();
+
+    // Only now 'setup' and 'ready': a host rebuilds on the engine there (its groups, its FX), and what it builds
+    // refers to the definitions and buffers just put back. Said any earlier, it refers to what is not there yet.
+    await this.#announceReady();
 
     this.#eventEmitter.emit('reload:complete', { success: true });
     return true;
@@ -893,8 +931,7 @@ export class Clockwork {
 
   async #partialShutdown() {
     this.#clock?.stopDriftTimer();
-    this.#syncListeners?.clear();
-    this.#syncListeners = null;
+    this.#abandonSyncs("the engine shut down");
 
     if (this.#osc) {
       this.#osc.dispose();
@@ -943,7 +980,7 @@ export class Clockwork {
       // every block, so two increasing reads prove the reset has run and
       // the engine is pumping.
       await this.#awaitEngineProcessing();
-      await this.#finishInitialization();
+      await this.#finishInitialization({ announce: false });
     } catch (error) {
       this.#initializing = false;
       this.#initPromise = null;
@@ -951,6 +988,23 @@ export class Clockwork {
       this.#eventEmitter.emit('error', error);
       throw error;
     }
+  }
+
+  // Everything waiting on a sync() told the engine has gone
+  #abandonSyncs(why) {
+    const pending = this.#syncListeners;
+    this.#syncListeners = null;
+    for (const handler of pending?.values() ?? []) handler.abandon?.(why);
+  }
+
+  // 'setup', where a host builds on the engine, then 'ready'
+  async #announceReady() {
+    // a listener that failed to build on the engine: the engine is up, but the host's world on it is not, and it
+    // says so on 'error' rather than the boot looking as if it went fine
+    for (const error of await this.#eventEmitter.emitAsync('setup')) {
+      this.#eventEmitter.emit('error', new Error(`a 'setup' listener failed: ${error?.message ?? error}`, { cause: error }));
+    }
+    this.#eventEmitter.emit('ready', { capabilities: this.#capabilities, bootStats: this.bootStats });
   }
 
   // ============================================================================
@@ -1564,6 +1618,11 @@ export class Clockwork {
         this.#syncListeners.delete(syncId);
         resolve();
       };
+      // the engine going away before the answer: said now, rather than as a timeout ten seconds later
+      messageHandler.abandon = (why) => {
+        clearTimeout(timeout);
+        reject(new Error(why));
+      };
 
       if (!this.#syncListeners) this.#syncListeners = new Map();
       this.#syncListeners.set(syncId, messageHandler);
@@ -1602,12 +1661,16 @@ export class Clockwork {
   async shutdown() {
     if (!this.#initialized && !this.#initializing) return;
 
+    // A boot under way sees this and stops (#doInit's stillWanted), and the client is no longer starting
+    this.#lifeEpoch++;
+    this.#initializing = false;
+    this.#initPromise = null;
+
     this.#eventEmitter.emit("shutdown");
     this.#clock?.stopDriftTimer();
     this.#audioHealthMonitor?.reset();
     this.#audioHealthMonitor = null;
-    this.#syncListeners?.clear();
-    this.#syncListeners = null;
+    this.#abandonSyncs("the engine shut down");
 
     if (this.#osc) {
       this.#osc.dispose();
@@ -2093,13 +2156,12 @@ export class Clockwork {
     }
   }
 
-  async #finishInitialization() {
+  async #finishInitialization({ announce = true } = {}) {
     this.#initialized = true;
     this.#initializing = false;
     this.bootStats.initDuration = performance.now() - this.bootStats.initStartTime;
 
-    await this.#eventEmitter.emitAsync('setup');
-    this.#eventEmitter.emit('ready', { capabilities: this.#capabilities, bootStats: this.bootStats });
+    if (announce) await this.#announceReady();
 
     // TODO(v1): Consider whether to keep this dev console helper.
     // It auto-registers instances to window.__clockwork__ for quick debugging (ss.metrics(), ss.tree(), etc.)
@@ -2116,7 +2178,7 @@ export class Clockwork {
         ss.window = () => ss.primary?.readWindow();
         ss.snapshot = () => ss.primary?.getSnapshot();
       }
-      window.__clockwork__.instances.push(this);
+      if (!window.__clockwork__.instances.includes(this)) window.__clockwork__.instances.push(this);   // once: a reload is the same instance
     }
   }
 

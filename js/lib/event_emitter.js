@@ -101,6 +101,9 @@ export class EventEmitter {
    * @param {...*} args - Arguments to pass to listeners
    */
   async emitAsync(event, ...args) {
+    // What the listeners threw, handed back: one failing listener does not stop the others, but its failure is the
+    // caller's to report — logged here and dropped, a host's broken 'setup' looked like a boot that went fine
+    const errors = [];
     const listeners = this.#listeners.get(event);
     if (listeners) {
       for (const callback of listeners) {
@@ -108,9 +111,11 @@ export class EventEmitter {
           await callback(...args);
         } catch (error) {
           console.error(`[EventEmitter] Error in ${event} listener:`, error);
+          errors.push(error);
         }
       }
     }
+    return errors;
   }
 
 }
