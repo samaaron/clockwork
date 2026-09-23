@@ -16,23 +16,29 @@
 # See docs/BOUNDARY.md.
 cmake_minimum_required(VERSION 3.24)
 
-# ─── Version ─────────────────────────────────────────────────────────────────
-# Single-sourced from src/clockwork_config.h so project() and the binary's own
-# -v banner agree.
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/clockwork_config.h" _ss_version_defs
-     REGEX "^#define CLOCKWORK_VERSION_(MAJOR|MINOR|PATCH) ")
-foreach(_ss_line IN LISTS _ss_version_defs)
-    if(_ss_line MATCHES "CLOCKWORK_VERSION_(MAJOR|MINOR|PATCH) +([0-9]+)")
-        set(_ss_ver_${CMAKE_MATCH_1} ${CMAKE_MATCH_2})
+# ─── Which Clockwork ─────────────────────────────────────────────────────────
+# Clockwork has no version number (src/clockwork_config.h): a build says which
+# Clockwork it is by the commit it was built from, as git names it in this
+# repository, "-dirty" when the tree had changes. Not a git checkout (a source
+# archive): "unknown". CLOCKWORK_COMMIT set by the caller wins.
+project(Clockwork LANGUAGES C CXX)
+if(NOT DEFINED CLOCKWORK_COMMIT)
+    set(CLOCKWORK_COMMIT "unknown")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --always --dirty --abbrev=12 --match=NeVeRmAtCh
+                        OUTPUT_VARIABLE _cw_commit OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _cw_git)
+        if(_cw_git EQUAL 0 AND _cw_commit)
+            set(CLOCKWORK_COMMIT "${_cw_commit}")
+        endif()
     endif()
-endforeach()
-if(NOT DEFINED _ss_ver_MAJOR OR NOT DEFINED _ss_ver_MINOR OR NOT DEFINED _ss_ver_PATCH)
-    message(FATAL_ERROR "Could not parse CLOCKWORK_VERSION_* from src/clockwork_config.h")
 endif()
-
-project(Clockwork
-    VERSION ${_ss_ver_MAJOR}.${_ss_ver_MINOR}.${_ss_ver_PATCH}
-    LANGUAGES C CXX)
+# its first eight hex digits as a number, where only a number fits (0: unknown)
+set(CLOCKWORK_COMMIT_WORD 0)
+if(CLOCKWORK_COMMIT MATCHES "^([0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])")
+    math(EXPR CLOCKWORK_COMMIT_WORD "0x${CMAKE_MATCH_1}" OUTPUT_FORMAT DECIMAL)
+endif()
+message(STATUS "Clockwork ${CLOCKWORK_COMMIT}")
 if(APPLE)
     enable_language(OBJCXX)
 endif()
@@ -60,10 +66,10 @@ set(CLOCKWORK_COMPANY_NAME "${CLOCKWORK_PRODUCT_NAME}" CACHE STRING
     "Company name in the Windows version resource")
 
 # The version stamped into the Windows resource and said under the boot
-# banner. Defaults to clockwork's own, which is right standalone and wrong
-# when embedded — an executable should carry the PRODUCT's version, and
-# clockwork's project() version is not it. See src/clockwork_product.h.
-set(CLOCKWORK_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
+# banner: the PRODUCT's, which an embedder sets. Clockwork has none of its own;
+# left empty, the banner says the commit and the Windows resource 0.0.0.0.
+# See src/clockwork_product.h.
+set(CLOCKWORK_PRODUCT_VERSION "" CACHE STRING
     "Version stamped into OS-visible metadata and the boot banner")
 
 option(BUILD_TESTS "Build the native Catch2 test suite" OFF)
@@ -427,7 +433,9 @@ endif()
 
 set(CLOCKWORK_COMPILE_DEFS
     CLOCKWORK_PRODUCT_NAME="${CLOCKWORK_PRODUCT_NAME}"
-    CLOCKWORK_PRODUCT_VERSION="${CLOCKWORK_PRODUCT_VERSION}"
+    $<$<BOOL:${CLOCKWORK_PRODUCT_VERSION}>:CLOCKWORK_PRODUCT_VERSION="${CLOCKWORK_PRODUCT_VERSION}">
+    CLOCKWORK_COMMIT="${CLOCKWORK_COMMIT}"
+    CLOCKWORK_COMMIT_WORD=${CLOCKWORK_COMMIT_WORD}u
     $<$<BOOL:${CLOCKWORK_PRODUCT_HEADER}>:CLOCKWORK_PRODUCT_HEADER="${CLOCKWORK_PRODUCT_HEADER}">
     NDEBUG=1
     NOMINMAX=1
@@ -1017,14 +1025,19 @@ endif()
 # link group is a target rather than a variable.
 if(WIN32)
     # Windows wants the version as four comma-separated fields.
-    string(REPLACE "." ";" CLOCKWORK_VERSION_PARTS "${CLOCKWORK_PRODUCT_VERSION}")
+    # Windows wants numbers: a product's version, or none (0.0.0.0) standalone
+    set(_cw_rc_version "0.0.0")
+    if(CLOCKWORK_PRODUCT_VERSION MATCHES "^[0-9]+(\\.[0-9]+)*$")
+        set(_cw_rc_version "${CLOCKWORK_PRODUCT_VERSION}")
+    endif()
+    string(REPLACE "." ";" CLOCKWORK_VERSION_PARTS "${_cw_rc_version}")
     list(LENGTH CLOCKWORK_VERSION_PARTS CLOCKWORK_VERSION_N)
     while(CLOCKWORK_VERSION_N LESS 4)
         list(APPEND CLOCKWORK_VERSION_PARTS 0)
         list(LENGTH CLOCKWORK_VERSION_PARTS CLOCKWORK_VERSION_N)
     endwhile()
     list(JOIN CLOCKWORK_VERSION_PARTS "," CLOCKWORK_RC_VERSION_COMMAS)
-    set(PROJECT_VERSION "${CLOCKWORK_PRODUCT_VERSION}")
+    set(PROJECT_VERSION "${_cw_rc_version}")
 
     # The product's icon, for the window class and the taskbar: resource id
     # 1 when the embedder names an .ico (CLOCKWORK_PRODUCT_ICON), nothing

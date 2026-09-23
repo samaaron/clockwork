@@ -13,20 +13,25 @@
 
 #include <stdint.h>   // uint32_t in the declarations below: this header is included on its own (clockwork_product.h)
 
-// ─── Version ─────────────────────────────────────────────────────────────────
-// Single source of truth for all builds (WASM, native exe, NIF).
-// Bumped by hand — nothing in this repository rewrites it.
-#define CLOCKWORK_VERSION_MAJOR 0
-#define CLOCKWORK_VERSION_MINOR 71
-#define CLOCKWORK_VERSION_PATCH 0
-
-// String form for CLI / banners (e.g. "0.64.0")
-#define CLOCKWORK_STRINGIFY2(x) #x
-#define CLOCKWORK_STRINGIFY(x) CLOCKWORK_STRINGIFY2(x)
-#define CLOCKWORK_VERSION_STRING \
-    CLOCKWORK_STRINGIFY(CLOCKWORK_VERSION_MAJOR) "." \
-    CLOCKWORK_STRINGIFY(CLOCKWORK_VERSION_MINOR) "." \
-    CLOCKWORK_STRINGIFY(CLOCKWORK_VERSION_PATCH)
+// ─── Which Clockwork ─────────────────────────────────────────────────────────
+// Clockwork has no version number of its own. It is taken as a git submodule,
+// pinned to a commit, so the commit is what says which Clockwork a build is: a
+// number kept by hand beside it only drifts (0.71.0 stood from the split until
+// it was taken out). The build passes the commit in, as git names it in this
+// repository (CMakeLists.txt; a product's own build does the same): its short
+// hash, with "-dirty" when the tree had changes. Without one it is "unknown".
+//
+// Compatibility is not this: CLOCKWORK_CLIENT_ABI_VERSION (clockwork_client.h),
+// the feature bits and the asserted shared-memory layout say what a client may
+// rely on.
+#ifndef CLOCKWORK_COMMIT
+#define CLOCKWORK_COMMIT "unknown"
+#endif
+// The commit's first eight hex digits as a number, where only a number fits
+// (the metrics word, the client info's engine_version); 0 when unknown.
+#ifndef CLOCKWORK_COMMIT_WORD
+#define CLOCKWORK_COMMIT_WORD 0u
+#endif
 
 // Pre-allocated heap size for RT-safe allocations (used by clockwork_heap).
 // Default 64MB for native builds (unused in WASM where emscripten manages

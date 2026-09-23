@@ -1774,9 +1774,7 @@ extern "C" {
         // 58-64). Constant for the session; written once now that the DSP
         // exists. Runs on every runtime — native's initialiseDsp() also
         // routes through init_memory().
-        metrics->clockwork_version_major.store(CLOCKWORK_VERSION_MAJOR, std::memory_order_relaxed);
-        metrics->clockwork_version_minor.store(CLOCKWORK_VERSION_MINOR, std::memory_order_relaxed);
-        metrics->clockwork_version_patch.store(CLOCKWORK_VERSION_PATCH, std::memory_order_relaxed);
+        metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
         metrics->audio_sample_rate.store(static_cast<uint32_t>(sample_rate + 0.5), std::memory_order_relaxed);
         metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
         metrics->audio_output_channels.store(config.max_output_channels, std::memory_order_relaxed);
@@ -1794,9 +1792,13 @@ extern "C" {
         clockwork_log("\n" CLOCKWORK_PRODUCT_BANNER);
         // the product introduces itself under its banner; the substrate it runs
         // on follows, unless the product is clockwork itself
-        clockwork_log("%s v%s", CLOCKWORK_PRODUCT_NAME, CLOCKWORK_PRODUCT_VERSION);
-        if (std::strcmp(CLOCKWORK_PRODUCT_NAME, "clockwork") != 0)
-            clockwork_log("on Clockwork v" CLOCKWORK_VERSION_STRING);
+        // (clockwork itself has no version: standalone its line is the commit it was built from)
+        if (std::strcmp(CLOCKWORK_PRODUCT_NAME, "clockwork") != 0) {
+            clockwork_log("%s v%s", CLOCKWORK_PRODUCT_NAME, CLOCKWORK_PRODUCT_VERSION);
+            clockwork_log("on Clockwork " CLOCKWORK_COMMIT);
+        } else {
+            clockwork_log("clockwork " CLOCKWORK_COMMIT);
+        }
         clockwork_log("%.0fkHz %dch", sample_rate / 1000, config.max_output_channels);
         clockwork_log("DSP: %s %s", dsp_name, dsp_version);
         clockwork_log("");
@@ -1813,9 +1815,7 @@ extern "C" {
         g_osc_increment = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
         g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
 
-        metrics->clockwork_version_major.store(CLOCKWORK_VERSION_MAJOR, std::memory_order_relaxed);
-        metrics->clockwork_version_minor.store(CLOCKWORK_VERSION_MINOR, std::memory_order_relaxed);
-        metrics->clockwork_version_patch.store(CLOCKWORK_VERSION_PATCH, std::memory_order_relaxed);
+        metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
         metrics->audio_sample_rate.store(static_cast<uint32_t>(sample_rate + 0.5), std::memory_order_relaxed);
         metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
 

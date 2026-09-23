@@ -89,9 +89,9 @@ pub const FIELDS: &[FieldInfo] = &[
     FieldInfo { offset: 36, key: "linkAudioDriftPpm", unit: "ppm", description: "Read-rate deviation from the sender's clock (parts per million)" },
     FieldInfo { offset: 37, key: "linkAudioPublish", unit: "bool", description: "Link Audio publishing enabled (0/1)" },
     FieldInfo { offset: 38, key: "linkAudioSinks", unit: "count", description: "Active Link Audio output sinks" },
-    FieldInfo { offset: 39, key: "clockworkVersionMajor", unit: "count", description: "Clockwork major version" },
-    FieldInfo { offset: 40, key: "clockworkVersionMinor", unit: "count", description: "Clockwork minor version" },
-    FieldInfo { offset: 41, key: "clockworkVersionPatch", unit: "count", description: "Clockwork patch version" },
+    FieldInfo { offset: 39, key: "clockworkCommit", unit: "commit", description: "Which Clockwork: the commit it was built from (its first 8 hex digits; 0 when unknown)" },
+    FieldInfo { offset: 40, key: "reserved40", unit: "count", description: "Reserved (always 0)" },
+    FieldInfo { offset: 41, key: "reserved41", unit: "count", description: "Reserved (always 0)" },
     FieldInfo { offset: 42, key: "audioSampleRate", unit: "Hz", description: "Output sample rate" },
     FieldInfo { offset: 43, key: "audioBlockSize", unit: "count", description: "Audio block size in frames per callback" },
     FieldInfo { offset: 44, key: "audioOutputChannels", unit: "count", description: "Output bus channels" },
@@ -139,7 +139,6 @@ pub const COMPOSITES: &[CompositeInfo] = &[
     CompositeInfo { key: "nrtRingUsedPeak", description: "Used / peak bytes in the NRT-out ring buffer (replies, notifications, debug)" },
     CompositeInfo { key: "linkAudioChannelsRate", description: "Received Link Audio channels and their sample rate" },
     CompositeInfo { key: "linkAudioPublishSinks", description: "Link Audio publishing state (1 = on) | active output sinks" },
-    CompositeInfo { key: "engineVersion", description: "Clockwork engine version" },
     CompositeInfo { key: "busChannelsOutIn", description: "Output | input audio bus channels" },
     CompositeInfo { key: "nrtWorstRecentBoot", description: "Worst control pass in the last minute | since boot (ms)" },
 ];
@@ -187,9 +186,9 @@ pub enum Metric {
     LinkAudioDriftPpm = 36,
     LinkAudioPublish = 37,
     LinkAudioSinks = 38,
-    ClockworkVersionMajor = 39,
-    ClockworkVersionMinor = 40,
-    ClockworkVersionPatch = 41,
+    ClockworkCommit = 39,
+    Reserved40 = 40,
+    Reserved41 = 41,
     AudioSampleRate = 42,
     AudioBlockSize = 43,
     AudioOutputChannels = 44,
@@ -217,7 +216,7 @@ pub enum Metric {
 
 impl Metric {
     /// Every metric, in offset order.
-    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkVersionMajor, Metric::ClockworkVersionMinor, Metric::ClockworkVersionPatch, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::DriftOffsetMs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::EngineSchedulerCapacity, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
+    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkCommit, Metric::Reserved40, Metric::Reserved41, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::DriftOffsetMs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::EngineSchedulerCapacity, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
 
     /// The word this metric is, in the metrics array.
     pub const fn offset(self) -> u32 {
@@ -266,9 +265,9 @@ impl Metric {
             Metric::LinkAudioDriftPpm => &FIELDS[36],
             Metric::LinkAudioPublish => &FIELDS[37],
             Metric::LinkAudioSinks => &FIELDS[38],
-            Metric::ClockworkVersionMajor => &FIELDS[39],
-            Metric::ClockworkVersionMinor => &FIELDS[40],
-            Metric::ClockworkVersionPatch => &FIELDS[41],
+            Metric::ClockworkCommit => &FIELDS[39],
+            Metric::Reserved40 => &FIELDS[40],
+            Metric::Reserved41 => &FIELDS[41],
             Metric::AudioSampleRate => &FIELDS[42],
             Metric::AudioBlockSize => &FIELDS[43],
             Metric::AudioOutputChannels => &FIELDS[44],

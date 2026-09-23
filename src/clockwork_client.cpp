@@ -238,9 +238,7 @@ ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientIn
     ClockworkClientInfo v{};
     v.struct_bytes    = out->struct_bytes;
     v.abi_version     = CLOCKWORK_CLIENT_ABI_VERSION;
-    v.engine_version  = CLOCKWORK_VERSION_MAJOR * 10000u
-                      + CLOCKWORK_VERSION_MINOR * 100u
-                      + CLOCKWORK_VERSION_PATCH;
+    v.engine_version  = CLOCKWORK_COMMIT_WORD;   // which Clockwork (clockwork_config.h): abi_version is what to check
     v.features        = CLOCKWORK_FEATURE_WINDOW
 #if CLOCKWORK_SCHEDULER
                       | CLOCKWORK_FEATURE_SCHEDULER

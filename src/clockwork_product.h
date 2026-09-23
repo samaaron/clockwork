@@ -29,8 +29,8 @@
  *
  * The version said under the banner is the product's too, as
  * CLOCKWORK_PRODUCT_VERSION (a string; from CMake, the cache variable of that
- * name, which the Windows version resource already carries). Clockwork's own
- * standalone. The boot log names the substrate on its own line when the
+ * name, which the Windows version resource already carries); standalone, the
+ * commit clockwork was built from. The boot log names the substrate on its own line when the
  * product is not clockwork itself.
  *
  * NOT the same as --app-name. That is a RUNTIME override for the names
@@ -59,9 +59,10 @@
     "░▀▀▀░▀▀▀░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀░▀░▀░▀"
 #endif
 
-/* The product's version: clockwork's own unless the build says the product's. */
+/* The product's version, as the build says it. Clockwork has none of its own
+   (clockwork_config.h), so standalone it is the commit it was built from. */
 #ifndef CLOCKWORK_PRODUCT_VERSION
-#define CLOCKWORK_PRODUCT_VERSION CLOCKWORK_VERSION_STRING
+#define CLOCKWORK_PRODUCT_VERSION CLOCKWORK_COMMIT
 #endif
 
 /* The prefix every diagnostic line carries. Written as a separate macro so the

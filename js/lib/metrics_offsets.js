@@ -104,9 +104,9 @@ export const LINK_AUDIO_SINKS        = 38;  // active output sinks
 // so these are real values on web AND native. Mirror of PerformanceMetrics
 // in shared_memory.h; asserted via CLOCKWORK_ASSERT_METRIC.
 // =============================================================================
-export const CLOCKWORK_VERSION_MAJOR = 39;  // CLOCKWORK_VERSION_MAJOR
-export const CLOCKWORK_VERSION_MINOR = 40;  // CLOCKWORK_VERSION_MINOR
-export const CLOCKWORK_VERSION_PATCH = 41;  // CLOCKWORK_VERSION_PATCH
+export const CLOCKWORK_COMMIT         = 39;  // CLOCKWORK_COMMIT_WORD: which Clockwork, its commit's first 8 hex digits (0: unknown)
+export const RESERVED_40              = 40;  // was the version's minor (Clockwork has no version); 0
+export const RESERVED_41              = 41;  // was the version's patch; 0
 export const AUDIO_SAMPLE_RATE        = 42;  // output sample rate (Hz)
 export const AUDIO_BLOCK_SIZE         = 43;  // block size (frames; 128 on web)
 export const AUDIO_OUTPUT_CHANNELS    = 44;  // output bus channels

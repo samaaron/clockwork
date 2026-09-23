@@ -190,7 +190,7 @@ typedef struct ClockworkClientInfo {
     uint32_t struct_bytes;      /* in: sizeof(ClockworkClientInfo) as you know it */
 
     uint32_t abi_version;       /* the library's, for a binding that wants to check */
-    uint32_t engine_version;    /* the engine's own build version */
+    uint32_t engine_version;    /* which Clockwork: its commit's first 8 hex digits as a number (0: unknown), to show, not to check */
     uint32_t features;          /* CLOCKWORK_FEATURE_* — what this engine has */
 
     double   sample_rate;

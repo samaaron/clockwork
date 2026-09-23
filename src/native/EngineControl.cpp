@@ -19,7 +19,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 #include "DevicePolicy.h"
-#include "clockwork_config.h"  // CLOCKWORK_VERSION_MAJOR / _MINOR
+#include "clockwork_config.h"  // CLOCKWORK_COMMIT
 #ifdef __APPLE__
 #include "AggregateDeviceHelper.h"
 #include "JuceAudioCallback.h"  // renderAudioBlock + the audio-width accessors
@@ -500,7 +500,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             osc::OutboundPacketStream s(buf, sizeof(buf));
             s << osc::BeginMessage(CLOCKWORK_SYS("notify.reply"))
               << static_cast<osc::int32>(1)
-              << CLOCKWORK_VERSION_STRING
+              << CLOCKWORK_COMMIT   // which Clockwork (it has no version number: clockwork_config.h)
               << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));

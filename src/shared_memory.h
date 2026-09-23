@@ -650,9 +650,9 @@ struct alignas(4) PerformanceMetrics {
     // ─── System info (cross-platform; written by shared C++ on every runtime) ─
     // Engine identity + audio connection details. Written once at init by
     // init_memory() (audio_processor.cpp). Constant for the session.
-    std::atomic<uint32_t> clockwork_version_major; // 39: CLOCKWORK_VERSION_MAJOR
-    std::atomic<uint32_t> clockwork_version_minor; // 40: CLOCKWORK_VERSION_MINOR
-    std::atomic<uint32_t> clockwork_version_patch; // 41: CLOCKWORK_VERSION_PATCH
+    std::atomic<uint32_t> clockwork_commit;        // 39: CLOCKWORK_COMMIT_WORD, the commit's first 8 hex digits (0: unknown)
+    std::atomic<uint32_t> reserved_40;             // 40: was the version's minor (Clockwork has no version); 0
+    std::atomic<uint32_t> reserved_41;             // 41: was the version's patch; 0
     std::atomic<uint32_t> audio_sample_rate;        // 42: output sample rate (Hz)
     std::atomic<uint32_t> audio_block_size;         // 43: block size (frames; 128 on web)
     std::atomic<uint32_t> audio_output_channels;    // 44: output bus channels
@@ -1278,9 +1278,9 @@ CLOCKWORK_ASSERT_METRIC(ring_buffer_direct_write_fails,  26);
 // array never reads those slots). The cross-platform system-info block [39-49]
 // is written by shared C++ on every runtime and IS asserted against the JS
 // mirror in js/lib/metrics_offsets.js.
-CLOCKWORK_ASSERT_METRIC(clockwork_version_major,        39);
-CLOCKWORK_ASSERT_METRIC(clockwork_version_minor,        40);
-CLOCKWORK_ASSERT_METRIC(clockwork_version_patch,        41);
+CLOCKWORK_ASSERT_METRIC(clockwork_commit,               39);
+CLOCKWORK_ASSERT_METRIC(reserved_40,                    40);
+CLOCKWORK_ASSERT_METRIC(reserved_41,                    41);
 CLOCKWORK_ASSERT_METRIC(audio_sample_rate,               42);
 CLOCKWORK_ASSERT_METRIC(audio_block_size,                43);
 CLOCKWORK_ASSERT_METRIC(audio_output_channels,           44);

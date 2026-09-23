@@ -155,9 +155,7 @@ export class MetricsReader {
       ringBufferDirectWriteFails: m[MetricsOffsets.RING_BUFFER_DIRECT_WRITE_FAILS],
 
       // System info (cross-platform; written by shared C++ at init)
-      clockworkVersionMajor: m[MetricsOffsets.CLOCKWORK_VERSION_MAJOR],
-      clockworkVersionMinor: m[MetricsOffsets.CLOCKWORK_VERSION_MINOR],
-      clockworkVersionPatch: m[MetricsOffsets.CLOCKWORK_VERSION_PATCH],
+      clockworkCommit: m[MetricsOffsets.CLOCKWORK_COMMIT],
       audioSampleRate: m[MetricsOffsets.AUDIO_SAMPLE_RATE],
       audioBlockSize: m[MetricsOffsets.AUDIO_BLOCK_SIZE],
       audioOutputChannels: m[MetricsOffsets.AUDIO_OUTPUT_CHANNELS],

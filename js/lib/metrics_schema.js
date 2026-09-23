@@ -34,7 +34,6 @@ const COMPOSITES = {
   nrtRingUsedPeak:           { description: 'Used / peak bytes in the NRT-out ring buffer (replies, notifications, debug)' },
   linkAudioChannelsRate:     { description: 'Received Link Audio channels and their sample rate' },
   linkAudioPublishSinks:     { description: 'Link Audio publishing state (1 = on) | active output sinks' },
-  engineVersion:             { description: 'Clockwork engine version' },
   busChannelsOutIn:          { description: 'Output | input audio bus channels' },
   nrtWorstRecentBoot:        { description: 'Worst control pass in the last minute | since boot (ms)' },
 };
@@ -101,9 +100,9 @@ export const METRICS_SCHEMA = {
     linkAudioSinks:               { offset: 38, type: 'gauge',    unit: 'count', nativeOnly: true, description: 'Active Link Audio output sinks' },
 
     // System info [39-45] — cross-platform; written by shared C++ at init.
-    clockworkVersionMajor:       { offset: 39, type: 'constant', unit: 'count', description: 'Clockwork major version' },
-    clockworkVersionMinor:       { offset: 40, type: 'constant', unit: 'count', description: 'Clockwork minor version' },
-    clockworkVersionPatch:       { offset: 41, type: 'constant', unit: 'count', description: 'Clockwork patch version' },
+    clockworkCommit:              { offset: 39, type: 'constant', unit: 'commit', description: 'Which Clockwork: the commit it was built from (its first 8 hex digits; 0 when unknown)' },
+    reserved40:                   { offset: 40, type: 'constant', unit: 'count', description: 'Reserved (always 0)' },
+    reserved41:                   { offset: 41, type: 'constant', unit: 'count', description: 'Reserved (always 0)' },
     audioSampleRate:              { offset: 42, type: 'constant', unit: 'Hz',    description: 'Output sample rate' },
     audioBlockSize:               { offset: 43, type: 'constant', unit: 'count', description: 'Audio block size in frames per callback' },
     audioOutputChannels:          { offset: 44, type: 'constant', unit: 'count', description: 'Output bus channels' },
@@ -215,7 +214,7 @@ export const METRICS_SCHEMA = {
       {
         title: 'Engine',
         rows: [
-          { label: 'version',  cells: [{ key: 'clockworkVersionMajor' }, { text: '.' }, { key: 'clockworkVersionMinor' }, { text: '.' }, { key: 'clockworkVersionPatch' }] },
+          { label: 'clockwork', cells: [{ key: 'clockworkCommit', format: 'commit' }] },
           { label: 'rate',     cells: [{ key: 'audioSampleRate' }, { text: ' Hz', kind: 'muted' }] },
           { label: 'block',    cells: [{ key: 'audioBlockSize' }, { text: ' frames', kind: 'muted' }] },
           { label: 'channels', tooltip: COMPOSITES.busChannelsOutIn.description, cells: [{ key: 'audioOutputChannels' }, { sep: ' | ' }, { key: 'audioInputChannels', kind: 'muted' }] },

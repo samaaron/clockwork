@@ -51,6 +51,11 @@ function formatCenti(val) {
   return (val / 100).toFixed(2);
 }
 
+// a commit's first eight hex digits, held as a number (clockworkCommit); 0 is unknown
+function formatCommit(val) {
+  return val ? (val >>> 0).toString(16).padStart(8, '0') : 'unknown';
+}
+
 function makeFormatter(cell, metricDef, metrics) {
   if (cell.format === 'bytes') return (v) => formatBytes(v);
   if (cell.format === 'headroom') return (v) => formatHeadroom(v);
@@ -59,6 +64,7 @@ function makeFormatter(cell, metricDef, metrics) {
   if (cell.format === 'latencyUs') return (v) => formatLatencyUs(v);
   if (cell.format === 'milliBpm') return (v) => formatMilliBpm(v);
   if (cell.format === 'centi') return (v) => formatCenti(v);
+  if (cell.format === 'commit') return (v) => formatCommit(v);
   if (cell.format === 'enum' && metricDef?.values) {
     const values = metricDef.values;
     return (v) => formatEnum(v, values);
