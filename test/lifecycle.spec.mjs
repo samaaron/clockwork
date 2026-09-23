@@ -236,6 +236,84 @@ test("a boot that fails leaves the engine in 'error' until it is asked again", a
 
 // A page's visibility, as a browser would change it: document.visibilityState is read-only, so it is redefined, then
 // the event it comes with is sent
+const setVisibility = `(v) => { Object.defineProperty(document, "visibilityState", { value: v, configurable: true }); Object.defineProperty(document, "hidden", { value: v === "hidden", configurable: true }); document.dispatchEvent(new Event("visibilitychange")); }`;
+
+test("a page going away takes the engine with it: shut down, its own context closed", async ({ page, clockworkConfig }) => {
+  // pagehide is the last word a page gets — the tab closed, the page left for another, or put in the back/forward
+  // cache. An engine still running after it is what iOS keeps playing with no page at all, a worker still scheduling.
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const cw = new window.Clockwork(config);
+    await cw.init();
+    const ctx = cw.audioContext;
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    return { state: cw.getEngineState(), context: ctx.state };
+  }, clockworkConfig);
+  expect(r.state).toBe("stopped");
+  expect(r.context, "the engine's context outlived the page").toBe("closed");
+});
+
+test("a host can keep the engine through pagehide", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const cw = new window.Clockwork({ ...config, pageLifecycle: { pagehide: "none" } });
+    await cw.init();
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const out = { state: cw.getEngineState(), context: cw.audioContext?.state };
+    await cw.shutdown();
+    return out;
+  }, clockworkConfig);
+  expect(r.state).toBe("running");
+  expect(r.context).toBe("running");
+});
+
+test("a hidden page keeps playing by default, and suspends if the host asks, resuming when shown again", async ({ page, clockworkConfig }) => {
+  // Keeping on is right for a performer with the tab behind another; a phone, where the page hidden is a page the
+  // system may freeze at any moment, is better suspended.
+  await boot(page);
+  const r = await page.evaluate(async ([config, setVisibilitySrc]) => {
+    const setVisibility = eval(setVisibilitySrc);
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const keep = new window.Clockwork(config);
+    await keep.init();
+    setVisibility("hidden"); await wait(300);
+    const kept = keep.audioContext.state;
+    setVisibility("visible"); await wait(100);
+    await keep.shutdown();
+    const pause = new window.Clockwork({ ...config, pageLifecycle: { hidden: "suspend" } });
+    await pause.init();
+    setVisibility("hidden"); await wait(300);
+    const hidden = pause.audioContext.state;
+    setVisibility("visible"); await wait(800);
+    const shown = pause.audioContext.state;
+    await pause.shutdown();
+    return { kept, hidden, shown };
+  }, [clockworkConfig, setVisibility]);
+  expect(r.kept).toBe("running");
+  expect(r.hidden).toBe("suspended");
+  expect(r.shown).toBe("running");
+});
+
+test("a shut-down engine listens to the page no more", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async ([config, setVisibilitySrc]) => {
+    const setVisibility = eval(setVisibilitySrc);
+    const cw = new window.Clockwork({ ...config, pageLifecycle: { hidden: "suspend" } });
+    await cw.init();
+    await cw.shutdown();
+    const seen = [];
+    cw.on("statechange", ({ state }) => seen.push(state));
+    for (const m of ["suspend", "resume", "shutdown"]) { const f = cw[m].bind(cw); cw[m] = (...a) => { seen.push(m); return f(...a); }; }
+    setVisibility("hidden"); setVisibility("visible");
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+    await new Promise((r) => setTimeout(r, 300));
+    return seen;
+  }, [clockworkConfig, setVisibility]);
+  expect(r).toEqual([]);
+});
+
 test("a 'setup' listener that fails is said on 'error', not swallowed", async ({ page, clockworkConfig }) => {
   await boot(page);
   const r = await page.evaluate(async (config) => {

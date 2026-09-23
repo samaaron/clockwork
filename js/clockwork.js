@@ -203,6 +203,8 @@ export class Clockwork {
   #lifeEpoch = 0;
   // What the engine is doing, in native's words (getEngineState), and 'statechange' says every change of it
   #engineState = 'stopped';
+  // The page's events the engine is listening to, while it is up
+  #pageHandlers = null;
 
   #cachedWasmBytes = null;
 
@@ -319,6 +321,10 @@ export class Clockwork {
     this.#config = {
       mode: mode,
       snapshotIntervalMs: options.snapshotIntervalMs ?? SNAPSHOT_INTERVAL_MS,
+      // What the page going away, or out of sight, does to the engine. pagehide: 'shutdown' (the default: an engine
+      // left running after its page is what a phone keeps playing with no page at all) or 'none'. hidden: 'keep'
+      // (the default: a performer's tab behind another plays on) or 'suspend' (and resume when shown again).
+      pageLifecycle: { pagehide: 'shutdown', hidden: 'keep', ...options.pageLifecycle },
       wasmBytes: options.wasmBytes ?? null,
       wasmUrl: options.wasmUrl || wasmBaseURL + "clockwork-engine.wasm",
       wasmBaseURL: wasmBaseURL,
@@ -519,6 +525,7 @@ export class Clockwork {
     const epoch = this.#lifeEpoch;
     const stillWanted = () => { if (epoch !== this.#lifeEpoch) throw new Error("shut down while starting"); };
     this.#setEngineState('booting', 'init');
+    this.#listenToPage();
 
     try {
       this.#setAndValidateCapabilities();
@@ -540,6 +547,7 @@ export class Clockwork {
       this.#initializing = false;
       this.#initPromise = null;
       if (epoch === this.#lifeEpoch) this.#setEngineState('error', 'boot-failed', { error });
+      this.#stopListeningToPage();
       console.error("[Clockwork] Initialization failed:", error);
       this.#eventEmitter.emit('error', error);
       throw error;
@@ -1003,6 +1011,32 @@ export class Clockwork {
       this.#eventEmitter.emit('error', error);
       throw error;
     }
+  }
+
+  // The page's own lifecycle, which the engine's context and workers live and die by (config.pageLifecycle). Listened
+  // to from init() until shutdown(): a reload keeps listening, and a shut-down engine hears nothing.
+  #listenToPage() {
+    if (this.#pageHandlers || typeof window === 'undefined' || typeof document === 'undefined') return;
+    const policy = this.#config.pageLifecycle;
+    const onPageHide = () => {
+      if (policy.pagehide === 'shutdown') this.shutdown();   // its first steps are synchronous: the context is closed within the event
+    };
+    const onVisibility = () => {
+      if (policy.hidden !== 'suspend' || !this.#initialized) return;
+      if (document.visibilityState === 'hidden') this.suspend();
+      else this.resume();   // may be refused without a press (iOS): the context stays suspended, for the host to ask for one
+    };
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibility);
+    this.#pageHandlers = { onPageHide, onVisibility };
+  }
+
+  #stopListeningToPage() {
+    const handlers = this.#pageHandlers;
+    if (!handlers) return;
+    this.#pageHandlers = null;
+    window.removeEventListener('pagehide', handlers.onPageHide);
+    document.removeEventListener('visibilitychange', handlers.onVisibility);
   }
 
   // Everything waiting on a sync() told the engine has gone
@@ -1680,6 +1714,7 @@ export class Clockwork {
     this.#lifeEpoch++;
     this.#initializing = false;
     this.#initPromise = null;
+    this.#stopListeningToPage();
     this.#setEngineState('stopped', 'shutdown');
 
     this.#eventEmitter.emit("shutdown");
