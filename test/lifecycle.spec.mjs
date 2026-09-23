@@ -201,6 +201,41 @@ test("shutdown() settles what is waiting on the engine at once, rather than seco
   expect(r.settled, "a sync() pending at shutdown() was left to time out").toBe(true);
 });
 
+test("the engine's state is native's, and every change of it is said", async ({ page, clockworkConfig }) => {
+  // One answer to "what is the engine doing?", in the words ClockworkEngine uses (src/engine_state.h), in place of a
+  // host keeping its own flags from half a dozen events. Suspending the audio is the context's business, not a state.
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const cw = new window.Clockwork(config);
+    const seen = [cw.getEngineState()];
+    cw.on("statechange", ({ state, reason }) => seen.push(`${state} (${reason})`));
+    await cw.init();
+    await cw.suspend();
+    await new Promise((r) => setTimeout(r, 100));
+    await cw.resume();
+    await cw.reload();
+    await cw.shutdown();
+    return { seen, final: cw.getEngineState() };
+  }, clockworkConfig);
+  expect(r.seen).toEqual(["stopped", "booting (init)", "running (boot)", "restarting (reload)", "running (reload)", "stopped (shutdown)"]);
+  expect(r.final).toBe("stopped");
+});
+
+test("a boot that fails leaves the engine in 'error' until it is asked again", async ({ page, clockworkConfig }) => {
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const cw = new window.Clockwork({ ...config, workletUrl: "/dist/workers/no-such-worklet.js" });
+    const seen = [];
+    cw.on("statechange", ({ state, error }) => seen.push(error ? `${state}!` : state));
+    await cw.init().catch(() => {});
+    return { seen, final: cw.getEngineState() };
+  }, clockworkConfig);
+  expect(r.seen).toEqual(["booting", "error!"]);
+  expect(r.final).toBe("error");
+});
+
+// A page's visibility, as a browser would change it: document.visibilityState is read-only, so it is redefined, then
+// the event it comes with is sent
 test("a 'setup' listener that fails is said on 'error', not swallowed", async ({ page, clockworkConfig }) => {
   await boot(page);
   const r = await page.evaluate(async (config) => {
@@ -209,10 +244,10 @@ test("a 'setup' listener that fails is said on 'error', not swallowed", async ({
     cw.on("error", (e) => errors.push(String(e?.message ?? e)));
     cw.on("setup", () => { throw new Error("no such group"); });
     await cw.init();
-    const out = { errors, initialized: cw.initialized };
+    const out = { errors, state: cw.getEngineState() };
     await cw.shutdown();
     return out;
   }, clockworkConfig);
   expect(r.errors.some((m) => m.includes("setup") && m.includes("no such group")), JSON.stringify(r.errors)).toBe(true);
-  expect(r.initialized, "the engine itself is up").toBe(true);
+  expect(r.state, "the engine itself is up").toBe("running");
 });

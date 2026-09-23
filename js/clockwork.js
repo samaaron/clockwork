@@ -201,6 +201,8 @@ export class Clockwork {
   // Counted up by every shutdown(): a boot that started before one sees the count move, and stops, rather than going
   // on to build on what shutdown() took away (and to say 'ready' for an engine that is gone)
   #lifeEpoch = 0;
+  // What the engine is doing, in native's words (getEngineState), and 'statechange' says every change of it
+  #engineState = 'stopped';
 
   #cachedWasmBytes = null;
 
@@ -395,14 +397,22 @@ export class Clockwork {
   // `initialized` getter, exposed as a method to match the C++ API shape.
   isRunning() { return this.#initialized; }
 
-  // Mirrors C++ ClockworkEngine::engineState(). Returns 'stopped',
-  // 'booting', or 'running'. The C++ enum also has 'restarting' and 'error'
-  // values that JS does not currently distinguish — calls to recover/resume
-  // do not surface a separate 'restarting' state from JS.
-  getEngineState() {
-    if (this.#initializing) return 'booting';
-    if (this.#initialized) return 'running';
-    return 'stopped';
+  // Mirrors C++ ClockworkEngine::engineState() (src/engine_state.h), word for word:
+  //   'booting'     init() under way
+  //   'running'     up
+  //   'restarting'  reload() under way — native's cold swap
+  //   'stopped'     not started, or shut down
+  //   'error'       the last init() or reload() failed; init() or reset() tries again
+  // Every change is emitted as 'statechange' { state, previous, reason } (and { error } on 'error'), as native sends
+  // /clockwork/statechange <state> <reason>. Whether the audio itself is running is the context's, not the engine's
+  // — native has no such state — and is said by the audiocontext:* events.
+  getEngineState() { return this.#engineState; }
+
+  #setEngineState(state, reason, detail = {}) {
+    const previous = this.#engineState;
+    if (state === previous) return;
+    this.#engineState = state;
+    this.#eventEmitter.emit('statechange', { state, previous, reason, ...detail });
   }
   get audioContext() { return this.#audioContext; }
   // ClockworkClock — engine-wide session-state + time authority.
@@ -508,6 +518,7 @@ export class Clockwork {
     this.bootStats.initStartTime = performance.now();
     const epoch = this.#lifeEpoch;
     const stillWanted = () => { if (epoch !== this.#lifeEpoch) throw new Error("shut down while starting"); };
+    this.#setEngineState('booting', 'init');
 
     try {
       this.#setAndValidateCapabilities();
@@ -528,6 +539,7 @@ export class Clockwork {
       try { await this.#partialShutdown(); } catch (e) { /* partly down already */ }
       this.#initializing = false;
       this.#initPromise = null;
+      if (epoch === this.#lifeEpoch) this.#setEngineState('error', 'boot-failed', { error });
       console.error("[Clockwork] Initialization failed:", error);
       this.#eventEmitter.emit('error', error);
       throw error;
@@ -809,6 +821,7 @@ export class Clockwork {
   }
 
   async #doReload() {
+    this.#setEngineState('restarting', 'reload');
     this.#eventEmitter.emit('reload:start');
     try {
       return await this.#reloadSteps();
@@ -817,6 +830,7 @@ export class Clockwork {
       // is false, as recover()'s is: an exception thrown past a recovery path leaves its caller with no way back.
       try { await this.#partialShutdown(); } catch (e) { /* partly down already */ }
       console.error("[Clockwork] reload failed:", error);
+      this.#setEngineState('error', 'reload-failed', { error });
       this.#eventEmitter.emit('reload:failed', { error });
       this.#eventEmitter.emit('reload:complete', { success: false, error });
       return false;
@@ -854,6 +868,7 @@ export class Clockwork {
 
     // Only now 'setup' and 'ready': a host rebuilds on the engine there (its groups, its FX), and what it builds
     // refers to the definitions and buffers just put back. Said any earlier, it refers to what is not there yet.
+    this.#setEngineState('running', 'reload');
     await this.#announceReady();
 
     this.#eventEmitter.emit('reload:complete', { success: true });
@@ -1665,6 +1680,7 @@ export class Clockwork {
     this.#lifeEpoch++;
     this.#initializing = false;
     this.#initPromise = null;
+    this.#setEngineState('stopped', 'shutdown');
 
     this.#eventEmitter.emit("shutdown");
     this.#clock?.stopDriftTimer();
@@ -2161,7 +2177,10 @@ export class Clockwork {
     this.#initializing = false;
     this.bootStats.initDuration = performance.now() - this.bootStats.initStartTime;
 
-    if (announce) await this.#announceReady();
+    if (announce) {
+      this.#setEngineState('running', 'boot');
+      await this.#announceReady();
+    }
 
     // TODO(v1): Consider whether to keep this dev console helper.
     // It auto-registers instances to window.__clockwork__ for quick debugging (ss.metrics(), ss.tree(), etc.)
