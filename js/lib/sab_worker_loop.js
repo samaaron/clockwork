@@ -47,6 +47,11 @@ export function runSabWorker(config) {
     };
 
     let running = false;
+    // Counted up by every start() and stop(). A yielding loop parked in Atomics.waitAsync when the reader is stopped
+    // and started again, with nothing written in between, wakes to a running reader — and without this read on beside
+    // the loop that replaced it: one more loop for each time, every one woken by every frame (and a watcher, which
+    // keeps its own place, shown each frame by each of them).
+    let generation = 0;
 
     async function initRingBuffer(buffer, base, constants, wasmModule, wasmMemory) {
         ctx.sharedBuffer = buffer;
@@ -74,7 +79,7 @@ export function runSabWorker(config) {
         await onInit?.(ctx);
     }
 
-    function waitLoop() {
+    function waitLoop(mine) {
         const hIdx = headIndex(ctx.CONTROL_INDICES);
         // A reader that CONSUMES leaves its position in the ring's own tail, so
         // "nothing to do" is head === tail. A reader that only WATCHES keeps its
@@ -83,7 +88,7 @@ export function runSabWorker(config) {
         const tIdx = tailIndex ? tailIndex(ctx.CONTROL_INDICES) : -1;
         let lastHead = -1;
 
-        while (running) {
+        while (running && mine === generation) {
             try {
                 const currentHead = Atomics.load(ctx.atomicView, hIdx);
                 const idle = tIdx >= 0
@@ -110,12 +115,12 @@ export function runSabWorker(config) {
     // The same loop, yielding rather than blocking: Atomics.waitAsync hands back a promise instead of
     // parking the thread, so the host's own work — its messages, its timers — keeps running between frames.
     // Where it is missing, a short sleep stands in: slower to wake, but it still yields.
-    async function waitLoopAsync() {
+    async function waitLoopAsync(mine) {
         const hIdx = headIndex(ctx.CONTROL_INDICES);
         const tIdx = tailIndex ? tailIndex(ctx.CONTROL_INDICES) : -1;
         let lastHead = -1;
 
-        while (running) {
+        while (running && mine === generation) {
             try {
                 const currentHead = Atomics.load(ctx.atomicView, hIdx);
                 const idle = tIdx >= 0
@@ -129,7 +134,7 @@ export function runSabWorker(config) {
                     } else {
                         await new Promise((r) => setTimeout(r, 1));
                     }
-                    if (!running) return;
+                    if (!running || mine !== generation) return;   // stopped, or replaced, while it waited
                 }
                 lastHead = Atomics.load(ctx.atomicView, hIdx);
 
@@ -155,11 +160,13 @@ export function runSabWorker(config) {
             return;
         }
         running = true;
-        if (blocking) waitLoop(); else waitLoopAsync();
+        const mine = ++generation;
+        if (blocking) waitLoop(mine); else waitLoopAsync(mine);
     }
 
     function stop() {
         running = false;
+        generation++;
     }
 
     endpoint.addEventListener('message', async (event) => {
