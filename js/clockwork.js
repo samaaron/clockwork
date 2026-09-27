@@ -195,6 +195,7 @@ export class Clockwork {
   #previousAudioContextState = null;
   // Whether the engine made its context (and so closes it), or the host handed it one (the host's to close)
   #ownsAudioContext = false;
+  #nextAudioContext = null;   // a context the next reload moves onto (reload()'s option: recover()'s spare)
   #onContextState = null;
   // A reload in progress: every caller asking for one while it runs gets the same one
   #reloading = null;
@@ -733,6 +734,13 @@ export class Clockwork {
   /**
    * Smart recovery - tries quick resume first, falls back to full reload.
    * Use this when you don't know if a quick resume will work.
+   *
+   * The reload is onto a new audio context, made here before anything is awaited. recover() is called from a press,
+   * and a browser lets audio start only within one; and the context there is may be past saving: iOS, after an
+   * interruption (a call, another app, the page switched away from), gives back a context that says it is running
+   * and renders nothing, and no worklet on it — the old one or a reload's — ever processes again. A context made
+   * any later (a reload's own, seconds in) starts suspended. So the spare is made now, the quick resume tries the
+   * context there is, and the spare is used only if that fails; otherwise it is closed.
    * @returns {Promise<boolean>} true if audio is running after recovery
    */
   async recover() {
@@ -740,13 +748,28 @@ export class Clockwork {
 
     if (__DEV__) console.log('[Dbg-Clockwork] Attempting recovery...');
 
+    const spare = this.#spareAudioContext();
     if (await this.resume()) {
       if (__DEV__) console.log('[Dbg-Clockwork] Quick resume succeeded');
+      spare?.close().catch(() => {});
       return true;
     }
 
-    if (__DEV__) console.log('[Dbg-Clockwork] Resume failed, doing full reload');
-    return await this.reload();
+    if (__DEV__) console.log('[Dbg-Clockwork] Resume failed, doing full reload onto a new context');
+    return await this.reload({ audioContext: spare });
+  }
+
+  // A context to recover onto, made and started within the press that asked for recovery (recover()); null where
+  // there is no Web Audio to make one with.
+  #spareAudioContext() {
+    if (typeof AudioContext === 'undefined') return null;
+    try {
+      const ctx = new AudioContext(this.#config.audioContextOptions);
+      ctx.resume().catch(() => {});
+      return ctx;
+    } catch (e) {
+      return null;
+    }
   }
 
   /**
@@ -817,13 +840,16 @@ export class Clockwork {
    * restoreClientState() to put back whatever the product was holding.
    * Emits 'setup' event so you can rebuild groups, FX chains, bus routing.
    * Use when the worklet was killed (e.g., long background, browser reclaimed memory).
+   * @param {{ audioContext?: AudioContext }} [options] audioContext: a context to reload onto in place of the one there
+   *   is (recover()'s spare): the engine's own from then on, and closed with it
    * @returns {Promise<boolean>} true if reload succeeded
    */
-  async reload() {
+  async reload({ audioContext = null } = {}) {
     // One at a time: recovery is asked for from several places at once (a press, a key, the tab coming back), and two
     // teardowns racing two builds leave nothing working. Every caller gets the reload already under way.
-    if (this.#reloading) return this.#reloading;
-    if (!this.#initialized) return false;
+    if (this.#reloading) { audioContext?.close().catch(() => {}); return this.#reloading; }
+    if (!this.#initialized) { audioContext?.close().catch(() => {}); return false; }
+    this.#nextAudioContext = audioContext;
     this.#reloading = this.#doReload().finally(() => { this.#reloading = null; });
     return this.#reloading;
   }
@@ -1827,10 +1853,15 @@ export class Clockwork {
 
   #initializeAudioContext() {
     // A context the host made is the host's: used, never closed, and kept across a reload. One that has been closed
-    // is no use to anyone, so the engine makes its own in its place (and that one is the engine's to close).
+    // is no use to anyone, so the engine makes its own in its place (and that one is the engine's to close). A reload
+    // given one to move onto (recover()'s, the host's past saving) makes that the engine's own, and the host's is
+    // not gone back to: a later reload makes its own.
+    const next = this.#nextAudioContext;
+    this.#nextAudioContext = null;
+    if (next) this.#config.audioContext = null;
     const supplied = this.#config.audioContext;
     this.#ownsAudioContext = !supplied || supplied.state === 'closed';
-    const ctx = this.#audioContext = this.#ownsAudioContext ? new AudioContext(this.#config.audioContextOptions) : supplied;
+    const ctx = this.#audioContext = next ?? (this.#ownsAudioContext ? new AudioContext(this.#config.audioContextOptions) : supplied);
 
     // Started here, synchronously, before anything is awaited. init() and recover() are called from inside a press,
     // and a browser lets audio start only within one: a context born suspended (iOS, a page's autoplay rules) would

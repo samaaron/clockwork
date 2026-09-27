@@ -36,6 +36,59 @@ test("a context the host supplies survives a reload, and the engine reloads onto
   expect(r.hostContextAfterShutdown, "shutdown() closed the host's context").not.toBe("closed");
 });
 
+test("recover() moves onto a new context when the host's no longer renders, and stays on it when it does", async ({ page, clockworkConfig }) => {
+  // iOS, after an interruption (a call, another app, the page switched away from): the host's context comes back
+  // saying it is running and renders nothing. No worklet on it processes again, the old one or a reload's new one, and
+  // a context made once the press has gone (a reload's, seconds in) starts suspended. recover() makes the replacement
+  // in the press itself; the quick resume tries the context there is, and only if that fails does the reload move
+  // onto the replacement. Played here by a host context that will not start again.
+  await boot(page);
+  const r = await page.evaluate(async ([config, withinSrc]) => {
+    const within = eval(withinSrc);
+    const made = [];
+    const Real = window.AudioContext;
+    window.AudioContext = class extends Real { constructor(...a) { super(...a); made.push(this); } };
+    try {
+      // the context comes back: the quick resume, on the host's context, and the spare let go of
+      const host = new Real();
+      const cw = new window.Clockwork({ ...config, audioContext: host });
+      await cw.init();
+      await cw.suspend();
+      const quick = await within(cw.recover(), 15000);
+      const stayed = { quick, onHost: cw.audioContext === host, running: cw.audioContext?.state, spares: made.map((c) => c.state) };
+      await cw.shutdown();
+      await host.close();
+      made.length = 0;
+      // the context does not come back: the reload, onto the replacement recover() made
+      const dead = new Real();
+      const cw2 = new window.Clockwork({ ...config, audioContext: dead });
+      await cw2.init();
+      await dead.suspend();
+      dead.resume = () => Promise.resolve();   // never starts again
+      const recovered = await within(cw2.recover(), 20000);
+      const moved = { recovered, onHost: cw2.audioContext === dead, running: cw2.audioContext?.state ?? null, hostClosed: dead.state === "closed", made: made.length };
+      // and a later reload stays on the engine's own, not back onto the host's dead one
+      moved.reloaded = await within(cw2.reload(), 15000);
+      moved.afterReloadOnHost = cw2.audioContext === dead;
+      await cw2.shutdown();
+      await dead.close();
+      return { stayed, moved };
+    } finally {
+      window.AudioContext = Real;
+    }
+  }, [clockworkConfig, within]);
+  expect(r.stayed.quick, "recover() on a context that comes back").toEqual({ settled: true, value: true });
+  expect(r.stayed.onHost, "a quick resume moved off the host's context").toBe(true);
+  expect(r.stayed.running).toBe("running");
+  expect(r.stayed.spares.every((s) => s === "closed"), `a spare context was left open: ${r.stayed.spares}`).toBe(true);
+  expect(r.moved.recovered, "recover() could not bring back a context that will not start").toEqual({ settled: true, value: true });
+  expect(r.moved.onHost, "the reload stayed on the dead context").toBe(false);
+  expect(r.moved.running).toBe("running");
+  expect(r.moved.hostClosed, "the engine closed a context it did not make").toBe(false);
+  expect(r.moved.reloaded).toEqual({ settled: true, value: true });
+  expect(r.moved.afterReloadOnHost, "a later reload went back to the host's dead context").toBe(false);
+});
+
 test("init() starts a context that begins suspended, rather than hanging on it", async ({ page, clockworkConfig }) => {
   // What a browser does to a context made outside a gesture (iOS, autoplay rules): it is born suspended. The engine
   // is asked to start inside a press, so starting the context is its job — and waiting on a clock that can never
