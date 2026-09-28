@@ -16,6 +16,13 @@ import {
   retempoClock, writeClockOrigin, writeClockTransport, writeClockMeter, isValidMeter,
 } from '../lib/clockwork_clock_protocol.js';
 
+// The output after the audio has been away (the context suspended or interrupted, the audio thread stalled): faded in
+// over this long, rather than starting mid-waveform. Whatever was sounding when it went carries on from where it was,
+// and the device heard silence meanwhile: the step from one to the other is a click. Away is a gap this long between
+// renders, well past the bursts a large device buffer renders in.
+const RESUME_FADE_SECONDS = 0.02;
+const RESUME_GAP_MS = 200;
+
 // postMessage mode: the engine's time goes down each channel's port this often, in blocks (OscChannel#now; about 20ms
 // at 48kHz). A channel counts on from the last by the wall clock, so it needs only a word now and then.
 const CLOCK_POST_BLOCKS = 8;
@@ -44,6 +51,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.wasmInstance = null;
         this.isInitialized = false;
         this.processCallCount = 0;
+        this.lastRenderWall = 0;       // Date.now() at the last render (RESUME_GAP_MS)
+        this.fadeInDone = 0;           // samples of the fade-in rendered, while one is under way (RESUME_FADE_SECONDS)
+        this.fadeInLength = 0;
         this.lastStatusCheck = 0;
         this.lastInTail = 0;
         this.ringBufferBase = null;
@@ -1328,6 +1338,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             return true;
         }
 
+        // back after the audio was away: what follows fades in (RESUME_FADE_SECONDS)
+        const wall = Date.now();
+        if (this.lastRenderWall !== 0 && wall - this.lastRenderWall > RESUME_GAP_MS) {
+            this.fadeInLength = Math.max(1, Math.round(sampleRate * RESUME_FADE_SECONDS));
+            this.fadeInDone = 0;
+        }
+        this.lastRenderWall = wall;
+
         try {
             if (this.wasmInstance && this.wasmInstance.exports.clockwork_tick) {
 
@@ -1485,6 +1503,15 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
                             for (let ch = 0; ch < effectiveOutputChannels; ch++) {
                                 outputs[0][ch].set(this.channelViews[ch]);
+                            }
+                            // the fade-in after the audio was away: a raised cosine, from silence to the engine's output
+                            if (this.fadeInDone < this.fadeInLength) {
+                                const n = outputs[0][0].length, from = this.fadeInDone, length = this.fadeInLength;
+                                for (let ch = 0; ch < effectiveOutputChannels; ch++) {
+                                    const out = outputs[0][ch];
+                                    for (let i = 0; i < n && from + i < length; i++) out[i] *= 0.5 - 0.5 * Math.cos(Math.PI * (from + i) / length);
+                                }
+                                this.fadeInDone = Math.min(length, from + n);
                             }
                         }
                     } catch (err) {
