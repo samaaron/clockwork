@@ -4,6 +4,12 @@
 import { WasmClient } from './wasm_client.js';
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateInControlIndices } from './control_offsets.js';
+import { sampleClockReader } from './sample_clock.js';
+
+// postMessage mode: how far past the audio thread's last word on the time the channel will count by the wall clock.
+// It says so every few blocks while it renders (the worklet's CLOCK_POST_BLOCKS); past this without a word, it has
+// stopped (suspended, interrupted, reloading), and so does the clock.
+const CLOCK_HEARD_FOR_SECS = 0.1;
 
 /**
  * OscChannel - sends OSC to the audio worklet.
@@ -40,6 +46,11 @@ export class OscChannel {
     #pendingNodeIdRange; // PM mode (worker): pre-fetched next range
     #transferNodeIdPort; // PM mode: port to include in transferList (created by transferable getter)
 
+    // The engine's clock (now)
+    #readClock = null;   // SAB mode: the sample clock in the arena
+    #clockReading = {};  // SAB mode: what #readClock fills, each time
+    #heardClock = null;  // PM mode: { ntp, at } — the audio thread's last word on the time, and when it came (ms)
+
     // Local metrics counters
     // SAB mode: used for tracking, then written atomically to shared memory
     // PM mode: accumulated locally, reported via getMetrics()
@@ -58,6 +69,12 @@ export class OscChannel {
 
         if (mode === 'postMessage') {
             this.#directPort = config.port;
+            // the audio thread's word on the time, down this port while it renders (now)
+            if (this.#directPort) {
+                this.#directPort.onmessage = ({ data }) => {
+                    if (data?.type === 'clock') this.#heardClock = { ntp: data.ntp, at: performance.now() };
+                };
+            }
         } else {
             this.#sabConfig = {
                 sharedBuffer: config.sharedBuffer,
@@ -79,6 +96,10 @@ export class OscChannel {
                     metricsBase,
                     config.bufferConstants.METRICS_SIZE / 4
                 );
+            }
+
+            if (config.sharedBuffer && config.bufferConstants?.SAMPLE_CLOCK_START !== undefined) {
+                this.#readClock = sampleClockReader(config.sharedBuffer, config.ringBufferBase + config.bufferConstants.SAMPLE_CLOCK_START);
             }
 
             // Create node ID counter view for atomic range allocation
@@ -202,6 +223,30 @@ export class OscChannel {
      */
     sendDirect(oscData) {
         return this.send(oscData);
+    }
+
+    // =========================================================================
+    // The engine's clock
+    // =========================================================================
+
+    /**
+     * The engine's clock, in NTP seconds: the time its audio thread has reached, readable on any thread the channel
+     * is on — a worker cannot see the AudioContext, and a time the page posts it goes stale. The clock bundles are
+     * stamped on (Clockwork#clock's now()), taken from the audio thread itself, once a block: it stands still while
+     * the audio does (suspended, interrupted), and after a reload it is the new engine's from its first block. 0 until
+     * the engine has rendered one.
+     *
+     * SAB mode reads the sample clock the audio thread publishes into the arena. postMessage mode hears it from the
+     * audio thread every few blocks, and counts on from the last word by the wall clock, no further than
+     * CLOCK_HEARD_FOR_SECS: an engine that has gone quiet has stopped.
+     *
+     * @returns {number} NTP seconds, or 0
+     */
+    now() {
+        if (this.#readClock) return this.#readClock(this.#clockReading)?.renderNtp ?? 0;
+        const heard = this.#heardClock;
+        if (!heard) return 0;
+        return heard.ntp + Math.min(CLOCK_HEARD_FOR_SECS, Math.max(0, (performance.now() - heard.at) / 1000));
     }
 
     // =========================================================================

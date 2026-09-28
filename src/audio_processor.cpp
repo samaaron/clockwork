@@ -377,6 +377,11 @@ extern "C" {
     ControlPointers* control = nullptr;
     PerformanceMetrics* metrics = nullptr;
     double* ntp_start_time = nullptr;
+#if CLOCKWORK_WORKLET_CLOCK
+    // The NTP start time in the arena when this engine began (first boot: 0; a reload: the engine before's). Until
+    // the host writes this engine's, the clock is not this engine's, and the sample clock is not published from it.
+    double ntp_start_at_init = 0.0;
+#endif
     std::atomic<int32_t>* drift_offset = nullptr;
     std::atomic<int32_t>* global_offset = nullptr;
     bool memory_initialized = false;
@@ -1155,6 +1160,10 @@ extern "C" {
 
         g_active_clockwork_clock.store(&clockworkClock(), std::memory_order_release);
         clockwork_clock_wasm_init(clockwork_clock_state, ntp_start_time, drift_offset, global_offset);
+        // The sample clock, as native's driver publishes it (AudioBlockClock.h), here once a block: the one reading of
+        // the engine's time a thread without the audio context can take, a host's worker included (OscChannel#now).
+        clockworkClock().bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
+        ntp_start_at_init = *ntp_start_time;
 #endif
 
 #if CLOCKWORK_SYNTH
@@ -1935,6 +1944,16 @@ extern "C" {
         // JUCE) take the #else: current_time is already the ClockworkClock-derived NTP
         // from the callback.
         const double current_ntp = clockworkClock().nowAt(current_time);
+        // Where the audio thread has got to, for readers on other threads: this block's first frame and its NTP time.
+        // The worklet knows no device latency, so the frame is stamped as rendered. A block that is not rendered (the
+        // context suspended) publishes nothing: the clock stands still, as the audio does. Nor does one before the host
+        // has written this engine's NTP start: until then its time is the context's alone (a first boot), or the new
+        // context's on the old one's start (a reload) — the past, and a reader would take the jump back for real.
+        {
+            const uint32_t rate = metrics->audio_sample_rate.load(std::memory_order_relaxed);
+            if (rate && *ntp_start_time != ntp_start_at_init)
+                clockworkClock().publishSampleClock(current_time * rate, rate, current_ntp, 0);
+        }
 #else
         const double current_ntp = current_time;
 #endif

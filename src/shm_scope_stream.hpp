@@ -329,7 +329,7 @@ using detail_shm_scope::SHM_SCOPE_TRIGGER_NONE;
 
 // Engine sample position at the start of the block currently being rendered.
 // Advanced by ClockworkClock::publishSampleClock / advanceEngineFrames; a stream's
-// producer passes it to write() to anchor and heal that stream's time mapping. On the
-// WASM worklet nothing advances it yet, so web streams anchor at 0 and the
-// paused-group heal is inert there.
+// producer passes it to write() to anchor and heal that stream's time mapping. The
+// WASM worklet advances it once a block too (process_audio publishes the sample
+// clock there), so web streams anchor and heal as native's do.
 extern std::atomic<uint64_t> g_engine_frames;

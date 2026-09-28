@@ -10,10 +10,15 @@ import * as MetricsOffsets from '../lib/metrics_offsets.js';
 import { REGION_INGRESS, CLIENT_MESSAGE_BYTES } from '../lib/wasm_client.js';
 import { calculateAllControlIndices } from '../lib/control_offsets.js';
 import { readArena } from '../lib/arena.js';
+import { sampleClockReader } from '../lib/sample_clock.js';
 import {
   ClockworkClockMessageType,
   retempoClock, writeClockOrigin, writeClockTransport, writeClockMeter, isValidMeter,
 } from '../lib/clockwork_clock_protocol.js';
+
+// postMessage mode: the engine's time goes down each channel's port this often, in blocks (OscChannel#now; about 20ms
+// at 48kHz). A channel counts on from the last by the wall clock, so it needs only a word now and then.
+const CLOCK_POST_BLOCKS = 8;
 
 // PM Mode Pool Configuration - pre-allocated buffers for allocation-free process()
 const PM_POOL_CONFIG = {
@@ -82,6 +87,12 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
         // Map of port -> sourceId for worker ports (postMessage mode)
         this.portSourceIds = new Map();
+
+        // postMessage mode: the sample clock the engine publishes, read to tell each channel's port the time
+        // (CLOCK_POST_BLOCKS). SAB channels read it from the arena themselves.
+        this.readSampleClock = null;
+        this.clockReading = {};
+        this.clockMessage = { type: 'clock', ntp: 0 };
 
         // Pre-allocated channel views to avoid per-frame subarray() allocations
         this.channelViews = null;
@@ -1380,6 +1391,16 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     outputChannels,
                     inputChannels
                 );
+
+                // postMessage mode: the engine's time to each channel's port, for a worker that cannot read the arena
+                if (this.oscPorts.length && this.processCallCount % CLOCK_POST_BLOCKS === 0 && this.ringBufferBase != null && this.bufferConstants) {
+                    this.readSampleClock ??= sampleClockReader(() => this.wasmMemory?.buffer, this.ringBufferBase + this.bufferConstants.SAMPLE_CLOCK_START);
+                    const clock = this.readSampleClock(this.clockReading);
+                    if (clock) {
+                        this.clockMessage.ntp = clock.renderNtp;
+                        for (const port of this.oscPorts) port.postMessage(this.clockMessage);
+                    }
+                }
 
                 // PM mode: check whether the counter advanced past our current range.
                 // With halfway pre-fetch (request at 50% remaining), the refill arrives
