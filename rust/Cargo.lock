@@ -153,6 +153,7 @@ name = "clockwork-midi"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "clockwork-log",
  "clockwork-osc",
  "core-foundation",
  "coremidi",

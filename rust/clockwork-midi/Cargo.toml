@@ -20,6 +20,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Shared OSC codec + OSC-safe name normalisation (also used by clockwork-gamepad).
 clockwork-osc = { path = "../clockwork-osc" }
+# A word on the engine's debug ring when there is no sequencer to ask (device.rs).
+clockwork-log = { path = "../clockwork-log" }
 
 [features]
 default = []

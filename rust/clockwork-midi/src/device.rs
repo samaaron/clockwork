@@ -23,6 +23,28 @@ use crate::normalize::{normalize_ports, PortInfo};
 // port model unchanged.
 #[cfg(target_os = "linux")]
 use linux_ports::{Inputs, Outputs};
+
+/// Whether ALSA's sequencer is there to ask. midir reaches MIDI on Linux
+/// through the sequencer, whose device is `/dev/snd/seq`; a machine without
+/// the `snd-seq` module (a CI runner, a container, a headless box) has no such
+/// file, and every client ALSA is asked to open on it fails — after libasound
+/// has printed "open /dev/snd/seq failed: No such file or directory" to
+/// stderr itself, which no flag of ours quiets. Asked first, there is nothing
+/// to print: no sequencer means no ports, said once (see `MidiIo::new`).
+#[cfg(target_os = "linux")]
+fn sequencer_present() -> bool {
+    sequencer_at(std::path::Path::new("/dev/snd/seq"))
+}
+
+#[cfg(target_os = "linux")]
+fn sequencer_at(dev: &std::path::Path) -> bool {
+    dev.exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sequencer_present() -> bool {
+    true
+}
 #[cfg(not(target_os = "linux"))]
 use per_port::{Inputs, Outputs};
 
@@ -53,6 +75,9 @@ pub type PortList = Vec<(String, bool)>;
 impl MidiIo {
     pub fn new(client_name: impl Into<String>, on_input: InputCallback) -> Self {
         let client_name = client_name.into();
+        if !sequencer_present() {
+            clockwork_log::log!("[midi] no ALSA sequencer (/dev/snd/seq): no MIDI ports on this machine");
+        }
         let mut io = Self {
             inputs: Inputs::new(&client_name, on_input),
             outputs: Outputs::new(&client_name),
@@ -88,13 +113,21 @@ impl MidiIo {
     /// same name reconnects instead of being treated as already-open), and if an
     /// "open all" intent is set, newly-appeared ports are reopened.
     pub fn refresh(&mut self) {
+        // No sequencer, no ports: asked anyway, ALSA says so on stderr for
+        // every client, every boot (sequencer_present).
+        let ask = sequencer_present();
         // Skip our own ports so "open everything" can't subscribe our inputs to
         // our own outputs (self-wired feedback loops + duplicate ports, #3543).
-        if let Ok(mi) = MidiInput::new(&self.client_name) {
+        if !ask {
+            self.in_ports.clear();
+            self.out_ports.clear();
+        } else if let Ok(mi) = MidiInput::new(&self.client_name) {
             self.in_ports = normalize_ports(&port_names_in(&mi));
             self.in_ports.retain(|p| !is_own_port(&p.raw));
         }
-        if let Ok(mo) = MidiOutput::new(&self.client_name) {
+        if !ask {
+            // nothing to enumerate
+        } else if let Ok(mo) = MidiOutput::new(&self.client_name) {
             self.out_ports = normalize_ports(&port_names_out(&mo));
             self.out_ports.retain(|p| !is_own_port(&p.raw));
             if !self.want_software_synths {
@@ -318,7 +351,7 @@ mod linux_ports {
 
     impl Inputs {
         pub fn new(client_name: &str, on_input: InputCallback) -> Self {
-            let shared = SharedInput::new(client_name, Ignore::None, on_input).ok();
+            let shared = if super::sequencer_present() { SharedInput::new(client_name, Ignore::None, on_input).ok() } else { None };
             Inputs {
                 shared,
                 open: HashSet::new(),
@@ -382,7 +415,7 @@ mod linux_ports {
     impl Outputs {
         pub fn new(client_name: &str) -> Self {
             Outputs {
-                shared: SharedOutput::new(client_name).ok(),
+                shared: if super::sequencer_present() { SharedOutput::new(client_name).ok() } else { None },
             }
         }
 
@@ -620,6 +653,14 @@ mod per_port {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_sequencer_is_asked_for_only_where_its_device_is() {
+        use std::path::Path;
+        assert!(!super::sequencer_at(Path::new("/dev/snd/there-is-no-such-sequencer")));
+        assert!(super::sequencer_at(Path::new("/dev/null")));
+    }
+
     use super::{is_own_port, is_software_synth};
     use crate::normalize::normalize_ports;
 
