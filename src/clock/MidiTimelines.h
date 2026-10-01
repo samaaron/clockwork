@@ -9,7 +9,7 @@
  * assignment, tempo estimation, primary selection and staleness all live in
  * Rust (rust/clockwork-clock, `Registry`); this is the C++ face of that handle:
  * it supplies "now" (wall-clock NTP), sizes the registry to the platform's
- * SC_MAX_TIMELINES, prepends the Link row to the listing, and fires the
+ * CLOCKWORK_MAX_TIMELINES, prepends the Link row to the listing, and fires the
  * timelines-changed callback when the registry says the listing moved.
  *
  * Timeline id: 0 = Link (routes to the ClockworkClock& reads); 1..K = midi slots.

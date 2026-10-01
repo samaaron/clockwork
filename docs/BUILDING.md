@@ -23,6 +23,30 @@ from the comms client library (`src/comms/`).
 **Keep the parallelism modest.** An unbounded `make -j` will exhaust memory on a
 small machine: this build compiles four JUCE modules and a Rust workspace.
 
+## The web module
+
+The same tree, under `emcmake`, produces the AudioWorklet module: the same
+lists of sources and the same guest, with the subsystems a worklet cannot
+have (the device, MIDI, the socket, the plugin host, Link) switched off before
+their options are read. It needs the Emscripten SDK on the shell's path, node
+(the memory sizes are read from `js/memory_layout.js` at configure time), and
+a Rust nightly with `rust-src` — `std` is rebuilt with atomics for the shared
+heap, which only nightly can do; `CLOCKWORK_RUST_NIGHTLY` names the toolchain
+(default `nightly-2026-07-02`, falling back to a floating `nightly`).
+
+```sh
+emcmake cmake -B build/web -DCMAKE_BUILD_TYPE=Release -DCLOCKWORK_DSP=dummy
+cmake --build build/web --parallel 3      # → dist/wasm/clockwork.wasm
+```
+
+`scripts/build-web.sh` wraps that and bundles the JavaScript client and workers
+around the module. A product names its own module (`CLOCKWORK_WEB_MODULE_NAME`)
+and where it lands (`CLOCKWORK_WEB_DIST_DIR`), sizes the scheduler for its
+worklet (`CLOCKWORK_SCHEDULER_SLOT_COUNT`, `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE`,
+`CLOCKWORK_SCHEDULER_SHED_LATE_MS`) and may export more of its own
+(`CLOCKWORK_WEB_EXTRA_EXPORTS`); the exports the worklet calls are clockwork's
+list in `CMakeLists.txt`.
+
 ## Tests
 
 `-DBUILD_TESTS=ON` adds the Catch2 suite. Run it in both Link configurations —
@@ -40,6 +64,19 @@ cmake --build build-link --parallel 3
 ./build-link/test/clockwork_tests && ./build-link/test/clockwork_lanes_reserved_tests \
   && ./build-link/test/clockwork_attach_tests && ./build-link/test/clockwork_engine_tests
 ```
+
+CI runs each suite twice, because each way sees what the other cannot:
+
+```sh
+ctest --test-dir build --output-on-failure -j 4      # each case in a process of its own
+./build/test/clockwork_tests --order rand             # every case in one process, shuffled
+```
+
+A case that only passes after another has run — reading something an earlier
+case left in the process — fails under `ctest` and nowhere else. A case that
+leaves something behind for the next fails in the shuffled run and nowhere
+else. A shuffled run prints its seed first ("Randomness seeded to");
+`--order rand --rng-seed <seed>` runs the same order again.
 
 `clockwork_lanes_reserved_tests` is a separate binary because it boots with
 channels reserved above the device (where Link peer audio lands), and

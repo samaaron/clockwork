@@ -93,11 +93,14 @@ is_nif_loaded() -> false.
 
 %% @doc Boot the audio engine (asynchronous).
 %%
-%% Config is a map with optional keys:
-%%   sample_rate, num_output_channels, num_input_channels,
-%%   buffer_size, num_buffers, max_nodes, num_audio_bus_channels,
-%%   num_control_bus_channels, max_wire_bufs, max_graph_defs,
-%%   real_time_memory_size, num_rgens, headless.
+%% Config is a map. The keys clockwork answers for itself are the device's:
+%%   sample_rate, num_output_channels, num_input_channels, buffer_size,
+%%   headless.
+%% EVERY OTHER KEY IS THE GUEST'S, handed to it by name as `name=value'
+%% (integers, floats, booleans as 1/0, or a binary). Which names a guest
+%% takes is the guest's to say — scsynth lists its own in scsynth_options.h
+%% (max_nodes, num_buffers, real_time_memory_size, ...) — and a name it does
+%% not know refuses the boot with a message naming it.
 %%
 %% `headless => true' skips audio device init (for testing/CI).
 %%

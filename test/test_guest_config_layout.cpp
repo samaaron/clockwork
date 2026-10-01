@@ -7,8 +7,8 @@
  *   - the block size the engine chooses follows the driver's buffer
  *   - after a cold swap, the engine reports the correct sample rate
  *
- * The block's slots are named by src/native/GuestConfigBlock.h — the layout
- * THIS host and its guest agree on.
+ * The block itself is opaque bytes (ClockworkEngine::Config::guestConfig):
+ * nothing here names a slot.
  *
  * Where the region SITS, and that it survives traffic and a rebuild, is
  * clockwork's guarantee about its own arena and is asserted in clockwork's
@@ -19,7 +19,6 @@
 #include "shared_memory.h"
 #include "audio_processor.h"
 #include "audio_config.h"
-#include "native/GuestConfigBlock.h"
 #include <cstring>
 
 // ── Layout validation ───────────────────────────────────────────────────────

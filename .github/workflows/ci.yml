@@ -85,18 +85,36 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 2
 
+      # THE SUITE IS RUN TWICE, because each way sees what the other cannot.
+      #
+      # Each case in a process of its own (ctest): a case that only passes
+      # after another has run — reading a value an earlier case left in the
+      # process — fails here and nowhere else. Two did, for months, with this
+      # workflow green: a memory check against the process's high-water mark,
+      # and a metric read before it was published.
+      - name: Test (each case on its own)
+        shell: bash
+        timeout-minutes: 15
+        run: ctest --test-dir build -C Release --output-on-failure -j 2 --timeout 300
+
+      # All of them in one process, in a shuffled order: a case that leaves
+      # something behind for the next fails here and nowhere else. The seed
+      # is the run number: every run shuffles differently, and re-running a
+      # failed job runs the same order again. Catch2 prints it first
+      # ("Randomness seeded to"); locally, --order rand --rng-seed <that>.
+      #
       # The engine suite hangs now and then on windows-x64. --durations prints
       # each case as it ends, so a hang names the case after the last one
       # printed, and the step timeout stops it well short of the job's.
-      - name: Test
+      - name: Test (one process, shuffled)
         shell: bash
         timeout-minutes: 15
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            build/test/Release/clockwork_tests.exe
-            build/test/Release/clockwork_lanes_reserved_tests.exe
-            build/test/Release/clockwork_attach_tests.exe
-            build/test/Release/clockwork_engine_tests.exe --durations yes
+            build/test/Release/clockwork_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_lanes_reserved_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_attach_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_engine_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             # Same binaries, but a hang prints every thread's stack first.
             bash scripts/ci-run-tests-linux.sh \
@@ -105,10 +123,10 @@ jobs:
               build/test/clockwork_attach_tests \
               build/test/clockwork_engine_tests
           else
-            build/test/clockwork_tests
-            build/test/clockwork_lanes_reserved_tests
-            build/test/clockwork_attach_tests
-            build/test/clockwork_engine_tests --durations yes
+            build/test/clockwork_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_lanes_reserved_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_attach_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_engine_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
           fi
 
   # ------------------------------------------------- linux-x86 (i686, 32-bit) --
@@ -126,6 +144,7 @@ jobs:
       - name: Build and test in an i386 container
         run: |
           docker run --rm --platform linux/386 \
+            -e GITHUB_RUN_NUMBER \
             -v "$PWD:/work" -w /work \
             i386/debian:bookworm \
             bash scripts/ci-linux-x86.sh all
@@ -183,9 +202,13 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ${{ matrix.flags }}
       - name: Build
         run: cmake --build build --parallel 2
-      - name: Test
+      # Twice, as the native job and for its reasons: each case on its own,
+      # then every case in one process in a shuffled order.
+      - name: Test (each case on its own)
+        run: ctest --test-dir build --output-on-failure -j 2 --timeout 300
+      - name: Test (one process, shuffled)
         run: |
-          for t in ${{ matrix.tests }}; do "$t"; done
+          for t in ${{ matrix.tests }}; do "$t" --order rand --rng-seed "$GITHUB_RUN_NUMBER"; done
 
   # ---------------------------------------------------------------- sanitize --
   # Plugin hosting is off here: the in-tree test plugins would be built

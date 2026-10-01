@@ -15,6 +15,8 @@
  * spec uses a non-zero port + headless so the redirect path exercises.
  */
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
+#include <vector>
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
 #include "OscTestUtils.h"
@@ -91,4 +93,31 @@ TEST_CASE("metrics-shm: increments via engine writes are visible through client"
 
     uint32_t after = externalMetrics->messages_processed.load();
     CHECK(after - before >= static_cast<uint32_t>(N));
+}
+
+TEST_CASE("metrics: a new engine's buffer peaks are its own",
+          "[metrics]") {
+    // The peaks are tracked in the process and published by whichever engine
+    // is running. They used to be cleared by a purge and by nothing else, so
+    // an engine booted after another published that one's peaks as its own
+    // from its first flush. One wide message through the first engine, then a
+    // second engine that is sent nothing wider than a ping.
+    const std::vector<uint8_t> wide(4000, 0x5a);
+    {
+        EngineFixture first;
+        first.send(osc_test::messageWithBlob("/dummy/ping", wide.data(), wide.size()));
+        REQUIRE(first.pollUntil([&] {
+            return first.engine().getMetrics().in_buffer_peak_bytes.load() >= wide.size();
+        }));
+    }
+
+    EngineFixture second;
+    second.send(osc_test::message("/dummy/ping"));
+    // The ping has to have been seen and a flush has to have published it,
+    // or the peak being small proves nothing.
+    REQUIRE(second.pollUntil([&] {
+        return second.engine().getMetrics().in_buffer_peak_bytes.load() > 0;
+    }));
+    REQUIRE(second.waitForBlocks(64));
+    CHECK(second.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
 }

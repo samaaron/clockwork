@@ -31,7 +31,7 @@ extern "C" void copyRow(void* ctx, const ClockworkTimelineInfo* row) {
 }  // namespace
 
 MidiTimelines::MidiTimelines(ClockworkClock& clock)
-    : mClock(clock), mRegistry(clockwork_midi_timelines_new(SC_MAX_TIMELINES)) {}
+    : mClock(clock), mRegistry(clockwork_midi_timelines_new(CLOCKWORK_MAX_TIMELINES)) {}
 
 MidiTimelines::~MidiTimelines() { clockwork_midi_timelines_free(mRegistry); }
 

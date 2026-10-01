@@ -117,8 +117,11 @@ phase_build() {
 phase_test() {
     echo "=== test: Catch2 suites ==="
     setup_paths
-    "$BUILD_DIR/test/clockwork_tests"
-    "$BUILD_DIR/test/clockwork_engine_tests"
+    # Twice, as ci.yml's native job and for its reasons: each case in a
+    # process of its own, then every case in one process in a shuffled order.
+    ctest --test-dir "$BUILD_DIR" --output-on-failure -j 2 --timeout 300
+    "$BUILD_DIR/test/clockwork_tests" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
+    "$BUILD_DIR/test/clockwork_engine_tests" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
 }
 
 phase_rust() {

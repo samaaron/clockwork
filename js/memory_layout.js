@@ -143,11 +143,14 @@ export const MemoryLayout = {
      * out of the FRONT of its own region and passed the offset to the engine
      * through a config-block slot; guestMemorySize was 36MB for that reason,
      * "32MB RT pool + 4MB buffers". The 32MB moved here and the guest region
-     * kept the 4MB it was actually using, so the total is unchanged and the
-     * engine's pool now comes from the same clockwork::mem every other target uses.
+     * kept the 4MB it was actually using, so the total is unchanged. The
+     * engine's pool now comes from clockwork's heap through DspHost::alloc_bytes,
+     * the same way on every target, and on this one the heap takes the arena
+     * less its spare growth area (CLOCKWORK_HEAP_SIZE, CLOCKWORK_FAST_RESERVE
+     * in src/memory_profile.h).
      *
-     * It bounds the engine: a real-time pool larger than this fails at boot
-     * with both numbers in the message, rather than being served from memory
+     * It bounds the engine: a real-time pool the heap cannot hold fails the
+     * boot with the size in the message, rather than being served from memory
      * clockwork does not own.
      */
     memArenaSize: 32 * 1024 * 1024,  // 32MB

@@ -7,7 +7,10 @@
  * parameter combinations, and verifies default values are correct.
  */
 #include "EngineFixture.h"
+#include "GuestConfigText.h"
+#include "shared_memory.h"   // GUEST_CONFIG_SIZE
 
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 
@@ -19,19 +22,13 @@ TEST_CASE("Default Config values are correct", "[config]") {
     CHECK(cfg.sampleRate             == 48000);
     CHECK(cfg.bufferSize             == 0);   // 0 = auto (smallest multiple of 128)
     CHECK(cfg.udpPort                == 57110);
-    CHECK(cfg.maxNodes               == 1024);
-    CHECK(cfg.numBuffers             == 1024);
     // Default is "auto" (-1) — JUCE/CoreAudio clamps to the device's real
     // channel count. Headless test fixtures override these to get
     // predictable 2-in / 2-out behaviour.
     CHECK(cfg.numOutputChannels      == ClockworkEngine::kAutoChannelCount);
     CHECK(cfg.numInputChannels       == ClockworkEngine::kAutoChannelCount);
-    CHECK(cfg.maxGraphDefs           == 512);
-    CHECK(cfg.maxWireBufs            == 64);
-    CHECK(cfg.numControlBusChannels  == 16384);
-    CHECK(cfg.realTimeMemorySize     == 8192);
-    CHECK(cfg.numRGens               == 64);
     CHECK(cfg.headless               == false);
+    CHECK(cfg.guestConfig.empty());   // the guest's defaults
 }
 
 // ── 2. Minimum viable config ────────────────────────────────────────────────
@@ -44,16 +41,42 @@ TEST_CASE("Engine boots with minimum viable config", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless    = true;
     cfg.udpPort     = 0;
-    cfg.maxNodes    = 4;
-    cfg.numBuffers  = 4;
-    cfg.maxGraphDefs = 4;
-    cfg.maxWireBufs  = 4;
-    cfg.numRGens     = 4;
+    clockwork::guest_config_text::set(cfg.guestConfig, "maxNodes", "4");
+    clockwork::guest_config_text::set(cfg.guestConfig, "numBuffers", "4");
+    clockwork::guest_config_text::set(cfg.guestConfig, "maxGraphDefs", "4");
+    clockwork::guest_config_text::set(cfg.guestConfig, "maxWireBufs", "4");
+    clockwork::guest_config_text::set(cfg.guestConfig, "numRGens", "4");
     engine.init(cfg);
 
     CHECK(engine.isRunning());
     engine.shutdown();
     CHECK_FALSE(engine.isRunning());
+}
+
+// ── 2b. A guest config that does not fit its region ────────────────────────
+// Config::guestConfig is carried to the guest in a region of GUEST_CONFIG_SIZE
+// bytes. One that does not fit, NUL included, is refused at init, as the
+// web side refuses it (writeGuestConfigToMemory): truncated instead, it
+// would boot a guest on a config cut mid-line — realTimeMemorySize=65536
+// read as realTimeMemorySize=6 — which is the silent misconfiguration the
+// text block exists to rule out.
+
+TEST_CASE("A guest config larger than its region refuses init", "[config]") {
+    ClockworkEngine engine;
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+
+    ClockworkEngine::Config cfg;
+    cfg.headless = true;
+    cfg.udpPort  = 0;
+    // valid lines, more of them than the region holds
+    while (cfg.guestConfig.size() + 1 <= GUEST_CONFIG_SIZE)
+        cfg.guestConfig += "# a comment line the guest ignores, one of many\n";
+    clockwork::guest_config_text::set(cfg.guestConfig, "maxNodes", "4");
+    REQUIRE(cfg.guestConfig.size() + 1 > GUEST_CONFIG_SIZE);
+
+    CHECK_THROWS_AS(engine.init(cfg), std::runtime_error);
+    CHECK_FALSE(engine.isRunning());
+    engine.shutdown();
 }
 
 // ── 3. Large config values ──────────────────────────────────────────────────
@@ -65,8 +88,8 @@ TEST_CASE("Engine boots with large config values", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     cfg.udpPort    = 0;
-    cfg.maxNodes   = 4096;
-    cfg.numBuffers = 4096;
+    clockwork::guest_config_text::set(cfg.guestConfig, "maxNodes", "4096");
+    clockwork::guest_config_text::set(cfg.guestConfig, "numBuffers", "4096");
     engine.init(cfg);
 
     CHECK(engine.isRunning());
@@ -226,7 +249,7 @@ TEST_CASE("Engine boots with small numControlBusChannels", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless              = true;
     cfg.udpPort               = 0;
-    cfg.numControlBusChannels = 128;
+    clockwork::guest_config_text::set(cfg.guestConfig, "numControlBusChannels", "128");
     engine.init(cfg);
 
     CHECK(engine.isRunning());
@@ -243,7 +266,7 @@ TEST_CASE("Engine boots with small realTimeMemorySize", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless           = true;
     cfg.udpPort            = 0;
-    cfg.realTimeMemorySize = 256;
+    clockwork::guest_config_text::set(cfg.guestConfig, "realTimeMemorySize", "256");
     engine.init(cfg);
 
     CHECK(engine.isRunning());
@@ -258,7 +281,7 @@ TEST_CASE("Engine boots with large realTimeMemorySize", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless           = true;
     cfg.udpPort            = 0;
-    cfg.realTimeMemorySize = 32768;
+    clockwork::guest_config_text::set(cfg.guestConfig, "realTimeMemorySize", "32768");
     engine.init(cfg);
 
     CHECK(engine.isRunning());

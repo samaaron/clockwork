@@ -81,10 +81,27 @@ float expectedSample(uint32_t channel, uint64_t frameIndex,
     return ((frameIndex % period) < width) ? channelSign(channel) * kOn : kOff;
 }
 
-// One channel's samples across `blocks` consecutive ticks, plus the absolute
-// frame index of the first of them. Everything below asserts against absolute
-// indices, so it does not matter what the rest of the suite left the shared
-// fixture's stream position at.
+// EVERY CASE RENDERS FROM A DSP IT CREATED. The placeholder's pulse is a
+// function of the frames IT has rendered, counted from its creation, and of
+// the width and period it was last told. The fixture is one engine for the
+// whole process, and other cases rebuild the DSP on it (test_dsp_regions.cpp,
+// test_event_sinks.cpp): after one of those the instance's frame 0 is no
+// longer the fixture's, and every index below is off by however far the
+// stream had run. These cases passed in the order the files are compiled in
+// and failed in any order that put a rebuild first. So each starts a stream
+// of its own and counts from there (lanes_test::freshDsp, ::dspFrame).
+uint32_t freshStream() {
+    const uint32_t bl = lanes_test::boot();
+    lanes_test::freshDsp();
+    return bl;
+}
+
+uint64_t dspFrame(uint64_t streamFrame) { return lanes_test::dspFrame(streamFrame); }
+
+// One channel's samples across `blocks` consecutive ticks, plus the DSP's
+// frame index of the first of them. Everything below asserts against those
+// indices, counted from freshStream(), so it does not matter what the rest of
+// the suite left the shared fixture's stream position at.
 struct Capture {
     uint64_t                        firstFrame = 0;
     uint32_t                        blockSize  = 0;
@@ -97,7 +114,7 @@ Capture capture(int blocks) {
     cap.blockSize = bl;
     cap.channel.resize(lanes_test::kOutChannels);
     for (int b = 0; b < blocks; ++b) {
-        const uint64_t at = lanes_test::tick();
+        const uint64_t at = dspFrame(lanes_test::tick());
         if (b == 0) cap.firstFrame = at;
         const float* out = clockwork_audio_out();
         REQUIRE(out != nullptr);
@@ -139,13 +156,13 @@ void setPulse(uint32_t widthMs, uint32_t periodMs) {
 } // namespace
 
 TEST_CASE("audio path: a rendered block reaches the hardware join intact", "[audio][lanes]") {
-    const uint32_t bl = lanes_test::boot();
+    const uint32_t bl = freshStream();
     REQUIRE(bl > 0);
 
     const uint64_t width  = framesFor(kDefaultWidthMs);
     const uint64_t period = framesFor(kDefaultPeriodMs);
 
-    const uint64_t at  = lanes_test::tick();
+    const uint64_t at  = dspFrame(lanes_test::tick());
     const float*   out = clockwork_audio_out();
     REQUIRE(out != nullptr);
 
@@ -163,16 +180,16 @@ TEST_CASE("audio path: a rendered block reaches the hardware join intact", "[aud
 }
 
 TEST_CASE("audio path: blocks are seamless across the boundary", "[audio][lanes]") {
-    const uint32_t bl     = lanes_test::boot();
+    const uint32_t bl     = freshStream();
     const uint64_t width  = framesFor(kDefaultWidthMs);
     const uint64_t period = framesFor(kDefaultPeriodMs);
 
     // Two consecutive blocks must continue one stream, not restart it. A DSP
     // whose phase reset per block would pass a single-block assertion and
     // click audibly every block; this is what catches that.
-    const uint64_t a = lanes_test::tick();
+    const uint64_t a = dspFrame(lanes_test::tick());
     std::vector<float> first(clockwork_audio_out(), clockwork_audio_out() + bl * lanes_test::kOutChannels);
-    const uint64_t b = lanes_test::tick();
+    const uint64_t b = dspFrame(lanes_test::tick());
     const float* second = clockwork_audio_out();
 
     REQUIRE(b == a + bl);
@@ -189,7 +206,7 @@ TEST_CASE("audio path: every pulse edge lands on its exact absolute frame",
 
     // Enough blocks to cover more than two full periods, so each channel is
     // seen switching on and off repeatedly rather than once by luck.
-    const uint32_t bl     = lanes_test::boot();
+    const uint32_t bl     = freshStream();
     const int      blocks = static_cast<int>((period * 5 / 2) / bl) + 2;
     const Capture  cap    = capture(blocks);
 
@@ -219,7 +236,7 @@ TEST_CASE("audio path: every pulse edge lands on its exact absolute frame",
 TEST_CASE("audio path: left and right are distinct channels", "[audio][lanes]") {
     REQUIRE(lanes_test::kOutChannels >= 2);
     const uint64_t period = framesFor(kDefaultPeriodMs);
-    const uint32_t bl     = lanes_test::boot();
+    const uint32_t bl     = freshStream();
 
     // A full period, so the pulse falls inside the window rather than the test
     // resting on whatever level the gap happens to hold.
@@ -250,7 +267,7 @@ TEST_CASE("audio path: left and right are distinct channels", "[audio][lanes]") 
 
 TEST_CASE("audio path: every sample is finite and is one of the two levels",
           "[audio][lanes]") {
-    const uint32_t bl = lanes_test::boot();
+    const uint32_t bl = freshStream();
     for (int block = 0; block < 8; ++block) {
         lanes_test::tick();
         const float* out = clockwork_audio_out();
@@ -274,7 +291,7 @@ TEST_CASE("audio path: an OSC message reaches the DSP and moves the edges",
     // dropping DSP-bound messages, which is not hypothetical: a host driving
     // the lanes ABI alone published no ingress root at all until this boundary was
     // narrowed, and every message it wrote was drained and discarded.
-    const uint32_t bl = lanes_test::boot();
+    const uint32_t bl = freshStream();
 
     constexpr uint32_t kNewWidthMs  = 5;
     constexpr uint32_t kNewPeriodMs = 100;
@@ -305,7 +322,7 @@ TEST_CASE("audio path: an OSC message reaches the DSP and moves the edges",
     // it, and prove the restore took — the fixture is a process singleton, so
     // leaving it reconfigured would be leaving a trap for whatever runs next.
     setPulse(kDefaultWidthMs, kDefaultPeriodMs);
-    const uint64_t at  = lanes_test::tick();
+    const uint64_t at  = dspFrame(lanes_test::tick());
     const float*   out = clockwork_audio_out();
     for (uint32_t i = 0; i < bl; ++i)
         REQUIRE(out[i] == expectedSample(0, at + i,

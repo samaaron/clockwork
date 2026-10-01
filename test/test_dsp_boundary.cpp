@@ -179,6 +179,11 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
     // frame: the bundle carries a reconfigure, so "did it fire yet" is
     // answerable from the samples rather than from a log line.
     const uint32_t bl = lanes_test::boot();
+    // The grid is counted from the DSP's creation, not the fixture's, and
+    // other cases rebuild the DSP on this engine: start one here and count
+    // from it (LanesFixture.h), or this case passes only in the orders that
+    // run it before a rebuild.
+    lanes_test::freshDsp();
 
     // Due a good many blocks out — far enough that a harness which fired it
     // immediately, or forwarded it straight to the DSP, is unmistakable.
@@ -200,8 +205,8 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
     // hunting for such a frame, assert the whole block against the old grid.
     constexpr uint64_t kOldPeriod = 24000, kOldWidth = 480;   // 500 ms / 10 ms @ 48k
     constexpr uint64_t kNewPeriod = 4800,  kNewWidth = 240;   // 100 ms /  5 ms @ 48k
-    const auto onOld = [](uint64_t n) { return (n % kOldPeriod) < kOldWidth; };
-    const auto onNew = [](uint64_t n) { return (n % kNewPeriod) < kNewWidth; };
+    const auto onOld = [](uint64_t n) { return (lanes_test::dspFrame(n) % kOldPeriod) < kOldWidth; };
+    const auto onNew = [](uint64_t n) { return (lanes_test::dspFrame(n) % kNewPeriod) < kNewWidth; };
     // Left channel only: it is the positive one, and its grid is the whole
     // question here. (test_audio_path.cpp pins the channel relationship.)
 

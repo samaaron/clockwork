@@ -66,8 +66,8 @@
   #ifndef SHM_SCOPE_RING_FRAMES
   #define SHM_SCOPE_RING_FRAMES 512
   #endif
-  #ifndef SC_MAX_TIMELINES
-  #define SC_MAX_TIMELINES 2
+  #ifndef CLOCKWORK_MAX_TIMELINES
+  #define CLOCKWORK_MAX_TIMELINES 2
   #endif
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
@@ -169,8 +169,8 @@
   #ifndef SHM_SCOPE_RING_FRAMES
   #define SHM_SCOPE_RING_FRAMES 512
   #endif
-  #ifndef SC_MAX_TIMELINES
-  #define SC_MAX_TIMELINES 2
+  #ifndef CLOCKWORK_MAX_TIMELINES
+  #define CLOCKWORK_MAX_TIMELINES 2
   #endif
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
@@ -319,9 +319,9 @@
 #endif
 
 // Max MIDI-clock follower timelines in the ClockworkClock registry (slot 0 is
-// always Link; slots 1..SC_MAX_TIMELINES are midi:<port> followers).
-#ifndef SC_MAX_TIMELINES
-#define SC_MAX_TIMELINES 8
+// always Link; slots 1..CLOCKWORK_MAX_TIMELINES are midi:<port> followers).
+#ifndef CLOCKWORK_MAX_TIMELINES
+#define CLOCKWORK_MAX_TIMELINES 8
 #endif
 
 // Scheduler pool
@@ -332,14 +332,28 @@
 #define SCHEDULER_SLOT_COUNT 512
 #endif
 
-// The buffer heap on WASM: modest pool, one spare growth area. (Desktop keeps
-// the 64 MB default below; the ESP32 profile sets its own.)
+// The heap on WASM: the placement arena, less one spare growth area.
+//
+// A DSP's real-time pool comes from this heap through DspHost::alloc_bytes
+// (dsp_api.h) — until 2026-09-29 scsynth took it from the arena directly —
+// and a heap that cannot hold it is a boot that fails, not a smaller pool. The
+// arena is what the host sized for that pool (memArenaSize in
+// js/memory_layout.js; the client grows it with realTimeMemorySize), so the
+// heap takes the arena: this figure is a ceiling, and clockwork_heap_init
+// clamps it to the arena's largest free block minus CLOCKWORK_FAST_RESERVE,
+// which keeps room for the spare growth area claimed right after. (Desktop
+// keeps the 64 MB default below; the ESP32 profile sets its own.)
 #if defined(__EMSCRIPTEN__)
   #ifndef CLOCKWORK_HEAP_SIZE
-  #define CLOCKWORK_HEAP_SIZE (8 * 1024 * 1024)
+  #define CLOCKWORK_HEAP_SIZE (2048u * 1024 * 1024)  // 2 GB: a ceiling; the arena bounds it
   #endif
   #ifndef CLOCKWORK_HEAP_GROWTH_SIZE
   #define CLOCKWORK_HEAP_GROWTH_SIZE (4 * 1024 * 1024)
+  #endif
+  // What the heap leaves of the arena: the spare growth area, and the arena's
+  // own block header on it.
+  #ifndef CLOCKWORK_FAST_RESERVE
+  #define CLOCKWORK_FAST_RESERVE (CLOCKWORK_HEAP_GROWTH_SIZE + 64 * 1024)
   #endif
 #endif
 
@@ -386,10 +400,11 @@
 #ifndef CLOCKWORK_HEAP_FAST_SIZE
 #define CLOCKWORK_HEAP_FAST_SIZE CLOCKWORK_HEAP_SIZE
 #endif
-// Fast-tier reserve + heap growth. Both 0 on single-tier targets: largest_free()
+// Fast-tier reserve + heap growth. Both 0 on desktop and the NIF: largest_free()
 // returns SIZE_MAX there so the boot-time bounding never clamps, and growth 0 keeps
-// the heap a fixed region with no allocation after boot (the desktop/NIF shape).
-// An embedded profile sets both non-zero.
+// the heap a fixed region with no allocation after boot. An embedded profile
+// sets both non-zero, and the web profile above sets the reserve so the heap
+// leaves its spare's worth of the arena.
 #ifndef CLOCKWORK_FAST_RESERVE
 #define CLOCKWORK_FAST_RESERVE 0
 #endif

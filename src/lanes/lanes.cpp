@@ -302,19 +302,20 @@ void clockwork_init(double   sample_rate,
     // looking at any of them. NULL means the host has already put them there
     // (the web one has no C pointer to pass) or that there are none.
     if (guest_config && guest_config_bytes) {
-        uint8_t* arena = g_external_segment ? g_external_segment : ring_buffer_storage;
-        const uint32_t n = guest_config_bytes < GUEST_CONFIG_SIZE
-                         ? guest_config_bytes : GUEST_CONFIG_SIZE;
-        // Refuse the tail rather than the block: a config that does not fit is
-        // a config the host and the region disagree about, and truncating it
-        // silently boots a guest that cannot tell it was cut short. The web
-        // side throws on the same condition (writeGuestConfigToMemory).
+        // Refused, not cut short: a config that does not fit is one the host
+        // and the region disagree about, and a truncated block boots a guest
+        // that cannot tell it was cut mid-line. ClockworkEngine refuses the
+        // same config before it gets here, and the web side throws on it
+        // (writeGuestConfigToMemory); this is the backstop for a host that
+        // calls clockwork_init itself.
         if (guest_config_bytes > GUEST_CONFIG_SIZE) {
-            clockwork_log("[init] guest config is %u bytes but the region holds %u "
-                    "— raise GUEST_CONFIG_SIZE; booting with a truncated block",
+            clockwork_log("[init] refused: guest config is %u bytes but the region "
+                    "holds %u — raise GUEST_CONFIG_SIZE (shared_memory.h) or send less",
                     guest_config_bytes, (uint32_t)GUEST_CONFIG_SIZE);
+            return;
         }
-        std::memcpy(arena + GUEST_CONFIG_START, guest_config, n);
+        uint8_t* arena = g_external_segment ? g_external_segment : ring_buffer_storage;
+        std::memcpy(arena + GUEST_CONFIG_START, guest_config, guest_config_bytes);
     }
 
     clockwork_set_engine_config(sample_rate, block_size, input_channels,

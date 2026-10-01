@@ -105,6 +105,23 @@ uint64_t tick();
 // says so, so this fixture's frame count stays the engine's.
 void ticked(uint64_t frames);
 
+// The stream position the next tick() renders from.
+uint64_t position();
+
+// A new DSP instance over the engine that is up — destroy_dsp + rebuild_dsp,
+// what a cold device switch does — and the stream position its first block
+// will have. For a case that asserts on what the DSP renders: an instance
+// keeps state of its own (the placeholder counts frames from its creation,
+// and holds whatever pulse it was last told), and the fixture is one engine
+// for the whole process, so a case that assumes the instance it finds is the
+// one that booted is assuming the order the suite ran in.
+uint64_t freshDsp();
+
+// The DSP's own index for a frame this fixture rendered at `streamFrame`:
+// frames since the last freshDsp(). What the placeholder's pulse is a
+// function of, and so what a case checking that pulse counts in.
+uint64_t dspFrame(uint64_t streamFrame);
+
 // One frame off an egress ring.
 struct EgressFrame {
     uint32_t             sourceId = 0;

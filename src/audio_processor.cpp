@@ -58,7 +58,8 @@ uint32_t clockwork_lane_base(void)      { return g_lane_base; }
 // free of any DSP dependency, so it is included in both builds — the core still
 // places the ring arena + scheduler pool in bulk RAM on tiered targets.
 #include "platform.h"
-#include "dsp_api.h"  // the seven-call contract with the DSP
+#include "dsp_api.h"  // the contract with the DSP
+#include "shm_scope_stream.hpp"   // the scope slots DspHost::scope_* hand a DSP
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
 #include "clockwork_port_bus.h" // ...and which DSP channels they occupy
 #include "clockwork_event_sink.h" // events leaving clockwork, on a stable slot
@@ -208,6 +209,13 @@ shm_audio_buffer* g_shm_audio_buffers = nullptr;
 // Engine sample position of the block being rendered (declared in
 // shm_scope_stream.hpp): anchors scope-stream writes on the sample clock.
 std::atomic<uint64_t> g_engine_frames{0};
+
+// The scope substrate (rust/clockwork-scope): an opaque context it never
+// reads, and a handle of the four-field shape DspScopeHandle spells out.
+extern "C" {
+int  clockwork_scope_get(void* ctx, int index, int channels, int max_frames, void* hnd);
+void clockwork_scope_release(void* ctx, void* hnd);
+}
 
 // Audio-thread /clock handler (the wasm ingress route). Handles the cheap
 // clock-core verbs inline and replies via the OUT ring. /clockwork/clock is
@@ -515,6 +523,34 @@ extern "C" {
     std::atomic<uint32_t> corruption_count{0};
     std::atomic<uint32_t> gap_log_count{0};
     std::atomic<int> late_count{0};
+    // The "say it a few times, then stop" log limiters, and the late log's
+    // one-a-second stamp. Here rather than static in the functions that use
+    // them so that a new engine can start them over (below).
+    std::atomic<uint32_t> no_backend_log_count{0};
+    std::atomic<uint32_t> oversize_forward_log_count{0};
+    std::atomic<int64_t>  last_late_log_osc{0};
+    // Blocks between metrics flushes (~30 Hz), derived from the rate and block
+    // size init_memory publishes; 0 until derived. Zeroed at every
+    // init_memory, because a rebuild may be at another rate.
+    std::atomic<uint32_t> metrics_flush_period{0};
+
+    // A NEW ENGINE STARTS THESE OVER. They are the process's, not an engine's,
+    // so a second engine in one process — a test suite, the NIF, an embedder
+    // that closes and boots again — used to inherit the first one's: it
+    // published the last engine's buffer peaks as its own from its first
+    // flush, and a limiter the last engine had used up kept this one's first
+    // error out of the log. (A purge clears the peaks too: clear_scheduler.)
+    static void reset_engine_diagnostics() {
+        local_in_peak.store(0, std::memory_order_relaxed);
+        local_out_peak.store(0, std::memory_order_relaxed);
+        local_nrt_out_peak.store(0, std::memory_order_relaxed);
+        corruption_count.store(0, std::memory_order_relaxed);
+        gap_log_count.store(0, std::memory_order_relaxed);
+        late_count.store(0, std::memory_order_relaxed);
+        no_backend_log_count.store(0, std::memory_order_relaxed);
+        oversize_forward_log_count.store(0, std::memory_order_relaxed);
+        last_late_log_osc.store(0, std::memory_order_relaxed);
+    }
 
     // Block-time constants, in NTP units (see clock_math.h).
     int64_t g_osc_increment = 0;             // NTP units per buffer
@@ -675,16 +711,54 @@ extern "C" {
     // crosses: what the bytes were is the guest's business, and was the whole
     // problem with the OSC verb this replaces.
     static void dsp_host_free_bytes(void* /*ctx*/, void* ptr) {
-        if (!ptr) return;
-#ifdef __EMSCRIPTEN__
-        // On web the guest's large blocks come from the CLIENT's pool inside
-        // the guest region, not from clockwork_heap — the client frees them when it
-        // sees the guest's own notification. Handing one of those to
-        // clockwork_heap_free would free a pointer this allocator never issued.
-        (void)ptr;
-#else
-        clockwork_heap_free(ptr);
-#endif
+        // What arrives here came from alloc_bytes, on every target: a guest
+        // whose buffer points into the client's inbox (an asset, or a sample
+        // the client placed there) does not hand that range to us — the
+        // inbox is the client's and the guest knows so (dsp_api.h, "Bulk").
+        // This used to be a no-op on web for fear of exactly that pointer,
+        // which meant every heap block a web guest ever freed was leaked.
+        if (ptr) clockwork_heap_free(ptr);
+    }
+
+    // The pair of the above: the heap a guest's larger allocations come from.
+    // clockwork_heap is a pre-claimed, lock-free pool, so this is callable on
+    // the audio thread, where it answers NULL rather than blocking when it
+    // cannot meet a request (dsp_api.h).
+    static void* dsp_host_alloc_bytes(void* /*ctx*/, size_t bytes) {
+        return bytes ? clockwork_heap_alloc(bytes) : nullptr;
+    }
+
+    // ── Scopes (dsp_api.h, "Scopes") ───────────────────────────────────────
+    //
+    // A DSP publishes a scope by claiming a slot and appending blocks; the
+    // slot's layout (shm_scope_stream) and the anchor every block is stamped
+    // with (g_engine_frames) stay on this side. The handle passes straight
+    // through to the substrate, which owns slots by the handle's address.
+    static int dsp_host_scope_open(void* /*ctx*/, uint32_t index, uint32_t channels,
+                                   DspScopeHandle* hnd) {
+        if (!hnd) return 0;
+        if (index > (uint32_t)INT32_MAX || channels > (uint32_t)INT32_MAX) return 0;
+        if (!clockwork_scope_get(nullptr, (int)index, (int)channels, 0, hnd)) return 0;
+        auto* slot = static_cast<shm_scope_stream*>(hnd->slot);
+        hnd->channels = slot ? slot->channels : 0;
+        return 1;
+    }
+
+    static void dsp_host_scope_write(void* /*ctx*/, DspScopeHandle* hnd,
+                                     const float* const* channels, uint32_t n_channels,
+                                     uint32_t frames) {
+        if (!hnd || !hnd->slot || !channels || n_channels == 0 || frames == 0) return;
+        // The writer takes a full set of channel pointers; short by some, the
+        // last one given fills the rest, as ScopeOut2 always did.
+        const float* padded[SHM_SCOPE_STREAM_CHANNELS];
+        for (uint32_t c = 0; c < SHM_SCOPE_STREAM_CHANNELS; ++c)
+            padded[c] = channels[c < n_channels ? c : n_channels - 1];
+        shm_scope_stream_writer writer(static_cast<shm_scope_stream*>(hnd->slot));
+        writer.write(padded, frames, g_engine_frames.load(std::memory_order_relaxed));
+    }
+
+    static void dsp_host_scope_close(void* /*ctx*/, DspScopeHandle* hnd) {
+        if (hnd) clockwork_scope_release(nullptr, hnd);
     }
 
 
@@ -751,7 +825,10 @@ extern "C" {
 
     const DspHost g_dsp_host = { /*ctx*/ nullptr, &dsp_host_emit_osc, &dsp_host_log,
                                  &dsp_host_open_sink, &dsp_host_send_sink,
-                                 &dsp_host_free_bytes, &dsp_host_asset_release };
+                                 &dsp_host_free_bytes, &dsp_host_asset_release,
+                                 &dsp_host_alloc_bytes,
+                                 &dsp_host_scope_open, &dsp_host_scope_write,
+                                 &dsp_host_scope_close };
 
 #if CLOCKWORK_WORKLET_CLOCK && CLOCKWORK_SYNTH
     // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
@@ -871,8 +948,7 @@ extern "C" {
         // Nothing claimed it: no matching route and no default registered (e.g.
         // a DSP-bound message in a build with no DSP attached). Drop, and log rate-limited so junk
         // can't flood the audio-thread log.
-        static std::atomic<uint32_t> noBackendLog{0};
-        if (noBackendLog.fetch_add(1, std::memory_order_relaxed) < 16) {
+        if (no_backend_log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
             uint32_t a = 0; while (a < len && osc[a] != '\0') ++a;
             clockwork_log("ERROR: no backend for OSC %.*s — dropped",
                    static_cast<int>(a), reinterpret_cast<const char*>(osc));
@@ -929,11 +1005,11 @@ extern "C" {
         // Count-based sampling alone hides lates 2..99, so a burst can leave no
         // log trace. Keep the count milestones but also emit at most one line
         // per second of block time.
-        static int64_t last_late_log_osc = 0;
         const bool second_elapsed =
-            (blockTime - last_late_log_osc) >= static_cast<int64_t>(4294967296LL);
+            (blockTime - last_late_log_osc.load(std::memory_order_relaxed))
+                >= static_cast<int64_t>(4294967296LL);
         if (late_now == 1 || late_now % 100 == 0 || second_elapsed) {
-            last_late_log_osc = blockTime;
+            last_late_log_osc.store(blockTime, std::memory_order_relaxed);
             clockwork_log("LATE: %.1fms (count=%d)", -time_diff_ms, late_now);
         }
         return false;
@@ -1093,8 +1169,13 @@ extern "C" {
         // are only ever written here with no reader threads alive (first
         // boot, or re-boot after teardown_memory).
         uint8_t* base = g_external_segment ? g_external_segment : ring_buffer_storage;
+        // Every build of the engine, a cold swap included: the rate or the
+        // block size may have changed, and the period is derived from both.
+        metrics_flush_period.store(0, std::memory_order_relaxed);
         if (shared_memory != base) {
             shared_memory = base;
+            // A new engine, not a rebuild of the one that was running.
+            reset_engine_diagnostics();
             // The table every reader takes the layout from, first, so nothing
             // is ever placed in an arena that does not describe itself. A
             // segment's creator wrote the same bytes already; the wasm arena
@@ -1995,16 +2076,17 @@ extern "C" {
             // Flush period in blocks, derived once from the audio rate to target ~30Hz
             // (tracks sample rate / block size instead of a fixed divisor); 16 until the
             // audio config is published.
-            static uint32_t s_flush_period = 0;
-            if (s_flush_period == 0u) {
+            uint32_t derived = metrics_flush_period.load(std::memory_order_relaxed);
+            if (derived == 0u) {
                 const uint32_t blk = metrics->audio_block_size.load(std::memory_order_relaxed);
                 const uint32_t sr  = metrics->audio_sample_rate.load(std::memory_order_relaxed);
                 if (blk && sr) {            // round(sr / (30 * blk)) in integer math
                     uint32_t p = (sr + 15u * blk) / (30u * blk);
-                    s_flush_period = (p < 1u) ? 1u : p;
+                    derived = (p < 1u) ? 1u : p;
+                    metrics_flush_period.store(derived, std::memory_order_relaxed);
                 }
             }
-            const uint32_t flush_period = (s_flush_period != 0u) ? s_flush_period : 16u;
+            const uint32_t flush_period = (derived != 0u) ? derived : 16u;
             if ((pc % flush_period) == 0u) {
 #if CLOCKWORK_WORKLET_CLOCK
                 clockworkClock().publishClockMetrics(metrics, current_ntp, 4.0);
@@ -2733,8 +2815,7 @@ static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element
     static constexpr uint32_t kHeader = 8 + 8 + 4;
     static uint8_t frame[kHeader + 66560];
     if (len > sizeof(frame) - kHeader) {
-        static std::atomic<uint32_t> oversize{0};
-        if (oversize.fetch_add(1, std::memory_order_relaxed) < 8)
+        if (oversize_forward_log_count.fetch_add(1, std::memory_order_relaxed) < 8)
             clockwork_log("WARNING: %s of %u bytes dropped — wider than the host forward carries",
                           reinterpret_cast<const char*>(element), static_cast<unsigned>(len));
         return;

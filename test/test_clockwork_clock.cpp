@@ -379,10 +379,10 @@ TEST_CASE("ClockworkClock: midi timeline claim is idempotent and slot-stable",
     CHECK(sc.claimMidiTimeline("", "") == -1);              // empty name rejected
 }
 
-TEST_CASE("ClockworkClock: midi registry is bounded at SC_MAX_TIMELINES",
+TEST_CASE("ClockworkClock: midi registry is bounded at CLOCKWORK_MAX_TIMELINES",
           "[ClockworkClock][midi]") {
     ClockworkClock sc;
-    for (int i = 1; i <= SC_MAX_TIMELINES; ++i)
+    for (int i = 1; i <= CLOCKWORK_MAX_TIMELINES; ++i)
         CHECK(sc.claimMidiTimeline(("p" + std::to_string(i)).c_str(), "raw") == i);
     CHECK(sc.claimMidiTimeline("overflow", "Overflow") == -1);      // registry full
 }

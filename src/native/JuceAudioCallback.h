@@ -75,8 +75,8 @@ public:
     // Boot the engine. The geometry here is the Clockwork's — what the device
     // opened — and it is passed as arguments because that is what it is.
     // guestConfig is the block the guest reads and nothing here interprets
-    // (GuestConfigBlock.h); clockwork copies it into the region and hands
-    // over base and length.
+    // (ClockworkEngine::Config::guestConfig); clockwork copies it into the
+    // region and hands over base and length.
     void initialiseDsp(uint8_t* ringBufferStorage,
                          int sampleRate,
                          int numOutputChannels,

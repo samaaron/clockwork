@@ -18,7 +18,7 @@ dsp_asset(dsp, asset)             a client's bytes — a sample, a wavetable —
                                   bound where they lie, never copied
 ```
 
-Calls in the other direction go through `DspHost`, six callbacks. **Every one
+Calls in the other direction go through `DspHost`, ten callbacks. **Every one
 may be NULL, so a DSP must check before calling.**
 
 ```
@@ -32,6 +32,12 @@ send_sink(ctx, sink, bytes,       send to an opened sink, at a time
 free_bytes(ctx, ptr)              hand back memory clockwork allocated
 asset_release(ctx, id)            done with an asset taken through dsp_asset;
                                   the client's slot goes back
+alloc_bytes(ctx, bytes)           take memory from the heap clockwork owns
+scope_open(ctx, index,            claim a scope slot to publish audio into
+           channels, hnd)
+scope_write(ctx, hnd, channels,   append a block to a claimed scope
+            n_channels, frames)
+scope_close(ctx, hnd)             give the slot back
 ```
 
 Not all callbacks can be called from all threads:
@@ -40,13 +46,29 @@ Not all callbacks can be called from all threads:
 |--------------|---------------------------------------------------------|
 | `emit_osc`   | any, including the audio thread                         |
 | `send_sink`  | any, including the audio thread                         |
-| `free_bytes` | any except the audio thread; freeing may defer           |
-| `log`        | **not** the audio thread                                |
+| `alloc_bytes` | any, including the audio thread; lock-free, answers NULL rather than blocking |
+| `free_bytes` | any, including the audio thread; freeing may defer       |
+| `log`        | any, including the audio thread, where it is lock-free and drops when the ring is full; formats nothing |
 | `open_sink`  | control thread only                                     |
 | `asset_release` | `dsp_process` and `dsp_osc` — one short message, nothing else |
+| `scope_open` / `scope_write` / `scope_close` | any, including the audio thread; none allocates |
 
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
 drops and counts rather than blocking, so a refusal is visible.
+
+A DSP's larger allocations come from `alloc_bytes` and go back through
+`free_bytes`: the heap is clockwork's, pre-claimed and lock-free, so a DSP
+never has to know which heap a host built, and never reaches past this header
+for one. `scope_open`, `scope_write` and `scope_close` are the same idea for
+scopes: clockwork owns the slots and the ring a client reads, and a DSP that
+publishes one claims a slot and appends blocks without learning the layout.
+
+**Those are the only doors.** A DSP includes `dsp_api.h`, the sink header it
+pulls in, and `clockwork_clock_state.h` to read `DspConfig::clock`, and
+nothing else of clockwork's: not the arena layout, not the heap, not the
+scope rings, not a global. SuperSonic's suite checks this against the scsynth
+guest's sources (`scripts/check-guest-boundary.sh`), because every reach past
+the header is a breakage waiting for the day the layout moves.
 
 `emit_osc` sends OSC back to clients, and its `origin` argument decides which
 of them. It is callable from the audio thread, which makes calls back into

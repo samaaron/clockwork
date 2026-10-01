@@ -279,6 +279,13 @@ endif()
 
 include(CTest)
 include(Catch)
+# One CTest entry per Catch2 case; CI runs the suite through ctest as well as
+# through the binaries (.github/workflows/ci.yml says why).
+#
+# A CASE'S NAME MUST NOT OPEN A SQUARE BRACKET IT DOES NOT CLOSE. The
+# discovered names travel through a CMake list, where an unbalanced `[`
+# swallows every `;` up to the next `]`, fusing the case and the ones after
+# it into a single entry that matches nothing. Tags are fine; prose is not.
 catch_discover_tests(clockwork_tests)
 
 # ─── Attaching ───────────────────────────────────────────────────────────────

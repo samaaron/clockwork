@@ -197,10 +197,9 @@ int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   
  * ── guest_config ───────────────────────────────────────────────────────────
  * Bytes for the GUEST, opaque to clockwork, which copies them into the
  * region it reserves and then hands the guest base and length
- * (DspConfig::guest_config). Nothing here reads a field, so the layout is a
- * private matter between a host and the guest it boots — see
- * src/native/GuestConfigBlock.h for the one this repository's native host
- * writes.
+ * (DspConfig::guest_config). Nothing here reads a byte, so the layout is a
+ * private matter between a host and the guest it boots — the hosts in this
+ * repository write `name=value` lines (src/native/GuestConfigText.h).
  *
  * Pass NULL/0 either because there is nothing to configure, or because the
  * bytes are already in place: a host that can write into the arena directly

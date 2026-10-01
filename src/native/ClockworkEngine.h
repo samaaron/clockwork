@@ -87,15 +87,19 @@ public:
                                                // [32, kMaxBlockSize]. WASM ignores it (must
                                                // equal the 128-sample render quantum).
         int    udpPort                  = 57110;
-        int    maxNodes                 = 1024;
-        int    numBuffers               = 1024;
         int    numOutputChannels        = kAutoChannelCount;
         int    numInputChannels         = kAutoChannelCount;
-        int    numAudioBusChannels      = 1024;
-        int    maxGraphDefs             = 512;
-        int    maxWireBufs              = 64;
-        int    numControlBusChannels    = 16384;
-        int    realTimeMemorySize       = 8192;    // KB — dsp_new multiplies by 1024
+        // THE GUEST'S OWN CONFIGURATION, as opaque bytes. Clockwork copies
+        // them into the block it reserves and hands the guest base and
+        // length (DspConfig::guest_config); it reads none of them. What
+        // they mean is between the host that fills this and the guest it
+        // boots. The hosts in this repository spell them as `name=value`
+        // lines (GuestConfigText.h), and a guest that does not know a name
+        // refuses to boot with the line, rather than booting with a
+        // silently different configuration. Empty: the guest's defaults.
+        // Must fit the region with its terminating NUL (GUEST_CONFIG_SIZE),
+        // or init refuses.
+        std::string guestConfig;
         // The guest's bulk lanes (shm_segment.hpp): the inbox a client writes
         // samples and other assets into, the outbox the guest renders into.
         // Address space, not memory — pages are committed as they are
@@ -103,7 +107,6 @@ public:
         // not the smallest. A host exposes them as a launch option.
         size_t inboxBytes               = CLOCKWORK_INBOX_BYTES;
         size_t outboxBytes              = CLOCKWORK_OUTBOX_BYTES;
-        int    numRGens                 = 64;
         bool   headless                 = false;   // skip audio device (for tests)
         bool   manualAudioPump          = false;   // skip the audio source entirely
                                                    // (no device, no headless driver):
@@ -882,6 +885,9 @@ private:
     // it owns is enough, and 64 KB is not something to put on a stack.
     static constexpr uint32_t kNrtMaxCommand = 66560;
     alignas(8) uint8_t        mNrtFrame[sizeof(NrtEnvelope) + kNrtMaxCommand] = {};
+    // How many over-wide control messages this engine has said it dropped;
+    // it says so eight times and then keeps count in the metrics alone.
+    std::atomic<uint32_t>     mNrtOversizeLogged{0};
     std::atomic<int32_t>      mNrtHead{0};
     std::atomic<int32_t>      mNrtTail{0};
     std::atomic<int32_t>      mNrtSeq{0};

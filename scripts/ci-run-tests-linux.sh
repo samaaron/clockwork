@@ -34,10 +34,13 @@ for t in "$@"; do
     echo "=== $t"
     # Its own process group where the runner has setsid (it does), so a hung
     # binary's children are killed with it rather than left behind.
+    # Shuffled (ci.yml says why), seeded with the run number where there is
+    # one, so a re-run of a failed job runs the same order. The seed is the
+    # first thing the binary prints; --order rand --rng-seed <it> repeats it.
     if command -v setsid >/dev/null 2>&1; then
-        setsid "$t" --durations yes &
+        setsid "$t" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
     else
-        "$t" --durations yes &
+        "$t" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
     fi
     pid=$!
 

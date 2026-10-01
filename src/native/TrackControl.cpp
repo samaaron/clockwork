@@ -103,7 +103,7 @@ uint32_t frameOffset(const DrainCallCtx& meta) {
 // How many follower timelines the segment is shown: every slot the registry
 // has, up to the room the header made.
 constexpr uint32_t kMirroredTimelines =
-    SC_MAX_TIMELINES < TIMELINE_SLOTS ? SC_MAX_TIMELINES : TIMELINE_SLOTS;
+    CLOCKWORK_MAX_TIMELINES < TIMELINE_SLOTS ? CLOCKWORK_MAX_TIMELINES : TIMELINE_SLOTS;
 
 // Scratch the audio thread reads a surplus return block into, to discard it.
 float  g_trim[LANES][MAX_BLOCK];

@@ -11,11 +11,20 @@
 
 #include <cstring>
 
+// Declared here rather than via audio_processor.h, which pulls in the
+// <emscripten/...> shim that is not on a native include path. Both have C
+// linkage (src/audio_processor.cpp).
+extern "C" {
+void destroy_dsp();
+void rebuild_dsp(double sample_rate);
+}
+
 namespace lanes_test {
 namespace {
 
 uint32_t   gBlockSize  = 0;
 uint64_t   gSamplePos  = 0;
+uint64_t   gDspOrigin  = 0;   // gSamplePos when freshDsp() last made an instance
 bool       gBooted     = false;
 
 void drainInto(std::vector<EgressFrame>& out,
@@ -78,6 +87,18 @@ uint32_t boot() {
 }
 
 void ticked(uint64_t frames) { gSamplePos += frames; }
+
+uint64_t position() { return gSamplePos; }
+
+uint64_t freshDsp() {
+    boot();
+    destroy_dsp();
+    rebuild_dsp(kSampleRate);
+    gDspOrigin = gSamplePos;
+    return gSamplePos;
+}
+
+uint64_t dspFrame(uint64_t streamFrame) { return streamFrame - gDspOrigin; }
 
 uint64_t tick() {
     boot();

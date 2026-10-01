@@ -22,6 +22,7 @@
 
 #include "erl_nif.h"
 #include "ClockworkEngine.h"
+#include "GuestConfigText.h"
 #include "IOscTransport.h"
 
 #include <juce_core/juce_core.h>
@@ -245,10 +246,51 @@ static void on_debug(const std::string& msg) {
 
 // ─── Config parsing helper ─────────────────────────────────────────────────
 
+// A map value as the guest's config text spells it: an integer, a float, a
+// boolean as 1/0, or a string as given. False for anything else.
+static bool value_as_text(ErlNifEnv* env, ERL_NIF_TERM value, std::string& out) {
+    int i;
+    if (enif_get_int(env, value, &i)) { out = std::to_string(i); return true; }
+    ErlNifSInt64 i64;
+    if (enif_get_int64(env, value, &i64)) { out = std::to_string((long long)i64); return true; }
+    double d;
+    if (enif_get_double(env, value, &d)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.17g", d);
+        out = buf;
+        return true;
+    }
+    char atom_buf[16];
+    if (enif_get_atom(env, value, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+        if (strcmp(atom_buf, "true") == 0)  { out = "1"; return true; }
+        if (strcmp(atom_buf, "false") == 0) { out = "0"; return true; }
+        return false;
+    }
+    ErlNifBinary bin;
+    if (enif_inspect_binary(env, value, &bin)) {
+        out.assign(reinterpret_cast<const char*>(bin.data), bin.size);
+        return out.find('\n') == std::string::npos;
+    }
+    return false;
+}
+
+// The keys clockwork answers for itself are the device's: rate, channels,
+// buffer, headless. EVERY OTHER KEY IS THE GUEST'S and goes into
+// Config::guestConfig as a `name=value` line, spelled as the caller spelled
+// it (GuestConfigText.h): clockwork does not know the guest's words, and a
+// guest that does not know a name refuses the boot with the line, which is
+// the error a misspelt option deserves rather than silence.
 static void parse_config(ErlNifEnv* env, ERL_NIF_TERM map,
                           ClockworkEngine::Config& cfg) {
     ERL_NIF_TERM key, value;
     ErlNifMapIterator iter;
+
+    // A native host has a filesystem, so the guest's definitions in its
+    // synthdef directory are loaded at boot, as the native process does
+    // (host/EngineHost.cpp) and as every native host did before the options
+    // moved into text. The map's own `load_graph_defs`, if given, comes after
+    // this line and wins: the guest takes the last value for a name.
+    clockwork::guest_config_text::set(cfg.guestConfig, "loadGraphDefs", "1");
 
     if (!enif_map_iterator_create(env, map, &iter, ERL_NIF_MAP_ITERATOR_FIRST))
         return;
@@ -265,26 +307,14 @@ static void parse_config(ErlNifEnv* env, ERL_NIF_TERM map,
                 cfg.numInputChannels = int_val;
             else if (strcmp(key_buf, "buffer_size") == 0 && enif_get_int(env, value, &int_val))
                 cfg.bufferSize = int_val;
-            else if (strcmp(key_buf, "num_buffers") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numBuffers = int_val;
-            else if (strcmp(key_buf, "max_nodes") == 0 && enif_get_int(env, value, &int_val))
-                cfg.maxNodes = int_val;
-            else if (strcmp(key_buf, "num_audio_bus_channels") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numAudioBusChannels = int_val;
-            else if (strcmp(key_buf, "num_control_bus_channels") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numControlBusChannels = int_val;
-            else if (strcmp(key_buf, "max_wire_bufs") == 0 && enif_get_int(env, value, &int_val))
-                cfg.maxWireBufs = int_val;
-            else if (strcmp(key_buf, "max_graph_defs") == 0 && enif_get_int(env, value, &int_val))
-                cfg.maxGraphDefs = int_val;
-            else if (strcmp(key_buf, "real_time_memory_size") == 0 && enif_get_int(env, value, &int_val))
-                cfg.realTimeMemorySize = int_val;
-            else if (strcmp(key_buf, "num_rgens") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numRGens = int_val;
             else if (strcmp(key_buf, "headless") == 0) {
                 char atom_buf[16];
                 if (enif_get_atom(env, value, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1))
                     cfg.headless = (strcmp(atom_buf, "true") == 0);
+            } else {
+                std::string text;
+                if (value_as_text(env, value, text))
+                    clockwork::guest_config_text::set(cfg.guestConfig, key_buf, text);
             }
         }
         enif_map_iterator_next(env, &iter);

@@ -108,7 +108,7 @@ constexpr uint32_t MAGIC   = 0x54425247;   // "TBRG"
 constexpr uint32_t VERSION = 3;   // 3: timelines (the meter moved the clock mirror too)
 
 // Follower timelines mirrored per block: slot k carries timeline id k + 1.
-// Sized for the native memory profile's SC_MAX_TIMELINES; the engine writes
+// Sized for the native memory profile's CLOCKWORK_MAX_TIMELINES; the engine writes
 // as many as it has and leaves the rest as they were made (all zero, which
 // reads as "nothing there").
 constexpr uint32_t TIMELINE_SLOTS = 8;

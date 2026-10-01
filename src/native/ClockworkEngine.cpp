@@ -13,7 +13,6 @@
 #include "clock/MidiClockOut.h"
 #include "AggregateDeviceHelper.h"
 #include "DevicePolicy.h"
-#include "GuestConfigBlock.h"
 #include "AsioDriverCheck.h"
 #include "PipeWireAudio.h"
 #include "audio_processor.h"
@@ -384,6 +383,17 @@ ClockworkEngine::~ClockworkEngine() {
 
 void ClockworkEngine::init(const Config& cfg) {
     if (mRunning.load()) return;
+    // The guest's config goes to it in a region of GUEST_CONFIG_SIZE bytes, its
+    // NUL included. One that does not fit is refused here, before anything is
+    // built, as the web side refuses it (writeGuestConfigToMemory): cut short
+    // instead, it would boot a guest on a line sliced mid-value — the silent
+    // misconfiguration the text block exists to rule out.
+    if (cfg.guestConfig.size() + 1 > GUEST_CONFIG_SIZE) {
+        throw std::runtime_error(
+            "guest config is " + std::to_string(cfg.guestConfig.size() + 1)
+            + " bytes with its NUL, but its region holds " + std::to_string(GUEST_CONFIG_SIZE)
+            + ": raise GUEST_CONFIG_SIZE (shared_memory.h) or send less");
+    }
 
     // Nothing logged during boot is lost: lines land on the debug ring the
     // moment init_memory has built it (see clockwork_log). The guard covers
@@ -1217,25 +1227,15 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // g_external_segment, so both agree.
     uint8_t* arena = g_external_segment ? g_external_segment : ring_buffer_storage;
 
-    // The guest's config block (GuestConfigBlock.h), carried as opaque bytes: a
-    // guest wanting a different block changes this function and nothing else.
+    // The guest's config block: whatever the host put in Config::guestConfig,
+    // carried as opaque bytes with its terminating NUL so a guest that reads
+    // text finds the end. Nothing here interprets it.
     //
-    // Clockwork's own geometry is NOT here — rate, block size and channel counts
-    // go to initialiseDsp as arguments, because they are what the device opened
-    // rather than what the guest asked for.
-    uint32_t guestBlock[clockwork::guest_config::kSlotCount] = {};
-    {
-        using namespace clockwork::guest_config;
-        guestBlock[kNumBuffers]            = static_cast<uint32_t>(cfg.numBuffers);
-        guestBlock[kMaxNodes]              = static_cast<uint32_t>(cfg.maxNodes);
-        guestBlock[kMaxGraphDefs]          = static_cast<uint32_t>(cfg.maxGraphDefs);
-        guestBlock[kMaxWireBufs]           = static_cast<uint32_t>(cfg.maxWireBufs);
-        guestBlock[kNumAudioBusChannels]   = static_cast<uint32_t>(cfg.numAudioBusChannels);
-        guestBlock[kNumControlBusChannels] = static_cast<uint32_t>(cfg.numControlBusChannels);
-        guestBlock[kRealTimeMemorySize]    = static_cast<uint32_t>(cfg.realTimeMemorySize);
-        guestBlock[kNumRGens]              = static_cast<uint32_t>(cfg.numRGens);
-        guestBlock[kLoadGraphDefs]         = 1;  // native has a filesystem to load from
-    }
+    // Clockwork's own geometry is NOT in it — rate, block size and channel
+    // counts go to initialiseDsp as arguments, because they are what the
+    // device opened rather than what the guest asked for.
+    const std::string& guestText  = cfg.guestConfig;
+    const uint32_t     guestBytes = static_cast<uint32_t>(guestText.size() + 1);
 
     // The guest's arena, allocated once and reused across cold swaps. It does
     // not depend on the segment: a guest needs working memory whether or not
@@ -1287,8 +1287,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         mCurrentConfig.sampleRate,
         mCurrentConfig.numOutputChannels,
         mCurrentConfig.numInputChannels,
-        guestBlock,
-        static_cast<uint32_t>(sizeof(guestBlock)),
+        guestText.c_str(),
+        guestBytes,
         guestArena,
         guestArenaBytes,
         chosenBufLen,
@@ -2092,8 +2092,7 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
     } else {
         // Wider than the hop carries. Say so, rate-limited: the sender gets no
         // reply, and a count alone does not name the message.
-        static std::atomic<uint32_t> oversize{0};
-        if (oversize.fetch_add(1, std::memory_order_relaxed) < 8) {
+        if (self->mNrtOversizeLogged.fetch_add(1, std::memory_order_relaxed) < 8) {
             uint32_t a = 0; while (a < len && data[a] != '\0') ++a;
             clockwork_log("WARNING: control message %.*s of %u bytes dropped — wider than the "
                           "audio-to-control hop carries (%u)",

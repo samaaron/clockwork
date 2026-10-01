@@ -32,26 +32,49 @@
 #include <cstring>
 #include <vector>
 
-#if !defined(_WIN32)
-#  include <sys/resource.h>
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#elif !defined(_WIN32)
+#  include <cstdio>
+#  include <unistd.h>
 #endif
 
 namespace {
 
-// Peak resident set, in bytes: what the process has actually touched. A lane
-// that is only reserved does not move it; one that was cleared at boot does.
-uint64_t peakResidentBytes() {
-#if defined(_WIN32)
+// The resident set as it stands, in bytes: what the process has touched and
+// still holds. A lane that is only reserved does not move it; one that was
+// cleared at boot does. 0 where it cannot be read (Windows), which the case
+// below takes as "nothing to measure here".
+//
+// NOT THE PEAK. This read ru_maxrss, the process's high-water mark, which
+// only moves when the process goes higher than it has ever been — so in a
+// suite run in one process, where earlier cases had already been higher, a
+// lane committed whole at boot would not have moved it at all, and the case
+// passed without measuring anything. Alone, it measured the boot and failed.
+uint64_t residentBytes() {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info {};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+        return 0;
+    return static_cast<uint64_t>(info.resident_size);
+#elif defined(_WIN32)
     return 0;
 #else
-    struct rusage ru {};
-    ::getrusage(RUSAGE_SELF, &ru);
-#  if defined(__APPLE__)
-    return static_cast<uint64_t>(ru.ru_maxrss);            // bytes
-#  else
-    return static_cast<uint64_t>(ru.ru_maxrss) * 1024u;    // kilobytes
-#  endif
+    unsigned long total = 0, resident = 0;
+    std::FILE* f = std::fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    const int got = std::fscanf(f, "%lu %lu", &total, &resident);
+    std::fclose(f);
+    if (got != 2) return 0;
+    return static_cast<uint64_t>(resident) * static_cast<uint64_t>(::sysconf(_SC_PAGESIZE));
 #endif
+}
+
+uint64_t grownSince(uint64_t before) {
+    const uint64_t now = residentBytes();
+    return now > before ? now - before : 0;
 }
 
 // The lane, as the client writes it. The engine's view is const (the guest
@@ -227,14 +250,31 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     INFO((segment ? "public segment" : "process-local lanes"));
 
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
+
+    // WHAT A BOOT COSTS ANYWAY, measured rather than assumed: the heap, the
+    // rings and the DSP are memory an engine touches whatever its lane is,
+    // and how much that is belongs to the build (a sanitizer's is several
+    // times a release's). An engine with the default lane says what it is
+    // here, in this process, and the big lane is held to that plus a margin
+    // far smaller than itself.
+    uint64_t ordinary = 0;
+    {
+        ClockworkEngine::Config plain = cfg;
+        plain.udpPort = segment ? 57342 : 0;
+        const uint64_t before = residentBytes();
+        EngineFixture small(plain);
+        ordinary = grownSince(before);
+    }
+
     cfg.inboxBytes = want;
     cfg.udpPort    = segment ? 57341 : 0;
-    const uint64_t before = peakResidentBytes();
+    const uint64_t before = residentBytes();
     EngineFixture fx(cfg);
     REQUIRE(fx.engine().guestInboxBytes() == want);
-    const uint64_t grew = peakResidentBytes() - before;
-    INFO("peak resident grew by " << (grew >> 20) << " MB");
-    CHECK(grew < 64u * 1024u * 1024u);
+    const uint64_t grew = grownSince(before);
+    INFO("an ordinary boot grew the resident set by " << (ordinary >> 20)
+         << " MB, this one by " << (grew >> 20) << " MB");
+    CHECK(grew < ordinary + 64u * 1024u * 1024u);
 
     // The far end is addressable: an asset at the last page of the lane
     // reaches the guest, which checksums the very bytes written there.
@@ -247,6 +287,19 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     const Last l = lastAsset(fx);
     CHECK(l.id == 11);
     CHECK(l.sum == checksum(inbox + off, n));
+
+    // AND THE MEASUREMENT CAN SEE A LANE THAT IS WRITTEN. Half of it, touched
+    // a page at a time, must show up in the resident set — otherwise "it did
+    // not grow" above is what a ruler that reads nothing would say as well.
+    if (before != 0) {
+        const uint64_t half = want / 2;
+        const uint64_t untouched = residentBytes();
+        for (uint64_t at = 0; at < half; at += 4096) inbox[at] = 1;
+        const uint64_t touched = grownSince(untouched);
+        INFO("writing " << (half >> 20) << " MB of the lane grew the resident set by "
+             << (touched >> 20) << " MB");
+        CHECK(touched > half / 2);
+    }
 
     if (segment) {
         // A reader takes the lane's size from the header, not from a constant

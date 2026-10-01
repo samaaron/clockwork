@@ -48,6 +48,23 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ─── The web target ──────────────────────────────────────────────────────────
+# `emcmake cmake -B build/web` builds this same tree for the AudioWorklet:
+# the same C++ core, the same Rust subsystems, the same DSP boundary, from the
+# same lists. What changes is which subsystems are present — a worklet has no
+# device, no MIDI port, no socket, no plugin host and no process of its own —
+# and those are decided here, before their options are declared, so a web
+# configure cannot ask for what a worklet cannot have. scripts/build-web.sh
+# wraps this and adds the JavaScript bundle; a product's own build (SuperSonic)
+# points CLOCKWORK_DSP at its guest and names the module.
+if(EMSCRIPTEN)
+    foreach(_off CLOCKWORK_DEVICE CLOCKWORK_MIDI CLOCKWORK_GAMEPAD CLOCKWORK_OSC
+                 CLOCKWORK_PLUGINS CLOCKWORK_LINK CLOCKWORK_LINK_AUDIO CLOCKWORK_NIF
+                 CLOCKWORK_STANDALONE BUILD_TESTS CLOCKWORK_ASIO)
+        set(${_off} OFF CACHE BOOL "off for the web target" FORCE)
+    endforeach()
+endif()
+
 # ─── Options ─────────────────────────────────────────────────────────────────
 # What this binary calls itself: the banner, every log line, the name given to
 # hosted plugins, the shared-memory segment, the headless device. An EMBEDDER
@@ -431,6 +448,70 @@ if(CLOCKWORK_MIDI_SINK_CLASSES)
     list(APPEND CLOCKWORK_SINK_CLASS_DEFS "CLOCKWORK_MIDI_SINK_CLASSES=\"${CLOCKWORK_MIDI_SINK_CLASSES}\"")
 endif()
 
+# ── The timed-event store's size ─────────────────────────────────────────────
+# Pending events and the payload pool they carry. The native defaults are the
+# process's; a worklet's live in a static arena inside the wasm module's own
+# gap before the guest region, so a web build sizes them for that. A product
+# sets its own (SuperSonic: 2048 slots, 512 KB, and late events play).
+if(EMSCRIPTEN)
+    set(CLOCKWORK_SCHEDULER_SLOT_COUNT 8192 CACHE STRING "Timed events the scheduler can hold")
+    set(CLOCKWORK_SCHEDULER_DATA_POOL_SIZE 4194304 CACHE STRING "Bytes of queued OSC payload the scheduler can hold")
+    set(CLOCKWORK_SCHEDULER_SHED_LATE_MS 1000 CACHE STRING "Drop an event this many ms late rather than play it; 0 never drops")
+    set(CLOCKWORK_IN_BUFFER_SIZE 1048576 CACHE STRING "The OSC IN ring, bytes")
+else()
+    set(CLOCKWORK_SCHEDULER_SLOT_COUNT 512 CACHE STRING "Timed events the scheduler can hold")
+    set(CLOCKWORK_SCHEDULER_DATA_POOL_SIZE 524288 CACHE STRING "Bytes of queued OSC payload the scheduler can hold")
+endif()
+
+# ── What the web module is compiled with, beyond the shared definitions ──────
+# Build-time and runtime memory come from ONE file: js/memory_layout.js is
+# what the worklet allocates against, and reading it here is what stops the
+# module and its heap disagreeing about how big the heap is.
+set(CLOCKWORK_WEB_COMPILE_DEFS "")
+if(EMSCRIPTEN)
+    find_program(NODE_EXECUTABLE NAMES node nodejs)
+    if(NOT NODE_EXECUTABLE AND DEFINED ENV{EMSDK})
+        file(GLOB _emsdk_node "$ENV{EMSDK}/node/*/bin/node")
+        if(_emsdk_node)
+            list(GET _emsdk_node 0 NODE_EXECUTABLE)
+        endif()
+    endif()
+    if(NOT NODE_EXECUTABLE)
+        message(FATAL_ERROR "node is needed to read js/memory_layout.js for the web build")
+    endif()
+    foreach(_which initial max arena)
+        execute_process(COMMAND ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/get_memory_config.js" ${_which}
+                        OUTPUT_VARIABLE _mem_${_which} OUTPUT_STRIP_TRAILING_WHITESPACE
+                        RESULT_VARIABLE _mem_rc)
+        if(NOT _mem_rc EQUAL 0)
+            message(FATAL_ERROR "scripts/get_memory_config.js ${_which} failed")
+        endif()
+    endforeach()
+    set(CLOCKWORK_WEB_INITIAL_MEMORY ${_mem_initial})
+    set(CLOCKWORK_WEB_MAX_MEMORY     ${_mem_max})
+    set(CLOCKWORK_WEB_MEM_ARENA_SIZE ${_mem_arena})
+    math(EXPR _mb_initial "${_mem_initial} / 1048576")
+    math(EXPR _mb_max     "${_mem_max} / 1048576")
+    math(EXPR _mb_arena   "${_mem_arena} / 1048576")
+    message(STATUS "web memory: ${_mb_initial}MB initial, ${_mb_max}MB ceiling, ${_mb_arena}MB arena")
+    set(CLOCKWORK_WEB_COMPILE_DEFS
+        CLOCKWORK_WORKLET_CLOCK=1
+        CLOCKWORK_AUDIO_NO_STDIO=1
+        SCHEDULER_SHED_LATE_MS=${CLOCKWORK_SCHEDULER_SHED_LATE_MS}
+        CLOCKWORK_IN_BUFFER_SIZE=${CLOCKWORK_IN_BUFFER_SIZE}
+        CLOCKWORK_MEM_ARENA_SIZE=${CLOCKWORK_WEB_MEM_ARENA_SIZE}u)
+    # Every translation unit of the module — clockwork's, the DSP's, the C
+    # under both — shares one heap with JavaScript and one set of codegen
+    # flags. Directory-wide, so the DSP added below gets them too.
+    add_compile_options(
+        -pthread -msimd128 -fwasm-exceptions
+        -fno-math-errno -fsigned-zeros -fno-associative-math
+        -Wno-nontrivial-memcall -Wno-extern-c-compat
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:Release>:-flto>)
+    add_link_options(-pthread -fwasm-exceptions $<$<CONFIG:Release>:-O3> $<$<CONFIG:Release>:-flto>)
+endif()
+
 set(CLOCKWORK_COMPILE_DEFS
     CLOCKWORK_PRODUCT_NAME="${CLOCKWORK_PRODUCT_NAME}"
     $<$<BOOL:${CLOCKWORK_PRODUCT_VERSION}>:CLOCKWORK_PRODUCT_VERSION="${CLOCKWORK_PRODUCT_VERSION}">
@@ -469,8 +550,11 @@ set(CLOCKWORK_COMPILE_DEFS
     # list itself is clockwork_sys_is_client_verb() in src/clockwork_sys.h.
     CLOCKWORK_CLIENT_VERBS=$<IF:$<BOOL:${CLOCKWORK_CLIENT_VERBS}>,1,0>
 
-    SCHEDULER_DATA_POOL_SIZE=524288
-    SCHEDULER_SLOT_COUNT=512
+    SCHEDULER_DATA_POOL_SIZE=${CLOCKWORK_SCHEDULER_DATA_POOL_SIZE}
+    SCHEDULER_SLOT_COUNT=${CLOCKWORK_SCHEDULER_SLOT_COUNT}
+    # What the web module is compiled with beyond the shared definitions
+    # (empty natively): the worklet clock, no stdio, its rings and arena.
+    ${CLOCKWORK_WEB_COMPILE_DEFS}
 
     # The sink size classes, when a build overrides memory_profile.h's.
     ${CLOCKWORK_SINK_CLASS_DEFS}
@@ -516,6 +600,15 @@ set(CLOCKWORK_CORE_SOURCES
 set(CLOCKWORK_NATIVE_SOURCES
     ${NATIVE_SRC}/OscEgress.cpp
     ${WORKERS_SRC}/RingReader.cpp)
+if(EMSCRIPTEN)
+    # A worklet has no egress thread and no ring reader of its own: the
+    # JavaScript workers are those. The lanes' asset pool and the embed API
+    # are client-side C for a native host.
+    set(CLOCKWORK_NATIVE_SOURCES)
+    list(REMOVE_ITEM CLOCKWORK_CORE_SOURCES
+        ${CLOCKWORK_SRC}/clockwork_asset_pool.cpp
+        ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp)
+endif()
 
 # The device layer: everything that opens, drives, watches, recovers or records
 # an audio device. All of it needs smoothie, and none of it means anything to a
@@ -553,8 +646,10 @@ set(CLOCKWORK_CLOCK_SOURCES
     ${CLOCKWORK_SRC}/clock/EngineClock.cpp
     ${CLOCKWORK_SRC}/clock/ClockworkClockNative.cpp
     ${CLOCKWORK_SRC}/clock/TimeSource.cpp
-    ${CLOCKWORK_SRC}/clock/MidiTimelines.cpp
-    ${NATIVE_SRC}/LinkAudioHost.cpp)
+    ${CLOCKWORK_SRC}/clock/MidiTimelines.cpp)
+if(NOT EMSCRIPTEN)
+    list(APPEND CLOCKWORK_CLOCK_SOURCES ${NATIVE_SRC}/LinkAudioHost.cpp)
+endif()
 if(CLOCKWORK_LINK)
     list(APPEND CLOCKWORK_CLOCK_SOURCES
         ${CLOCKWORK_SRC}/clock/LinkSession.cpp
@@ -762,7 +857,49 @@ endif()
 # staticlib — each carries its own copy of std). The C++ boundaries are
 # src/native/{MidiControl,GamepadControl,OscControl}.cpp against the headers in
 # each crate's cpp/ directory.
-if(CLOCKWORK_RUST)
+if(CLOCKWORK_RUST AND EMSCRIPTEN)
+    # The worklet shares its heap with JavaScript, so std must be rebuilt with
+    # atomics and bulk memory (-Z build-std), which only nightly can do. The
+    # pin is a preference: a box with a floating `nightly` that has rust-src
+    # still builds, with a note. A toolchain that merely RESOLVES is not one
+    # that works — `rustup which` will install a bare dated toolchain — so
+    # only one that is listed AND carries the std sources is taken.
+    set(CLOCKWORK_RUST_NIGHTLY "nightly-2026-07-02" CACHE STRING
+        "The nightly toolchain that rebuilds std for the wasm target")
+    find_program(RUSTUP_EXECUTABLE rustup REQUIRED)
+    execute_process(COMMAND ${RUSTUP_EXECUTABLE} toolchain list
+                    OUTPUT_VARIABLE _toolchains OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    set(CARGO_EXECUTABLE "")
+    foreach(_tc IN ITEMS ${CLOCKWORK_RUST_NIGHTLY} nightly)
+        if(NOT _toolchains MATCHES "(^|\n)${_tc}")
+            continue()
+        endif()
+        execute_process(COMMAND ${RUSTUP_EXECUTABLE} which --toolchain ${_tc} rustc
+                        OUTPUT_VARIABLE _rustc OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc ERROR_QUIET)
+        if(NOT _rc EQUAL 0)
+            continue()
+        endif()
+        get_filename_component(_rust_bin "${_rustc}" DIRECTORY)
+        if(NOT EXISTS "${_rust_bin}/../lib/rustlib/src/rust/library/Cargo.lock")
+            continue()
+        endif()
+        set(CARGO_EXECUTABLE "${_rust_bin}/cargo")
+        set(CLOCKWORK_RUSTC_EXECUTABLE "${_rustc}")
+        if(NOT _tc STREQUAL CLOCKWORK_RUST_NIGHTLY)
+            message(STATUS "rust: ${CLOCKWORK_RUST_NIGHTLY} not installed, using ${_tc}")
+        else()
+            message(STATUS "rust: ${_tc}")
+        endif()
+        break()
+    endforeach()
+    if(NOT CARGO_EXECUTABLE)
+        message(FATAL_ERROR
+            "a nightly Rust toolchain with rust-src is required for the web build:\n"
+            "  rustup toolchain install ${CLOCKWORK_RUST_NIGHTLY} --component rust-src\n"
+            "  rustup target add wasm32-unknown-emscripten --toolchain ${CLOCKWORK_RUST_NIGHTLY}")
+    endif()
+    target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
+elseif(CLOCKWORK_RUST)
     find_program(CARGO_EXECUTABLE cargo REQUIRED)
     # The umbrella carries clockwork-log, so the engine can route the Rust
     # subsystems' lines onto its debug ring (ClockworkEngine::init). An
@@ -845,14 +982,24 @@ set(CLOCKWORK_RUST_PACKAGE "clockwork-native" CACHE STRING
 set(CLOCKWORK_RUST_LIB_NAME "clockwork_native" CACHE STRING
     "Basename of the staticlib that package produces")
 
+if(EMSCRIPTEN)
+    set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/wasm32-unknown-emscripten/${CLOCKWORK_RUST_PROFILE})
+    set(CLOCKWORK_RUST_CARGO_ENV ${CMAKE_COMMAND} -E env
+        "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+        "RUSTC=${CLOCKWORK_RUSTC_EXECUTABLE}")
+    list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --target wasm32-unknown-emscripten -Z build-std=std,panic_abort)
+else()
+    set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE})
+    set(CLOCKWORK_RUST_CARGO_ENV)
+endif()
 set(CLOCKWORK_RUST_LIB
-    ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE}/${CMAKE_STATIC_LIBRARY_PREFIX}${CLOCKWORK_RUST_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
+    ${CLOCKWORK_RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${CLOCKWORK_RUST_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
 
 # cargo tracks incremental freshness itself, so run it every build.
 if(CLOCKWORK_RUST)
     add_custom_target(clockwork_rust ALL
         BYPRODUCTS ${CLOCKWORK_RUST_LIB}
-        COMMAND ${CARGO_EXECUTABLE} build ${CLOCKWORK_RUST_CARGO_FLAGS} -p ${CLOCKWORK_RUST_PACKAGE}
+        COMMAND ${CLOCKWORK_RUST_CARGO_ENV} ${CARGO_EXECUTABLE} build ${CLOCKWORK_RUST_CARGO_FLAGS} -p ${CLOCKWORK_RUST_PACKAGE}
         WORKING_DIRECTORY ${CLOCKWORK_RUST_WORKSPACE}
         COMMENT "Building Rust subsystems (cargo: ${CLOCKWORK_RUST_PACKAGE})"
         VERBATIM)
@@ -969,7 +1116,7 @@ message(STATUS "DSP: ${CLOCKWORK_DSP}")
 # clockwork runs blocks and hands over OSC, the DSP answers through
 # DspHost::emit_osc and DspHost::log. Link them as a group so a single pass is
 # not asked to resolve a cycle.
-if(APPLE OR MSVC)
+if(APPLE OR MSVC OR EMSCRIPTEN)
     set(CLOCKWORK_LIB_GROUP clockwork ${CLOCKWORK_DSP} ${CLOCKWORK_RUST_LIB})
 else()
     # $<TARGET_FILE:clockwork>, not the target NAME. CMake reorders a named
@@ -1014,6 +1161,89 @@ target_link_libraries(clockwork_bundle INTERFACE ${CLOCKWORK_LIB_GROUP})
 add_dependencies(clockwork_bundle ${CLOCKWORK_DSP})
 if(CLOCKWORK_RUST)
     add_dependencies(clockwork_bundle clockwork_rust)
+endif()
+
+# ─── The web module ──────────────────────────────────────────────────────────
+# One STANDALONE_WASM module with imported shared memory — the worklet
+# supplies the memory, so JavaScript and clockwork address one heap — and no
+# JavaScript of its own: js/workers/clockwork_audio_worklet.js loads it.
+if(EMSCRIPTEN)
+    set(CLOCKWORK_WEB_MODULE_NAME "clockwork" CACHE STRING
+        "Basename of the wasm module (a product names its own: SuperSonic's is scsynth-nrt)")
+    set(CLOCKWORK_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist/wasm" CACHE PATH
+        "Where the module is written")
+    set(CLOCKWORK_WEB_STACK_SIZE 1048576 CACHE STRING "The wasm stack, bytes")
+    set(CLOCKWORK_WEB_ASSERTIONS 0 CACHE STRING "emscripten -sASSERTIONS")
+    set(CLOCKWORK_WEB_SAFE_HEAP 0 CACHE STRING "emscripten -sSAFE_HEAP")
+    option(CLOCKWORK_WEB_KEEP_NAMES "Keep function names in the module (--profiling-funcs)" OFF)
+    # The audio file codecs (dr_wav, dr_flac, dr_mp3, stb_vorbis, the FLAC
+    # encoder) are a native concern: on the web, samples arrive already
+    # decoded through the browser's own decoder and nothing records to a
+    # file. Opt in for a client that decodes in the module.
+    option(CLOCKWORK_WEB_AUDIO_FILES "Export the audio file codecs to the web client" OFF)
+    # A product may export more of its own (CLOCKWORK_WEB_EXTRA_EXPORTS).
+    set(CLOCKWORK_WEB_EXTRA_EXPORTS "" CACHE STRING "Extra exported functions, ';'-separated, with their leading underscore")
+
+    # Every worklet entry point. A name missing here is dead-stripped and the
+    # worklet fails at run time, not at build time — so this list has to be
+    # right, and it is clockwork's to keep: the worklet is clockwork's.
+    set(CLOCKWORK_WEB_EXPORTS
+        ___wasm_call_ctors _clockwork_init _get_ring_buffer_base
+        _clockwork_tick _process_audio _get_audio_output_bus _get_audio_input_bus
+        _get_audio_num_output_buses _get_audio_num_input_buses _get_audio_buffer_samples
+        _clockwork_clock_wasm_init _set_time_offset _get_time_offset
+        _clockwork_log _clockwork_log_va _clockwork_log_raw
+        _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
+        _clear_scheduler _clockwork_host_forward _clockwork_host_forwards _malloc _free
+        _clockwork_client_abi_version _clockwork_client_status_text
+        _clockwork_client_open_memory _clockwork_client_open_memory_in
+        _clockwork_client_sizeof _clockwork_client_close _clockwork_client_info
+        _clockwork_client_send _clockwork_client_send_begin
+        _clockwork_client_send_commit _clockwork_client_send_abort
+        _clockwork_client_poll _clockwork_client_region
+        _clockwork_client_metrics _clockwork_client_clock _clockwork_client_beat_at
+        _clockwork_client_tap_sizeof _clockwork_client_tap_open
+        _clockwork_client_tap_open_in _clockwork_client_tap_close
+        _clockwork_client_tap_poll _clockwork_client_tap_missed
+        _clockwork_client_scope_open _clockwork_client_scope_valid
+        _clockwork_client_scope_audible_end _clockwork_client_scope_read)
+    if(CLOCKWORK_WEB_AUDIO_FILES)
+        list(APPEND CLOCKWORK_WEB_EXPORTS
+            _clockwork_audio_probe_memory _clockwork_audio_decode_memory
+            _clockwork_audio_free _clockwork_audio_duration
+            _clockwork_audio_can_write _clockwork_audio_writer_open_memory
+            _clockwork_audio_writer_write _clockwork_audio_writer_frames
+            _clockwork_audio_writer_close)
+    endif()
+    if(CLOCKWORK_WEB_EXTRA_EXPORTS)
+        list(APPEND CLOCKWORK_WEB_EXPORTS ${CLOCKWORK_WEB_EXTRA_EXPORTS})
+    endif()
+    list(JOIN CLOCKWORK_WEB_EXPORTS "\",\"" _exports_joined)
+    set(_exports_file "${CMAKE_CURRENT_BINARY_DIR}/clockwork_web_exports.json")
+    file(WRITE "${_exports_file}" "[\"${_exports_joined}\"]\n")
+
+    add_executable(clockwork_web ${CLOCKWORK_SRC}/web_module.cpp)
+    set_target_properties(clockwork_web PROPERTIES
+        OUTPUT_NAME "${CLOCKWORK_WEB_MODULE_NAME}"
+        SUFFIX ".wasm"
+        RUNTIME_OUTPUT_DIRECTORY "${CLOCKWORK_WEB_DIST_DIR}")
+    target_link_libraries(clockwork_web PRIVATE clockwork_bundle)
+    target_link_options(clockwork_web PRIVATE
+        -sSTANDALONE_WASM
+        -sNO_FILESYSTEM=1
+        -sENVIRONMENT=worker
+        -sALLOW_MEMORY_GROWTH=1
+        -sINITIAL_MEMORY=${CLOCKWORK_WEB_INITIAL_MEMORY}
+        -sMAXIMUM_MEMORY=${CLOCKWORK_WEB_MAX_MEMORY}
+        -sSTACK_SIZE=${CLOCKWORK_WEB_STACK_SIZE}
+        "-sEXPORTED_FUNCTIONS=@${_exports_file}"
+        --no-entry
+        -Wl,--import-memory,--shared-memory,--allow-multiple-definition
+        -sASSERTIONS=${CLOCKWORK_WEB_ASSERTIONS}
+        -sSAFE_HEAP=${CLOCKWORK_WEB_SAFE_HEAP}
+        $<$<BOOL:${CLOCKWORK_WEB_KEEP_NAMES}>:--profiling-funcs>
+        -sERROR_ON_UNDEFINED_SYMBOLS=1)
+    message(STATUS "web module: ${CLOCKWORK_WEB_DIST_DIR}/${CLOCKWORK_WEB_MODULE_NAME}.wasm")
 endif()
 
 # ── Windows version resource ─────────────────────────────────────────────────
@@ -1084,6 +1314,9 @@ endif()
 # do; an in-process embedder need not. Its Rust half is
 # the clockwork-comms crate, carried in the native umbrella under the `comms`
 # feature so the symbols are there for whoever links this.
+# A worklet has no sockets and no host process to stand them in, so the web
+# target builds none of this.
+if(NOT EMSCRIPTEN)
 add_library(clockwork_comms STATIC
     ${CLOCKWORK_SRC}/comms/UdpOscTransport.cpp
     ${CLOCKWORK_SRC}/comms/StreamOscTransport.cpp
@@ -1097,6 +1330,7 @@ target_link_libraries(clockwork_comms PUBLIC clockwork)
 set_target_properties(clockwork_comms PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # The old name, for consumers pinned to it; retire once they say clockwork_comms.
 add_library(clockwork_transports ALIAS clockwork_comms)
+endif()
 
 # ─── The plugin-host dispatcher ──────────────────────────────────────────────
 # The adapters themselves were added further up, where clockwork is built.

@@ -205,8 +205,9 @@ void clockwork_heap_init(size_t bytes) {
     // for Fast allocations made later) so we never request more contiguous internal
     // SRAM than exists. A larger request would fall back to Bulk and put the whole
     // pool — including the per-sample audio buses and wire scratch — in slow RAM.
-    // Overflow still grows into Bulk on demand via heap_new_area. On desktop/WASM/
-    // NIF largest_free() is SIZE_MAX, so bytes is unchanged.
+    // Overflow still grows into Bulk on demand via heap_new_area. On desktop and
+    // the NIF largest_free() is SIZE_MAX, so bytes is unchanged; on the web an
+    // arena is set and this is what sizes the heap to it (memory_profile.h).
     {
         const size_t avail = clockwork::mem::largest_free(clockwork::mem::Tier::Fast);
         const size_t reserve = (size_t)CLOCKWORK_FAST_RESERVE + clockwork_heap_pool_area_overhead();

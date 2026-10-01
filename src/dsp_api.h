@@ -12,6 +12,7 @@
 #ifndef CLOCKWORK_DSP_API_H
 #define CLOCKWORK_DSP_API_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "clockwork_event_sink.h"   /* ClockworkSink: where a DSP's own output goes */
@@ -40,9 +41,10 @@ typedef struct DspConfig {
     uint32_t max_input_channels;
     uint32_t max_output_channels;
 
-    /* The session clock. Read it with readClockworkClock() (shared_memory.h),
-       NEVER field by field — that is how the coherence rules get broken. May
-       be NULL; readClockworkClock() then answers with a sane default. */
+    /* The session clock. Read it with readClockworkClock()
+       (clockwork_clock_state.h — the one other header a DSP includes), NEVER
+       field by field: that is how the coherence rules get broken. May be
+       NULL; readClockworkClock() then answers with a sane default. */
     const struct ClockworkClockState* clock;
 
     /* WHICH CHANNEL IS WHICH. Without this dsp_process is handed an anonymous
@@ -202,6 +204,18 @@ typedef enum DspFpEnv {
     DSP_FP_ENV_FLUSH_TO_ZERO      = 2   /* FTZ/DAZ armed on the audio thread by the host */
 } DspFpEnv;
 
+/* A DSP's hold on a scope slot (DspHost::scope_open). Four words, the shape
+   the scope substrate spells out (rust/clockwork-scope), and a DSP treats it
+   as opaque apart from two reads: `slot` is non-NULL while the handle owns a
+   slot, and `channels` is how many channels that slot carries, as clamped by
+   the host. The other two are historical and 0. */
+typedef struct DspScopeHandle {
+    void*    slot;
+    float*   data;
+    uint32_t channels;
+    uint32_t max_frames;
+} DspScopeHandle;
+
 /* What the DSP may call back into. Every entry may be NULL; a DSP must check.
    `ctx` is clockwork's own and is passed back untouched. */
 typedef struct DspHost {
@@ -227,7 +241,14 @@ typedef struct DspHost {
     int (*emit_osc)(void* ctx, uint32_t origin, const uint8_t* bytes, uint32_t len);
 
     /* Diagnostics. `level` follows syslog severities (3 = error, 6 = info,
-       7 = debug). NOT RT-SAFE; do not call from dsp_process. */
+     * 7 = debug). Hand it FINISHED TEXT: it formats nothing.
+     *
+     * Callable from any thread, INCLUDING the audio thread, which is where a
+     * DSP's own errors mostly happen: on the audio thread the text is copied
+     * into the lock-free debug ring and dropped, counted, when that is full;
+     * on any other thread it may take a lock. So it is not free — a line per
+     * block is fine, a line per sample is not — but it never blocks the
+     * tick. */
     void (*log)(void* ctx, int level, const char* text);
 
     /* Open a sink onto an external destination and get a handle. `target` names
@@ -276,8 +297,9 @@ typedef struct DspHost {
 
     /* Give back bytes clockwork allocated. Clockwork owns the heap the guest's
        larger allocations come from and has to be told when one is finished
-       with. Callable off the audio thread; freeing may defer internally.
-       Passing NULL, or a pointer clockwork did not allocate, is ignored. */
+       with. Callable from any thread, the audio thread included: freeing
+       is lock-free and may defer internally. Passing NULL, or a pointer
+       clockwork did not allocate, is ignored. */
     void (*free_bytes)(void* ctx, void* ptr);
 
     /* The guest is done with an asset it was handed through dsp_asset: the
@@ -288,6 +310,46 @@ typedef struct DspHost {
      * live asset; a release of something not committed is ignored. NULL on a
      * host with no asset facility. */
     int (*asset_release)(void* ctx, uint32_t id);
+
+    /* Take bytes from the heap clockwork owns; free_bytes gives them back.
+     *
+     * This is where a DSP's larger, longer-lived allocations come from — a
+     * definition, a buffer a client asked for empty, an area for the DSP's own
+     * real-time pool when the arena cannot hold it — so that no DSP has to
+     * know which heap a host built, or reach past this header for one.
+     *
+     * Lock-free and callable from ANY THREAD, the audio thread included: the
+     * heap is a pre-claimed pool, and a request it cannot meet answers NULL
+     * rather than blocking or growing on that thread. A host with no heap
+     * leaves this NULL and a DSP falls back to whatever it has. NULL for 0
+     * bytes. */
+    void* (*alloc_bytes)(void* ctx, size_t bytes);
+
+    /* ── Scopes ────────────────────────────────────────────────────────────
+     *
+     * A scope is a stream of audio a client reads out of shared memory to
+     * draw. Clockwork owns the slots and the ring format; a DSP that wants to
+     * publish one claims a slot here and appends blocks to it, and never
+     * learns the layout.
+     *
+     * scope_open claims slot `index` for `channels` channels — clamped to
+     * what a slot carries, and the clamped count is written back into the
+     * handle — and returns non-zero if it did. The handle is the DSP's, and
+     * it is the handle's ADDRESS that owns the slot: a slot may be re-claimed
+     * through another handle while a superseded one still lives (a graph
+     * rebuilt under a running client), and a late close from the old handle
+     * then does nothing. Callable from the audio thread; never allocates.
+     *
+     * scope_write appends `frames` frames from `n_channels` channel buffers.
+     * Fewer channels than the slot carries fill the rest with the last one
+     * given. Clockwork anchors the block on its own sample clock, so the DSP
+     * has no position to pass. Audio thread; never allocates or blocks.
+     *
+     * scope_close gives the slot back, if `hnd` still owns it. */
+    int  (*scope_open)(void* ctx, uint32_t index, uint32_t channels, DspScopeHandle* hnd);
+    void (*scope_write)(void* ctx, DspScopeHandle* hnd, const float* const* channels,
+                        uint32_t n_channels, uint32_t frames);
+    void (*scope_close)(void* ctx, DspScopeHandle* hnd);
 } DspHost;
 
 /* ── What the DSP says about itself ─────────────────────────────────────── */
