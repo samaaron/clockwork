@@ -107,8 +107,17 @@ void* dso_open(const char* path) {
     // makes the plugin's own folder the first place its dependent DLLs are
     // looked for — which is where a vendor puts them, and which the default
     // search (the engine's folder, then the system) never reaches.
-    return (void*)::LoadLibraryExW(clockwork_path::to_wide(path).c_str(), nullptr,
-                                   LOAD_WITH_ALTERED_SEARCH_PATH);
+    // A file that is not a DLL — a scan opens plenty — is an error code, never
+    // the loader's "not a valid Win32 application" box: with the dialog on, the
+    // scan stops dead until someone clicks it, and nobody is there to.
+    DWORD mode = 0;
+    const BOOL had = ::SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &mode);
+    void* h = (void*)::LoadLibraryExW(clockwork_path::to_wide(path).c_str(), nullptr,
+                                      LOAD_WITH_ALTERED_SEARCH_PATH);
+    const DWORD err = ::GetLastError();
+    if (had) ::SetThreadErrorMode(mode, nullptr);
+    ::SetLastError(err);
+    return h;
 #else
     return ::dlopen(path, RTLD_LOCAL | RTLD_NOW);
 #endif

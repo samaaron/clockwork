@@ -627,9 +627,16 @@ bool loadModule(const char* path, Module& m, std::string& err) {
     }
 
     const std::wstring wide = to_wide(real);
+    // A file that is not a DLL — a scan opens plenty — is an error code, never
+    // the loader's "not a valid Win32 application" box: with the dialog on, the
+    // scan stops dead until someone clicks it, and nobody is there to.
+    DWORD mode = 0;
+    const BOOL had = SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &mode);
     HMODULE dll = LoadLibraryExW(wide.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    const DWORD loadErr = GetLastError();
+    if (had) SetThreadErrorMode(mode, nullptr);
     if (!dll) {
-        err = "LoadLibrary failed: " + lastErrorText(GetLastError());
+        err = "LoadLibrary failed: " + lastErrorText(loadErr);
         return false;
     }
     m.handle = dll;
