@@ -279,6 +279,13 @@ endif()
 
 include(CTest)
 include(Catch)
+# Discovery reads the test list as UTF-8 (test/cmake/CatchAddTestsUtf8.cmake.in
+# says why): Catch2's own script, included under the policy that makes CMake
+# decode a process's output that way on Windows.
+set(CATCH_ADD_TESTS_SCRIPT "${_CATCH_DISCOVER_TESTS_SCRIPT}")
+configure_file(cmake/CatchAddTestsUtf8.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/CatchAddTestsUtf8.cmake" @ONLY)
+set(_CATCH_DISCOVER_TESTS_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/CatchAddTestsUtf8.cmake"
+    CACHE INTERNAL "Catch2's CatchAddTests.cmake, run with its output read as UTF-8" FORCE)
 # One CTest entry per Catch2 case; CI runs the suite through ctest as well as
 # through the binaries (.github/workflows/ci.yml says why).
 #
