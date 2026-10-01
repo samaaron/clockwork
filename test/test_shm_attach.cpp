@@ -70,6 +70,7 @@ TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
 
     // The server keeps serving: a second reader gets its own handle.
     const auto h2 = shm_attach::receive(ep, &err);
+    INFO(err);   // this receive's reason, not the first's: INFO keeps the string as it was when it ran
     REQUIRE(shm_handle_valid(h2));
     CHECK(h2 != h);
     shm_segment_client second(h2);

@@ -294,10 +294,18 @@ private:
             const BOOL connected = ConnectNamedPipe(instance, nullptr)
                                    || GetLastError() == ERROR_PIPE_CONNECTED;
             if (mStop.load()) { CloseHandle(instance); break; }
+            // The next instance BEFORE this one is served, so the name always
+            // has an instance behind it. Made only after, there was a moment
+            // between closing this one and making the next with none, and a
+            // second reader connecting in it was told the pipe did not exist
+            // — which a client takes as final, as it should when nothing is
+            // serving. Now it finds the next instance, or for the moment
+            // before this one is closed a busy one, which it waits on.
+            HANDLE next = connected ? make_instance(false) : INVALID_HANDLE_VALUE;
             if (connected) serve_one(instance);
             DisconnectNamedPipe(instance);
             CloseHandle(instance);
-            instance = INVALID_HANDLE_VALUE;
+            instance = next;
         }
     }
 
