@@ -71,6 +71,20 @@ pub struct DspConfig {
     pub fp_env: i32,
 }
 
+/// A DSP's hold on a scope slot (`DspHost::scope_open`): four words, the
+/// shape the scope substrate spells out (rust/clockwork-scope). Opaque to a
+/// DSP apart from two reads: `slot` is non-NULL while the handle owns a slot,
+/// and `channels` is how many that slot carries, as the host clamped it. The
+/// other two are historical and 0.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DspScopeHandle {
+    pub slot: *mut c_void,
+    pub data: *mut f32,
+    pub channels: u32,
+    pub max_frames: u32,
+}
+
 /// What a guest may call back into. Every pointer may be NULL and must be
 /// checked: a host that offers no sinks leaves `open_sink` NULL. `Copy`,
 /// because a guest keeps its own copy: the host's pointer is only promised
@@ -105,6 +119,24 @@ pub struct DspHost {
     pub free_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *mut c_void)>,
     /// The guest is done with an asset `dsp_asset` handed it.
     pub asset_release: Option<unsafe extern "C" fn(ctx: *mut c_void, id: u32) -> c_int>,
+    /// Memory from the heap clockwork owns, given back through `free_bytes`.
+    /// Audio thread callable; lock-free, and NULL rather than blocking.
+    pub alloc_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, bytes: usize) -> *mut c_void>,
+    /// Claim scope slot `index` to publish `channels` channels into. Non-zero on success.
+    pub scope_open:
+        Option<unsafe extern "C" fn(ctx: *mut c_void, index: u32, channels: u32, hnd: *mut DspScopeHandle) -> c_int>,
+    /// Append a block to a claimed scope. Audio thread callable; never allocates.
+    pub scope_write: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            hnd: *mut DspScopeHandle,
+            channels: *const *const f32,
+            n_channels: u32,
+            frames: u32,
+        ),
+    >,
+    /// Give the slot back.
+    pub scope_close: Option<unsafe extern "C" fn(ctx: *mut c_void, hnd: *mut DspScopeHandle)>,
 }
 
 /// What `dsp_describe` answers. Static: describable before any instance.

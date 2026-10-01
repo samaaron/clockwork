@@ -51,6 +51,7 @@ mkdir -p "$OUT"
 # links the exports the worklet calls. This script wraps that and bundles the
 # JavaScript around it.
 BUILD_DIR="$ROOT/build/web"
+mkdir -p "$ROOT/build"   # the configure log goes beside the build dir, on a fresh checkout too
 CMAKE_BUILD_TYPE=Release
 [ "$OPT" = "-O0 -g" ] && CMAKE_BUILD_TYPE=Debug
 echo "clockwork → wasm   dsp=$DSP scheduler=$SCHEDULER ($CMAKE_BUILD_TYPE)"
