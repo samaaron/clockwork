@@ -17,7 +17,7 @@ Two-file patch:
 Wire protocol unchanged. No existing API behaviour changes. Public
 surface gains one read-only method; existing callers unaffected.
 
-Pinned to Link-4.0.
+Pinned to Link-4.1.
 
 --- a/include/ableton/link/Controller.hpp
 +++ b/include/ableton/link/Controller.hpp

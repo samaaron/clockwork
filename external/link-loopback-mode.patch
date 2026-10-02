@@ -13,7 +13,7 @@ LinkVisibility.
 Targets the platform interface scanners so every platform honours the flag:
   include/ableton/platforms/posix/ScanIpIfAddrs.hpp   (macOS, Linux)
   include/ableton/platforms/windows/ScanIpIfAddrs.hpp (Windows)
-Pinned to Link-4.0.
+Pinned to Link-4.1.
 
 --- a/include/ableton/platforms/posix/ScanIpIfAddrs.hpp
 +++ b/include/ableton/platforms/posix/ScanIpIfAddrs.hpp

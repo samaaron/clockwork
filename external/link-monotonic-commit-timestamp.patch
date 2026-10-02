@@ -25,7 +25,7 @@ Compatibility: timestamps remain in mClock's micros domain (at most
 one microsecond, then re-converges on the next tick). Wire protocol
 unchanged. Single-write-per-microsecond case is unaffected.
 
-Pinned to Link-4.0.
+Pinned to Link-4.1.
 
 --- a/include/ableton/Link.ipp
 +++ b/include/ableton/Link.ipp

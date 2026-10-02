@@ -376,14 +376,14 @@ endif()
 
 # ─── Ableton Link (opt-in, GPL) ──────────────────────────────────────────────
 if(CLOCKWORK_LINK)
-    message(STATUS "Ableton Link: fetching Link-4.0 (GPL-2.0-or-later)")
+    message(STATUS "Ableton Link: fetching Link-4.1 (GPL-2.0-or-later)")
     FetchContent_Declare(AbletonLink
         GIT_REPOSITORY https://github.com/Ableton/link.git
-        GIT_TAG        Link-4.0
+        GIT_TAG        Link-4.1
         GIT_SHALLOW    TRUE
         # Link patches, applied through cmake -P so no Unix shell is needed on
         # Windows. Two of them are not optional: LinkSession.cpp calls
-        # loopbackOnly() and sessionPeers(), which Link-4.0 does not have —
+        # loopbackOnly() and sessionPeers(), which Link-4.1 does not have —
         # this option could not build without them, which is why it had never
         # been built. See each patch header for what it does and why.
         PATCH_COMMAND  ${CMAKE_COMMAND}
