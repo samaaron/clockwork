@@ -399,6 +399,39 @@ extern "C" {
     static void clockwork_boot_fail(const char* fmt, ...);
     struct Dsp* g_dsp = nullptr;
 
+    // WHY THIS BUILD HAS NO GUEST, for the host to report (clockwork_boot_error).
+    // Written on the control thread while the build runs, before the audio
+    // thread is let at it, and read by the host after; g_boot_failed is the
+    // flag the audio thread reads to know the instance is not coming. The first
+    // reason wins: what stopped the build, not what went wrong because of it.
+    // A fixed buffer, so recording a failure allocates nothing.
+    static char g_boot_error[512] = {0};
+    static std::atomic<bool> g_boot_failed{false};
+
+    static void clear_boot_error() {
+        g_boot_error[0] = '\0';
+        g_boot_failed.store(false, std::memory_order_release);
+    }
+
+    static void record_boot_error(const char* fmt, ...) {
+        if (g_boot_failed.load(std::memory_order_relaxed)) return;
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(g_boot_error, sizeof(g_boot_error), fmt, args);
+        va_end(args);
+        g_boot_failed.store(true, std::memory_order_release);
+    }
+
+    const char* clockwork_last_boot_error() {
+        return g_boot_failed.load(std::memory_order_acquire) ? g_boot_error : nullptr;
+    }
+
+    // The heap this build takes: what the host asked for, else the profile's.
+    static size_t heap_bytes_wanted() {
+        return g_clockwork_config.heap_bytes ? g_clockwork_config.heap_bytes
+                                             : (size_t)CLOCKWORK_HEAP_FAST_SIZE;
+    }
+
     // The session's audio geometry. CLOCKWORK CHOOSES THESE and writes them into
     // DspConfig, so it never asks the DSP what block size or channel count it
     // settled on.
@@ -1159,6 +1192,9 @@ extern "C" {
 
     void init_memory() {
         const double sample_rate = g_clockwork_config.sample_rate;
+        // A build starts with no reason not to have a guest; the first thing
+        // that stops it below records one (clockwork_boot_fail, or dsp_new's).
+        clear_boot_error();
         // The arena base is fixed for the engine's whole threaded life: native
         // binds g_external_segment before any engine thread starts (and nulls
         // it only after they are all joined); the WASM arena is the static
@@ -1706,7 +1742,7 @@ extern "C" {
          * the base a carve would take. Both pools then write the same bytes, and no
          * amount of resizing the region helps because the collision is at the base.
          */
-        clockwork_heap_init(CLOCKWORK_HEAP_FAST_SIZE);
+        clockwork_heap_init(heap_bytes_wanted());
 
         /*
          * AND PROVES IT. On web the heap's backing is claimed with malloc, so where
@@ -1764,7 +1800,22 @@ extern "C" {
                         (unsigned)(guest_base + g_guest_arena_bytes));
         }
 #else
-        clockwork_heap_init(CLOCKWORK_HEAP_FAST_SIZE);
+        clockwork_heap_init(heap_bytes_wanted());
+#endif
+#if CLOCKWORK_SYNTH
+        // A heap that could not be had is a boot that stops here and says so.
+        // Going on would boot a guest whose every allocation answers NULL, and
+        // what it reported would be its own failure, not the cause. (A no-DSP
+        // core has no heap at all — its init is a stub — so there is nothing
+        // to check.)
+        if (clockwork_heap_total_allocated() == 0) {
+            clockwork_boot_fail("FATAL: clockwork could not take a heap of %zu bytes for the "
+                                "guest - ask for less (clockwork_set_heap_bytes), or lower what "
+                                "the guest's configuration takes from it",
+                                heap_bytes_wanted());
+            control->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
+            return;
+        }
 #endif
 
         #if CLOCKWORK_SCHEDULER
@@ -1802,15 +1853,18 @@ extern "C" {
             g_dsp = dsp_new(&config, &g_dsp_host, &err);
             if (!g_dsp) {
                 clockwork_log("ERROR: engine bring-up failed: %s", err ? err : "unknown");
+                record_boot_error("%s did not start: %s", dsp_name, err ? err : "it gave no reason");
                 control->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
             }
         } catch (const std::exception& e) {
             clockwork_log("ERROR: engine bring-up threw exception: %s", e.what());
+            record_boot_error("%s did not start: %s", dsp_name, e.what());
             control->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
             return;
         } catch (...) {
             clockwork_log("ERROR: engine bring-up threw unknown exception");
+            record_boot_error("%s did not start: it threw", dsp_name);
             control->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
             return;
         }
@@ -1988,6 +2042,41 @@ extern "C" {
     }
 #endif
 
+#if CLOCKWORK_SYNTH
+    // A BUILD WITH NO GUEST STILL ANSWERS FOR CLOCKWORK. When the build failed
+    // (clockwork_boot_error) no instance is coming, but a client still has to
+    // be able to register, ask what state the engine is in and hear why — and
+    // every one of those is a /clockwork/ verb, which clockwork answers. So the
+    // ingress ring is walked as on any block and those are dispatched. What was
+    // for the guest is consumed and dropped: there is no instance to hand it
+    // to, and holding it would replay it into whatever build comes next.
+    // Nothing is parked — /clockwork/schedule carries the guest's work too —
+    // and nothing is rendered.
+    static void drain_without_guest() {
+        constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
+        const int64_t blockTime = g_block_osc_time.load(std::memory_order_relaxed);
+        ClockworkDrainStop stop = ClockworkDrainStop::Empty;
+        clockwork_drain_ring(
+            shared_memory + IN_BUFFER_START, IN_BUFFER_SIZE,
+            &control->in_head, &control->in_tail, g_in_drain,
+            ClockworkDrainMetrics{ &metrics->messages_processed, nullptr,
+                            &metrics->messages_dropped,
+                            &metrics->messages_sequence_gaps },
+            MAX_MESSAGES_PER_FRAME,
+            [blockTime](uint32_t sourceId, const uint8_t* payload,
+                        uint32_t payload_size, uint32_t) -> ClockworkDrainVerdict {
+                const bool schedule =
+                    payload_size >= CLOCKWORK_SYS_PADDED("schedule") &&
+                    std::memcmp(payload, CLOCKWORK_SYS("schedule"), CLOCKWORK_SYS_LEN("schedule")) == 0 &&
+                    payload[CLOCKWORK_SYS_LEN("schedule")] == '\0';
+                if (!schedule && clockwork_sys_claims(payload, payload_size))
+                    dispatch(payload, payload_size, sourceId, 1, blockTime);
+                return ClockworkDrainVerdict::Consume;
+            },
+            &stop);
+    }
+#endif
+
     // Main audio processing function - called once per block (the lanes tick,
     // clockwork_tick, wraps this).
     // current_time: AudioContext.currentTime (WASM) or wall-clock NTP (native)
@@ -1997,8 +2086,16 @@ extern "C" {
         AudioThreadScope _audio_thread_scope;   // this thread owns RT-out for clockwork_log routing
         clockwork_heap_register_engine_thread();  // pool ownership follows the audio thread
 #if CLOCKWORK_SYNTH
-        if (!memory_initialized || !g_dsp) {
-            return true; // Not ready or instance destroyed during cold swap — output silence
+        if (!memory_initialized) {
+            return true; // Not ready — output silence
+        }
+        if (!g_dsp) {
+            // The instance was destroyed for a cold swap and its successor is
+            // being built: silence, and ingress waits for it. Unless the build
+            // failed — then nothing is coming, and clockwork still answers.
+            if (g_boot_failed.load(std::memory_order_acquire) && control && metrics)
+                drain_without_guest();
+            return true;
         }
 #else
         // No-DSP core: there is no instance; the scheduler/router still ticks.
@@ -2385,6 +2482,9 @@ extern "C" {
         va_start(args, fmt);
         vsnprintf(buffer, sizeof(buffer), fmt, args);
         va_end(args);
+        // And kept, for the host to hand its clients: a reason on stderr is a
+        // reason only someone reading the terminal ever sees.
+        record_boot_error("%s", buffer);
 #ifdef __EMSCRIPTEN__
         emscripten_console_error(buffer);
 #else

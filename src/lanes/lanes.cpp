@@ -334,6 +334,14 @@ void clockwork_declare_fp_env(uint32_t env) {
     g_clockwork_config.fp_env = env;
 }
 
+void clockwork_set_heap_bytes(size_t bytes) {
+    g_clockwork_config.heap_bytes = bytes;
+}
+
+const char* clockwork_boot_error(void) {
+    return clockwork_last_boot_error();
+}
+
 // ── Layout ──────────────────────────────────────────────────────────────────
 
 const ClockworkArenaHeader* clockwork_arena_header(void) {

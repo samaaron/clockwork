@@ -56,6 +56,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "clockwork_arena.h"
 
@@ -319,6 +320,27 @@ void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_cha
  * arm a flush, so it is always DENORMALS_HONOURED there. Takes effect at the
  * next dsp_new, like clockwork_set_channel_ceilings. */
 void clockwork_declare_fp_env(uint32_t env);
+
+/* Size the heap the guest's DspHost::alloc_bytes draws from, for the NEXT
+ * build.
+ *
+ * The heap is taken once per build and never grown on the audio thread, so it
+ * has to hold what the guest will take from it — and that is set by the
+ * guest's own configuration (a server guest's real-time pool is an option),
+ * which clockwork never reads. The host that wrote the configuration knows the
+ * figure; this is where it says so. 0 restores the memory profile's
+ * CLOCKWORK_HEAP_FAST_SIZE. A heap the system cannot provide fails the build
+ * with that reason (clockwork_boot_error), rather than booting a guest that
+ * cannot allocate. On a tiered or arena-bound host (web, embedded) the figure
+ * is a ceiling: the heap is still clamped to the memory that tier has. */
+void clockwork_set_heap_bytes(size_t bytes);
+
+/* Why the last build has no guest, or NULL when it has one: the first thing
+ * that stopped the build, or the guest's own reason when dsp_new refused. Text
+ * for a person, stable until the next build. A host reports it to its clients
+ * (the native engine enters its error state with it as the reason) rather than
+ * running on as though the guest were there. */
+const char* clockwork_boot_error(void);
 
 /* ── The host as the end of clockwork's chain ──────────────────────────────
  * A /clockwork/ verb the audio thread does not answer itself is, on a host

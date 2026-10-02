@@ -8,6 +8,9 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include "clockwork_prefix.h"
+#include "lanes/lanes.h"     // clockwork_set_heap_bytes
+#include "memory_profile.h"  // CLOCKWORK_HEAP_SIZE
 
 TEST_CASE("ColdSwapRecovery: rebuild failure recovers at safe defaults",
           "[ColdSwapRecovery]") {
@@ -116,4 +119,31 @@ TEST_CASE("ColdSwapRecovery: state transitions through recovery",
     // At swap:recovered, state should be Running (set before event fires)
     CHECK(trace[1].first == "swap:recovered");
     CHECK(trace[1].second == EngineState::Running);
+}
+
+// A rebuild whose guest does not come up is the same failure as a boot whose
+// guest does not: the engine is in error with the guest's reason, and its own
+// verbs still answer. Here the guest's pool fitted the heap the engine booted
+// with; the rebuild gets the profile's heap, which it does not fit.
+TEST_CASE("ColdSwapRecovery: a rebuild whose guest does not come up leaves the engine in error",
+          "[ColdSwapRecovery][guest-failed]") {
+    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\n";
+    cfg.heapBytes   = pool + 8u * 1024u * 1024u;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().engineState() == EngineState::Running);
+
+    clockwork_set_heap_bytes(0);
+    auto result = fix.engine().switchDevice("", 44100);
+    CHECK(fix.engine().engineState() == EngineState::Error);
+    INFO("swap error: " << result.error);
+    CHECK(result.error.find("rtPoolBytes") != std::string::npos);
+
+    fix.clearReplies();
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack, state;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
+    CHECK(state.parsed().argString(0) == "error");
 }

@@ -122,6 +122,15 @@
  * arithmetic a real scheduling DSP does, against the block the send is
  * actually emitted in. Sending from dsp_osc instead would prove nothing about
  * the audio thread, which is the thread the contract is really about.
+ *
+ * AND IT CAN TAKE A REAL-TIME POOL FROM THE HOST'S HEAP AT BIRTH, the way a
+ * server guest does (scsynth sizes its pool by an option and takes it through
+ * DspHost::alloc_bytes in dsp_new). One line in the guest config asks for it:
+ *
+ *   rtPoolBytes=<bytes>
+ *
+ * A heap that cannot hold it refuses the boot with this guest's reason, which
+ * is the path a host has to size its heap for and report when it has not.
  */
 
 #include "dsp_api.h"
@@ -221,6 +230,7 @@ struct DummyDsp {
     DspConfig config{};
     DspHost   host{};
     RegionsAtBirth born{};
+    void*     rt_pool = nullptr;  // taken from the host's heap at birth (rtPoolBytes)
     uint32_t  persist_gen = 0;    // generation of the record WE last wrote
     uint32_t  window_writes = 0;
     uint64_t  frame = 0;      // absolute frames rendered; the phase clock
@@ -703,6 +713,23 @@ const DspInfo* dsp_describe(void) {
     return &info;
 }
 
+// The number set for `name` in the guest config's `name=value` lines, or 0.
+// The block is NUL-terminated text when a host wrote any (GuestConfigText.h).
+static uint64_t configNumber(const DspConfig* config, const char* name) {
+    if (!config->guest_config || config->guest_config_bytes == 0) return 0;
+    const char* text = static_cast<const char*>(config->guest_config);
+    const char* end  = text + strnlen(text, config->guest_config_bytes);
+    const size_t n   = std::strlen(name);
+    for (const char* line = text; line < end; ) {
+        const char* eol = static_cast<const char*>(std::memchr(line, '\n', end - line));
+        if (!eol) eol = end;
+        if (static_cast<size_t>(eol - line) > n && std::memcmp(line, name, n) == 0 && line[n] == '=')
+            return std::strtoull(line + n + 1, nullptr, 10);
+        line = eol + 1;
+    }
+    return 0;
+}
+
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err) {
     if (!config || config->block_size == 0 || !(config->sample_rate > 0.0)) {
         if (err) *err = "dummy dsp: needs a sample rate and a block size";
@@ -715,13 +742,23 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
     }
     d->config = *config;
     if (host) d->host = *host;
+    if (const uint64_t want = configNumber(config, "rtPoolBytes")) {
+        if (d->host.alloc_bytes) d->rt_pool = d->host.alloc_bytes(d->host.ctx, want);
+        if (!d->rt_pool) {
+            delete d;
+            if (err) *err = "dummy dsp: the host's heap cannot hold the real-time pool rtPoolBytes asks for";
+            return nullptr;
+        }
+    }
     d->setPulse(kDefaultPulseWidthMs, kDefaultPulsePeriodMs);
     d->inspectRegions();
     return reinterpret_cast<struct Dsp*>(d);
 }
 
 void dsp_free(struct Dsp* dsp) {
-    delete reinterpret_cast<DummyDsp*>(dsp);
+    auto* d = reinterpret_cast<DummyDsp*>(dsp);
+    if (d && d->rt_pool && d->host.free_bytes) d->host.free_bytes(d->host.ctx, d->rt_pool);
+    delete d;
 }
 
 // Take an asset: record its shape and a checksum of the bytes AS THE GUEST

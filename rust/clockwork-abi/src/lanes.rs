@@ -15,7 +15,7 @@
 //! a control thread; the rest are the per-block sequence. The engine is a
 //! process singleton, which is what the attach protocol is for.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 
 /// One drained egress frame: the origin token the reply targets, the route
 /// word, the OSC bytes (valid only for the duration of the call), and the
@@ -91,6 +91,10 @@ unsafe extern "C" {
 
     pub fn clockwork_set_channel_ceilings(input_channels: u32, output_channels: u32);
     pub fn clockwork_declare_fp_env(env: u32);
+    /// The heap the guest's `alloc_bytes` draws from, for the next build; 0 = the profile's.
+    pub fn clockwork_set_heap_bytes(bytes: usize);
+    /// Why the last build has no guest, or null when it has one. NUL-terminated.
+    pub fn clockwork_boot_error() -> *const c_char;
 
     // ── Forwarding ── the host answers the subsystem verbs itself.
     pub fn clockwork_host_forward(on: c_int);

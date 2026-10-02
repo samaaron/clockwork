@@ -339,6 +339,12 @@ static void preferPipeWireDriverIfAvailable(juce::AudioDeviceManager& dm) {
 #endif
 
 void ClockworkEngine::setEngineState(EngineState state, const std::string& reason) {
+    if (state == EngineState::Error) {
+        // Kept for a client that registers later: an error's reason is the
+        // one thing it needs, and the transition has gone by.
+        std::lock_guard<std::mutex> lock(mErrorReasonMutex);
+        mErrorReason = reason;
+    }
     EngineState prev = mEngineState.exchange(state);
     if (prev == state) return;  // no transition
 
@@ -372,8 +378,16 @@ void ClockworkEngine::snapshotStateTo(uint32_t token) {
     // replayed — it is an EVENT ("the DSP was rebuilt; reset what you were
     // tracking") and replaying it forced clients into spurious reinits. Late
     // joiners query config instead (devices/report, shm metrics).
-    mEgress.sendStateChangeTo(token, engineStateToString(mEngineState.load()),
-                              "snapshot");
+    //
+    // An error replays with its reason rather than "snapshot": a client that
+    // arrives after the transition has no other way to learn why.
+    const EngineState state = mEngineState.load();
+    if (state == EngineState::Error) {
+        std::lock_guard<std::mutex> lock(mErrorReasonMutex);
+        mEgress.sendStateChangeTo(token, engineStateToString(state), mErrorReason.c_str());
+        return;
+    }
+    mEgress.sendStateChangeTo(token, engineStateToString(state), "snapshot");
 }
 
 ClockworkEngine::~ClockworkEngine() {
@@ -1282,6 +1296,11 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mGuestOutbox      = guestOutbox;
     mGuestOutboxBytes = guestOutboxBytes;
 
+    // The heap the guest allocates from, as this host sized it — every build,
+    // including 0 for the profile's, so an earlier engine's figure in this
+    // process is never the one used.
+    clockwork_set_heap_bytes(mCurrentConfig.heapBytes);
+
     mAudioCallback.initialiseDsp(
         arena,
         mCurrentConfig.sampleRate,
@@ -1738,7 +1757,14 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     }
 
     mRunning.store(true);
-    setEngineState(EngineState::Running, "boot");
+    // An engine whose build left no guest is not running a guest, and says so:
+    // in error, with the reason the build gave, which every client that
+    // registers is told (snapshotStateTo). It stays up — its transport and its
+    // own verbs still answer — so a client can learn why and choose what next.
+    if (const char* why = clockwork_boot_error())
+        setEngineState(EngineState::Error, why);
+    else
+        setEngineState(EngineState::Running, "boot");
 
     // Callback-starvation watchdog (see watchdogLoop). Pointless in manual-
     // pump mode, where the test owns process_audio and long gaps are normal.
@@ -4508,7 +4534,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         startAudioSource();
         mAudioCallback.resume();
         result.error = errStr;
-        if (isCold) setEngineState(EngineState::Running, "swap-failed-rollback");
+        if (isCold) {
+            // The rollback rebuilt the guest too, and that can fail like any build.
+            if (const char* why = clockwork_boot_error())
+                setEngineState(EngineState::Error, why);
+            else
+                setEngineState(EngineState::Running, "swap-failed-rollback");
+        }
         if (onSwapEvent) onSwapEvent("swap:failed", result);
         return result;
     }
@@ -4656,7 +4688,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     result.success = true;
     recordSwapPreferences(deviceName, inputDeviceName, result.sampleRate, origin);
     if (isCold) {
-        if (recovered) {
+        if (const char* why = clockwork_boot_error()) {
+            // The device swap went through; the guest did not come back on
+            // it. The same failure as a boot's, reported the same way.
+            result.error = why;
+            setEngineState(EngineState::Error, why);
+            if (onSwapEvent) onSwapEvent("swap:complete", result);
+        } else if (recovered) {
             setEngineState(EngineState::Running, "swap-recovered");
             if (onSwapEvent) onSwapEvent("swap:recovered", result);
         } else {

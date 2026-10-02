@@ -89,6 +89,114 @@ TEST_CASE("EngineState: switchDevice in headless doesn't change state", "[Engine
     CHECK(fix.engine().engineState() == EngineState::Running);
 }
 
+// ── A guest that does not come up ───────────────────────────────────────────
+//
+// A boot whose guest refuses (here: the dummy asks the host's heap for a
+// real-time pool larger than the heap) is an engine in error, not a running
+// one, and every client can learn why: the engine still answers its own
+// verbs, and a late registrant's state replay carries the guest's reason.
+// Before this, the engine reported "running" with no guest inside, nothing
+// drained its ingress, and a client's /clockwork/notify timed out — the
+// reason reached only the log.
+
+namespace {
+ClockworkEngine::Config askingForAPool(size_t bytes) {
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.guestConfig = "rtPoolBytes=" + std::to_string(bytes) + "\n";
+    return cfg;
+}
+}
+
+TEST_CASE("EngineState: a guest that does not come up leaves the engine in error, saying why",
+          "[EngineState][guest-failed]") {
+    EngineFixture fix(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    CHECK(fix.engine().engineState() == EngineState::Error);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    OscReply state;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
+    const auto s = state.parsed();
+    REQUIRE(s.argCount() >= 2);
+    CHECK(s.argString(0) == "error");
+    INFO("reason: " << s.argString(1));
+    CHECK(s.argString(1).find("rtPoolBytes") != std::string::npos);
+}
+
+TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's own verbs still answer",
+          "[EngineState][guest-failed]") {
+    EngineFixture fix(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    fix.send(osc_test::message("/dummy/ping"));
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 777));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r));
+    CHECK(lastInt(r) == 777);
+    CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 200));
+}
+
+// ── The heap is the host's to size ──────────────────────────────────────────
+//
+// What a guest will take from the heap depends on its configuration — a
+// server guest's real-time pool is an option — and only the host that wrote
+// that configuration knows it. So the host says how big a heap to take, and
+// the boot either has it or says it could not get it.
+
+TEST_CASE("EngineState: a host that sizes the heap for its guest's pool boots the guest",
+          "[EngineState][heap]") {
+    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+    auto cfg = askingForAPool(pool);
+    cfg.heapBytes = pool + 8u * 1024u * 1024u;
+    EngineFixture fix(cfg);
+    CHECK(fix.engine().engineState() == EngineState::Running);
+    fix.send(osc_test::message("/dummy/ping"));
+    OscReply r;
+    REQUIRE(fix.waitForReply("/dummy/pong", r));
+}
+
+TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying why",
+          "[EngineState][heap]") {
+    // AddressSanitizer's allocator aborts the process on a request this size
+    // rather than answering NULL (allocation-size-too-big), so under it the
+    // failure this case is about cannot happen; the plain builds run it.
+#if defined(__SANITIZE_ADDRESS__)
+    SKIP("ASan aborts on an impossible allocation instead of failing it");
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+    SKIP("ASan aborts on an impossible allocation instead of failing it");
+#  endif
+#endif
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.heapBytes = size_t(1) << 60;   // past any address space
+    EngineFixture fix(cfg);
+    CHECK(fix.engine().engineState() == EngineState::Error);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack, state;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
+    const auto s = state.parsed();
+    REQUIRE(s.argCount() >= 2);
+    CHECK(s.argString(0) == "error");
+    INFO("reason: " << s.argString(1));
+    CHECK(s.argString(1).find("heap") != std::string::npos);
+}
+
+TEST_CASE("EngineState: the next engine takes the profile's heap again", "[EngineState][heap]") {
+    // heapBytes is one engine's, not the process's: a later boot that does
+    // not ask gets the default, and a pool that only the bigger heap held no
+    // longer fits.
+    {
+        const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+        auto cfg = askingForAPool(pool);
+        cfg.heapBytes = pool + 8u * 1024u * 1024u;
+        EngineFixture fix(cfg);
+        REQUIRE(fix.engine().engineState() == EngineState::Running);
+    }
+    EngineFixture again(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    CHECK(again.engine().engineState() == EngineState::Error);
+}
+
 // ── Recording survives pause/resume (hot swap) ──────────────────────────────
 
 // (A recording case lived here. The engine opens no files now; session

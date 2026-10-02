@@ -75,8 +75,19 @@ extern "C" {
         // guest as DspConfig::fp_env; the web build overrides it to
         // DENORMALS_HONOURED because a worklet cannot arm a flush at all.
         uint32_t fp_env             = 0;
+        // The heap the guest's alloc_bytes draws from, as the host asked for it
+        // through clockwork_set_heap_bytes. 0 = the memory profile's
+        // CLOCKWORK_HEAP_FAST_SIZE. A runtime figure for the same reason
+        // arena_bytes is: what the guest takes from the heap is set by its own
+        // configuration, which only the host that wrote it can read.
+        size_t   heap_bytes         = 0;
     };
     extern ClockworkConfig g_clockwork_config;
+
+    // Why the last build has no guest: the first FATAL of init_memory, or the
+    // guest's own reason when dsp_new refused. NULL when the build has one.
+    // Cleared at the start of every build.
+    const char* clockwork_last_boot_error();
 
     // The one rule for a guest's memory wants (DspInfo::arena_bytes_wanted /
     // arena_bulk_bytes_wanted), stated once so the boot path and a test agree:
