@@ -2630,7 +2630,9 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
             stopAudioSource();                      // detach the dead callback
             err = recreateDeviceManager();
             if (err.isEmpty()) swap = reopenCurrentDevice(intent.adoptRate);
-            restored = err.isEmpty() && swap.success
+            // A pinned device that delivered nothing, with the engine back on
+            // the default the fresh manager opened, is audio restored — there.
+            restored = err.isEmpty() && (swap.success || swap.fellBack)
                     && mActiveSource.load() == AudioSource::RealCallback;
         } catch (const std::exception& ex) {
             err = juce::String("recovery exception: ") + ex.what();
@@ -2648,6 +2650,10 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
         }
     }   // release the gate before sendDeviceReport (which re-takes it)
 
+    // The swap's own reason when the recreate went through: "No sound is coming
+    // out of X…" says more than an empty err.
+    if (err.isEmpty() && !swap.success && !swap.error.empty())
+        err = juce::String(swap.error);
     clockwork_log("[recover] %s (err='%s')",
            restored ? "restored real audio" : "device down — watchdog will retry",
            err.toRawUTF8());
@@ -3604,7 +3610,7 @@ ClockworkEngine::AudioSource ClockworkEngine::desiredAudioSource() const {
     return AudioSource::None;
 }
 
-void ClockworkEngine::startAudioSource() {
+bool ClockworkEngine::startAudioSource() {
     if (mActiveSource.load() != AudioSource::None) {
         // Should be unreachable: every caller stops before starting.
         // Assert in debug so a regression fails loudly; log+return in
@@ -3613,7 +3619,7 @@ void ClockworkEngine::startAudioSource() {
         clockwork_log(
                 "[engine] BUG: startAudioSource called while %s already active",
                 mActiveSource.load() == AudioSource::RealCallback ? "RealCallback" : "Headless");
-        return;
+        return true;
     }
 
     // Manual-pump mode (tests): start no audio source at all. The caller owns
@@ -3625,7 +3631,7 @@ void ClockworkEngine::startAudioSource() {
                 "[engine] manual audio pump — no audio source started; "
                 "caller drives process_audio()");
         mActiveSource.store(AudioSource::None, std::memory_order_release);
-        return;
+        return true;
     }
 
     uint32_t before = mAudioCallback.processCount.load(std::memory_order_acquire);
@@ -3671,10 +3677,10 @@ void ClockworkEngine::startAudioSource() {
         clockwork_log("[engine] no audio device available — engine is idle and will "
                "recover when one appears");
         sendDeviceReport();   // GUI sees an empty current device
-        return;               // nothing will tick; don't wait for a first block
+        return true;          // nothing will tick; don't wait for a first block
     }
 
-    waitForFirstAudioTick(before);
+    return waitForFirstAudioTick(before);
 }
 
 void ClockworkEngine::stopAudioSource() {
@@ -3696,7 +3702,7 @@ void ClockworkEngine::stopAudioSource() {
     mActiveSource.store(AudioSource::None, std::memory_order_release);
 }
 
-void ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
+bool ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     constexpr int kTimeoutMs = 5000;
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(kTimeoutMs);
@@ -3715,6 +3721,7 @@ void ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
         clockwork_log("[engine] audio callbacks started (%lld ms)",
                        static_cast<long long>(elapsedMs));
     }
+    return ticked;
 }
 
 juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
@@ -3988,6 +3995,26 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     if (auto it = mDeviceRateMemory.find(deviceName);
         it != mDeviceRateMemory.end())
         snap.rememberedRate = it->second;
+
+    // Where to go back to if the target opens but never delivers a block: the
+    // device playing now, at its rate and buffer, by its real names (an
+    // aggregate is rebuilt from those).
+    struct { std::string output, input; double rate = 0; int buffer = 0; } playing;
+    if (mDeviceManager) {
+        if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
+            playing.output = mRealOutputDeviceName.empty() ? snap.currentOutputName
+                                                           : mRealOutputDeviceName;
+            playing.rate   = snap.currentRate;
+            playing.buffer = dev->getCurrentBufferSizeSamples();
+            if (mCurrentConfig.numInputChannels > 0) {
+                juce::AudioDeviceManager::AudioDeviceSetup setup;
+                mDeviceManager->getAudioDeviceSetup(setup);
+                playing.input = mRealInputDeviceName.empty()
+                    ? setup.inputDeviceName.toStdString() : mRealInputDeviceName;
+            }
+        }
+    }
+    if (playing.input.empty()) playing.input = "__none__";
 
     clockwork::device::SwapPlanRequest planReq;
     planReq.outputName    = deviceName;
@@ -4614,8 +4641,65 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
     // --- Restart audio (success path) ---
     readerPark.resumeNow();
-    startAudioSource();
+    const bool delivered = startAudioSource();
     mAudioCallback.resume();
+
+    // A device that opened and started but never delivered a block is a failed
+    // swap, as one that refused to open is: nothing is playing on it, whatever
+    // the device manager says, and while nothing ticks the engine hears no
+    // commands. Go back to the device that was playing — unless that is this
+    // device at this rate (a recovery reopening it: the watchdog retries), or
+    // this swap is itself the way back.
+    if (!delivered && mActiveSource.load() == AudioSource::RealCallback) {
+        auto* dead = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
+        const std::string deadName = !mRealOutputDeviceName.empty() ? mRealOutputDeviceName
+                                   : dead ? dead->getName().toStdString() : deviceName;
+        const double deadRate = dead ? dead->getCurrentSampleRate() : sampleRate;
+        const bool goBack = !mNoAudioRollbackInFlight && !playing.output.empty()
+            && !(sameDeviceName(playing.output, deadName)
+                 && std::abs(playing.rate - deadRate) < 1.0);
+        result.success = false;
+        // The error is what a person who picked the device reads: what they
+        // heard, where the sound is now, and what to try. Detail is the log's.
+        clockwork_log("[switchDevice] '%s' started but delivered no audio in 5 s%s",
+                deadName.c_str(),
+                goBack ? (" — going back to '" + playing.output + "'").c_str() : "");
+        result.error = "No sound is coming out of " + deadName
+                     + ". Try choosing it again, or pick another output.";
+        if (goBack) {
+            mNoAudioRollbackInFlight = true;
+            auto back = switchDevice(playing.output, playing.rate, playing.buffer,
+                                     false, playing.input, SwapOrigin::Internal);
+            mNoAudioRollbackInFlight = false;
+            if (back.success) {
+                result.fellBack   = true;
+                result.deviceName = back.deviceName;
+                result.sampleRate = back.sampleRate;
+                result.bufferSize = back.bufferSize;
+                result.error = "No sound came out of " + deadName
+                             + ", so audio has gone back to " + back.deviceName + ".";
+            } else {
+                clockwork_log("[switchDevice] going back to '%s' failed: %s",
+                        playing.output.c_str(), back.error.c_str());
+                result.error = "No sound is coming out of " + deadName
+                             + ", and switching back to " + playing.output
+                             + " didn't work. Try choosing an output again.";
+            }
+        }
+        // A cold swap left Restarting; the way back, when it was cold too, has
+        // already said Running (this is then no transition, and no second
+        // /clockwork/setup).
+        if (isCold) {
+            if (const char* why = clockwork_boot_error())
+                setEngineState(EngineState::Error, why);
+            else
+                setEngineState(EngineState::Running, "swap-no-audio");
+        }
+        if (onSwapEvent) onSwapEvent("swap:failed", result);
+        clockwork_log("[switchDevice] EXIT success=0 type=%s err='%s'",
+                (result.type == SwapType::Cold) ? "Cold" : "Hot", result.error.c_str());
+        return result;
+    }
 
     // On a cold swap, don't restore definitions, buffers, or module state
     // here. The client receives /clockwork/setup and handles

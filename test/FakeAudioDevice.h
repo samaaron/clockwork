@@ -46,7 +46,10 @@ struct FakeDeviceSpec {
 
     bool failOpen      = false;  // open() errors outright
     bool failInputOpen = false;  // open() errors iff input channels requested
-    bool failStart     = false;  // open() succeeds but callbacks never tick
+    // open() succeeds but callbacks never tick. Atomic: a case may flip it on
+    // a running engine — the device comes back — and start() reads it on
+    // whichever engine thread is reopening.
+    std::atomic<bool> failStart { false };
     // A lying device: the rate its callbacks actually keep time at, whatever
     // rate it was opened at and reports. 0 = honest (ticks at the open rate).
     // sonic-pi#3565's mixer: reports 48000, delivers ~44100.

@@ -735,13 +735,17 @@ private:
     // based on desiredAudioSource(), then blocks until process_audio has
     // ticked at least once (or 5s with a warning). This blocking wait is
     // the boot/swap barrier so callers can sendOSC() immediately after.
-    void startAudioSource();
+    // False when the source started and never ticked — a device that opened
+    // and then delivered nothing; true otherwise, including when no source
+    // was started (no device, manual pump) and so none was waited for.
+    bool startAudioSource();
 
     // Idempotent. Does NOT remove the change listener (shutdown-only) so
     // hot-plug events survive swaps.
     void stopAudioSource();
 
-    void waitForFirstAudioTick(uint32_t before);
+    // True once process_audio has ticked past `before`; false after 5 s.
+    bool waitForFirstAudioTick(uint32_t before);
 
     // switchDevice sub-stages. Each has a single responsibility and is
     // safe to call independently (they read / write engine state, so
@@ -1107,6 +1111,10 @@ private:
     std::atomic<bool>        mSuppressRunLoop{false};
     std::string              mDeviceMode;   // empty = system/auto, non-empty = manual device name
     bool                     mDspRebuilt{false};
+    // Set while switchDevice is taking the engine back to the device it was
+    // playing on, after the new one delivered no audio. Under the swap gate.
+    // A rollback whose device is silent too stops there: it does not roll back.
+    bool                     mNoAudioRollbackInFlight{false};
     std::map<std::string, int> mDeviceRateMemory; // per-device remembered sample rate
 
     // Cold-swap generation. Cross-thread: write from setEngineState on

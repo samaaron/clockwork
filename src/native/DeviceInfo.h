@@ -143,4 +143,9 @@ struct SwapResult {
     // no remembered preferred device, where letting JUCE auto-pick
     // the alphabetical-first device of the new type is unsafe.
     bool        requiresDeviceSelection = false;
+    // Set when the target opened but delivered no audio and the engine went
+    // back to the device it was playing on, which does: deviceName, rate and
+    // buffer are that device's. success stays false — the request failed —
+    // but the engine is not silent.
+    bool        fellBack = false;
 };
