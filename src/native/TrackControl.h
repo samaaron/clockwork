@@ -138,11 +138,11 @@ private:
     // The bridge's slack, sized to the device: a callback of B blocks pulls
     // B returns in one go, so the return must hold B ahead of it or the
     // tail of every callback is silence and the bridge's late render is
-    // dropped as stale. Read from the engine when the device (re)starts.
+    // dropped as stale. Re-sized from the buffer size the audio callback
+    // records when the device (re)starts.
     static uint32_t slackFor(uint32_t bufferFrames, uint32_t block);
     void refreshSlack();
     uint32_t mDeviceBufferFrames = 0;   // what the slack was last sized for
-    uint32_t mSlackPoll = 0;            // gatewayPass turns since the last look
     static void onReturnTransfer(ClockworkPort port, void* ctx);
     void tapReturns();
     void releaseScopes();

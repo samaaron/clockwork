@@ -385,6 +385,7 @@ add_executable(clockwork_engine_tests
     test_system_default.cpp
     test_device_switch_verb.cpp
     test_device_events.cpp
+    test_gateway_swap_gate.cpp
     test_guest_config_layout.cpp
     test_in_ring_drain.cpp
     test_shm_repro.cpp

@@ -138,7 +138,10 @@ the engine refuses them, or forwards them to a host that asked for that.
 The ones that change the device — `devices/switch`, `devices/mode`,
 `devices/reopen`, `drivers/switch`, `inputs/enable` — do their work on the
 engine's device lane, not on the control pass: a device change can take
-seconds, and the pass serves every other client meanwhile.
+seconds, and the pass serves every other client meanwhile. The ones that ask
+about it — `devices/list`, `devices/current`, `devices/report`,
+`drivers/list` — are answered there too, so an answer describes the device
+any change in flight leaves behind, and the pass never waits for one.
 
 `devices/switch <output> <rate> <buffer> [<input>]` is acknowledged at once
 with `devices/switch.reply 1` — heard, nothing more — and ends in exactly one

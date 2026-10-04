@@ -533,44 +533,51 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/list")) == 0) {
-            auto devices = mEngine->listDevices();
-            for (auto& dev : devices) {
-                if (dev.isWirelessTransport()) continue;
-                char buf[4096];
+            // Device questions are answered on the device lane, never here: the
+            // device readers take the swap gate, and a cold swap holding it
+            // waits for this pass to park (test_gateway_swap_gate.cpp). The
+            // answer then describes the device any swap in flight leaves.
+            mEngine->postDeviceTask([this, token] {
+                for (auto& dev : mEngine->listDevices()) {
+                    if (dev.isWirelessTransport()) continue;
+                    char buf[4096];
+                    osc::OutboundPacketStream s(buf, sizeof(buf));
+                    s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.reply"))
+                      << dev.name.c_str()
+                      << dev.typeName.c_str()
+                      << static_cast<osc::int32>(dev.maxOutputChannels)
+                      << static_cast<osc::int32>(dev.maxInputChannels);
+                    for (auto r : dev.availableSampleRates)
+                        s << static_cast<float>(r);
+                    s << osc::EndMessage;
+                    mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                              static_cast<uint32_t>(s.Size()));
+                }
+                // Done marker
+                char buf[256];
                 osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.reply"))
-                  << dev.name.c_str()
-                  << dev.typeName.c_str()
-                  << static_cast<osc::int32>(dev.maxOutputChannels)
-                  << static_cast<osc::int32>(dev.maxInputChannels);
-                for (auto r : dev.availableSampleRates)
-                    s << static_cast<float>(r);
-                s << osc::EndMessage;
+                s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.done")) << osc::EndMessage;
                 mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
-            }
-            // Done marker
-            char buf[256];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.done")) << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/current")) == 0) {
-            auto dev = mEngine->currentDevice();
-            char buf[1024];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("devices/current.reply"))
-              << dev.name.c_str()
-              << dev.typeName.c_str()
-              << static_cast<float>(dev.activeSampleRate)
-              << static_cast<osc::int32>(dev.activeBufferSize)
-              << static_cast<osc::int32>(dev.activeOutputChannels)
-              << static_cast<osc::int32>(dev.activeInputChannels)
-              << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
+                auto dev = mEngine->currentDevice();
+                char buf[1024];
+                osc::OutboundPacketStream s(buf, sizeof(buf));
+                s << osc::BeginMessage(CLOCKWORK_SYS("devices/current.reply"))
+                  << dev.name.c_str()
+                  << dev.typeName.c_str()
+                  << static_cast<float>(dev.activeSampleRate)
+                  << static_cast<osc::int32>(dev.activeBufferSize)
+                  << static_cast<osc::int32>(dev.activeOutputChannels)
+                  << static_cast<osc::int32>(dev.activeInputChannels)
+                  << osc::EndMessage;
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                          static_cast<uint32_t>(s.Size()));
+            });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/switch")) == 0) {
@@ -704,17 +711,19 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("drivers/list")) == 0) {
-            auto drivers = mEngine->listDrivers();
-            auto current = mEngine->currentDriver();
-            char buf[4096];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("drivers/list.reply"));
-            s << current.c_str();
-            for (auto& d : drivers)
-                s << d.c_str();
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
+                auto drivers = mEngine->listDrivers();
+                auto current = mEngine->currentDriver();
+                char buf[4096];
+                osc::OutboundPacketStream s(buf, sizeof(buf));
+                s << osc::BeginMessage(CLOCKWORK_SYS("drivers/list.reply"));
+                s << current.c_str();
+                for (auto& d : drivers)
+                    s << d.c_str();
+                s << osc::EndMessage;
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                          static_cast<uint32_t>(s.Size()));
+            });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("drivers/switch")) == 0) {

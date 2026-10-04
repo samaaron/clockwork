@@ -160,7 +160,7 @@ bool TrackControl::createSegment() {
         return false;
     }
     double sr = clockwork_sample_rate();
-    if (!(sr > 0.0) && mEngine) sr = mEngine->currentDevice().activeSampleRate;
+    if (!(sr > 0.0) && mEngine) sr = mEngine->audioCallback().nominalSampleRate();
     if (!(sr > 0.0)) sr = 48000.0;
     uint32_t block = clockwork_block_size();
     if (block == 0 || block > MAX_BLOCK) block = std::min<uint32_t>(block ? block : 128, MAX_BLOCK);
@@ -168,7 +168,7 @@ bool TrackControl::createSegment() {
     // bridge is spawned at boot, the device some seconds later), so this is
     // sized for whatever is known now and re-sized by refreshSlack() from the
     // gateway once the device has settled.
-    mDeviceBufferFrames = mEngine ? static_cast<uint32_t>(std::max(0, mEngine->currentDevice().activeBufferSize)) : 0;
+    mDeviceBufferFrames = mEngine ? static_cast<uint32_t>(std::max(0, mEngine->audioCallback().deviceBufferSize())) : 0;
     const uint32_t slack = slackFor(mDeviceBufferFrames, block);
     mHeader = header(mSeg.ptr);
     init_header(mHeader, sr, block, clockwork_lane_base(), ownPid(), slack);
@@ -184,14 +184,13 @@ uint32_t TrackControl::slackFor(uint32_t bufferFrames, uint32_t block) {
     return clockwork_bridge::slack_for(bufferFrames, block, override);   // plugin_bridge.h says why
 }
 
-// Called from the gateway. currentDevice() is not free (it copies names), so
-// this looks every 64 turns — a sixth of a second at 128 frames — which is
-// still well inside the time a device swap takes to settle.
+// Called from the gateway, every pass: the buffer size is what the audio
+// callback recorded when the device started, an atomic read. Never ask the
+// device itself from here — that takes the swap gate, and a cold swap holding
+// the gate waits for this pass to park (test_gateway_swap_gate.cpp).
 void TrackControl::refreshSlack() {
     if (!mHeader || !mEngine) return;
-    if (++mSlackPoll < 64) return;
-    mSlackPoll = 0;
-    const uint32_t frames = static_cast<uint32_t>(std::max(0, mEngine->currentDevice().activeBufferSize));
+    const uint32_t frames = static_cast<uint32_t>(std::max(0, mEngine->audioCallback().deviceBufferSize()));
     if (frames == mDeviceBufferFrames) return;
     mDeviceBufferFrames = frames;
     const uint32_t block = std::max<uint32_t>(1, mHeader->block_size.load(std::memory_order_relaxed));
