@@ -287,13 +287,16 @@ configure_file(cmake/CatchAddTestsUtf8.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/Cat
 set(_CATCH_DISCOVER_TESTS_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/CatchAddTestsUtf8.cmake"
     CACHE INTERNAL "Catch2's CatchAddTests.cmake, run with its output read as UTF-8" FORCE)
 # One CTest entry per Catch2 case; CI runs the suite through ctest as well as
-# through the binaries (.github/workflows/ci.yml says why).
+# through the binaries (.github/workflows/ci.yml says why). A case that SKIPs
+# (the impossible-heap case does under ASan) is the only case its process
+# runs, so the process exits 4, Catch2's "everything was skipped"; Catch2
+# 3.5's discovery doesn't tell ctest that, which then reports it failed.
 #
 # A CASE'S NAME MUST NOT OPEN A SQUARE BRACKET IT DOES NOT CLOSE. The
 # discovered names travel through a CMake list, where an unbalanced `[`
 # swallows every `;` up to the next `]`, fusing the case and the ones after
 # it into a single entry that matches nothing. Tags are fine; prose is not.
-catch_discover_tests(clockwork_tests)
+catch_discover_tests(clockwork_tests PROPERTIES SKIP_RETURN_CODE 4)
 
 # ─── Attaching ───────────────────────────────────────────────────────────────
 # More than one host in one process. Its own executable because it walks the
@@ -308,7 +311,7 @@ target_link_libraries(clockwork_attach_tests PRIVATE ${CLOCKWORK_LIB_GROUP} Catc
 target_compile_definitions(clockwork_attach_tests PRIVATE
     JUCE_APPLICATION_NAME_STRING="clockwork-attach-tests"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
-catch_discover_tests(clockwork_attach_tests)
+catch_discover_tests(clockwork_attach_tests PROPERTIES SKIP_RETURN_CODE 4)
 
 # ─── Reserved lanes ──────────────────────────────────────────────────────────
 # The channels above the device, where a Link peer's audio lands.
@@ -337,7 +340,7 @@ target_compile_definitions(clockwork_lanes_reserved_tests PRIVATE
 if(MSVC)
     target_compile_options(clockwork_lanes_reserved_tests PRIVATE /W1 /wd4244 /wd4267 /wd4305 /permissive-)
 endif()
-catch_discover_tests(clockwork_lanes_reserved_tests)
+catch_discover_tests(clockwork_lanes_reserved_tests PROPERTIES SKIP_RETURN_CODE 4)
 
 # ─── The engine, booted whole ────────────────────────────────────────────────
 # A ClockworkEngine and the lanes fixture both own the process-global
@@ -449,7 +452,7 @@ target_compile_definitions(clockwork_engine_tests PRIVATE
 if(WIN32)
     target_link_libraries(clockwork_engine_tests PRIVATE ws2_32)
 endif()
-catch_discover_tests(clockwork_engine_tests)
+catch_discover_tests(clockwork_engine_tests PROPERTIES SKIP_RETURN_CODE 4)
 if(APPLE)
     # The MIDI case receives on a CoreMIDI virtual destination of its own.
     target_link_libraries(clockwork_engine_tests PRIVATE "-framework CoreMIDI")
