@@ -13,12 +13,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 class OscEgress;
 class ClockworkEngine;
 class ClockworkClock;
 class LinkAudioHost;
 struct DrainCallCtx;
+struct SwapResult;
 
 class EngineControl {
 public:
@@ -38,6 +40,13 @@ public:
 private:
     // Refuse one claimed-but-unknown address under the reserved prefix.
     void refuseUnknown(uint32_t token, const uint8_t* data, uint32_t size);
+
+    // The end of a /clockwork/devices/switch that did not go through the
+    // debounced switchDevice (which reports its own): name the device the
+    // engine is on now, broadcast switch.done, and re-report the devices on
+    // success. On the device lane.
+    void finishSwitch(SwapResult result, const std::string& requestedOutput,
+                      const std::string& requestedInput);
 
     ClockworkEngine* mEngine     = nullptr;
     OscEgress*        mEgress     = nullptr;

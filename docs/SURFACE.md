@@ -127,3 +127,31 @@ bundle carrying its time, and the front hands the browser the bytes with the
 moment. The port is opened on demand, as opening a sink onto a port opens it
 natively. Nothing about the guest changes between the two hosts: it said
 when it meant, and the edge did the rest.
+
+## Device verbs
+
+`devices/*`, `drivers/*` and `inputs/enable` exist where clockwork owns the
+audio device: the native device layer. On the web the page owns the output,
+and the client's front refuses them; an attached engine's host owns it, and
+the engine refuses them, or forwards them to a host that asked for that.
+
+The ones that change the device — `devices/switch`, `devices/mode`,
+`devices/reopen`, `drivers/switch`, `inputs/enable` — do their work on the
+engine's device lane, not on the control pass: a device change can take
+seconds, and the pass serves every other client meanwhile.
+
+`devices/switch <output> <rate> <buffer> [<input>]` is acknowledged at once
+with `devices/switch.reply 1` — heard, nothing more — and ends in exactly one
+`devices/switch.done` broadcast to the notify subscribers:
+
+    success, requestedOutput, requestedInput, actualOutput, actualInput,
+    error, inputUnavailable, inputUnavailableReason
+
+`actualOutput` is where the engine is when it is over, whether or not the
+switch succeeded; a client records its user's choice from this, and only
+from this. The output `__system__`, or the device table's default-follow row
+by name, means "follow the system default" — and following it is not
+choosing it: nothing is pinned, so the engine follows the next move too.
+Turning inputs off (input `__none__`, or `inputs/enable 0`) leaves the output
+mode alone. One gap, known: a named output and `__none__` in the same switch
+turns the inputs off and does not switch the output.

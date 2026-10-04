@@ -383,6 +383,7 @@ add_executable(clockwork_engine_tests
     test_swap_characterization.cpp
     test_dead_device.cpp
     test_system_default.cpp
+    test_device_switch_verb.cpp
     test_guest_config_layout.cpp
     test_in_ring_drain.cpp
     test_shm_repro.cpp

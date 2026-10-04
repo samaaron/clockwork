@@ -472,6 +472,17 @@ void EngineControl::refuseUnknown(uint32_t token, const uint8_t* data, uint32_t 
                    [this, token](const uint8_t* d, uint32_t n) { mEgress->reply(token, d, n); });
 }
 
+void EngineControl::finishSwitch(SwapResult result, const std::string& requestedOutput,
+                                 const std::string& requestedInput) {
+    // Where the engine is now, whichever path got it there and whatever that
+    // path filled in.
+    const auto cur = mEngine->currentDevice();
+    if (result.deviceName.empty())      result.deviceName      = cur.name;
+    if (result.inputDeviceName.empty()) result.inputDeviceName = cur.inputDeviceName;
+    mEngine->sendSwitchDone(result, requestedOutput, requestedInput);
+    if (result.success) mEngine->sendDeviceReport();
+}
+
 // The FALLBACK for the reserved prefix on the NRT thread: the engine's own
 // top-level verbs, and — because this is the last link in clockwork's chain —
 // the refusal for a claimed address nobody recognised. The prefix is claimed
@@ -581,50 +592,11 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
                 inputDevName = it->AsStringUnchecked();
             }
 
-            // "__system__" sentinel means "follow system default output" —
-            // as does picking the device table's synthetic default-follow
-            // row by name (the GUI sends table names verbatim).
-            // Off the gateway: the reinit plus its report can take seconds.
-            if (devName == "__system__" || mEngine->isSyntheticDefaultPick(devName)) {
-                mEngine->postDeviceTask([this, token] {
-                    auto error = mEngine->setDeviceMode("");
-                    char buf[1024];
-                    osc::OutboundPacketStream s(buf, sizeof(buf));
-                    s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.reply"))
-                      << static_cast<osc::int32>(error.empty() ? 1 : 0);
-                    if (!error.empty()) s << error.c_str();
-                    s << osc::EndMessage;
-                    mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                              static_cast<uint32_t>(s.Size()));
-                    if (error.empty()) mEngine->sendDeviceReport();
-                });
-                return true;
-            }
-
-            // "__none__" sentinel from GUI means "disable audio inputs"
-            if (inputDevName == "__none__") {
-                // Lock device mode so changeListenerCallback doesn't interfere
-                auto curDev = mEngine->currentDevice();
-                if (!curDev.name.empty())
-                    mEngine->forceDeviceMode(curDev.name);
-                auto result = mEngine->enableInputChannels(0);
-                char buf[1024];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.reply"))
-                  << static_cast<osc::int32>(result.success ? 1 : 0);
-                if (!result.success) s << result.error.c_str();
-                s << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
-                if (result.success) mEngine->sendDeviceReport();
-                return true;
-            }
-
-            // Debounce: the transport stores the request and runs only the
-            // last one after a quiet period.
-            mEngine->scheduleDeviceSwitch(devName, inputDevName, sr, bufSz);
-
-            // Ack immediately so the GUI knows we received it
+            // Every switch is acknowledged here (switch.reply 1: heard), does
+            // its work on the device lane — a device change can take seconds
+            // and the control pass must not — and ends in exactly one
+            // switch.done broadcast: what was asked for, where the engine is
+            // now, and why not when it failed.
             {
                 char buf[128];
                 osc::OutboundPacketStream s(buf, sizeof(buf));
@@ -633,6 +605,38 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
                 mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
             }
+
+            // Follow the system default: the "__system__" sentinel, or the
+            // device table's default-follow row picked by name (clients send
+            // table names verbatim).
+            if (devName == "__system__" || mEngine->isSyntheticDefaultPick(devName)) {
+                mEngine->postDeviceTask([this, devName, inputDevName] {
+                    SwapResult result;
+                    result.error   = mEngine->setDeviceMode("");
+                    result.success = result.error.empty();
+                    finishSwitch(result, devName, inputDevName);
+                });
+                return true;
+            }
+
+            // Inputs off. A named output in the same message is not switched:
+            // a known gap — routed through switchDevice it could open an ASIO
+            // device output-only, which enableInputChannels refuses because it
+            // crashes real drivers.
+            // Turning inputs off leaves the output mode alone: in system mode the
+            // engine goes on following the default. (It used to lock the output
+            // into manual mode here, against a changeListenerCallback reinit that
+            // system mode no longer does.)
+            if (inputDevName == "__none__") {
+                mEngine->postDeviceTask([this, devName, inputDevName] {
+                    finishSwitch(mEngine->enableInputChannels(0), devName, inputDevName);
+                });
+                return true;
+            }
+
+            // A device, a rate or a buffer: debounced, so rapid picks collapse
+            // to the last; executePendingSwitch sends its switch.done.
+            mEngine->scheduleDeviceSwitch(devName, inputDevName, sr, bufSz);
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/reopen")) == 0) {
@@ -719,53 +723,58 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             if (it != msg.ArgumentsEnd() && it->IsString())
                 driverName = it->AsStringUnchecked();
 
-            auto result = mEngine->switchDriver(driverName);
-            char buf[1024];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("drivers/switch.reply"));
-            if (result.success) {
-                s << static_cast<osc::int32>(1)
-                  << mEngine->currentDriver().c_str()
-                  << static_cast<float>(result.sampleRate)
-                  << static_cast<osc::int32>(result.bufferSize);
-            } else {
-                s << static_cast<osc::int32>(0) << result.error.c_str();
-            }
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
-            if (result.success)
-                mEngine->sendDeviceReport();
+            // On the device lane: a cross-driver change takes seconds (the
+            // device layer itself waits 1.5 s between drivers).
+            mEngine->postDeviceTask([this, token, driverName] {
+                auto result = mEngine->switchDriver(driverName);
+                char buf[1024];
+                osc::OutboundPacketStream s(buf, sizeof(buf));
+                s << osc::BeginMessage(CLOCKWORK_SYS("drivers/switch.reply"));
+                if (result.success) {
+                    s << static_cast<osc::int32>(1)
+                      << mEngine->currentDriver().c_str()
+                      << static_cast<float>(result.sampleRate)
+                      << static_cast<osc::int32>(result.bufferSize);
+                } else {
+                    s << static_cast<osc::int32>(0) << result.error.c_str();
+                }
+                s << osc::EndMessage;
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                          static_cast<uint32_t>(s.Size()));
+                if (result.success)
+                    mEngine->sendDeviceReport();
+            });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("inputs/enable")) == 0) {
             // Enable/disable audio input channels.
-            // Args: numChannels(int32) — 0 to disable, >0 to enable that many channels
+            // Args: numChannels(int32) — 0 to disable, >0 to enable that many,
+            // -1 to re-enable at the boot width.
             auto it = msg.ArgumentsBegin();
             int numChannels = 0;
             if (it != msg.ArgumentsEnd() && it->IsInt32())
                 numChannels = it->AsInt32Unchecked();
 
-            // Lock device mode so changeListenerCallback doesn't interfere
-            auto curDev = mEngine->currentDevice();
-            if (!curDev.name.empty())
-                mEngine->forceDeviceMode(curDev.name);
-
-            auto result = mEngine->enableInputChannels(numChannels);
-            char buf[1024];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("inputs/enable.reply"));
-            if (result.success) {
-                s << static_cast<osc::int32>(1)
-                  << static_cast<osc::int32>(numChannels);
-            } else {
-                s << static_cast<osc::int32>(0) << result.error.c_str();
-            }
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
-            if (result.success)
-                mEngine->sendDeviceReport();
+            // On the device lane — the swap can take seconds — and with the
+            // output mode left alone: in system mode the engine goes on
+            // following the default.
+            mEngine->postDeviceTask([this, token, numChannels] {
+                auto result = mEngine->enableInputChannels(numChannels);
+                char buf[1024];
+                osc::OutboundPacketStream s(buf, sizeof(buf));
+                s << osc::BeginMessage(CLOCKWORK_SYS("inputs/enable.reply"));
+                if (result.success) {
+                    s << static_cast<osc::int32>(1)
+                      << static_cast<osc::int32>(numChannels);
+                } else {
+                    s << static_cast<osc::int32>(0) << result.error.c_str();
+                }
+                s << osc::EndMessage;
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                          static_cast<uint32_t>(s.Size()));
+                if (result.success)
+                    mEngine->sendDeviceReport();
+            });
             return true;
 
         }
