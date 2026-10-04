@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
 #include "engine_state.h"
@@ -167,7 +168,12 @@ TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying 
 #  endif
 #endif
     auto cfg = EngineFixture::defaultConfig();
-    cfg.heapBytes = size_t(1) << 60;   // past any address space
+    // Past any address space, 32-bit as much as 64-bit: the most size_t can
+    // say. (1 << 60 is no size at all where size_t is 32 bits — the shift is
+    // undefined, and i386 booted a heap.) The engine caps a request to what
+    // it can add its own bookkeeping to, so this cannot wrap to something
+    // small; it is refused for being more than there is.
+    cfg.heapBytes = std::numeric_limits<size_t>::max();
     EngineFixture fix(cfg);
     CHECK(fix.engine().engineState() == EngineState::Error);
 

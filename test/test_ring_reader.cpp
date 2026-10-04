@@ -309,6 +309,12 @@ TEST_CASE("RingReader reports how long a blocking handler held the thread",
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
 
+    // The handler counts itself in from INSIDE the pass, and the pass records
+    // its time only after every drain has returned: read now and the record
+    // may not be there yet. Joining the reader puts the finished pass, and
+    // all it recorded, before the reads — an order, not a wait.
+    reader.stop();
+
     // The reader measures itself, so this holds however starved the test
     // process was — unlike a wall-clock deadline in the test thread.
     REQUIRE(reader.maxPassUs() >= 100'000);
@@ -351,6 +357,7 @@ TEST_CASE("RingReader tracks the worst pass in the recent window",
         std::this_thread::sleep_for(milliseconds(5));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
+    reader.stop();   // the pass's record is written after its handler returns
 
     // The slow pass just ended, so it is inside the rolling window and the
     // two measures agree; only the windowed copy will decay back to quiet
@@ -409,9 +416,10 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
 
     release.store(true, std::memory_order_release);
 
-    deadline = steady_clock::now() + seconds(5);
-    while (reader.inFlightUs() != 0 && steady_clock::now() < deadline)
-        std::this_thread::sleep_for(milliseconds(5));
+    // The pass clears its in-flight mark before it records its time, so an
+    // in-flight of 0 does not yet mean the record is there. Joining the
+    // reader does: the released pass has finished, and all of it is visible.
+    reader.stop();
     REQUIRE(reader.inFlightUs() == 0);       // released
     REQUIRE(reader.maxPassUs() >= 50'000);   // and recorded on the way out
 }
