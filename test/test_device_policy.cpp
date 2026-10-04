@@ -10,8 +10,9 @@
  *
  *   - resolveWirelessExitRate: should we restore the pre-wireless rate
  *     when leaving AirPlay / Bluetooth?
- *   - decideHotplugAction: given visible devices, should we re-attach
- *     to the preferred output or re-aggregate to pick up an input?
+ *   - decideHotplugAction: given visible devices, should we reopen
+ *     because the output has gone, re-attach to the preferred output, or
+ *     re-aggregate to pick up an input?
  *
  * Each scenario here corresponds to a bug we've fixed or a behaviour
  * we want to lock in going forward.
@@ -136,6 +137,38 @@ TEST_CASE("Hotplug: preferred input returns while output matches",
     REQUIRE_FALSE(d.switchOutput);
     REQUIRE(d.switchInput);
     REQUIRE(d.inputName == "MacBook Pro Microphone");
+}
+
+TEST_CASE("Hotplug: the output being played on has gone = reopen",
+          "[Hotplug]") {
+    // Headphones pulled out, Bluetooth out of range: the device the engine
+    // plays on is no longer in the list. Reopen, which lands on the default.
+    auto d = decide("", "", "USB Headphones", 0, {"MacBook Pro Speakers"});
+    REQUIRE(d.reopen);
+    REQUIRE_FALSE(d.switchOutput);
+    REQUIRE_FALSE(d.switchInput);
+}
+
+TEST_CASE("Hotplug: the output being played on has gone, and the preferred "
+          "output is here = switch to it", "[Hotplug]") {
+    auto d = decide("MOTU UltraLite", "", "AirPods", 0,
+                    {"MacBook Pro Speakers", "MOTU UltraLite"});
+    REQUIRE(d.switchOutput);
+    REQUIRE(d.outputName == "MOTU UltraLite");
+    REQUIRE_FALSE(d.reopen);
+}
+
+TEST_CASE("Hotplug: no output open = nothing to reopen", "[Hotplug]") {
+    auto d = decide("", "", "", 0, {"MacBook Pro Speakers"});
+    REQUIRE_FALSE(d.reopen);
+    REQUIRE_FALSE(d.switchOutput);
+}
+
+TEST_CASE("Hotplug: the output being played on is listed under its "
+          "disambiguated name = still here", "[Hotplug]") {
+    auto d = decide("", "", "MOTU UltraLite", 0,
+                    {"MacBook Pro Speakers", "MOTU UltraLite (2)"});
+    REQUIRE_FALSE(d.reopen);
 }
 
 TEST_CASE("Hotplug: preferred input returns but input already active = no action",

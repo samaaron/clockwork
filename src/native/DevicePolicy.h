@@ -149,10 +149,10 @@ std::vector<int> usableAggregateRates(const std::vector<int>& outputRates,
 
 // Hot-plug decision. Given the user's preferred output/input device
 // names, the currently-active output, the currently-active input
-// channel count, and the list of devices now visible to CoreAudio,
-// returns what (if anything) the engine should do in response to a
-// device-list change.
+// channel count, and the list of devices now visible, returns what (if
+// anything) the engine should do in response to a device-list change.
 struct HotplugDecision {
+    bool        reopen       = false;  // the current output has gone
     bool        switchOutput = false;  // full swap to preferred output
     bool        switchInput  = false;  // input-only re-aggregate
     std::string outputName;            // target output device

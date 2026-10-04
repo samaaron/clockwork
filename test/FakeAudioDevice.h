@@ -27,7 +27,9 @@
 #include "ClockworkEngine.h"
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -54,7 +56,12 @@ struct FakeDeviceSpec {
     // rate it was opened at and reports. 0 = honest (ticks at the open rate).
     // sonic-pi#3565's mixer: reports 48000, delivers ~44100.
     double deliveredRate = 0;
+    // Unplugged: absent from every device list and refused by name until it
+    // comes back. Atomic: a case flips it on a running engine.
+    std::atomic<bool> hidden { false };
 };
+
+class FakeAudioIODeviceType;
 
 // The simulated machine: device types and their devices, shared between
 // the test (which scripts it) and every manager the factory builds —
@@ -73,6 +80,18 @@ struct FakeSystem {
                 if (d->name == name) return d;
         return nullptr;
     }
+
+    // The device types alive right now. Each manager owns its own, and
+    // recovery replaces the manager, so a case delivers an OS notification
+    // through whichever exists.
+    std::mutex liveTypesMutex;
+    std::vector<FakeAudioIODeviceType*> liveTypes;
+
+    // The OS reporting "the device list changed": on the calling thread, at
+    // the caller's moment, through whichever device type is alive. Fenced
+    // against that type being destroyed mid-call, as CoreAudio's listener is
+    // (LiveInternalRegistry). False when no manager exists.
+    bool reportListChanged();
 };
 
 class FakeAudioIODevice : public juce::AudioIODevice {
@@ -108,6 +127,7 @@ public:
     juce::String open(const juce::BigInteger& inputChannels,
                       const juce::BigInteger& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
+        std::lock_guard<std::recursive_mutex> lk(mLifecycle);
         // Error strings mimic real JUCE drivers, which name the device.
         // Nothing reads the wording: the engine attributes input-side
         // failures by retrying output-only, not by parsing these.
@@ -130,10 +150,17 @@ public:
         return {};
     }
 
-    void close() override { stop(); mOpen = false; }
+    // A real driver serialises its own open/close/start/stop, so the fake does
+    // too: a race that remains is the caller's, not the harness's.
+    void close() override {
+        std::lock_guard<std::recursive_mutex> lk(mLifecycle);
+        stop();
+        mOpen = false;
+    }
     bool isOpen() override { return mOpen; }
 
     void start(juce::AudioIODeviceCallback* callback) override {
+        std::lock_guard<std::recursive_mutex> lk(mLifecycle);
         if (!mOpen || mPlaying.load()) return;
         mCallback = callback;
         if (callback) callback->audioDeviceAboutToStart(this);
@@ -143,6 +170,7 @@ public:
     }
 
     void stop() override {
+        std::lock_guard<std::recursive_mutex> lk(mLifecycle);
         if (!mPlaying.exchange(false)) return;
         if (mThread.joinable()) mThread.join();
         if (mCallback) mCallback->audioDeviceStopped();
@@ -224,6 +252,7 @@ private:
     juce::AudioIODeviceCallback* mCallback = nullptr;
     juce::BigInteger mActiveOut, mActiveIn;
     std::thread mThread;
+    std::recursive_mutex mLifecycle;
     std::atomic<bool> mPlaying { false };
     bool mOpen = false;
     double mRate = 48000.0;
@@ -235,13 +264,26 @@ public:
     FakeAudioIODeviceType(std::shared_ptr<FakeSystem> system, size_t typeIndex)
         : juce::AudioIODeviceType(
               juce::String(system->types[typeIndex].typeName)),
-          mSystem(std::move(system)), mTypeIndex(typeIndex) {}
+          mSystem(std::move(system)), mTypeIndex(typeIndex) {
+        std::lock_guard<std::mutex> lk(mSystem->liveTypesMutex);
+        mSystem->liveTypes.push_back(this);
+    }
+
+    ~FakeAudioIODeviceType() override {
+        std::lock_guard<std::mutex> lk(mSystem->liveTypesMutex);
+        auto& v = mSystem->liveTypes;
+        v.erase(std::remove(v.begin(), v.end(), this), v.end());
+    }
+
+    // What a real type does when the OS tells it the list changed.
+    void reportListChanged() { callDeviceChangeListeners(); }
 
     void scanForDevices() override { mScanned = true; }
 
     juce::StringArray getDeviceNames(bool wantInputNames) const override {
         juce::StringArray names;
         for (auto& d : spec().devices) {
+            if (d->hidden.load()) continue;
             if (wantInputNames ? d->maxInputChannels > 0
                                : d->maxOutputChannels > 0)
                 names.add(juce::String(d->name));
@@ -275,7 +317,7 @@ private:
     std::shared_ptr<FakeDeviceSpec> find(const std::string& name) const {
         if (name.empty()) return nullptr;
         for (auto& d : spec().devices)
-            if (d->name == name) return d;
+            if (d->name == name && !d->hidden.load()) return d;
         return nullptr;
     }
 
@@ -283,6 +325,13 @@ private:
     size_t mTypeIndex;
     bool mScanned = false;
 };
+
+inline bool FakeSystem::reportListChanged() {
+    std::lock_guard<std::mutex> lk(liveTypesMutex);
+    if (liveTypes.empty()) return false;
+    liveTypes.back()->reportListChanged();
+    return true;
+}
 
 class FakeDeviceManager : public juce::AudioDeviceManager {
 public:

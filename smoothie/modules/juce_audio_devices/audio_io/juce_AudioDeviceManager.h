@@ -405,6 +405,14 @@ public:
     /** Removes a previously added device type from the manager. */
     void removeAudioDeviceType (AudioIODeviceType* deviceTypeToRemove);
 
+    /** smoothie addition: hands every device type's list changes to `sink`
+        (see AudioIODeviceType::setDeviceChangeSink), including types added
+        later. While a sink is set the manager no longer hears of them, so it
+        never closes or reopens a device by itself: the sink's owner decides,
+        on its own thread. Pass nullptr to go back.
+    */
+    void setDeviceChangeSink (std::function<void()> sink);
+
     //==============================================================================
     /** Plays a beep through the current audio device.
 
@@ -493,6 +501,7 @@ private:
     //==============================================================================
     OwnedArray<AudioIODeviceType> availableDeviceTypes;
     OwnedArray<AudioDeviceSetup> lastDeviceTypeConfigs;
+    std::function<void()> deviceChangeSink;
 
     AudioDeviceSetup currentSetup;
     std::unique_ptr<AudioIODevice> currentAudioDevice;

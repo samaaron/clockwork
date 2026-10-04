@@ -259,8 +259,21 @@ void AudioDeviceManager::addAudioDeviceType (std::unique_ptr<AudioIODeviceType> 
         availableDeviceTypes.add (newDeviceType.release());
         lastDeviceTypeConfigs.add (new AudioDeviceSetup());
 
+        // smoothie: the sink first — a change reported between the two
+        // must not reach the listener.
+        if (deviceChangeSink != nullptr)
+            availableDeviceTypes.getLast()->setDeviceChangeSink (deviceChangeSink);
+
         availableDeviceTypes.getLast()->addListener (callbackHandler.get());
     }
+}
+
+void AudioDeviceManager::setDeviceChangeSink (std::function<void()> sink)
+{
+    deviceChangeSink = std::move (sink);
+
+    for (auto* type : availableDeviceTypes)
+        type->setDeviceChangeSink (deviceChangeSink);
 }
 
 void AudioDeviceManager::removeAudioDeviceType (AudioIODeviceType* deviceTypeToRemove)

@@ -612,6 +612,14 @@ HotplugDecision decideHotplugAction(
         return d;
     }
 
+    // The output being played on has gone (unplugged, switched off, out of
+    // range). Nothing else matters while it is silent: reopen, which lands
+    // on the default.
+    if (!currentOutput.empty() && !visible(currentOutput)) {
+        d.reopen = true;
+        return d;
+    }
+
     // Preferred input returned while already on the correct output and
     // currently running with no inputs — re-aggregate without touching
     // the output.

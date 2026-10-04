@@ -2461,10 +2461,15 @@ private:
     static OSStatus hardwareListenerProc (AudioDeviceID, UInt32, const AudioObjectPropertyAddress*, void* clientData)
     {
         // smoothie: fenced — the type may be mid-destruction (see
-        // LiveInternalRegistry).
+        // LiveInternalRegistry). An owner with a device-change sink hears
+        // here, on CoreAudio's thread, and rescans on its own; without one
+        // the message thread rescans and tells the listeners.
         LiveInternalRegistry::get().ifLive (clientData, [&]
         {
-            static_cast<CoreAudioIODeviceType*> (clientData)->triggerAsyncUpdate();
+            auto* type = static_cast<CoreAudioIODeviceType*> (clientData);
+
+            if (! type->deliverToDeviceChangeSink())
+                type->triggerAsyncUpdate();
         });
 
         return noErr;

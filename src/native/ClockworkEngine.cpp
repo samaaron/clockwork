@@ -192,10 +192,15 @@ std::string ClockworkEngine::refuseWirelessMicAddition(
 }
 
 std::unique_ptr<juce::AudioDeviceManager>
-ClockworkEngine::makeDeviceManager() const {
-    if (mCurrentConfig.deviceManagerFactory)
-        return mCurrentConfig.deviceManagerFactory();
-    return std::make_unique<juce::AudioDeviceManager>();
+ClockworkEngine::makeDeviceManager() {
+    auto manager = mCurrentConfig.deviceManagerFactory
+        ? mCurrentConfig.deviceManagerFactory()
+        : std::make_unique<juce::AudioDeviceManager>();
+    // Device-list changes come to the engine, not to the manager: left to
+    // itself the manager closes and reopens devices on whatever thread the
+    // OS reports a change, under the device lane's feet.
+    manager->setDeviceChangeSink([this] { deviceListChanged(); });
+    return manager;
 }
 
 std::string ClockworkEngine::probeDriverTypeName(
@@ -2263,8 +2268,8 @@ void ClockworkEngine::executePendingSwitch() {
     clockwork_log("[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d",
             devName.c_str(), inputDevName.c_str(), sr, bufSz);
 
-    // Explicit GUI switch → force device mode so changeListenerCallback
-    // doesn't fight us by reinitialising to system defaults.
+    // An explicit pick of a device leaves system mode: the default-output
+    // listener must not take the engine off it.
     if (!devName.empty())
         forceDeviceMode(devName);
 
@@ -3652,9 +3657,6 @@ bool ClockworkEngine::startAudioSource() {
         }
         mDeviceManager->addAudioCallback(&mAudioCallback);
         clockwork_log("[engine] audio callback attached — waiting for first tick");
-        // addChangeListener is idempotent (JUCE's ListenerList dedupes), so
-        // re-attaching across hot-plug / swap sequences is harmless.
-        mDeviceManager->addChangeListener(this);
         mActiveSource.store(AudioSource::RealCallback, std::memory_order_release);
     } else if (desired == AudioSource::Headless) {
         // Explicit headless (mHeadless): tests and future non-JUCE backends.
@@ -3752,8 +3754,8 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     }
 #endif
 
-    // Refresh suppression timestamp before each JUCE call to prevent
-    // changeListenerCallback feedback storms.
+    // Stamp before each manager call: the default-output listener must not
+    // chase the default changes this reinit causes.
     mLastSelfTriggeredChange = std::chrono::steady_clock::now();
     auto err = mDeviceManager->initialiseWithDefaultDevices(0, 2);
     if (err.isNotEmpty()) {
@@ -3955,10 +3957,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         return result;
     }
     PhaseGuard phase(mDevicePhase, DevicePhase::Swapping);
-    // Entry+exit stamps: during the span the gate makes the MM handlers
-    // skip; the exit stamp arms the quiet window against our own change
-    // notifications. Mid-function stamps are gone — they silently expired
-    // inside >1 s swaps.
     SelfTriggerSpan selfTrigger(mLastSelfTriggeredChange);
     RunLoopSuppressGuard runLoopSuppress { mSuppressRunLoop };
 
@@ -4800,7 +4798,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
 void ClockworkEngine::teardownDeviceManager() {
     if (mDeviceManager) {
-        mDeviceManager->removeChangeListener(this);
+        // The sink stays to the end: a change reported while the manager goes
+        // down only queues a pass on the lane, where without the sink it
+        // would reach the manager's own close-and-reopen.
         mDeviceManager->removeAudioCallback(&mAudioCallback);
         mDeviceManager->closeAudioDevice();
         mDeviceManager.reset();
@@ -5293,121 +5293,93 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
 
 // --- Device change detection ---
 
-void ClockworkEngine::changeListenerCallback(juce::ChangeBroadcaster* source) {
+void ClockworkEngine::deviceListChanged() {
+    // Any thread, at the OS's moment: only queue. A pass already queued
+    // has yet to look, so it will see this change too.
+    if (!mDeviceListChangeQueued.exchange(true))
+        postDeviceTask([this] { handleDeviceListChanged(); });
+}
+
+void ClockworkEngine::handleDeviceListChanged() {
+    // Cleared before looking: a change from here on queues another pass.
+    mDeviceListChangeQueued.store(false);
     if (!mRunning.load()) return;
 
-    // Two separate windows, checked independently:
-    //  - engine self-triggered mutations (shared stamp — a swap/reinit/boot
-    //    just churned the device state; this event is our own echo);
-    //  - our own recent processing (private stamp — JUCE fires several
-    //    broadcasts per hot-plug; one pass per second is plenty).
-    // Only the PRIVATE stamp is written here: writing the shared one on an
-    // external event poisoned the default-follow handler's quiet window.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - mLastSelfTriggeredChange.load() < std::chrono::seconds(1)) return;
-    if (now - mLastListChangeHandled.load()   < std::chrono::seconds(1)) return;
-    // Non-blocking: if a swap/recovery holds the gate, skip this event rather
-    // than stall the message thread. The gate also serialises the mDeviceManager
-    // reads below — including the source-vs-current comparison — against
-    // recovery's recreateDeviceManager() reset().
+    // Held from looking through acting, so what is decided is what is done:
+    // the swap and the reopen below take the gate again (it is recursive)
+    // rather than racing a reader for it. Readers hold it only briefly; a
+    // mutation outside the lane holding it for 3 s is a fault, and this
+    // change must not be lost to it — look again once the lane comes round.
     std::unique_lock<std::recursive_mutex> gate;
-    if (!tryAcquireSwapGate(gate, 1, 0)) {
-        DEV_LOG("[hotplug] changeListenerCallback skipped — swap in progress");
+    if (!tryAcquireSwapGate(gate, 30, 100)) {
+        clockwork_log("[hotplug] device list changed, gate busy for 3 s — looking again");
+        deviceListChanged();
         return;
     }
-    if (source != mDeviceManager.get()) return;
+    if (!mDeviceManager) return;
 
-    mLastListChangeHandled = std::chrono::steady_clock::now();
+    // MIDI hot-plug is the MIDI subsystem's own (rust/clockwork-midi's
+    // watcher); this is audio devices only.
+    auto devices = listDevices(true);   // rescans: the lists are this thread's
+    auto* dev = mDeviceManager->getCurrentAudioDevice();
 
-    // MIDI hot-swap is owned by the MIDI subsystem's own native device-change
-    // watcher (WinRT DeviceWatcher / CoreMIDI notify / ALSA announce — see
-    // rust/clockwork-midi/src/watcher.rs), not JUCE. This audio callback no
-    // longer pokes MIDI: a pure-MIDI hot-plug never reached here reliably (it
-    // doesn't change the audio device list, and the audio debounce below could
-    // swallow it), which is exactly what the dedicated watcher fixes.
-
-    // Collected hot-plug work to schedule after the gate is released.
-    std::string pendingSwitchOutput;
-    std::string pendingSwitchInput;
-    bool schedulePreferredReattach = false;
-    bool scheduleInputReattach = false;
-
-    {
-        auto devices = listDevices(true);
-        auto* dev = mDeviceManager->getCurrentAudioDevice();
-
-        // Active channel counts track the current device's live mask, not the
-        // device list, so refresh them on every callback — independent of the
-        // device-list fingerprint below. (System mode only: a reinit here would
-        // destroy our aggregate device; handleSystemDefaultOutputChanged owns
-        // actual default-output changes.)
-        if (mDeviceMode.empty() && dev) {
-            mCurrentConfig.numOutputChannels =
-                dev->getActiveOutputChannels().countNumberOfSetBits();
-            mCurrentConfig.numInputChannels =
-                dev->getActiveInputChannels().countNumberOfSetBits();
-        }
-
-        // Fingerprint the audio device LIST; skip the hotplug decision + device
-        // re-report when it's unchanged (e.g. a MIDI-only change that fired this
-        // callback) so a MIDI hotplug doesn't churn the GUI's audio list. The
-        // field/record separators are control chars that can't appear in a name.
-        std::string fingerprint;
-        for (auto& d : devices) {
-            fingerprint += d.name;
-            fingerprint += '\x1f' + std::to_string(d.maxOutputChannels);
-            fingerprint += '\x1f' + std::to_string(d.maxInputChannels);
-            fingerprint += '\x1f' + std::to_string(d.transportType) + '\x1e';
-        }
-
-        if (fingerprint != mLastAudioDeviceFingerprint) {
-            mLastAudioDeviceFingerprint = fingerprint;
-
-            std::string currentOutput = mRealOutputDeviceName.empty()
-                ? (dev ? dev->getName().toStdString() : "")
-                : mRealOutputDeviceName;
-            int currentActiveIn = dev ? dev->getActiveInputChannels().countNumberOfSetBits() : 0;
-
-            std::vector<std::string> visibleNames;
-            visibleNames.reserve(devices.size());
-            for (auto& d : devices) visibleNames.push_back(d.name);
-
-            auto decision = clockwork::device::decideHotplugAction(
-                mPreferredOutputDevice, mPreferredInputDevice,
-                currentOutput, currentActiveIn, visibleNames);
-
-            schedulePreferredReattach = decision.switchOutput;
-            scheduleInputReattach     = decision.switchInput;
-            pendingSwitchOutput       = decision.outputName;
-            pendingSwitchInput        = decision.inputName;
-
-            printDeviceList();
-        }
+    // Active channel counts track the current device's live mask, not the
+    // list. (System mode only: in device mode the switch that opened the
+    // device set them.)
+    if (mDeviceMode.empty() && dev) {
+        mCurrentConfig.numOutputChannels =
+            dev->getActiveOutputChannels().countNumberOfSetBits();
+        mCurrentConfig.numInputChannels =
+            dev->getActiveInputChannels().countNumberOfSetBits();
     }
 
-    // Release the gate before scheduling — the re-attach runs on the
-    // device task lane (NOT the message thread: every other swap
-    // deliberately stays off it, and the lane serialises against any
-    // mutation already queued) and takes the gate itself.
-    gate.unlock();
-    if (schedulePreferredReattach) {
-        std::string outName = pendingSwitchOutput;
-        std::string inName  = pendingSwitchInput;
-        clockwork_log("[hotplug] preferred output '%s' returned — scheduling switch "
-                "(preferred input='%s')", outName.c_str(), inName.c_str());
-        postDeviceTask([this, outName, inName]() {
-            switchDevice(outName, 0, 0, false, inName, SwapOrigin::Internal);
-        });
-    } else if (scheduleInputReattach) {
-        std::string inName = pendingSwitchInput;
-        clockwork_log("[hotplug] preferred input '%s' returned — scheduling input re-attach",
-                inName.c_str());
-        postDeviceTask([this, inName]() {
-            switchDevice("", 0, 0, false, inName, SwapOrigin::Internal);
-        });
-    }
+    const std::string currentOutput = mRealOutputDeviceName.empty()
+        ? (dev ? dev->getName().toStdString() : std::string())
+        : mRealOutputDeviceName;
+    const int currentActiveIn =
+        dev ? dev->getActiveInputChannels().countNumberOfSetBits() : 0;
+    std::vector<std::string> visibleNames;
+    visibleNames.reserve(devices.size());
+    for (auto& d : devices) visibleNames.push_back(d.name);
+    const auto decision = clockwork::device::decideHotplugAction(
+        mPreferredOutputDevice, mPreferredInputDevice,
+        currentOutput, currentActiveIn, visibleNames);
 
-    mLastListChangeHandled = std::chrono::steady_clock::now();
+    // The list as last reported, so a change that leaves it as it was isn't
+    // re-sent. The field/record separators are control chars that can't
+    // appear in a name.
+    std::string fingerprint;
+    for (auto& d : devices) {
+        fingerprint += d.name;
+        fingerprint += '\x1f' + std::to_string(d.maxOutputChannels);
+        fingerprint += '\x1f' + std::to_string(d.maxInputChannels);
+        fingerprint += '\x1f' + std::to_string(d.transportType) + '\x1e';
+    }
+    const bool listChanged = fingerprint != mLastAudioDeviceFingerprint;
+    mLastAudioDeviceFingerprint = fingerprint;
+
+    // A swap or a reopen reports for itself.
+    if (decision.reopen) {
+        // A recovery already claimed is queued behind this pass and will
+        // find the device gone itself.
+        bool expected = false;
+        if (mReopenInProgress.compare_exchange_strong(expected, true)) {
+            clockwork_log("[hotplug] '%s' has gone — reopening", currentOutput.c_str());
+            recoverAudio({});
+        }
+    } else if (decision.switchOutput) {
+        clockwork_log("[hotplug] preferred output '%s' is here — switching to it "
+                "(preferred input='%s')", decision.outputName.c_str(),
+                decision.inputName.c_str());
+        switchDevice(decision.outputName, 0, 0, false, decision.inputName,
+                     SwapOrigin::Internal);
+    } else if (decision.switchInput) {
+        clockwork_log("[hotplug] preferred input '%s' is here — adding it",
+                decision.inputName.c_str());
+        switchDevice("", 0, 0, false, decision.inputName, SwapOrigin::Internal);
+    } else if (listChanged) {
+        printDeviceList();
+    }
 }
 
 #ifdef __APPLE__
@@ -5543,10 +5515,8 @@ void ClockworkEngine::handleSystemDefaultOutputChanged() {
 
     // If we're on an aggregate, compare the new default against the real
     // (underlying) output we're aggregating, not the aggregate's own name.
-    // Non-blocking gate, same as changeListenerCallback: never stall the
-    // message thread, and serialise the mDeviceManager /
-    // mRealOutputDeviceName reads against recovery's
-    // teardownDeviceManager() reset().
+    // Under the gate: serialises the mDeviceManager / mRealOutputDeviceName
+    // reads against recovery's teardownDeviceManager() reset().
     std::string currentOutput;
     {
         // Runs on the device lane: wait for the gate (bounded, same

@@ -625,8 +625,8 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // crashes real drivers.
             // Turning inputs off leaves the output mode alone: in system mode the
             // engine goes on following the default. (It used to lock the output
-            // into manual mode here, against a changeListenerCallback reinit that
-            // system mode no longer does.)
+            // into manual mode here, against a list-change reinit that system
+            // mode no longer does.)
             if (inputDevName == "__none__") {
                 mEngine->postDeviceTask([this, devName, inputDevName] {
                     finishSwitch(mEngine->enableInputChannels(0), devName, inputDevName);

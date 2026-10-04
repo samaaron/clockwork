@@ -38,7 +38,27 @@ void AudioIODeviceType::removeListener (Listener* l)   { listeners.remove (l); }
 
 void AudioIODeviceType::callDeviceChangeListeners()
 {
+    if (deliverToDeviceChangeSink())
+        return;
+
     listeners.call ([] (Listener& l) { l.audioDeviceListChanged(); });
+}
+
+void AudioIODeviceType::setDeviceChangeSink (std::function<void()> sink)
+{
+    const ScopedLock sl (sinkLock);
+    deviceChangeSink = std::move (sink);
+}
+
+bool AudioIODeviceType::deliverToDeviceChangeSink()
+{
+    const ScopedLock sl (sinkLock);
+
+    if (deviceChangeSink == nullptr)
+        return false;
+
+    deviceChangeSink();
+    return true;
 }
 
 //==============================================================================

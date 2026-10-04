@@ -139,6 +139,16 @@ public:
     /** Removes a listener that was previously added with addListener(). */
     void removeListener (Listener* listener);
 
+    /** smoothie addition: hands this type's device-list changes to `sink`
+        instead of its listeners. A type that delivers from its OS callback
+        (CoreAudio) does so on the OS's thread, the moment it reports, with no
+        message loop, and leaves the rescan to the sink's owner, so its lists
+        are only touched by the thread that owns the device. Pass nullptr to
+        go back to the listeners; that waits for a delivery in progress, so
+        once it returns the sink is never called again.
+    */
+    void setDeviceChangeSink (std::function<void()> sink);
+
     //==============================================================================
     /** Destructor. */
     virtual ~AudioIODeviceType();
@@ -175,12 +185,22 @@ public:
 protected:
     explicit AudioIODeviceType (const String& typeName);
 
-    /** Synchronously calls all the registered device list change listeners. */
+    /** Synchronously calls all the registered device list change listeners,
+        or the sink when one is set (see setDeviceChangeSink).
+    */
     void callDeviceChangeListeners();
+
+    /** smoothie addition: calls the sink if one is set, and says whether it
+        did. A type whose OS callback would otherwise rescan and notify on the
+        message thread calls this from the callback first.
+    */
+    bool deliverToDeviceChangeSink();
 
 private:
     String typeName;
     ListenerList<Listener> listeners;
+    CriticalSection sinkLock;
+    std::function<void()> deviceChangeSink;
 
     JUCE_DECLARE_NON_COPYABLE (AudioIODeviceType)
 };

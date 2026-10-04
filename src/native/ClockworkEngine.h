@@ -58,7 +58,7 @@
 #include "engine_state.h"
 #include "shm_segment.hpp"
 
-class ClockworkEngine : private juce::ChangeListener {
+class ClockworkEngine {
     friend class EngineFixture;  // test fixture needs access to mAudioCallback
 public:
     // Channel-count sentinel: negative means "open the device with all its
@@ -637,7 +637,6 @@ public:
     void purge();
 
 private:
-    void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     bool interceptBufferFreed(const uint8_t* data, uint32_t size);
 
     // Clamp bufferSize up to kMinAggregateBufferSize when the current
@@ -674,8 +673,17 @@ private:
     // The one place a juce::AudioDeviceManager is constructed: the
     // Config::deviceManagerFactory boundary when set (tests), else a plain
     // manager. Both boot (init) and recovery (recreateDeviceManager) go
-    // through this so a recovered engine keeps its injected fakes.
-    std::unique_ptr<juce::AudioDeviceManager> makeDeviceManager() const;
+    // through this so a recovered engine keeps its injected fakes, and
+    // every manager hands its device-list changes to deviceListChanged().
+    std::unique_ptr<juce::AudioDeviceManager> makeDeviceManager();
+
+    // A device came or went. Called by the device layer on whatever thread
+    // the OS reports it, the moment it does; queues one pass of
+    // handleDeviceListChanged on the device lane, which owns the device
+    // manager. A burst of reports is one pass.
+    void deviceListChanged();
+    void handleDeviceListChanged();   // on the device lane
+    std::atomic<bool> mDeviceListChangeQueued{false};
 
     // Destroy and recreate mDeviceManager, then re-open the default device and
     // re-attach the audio callback. Unlike a reopen (which reuses the existing
@@ -1003,11 +1011,6 @@ private:
         ~PhaseGuard() { phase.store(prev); }
     };
 
-    // Stamps mLastSelfTriggeredChange on entry AND exit of a mutation span:
-    // during the span the gate makes the message-thread handlers skip; the
-    // exit stamp arms the quiet window against the change notifications the
-    // mutation itself provoked. Replaces scattered mid-function stamps that
-    // silently expired inside >1 s swaps.
     // Arms mSuppressRunLoop and guarantees the clear on every exit path —
     // an exception between arm and an explicit clear would wedge the macOS
     // run-loop pump for the rest of the session.
@@ -1018,6 +1021,10 @@ private:
         ~RunLoopSuppressGuard() { if (armed) flag.store(false); }
     };
 
+    // Stamps mLastSelfTriggeredChange on entry AND exit of a mutation span:
+    // the exit stamp arms the default-output handler's quiet window against
+    // the default changes the mutation itself provoked. Replaces scattered
+    // mid-function stamps that silently expired inside >1 s swaps.
     struct SelfTriggerSpan {
         std::atomic<std::chrono::steady_clock::time_point>& stamp;
         explicit SelfTriggerSpan(
@@ -1084,20 +1091,10 @@ private:
     // while already holding it, and so a recovery can hold it across
     // reopenCurrentDevice (which re-takes it). mutable for the const readers.
     mutable std::recursive_mutex mSwapMutex;
-    // Rate-limits changeListenerCallback's own processing of JUCE
-    // device-list churn (several broadcasts per hot-plug). Separate from
-    // mLastSelfTriggeredChange below on purpose: stamping the SHARED
-    // window on external events poisoned it — a user changing the macOS
-    // default fires BOTH a JUCE list broadcast and the HAL default
-    // listener, and the broadcast's stamp made the default-follow
-    // handler treat the user's change as engine-self-triggered and drop
-    // it (field-reported 2026-08-03).
-    std::atomic<std::chrono::steady_clock::time_point> mLastListChangeHandled{};
-
-    // Suppress async change notifications from our own setAudioDeviceSetup.
-    // Atomic: written from the boot thread, the switch worker, the reopen
-    // thread and the message thread; read on the message thread. A plain
-    // time_point here is a data race (UB) under TSan.
+    // Suppress the default-output listener's echo of our own device changes
+    // (handleSystemDefaultOutputChanged). Atomic: written from the boot
+    // thread and the device lane, read on the lane. A plain time_point here
+    // is a data race (UB) under TSan.
     std::atomic<std::chrono::steady_clock::time_point> mLastSelfTriggeredChange{};
 
     // listDrivers() cache — avoids re-scanning every AudioIODeviceType
@@ -1114,14 +1111,14 @@ private:
     // full WASAPI IAudioClient activation each time, ~50–100 ms per device.
     // With ~150 device/type combinations on a typical machine the call takes
     // ~10 s, which during boot starves the OSC thread and causes the client's
-    // /clockwork/notify handshake to time out. Cache invalidated by device-
-    // change events (audioDeviceListChanged) and by listDevices(true).
+    // /clockwork/notify handshake to time out. Refreshed by listDevices(true),
+    // which every device-list change runs (handleDeviceListChanged).
     mutable std::mutex                           mListDevicesMutex;
     mutable std::vector<DeviceInfo>              mCachedDevices;
     mutable std::chrono::steady_clock::time_point mCachedDevicesAt{};
-    // Audio device-list fingerprint from the last changeListenerCallback. JUCE
-    // fires that callback for MIDI device changes too, so it's used to skip the
-    // audio re-report when only MIDI changed (no needless audio-list churn).
+    // The audio device list as handleDeviceListChanged last reported it, so
+    // a change that leaves the list as it was (a device's own property, our
+    // own aggregate work) doesn't re-send the device report. Device lane only.
     std::string                                  mLastAudioDeviceFingerprint;
     // Pause CFRunLoop pumping in the host during aggregate destroy/create
     // — queued audioDeviceListChanged messages would trigger a second
