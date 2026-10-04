@@ -287,10 +287,16 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
         << static_cast<int32_t>(0);
     const auto noteOff = b.end();
 
-    const double when = wallClockNTP() + kLeadSec;
+    // Scheduled further ahead than the other cases: the sink must FIRST SEE
+    // it before it is due (`late == 0` below), and the engine's clock here is
+    // the sample count, rendered in milliseconds — so the only real time
+    // between scheduling and the sink is the hand-off to it, and the lead is
+    // a margin only a wedged hand-off uses up.
+    constexpr double kSinkLeadSec = 2.0;
+    const double when = wallClockNTP() + kSinkLeadSec;
     const auto   pkt  = scheduled(when, noteOff);
     e.engine.ingest(pkt.ptr(), pkt.size(), 0);
-    e.pump(kLeadSec + 0.1);
+    e.pump(kSinkLeadSec + 0.1);
 
 #ifdef __APPLE__
     // The bytes themselves, at the destination. CoreMIDI hands a
@@ -299,7 +305,8 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
     // reached the port is its stamp if it has one, else when it was read —
     // and either way it must not be before `when`.
     VirtualDestination::Packet got;
-    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    const auto until = std::chrono::steady_clock::now()
+                     + std::chrono::milliseconds(static_cast<int>((kSinkLeadSec + 1.5) * 1000));
     while (!vd.first(got) && std::chrono::steady_clock::now() < until)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     REQUIRE(vd.first(got));
@@ -319,7 +326,8 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
     // that cannot timestamp (the sink holds it) has released it too.
     ClockworkSink sink = CLOCKWORK_SINK_NONE;
     ClockworkSinkStats st{};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(static_cast<int>((kSinkLeadSec + 1.5) * 1000));
     while (std::chrono::steady_clock::now() < deadline) {
         sink = midiSinkFor(port);
         if (sink != CLOCKWORK_SINK_NONE && clockwork_sink_stats(sink, &st) && st.sent >= 1) break;

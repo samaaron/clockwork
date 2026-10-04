@@ -44,11 +44,13 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
     // (JuceAudioCallback, mCallbackCount < 4), so how long the count takes
     // to move is the hardware buffer's period times four — 43 ms on a
     // 512-frame device, 213 ms on the 2560-frame buffer Windows' DirectSound
-    // default hands out, which a fixed 200 ms sleep loses to.
+    // default hands out, which a fixed 200 ms sleep loses to. The bound is
+    // one only a device that never ticks reaches.
+    const auto boundFromNow = [] { return std::chrono::steady_clock::now() + std::chrono::seconds(30); };
     if (haveDevice) {
         uint32_t m1[4] = {}, m2[4] = {};
         REQUIRE(clockwork_client_metrics(c, m1, 4) >= 1);
-        for (int i = 0; i < 100; ++i) {
+        for (const auto until = boundFromNow(); std::chrono::steady_clock::now() < until;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             REQUIRE(clockwork_client_metrics(c, m2, 4) >= 1);
             if (m2[0] > m1[0]) break;
@@ -62,7 +64,7 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
         const auto ping = osc_test::message("/dummy/ping");
         REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 0x5a5a) == CLOCKWORK_OK);
         bool pong = false;
-        for (int i = 0; i < 50 && !pong; ++i) {
+        for (const auto until = boundFromNow(); !pong && std::chrono::steady_clock::now() < until;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             ClockworkClientMessage m[8];
             const uint32_t n = clockwork_client_poll(c, m, 8);

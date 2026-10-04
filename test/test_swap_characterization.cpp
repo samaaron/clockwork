@@ -92,17 +92,16 @@ TEST_CASE("Swap: inputs enable via saved device name, disable via __none__",
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
 
     // Seed mLastInputDeviceName with an explicit full-duplex switch.
-    auto r = fix.engine().switchDevice("Fake Interface", 0, 0, false,
-                                       "Fake Interface");
+    auto r = switchWhenFree(fix, "Fake Interface", 0, 0, false, "Fake Interface");
     REQUIRE(r.success);
     REQUIRE(r.inputDeviceName == "Fake Interface");
 
     // Disable...
-    auto off = fix.engine().enableInputChannels(0);
+    auto off = whenSwapGateFree([&] { return fix.engine().enableInputChannels(0); });
     REQUIRE(off.success);
 
     // ...and re-enable through the saved name — no live CoreAudio needed.
-    auto on = fix.engine().enableInputChannels(2);
+    auto on = whenSwapGateFree([&] { return fix.engine().enableInputChannels(2); });
     REQUIRE(on.success);
     REQUIRE(on.inputDeviceName == "Fake Interface");
 }

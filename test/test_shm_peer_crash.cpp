@@ -62,11 +62,11 @@ constexpr int kTimeoutScale = 1;
 
 // Engine-liveness waits (/dummy/ping round trips, ring-drain checks) run against a
 // free-running headless driver whose audio thread a loaded CI runner can
-// preempt for long stretches — and each cycle also drains a peer's flood — so
-// a 2s ceiling is too tight there. Use a generous one: a genuinely wedged
-// engine still fails (the reply never arrives before the deadline); only real
-// slowness is absorbed.
-constexpr int kEngineWaitMs = 10000 * kTimeoutScale;
+// preempt for long stretches — and each cycle also drains a peer's flood, up
+// to ~20k messages, about 1.7 s of blocks on an idle machine. The bound is one
+// only a wedged engine reaches: it fails (the reply never arrives), while
+// real slowness, however much of it the machine has, is absorbed.
+constexpr int kEngineWaitMs = 60000 * kTimeoutScale;
 
 namespace {
 

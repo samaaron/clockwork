@@ -118,6 +118,6 @@ TEST_CASE("metrics: a new engine's buffer peaks are its own",
     REQUIRE(second.pollUntil([&] {
         return second.engine().getMetrics().in_buffer_peak_bytes.load() > 0;
     }));
-    REQUIRE(second.waitForBlocks(64));
+    REQUIRE(second.waitForBlocks(64, 30000));   // a bound only a broken engine reaches
     CHECK(second.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
 }

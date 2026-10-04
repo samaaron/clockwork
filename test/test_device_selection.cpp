@@ -25,20 +25,10 @@
 // ── Rate memory bound (32 entries) ───────────────────────────────────────────
 
 namespace {
-// switchDevice() is non-blocking by design: while a swap's tail is still
-// releasing the gate it answers "swap already in progress", and the engine's
-// own callers (the debounced switch) retry that for up to ~3 s. A test that
-// fires swaps back to back does the same — on a slow runner the previous
-// swap's tail is still there when the next request lands.
+// Swaps back to back: see switchWhenFree (EngineFixture.h).
 template <typename... Args>
 SwapResult swap(EngineFixture& fix, Args&&... args) {
-    SwapResult r;
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        r = fix.engine().switchDevice(std::forward<Args>(args)...);
-        if (r.success || r.error != "swap already in progress") break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    return r;
+    return switchWhenFree(fix, std::forward<Args>(args)...);
 }
 } // namespace
 

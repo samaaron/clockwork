@@ -88,8 +88,10 @@ ClockworkSinkStats statsOf(ClockworkSink sink) {
 // No REQUIRE inside the loop, deliberately: how many times round it goes
 // depends on the scheduler, and an assertion in here would make the binary's
 // total assertion count differ from run to run.
-bool settled(ClockworkSink sink, uint64_t n, int max_ms = 3000) {
-    for (int i = 0; i < max_ms; ++i) {
+// Bounded only against a sink that never delivers.
+bool settled(ClockworkSink sink, uint64_t n, int max_ms = 30000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
         ClockworkSinkStats s{};
         if (clockwork_sink_stats(sink, &s) != 0 && s.sent + s.dropped >= n) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -240,17 +242,13 @@ TEST_CASE("sinks: every message is either sent or dropped, and none is lost",
     constexpr uint64_t kSends = 20000;
     const uint8_t body[3] = { 0x90, 60, 100 };
     uint64_t accepted = 0;
-    const auto start = std::chrono::steady_clock::now();
     for (uint64_t i = 0; i < kSends; ++i) {
         if (clockwork_sink_send(sink, body, 3, 1) != 0) ++accepted;
     }
-    const auto elapsed = std::chrono::steady_clock::now() - start;
 
-    // Nothing waited. A send that took a lock or a syscall could not do
-    // twenty thousand of these inside a second on any machine this runs on.
-    REQUIRE(elapsed < std::chrono::seconds(1));
-    // The sink is genuinely shallower than the offer, so the drop path really
-    // was taken rather than the whole lot fitting.
+    // Nothing waited: the sink is genuinely shallower than the offer, and the
+    // drop path was taken — a send that waited for room would have been
+    // accepted every time.
     REQUIRE(accepted < kSends);
 
     REQUIRE(settled(sink, kSends));
@@ -312,7 +310,7 @@ TEST_CASE("sinks: a message wider than the base cell rides a wider class",
     REQUIRE(clockwork_sink_send(sink, big.data(), static_cast<uint32_t>(big.size()), 1) != 0);
 
     ClockworkSinkStats st{};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);   // wedge-only
     while (std::chrono::steady_clock::now() < deadline) {
         if (clockwork_sink_stats(sink, &st) != 0 && st.sent + st.dropped >= 2) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

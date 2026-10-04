@@ -61,7 +61,7 @@ TEST_CASE("ColdSwap: engine reports correct rate after swap", "[ColdSwap]") {
     REQUIRE(fix.waitForReply("/dummy/pong", reply));
 
     // Cold swap to 44100
-    auto result = fix.engine().switchDevice("", 44100);
+    auto result = switchWhenFree(fix, "", 44100);
     REQUIRE(result.success);
     REQUIRE(result.sampleRate == 44100);
 
@@ -71,7 +71,7 @@ TEST_CASE("ColdSwap: engine reports correct rate after swap", "[ColdSwap]") {
     REQUIRE(fix.waitForReply("/dummy/pong", reply));
 
     // Round-trip: swap back to 48000
-    result = fix.engine().switchDevice("", 48000);
+    result = switchWhenFree(fix, "", 48000);
     REQUIRE(result.success);
     REQUIRE(result.sampleRate == 48000);
 

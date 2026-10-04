@@ -81,21 +81,22 @@ TEST_CASE("Offloaded device commands still reply", "[control][notify]") {
 
 // The control thread is the sole non-RT consumer: whatever it does while
 // handling one client's registration is time every other client spends
-// unanswered. Assert on the engine's own measurement rather than a wall-clock
-// deadline here, so a loaded CI runner can't turn preemption into a failure.
+// unanswered. What parked it was device work done inline — a probe of every
+// device — and device work takes the swap gate. So the registrations are made
+// while a swap holds it: each is answered all the same, where inline device
+// work would wait for the swap and never answer. Structural, not a duration a
+// loaded machine can overrun (test_gateway_swap_gate.cpp holds the same line
+// for every device question).
 TEST_CASE("Registering clients does not park the control thread",
           "[control][blocking][notify]") {
     EngineFixture fix;
-    fix.engine().resetNrtMaxPass();
+    auto swap = fix.engine().testHoldSwapGate();
 
     // Five origins register during a real boot — the second of them was what
     // parked the thread behind the first one's device probe.
     for (int i = 0; i < 5; ++i) {
         OscReply r;
         fix.send(osc_test::message("/clockwork/notify"));
-        REQUIRE(fix.waitForReply("/clockwork/notify.reply", r));
+        REQUIRE(fix.waitForReply("/clockwork/notify.reply", r, 30000));
     }
-
-    CHECK(fix.engine().nrtInFlightMs() == 0);
-    CHECK(fix.engine().nrtMaxPassMs() < 250);
 }

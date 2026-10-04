@@ -216,6 +216,10 @@ TEST_CASE("scope-stream: headless engine publishes an advancing sample clock",
     cfg.headless          = true;
     cfg.numOutputChannels = 2;
     cfg.numInputChannels  = 0;
+    // The case renders every block, and the engine's clock is the sample
+    // count: what is published is measured against what was rendered.
+    cfg.manualAudioPump   = true;
+    cfg.freewheelClock    = true;
     EngineFixture fix(cfg);
 
     OscReply reply;
@@ -233,11 +237,10 @@ TEST_CASE("scope-stream: headless engine publishes an advancing sample clock",
     const sample_clock_view b = client.get_sample_clock();
     REQUIRE(b.valid);
     CHECK(b.engine_frames > a.engine_frames);
-    // NTP advances with the sample clock: the two snapshots must agree to
-    // within a generous scheduling tolerance (headless ticks are timed).
+    // NTP advances with the sample clock: the two snapshots agree.
     const double dtFrames = double(b.engine_frames - a.engine_frames) / 48000.0;
     const double dtNtp = b.dac_ntp - a.dac_ntp;
-    CHECK(std::abs(dtNtp - dtFrames) < 0.25);
+    CHECK(std::abs(dtNtp - dtFrames) < 1e-6);
 
     // visible_frames at the publish instant is close to the published frame.
     const double vis = b.visible_frames(b.dac_ntp);

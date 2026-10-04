@@ -177,12 +177,10 @@ TEST_CASE("ports: a full sink drops, counts, and does not block", "[ports]") {
     REQUIRE(clockwork_port_overruns(p) == 0);
 
     // Full. The next block is dropped WHOLE and counted whole, and the call
-    // returns rather than waiting for the endpoint.
-    const auto before = std::chrono::steady_clock::now();
+    // returns rather than waiting for the endpoint — nothing here ever drains
+    // the ring, so a write that waited for room would never return at all.
     REQUIRE(clockwork_port_write(p, b.in.data(), 1, 16) == 0);
-    const auto elapsed = std::chrono::steady_clock::now() - before;
     REQUIRE(clockwork_port_overruns(p) == 16);
-    REQUIRE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 50);
 
     // A PARTIAL drop: make room for 4, offer 16, and 12 are counted.
     std::vector<float> drained(4, -1.0f);

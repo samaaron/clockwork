@@ -127,9 +127,15 @@ public:
     void onSlowPass(std::function<void(uint32_t)> fn) { mOnSlowPass = std::move(fn); }
     void setSlowPassThresholdUs(uint32_t us) { mSlowPassThresholdUs = us; }
 
+    // The clock passes are timed against, in microseconds: steady_clock unless
+    // a test sets one (before start()), so that a pass takes exactly the time
+    // the test says it does, whatever the machine is doing.
+    void setClock(std::function<uint64_t()> clock) { mClock = std::move(clock); }
+
 private:
     void run();
-    static uint64_t nowUs();
+    uint64_t nowUs() const;
+    std::function<uint64_t()> mClock;
 
     struct Drain {
         uint8_t*              buffer = nullptr;

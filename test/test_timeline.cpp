@@ -376,18 +376,23 @@ TEST_CASE("timeline: the session-of-one answers in the NTP domain once bound",
 
     // The session's own mutators go through the same region: a tempo change
     // holds the beat, and a transport change stamps its time.
+    const double retempoFrom = wallClockNTP();
     ask(clock, floatMsg("/clockwork/clock/tempo/set", 60.0f));
+    const double retempoBy = wallClockNTP();
     r = ask(clock, timeQuery("/clockwork/clock/rpc/beat_at_time", t8, 4.0f)).only();
     // The beat playing at the retempo instant (2 per second since the
-    // origin, moments ago) was held, and from there t8 is under four
-    // seconds away at one beat a second: a little over 4, never the 8 the
-    // old origin would give.
-    CHECK(r.argDouble(0) >= 4.0 - 1e-5);
-    CHECK(r.argDouble(0) < 6.0);
+    // origin) was held, and from there t8 is (origin + 4 - instant) away at
+    // one beat a second: 4 + (instant - origin) in all, a little over 4 —
+    // never the 8 the old origin would give. The instant lies between the
+    // two reads around the request, however long the machine took over it.
+    CHECK(r.argDouble(0) >= 4.0 + (retempoFrom - origin) - 1e-5);
+    CHECK(r.argDouble(0) <= 4.0 + (retempoBy - origin) + 1e-5);
+    const double transportFrom = wallClockNTP();
     ask(clock, osc_test::message("/clockwork/clock/transport/set", 1));
+    const double transportBy = wallClockNTP();
     r = ask(clock, osc_test::message("/clockwork/clock/transport/time/get")).only();
-    CHECK(r.argInt64(0) >= static_cast<int64_t>(std::llround(origin * 1e6)));
-    CHECK(std::llabs(r.argInt64(0) - static_cast<int64_t>(std::llround(wallClockNTP() * 1e6))) < 1'000'000);
+    CHECK(r.argInt64(0) >= static_cast<int64_t>(std::llround(transportFrom * 1e6)) - 1);
+    CHECK(r.argInt64(0) <= static_cast<int64_t>(std::llround(transportBy * 1e6)) + 1);
 
     // Bound twice is bound once: an origin that exists is not stamped over.
     const double placed = clock.getBeatOriginNtp();
@@ -418,14 +423,21 @@ TEST_CASE("timeline: tempo/set with an instant holds the beat at that instant",
     constexpr double slack = 1e-6;
 #endif
 
-    const double at = wallClockNTP() + 0.5;
+    // Far enough ahead that it is still ahead when the request lands,
+    // however long the machine takes to send it. Nothing waits for it.
+    const double at = wallClockNTP() + 5.0;
     const double beatThen = clock.beatAtTime(at, 4.0);
     const uint32_t generation = readClockworkClock(clock.state()).generation;
     osc_test::Builder b;
     b.begin("/clockwork/clock/tempo/set") << 60.0f << static_cast<osc::int64>(std::llround(at * 1e6));
     ask(clock, b.end());
 #ifdef CLOCKWORK_LINK
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let Link's re-anchor land
+    // Link's re-anchor lands a moment later, on its own thread: waited for,
+    // within a bound only a re-anchor that never comes reaches.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < until
+           && std::abs(clock.beatAtTime(at, 4.0) - beatThen) > slack)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
 #endif
 
     CHECK_THAT(clock.getBpm(), WithinAbs(60.0, 1e-9));

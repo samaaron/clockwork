@@ -38,23 +38,26 @@ namespace {
 // midiTimelinePulse takes an OS timestamp in microseconds, as a driver
 // callback supplies it. The clock captures `wallClockNTP() - ts` at the FIRST
 // pulse of a run and applies that offset to every pulse after it, so a pulse
-// at device time t0 + k*iv lands at NTP n0 + k*iv. Anchoring n0 here is what
-// lets a case name the exact NTP of any pulse it wants the beat at, rather
-// than reading "now" and hoping the two agree.
+// at device time t0 + k*iv lands at NTP n0 + k*iv. The feed reads the wall
+// clock on either side of that first pulse: the clock's own read lies between
+// the two, so a case can name the NTP of any pulse it wants the beat at, to
+// within the beats that span covers — microseconds, or however long the
+// machine took over it — rather than reading "now" and hoping.
 struct PulseFeed {
     ClockworkClock& sc;
     int             id;
     double          ivSec;
+    double          bpm;
     int64_t         tsUs;
-    double          n0;
+    double          n0 = 0;        // the wall clock just before the first pulse
+    double          n0Spread = 0;  // ...and how long that pulse took to land
     int             sent = 0;
 
-    PulseFeed(ClockworkClock& c, int timeline, double bpm)
-        : sc(c), id(timeline), ivSec(60.0 / bpm / 24.0) {
+    PulseFeed(ClockworkClock& c, int timeline, double tempo)
+        : sc(c), id(timeline), ivSec(60.0 / tempo / 24.0), bpm(tempo) {
         tsUs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        n0 = wallClockNTP();
     }
 
     // Restart the device series at engine-now, as a real stream does after
@@ -63,14 +66,16 @@ struct PulseFeed {
         tsUs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        n0 = wallClockNTP();
         sent = 0;
     }
 
     void send(int n = 1) {
         for (int k = 0; k < n; ++k) {
+            const bool first = sent == 0;
+            if (first) n0 = wallClockNTP();
             sc.midiTimelinePulse(id, static_cast<uint64_t>(
                 tsUs + static_cast<int64_t>(sent) * static_cast<int64_t>(ivSec * 1e6)));
+            if (first) n0Spread = wallClockNTP() - n0;
             ++sent;
         }
     }
@@ -78,6 +83,10 @@ struct PulseFeed {
     // The NTP instant of pulse `k` (0-based), and of the last one sent.
     double ntpOf(int k) const { return n0 + k * ivSec; }
     double ntpOfLast()  const { return ntpOf(sent - 1); }
+
+    // How far a beat read at ntpOf() can sit from the exact count: the
+    // estimator's own allowance, and the beats the first pulse's landing spans.
+    double margin() const { return 0.02 + n0Spread * bpm / 60.0; }
 };
 
 
@@ -87,11 +96,15 @@ struct PulseFeed {
 // applies that offset to every pulse after. Sampling the same pair here, just
 // before that first pulse, lets a case name the exact NTP of any device
 // timestamp it feeds instead of reading "now" and hoping the two agree.
+// Read just before the first pulse is delivered; landed() just after it, so
+// spread is how far the clock's own capture can sit from n0 (see PulseFeed).
 struct DeviceClock {
     double t0us;
     double n0;
+    double spread = 0;
     explicit DeviceClock(double firstPulseUs)
         : t0us(firstPulseUs), n0(wallClockNTP()) {}
+    void landed() { spread = wallClockNTP() - n0; }
     double ntp(double tsUs) const { return n0 + (tsUs - t0us) * 1e-6; }
 };
 
@@ -113,7 +126,7 @@ namespace {
 // equals".
 bool eventuallyBpm(ClockworkClock& sc, double expected, double eps = 1e-9) {
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);   // wedge-only
     while (std::chrono::steady_clock::now() < deadline) {
         if (std::abs(sc.getBpm() - expected) < eps) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -344,10 +357,14 @@ TEST_CASE("ClockworkClock: now() returns sensible NTP time", "[ClockworkClock]")
 
 TEST_CASE("ClockworkClock: wallNow tracks wallClockNTP within tight bound",
           "[ClockworkClock]") {
+    // Bracketed by the wall clock on either side, so the bound is the time the
+    // read actually took, however long the machine took over it.
     ClockworkClock sc;
-    const double direct = wallClockNTP();
+    const double before = wallClockNTP();
     const double via_sc = sc.wallNow();
-    CHECK(std::abs(via_sc - direct) < 0.01);
+    const double after  = wallClockNTP();
+    CHECK(via_sc >= before - 1e-6);
+    CHECK(via_sc <= after + 1e-6);
 }
 
 TEST_CASE("ClockworkClock: updateAudioThreadNTP publishes the returned value",
@@ -361,8 +378,11 @@ TEST_CASE("ClockworkClock: updateAudioThreadNTP publishes the returned value",
 TEST_CASE("ClockworkClock: resetAudioThreadTime publishes a usable NTP immediately",
           "[ClockworkClock]") {
     ClockworkClock sc;
+    const double before = wallClockNTP();
     sc.resetAudioThreadTime(0.0, 48000.0);
-    CHECK(std::abs(sc.now() - wallClockNTP()) < 0.01);
+    const double after  = wallClockNTP();
+    CHECK(sc.now() >= before - 1e-6);
+    CHECK(sc.now() <= after + 1e-6);
 }
 
 // ─── MIDI follower timelines ─────────────────────────────────────────────
@@ -427,7 +447,7 @@ TEST_CASE("ClockworkClock: a local setBpm fires the tempo callback exactly once"
     // Wait for the notification to land (Link's handler runs on its io thread),
     // then give any duplicate a generous window to surface before asserting.
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);   // wedge-only
     while (notifications.load() < 1
            && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -460,7 +480,7 @@ TEST_CASE("ClockworkClock: binding into the arena anchors the Link grid so beats
     // And the beat playing now stays put across a tempo change.
     const double target = sc.getBpm() * 2.0;
     sc.setBpm(target);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let applyTempoChange land
+    REQUIRE(eventuallyBpm(sc, target));   // applyTempoChange has landed
     const double t = sc.timeAtBeat(beatNow, 4.0);
     CHECK(t == Catch::Approx(now).margin(0.5));
 }
@@ -488,16 +508,20 @@ TEST_CASE("ClockworkClock: the arena grid and Link's own grid agree from the bin
     ClockworkClockState region;
     ClockworkClockState::initDefaults(region);
     sc.bindStateToShm(&region);
+    // The two grids agree at the bind: the arena's beat, read between two of
+    // Link's, lies between them — however long the reads take.
+    const double linkBefore = linkBeatNow(sc);
     const double bound = wallClockNTP();
     const double beatAtBind = sc.beatAtTime(bound, 4.0);
-
-    // The two grids agree at the bind.
-    CHECK(beatAtBind == Catch::Approx(linkBeatNow(sc)).margin(0.01));
+    const double linkAfter = linkBeatNow(sc);
+    CHECK(beatAtBind >= linkBefore - 1e-3);
+    CHECK(beatAtBind <= linkAfter + 1e-3);
 
     // And the beat playing at the bind is still there once a tempo change
     // has been through Link's callback.
-    sc.setBpm(sc.getBpm() * 2.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const double doubled = sc.getBpm() * 2.0;
+    sc.setBpm(doubled);
+    REQUIRE(eventuallyBpm(sc, doubled));
     CHECK(sc.timeAtBeat(beatAtBind, 4.0) == Catch::Approx(bound).margin(0.02));
 }
 
@@ -522,14 +546,19 @@ TEST_CASE("ClockworkClock: when Link's session moves its grid under the clock, t
     st.forceBeatAtTime(7.0, link.clock().micros(), 4.0);
     link.commitAppSessionState(st);
 
-    double gap = 1e9;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    while (std::chrono::steady_clock::now() < deadline) {
-        gap = std::fabs(sc.beatAtTime(wallClockNTP(), 4.0) - linkBeatNow(sc));
-        if (gap < 0.01) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Followed: the arena's beat, read between two of Link's, lies between
+    // them. Waited for — the worker's tick carries the move — within a bound
+    // only a grid that never follows reaches.
+    bool followed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!followed && std::chrono::steady_clock::now() < deadline) {
+        const double linkBefore = linkBeatNow(sc);
+        const double arena = sc.beatAtTime(wallClockNTP(), 4.0);
+        const double linkAfter = linkBeatNow(sc);
+        followed = arena >= linkBefore - 1e-3 && arena <= linkAfter + 1e-3;
+        if (!followed) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    CHECK(gap < 0.01);
+    CHECK(followed);
     sc.setLinkEnabled(false);
 }
 #endif  // CLOCKWORK_LINK
@@ -546,8 +575,9 @@ TEST_CASE("ClockworkClock: a local transport change fires the start/stop callbac
 
     sc.setIsPlaying(true, wallClockNTP());
 
+    // A bound only a callback that never comes reaches.
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (notifications.load() < 1
            && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -560,10 +590,16 @@ TEST_CASE("ClockworkClock: midi tempo change preserves the current beat",
     ClockworkClock sc;
     const int id = sc.claimMidiTimeline("portA", "Port A");
     sc.setMidiTimelineTempo(id, 120.0);
-    const double before = sc.timeline(id).beatAt(wallClockNTP());
+    const double t1 = wallClockNTP();
+    const double before = sc.timeline(id).beatAt(t1);
     sc.setMidiTimelineTempo(id, 174.0);                 // jump tempo
-    const double after = sc.timeline(id).beatAt(wallClockNTP());
-    CHECK(after == Catch::Approx(before).margin(0.05)); // no beat discontinuity
+    const double t2 = wallClockNTP();
+    const double after = sc.timeline(id).beatAt(t2);
+    // No beat discontinuity: across a change made between the two reads the
+    // beat moved by what the time between them allows at one tempo or the
+    // other — measured, so a pause between the reads moves the allowance.
+    CHECK(after - before >= (t2 - t1) * 120.0 / 60.0 - 0.05);
+    CHECK(after - before <= (t2 - t1) * 174.0 / 60.0 + 0.05);
 }
 
 TEST_CASE("ClockworkClock: midi transport drives playing state", "[ClockworkClock][midi]") {
@@ -638,7 +674,7 @@ TEST_CASE("ClockworkClock: START mid-stream re-anchors beat 0 to the downbeat",
     feed.reanchor();
     feed.send(25);
     const double beat = sc.timeline(id).beatAt(feed.ntpOfLast());
-    CHECK(beat == Catch::Approx(1.0).margin(0.02));     // downbeat + 24 pulses
+    CHECK(beat == Catch::Approx(1.0).margin(feed.margin()));     // downbeat + 24 pulses
 }
 
 TEST_CASE("ClockworkClock: SPP re-bases the beat counter", "[ClockworkClock][midi]") {
@@ -649,7 +685,7 @@ TEST_CASE("ClockworkClock: SPP re-bases the beat counter", "[ClockworkClock][mid
     PulseFeed feed(sc, id, 120.0);
     feed.send(25);
     const double beat = sc.timeline(id).beatAt(feed.ntpOfLast());
-    CHECK(beat == Catch::Approx(9.0).margin(0.02));     // 8.0 + downbeat + 24/24
+    CHECK(beat == Catch::Approx(9.0).margin(feed.margin()));     // 8.0 + downbeat + 24/24
 }
 
 TEST_CASE("ClockworkClock: CONTINUE preserves the beat anchor", "[ClockworkClock][midi]") {
@@ -665,7 +701,7 @@ TEST_CASE("ClockworkClock: CONTINUE preserves the beat anchor", "[ClockworkClock
     // and the device series carries straight on.
     feed.send(24);
     const double beat = sc.timeline(id).beatAt(feed.ntpOfLast());
-    CHECK(beat == Catch::Approx(2.0).margin(0.02));     // 1.0 + 24 (counts on)
+    CHECK(beat == Catch::Approx(2.0).margin(feed.margin()));     // 1.0 + 24 (counts on)
     CHECK(sc.timelineIsAnchored(id));
 }
 
@@ -677,7 +713,7 @@ TEST_CASE("ClockworkClock: midi beat tracks the pulse count", "[ClockworkClock][
     // The beat is the exact count: the first pulse IS the downbeat (beat 0),
     // so querying at the last pulse's own instant gives 48/24 = 2.0.
     const double beat = sc.timeline(id).beatAt(feed.ntpOfLast());
-    CHECK(beat == Catch::Approx(2.0).margin(0.02));
+    CHECK(beat == Catch::Approx(2.0).margin(feed.margin()));
     CHECK(sc.timelineBpm(id) == Catch::Approx(120.0).margin(0.5));     // tempo recovered
 }
 
@@ -707,9 +743,13 @@ TEST_CASE("ClockworkClock: midi stall-and-burst keeps both beat and tempo",
     const int id = sc.claimMidiTimeline("portA", "Port A");
     const double iv = 60.0 / 111.0 / 24.0 * 1e6;          // ~111 BPM interval
     double t = static_cast<double>(deviceMicros());
-    const DeviceClock dev(t);
+    DeviceClock dev(t);
     int pulses = 0;
-    for (int k = 0; k < 96; ++k) { sc.midiTimelinePulse(id, static_cast<uint64_t>(t)); t += iv; ++pulses; }
+    for (int k = 0; k < 96; ++k) {
+        sc.midiTimelinePulse(id, static_cast<uint64_t>(t));
+        if (k == 0) dev.landed();
+        t += iv; ++pulses;
+    }
     const double bpmBefore = sc.timelineBpm(id);
 
     t += 122000.0 - iv;                                    // stall: next tick 122ms late
@@ -722,7 +762,8 @@ TEST_CASE("ClockworkClock: midi stall-and-burst keeps both beat and tempo",
     // Beat at the last pulse's own timestamp = ticks since the downbeat pulse
     // / 24: every burst tick counted, no phase slip.
     const double beat = sc.timeline(id).beatAt(dev.ntp(t - iv));
-    CHECK(beat == Catch::Approx(static_cast<double>(pulses - 1) / 24.0).margin(0.02));
+    CHECK(beat == Catch::Approx(static_cast<double>(pulses - 1) / 24.0)
+                      .margin(0.02 + dev.spread * 111.0 / 60.0));
 }
 
 TEST_CASE("ClockworkClock: midi tempo only interpolates between pulses",

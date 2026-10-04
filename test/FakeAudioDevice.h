@@ -28,6 +28,8 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,6 +63,7 @@ struct FakeDeviceSpec {
     std::atomic<bool> hidden { false };
 };
 
+class FakeAudioIODevice;
 class FakeAudioIODeviceType;
 
 // The simulated machine: device types and their devices, shared between
@@ -92,17 +95,43 @@ struct FakeSystem {
     // against that type being destroyed mid-call, as CoreAudio's listener is
     // (LiveInternalRegistry). False when no manager exists.
     bool reportListChanged();
+
+    // ── Time the case keeps ──────────────────────────────────────────────
+    // A device keeps wall time until the case takes the clock. From then on
+    // each playing device delivers exactly the blocks due by the case's
+    // clock, at its delivered rate — the first at once when it starts, as
+    // hardware calls back promptly — and advanceTo() returns once every
+    // playing device has delivered what is due. Frames and time move
+    // together exactly, whatever the machine is doing; give the engine the
+    // same clock (Config::watchdogClockMs = nowMs) and what the watchdog
+    // measures is exact.
+    void useVirtualTime();                  // from now; returns once every device has joined
+    void useWallTime();                     // and back: devices keep wall time again
+    void advanceTo(int64_t us);
+    void advanceBy(int64_t us) { advanceTo(nowUs() + us); }
+    int64_t nowUs() const { return mNowUs.load(); }
+    int64_t nowMs() const { return mNowUs.load() / 1000; }
+
+    // The device side of the clock (FakeAudioIODevice), under clockMutex.
+    std::mutex                      clockMutex;
+    std::condition_variable         clockCv;
+    bool                            virtualTime = false;
+    std::vector<FakeAudioIODevice*> playing;
+
+private:
+    std::atomic<int64_t> mNowUs { 0 };
 };
 
 class FakeAudioIODevice : public juce::AudioIODevice {
 public:
-    FakeAudioIODevice(std::shared_ptr<FakeDeviceSpec> outSpec,
+    FakeAudioIODevice(std::shared_ptr<FakeSystem> system,
+                      std::shared_ptr<FakeDeviceSpec> outSpec,
                       std::shared_ptr<FakeDeviceSpec> inSpec,
                       const juce::String& typeName)
         : juce::AudioIODevice(outSpec ? juce::String(outSpec->name)
                                       : juce::String(inSpec->name),
                               typeName),
-          mOut(std::move(outSpec)), mIn(std::move(inSpec)) {}
+          mSystem(std::move(system)), mOut(std::move(outSpec)), mIn(std::move(inSpec)) {}
 
     ~FakeAudioIODevice() override { close(); }
 
@@ -165,17 +194,40 @@ public:
         mCallback = callback;
         if (callback) callback->audioDeviceAboutToStart(this);
         mPlaying.store(true);
-        if (!primary()->failStart)
+        if (!primary()->failStart) {
+            {
+                std::lock_guard<std::mutex> clk(mSystem->clockMutex);
+                mJoinedVirtual = false;
+                mSystem->playing.push_back(this);
+            }
             mThread = std::thread([this] { tickLoop(); });
+        }
     }
 
     void stop() override {
         std::lock_guard<std::recursive_mutex> lk(mLifecycle);
-        if (!mPlaying.exchange(false)) return;
+        {
+            std::lock_guard<std::mutex> clk(mSystem->clockMutex);
+            if (!mPlaying.exchange(false)) return;
+        }
+        mSystem->clockCv.notify_all();
         if (mThread.joinable()) mThread.join();
+        {
+            std::lock_guard<std::mutex> clk(mSystem->clockMutex);
+            auto& v = mSystem->playing;
+            v.erase(std::remove(v.begin(), v.end(), this), v.end());
+        }
+        mSystem->clockCv.notify_all();
         if (mCallback) mCallback->audioDeviceStopped();
         mCallback = nullptr;
     }
+
+    // Under the system's clockMutex: delivered everything due by `us`, or
+    // not playing.
+    bool caughtUpTo(int64_t us) const {
+        return !mPlaying.load() || (mJoinedVirtual && mNextUs > static_cast<double>(us));
+    }
+    bool joinedVirtualTime() const { return !mPlaying.load() || mJoinedVirtual; }
 
     bool isPlaying() override { return mPlaying.load(); }
     juce::String getLastError() override { return {}; }
@@ -235,21 +287,59 @@ private:
         // by default) would read an honest device as slow.
         const double tickRate = primary()->deliveredRate > 0 ? primary()->deliveredRate
                                                               : mRate;
-        const auto period = std::chrono::microseconds(
-            static_cast<int64_t>(1e6 * mBufferSize / tickRate));
+        const double periodUs = 1e6 * mBufferSize / tickRate;
+        const auto period = std::chrono::microseconds(static_cast<int64_t>(periodUs));
         auto next = std::chrono::steady_clock::now();
+        FakeSystem& sys = *mSystem;
         while (mPlaying.load()) {
+            // On the case's clock: wait for this block to fall due (the first
+            // is due as the device joins).
+            bool onCaseClock = false;
+            {
+                std::unique_lock<std::mutex> clk(sys.clockMutex);
+                if (sys.virtualTime) {
+                    onCaseClock = true;
+                    if (!mJoinedVirtual) {
+                        mJoinedVirtual = true;
+                        mNextUs = static_cast<double>(sys.nowUs());
+                        sys.clockCv.notify_all();
+                    }
+                    sys.clockCv.wait(clk, [&] {
+                        return !mPlaying.load() || !sys.virtualTime
+                            || static_cast<double>(sys.nowUs()) >= mNextUs;
+                    });
+                    if (!mPlaying.load()) break;
+                    if (!sys.virtualTime) {     // the case handed the clock back
+                        onCaseClock = false;
+                        mJoinedVirtual = false;
+                        next = std::chrono::steady_clock::now();
+                    }
+                }
+            }
             if (mCallback)
                 mCallback->audioDeviceIOCallbackWithContext(
                     nIn > 0 ? inPtrs.data() : nullptr, nIn,
                     outPtrs.data(), nOut, mBufferSize, {});
-            next += period;
-            std::this_thread::sleep_until(next);
+            if (onCaseClock) {
+                {
+                    std::lock_guard<std::mutex> clk(sys.clockMutex);
+                    mNextUs += periodUs;
+                }
+                sys.clockCv.notify_all();
+            } else {
+                next += period;
+                std::this_thread::sleep_until(next);
+            }
         }
     }
 
+    std::shared_ptr<FakeSystem> mSystem;
     std::shared_ptr<FakeDeviceSpec> mOut, mIn;
     juce::AudioIODeviceCallback* mCallback = nullptr;
+    // On the case's clock (FakeSystem::useVirtualTime), under clockMutex:
+    // whether this device has joined it, and when its next block falls due.
+    bool   mJoinedVirtual = false;
+    double mNextUs = 0;
     juce::BigInteger mActiveOut, mActiveIn;
     std::thread mThread;
     std::recursive_mutex mLifecycle;
@@ -307,7 +397,7 @@ public:
         auto out = find(outputDeviceName.toStdString());
         auto in  = find(inputDeviceName.toStdString());
         if (!out && !in) return nullptr;
-        return new FakeAudioIODevice(out, in, getTypeName());
+        return new FakeAudioIODevice(mSystem, out, in, getTypeName());
     }
 
 private:
@@ -325,6 +415,35 @@ private:
     size_t mTypeIndex;
     bool mScanned = false;
 };
+
+inline void FakeSystem::useVirtualTime() {
+    std::unique_lock<std::mutex> lk(clockMutex);
+    virtualTime = true;
+    clockCv.notify_all();
+    // A device mid-way through a wall-clock period joins when it wakes.
+    clockCv.wait(lk, [&] {
+        for (auto* d : playing) if (!d->joinedVirtualTime()) return false;
+        return true;
+    });
+}
+
+inline void FakeSystem::useWallTime() {
+    {
+        std::lock_guard<std::mutex> lk(clockMutex);
+        virtualTime = false;
+    }
+    clockCv.notify_all();
+}
+
+inline void FakeSystem::advanceTo(int64_t us) {
+    std::unique_lock<std::mutex> lk(clockMutex);
+    if (us > mNowUs.load()) mNowUs.store(us);
+    clockCv.notify_all();
+    clockCv.wait(lk, [&] {
+        for (auto* d : playing) if (!d->caughtUpTo(us)) return false;
+        return true;
+    });
+}
 
 inline bool FakeSystem::reportListChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
@@ -347,6 +466,38 @@ public:
 private:
     std::shared_ptr<FakeSystem> mSystem;
 };
+
+// The engine's watchdog on the case's clock (FakeSystem::useVirtualTime,
+// Config::watchdogClockMs = the system's nowMs): polled every `pollMs` of it,
+// while every playing device delivers what falls due, until `done` or `forMs`
+// of it have passed. A device change in flight is not polled through (the
+// watchdog does not measure during one): the clock creeps a millisecond per
+// millisecond of wall time, so the devices the change opens deliver as it
+// waits for them. How much of the case's clock a change takes then varies
+// with the machine; what the watchdog measures never does — frames and time
+// still move together, and nothing it judges spans a change. False if a
+// change never finished (30 s of wall time), or `done` never came.
+inline bool runWatchdogUntil(ClockworkEngine& engine, FakeSystem& sys, int pollMs,
+                             int64_t forMs, const std::function<bool()>& done) {
+    const int64_t end = sys.nowMs() + forMs;
+    for (;;) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (engine.devicePhase() != ClockworkEngine::DevicePhase::Idle
+               || engine.recoveryInFlight()) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            sys.advanceBy(1000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (done && done()) return true;
+        if (sys.nowMs() >= end) return !done;
+        sys.advanceBy(int64_t(pollMs) * 1000);
+        engine.watchdogPoll();
+    }
+}
+
+inline bool runWatchdogFor(ClockworkEngine& engine, FakeSystem& sys, int pollMs, int64_t forMs) {
+    return runWatchdogUntil(engine, sys, pollMs, forMs, nullptr);
+}
 
 // A one-output-one-input machine on a single driver — the common case.
 inline std::shared_ptr<FakeSystem> makeSimpleSystem() {

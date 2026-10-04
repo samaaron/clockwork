@@ -11,6 +11,7 @@
 #include "OscTestUtils.h"
 #include "ClockworkEngine.h"
 #include <atomic>
+#include <memory>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -134,7 +135,7 @@ TEST_CASE("NoAudioDevice: explicit headless ticks; no-device non-headless stays 
         // Explicit headless (Config::headless=true) — tests / non-JUCE backends.
         EngineFixture fix;  // default fixture sets headless=true
         CHECK(fix.engine().audioSource() == ClockworkEngine::AudioSource::Headless);
-        CHECK(pollUntil([&] { return processCount(fix.engine()) > 20; }, 3000));
+        CHECK(pollUntil([&] { return processCount(fix.engine()) > 20; }, 30000));
     }
     {
         // Default engine, no device — idle, no headless, no ticks.
@@ -150,19 +151,22 @@ TEST_CASE("NoAudioDevice: explicit headless ticks; no-device non-headless stays 
 TEST_CASE("NoAudioDevice: the watchdog keeps trying to open a device",
           "[NoAudioDevice]") {
     NoDeviceEngine harness;
+    auto clockMs = std::make_shared<std::atomic<int64_t>>(0);
     auto cfg = nonHeadlessTestConfig();
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 250;
     cfg.watchdogPollMs   = 50;
+    cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };   // polled by the case
     harness.init(cfg);
 
     // The watchdog fires recovery to open a device. On a machine with hardware
     // it climbs back to a real source; on a headless CI runner the attempts keep
-    // failing — either way an attempt happens within the window.
-    CHECK(pollUntil([&] {
-        return harness.engine().watchdogRecoveryCount() >= 1
-            || harness.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback;
-    }, 3000));
+    // failing — either way an attempt happens at its first poll.
+    clockMs->fetch_add(50);
+    harness.engine().watchdogPoll();
+    CHECK((harness.engine().watchdogRecoveryCount() >= 1
+           || harness.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback));
+    REQUIRE(pollUntil([&] { return !harness.engine().recoveryInFlight(); }, 30000));
 
     CHECK(harness.engine().audioSource() != ClockworkEngine::AudioSource::Headless);
 }
@@ -188,16 +192,21 @@ TEST_CASE("NoAudioDevice: watchdog defers recovery while a device swap holds the
     // Hold the gate before init() spins up the watchdog thread.
     auto gate = harness.engine().testHoldSwapGate();
 
+    auto clockMs = std::make_shared<std::atomic<int64_t>>(0);
     auto cfg = nonHeadlessTestConfig();
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 100;
     cfg.watchdogPollMs   = 20;
+    cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };   // polled by the case
     harness.init(cfg);
 
     REQUIRE(harness.engine().waitingForAudioDevice());
 
     // Several poll windows elapse with the swap in flight the whole time.
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    for (int i = 0; i < 20; ++i) {
+        clockMs->fetch_add(20);
+        harness.engine().watchdogPoll();
+    }
 
     // No recovery should have launched: a swap is in flight, exactly the state
     // the benign block skips. (Fails today — the waiting branch fires anyway.)

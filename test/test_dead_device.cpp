@@ -77,11 +77,13 @@ TEST_CASE("DeadDevice: a recovery onto a device that never delivers audio is not
     cfg.watchdogStallMs            = 500;
     cfg.watchdogRecoveryCooldownMs = 200;
     cfg.watchdogRateWindowMs       = 0;   // not the subject
+    // The watchdog polls only when the case says, on the case's clock: it
+    // cannot launch a recovery of its own into the user's reopen below.
+    cfg.watchdogClockMs            = [sys] { return sys->nowMs(); };
     // Drain the egress on a host thread. With the engine's own gateway the
     // control pass runs once per audio block, so while nothing ticks the
-    // replies wait in the ring — and the next cold swap rebuilds the arena
-    // and loses them. That is a gap of its own; this case is about what the
-    // recovery says, so it needs to hear it.
+    // replies wait in the ring until the next swap passes them on; this case
+    // is about what the recovery says, as it says it.
     cfg.hostDrivesControl          = true;
     EngineFixture fix(cfg);
 
@@ -102,15 +104,17 @@ TEST_CASE("DeadDevice: a recovery onto a device that never delivers audio is not
     // While nothing ticks the engine hears no commands: the watchdog's
     // recovery is the way out. The speakers come back, and it finds them.
     sys->device("Fake Speakers")->failStart = false;
-    REQUIRE(fix.pollUntil([&] {
+    sys->useVirtualTime();
+    REQUIRE(fake_audio::runWatchdogUntil(fix.engine(), *sys, 50, 20000, [&] {
         for (auto& r : fix.allReplies())
             if (r.address == "/clockwork/devices/reopen.done" && r.parsed().argInt(0) == 1)
                 return true;
         return false;
-    }, 20000));
+    }));
     INFO(fix.debugMessagesDump());
     CHECK(fix.engine().currentDevice().name == "Fake Speakers");
 
+    sys->useWallTime();   // the watchdog's part is done; the ping needs the audio thread
     fix.clearReplies();
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForReply("/dummy/pong", reply));

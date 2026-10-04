@@ -1757,11 +1757,15 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     else
         setEngineState(EngineState::Running, "boot");
 
-    // Callback-starvation watchdog (see watchdogLoop). Pointless in manual-
+    // Callback-starvation watchdog (see watchdogPoll). Pointless in manual-
     // pump mode, where the test owns process_audio and long gaps are normal.
+    // A test that owns the watchdog's clock polls it itself.
     if (mCurrentConfig.callbackWatchdog && !mCurrentConfig.manualAudioPump) {
-        mWatchdogStop.store(false);
-        mWatchdogThread = std::thread(&ClockworkEngine::watchdogLoop, this);
+        mWatchdog = std::make_unique<WatchdogState>(mCurrentConfig);
+        if (!mCurrentConfig.watchdogClockMs) {
+            mWatchdogStop.store(false);
+            mWatchdogThread = std::thread(&ClockworkEngine::watchdogLoop, this);
+        }
     }
 }
 
@@ -1851,6 +1855,7 @@ void ClockworkEngine::shutdown() {
     // mRunning check runs to completion and is waited on here.
     mWatchdogStop.store(true);
     if (mWatchdogThread.joinable()) mWatchdogThread.join();
+    mWatchdog.reset();   // a poll after this does nothing
 
     // No control command can run now — join the device-orchestration worker
     // before tearing down the device manager + egress it calls into.
@@ -2353,218 +2358,194 @@ ClockworkEngine::TestSwapHold ClockworkEngine::testHoldSwapGate() {
 // its control socket stays up. Sample processCount; when it freezes past the stall
 // window with a source nominally active and no swap in flight, restart the source
 // or request a device reopen.
+ClockworkEngine::WatchdogState::WatchdogState(const Config& cfg)
+    : stallMs(std::max(1, cfg.watchdogStallMs)),
+      pollMs(std::max(10, cfg.watchdogPollMs)),
+      rateCheck(cfg.watchdogRateWindowMs > 0),
+      liveness(stallMs, stallMs),
+      rateSkew(cfg.watchdogRateWindowMs,
+               /*maxGap*/ std::max<int64_t>(3 * pollMs, 1000),
+               cfg.watchdogRateTolerance,
+               std::max(1, cfg.watchdogRateBadWindows)),
+      skewPolicy(std::max(1, cfg.watchdogRateMaxRecoveries),
+                 2.0 * cfg.watchdogRateTolerance),
+      skewGoodRequired(std::max(1, cfg.watchdogRateBadWindows)) {}
+
+int64_t ClockworkEngine::watchdogNowMs() const {
+    if (mCurrentConfig.watchdogClockMs) return mCurrentConfig.watchdogClockMs();
+    return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void ClockworkEngine::watchdogLoop() {
-    const int64_t stallMs = std::max(1, mCurrentConfig.watchdogStallMs);
-    const int     pollMs  = std::max(10, mCurrentConfig.watchdogPollMs);
-
-    // Liveness by SUSTAINED ticks: a lone tick (one callback per failed attempt)
-    // reads as Confirming, not Live, so it can't masquerade as recovered. Ticks
-    // must sustain for a stall window to count as live.
-    clockwork::audio::LivenessMonitor liveness(stallMs, stallMs);
-
-    // Rate skew by rendered frames against a monotonic clock: a device can keep
-    // ticking while its timer free-runs fast or slow (post-sleep DirectSound),
-    // splitting the audio timebase seconds from the wall clock. maxGap of a few polls
-    // makes any sampling pause discard the window rather than read as skew.
-    const bool rateCheck = mCurrentConfig.watchdogRateWindowMs > 0;
-    clockwork::audio::RateSkewMonitor rateSkew(
-        mCurrentConfig.watchdogRateWindowMs,
-        /*maxGap*/ std::max<int64_t>(3 * pollMs, 1000),
-        mCurrentConfig.watchdogRateTolerance,
-        std::max(1, mCurrentConfig.watchdogRateBadWindows));
-    // Detection is logged once per skew episode, separately from the recovery
-    // action: requestAudioRecovery can be gated (cooldown / already in flight)
-    // for many polls, and a silent gated detection would leave user logs with
-    // no trace of WHY a later recovery fired.
-    bool rateSkewLogged = false;
-    // What to do about a verdict. A reopen fixes a transient skew and is the
-    // wrong tool for a persistent one — a device clocked at 44.1k that reports
-    // 48k skews identically after every reopen, and reopening it every window
-    // is a storm that stops the client's jobs each time. The policy counts
-    // same-ratio verdicts, switches the remedy to "adopt the measured rate",
-    // and after that gives up for the session. Its streak is only advanced by
-    // recoveries that actually launched (acted), and cleared by a window that
-    // came back healthy (healthy) — see RateSkewPolicy.
-    // "The same fault" is judged with twice the skew tolerance: a verdict is
-    // one noisy measurement against 1.0, but two consecutive verdicts are two
-    // noisy measurements against each other, and a 0.919x device read as
-    // 0.89x then 0.94x on a loaded machine (macOS CI, 2026-09-13) is still
-    // one device — with the tolerance alone the streak restarted at every
-    // wobble and the adopt came after five plain reopens instead of two.
-    clockwork::audio::RateSkewPolicy skewPolicy(
-        std::max(1, mCurrentConfig.watchdogRateMaxRecoveries),
-        2.0 * mCurrentConfig.watchdogRateTolerance);
-    uint64_t skewWindowsSeen    = 0;
-    int      skewGoodWindows    = 0;   // consecutive, since the last bad one or recovery
-    const int skewGoodRequired  = std::max(1, mCurrentConfig.watchdogRateBadWindows);
-    bool     skewGiveUpLogged   = false;
-
-    auto nowMs = [] {
-        return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-
+    const int pollMs = mWatchdog->pollMs;
     while (!mWatchdogStop.load()) {
         // Sleep in small slices so shutdown joins quickly.
         for (int slept = 0; slept < pollMs && !mWatchdogStop.load(); slept += 20)
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(std::min(20, pollMs - slept)));
         if (mWatchdogStop.load()) return;
+        watchdogPoll();
+    }
+}
 
-        // Publish control-thread blocking from here, off the gateway: a gateway
-        // stuck in a handler cannot report its own stall.
-        // µs, not ms: healthy gateway passes are tens of µs, so integer ms
-        // rounds every reading a user ever sees to 0.
-        clockwork_publish_nrt_blocking(mNrtGateway.maxPassUs(),
-                                 mNrtGateway.recentMaxPassUs(),
-                                 mNrtGateway.inFlightUs());
+void ClockworkEngine::watchdogPoll() {
+    if (!mWatchdog) return;
+    WatchdogState& w = *mWatchdog;
 
-        // Waiting for an audio device (no device open, not a headless / manual-
-        // pump build). Keep trying to open one so the engine self-heals the
-        // moment a device appears (plug in / wake). requestAudioRecovery is
-        // cooldown-gated.
-        if (waitingForAudioDevice() && !mReopenInProgress.load()) {
-            // Skip while a swap holds the gate. A normal switchDevice passes through a
-            // transient mActiveSource==None window with the gate held and brings a device up
-            // itself; racing a recovery into that window would, on winning the gate, recreate
-            // the device manager and revert to the system default — silently undoing the
-            // switch. The next poll retries once the gate frees.
-            const bool swapInFlight =
-                mDevicePhase.load() != DevicePhase::Idle;
-            if (!swapInFlight) {
-                std::string reason;
-                if (requestAudioRecovery(reason)) {
-                    mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
-                    clockwork_log("[watchdog] no audio device — attempting to open one");
-                }
+    // Publish control-thread blocking from here, off the gateway: a gateway
+    // stuck in a handler cannot report its own stall.
+    // µs, not ms: healthy gateway passes are tens of µs, so integer ms
+    // rounds every reading a user ever sees to 0.
+    clockwork_publish_nrt_blocking(mNrtGateway.maxPassUs(),
+                             mNrtGateway.recentMaxPassUs(),
+                             mNrtGateway.inFlightUs());
+
+    // Waiting for an audio device (no device open, not a headless / manual-
+    // pump build). Keep trying to open one so the engine self-heals the
+    // moment a device appears (plug in / wake). requestAudioRecovery is
+    // cooldown-gated.
+    if (waitingForAudioDevice() && !mReopenInProgress.load()) {
+        // Skip while a swap holds the gate. A normal switchDevice passes through a
+        // transient mActiveSource==None window with the gate held and brings a device up
+        // itself; racing a recovery into that window would, on winning the gate, recreate
+        // the device manager and revert to the system default — silently undoing the
+        // switch. The next poll retries once the gate frees.
+        const bool swapInFlight =
+            mDevicePhase.load() != DevicePhase::Idle;
+        if (!swapInFlight) {
+            std::string reason;
+            if (requestAudioRecovery(reason)) {
+                mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
+                clockwork_log("[watchdog] no audio device — attempting to open one");
             }
-            continue;
         }
+        return;
+    }
 
-        // Skip sampling where a tick gap is expected — not running, no source,
-        // recovery in flight, a swap holding the gate — so a paused callback
-        // cannot drift the monitor to a false stall.
-        bool benign = !mRunning.load()
-                   || mActiveSource.load() == AudioSource::None
-                   || mReopenInProgress.load();
-        if (!benign && mDevicePhase.load() != DevicePhase::Idle)
-            benign = true;  // mutation in flight — callbacks legitimately paused
-        if (benign) continue;
+    // Skip sampling where a tick gap is expected — not running, no source,
+    // recovery in flight, a swap holding the gate — so a paused callback
+    // cannot drift the monitor to a false stall.
+    bool benign = !mRunning.load()
+               || mActiveSource.load() == AudioSource::None
+               || mReopenInProgress.load();
+    if (!benign && mDevicePhase.load() != DevicePhase::Idle)
+        benign = true;  // mutation in flight — callbacks legitimately paused
+    if (benign) return;
 
-        const int64_t  t     = nowMs();
-        const uint32_t count = mAudioCallback.processCount.load(std::memory_order_acquire);
-        liveness.observe(count, t);
-        const auto ph = liveness.phase(t);
+    const int64_t  t     = watchdogNowMs();
+    const uint32_t count = mAudioCallback.processCount.load(std::memory_order_acquire);
+    w.liveness.observe(count, t);
+    const auto ph = w.liveness.phase(t);
 
-        if (mActiveSource.load() == AudioSource::Headless) {
-            // Explicit-headless build (tests / non-JUCE backends). If its timer
-            // thread died/wedged, restart it under the swap gate; otherwise it's
-            // ticking fine and there's no real device to recover.
-            if (ph == clockwork::audio::LivenessPhase::Stalled) {
-                std::unique_lock<std::recursive_mutex> lk;
-                if (tryAcquireSwapGate(lk, 1, 0)
-                    && mActiveSource.load() == AudioSource::Headless) {
-                    mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
-                    clockwork_log("[watchdog] headless driver stalled — restarting");
-                    stopAudioSource();
-                    startAudioSource();
-                }
+    if (mActiveSource.load() == AudioSource::Headless) {
+        // Explicit-headless build (tests / non-JUCE backends). If its timer
+        // thread died/wedged, restart it under the swap gate; otherwise it's
+        // ticking fine and there's no real device to recover.
+        if (ph == clockwork::audio::LivenessPhase::Stalled) {
+            std::unique_lock<std::recursive_mutex> lk;
+            if (tryAcquireSwapGate(lk, 1, 0)
+                && mActiveSource.load() == AudioSource::Headless) {
+                mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
+                clockwork_log("[watchdog] headless driver stalled — restarting");
+                stopAudioSource();
+                startAudioSource();
             }
-            continue;
         }
+        return;
+    }
 
-        // Real device source.
-        if (ph != clockwork::audio::LivenessPhase::Stalled) {
-            // Ticking — but at the right rate? Only judge while Live (a
-            // Confirming run is still settling) and not paused (stopRecording
-            // pauses the callback briefly: ticks continue, frames freeze — a
-            // false skew).
-            if (rateCheck && ph == clockwork::audio::LivenessPhase::Live
-                && !mAudioCallback.isPaused()) {
-                const int nominal = mAudioCallback.nominalSampleRate();
-                rateSkew.observe(mClockworkClock.engineFrames(),
-                                 static_cast<double>(nominal) / 1000.0, t);
-                // Windows within tolerance end the skew episode for the
-                // policy: a later verdict is a new fault, not the
-                // continuation of this one. As many good windows in a row as
-                // it takes bad ones to reach a verdict, for the same reason:
-                // one window can be a transient. A 0.919x device on a loaded
-                // macOS runner read one 300 ms window just after its reopen
-                // as healthy (2026-09-19), which restarted the streak and
-                // cost a fourth swap.
-                if (rateSkew.windowsCompleted() != skewWindowsSeen) {
-                    skewWindowsSeen = rateSkew.windowsCompleted();
-                    skewGoodWindows = rateSkew.lastWindowGood() ? skewGoodWindows + 1 : 0;
-                    if (skewGoodWindows >= skewGoodRequired) skewPolicy.healthy();
-                }
-                if (rateSkew.skewed()) {
-                    const double ratio    = rateSkew.lastRatio();
-                    const double measured = ratio * static_cast<double>(nominal);
-                    const auto   action   = skewPolicy.next(ratio);
-                    if (action == clockwork::audio::RateSkewAction::None) {
-                        // Given up this session: keep playing, keep quiet.
-                    } else if (action == clockwork::audio::RateSkewAction::GiveUp) {
-                        // Skewing at the very rate it was measured delivering:
-                        // no rate request corrects this device, and another
-                        // swap would only stop the client's jobs again.
-                        if (!skewGiveUpLogged) {
-                            skewGiveUpLogged = true;
-                            clockwork_log("[watchdog] rate skew persists at the adopted "
-                                   "rate (%.2fx of %d Hz) — no further recoveries this "
-                                   "session; playback continues at this rate",
-                                   ratio, nominal);
-                        }
-                        skewPolicy.acted(ratio);
-                    } else {
-                        const bool adopt =
-                            action == clockwork::audio::RateSkewAction::AdoptMeasuredRate;
-                        if (!rateSkewLogged) {
-                            rateSkewLogged = true;
-                            clockwork_log("[watchdog] rate skew detected: device delivering "
-                                   "%.2fx real-time (nominal %d Hz) — clock cannot "
-                                   "converge, will %s",
-                                   ratio, nominal,
-                                   adopt ? "adopt the measured rate with a cold swap"
-                                         : "recover with a cold swap");
-                        }
-                        RecoveryIntent intent;
-                        intent.nominalRate  = nominal;
-                        intent.measuredRate = measured;
-                        if (adopt) intent.adoptRate = measured;
-                        std::string reason;
-                        if (requestAudioRecovery(reason, intent)) {
-                            mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
-                            mRateSkewRecoveries.fetch_add(1, std::memory_order_release);
-                            skewPolicy.acted(ratio);
-                            if (adopt)
-                                clockwork_log("[watchdog] rate skew persisted through %d "
-                                       "recoveries: cold swap requesting the measured "
-                                       "rate, ~%.0f Hz (%.2fx of %d Hz)",
-                                       skewPolicy.streak() - 1, measured, ratio, nominal);
-                            else
-                                clockwork_log("[watchdog] rate skew: recovering with a cold "
-                                       "swap (%.2fx real-time)", ratio);
-                            rateSkew.reset();
-                            skewGoodWindows = 0;
-                            rateSkewLogged = false;
-                        }
+    // Real device source.
+    if (ph != clockwork::audio::LivenessPhase::Stalled) {
+        // Ticking — but at the right rate? Only judge while Live (a
+        // Confirming run is still settling) and not paused (stopRecording
+        // pauses the callback briefly: ticks continue, frames freeze — a
+        // false skew).
+        if (w.rateCheck && ph == clockwork::audio::LivenessPhase::Live
+            && !mAudioCallback.isPaused()) {
+            const int nominal = mAudioCallback.nominalSampleRate();
+            w.rateSkew.observe(mClockworkClock.engineFrames(),
+                             static_cast<double>(nominal) / 1000.0, t);
+            // Windows within tolerance end the skew episode for the
+            // policy: a later verdict is a new fault, not the
+            // continuation of this one. As many good windows in a row as
+            // it takes bad ones to reach a verdict, for the same reason:
+            // one window can be a transient. A 0.919x device on a loaded
+            // macOS runner read one 300 ms window just after its reopen
+            // as healthy (2026-09-19), which restarted the streak and
+            // cost a fourth swap.
+            if (w.rateSkew.windowsCompleted() != w.skewWindowsSeen) {
+                w.skewWindowsSeen = w.rateSkew.windowsCompleted();
+                w.skewGoodWindows = w.rateSkew.lastWindowGood() ? w.skewGoodWindows + 1 : 0;
+                if (w.skewGoodWindows >= w.skewGoodRequired) w.skewPolicy.healthy();
+            }
+            if (w.rateSkew.skewed()) {
+                const double ratio    = w.rateSkew.lastRatio();
+                const double measured = ratio * static_cast<double>(nominal);
+                const auto   action   = w.skewPolicy.next(ratio);
+                if (action == clockwork::audio::RateSkewAction::None) {
+                    // Given up this session: keep playing, keep quiet.
+                } else if (action == clockwork::audio::RateSkewAction::GiveUp) {
+                    // Skewing at the very rate it was measured delivering:
+                    // no rate request corrects this device, and another
+                    // swap would only stop the client's jobs again.
+                    if (!w.skewGiveUpLogged) {
+                        w.skewGiveUpLogged = true;
+                        clockwork_log("[watchdog] rate skew persists at the adopted "
+                               "rate (%.2fx of %d Hz) — no further recoveries this "
+                               "session; playback continues at this rate",
+                               ratio, nominal);
                     }
+                    w.skewPolicy.acted(ratio);
                 } else {
-                    rateSkewLogged = false;
+                    const bool adopt =
+                        action == clockwork::audio::RateSkewAction::AdoptMeasuredRate;
+                    if (!w.rateSkewLogged) {
+                        w.rateSkewLogged = true;
+                        clockwork_log("[watchdog] rate skew detected: device delivering "
+                               "%.2fx real-time (nominal %d Hz) — clock cannot "
+                               "converge, will %s",
+                               ratio, nominal,
+                               adopt ? "adopt the measured rate with a cold swap"
+                                     : "recover with a cold swap");
+                    }
+                    RecoveryIntent intent;
+                    intent.nominalRate  = nominal;
+                    intent.measuredRate = measured;
+                    if (adopt) intent.adoptRate = measured;
+                    std::string reason;
+                    if (requestAudioRecovery(reason, intent)) {
+                        mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
+                        mRateSkewRecoveries.fetch_add(1, std::memory_order_release);
+                        w.skewPolicy.acted(ratio);
+                        if (adopt)
+                            clockwork_log("[watchdog] rate skew persisted through %d "
+                                   "recoveries: cold swap requesting the measured "
+                                   "rate, ~%.0f Hz (%.2fx of %d Hz)",
+                                   w.skewPolicy.streak() - 1, measured, ratio, nominal);
+                        else
+                            clockwork_log("[watchdog] rate skew: recovering with a cold "
+                                   "swap (%.2fx real-time)", ratio);
+                        w.rateSkew.reset();
+                        w.skewGoodWindows = 0;
+                        w.rateSkewLogged = false;
+                    }
                 }
+            } else {
+                w.rateSkewLogged = false;
             }
-            continue;  // Live (healthy) or Confirming (give the ticks the window)
         }
+        return;  // Live (healthy) or Confirming (give the ticks the window)
+    }
 
-        // The device stopped delivering. Recover with a cold swap on a fresh
-        // connection. requestAudioRecovery is in-flight/cooldown gated, so only
-        // log (and count) when one actually starts — not on every poll of the
-        // stall.
-        std::string reason;
-        if (requestAudioRecovery(reason)) {
-            mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
-            clockwork_log("[watchdog] audio device stalled (processCount=%u) — recovering", count);
-        }
+    // The device stopped delivering. Recover with a cold swap on a fresh
+    // connection. requestAudioRecovery is in-flight/cooldown gated, so only
+    // log (and count) when one actually starts — not on every poll of the
+    // stall.
+    std::string reason;
+    if (requestAudioRecovery(reason)) {
+        mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
+        clockwork_log("[watchdog] audio device stalled (processCount=%u) — recovering", count);
     }
 }
 
@@ -2591,10 +2572,9 @@ bool ClockworkEngine::requestAudioRecovery(std::string& reason,
         return false;
     }
 
-    const int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int64_t now = watchdogNowMs();
     const int64_t last = mLastReopenFinishedAtMs.load();
-    const int64_t sinceLast = last ? now - last : kRecoveryCooldownMs;
+    const int64_t sinceLast = last != kNeverMs ? now - last : kRecoveryCooldownMs;
     if (sinceLast < kRecoveryCooldownMs) {
         mReopenInProgress.store(false);   // release the slot we just claimed
         char msg[96];
@@ -2721,9 +2701,7 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     // ALWAYS clear the in-flight flag + stamp the cooldown, even after an
     // exception above — otherwise mReopenInProgress leaks true and the watchdog
     // (which treats it as benign) never recovers again for the rest of the session.
-    mLastReopenFinishedAtMs.store(
-        (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
+    mLastReopenFinishedAtMs.store(watchdogNowMs());
     mReopenInProgress.store(false);
 }
 

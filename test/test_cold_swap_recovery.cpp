@@ -78,14 +78,14 @@ TEST_CASE("ColdSwapRecovery: normal swap works after recovery",
         return "simulated rebuild crash";
     };
 
-    auto r1 = fix.engine().switchDevice("", 44100);
+    auto r1 = switchWhenFree(fix, "", 44100);
     REQUIRE(r1.success);
 
     // Clear hook
     fix.engine().testRebuildFailure = nullptr;
 
     // Second: normal cold swap should work
-    auto r2 = fix.engine().switchDevice("", 44100);
+    auto r2 = switchWhenFree(fix, "", 44100);
     REQUIRE(r2.success);
     REQUIRE(r2.type == SwapType::Cold);
     CHECK(r2.error.empty());

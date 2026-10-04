@@ -12,21 +12,23 @@
  * N recoveries, the last of which requests the measured rate, and no further
  * swaps if the device skews at that rate too. The engine keeps playing.
  *
- * The fake device lies the same way (FakeDeviceSpec::deliveredRate), the
- * windows are short, and the recovery cooldown is short, so a session that
- * took the mixer ten minutes plays out here in a few seconds.
+ * The fake device lies the same way (FakeDeviceSpec::deliveredRate), and
+ * the case keeps the clock: the device delivers exactly the frames due by it
+ * and the watchdog measures against it (fake_audio::runWatchdogUntil), so
+ * every window reads the device's true ratio whatever the machine is doing,
+ * and a session that took the mixer ten minutes plays out exactly the same
+ * way every time, in a moment.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
-#include <atomic>
-#include <chrono>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 using fake_audio::fakeEngineConfig;
 using fake_audio::makeSimpleSystem;
+using fake_audio::runWatchdogFor;
+using fake_audio::runWatchdogUntil;
 
 namespace {
 
@@ -40,6 +42,7 @@ ClockworkEngine::Config lyingDeviceConfig(std::shared_ptr<fake_audio::FakeSystem
     cfg.watchdogRateBadWindows     = 2;
     cfg.watchdogRateMaxRecoveries  = 3;
     cfg.watchdogRecoveryCooldownMs = 200;
+    cfg.watchdogClockMs            = [sys] { return sys->nowMs(); };
     // Drain the egress on a host thread, as SuperSonic's host does. With the
     // engine's own gateway the control pass runs once per audio block, so a
     // line logged just before a cold swap — every watchdog line, the user's
@@ -56,6 +59,20 @@ struct SwapLog {
     size_t count() { std::lock_guard<std::mutex> lk(mu); return swaps.size(); }
     SwapResult last() { std::lock_guard<std::mutex> lk(mu); return swaps.back(); }
 };
+
+constexpr int kPollMs = 50;   // lyingDeviceConfig's watchdogPollMs
+
+int sessionRate(EngineFixture& fix) {
+    return static_cast<int>(fix.engine().currentDevice().activeSampleRate);
+}
+
+// Every line logged so far has reached the fixture: the reply comes back
+// through the same ring, after them.
+void flushLog(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
+}
 
 } // namespace
 
@@ -74,23 +91,22 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
         }
     };
 
-    REQUIRE(static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 48000);
+    REQUIRE(sessionRate(fix) == 48000);
+    sys->useVirtualTime();
 
     // Three recoveries: two plain reopens, then the adopt. Each needs two bad
-    // 300 ms windows plus the swap and the cooldown.
-    REQUIRE(fix.pollUntil([&] {
-        return fix.engine().rateSkewRecoveryCount() >= 3;
-    }, 15000));
-
-    // The adopt landed the session on the rate the device actually keeps
-    // time at — which it advertises, so the request snapped to it exactly.
-    REQUIRE(fix.pollUntil([&] {
-        return static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 44100;
-    }, 5000));
+    // 300 ms windows plus the cooldown. The adopt lands the session on the
+    // rate the device actually keeps time at — which it advertises, so the
+    // request snaps to it exactly.
+    REQUIRE(runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
+        return fix.engine().rateSkewRecoveryCount() >= 3 && sessionRate(fix) == 44100;
+    }));
 
     // From here the device is honest against its new nominal rate: no further
-    // recoveries. Wait several verdict periods to prove the storm is over.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    // recoveries. Several verdict periods prove the storm is over.
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 2500));
+    sys->useWallTime();   // the measuring is done; requests need the audio thread
+    flushLog(fix);
     INFO(fix.debugMessagesDump());
     CHECK(fix.engine().rateSkewRecoveryCount() == 3);
 
@@ -105,7 +121,7 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
     CHECK(count("'Fake Speakers' reports 48000 Hz but is delivering ~") == 1);
     CHECK(count("rate skew detected") >= 1);
     CHECK(count("requesting the measured rate") == 1);
-    CHECK(static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 44100);
+    CHECK(sessionRate(fix) == 44100);
 
     // Still playing, still answering.
     CHECK(fix.engine().engineState() == EngineState::Running);
@@ -122,17 +138,16 @@ TEST_CASE("RateSkew: a device that skews at the measured rate too gets no furthe
     sys->device("Fake Speakers")->deliveredRate = 40000.0;
     EngineFixture fix(lyingDeviceConfig(sys));
 
+    sys->useVirtualTime();
     // Two reopens, one adopt (44100, the nearest advertised to 40000)...
-    REQUIRE(fix.pollUntil([&] {
-        return fix.engine().rateSkewRecoveryCount() >= 3;
-    }, 15000));
-    REQUIRE(fix.pollUntil([&] {
-        return static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 44100;
-    }, 5000));
+    REQUIRE(runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
+        return fix.engine().rateSkewRecoveryCount() >= 3 && sessionRate(fix) == 44100;
+    }));
 
     // ...and at 44100 it still skews (0.907x). The policy gives up: the
     // count freezes, the engine keeps playing at the adopted rate.
-    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 3000));
+    sys->useWallTime();   // the measuring is done; requests need the audio thread
     INFO(fix.debugMessagesDump());
     CHECK(fix.engine().rateSkewRecoveryCount() == 3);
     CHECK(fix.engine().engineState() == EngineState::Running);
@@ -145,7 +160,8 @@ TEST_CASE("RateSkew: a device that skews at the measured rate too gets no furthe
 TEST_CASE("RateSkew: an honest device is never recovered", "[RateSkew][Watchdog]") {
     auto sys = makeSimpleSystem();
     EngineFixture fix(lyingDeviceConfig(sys));
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));   // five windows
+    sys->useVirtualTime();
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 1500));   // five windows, once Live
     CHECK(fix.engine().rateSkewRecoveryCount() == 0);
-    CHECK(static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 48000);
+    CHECK(sessionRate(fix) == 48000);
 }

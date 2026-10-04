@@ -303,12 +303,12 @@ TEST_CASE("EngineState: sequential swaps in headless both succeed cleanly",
     EngineFixture fix;
     // In headless mode, switchDevice with a device name is a hot swap
     // (device name is ignored, headless driver pause/resumes)
-    auto r1 = fix.engine().switchDevice("test");
+    auto r1 = switchWhenFree(fix, "test");
     REQUIRE(r1.success);
     REQUIRE(r1.type == SwapType::Hot);
 
     // Second call should also succeed cleanly
-    auto r2 = fix.engine().switchDevice("test2");
+    auto r2 = switchWhenFree(fix, "test2");
     REQUIRE(r2.success);
     REQUIRE(r2.type == SwapType::Hot);
 

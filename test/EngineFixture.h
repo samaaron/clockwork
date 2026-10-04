@@ -163,6 +163,28 @@ struct OscReply {
 
 // The correlation token a clockwork reply echoes as its LAST argument
 // (see EngineClock.cpp): the id a request carried, back on its reply.
+// switchDevice() is non-blocking by design: while anything else holds the
+// swap gate — a swap's tail, the device lane's own work — it answers "swap
+// already in progress", and the engine's own callers retry (the debounced
+// switch, for ~3 s). So does a case, until the gate is free: within a bound
+// only a gate that is never released reaches.
+template <typename Attempt>
+SwapResult whenSwapGateFree(Attempt&& attempt) {
+    SwapResult r;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    do {
+        r = attempt();
+        if (r.success || r.error != "swap already in progress") break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    } while (std::chrono::steady_clock::now() < until);
+    return r;
+}
+
+template <typename Fix, typename... Args>
+SwapResult switchWhenFree(Fix& fix, Args&&... args) {
+    return whenSwapGateFree([&] { return fix.engine().switchDevice(args...); });
+}
+
 inline int32_t lastInt(const OscReply& r) {
     const auto p = r.parsed();
     return p.argCount() > 0 ? p.argInt(p.argCount() - 1) : -1;
@@ -172,6 +194,10 @@ class EngineFixture {
 public:
     EngineFixture();
     explicit EngineFixture(const ClockworkEngine::Config& cfg);
+    // A host whose control thread comes up late: started this long after
+    // init returns rather than before it (Config::hostDrivesControl only).
+    // What a slow host looks like to the boot barrier.
+    EngineFixture(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs);
     ~EngineFixture();
 
     // OSC in, in process — no socket.
@@ -237,9 +263,10 @@ public:
     bool manualPump() const { return mManualPump; }
 
 private:
-    void init(const ClockworkEngine::Config& cfg);
+    void init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs = 0);
     ClockworkEngine mEngine;
     engine_test::HostControlThread mHostControl;
+    std::thread                    mLateHostStart;
     bool            mManualPump = false;
 
     mutable std::mutex       mReplyMutex;

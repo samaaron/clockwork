@@ -50,8 +50,11 @@ ClockworkEngine::Config EngineFixture::defaultConfig() {
 
 EngineFixture::EngineFixture() { init(defaultConfig()); }
 EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg) { init(cfg); }
+EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs) {
+    init(cfg, hostControlStartsAfterMs);
+}
 
-void EngineFixture::init(const ClockworkEngine::Config& cfg) {
+void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs) {
     mManualPump = cfg.manualAudioPump;
 
     mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
@@ -73,20 +76,38 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg) {
     // A host's thread, when the config says the host runs the control plane.
     // Started first: it spins on a closed door until init opens it, so the
     // pass is running from the moment the engine needs one.
-    if (cfg.hostDrivesControl) mHostControl.start(mEngine);
+    if (cfg.hostDrivesControl && hostControlStartsAfterMs <= 0) mHostControl.start(mEngine);
 
     mEngine.init(cfg);
 
-    // Boot barrier: a pong means the whole loop is live.
-    OscReply r;
-    send(osc_test::message("/dummy/ping"));
-    waitForReply("/dummy/pong", r);
+    if (cfg.hostDrivesControl && hostControlStartsAfterMs > 0) {
+        mLateHostStart = std::thread([this, hostControlStartsAfterMs] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(hostControlStartsAfterMs));
+            mHostControl.start(mEngine);
+        });
+    }
+
+    // Boot barrier: a pong means the whole loop is live. Waited for as long as
+    // it takes, within a bound that only a broken boot reaches, and said
+    // loudly: a pong given up on still comes, and a case's own ping would
+    // take it for its answer (test_engine_fixture.cpp). Not waited for when
+    // no answer can reach this fixture: nothing rendering, no guest running
+    // to hear the ping, or a host draining the egress itself.
+    const bool renders = mManualPump
+        || mEngine.audioSource() != ClockworkEngine::AudioSource::None;
+    if (renders && mEngine.engineState() == EngineState::Running && !cfg.hostDrainsEgress) {
+        OscReply r;
+        send(osc_test::message("/dummy/ping"));
+        if (!waitForReply("/dummy/pong", r, 30000))
+            FAIL("the engine booted but did not answer a ping within 30 s");
+    }
 
     clearReplies();
     clearDebugMessages();
 }
 
 EngineFixture::~EngineFixture() {
+    if (mLateHostStart.joinable()) mLateHostStart.join();
     mHostControl.stop();   // a host stops its thread before the engine
     mEngine.shutdown();
     clockwork_sink_close_all();

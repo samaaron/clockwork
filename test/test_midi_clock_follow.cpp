@@ -30,19 +30,26 @@ namespace {
 // Every byte that left the ring, delivered or counted as undeliverable.
 uint64_t released(const MidiClockOut& m) { return m.sent() + m.dropped(); }
 
-// Render `seconds` of audio, giving the gateway thread room to keep up: the
-// freewheel clock advances a block per pump, and a follower whose grid ran
-// more than a beat ahead of its last tick re-syncs instead of catching up,
-// so a tight loop that starves the gateway would undercount by design.
-void pumpGently(Engine& e, double seconds) {
+// One block rendered, then one control pass: the pass that produces the
+// clock's pulses runs after every block, in step with it. (The freewheel
+// clock advances a block per pump, and a follower whose grid ran more than a
+// beat ahead of its last tick re-syncs instead of catching up — so a pass
+// left to keep up on a thread of its own undercounts whenever the machine
+// starves that thread.) The case is the host: see hostedEngine.
+void step(Engine& e) {
+    e.engine.pumpAudioBlock();
+    e.engine.controlPass();
+}
+
+void pumpInStep(Engine& e, double seconds) {
     // The DSP's block, which is what one pump renders.
     const int blocks = static_cast<int>(seconds * engine_test::kSampleRate
                                         / get_audio_buffer_samples());
-    for (int i = 0; i < blocks; ++i) {
-        e.engine.pumpAudioBlock();
-        if (i % 8 == 7) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    for (int i = 0; i < blocks; ++i) step(e);
 }
+
+// An engine whose control pass runs only when the case says (step).
+void becomeTheHost(Engine& e) { e.hostControl.stop(); }
 
 osc_test::Packet follow(const char* port, const char* timeline, int32_t token) {
     osc_test::Builder b;
@@ -64,7 +71,7 @@ osc_test::Packet followers(int32_t token) {
 
 // The reply carrying this token, ignoring earlier replies to the same verb.
 bool replyWithToken(Engine& e, const char* address, int32_t token, osc_test::ParsedReply& out) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
         {
             std::lock_guard<std::mutex> lock(e.mu);
@@ -74,7 +81,7 @@ bool replyWithToken(Engine& e, const char* address, int32_t token, osc_test::Par
                 if (p.argCount() > 0 && p.argInt(p.argCount() - 1) == token) { out = p; return true; }
             }
         }
-        e.engine.pumpAudioBlock();
+        step(e);   // a pass the engine refuses (its own thread runs them) is harmless
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return false;
@@ -84,7 +91,8 @@ bool replyWithToken(Engine& e, const char* address, int32_t token, osc_test::Par
 
 TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
           "[engine][midi][clock]") {
-    Engine e;
+    Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrivesControl = true; });
+    becomeTheHost(e);
     MidiClockOut& out = e.engine.midiClockOut();
 
     // Follow every port on the Link timeline (the engine's default, 120 BPM).
@@ -107,7 +115,7 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
     // horizon the gateway records ahead and the block the render path
     // releases ahead.
     const uint64_t before = released(out);
-    pumpGently(e, 1.0);
+    pumpInStep(e, 1.0);
     const uint64_t during = released(out) - before;
     INFO(during << " bytes left in one second");
     CHECK(during >= 40);
@@ -120,9 +128,9 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/unfollow.reply"), 9, r));
     CHECK(r.argCount() == 2);
     CHECK(r.argString(0) == "*");
-    pumpGently(e, 0.3);
+    pumpInStep(e, 0.3);
     const uint64_t after = released(out);
-    pumpGently(e, 1.0);
+    pumpInStep(e, 1.0);
     CHECK(released(out) == after);
 
     pkt = followers(10);

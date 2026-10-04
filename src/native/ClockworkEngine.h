@@ -169,6 +169,12 @@ public:
                                                    // a promotion (seconds), so a
                                                    // second swap cannot land on
                                                    // a reinit still in progress
+        // The watchdog's clock, for a test: milliseconds from any origin,
+        // never going back. Set, the watchdog and the recovery cooldown read
+        // time from it and no watchdog thread is started — the test calls
+        // watchdogPoll() itself, so time passes only when the test says.
+        // Empty: steady_clock, polled every watchdogPollMs on a thread.
+        std::function<int64_t()> watchdogClockMs;
         // The host drains the egress rings itself, through the client API
         // (clockwork_client_poll on egressClient()), and routes what it takes
         // to its transport — as the JavaScript client does on the web. The
@@ -563,6 +569,11 @@ public:
     // the wrong rate rather than stalled). See Config::watchdogRateWindowMs.
     uint32_t rateSkewRecoveryCount() const { return mRateSkewRecoveries.load(); }
 
+    // One watchdog poll, now: what the watchdog's thread does every
+    // watchdogPollMs. For a test that owns the watchdog's clock
+    // (Config::watchdogClockMs); does nothing without Config::callbackWatchdog.
+    void watchdogPoll();
+
     // The one authoritative answer to "is a device mutation in flight".
     // Set via PhaseGuard by switchDevice (Swapping) and recoverAudio
     // (Recovering). Replaces probing the swap gate with try_lock/unlock
@@ -570,6 +581,9 @@ public:
     // gate).
     enum class DevicePhase : uint8_t { Idle, Swapping, Recovering };
     DevicePhase devicePhase() const { return mDevicePhase.load(); }
+    // A recovery accepted and not yet finished — including one queued on the
+    // device lane that has not started, when devicePhase() still reads Idle.
+    bool recoveryInFlight() const { return mReopenInProgress.load(); }
 
     // Bounded acquisition of the swap gate: up to `attempts` try_locks,
     // `sleepMs` apart, mirroring executePendingSwitch's retry discipline.
@@ -1007,9 +1021,10 @@ private:
     // Device reopen — rejected while one is in flight or within a short cooldown
     // after completion; accepted requests run on the device task lane.
     std::atomic<bool>          mReopenInProgress{false};
-    // steady_clock millis at the last recovery's completion. Atomic: written by
-    // the recovery worker, read by the watchdog / control threads. 0 = never.
-    std::atomic<int64_t>       mLastReopenFinishedAtMs{0};
+    // watchdogNowMs() at the last recovery's completion. Atomic: written by
+    // the recovery worker, read by the watchdog / control threads.
+    static constexpr int64_t   kNeverMs = INT64_MIN;
+    std::atomic<int64_t>       mLastReopenFinishedAtMs{kNeverMs};
     // Recreate the device manager, rebuild the real device, and promote back to
     // it — or, if none opens, settle into the idle "waiting for audio device"
     // state. Runs on the device task lane (posted by requestAudioRecovery) so
@@ -1058,12 +1073,57 @@ private:
                              const std::string& error);
 
     // Callback-starvation watchdog (Config::callbackWatchdog) — samples
-    // processCount and recovers a source whose callbacks stopped.
+    // processCount and recovers a source whose callbacks stopped. Its
+    // monitors live between polls here; a poll runs on the watchdog's thread,
+    // or on a test's (watchdogPoll) when the test owns the clock.
+    struct WatchdogState {
+        explicit WatchdogState(const Config& cfg);
+        int64_t stallMs;
+        int     pollMs;
+        bool    rateCheck;
+        // Liveness by SUSTAINED ticks: a lone tick (one callback per failed
+        // attempt) reads as Confirming, not Live, so it can't masquerade as
+        // recovered. Ticks must sustain for a stall window to count as live.
+        clockwork::audio::LivenessMonitor liveness;
+        // Rate skew by rendered frames against a monotonic clock: a device
+        // can keep ticking while its timer free-runs fast or slow
+        // (post-sleep DirectSound), splitting the audio timebase seconds from
+        // the wall clock. maxGap of a few polls makes any sampling pause
+        // discard the window rather than read as skew.
+        clockwork::audio::RateSkewMonitor rateSkew;
+        // Detection is logged once per skew episode, separately from the
+        // recovery action: requestAudioRecovery can be gated (cooldown /
+        // already in flight) for many polls, and a silent gated detection
+        // would leave user logs with no trace of WHY a later recovery fired.
+        bool rateSkewLogged = false;
+        // What to do about a verdict. A reopen fixes a transient skew and is
+        // the wrong tool for a persistent one — a device clocked at 44.1k
+        // that reports 48k skews identically after every reopen, and
+        // reopening it every window is a storm that stops the client's jobs
+        // each time. The policy counts same-ratio verdicts, switches the
+        // remedy to "adopt the measured rate", and after that gives up for
+        // the session. Its streak is only advanced by recoveries that
+        // actually launched (acted), and cleared by a window that came back
+        // healthy (healthy) — see RateSkewPolicy. "The same fault" is judged
+        // with twice the skew tolerance: a verdict is one noisy measurement
+        // against 1.0, but two consecutive verdicts are two noisy
+        // measurements against each other, and a 0.919x device read as 0.89x
+        // then 0.94x on a loaded machine (macOS CI, 2026-09-13) is still one
+        // device — with the tolerance alone the streak restarted at every
+        // wobble and the adopt came after five plain reopens instead of two.
+        clockwork::audio::RateSkewPolicy skewPolicy;
+        uint64_t skewWindowsSeen  = 0;
+        int      skewGoodWindows  = 0;   // consecutive, since the last bad one or recovery
+        int      skewGoodRequired;
+        bool     skewGiveUpLogged = false;
+    };
+    std::unique_ptr<WatchdogState> mWatchdog;
     std::thread                mWatchdogThread;
     std::atomic<bool>          mWatchdogStop{false};
     std::atomic<uint32_t>      mWatchdogRecoveries{0};
     std::atomic<uint32_t>      mRateSkewRecoveries{0};
     void watchdogLoop();
+    int64_t watchdogNowMs() const;   // Config::watchdogClockMs, else steady_clock
 
     HeadlessDriver               mHeadlessDriver;
     std::unique_ptr<juce::AudioDeviceManager> mDeviceManager;
