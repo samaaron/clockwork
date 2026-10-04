@@ -27,13 +27,13 @@ void RingReader::stop() {
     mThread.join();
 }
 
-void RingReader::pause() {
-    if (!mThread.joinable()) return;
+bool RingReader::pause() {
+    if (!mThread.joinable()) return true;
     // Self-pause would deadlock waiting for our own park acknowledgement. It is
     // also unnecessary: a drain handler that triggers the caller's critical
     // section (e.g. a cold swap run from an OSC command on the NRT gateway
     // thread) is by definition not draining concurrently with it.
-    if (std::this_thread::get_id() == mThread.get_id()) return;
+    if (std::this_thread::get_id() == mThread.get_id()) return true;
     mPauseRequest.store(1, std::memory_order_release);
     // Kick the wake word so a reader blocked on it re-checks the request.
     if (mWake) {
@@ -47,10 +47,11 @@ void RingReader::pause() {
         if (waited >= 2000) {
             clockwork_log("[%s] pause: reader did not park within 2s — "
                     "proceeding unparked", mName);
-            return;
+            return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    return true;
 }
 
 void RingReader::resume() {

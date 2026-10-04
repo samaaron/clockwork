@@ -1387,21 +1387,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (cfg.hostDrainsEgress) {
         mNrtGateway.addTask([this]() { interceptBufferFreed(nullptr, 0); });
     } else {
-        mNrtGateway.addTask([this]() {
-            ClockworkClient* client = ensureClient();
-            if (!client) return;
-            // A batch at a time until the rings are empty. Bounded per call
-            // because the array is the caller's, which is the ABI's rule.
-            ClockworkClientMessage batch[64];
-            for (;;) {
-                const uint32_t n = clockwork_client_poll(client, batch,
-                                                         sizeof batch / sizeof batch[0]);
-                for (uint32_t i = 0; i < n; ++i)
-                    mEgress.dispatchEgress(batch[i].origin, batch[i].route,
-                                           batch[i].bytes, batch[i].length);
-                if (n < sizeof batch / sizeof batch[0]) break;
-            }
-        });
+        mNrtGateway.addTask([this]() { drainEgressNow(); });
     }
 
     // -- Control pass: peer command plane (SHM segment; shm_peer_plane.h) ----
@@ -2042,6 +2028,21 @@ ClockworkClient* ClockworkEngine::ensureClient() {
     return mClientHandle;
 }
 
+void ClockworkEngine::drainEgressNow() {
+    ClockworkClient* client = ensureClient();
+    if (!client) return;
+    // A batch at a time until the rings are empty. Bounded per call because
+    // the array is the caller's, which is the ABI's rule.
+    ClockworkClientMessage batch[64];
+    for (;;) {
+        const uint32_t n = clockwork_client_poll(client, batch, sizeof batch / sizeof batch[0]);
+        for (uint32_t i = 0; i < n; ++i)
+            mEgress.dispatchEgress(batch[i].origin, batch[i].route,
+                                   batch[i].bytes, batch[i].length);
+        if (n < sizeof batch / sizeof batch[0]) break;
+    }
+}
+
 void ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t originToken) {
     // THROUGH THE CLIENT BOUNDARY, not past it. A datagram from another machine
     // and a call from a GUI in this process arrive here alike, and both go on
@@ -2106,22 +2107,20 @@ bool ClockworkEngine::controlPass() {
 // sees the park or the park waits for the pass. Bounded as the reader's park
 // is, for the same reason: a pass wedged behind a foreign lock must not hang
 // the device switch.
-void ClockworkEngine::parkControlPass() {
-    if (mNrtGateway.running()) {
-        mNrtGateway.pause();
-        return;
-    }
+bool ClockworkEngine::parkControlPass() {
+    if (mNrtGateway.running()) return mNrtGateway.pause();
     mControlParked.store(true);
     // A swap run from inside a pass is not draining beside it.
-    if (mControlPassThread.load() == std::this_thread::get_id()) return;
+    if (mControlPassThread.load() == std::this_thread::get_id()) return true;
     for (int waited = 0; mControlPassBusy.load(); ++waited) {
         if (waited >= 2000) {
             clockwork_log("[control] park: the host's pass did not finish within 2s — "
                           "proceeding unparked");
-            return;
+            return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    return true;
 }
 
 void ClockworkEngine::resumeControlPass() {
@@ -4180,7 +4179,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // resume explicitly just before audio restarts.
     struct ControlPark {
         ClockworkEngine* engine = nullptr;
-        void park(ClockworkEngine* e) { e->parkControlPass(); engine = e; }
+        bool parked = false;
+        void park(ClockworkEngine* e) { parked = e->parkControlPass(); engine = e; }
         void resumeNow() { if (engine) engine->resumeControlPass(); engine = nullptr; }
         ~ControlPark()   { resumeNow(); }
     } controlPark;
@@ -4191,6 +4191,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
     // --- Stop audio ---
     stopAudioSource();
+
+    // What the engine has said so far reaches its clients before the rings
+    // go down with the arena — the user's notice before a recovery, this
+    // swap's own account of itself. The pass is parked, so this thread is the
+    // rings' only reader now. (A host that drains the egress itself is a
+    // reader the engine cannot park, and drains its own.)
+    if (isCold && controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
 
     if (isCold) destroy_dsp();
 

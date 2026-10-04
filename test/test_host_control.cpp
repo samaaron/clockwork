@@ -344,3 +344,28 @@ TEST_CASE("host control: a cold swap waits for the host's pass in flight",
     CHECK_FALSE(parkedWhileHeld);
     CHECK(parked.load());
 }
+
+TEST_CASE("host control: what the engine said before a cold swap reaches the host after it",
+          "[HostControl][SwapPark]") {
+    auto sys = fake_audio::makeSimpleSystem();
+    EngineFixture fx(hostDrivenDeviceConfig(sys));
+    fx.stopHostControl();
+    fx.engine().controlPass();   // anything boot left, gone
+    fx.clearDebugMessages();
+
+    // Said, and not yet passed on: no pass has run since. The user's notice
+    // before a recovery, a switch's own account of itself — written just
+    // before the cold swap they describe.
+    clockwork_log("[test] said before the swap");
+    const auto r = fx.engine().switchDevice("Fake Interface", 0, 0, /*forceCold*/ true, "__none__");
+    INFO(r.error);
+    REQUIRE(r.success);
+
+    // The swap rebuilt the rings; what was in them was passed on first.
+    for (int i = 0; i < 20; ++i) fx.engine().controlPass();
+    bool heard = false;
+    for (const auto& line : fx.debugMessages())
+        if (line.find("[test] said before the swap") != std::string::npos) heard = true;
+    INFO(fx.debugMessagesDump());
+    CHECK(heard);
+}

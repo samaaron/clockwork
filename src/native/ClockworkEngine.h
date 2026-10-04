@@ -960,9 +960,14 @@ private:
     std::atomic<bool>            mControlParked{false};
     std::atomic<std::thread::id> mControlPassThread{};
     // Park the control pass for a cold swap's arena rebuild, and let it go,
-    // whoever runs it: the engine's own gateway thread or a host.
-    void parkControlPass();
+    // whoever runs it: the engine's own gateway thread or a host. False if
+    // the pass did not park in time and the swap goes on beside it.
+    bool parkControlPass();
     void resumeControlPass();
+    // Every frame waiting in the egress rings, to the transport, on the
+    // calling thread: the control pass's work, done by a cold swap too once
+    // the pass is parked (the rings' only reader then).
+    void drainEgressNow();
 
     // Peer command plane (SHM segment; shm_peer_plane.h). init() publishes the
     // segment's plane here when Config::shmCommands is set; shutdown() nulls it

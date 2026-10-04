@@ -93,8 +93,9 @@ public:
     // No-op if the thread was never started or when called from this reader's
     // own thread (a drain handler that triggers the swap is by definition not
     // draining concurrently with it). resume() unparks; extra resumes are
-    // harmless.
-    void pause();
+    // harmless. False if the reader did not park in time and the caller goes
+    // on beside it.
+    bool pause();
     void resume();
 
     // ── Blocking observability ───────────────────────────────────────────────
