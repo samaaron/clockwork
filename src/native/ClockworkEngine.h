@@ -599,6 +599,14 @@ public:
     };
     TestSwapHold testHoldSwapGate();
 
+#ifdef __APPLE__
+    // Test: deliver "the OS default output changed" exactly as the HAL
+    // listener does — the handler, on the device lane. Under the factory
+    // boundary the fake's default device is the OS default (see
+    // systemDefaultOutput), so a case moves it and then calls this.
+    void testSystemDefaultOutputChanged();
+#endif
+
     // --- Audio callback access (for preTick hook, pause/resume) ---
     JuceAudioCallback& audioCallback() { return mAudioCallback; }
 
@@ -806,6 +814,18 @@ private:
                                SwapOrigin origin);
 
 #ifdef __APPLE__
+    // What the OS says its default output is, and whether it is wireless or
+    // virtual — the follow policy and setDeviceMode's system path branch on
+    // both. Empty name when it cannot be read. Under the factory boundary the
+    // factory's device type answers instead of the HAL, as it does for the
+    // rest of the device edge: its default device index is the default.
+    struct SystemDefaultOutput {
+        std::string name;
+        bool        wireless  = false;
+        bool        isVirtual = false;
+    };
+    SystemDefaultOutput systemDefaultOutput();
+
     void handleSystemDefaultOutputChanged();
     static OSStatus defaultDevicePropertyListenerProc(
         AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData);

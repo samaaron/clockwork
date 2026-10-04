@@ -5428,6 +5428,69 @@ OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
     return noErr;
 }
 
+void ClockworkEngine::testSystemDefaultOutputChanged() {
+    postDeviceTask([this]() { handleSystemDefaultOutputChanged(); });
+}
+
+ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
+    SystemDefaultOutput out;
+    if (mCurrentConfig.deviceManagerFactory) {
+        // Under the gate, as every mDeviceManager read is: recovery's
+        // recreate resets it.
+        std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+        if (!mDeviceManager) return out;
+        if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+            const auto names = type->getDeviceNames(false);
+            const int i = type->getDefaultDeviceIndex(false);
+            if (i >= 0 && i < names.size()) out.name = names[i].toStdString();
+        }
+        return out;
+    }
+
+    AudioDeviceID defaultID = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 sz = sizeof(defaultID);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &defaultID) != noErr
+        || defaultID == kAudioObjectUnknown) {
+        return out;
+    }
+    CFStringRef nameCF = nullptr;
+    UInt32 nameSz = sizeof(nameCF);
+    AudioObjectPropertyAddress nameAddr = {
+        kAudioDevicePropertyDeviceNameCFString,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    if (AudioObjectGetPropertyData(defaultID, &nameAddr, 0, nullptr, &nameSz, &nameCF) != noErr
+        || !nameCF) {
+        return out;
+    }
+    char buf[256];
+    CFStringGetCString(nameCF, buf, sizeof(buf), kCFStringEncodingUTF8);
+    CFRelease(nameCF);
+    out.name = buf;
+
+    // Transport straight off the device just resolved: wireless defaults take
+    // JUCE's default-device path, virtual ones (NDI Audio, Loopback, …) are
+    // never chased.
+    uint32_t transport = 0;
+    UInt32 tSz = sizeof(transport);
+    AudioObjectPropertyAddress tAddr = {
+        kAudioDevicePropertyTransportType,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    if (AudioObjectGetPropertyData(defaultID, &tAddr, 0, nullptr, &tSz, &transport) == noErr) {
+        out.wireless  = CoreAudioTransport::isWireless(transport);
+        out.isVirtual = CoreAudioTransport::isVirtual(transport);
+    }
+    return out;
+}
+
 bool ClockworkEngine::waitForDeviceVisible(const std::string& name, int timeoutMs) {
     if (name.empty() || !mDeviceManager) return false;
     auto* dt = mDeviceManager->getCurrentDeviceTypeObject();
@@ -5473,33 +5536,10 @@ void ClockworkEngine::handleSystemDefaultOutputChanged() {
         return;
     }
 
-    // Read the new macOS system-default output device.
-    AudioDeviceID defaultID = kAudioObjectUnknown;
-    AudioObjectPropertyAddress addr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    UInt32 sz = sizeof(defaultID);
-    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &defaultID) != noErr
-        || defaultID == kAudioObjectUnknown) {
-        return;
-    }
-    CFStringRef nameCF = nullptr;
-    UInt32 nameSz = sizeof(nameCF);
-    AudioObjectPropertyAddress nameAddr = {
-        kAudioDevicePropertyDeviceNameCFString,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    if (AudioObjectGetPropertyData(defaultID, &nameAddr, 0, nullptr, &nameSz, &nameCF) != noErr
-        || !nameCF) {
-        return;
-    }
-    char buf[256];
-    CFStringGetCString(nameCF, buf, sizeof(buf), kCFStringEncodingUTF8);
-    CFRelease(nameCF);
-    std::string newDefault(buf);
+    // The new macOS system-default output device.
+    const SystemDefaultOutput def = systemDefaultOutput();
+    if (def.name.empty()) return;
+    const std::string& newDefault = def.name;
 
     // If we're on an aggregate, compare the new default against the real
     // (underlying) output we're aggregating, not the aggregate's own name.
@@ -5524,17 +5564,7 @@ void ClockworkEngine::handleSystemDefaultOutputChanged() {
             : mRealOutputDeviceName;
     }
 
-    // Is the new default a virtual device (NDI Audio, Loopback, …)? Read its
-    // transport type straight off the device we already resolved.
-    uint32_t transport = 0;
-    UInt32 tSz = sizeof(transport);
-    AudioObjectPropertyAddress tAddr = {
-        kAudioDevicePropertyTransportType,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    AudioObjectGetPropertyData(defaultID, &tAddr, 0, nullptr, &tSz, &transport);
-    const bool newIsVirtual = CoreAudioTransport::isVirtual(transport);
+    const bool newIsVirtual = def.isVirtual;
 
     // Don't chase our own aggregates, no-ops, virtual devices, or anything
     // while the user has pinned an output (-H / GUI choice): chasing a
@@ -5585,30 +5615,8 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
         if (mDeviceManager) {
             clockwork_log("[device-setup] switching to system default");
 #ifdef __APPLE__
-            AudioDeviceID defaultID = kAudioObjectUnknown;
-            AudioObjectPropertyAddress addr = {
-                kAudioHardwarePropertyDefaultOutputDevice,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            UInt32 sz = sizeof(defaultID);
-            std::string newDefault;
-            if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &defaultID) == noErr
-                && defaultID != kAudioObjectUnknown) {
-                CFStringRef nameCF = nullptr;
-                UInt32 nameSz = sizeof(nameCF);
-                AudioObjectPropertyAddress nameAddr = {
-                    kAudioDevicePropertyDeviceNameCFString,
-                    kAudioObjectPropertyScopeGlobal,
-                    kAudioObjectPropertyElementMain
-                };
-                if (AudioObjectGetPropertyData(defaultID, &nameAddr, 0, nullptr, &nameSz, &nameCF) == noErr && nameCF) {
-                    char buf[256];
-                    CFStringGetCString(nameCF, buf, sizeof(buf), kCFStringEncodingUTF8);
-                    CFRelease(nameCF);
-                    newDefault = buf;
-                }
-            }
+            const SystemDefaultOutput def = systemDefaultOutput();
+            const std::string& newDefault = def.name;
             if (!newDefault.empty()) {
                 // Branch on the new default's transport type:
                 //
@@ -5617,23 +5625,17 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
                 //    AirPlay correctly; opening AirPlay by explicit name has never been
                 //    reliable in testing.
                 //  * Non-wireless: switchDevice, so the mic is preserved via aggregate.
-                AudioObjectPropertyAddress tAddr = {
-                    kAudioDevicePropertyTransportType,
-                    kAudioObjectPropertyScopeGlobal,
-                    kAudioObjectPropertyElementMain
-                };
-                UInt32 tType = 0, tSize = sizeof(tType);
-                bool newIsWireless = false;
-                if (AudioObjectGetPropertyData(defaultID, &tAddr, 0, nullptr, &tSize, &tType) == noErr) {
-                    newIsWireless = CoreAudioTransport::isWireless(tType);
-                }
-                if (!newIsWireless) {
+                if (!def.wireless) {
                     std::string inputName = mRealInputDeviceName;
                     if (inputName.empty() && mCurrentConfig.numInputChannels > 0) {
                         auto setup = mDeviceManager->getAudioDeviceSetup();
                         inputName = setup.inputDeviceName.toStdString();
                     }
-                    auto result = switchDevice(newDefault, 0, 0, false, inputName);
+                    // Internal: following the default is not choosing it. A
+                    // user-origin swap would pin the default it landed on, and
+                    // every later move of the default would then be refused.
+                    auto result = switchDevice(newDefault, 0, 0, false, inputName,
+                                               SwapOrigin::Internal);
                     if (!result.success) return result.error;
                     return {};
                 }
@@ -5697,8 +5699,10 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
                 // Without forceCold, switchDevice sees currentRate ==
                 // sampleRate and skips the rebuild, leaving the DSP
                 // running at the old rate while JUCE delivers samples at
-                // the new rate — mismatch, pitched-down audio.
-                switchDevice(newDevName, newRate, 0, /*forceCold=*/true);
+                // the new rate — mismatch, pitched-down audio. Internal, as
+                // above: the default it opened is not the user's pick.
+                switchDevice(newDevName, newRate, 0, /*forceCold=*/true, "",
+                             SwapOrigin::Internal);
             } else {
                 printDeviceList();
             }
