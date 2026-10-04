@@ -9,13 +9,46 @@
 //! thread that is not a slow allocator, it is a broken one: a few hundred live
 //! synths took allocation from nanoseconds to hundreds of microseconds, the
 //! block deadline went with it, and the engine stopped dead rather than
-//! degrading. A wall-clock ratio is a crude instrument, but the regression it
-//! guards against was five orders of magnitude, so the bound can be loose
-//! enough never to flake on a loaded machine and still catch it.
+//! degrading.
+//!
+//! The pool is constant-time by construction — two bitmap scans, no walk —
+//! so there is no loop to count: only a measurement of the cost can catch a
+//! walk someone adds later. What is measured is the thread's own CPU time,
+//! not the wall clock: time the thread spends preempted or waiting is not in
+//! it, so a busy machine cannot make the pool look slower than it is, and
+//! only work the pool does can. The regression it guards against was 90x to
+//! 170x, against ~1x for the pool as it is.
+//!
+//! The pool's code is the same for every target, wasm included, so measuring
+//! it natively — where a thread CPU clock exists — covers the AudioWorklet's
+//! allocator too.
+#![cfg(any(unix, windows))]
 
 use std::ffi::c_void;
-use std::time::Instant;
 use clockwork_heap::HeapPool;
+
+/// CPU time this thread has used: nanoseconds on Unix, cycles on Windows.
+/// Only ratios of it are compared, so the unit cancels.
+#[cfg(unix)]
+fn thread_cpu() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid out-pointer to a timespec.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "no thread CPU clock");
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+#[cfg(windows)]
+fn thread_cpu() -> u64 {
+    use windows_sys::Win32::System::Threading::GetCurrentThread;
+    use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
+    let mut cycles = 0u64;
+    // SAFETY: GetCurrentThread is a pseudo-handle for this thread, always
+    // valid; `cycles` is a valid out-pointer.
+    let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+    assert_ne!(ok, 0, "no thread cycle count");
+    cycles
+}
 
 unsafe extern "C" fn new_area(size: usize) -> *mut c_void {
     let l = std::alloc::Layout::from_size_align(size, 16).unwrap();
@@ -28,23 +61,26 @@ fn pool() -> HeapPool {
     HeapPool::new(Some(new_area), Some(free_area), 48 * 1024 * 1024, 0)
 }
 
-/// Nanoseconds per alloc/free, best of three passes so a scheduling hiccup
-/// does not decide the result.
-fn ns_per_op(setup: impl Fn(&mut HeapPool) -> Vec<*mut u8>, size: usize) -> f64 {
+/// The thread's CPU time per alloc/free, best of five passes: what is left
+/// of the machine in it (another process warming the shared cache, a timer
+/// interrupt charged to the thread) is noise of a few percent, and the least
+/// of five is the pool's own cost.
+fn cpu_per_op(setup: impl Fn(&mut HeapPool) -> Vec<*mut u8>, size: usize) -> f64 {
     let mut best = f64::MAX;
-    for _ in 0..3 {
+    for _ in 0..5 {
         let mut p = pool();
         let held = setup(&mut p);
-        let churn = 2000;
-        let t = Instant::now();
+        // Long enough to stand well clear of the clock's resolution.
+        let churn = 20_000;
+        let t = thread_cpu();
         for _ in 0..churn {
             let q = p.alloc(size);
             assert!(!q.is_null());
             // SAFETY: just allocated from this pool, freed once.
             unsafe { p.free(q) };
         }
-        let ns = t.elapsed().as_secs_f64() * 1e9 / (churn as f64 * 2.0);
-        best = best.min(ns);
+        let per_op = (thread_cpu() - t) as f64 / (churn as f64 * 2.0);
+        best = best.min(per_op);
         for h in held {
             // SAFETY: each was allocated by `setup` from this pool.
             unsafe { p.free(h) };
@@ -53,18 +89,21 @@ fn ns_per_op(setup: impl Fn(&mut HeapPool) -> Vec<*mut u8>, size: usize) -> f64 
     best
 }
 
-/// A generous bound: TLSF measures ~1x across these ranges and the linear
-/// walk it replaced measured 90x and 170x.
-const MAX_RATIO: f64 = 20.0;
+/// TLSF measures 1.0x across these ranges on the thread's CPU clock (0.99x
+/// and 1.00x on an M-series Mac), and the linear walk it replaced measured
+/// 90x and 170x. Measured on a clock load cannot inflate, the bound can sit
+/// close enough to catch a walk over a fraction of the pool, and still far
+/// from anything a cache's worth of difference between machines makes.
+const MAX_RATIO: f64 = 5.0;
 
 #[test]
 fn cost_is_flat_in_live_blocks() {
-    let small = ns_per_op(|p| (0..500).map(|_| p.alloc(256)).collect(), 256);
-    let large = ns_per_op(|p| (0..32_000).map(|_| p.alloc(256)).collect(), 256);
+    let small = cpu_per_op(|p| (0..500).map(|_| p.alloc(256)).collect(), 256);
+    let large = cpu_per_op(|p| (0..32_000).map(|_| p.alloc(256)).collect(), 256);
     assert!(
         large < small * MAX_RATIO,
-        "allocation cost grew with occupancy: {small:.1} ns at 500 live blocks, \
-         {large:.1} ns at 32000 — the pool is scanning what it holds"
+        "allocation cost grew with occupancy: {small:.1} at 500 live blocks, \
+         {large:.1} at 32000 (thread CPU per op) — the pool is scanning what it holds"
     );
 }
 
@@ -88,11 +127,11 @@ fn cost_is_flat_in_free_blocks() {
             held
         }
     };
-    let small = ns_per_op(fragment(500), 112);
-    let large = ns_per_op(fragment(32_000), 112);
+    let small = cpu_per_op(fragment(500), 112);
+    let large = cpu_per_op(fragment(32_000), 112);
     assert!(
         large < small * MAX_RATIO,
-        "allocation cost grew with fragmentation: {small:.1} ns at 500 free blocks, \
-         {large:.1} ns at 32000 — the pool is walking its free space"
+        "allocation cost grew with fragmentation: {small:.1} at 500 free blocks, \
+         {large:.1} at 32000 (thread CPU per op) — the pool is walking its free space"
     );
 }
