@@ -11,7 +11,8 @@
  * calling ClockworkEngine::controlPass() (Config::hostDrivesControl). This
  * file pins the second shape: the engine starts no thread, nothing is
  * answered until the host passes, every subsystem is reached through the
- * host's thread, and the door closes cleanly at shutdown.
+ * host's thread, the door closes cleanly at shutdown, and a cold swap parks
+ * the host's pass as it parks the engine's own thread.
  *
  * The whole engine suite can also be run with every fixture in this shape
  * (CLOCKWORK_TEST_HOST_DRIVES_CONTROL=1, see EngineFixture.h); these cases
@@ -20,6 +21,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "FakeAudioDevice.h"
 #include "OscTestUtils.h"
 #include "clockwork_client.h"
 #include "clockwork_prefix.h"
@@ -28,7 +30,10 @@
 #include "shm_segment.hpp"
 #include "workers/RingBufferWriter.h"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -247,4 +252,95 @@ TEST_CASE("host control: the peer command plane rides the host's pass",
     OscReply reply;
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), reply));
     CHECK(lastInt(reply) == 4343);
+}
+
+// ── A cold swap parks the host's pass ────────────────────────────────────────
+// A cold swap tears down and rebuilds the shared-memory arena the pass drains.
+// The engine's own gateway thread is parked for it (RingReader::pause); a
+// host's pass has to be held off the same way, or the host drains an arena
+// being rebuilt under it. Each case below is the host itself: the fixture's
+// host thread is stopped after boot, so the only passes are the case's own.
+
+namespace {
+
+ClockworkEngine::Config hostDrivenDeviceConfig(std::shared_ptr<fake_audio::FakeSystem> sys) {
+    auto cfg = fake_audio::fakeEngineConfig(std::move(sys), "Fake Speakers");
+    cfg.hostDrivesControl = true;
+    return cfg;
+}
+
+}  // namespace
+
+TEST_CASE("host control: a pass the host asks for during a cold swap does not run",
+          "[HostControl][SwapPark]") {
+    auto sys = fake_audio::makeSimpleSystem();
+    EngineFixture fx(hostDrivenDeviceConfig(sys));
+    fx.stopHostControl();
+
+    int parked = 0;
+    bool ranWhileParked = true;
+    fx.engine().testControlParked = [&] {
+        ++parked;
+        ranWhileParked = fx.engine().controlPass();
+    };
+    const auto r = fx.engine().switchDevice("Fake Interface", 0, 0, /*forceCold*/ true, "__none__");
+    fx.engine().testControlParked = nullptr;
+    INFO(r.error);
+    REQUIRE(parked == 1);
+    CHECK_FALSE(ranWhileParked);
+
+    // And once the swap is done, the host's passes run again.
+    CHECK(fx.engine().controlPass());
+}
+
+TEST_CASE("host control: a cold swap waits for the host's pass in flight",
+          "[HostControl][SwapPark]") {
+    auto sys = fake_audio::makeSimpleSystem();
+    EngineFixture fx(hostDrivenDeviceConfig(sys));
+    fx.stopHostControl();
+
+    // Hold one pass mid-flight: the egress drain hands each debug line to
+    // onDebug on the thread running the pass.
+    std::mutex m;
+    std::condition_variable cv;
+    bool held = false, release = false;
+    std::thread::id host;
+    fx.engine().onDebug = [&](const std::string&) {
+        if (std::this_thread::get_id() != host) return;
+        std::unique_lock<std::mutex> lk(m);
+        held = true;
+        cv.notify_all();
+        cv.wait(lk, [&] { return release; });
+    };
+    clockwork_log("[test] a line for the held pass to drain");
+    std::thread hostThread([&] {
+        { std::lock_guard<std::mutex> lk(m); host = std::this_thread::get_id(); }
+        fx.engine().controlPass();
+    });
+    {
+        std::unique_lock<std::mutex> lk(m);
+        REQUIRE(cv.wait_for(lk, std::chrono::seconds(5), [&] { return held; }));
+    }
+
+    std::atomic<bool> parked { false };
+    fx.engine().testControlParked = [&] { parked = true; };
+    std::thread swap([&] {
+        fx.engine().switchDevice("Fake Interface", 0, 0, /*forceCold*/ true, "__none__");
+    });
+
+    // The swap waits for the pass: it cannot park while the pass is held.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const bool parkedWhileHeld = parked.load();
+    {
+        std::lock_guard<std::mutex> lk(m);
+        release = true;
+    }
+    cv.notify_all();
+    hostThread.join();
+    swap.join();
+    fx.engine().testControlParked = nullptr;
+    fx.engine().onDebug = nullptr;
+
+    CHECK_FALSE(parkedWhileHeld);
+    CHECK(parked.load());
 }

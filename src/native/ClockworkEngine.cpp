@@ -2083,14 +2083,53 @@ bool ClockworkEngine::controlPass() {
     if (!mControlOpen.load(std::memory_order_acquire)) return false;
     mControlPassesInFlight.fetch_add(1, std::memory_order_acq_rel);
     bool ran = false;
-    if (mControlOpen.load(std::memory_order_acquire) &&
-        !mControlPassBusy.exchange(true, std::memory_order_acq_rel)) {
-        mNrtGateway.pass();
-        mControlPassBusy.store(false, std::memory_order_release);
-        ran = true;
+    // The pass is taken, then the park looked at — both seq_cst, against the
+    // park's store-then-look (see parkControlPass).
+    if (mControlOpen.load(std::memory_order_acquire) && !mControlPassBusy.exchange(true)) {
+        if (!mControlParked.load()) {
+            mControlPassThread.store(std::this_thread::get_id());
+            mNrtGateway.pass();
+            mControlPassThread.store(std::thread::id{});
+            ran = true;
+        }
+        mControlPassBusy.store(false);
     }
     mControlPassesInFlight.fetch_sub(1, std::memory_order_acq_rel);
     return ran;
+}
+
+// A cold swap tears down and rebuilds the arena the control pass drains. The
+// engine's own gateway thread parks between passes (RingReader::pause). A
+// host's pass is held off by the flag controlPass() reads once it has taken
+// the pass: the flag is stored and then the pass looked at here, the pass is
+// taken and then the flag looked at there, all seq_cst, so either the pass
+// sees the park or the park waits for the pass. Bounded as the reader's park
+// is, for the same reason: a pass wedged behind a foreign lock must not hang
+// the device switch.
+void ClockworkEngine::parkControlPass() {
+    if (mNrtGateway.running()) {
+        mNrtGateway.pause();
+        return;
+    }
+    mControlParked.store(true);
+    // A swap run from inside a pass is not draining beside it.
+    if (mControlPassThread.load() == std::this_thread::get_id()) return;
+    for (int waited = 0; mControlPassBusy.load(); ++waited) {
+        if (waited >= 2000) {
+            clockwork_log("[control] park: the host's pass did not finish within 2s — "
+                          "proceeding unparked");
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void ClockworkEngine::resumeControlPass() {
+    if (mNrtGateway.running()) {
+        mNrtGateway.resume();
+        return;
+    }
+    mControlParked.store(false);
 }
 
 // --- Audio-thread control route: forward clockwork's control verbs to the NRT
@@ -4135,18 +4174,20 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     mAudioCallback.pause();
 
     // Cold swaps tear down and re-init the shared-memory arena (destroy_dsp
-    // / rebuild_dsp → init_memory → clockwork_lanes_reset_drains) that the reader
-    // threads' drains walk concurrently — park them until the arena is back.
-    // Scope guard so every exit path below resumes them; the happy paths
+    // / rebuild_dsp → init_memory → clockwork_lanes_reset_drains) that the
+    // control pass drains — park it until the arena is back, whoever runs it.
+    // Scope guard so every exit path below resumes it; the happy paths
     // resume explicitly just before audio restarts.
-    struct ReaderPark {
-        std::vector<std::function<void()>> resumers;
-        void park(RingReader& r)      { r.pause(); resumers.push_back([&r] { r.resume(); }); }
-        void resumeNow() { for (auto& f : resumers) f(); resumers.clear(); }
-        ~ReaderPark()    { resumeNow(); }
-    } readerPark;
-    if (isCold)
-        readerPark.park(mNrtGateway);
+    struct ControlPark {
+        ClockworkEngine* engine = nullptr;
+        void park(ClockworkEngine* e) { e->parkControlPass(); engine = e; }
+        void resumeNow() { if (engine) engine->resumeControlPass(); engine = nullptr; }
+        ~ControlPark()   { resumeNow(); }
+    } controlPark;
+    if (isCold) {
+        controlPark.park(this);
+        if (testControlParked) testControlParked();
+    }
 
     // --- Stop audio ---
     stopAudioSource();
@@ -4555,7 +4596,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 }
             }
         }
-        readerPark.resumeNow();
+        controlPark.resumeNow();
         startAudioSource();
         mAudioCallback.resume();
         result.error = errStr;
@@ -4638,7 +4679,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
 
     // --- Restart audio (success path) ---
-    readerPark.resumeNow();
+    controlPark.resumeNow();
     const bool delivered = startAudioSource();
     mAudioCallback.resume();
 

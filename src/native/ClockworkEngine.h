@@ -519,6 +519,10 @@ public:
     // Device swap event callback
     std::function<void(const std::string& event, const SwapResult& result)> onSwapEvent;
 
+    // Injectable hook for testing: called on the swapping thread once a cold
+    // swap has parked the control pass, before it tears the arena down.
+    std::function<void()> testControlParked;
+
     // Injectable hook for testing: if set and returns non-empty string,
     // the device configuration step is treated as failed with that error.
     // The bool argument is true when an input device was requested in the
@@ -950,6 +954,15 @@ private:
     std::atomic<uint32_t>     mControlPassesInFlight{0};
     // Held by the one thread inside the pass; a second is refused.
     std::atomic<bool>         mControlPassBusy{false};
+    // Set while a cold swap rebuilds the arena the pass drains: a host's
+    // controlPass() runs nothing meanwhile. The thread inside a pass, so a
+    // swap run from within one does not wait for itself.
+    std::atomic<bool>            mControlParked{false};
+    std::atomic<std::thread::id> mControlPassThread{};
+    // Park the control pass for a cold swap's arena rebuild, and let it go,
+    // whoever runs it: the engine's own gateway thread or a host.
+    void parkControlPass();
+    void resumeControlPass();
 
     // Peer command plane (SHM segment; shm_peer_plane.h). init() publishes the
     // segment's plane here when Config::shmCommands is set; shutdown() nulls it

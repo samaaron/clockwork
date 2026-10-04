@@ -224,6 +224,9 @@ public:
 
     // The host's control thread, when the config asked for one.
     bool hostDrivesControl() const { return mHostControl.running(); }
+    // Stop it, so the case is the host: no control pass runs but the ones it
+    // runs itself (engine().controlPass()).
+    void stopHostControl() { mHostControl.stop(); }
 
     // Stop the headless driver so the caller owns process_audio exclusively.
     void stopHeadlessDriver();
