@@ -119,12 +119,18 @@ mod tests {
     fn now_agrees_with_the_harness_packing() {
         // ntpToOscTimetag(wallClockNTP()): whole seconds in the high 32 bits,
         // counted from 1900. Checked against the Unix epoch the long way round.
-        let n = now();
-        let unix = std::time::SystemTime::now()
+        // Bracketed by the Unix clock on either side, so the check holds
+        // however long the read takes.
+        let unix = || std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let before = unix();
+        let n = now();
+        let after = unix();
         let ntp_secs = n >> 32;
-        assert!(ntp_secs.abs_diff(unix + NTP_EPOCH_OFFSET_SECS) <= 1,
-                "packed seconds {ntp_secs} vs expected {}", unix + NTP_EPOCH_OFFSET_SECS);
+        assert!(ntp_secs >= before + NTP_EPOCH_OFFSET_SECS
+                    && ntp_secs <= after + NTP_EPOCH_OFFSET_SECS,
+                "packed seconds {ntp_secs} vs {}..={}",
+                before + NTP_EPOCH_OFFSET_SECS, after + NTP_EPOCH_OFFSET_SECS);
     }
 
     #[test]

@@ -827,9 +827,16 @@ mod timetag_tests {
 
     #[test]
     fn a_future_timetag_converts_to_about_that_long() {
+        // delay_until reads the clock itself, somewhere between the two reads
+        // here: the delay is a second less however long that took — measured,
+        // so a machine that pauses moves the allowance with it.
+        let before = std::time::Instant::now();
         let now = now_timetag();
         let d = delay_until(now + (1u64 << 32)).expect("a second out is a delay");
+        let took = before.elapsed();
         let ms = d.as_millis();
-        assert!((950..=1050).contains(&ms), "one second, got {ms}ms");
+        let slack = 2 + took.as_millis();   // + the timetag's own rounding
+        assert!(ms <= 1000 + 2 && ms + slack >= 1000,
+                "one second less {took:?}, got {ms}ms");
     }
 }

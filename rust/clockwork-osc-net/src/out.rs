@@ -88,7 +88,7 @@ mod tests {
         // below the protocol's. Without the widened send buffer this send
         // returns false on macOS and the sink would count a drop.
         let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
-        listener.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        listener.set_read_timeout(Some(Duration::from_secs(30))).unwrap();   // wedge-only
         let port = listener.local_addr().unwrap().port();
         let sender = OscSender::new().expect("a socket binds");
         let body = vec![0xABu8; 60_000];

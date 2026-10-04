@@ -569,8 +569,10 @@ mod tests {
     fn v6_loopback_available() -> bool {
         UdpSocket::bind("[::1]:0").is_ok()
     }
+    // Bounded only against what never comes: the recv thread takes the time
+    // it takes on a loaded machine, and a passing case never waits it out.
     fn wait_until(mut f: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if f() {
                 return true;
@@ -637,7 +639,7 @@ mod tests {
         let mut buf = [0u8; 1024];
 
         let l4 = UdpSocket::bind("127.0.0.1:0").unwrap();
-        l4.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        l4.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         let p4 = l4.local_addr().unwrap().port();
         send_osc(h, "127.0.0.1", p4, &inner);
         let (n, _) = l4.recv_from(&mut buf).expect("IPv4 outbound delivery");
@@ -645,7 +647,7 @@ mod tests {
 
         if v6_loopback_available() {
             let l6 = UdpSocket::bind("[::1]:0").unwrap();
-            l6.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            l6.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             let p6 = l6.local_addr().unwrap().port();
             send_osc(h, "::1", p6, &inner);
             let (n, _) = l6.recv_from(&mut buf).expect("IPv6 outbound delivery");

@@ -23,6 +23,12 @@
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long a loop may go without the other side doing anything before the
+/// ring is taken to be broken: a bound only a ring that never moves reaches,
+/// however starved of the CPU either thread is.
+const NO_PROGRESS: Duration = Duration::from_secs(30);
 
 use clockwork_ports::ffi::*;
 
@@ -79,11 +85,13 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
         next
     });
 
-    // The audio thread: a fixed cadence, taking whatever is there.
+    // The audio thread: a fixed cadence, taking whatever is there. When there
+    // is nothing it lets the producer run — a consumer spinning on an empty
+    // ring on a runner with few cores can starve the very thread it waits for.
     let mut chans: Vec<Vec<f32>> = (0..CH).map(|_| vec![f32::NAN; BLOCK]).collect();
     let mut next_out: u64 = 0;
     let mut requested: u64 = 0;
-    let mut blocks: u64 = 0;
+    let mut last_progress = Instant::now();
     while next_out < TOTAL {
         let ptrs: Vec<*mut f32> = chans.iter_mut().map(|v| v.as_mut_ptr()).collect();
         // SAFETY: `CH` channel pointers, each to `BLOCK` writable frames.
@@ -91,7 +99,6 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
             clockwork_port_read(port, ptrs.as_ptr(), CH as u32, BLOCK as u32)
         } as u64;
         requested += BLOCK as u64;
-        blocks += 1;
         for (c, chan) in chans.iter().enumerate() {
             for (f, &v) in chan.iter().enumerate().take(got as usize) {
                 assert_eq!(v, sample(next_out + f as u64, c),
@@ -103,7 +110,12 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
             }
         }
         next_out += got;
-        assert!(blocks < 10_000_000, "consumer made no progress");
+        if got > 0 {
+            last_progress = Instant::now();
+        } else {
+            assert!(last_progress.elapsed() < NO_PROGRESS, "consumer made no progress");
+            std::thread::yield_now();
+        }
     }
 
     let produced = producer.join().unwrap();
@@ -127,8 +139,9 @@ fn a_sink_that_overruns_accounts_for_every_frame_it_dropped() {
     // Not a divisor of the 256-frame ring, for the same reason.
     const BLOCK: usize = 100;
 
-    // Deliberately shallow, and drained by a consumer that dawdles, so the
-    // ring really does fill.
+    // Deliberately shallow, and the consumer starts draining only once the
+    // ring has overrun: it really does fill, whichever thread the machine
+    // happens to favour, and the drops are concurrent with draining from then.
     let port = open("concurrency-sink", SINK, CH as u32, 256);
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -138,6 +151,11 @@ fn a_sink_that_overruns_accounts_for_every_frame_it_dropped() {
             let mut buf = vec![0.0f32; 96 * CH];
             let mut count: u64 = 0;
             let mut last: Option<u64> = None;
+            let waiting_since = Instant::now();
+            while clockwork_port_overruns(port) == 0 && !stop.load(Ordering::Acquire) {
+                assert!(waiting_since.elapsed() < NO_PROGRESS, "the producer never filled the ring");
+                std::thread::yield_now();
+            }
             loop {
                 // SAFETY: `buf` holds 96 frames of `CH` channels.
                 let got = unsafe { clockwork_port_consume(port, buf.as_mut_ptr(), 96) } as usize;

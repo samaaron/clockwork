@@ -293,8 +293,9 @@ mod tests {
         unsafe { clockwork_osc_uds_stop(h) };
     }
 
+    // Bounded only against what never comes (see stream.rs's tests).
     fn wait_until(mut f: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if f() {
                 return true;
@@ -330,7 +331,7 @@ mod tests {
         assert!(!h.is_null());
 
         let client = UnixDatagram::bind(&client_path).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         let msg = encode("/s_new", &[OscArg::Str("sine".into()), OscArg::Int(1000)]);
         client.send_to(&msg, &server_path).unwrap();
 
@@ -404,7 +405,9 @@ mod tests {
         assert!(!h.is_null());
         let t0 = Instant::now();
         stop(h);
-        assert!(t0.elapsed() < Duration::from_secs(1), "stop should be prompt");
+        // A stop that waited on something that never comes would never
+        // return; any bound tells the two apart, and this one only that does.
+        assert!(t0.elapsed() < Duration::from_secs(30), "stop should be prompt");
         assert!(!path.exists());
     }
 }

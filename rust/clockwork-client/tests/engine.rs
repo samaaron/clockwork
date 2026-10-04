@@ -259,7 +259,9 @@ fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
             }
         });
         client.send(&ping(), ORIGIN).unwrap();
-        let got = client.poll_until(Duration::from_secs(5), |m| {
+        // Bounded only against a pong that never comes: the renderer thread
+        // takes the time it takes on a loaded machine.
+        let got = client.poll_until(Duration::from_secs(30), |m| {
             (m.address() == "/dummy/pong").then_some(m.origin)
         });
         stop.store(true, Ordering::Relaxed);

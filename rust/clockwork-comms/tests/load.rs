@@ -345,7 +345,7 @@ mod dgram {
         // used to end the wait early and undercount. Falling out on the deadline
         // is fine, the assertion below reports the shortfall.
         let attempted = DGRAM_CLIENTS as i64 * DGRAM_PER as i64;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);   // wedge-only, as tcp_load's
         while sink.total() < accepted && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
