@@ -238,7 +238,6 @@ endif()
 if(CLOCKWORK_DEVICE)
     target_sources(clockwork_tests PRIVATE
         test_device_policy.cpp
-        test_aggregate_buffer_clamp.cpp
         test_audio_recovery.cpp
         test_realtime_thread.cpp)
 endif()
@@ -385,6 +384,7 @@ add_executable(clockwork_engine_tests
     test_boot_input_pairing.cpp
     test_swap_characterization.cpp
     test_dead_device.cpp
+    test_real_devices.cpp
     test_system_default.cpp
     test_device_switch_verb.cpp
     test_device_events.cpp

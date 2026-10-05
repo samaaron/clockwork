@@ -122,8 +122,13 @@ public:
         bool isVirtual = false;       /**< made in software (Loopback, BlackHole) */
         bool aggregateClass = false;  /**< made of other devices (an aggregate, a
                                            multi-output device) */
+        bool pairs = true;            /**< can play as one with a different device,
+                                           output on one and input on the other
+                                           (createDevice with two names) */
         int numOutputChannels = -1;   /**< -1: can't say without opening it */
         int numInputChannels = -1;
+        Array<double> sampleRates;    /**< empty: can't say without opening it */
+        Array<int> bufferSizes;       /**< empty: can't say without opening it */
         String kind;                  /**< the driver's own word for how it is
                                            connected, for logs ("usb ", "blue") */
     };
@@ -139,6 +144,12 @@ public:
         answers by getDefaultDeviceIndex.
     */
     virtual String getSystemDefaultDeviceName (bool forInput) const;
+
+    /** smoothie addition: the name of the application the devices are
+        opened for, for what a type makes in the operating system's name (a
+        CoreAudio aggregate device, a PipeWire node). The default keeps none.
+    */
+    virtual void setClientName (const String& name);
 
     //==============================================================================
     /** smoothie addition: what a device-change sink is told changed. */

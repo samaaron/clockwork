@@ -151,44 +151,6 @@ TEST_CASE("SystemDefault: a default that moves with the device list is followed 
     CHECK(fix.engine().preferredOutputDevice().empty());
 }
 
-TEST_CASE("SystemDefault: the engine's own aggregate becoming the default is not "
-          "followed, but a real device whose name starts with the app's name is",
-          "[SystemDefault]") {
-    // On macOS the engine pairs a separate microphone through an aggregate
-    // device it names "<app name>#N", and building one can briefly make it the
-    // default. Following it would nest the engine inside its own device, and
-    // each rebuild would move the default again. Only that name is the
-    // engine's own: the app name is the embedder's, not a fixed word.
-    auto sys = makeSimpleSystem();
-    auto own  = addUnpluggedOutput(*sys, "TestApp#1");
-    auto real = addUnpluggedOutput(*sys, "TestApp Audio Interface");
-    auto cfg = fakeEngineConfig(sys, "Fake Speakers");
-    cfg.appName = "TestApp";
-    EngineFixture fix(cfg);
-    REQUIRE(fix.engine().setDeviceMode("system").empty());
-    REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
-
-    {   // outputs: Fake Speakers, Fake Interface, TestApp#1
-        auto hold = fix.engine().testHoldSwapGate();
-        own->hidden = false;
-        sys->types[0].defaultDeviceIndex = 2;
-    }
-    REQUIRE(sys->reportListChanged());
-    deviceLaneDone(fix.engine());
-    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
-    CHECK(own->opens.load() == 0);
-
-    {   // ...and TestApp Audio Interface, a real one
-        auto hold = fix.engine().testHoldSwapGate();
-        real->hidden = false;
-        sys->types[0].defaultDeviceIndex = 3;
-    }
-    REQUIRE(sys->reportListChanged());
-    INFO(fix.debugMessagesDump());
-    CHECK(playingOn(fix, "TestApp Audio Interface"));
-    CHECK(fix.engine().preferredOutputDevice().empty());
-}
-
 TEST_CASE("SystemDefault: a chosen output stays put when the default moves",
           "[SystemDefault]") {
     auto sys = makeSimpleSystem();               // the default is Fake Speakers

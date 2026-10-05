@@ -214,6 +214,9 @@ void AudioDeviceManager::addAudioDeviceType (std::unique_ptr<AudioIODeviceType> 
         // smoothie: the sink is how the type's device changes leave it.
         if (deviceChangeSink != nullptr)
             availableDeviceTypes.getLast()->setDeviceChangeSink (deviceChangeSink);
+
+        if (clientName.isNotEmpty())
+            availableDeviceTypes.getLast()->setClientName (clientName);
     }
 }
 
@@ -223,6 +226,14 @@ void AudioDeviceManager::setDeviceChangeSink (std::function<void (AudioIODeviceT
 
     for (auto* type : availableDeviceTypes)
         type->setDeviceChangeSink (deviceChangeSink);
+}
+
+void AudioDeviceManager::setClientName (const String& name)
+{
+    clientName = name;
+
+    for (auto* type : availableDeviceTypes)
+        type->setClientName (clientName);
 }
 
 void AudioDeviceManager::removeAudioDeviceType (AudioIODeviceType* deviceTypeToRemove)

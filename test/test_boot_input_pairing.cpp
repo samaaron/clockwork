@@ -59,12 +59,11 @@ TEST_CASE("Boot: -H full-duplex device with matching input pref keeps its input"
 }
 
 // ── A saved microphone, paired with the output as the engine comes up ───────
-// Off macOS a driver opens the output and the input as separate devices, and
-// the boot pairs the saved one itself; otherwise a GUI would find its choice
-// not honoured on every launch and correct it with a needless rebuild. macOS
-// pairs through an aggregate device, which the fakes cannot build yet.
+// The driver opens the output and the input as one device (CoreAudio on an
+// aggregate of the two), and the boot pairs the saved one itself; otherwise a
+// GUI would find its choice not honoured on every launch and correct it with
+// a needless rebuild.
 
-#ifndef __APPLE__
 namespace {
 
 // The driver the engine says it is on, as the GUI's driver menu reads it.
@@ -160,4 +159,40 @@ TEST_CASE("Boot: a saved microphone known by another driver's name doesn't cost 
     CHECK(sys->device("Speakers (MOTU)")->opens.load() == cleanBootOpens);
     CHECK(fix.waitForBlocks(20));
 }
-#endif
+
+TEST_CASE("Boot: a saved microphone its driver won't pair with the output isn't tried",
+          "[DeviceSelection][boot]") {
+    // AirPods' microphone, saved while the AirPods played. CoreAudio can't
+    // put a wireless device in an aggregate (its codec drops the pair to
+    // 16 kHz, #3555): tried, the pair is refused with the output already
+    // closed, and the output is opened again — a dropout at every launch.
+    auto machine = [] {
+        auto sys = makeSimpleSystem();
+        auto airpods = device("Fake AirPods", 2, 1);
+        airpods->wireless = true;
+        sys->types[0].devices.push_back(airpods);
+        return sys;
+    };
+    auto boot = [](std::shared_ptr<fake_audio::FakeSystem> sys, const std::string& savedMic) {
+        auto cfg = fakeEngineConfig(std::move(sys), "Fake Speakers");
+        cfg.numInputChannels = 2;
+        cfg.inputDevice = savedMic;
+        return cfg;
+    };
+
+    int cleanBootOpens = 0;
+    {
+        auto sys = machine();
+        EngineFixture fix(boot(sys, ""));
+        cleanBootOpens = sys->device("Fake Speakers")->opens.load();
+    }
+
+    auto sys = machine();
+    EngineFixture fix(boot(sys, "Fake AirPods"));
+    INFO(fix.debugMessagesDump());
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    CHECK(fix.engine().currentDevice().activeInputChannels == 0);
+    CHECK(sys->device("Fake AirPods")->opens.load() == 0);
+    CHECK(sys->device("Fake Speakers")->opens.load() == cleanBootOpens);
+    CHECK(fix.waitForBlocks(20));
+}

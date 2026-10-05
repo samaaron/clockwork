@@ -11,7 +11,6 @@
 // own time to its sink, so it is present whatever this build decided about
 // the timed queue (matching audio_processor.cpp).
 #include "clock/MidiClockOut.h"
-#include "AggregateDeviceHelper.h"
 #include "DevicePolicy.h"
 #include "AsioDriverCheck.h"
 #include "PipeWireAudio.h"
@@ -37,7 +36,6 @@
 #include <dlfcn.h>
 #endif
 #ifdef __APPLE__
-#include <CoreAudio/CoreAudio.h>
 #include "MicPermission.h"
 #endif
 
@@ -164,48 +162,66 @@ std::string ClockworkEngine::refuseUnknownDeviceName(
         deviceName, inputDeviceName, visibleNames);
 }
 
-std::string ClockworkEngine::refuseWirelessMicAddition(
+std::string ClockworkEngine::refuseUnpairableInput(
         const std::string& deviceName,
         const std::string& inputDeviceName) {
-#ifdef __APPLE__
-    // Only applies to "add mic while keeping current output" swaps.
+    // Only applies to "add an input while keeping the current output" swaps.
     if (!deviceName.empty()) return {};
     if (inputDeviceName.empty() || inputDeviceName == "__none__") return {};
     if (!mDeviceManager) return {};
     auto* cur = mDeviceManager->getCurrentAudioDevice();
-    if (!cur) return {};
-    std::string curOut = mRealOutputDeviceName.empty()
-        ? cur->getName().toStdString()
-        : mRealOutputDeviceName;
-    for (auto& dev : listDevices(false)) {
-        if (sameDeviceName(dev.name, curOut) && !dev.isSuitableForAggregate()) {
-            std::string err = "can't add input '" + inputDeviceName
-                            + "' — current output '" + curOut
-                            + "' is wireless and can't be aggregated with a mic";
-            clockwork_log("[switchDevice] %s", err.c_str());
-            return err;
-        }
-    }
-#else
-    (void)deviceName; (void)inputDeviceName;
-#endif
-    return {};
+    auto* type = mDeviceManager->getCurrentDeviceTypeObject();
+    if (!cur || !type) return {};
+    const juce::String curOut = cur->getName();
+    if (sameDeviceName(inputDeviceName, curOut.toStdString())) return {};
+    const auto traits = type->getDeviceTraits(curOut);
+    if (traits.pairs) return {};
+    std::string err = "can't add input '" + inputDeviceName
+                    + "' — current output '" + curOut.toStdString() + "' is "
+                    + (traits.wireless ? "wireless, and " : "")
+                    + "can't be paired with another device's input";
+    clockwork_log("[switchDevice] %s", err.c_str());
+    return err;
 }
+
+namespace {
+// The device layer's diagnostics (smoothie writes them through JUCE's
+// Logger) on the engine's log. One for the process, installed once, and
+// never over a logger the embedder set.
+struct DeviceLayerLog final : juce::Logger {
+    void logMessage(const juce::String& message) override {
+        clockwork_log("%s", message.toRawUTF8());
+    }
+};
+
+void routeDeviceLayerLog() {
+    static DeviceLayerLog log;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (juce::Logger::getCurrentLogger() == nullptr)
+            juce::Logger::setCurrentLogger(&log);
+    });
+}
+} // namespace
 
 std::unique_ptr<juce::AudioDeviceManager>
 ClockworkEngine::makeDeviceManager() {
+    routeDeviceLayerLog();
     auto manager = mCurrentConfig.deviceManagerFactory
         ? mCurrentConfig.deviceManagerFactory()
         : std::make_unique<juce::AudioDeviceManager>();
-    // Device-list changes come to the engine, not to the manager: left to
-    // itself the manager closes and reopens devices on whatever thread the
-    // OS reports a change, under the device lane's feet.
+    // Device changes come to the engine, not to the manager: left to itself
+    // the manager closes and reopens devices on whatever thread the OS
+    // reports a change, under the device lane's feet.
     manager->setDeviceChangeSink([this](juce::AudioIODeviceType::DeviceChange change) {
         using Change = juce::AudioIODeviceType::DeviceChange;
         devicesChanged(change == Change::list          ? kListChanged
                      : change == Change::systemDefault ? kDefaultChanged
                                                        : kOpenDeviceChanged);
     });
+    // What the device layer names in the OS after the app: a CoreAudio
+    // aggregate device pairing an output with an input, a PipeWire node.
+    manager->setClientName(juce::String(sPublishedAppName));
     return manager;
 }
 
@@ -297,30 +313,6 @@ std::vector<double> ClockworkEngine::probeDeviceSampleRates(
     return result;
 }
 
-
-void ClockworkEngine::clampAggregateBufferIfNeeded(int& bufferSize) {
-#ifdef __APPLE__
-    const bool active = AggregateDeviceHelper::exists()
-                     && AggregateDeviceHelper::driftCompensationEnabled();
-    const int clamped = clockwork::device::clampBufferForDriftComp(bufferSize, active);
-    if (clamped != bufferSize) {
-        clockwork_log("[device-setup] clamping aggregate buffer "
-                "%d -> %d (drift-comp minimum)",
-                bufferSize, clamped);
-        bufferSize = clamped;
-        mCurrentConfig.bufferSize = clamped;
-    }
-#endif
-}
-
-int ClockworkEngine::aggregateInputChannelOffsetFor(
-        const std::string& outputDeviceName) const {
-    if (outputDeviceName.empty()) return 0;
-    for (auto& d : listDevices(false)) {
-        if (d.name == outputDeviceName) return d.maxInputChannels;
-    }
-    return 0;
-}
 
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
 // Touch the type list before adding ours: JUCE only creates its built-in
@@ -495,10 +487,6 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     // deviceManagerFactory boundary — an injected (fake-device) manager
     // must not touch real CoreAudio/PipeWire/DirectSound state.
     const bool platformSetup = !cfg.deviceManagerFactory;
-#ifdef __APPLE__
-    if (platformSetup)
-        AggregateDeviceHelper::cleanupOrphaned();
-#endif
     mDeviceManager = makeDeviceManager();
 
 #ifdef __linux__
@@ -689,7 +677,7 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 // A failed full-duplex attempt may be the input half alone (mic-privacy
                 // denial, exclusive-mode contention, input-side rate limits). Retry
                 // output-only so a bad input never costs the user their chosen output;
-                // aggregate promotion below pairs an input normally.
+                // boot's input pairing below pairs an input normally.
                 if (initError.isNotEmpty()
                     && setup.inputDeviceName.isNotEmpty()) {
                     clockwork_log("[device-setup] -H full-duplex open of "
@@ -719,16 +707,15 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     }
 
     if (!openedByHardwareFlag) {
-#ifdef __APPLE__
-        // On macOS, boot output-only then create an Aggregate Device.
-        // JUCE's AudioIODeviceCombiner (used when input and output are
-        // different hardware devices) is unreliable at small buffer sizes.
+        // The default output, with the default input when inputs are wanted:
+        // the driver pairs the two (CoreAudio on an aggregate device of them).
         //
-        // NEVER OPEN A WIRELESS DEFAULT (AirPlay, Bluetooth) at boot: opening
-        // wireless and then transitioning to a non-wireless device for the
-        // aggregate triggers a ~15 s CoreAudio IOProc halt. Pick a non-wireless
-        // fallback up front.
+        // NEVER OPEN A WIRELESS DEFAULT (AirPlay, Bluetooth) at boot on
+        // macOS: opening wireless and then moving to a wired device for the
+        // aggregate a microphone needs halts CoreAudio's IOProc for ~15 s.
+        // Pick a wired output up front.
         std::string bootFallback;
+#ifdef __APPLE__
         if (const SystemDefaultOutput def = systemDefaultOutput();
             def.wireless && !def.name.empty()) {
             std::vector<std::string> names;
@@ -752,31 +739,34 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             }
         }
 
-        if (!bootFallback.empty()) {
+#endif
+        auto openDefault = [&](int ins) -> juce::String {
+            if (bootFallback.empty())
+                return mDeviceManager->initialiseWithDefaultDevices(ins, reqOut);
             juce::AudioDeviceManager::AudioDeviceSetup setup;
             setup.outputDeviceName = juce::String(bootFallback);
             setup.useDefaultOutputChannels = true;
-            initError = mDeviceManager->initialise(
-                0, reqOut, nullptr, false, juce::String(), &setup);
-            if (initError.isEmpty()) mDeviceMode = bootFallback;
-        } else {
-            initError = mDeviceManager->initialiseWithDefaultDevices(
-                0, reqOut);
+            if (ins != 0)
+                if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+                    setup.inputDeviceName = type->getSystemDefaultDeviceName(true);
+                    setup.useDefaultInputChannels = true;
+                }
+            return mDeviceManager->initialise(ins, reqOut, nullptr, false,
+                                              juce::String(), &setup);
+        };
+        initError = openDefault(reqIn);
+        // An input the driver won't pair with the output (CoreAudio refuses a
+        // wireless one, whose codec would drop the pair to 16 kHz — #3555)
+        // costs the input, never the output.
+        if (initError.isNotEmpty() && reqIn != 0) {
+            clockwork_log("[device-setup] init with %d in / %d out failed: %s "
+                    "— opening the output alone", reqIn, reqOut, initError.toRawUTF8());
+            initError = openDefault(0);
         }
+        if (initError.isEmpty() && !bootFallback.empty()) mDeviceMode = bootFallback;
         if (initError.isNotEmpty()) {
             clockwork_log("[device-setup] init with 0 in / %d out failed: %s",
                     reqOut, initError.toRawUTF8());
-            initError = mDeviceManager->initialiseWithDefaultDevices(0, 0);
-        }
-        // Aggregate-device creation runs below — for both the -H path
-        // and this default-device path.
-#else
-        initError = mDeviceManager->initialiseWithDefaultDevices(
-            reqIn, reqOut);
-        if (initError.isNotEmpty()) {
-            clockwork_log("[device-setup] init with %d in / %d out failed: %s",
-                    reqIn, reqOut,
-                    initError.toRawUTF8());
             initError = mDeviceManager->initialiseWithDefaultDevices(0, 2);
         }
         if (initError.isNotEmpty()) {
@@ -784,7 +774,6 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                     initError.toRawUTF8());
             initError = mDeviceManager->initialiseWithDefaultDevices(0, 0);
         }
-#endif
         if (initError.isNotEmpty()) {
             clockwork_log("[device-setup] all init attempts failed: %s",
                     initError.toRawUTF8());
@@ -822,136 +811,10 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
     }
 
-#ifdef __APPLE__
-    // Aggregate-promotion runs after both open paths (-H match and
-    // default-device fallback). Without it, the -H path leaves the
-    // engine on an output-only device while the config requests
-    // inputs — some Macs never deliver callbacks on that mismatch,
-    // stalling boot until an external swap arrives.
-    if (initError.isEmpty() && cfg.numInputChannels != 0) {
-        auto* dev = mDeviceManager->getCurrentAudioDevice();
-        // A full-duplex -H open already carries its input: nothing to
-        // promote — and the same-name fallback below would clobber the
-        // opened device with a default-device re-open.
-        if (dev && dev->getActiveInputChannels().countNumberOfSetBits() > 0)
-            dev = nullptr;
-        if (dev) {
-            std::string outName = dev->getName().toStdString();
-            // The system's default input, as the driver names it.
-            std::string inName;
-            if (auto* type = mDeviceManager->getCurrentDeviceTypeObject())
-                inName = type->getSystemDefaultDeviceName(true).toStdString();
-            // One cached-list snapshot serves the whole pairing decision: a rescan here can
-            // disrupt the just-opened device. The decision is pure policy (#3555 — vetting
-            // only the requested input let an unvetted Bluetooth HFP default become an
-            // aggregate sub-device: 16 kHz engine and heap corruption).
-            const auto bootDevices = listDevices(false);
-            const auto plan = clockwork::device::planBootInputPairing(
-                outName, openedByHardwareFlag, mPreferredInputDevice,
-                inName, bootDevices);
-            if (!plan.reason.empty()) {
-                clockwork_log("[device-setup] boot: %s",
-                        plan.reason.c_str());
-            }
-            if (!plan.inputName.empty() && plan.inputName != inName) {
-                clockwork_log("[device-setup] boot: pairing requested "
-                        "input '%s' (system default '%s')",
-                        plan.inputName.c_str(), inName.c_str());
-            }
-            inName = plan.inputName;
-            if (plan.action
-                    == clockwork::device::BootInputPairing::Action::Aggregate) {
-                double aggRate = 0;
-                auto aggName = AggregateDeviceHelper::createOrUpdate(
-                    outName, inName,
-                    static_cast<double>(mCurrentConfig.sampleRate),
-                    &aggRate);
-                if (!aggName.empty()) {
-                    // Wait until JUCE can actually see the new aggregate
-                    // before opening it — a fixed sleep races CoreAudio's
-                    // device-list refresh, and opening too early errors
-                    // "No such device" → fallback that drops the mic.
-                    waitForDeviceVisible(aggName, 2000);
-                    mRealOutputDeviceName = outName;
-                    mRealInputDeviceName  = inName;
-                    mLastInputDeviceName  = inName;
-                    juce::AudioDeviceManager::AudioDeviceSetup setup;
-                    mDeviceManager->getAudioDeviceSetup(setup);
-                    // Open at the rate the aggregate actually settled on
-                    // (the helper adopts the sub-devices' rate if they
-                    // refused the desired one) — don't force the rejected
-                    // rate and re-introduce aggregate SRC.
-                    if (aggRate > 0) setup.sampleRate = aggRate;
-                    setup.outputDeviceName = juce::String(aggName);
-                    setup.inputDeviceName  = juce::String(aggName);
-                    setup.useDefaultInputChannels = false;
-                    clampAggregateBufferIfNeeded(setup.bufferSize);
-                    const int inOffset = aggregateInputChannelOffsetFor(outName);
-                    juce::BigInteger inputBits;
-                    inputBits.setRange(inOffset, reqIn, true);
-                    setup.inputChannels = inputBits;
-                    if (inOffset > 0) {
-                        clockwork_log("[device-setup] aggregate input bits offset by %d "
-                                "(output sub-device '%s' contributes %d input channels) — "
-                                "active input range = [%d..%d]",
-                                inOffset, outName.c_str(), inOffset,
-                                inOffset, inOffset + reqIn - 1);
-                    }
-                    auto aggErr = mDeviceManager->setAudioDeviceSetup(setup, true);
-                    if (aggErr.isNotEmpty()) {
-                        // Output-only, NEVER (reqIn, reqOut): asking JUCE for inputs here pairs the
-                        // default mic with the default output via its Combiner — the #3554 SIGSEGV
-                        // (restartAsync into a torn-down Combiner) — and with a Bluetooth default both
-                        // sides are BT. A boot without a mic beats one that crashes.
-                        clockwork_log("[device-setup] aggregate setup failed: %s — "
-                                "booting output-only", aggErr.toRawUTF8());
-                        AggregateDeviceHelper::destroy();
-                        mRealOutputDeviceName.clear();
-                        mRealInputDeviceName.clear();
-                        mDeviceManager->initialiseWithDefaultDevices(
-                            0, reqOut);
-                    } else {
-                        clockwork_log("[device-setup] booted with aggregate: "
-                                "out='%s' in='%s'", outName.c_str(), inName.c_str());
-                        // Suppress CFRunLoop until the client has finished
-                        // re-initialising — queued audioDeviceListChanged
-                        // messages would trigger a second cold swap, which
-                        // crashes a scope-stream producer mid-rebuild.
-                        mSuppressRunLoop.store(true);
-                    }
-                }
-            } else if (plan.action == clockwork::device::BootInputPairing
-                                          ::Action::FullDuplexReopen) {
-                // Default-device boot where the chosen input IS the
-                // opened output: reopen full duplex on that device by
-                // name. Reopening system defaults here would discard a
-                // wireless-avoiding bootFallback and reopen the
-                // wireless default (~15 s IOProc halt).
-                juce::AudioDeviceManager::AudioDeviceSetup dupSetup;
-                dupSetup.outputDeviceName = juce::String(outName);
-                dupSetup.inputDeviceName  = juce::String(outName);
-                dupSetup.useDefaultOutputChannels = true;
-                dupSetup.useDefaultInputChannels  = true;
-                initError = mDeviceManager->initialise(
-                    reqIn, reqOut, nullptr, false, juce::String(),
-                    &dupSetup);
-                if (initError.isNotEmpty()) {
-                    // Output-only fallback — same no-Combiner rule as the
-                    // aggregate failure path above.
-                    clockwork_log("[device-setup] boot: full-duplex "
-                            "reopen of '%s' failed: %s — booting "
-                            "output-only",
-                            outName.c_str(), initError.toRawUTF8());
-                    initError = mDeviceManager->initialiseWithDefaultDevices(
-                        0, reqOut);
-                }
-            }
-        }
-    }
-#else
-    // Pair the requested input on non-mac drivers, which open input and output as
-    // separate devices. Without it the GUI reconciler sees intent != actual on every
-    // boot and corrects with the redundant cold swap this exists to remove.
+    // Pair the requested input with the output (the driver opens the two as
+    // one: CoreAudio on an aggregate device, others side by side). Without it
+    // the GUI reconciler sees intent != actual on every boot and corrects with
+    // the redundant cold swap this exists to remove.
     if (initError.isEmpty() && cfg.numInputChannels != 0
         && !mPreferredInputDevice.empty()
         && mDeviceManager->getCurrentAudioDevice()) {
@@ -961,10 +824,19 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         // Candidates must be SCOPED to the driver actually open. Windows lists the same
         // hardware under each driver with a different name, so an unscoped list makes a
         // stale pref from another driver look pairable — it then fails at the open,
-        // with the output already up. See scopeInputsToDriver.
+        // with the output already up. See scopeInputsToDriver. Nor one its driver won't
+        // pair with the output (a wireless one, on CoreAudio): tried, it is refused with
+        // the output already closed, and the output opened again.
+        const auto devices = listDevices(false);
+        const std::string currentOut =
+            mDeviceManager->getCurrentAudioDevice()->getName().toStdString();
+        bool outputPairs = true;
+        for (auto& d : devices)
+            if (sameDeviceName(d.name, currentOut)) outputPairs = d.pairs;
         std::vector<std::pair<std::string, std::string>> inputTable;
-        for (auto& d : listDevices(false))
-            if (d.maxInputChannels > 0)
+        for (auto& d : devices)
+            if (d.maxInputChannels > 0
+                && (sameDeviceName(d.name, currentOut) || (outputPairs && d.pairs)))
                 inputTable.emplace_back(d.typeName, d.name);
         const std::vector<std::string> inputNames =
             clockwork::device::scopeInputsToDriver(
@@ -1013,7 +885,6 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             }
         }
     }
-#endif
 
     // Negotiate rate and buffer. A hardware buffer that is a whole multiple of
     // the DSP's fixed block avoids prefetch overhead and NTP discontinuities at
@@ -1023,19 +894,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         mDeviceManager->getAudioDeviceSetup(setup);
         bool changed = false;
 
-        // Clamp sample rate to what the device supports. EXCEPTION: a managed
-        // CoreAudio aggregate is already at the sub-devices' native rate (the helper
-        // adopts it when they refuse the desired one). Forcing cfg.sampleRate makes
-        // CoreAudio resample inside the aggregate IOProc — audible distortion — and
-        // changes the system rate for nothing. Aggregates also falsely report
-        // cfg.sampleRate as supported via that same SRC, so getAvailableSampleRates
-        // below cannot catch it.
-        bool onManagedAggregate = false;
-#ifdef __APPLE__
-        onManagedAggregate = AggregateDeviceHelper::exists();
-#endif
-        if (!onManagedAggregate &&
-            static_cast<int>(setup.sampleRate) != cfg.sampleRate) {
+        // The configured rate, when the device offers it (a paired device
+        // offers the rates both its devices share).
+        if (static_cast<int>(setup.sampleRate) != cfg.sampleRate) {
             auto rates = dev->getAvailableSampleRates();
             bool supported = false;
             for (auto r : rates) {
@@ -1054,13 +915,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
 
         if (cfg.bufferSize > 0) {
-            // Honour the user's -z / -Z / TOML buffer size, clamped up
-            // only when we're running a drift-comp aggregate (a stale
-            // block_size=64 in the TOML would otherwise boot into a
-            // drift storm).
-            int wantedBuf = cfg.bufferSize;
-            clampAggregateBufferIfNeeded(wantedBuf);
-            setup.bufferSize = wantedBuf;
+            // The user's -z / -Z / TOML buffer size (a drift-compensated
+            // pair raises one too small for it itself).
+            setup.bufferSize = cfg.bufferSize;
             changed = true;
         } else if (dev->getTypeName() != "DirectSound") {
             // Auto: pick the smallest available buffer that is at least
@@ -1767,10 +1624,6 @@ void ClockworkEngine::shutdown() {
     // wait() sees a change and returns.
     mAudioCallback.processCount.fetch_add(1, std::memory_order_release);
     mAudioCallback.processCount.notify_all();
-
-#ifdef __APPLE__
-    AggregateDeviceHelper::destroy();
-#endif
 
     mHeadlessDriver.stopThread(2000);
 
@@ -2546,8 +2399,8 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
             // where the device's name can be read; said once, because the
             // policy adopts once — anything after this is a plain log line.
             if (intent.adoptRate > 0) {
-                std::string name = mRealOutputDeviceName;
-                if (name.empty() && mDeviceManager)
+                std::string name;
+                if (mDeviceManager)
                     if (auto* dev = mDeviceManager->getCurrentAudioDevice())
                         name = dev->getName().toStdString();
                 clockwork_log("[watchdog] '%s' reports %.0f Hz but is delivering "
@@ -2832,13 +2685,8 @@ void ClockworkEngine::sendDeviceReport() {
     double outLatMs = sr > 0 ? (current.outputLatencySamples / sr) * 1000.0 : 0.0;
     double inLatMs  = sr > 0 ? (current.inputLatencySamples  / sr) * 1000.0 : 0.0;
 
-    // Use per-device channel counts (maxOutputChannels / maxInputChannels)
-    // rather than the aggregate's activeOutputChannels / activeInputChannels.
-    // When running on an aggregate, active counts are sums across sub-devices
-    // (MBP Speakers 2 out + MOTU 8 out = 10) which is confusing when the
-    // user picked MBP Speakers as the output — they see "10 out" on a
-    // 2-channel device. currentDevice() populates maxOutputChannels /
-    // maxInputChannels with the real underlying sub-device counts.
+    // The device's channel counts (maxOutputChannels / maxInputChannels),
+    // falling back to the active ones when it gives none.
     int outCh = current.maxOutputChannels > 0 ? current.maxOutputChannels
                                               : current.activeOutputChannels;
     // Only report an input count when input channels are actually open —
@@ -2890,36 +2738,10 @@ void ClockworkEngine::sendDeviceReport() {
     auto drivers = listDrivers();
     auto curDriver = currentDriver();
 
-    // Compute usable sample rates: intersection of output and input device rates.
-    // If no input device is active, use the output device's rates.
-    //
-    // ON A LIVE AGGREGATE, ONLY THE CURRENT RATE. Pre-aligning sub-devices fails
-    // because the old aggregate still owns them, and destroying it early crashes
-    // JUCE's AudioComponentInstanceDispose on the dangling id — so the new
-    // aggregate inherits the old rates and CoreAudio snaps the requested one back
-    // within a few callbacks. Changing rate means switching to a non-aggregated
-    // device first.
+    // The rates the output and the input both offer (a paired device offers
+    // its pair's already); the output's alone when no input is open.
     std::vector<double> usableRates = current.availableSampleRates;
-    bool onAggregate = !realOutputDeviceName().empty();
-    if (onAggregate) {
-        // Offer the rates BOTH sub-devices natively support — not just the
-        // current one — so the rate is selectable on macOS. A rate only one
-        // side supports would force aggregate-internal SRC, so it's excluded.
-        std::vector<int> outRates, inRates;
-        const std::string ro = realOutputDeviceName();
-        const std::string ri = realInputDeviceName();
-        for (auto& dev : allDevices) {
-            if (dev.name == ro)
-                for (auto r : dev.availableSampleRates)
-                    outRates.push_back(static_cast<int>(r));
-            if (!ri.empty() && dev.name == ri)
-                for (auto r : dev.availableSampleRates)
-                    inRates.push_back(static_cast<int>(r));
-        }
-        auto offered = clockwork::device::usableAggregateRates(outRates, inRates);
-        if (!offered.empty())
-            usableRates.assign(offered.begin(), offered.end());
-    } else if (!current.inputDeviceName.empty()) {
+    if (!current.inputDeviceName.empty()) {
         for (auto& dev : allDevices) {
             if (dev.name == current.inputDeviceName) {
                 std::vector<double> intersection;
@@ -2944,9 +2766,9 @@ void ClockworkEngine::sendDeviceReport() {
     for (auto r : usableRates)
         infoMsg << static_cast<osc::int32>(r);
 
-    // Same intersection for buffer sizes (skip when on aggregate)
+    // Same intersection for buffer sizes.
     std::vector<int> usableBufferSizes = current.availableBufferSizes;
-    if (!onAggregate && !current.inputDeviceName.empty()) {
+    if (!current.inputDeviceName.empty()) {
         for (auto& dev : allDevices) {
             if (dev.name == current.inputDeviceName) {
                 std::vector<int> intersection;
@@ -2962,31 +2784,13 @@ void ClockworkEngine::sendDeviceReport() {
     }
 
     // Raw CoreAudio lists non-powers-of-two (14, 24, 48, 96) and extremes
-    // (16, 8192); 64-2048 is the useful range. ON AN AGGREGATE WITH DRIFT
-    // CORRECTION, buffers below 256 starve the drift compensator and the audio
-    // warbles, so raise the minimum there.
+    // (16, 8192); the powers of two from 16 to 2048 are the useful ones. (A
+    // drift-compensated pair offers none below 256 already.)
     //
     // A DISPLAY filter, not a safety net: -Z / -z and sound_card_buffer_size
     // still force any value.
     {
-        // Non-aggregate and same-clock aggregate: include small sizes for low-latency
-        // use. Only DRIFT-COMPENSATED aggregates force the 256 floor — the SRC IOProc
-        // starves at tight buffers and warbles. Same-clock aggregates run no SRC and
-        // handle 16/32 like a single device.
-        static const int kCanonicalSingle[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
-        static const int kCanonicalAggregate[] = {256, 512, 1024, 2048};
-        std::set<int> canonical;
-#ifdef __APPLE__
-        bool driftAggregate = onAggregate
-            && AggregateDeviceHelper::driftCompensationEnabled();
-#else
-        bool driftAggregate = false;
-#endif
-        if (driftAggregate) {
-            for (int b : kCanonicalAggregate) canonical.insert(b);
-        } else {
-            for (int b : kCanonicalSingle) canonical.insert(b);
-        }
+        static const std::set<int> canonical = {16, 32, 64, 128, 256, 512, 1024, 2048};
         std::vector<int> filtered;
         for (int b : usableBufferSizes)
             if (canonical.count(b)) filtered.push_back(b);
@@ -3011,8 +2815,8 @@ void ClockworkEngine::sendDeviceReport() {
     for (auto& d : drivers)
         infoMsg << d.c_str();
     infoMsg << curDriver.c_str();
-    // Send per-device counts (outCh/inCh), not aggregate sums — same
-    // semantics as the banner, so a GUI can render them directly.
+    // The device's counts (outCh/inCh), as the banner has them, so a GUI
+    // can render them directly.
     infoMsg << static_cast<osc::int32>(outCh);
     infoMsg << static_cast<osc::int32>(inCh);
     // Device output latency: DSP-computed audio reaches the speaker this
@@ -3103,6 +2907,7 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
         info.wireless       = t.wireless;
         info.isVirtual      = t.isVirtual;
         info.aggregateClass = t.aggregateClass;
+        info.pairs          = t.pairs;
         info.kind           = t.kind.toStdString();
     };
     auto fillOutputs = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
@@ -3110,25 +2915,22 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
         info.maxOutputChannels = t.numOutputChannels >= 0 ? t.numOutputChannels : 2;
         info.outChannelsProbed = t.numOutputChannels > 0;
     };
+    auto takeTraitRates = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
+        if (t.sampleRates.isEmpty()) return false;
+        info.availableSampleRates.assign(t.sampleRates.begin(), t.sampleRates.end());
+        info.availableBufferSizes.assign(t.bufferSizes.begin(), t.bufferSizes.end());
+        return true;
+    };
     auto fillInputs = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
         if (info.maxInputChannels != 0) return;
         info.maxInputChannels = t.numInputChannels >= 0 ? t.numInputChannels : 1;
         info.inChannelsProbed = t.numInputChannels > 0;
     };
 
-    // When an aggregate is active, DON'T probe any devices via createDevice.
-    // Creating a JUCE AudioIODevice wrapper on a subdevice of our aggregate
-    // (e.g. MacBook Pro Microphone when the aggregate owns it) and then
-    // destroying it at end of unique_ptr scope closes the HAL IOProc and
-    // silences the aggregate. We return device names without sample-rate /
-    // buffer-size info in this case; cached values from pre-aggregate
-    // enumeration remain with the GUI until the aggregate is torn down.
-    bool skipAllProbing = false;
-#ifdef __APPLE__
-    if (AggregateDeviceHelper::exists())
-        skipAllProbing = true;
-#endif
-    // Also skip probing the currently open device — its handle is live.
+    // A device its driver describes without opening it (traits with its
+    // rates — CoreAudio's do) is never opened to be asked: a probe of a
+    // device a live aggregate holds can stop the aggregate. Others are
+    // probed, once each, never the one open — its handle is live.
     std::string activeDeviceName;
     if (auto* dev = mDeviceManager->getCurrentAudioDevice())
         activeDeviceName = dev->getName().toStdString();
@@ -3165,7 +2967,7 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
         probesListed.insert(key);
         if (auto it = mDeviceProbes.find(key); it != mDeviceProbes.end())
             return &it->second;
-        if (skipAllProbing || name == activeDeviceName) return nullptr;
+        if (name == activeDeviceName) return nullptr;
         std::unique_ptr<juce::AudioIODevice> dev(
             asInput ? type->createDevice(juce::String(), devName)
                     : type->createDevice(devName, juce::String()));
@@ -3198,8 +3000,9 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             const auto traits = type->getDeviceTraits(devName);
             takeTraits(info, traits);
 
-            if (auto* probed = probe(type, typeNameStr, devName, false))
-                takeProbe(info, *probed);
+            if (!takeTraitRates(info, traits))
+                if (auto* probed = probe(type, typeNameStr, devName, false))
+                    takeProbe(info, *probed);
             fillOutputs(info, traits);
 
             result.push_back(std::move(info));
@@ -3224,11 +3027,13 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             }
 
             if (existing) {
-                if (auto* probed = probe(type, typeNameStr, devName, true)) {
-                    existing->maxInputChannels = probed->maxInputChannels;
-                    existing->inChannelsProbed = existing->maxInputChannels > 0;
-                }
-                fillInputs(*existing, type->getDeviceTraits(devName));
+                const auto traits = type->getDeviceTraits(devName);
+                if (traits.numInputChannels < 0)
+                    if (auto* probed = probe(type, typeNameStr, devName, true)) {
+                        existing->maxInputChannels = probed->maxInputChannels;
+                        existing->inChannelsProbed = existing->maxInputChannels > 0;
+                    }
+                fillInputs(*existing, traits);
                 continue;
             }
 
@@ -3239,8 +3044,9 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             const auto traits = type->getDeviceTraits(devName);
             takeTraits(info, traits);
 
-            if (auto* probed = probe(type, typeNameStr, devName, true))
-                takeProbe(info, *probed);
+            if (!takeTraitRates(info, traits))
+                if (auto* probed = probe(type, typeNameStr, devName, true))
+                    takeProbe(info, *probed);
             fillInputs(info, traits);
 
             result.push_back(std::move(info));
@@ -3251,17 +3057,6 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
     // probed as it is then.
     for (auto it = mDeviceProbes.begin(); it != mDeviceProbes.end();)
         it = probesListed.count(it->first) ? std::next(it) : mDeviceProbes.erase(it);
-
-#ifdef __APPLE__
-    // Filter out our managed aggregate device — it's an implementation detail.
-    if (AggregateDeviceHelper::exists()) {
-        auto aggName = AggregateDeviceHelper::currentName();
-        result.erase(
-            std::remove_if(result.begin(), result.end(),
-                [&aggName](const DeviceInfo& d) { return d.name == aggName; }),
-            result.end());
-    }
-#endif
 
     {
         std::lock_guard<std::mutex> lk(mListDevicesMutex);
@@ -3322,34 +3117,13 @@ CurrentDeviceInfo ClockworkEngine::currentDevice() const {
     if (info.activeInputChannels == 0)
         info.inputDeviceName.clear();
 
-    // If running on an aggregate device, report the real underlying names so
-    // a GUI sees the actual hardware rather than the aggregate we created.
-    if (!mRealOutputDeviceName.empty())
-        info.name = mRealOutputDeviceName;
-    if (!mRealInputDeviceName.empty())
-        info.inputDeviceName = mRealInputDeviceName;
-
     for (auto r : dev->getAvailableSampleRates())
         info.availableSampleRates.push_back(r);
     for (auto b : dev->getAvailableBufferSizes())
         info.availableBufferSizes.push_back(b);
 
-    // Populate max channel counts. When on aggregate, query the real
-    // underlying devices (not the aggregate wrapper — which reports
-    // the union of sub-device channels). When on a plain device,
-    // JUCE's channel-name lists are accurate.
     info.maxOutputChannels = dev->getOutputChannelNames().size();
     info.maxInputChannels  = dev->getInputChannelNames().size();
-    // On an aggregate, the real devices' counts (the wrapper reports the
-    // union of its sub-devices'), as their driver gives them.
-    if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
-        if (!mRealOutputDeviceName.empty())
-            if (const int n = type->getDeviceTraits(juce::String(mRealOutputDeviceName)).numOutputChannels; n > 0)
-                info.maxOutputChannels = n;
-        if (!mRealInputDeviceName.empty())
-            if (const int n = type->getDeviceTraits(juce::String(mRealInputDeviceName)).numInputChannels; n > 0)
-                info.maxInputChannels = n;
-    }
 
     return info;
 }
@@ -3527,17 +3301,8 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     // survive System Output toggles.
     auto setup = mDeviceManager->getAudioDeviceSetup();
     bool isWireless = false;
-#ifdef __APPLE__
-    if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
-        std::string curName = dev->getName().toStdString();
-        for (auto& d : listDevices(false)) {
-            if (sameDeviceName(d.name, curName) && d.wireless) {
-                isWireless = true;
-                break;
-            }
-        }
-    }
-#endif
+    if (auto* type = mDeviceManager->getCurrentDeviceTypeObject())
+        isWireless = type->getDeviceTraits(mDeviceManager->getCurrentAudioDevice()->getName()).wireless;
     if (!isWireless) {
         setup.sampleRate = static_cast<double>(prevRate);
         setup.bufferSize = prevBufSize;
@@ -3576,19 +3341,6 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
                     setup.sampleRate, setup.bufferSize, prevRate, prevBufSize);
         }
     }
-
-    // Post-init cleanup: we just switched away from whatever device we were on to
-    // JUCE's default. Drop the stale real-device-name state so currentDevice() and any
-    // following reopen target the new device. EVERY PLATFORM — reopenCurrentDevice
-    // reads mRealOutputDeviceName, so a stale name on Win/Linux reopens a gone device.
-    mRealOutputDeviceName.clear();
-    mRealInputDeviceName.clear();
-#ifdef __APPLE__
-    AggregateDeviceHelper::destroyPrevious();
-    if (AggregateDeviceHelper::exists()) {
-        AggregateDeviceHelper::destroy();
-    }
-#endif
     return {};
 }
 
@@ -3640,8 +3392,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     bool recovered = false;
 
     // No-op detection: destroying and recreating an identical device is
-    // fragile — CoreAudio sometimes stops a recreated aggregate within a
-    // callback or two, and on Linux the ALSA close+reopen races PipeWire's
+    // fragile — CoreAudio sometimes stops a recreated aggregate device within
+    // a callback or two, and on Linux the ALSA close+reopen races PipeWire's
     // client-side node setup and can SIGSEGV inside libspa-audioconvert
     // (a GUI's boot-time saved-prefs restore sends exactly
     // such a same-device switch). If the caller asked for exactly what we
@@ -3649,10 +3401,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // only when it names the input that is currently open — enabling a
     // closed input is a real change and must reopen.
     if (!deviceName.empty() && sampleRate <= 0 && bufferSize <= 0 && !forceCold) {
-        std::string activeReal = mRealOutputDeviceName.empty()
-            ? (mDeviceManager && mDeviceManager->getCurrentAudioDevice()
-               ? mDeviceManager->getCurrentAudioDevice()->getName().toStdString() : "")
-            : mRealOutputDeviceName;
+        std::string activeReal = mDeviceManager && mDeviceManager->getCurrentAudioDevice()
+            ? mDeviceManager->getCurrentAudioDevice()->getName().toStdString() : "";
         bool inputSatisfied = inputDeviceName.empty();
         if (!inputSatisfied) {
             auto cur = currentDevice();
@@ -3670,12 +3420,10 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         }
     }
 
-    // Reject "add mic while current output is wireless" upfront, BEFORE
-    // any cold-swap work. The aggregate filter later in this function
-    // would drop the mic anyway, but by that point we've already
-    // triggered a cold swap that can race the audio thread's scope-stream
-    // producer and crash inside it.
-    if (auto err = refuseWirelessMicAddition(deviceName, inputDeviceName);
+    // Refuse "add an input to an output that plays alone" upfront, BEFORE
+    // any cold-swap work: the pairing check later in this function would
+    // drop the input anyway, after a cold swap for nothing.
+    if (auto err = refuseUnpairableInput(deviceName, inputDeviceName);
         !err.empty()) {
         result.error = err;
         return result;
@@ -3703,7 +3451,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         return result;
     }
     PhaseGuard phase(mDevicePhase, DevicePhase::Swapping);
-    RunLoopSuppressGuard runLoopSuppress { mSuppressRunLoop };
 
     // ── Plan ────────────────────────────────────────────────────────────
     // All decisions live in DevicePolicy::planSwap; this function gathers the
@@ -3740,20 +3487,17 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         snap.rememberedRate = it->second;
 
     // Where to go back to if the target opens but never delivers a block: the
-    // device playing now, at its rate and buffer, by its real names (an
-    // aggregate is rebuilt from those).
+    // device playing now, at its rate and buffer.
     struct { std::string output, input; double rate = 0; int buffer = 0; } playing;
     if (mDeviceManager) {
         if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
-            playing.output = mRealOutputDeviceName.empty() ? snap.currentOutputName
-                                                           : mRealOutputDeviceName;
+            playing.output = snap.currentOutputName;
             playing.rate   = snap.currentRate;
             playing.buffer = dev->getCurrentBufferSizeSamples();
             if (mCurrentConfig.numInputChannels > 0) {
                 juce::AudioDeviceManager::AudioDeviceSetup setup;
                 mDeviceManager->getAudioDeviceSetup(setup);
-                playing.input = mRealInputDeviceName.empty()
-                    ? setup.inputDeviceName.toStdString() : mRealInputDeviceName;
+                playing.input = setup.inputDeviceName.toStdString();
             }
         }
     }
@@ -3959,19 +3703,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                     : juce::String(inputDeviceName);
         }
 
-#ifdef __APPLE__
-        // If currently on an aggregate device, resolve back to real device names
-        // so we don't recursively wrap aggregates.
-        if (AggregateDeviceHelper::exists()) {
-            if (setup.outputDeviceName.toStdString() == AggregateDeviceHelper::currentName()) {
-                if (!mRealOutputDeviceName.empty())
-                    setup.outputDeviceName = juce::String(mRealOutputDeviceName);
-                if (!mRealInputDeviceName.empty())
-                    setup.inputDeviceName = juce::String(mRealInputDeviceName);
-            }
-        }
-#endif
-
         if (!deviceName.empty()) {
             setup.outputDeviceName = juce::String(deviceName);
         } else if (!mDeviceMode.empty()) {
@@ -4042,140 +3773,26 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         if (sampleRate > 0) setup.sampleRate = sampleRate;
         if (bufferSize > 0) setup.bufferSize = bufferSize;
 
-#ifdef __APPLE__
-        // On macOS, if input and output are different devices, create an
-        // Aggregate Device with drift correction instead of relying on
-        // JUCE's AudioIODeviceCombiner (which has no drift correction).
-        // Skip aggregation for Bluetooth/AirPlay inputs — they force
-        // low-quality codec modes and don't support drift correction.
-        bool wasOnAggregate = AggregateDeviceHelper::exists();
-        bool needsAggregate = !setup.outputDeviceName.isEmpty()
-            && !setup.inputDeviceName.isEmpty()
-            && setup.outputDeviceName != setup.inputDeviceName;
-
-        bool dropInput = false;
-        if (needsAggregate) {
-            // Skip the aggregate when either sub-device is unsuitable —
-            // isSuitableForAggregate excludes wireless (Bluetooth / AirPlay: HAL cannot open
-            // them and codec-mode negotiation wrecks rates). Virtual devices (Loopback,
-            // BlackHole) are deliberately ALLOWED: the aggregate works when the hardware
-            // sub-device is clock master, and virtual-output + hardware-mic is
-            // field-verified. The skip line below is user-actionable and always logs.
-            auto devices = listDevices();
-            std::string outName = setup.outputDeviceName.toStdString();
-            std::string inName  = setup.inputDeviceName.toStdString();
-            bool matched = false;
-            for (auto& dev : devices) {
-                bool nameMatch = (dev.name == outName || dev.name == inName);
-                if (nameMatch) matched = true;
-                if (nameMatch && !dev.isSuitableForAggregate()) {
-                    needsAggregate = false;
-                    dropInput = true;
-                    clockwork_log("[device-setup] skipping aggregate — '%s' is not "
-                            "aggregable (wireless or aggregate-class); input disabled",
-                            dev.name.c_str());
+        // Two devices play as one only when both pair (the driver's word —
+        // CoreAudio won't aggregate a wireless device, whose codec would drop
+        // the pair to 16 kHz, #3555). Otherwise the output plays alone and
+        // the input is remembered for the next output that pairs.
+        if (setup.outputDeviceName.isNotEmpty() && setup.inputDeviceName.isNotEmpty()
+            && setup.outputDeviceName != setup.inputDeviceName) {
+            if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+                for (const auto& name : { setup.outputDeviceName, setup.inputDeviceName }) {
+                    if (type->getDeviceTraits(name).pairs) continue;
+                    clockwork_log("[device-setup] '%s' plays only on its own — "
+                            "clearing input (was '%s')",
+                            name.toRawUTF8(), setup.inputDeviceName.toRawUTF8());
+                    mLastInputDeviceName = setup.inputDeviceName.toStdString();
+                    setup.inputDeviceName = "";
+                    setup.inputChannels.clear();
+                    inputWasDropped = true;
                     break;
                 }
             }
-            if (!matched) {
-                clockwork_log("[agg-filter] WARNING: no device matched outName='%s' inName='%s' "
-                        "— filter never fired", outName.c_str(), inName.c_str());
-            }
         }
-
-        if (needsAggregate) {
-            // Remember the real device names before replacing with aggregate
-            mRealOutputDeviceName = setup.outputDeviceName.toStdString();
-            mRealInputDeviceName  = setup.inputDeviceName.toStdString();
-
-            // Pause CFRunLoop pumping to prevent JUCE's audioDeviceListChanged
-            // from firing during aggregate destroy/create — it crashes trying
-            // to reinitialise with a stale device reference.
-            runLoopSuppress.arm();
-            // Pass the engine's current sample rate so the aggregate's
-            // sub-devices are forced to the same rate — otherwise
-            // CoreAudio will apply aggregate-level SRC inside the
-            // IOProc to bridge a rate mismatch, producing "hideous
-            // distortion" (user-reported symptom).
-            double wantedRate = sampleRate > 0
-                ? sampleRate
-                : static_cast<double>(mCurrentConfig.sampleRate);
-            double aggRate = 0;
-            auto aggName = AggregateDeviceHelper::createOrUpdate(
-                mRealOutputDeviceName, mRealInputDeviceName, wantedRate, &aggRate);
-            if (!aggName.empty()) {
-                // Open the aggregate at the rate it actually settled on. If
-                // the sub-devices refused wantedRate the helper adopted their
-                // current rate; forcing wantedRate here would re-introduce the
-                // SRC mismatch (distortion).
-                if (aggRate > 0) setup.sampleRate = aggRate;
-                // Use the aggregate as a single device for both I/O
-                setup.outputDeviceName = juce::String(aggName);
-                setup.inputDeviceName  = juce::String(aggName);
-                clampAggregateBufferIfNeeded(setup.bufferSize);
-
-                // Re-issue the input bitmask with an offset past the
-                // output sub-device's own input streams (e.g. Loopback
-                // Audio exposes 4 loopback-return inputs; without this
-                // offset JUCE activates those silent returns instead of
-                // the user's intended input device's channels).
-                if (mCurrentConfig.numInputChannels > 0) {
-                    const int inOffset = aggregateInputChannelOffsetFor(mRealOutputDeviceName);
-                    if (inOffset > 0) {
-                        juce::BigInteger inputBits;
-                        inputBits.setRange(inOffset,
-                                           mCurrentConfig.numInputChannels, true);
-                        setup.inputChannels = inputBits;
-                        clockwork_log("[device-setup] aggregate input bits offset by %d "
-                                "(output sub-device '%s' contributes %d input channels) — "
-                                "active input range = [%d..%d]",
-                                inOffset, mRealOutputDeviceName.c_str(), inOffset,
-                                inOffset, inOffset + mCurrentConfig.numInputChannels - 1);
-                    }
-                }
-
-                // Wait until JUCE can actually see the new aggregate before
-                // the setAudioDeviceSetup below opens it — a fixed sleep races
-                // CoreAudio's device-list refresh and errors "No such device".
-                waitForDeviceVisible(aggName, 2000);
-            }
-        } else {
-            // Same device for both I/O, or no input — no aggregate needed.
-            // Save the real input device name before clearing — when switching
-            // to AirPlay (no aggregate), we want to restore the input device
-            // when switching back to local speakers.
-            if (!mRealInputDeviceName.empty())
-                mLastInputDeviceName = mRealInputDeviceName;
-            mRealOutputDeviceName.clear();
-            mRealInputDeviceName.clear();
-
-            // If we skipped aggregate because a sub-device is unsuitable
-            // (wireless), drop the input. Keeping it would make JUCE fall
-            // back to its combiner, which has the same failure mode as
-            // our aggregate on wireless (both use AudioUnitRender under
-            // the hood).
-            if (dropInput && !setup.inputDeviceName.isEmpty()) {
-                clockwork_log("[device-setup] clearing input (was '%s') because output "
-                        "can't be combined with it",
-                        setup.inputDeviceName.toRawUTF8());
-                mLastInputDeviceName = setup.inputDeviceName.toStdString();
-                setup.inputDeviceName = "";
-                setup.inputChannels.clear();
-                inputWasDropped = true;
-            }
-
-            // Don't destroy aggregate yet — JUCE still references it.
-            // setAudioDeviceSetup below will switch JUCE to the new device,
-            // then we destroy the orphaned aggregate safely.
-        }
-#endif
-
-        // Don't call closeAudioDevice() here — it races with JUCE's internal
-        // CoreAudio lock on destruction of aggregates that contained virtual
-        // sub-devices (_os_unfair_lock_unowned_abort). We rely on each new
-        // aggregate having a unique name (see AggregateDeviceHelper) so
-        // JUCE's setAudioDeviceSetup sees it as a different device and
-        // reopens properly.
 
         clockwork_log("[device-setup] calling setAudioDeviceSetup: out='%s' in='%s' sr=%.0f buf=%d",
                 setup.outputDeviceName.toRawUTF8(),
@@ -4232,22 +3849,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             }
         }
 
-#ifdef __APPLE__
-        // Now JUCE has switched away from the old aggregate — safe to
-        // destroy it. AggregateDeviceHelper stashes the previous ID in
-        // sPrevAggregateID precisely so this happens after JUCE has moved.
-        AggregateDeviceHelper::destroyPrevious();
-        juce::Thread::sleep(150);
-        // Also destroy the current one if we're no longer using an aggregate
-        // (e.g. single-device setup that doesn't need input combining).
-        if (wasOnAggregate && !needsAggregate) {
-            AggregateDeviceHelper::destroy();
-            juce::Thread::sleep(150);
-        }
-        // mSuppressRunLoop clears via runLoopSuppress at function exit —
-        // exception-proof, and a marginally longer suppression window is
-        // the safe direction.
-#endif
     } else {
         // Headless: no real device to configure; use failure hook for testing.
         // Mirrors the real-device input-fallback above so the same code path
@@ -4306,9 +3907,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 } else {
                     clockwork_log(
                             "[device-setup] recovered to system default after rollback failure");
-                    // Clear aggregate-bookkeeping; we're on a single device now.
-                    mRealOutputDeviceName.clear();
-                    mRealInputDeviceName.clear();
                     // Drop input — fallback is output-only. Caller can
                     // re-enable inputs explicitly afterward.
                     mCurrentConfig.numInputChannels = 0;
@@ -4352,9 +3950,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 int newIn  = dev->getActiveInputChannels().countNumberOfSetBits();
                 if (newOut > 0) mCurrentConfig.numOutputChannels = newOut;
                 // Respect inputWasDropped: when we've dropped input because
-                // the new output can't be aggregated (wireless / virtual),
-                // keep the previously-remembered input count in config but
-                // build the DSP with zero inputs for this rebuild.
+                // the new output doesn't pair with it, keep the previously-
+                // remembered input count in config but build the DSP with
+                // zero inputs for this rebuild.
                 if (!inputWasDropped || newIn > 0) {
                     mCurrentConfig.numInputChannels = newIn;
                 }
@@ -4412,8 +4010,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // this swap is itself the way back.
     if (!delivered && mActiveSource.load() == AudioSource::RealCallback) {
         auto* dead = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
-        const std::string deadName = !mRealOutputDeviceName.empty() ? mRealOutputDeviceName
-                                   : dead ? dead->getName().toStdString() : deviceName;
+        const std::string deadName = dead ? dead->getName().toStdString() : deviceName;
         const double deadRate = dead ? dead->getCurrentSampleRate() : sampleRate;
         const bool goBack = !mNoAudioRollbackInFlight && !playing.output.empty()
             && !(sameDeviceName(playing.output, deadName)
@@ -4475,9 +4072,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             mCurrentConfig.sampleRate = static_cast<int>(result.sampleRate);
             mCurrentConfig.numOutputChannels = finalDev->getActiveOutputChannels().countNumberOfSetBits();
             // Preserve the user's desired input channel count when we had to
-            // drop inputs for an unsuitable output (wireless/virtual). Without
-            // this, a detour through e.g. AirPlay would permanently erase the
-            // mic setting — switching back to speakers wouldn't re-aggregate.
+            // drop inputs for an output that doesn't pair. Without this, a
+            // detour through e.g. AirPlay would permanently erase the mic
+            // setting — switching back to speakers wouldn't pair it again.
             int actualIn = finalDev->getActiveInputChannels().countNumberOfSetBits();
             if (!inputWasDropped || actualIn > 0) {
                 mCurrentConfig.numInputChannels = actualIn;
@@ -4490,12 +4087,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             // Report the device that actually opened, not the request:
             // JUCE keeps the requested name in its setup even when the
             // device type resolved it elsewhere, and subscribers (the GUI)
-            // must never be told a fiction. On macOS the aggregate wraps
-            // the real device — report the real one, matching the device
-            // lists the GUI displays.
-            result.deviceName = mRealOutputDeviceName.empty()
-                ? finalDev->getName().toStdString()
-                : mRealOutputDeviceName;
+            // must never be told a fiction.
+            result.deviceName = finalDev->getName().toStdString();
 
             clockwork_log("[device-setup] switched to %s: %s %.0fHz buf=%d %dch",
                     finalDev->getTypeName().toRawUTF8(),
@@ -4503,25 +4096,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                     result.sampleRate, result.bufferSize,
                     mCurrentConfig.numOutputChannels);
 
-#ifdef __APPLE__
             // Remember the rate of the last non-wireless settle so a
             // future detour through AirPlay/Bluetooth doesn't leave the
             // engine stuck at the wireless receiver's negotiated rate.
-            if (result.sampleRate > 0) {
-                bool finalIsWireless = false;
-                std::string finalName = mRealOutputDeviceName.empty()
-                    ? finalDev->getName().toStdString()
-                    : mRealOutputDeviceName;
-                for (auto& d : listDevices(false)) {
-                    if (sameDeviceName(d.name, finalName) && d.wireless) {
-                        finalIsWireless = true;
-                        break;
-                    }
-                }
-                if (!finalIsWireless)
-                    mPreWirelessRate = static_cast<int>(result.sampleRate);
-            }
-#endif
+            if (result.sampleRate > 0)
+                if (auto* type = mDeviceManager->getCurrentDeviceTypeObject())
+                    if (!type->getDeviceTraits(finalDev->getName()).wireless)
+                        mPreWirelessRate = static_cast<int>(result.sampleRate);
         }
     } else {
         if (!recovered) {
@@ -4606,10 +4187,7 @@ juce::String ClockworkEngine::recreateDeviceManager() {
     restoreBootDriver();
 
     // Open the device via the shared system-default reinit: it preserves the
-    // session sample rate, drops the now-stale aggregate / real-device names,
-    // and cleans up leftover aggregates — so the engine's cached device state
-    // stays consistent with what actually opened and a later reopen can't chase
-    // a dead aggregate.
+    // session sample rate.
     juce::String err = reinitialiseWithDefaultsPreservingConfig();
     if (err.isNotEmpty()) return err;
     if (!mDeviceManager->getCurrentAudioDevice())
@@ -4631,35 +4209,30 @@ SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
         return result;
     }
 
-    // Always delegate to switchDevice with forceCold=true so aggregates are rebuilt
-    // with the same sub-device pair and pick up any channel-count change. System,
-    // manual and aggregate share this path: mRealOutputDeviceName /
-    // mRealInputDeviceName track the sub-device names behind an aggregate. For direct
-    // devices those are empty and we fall back to the pinned device, then JUCE's.
-    std::string outName = mRealOutputDeviceName;
-    std::string inName  = mRealInputDeviceName;
-    if (outName.empty()) {
-        // After recovery's recreate the "current" device is whatever the
-        // system-default reinit opened — NOT necessarily the user's pinned
-        // choice (#3555 follow-on: Testy wedged, recovery reopened the
-        // wireless default and stayed there). Aim at the pin while it's
-        // still attached; a pin that's genuinely gone falls through to
-        // the current device.
-        if (!mPreferredOutputDevice.empty()) {
-            std::vector<std::string> outputNames;
-            for (auto& d : listDevices(false))
-                if (d.maxOutputChannels > 0) outputNames.push_back(d.name);
-            outName = clockwork::device::selectRecoveryTarget(
-                mPreferredOutputDevice, outputNames);
-            if (!outName.empty()
-                && mDeviceManager->getCurrentAudioDevice()
-                && outName != mDeviceManager->getCurrentAudioDevice()
-                                  ->getName().toStdString()) {
-                clockwork_log("[reopen] retargeting pinned device '%s' "
-                        "(current is '%s')", outName.c_str(),
-                        mDeviceManager->getCurrentAudioDevice()
-                            ->getName().toRawUTF8());
-            }
+    // Always delegate to switchDevice with forceCold=true, so the device opens
+    // afresh and picks up any channel-count change; an open input carries
+    // over from the setup. Aim at the pinned device, then the current one.
+    std::string outName;
+    // After recovery's recreate the "current" device is whatever the
+    // system-default reinit opened — NOT necessarily the user's pinned
+    // choice (#3555 follow-on: Testy wedged, recovery reopened the
+    // wireless default and stayed there). Aim at the pin while it's
+    // still attached; a pin that's genuinely gone falls through to
+    // the current device.
+    if (!mPreferredOutputDevice.empty()) {
+        std::vector<std::string> outputNames;
+        for (auto& d : listDevices(false))
+            if (d.maxOutputChannels > 0) outputNames.push_back(d.name);
+        outName = clockwork::device::selectRecoveryTarget(
+            mPreferredOutputDevice, outputNames);
+        if (!outName.empty()
+            && mDeviceManager->getCurrentAudioDevice()
+            && outName != mDeviceManager->getCurrentAudioDevice()
+                              ->getName().toStdString()) {
+            clockwork_log("[reopen] retargeting pinned device '%s' "
+                    "(current is '%s')", outName.c_str(),
+                    mDeviceManager->getCurrentAudioDevice()
+                        ->getName().toRawUTF8());
         }
     }
     if (outName.empty()) {
@@ -4692,10 +4265,10 @@ SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
                     sampleRate, advertised.empty() ? "nothing" : advertised.c_str());
         }
     }
-    clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s' rate=%.0f",
-            outName.c_str(), inName.c_str(),
+    clockwork_log("[reopen] forceCold switch out='%s' mode='%s' rate=%.0f",
+            outName.c_str(),
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str(), sampleRate);
-    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, inName,
+    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, {},
                         SwapOrigin::Internal);
 }
 
@@ -4798,7 +4371,7 @@ std::vector<std::string> ClockworkEngine::listDrivers() const {
 
     // Cache hit — skip the rescan. sendDeviceReport() is called many
     // times during boot (notify registration, first info push, device
-    // change settles, aggregate build) and once per user-initiated
+    // change settles, input pairing) and once per user-initiated
     // switch; re-running scanForDevices() on every call is wasteful
     // and on Linux without a JACK server produces libjack connect()
     // stderr spam. Short TTL so a freshly-started jackd shows up.
@@ -5007,19 +4580,7 @@ void ClockworkEngine::reconcileDevices() {
     auto devices = listDevices((changes & (kListChanged | kDefaultChanged)) != 0);
     auto* dev = mDeviceManager->getCurrentAudioDevice();
 
-    // Active channel counts track the current device's live mask, not the
-    // list. (System mode only: in device mode the switch that opened the
-    // device set them.)
-    if (mDeviceMode.empty() && dev) {
-        mCurrentConfig.numOutputChannels =
-            dev->getActiveOutputChannels().countNumberOfSetBits();
-        mCurrentConfig.numInputChannels =
-            dev->getActiveInputChannels().countNumberOfSetBits();
-    }
-
-    const std::string currentOutput = mRealOutputDeviceName.empty()
-        ? (dev ? dev->getName().toStdString() : std::string())
-        : mRealOutputDeviceName;
+    const std::string currentOutput = dev ? dev->getName().toStdString() : std::string();
     const int currentActiveIn =
         dev ? dev->getActiveInputChannels().countNumberOfSetBits() : 0;
     std::vector<std::string> visibleNames;
@@ -5131,10 +4692,7 @@ bool ClockworkEngine::followDefaultOutput() {
 
     const SystemDefaultOutput def = systemDefaultOutput();
     auto* dev = mDeviceManager->getCurrentAudioDevice();
-    // On an aggregate, the output inside it is what plays.
-    const std::string currentOutput = mRealOutputDeviceName.empty()
-        ? (dev ? dev->getName().toStdString() : std::string())
-        : mRealOutputDeviceName;
+    const std::string currentOutput = dev ? dev->getName().toStdString() : std::string();
     const bool moved = def.name != mDefaultSeen;
     mDefaultSeen = def.name;
     if (def.name.empty() || def.name == currentOutput) {
@@ -5151,7 +4709,7 @@ bool ClockworkEngine::followDefaultOutput() {
     const std::string& chosen =
         mPreferredOutputDevice.empty() ? mDeviceMode : mPreferredOutputDevice;
     if (!clockwork::device::shouldFollowDefaultOutputChange(
-            def.name, currentOutput, def.isVirtual, sPublishedAppName, chosen)) {
+            def.name, currentOutput, def.isVirtual, chosen)) {
         if (moved)
             clockwork_log("[device-setup] system default is '%s' (virtual=%d, "
                     "pinned='%s'); not following (staying on '%s')",
@@ -5192,35 +4750,6 @@ ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
     return out;
 }
 
-#ifdef __APPLE__
-bool ClockworkEngine::waitForDeviceVisible(const std::string& name, int timeoutMs) {
-    if (name.empty() || !mDeviceManager) return false;
-    auto* dt = mDeviceManager->getCurrentDeviceTypeObject();
-    if (!dt) return false;
-    // A freshly-created CoreAudio aggregate isn't in JUCE's list until it
-    // rescans, and that can take longer than any fixed sleep. Poll until it
-    // shows up so we never open it before JUCE can find it ("No such device").
-    constexpr int kStepMs = 50;
-    for (int waited = 0; ; waited += kStepMs) {
-        dt->scanForDevices();
-        std::vector<std::string> names;
-        for (auto& n : dt->getDeviceNames(false)) names.push_back(n.toStdString());
-        if (clockwork::device::deviceNameVisible(name, names)) {
-            if (waited > 0) {
-                clockwork_log("[device-setup] aggregate '%s' visible after %d ms",
-                        name.c_str(), waited);
-            }
-            return true;
-        }
-        if (waited >= timeoutMs) break;
-        juce::Thread::sleep(kStepMs);
-    }
-    clockwork_log("[device-setup] aggregate '%s' still not visible after %d ms — "
-            "aborting open", name.c_str(), timeoutMs);
-    return false;
-}
-#endif
-
 std::string ClockworkEngine::openSystemDefault() {
     if (!mDeviceManager) return {};
 #ifdef __APPLE__
@@ -5233,13 +4762,11 @@ std::string ClockworkEngine::openSystemDefault() {
         //    JUCE uses CoreAudio's default-output abstraction, which routes through
         //    AirPlay correctly; opening AirPlay by explicit name has never been
         //    reliable in testing.
-        //  * Non-wireless: switchDevice, so the mic is preserved via aggregate.
+        //  * Non-wireless: switchDevice, so the input is kept.
         if (!def.wireless) {
-            std::string inputName = mRealInputDeviceName;
-            if (inputName.empty() && mCurrentConfig.numInputChannels > 0) {
-                auto setup = mDeviceManager->getAudioDeviceSetup();
-                inputName = setup.inputDeviceName.toStdString();
-            }
+            std::string inputName;
+            if (mCurrentConfig.numInputChannels > 0)
+                inputName = mDeviceManager->getAudioDeviceSetup().inputDeviceName.toStdString();
             // Internal: following the default is not choosing it. A
             // user-origin swap would pin the default it landed on, and
             // every later move of the default would then be refused.

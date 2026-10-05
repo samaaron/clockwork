@@ -412,6 +412,11 @@ public:
     */
     void setDeviceChangeSink (std::function<void (AudioIODeviceType::DeviceChange)> sink);
 
+    /** smoothie addition: the application's name, for every device type,
+        including types added later (see AudioIODeviceType::setClientName).
+    */
+    void setClientName (const String& name);
+
     //==============================================================================
     /** Plays a beep through the current audio device.
 
@@ -501,6 +506,7 @@ private:
     OwnedArray<AudioIODeviceType> availableDeviceTypes;
     OwnedArray<AudioDeviceSetup> lastDeviceTypeConfigs;
     std::function<void (AudioIODeviceType::DeviceChange)> deviceChangeSink;
+    String clientName;
 
     AudioDeviceSetup currentSetup;
     std::unique_ptr<AudioIODevice> currentAudioDevice;

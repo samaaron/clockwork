@@ -97,14 +97,12 @@ std::vector<std::string> offeredInputs(const osc_test::ParsedReply& r) {
     return names;
 }
 
-#ifndef __APPLE__
 // /clockwork/info: text, rate, buffer, count, rates...
 std::vector<int> offeredRates(const osc_test::ParsedReply& r) {
     std::vector<int> rates;
     for (int i = 0; i < r.argInt(3); ++i) rates.push_back(r.argInt(4 + i));
     return rates;
 }
-#endif
 
 // One driver's rows in /clockwork/device-table, each a name and its flags.
 struct DriverRows {
@@ -271,9 +269,8 @@ TEST_CASE("DeviceReport: a device list caught mid-change, missing the microphone
     CHECK(offeredInputs(inputs.parsed()) == std::vector<std::string>{ "Fake Microphone" });
 }
 
-// macOS pairs a separate microphone through an aggregate device, which the
-// fakes cannot build yet; the rates on offer there are the aggregate's.
-#ifndef __APPLE__
+// The pair's rates are its driver's to give (CoreAudio's aggregate offers
+// these too); the report offers what the device it opened gives.
 TEST_CASE("DeviceReport: with an output and a separate microphone, the rates offered "
           "are the ones both can play, or the output's when they share none",
           "[DeviceReport]") {
@@ -298,7 +295,6 @@ TEST_CASE("DeviceReport: with an output and a separate microphone, the rates off
     CHECK(offeredRates(latest(fix, CLOCKWORK_SYS("info")))
           == std::vector<int>{ 44100, 48000, 88200, 96000 });
 }
-#endif
 
 // Only Linux has ALSA, and only there does PipeWire hold the card.
 #ifdef __linux__
@@ -325,10 +321,9 @@ TEST_CASE("DeviceReport: on a PipeWire desktop, ALSA's direct-hardware devices t
 }
 #endif
 
-#ifdef __APPLE__
-// CoreAudio opens a wireless device reliably only as the default, and can't
-// run one inside an aggregate: wireless outputs are not offered by name,
-// and while one is playing no microphone can join it.
+// A wireless device is opened reliably only as the default (CoreAudio), and
+// can't pair with another (CoreAudio's aggregate): wireless outputs are not
+// offered by name, and while one is playing no microphone can join it.
 TEST_CASE("DeviceReport: wireless devices are not offered, and while one is "
           "playing no microphone is offered or added", "[DeviceReport]") {
     auto airpods = device("Fake AirPods", 2, 1);
@@ -386,4 +381,3 @@ TEST_CASE("DeviceReport: wireless devices are not offered, and while one is "
     CHECK(contains(offeredInputs(latest(fix, CLOCKWORK_SYS("input-devices"))),
                    "Fake Microphone"));
 }
-#endif

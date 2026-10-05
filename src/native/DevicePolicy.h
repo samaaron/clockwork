@@ -17,10 +17,6 @@
 
 namespace clockwork::device {
 
-// Minimum buffer size on a drift-compensated aggregate (see the longer
-// comment on ClockworkEngine::kMinAggregateBufferSize).
-inline constexpr int kMinAggregateBufferSize = 256;
-
 // Upper bound on channels we'll ever request when the true capacity is
 // unknown. 64 covers commodity audio interfaces (MOTU, RME, etc.). NOTE:
 // CoreAudio silently clamps an over-request to the device's real count,
@@ -45,14 +41,6 @@ inline constexpr int kRequestMaxChannels = 64;
 // enableInputChannels(-1) path.
 int resolveInputWidth(int requested, int bootInputChannels, int probedMax);
 
-// Clamp bufferSize up to kMinAggregateBufferSize if and only if a
-// drift-compensated aggregate is active. Same-clock aggregates and
-// single devices pass through unchanged (they can run at 16/32/64).
-// Zero or negative bufferSize is a sentinel meaning "pick
-// automatically" and must NOT be reinterpreted as "too small".
-int clampBufferForDriftComp(int bufferSize,
-                            bool aggregateWithDriftCompActive);
-
 // Wireless-exit rate resolution. When leaving an AirPlay / Bluetooth
 // device, currentRate is whatever the wireless receiver negotiated
 // (often 44.1 kHz on AirPlay 1). That rate shouldn't carry onto
@@ -66,35 +54,16 @@ double resolveWirelessExitRate(double requestedRate,
                                bool currentIsWireless,
                                bool targetIsWireless);
 
-// Decide the rate to run a CoreAudio aggregate at, after the caller has
-// TRIED to set both sub-devices to `desired` and read back what they
-// actually settled at (`actualIn` / `actualOut`). The output sub-device
-// carries playback and is therefore the audible path, so the engine
-// must run at the OUTPUT's actual rate — running it at a rate the output
-// doesn't share makes CoreAudio resample inside the IOProc (audible
-// distortion) and changes the system device rate for nothing.
-//
-// This implements "try the remembered rate, else use the device's rate":
-// actualOut == desired when the output accepted it, or the output's own
-// rate when it refused. A disagreeing input (e.g. a Bluetooth HFP mic
-// pinned to 16 kHz against a 48 kHz output) is resampled to match — that
-// only affects the input path, which is unavoidable for such a device.
-double resolveAggregateRate(double desired, double actualIn, double actualOut);
-
-// Decide whether to follow a macOS system-default-output change (the
-// CoreAudio default-device listener fired). We auto-follow the default so
-// playback tracks where the user sends sound — but only onto a *real*
-// device. Following the wrong thing here is what storms the device list:
-// each follow cold-swaps + rebuilds the aggregate, which itself perturbs
-// the device list, re-firing the listener.
+// Decide whether to follow a system-default-output change. We auto-follow
+// the default so playback tracks where the user sends sound — but only onto
+// a *real* device. Following the wrong thing here is what storms the device
+// list: each follow cold-swaps, and on macOS a pair rebuilds its aggregate,
+// which itself perturbs the device list, re-firing the listener. (Our own
+// aggregates, which macOS can make the default for a moment, the driver
+// never reports as the default.)
 //
 // Returns false (don't follow) when:
 //   - newDefault is empty (couldn't read it)
-//   - newDefault is one of our own aggregates, named
-//     "<selfAggregatePrefix>#N" where the prefix is the published app name
-//     (AggregateDeviceHelper names them from clockwork_app_name(), not a fixed
-//     "clockwork" literal) — creating an aggregate briefly elevates it to
-//     system default; following that nests aggregation and spirals
 //   - newDefault == currentOutput (already there)
 //   - newDefault is a virtual device (NDI Audio, Loopback, BlackHole, …):
 //     apps spawn these and macOS may make one the default, but chasing it
@@ -110,7 +79,6 @@ double resolveAggregateRate(double desired, double actualIn, double actualOut);
 bool shouldFollowDefaultOutputChange(const std::string& newDefault,
                                      const std::string& currentOutput,
                                      bool newDefaultIsVirtual,
-                                     const std::string& selfAggregatePrefix,
                                      const std::string& pinnedOutputDevice = {});
 
 // After the watchdog rebuilds the device manager, which output should the
@@ -122,30 +90,10 @@ std::string selectRecoveryTarget(const std::string& pinnedOutput,
                                  const std::vector<std::string>& visibleOutputs);
 
 // True if `name` (or its JUCE "<name> (N)" disambiguated form) currently
-// appears in `visibleNames`. After creating a CoreAudio aggregate, JUCE's
-// device list only shows it once it rescans — which can take longer than a
-// fixed sleep. The engine polls scanForDevices() and uses this to know when
-// the aggregate is safe to open: opening it before JUCE can see it errors
-// "No such device" and forces a fallback that drops the aggregate (losing
-// the mic). Same "<base> (N)" tolerance as resolveJuceDeviceName.
+// appears in `visibleNames`. Same "<base> (N)" tolerance as
+// resolveJuceDeviceName.
 bool deviceNameVisible(const std::string& name,
                        const std::vector<std::string>& visibleNames);
-
-// Sample rates an aggregate can run *cleanly*, given its two sub-devices'
-// available-rate lists: the rates BOTH support. A rate only one side
-// supports forces CoreAudio to resample inside the aggregate (distortion),
-// so it isn't offered. This is what the macOS rate dropdown should show
-// when on an aggregate — not just the current rate. Fallbacks keep the
-// list usable:
-//   - outputRates empty                  → inputRates
-//   - inputRates empty (output-only)     → outputRates
-//   - both present but disjoint (e.g. a  → outputRates (output is the
-//     16 kHz Bluetooth HFP mic vs a         audible path, so its rate is
-//     48 kHz output)                        the one that wins; the input is
-//                                            resampled to match)
-// Order follows outputRates (already device-sorted).
-std::vector<int> usableAggregateRates(const std::vector<int>& outputRates,
-                                      const std::vector<int>& inputRates);
 
 // Hot-plug decision. Given the user's preferred output/input device
 // names, the currently-active output, the currently-active input
@@ -154,7 +102,7 @@ std::vector<int> usableAggregateRates(const std::vector<int>& outputRates,
 struct HotplugDecision {
     bool        reopen       = false;  // the current output has gone
     bool        switchOutput = false;  // full swap to preferred output
-    bool        switchInput  = false;  // input-only re-aggregate
+    bool        switchInput  = false;  // input-only re-pair
     std::string outputName;            // target output device
     std::string inputName;             // target input device
 };
@@ -220,53 +168,17 @@ std::vector<std::string> scopeInputsToDriver(
 
 // Decide which input device the boot open pairs with the opened output.
 // The embedder passes the user's saved input (scsynth's -H, for SuperSonic).
-//   - requestedInput visible (exact or JUCE
-//     "<name> (N)" form, resolveJuceDeviceName) and suitable → the
-//     resolved name
-//   - otherwise (no request / "__none__" / unplugged / unsuitable) → the
-//     system default, which gets the SAME vetting: resolved against
-//     visibleInputs and judged by its mask slot (#3555 — an unvetted
-//     Bluetooth HFP default became an aggregate sub-device: 16 kHz engine
-//     + heap corruption). Unresolvable-under-mask = unjudgeable = unpaired.
-//   - empty return = pair nothing; boot output-only.
-//   - visibleIsSuitable empty or length-mismatched (caller bug) = legacy
-//     no-vetting behaviour: requested-if-visible, else raw systemDefaultInput.
-//     Callers pass the same vetting switchDevice applies (no wireless
-//     aggregate sub-devices).
+// `visibleInputs` are the inputs that can pair with that output (the caller
+// leaves out any its driver won't pair — #3555: a Bluetooth HFP mic in an
+// aggregate made a 16 kHz engine and corrupted the heap).
+//   - requestedInput visible (exact or JUCE "<name> (N)" form,
+//     resolveJuceDeviceName) → the resolved name
+//   - otherwise (no request / "__none__" / unplugged / can't pair) →
+//     systemDefaultInput (the caller passes the input already open, so
+//     nothing changes).
 std::string chooseBootInputDevice(const std::string& requestedInput,
                                   const std::string& systemDefaultInput,
-                                  const std::vector<std::string>& visibleInputs,
-                                  const std::vector<bool>& visibleIsSuitable = {});
-
-// The whole boot input-pairing decision as one pure function (#3555).
-// After the output is open, decide what (if anything) to do about inputs:
-//   None             — boot output-only (no judgeable, suitable input; or
-//                      the output can't aggregate; or a -H open already
-//                      settled its own input)
-//   Aggregate        — createOrUpdate(openedOutputName, inputName)
-//   FullDuplexReopen — the chosen input IS the opened output on a
-//                      default-device boot: reopen that device by name
-//                      full-duplex (never on -H — it would discard the
-//                      user's chosen output)
-// Vetting is chooseBootInputDevice's: preferred first, then the system
-// default, both judged by isSuitableForAggregate (the opened output
-//   opened output must itself be present in `devices` and aggregable for
-//   Aggregate: an output missing from the enumeration is unjudgeable, and
-//   unjudgeable = input disabled. `reason` carries the boot-log line on a
-//   refusal.
-// outputSuitable=true in that case). `reason` carries the boot-log line
-// when the plan is a refusal.
-struct BootInputPairing {
-    enum class Action { None, Aggregate, FullDuplexReopen };
-    Action action = Action::None;
-    std::string inputName;
-    std::string reason;
-};
-BootInputPairing planBootInputPairing(const std::string& openedOutputName,
-                                      bool openedByHardwareFlag,
-                                      const std::string& preferredInput,
-                                      const std::string& systemDefaultInput,
-                                      const std::vector<DeviceInfo>& devices);
+                                  const std::vector<std::string>& visibleInputs);
 
 // Resolve the driver (JUCE device type) the engine opens at boot. `requested` is
 // the embedder's --audio-driver value, so boot lands on the saved preference

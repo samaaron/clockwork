@@ -1388,13 +1388,6 @@ public:
         return internal->setNominalSampleRate (newSampleRate);
     }
 
-    // smoothie: lets an owner (the combiner) fence HAL listeners before
-    // starting teardown — see ~CoreAudioIODevice and LiveInternalRegistry.
-    void detachHardwareListener()
-    {
-        internal->detachListener();
-    }
-
     // smoothie: a change to this device, to its type's sink. The type
     // outlives its devices, and the listener reaching here is fenced
     // against this device's teardown (LiveInternalRegistry).
@@ -1432,594 +1425,520 @@ private:
 
 
 //==============================================================================
-class AudioIODeviceCombiner final : public AudioIODevice
+// smoothie addition: what CoreAudio says of a device by its ID alone — no
+// CoreAudioIODevice, nothing opened.
+struct CoreAudioDeviceFacts
 {
-public:
-    AudioIODeviceCombiner (const String& deviceName,
-                           std::unique_ptr<CoreAudioIODevice>&& inputDevice,
-                           std::unique_ptr<CoreAudioIODevice>&& outputDevice)
-        : AudioIODevice (deviceName, "CoreAudio"),
-          currentSampleRate (inputDevice->getCurrentSampleRate()),
-          currentBufferSize (inputDevice->getCurrentBufferSizeSamples()),
-          inputWrapper  (*this, std::move (inputDevice),  true),
-          outputWrapper (*this, std::move (outputDevice), false)
+    static Array<double> sampleRates (AudioDeviceID deviceID)
     {
-        if (getAvailableSampleRates().isEmpty())
-            lastError = TRANS ("The input and output devices don't share a common sample rate!");
+        Array<double> rates;
+
+        const auto ranges = audioObjectGetProperties<AudioValueRange> (deviceID, { kAudioDevicePropertyAvailableNominalSampleRates,
+                                                                                   kAudioObjectPropertyScopeWildcard,
+                                                                                   juceAudioObjectPropertyElementMain });
+        for (const auto rate : SampleRateHelpers::getAllSampleRates())
+            for (auto range = ranges.rbegin(); range != ranges.rend(); ++range)
+                if (range->mMinimum - 2 <= rate && rate <= range->mMaximum + 2)
+                {
+                    rates.add (rate);
+                    break;
+                }
+
+        if (const auto nominal = nominalSampleRate (deviceID); nominal > 0 && ! rates.contains (nominal))
+            rates.add (nominal);
+
+        return rates;
     }
 
-    ~AudioIODeviceCombiner() override
+    static Array<int> bufferSizes (AudioDeviceID deviceID)
     {
-        // smoothie: fence the sub-devices' HAL listeners — deregistration
-        // blocks on in-flight bodies, so none lands on this combiner once
-        // teardown begins (observed SIGSEGV on a dying combiner, #3554).
-        inputWrapper.detachHardwareListener();
-        outputWrapper.detachHardwareListener();
+        Array<int> sizes;
 
-        close();
-    }
-
-    auto getDeviceWrappers()       { return std::array<      DeviceWrapper*, 2> { { &inputWrapper, &outputWrapper } }; }
-    auto getDeviceWrappers() const { return std::array<const DeviceWrapper*, 2> { { &inputWrapper, &outputWrapper } }; }
-
-    int getIndexOfDevice (bool asInput) const
-    {
-        return asInput ? inputWrapper.getIndexOfDevice (true)
-                       : outputWrapper.getIndexOfDevice (false);
-    }
-
-    StringArray getOutputChannelNames() override        { return outputWrapper.getChannelNames(); }
-    StringArray getInputChannelNames()  override        { return inputWrapper .getChannelNames(); }
-    BigInteger getActiveOutputChannels() const override { return outputWrapper.getActiveChannels(); }
-    BigInteger getActiveInputChannels() const override  { return inputWrapper .getActiveChannels(); }
-
-    Array<double> getAvailableSampleRates() override
-    {
-        auto commonRates = inputWrapper.getAvailableSampleRates();
-        commonRates.removeValuesNotIn (outputWrapper.getAvailableSampleRates());
-
-        return commonRates;
-    }
-
-    Array<int> getAvailableBufferSizes() override
-    {
-        auto commonSizes = inputWrapper.getAvailableBufferSizes();
-        commonSizes.removeValuesNotIn (outputWrapper.getAvailableBufferSizes());
-
-        return commonSizes;
-    }
-
-    bool isOpen() override                          { return active; }
-    bool isPlaying() override                       { return callback != nullptr; }
-    double getCurrentSampleRate() override          { return currentSampleRate; }
-    int getCurrentBufferSizeSamples() override      { return currentBufferSize; }
-
-    int getCurrentBitDepth() override
-    {
-        return jmin (32, inputWrapper.getCurrentBitDepth(), outputWrapper.getCurrentBitDepth());
-    }
-
-    int getDefaultBufferSize() override
-    {
-        return jmax (0, inputWrapper.getDefaultBufferSize(), outputWrapper.getDefaultBufferSize());
-    }
-
-    AudioWorkgroup getWorkgroup() const override
-    {
-        return inputWrapper.getWorkgroup();
-    }
-
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
-                 double sampleRate, int bufferSize) override
-    {
-        close();
-        active = true;
-
-        if (bufferSize <= 0)
-            bufferSize = getDefaultBufferSize();
-
-        if (sampleRate <= 0)
+        if (const auto ranges = audioObjectGetProperties<AudioValueRange> (deviceID, { kAudioDevicePropertyBufferFrameSizeRange,
+                                                                                       kAudioObjectPropertyScopeWildcard,
+                                                                                       juceAudioObjectPropertyElementMain });
+            ! ranges.empty())
         {
-            auto rates = getAvailableSampleRates();
+            sizes.add ((int) (ranges[0].mMinimum + 15) & ~15);
 
-            for (int i = 0; i < rates.size() && sampleRate < 44100.0; ++i)
-                sampleRate = rates.getUnchecked (i);
+            for (int i = 32; i <= 2048; i += 32)
+                for (auto range = ranges.rbegin(); range != ranges.rend(); ++range)
+                    if (i >= range->mMinimum && i <= range->mMaximum)
+                    {
+                        sizes.addIfNotAlreadyThere (i);
+                        break;
+                    }
         }
 
-        currentSampleRate = sampleRate;
-        currentBufferSize = bufferSize;
-        targetLatency = bufferSize;
+        return sizes;
+    }
 
-        for (auto& d : getDeviceWrappers())
-        {
-            auto err = d->open (  d->isInput() ? inputChannels  : BigInteger(),
-                                ! d->isInput() ? outputChannels : BigInteger(),
-                                sampleRate, bufferSize);
+    static double nominalSampleRate (AudioDeviceID deviceID)
+    {
+        return audioObjectGetProperty<Float64> (deviceID, { kAudioDevicePropertyNominalSampleRate,
+                                                            kAudioObjectPropertyScopeGlobal,
+                                                            juceAudioObjectPropertyElementMain }).value_or (0.0);
+    }
 
-            if (err.isNotEmpty())
-            {
-                close();
-                lastError = err;
-                return err;
-            }
-
-            targetLatency += d->getLatencyInSamples();
-        }
-
-        const auto numOuts = outputWrapper.getChannelNames().size();
-
-        fifo.setSize (numOuts, targetLatency + (bufferSize * 2));
-        scratchBuffer.setSize (numOuts, bufferSize);
+    static String uid (AudioDeviceID deviceID)
+    {
+        if (const auto uid = audioObjectGetProperty<CFStringRef> (deviceID, { kAudioDevicePropertyDeviceUID,
+                                                                              kAudioObjectPropertyScopeGlobal,
+                                                                              juceAudioObjectPropertyElementMain }))
+            if (const CFUniquePtr<CFStringRef> owned { *uid })
+                return String::fromCFString (owned.get());
 
         return {};
     }
 
-    void close() override
+    static UInt32 transport (AudioDeviceID deviceID)
     {
-        stop();
-        fifo.clear();
-        active = false;
-
-        for (auto& d : getDeviceWrappers())
-            d->close();
+        return audioObjectGetProperty<UInt32> (deviceID, { kAudioDevicePropertyTransportType,
+                                                           kAudioObjectPropertyScopeGlobal,
+                                                           juceAudioObjectPropertyElementMain }).value_or (0);
     }
 
-    int getOutputLatencyInSamples() override
+    static bool isAlive (AudioDeviceID deviceID)
     {
-        return targetLatency - getInputLatencyInSamples();
+        return audioObjectGetProperty<UInt32> (deviceID, { kAudioDevicePropertyDeviceIsAlive,
+                                                           kAudioObjectPropertyScopeWildcard,
+                                                           juceAudioObjectPropertyElementMain }).value_or (0) != 0;
     }
+};
 
-    int getInputLatencyInSamples() override
+//==============================================================================
+// smoothie addition: an aggregate device of one output device and one input
+// device, so the two play to one clock — the output's channels first, a
+// hardware clock as master, drift compensation across clock domains. Made
+// when its CoreAudioPairedDevice opens and destroyed when it closes, after
+// the device made on it.
+//
+// Public (the HAL lists it, as "<client>#<n>"): the private flag leaves
+// drift compensation half-applied on some macOS versions. This type never
+// lists one (isOurs), and one a crashed process left behind is destroyed by
+// the next type made (destroyLeftovers).
+class CoreAudioAggregate final
+{
+public:
+    static std::unique_ptr<CoreAudioAggregate> create (AudioDeviceID outputID, AudioDeviceID inputID,
+                                                       const String& clientName, String& error)
     {
-        return inputWrapper.getLatencyInSamples();
-    }
+        const auto outputUID = CoreAudioDeviceFacts::uid (outputID);
+        const auto inputUID  = CoreAudioDeviceFacts::uid (inputID);
 
-    void start (AudioIODeviceCallback* newCallback) override
-    {
-        const auto shouldStart = [&]
+        if (outputUID.isEmpty() || inputUID.isEmpty())
         {
-            const ScopedLock sl (callbackLock);
-            return callback != newCallback;
-        }();
-
-        if (shouldStart)
-        {
-            stop();
-            fifo.clear();
-            reset();
-
-            {
-                ScopedErrorForwarder forwarder (*this, newCallback);
-
-                for (auto& d : getDeviceWrappers())
-                    d->start (d);
-
-                if (! forwarder.encounteredError() && newCallback != nullptr)
-                    newCallback->audioDeviceAboutToStart (this);
-                else if (lastError.isEmpty())
-                    lastError = TRANS ("Failed to initialise all requested devices.");
-            }
-
-            const ScopedLock sl (callbackLock);
-            callback = newCallback;
+            error = "the devices to pair have no UIDs";
+            return nullptr;
         }
+
+        // A new UID every time: one reused makes a reopen look like the same
+        // device, which then starts with stale state and calls back nothing.
+        static std::atomic<int> counter { 0 };
+        const auto n    = ++counter;
+        const auto uid  = uidPrefix() + String ((int) getpid()) + "." + String (n);
+        const auto name = (clientName.isNotEmpty() ? clientName : String ("smoothie")) + "#" + String (n);
+
+        const void* keys[]   = { CFSTR (kAudioAggregateDeviceUIDKey), CFSTR (kAudioAggregateDeviceNameKey) };
+        const void* values[] = { uid.toCFString(), name.toCFString() };
+        CFUniquePtr<CFDictionaryRef> description { CFDictionaryCreate (nullptr, keys, values, 2,
+                                                                       &kCFTypeDictionaryKeyCallBacks,
+                                                                       &kCFTypeDictionaryValueCallBacks) };
+        CFRelease ((CFStringRef) values[0]);
+        CFRelease ((CFStringRef) values[1]);
+
+        AudioObjectID aggregateID = kAudioObjectUnknown;
+
+        if (const auto status = AudioHardwareCreateAggregateDevice (description.get(), &aggregateID); status != noErr)
+        {
+            error = "the aggregate device could not be made (" + String ((int) status) + ")";
+            return nullptr;
+        }
+
+        std::unique_ptr<CoreAudioAggregate> aggregate (new CoreAudioAggregate (aggregateID, name));
+        settle();
+
+        // The output first: CoreAudio lays the aggregate's channels out in
+        // sub-device order, and the engine writes from channel 0.
+        CFUniquePtr<CFStringRef> outUID { outputUID.toCFString() }, inUID { inputUID.toCFString() };
+        CFMutableArrayRef subDevices = CFArrayCreateMutable (nullptr, 0, &kCFTypeArrayCallBacks);
+        CFArrayAppendValue (subDevices, outUID.get());
+        CFArrayAppendValue (subDevices, inUID.get());
+        const auto setList = audioObjectSetProperty (aggregateID, { kAudioAggregateDevicePropertyFullSubDeviceList,
+                                                                    kAudioObjectPropertyScopeGlobal,
+                                                                    juceAudioObjectPropertyElementMain },
+                                                     (CFArrayRef) subDevices);
+        CFRelease (subDevices);
+
+        if (! setList)
+        {
+            error = "the aggregate device's sub-devices could not be set";
+            return nullptr;
+        }
+
+        settle();
+
+        // The master must keep a hardware clock: a virtual device's is the
+        // scheduler's, and drift compensation crashes on it. The input is
+        // tried first (it is usually the hardware side), unless it alone is
+        // virtual.
+        const bool inputVirtual  = CoreAudioDeviceFacts::transport (inputID)  == kAudioDeviceTransportTypeVirtual;
+        const bool outputVirtual = CoreAudioDeviceFacts::transport (outputID) == kAudioDeviceTransportTypeVirtual;
+        CFStringRef masterUID = (inputVirtual && ! outputVirtual) ? outUID.get() : inUID.get();
+        const AudioObjectPropertyAddress masterAddress { kAudioAggregateDevicePropertyMainSubDevice,
+                                                         kAudioObjectPropertyScopeGlobal,
+                                                         juceAudioObjectPropertyElementMain };
+
+        if (! audioObjectSetProperty (aggregateID, masterAddress, masterUID))
+        {
+            masterUID = masterUID == inUID.get() ? outUID.get() : inUID.get();
+
+            if (! audioObjectSetProperty (aggregateID, masterAddress, masterUID))
+            {
+                error = "no master clock could be set on the aggregate device";
+                return nullptr;
+            }
+        }
+
+        settle();
+
+        // Drift compensation where the two keep different clocks (separate
+        // USB/PCI clocks), or can't say; not where they share one (built-in
+        // speakers and microphone).
+        const auto clockDomain = [] (AudioDeviceID id)
+        {
+            return audioObjectGetProperty<UInt32> (id, { kAudioDevicePropertyClockDomain,
+                                                         kAudioObjectPropertyScopeGlobal,
+                                                         juceAudioObjectPropertyElementMain });
+        };
+        const auto outClock = clockDomain (outputID), inClock = clockDomain (inputID);
+        aggregate->driftCompensated = ! outClock || ! inClock || *outClock != *inClock;
+
+        if (aggregate->driftCompensated)
+            aggregate->compensateDrift (masterUID);
+
+        settle();
+        Logger::writeToLog ("[aggregate] made '" + name + "' of '" + String (outputUID) + "' (out) and '"
+                            + String (inputUID) + "' (in)"
+                            + (aggregate->driftCompensated ? ", drift compensated" : ""));
+        return aggregate;
     }
 
-    void stop() override    { shutdown ({}); }
-
-    // smoothie: alive while both are; the input side's inputs, the output
-    // side's outputs, and the output's rate (the clock it plays to).
-    LiveState readLiveState() override
+    ~CoreAudioAggregate()
     {
-        const auto in  = inputWrapper.readLiveState();
-        const auto out = outputWrapper.readLiveState();
-
-        LiveState state;
-        state.alive             = in.alive && out.alive;
-        state.sampleRate        = out.sampleRate;
-        state.numOutputChannels = out.numOutputChannels;
-        state.numInputChannels  = in.numInputChannels;
-        return state;
+        AudioHardwareDestroyAggregateDevice (aggregateID);
     }
 
-    String getLastError() override
+    AudioDeviceID getID() const noexcept        { return aggregateID; }
+    bool isDriftCompensated() const noexcept    { return driftCompensated; }
+
+    // An aggregate device this code made, in this process or another.
+    static bool isOurs (AudioDeviceID deviceID)
     {
-        return lastError;
+        const auto uid = CoreAudioDeviceFacts::uid (deviceID);
+        return uid.startsWith (uidPrefix()) || isLegacy (uid);
     }
 
-    int getXRunCount() const noexcept override
+    // Ours, made by a process no longer running (a crash leaves its
+    // aggregate behind, in Audio MIDI Setup and in every app's device list).
+    static void destroyLeftovers()
     {
-        return xruns.load();
+        for (const auto device : audioObjectGetProperties<AudioDeviceID> (kAudioObjectSystemObject, { kAudioHardwarePropertyDevices,
+                                                                                                      kAudioObjectPropertyScopeWildcard,
+                                                                                                      juceAudioObjectPropertyElementMain }))
+        {
+            const auto uid = CoreAudioDeviceFacts::uid (device);
+            const bool ours = uid.startsWith (uidPrefix());
+
+            if (! ours && ! isLegacy (uid))
+                continue;
+
+            const auto pid = uid.fromFirstOccurrenceOf (uidPrefix(), false, false).upToFirstOccurrenceOf (".", false, false).getIntValue();
+
+            if (ours && pid > 0 && (kill ((pid_t) pid, 0) == 0 || errno != ESRCH))
+                continue;   // its process is still running
+
+            // A legacy one names no process: one an older app is playing on now is its.
+            if (! ours && audioObjectGetProperty<UInt32> (device, { kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                                                    kAudioObjectPropertyScopeGlobal,
+                                                                    juceAudioObjectPropertyElementMain }).value_or (0) != 0)
+                continue;
+
+            Logger::writeToLog ("[aggregate] destroying a leftover aggregate device (" + uid + ")");
+            AudioHardwareDestroyAggregateDevice (device);
+        }
     }
 
 private:
-    static constexpr auto invalidSampleTime = std::numeric_limits<std::uint64_t>::max();
+    CoreAudioAggregate (AudioDeviceID id, String nameIn) : aggregateID (id), name (std::move (nameIn)) {}
 
-    CriticalSection callbackLock;
-    AudioIODeviceCallback* callback = nullptr;
-    double currentSampleRate = 0;
-    int currentBufferSize = 0;
-    bool active = false;
+    static String uidPrefix()       { return "smoothie.aggregate."; }
+
+    // What our aggregates were named before they were smoothie's: Clockwork's
+    // "clockwork.<product>.aggregate.<n>", SuperSonic's
+    // "com.sonicpi.supersonic.aggregate[.<n>]" (Sonic Pi's releases), and
+    // "net.sonic-pi.<product>.aggregate.<n>" (development builds).
+    static bool isLegacy (const String& uid)
+    {
+        return ((uid.startsWith ("clockwork.") || uid.startsWith ("net.sonic-pi.")) && uid.contains (".aggregate"))
+            || uid.startsWith ("com.sonicpi.supersonic.aggregate");
+    }
+
+    // CoreAudio applies an aggregate's configuration asynchronously; the
+    // next step waits this long, as every aggregate tool does.
+    static void settle()    { Thread::sleep (100); }
+
+    void compensateDrift (CFStringRef masterUID)
+    {
+        // Only the sub-devices (not clocks or taps), and every one but the
+        // master: it is the clock the others are compensated to. They can
+        // take a moment to appear, a virtual one longest.
+        const AudioObjectPropertyAddress owned { kAudioObjectPropertyOwnedObjects,
+                                                 kAudioObjectPropertyScopeGlobal,
+                                                 juceAudioObjectPropertyElementMain };
+        AudioClassID subDeviceClass = kAudioSubDeviceClassID;
+        UInt32 size = 0;
+
+        for (int i = 0; i < 10; ++i)
+        {
+            if (AudioObjectGetPropertyDataSize (aggregateID, &owned, sizeof (subDeviceClass), &subDeviceClass, &size) == noErr && size > 0)
+                break;
+
+            settle();
+        }
+
+        std::vector<AudioObjectID> subDevices (size / sizeof (AudioObjectID));
+
+        if (subDevices.empty()
+            || AudioObjectGetPropertyData (aggregateID, &owned, sizeof (subDeviceClass), &subDeviceClass, &size, subDevices.data()) != noErr)
+        {
+            Logger::writeToLog ("[aggregate] drift compensation skipped: no sub-devices after 1 s");
+            return;
+        }
+
+        for (const auto subDevice : subDevices)
+        {
+            const auto uid = CoreAudioDeviceFacts::uid (subDevice);
+
+            if (uid.isEmpty() || uid == String::fromCFString (masterUID))
+                continue;
+
+            audioObjectSetProperty (subDevice, { kAudioSubDevicePropertyDriftCompensation,
+                                                 kAudioObjectPropertyScopeGlobal,
+                                                 juceAudioObjectPropertyElementMain },
+                                    (UInt32) 1);
+        }
+    }
+
+    AudioDeviceID aggregateID;
+    String name;
+    bool driftCompensated = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CoreAudioAggregate)
+};
+
+//==============================================================================
+// smoothie addition: an output device and a separate input device as one
+// device, on an aggregate device of the two (CoreAudioAggregate) — what
+// CoreAudio offers for playing and recording on separate hardware, in place
+// of JUCE's AudioIODeviceCombiner (which the #3554 crash came from). Named
+// after its output; its outputs are the output device's, its inputs the
+// input device's.
+class CoreAudioPairedDevice final : public AudioIODevice
+{
+public:
+    CoreAudioPairedDevice (CoreAudioIODeviceType* type, const String& outputName, const String& inputNameIn,
+                           AudioDeviceID outputIDIn, AudioDeviceID inputIDIn, const String& clientNameIn)
+        : AudioIODevice (outputName, "CoreAudio"),
+          deviceType (type),
+          inputName (inputNameIn),
+          outputID (outputIDIn),
+          inputID (inputIDIn),
+          clientName (clientNameIn)
+    {
+        // Described from its two devices, before any aggregate exists.
+        CoreAudioIODevice output (type, outputName, 0, outputID);
+        CoreAudioIODevice input  (type, inputName, inputID, 0);
+        outputChannelNames = output.getOutputChannelNames();
+        inputChannelNames  = input.getInputChannelNames();
+        defaultBufferSize  = output.getDefaultBufferSize();
+        bufferSizes        = output.getAvailableBufferSizes();
+
+        // The rates both offer; the output's, when they share none (the
+        // engine's buffer converts the input's).
+        const auto outRates = output.getAvailableSampleRates();
+        const auto inRates  = input.getAvailableSampleRates();
+
+        for (const auto rate : outRates)
+            if (inRates.contains (rate))
+                sampleRates.add (rate);
+
+        if (sampleRates.isEmpty())
+            sampleRates = outRates.isEmpty() ? inRates : outRates;
+
+        // In the aggregate the output device's own inputs come first.
+        inputOffset = CoreAudioInternal::getNumChannels (outputID, true);
+    }
+
+    ~CoreAudioPairedDevice() override { close(); }
+
+    String getInputDeviceName() const       { return inputName; }
+
+    StringArray getOutputChannelNames() override        { return outputChannelNames; }
+    StringArray getInputChannelNames() override         { return inputChannelNames; }
+    Array<double> getAvailableSampleRates() override    { return sampleRates; }
+    int getDefaultBufferSize() override                 { return driftFloor (defaultBufferSize); }
+
+    Array<int> getAvailableBufferSizes() override
+    {
+        // A drift-compensated aggregate needs 256 frames or more: below it,
+        // CoreAudio's resampler starves.
+        Array<int> sizes;
+
+        for (const auto size : bufferSizes)
+            if (size == driftFloor (size))
+                sizes.add (size);
+
+        return sizes.isEmpty() ? bufferSizes : sizes;
+    }
+
+    String open (const BigInteger& inputChannels, const BigInteger& outputChannels,
+                 double sampleRate, int bufferSizeSamples) override
+    {
+        close();
+
+        const auto rate = alignRates (sampleRate);
+        lastError.clear();
+        aggregate = CoreAudioAggregate::create (outputID, inputID, clientName, lastError);
+
+        if (aggregate == nullptr)
+            return lastError;
+
+        inner = std::make_unique<CoreAudioIODevice> (deviceType, getName(), aggregate->getID(), aggregate->getID());
+
+        BigInteger outs = outputChannels;
+        outs.setRange (outputChannelNames.size(), 256, false);
+
+        BigInteger ins;
+        for (int i = 0; i < inputChannelNames.size(); ++i)
+            if (inputChannels[i])
+                ins.setBit (i + inputOffset);
+
+        lastError = inner->open (ins, outs, rate, driftFloor (bufferSizeSamples));
+
+        if (lastError.isNotEmpty())
+            close();
+
+        return lastError;
+    }
+
+    void close() override
+    {
+        inner.reset();       // the device before the aggregate it is on
+        aggregate.reset();
+    }
+
+    bool isOpen() override                         { return inner != nullptr && inner->isOpen(); }
+    void start (AudioIODeviceCallback* callback) override   { if (inner != nullptr) inner->start (callback); }
+    void stop() override                           { if (inner != nullptr) inner->stop(); }
+    bool isPlaying() override                      { return inner != nullptr && inner->isPlaying(); }
+    String getLastError() override                 { return lastError; }
+
+    int getCurrentBufferSizeSamples() override     { return inner != nullptr ? inner->getCurrentBufferSizeSamples() : 0; }
+    double getCurrentSampleRate() override         { return inner != nullptr ? inner->getCurrentSampleRate() : 0.0; }
+    int getCurrentBitDepth() override              { return inner != nullptr ? inner->getCurrentBitDepth() : 32; }
+    int getOutputLatencyInSamples() override       { return inner != nullptr ? inner->getOutputLatencyInSamples() : 0; }
+    int getInputLatencyInSamples() override        { return inner != nullptr ? inner->getInputLatencyInSamples() : 0; }
+    int getXRunCount() const noexcept override     { return inner != nullptr ? inner->getXRunCount() : -1; }
+    AudioWorkgroup getWorkgroup() const override   { return inner != nullptr ? inner->getWorkgroup() : AudioWorkgroup{}; }
+
+    BigInteger getActiveOutputChannels() const override
+    {
+        return inner != nullptr ? inner->getActiveOutputChannels() : BigInteger();
+    }
+
+    BigInteger getActiveInputChannels() const override
+    {
+        BigInteger active;
+
+        if (inner != nullptr)
+            for (int i = 0; i < inputChannelNames.size(); ++i)
+                if (inner->getActiveInputChannels()[i + inputOffset])
+                    active.setBit (i);
+
+        return active;
+    }
+
+    // Alive while both its devices are; their channels and the output's
+    // rate as CoreAudio has them now.
+    LiveState readLiveState() override
+    {
+        LiveState state;
+        state.alive = CoreAudioDeviceFacts::isAlive (outputID) && CoreAudioDeviceFacts::isAlive (inputID);
+
+        if (state.alive)
+        {
+            state.sampleRate        = CoreAudioDeviceFacts::nominalSampleRate (outputID);
+            state.numOutputChannels = CoreAudioInternal::getNumChannels (outputID, false);
+            state.numInputChannels  = CoreAudioInternal::getNumChannels (inputID, true);
+        }
+
+        return state;
+    }
+
+private:
+    int driftFloor (int frames) const
+    {
+        return aggregate != nullptr && aggregate->isDriftCompensated() ? jmax (frames, 256) : frames;
+    }
+
+    // Both devices to the rate before the aggregate is made of them: one left
+    // at another rate makes the aggregate resample inside its IO (audible
+    // distortion) or stop within a callback. A device that refuses keeps its
+    // own; the output's then rules, as the clock the music plays to.
+    double alignRates (double wanted)
+    {
+        if (wanted <= 0)
+            wanted = CoreAudioDeviceFacts::nominalSampleRate (outputID);
+
+        for (const auto id : { inputID, outputID })
+        {
+            if (std::abs (CoreAudioDeviceFacts::nominalSampleRate (id) - wanted) < 1.0)
+                continue;
+
+            audioObjectSetProperty (id, { kAudioDevicePropertyNominalSampleRate,
+                                          kAudioObjectPropertyScopeGlobal,
+                                          juceAudioObjectPropertyElementMain },
+                                    (Float64) wanted);
+
+            for (int i = 0; i < 100 && std::abs (CoreAudioDeviceFacts::nominalSampleRate (id) - wanted) >= 1.0; ++i)
+                Thread::sleep (10);
+        }
+
+        const auto out = CoreAudioDeviceFacts::nominalSampleRate (outputID);
+        const auto in  = CoreAudioDeviceFacts::nominalSampleRate (inputID);
+
+        if (std::abs (out - wanted) >= 1.0 || std::abs (in - wanted) >= 1.0)
+            Logger::writeToLog ("[aggregate] asked " + String (wanted) + " Hz; output at " + String (out)
+                                + ", input at " + String (in) + " — running at the output's");
+
+        return out > 0 ? out : (in > 0 ? in : wanted);
+    }
+
+    CoreAudioIODeviceType* deviceType;
+    String inputName;
+    AudioDeviceID outputID, inputID;
+    String clientName;
+    StringArray outputChannelNames, inputChannelNames;
+    Array<double> sampleRates;
+    Array<int> bufferSizes;
+    int defaultBufferSize = 512;
+    int inputOffset = 0;
     String lastError;
-    AudioSampleBuffer fifo, scratchBuffer;
-    int targetLatency = 0;
-    std::atomic<int> xruns { -1 };
-    std::atomic<uint64_t> lastValidReadPosition { invalidSampleTime };
+    std::unique_ptr<CoreAudioAggregate> aggregate;   // declared first: destroyed last
+    std::unique_ptr<CoreAudioIODevice> inner;
 
-    void shutdown (const String& error)
-    {
-        AudioIODeviceCallback* lastCallback = nullptr;
-
-        {
-            const ScopedLock sl (callbackLock);
-            std::swap (callback, lastCallback);
-        }
-
-        for (auto& d : getDeviceWrappers())
-            d->stop();
-
-        if (lastCallback != nullptr)
-        {
-            if (error.isNotEmpty())
-                lastCallback->audioDeviceError (error);
-            else
-                lastCallback->audioDeviceStopped();
-        }
-    }
-
-    void reset()
-    {
-        xruns.store (0);
-        fifo.clear();
-        scratchBuffer.clear();
-
-        for (auto& d : getDeviceWrappers())
-            d->reset();
-    }
-
-    // AbstractFifo cannot be used here for two reasons:
-    // 1) We use absolute timestamps as the fifo's read/write positions. This not only makes the code
-    //    more readable (especially when checking for underruns/overflows) but also simplifies the
-    //    initial setup when actual latency is not known yet until both callbacks have fired.
-    // 2) AbstractFifo doesn't have the necessary mechanics to recover from underrun/overflow conditions
-    //    in a lock-free and data-race free way. It's great if you don't care (i.e. overwrite and/or
-    //    read stale data) or can abort the operation entirely, but this is not the case here. We
-    //    need bespoke underrun/overflow handling here which fits this use-case.
-    template <typename Callback>
-    void accessFifo (const uint64_t startPos, const int numChannels, const int numItems, Callback&& operateOnRange)
-    {
-        const auto fifoSize = fifo.getNumSamples();
-        auto fifoPos = static_cast<int> (startPos % static_cast<std::uint64_t> (fifoSize));
-
-        for (int pos = 0; pos < numItems;)
-        {
-            const auto max = std::min (numItems - pos, fifoSize - fifoPos);
-
-            struct Args { int fifoPos, inputPos, nItems, channel; };
-
-            for (auto ch = 0; ch < numChannels; ++ch)
-                operateOnRange (Args { fifoPos, pos, max, ch });
-
-            fifoPos = (fifoPos + max) % fifoSize;
-            pos += max;
-        }
-    }
-
-    void inputAudioCallback (const float* const* channels, int numChannels, int n, const AudioIODeviceCallbackContext& context) noexcept
-    {
-        auto& writePos = inputWrapper.sampleTime;
-
-        {
-            ScopedLock lock (callbackLock);
-
-            if (callback != nullptr)
-            {
-                const auto numActiveOutputChannels = outputWrapper.getActiveChannels().countNumberOfSetBits();
-                jassert (numActiveOutputChannels <= scratchBuffer.getNumChannels());
-
-                callback->audioDeviceIOCallbackWithContext (channels,
-                                                            numChannels,
-                                                            scratchBuffer.getArrayOfWritePointers(),
-                                                            numActiveOutputChannels,
-                                                            n,
-                                                            context);
-            }
-            else
-            {
-                scratchBuffer.clear();
-            }
-        }
-
-        auto currentWritePos = writePos.load();
-        const auto nextWritePos = currentWritePos + static_cast<std::uint64_t> (n);
-
-        writePos.compare_exchange_strong (currentWritePos, nextWritePos);
-
-        if (currentWritePos == invalidSampleTime)
-            return;
-
-        const auto readPos = outputWrapper.sampleTime.load();
-
-        // check for fifo overflow
-        if (readPos != invalidSampleTime)
-        {
-            // write will overlap previous read
-            if (readPos > currentWritePos || (currentWritePos + static_cast<std::uint64_t> (n) - readPos) > static_cast<std::uint64_t> (fifo.getNumSamples()))
-            {
-                xrun();
-                return;
-            }
-        }
-
-        accessFifo (currentWritePos, scratchBuffer.getNumChannels(), n, [&] (const auto& args)
-        {
-            FloatVectorOperations::copy (fifo.getWritePointer (args.channel, args.fifoPos),
-                                         scratchBuffer.getReadPointer (args.channel, args.inputPos),
-                                         args.nItems);
-        });
-
-        {
-            auto invalid = invalidSampleTime;
-            lastValidReadPosition.compare_exchange_strong (invalid, nextWritePos);
-        }
-    }
-
-    void outputAudioCallback (float* const* channels, int numChannels, int n) noexcept
-    {
-        auto& readPos = outputWrapper.sampleTime;
-        auto currentReadPos = readPos.load();
-
-        if (currentReadPos == invalidSampleTime)
-            return;
-
-        const auto writePos = inputWrapper.sampleTime.load();
-
-        // check for fifo underrun
-        if (writePos != invalidSampleTime)
-        {
-            if ((currentReadPos + static_cast<std::uint64_t> (n)) > writePos)
-            {
-                xrun();
-                return;
-            }
-        }
-
-        // If there was an xrun, we want to output zeros until we're sure that there's some valid
-        // input for us to read.
-        const auto longN = static_cast<uint64_t> (n);
-        const auto nextReadPos = currentReadPos + longN;
-        const auto validReadPos = lastValidReadPosition.load();
-        const auto sanitisedValidReadPos = validReadPos != invalidSampleTime ? validReadPos : nextReadPos;
-        const auto numZerosToWrite = sanitisedValidReadPos <= currentReadPos
-                                   ? 0
-                                   : jmin (longN, sanitisedValidReadPos - currentReadPos);
-
-        for (auto i = 0; i < numChannels; ++i)
-            std::fill (channels[i], channels[i] + numZerosToWrite, 0.0f);
-
-        accessFifo (currentReadPos + numZerosToWrite, numChannels, static_cast<int> (longN - numZerosToWrite), [&] (const auto& args)
-        {
-            FloatVectorOperations::copy (channels[args.channel] + args.inputPos + numZerosToWrite,
-                                         fifo.getReadPointer (args.channel, args.fifoPos),
-                                         args.nItems);
-        });
-
-        // use compare exchange here as we need to avoid the case
-        // where we overwrite readPos being equal to invalidSampleTime
-        readPos.compare_exchange_strong (currentReadPos, nextReadPos);
-    }
-
-    void xrun() noexcept
-    {
-        for (auto& d : getDeviceWrappers())
-            d->sampleTime.store (invalidSampleTime);
-
-        ++xruns;
-    }
-
-    void handleAudioDeviceAboutToStart (AudioIODevice* device)
-    {
-        const ScopedLock sl (callbackLock);
-
-        auto newSampleRate = device->getCurrentSampleRate();
-        auto commonRates = getAvailableSampleRates();
-
-        if (! commonRates.contains (newSampleRate))
-        {
-            commonRates.sort();
-
-            if (newSampleRate < commonRates.getFirst() || newSampleRate > commonRates.getLast())
-            {
-                newSampleRate = jlimit (commonRates.getFirst(), commonRates.getLast(), newSampleRate);
-            }
-            else
-            {
-                for (auto it = commonRates.begin(); it < commonRates.end() - 1; ++it)
-                {
-                    if (it[0] < newSampleRate && it[1] > newSampleRate)
-                    {
-                        newSampleRate = newSampleRate - it[0] < it[1] - newSampleRate ? it[0] : it[1];
-                        break;
-                    }
-                }
-            }
-        }
-
-        currentSampleRate = newSampleRate;
-
-        for (auto& d : getDeviceWrappers())
-            if (! approximatelyEqual (d->getCurrentSampleRate(), currentSampleRate))
-                d->setCurrentSampleRate (currentSampleRate);
-
-        if (callback != nullptr)
-            callback->audioDeviceAboutToStart (device);
-    }
-
-    void handleAudioDeviceStopped()                            { shutdown ({}); }
-    void handleAudioDeviceError (const String& errorMessage)   { shutdown (errorMessage.isNotEmpty() ? errorMessage : String ("unknown")); }
-
-    //==============================================================================
-    struct DeviceWrapper final : public AudioIODeviceCallback
-    {
-        DeviceWrapper (AudioIODeviceCombiner& cd, std::unique_ptr<CoreAudioIODevice> d, bool shouldBeInput)
-            : owner (cd),
-              device (std::move (d)),
-              input (shouldBeInput)
-        {
-        }
-
-        ~DeviceWrapper() override
-        {
-            device->close();
-        }
-
-        // smoothie: passthrough for the combiner's teardown fence.
-        void detachHardwareListener()
-        {
-            device->detachHardwareListener();
-        }
-
-        void reset()
-        {
-            sampleTime.store (invalidSampleTime);
-        }
-
-        void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
-                                               int numInputChannels,
-                                               float* const* outputChannelData,
-                                               int numOutputChannels,
-                                               int numSamples,
-                                               const AudioIODeviceCallbackContext& context) override
-        {
-            if (std::exchange (device->hadDiscontinuity, false))
-                owner.xrun();
-
-            updateSampleTimeFromContext (context);
-
-            if (input)
-                owner.inputAudioCallback (inputChannelData, numInputChannels, numSamples, context);
-            else
-                owner.outputAudioCallback (outputChannelData, numOutputChannels, numSamples);
-        }
-
-        void audioDeviceAboutToStart (AudioIODevice* d)        override { owner.handleAudioDeviceAboutToStart (d); }
-        void audioDeviceStopped()                              override { owner.handleAudioDeviceStopped(); }
-        void audioDeviceError (const String& errorMessage)     override { owner.handleAudioDeviceError (errorMessage); }
-
-        bool setCurrentSampleRate (double newSampleRate)                { return device->setCurrentSampleRate (newSampleRate); }
-        StringArray getChannelNames()                             const { return input ? device->getInputChannelNames()     : device->getOutputChannelNames(); }
-        BigInteger getActiveChannels()                            const { return input ? device->getActiveInputChannels()   : device->getActiveOutputChannels(); }
-        int getLatencyInSamples()                                 const { return input ? device->getInputLatencyInSamples() : device->getOutputLatencyInSamples(); }
-        int getIndexOfDevice (bool asInput)                       const { return device->getIndexOfDevice (asInput); }
-        double getCurrentSampleRate()                             const { return device->getCurrentSampleRate(); }
-        int getCurrentBufferSizeSamples()                         const { return device->getCurrentBufferSizeSamples(); }
-        Array<double> getAvailableSampleRates()                   const { return device->getAvailableSampleRates(); }
-        Array<int> getAvailableBufferSizes()                      const { return device->getAvailableBufferSizes(); }
-        int getCurrentBitDepth()                                  const { return device->getCurrentBitDepth(); }
-        int getDefaultBufferSize()                                const { return device->getDefaultBufferSize(); }
-        void start (AudioIODeviceCallback* callbackToNotify)      const { return device->start (callbackToNotify); }
-        void stop()                                               const { device->stop(); }
-        LiveState readLiveState()                                 const { return device->readLiveState(); }
-        void close()                                              const { return device->close(); }
-        AudioWorkgroup getWorkgroup()                             const { return device->getWorkgroup(); }
-
-        String open (const BigInteger& inputChannels, const BigInteger& outputChannels, double sampleRate, int bufferSizeSamples) const
-        {
-            return device->open (inputChannels, outputChannels, sampleRate, bufferSizeSamples);
-        }
-
-        std::uint64_t nsToSampleTime (std::uint64_t ns) const noexcept
-        {
-            return static_cast<std::uint64_t> (std::round (static_cast<double> (ns) * device->getCurrentSampleRate() * 1e-9));
-        }
-
-        void updateSampleTimeFromContext (const AudioIODeviceCallbackContext& context) noexcept
-        {
-            auto callbackSampleTime = context.hostTimeNs != nullptr ? nsToSampleTime (*context.hostTimeNs) : 0;
-
-            if (input)
-                callbackSampleTime += static_cast<std::uint64_t> (owner.targetLatency);
-
-            auto copy = invalidSampleTime;
-
-            if (sampleTime.compare_exchange_strong (copy, callbackSampleTime) && (! input))
-                owner.lastValidReadPosition = invalidSampleTime;
-        }
-
-        bool isInput() const { return input; }
-
-        std::atomic<std::uint64_t> sampleTime { invalidSampleTime };
-
-    private:
-
-        //==============================================================================
-        AudioIODeviceCombiner& owner;
-        std::unique_ptr<CoreAudioIODevice> device;
-        const bool input;
-
-        //==============================================================================
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceWrapper)
-    };
-
-    /* If the current AudioIODeviceCombiner::callback is nullptr, it sets itself as the callback
-       and forwards error related callbacks to the provided callback
-    */
-    class ScopedErrorForwarder final : public AudioIODeviceCallback
-    {
-    public:
-        ScopedErrorForwarder (AudioIODeviceCombiner& ownerIn, AudioIODeviceCallback* cb)
-            : owner (ownerIn),
-              target (cb)
-        {
-            const ScopedLock sl (owner.callbackLock);
-
-            if (owner.callback == nullptr)
-                owner.callback = this;
-        }
-
-        ~ScopedErrorForwarder() override
-        {
-            const ScopedLock sl (owner.callbackLock);
-
-            if (owner.callback == this)
-                owner.callback = nullptr;
-        }
-
-        // We only want to be notified about error conditions when the owner's callback is nullptr.
-        // This class shouldn't be relied on for forwarding this call.
-        void audioDeviceAboutToStart (AudioIODevice*) override {}
-
-        void audioDeviceStopped() override
-        {
-            if (target != nullptr)
-                target->audioDeviceStopped();
-
-            // The audio device may stop because it's about to be restarted with new settings.
-            // Stopping the device doesn't necessarily count as an error.
-        }
-
-        void audioDeviceError (const String& errorMessage) override
-        {
-            owner.lastError = errorMessage;
-
-            if (target != nullptr)
-                target->audioDeviceError (errorMessage);
-
-            error = true;
-        }
-
-        bool encounteredError() const { return error; }
-
-    private:
-        AudioIODeviceCombiner& owner;
-        AudioIODeviceCallback* target;
-        bool error = false;
-    };
-
-    DeviceWrapper inputWrapper, outputWrapper;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioIODeviceCombiner)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CoreAudioPairedDevice)
 };
 
 
@@ -2029,6 +1948,8 @@ class CoreAudioIODeviceType final : public AudioIODeviceType
 public:
     CoreAudioIODeviceType()  : AudioIODeviceType ("CoreAudio")
     {
+        CoreAudioAggregate::destroyLeftovers();
+
         // smoothie: the HAL's notifications on its own threads, not a run
         // loop's — the listeners below deliver to the sink from there, and
         // nothing need pump a main run loop for them.
@@ -2073,12 +1994,14 @@ public:
     //==============================================================================
     // smoothie: the HAL's default output (or input), by the name this type
     // lists it under — or by its own name, when the lists don't have it yet
-    // (nothing has scanned them, or the device has only just arrived).
+    // (nothing has scanned them, or the device has only just arrived). Never
+    // one of our aggregates: macOS can make one the default for a moment as
+    // it is made, and it is no device of this type's.
     String getSystemDefaultDeviceName (bool forInput) const override
     {
         const auto deviceID = defaultDeviceID (forInput);
 
-        if (deviceID == kAudioObjectUnknown)
+        if (deviceID == kAudioObjectUnknown || CoreAudioAggregate::isOurs (deviceID))
             return {};
 
         const auto& ids   = forInput ? inputIds : outputIds;
@@ -2112,8 +2035,13 @@ public:
         traits.isVirtual         = transport == kAudioDeviceTransportTypeVirtual;
         traits.aggregateClass    = transport == kAudioDeviceTransportTypeAggregate
                                 || transport == kAudioDeviceTransportTypeAutoAggregate;
+        // A wireless device's codec and its own clock make an aggregate fail,
+        // or drop the pair to 16 kHz (#3555); CoreAudio can't nest aggregates.
+        traits.pairs             = ! (traits.wireless || traits.aggregateClass);
         traits.numOutputChannels = getNumChannels (deviceID, false);
         traits.numInputChannels  = getNumChannels (deviceID, true);
+        traits.sampleRates       = CoreAudioDeviceFacts::sampleRates (deviceID);
+        traits.bufferSizes       = CoreAudioDeviceFacts::bufferSizes (deviceID);
 
         if (transport != 0)
         {
@@ -2141,6 +2069,11 @@ public:
 
         for (const auto audioDevice : audioDevices)
         {
+            // smoothie: our own aggregate devices are a paired device's
+            // insides, not a device to offer.
+            if (CoreAudioAggregate::isOurs (audioDevice))
+                continue;
+
             if (const auto optionalName = audioObjectGetProperty<CFStringRef> (audioDevice, { kAudioDevicePropertyDeviceNameCFString,
                                                                                               kAudioObjectPropertyScopeWildcard,
                                                                                               juceAudioObjectPropertyElementMain }))
@@ -2209,8 +2142,9 @@ public:
         if (auto* d = dynamic_cast<CoreAudioIODevice*> (device))
             return d->getIndexOfDevice (asInput);
 
-        if (auto* d = dynamic_cast<AudioIODeviceCombiner*> (device))
-            return d->getIndexOfDevice (asInput);
+        if (auto* d = dynamic_cast<CoreAudioPairedDevice*> (device))
+            return (asInput ? inputDeviceNames : outputDeviceNames)
+                       .indexOf (asInput ? d->getInputDeviceName() : d->getName());
 
         return -1;
     }
@@ -2237,18 +2171,29 @@ public:
         if (inputDeviceID == outputDeviceID)
             return std::make_unique<CoreAudioIODevice> (this, combinedName, inputDeviceID, outputDeviceID).release();
 
-        auto in = inputDeviceID != 0 ? std::make_unique<CoreAudioIODevice> (this, inputDeviceName, inputDeviceID, 0)
-                                     : nullptr;
+        if (inputDeviceID == 0)
+            return std::make_unique<CoreAudioIODevice> (this, outputDeviceName, 0, outputDeviceID).release();
 
-        auto out = outputDeviceID != 0 ? std::make_unique<CoreAudioIODevice> (this, outputDeviceName, 0, outputDeviceID)
-                                       : nullptr;
+        if (outputDeviceID == 0)
+            return std::make_unique<CoreAudioIODevice> (this, inputDeviceName, inputDeviceID, 0).release();
 
-        if (in  == nullptr)  return out.release();
-        if (out == nullptr)  return in.release();
+        // smoothie: separate devices play as one on an aggregate of the two
+        // (CoreAudioPairedDevice) — unless one of them doesn't pair (its
+        // traits say why): refused, and the owner opens the output alone.
+        for (const auto& name : { outputDeviceName, inputDeviceName })
+        {
+            if (! getDeviceTraits (name).pairs)
+            {
+                Logger::writeToLog ("[aggregate] '" + name + "' can't be paired with another device");
+                return nullptr;
+            }
+        }
 
-        auto combo = std::make_unique<AudioIODeviceCombiner> (combinedName, std::move (in), std::move (out));
-        return combo.release();
+        return std::make_unique<CoreAudioPairedDevice> (this, outputDeviceName, inputDeviceName,
+                                                        outputDeviceID, inputDeviceID, clientName).release();
     }
+
+    void setClientName (const String& name) override    { clientName = name; }
 
     // smoothie: an open device's change, to the sink.
     void reportOpenDeviceChange()
@@ -2260,6 +2205,7 @@ public:
 private:
     StringArray inputDeviceNames, outputDeviceNames;
     Array<AudioDeviceID> inputIds, outputIds;
+    String clientName;
 
     bool hasScanned = false;
 

@@ -70,6 +70,9 @@ struct FakeDeviceSpec {
     // is connected, in the driver's own word, and what that makes it.
     std::string kind;
     bool wireless = false, isVirtual = false, aggregateClass = false;
+    // Plays as one with a different device: as CoreAudio says, not when
+    // wireless or itself made of devices.
+    bool pairs() const { return !(wireless || aggregateClass); }
     // The rate the system now runs the device at, set outside the engine
     // (Windows' sound settings, for a shared-mode device); 0 = unchanged.
     // A stream opened at another rate cannot carry on — its driver says it
@@ -425,6 +428,7 @@ public:
             t.wireless          = d->wireless;
             t.isVirtual         = d->isVirtual;
             t.aggregateClass    = d->aggregateClass;
+            t.pairs             = d->pairs();
             t.numOutputChannels = d->maxOutputChannels;
             t.numInputChannels  = d->maxInputChannels;
             t.kind              = juce::String(d->kind);
@@ -461,6 +465,8 @@ public:
         auto out = find(outputDeviceName.toStdString());
         auto in  = find(inputDeviceName.toStdString());
         if (!out && !in) return nullptr;
+        // Two devices that don't both pair are refused, as CoreAudio does.
+        if (out && in && out != in && !(out->pairs() && in->pairs())) return nullptr;
         return new FakeAudioIODevice(mSystem, out, in, getTypeName());
     }
 

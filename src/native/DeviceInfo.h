@@ -28,25 +28,18 @@ struct DeviceInfo {
     // a wireless link negotiates its own rate and buffer (Bluetooth, AirPlay
     // — codecs unsuited to low-latency work: HFP's 16 kHz mono, AirPlay's
     // buffering); a virtual device is made in software (Loopback,
-    // BlackHole); an aggregate-class one is made of other devices. `kind` is
-    // the driver's own word for how it is connected, for logs.
+    // BlackHole); an aggregate-class one is made of other devices; one that
+    // pairs plays as one with a different device, output on one and input
+    // on the other. `kind` is the driver's own word for how it is
+    // connected, for logs.
     bool wireless       = false;
     bool isVirtual      = false;
     bool aggregateClass = false;
+    bool pairs          = true;
     std::string kind;
 
     // Suitable for input: not wireless (it forces a low-quality codec).
     bool isSuitableForInput() const { return !wireless; }
-
-    // Suitable for aggregation: exclude wireless (Bluetooth/AirPlay) and
-    // aggregate-class devices (Multi-Output / user aggregates, 'grup') —
-    // CoreAudio can't nest an aggregate inside another; the wrapper is
-    // created but never becomes visible (2 s stall, then a defaults
-    // fallback that abandons the chosen output). Virtual devices
-    // (Loopback, Blackhole) CAN be aggregated when the master clock is
-    // set to the HARDWARE side (matches Ardour / JACK2 patterns) — see
-    // AggregateDeviceHelper::createOrUpdate for master-selection logic.
-    bool isSuitableForAggregate() const { return !wireless && !aggregateClass; }
 
     // Hide platform-specific clutter from the GUI dropdown list. On macOS
     // the wireless / virtual predicates above cover everything. On Linux

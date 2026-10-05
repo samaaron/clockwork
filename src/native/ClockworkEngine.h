@@ -20,10 +20,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#ifdef __APPLE__
-#include <CoreAudio/CoreAudio.h>
-#endif
-
 #include "RingReader.h"
 #include "IOscTransport.h"
 #include "CallbackTransport.h"
@@ -72,11 +68,6 @@ public:
     // count wherever one is obtainable (see resolveInputWidth).
     static constexpr int kRequestMaxChannels =
         clockwork::device::kRequestMaxChannels;
-    // Minimum buffer size on an aggregate device (single source of truth
-    // in DevicePolicy — see the longer story there: drift-comp SRC
-    // starvation, "drift storm").
-    static constexpr int kMinAggregateBufferSize =
-        clockwork::device::kMinAggregateBufferSize;
 
     struct Config {
         int    sampleRate               = 48000;
@@ -216,12 +207,10 @@ public:
         // Test boundary: build the JUCE device manager. When set, the engine
         // calls this instead of constructing a plain AudioDeviceManager —
         // both at boot and in recovery's recreateDeviceManager — and skips
-        // every platform-specific piece of device bring-up (CoreAudio
-        // runloop/aggregate cleanup, PipeWire registration, DirectSound
-        // preference, the HAL default-output listener): the factory's
-        // manager owns its own device types, typically fakes. Production
-        // leaves it unset — and so does every test here, which is why no
-        // fake device exists in this tree yet.
+        // every platform-specific piece of device bring-up (PipeWire
+        // registration, the Windows driver preference): the factory's
+        // manager owns its own device types, typically fakes
+        // (test/FakeAudioDevice.h). Production leaves it unset.
         std::function<std::unique_ptr<juce::AudioDeviceManager>()>
             deviceManagerFactory;
     };
@@ -446,14 +435,12 @@ public:
     // rescan=true triggers a full CoreAudio re-enumeration (may disrupt a
     // just-opened device on macOS). Pass false to reuse JUCE's cached list.
     std::vector<DeviceInfo>  listDevices(bool rescan = true) const;
-    CurrentDeviceInfo        currentDevice() const;     // resolves aggregate to real names
+    CurrentDeviceInfo        currentDevice() const;
     // True when `name` is the device table's synthetic default-follow row
     // ("System Default" under a driver that has no real device of that
     // name) — callers translate the pick into a system-mode request, the
     // same path as the "__system__" sentinel.
     bool                     isSyntheticDefaultPick(const std::string& name) const;
-    std::string              realOutputDeviceName() const { return mRealOutputDeviceName; }
-    std::string              realInputDeviceName() const  { return mRealInputDeviceName; }
     // origin: pass SwapOrigin::Internal for engine-originated swaps
     // (recovery reopen, hotplug re-attach) — they scope against the
     // driver actually open and leave the user's preferred-device memory
@@ -468,8 +455,8 @@ public:
     // Re-open the current device (tear down and recreate without changing
     // selection). Use when an external config change — e.g. a MOTU Pro
     // Audio Control "Computer" channel-count bump — needs to flow through
-    // without a full engine restart. Preserves aggregate / system-
-    // default / manual mode semantics. sampleRate > 0 makes the reopen an
+    // without a full engine restart. Preserves the input pairing and
+    // system-default / manual mode semantics. sampleRate > 0 makes the reopen an
     // explicit rate request (snapped to the device's advertised rates); 0
     // keeps the session rate, as a reopen always did.
     SwapResult               reopenCurrentDevice(double sampleRate = 0);
@@ -615,8 +602,8 @@ public:
 
     // CFRunLoop suppression (macOS). The host's run-loop pump calls
     // isRunLoopSuppressed() each tick and sleeps instead of pumping
-    // while true. setRunLoopSuppressed(false) is called by Main once
-    // the boot-time aggregate has settled.
+    // while true. Nothing in the engine sets it any more: the device
+    // layer pairs devices without the run loop.
     bool isRunLoopSuppressed() const { return mSuppressRunLoop.load(); }
     void setRunLoopSuppressed(bool v) { mSuppressRunLoop.store(v); }
 
@@ -641,28 +628,6 @@ public:
 
 private:
     bool interceptBufferFreed(const uint8_t* data, uint32_t size);
-
-    // Clamp bufferSize up to kMinAggregateBufferSize when the current
-    // aggregate has kernel drift compensation running (SRC IOProc
-    // starves at tight buffers — audible warble). Also mirrors the
-    // clamped value into mCurrentConfig.bufferSize. No-op on single
-    // devices and same-clock aggregates (where drift-comp is skipped).
-    // Called from all three aggregate-setup sites (init boot
-    // path, init post-setup negotiate step, switchDevice
-    // aggregate branch) so the floor is uniformly applied.
-    void clampAggregateBufferIfNeeded(int& bufferSize);
-
-    // When running on an aggregate, CoreAudio concatenates each
-    // sub-device's input streams in sub-device-list order. We add
-    // the output sub-device first (so its outputs occupy aggregate
-    // output channels 0..N), which means any input streams that
-    // sub-device also exposes (e.g. Loopback Audio's loopback
-    // returns) claim the FIRST positions of the aggregate's input
-    // map. Returns how many positions to skip so the input bitmask
-    // lands on the actual input sub-device's channels. Returns 0
-    // when not aggregated or when the output sub-device has no
-    // input streams.
-    int aggregateInputChannelOffsetFor(const std::string& outputDeviceName) const;
 
     juce::String reinitialiseWithDefaultsPreservingConfig();
 
@@ -709,9 +674,9 @@ private:
     // on, open the default (openSystemDefault). True if it tried.
     bool followDefaultOutput();
     // A default output that failed to open, not tried again until the
-    // default moves: on macOS a failed switch builds and pulls down an
-    // aggregate device, which changes the list again. Device lane, under
-    // the gate.
+    // default moves: on macOS a failed switch to a pair builds and pulls
+    // down an aggregate device, which changes the list again. Device lane,
+    // under the gate.
     std::string mUnopenableDefault;
     // The default output as the last pass saw it, so a decision not to
     // follow it is said once, not on every pass. Device lane.
@@ -804,12 +769,12 @@ private:
     // they're member methods rather than pure functions). Extracted to
     // keep switchDevice itself readable.
     //
-    // Refuses "add mic while wireless output is active" upfront — the
-    // aggregate logic later would drop it anyway, but refusing early
-    // avoids triggering a cold swap that can race a scope-stream producer
-    // during rebuild. Returns non-empty error string on refusal; empty = OK.
-    std::string refuseWirelessMicAddition(const std::string& deviceName,
-                                          const std::string& inputDeviceName);
+    // Refuses "add an input to an output that plays alone" (its driver says
+    // it doesn't pair) upfront — the pairing check later would drop the
+    // input anyway, but only after a cold swap. Returns non-empty error
+    // string on refusal; empty = OK.
+    std::string refuseUnpairableInput(const std::string& deviceName,
+                                      const std::string& inputDeviceName);
 
     // Refuses a swap whose output or input name doesn't resolve to any
     // visible device (and isn't a known sentinel like "__system__" /
@@ -873,13 +838,6 @@ private:
     // Open the system default output, keeping the input: system mode's way
     // onto a device (setDeviceMode, followDefaultOutput). Empty on success.
     std::string openSystemDefault();
-
-#ifdef __APPLE__
-    // Poll scanForDevices() until a just-created aggregate `name` appears in
-    // JUCE's device list (or timeoutMs elapses). Returns true once visible.
-    // Avoids the "No such device" race from opening it after only a fixed sleep.
-    bool waitForDeviceVisible(const std::string& name, int timeoutMs);
-#endif
 
     JuceAudioCallback mAudioCallback;
     // The default egress transport: in-process, replies via onReply. An embedder
@@ -1068,16 +1026,6 @@ private:
         ~PhaseGuard() { phase.store(prev); }
     };
 
-    // Arms mSuppressRunLoop and guarantees the clear on every exit path —
-    // an exception between arm and an explicit clear would wedge the macOS
-    // run-loop pump for the rest of the session.
-    struct RunLoopSuppressGuard {
-        std::atomic<bool>& flag;
-        bool armed = false;
-        void arm() { flag.store(true); armed = true; }
-        ~RunLoopSuppressGuard() { if (armed) flag.store(false); }
-    };
-
     // Broadcast /clockwork/devices/reopen.done to the client/GUI. Every accepted
     // recovery reports exactly one of these so a /reopen caller never hangs.
     void broadcastReopenDone(bool success, const std::string& deviceName,
@@ -1170,11 +1118,9 @@ private:
     // whether device is present"; mPreferredOutputDevice tracks "want to
     // use this device whenever it's available".
     std::string              mPreferredOutputDevice;
-    // Same for the input sub-device in an aggregate.
+    // Same for the input.
     std::string              mPreferredInputDevice;
     std::string              mLastInputDeviceName;    // saved on disable, restored on re-enable
-    std::string              mRealOutputDeviceName;   // actual output device behind aggregate
-    std::string              mRealInputDeviceName;    // actual input device behind aggregate
     // Recursive so the device readers (currentDevice/listDevices/currentDriver/
     // listDrivers/sendDeviceReport) can take it to serialise against device
     // mutations without deadlocking the mutation paths that call those readers
@@ -1204,19 +1150,15 @@ private:
     // Each listed device's probe (its rates, buffer sizes and channels, read
     // from a device created to be asked), by driver, name and direction, so
     // a rescan probes only devices it has not seen: on Windows each probe
-    // activates the device, and on macOS one of an aggregate's sub-device
-    // can stop it. A name gone from its driver's list is forgotten, so a
+    // activates the device. A driver that describes a device without opening
+    // it (traits with its rates) is never probed. A name gone from its driver's list is forgotten, so a
     // device plugged back in is probed afresh. Under the gate (listDevices).
     mutable std::map<std::string, DeviceInfo>    mDeviceProbes;
     // The audio device list as reconcileDevices last reported it, so
-    // a change that leaves the list as it was (a device's own property, our
-    // own aggregate work) doesn't re-send the device report. Device lane only.
+    // a change that leaves the list as it was (a device's own property, an
+    // aggregate the device layer made) doesn't re-send the device report. Device lane only.
     std::string                                  mLastAudioDeviceFingerprint;
-    // Pause CFRunLoop pumping in the host during aggregate destroy/create
-    // — queued audioDeviceListChanged messages would trigger a second
-    // cold swap, crashing a scope-stream producer mid-rebuild. Accessed from
-    // both the engine (writer during aggregate transitions) and Main's
-    // CFRunLoop pump (reader at every tick), so an atomic is needed.
+    // Read by the host's CFRunLoop pump at every tick (isRunLoopSuppressed).
     std::atomic<bool>        mSuppressRunLoop{false};
     std::string              mDeviceMode;   // empty = system/auto, non-empty = manual device name
     bool                     mDspRebuilt{false};

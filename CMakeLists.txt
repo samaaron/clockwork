@@ -624,8 +624,7 @@ if(CLOCKWORK_DEVICE)
         ${NATIVE_SRC}/DevicePolicy.cpp
         ${NATIVE_SRC}/AsioDriverCheck.cpp
         ${NATIVE_SRC}/DeviceLaneApartment.cpp
-        ${NATIVE_SRC}/AudioRecovery.cpp
-        ${NATIVE_SRC}/AggregateDeviceHelper.cpp)
+        ${NATIVE_SRC}/AudioRecovery.cpp)
 endif()
 if(APPLE)
     list(APPEND CLOCKWORK_NATIVE_SOURCES ${NATIVE_SRC}/MicPermission.mm)

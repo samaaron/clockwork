@@ -215,6 +215,71 @@ TEST_CASE("Swap: input-side open failure keeps the output and flags the input",
     REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
 }
 
+// ── A pair the driver won't make ────────────────────────────────────────────
+
+TEST_CASE("Swap: a microphone sits out while a wireless output plays, and is "
+          "back on the next output", "[SwapChar][inputs]") {
+    auto sys = makeSimpleSystem();
+    addOutput(*sys, "Fake AirPlay", 2)->wireless = true;
+    auto cfg = fakeEngineConfig(sys, "Fake Speakers");
+    cfg.numInputChannels = 2;
+    cfg.inputDevice = "Fake Microphone";
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().inputDeviceName == "Fake Microphone");
+
+    // CoreAudio can't put a wireless device in an aggregate: the output
+    // plays alone — not refused, and the microphone not called unavailable.
+    auto r = switchWhenFree(fix, "Fake AirPlay");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(r.success);
+    CHECK_FALSE(r.inputUnavailable);
+    CHECK(fix.engine().currentDevice().name == "Fake AirPlay");
+    CHECK(fix.engine().currentDevice().activeInputChannels == 0);
+
+    auto back = switchWhenFree(fix, "Fake Speakers");
+    REQUIRE(back.success);
+    CHECK(fix.engine().currentDevice().inputDeviceName == "Fake Microphone");
+    CHECK(fix.engine().currentDevice().activeInputChannels == 2);
+}
+
+TEST_CASE("Swap: a microphone paired with an interface sits out while an aggregate "
+          "output plays, and is back on the interface", "[SwapChar][inputs]") {
+    // As this Mac has them: a USB interface with its own inputs, the built-in
+    // microphone, and an aggregate a user made in Audio MIDI Setup.
+    auto sys = std::make_shared<FakeSystem>();
+    auto motu = std::make_shared<FakeDeviceSpec>();
+    motu->name = "Fake MOTU";
+    motu->maxOutputChannels = 8;
+    motu->maxInputChannels  = 8;
+    auto testy = std::make_shared<FakeDeviceSpec>();
+    testy->name = "Fake Testy";
+    testy->maxInputChannels = 0;
+    testy->aggregateClass = true;
+    auto mic = std::make_shared<FakeDeviceSpec>();
+    mic->name = "Fake Microphone";
+    mic->maxOutputChannels = 0;
+    mic->maxInputChannels  = 1;
+    sys->types.push_back({ "FakeDriver", { motu, testy, mic }, 0 });
+    auto cfg = fakeEngineConfig(sys, "");   // following the system default
+    cfg.numInputChannels = 1;
+    cfg.inputDevice = "Fake Microphone";
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().name == "Fake MOTU");
+    REQUIRE(fix.engine().currentDevice().inputDeviceName == "Fake Microphone");
+
+    REQUIRE(switchWhenFree(fix, "Fake Testy").success);
+    CHECK(fix.engine().currentDevice().activeInputChannels == 0);
+    // CoreAudio says the list changed: the pair's aggregate device has gone.
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+
+    auto back = switchWhenFree(fix, "Fake MOTU");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(back.success);
+    CHECK(fix.engine().currentDevice().inputDeviceName == "Fake Microphone");
+    CHECK(fix.engine().currentDevice().activeInputChannels == 1);
+}
+
 // ── Driver switch ───────────────────────────────────────────────────────────
 
 TEST_CASE("Swap: driver switch lands on the target driver's default device",

@@ -38,6 +38,8 @@ AudioIODeviceType::DeviceTraits AudioIODeviceType::getDeviceTraits (const String
     return {};
 }
 
+void AudioIODeviceType::setClientName (const String&) {}
+
 String AudioIODeviceType::getSystemDefaultDeviceName (bool forInput) const
 {
     const auto names = getDeviceNames (forInput);

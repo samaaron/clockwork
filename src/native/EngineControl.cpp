@@ -20,10 +20,6 @@
 #include "osc/OscReceivedElements.h"
 #include "DevicePolicy.h"
 #include "clockwork_config.h"  // CLOCKWORK_COMMIT
-#ifdef __APPLE__
-#include "AggregateDeviceHelper.h"
-#include "JuceAudioCallback.h"  // renderAudioBlock + the audio-width accessors
-#endif
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <chrono>
