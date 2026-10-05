@@ -617,13 +617,11 @@ public:
     };
     TestSwapHold testHoldSwapGate();
 
-#ifdef __APPLE__
-    // Test: deliver "the OS default output changed" exactly as the HAL
-    // listener does — the handler, on the device lane. Under the factory
-    // boundary the fake's default device is the OS default (see
+    // Test: deliver "the OS default output changed" exactly as macOS's HAL
+    // listener does — a pass of reconcileDevices on the device lane. Under
+    // the factory boundary the fake's default device is the OS default (see
     // systemDefaultOutput), so a case moves it and then calls this.
     void testSystemDefaultOutputChanged();
-#endif
 
     // --- Audio callback access (for preTick hook, pause/resume) ---
     JuceAudioCallback& audioCallback() { return mAudioCallback; }
@@ -692,16 +690,32 @@ private:
     // Config::deviceManagerFactory boundary when set (tests), else a plain
     // manager. Both boot (init) and recovery (recreateDeviceManager) go
     // through this so a recovered engine keeps its injected fakes, and
-    // every manager hands its device-list changes to deviceListChanged().
+    // every manager hands its device-list changes to devicesChanged().
     std::unique_ptr<juce::AudioDeviceManager> makeDeviceManager();
 
-    // A device came or went. Called by the device layer on whatever thread
-    // the OS reports it, the moment it does; queues one pass of
-    // handleDeviceListChanged on the device lane, which owns the device
+    // Something about the devices changed: one came or went (the device
+    // layer), or the OS default output moved (macOS's HAL listener). Called
+    // on whatever thread the OS reports it, the moment it does; queues one
+    // pass of reconcileDevices on the device lane, which owns the device
     // manager. A burst of reports is one pass.
-    void deviceListChanged();
-    void handleDeviceListChanged();   // on the device lane
-    std::atomic<bool> mDeviceListChangeQueued{false};
+    void devicesChanged();
+    // On the device lane: compares what the devices are with what the
+    // engine plays on, and acts only where they differ — so a report of a
+    // change the engine made itself finds nothing to do, and no report needs
+    // to be dropped.
+    void reconcileDevices();
+    std::atomic<bool> mDevicesChangedQueued{false};
+    // A pass that came while the engine was booting: init runs one once
+    // the engine is running.
+    std::atomic<bool> mReconcileAfterBoot{false};
+    // System mode: when the default output differs from the device played
+    // on, open the default (openSystemDefault). True if it tried.
+    bool followDefaultOutput();
+    // A default output that failed to open, not tried again until the
+    // default moves: on macOS a failed switch builds and pulls down an
+    // aggregate device, which changes the list again. Device lane, under
+    // the gate.
+    std::string mUnopenableDefault;
 
     // Destroy and recreate mDeviceManager, then re-open the default device and
     // re-attach the audio callback. Unlike a reopen (which reuses the existing
@@ -839,20 +853,24 @@ private:
                                double sampleRate,
                                SwapOrigin origin);
 
-#ifdef __APPLE__
     // What the OS says its default output is, and whether it is wireless or
     // virtual — the follow policy and setDeviceMode's system path branch on
-    // both. Empty name when it cannot be read. Under the factory boundary the
-    // factory's device type answers instead of the HAL, as it does for the
-    // rest of the device edge: its default device index is the default.
+    // both. Empty name when it cannot be read. macOS asks the HAL; elsewhere
+    // the current device type's default device is the default (WASAPI lists
+    // the system default first). Under the factory boundary the factory's
+    // device type answers on every platform, as it does for the rest of the
+    // device edge.
     struct SystemDefaultOutput {
         std::string name;
         bool        wireless  = false;
         bool        isVirtual = false;
     };
     SystemDefaultOutput systemDefaultOutput();
+    // Open the system default output, keeping the input: system mode's way
+    // onto a device (setDeviceMode, followDefaultOutput). Empty on success.
+    std::string openSystemDefault();
 
-    void handleSystemDefaultOutputChanged();
+#ifdef __APPLE__
     static OSStatus defaultDevicePropertyListenerProc(
         AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData);
     bool mDefaultDevicePropertyListenerInstalled = false;
@@ -1054,18 +1072,6 @@ private:
         ~RunLoopSuppressGuard() { if (armed) flag.store(false); }
     };
 
-    // Stamps mLastSelfTriggeredChange on entry AND exit of a mutation span:
-    // the exit stamp arms the default-output handler's quiet window against
-    // the default changes the mutation itself provoked. Replaces scattered
-    // mid-function stamps that silently expired inside >1 s swaps.
-    struct SelfTriggerSpan {
-        std::atomic<std::chrono::steady_clock::time_point>& stamp;
-        explicit SelfTriggerSpan(
-            std::atomic<std::chrono::steady_clock::time_point>& s) : stamp(s) {
-            stamp.store(std::chrono::steady_clock::now());
-        }
-        ~SelfTriggerSpan() { stamp.store(std::chrono::steady_clock::now()); }
-    };
     // Broadcast /clockwork/devices/reopen.done to the client/GUI. Every accepted
     // recovery reports exactly one of these so a /reopen caller never hangs.
     void broadcastReopenDone(bool success, const std::string& deviceName,
@@ -1169,11 +1175,6 @@ private:
     // while already holding it, and so a recovery can hold it across
     // reopenCurrentDevice (which re-takes it). mutable for the const readers.
     mutable std::recursive_mutex mSwapMutex;
-    // Suppress the default-output listener's echo of our own device changes
-    // (handleSystemDefaultOutputChanged). Atomic: written from the boot
-    // thread and the device lane, read on the lane. A plain time_point here
-    // is a data race (UB) under TSan.
-    std::atomic<std::chrono::steady_clock::time_point> mLastSelfTriggeredChange{};
 
     // listDrivers() cache — avoids re-scanning every AudioIODeviceType
     // on every /clockwork/info push. Re-scanning is expensive (each
@@ -1190,11 +1191,11 @@ private:
     // With ~150 device/type combinations on a typical machine the call takes
     // ~10 s, which during boot starves the OSC thread and causes the client's
     // /clockwork/notify handshake to time out. Refreshed by listDevices(true),
-    // which every device-list change runs (handleDeviceListChanged).
+    // which every device change runs (reconcileDevices).
     mutable std::mutex                           mListDevicesMutex;
     mutable std::vector<DeviceInfo>              mCachedDevices;
     mutable std::chrono::steady_clock::time_point mCachedDevicesAt{};
-    // The audio device list as handleDeviceListChanged last reported it, so
+    // The audio device list as reconcileDevices last reported it, so
     // a change that leaves the list as it was (a device's own property, our
     // own aggregate work) doesn't re-send the device report. Device lane only.
     std::string                                  mLastAudioDeviceFingerprint;

@@ -199,7 +199,7 @@ ClockworkEngine::makeDeviceManager() {
     // Device-list changes come to the engine, not to the manager: left to
     // itself the manager closes and reopens devices on whatever thread the
     // OS reports a change, under the device lane's feet.
-    manager->setDeviceChangeSink([this] { deviceListChanged(); });
+    manager->setDeviceChangeSink([this] { devicesChanged(); });
     return manager;
 }
 
@@ -738,66 +738,26 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         // aggregate triggers a ~15 s CoreAudio IOProc halt. Pick a non-wireless
         // fallback up front.
         std::string bootFallback;
-        {
-            AudioDeviceID defaultID = kAudioObjectUnknown;
-            AudioObjectPropertyAddress addr = {
-                kAudioHardwarePropertyDefaultOutputDevice,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            UInt32 sz = sizeof(defaultID);
-            if (AudioObjectGetPropertyData(kAudioObjectSystemObject,
-                    &addr, 0, nullptr, &sz, &defaultID) == noErr
-                && defaultID != kAudioObjectUnknown) {
-                CFStringRef cfName = nullptr;
-                UInt32 nsz = sizeof(cfName);
-                AudioObjectPropertyAddress nameAddr = {
-                    kAudioDevicePropertyDeviceNameCFString,
-                    kAudioObjectPropertyScopeGlobal,
-                    kAudioObjectPropertyElementMain
-                };
-                std::string defaultName;
-                if (AudioObjectGetPropertyData(defaultID, &nameAddr,
-                        0, nullptr, &nsz, &cfName) == noErr && cfName) {
-                    char buf[256];
-                    CFStringGetCString(cfName, buf, sizeof(buf),
-                                       kCFStringEncodingUTF8);
-                    CFRelease(cfName);
-                    defaultName = buf;
-                }
-                // Transport type
-                AudioObjectPropertyAddress tAddr = {
-                    kAudioDevicePropertyTransportType,
-                    kAudioObjectPropertyScopeGlobal,
-                    kAudioObjectPropertyElementMain
-                };
-                UInt32 tType = 0, tSize = sizeof(tType);
-                bool defaultIsWireless = false;
-                if (AudioObjectGetPropertyData(defaultID, &tAddr, 0,
-                        nullptr, &tSize, &tType) == noErr) {
-                    defaultIsWireless = CoreAudioTransport::isWireless(tType);
-                }
-                if (defaultIsWireless && !defaultName.empty()) {
-                    std::vector<std::string> names;
-                    std::vector<bool> wirelessFlags;
-                    for (auto& d : listDevices()) {
-                        names.push_back(d.name);
-                        wirelessFlags.push_back(d.isWirelessTransport());
-                    }
-                    bootFallback = clockwork::device::selectBootOutputDevice(
-                        defaultName, defaultIsWireless, names, wirelessFlags);
-                    if (!bootFallback.empty()) {
-                        clockwork_log("[device-setup] boot: default '%s' "
-                                "is wireless; using non-wireless fallback '%s'",
-                                defaultName.c_str(), bootFallback.c_str());
-                    } else {
-                        clockwork_log("[device-setup] boot: default '%s' "
-                                "is wireless and no non-wireless fallback "
-                                "available — opening wireless default may "
-                                "silence audio for ~15 s during boot handshake",
-                                defaultName.c_str());
-                    }
-                }
+        if (const SystemDefaultOutput def = systemDefaultOutput();
+            def.wireless && !def.name.empty()) {
+            std::vector<std::string> names;
+            std::vector<bool> wirelessFlags;
+            for (auto& d : listDevices()) {
+                names.push_back(d.name);
+                wirelessFlags.push_back(d.isWirelessTransport());
+            }
+            bootFallback = clockwork::device::selectBootOutputDevice(
+                def.name, def.wireless, names, wirelessFlags);
+            if (!bootFallback.empty()) {
+                clockwork_log("[device-setup] boot: default '%s' "
+                        "is wireless; using non-wireless fallback '%s'",
+                        def.name.c_str(), bootFallback.c_str());
+            } else {
+                clockwork_log("[device-setup] boot: default '%s' "
+                        "is wireless and no non-wireless fallback "
+                        "available — opening wireless default may "
+                        "silence audio for ~15 s during boot handshake",
+                        def.name.c_str());
             }
         }
 
@@ -1179,12 +1139,6 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     } else {
         clockwork_log("[engine] warning: no audio device available");
     }
-
-    // Arm the post-boot quiet window ONCE, here, against the change
-    // notifications boot's own opens/aggregate work will deliver after
-    // mRunning goes true. One stamp, here: every consumer bails until
-    // mRunning, so a stamp anywhere earlier is dead.
-    mLastSelfTriggeredChange = std::chrono::steady_clock::now();
 }
 
 // Boot half 2: bring up the engine around whatever initAudioDevice
@@ -1748,6 +1702,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     }
 
     mRunning.store(true);
+    // A change to the devices that came while booting, looked at now (see
+    // reconcileDevices).
+    if (mReconcileAfterBoot.exchange(false)) devicesChanged();
     // An engine whose build left no guest is not running a guest, and says so:
     // in error, with the reason the build gave, which every client that
     // registers is told (snapshotStateTo). It stays up — its transport and its
@@ -3763,21 +3720,15 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
                     ? mBootDriver : std::string("DirectSound");
             clockwork_log("[device-setup] system default requested from ASIO "
                     "— returning to %s first", target.c_str());
-            mLastSelfTriggeredChange = std::chrono::steady_clock::now();
             mDeviceManager->setCurrentAudioDeviceType(
                 juce::String(target), true);
         }
     }
 #endif
 
-    // Stamp before each manager call: the default-output listener must not
-    // chase the default changes this reinit causes.
-    mLastSelfTriggeredChange = std::chrono::steady_clock::now();
     auto err = mDeviceManager->initialiseWithDefaultDevices(0, 2);
-    if (err.isNotEmpty()) {
-        mLastSelfTriggeredChange = std::chrono::steady_clock::now();
+    if (err.isNotEmpty())
         err = mDeviceManager->initialiseWithDefaultDevices(0, 0);
-    }
     if (err.isNotEmpty()) return err;
 
     // An init that reports success but opens no device is still a failure
@@ -3809,7 +3760,6 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     if (!isWireless) {
         setup.sampleRate = static_cast<double>(prevRate);
         setup.bufferSize = prevBufSize;
-        mLastSelfTriggeredChange = std::chrono::steady_clock::now();
         mDeviceManager->setAudioDeviceSetup(setup, true);
     } else {
         // Wireless device now active. AirPlay 1 negotiates 44.1 kHz, but AirPlay 2
@@ -3826,7 +3776,6 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
             }
             if (prevSupported && static_cast<int>(setup.sampleRate) != prevRate) {
                 setup.sampleRate = static_cast<double>(prevRate);
-                mLastSelfTriggeredChange = std::chrono::steady_clock::now();
                 auto err2 = mDeviceManager->setAudioDeviceSetup(setup, true);
                 if (err2.isEmpty()) {
                     forcedPrev = true;
@@ -3973,7 +3922,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         return result;
     }
     PhaseGuard phase(mDevicePhase, DevicePhase::Swapping);
-    SelfTriggerSpan selfTrigger(mLastSelfTriggeredChange);
     RunLoopSuppressGuard runLoopSuppress { mSuppressRunLoop };
 
     // ── Plan ────────────────────────────────────────────────────────────
@@ -5319,17 +5267,24 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
 
 // --- Device change detection ---
 
-void ClockworkEngine::deviceListChanged() {
+void ClockworkEngine::devicesChanged() {
     // Any thread, at the OS's moment: only queue. A pass already queued
     // has yet to look, so it will see this change too.
-    if (!mDeviceListChangeQueued.exchange(true))
-        postDeviceTask([this] { handleDeviceListChanged(); });
+    if (!mDevicesChangedQueued.exchange(true))
+        postDeviceTask([this] { reconcileDevices(); });
 }
 
-void ClockworkEngine::handleDeviceListChanged() {
+void ClockworkEngine::reconcileDevices() {
     // Cleared before looking: a change from here on queues another pass.
-    mDeviceListChangeQueued.store(false);
-    if (!mRunning.load()) return;
+    mDevicesChangedQueued.store(false);
+    // Booting: init runs a pass once the engine is running. The flag is set
+    // before running is looked at again, and init sets running before it
+    // reads the flag, so at least one of them sees the other — both, at
+    // worst, and the second pass finds nothing to do.
+    if (!mRunning.load()) {
+        mReconcileAfterBoot.store(true);
+        if (!mRunning.load()) return;
+    }
 
     // Held from looking through acting, so what is decided is what is done:
     // the swap and the reopen below take the gate again (it is recursive)
@@ -5338,8 +5293,8 @@ void ClockworkEngine::handleDeviceListChanged() {
     // change must not be lost to it — look again once the lane comes round.
     std::unique_lock<std::recursive_mutex> gate;
     if (!tryAcquireSwapGate(gate, 30, 100)) {
-        clockwork_log("[hotplug] device list changed, gate busy for 3 s — looking again");
-        deviceListChanged();
+        clockwork_log("[devices] changed, gate busy for 3 s — looking again");
+        devicesChanged();
         return;
     }
     if (!mDeviceManager) return;
@@ -5384,7 +5339,8 @@ void ClockworkEngine::handleDeviceListChanged() {
     const bool listChanged = fingerprint != mLastAudioDeviceFingerprint;
     mLastAudioDeviceFingerprint = fingerprint;
 
-    // A swap or a reopen reports for itself.
+    // A swap or a reopen reports for itself. An output the user chose comes
+    // first; only without one does the system default decide.
     if (decision.reopen) {
         // A recovery already claimed is queued behind this pass and will
         // find the device gone itself.
@@ -5399,13 +5355,61 @@ void ClockworkEngine::handleDeviceListChanged() {
                 decision.inputName.c_str());
         switchDevice(decision.outputName, 0, 0, false, decision.inputName,
                      SwapOrigin::Internal);
-    } else if (decision.switchInput) {
-        clockwork_log("[hotplug] preferred input '%s' is here — adding it",
-                decision.inputName.c_str());
-        switchDevice("", 0, 0, false, decision.inputName, SwapOrigin::Internal);
-    } else if (listChanged) {
-        printDeviceList();
+    } else {
+        bool acted = false;
+        if (decision.switchInput) {
+            clockwork_log("[hotplug] preferred input '%s' is here — adding it",
+                    decision.inputName.c_str());
+            switchDevice("", 0, 0, false, decision.inputName, SwapOrigin::Internal);
+            acted = true;
+        }
+        if (followDefaultOutput()) acted = true;
+        if (!acted && listChanged) printDeviceList();
     }
+}
+
+bool ClockworkEngine::followDefaultOutput() {
+    // A queued recovery opens the default itself.
+    if (!mDeviceManager || mReopenInProgress.load()) return false;
+
+    const SystemDefaultOutput def = systemDefaultOutput();
+    auto* dev = mDeviceManager->getCurrentAudioDevice();
+    // On an aggregate, the output inside it is what plays.
+    const std::string currentOutput = mRealOutputDeviceName.empty()
+        ? (dev ? dev->getName().toStdString() : std::string())
+        : mRealOutputDeviceName;
+    if (def.name.empty() || def.name == currentOutput) {
+        mUnopenableDefault.clear();
+        return false;
+    }
+    if (def.name != mUnopenableDefault) mUnopenableDefault.clear();
+
+    // Not our own aggregates, not virtual devices (an app may spawn one and
+    // macOS make it the default), and never away from a device the user
+    // chose: following would turn a hardware event into a switch they never
+    // asked for. A device mode with no pin is boot's stand-in for a wireless
+    // default, which is not followed either.
+    const std::string& chosen =
+        mPreferredOutputDevice.empty() ? mDeviceMode : mPreferredOutputDevice;
+    if (!clockwork::device::shouldFollowDefaultOutputChange(
+            def.name, currentOutput, def.isVirtual, sPublishedAppName, chosen)) {
+        clockwork_log("[device-setup] system default is '%s' (virtual=%d, "
+                "pinned='%s'); not following (staying on '%s')",
+                def.name.c_str(), def.isVirtual ? 1 : 0, chosen.c_str(),
+                currentOutput.c_str());
+        return false;
+    }
+    if (def.name == mUnopenableDefault) return false;   // tried since it moved here
+
+    clockwork_log("[device-setup] system default output is now '%s' — following "
+            "(was '%s')", def.name.c_str(), currentOutput.c_str());
+    const std::string err = openSystemDefault();
+    if (!err.empty()) {
+        mUnopenableDefault = def.name;
+        clockwork_log("[device-setup] could not open the default '%s' (%s) — "
+                "trying again when the default moves", def.name.c_str(), err.c_str());
+    }
+    return true;
 }
 
 #ifdef __APPLE__
@@ -5413,26 +5417,24 @@ OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
     AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData)
 {
     clockwork_log("[default-output-listener] fired");
-    auto* self = static_cast<ClockworkEngine*>(inClientData);
-    // Straight to the device lane — not the message thread. The lane can
-    // afford the bounded gate wait the handler needs; on the MM the
-    // handler could only try_lock once and DROPPED the event whenever a
-    // reader briefly held the gate, which is why following the macOS
-    // default was unreliable.
-    self->postDeviceTask([self]() {
-        clockwork_log("[default-output-listener] dispatched to handler");
-        self->handleSystemDefaultOutputChanged();
-    });
+    // The same pass a device coming or going starts, on the device lane.
+    static_cast<ClockworkEngine*>(inClientData)->devicesChanged();
     return noErr;
 }
+#endif
 
 void ClockworkEngine::testSystemDefaultOutputChanged() {
-    postDeviceTask([this]() { handleSystemDefaultOutputChanged(); });
+    devicesChanged();
 }
 
 ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
     SystemDefaultOutput out;
-    if (mCurrentConfig.deviceManagerFactory) {
+#ifdef __APPLE__
+    const bool askTheType = static_cast<bool>(mCurrentConfig.deviceManagerFactory);
+#else
+    const bool askTheType = true;
+#endif
+    if (askTheType) {
         // Under the gate, as every mDeviceManager read is: recovery's
         // recreate resets it.
         std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
@@ -5444,6 +5446,7 @@ ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
         }
         return out;
     }
+#ifdef __APPLE__
 
     AudioDeviceID defaultID = kAudioObjectUnknown;
     AudioObjectPropertyAddress addr = {
@@ -5486,9 +5489,11 @@ ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
         out.wireless  = CoreAudioTransport::isWireless(transport);
         out.isVirtual = CoreAudioTransport::isVirtual(transport);
     }
+#endif
     return out;
 }
 
+#ifdef __APPLE__
 bool ClockworkEngine::waitForDeviceVisible(const std::string& name, int timeoutMs) {
     if (name.empty() || !mDeviceManager) return false;
     auto* dt = mDeviceManager->getCurrentDeviceTypeObject();
@@ -5515,87 +5520,103 @@ bool ClockworkEngine::waitForDeviceVisible(const std::string& name, int timeoutM
             "aborting open", name.c_str(), timeoutMs);
     return false;
 }
-
-void ClockworkEngine::handleSystemDefaultOutputChanged() {
-    if (!mDeviceMode.empty()) {
-        clockwork_log("[default-output-handler] bail: mDeviceMode='%s' (not empty — not in system mode)",
-                mDeviceMode.c_str());
-        return;
-    }
-    if (!mRunning.load()) {
-        clockwork_log("[default-output-handler] bail: not running");
-        return;
-    }
-    auto elapsed = std::chrono::steady_clock::now()
-                   - mLastSelfTriggeredChange.load();
-    if (elapsed < std::chrono::seconds(2)) {
-        clockwork_log("[default-output-handler] bail: %lld ms since last self-triggered change (< 2 s)",
-                (long long)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-        return;
-    }
-
-    // The new macOS system-default output device.
-    const SystemDefaultOutput def = systemDefaultOutput();
-    if (def.name.empty()) return;
-    const std::string& newDefault = def.name;
-
-    // If we're on an aggregate, compare the new default against the real
-    // (underlying) output we're aggregating, not the aggregate's own name.
-    // Under the gate: serialises the mDeviceManager / mRealOutputDeviceName
-    // reads against recovery's teardownDeviceManager() reset().
-    std::string currentOutput;
-    {
-        // Runs on the device lane: wait for the gate (bounded, same
-        // 30x100ms discipline as the debounced switch) rather than
-        // dropping the event — a lost default-change never re-fires.
-        std::unique_lock<std::recursive_mutex> guard;
-        if (!tryAcquireSwapGate(guard, 30, 100)) {
-            clockwork_log("[default-output-handler] bail: gate busy for 3s");
-            return;
-        }
-        if (!mDeviceManager) return;
-        currentOutput = mRealOutputDeviceName.empty()
-            ? (mDeviceManager->getCurrentAudioDevice()
-               ? mDeviceManager->getCurrentAudioDevice()->getName().toStdString() : "")
-            : mRealOutputDeviceName;
-    }
-
-    const bool newIsVirtual = def.isVirtual;
-
-    // Don't chase our own aggregates, no-ops, virtual devices, or anything
-    // while the user has pinned an output (-H / GUI choice): chasing a
-    // virtual device an app spawned cold-swaps onto something the user
-    // never chose and storms the device list, and following while pinned
-    // routes through setDeviceMode("") which ERASES the pin (#3555
-    // follow-on: a healthy -H boot yanked onto the wireless default).
-    if (!clockwork::device::shouldFollowDefaultOutputChange(
-            newDefault, currentOutput, newIsVirtual, sPublishedAppName,
-            mPreferredOutputDevice)) {
-        clockwork_log("[device-setup] system default → '%s' (virtual=%d, "
-                "pinned='%s'); not following (staying on '%s')",
-                newDefault.c_str(), newIsVirtual ? 1 : 0,
-                mPreferredOutputDevice.c_str(), currentOutput.c_str());
-        return;
-    }
-
-    clockwork_log("[device-setup] system default output changed: '%s' -> '%s'",
-            currentOutput.c_str(), newDefault.c_str());
-    // Route through setDeviceMode("") so we get the wireless/non-wireless
-    // branching: non-wireless defaults go via switchDevice (aggregate
-    // preserved); wireless defaults go via reinitialiseWithDefaults
-    // (JUCE's default-device abstraction, which CoreAudio routes through
-    // AirPlay correctly). Already on the device lane — call it directly.
-    setDeviceMode("");
-}
 #endif
+
+std::string ClockworkEngine::openSystemDefault() {
+    if (!mDeviceManager) return {};
+#ifdef __APPLE__
+    const SystemDefaultOutput def = systemDefaultOutput();
+    const std::string& newDefault = def.name;
+    if (!newDefault.empty()) {
+        // Branch on the new default's transport type:
+        //
+        //  * Wireless (AirPlay/Bluetooth): reinitialiseWithDefaultsPreservingConfig.
+        //    JUCE uses CoreAudio's default-output abstraction, which routes through
+        //    AirPlay correctly; opening AirPlay by explicit name has never been
+        //    reliable in testing.
+        //  * Non-wireless: switchDevice, so the mic is preserved via aggregate.
+        if (!def.wireless) {
+            std::string inputName = mRealInputDeviceName;
+            if (inputName.empty() && mCurrentConfig.numInputChannels > 0) {
+                auto setup = mDeviceManager->getAudioDeviceSetup();
+                inputName = setup.inputDeviceName.toStdString();
+            }
+            // Internal: following the default is not choosing it. A
+            // user-origin swap would pin the default it landed on, and
+            // every later move of the default would then be refused.
+            auto result = switchDevice(newDefault, 0, 0, false, inputName,
+                                       SwapOrigin::Internal);
+            if (!result.success) return result.error;
+            return {};
+        }
+        // Wireless default — fall through to the reinitialise
+        // path below.
+        clockwork_log("[device-setup] system default '%s' is wireless; "
+                "using JUCE default-device init", newDefault.c_str());
+    }
+#endif
+    // The reinit and the cold swap after it are one mutation: under the
+    // gate throughout, so no other swap drives the manager in between (two
+    // at once wedged DirectSound's callback thread in a cursor-poll spin).
+    std::unique_lock<std::recursive_mutex> swapGate;
+    if (!tryAcquireSwapGate(swapGate, 30, 100)) {
+        clockwork_log("[device-setup] system mode init refused: "
+                "swap already in progress");
+        return "swap already in progress";
+    }
+
+    auto err = reinitialiseWithDefaultsPreservingConfig();
+    if (err.isNotEmpty()) {
+        clockwork_log("[device-setup] system mode init failed: %s",
+                err.toRawUTF8());
+        // Never leave the engine with a stopped device and no
+        // replacement: restart the audio source (falls back to the
+        // headless driver when no device is open) so commands keep
+        // draining — silent audio beats a deaf server.
+        if (mActiveSource.load() != AudioSource::None) {
+            stopAudioSource();
+            startAudioSource();
+        }
+        return err.toStdString();
+    }
+
+    std::string newDevName;
+    double newRate = 0.0;
+    if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
+        mCurrentConfig.numOutputChannels =
+            dev->getActiveOutputChannels().countNumberOfSetBits();
+        mCurrentConfig.numInputChannels =
+            dev->getActiveInputChannels().countNumberOfSetBits();
+        newRate = dev->getCurrentSampleRate();
+        newDevName = dev->getName().toStdString();
+    }
+
+    if (newRate > 0 && static_cast<int>(newRate) != mCurrentConfig.sampleRate) {
+        clockwork_log(
+                "[device-setup] system default has different rate "
+                "(%d -> %.0f Hz) — performing cold swap",
+                mCurrentConfig.sampleRate, newRate);
+        // Force cold even though JUCE is already at newRate (we
+        // just opened it via reinitialiseWithDefaultsPreservingConfig).
+        // Without forceCold, switchDevice sees currentRate ==
+        // sampleRate and skips the rebuild, leaving the DSP
+        // running at the old rate while JUCE delivers samples at
+        // the new rate — mismatch, pitched-down audio. Internal, as
+        // above: the default it opened is not the user's pick.
+        switchDevice(newDevName, newRate, 0, /*forceCold=*/true, "",
+                     SwapOrigin::Internal);
+    }
+    printDeviceList();
+    return {};
+}
 
 std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
     std::string previousMode = mDeviceMode;
 
     if (mode == "system" || mode.empty()) {
         mDeviceMode.clear();
-        // Entering system mode means "follow macOS default" — user has
-        // opted out of sticking to a specific hardware device, so drop
+        // Entering system mode means "follow the system default" — the user
+        // has opted out of sticking to a specific hardware device, so drop
         // the hot-plug preference that would otherwise pull them back.
         mPreferredOutputDevice.clear();
     } else {
@@ -5606,103 +5627,9 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
     if (!mRunning.load()) return "";
 
     if (mDeviceMode.empty()) {
-        // System mode — switch to the current macOS default output while
-        // keeping the input device (mic) so live_audio follows the output.
-        if (mDeviceManager) {
-            clockwork_log("[device-setup] switching to system default");
-#ifdef __APPLE__
-            const SystemDefaultOutput def = systemDefaultOutput();
-            const std::string& newDefault = def.name;
-            if (!newDefault.empty()) {
-                // Branch on the new default's transport type:
-                //
-                //  * Wireless (AirPlay/Bluetooth): reinitialiseWithDefaultsPreservingConfig.
-                //    JUCE uses CoreAudio's default-output abstraction, which routes through
-                //    AirPlay correctly; opening AirPlay by explicit name has never been
-                //    reliable in testing.
-                //  * Non-wireless: switchDevice, so the mic is preserved via aggregate.
-                if (!def.wireless) {
-                    std::string inputName = mRealInputDeviceName;
-                    if (inputName.empty() && mCurrentConfig.numInputChannels > 0) {
-                        auto setup = mDeviceManager->getAudioDeviceSetup();
-                        inputName = setup.inputDeviceName.toStdString();
-                    }
-                    // Internal: following the default is not choosing it. A
-                    // user-origin swap would pin the default it landed on, and
-                    // every later move of the default would then be refused.
-                    auto result = switchDevice(newDefault, 0, 0, false, inputName,
-                                               SwapOrigin::Internal);
-                    if (!result.success) return result.error;
-                    return {};
-                }
-                // Wireless default — fall through to the reinitialise
-                // path below.
-                clockwork_log("[device-setup] system default '%s' is wireless; "
-                        "using JUCE default-device init", newDefault.c_str());
-            }
-#endif
-            // Serialise against in-flight swaps. Without the gate this
-            // reinit runs concurrently with a debounced switchDevice (which
-            // holds mSwapMutex on its worker thread) — two threads driving
-            // JUCE's AudioDeviceManager teardown/reopen at once, which can
-            // wedge DirectSound's callback thread in a cursor-poll spin and
-            // leave the whole server deaf. Bounded retry mirrors
-            // executePendingSwitch (~3 s).
-            std::unique_lock<std::recursive_mutex> swapGate;
-            if (!tryAcquireSwapGate(swapGate, 30, 100)) {
-                clockwork_log("[device-setup] system mode init refused: "
-                        "swap already in progress");
-                return "swap already in progress";
-            }
-
-            auto err = reinitialiseWithDefaultsPreservingConfig();
-            if (err.isNotEmpty()) {
-                clockwork_log("[device-setup] system mode init failed: %s",
-                        err.toRawUTF8());
-                // Never leave the engine with a stopped device and no
-                // replacement: restart the audio source (falls back to the
-                // headless driver when no device is open) so commands keep
-                // draining — silent audio beats a deaf server.
-                if (mActiveSource.load() != AudioSource::None) {
-                    stopAudioSource();
-                    startAudioSource();
-                }
-                return err.toStdString();
-            }
-
-            std::string newDevName;
-            double newRate = 0.0;
-            if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
-                mCurrentConfig.numOutputChannels =
-                    dev->getActiveOutputChannels().countNumberOfSetBits();
-                mCurrentConfig.numInputChannels =
-                    dev->getActiveInputChannels().countNumberOfSetBits();
-                newRate = dev->getCurrentSampleRate();
-                newDevName = dev->getName().toStdString();
-            }
-
-            // Release before the cold swap below — switchDevice acquires the
-            // gate itself (try_lock) and would otherwise self-deadlock.
-            swapGate.unlock();
-
-            if (newRate > 0 && static_cast<int>(newRate) != mCurrentConfig.sampleRate) {
-                clockwork_log(
-                        "[device-setup] system default has different rate "
-                        "(%d -> %.0f Hz) — performing cold swap",
-                        mCurrentConfig.sampleRate, newRate);
-                // Force cold even though JUCE is already at newRate (we
-                // just opened it via reinitialiseWithDefaultsPreservingConfig).
-                // Without forceCold, switchDevice sees currentRate ==
-                // sampleRate and skips the rebuild, leaving the DSP
-                // running at the old rate while JUCE delivers samples at
-                // the new rate — mismatch, pitched-down audio. Internal, as
-                // above: the default it opened is not the user's pick.
-                switchDevice(newDevName, newRate, 0, /*forceCold=*/true, "",
-                             SwapOrigin::Internal);
-            } else {
-                printDeviceList();
-            }
-        }
+        // System mode: the default output, keeping the input.
+        clockwork_log("[device-setup] switching to system default");
+        return openSystemDefault();
     } else {
         // Manual mode: switch to the named device. setDeviceMode is called by clients
         // that cannot handle a cold swap, so pre-check whether the target supports the

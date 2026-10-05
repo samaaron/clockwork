@@ -61,6 +61,8 @@ struct FakeDeviceSpec {
     // Unplugged: absent from every device list and refused by name until it
     // comes back. Atomic: a case flips it on a running engine.
     std::atomic<bool> hidden { false };
+    // Times the engine has tried to open it, failed or not.
+    std::atomic<int> opens { 0 };
 };
 
 class FakeAudioIODevice;
@@ -157,6 +159,7 @@ public:
                       const juce::BigInteger& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         std::lock_guard<std::recursive_mutex> lk(mLifecycle);
+        primary()->opens.fetch_add(1);
         // Error strings mimic real JUCE drivers, which name the device.
         // Nothing reads the wording: the engine attributes input-side
         // failures by retrying output-only, not by parsing these.

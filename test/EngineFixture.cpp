@@ -53,8 +53,13 @@ EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg) { init(cfg); }
 EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs) {
     init(cfg, hostControlStartsAfterMs);
 }
+EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg,
+                             const std::function<void(ClockworkEngine&)>& beforeInit) {
+    init(cfg, 0, beforeInit);
+}
 
-void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs) {
+void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs,
+                         const std::function<void(ClockworkEngine&)>& beforeInit) {
     mManualPump = cfg.manualAudioPump;
 
     mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
@@ -78,6 +83,7 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
     // pass is running from the moment the engine needs one.
     if (cfg.hostDrivesControl && hostControlStartsAfterMs <= 0) mHostControl.start(mEngine);
 
+    if (beforeInit) beforeInit(mEngine);
     mEngine.init(cfg);
 
     if (cfg.hostDrivesControl && hostControlStartsAfterMs > 0) {

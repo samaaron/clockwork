@@ -198,6 +198,10 @@ public:
     // init returns rather than before it (Config::hostDrivesControl only).
     // What a slow host looks like to the boot barrier.
     EngineFixture(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs);
+    // Given the engine before it boots, to set the hooks a case drives boot
+    // through (testInitFailure and the like).
+    EngineFixture(const ClockworkEngine::Config& cfg,
+                  const std::function<void(ClockworkEngine&)>& beforeInit);
     ~EngineFixture();
 
     // OSC in, in process — no socket.
@@ -263,7 +267,8 @@ public:
     bool manualPump() const { return mManualPump; }
 
 private:
-    void init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs = 0);
+    void init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs = 0,
+              const std::function<void(ClockworkEngine&)>& beforeInit = {});
     ClockworkEngine mEngine;
     engine_test::HostControlThread mHostControl;
     std::thread                    mLateHostStart;
