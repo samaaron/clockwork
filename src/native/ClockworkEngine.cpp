@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <thread>
 #ifdef __linux__
 #include <dlfcn.h>
@@ -463,7 +464,8 @@ void ClockworkEngine::init(const Config& cfg) {
         && !cfg.inputDevice.empty() && cfg.inputDevice != "__none__")
         mPreferredInputDevice = cfg.inputDevice;
 
-    if (!cfg.headless) initAudioDevice(cfg);
+    // The device lane opens boot's device, as it opens every other.
+    if (!cfg.headless) runOnDeviceLane([this, &cfg] { initAudioDevice(cfg); });
     initEngine(cfg);
 }
 
@@ -1663,8 +1665,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // -- Start the audio source (real callback or headless fallback) -------
     // Blocks until process_audio has ticked once, or 5 s with a warning. After this
     // returns the engine is fully responsive: OSC sent via sendOSC() or UDP is
-    // drained on the next audio block.
-    startAudioSource();
+    // drained on the next audio block. A device is started on the device lane,
+    // which opened it.
+    if (mDeviceManager) runOnDeviceLane([this] { startAudioSource(); });
+    else                startAudioSource();
 
 #ifdef __APPLE__
     // CoreAudio default-output listener: JUCE only watches device
@@ -1806,14 +1810,13 @@ void ClockworkEngine::shutdown() {
     if (mWatchdogThread.joinable()) mWatchdogThread.join();
     mWatchdog.reset();   // a poll after this does nothing
 
-    // No control command can run now — join the device-orchestration worker
-    // before tearing down the device manager + egress it calls into.
+    // No control command can run now. The device lane closes the devices it
+    // opened, as its last work, and stops: nothing after this touches the
+    // device manager or the egress it reports through.
     mDebounceSwitchStop.store(true);
-
-    // Same window as the debounce worker: device tasks touch the device manager
-    // and egress, both torn down below.
+    if (mDeviceManager) runOnDeviceLane([this] { teardownDeviceManager(); });
     mDeviceTaskStop.store(true);
-    mDeviceTaskCv.notify_all();
+    mDeviceLane.wake();
     if (mDeviceTaskThread.joinable()) mDeviceTaskThread.join();
 
     mHeadlessDriver.signalThreadShouldExit();
@@ -1822,8 +1825,6 @@ void ClockworkEngine::shutdown() {
     // wait() sees a change and returns.
     mAudioCallback.processCount.fetch_add(1, std::memory_order_release);
     mAudioCallback.processCount.notify_all();
-
-    teardownDeviceManager();
 
 #ifdef __APPLE__
     if (mDefaultDevicePropertyListenerInstalled) {
@@ -2174,34 +2175,61 @@ bool ClockworkEngine::schedFlushSink(void* /*ctx*/, const void* /*callCtx*/,
 
 // --- Device switch / reopen orchestration -------------------------------------
 
-void ClockworkEngine::postDeviceTask(std::function<void()> task) {
-    if (!task) return;
+bool ClockworkEngine::postDeviceTask(std::function<void()> task) {
+    if (!task) return false;
     {
         std::lock_guard<std::mutex> lock(mDeviceTaskMutex);
-        if (mDeviceTaskStop.load()) return;   // shutting down: drop rather than queue
+        if (mDeviceTaskStop.load()) return false;   // shutting down: drop rather than queue
         mDeviceTasks.push_back(std::move(task));
         if (!mDeviceTaskThread.joinable())
             mDeviceTaskThread = std::thread(&ClockworkEngine::deviceTaskLoop, this);
     }
-    mDeviceTaskCv.notify_one();
+    mDeviceLane.wake();
+    return true;
 }
 
 void ClockworkEngine::deviceTaskLoop() {
+    mDeviceLane.enter();
     for (;;) {
+        // A pass that is due runs before the next task: a task posted after
+        // a change was reported finds it looked at.
+        if (mDeviceChanges.load() & kPassQueued) {
+            reconcileDevices();
+            continue;
+        }
         std::function<void()> task;
         {
-            std::unique_lock<std::mutex> lock(mDeviceTaskMutex);
-            mDeviceTaskCv.wait(lock, [this] {
-                return mDeviceTaskStop.load() || !mDeviceTasks.empty();
-            });
-            // Drain what is already queued before exiting, so work accepted
-            // just before shutdown still completes (and still replies).
-            if (mDeviceTasks.empty()) return;
-            task = std::move(mDeviceTasks.front());
-            mDeviceTasks.pop_front();
+            std::lock_guard<std::mutex> lock(mDeviceTaskMutex);
+            if (!mDeviceTasks.empty()) {
+                task = std::move(mDeviceTasks.front());
+                mDeviceTasks.pop_front();
+            } else if (mDeviceTaskStop.load()) {
+                // Drained: work accepted before shutdown has run, and replied.
+                break;
+            }
         }
-        task();
+        if (task) task();
+        else      mDeviceLane.sleep();
     }
+    mDeviceLane.leave();
+}
+
+void ClockworkEngine::runOnDeviceLane(const std::function<void()>& work) {
+    std::promise<void> done;
+    auto finished = done.get_future();
+    const bool queued = postDeviceTask([&work, &done] {
+        try {
+            work();
+            done.set_value();
+        } catch (...) {
+            done.set_exception(std::current_exception());
+        }
+    });
+    if (!queued) {
+        work();
+        return;
+    }
+    finished.get();
 }
 
 void ClockworkEngine::scheduleDeviceSwitch(const std::string& devName,
@@ -3276,28 +3304,53 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
     if (auto* dev = mDeviceManager->getCurrentAudioDevice())
         activeDeviceName = dev->getName().toStdString();
 
+    // A device's rates, buffer sizes and channels, from a device created to
+    // be asked (a probe), kept by driver, name and direction (mDeviceProbes):
+    // each is probed once, not on every rescan.
+    auto populateFromDevice = [](DeviceInfo& info, juce::AudioIODevice* dev) {
+        for (auto r : dev->getAvailableSampleRates())
+            info.availableSampleRates.push_back(r);
+        for (auto b : dev->getAvailableBufferSizes())
+            info.availableBufferSizes.push_back(b);
+        info.maxOutputChannels = dev->getOutputChannelNames().size();
+        info.maxInputChannels  = dev->getInputChannelNames().size();
+        // Only the side the device was created on is authoritative: a
+        // wrapper created output-only reports no input channels even on
+        // a full-duplex device (the input merge below probes that side).
+        info.outChannelsProbed = info.maxOutputChannels > 0;
+        info.inChannelsProbed  = info.maxInputChannels > 0;
+    };
+    auto takeProbe = [](DeviceInfo& info, const DeviceInfo& probe) {
+        info.availableSampleRates = probe.availableSampleRates;
+        info.availableBufferSizes = probe.availableBufferSizes;
+        info.maxOutputChannels    = probe.maxOutputChannels;
+        info.maxInputChannels     = probe.maxInputChannels;
+        info.outChannelsProbed    = probe.outChannelsProbed;
+        info.inChannelsProbed     = probe.inChannelsProbed;
+    };
+    std::set<std::string> probesListed;   // the rest are forgotten below
+    auto probe = [&](juce::AudioIODeviceType* type, const std::string& typeName,
+                     const juce::String& devName, bool asInput) -> const DeviceInfo* {
+        const std::string name = devName.toStdString();
+        const std::string key  = typeName + '\x1f' + name + (asInput ? "\x1fin" : "\x1fout");
+        probesListed.insert(key);
+        if (auto it = mDeviceProbes.find(key); it != mDeviceProbes.end())
+            return &it->second;
+        if (skipAllProbing || name == activeDeviceName) return nullptr;
+        std::unique_ptr<juce::AudioIODevice> dev(
+            asInput ? type->createDevice(juce::String(), devName)
+                    : type->createDevice(devName, juce::String()));
+        if (!dev) return nullptr;              // asked again next time
+        DeviceInfo probed;
+        populateFromDevice(probed, dev.get());
+        return &(mDeviceProbes[key] = std::move(probed));
+    };
+
     auto& types = mDeviceManager->getAvailableDeviceTypes();
     for (auto* type : types) {
         if (rescan) type->scanForDevices();
 
-        auto populateFromDevice = [](DeviceInfo& info, juce::AudioIODevice* dev) {
-            for (auto r : dev->getAvailableSampleRates())
-                info.availableSampleRates.push_back(r);
-            for (auto b : dev->getAvailableBufferSizes())
-                info.availableBufferSizes.push_back(b);
-            info.maxOutputChannels = dev->getOutputChannelNames().size();
-            info.maxInputChannels  = dev->getInputChannelNames().size();
-            // Only the side the device was created on is authoritative: a
-            // wrapper created output-only reports no input channels even on
-            // a full-duplex device (the input merge below probes that side).
-            info.outChannelsProbed = info.maxOutputChannels > 0;
-            info.inChannelsProbed  = info.maxInputChannels > 0;
-        };
-
         std::string typeNameStr = type->getTypeName().toStdString();
-        auto shouldSkipProbe = [&](const std::string& name) {
-            return skipAllProbing || name == activeDeviceName;
-        };
 
         // ASIO names come from the registry, so an installed-but-unloadable
         // driver is listed exactly like a working one. Drop the ones the
@@ -3317,12 +3370,8 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             info.transportType = lookupTransport(info.name);
 #endif
 
-            if (!shouldSkipProbe(info.name)) {
-                std::unique_ptr<juce::AudioIODevice> tempDev(
-                    type->createDevice(devName, juce::String()));
-                if (tempDev)
-                    populateFromDevice(info, tempDev.get());
-            }
+            if (auto* probed = probe(type, typeNameStr, devName, false))
+                takeProbe(info, *probed);
 #ifdef __APPLE__
             // Fill maxOutputChannels from CoreAudio when the JUCE probe did not return it.
             // CoreAudio's stream configuration is authoritative for a full-duplex
@@ -3359,15 +3408,9 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             }
 
             if (existing) {
-                if (!shouldSkipProbe(existing->name)) {
-                    std::unique_ptr<juce::AudioIODevice> tempDev(
-                        type->createDevice(juce::String(), devName));
-                    if (tempDev) {
-                        existing->maxInputChannels =
-                            tempDev->getInputChannelNames().size();
-                        existing->inChannelsProbed =
-                            existing->maxInputChannels > 0;
-                    }
+                if (auto* probed = probe(type, typeNameStr, devName, true)) {
+                    existing->maxInputChannels = probed->maxInputChannels;
+                    existing->inChannelsProbed = existing->maxInputChannels > 0;
                 }
 #ifdef __APPLE__
                 // Always check CoreAudio for the actual input count,
@@ -3393,12 +3436,8 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             info.transportType = lookupTransport(info.name);
 #endif
 
-            if (!shouldSkipProbe(info.name)) {
-                std::unique_ptr<juce::AudioIODevice> tempDev(
-                    type->createDevice(juce::String(), devName));
-                if (tempDev)
-                    populateFromDevice(info, tempDev.get());
-            }
+            if (auto* probed = probe(type, typeNameStr, devName, true))
+                takeProbe(info, *probed);
 #ifdef __APPLE__
             if (info.maxInputChannels == 0) {
                 AudioObjectID devID = lookupID(info.name);
@@ -3412,6 +3451,11 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             result.push_back(std::move(info));
         }
     }
+
+    // A device no longer listed is forgotten: plugged back in, it is
+    // probed as it is then.
+    for (auto it = mDeviceProbes.begin(); it != mDeviceProbes.end();)
+        it = probesListed.count(it->first) ? std::next(it) : mDeviceProbes.erase(it);
 
 #ifdef __APPLE__
     // Filter out our managed aggregate device — it's an implementation detail.
@@ -4769,47 +4813,37 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 void ClockworkEngine::teardownDeviceManager() {
     if (mDeviceManager) {
         // The sink stays to the end: a change reported while the manager goes
-        // down only queues a pass on the lane, where without the sink it
-        // would reach the manager's own close-and-reopen.
+        // down only notes it for a pass on the lane, which finds no manager.
         mDeviceManager->removeAudioCallback(&mAudioCallback);
         mDeviceManager->closeAudioDevice();
         mDeviceManager.reset();
     }
 }
 
-bool ClockworkEngine::runOnMessageThread(std::function<void()> fn, int timeoutMs) {
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
-    if (mm == nullptr || mm->isThisTheMessageThread()) {
-        fn();
-        return true;
+void ClockworkEngine::restoreBootDriver() {
+    if (mCurrentConfig.deviceManagerFactory || !mDeviceManager) return;
+#if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
+    // As at boot: PipeWire registered, and preferred unless boot honoured
+    // another driver (--audio-driver). The scan must land before the
+    // default-device open that follows, or the fresh manager cannot see
+    // PipeWire's devices at all.
+    registerPipeWireDriver(*mDeviceManager);
+    if (mBootDriver.empty() || mBootDriver == "PipeWire") {
+        preferPipeWireDriverIfAvailable(*mDeviceManager);
+    } else {
+        mDeviceManager->setCurrentAudioDeviceType(juce::String(mBootDriver), true);
     }
-
-    // `claimed` decides who runs fn — exactly one of the queued lambda and the
-    // timeout fallback below. shared_ptr keeps the state alive if the queued
-    // lambda fires after this function has already returned.
-    struct Task {
-        std::function<void()> fn;
-        juce::WaitableEvent   done;
-        std::atomic<bool>     claimed{false};
-    };
-    auto task = std::make_shared<Task>();
-    task->fn = std::move(fn);
-    juce::MessageManager::callAsync([task] {
-        if (!task->claimed.exchange(true)) {
-            task->fn();
-            task->done.signal();
+#elif defined(_WIN32)
+    // A fresh manager starts on WASAPI; boot's driver, or DirectSound when
+    // boot named none.
+    const std::string driver = !mBootDriver.empty() ? mBootDriver : std::string("DirectSound");
+    for (auto* t : mDeviceManager->getAvailableDeviceTypes()) {
+        if (t->getTypeName().toStdString() == driver) {
+            mDeviceManager->setCurrentAudioDeviceType(juce::String(driver), true);
+            break;
         }
-    });
-    if (task->done.wait(timeoutMs)) return true;
-
-    if (!task->claimed.exchange(true)) {
-        // The queue never ran it — no pump on the message thread. Run inline.
-        task->fn();
-        return false;
     }
-    // Lost the claim: fn is mid-run on the message thread — wait it out.
-    task->done.wait(-1);
-    return true;
+#endif
 }
 
 juce::String ClockworkEngine::recreateDeviceManager() {
@@ -4817,71 +4851,11 @@ juce::String ClockworkEngine::recreateDeviceManager() {
     // build a fresh manager. A reopen keeps this same dead connection; only a
     // new manager gets a new IsolatedCoreAudioClient + AudioObjectIDs that
     // coreaudiod will actually drive with a live IO thread. Runs on the device task lane
-    // (the recovery worker — see requestAudioRecovery), holding the swap gate.
-#ifdef _WIN32
-    // The old manager's DeviceChangeDetector hidden windows are owned by the
-    // message thread (created there at boot). DestroyWindow from this worker
-    // fails silently cross-thread, leaving a zombie window whose GWLP_USERDATA
-    // points at the freed detector — the next WM_DEVICECHANGE broadcast
-    // (resume, hot-plug) then use-after-frees in Timer::startTimer. Tear down
-    // AND rebuild on the message thread so window ownership stays with the
-    // pump. Device types are created there too (lazily created on first
-    // touch, they'd otherwise land on this worker, which exits after
-    // recovery — killing hot-plug detection). Deadlock-safe: message-thread
-    // device handlers only try_lock the swap gate we hold. The message-thread
-    // work is fast (close + construct + enumerate); the open that follows
-    // stays on this worker.
-    constexpr int kRecreateOnMessageThreadTimeoutMs = 4000;
-    const bool marshalled = runOnMessageThread([this]() {
-        try {
-            teardownDeviceManager();
-            mDeviceManager = makeDeviceManager();
-            // A fresh manager defaults to WASAPI (JUCE's first type); restore
-            // the boot-time driver choice (see init) so recovery doesn't
-            // silently change driver. Skipped under the factory boundary — an
-            // injected manager owns its own types.
-            if (!mCurrentConfig.deviceManagerFactory) {
-                const std::string bootType =
-                    !mBootDriver.empty() ? mBootDriver
-                                         : std::string("DirectSound");
-                for (auto* t : mDeviceManager->getAvailableDeviceTypes()) {
-                    if (t->getTypeName().toStdString() == bootType) {
-                        mDeviceManager->setCurrentAudioDeviceType(
-                            juce::String(bootType), true);
-                        break;
-                    }
-                }
-            }
-        } catch (...) {
-            clockwork_log("[recover] device manager rebuild threw on message thread");
-        }
-    }, kRecreateOnMessageThreadTimeoutMs);
-    if (!marshalled)
-        clockwork_log("[recover] message thread unresponsive — device manager rebuilt "
-               "on the recovery worker (hidden-window ownership degraded)");
-    if (!mDeviceManager)
-        return "recreate: device manager rebuild failed";
-#else
+    // (the recovery worker — see requestAudioRecovery), holding the swap gate:
+    // the thread that made the old one, on every platform.
     teardownDeviceManager();
     mDeviceManager = makeDeviceManager();
-#if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
-    // Same registration and preference as at boot; the scan must land before
-    // the default-device init below so the fresh manager can see PipeWire's
-    // devices at all. Skipped under the factory boundary. A boot driver other
-    // than PipeWire (an honoured --audio-driver) is restored instead of
-    // re-applying the PipeWire preference — recovery must not change the
-    // driver the user chose.
-    if (!mCurrentConfig.deviceManagerFactory) {
-        registerPipeWireDriver(*mDeviceManager);
-        if (mBootDriver.empty() || mBootDriver == "PipeWire") {
-            preferPipeWireDriverIfAvailable(*mDeviceManager);
-        } else {
-            mDeviceManager->setCurrentAudioDeviceType(
-                juce::String(mBootDriver), true);
-        }
-    }
-#endif
-#endif
+    restoreBootDriver();
 
     // Open the device via the shared system-default reinit: it preserves the
     // session sample rate, drops the now-stale aggregate / real-device names,
@@ -5264,10 +5238,11 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
 // --- Device change detection ---
 
 void ClockworkEngine::devicesChanged(unsigned changes) {
-    // Any thread, at the OS's moment: only note it and queue. A pass already
-    // queued has yet to look, so it will see this change too.
+    // Any thread, at the OS's moment — a driver's own audio thread among
+    // them: a note and a wake, no allocation. A pass already due has yet to
+    // look, so it will see this change too.
     if (!(mDeviceChanges.fetch_or(changes | kPassQueued) & kPassQueued))
-        postDeviceTask([this] { reconcileDevices(); });
+        mDeviceLane.wake();
 }
 
 void ClockworkEngine::reconcileDevices() {
@@ -5384,6 +5359,15 @@ bool ClockworkEngine::reconcileOpenDevice() {
     const auto live = dev->readLiveState();
     if (!live.alive) {
         recoverLostDevice(name, "has stopped where it stands");
+        return true;
+    }
+    // Its driver says it cannot carry on as opened (a stream a format change
+    // invalidated, a reset the driver asked for): the same device, opened
+    // again, at a rate it offers now.
+    if (live.mustReopen) {
+        clockwork_log("[devices] '%s' cannot carry on as opened — opening it again",
+                name.c_str());
+        reopenCurrentDevice(0);
         return true;
     }
 

@@ -66,6 +66,11 @@ struct FakeDeviceSpec {
     // Gone where it stands: still listed, but its driver says it is no
     // longer alive, and it cannot be opened.
     std::atomic<bool> dead { false };
+    // The rate the system now runs the device at, set outside the engine
+    // (Windows' sound settings, for a shared-mode device); 0 = unchanged.
+    // A stream opened at another rate cannot carry on — its driver says it
+    // must be opened again — and this is the only rate it offers.
+    std::atomic<double> systemRate { 0 };
 };
 
 class FakeAudioIODevice;
@@ -157,7 +162,9 @@ public:
         LiveState state;
         state.alive = !primary()->dead.load();
         if (state.alive) {
-            state.sampleRate        = mRate;
+            const double systemRate = primary()->systemRate.load();
+            state.mustReopen        = systemRate > 0 && systemRate != mRate;
+            state.sampleRate        = systemRate > 0 ? systemRate : mRate;
             state.numOutputChannels = liveOuts();
             state.numInputChannels  = liveIns();
         }
@@ -165,7 +172,7 @@ public:
     }
     juce::Array<double> getAvailableSampleRates() override {
         juce::Array<double> r;
-        for (double sr : primary()->sampleRates) r.add(sr);
+        for (double sr : offeredRates()) r.add(sr);
         return r;
     }
     juce::Array<int> getAvailableBufferSizes() override {
@@ -196,7 +203,7 @@ public:
         mActiveIn = inputChannels;
         mActiveIn.setRange(mOpenIns, 256, false);
 
-        mRate = pickNearest(primary()->sampleRates, sampleRate);
+        mRate = pickNearest(offeredRates(), sampleRate);
         mBufferSize = pickNearest(primary()->bufferSizes,
                                   bufferSizeSamples > 0 ? bufferSizeSamples
                                                         : getDefaultBufferSize());
@@ -272,6 +279,10 @@ private:
         return mOut ? mOut : mIn;
     }
 
+    std::vector<double> offeredRates() const {
+        const double systemRate = primary()->systemRate.load();
+        return systemRate > 0 ? std::vector<double>{ systemRate } : primary()->sampleRates;
+    }
     int liveOuts() const { return mOut ? mOut->maxOutputChannels : 0; }
     int liveIns()  const { return mIn  ? mIn->maxInputChannels   : 0; }
 

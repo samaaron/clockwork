@@ -1273,18 +1273,16 @@ public:
     }
 
 private:
-    DeviceChangeDetector detector { L"DirectSound", [this] { systemDeviceChanged(); } };
+   #if JUCE_WASAPI
+    // smoothie: DirectSound's devices are Windows' audio endpoints, so the
+    // endpoint notifications (WASAPI's MMDeviceChangeNotifier) say when they
+    // come and go — to the sink, from Windows' thread, with no hidden window.
+    // The rescan is the sink owner's. Without WASAPI compiled in, DirectSound
+    // reports no changes.
+    WasapiClasses::MMDeviceChangeNotifier changeNotifier { [this] { reportDeviceChange (DeviceChange::list); } };
+   #endif
     DSoundDeviceList deviceList;
     bool hasScanned = false;
-
-    void systemDeviceChanged()
-    {
-        DSoundDeviceList newList;
-        newList.scan();
-
-        if (std::exchange (deviceList, newList) != newList)
-            reportDeviceChange (AudioIODeviceType::DeviceChange::list);
-    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DSoundAudioIODeviceType)
 };

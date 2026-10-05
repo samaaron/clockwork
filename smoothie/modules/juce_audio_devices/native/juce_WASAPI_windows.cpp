@@ -518,6 +518,7 @@ public:
     void deviceSampleRateChanged()
     {
         sampleRateHasChanged = true;
+        NullCheckedInvocation::invoke (onSessionChange);
     }
 
     void deviceSessionBecameInactive()
@@ -528,6 +529,7 @@ public:
     void deviceSessionExpired()
     {
         shouldShutdown = true;
+        NullCheckedInvocation::invoke (onSessionChange);
     }
 
     void deviceSessionBecameActive()
@@ -563,6 +565,10 @@ public:
     UINT32 actualBufferSize = 0;
     int bytesPerSample = 0, bytesPerFrame = 0;
     std::atomic<bool> sampleRateHasChanged { false }, shouldShutdown { false }, isActive { true };
+
+    // smoothie: told, on the thread Windows sends it on, that this half's
+    // session expired or its format changed (WASAPIAudioIODevice sets it).
+    std::function<void()> onSessionChange;
 
     virtual void updateFormat (bool isFloat) = 0;
 
@@ -1222,27 +1228,44 @@ private:
 
 //==============================================================================
 class WASAPIAudioIODevice final : public AudioIODevice,
-                                  public Thread,
-                                  private AsyncUpdater
+                                  public Thread
 {
 public:
+    // smoothie: reportChange tells the type's sink this device changed
+    // where it stands (see readLiveState); the type outlives its devices.
     WASAPIAudioIODevice (const String& deviceName,
                          const String& typeNameIn,
                          const String& outputDeviceID,
                          const String& inputDeviceID,
-                         WASAPIDeviceMode mode)
+                         WASAPIDeviceMode mode,
+                         std::function<void()> reportChangeIn)
         : AudioIODevice (deviceName, typeNameIn),
           Thread ("JUCE WASAPI"),
           outputDeviceId (outputDeviceID),
           inputDeviceId (inputDeviceID),
-          deviceMode (mode)
+          deviceMode (mode),
+          reportChange (std::move (reportChangeIn))
     {
     }
 
     ~WASAPIAudioIODevice() override
     {
-        cancelPendingUpdate();
         close();
+    }
+
+    // smoothie: gone when a session expired (the endpoint went away); must
+    // be opened again when a format change invalidated a stream (the user
+    // changed the device's rate in the sound settings) — the thread has
+    // stopped either way, and the owner decides what to open.
+    LiveState readLiveState() override
+    {
+        const auto expired     = [] (const auto& d) { return d != nullptr && d->shouldShutdown.load(); };
+        const auto rateChanged = [] (const auto& d) { return d != nullptr && d->sampleRateHasChanged.load(); };
+
+        LiveState state;
+        state.alive      = ! (shouldShutdown || expired (inputDevice) || expired (outputDevice));
+        state.mustReopen = deviceSampleRateChanged || rateChanged (inputDevice) || rateChanged (outputDevice);
+        return state;
     }
 
     bool initialise()
@@ -1395,8 +1418,6 @@ public:
 
         currentBufferSizeSamples  = bufferSizeSamples <= 0 ? defaultBufferSize : jmax (bufferSizeSamples, minBufferSize);
         currentSampleRate         = sampleRate > 0 ? sampleRate : defaultSampleRate;
-        lastKnownInputChannels    = inputChannels;
-        lastKnownOutputChannels   = outputChannels;
 
         if (inputDevice != nullptr && ! inputDevice->open (currentSampleRate, inputChannels, bufferSizeSamples))
         {
@@ -1552,8 +1573,6 @@ public:
                 || (inputDevice != nullptr && inputDevice->shouldShutdown))
             {
                 shouldShutdown = true;
-                triggerAsyncUpdate();
-
                 break;
             }
 
@@ -1586,8 +1605,6 @@ public:
                 if (inputDevice->sampleRateHasChanged)
                 {
                     deviceSampleRateChanged = true;
-                    triggerAsyncUpdate();
-
                     break;
                 }
             }
@@ -1615,8 +1632,6 @@ public:
                 if (outputDevice->sampleRateHasChanged)
                 {
                     deviceSampleRateChanged = true;
-                    triggerAsyncUpdate();
-
                     break;
                 }
             }
@@ -1648,8 +1663,8 @@ private:
     CriticalSection startStopLock;
 
     std::atomic<bool> shouldShutdown { false }, deviceSampleRateChanged { false };
+    std::function<void()> reportChange;
 
-    BigInteger lastKnownInputChannels, lastKnownOutputChannels;
 
     //==============================================================================
     bool createDevices()
@@ -1684,9 +1699,15 @@ private:
             auto flow = getDataFlow (device);
 
             if (deviceId == inputDeviceId && flow == eCapture)
+            {
                 inputDevice.reset (new WASAPIInputDevice (device, deviceMode));
+                inputDevice->onSessionChange = reportChange;
+            }
             else if (deviceId == outputDeviceId && flow == eRender)
+            {
                 outputDevice.reset (new WASAPIOutputDevice (device, deviceMode));
+                outputDevice->onSessionChange = reportChange;
+            }
         }
 
         return (outputDeviceId.isEmpty() || (outputDevice != nullptr && outputDevice->isOk()))
@@ -1694,49 +1715,71 @@ private:
     }
 
     //==============================================================================
-    void handleAsyncUpdate() override
-    {
-        auto closeDevices = [this]
-        {
-            close();
-
-            outputDevice = nullptr;
-            inputDevice = nullptr;
-        };
-
-        if (shouldShutdown)
-        {
-            closeDevices();
-        }
-        else if (deviceSampleRateChanged)
-        {
-            auto sampleRateChangedByInput = (inputDevice != nullptr && inputDevice->sampleRateHasChanged);
-
-            closeDevices();
-            initialise();
-
-            auto changedSampleRate = [this, sampleRateChangedByInput]()
-            {
-                if (inputDevice != nullptr && sampleRateChangedByInput)
-                    return inputDevice->defaultSampleRate;
-
-                if (outputDevice != nullptr && ! sampleRateChangedByInput)
-                    return outputDevice->defaultSampleRate;
-
-                return 0.0;
-            }();
-
-            open (lastKnownInputChannels, lastKnownOutputChannels,
-                  changedSampleRate, currentBufferSizeSamples);
-
-            start (callback);
-        }
-    }
-
-    //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WASAPIAudioIODevice)
 };
 
+
+//==============================================================================
+// smoothie addition: Windows' word that audio endpoints came, went, changed
+// state, changed default or changed a property (IMMNotificationClient),
+// handed to onChange on the thread Windows sends it on — no hidden window,
+// no timer, no message loop. A device type reports it to its sink and leaves
+// the rescan to the sink's owner. Created on a thread in a COM apartment.
+class MMDeviceChangeNotifier final
+{
+public:
+    explicit MMDeviceChangeNotifier (std::function<void()> onChangeIn)
+        : onChange (std::move (onChangeIn))
+    {
+        // Fenced: notifications arrive on Windows' threads, and can race
+        // this notifier's destruction (LiveObjectRegistry).
+        LiveObjectRegistry::get().add (this);
+
+        if (check (enumerator.CoCreateInstance (__uuidof (MMDeviceEnumerator))))
+        {
+            client = new Client (*this);
+
+            if (! check (enumerator->RegisterEndpointNotificationCallback (client)))
+                client = nullptr;
+        }
+    }
+
+    ~MMDeviceChangeNotifier()
+    {
+        // Out of the fence first: blocks on a notification in flight.
+        LiveObjectRegistry::get().remove (this);
+
+        if (client != nullptr)
+            enumerator->UnregisterEndpointNotificationCallback (client);
+    }
+
+private:
+    struct Client final : public ComBaseClassHelper<IMMNotificationClient>
+    {
+        explicit Client (MMDeviceChangeNotifier& o) : ComBaseClassHelper (0), owner (o) {}
+
+        JUCE_COMRESULT OnDeviceAdded (LPCWSTR)                             override { return notify(); }
+        JUCE_COMRESULT OnDeviceRemoved (LPCWSTR)                           override { return notify(); }
+        JUCE_COMRESULT OnDeviceStateChanged (LPCWSTR, DWORD)               override { return notify(); }
+        JUCE_COMRESULT OnDefaultDeviceChanged (EDataFlow, ERole, LPCWSTR)  override { return notify(); }
+        JUCE_COMRESULT OnPropertyValueChanged (LPCWSTR, const PROPERTYKEY) override { return notify(); }
+
+        HRESULT notify()
+        {
+            LiveObjectRegistry::get().ifLive (&owner, [&] { owner.onChange(); });
+            return S_OK;
+        }
+
+        MMDeviceChangeNotifier& owner;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Client)
+    };
+
+    std::function<void()> onChange;
+    ComSmartPtr<IMMDeviceEnumerator> enumerator;
+    ComSmartPtr<Client> client;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MMDeviceChangeNotifier)
+};
 
 //==============================================================================
 class WASAPIAudioIODeviceType final : public AudioIODeviceType
@@ -1746,19 +1789,6 @@ public:
         : AudioIODeviceType (getDeviceTypename (mode)),
           deviceMode (mode)
     {
-        // smoothie: fence for ChangeNotificationClient — endpoint
-        // notifications arrive on MTA threads and can race this type's
-        // destruction (device-manager rebuilds destroy types).
-        LiveObjectRegistry::get().add (this);
-    }
-
-    ~WASAPIAudioIODeviceType() override
-    {
-        // smoothie: deregister FIRST — blocks on in-flight notify().
-        LiveObjectRegistry::get().remove (this);
-
-        if (notifyClient != nullptr)
-            enumerator->UnregisterEndpointNotificationCallback (notifyClient);
     }
 
     //==============================================================================
@@ -1812,7 +1842,8 @@ public:
                                                    getTypeName(),
                                                    devices.outputDeviceIds[outputIndex],
                                                    devices.inputDeviceIds [inputIndex],
-                                                   deviceMode));
+                                                   deviceMode,
+                                                   [this] { reportDeviceChange (DeviceChange::openDevice); }));
 
             if (! device->initialise())
                 device = nullptr;
@@ -1839,44 +1870,13 @@ public:
     Devices devices;
 
 private:
-    DeviceChangeDetector deviceChangeDetector { L"Windows Audio", [this] { systemDeviceChanged(); } };
+    // smoothie: Windows' word on endpoints, to the sink; the rescan is the
+    // sink owner's.
+    MMDeviceChangeNotifier changeNotifier { [this] { reportDeviceChange (DeviceChange::list); } };
     WASAPIDeviceMode deviceMode;
     bool hasScanned = false;
     ComSmartPtr<IMMDeviceEnumerator> enumerator;
 
-    //==============================================================================
-    class ChangeNotificationClient final : public ComBaseClassHelper<IMMNotificationClient>
-    {
-    public:
-        explicit ChangeNotificationClient (WASAPIAudioIODeviceType* d)
-            : ComBaseClassHelper (0), device (d) {}
-
-        JUCE_COMRESULT OnDeviceAdded (LPCWSTR)                             override { return notify(); }
-        JUCE_COMRESULT OnDeviceRemoved (LPCWSTR)                           override { return notify(); }
-        JUCE_COMRESULT OnDeviceStateChanged (LPCWSTR, DWORD)               override { return notify(); }
-        JUCE_COMRESULT OnDefaultDeviceChanged (EDataFlow, ERole, LPCWSTR)  override { return notify(); }
-        JUCE_COMRESULT OnPropertyValueChanged (LPCWSTR, const PROPERTYKEY) override { return notify(); }
-
-    private:
-        WeakReference<WASAPIAudioIODeviceType> device;
-
-        HRESULT notify()
-        {
-            // smoothie: fenced — the WeakReference null-check alone is
-            // not atomic against the type's destruction on another
-            // thread; the registry lock is (see LiveObjectRegistry).
-            LiveObjectRegistry::get().ifLive (device.get(), [&]
-            {
-                device->deviceChangeDetector.triggerAsyncDeviceChangeCallback();
-            });
-
-            return S_OK;
-        }
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChangeNotificationClient)
-    };
-
-    ComSmartPtr<ChangeNotificationClient> notifyClient;
 
     //==============================================================================
     static String getDefaultEndpoint (IMMDeviceEnumerator* enumerator, bool forCapture)
@@ -1904,14 +1904,9 @@ private:
     //==============================================================================
     Devices scan()
     {
-        if (enumerator == nullptr)
-        {
-            if (! check (enumerator.CoCreateInstance (__uuidof (MMDeviceEnumerator))))
-                return {};
-
-            notifyClient = new ChangeNotificationClient (this);
-            enumerator->RegisterEndpointNotificationCallback (notifyClient);
-        }
+        if (enumerator == nullptr
+            && ! check (enumerator.CoCreateInstance (__uuidof (MMDeviceEnumerator))))
+            return {};
 
         auto defaultRenderer = getDefaultEndpoint (enumerator, false);
         auto defaultCapture  = getDefaultEndpoint (enumerator, true);
@@ -1978,18 +1973,6 @@ private:
         result.outputDeviceNames.appendNumbersToDuplicates (false, false);
 
         return result;
-    }
-
-    //==============================================================================
-    void systemDeviceChanged()
-    {
-        const auto newDevices = scan();
-
-        if (std::exchange (devices, newDevices) != newDevices)
-        {
-            hasScanned = true;
-            reportDeviceChange (AudioIODeviceType::DeviceChange::list);
-        }
     }
 
     //==============================================================================

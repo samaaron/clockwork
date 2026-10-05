@@ -305,11 +305,10 @@ static ASIOAudioIODevice* currentASIODev[maxNumASIODevices] = {};
 extern HWND juce_messageWindowHandle;
 
 class ASIOAudioIODeviceType;
-static void sendASIODeviceChangeToListeners (ASIOAudioIODeviceType*);
+static void reportASIODeviceChange (ASIOAudioIODeviceType*);
 
 //==============================================================================
-class ASIOAudioIODevice final : public AudioIODevice,
-                                private Timer
+class ASIOAudioIODevice final : public AudioIODevice
 {
 public:
     ASIOAudioIODevice (ASIOAudioIODeviceType* ownerType, const String& devName,
@@ -445,6 +444,10 @@ public:
 
         inBuffers.calloc (totalNumInputChans + 8);
         outBuffers.calloc (totalNumOutputChans + 8);
+
+        // smoothie: a reset the driver asked for (resetRequest) reloads it.
+        if (resetRequested.exchange (false))
+            needToReset = true;
 
         if (needToReset)
         {
@@ -605,7 +608,6 @@ public:
     void close() override
     {
         error.clear();
-        stopTimer();
         stop();
 
         if (asioObject != nullptr && deviceIsOpen)
@@ -693,38 +695,35 @@ public:
         }
 
         insideControlPanelModalLoop = false;
+
+        // smoothie: a reset asked for while the panel was up is said now.
+        if (resetRequested)
+            reportASIODeviceChange (owner);
+
         return done;
     }
 
-    void resetRequest() noexcept
+    // smoothie: the driver can't carry on as opened once it has asked to be
+    // reset — opened again, it is reloaded (needToReset). Not while its
+    // control panel is up.
+    LiveState readLiveState() override
     {
-        startTimer (500);
+        LiveState state;
+        state.alive      = asioObject != nullptr;
+        state.mustReopen = resetRequested && ! insideControlPanelModalLoop;
+        return state;
     }
 
-    void timerCallback() override
+    // smoothie: the driver asked to be reset (its buffer size, rate or
+    // latencies changed under it). Said to the type's sink from whatever
+    // thread the driver asked on — the owner opens the device again and the
+    // open reloads the driver; nothing here closes or reopens it.
+    void resetRequest() noexcept
     {
+        resetRequested = true;
+
         if (! insideControlPanelModalLoop)
-        {
-            stopTimer();
-            JUCE_ASIO_LOG ("restart request!");
-
-            auto* oldCallback = currentCallback;
-            close();
-            needToReset = true;
-            open (BigInteger (currentChansIn), BigInteger (currentChansOut),
-                  currentSampleRate, currentBlockSizeSamples);
-
-            reloadChannelNames();
-
-            if (oldCallback != nullptr)
-                start (oldCallback);
-
-            sendASIODeviceChangeToListeners (owner);
-        }
-        else
-        {
-            startTimer (100);
-        }
+            reportASIODeviceChange (owner);
     }
 
 private:
@@ -762,7 +761,7 @@ private:
     bool deviceIsOpen = false, isStarted = false, buffersCreated = false;
     std::atomic<bool> calledback { false };
     bool postOutput = true, needToReset = false;
-    bool insideControlPanelModalLoop = false;
+    std::atomic<bool> insideControlPanelModalLoop { false }, resetRequested { false };
     bool shouldUsePreferredSize = false;
     int xruns = 0;
 
@@ -1280,7 +1279,6 @@ private:
 
         deviceIsOpen = false;
         needToReset = false;
-        stopTimer();
         return error;
     }
 
@@ -1535,9 +1533,10 @@ public:
         return nullptr;
     }
 
-    void sendDeviceChangeToListeners()
+    // smoothie: an open device's change, to the sink.
+    void reportOpenDeviceChange()
     {
-        reportDeviceChange (AudioIODeviceType::DeviceChange::list);
+        reportDeviceChange (DeviceChange::openDevice);
     }
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (ASIOAudioIODeviceType)
@@ -1641,10 +1640,10 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ASIOAudioIODeviceType)
 };
 
-void sendASIODeviceChangeToListeners (ASIOAudioIODeviceType* type)
+void reportASIODeviceChange (ASIOAudioIODeviceType* type)
 {
     if (type != nullptr)
-        type->sendDeviceChangeToListeners();
+        type->reportOpenDeviceChange();
 }
 
 } // namespace juce

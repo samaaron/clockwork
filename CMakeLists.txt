@@ -623,6 +623,7 @@ if(CLOCKWORK_DEVICE)
         ${NATIVE_SRC}/ClockworkEmbedDevice.cpp
         ${NATIVE_SRC}/DevicePolicy.cpp
         ${NATIVE_SRC}/AsioDriverCheck.cpp
+        ${NATIVE_SRC}/DeviceLaneApartment.cpp
         ${NATIVE_SRC}/AudioRecovery.cpp
         ${NATIVE_SRC}/AggregateDeviceHelper.cpp)
 endif()
@@ -832,7 +833,7 @@ if(CLOCKWORK_LINK)
 endif()
 
 if(WIN32)
-    target_link_libraries(clockwork PUBLIC Ws2_32 winmm)
+    target_link_libraries(clockwork PUBLIC Ws2_32 winmm ole32)
 elseif(APPLE)
     target_link_libraries(clockwork PUBLIC
         "-framework CoreAudio" "-framework AudioUnit" "-framework Foundation"

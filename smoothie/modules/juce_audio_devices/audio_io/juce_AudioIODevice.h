@@ -349,6 +349,10 @@ public:
     struct LiveState
     {
         bool alive = true;            /**< false once the driver says it has gone */
+        bool mustReopen = false;      /**< the driver says it cannot carry on as
+                                           opened (its stream invalidated by a
+                                           format change, a reset requested): it
+                                           has to be opened again */
         double sampleRate = 0;        /**< 0 when the driver can't say */
         int numOutputChannels = -1;   /**< -1 when the driver can't say */
         int numInputChannels = -1;    /**< -1 when the driver can't say */

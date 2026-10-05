@@ -52,6 +52,23 @@ bool reported(EngineFixture& fix, const std::string& name) {
     return false;
 }
 
+// Whether the last device report says `name` plays at the engine's rate,
+// as the GUI's output menu shows it: -1 if no report lists it. The report is
+// mode, current device, the outputs' names, the rate, then one flag per
+// output in the same order.
+int playsAtTheRate(EngineFixture& fix, const std::string& name) {
+    int result = -1;
+    for (auto& r : fix.allReplies()) {
+        if (r.address != CLOCKWORK_SYS("devices")) continue;
+        const auto p = r.parsed();
+        int outputs = 0;
+        while (2 + outputs < p.argCount() && !p.argString(2 + outputs).empty()) ++outputs;
+        for (int i = 0; i < outputs; ++i)
+            if (p.argString(2 + i) == name) result = p.argInt(2 + outputs + 1 + i);
+    }
+    return result;
+}
+
 bool playingOn(EngineFixture& fix, const std::string& name, int timeoutMs = 10000) {
     return fix.pollUntil([&] { return fix.engine().currentDevice().name == name; },
                          timeoutMs);
@@ -288,6 +305,53 @@ TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
         if (r.address == CLOCKWORK_SYS("setup")) ++rebuilds;
     CHECK(rebuilds == 0);
     CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("DeviceEvents: the device played on is played on at the rate the "
+          "system's sound settings change it to", "[DeviceEvents]") {
+    // A shared-mode device runs at the rate the system sets. When the user
+    // changes it, the stream the engine opened cannot carry on — the driver
+    // says so — and the engine rebuilds at the new rate rather than playing
+    // at the wrong pitch or not at all.
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));    // at 48k
+    subscribe(fix);
+
+    sys->device("Fake Interface")->systemRate = 44100.0;
+    REQUIRE(sys->reportOpenDeviceChanged());
+
+    OscReply setup;
+    const bool rebuilt = fix.waitForReply(CLOCKWORK_SYS("setup"), setup, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(rebuilt);
+    CHECK(setup.parsed().argInt(0) == 44100);
+    CHECK(fix.engine().currentDevice().name == "Fake Interface");
+    CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("DeviceEvents: a device plugged back in is reported as it is now, "
+          "not as it was", "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));   // at 48k
+    subscribe(fix);
+    auto speakers = sys->device("Fake Speakers");
+
+    speakers->hidden = true;                     // unplugged...
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    {   // ...and back, as something that plays only at 96k
+        auto hold = fix.engine().testHoldSwapGate();
+        speakers->sampleRates = { 96000.0 };
+        speakers->hidden = false;
+    }
+    fix.clearReplies();
+    REQUIRE(sys->reportListChanged());
+
+    const bool reported = fix.pollUntil([&] { return playsAtTheRate(fix, "Fake Speakers") >= 0; },
+                                        10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(reported);
+    CHECK(playsAtTheRate(fix, "Fake Speakers") == 0);
 }
 
 

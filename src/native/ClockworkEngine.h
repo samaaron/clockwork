@@ -52,6 +52,7 @@
 #include "native/LinkAudioHost.h"
 #include "DeviceInfo.h"
 #include "DevicePolicy.h"
+#include "DeviceLaneApartment.h"
 #include "AudioRecovery.h"
 #include "OscBuilder.h"
 #include "HeadlessDriver.h"
@@ -370,7 +371,8 @@ public:
     // switches already run on their own worker; this applies the same
     // discipline to the paths that didn't. Replies still work from here: the
     // egress accepts off-thread producers (sendSwitchDone always has).
-    void postDeviceTask(std::function<void()> task);
+    // False when the lane has stopped (shutdown) and the task was dropped.
+    bool postDeviceTask(std::function<void()> task);
 
     // Device control surface (called by EngineControl + engine lifecycle).
     // Builds the device/input/info report and pushes it to notify subscribers.
@@ -721,8 +723,8 @@ private:
     // follow it is said once, not on every pass. Device lane.
     std::string mDefaultSeen;
     // The device played on, as its driver reports it now: gone where it
-    // stands, or with other channels than it was opened with, it is opened
-    // again. True if it acted.
+    // stands, unable to carry on as opened, or with other channels than it
+    // was opened with, it is opened again. True if it acted.
     bool reconcileOpenDevice();
 
     // Destroy and recreate mDeviceManager, then re-open the default device and
@@ -738,11 +740,11 @@ private:
     // Shared by shutdown() and recreateDeviceManager().
     void teardownDeviceManager();
 
-    // Run fn on the JUCE message thread and wait for it. Returns true when it
-    // ran there (or the caller already is the message thread). If the queue
-    // never drains — embeddings with no pump (NIF/BEAM, Linux standalone) —
-    // falls back to running fn inline after timeoutMs and returns false.
-    bool runOnMessageThread(std::function<void()> fn, int timeoutMs);
+    // On a fresh device manager, the driver boot settled on: recovery must
+    // not change the driver the user chose (a fresh manager starts on JUCE's
+    // first type). Not under the factory boundary — an injected manager owns
+    // its types.
+    void restoreBootDriver();
 
     // ── Audio source state machine ──────────────────────────────────────────
     //
@@ -1032,17 +1034,22 @@ private:
     std::atomic<bool>          mDebounceSwitchStop{false};
     void executePendingSwitch();   // runs on the device task lane
 
-    // THE device mutation lane. Every deferred device mutation — GUI
-    // debounced switches, mode changes, hotplug re-attaches, default-output
-    // follows, recovery — runs here via postDeviceTask(), serialised, off
-    // the JUCE message thread (which the Linux standalone never pumps).
-    // Started on first use and joined in shutdown().
+    // THE device lane. The devices a device boot opens are opened, started,
+    // switched, recovered and closed here, and nowhere else: boot's open and
+    // start, every control verb's switch, every pass of reconcileDevices,
+    // recovery, and shutdown's close — serialised, on one thread, in the
+    // apartment the device layer needs (DeviceLaneApartment.h). Started on
+    // first use (a device boot's open) and joined in shutdown().
     std::thread                        mDeviceTaskThread;
     std::mutex                         mDeviceTaskMutex;
-    std::condition_variable            mDeviceTaskCv;
     std::deque<std::function<void()>>  mDeviceTasks;
     std::atomic<bool>                  mDeviceTaskStop{false};
+    clockwork::device::DeviceLaneApartment mDeviceLane;   // its apartment and its wake
+    clockwork::device::ProcessComApartment mProcessCom;   // any other thread's COM
     void deviceTaskLoop();
+    // `work` on the device lane, waited for; its exception, if any, rethrown
+    // here. On the calling thread when the lane has stopped (shutdown).
+    void runOnDeviceLane(const std::function<void()>& work);
 
     // Device reopen — rejected while one is in flight or within a short cooldown
     // after completion; accepted requests run on the device task lane.
@@ -1203,6 +1210,13 @@ private:
     // the first scan.
     mutable std::mutex                           mListDevicesMutex;
     mutable std::vector<DeviceInfo>              mCachedDevices;
+    // Each listed device's probe (its rates, buffer sizes and channels, read
+    // from a device created to be asked), by driver, name and direction, so
+    // a rescan probes only devices it has not seen: on Windows each probe
+    // activates the device, and on macOS one of an aggregate's sub-device
+    // can stop it. A name gone from its driver's list is forgotten, so a
+    // device plugged back in is probed afresh. Under the gate (listDevices).
+    mutable std::map<std::string, DeviceInfo>    mDeviceProbes;
     // The audio device list as reconcileDevices last reported it, so
     // a change that leaves the list as it was (a device's own property, our
     // own aggregate work) doesn't re-send the device report. Device lane only.

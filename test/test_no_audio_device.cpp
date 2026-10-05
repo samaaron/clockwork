@@ -19,7 +19,6 @@
 #include "FakeAudioDevice.h"
 #include <atomic>
 #include <memory>
-#include <optional>
 #include <string>
 
 using fake_audio::fakeEngineConfig;
@@ -103,8 +102,8 @@ TEST_CASE("NoAudioDevice: a device plugged in while the engine waits is found "
 
 // A swap holds the gate across a moment with no audio source (stop, rebuild,
 // start). A watchdog that took that moment for "waiting for a device" would
-// recover onto the system default and undo the switch. Held from before the
-// watchdog starts, so every poll sees a swap in flight.
+// recover onto the system default and undo the switch. The case polls the
+// watchdog itself, so every poll sees the swap in flight.
 TEST_CASE("NoAudioDevice: the watchdog leaves a device swap in flight alone",
           "[NoAudioDevice]") {
     auto sys = machineWithNothingPluggedIn();
@@ -114,17 +113,14 @@ TEST_CASE("NoAudioDevice: the watchdog leaves a device swap in flight alone",
     cfg.watchdogStallMs  = 100;
     cfg.watchdogPollMs   = 20;
     cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };
-    std::optional<ClockworkEngine::TestSwapHold> swap;
-    EngineFixture fix(cfg, [&](ClockworkEngine& engine) {
-        swap.emplace(engine.testHoldSwapGate());
-    });
+    EngineFixture fix(cfg);
     REQUIRE(fix.engine().waitingForAudioDevice());
 
+    auto swap = fix.engine().testHoldSwapGate();
     sys->device("Fake Speakers")->hidden = false;        // there to recover onto
     for (int i = 0; i < 20; ++i) {
         clockMs->fetch_add(20);
         fix.engine().watchdogPoll();
     }
     CHECK(fix.engine().watchdogRecoveryCount() == 0);
-    swap.reset();
 }
