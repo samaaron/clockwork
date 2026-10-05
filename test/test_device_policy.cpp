@@ -69,45 +69,11 @@ static HD decide(const std::string& prefOut,
         prefOut, prefIn, currentOut, inChan, visible);
 }
 
-TEST_CASE("Hotplug: preferred output + preferred input both return",
-          "[Hotplug]") {
-    // USB interface with its own mic came back — aggregate with both.
-    auto d = decide("MOTU UltraLite", "MOTU UltraLite Mic",
-                    "MacBook Pro Speakers", 0,
-                    {"MacBook Pro Speakers", "MOTU UltraLite",
-                     "MOTU UltraLite Mic"});
-    REQUIRE(d.switchOutput);
-    REQUIRE(d.outputName == "MOTU UltraLite");
-    REQUIRE(d.inputName  == "MOTU UltraLite Mic");
-}
-
-TEST_CASE("Hotplug: the output being played on has gone, and the preferred "
-          "output is here = switch to it", "[Hotplug]") {
-    auto d = decide("MOTU UltraLite", "", "AirPods", 0,
-                    {"MacBook Pro Speakers", "MOTU UltraLite"});
-    REQUIRE(d.switchOutput);
-    REQUIRE(d.outputName == "MOTU UltraLite");
-    REQUIRE_FALSE(d.reopen);
-}
-
 TEST_CASE("Hotplug: the output being played on is listed under its "
           "disambiguated name = still here", "[Hotplug]") {
     auto d = decide("", "", "MOTU UltraLite", 0,
                     {"MacBook Pro Speakers", "MOTU UltraLite (2)"});
     REQUIRE_FALSE(d.reopen);
-}
-
-TEST_CASE("Hotplug: preferred input visible but preferred output NOT visible "
-          "= only input re-aggregate",
-          "[Hotplug]") {
-    // Output device is gone but input came back. Shouldn't try to
-    // switch to a missing output — just re-aggregate for the input.
-    auto d = decide("MOTU UltraLite", "MacBook Pro Microphone",
-                    "MacBook Pro Speakers", 0,
-                    {"MacBook Pro Speakers", "MacBook Pro Microphone"});
-    REQUIRE_FALSE(d.switchOutput);
-    REQUIRE(d.switchInput);
-    REQUIRE(d.inputName == "MacBook Pro Microphone");
 }
 
 // =============================================================================

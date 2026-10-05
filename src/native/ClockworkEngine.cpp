@@ -4183,8 +4183,15 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         if (!deviceName.empty()) {
             setup.outputDeviceName = juce::String(deviceName);
         } else if (!mDeviceMode.empty()) {
-            // Re-assert the user's explicit output choice on input-only switches
-            setup.outputDeviceName = juce::String(mDeviceMode);
+            // An input-only switch re-asserts the user's chosen output — when
+            // it is there. Gone (unplugged, the engine fallen back to another),
+            // the input joins what is playing, and the chosen output's return
+            // is the hot-plug pass's to act on.
+            std::vector<std::string> outputs;
+            if (auto* type = mDeviceManager->getCurrentDeviceTypeObject())
+                for (auto& n : type->getDeviceNames(false)) outputs.push_back(n.toStdString());
+            if (clockwork::device::deviceNameVisible(mDeviceMode, outputs))
+                setup.outputDeviceName = juce::String(mDeviceMode);
         }
         // "__none__" can arrive here with numInputChannels still > 0 (the
         // exclusive-pair resolver yields a carried-over patchbay input when

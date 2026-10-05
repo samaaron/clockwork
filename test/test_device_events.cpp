@@ -289,3 +289,56 @@ TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
     CHECK(rebuilds == 0);
     CHECK(fix.waitForBlocks(20));
 }
+
+
+TEST_CASE("DeviceEvents: the user's microphone coming back joins the default output, "
+          "and the user's output coming back as the default goes is played on with "
+          "that microphone", "[DeviceEvents]") {
+    auto sys = std::make_shared<fake_audio::FakeSystem>();
+    auto speakers   = device("Fake Speakers", 2, 0);
+    auto headphones = device("Fake Headphones", 2, 0);
+    auto mic        = device("Fake Microphone", 0, 2);
+    sys->types.push_back({ "FakeDriver", { speakers, headphones, mic }, 0 });
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    // The user's choice: headphones, and a microphone.
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("devices/switch"))
+        << "Fake Headphones" << 0.0f << static_cast<osc::int32>(0) << "Fake Microphone";
+    fix.send(b.end());
+    OscReply done;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), done, 10000));
+    REQUIRE(done.parsed().argInt(0) == 1);
+
+    {   // both unplugged at once
+        auto hold = fix.engine().testHoldSwapGate();
+        headphones->hidden = true;
+        mic->hidden = true;
+    }
+    REQUIRE(sys->reportListChanged());
+    REQUIRE(fix.pollUntil([&] {
+        const auto cur = fix.engine().currentDevice();
+        return cur.name == "Fake Speakers" && cur.activeInputChannels == 0;
+    }, 10000));
+
+    // The microphone comes back first: it joins what is playing.
+    fix.clearReplies();
+    mic->hidden = false;
+    REQUIRE(sys->reportListChanged());
+    const bool joined = recordingFrom(fix, "Fake Speakers", "Fake Microphone");
+    INFO(fix.debugMessagesDump());
+    CHECK(joined);
+    CHECK(fix.pollUntil([&] { return reportedInput(fix, "Fake Microphone"); }, 10000));
+
+    {   // the headphones come back as the speakers go
+        auto hold = fix.engine().testHoldSwapGate();
+        speakers->hidden = true;
+        headphones->hidden = false;
+    }
+    REQUIRE(sys->reportListChanged());
+    CHECK(recordingFrom(fix, "Fake Headphones", "Fake Microphone"));
+    CHECK(fix.pollUntil([&] { return reported(fix, "Fake Headphones"); }, 10000));
+    CHECK(fix.engine().preferredOutputDevice() == "Fake Headphones");
+    CHECK(fix.waitForBlocks(20));
+}
