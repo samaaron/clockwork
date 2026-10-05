@@ -225,6 +225,8 @@ public:
     // Wait until the audio thread has rendered `n` more blocks, or time out.
     // Anchors a read of live state to DSP progress rather than wall clock,
     // which a loaded runner cannot honour.
+    // n more blocks rendered: by the driver, within timeoutMs; or, under the
+    // manual pump, rendered here and now (the timeout is not used).
     bool waitForBlocks(uint32_t n, int timeoutMs = 2000);
 
     // Poll `pred()` every few ms until true or timeout. In manual-pump mode

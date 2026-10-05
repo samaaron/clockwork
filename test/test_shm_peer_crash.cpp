@@ -87,7 +87,9 @@ struct AttachServer {
     std::string        endpoint;
     shm_attach::server server;
     AttachServer(EngineFixture& fx, unsigned port)
-        : endpoint(shm_attach::default_endpoint(port)) {
+        // The case's port, and this process's id: two runs at once must not
+        // serve each other's peers.
+        : endpoint(shm_attach::default_endpoint(port) + "." + std::to_string(getpid())) {
         std::string err;
         REQUIRE(server.start(endpoint, fx.engine().shmNativeHandle(),
                              fx.engine().shmSegmentSize(), &err));

@@ -175,9 +175,16 @@ bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {
     const uint32_t start =
         mEngine.audioCallback().processCount.load(std::memory_order_acquire);
     // Unsigned wrap is fine: (now - start) counts blocks since the snapshot.
-    return pollUntil([&] {
-        return mEngine.audioCallback().processCount.load(std::memory_order_acquire) - start >= n;
-    }, timeoutMs);
+    auto rendered = [&] {
+        return mEngine.audioCallback().processCount.load(std::memory_order_acquire) - start;
+    };
+    // Manual pump: the case is the clock. The blocks are rendered here, now,
+    // however busy the machine is — no deadline to miss.
+    if (mManualPump) {
+        pumpBlock(n);
+        return rendered() >= n;
+    }
+    return pollUntil([&] { return rendered() >= n; }, timeoutMs);
 }
 
 std::vector<OscReply> EngineFixture::allReplies() const {

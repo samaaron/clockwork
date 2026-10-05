@@ -15,6 +15,11 @@
 #include "clockwork_client.h"
 
 #include <string>
+#ifdef _WIN32
+#include <process.h>   // _getpid
+#else
+#include <unistd.h>    // getpid
+#endif
 
 #if !defined(_WIN32)
 #  include <sys/socket.h>
@@ -34,9 +39,17 @@ ClockworkEngine::Config attachConfig(unsigned port) {
     return cfg;
 }
 
-// An endpoint no other test (and no other run of this one) is using: the
-// derived name carries the port, and the port is unique to the case.
-std::string endpointFor(unsigned port) { return shm_attach::default_endpoint(port); }
+// An endpoint no other test, and no other process running these tests, is
+// using: the derived name carries the case's port (unique to the case) and
+// this process's id (unique to the run — two runs at once once shared it).
+std::string endpointFor(unsigned port) {
+#ifdef _WIN32
+    const auto pid = static_cast<unsigned long>(_getpid());
+#else
+    const auto pid = static_cast<unsigned long>(getpid());
+#endif
+    return shm_attach::default_endpoint(port) + "." + std::to_string(pid);
+}
 
 } // namespace
 
