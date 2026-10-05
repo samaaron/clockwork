@@ -400,18 +400,25 @@ static std::string chooseInput(const std::string& requested,
 
 #include "DeviceInfo.h"
 
-static DeviceInfo withTransport(uint32_t fourCC) {
+// What a device is, as its driver says (DeviceInfo's traits).
+enum class Kind { wired, wireless, isVirtual, aggregate };
+static DeviceInfo& setKind(DeviceInfo& d, Kind kind) {
+    d.wireless       = kind == Kind::wireless;
+    d.isVirtual      = kind == Kind::isVirtual;
+    d.aggregateClass = kind == Kind::aggregate;
+    return d;
+}
+static DeviceInfo withKind(Kind kind) {
     DeviceInfo d;
     d.name = "X";
-    d.transportType = fourCC;
-    return d;
+    return setKind(d, kind);
 }
 
 TEST_CASE("Aggregate suitability: wireless transports are unsuitable",
           "[DeviceInfo]") {
-    REQUIRE_FALSE(withTransport(CoreAudioTransport::kBluetooth)
+    REQUIRE_FALSE(withKind(Kind::wireless)
                       .isSuitableForAggregate());
-    REQUIRE_FALSE(withTransport(CoreAudioTransport::kAirPlay)
+    REQUIRE_FALSE(withKind(Kind::wireless)
                       .isSuitableForAggregate());
 }
 
@@ -429,14 +436,13 @@ using clockwork::device::selectReportedDevices;
 
 namespace {
 DeviceInfo dev(const std::string& name, const std::string& driver,
-               int outs, int ins, uint32_t transport = 0) {
+               int outs, int ins, Kind kind = Kind::wired) {
     DeviceInfo d;
     d.name = name;
     d.typeName = driver;
     d.maxOutputChannels = outs;
     d.maxInputChannels = ins;
-    d.transportType = transport;
-    return d;
+    return setKind(d, kind);
 }
 } // namespace
 
@@ -444,7 +450,7 @@ TEST_CASE("ReportSelect: wireless devices are hidden from both lists",
           "[ReportSelect]") {
     auto sel = selectReportedDevices(
         { dev("Speakers", "CoreAudio", 2, 0),
-          dev("AirPods", "CoreAudio", 2, 1, CoreAudioTransport::kBluetooth) },
+          dev("AirPods", "CoreAudio", 2, 1, Kind::wireless) },
         "Speakers", "", "CoreAudio", {});
     REQUIRE(sel.outputs.size() == 1);
     REQUIRE(sel.outputs[0].name == "Speakers");
@@ -457,13 +463,13 @@ TEST_CASE("ReportSelect: unpairable current output clears the input list",
     // "-- None --" row is client-side; an empty input list here is the
     // deliberate signal.
     auto sel = selectReportedDevices(
-        { dev("AirPods", "CoreAudio", 2, 0, CoreAudioTransport::kAirPlay),
+        { dev("AirPods", "CoreAudio", 2, 0, Kind::wireless),
           dev("Mic", "CoreAudio", 0, 1) },
         "AirPods", "", "CoreAudio", {});
     REQUIRE(sel.inputs.empty());
     // Virtual current output pairs fine — inputs stay.
     auto sel2 = selectReportedDevices(
-        { dev("BlackHole", "CoreAudio", 2, 0, CoreAudioTransport::kVirtual),
+        { dev("BlackHole", "CoreAudio", 2, 0, Kind::isVirtual),
           dev("Mic", "CoreAudio", 0, 1) },
         "BlackHole", "", "CoreAudio", {});
     REQUIRE(sel2.inputs.size() == 1);
@@ -615,22 +621,20 @@ using clockwork::device::planBootInputPairing;
 using clockwork::device::BootInputPairing;
 
 namespace {
-DeviceInfo dev(const std::string& name, int outs, int ins,
-               uint32_t transport = 0x626C746E /* 'bltn' */) {
+DeviceInfo dev(const std::string& name, int outs, int ins, Kind kind = Kind::wired) {
     DeviceInfo d;
     d.name = name;
     d.maxOutputChannels = outs;
     d.maxInputChannels  = ins;
-    d.transportType     = transport;
-    return d;
+    return setKind(d, kind);
 }
 
 const std::vector<DeviceInfo> kBtMachine = {
     dev("MacBook Pro Speakers",   2, 0),
     dev("MacBook Pro Microphone", 0, 1),
-    dev("WH-1000XM5",             2, 1, CoreAudioTransport::kBluetooth),
-    dev("Loopback Audio",         4, 4, CoreAudioTransport::kVirtual),
-    dev("Multi-Output Device",    2, 0, CoreAudioTransport::kAggregate),
+    dev("WH-1000XM5",             2, 1, Kind::wireless),
+    dev("Loopback Audio",         4, 4, Kind::isVirtual),
+    dev("Multi-Output Device",    2, 0, Kind::aggregate),
 };
 } // namespace
 

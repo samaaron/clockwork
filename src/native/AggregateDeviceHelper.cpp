@@ -21,7 +21,6 @@
 #include "AggregateDeviceHelper.h"
 #include "clockwork_product.h"
 #include "clockwork_config.h"   // clockwork_log
-#include "DeviceInfo.h"
 #include "DevicePolicy.h"
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -433,8 +432,8 @@ std::string createOrUpdate(const std::string& outputDeviceName,
     CFStringRef* secondTry = &outUIDRef;
     const char*  firstName  = "input";
     const char*  secondName = "output";
-    if (CoreAudioTransport::isVirtual(inTransport)
-        && !CoreAudioTransport::isVirtual(outTransport)) {
+    if (inTransport == kAudioDeviceTransportTypeVirtual
+        && outTransport != kAudioDeviceTransportTypeVirtual) {
         firstTry = &outUIDRef; secondTry = &inUIDRef;
         firstName = "output"; secondName = "input";
     }

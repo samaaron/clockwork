@@ -1539,6 +1539,9 @@ public:
         reportDeviceChange (DeviceChange::openDevice);
     }
 
+    // smoothie: ASIO has drivers, not an operating-system default.
+    String getSystemDefaultDeviceName (bool) const override    { return {}; }
+
     JUCE_DECLARE_WEAK_REFERENCEABLE (ASIOAudioIODeviceType)
 
 private:

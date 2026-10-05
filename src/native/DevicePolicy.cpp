@@ -178,7 +178,7 @@ DeviceListSelection selectReportedDevices(
     std::vector<DeviceInfo> outputs, inputs;
     for (auto& d : all) {
         if (d.isPlatformClutter(sel.pipewireActive)) continue;
-        if (d.maxOutputChannels > 0 && !d.isWirelessTransport())
+        if (d.maxOutputChannels > 0 && !d.wireless)
             outputs.push_back(d);
         if (d.maxInputChannels > 0 && d.isSuitableForInput())
             inputs.push_back(d);

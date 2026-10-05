@@ -113,15 +113,45 @@ public:
                                          const String& inputDeviceName) = 0;
 
     //==============================================================================
+    /** smoothie addition: what a device is, as its driver says without
+        opening it. What the driver can't say is left as it is here. */
+    struct DeviceTraits
+    {
+        bool wireless = false;        /**< its link negotiates its own rate and
+                                           buffer (AirPlay, Bluetooth) */
+        bool isVirtual = false;       /**< made in software (Loopback, BlackHole) */
+        bool aggregateClass = false;  /**< made of other devices (an aggregate, a
+                                           multi-output device) */
+        int numOutputChannels = -1;   /**< -1: can't say without opening it */
+        int numInputChannels = -1;
+        String kind;                  /**< the driver's own word for how it is
+                                           connected, for logs ("usb ", "blue") */
+    };
+
+    /** smoothie addition: the traits of the device getDeviceNames lists as
+        `deviceName`. The default knows nothing about it.
+    */
+    virtual DeviceTraits getDeviceTraits (const String& deviceName) const;
+
+    /** smoothie addition: the operating system's default output (or input)
+        among this type's devices, by the name getDeviceNames gives it; empty
+        when the type has no such thing (ASIO) or can't say. The default
+        answers by getDefaultDeviceIndex.
+    */
+    virtual String getSystemDefaultDeviceName (bool forInput) const;
+
+    //==============================================================================
     /** smoothie addition: what a device-change sink is told changed. */
     enum class DeviceChange
     {
-        list,       /**< Devices came or went: the lists need rescanning. */
-        openDevice  /**< An open device of this type changed where it stands
-                         (its channels, its rate) or stopped being alive. The
-                         device does nothing about it by itself: the sink's
-                         owner looks (AudioIODevice::readLiveState) and
-                         decides. */
+        list,          /**< Devices came or went: the lists need rescanning. */
+        openDevice,    /**< An open device of this type changed where it stands
+                            (its channels, its rate) or stopped being alive. The
+                            device does nothing about it by itself: the sink's
+                            owner looks (AudioIODevice::readLiveState) and
+                            decides. */
+        systemDefault  /**< The operating system's default device moved
+                            (getSystemDefaultDeviceName). */
     };
 
     /** smoothie addition: the one way this type's device changes leave it.

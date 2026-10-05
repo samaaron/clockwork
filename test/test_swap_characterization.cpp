@@ -282,3 +282,37 @@ TEST_CASE("Swap: a reopen lands back on the user's device, not on the system def
 
 // ── Device-mutation phase ───────────────────────────────────────────────────
 
+
+#ifdef __APPLE__
+// A wireless link negotiates its own rate (AirPlay's is 44.1k). Leaving it
+// for a wired device goes back to the rate the session had before it — the
+// user's, not the link's — unless the switch asks for one. macOS's: a
+// CoreAudio wireless default is opened through the default device.
+TEST_CASE("Swap: leaving AirPlay goes back to the rate the session had before "
+          "it, unless a rate is asked for", "[Swap]") {
+    auto sys = std::make_shared<FakeSystem>();
+    sys->types.push_back({ "FakeDriver", {}, 0 });
+    addOutput(*sys, "Fake Speakers", 2);
+    auto airplay = addOutput(*sys, "Fake AirPlay", 2);
+    airplay->sampleRates = { 44100.0 };
+    airplay->kind = "airp";
+    airplay->wireless = true;
+    auto bluetooth = addOutput(*sys, "Fake Bluetooth", 2);
+    bluetooth->kind = "blue";
+    bluetooth->wireless = true;
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));    // at 48k
+    auto rate = [&] { return static_cast<int>(fix.engine().currentDevice().activeSampleRate); };
+
+    REQUIRE(switchWhenFree(fix, "Fake AirPlay").success);
+    CHECK(rate() == 44100);
+    REQUIRE(switchWhenFree(fix, "Fake Bluetooth").success);
+    CHECK(rate() == 44100);                 // wireless to wireless: the link's rate stays
+    REQUIRE(switchWhenFree(fix, "Fake Speakers").success);
+    INFO(fix.debugMessagesDump());
+    CHECK(rate() == 48000);                 // back to the session's own
+
+    REQUIRE(switchWhenFree(fix, "Fake AirPlay").success);
+    REQUIRE(switchWhenFree(fix, "Fake Speakers", 44100.0).success);
+    CHECK(rate() == 44100);                 // a rate asked for wins
+}
+#endif

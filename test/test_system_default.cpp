@@ -99,11 +99,11 @@ TEST_CASE("SystemDefault: in system mode the engine follows the default every "
     // for a real move to fall into.
     // The headphones come out: the default is the speakers...
     setDefault(fix, *sys, 0);
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     CHECK(playingOn(fix, "Fake Speakers"));
     // ...and they go back in.
     setDefault(fix, *sys, 1);
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     INFO(fix.debugMessagesDump());
     CHECK(playingOn(fix, "Fake Interface"));
     CHECK(fix.engine().preferredOutputDevice().empty());
@@ -120,7 +120,7 @@ TEST_CASE("SystemDefault: a default that moves while a swap holds the devices is
     {
         auto hold = fix.engine().testHoldSwapGate();   // a swap, longer than any real one
         sys->types[0].defaultDeviceIndex = 0;
-        fix.engine().testSystemDefaultOutputChanged();
+        REQUIRE(sys->reportDefaultChanged());
         // The pass waits its bounded turn, then says it gave up waiting.
         REQUIRE(fix.pollUntil([&] {
             return fix.debugMessagesDump().find("gate busy") != std::string::npos; },
@@ -195,7 +195,7 @@ TEST_CASE("SystemDefault: a chosen output stays put when the default moves",
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));   // -H is a pick
     setDefault(fix, *sys, 1);
     setDefault(fix, *sys, 0);
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     REQUIRE(sys->reportListChanged());
     deviceLaneDone(fix.engine());
     INFO(fix.debugMessagesDump());
@@ -226,17 +226,17 @@ TEST_CASE("SystemDefault: a default that will not open is tried once each time "
     REQUIRE(tried > 0);
 
     for (int i = 0; i < 3; ++i) REQUIRE(sys->reportListChanged());
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     deviceLaneDone(fix.engine());
     CHECK(phones->opens.load() == tried);
     CHECK(fix.waitForBlocks(20));                // still playing, somewhere
 
     // The default moves away and back: a move, so it is tried again.
     setDefault(fix, *sys, 0);
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     deviceLaneDone(fix.engine());
     setDefault(fix, *sys, 2);
-    fix.engine().testSystemDefaultOutputChanged();
+    REQUIRE(sys->reportDefaultChanged());
     deviceLaneDone(fix.engine());
     CHECK(phones->opens.load() > tried);
 }
@@ -250,7 +250,7 @@ TEST_CASE("SystemDefault: a default that moves while the engine boots is followe
         // so, and the device lane takes the news in.
         engine.testInitFailure = [&engine, sys] {
             sys->types[0].defaultDeviceIndex = 1;
-            engine.testSystemDefaultOutputChanged();
+            sys->reportDefaultChanged();
             deviceLaneDone(engine);
             return std::string();
         };
@@ -259,4 +259,87 @@ TEST_CASE("SystemDefault: a default that moves while the engine boots is followe
     INFO(fix.debugMessagesDump());
     INFO("playing on " << fix.engine().currentDevice().name);
     CHECK(followed);
+}
+
+TEST_CASE("SystemDefault: a virtual device another app makes the default is "
+          "not followed", "[SystemDefault]") {
+    // An app's virtual device (Loopback, BlackHole, NDI) can become the
+    // default; following it cold-swaps onto a device the user never chose.
+    auto sys = makeSimpleSystem();
+    auto loopback = std::make_shared<FakeDeviceSpec>();
+    loopback->name = "Fake Loopback";
+    loopback->kind = "virt";
+    loopback->isVirtual = true;
+    sys->types[0].devices.push_back(loopback);    // outputs: Speakers, Interface, Loopback
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+    REQUIRE(fix.engine().setDeviceMode("system").empty());
+    REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
+
+    setDefault(fix, *sys, 2);                     // the app makes its device the default
+    REQUIRE(sys->reportDefaultChanged());
+    deviceLaneDone(fix.engine());
+    INFO(fix.debugMessagesDump());
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    CHECK(loopback->opens.load() == 0);
+}
+
+#ifdef __APPLE__
+// Booting on a wireless default and then building the aggregate device a
+// microphone needs halts CoreAudio's IO for ~15 s: boot plays on a wired
+// device instead, when there is one.
+TEST_CASE("SystemDefault: booting while the default is AirPlay plays on the "
+          "speakers instead, and stays there", "[SystemDefault]") {
+    auto output = [](const char* name, bool wireless) {
+        auto d = std::make_shared<FakeDeviceSpec>();
+        d->name = name;
+        d->maxInputChannels = 0;
+        d->wireless = wireless;
+        d->kind = wireless ? "airp" : "bltn";
+        return d;
+    };
+    {
+        auto sys = std::make_shared<FakeSystem>();
+        auto airplay = output("Fake AirPlay", true);
+        sys->types.push_back({ "FakeDriver", { airplay, output("Fake Speakers", false) }, 0 });
+        EngineFixture fix(fakeEngineConfig(sys, ""));             // the default is AirPlay
+        const bool onSpeakers = playingOn(fix, "Fake Speakers");
+        INFO(fix.debugMessagesDump());
+        CHECK(onSpeakers);
+        CHECK(airplay->opens.load() == 0);
+        REQUIRE(sys->reportListChanged());
+        deviceLaneDone(fix.engine());
+        CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    }
+    {   // nothing but wireless: the default it is
+        auto sys = std::make_shared<FakeSystem>();
+        sys->types.push_back({ "FakeDriver",
+                               { output("Fake AirPlay", true), output("Fake AirPlay 2", true) }, 0 });
+        EngineFixture fix(fakeEngineConfig(sys, ""));
+        CHECK(playingOn(fix, "Fake AirPlay"));
+        CHECK(fix.waitForBlocks(20));
+    }
+}
+#endif
+
+TEST_CASE("SystemDefault: a device plugged in as the new default is followed, "
+          "whichever the OS reports first", "[SystemDefault]") {
+    // macOS says the default moved and the list changed in no set order. If
+    // the default comes first, it names a device the engine has not listed
+    // yet — which must still be followed, not refused and given up on.
+    auto sys = makeSimpleSystem();
+    auto phones = addHeadphones(*sys);
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+    REQUIRE(fix.engine().setDeviceMode("system").empty());
+    REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
+
+    {
+        auto hold = fix.engine().testHoldSwapGate();
+        phones->hidden = false;
+        sys->types[0].defaultDeviceIndex = 2;
+    }
+    REQUIRE(sys->reportDefaultChanged());        // first...
+    deviceLaneDone(fix.engine());
+    REQUIRE(sys->reportListChanged());           // ...then the list
+    INFO(fix.debugMessagesDump());
+    CHECK(playingOn(fix, "Fake Headphones"));
 }

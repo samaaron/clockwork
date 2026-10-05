@@ -33,6 +33,19 @@ AudioIODeviceType::~AudioIODeviceType()
 }
 
 //==============================================================================
+AudioIODeviceType::DeviceTraits AudioIODeviceType::getDeviceTraits (const String&) const
+{
+    return {};
+}
+
+String AudioIODeviceType::getSystemDefaultDeviceName (bool forInput) const
+{
+    const auto names = getDeviceNames (forInput);
+    const auto index = getDefaultDeviceIndex (forInput);
+    return isPositiveAndBelow (index, names.size()) ? names[index] : String();
+}
+
+//==============================================================================
 void AudioIODeviceType::setDeviceChangeSink (std::function<void (DeviceChange)> sink)
 {
     const ScopedLock sl (sinkLock);

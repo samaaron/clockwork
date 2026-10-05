@@ -539,7 +539,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // answer then describes the device any swap in flight leaves.
             mEngine->postDeviceTask([this, token] {
                 for (auto& dev : mEngine->listDevices()) {
-                    if (dev.isWirelessTransport()) continue;
+                    if (dev.wireless) continue;
                     char buf[4096];
                     osc::OutboundPacketStream s(buf, sizeof(buf));
                     s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.reply"))

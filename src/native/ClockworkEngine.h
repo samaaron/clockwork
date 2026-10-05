@@ -610,12 +610,6 @@ public:
     };
     TestSwapHold testHoldSwapGate();
 
-    // Test: deliver "the OS default output changed" exactly as macOS's HAL
-    // listener does — a pass of reconcileDevices on the device lane. Under
-    // the factory boundary the fake's default device is the OS default (see
-    // systemDefaultOutput), so a case moves it and then calls this.
-    void testSystemDefaultOutputChanged();
-
     // --- Audio callback access (for preTick hook, pause/resume) ---
     JuceAudioCallback& audioCallback() { return mAudioCallback; }
 
@@ -881,9 +875,6 @@ private:
     std::string openSystemDefault();
 
 #ifdef __APPLE__
-    static OSStatus defaultDevicePropertyListenerProc(
-        AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData);
-    bool mDefaultDevicePropertyListenerInstalled = false;
     // Poll scanForDevices() until a just-created aggregate `name` appears in
     // JUCE's device list (or timeoutMs elapses). Returns true once visible.
     // Avoids the "No such device" race from opening it after only a fixed sleep.

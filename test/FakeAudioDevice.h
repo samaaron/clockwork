@@ -66,6 +66,10 @@ struct FakeDeviceSpec {
     // Gone where it stands: still listed, but its driver says it is no
     // longer alive, and it cannot be opened.
     std::atomic<bool> dead { false };
+    // What its driver says it is (AudioIODeviceType::DeviceTraits): how it
+    // is connected, in the driver's own word, and what that makes it.
+    std::string kind;
+    bool wireless = false, isVirtual = false, aggregateClass = false;
     // The rate the system now runs the device at, set outside the engine
     // (Windows' sound settings, for a shared-mode device); 0 = unchanged.
     // A stream opened at another rate cannot carry on — its driver says it
@@ -108,6 +112,9 @@ struct FakeSystem {
     // The OS reporting a change to an open device (its channels, whether it
     // is alive), the same way.
     bool reportOpenDeviceChanged();
+    // The OS reporting that its default device moved (TypeSpec's
+    // defaultDeviceIndex), the same way.
+    bool reportDefaultChanged();
 
     // ── Time the case keeps ──────────────────────────────────────────────
     // A device keeps wall time until the case takes the clock. From then on
@@ -405,10 +412,25 @@ public:
         v.erase(std::remove(v.begin(), v.end(), this), v.end());
     }
 
-    // What a real type does when the OS tells it the list changed, or that
-    // an open device changed where it stands.
+    // What a real type does when the OS tells it the list changed, that an
+    // open device changed where it stands, or that its default moved.
     void reportListChanged() { reportDeviceChange(DeviceChange::list); }
     void reportOpenDeviceChanged() { reportDeviceChange(DeviceChange::openDevice); }
+    void reportDefaultChanged() { reportDeviceChange(DeviceChange::systemDefault); }
+
+    DeviceTraits getDeviceTraits(const juce::String& deviceName) const override {
+        DeviceTraits t;
+        for (auto& d : spec().devices) {
+            if (d->hidden.load() || juce::String(d->name) != deviceName) continue;
+            t.wireless          = d->wireless;
+            t.isVirtual         = d->isVirtual;
+            t.aggregateClass    = d->aggregateClass;
+            t.numOutputChannels = d->maxOutputChannels;
+            t.numInputChannels  = d->maxInputChannels;
+            t.kind              = juce::String(d->kind);
+        }
+        return t;
+    }
 
     void scanForDevices() override { mScanned = true; }
 
@@ -498,6 +520,13 @@ inline bool FakeSystem::reportOpenDeviceChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
     if (liveTypes.empty()) return false;
     liveTypes.back()->reportOpenDeviceChanged();
+    return true;
+}
+
+inline bool FakeSystem::reportDefaultChanged() {
+    std::lock_guard<std::mutex> lk(liveTypesMutex);
+    if (liveTypes.empty()) return false;
+    liveTypes.back()->reportDefaultChanged();
     return true;
 }
 

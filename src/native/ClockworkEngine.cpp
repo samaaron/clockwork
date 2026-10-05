@@ -201,8 +201,10 @@ ClockworkEngine::makeDeviceManager() {
     // itself the manager closes and reopens devices on whatever thread the
     // OS reports a change, under the device lane's feet.
     manager->setDeviceChangeSink([this](juce::AudioIODeviceType::DeviceChange change) {
-        devicesChanged(change == juce::AudioIODeviceType::DeviceChange::list
-                           ? kListChanged : kOpenDeviceChanged);
+        using Change = juce::AudioIODeviceType::DeviceChange;
+        devicesChanged(change == Change::list          ? kListChanged
+                     : change == Change::systemDefault ? kDefaultChanged
+                                                       : kOpenDeviceChanged);
     });
     return manager;
 }
@@ -494,24 +496,8 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     // must not touch real CoreAudio/PipeWire/DirectSound state.
     const bool platformSetup = !cfg.deviceManagerFactory;
 #ifdef __APPLE__
-    if (platformSetup) {
-        // Tell CoreAudio to deliver HAL property notifications on its
-        // own internal thread instead of the main CFRunLoop.  Required
-        // because we don't run a Cocoa event loop.
-        {
-            CFRunLoopRef nullRunLoop = NULL;
-            AudioObjectPropertyAddress prop = {
-                kAudioHardwarePropertyRunLoop,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            AudioObjectSetPropertyData(kAudioObjectSystemObject, &prop,
-                                       0, NULL, sizeof(CFRunLoopRef),
-                                       &nullRunLoop);
-        }
-
+    if (platformSetup)
         AggregateDeviceHelper::cleanupOrphaned();
-    }
 #endif
     mDeviceManager = makeDeviceManager();
 
@@ -630,7 +616,7 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             auto allDevs = listDevices();
             std::set<std::string> wirelessNames;
             for (auto& d : allDevs)
-                if (d.isWirelessTransport()) wirelessNames.insert(d.name);
+                if (d.wireless) wirelessNames.insert(d.name);
 
             entries.erase(std::remove_if(entries.begin(), entries.end(),
                 [&wirelessNames](const DevEntry& e) {
@@ -749,7 +735,7 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             std::vector<bool> wirelessFlags;
             for (auto& d : listDevices()) {
                 names.push_back(d.name);
-                wirelessFlags.push_back(d.isWirelessTransport());
+                wirelessFlags.push_back(d.wireless);
             }
             bootFallback = clockwork::device::selectBootOutputDevice(
                 def.name, def.wireless, names, wirelessFlags);
@@ -851,33 +837,10 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
             dev = nullptr;
         if (dev) {
             std::string outName = dev->getName().toStdString();
+            // The system's default input, as the driver names it.
             std::string inName;
-            AudioObjectPropertyAddress pa = {
-                kAudioHardwarePropertyDefaultInputDevice,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            AudioDeviceID inputDevId = 0;
-            UInt32 sz = sizeof(inputDevId);
-            if (AudioObjectGetPropertyData(kAudioObjectSystemObject,
-                    &pa, 0, nullptr, &sz, &inputDevId) == noErr
-                    && inputDevId != 0) {
-                CFStringRef cfName = nullptr;
-                UInt32 nsz = sizeof(cfName);
-                AudioObjectPropertyAddress nameAddr = {
-                    kAudioDevicePropertyDeviceNameCFString,
-                    kAudioObjectPropertyScopeGlobal,
-                    kAudioObjectPropertyElementMain
-                };
-                if (AudioObjectGetPropertyData(inputDevId, &nameAddr,
-                        0, nullptr, &nsz, &cfName) == noErr && cfName) {
-                    char buf[256];
-                    CFStringGetCString(cfName, buf, sizeof(buf),
-                                       kCFStringEncodingUTF8);
-                    CFRelease(cfName);
-                    inName = buf;
-                }
-            }
+            if (auto* type = mDeviceManager->getCurrentDeviceTypeObject())
+                inName = type->getSystemDefaultDeviceName(true).toStdString();
             // One cached-list snapshot serves the whole pairing decision: a rescan here can
             // disrupt the just-opened device. The decision is pure policy (#3555 — vetting
             // only the requested input let an unvetted Bluetooth HFP default become an
@@ -1670,27 +1633,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (mDeviceManager) runOnDeviceLane([this] { startAudioSource(); });
     else                startAudioSource();
 
-#ifdef __APPLE__
-    // CoreAudio default-output listener: JUCE only watches device
-    // connect/disconnect, not "user changed default in System Settings".
-    // Only install on a real device; a headless-fallback engine has no
-    // system default to track. Skipped under the factory boundary — fake
-    // devices have no HAL presence.
-    if (!cfg.deviceManagerFactory &&
-        mActiveSource.load() == AudioSource::RealCallback &&
-        !mDefaultDevicePropertyListenerInstalled) {
-        AudioObjectPropertyAddress pa = {
-            kAudioHardwarePropertyDefaultOutputDevice,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &pa,
-                                           &ClockworkEngine::defaultDevicePropertyListenerProc,
-                                           this) == noErr) {
-            mDefaultDevicePropertyListenerInstalled = true;
-        }
-    }
-#endif
 
     if (testInitFailure) {
         auto msg = testInitFailure();
@@ -1827,18 +1769,6 @@ void ClockworkEngine::shutdown() {
     mAudioCallback.processCount.notify_all();
 
 #ifdef __APPLE__
-    if (mDefaultDevicePropertyListenerInstalled) {
-        AudioObjectPropertyAddress pa = {
-            kAudioHardwarePropertyDefaultOutputDevice,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        AudioObjectRemovePropertyListener(
-            kAudioObjectSystemObject, &pa,
-            &ClockworkEngine::defaultDevicePropertyListenerProc,
-            this);
-        mDefaultDevicePropertyListenerInstalled = false;
-    }
     AggregateDeviceHelper::destroy();
 #endif
 
@@ -3165,127 +3095,26 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             return mCachedDevices;
     }
 
-#ifdef __APPLE__
-    std::map<std::string, uint32_t> transportMap;
-    {
-        AudioObjectPropertyAddress pa = {
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        UInt32 dataSize = 0;
-        if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &pa, 0, nullptr, &dataSize) == noErr) {
-            auto count = dataSize / sizeof(AudioObjectID);
-            std::vector<AudioObjectID> ids(count);
-            if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &pa, 0, nullptr, &dataSize, ids.data()) == noErr) {
-                for (auto id : ids) {
-                    AudioObjectPropertyAddress nameAddr = {
-                        kAudioDevicePropertyDeviceNameCFString,
-                        kAudioObjectPropertyScopeGlobal,
-                        kAudioObjectPropertyElementMain
-                    };
-                    CFStringRef cfName = nullptr;
-                    UInt32 nameSize = sizeof(cfName);
-                    if (AudioObjectGetPropertyData(id, &nameAddr, 0, nullptr, &nameSize, &cfName) != noErr)
-                        continue;
-                    char buf[256];
-                    CFStringGetCString(cfName, buf, sizeof(buf), kCFStringEncodingUTF8);
-                    CFRelease(cfName);
-
-                    AudioObjectPropertyAddress tAddr = {
-                        kAudioDevicePropertyTransportType,
-                        kAudioObjectPropertyScopeGlobal,
-                        kAudioObjectPropertyElementMain
-                    };
-                    UInt32 transport = 0;
-                    UInt32 tSize = sizeof(transport);
-                    AudioObjectGetPropertyData(id, &tAddr, 0, nullptr, &tSize, &transport);
-
-                    transportMap[std::string(buf)] = transport;
-                }
-            }
-        }
-    }
-#endif
-
-    // JUCE appends " (N)" suffixes to disambiguate duplicate CoreAudio names.
-    // This lambda strips the suffix for fallback matching against CoreAudio names.
-#ifdef __APPLE__
-    // Build a parallel name→AudioObjectID map (alongside transportMap) so
-    // we can query per-device CoreAudio properties without opening JUCE
-    // devices — critical when an aggregate is active and probing a sub-
-    // device via JUCE would disrupt the live callback.
-    std::map<std::string, AudioObjectID> idMap;
-    {
-        AudioObjectPropertyAddress pa = {
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        UInt32 dataSize = 0;
-        if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &pa, 0, nullptr, &dataSize) == noErr) {
-            auto count = dataSize / sizeof(AudioObjectID);
-            std::vector<AudioObjectID> ids(count);
-            if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &pa, 0, nullptr, &dataSize, ids.data()) == noErr) {
-                for (auto id : ids) {
-                    AudioObjectPropertyAddress nameAddr = {
-                        kAudioDevicePropertyDeviceNameCFString,
-                        kAudioObjectPropertyScopeGlobal,
-                        kAudioObjectPropertyElementMain
-                    };
-                    CFStringRef cfName = nullptr;
-                    UInt32 sz = sizeof(cfName);
-                    if (AudioObjectGetPropertyData(id, &nameAddr, 0, nullptr, &sz, &cfName) != noErr || !cfName)
-                        continue;
-                    char buf[256];
-                    CFStringGetCString(cfName, buf, sizeof(buf), kCFStringEncodingUTF8);
-                    CFRelease(cfName);
-                    idMap[std::string(buf)] = id;
-                }
-            }
-        }
-    }
-
-    auto lookupTransport = [&transportMap](const std::string& juceName) -> uint32_t {
-        auto it = transportMap.find(juceName);
-        if (it != transportMap.end()) return it->second;
-        for (auto& [caName, transport] : transportMap)
-            if (sameDeviceName(juceName, caName)) return transport;
-        return 0;
+    // What the driver says of a device without opening it (its traits), and
+    // its channels where no probe answered: the driver's count when it can
+    // say, else a placeholder of 2 out / 1 in that decisions don't trust
+    // (out/inChannelsProbed stay false).
+    auto takeTraits = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
+        info.wireless       = t.wireless;
+        info.isVirtual      = t.isVirtual;
+        info.aggregateClass = t.aggregateClass;
+        info.kind           = t.kind.toStdString();
     };
-
-    auto lookupID = [&idMap](const std::string& juceName) -> AudioObjectID {
-        auto it = idMap.find(juceName);
-        if (it != idMap.end()) return it->second;
-        for (auto& [caName, id] : idMap)
-            if (sameDeviceName(juceName, caName)) return id;
-        return kAudioObjectUnknown;
+    auto fillOutputs = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
+        if (info.maxOutputChannels != 0) return;
+        info.maxOutputChannels = t.numOutputChannels >= 0 ? t.numOutputChannels : 2;
+        info.outChannelsProbed = t.numOutputChannels > 0;
     };
-
-    // Channel count via CoreAudio's kAudioDevicePropertyStreamConfiguration.
-    // Sums channels across all streams in the requested scope. Works
-    // without opening the device via JUCE — so it's safe to call when
-    // the aggregate is active and skipAllProbing is true.
-    auto scopeChannelCount = [](AudioObjectID devID, bool isInput) -> int {
-        if (devID == kAudioObjectUnknown) return 0;
-        AudioObjectPropertyAddress addr = {
-            kAudioDevicePropertyStreamConfiguration,
-            isInput ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput,
-            kAudioObjectPropertyElementMain
-        };
-        UInt32 sz = 0;
-        if (AudioObjectGetPropertyDataSize(devID, &addr, 0, nullptr, &sz) != noErr || sz == 0)
-            return 0;
-        std::vector<uint8_t> buf(sz);
-        auto* bl = reinterpret_cast<AudioBufferList*>(buf.data());
-        if (AudioObjectGetPropertyData(devID, &addr, 0, nullptr, &sz, bl) != noErr)
-            return 0;
-        int total = 0;
-        for (UInt32 i = 0; i < bl->mNumberBuffers; ++i)
-            total += (int)bl->mBuffers[i].mNumberChannels;
-        return total;
+    auto fillInputs = [](DeviceInfo& info, const juce::AudioIODeviceType::DeviceTraits& t) {
+        if (info.maxInputChannels != 0) return;
+        info.maxInputChannels = t.numInputChannels >= 0 ? t.numInputChannels : 1;
+        info.inChannelsProbed = t.numInputChannels > 0;
     };
-#endif
 
     // When an aggregate is active, DON'T probe any devices via createDevice.
     // Creating a JUCE AudioIODevice wrapper on a subdevice of our aggregate
@@ -3366,25 +3195,12 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             info.name = devName.toStdString();
             if (unloadable.count(info.name)) continue;
             info.typeName = typeNameStr;
-#ifdef __APPLE__
-            info.transportType = lookupTransport(info.name);
-#endif
+            const auto traits = type->getDeviceTraits(devName);
+            takeTraits(info, traits);
 
             if (auto* probed = probe(type, typeNameStr, devName, false))
                 takeProbe(info, *probed);
-#ifdef __APPLE__
-            // Fill maxOutputChannels from CoreAudio when the JUCE probe did not return it.
-            // CoreAudio's stream configuration is authoritative for a full-duplex
-            // multi-channel device and needs no open, so it is safe while the aggregate is
-            // live.
-            if (info.maxOutputChannels == 0) {
-                AudioObjectID devID = lookupID(info.name);
-                info.maxOutputChannels = scopeChannelCount(devID, false);
-                info.outChannelsProbed = info.maxOutputChannels > 0;
-            }
-#else
-            if (info.maxOutputChannels == 0) info.maxOutputChannels = 2;
-#endif
+            fillOutputs(info, traits);
 
             result.push_back(std::move(info));
         }
@@ -3412,19 +3228,7 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
                     existing->maxInputChannels = probed->maxInputChannels;
                     existing->inChannelsProbed = existing->maxInputChannels > 0;
                 }
-#ifdef __APPLE__
-                // Always check CoreAudio for the actual input count,
-                // so full-duplex devices (MOTU etc.) report the true
-                // number even when probing was skipped.
-                if (existing->maxInputChannels == 0) {
-                    AudioObjectID devID = lookupID(existing->name);
-                    existing->maxInputChannels = scopeChannelCount(devID, true);
-                    existing->inChannelsProbed = existing->maxInputChannels > 0;
-                }
-#else
-                if (existing->maxInputChannels == 0)
-                    existing->maxInputChannels = 1;
-#endif
+                fillInputs(*existing, type->getDeviceTraits(devName));
                 continue;
             }
 
@@ -3432,21 +3236,12 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
             DeviceInfo info;
             info.name = std::move(nameStr);
             info.typeName = typeNameStr;
-#ifdef __APPLE__
-            info.transportType = lookupTransport(info.name);
-#endif
+            const auto traits = type->getDeviceTraits(devName);
+            takeTraits(info, traits);
 
             if (auto* probed = probe(type, typeNameStr, devName, true))
                 takeProbe(info, *probed);
-#ifdef __APPLE__
-            if (info.maxInputChannels == 0) {
-                AudioObjectID devID = lookupID(info.name);
-                info.maxInputChannels = scopeChannelCount(devID, true);
-                info.inChannelsProbed = info.maxInputChannels > 0;
-            }
-#else
-            if (info.maxInputChannels == 0) info.maxInputChannels = 1;
-#endif
+            fillInputs(info, traits);
 
             result.push_back(std::move(info));
         }
@@ -3545,63 +3340,16 @@ CurrentDeviceInfo ClockworkEngine::currentDevice() const {
     // JUCE's channel-name lists are accurate.
     info.maxOutputChannels = dev->getOutputChannelNames().size();
     info.maxInputChannels  = dev->getInputChannelNames().size();
-#ifdef __APPLE__
-    auto caChannelCount = [](const std::string& name, bool isInput) -> int {
-        if (name.empty()) return 0;
-        AudioObjectPropertyAddress listAddr = {
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        UInt32 listSize = 0;
-        if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &listAddr, 0, nullptr, &listSize) != noErr)
-            return 0;
-        std::vector<AudioObjectID> ids(listSize / sizeof(AudioObjectID));
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &listAddr, 0, nullptr, &listSize, ids.data()) != noErr)
-            return 0;
-        for (auto id : ids) {
-            AudioObjectPropertyAddress nameAddr = {
-                kAudioDevicePropertyDeviceNameCFString,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            CFStringRef cfName = nullptr;
-            UInt32 sz = sizeof(cfName);
-            if (AudioObjectGetPropertyData(id, &nameAddr, 0, nullptr, &sz, &cfName) != noErr || !cfName)
-                continue;
-            char buf[256];
-            CFStringGetCString(cfName, buf, sizeof(buf), kCFStringEncodingUTF8);
-            CFRelease(cfName);
-            if (name != buf) continue;
-            AudioObjectPropertyAddress scopeAddr = {
-                kAudioDevicePropertyStreamConfiguration,
-                isInput ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput,
-                kAudioObjectPropertyElementMain
-            };
-            UInt32 cfgSize = 0;
-            if (AudioObjectGetPropertyDataSize(id, &scopeAddr, 0, nullptr, &cfgSize) != noErr || cfgSize == 0)
-                return 0;
-            std::vector<uint8_t> cfgBuf(cfgSize);
-            auto* bl = reinterpret_cast<AudioBufferList*>(cfgBuf.data());
-            if (AudioObjectGetPropertyData(id, &scopeAddr, 0, nullptr, &cfgSize, bl) != noErr)
-                return 0;
-            int total = 0;
-            for (UInt32 i = 0; i < bl->mNumberBuffers; ++i)
-                total += (int)bl->mBuffers[i].mNumberChannels;
-            return total;
-        }
-        return 0;
-    };
-    // Prefer real-device counts when we're on an aggregate.
-    if (!mRealOutputDeviceName.empty()) {
-        int n = caChannelCount(mRealOutputDeviceName, false);
-        if (n > 0) info.maxOutputChannels = n;
+    // On an aggregate, the real devices' counts (the wrapper reports the
+    // union of its sub-devices'), as their driver gives them.
+    if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+        if (!mRealOutputDeviceName.empty())
+            if (const int n = type->getDeviceTraits(juce::String(mRealOutputDeviceName)).numOutputChannels; n > 0)
+                info.maxOutputChannels = n;
+        if (!mRealInputDeviceName.empty())
+            if (const int n = type->getDeviceTraits(juce::String(mRealInputDeviceName)).numInputChannels; n > 0)
+                info.maxInputChannels = n;
     }
-    if (!mRealInputDeviceName.empty()) {
-        int n = caChannelCount(mRealInputDeviceName, true);
-        if (n > 0) info.maxInputChannels = n;
-    }
-#endif
 
     return info;
 }
@@ -3783,7 +3531,7 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
         std::string curName = dev->getName().toStdString();
         for (auto& d : listDevices(false)) {
-            if (sameDeviceName(d.name, curName) && d.isWirelessTransport()) {
+            if (sameDeviceName(d.name, curName) && d.wireless) {
                 isWireless = true;
                 break;
             }
@@ -3975,7 +3723,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         }
         for (auto& d : listDevices(false)) {
             snap.deviceTable.emplace_back(d.typeName, d.name);
-            if (d.isWirelessTransport())
+            if (d.wireless)
                 snap.wirelessDeviceNames.push_back(d.name);
         }
     } else {
@@ -4765,7 +4513,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                     ? finalDev->getName().toStdString()
                     : mRealOutputDeviceName;
                 for (auto& d : listDevices(false)) {
-                    if (sameDeviceName(d.name, finalName) && d.isWirelessTransport()) {
+                    if (sameDeviceName(d.name, finalName) && d.wireless) {
                         finalIsWireless = true;
                         break;
                     }
@@ -4958,41 +4706,19 @@ SwapResult ClockworkEngine::enableInputChannels(int numChannels) {
     // clamped against that device's probed capacity. When enabling, prefer an
     // explicit name over switchDevice's "first in JUCE's input list" fallback — that
     // can pick a virtual device over the real hardware mic and produce silent zeros.
-    // Order: saved mLastInputDeviceName, the macOS system default input, then empty.
+    // Order: saved mLastInputDeviceName, the system default input, then empty.
     std::string inputName;
     const char* inputSource = "disable";
     if (numChannels != 0) {
         inputName = mLastInputDeviceName;
         inputSource = inputName.empty() ? "none" : "mLastInputDeviceName";
     }
-#ifdef __APPLE__
-    if (numChannels != 0 && inputName.empty()) {
-        AudioObjectPropertyAddress addr = {
-            kAudioHardwarePropertyDefaultInputDevice,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        AudioDeviceID devId = 0;
-        UInt32 sz = sizeof(devId);
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &devId) == noErr
-            && devId != 0) {
-            CFStringRef cfName = nullptr;
-            UInt32 nsz = sizeof(cfName);
-            AudioObjectPropertyAddress nameAddr = {
-                kAudioDevicePropertyDeviceNameCFString,
-                kAudioObjectPropertyScopeGlobal,
-                kAudioObjectPropertyElementMain
-            };
-            if (AudioObjectGetPropertyData(devId, &nameAddr, 0, nullptr, &nsz, &cfName) == noErr && cfName) {
-                char buf[256];
-                CFStringGetCString(cfName, buf, sizeof(buf), kCFStringEncodingUTF8);
-                CFRelease(cfName);
-                inputName = buf;
-                inputSource = "kAudioHardwarePropertyDefaultInputDevice";
-            }
+    if (numChannels != 0 && inputName.empty() && mDeviceManager) {
+        if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+            inputName = type->getSystemDefaultDeviceName(true).toStdString();
+            if (!inputName.empty()) inputSource = "the system default input";
         }
     }
-#endif
 
     // -1 means "re-enable inputs": resolved against the boot -i flag and
     // clamped to the device's probed input capacity. The clamp is what
@@ -5274,9 +5000,11 @@ void ClockworkEngine::reconcileDevices() {
 
     // MIDI hot-plug is the MIDI subsystem's own (rust/clockwork-midi's
     // watcher); this is audio devices only. The lists are rescanned (they are
-    // this thread's) only when they changed: a rescan just after a switch
-    // can close a CoreAudio device just opened.
-    auto devices = listDevices((changes & kListChanged) != 0);
+    // this thread's) when they changed, or the default moved: a device just
+    // plugged in can become the default before the OS says the list changed,
+    // and a default the lists don't have yet would be refused. Not for a
+    // change to the open device alone.
+    auto devices = listDevices((changes & (kListChanged | kDefaultChanged)) != 0);
     auto* dev = mDeviceManager->getCurrentAudioDevice();
 
     // Active channel counts track the current device's live mask, not the
@@ -5309,7 +5037,7 @@ void ClockworkEngine::reconcileDevices() {
         fingerprint += d.name;
         fingerprint += '\x1f' + std::to_string(d.maxOutputChannels);
         fingerprint += '\x1f' + std::to_string(d.maxInputChannels);
-        fingerprint += '\x1f' + std::to_string(d.transportType) + '\x1e';
+        fingerprint += '\x1f' + d.kind + '\x1e';
     }
     const bool listChanged = fingerprint != mLastAudioDeviceFingerprint;
     mLastAudioDeviceFingerprint = fingerprint;
@@ -5444,84 +5172,23 @@ bool ClockworkEngine::followDefaultOutput() {
     return true;
 }
 
-#ifdef __APPLE__
-OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
-    AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* inClientData)
-{
-    clockwork_log("[default-output-listener] fired");
-    // The same pass a device coming or going starts, on the device lane.
-    static_cast<ClockworkEngine*>(inClientData)->devicesChanged(kDefaultChanged);
-    return noErr;
-}
-#endif
-
-void ClockworkEngine::testSystemDefaultOutputChanged() {
-    devicesChanged(kDefaultChanged);
-}
-
 ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
+    // The current driver's word for it, and for what kind of device it is
+    // (juce::AudioIODeviceType): CoreAudio asks the HAL, WASAPI lists the
+    // default first, a driver with no default (ASIO) names none. Under the
+    // gate, as every mDeviceManager read is: recovery's recreate resets it.
     SystemDefaultOutput out;
-#ifdef __APPLE__
-    const bool askTheType = static_cast<bool>(mCurrentConfig.deviceManagerFactory);
-#else
-    const bool askTheType = true;
-#endif
-    if (askTheType) {
-        // Under the gate, as every mDeviceManager read is: recovery's
-        // recreate resets it.
-        std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
-        if (!mDeviceManager) return out;
-        if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
-            const auto names = type->getDeviceNames(false);
-            const int i = type->getDefaultDeviceIndex(false);
-            if (i >= 0 && i < names.size()) out.name = names[i].toStdString();
+    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    if (!mDeviceManager) return out;
+    if (auto* type = mDeviceManager->getCurrentDeviceTypeObject()) {
+        const juce::String name = type->getSystemDefaultDeviceName(false);
+        if (name.isNotEmpty()) {
+            const auto traits = type->getDeviceTraits(name);
+            out.name      = name.toStdString();
+            out.wireless  = traits.wireless;
+            out.isVirtual = traits.isVirtual;
         }
-        return out;
     }
-#ifdef __APPLE__
-
-    AudioDeviceID defaultID = kAudioObjectUnknown;
-    AudioObjectPropertyAddress addr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    UInt32 sz = sizeof(defaultID);
-    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &defaultID) != noErr
-        || defaultID == kAudioObjectUnknown) {
-        return out;
-    }
-    CFStringRef nameCF = nullptr;
-    UInt32 nameSz = sizeof(nameCF);
-    AudioObjectPropertyAddress nameAddr = {
-        kAudioDevicePropertyDeviceNameCFString,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    if (AudioObjectGetPropertyData(defaultID, &nameAddr, 0, nullptr, &nameSz, &nameCF) != noErr
-        || !nameCF) {
-        return out;
-    }
-    char buf[256];
-    CFStringGetCString(nameCF, buf, sizeof(buf), kCFStringEncodingUTF8);
-    CFRelease(nameCF);
-    out.name = buf;
-
-    // Transport straight off the device just resolved: wireless defaults take
-    // JUCE's default-device path, virtual ones (NDI Audio, Loopback, …) are
-    // never chased.
-    uint32_t transport = 0;
-    UInt32 tSz = sizeof(transport);
-    AudioObjectPropertyAddress tAddr = {
-        kAudioDevicePropertyTransportType,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-    if (AudioObjectGetPropertyData(defaultID, &tAddr, 0, nullptr, &tSz, &transport) == noErr) {
-        out.wireless  = CoreAudioTransport::isWireless(transport);
-        out.isVirtual = CoreAudioTransport::isVirtual(transport);
-    }
-#endif
     return out;
 }
 
@@ -5711,17 +5378,10 @@ void ClockworkEngine::printDeviceList() {
 
     clockwork_log("[audio-devices-start]");
     for (auto& dev : devices) {
-        char tt[5] = {};
-        if (dev.transportType) {
-            tt[0] = (char)((dev.transportType >> 24) & 0xFF);
-            tt[1] = (char)((dev.transportType >> 16) & 0xFF);
-            tt[2] = (char)((dev.transportType >> 8) & 0xFF);
-            tt[3] = (char)(dev.transportType & 0xFF);
-        }
         clockwork_log("[audio-device-entry] %s|%s|%d|%d|%s",
                 dev.name.c_str(), dev.typeName.c_str(),
                 dev.maxOutputChannels, dev.maxInputChannels,
-                dev.transportType ? tt : "?");
+                dev.kind.empty() ? "?" : dev.kind.c_str());
     }
     clockwork_log("[audio-device-current] %s|%s|%.0f|%d|%d|%d",
             current.name.c_str(), current.typeName.c_str(),

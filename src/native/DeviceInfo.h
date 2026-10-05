@@ -9,24 +9,6 @@
 #include <string>
 #include <vector>
 
-// CoreAudio transportType fourCC codes. Useful when dealing with a raw
-// transportType from CoreAudio without a full DeviceInfo.
-namespace CoreAudioTransport {
-    inline constexpr uint32_t kBluetooth     = 0x626C7565; // 'blue'
-    inline constexpr uint32_t kBluetoothLE   = 0x626C6561; // 'blea'
-    inline constexpr uint32_t kAirPlay       = 0x61697270; // 'airp'
-    inline constexpr uint32_t kContinuityCam = 0x63637764; // 'ccwd'
-    inline constexpr uint32_t kVirtual       = 0x76697274; // 'virt'
-    inline constexpr uint32_t kAggregate     = 0x67727570; // 'grup'
-
-    inline bool isWireless(uint32_t t) {
-        return t == kBluetooth || t == kBluetoothLE
-            || t == kAirPlay   || t == kContinuityCam;
-    }
-    inline bool isVirtual(uint32_t t) { return t == kVirtual; }
-    inline bool isAggregate(uint32_t t) { return t == kAggregate; }
-}
-
 struct DeviceInfo {
     std::string name;
     std::string typeName;                    // "Windows Audio", "ASIO", "CoreAudio", "ALSA"
@@ -41,20 +23,20 @@ struct DeviceInfo {
     // feed decisions like hot-vs-cold swap or input re-enable width.
     bool outChannelsProbed = false;
     bool inChannelsProbed  = false;
-    uint32_t transportType = 0;              // CoreAudio transport type (macOS only)
 
-    // Bluetooth and AirPlay use wireless codecs that are unsuitable for
-    // low-latency audio aggregation (HFP 16kHz mono, AirPlay buffering).
-    bool isWirelessTransport() const { return CoreAudioTransport::isWireless(transportType); }
+    // What its driver says it is (juce::AudioIODeviceType::DeviceTraits):
+    // a wireless link negotiates its own rate and buffer (Bluetooth, AirPlay
+    // — codecs unsuited to low-latency work: HFP's 16 kHz mono, AirPlay's
+    // buffering); a virtual device is made in software (Loopback,
+    // BlackHole); an aggregate-class one is made of other devices. `kind` is
+    // the driver's own word for how it is connected, for logs.
+    bool wireless       = false;
+    bool isVirtual      = false;
+    bool aggregateClass = false;
+    std::string kind;
 
-    // Virtual devices (Loopback Audio, Blackhole, SoundSource, etc.) don't
-    // have a real hardware clock — their sample clock is driven by the OS
-    // scheduler. Using a virtual device as an aggregate's master clock
-    // crashes CoreAudio's drift-compensation SRC inside AudioUnitRender.
-    bool isVirtualTransport() const { return CoreAudioTransport::isVirtual(transportType); }
-
-    // Suitable for input: exclude Bluetooth/AirPlay (force low-quality codecs)
-    bool isSuitableForInput() const { return !isWirelessTransport(); }
+    // Suitable for input: not wireless (it forces a low-quality codec).
+    bool isSuitableForInput() const { return !wireless; }
 
     // Suitable for aggregation: exclude wireless (Bluetooth/AirPlay) and
     // aggregate-class devices (Multi-Output / user aggregates, 'grup') —
@@ -64,10 +46,7 @@ struct DeviceInfo {
     // (Loopback, Blackhole) CAN be aggregated when the master clock is
     // set to the HARDWARE side (matches Ardour / JACK2 patterns) — see
     // AggregateDeviceHelper::createOrUpdate for master-selection logic.
-    bool isSuitableForAggregate() const {
-        return !isWirelessTransport()
-            && !CoreAudioTransport::isAggregate(transportType);
-    }
+    bool isSuitableForAggregate() const { return !wireless && !aggregateClass; }
 
     // Hide platform-specific clutter from the GUI dropdown list. On macOS
     // the wireless / virtual predicates above cover everything. On Linux

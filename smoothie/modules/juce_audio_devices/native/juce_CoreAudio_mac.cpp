@@ -2029,6 +2029,15 @@ class CoreAudioIODeviceType final : public AudioIODeviceType
 public:
     CoreAudioIODeviceType()  : AudioIODeviceType ("CoreAudio")
     {
+        // smoothie: the HAL's notifications on its own threads, not a run
+        // loop's — the listeners below deliver to the sink from there, and
+        // nothing need pump a main run loop for them.
+        CFRunLoopRef noRunLoop = nullptr;
+        audioObjectSetProperty (kAudioObjectSystemObject, { kAudioHardwarePropertyRunLoop,
+                                                            kAudioObjectPropertyScopeGlobal,
+                                                            juceAudioObjectPropertyElementMain },
+                                noRunLoop);
+
         AudioObjectPropertyAddress pa;
         pa.mSelector = kAudioHardwarePropertyDevices;
         pa.mScope = kAudioObjectPropertyScopeWildcard;
@@ -2040,6 +2049,10 @@ public:
         LiveInternalRegistry::get().add (this);
 
         AudioObjectAddPropertyListener (kAudioObjectSystemObject, &pa, hardwareListenerProc, this);
+
+        // smoothie: the system default moving is a change of its own.
+        for (auto& address : defaultDeviceAddresses())
+            AudioObjectAddPropertyListener (kAudioObjectSystemObject, &address, defaultDeviceListenerProc, this);
     }
 
     ~CoreAudioIODeviceType() override
@@ -2052,6 +2065,64 @@ public:
         pa.mElement = kAudioObjectPropertyElementWildcard;
 
         AudioObjectRemovePropertyListener (kAudioObjectSystemObject, &pa, hardwareListenerProc, this);
+
+        for (auto& address : defaultDeviceAddresses())
+            AudioObjectRemovePropertyListener (kAudioObjectSystemObject, &address, defaultDeviceListenerProc, this);
+    }
+
+    //==============================================================================
+    // smoothie: the HAL's default output (or input), by the name this type
+    // lists it under — or by its own name, when the lists don't have it yet
+    // (nothing has scanned them, or the device has only just arrived).
+    String getSystemDefaultDeviceName (bool forInput) const override
+    {
+        const auto deviceID = defaultDeviceID (forInput);
+
+        if (deviceID == kAudioObjectUnknown)
+            return {};
+
+        const auto& ids   = forInput ? inputIds : outputIds;
+        const auto& names = forInput ? inputDeviceNames : outputDeviceNames;
+
+        for (int i = 0; i < ids.size(); ++i)
+            if (ids.getUnchecked (i) == deviceID)
+                return names[i];
+
+        return deviceName (deviceID);
+    }
+
+    // smoothie: how the device is connected (its HAL transport type) and
+    // what that makes it; its channels from its stream configuration, so
+    // nothing is opened to ask.
+    DeviceTraits getDeviceTraits (const String& name) const override
+    {
+        DeviceTraits traits;
+        const auto deviceID = deviceIDForName (name);
+
+        if (deviceID == kAudioObjectUnknown)
+            return traits;
+
+        const auto transport = audioObjectGetProperty<UInt32> (deviceID, { kAudioDevicePropertyTransportType,
+                                                                           kAudioObjectPropertyScopeGlobal,
+                                                                           juceAudioObjectPropertyElementMain }).value_or (0);
+        traits.wireless          = transport == kAudioDeviceTransportTypeBluetooth
+                                || transport == kAudioDeviceTransportTypeBluetoothLE
+                                || transport == kAudioDeviceTransportTypeAirPlay
+                                || transport == 0x63637764;   // 'ccwd', Continuity Capture (wireless)
+        traits.isVirtual         = transport == kAudioDeviceTransportTypeVirtual;
+        traits.aggregateClass    = transport == kAudioDeviceTransportTypeAggregate
+                                || transport == kAudioDeviceTransportTypeAutoAggregate;
+        traits.numOutputChannels = getNumChannels (deviceID, false);
+        traits.numInputChannels  = getNumChannels (deviceID, true);
+
+        if (transport != 0)
+        {
+            const char code[] = { (char) (transport >> 24), (char) (transport >> 16),
+                                  (char) (transport >> 8),  (char) transport, 0 };
+            traits.kind = code;
+        }
+
+        return traits;
     }
 
     //==============================================================================
@@ -2195,6 +2266,62 @@ private:
     static int getNumChannels (AudioDeviceID deviceID, bool input)
     {
         return CoreAudioInternal::getNumChannels (deviceID, input);
+    }
+
+    static std::array<AudioObjectPropertyAddress, 2> defaultDeviceAddresses()
+    {
+        return { { { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, juceAudioObjectPropertyElementMain },
+                   { kAudioHardwarePropertyDefaultInputDevice,  kAudioObjectPropertyScopeGlobal, juceAudioObjectPropertyElementMain } } };
+    }
+
+    static AudioDeviceID defaultDeviceID (bool forInput)
+    {
+        return audioObjectGetProperty<AudioDeviceID> (kAudioObjectSystemObject,
+                                                      defaultDeviceAddresses()[forInput ? 1 : 0])
+                   .value_or (kAudioObjectUnknown);
+    }
+
+    static String deviceName (AudioDeviceID deviceID)
+    {
+        if (const auto name = audioObjectGetProperty<CFStringRef> (deviceID, { kAudioDevicePropertyDeviceNameCFString,
+                                                                               kAudioObjectPropertyScopeWildcard,
+                                                                               juceAudioObjectPropertyElementMain }))
+            if (const CFUniquePtr<CFStringRef> owned { *name })
+                return String::fromCFString (owned.get());
+
+        return {};
+    }
+
+    // The device this type lists as `name` (its " (N)" form included), or —
+    // not listed yet — the one the HAL calls that.
+    AudioDeviceID deviceIDForName (const String& name) const
+    {
+        for (const auto* list : { &outputDeviceNames, &inputDeviceNames })
+        {
+            const auto& ids = list == &outputDeviceNames ? outputIds : inputIds;
+
+            if (const auto index = list->indexOf (name); index >= 0)
+                return ids[index];
+        }
+
+        for (const auto device : audioObjectGetProperties<AudioDeviceID> (kAudioObjectSystemObject, { kAudioHardwarePropertyDevices,
+                                                                                                      kAudioObjectPropertyScopeWildcard,
+                                                                                                      juceAudioObjectPropertyElementMain }))
+            if (deviceName (device) == name)
+                return device;
+
+        return kAudioObjectUnknown;
+    }
+
+    static OSStatus defaultDeviceListenerProc (AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void* clientData)
+    {
+        // smoothie: fenced, as hardwareListenerProc.
+        LiveInternalRegistry::get().ifLive (clientData, [&]
+        {
+            static_cast<CoreAudioIODeviceType*> (clientData)->reportDeviceChange (DeviceChange::systemDefault);
+        });
+
+        return noErr;
     }
 
     static OSStatus hardwareListenerProc (AudioDeviceID, UInt32, const AudioObjectPropertyAddress*, void* clientData)

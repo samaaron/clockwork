@@ -324,3 +324,66 @@ TEST_CASE("DeviceReport: on a PipeWire desktop, ALSA's direct-hardware devices t
     CHECK(contains(offered(false), hw));
 }
 #endif
+
+#ifdef __APPLE__
+// CoreAudio opens a wireless device reliably only as the default, and can't
+// run one inside an aggregate: wireless outputs are not offered by name,
+// and while one is playing no microphone can join it.
+TEST_CASE("DeviceReport: wireless devices are not offered, and while one is "
+          "playing no microphone is offered or added", "[DeviceReport]") {
+    auto airpods = device("Fake AirPods", 2, 1);
+    airpods->kind = "blue";
+    airpods->wireless = true;
+    auto airplay = device("Fake AirPlay", 2, 0);
+    airplay->kind = "airp";
+    airplay->wireless = true;
+    auto blackhole = device("Fake BlackHole", 2, 2);
+    blackhole->kind = "virt";
+    blackhole->isVirtual = true;
+    auto sys = std::make_shared<FakeSystem>();
+    sys->types.push_back({ "FakeDriver", { device("Fake Speakers", 2, 0), airpods, airplay,
+                                           blackhole, device("Fake Microphone", 0, 2) }, 0 });
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    // A fresh report: it is built on the device lane, so wait for it, not
+    // for a round trip through the control path.
+    auto report = [&] {
+        fix.clearReplies();
+        fix.send(osc_test::message(CLOCKWORK_SYS("devices/report")));
+        REQUIRE(fix.pollUntil([&] {
+            return countOf(fix, CLOCKWORK_SYS("devices")) > 0
+                && countOf(fix, CLOCKWORK_SYS("input-devices")) > 0;
+        }, 30000));
+    };
+    auto offersOutput = [&](const std::string& name) {
+        for (auto& o : offeredOutputs(latest(fix, CLOCKWORK_SYS("devices"))))
+            if (o.name == name) return true;
+        return false;
+    };
+    report();
+    CHECK_FALSE(offersOutput("Fake AirPods"));
+    CHECK_FALSE(offersOutput("Fake AirPlay"));
+    CHECK(offersOutput("Fake Speakers"));
+    CHECK(offersOutput("Fake BlackHole"));
+    const auto inputs = offeredInputs(latest(fix, CLOCKWORK_SYS("input-devices")));
+    CHECK_FALSE(contains(inputs, "Fake AirPods"));
+    CHECK(contains(inputs, "Fake Microphone"));
+
+    // Playing on AirPlay (an embedder can still ask for it by name).
+    REQUIRE(switchWhenFree(fix, "Fake AirPlay").success);
+    report();
+    INFO(fix.debugMessagesDump());
+    CHECK(offeredInputs(latest(fix, CLOCKWORK_SYS("input-devices"))).empty());
+    const auto done = pick(fix, "", "Fake Microphone");
+    CHECK(done.argInt(0) == 0);
+    CHECK(done.argString(5).find("Fake Microphone") != std::string::npos);
+    CHECK(done.argString(5).find("wireless") != std::string::npos);
+
+    // Off the wireless output, microphones are offered again.
+    REQUIRE(switchWhenFree(fix, "Fake BlackHole").success);
+    report();
+    CHECK(contains(offeredInputs(latest(fix, CLOCKWORK_SYS("input-devices"))),
+                   "Fake Microphone"));
+}
+#endif
