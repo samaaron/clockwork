@@ -155,6 +155,8 @@ switch succeeded; a client records its user's choice from this, and only
 from this. The output `__system__`, or the device table's default-follow row
 by name, means "follow the system default" — and following it is not
 choosing it: nothing is pinned, so the engine follows the next move too.
+On a driver with no default (ASIO) it moves to a driver with one: the one it
+booted on when that has a default, otherwise the first that does.
 Turning inputs off (input `__none__`, or `inputs/enable 0`) leaves the output
 mode alone. One gap, known: a named output and `__none__` in the same switch
 turns the inputs off and does not switch the output.

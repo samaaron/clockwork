@@ -630,6 +630,13 @@ private:
     bool interceptBufferFreed(const uint8_t* data, uint32_t size);
 
     juce::String reinitialiseWithDefaultsPreservingConfig();
+    // A driver that names a default: the boot's when it does, otherwise the
+    // first; empty when none does.
+    std::string driverWithADefault();
+    // openSystemDefault's way when the default is not opened by name: the
+    // driver opens its own default, and the engine plays on it afterwards,
+    // or on what it played on before when that fails.
+    std::string openDriverDefault();
 
     // The two halves of init(): open the audio device (skipped headless),
     // then bring the engine up around whatever it settled on. Split so

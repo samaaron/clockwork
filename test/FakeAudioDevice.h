@@ -34,6 +34,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -83,6 +84,13 @@ struct FakeDeviceSpec {
 class FakeAudioIODevice;
 class FakeAudioIODeviceType;
 
+// How an OS tells a driver about one kind of change (TypeSpec).
+enum class Says {
+    itself,         // in a notification of its own
+    asListChange,   // as a change to the device list (Windows, for its default)
+    nothing,        // not at all (ALSA): only looking finds it
+};
+
 // The simulated machine: device types and their devices, shared between
 // the test (which scripts it) and every manager the factory builds —
 // including managers built later by recovery's recreateDeviceManager.
@@ -91,6 +99,15 @@ struct FakeSystem {
         std::string typeName;
         std::vector<std::shared_ptr<FakeDeviceSpec>> devices;
         int defaultDeviceIndex = 0;
+
+        // How the driver behaves where the engine asks it something or waits
+        // to hear from it. Each real driver's are in behaveLike(Driver) below;
+        // these defaults are CoreAudio's.
+        bool namesDefault  = true;          // a default by name (ASIO has none)
+        bool pairsDevices  = true;          // one device's output with another's input
+        Says listChanges   = Says::itself;
+        Says defaultMoves  = Says::itself;
+        Says openDeviceChanges = Says::itself;
     };
     std::vector<TypeSpec> types;
 
@@ -110,13 +127,16 @@ struct FakeSystem {
     // The OS reporting "the device list changed": on the calling thread, at
     // the caller's moment, through whichever device type is alive. Fenced
     // against that type being destroyed mid-call, as CoreAudio's listener is
-    // (LiveInternalRegistry). False when no manager exists.
+    // (LiveInternalRegistry). False when no manager exists, or when the
+    // driver hears nothing of it (TypeSpec::listChanges): the case then has
+    // the engine look for itself (its watchdog) as it would on that driver.
     bool reportListChanged();
     // The OS reporting a change to an open device (its channels, whether it
     // is alive), the same way.
     bool reportOpenDeviceChanged();
     // The OS reporting that its default device moved (TypeSpec's
-    // defaultDeviceIndex), the same way.
+    // defaultDeviceIndex), the same way — in a notification of its own, or
+    // as a change to the list, as the driver hears it.
     bool reportDefaultChanged();
 
     // ── Time the case keeps ──────────────────────────────────────────────
@@ -416,10 +436,21 @@ public:
     }
 
     // What a real type does when the OS tells it the list changed, that an
-    // open device changed where it stands, or that its default moved.
-    void reportListChanged() { reportDeviceChange(DeviceChange::list); }
-    void reportOpenDeviceChanged() { reportDeviceChange(DeviceChange::openDevice); }
-    void reportDefaultChanged() { reportDeviceChange(DeviceChange::systemDefault); }
+    // open device changed where it stands, or that its default moved: as the
+    // driver hears of it (TypeSpec), if it does. False when it hears nothing.
+    bool reportListChanged() { return deliver(spec().listChanges, DeviceChange::list); }
+    bool reportOpenDeviceChanged() {
+        return deliver(spec().openDeviceChanges, DeviceChange::openDevice);
+    }
+    bool reportDefaultChanged() {
+        return deliver(spec().defaultMoves, DeviceChange::systemDefault);
+    }
+
+    // The default by name, or none (ASIO).
+    juce::String getSystemDefaultDeviceName(bool forInput) const override {
+        if (!spec().namesDefault) return {};
+        return juce::AudioIODeviceType::getSystemDefaultDeviceName(forInput);
+    }
 
     DeviceTraits getDeviceTraits(const juce::String& deviceName) const override {
         DeviceTraits t;
@@ -428,7 +459,7 @@ public:
             t.wireless          = d->wireless;
             t.isVirtual         = d->isVirtual;
             t.aggregateClass    = d->aggregateClass;
-            t.pairs             = d->pairs();
+            t.pairs             = spec().pairsDevices && d->pairs();
             t.numOutputChannels = d->maxOutputChannels;
             t.numInputChannels  = d->maxInputChannels;
             t.kind              = juce::String(d->kind);
@@ -465,14 +496,24 @@ public:
         auto out = find(outputDeviceName.toStdString());
         auto in  = find(inputDeviceName.toStdString());
         if (!out && !in) return nullptr;
-        // Two devices that don't both pair are refused, as CoreAudio does.
-        if (out && in && out != in && !(out->pairs() && in->pairs())) return nullptr;
+        // Two devices that don't both pair are refused, as CoreAudio does,
+        // and any two where the driver pairs none (ASIO).
+        if (out && in && out != in
+            && !(spec().pairsDevices && out->pairs() && in->pairs())) return nullptr;
         return new FakeAudioIODevice(mSystem, out, in, getTypeName());
     }
 
 private:
     const FakeSystem::TypeSpec& spec() const {
         return mSystem->types[mTypeIndex];
+    }
+    bool deliver(Says how, DeviceChange change) {
+        switch (how) {
+        case Says::itself:       reportDeviceChange(change); return true;
+        case Says::asListChange: reportDeviceChange(DeviceChange::list); return true;
+        case Says::nothing:      return false;
+        }
+        return false;
     }
     std::shared_ptr<FakeDeviceSpec> find(const std::string& name) const {
         if (name.empty()) return nullptr;
@@ -517,23 +558,17 @@ inline void FakeSystem::advanceTo(int64_t us) {
 
 inline bool FakeSystem::reportListChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
-    if (liveTypes.empty()) return false;
-    liveTypes.back()->reportListChanged();
-    return true;
+    return !liveTypes.empty() && liveTypes.back()->reportListChanged();
 }
 
 inline bool FakeSystem::reportOpenDeviceChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
-    if (liveTypes.empty()) return false;
-    liveTypes.back()->reportOpenDeviceChanged();
-    return true;
+    return !liveTypes.empty() && liveTypes.back()->reportOpenDeviceChanged();
 }
 
 inline bool FakeSystem::reportDefaultChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
-    if (liveTypes.empty()) return false;
-    liveTypes.back()->reportDefaultChanged();
-    return true;
+    return !liveTypes.empty() && liveTypes.back()->reportDefaultChanged();
 }
 
 class FakeDeviceManager : public juce::AudioDeviceManager {
@@ -598,6 +633,89 @@ inline std::shared_ptr<FakeSystem> makeSimpleSystem() {
     mic->maxOutputChannels = 0;
     sys->types.push_back({ "FakeDriver", { out, duplex, mic }, 0 });
     return sys;
+}
+
+// ── The drivers the engine runs on ──────────────────────────────────────────
+// What each real driver does where the engine asks it something or waits to
+// hear from it, read from its code (smoothie's native types, PipeWireAudio).
+// A case run against the drivers that differ in what it depends on
+// (GENERATE(from_range(onePerWay(...)))) covers, on whatever machine runs it,
+// what each platform's driver does: a Mac run is not only a CoreAudio run,
+// and the engine's choices are the driver's answers, not the platform it was
+// built for.
+enum class Driver { CoreAudio, Wasapi, Asio, Alsa, Jack, PipeWire };
+
+inline const char* driverName(Driver d) {
+    switch (d) {
+    case Driver::CoreAudio: return "CoreAudio";
+    case Driver::Wasapi:    return "WASAPI";
+    case Driver::Asio:      return "ASIO";
+    case Driver::Alsa:      return "ALSA";
+    case Driver::Jack:      return "JACK";
+    case Driver::PipeWire:  return "PipeWire";
+    }
+    return "?";
+}
+
+inline std::vector<Driver> drivers() {
+    return { Driver::CoreAudio, Driver::Wasapi, Driver::Asio,
+             Driver::Alsa, Driver::Jack, Driver::PipeWire };
+}
+
+inline void behaveLike(FakeSystem::TypeSpec& t, Driver d) {
+    t.namesDefault = true;
+    t.pairsDevices = true;
+    switch (d) {
+    case Driver::CoreAudio:     // a HAL listener for each
+        t.listChanges = t.defaultMoves = t.openDeviceChanges = Says::itself;
+        break;
+    case Driver::Wasapi:        // one notifier for the endpoints, the default among them
+        t.listChanges       = Says::itself;
+        t.defaultMoves      = Says::asListChange;
+        t.openDeviceChanges = Says::itself;
+        break;
+    case Driver::Asio:          // one driver, no default, and only its reset request
+        t.namesDefault      = false;
+        t.pairsDevices      = false;
+        t.listChanges = t.defaultMoves = Says::nothing;
+        t.openDeviceChanges = Says::itself;
+        break;
+    case Driver::Alsa:          // nothing at all
+        t.listChanges = t.defaultMoves = t.openDeviceChanges = Says::nothing;
+        break;
+    case Driver::Jack:          // ports come and go; no default to move
+        t.listChanges = Says::itself;
+        t.defaultMoves = t.openDeviceChanges = Says::nothing;
+        break;
+    case Driver::PipeWire:      // its registry, the default's metadata among it
+        t.listChanges       = Says::itself;
+        t.defaultMoves      = Says::asListChange;
+        t.openDeviceChanges = Says::nothing;
+        break;
+    }
+}
+
+inline bool anyDriver(const FakeSystem::TypeSpec&) { return true; }
+
+// The drivers `keep` accepts, one for each different `way` among them. A case
+// runs once for each way drivers differ in what decides its outcome (how a
+// list change is heard, whether there is a default), not once per driver: the
+// drivers that hear a list change the same way give it the same run. The
+// first in drivers() stands for its way.
+template <typename Keep, typename Way>
+std::vector<Driver> onePerWay(Keep keep, Way way) {
+    std::vector<Driver> out;
+    std::vector<decltype(way(std::declval<const FakeSystem::TypeSpec&>()))> seen;
+    for (Driver d : drivers()) {
+        FakeSystem::TypeSpec t;
+        behaveLike(t, d);
+        if (!keep(t)) continue;
+        auto w = way(t);
+        if (std::find(seen.begin(), seen.end(), w) != seen.end()) continue;
+        seen.push_back(w);
+        out.push_back(d);
+    }
+    return out;
 }
 
 inline std::function<std::unique_ptr<juce::AudioDeviceManager>()>

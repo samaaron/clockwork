@@ -92,6 +92,16 @@ engine's thread shows itself:
 CLOCKWORK_TEST_HOST_DRIVES_CONTROL=1 ./build/test/clockwork_engine_tests
 ```
 
+The device cases run on fake devices (`test/FakeAudioDevice.h`), and on each
+real driver's behaviour: what CoreAudio, WASAPI, ASIO, ALSA, JACK and
+PipeWire each name, report and pair (`fake_audio::behaveLike`). A run on any
+one machine covers what every platform's driver does, which holds only while
+the engine decides by asking the driver, not by the platform it was built
+for. After each step a case checks that the engine agrees with itself about
+its device (`test/DeviceInvariants.h`): a device is open, its callback is the
+engine's source and the engine is not waiting, or none of the three, and an
+open device keeps rendering.
+
 The BEAM NIF has a suite of its own, in Elixir, under `test/nif`. It drives
 the built library through `src/nif/clockwork.erl`, so build that first:
 

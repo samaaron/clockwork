@@ -3254,32 +3254,45 @@ bool ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     return ticked;
 }
 
+std::string ClockworkEngine::driverWithADefault() {
+    // The boot's driver when it has a default, otherwise the first that does:
+    // on Windows, back from ASIO to the driver it booted on, or to WASAPI if it
+    // booted on ASIO. A driver's names are only known once it has looked; the
+    // current one has, and is not looked through again under its open device.
+    auto* current = mDeviceManager->getCurrentDeviceTypeObject();
+    auto namesADefault = [current](juce::AudioIODeviceType* type) {
+        if (type->getSystemDefaultDeviceName(false).isNotEmpty()) return true;
+        if (type == current) return false;
+        type->scanForDevices();
+        return type->getSystemDefaultDeviceName(false).isNotEmpty();
+    };
+    auto& types = mDeviceManager->getAvailableDeviceTypes();
+    for (auto* type : types)
+        if (type->getTypeName().toStdString() == mBootDriver && namesADefault(type))
+            return mBootDriver;
+    for (auto* type : types)
+        if (namesADefault(type)) return type->getTypeName().toStdString();
+    return {};
+}
+
 juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     int prevRate = mCurrentConfig.sampleRate;
     auto prevSetup = mDeviceManager->getAudioDeviceSetup();
     int prevBufSize = prevSetup.bufferSize;
 
-#ifdef _WIN32
-    // "System default" has no meaning under ASIO: JUCE's ASIO type has no
-    // default device, so initialiseWithDefaultDevices from an ASIO session
-    // stops the current device and opens none, leaving the engine with no
-    // device and no callbacks. Return to the boot-time type (mBootDriver —
-    // see init's type selection) before asking for defaults; when boot
-    // itself was ASIO (-H onto an ASIO device), DirectSound stands in as
-    // the type that can serve a default.
-    {
-        auto curType = mDeviceManager->getCurrentAudioDeviceType();
-        if (curType == "ASIO") {
-            const std::string target =
-                (!mBootDriver.empty() && mBootDriver != "ASIO")
-                    ? mBootDriver : std::string("DirectSound");
-            clockwork_log("[device-setup] system default requested from ASIO "
-                    "— returning to %s first", target.c_str());
-            mDeviceManager->setCurrentAudioDeviceType(
-                juce::String(target), true);
+    // "System default" means nothing on a driver with none (ASIO): JUCE's
+    // default-device init stops the current device and opens nothing. Ask a
+    // driver that has one instead (driverWithADefault).
+    if (auto* type = mDeviceManager->getCurrentDeviceTypeObject();
+        type && type->getSystemDefaultDeviceName(false).isEmpty()) {
+        const std::string current = type->getTypeName().toStdString();
+        const std::string target = driverWithADefault();
+        if (!target.empty() && target != current) {
+            clockwork_log("[device-setup] system default requested from %s, which "
+                    "has none — using %s's", current.c_str(), target.c_str());
+            mDeviceManager->setCurrentAudioDeviceType(juce::String(target), true);
         }
     }
-#endif
 
     auto err = mDeviceManager->initialiseWithDefaultDevices(0, 2);
     if (err.isNotEmpty())
@@ -4752,38 +4765,37 @@ ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
 
 std::string ClockworkEngine::openSystemDefault() {
     if (!mDeviceManager) return {};
-#ifdef __APPLE__
+    // The default as its driver names it. A wired one is opened by that name,
+    // like any device the engine switches to: switchDevice keeps the input,
+    // rebuilds when the rate differs, and goes back when it won't open. The
+    // driver opens a wireless one itself (AirPlay, Bluetooth): CoreAudio's
+    // default route reaches AirPlay, which opening by name never did
+    // reliably. So it does when it names none (ASIO), by way of a driver that
+    // has one. The driver's answer decides, on every platform: Linux and
+    // Windows used to take the driver's way for every default, and no Mac run
+    // went that way (test_no_audio_device.cpp).
     const SystemDefaultOutput def = systemDefaultOutput();
-    const std::string& newDefault = def.name;
-    if (!newDefault.empty()) {
-        // Branch on the new default's transport type:
-        //
-        //  * Wireless (AirPlay/Bluetooth): reinitialiseWithDefaultsPreservingConfig.
-        //    JUCE uses CoreAudio's default-output abstraction, which routes through
-        //    AirPlay correctly; opening AirPlay by explicit name has never been
-        //    reliable in testing.
-        //  * Non-wireless: switchDevice, so the input is kept.
-        if (!def.wireless) {
-            std::string inputName;
-            if (mCurrentConfig.numInputChannels > 0)
-                inputName = mDeviceManager->getAudioDeviceSetup().inputDeviceName.toStdString();
-            // Internal: following the default is not choosing it. A
-            // user-origin swap would pin the default it landed on, and
-            // every later move of the default would then be refused.
-            auto result = switchDevice(newDefault, 0, 0, false, inputName,
-                                       SwapOrigin::Internal);
-            if (!result.success) return result.error;
-            return {};
-        }
-        // Wireless default — fall through to the reinitialise
-        // path below.
-        clockwork_log("[device-setup] system default '%s' is wireless; "
-                "using JUCE default-device init", newDefault.c_str());
+    if (!def.name.empty() && !def.wireless) {
+        std::string inputName;
+        if (mCurrentConfig.numInputChannels > 0)
+            inputName = mDeviceManager->getAudioDeviceSetup().inputDeviceName.toStdString();
+        // Internal: following the default is not choosing it. A user-origin
+        // swap would pin the default it landed on, and every later move of
+        // the default would then be refused.
+        const auto result = switchDevice(def.name, 0, 0, false, inputName,
+                                         SwapOrigin::Internal);
+        return result.success ? std::string() : result.error;
     }
-#endif
-    // The reinit and the cold swap after it are one mutation: under the
-    // gate throughout, so no other swap drives the manager in between (two
-    // at once wedged DirectSound's callback thread in a cursor-poll spin).
+    if (!def.name.empty())
+        clockwork_log("[device-setup] system default '%s' is wireless; its driver "
+                "opens it", def.name.c_str());
+    return openDriverDefault();
+}
+
+std::string ClockworkEngine::openDriverDefault() {
+    // The init and what follows it are one mutation: under the gate
+    // throughout, so no other swap drives the manager in between (two at once
+    // wedged DirectSound's callback thread in a cursor-poll spin).
     std::unique_lock<std::recursive_mutex> swapGate;
     if (!tryAcquireSwapGate(swapGate, 30, 100)) {
         clockwork_log("[device-setup] system mode init refused: "
@@ -4791,18 +4803,33 @@ std::string ClockworkEngine::openSystemDefault() {
         return "swap already in progress";
     }
 
+    // What it plays on now, to go back to: the init stops it to try the
+    // default.
+    const bool wasOpen = mDeviceManager->getCurrentAudioDevice() != nullptr;
+    const auto wasSetup = mDeviceManager->getAudioDeviceSetup();
+    const juce::String wasDriver = mDeviceManager->getCurrentAudioDeviceType();
+
     auto err = reinitialiseWithDefaultsPreservingConfig();
     if (err.isNotEmpty()) {
         clockwork_log("[device-setup] system mode init failed: %s",
                 err.toRawUTF8());
-        // Never leave the engine with a stopped device and no
-        // replacement: restart the audio source (falls back to the
-        // headless driver when no device is open) so commands keep
-        // draining — silent audio beats a deaf server.
-        if (mActiveSource.load() != AudioSource::None) {
-            stopAudioSource();
-            startAudioSource();
+        // Back on what it played on, as switchDevice goes back when a device
+        // won't open: the device, its rate and buffer, and its driver.
+        if (wasOpen) {
+            if (mDeviceManager->getCurrentAudioDeviceType() != wasDriver)
+                mDeviceManager->setCurrentAudioDeviceType(wasDriver, true);
+            const auto back = mDeviceManager->setAudioDeviceSetup(wasSetup, true);
+            if (back.isEmpty())
+                clockwork_log("[device-setup] back on '%s'",
+                        wasSetup.outputDeviceName.toRawUTF8());
+            else
+                clockwork_log("[device-setup] could not go back to '%s': %s",
+                        wasSetup.outputDeviceName.toRawUTF8(), back.toRawUTF8());
         }
+        // The engine plays on what is open now: that device, or none, and then
+        // it waits for one (waitingForAudioDevice).
+        stopAudioSource();
+        startAudioSource();
         return err.toStdString();
     }
 
@@ -4817,6 +4844,8 @@ std::string ClockworkEngine::openSystemDefault() {
         newDevName = dev->getName().toStdString();
     }
 
+    // The engine plays on what the init opened: at its rate, and when it was
+    // waiting for a device too, where nothing else would attach it.
     if (newRate > 0 && static_cast<int>(newRate) != mCurrentConfig.sampleRate) {
         clockwork_log(
                 "[device-setup] system default has different rate "
@@ -4828,9 +4857,12 @@ std::string ClockworkEngine::openSystemDefault() {
         // sampleRate and skips the rebuild, leaving the DSP
         // running at the old rate while JUCE delivers samples at
         // the new rate — mismatch, pitched-down audio. Internal, as
-        // above: the default it opened is not the user's pick.
+        // in openSystemDefault: the default it opened is not the user's pick.
         switchDevice(newDevName, newRate, 0, /*forceCold=*/true, "",
                      SwapOrigin::Internal);
+    } else if (mActiveSource.load() == AudioSource::None) {
+        clockwork_log("[device-setup] playing on '%s'", newDevName.c_str());
+        startAudioSource();
     }
     printDeviceList();
     return {};
