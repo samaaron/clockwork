@@ -43,6 +43,13 @@ bool AudioIODevice::setAudioPreprocessingEnabled (bool)         { return false; 
 bool AudioIODevice::hasControlPanel() const                     { return false; }
 int  AudioIODevice::getXRunCount() const noexcept               { return -1; }
 
+AudioIODevice::LiveState AudioIODevice::readLiveState()
+{
+    LiveState state;
+    state.alive = isOpen();
+    return state;
+}
+
 bool AudioIODevice::showControlPanel()
 {
     jassertfalse;    // this should only be called for devices which return true from

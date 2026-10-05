@@ -24,6 +24,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -183,6 +184,15 @@ SwapResult whenSwapGateFree(Attempt&& attempt) {
 template <typename Fix, typename... Args>
 SwapResult switchWhenFree(Fix& fix, Args&&... args) {
     return whenSwapGateFree([&] { return fix.engine().switchDevice(args...); });
+}
+
+// Everything the engine's device lane was given before this has run: it
+// runs its tasks in order.
+inline void deviceLaneDone(ClockworkEngine& engine) {
+    std::promise<void> done;
+    auto finished = done.get_future();
+    engine.postDeviceTask([&] { done.set_value(); });
+    REQUIRE(finished.wait_for(std::chrono::seconds(30)) == std::future_status::ready);
 }
 
 inline int32_t lastInt(const OscReply& r) {

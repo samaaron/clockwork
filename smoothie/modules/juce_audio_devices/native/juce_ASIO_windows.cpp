@@ -1537,7 +1537,7 @@ public:
 
     void sendDeviceChangeToListeners()
     {
-        callDeviceChangeListeners();
+        reportDeviceChange (AudioIODeviceType::DeviceChange::list);
     }
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (ASIOAudioIODeviceType)

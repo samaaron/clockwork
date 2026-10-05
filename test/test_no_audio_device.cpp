@@ -1,216 +1,130 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
-// Behaviour when the default (JUCE) engine has no audio device.
-//
-// Contract: no device → the engine is IDLE (no audio source), reports it, and
-// the watchdog keeps trying to open one so it self-heals when a device appears.
-// Headless is an EXPLICIT mode only (Config::headless / manualAudioPump — the
-// test harness and future non-JUCE backends).
+/*
+ * test_no_audio_device.cpp — the engine with no audio device to open.
+ *
+ * No device: the engine is idle (no audio source, nothing ticking), says it is
+ * waiting, and plays as soon as a device appears — at once when the OS reports
+ * one, and through the watchdog's own looking when the OS says nothing (ALSA
+ * reports no device changes at all). It never fakes a session on a silent
+ * driver: headless is an explicit mode only (Config::headless).
+ *
+ * The machine is a fake one whose devices are all unplugged, so the device
+ * manager exists and initialises and opens nothing — what PipeWire's "no
+ * channels" default sink did to a JUCE ALSA boot (#3526) — and nothing on the
+ * machine running the case can reach it.
+ */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
-#include "OscTestUtils.h"
-#include "ClockworkEngine.h"
+#include "FakeAudioDevice.h"
 #include <atomic>
 #include <memory>
-#include <chrono>
-#include <mutex>
-#include <thread>
-#include <vector>
+#include <optional>
+#include <string>
+
+using fake_audio::fakeEngineConfig;
+using fake_audio::makeSimpleSystem;
 
 namespace {
 
-// Boot config that mirrors how a product launches the engine at runtime:
-// non-headless (a real device manager exists), 2-channel output, no input,
-// 48 kHz, no UDP port (we send OSC in-process via sendOSC to keep the test
-// hermetic).
-ClockworkEngine::Config nonHeadlessTestConfig() {
-    ClockworkEngine::Config cfg;
-    cfg.sampleRate        = 48000;
-    cfg.bufferSize        = 128;
-    cfg.udpPort           = 0;
-    cfg.headless          = false;   // mDeviceManager will be created; NOT headless
-    cfg.numOutputChannels = 2;
-    cfg.numInputChannels  = 0;
-    return cfg;
+// A machine with every device unplugged.
+std::shared_ptr<fake_audio::FakeSystem> machineWithNothingPluggedIn() {
+    auto sys = makeSimpleSystem();
+    for (auto& d : sys->types[0].devices) d->hidden = true;
+    return sys;
 }
-
-// EngineFixture constructs and initialises atomically, which is too late
-// to set testForceNoCurrentDeviceAfterInit. This fixture sets the flag
-// before init().
-class NoDeviceEngine {
-public:
-    NoDeviceEngine() {
-        mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
-            std::lock_guard<std::mutex> lk(mMutex);
-            Reply r;
-            r.address = osc_test::parseAddress(data, size);
-            r.raw.assign(data, data + size);
-            mReplies.push_back(std::move(r));
-        };
-        mEngine.onDebug = [](const std::string&) {};
-        mEngine.testForceNoCurrentDeviceAfterInit = true;
-    }
-
-    ~NoDeviceEngine() { mEngine.shutdown(); }
-
-    void init(const ClockworkEngine::Config& cfg) { mEngine.init(cfg); }
-    ClockworkEngine& engine() { return mEngine; }
-
-private:
-    struct Reply { std::string address; std::vector<uint8_t> raw; };
-    ClockworkEngine mEngine;
-    std::mutex mMutex;
-    std::vector<Reply> mReplies;
-};
 
 uint32_t processCount(ClockworkEngine& e) {
     return e.audioCallback().processCount.load(std::memory_order_acquire);
 }
 
-bool pollUntil(std::function<bool()> pred, int timeoutMs) {
-    const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return pred();
+bool playingOn(EngineFixture& fix, const std::string& name, int timeoutMs = 10000) {
+    return fix.pollUntil([&] { return fix.engine().currentDevice().name == name; },
+                         timeoutMs);
 }
 
-} // namespace
+}  // namespace
 
-// ── The core contract: no device → idle waiting state, never a silent driver ──
+TEST_CASE("NoAudioDevice: with no device to open, the engine waits for one and "
+          "plays nothing meanwhile", "[NoAudioDevice]") {
+    auto sys = machineWithNothingPluggedIn();
+    EngineFixture fix(fakeEngineConfig(sys, ""));        // system mode
 
-TEST_CASE("NoAudioDevice: boot with no device lands in the waiting state, not a driver",
-          "[NoAudioDevice]") {
-    NoDeviceEngine harness;
-    REQUIRE_NOTHROW(harness.init(nonHeadlessTestConfig()));
+    CHECK(fix.engine().isRunning());
+    CHECK(fix.engine().waitingForAudioDevice());
+    CHECK(fix.engine().audioSource() == ClockworkEngine::AudioSource::None);
+    CHECK(fix.engine().currentDevice().name.empty());
+    CHECK(fix.engine().currentDevice().activeSampleRate == 0.0);
 
-    // The engine boots (so it can accept device-switch / prefs OSC and recover)
-    // but has NO audio source.
-    CHECK(harness.engine().isRunning());
-    CHECK(harness.engine().audioSource() == ClockworkEngine::AudioSource::None);
-    CHECK(harness.engine().audioSource() != ClockworkEngine::AudioSource::Headless);
-    CHECK(harness.engine().waitingForAudioDevice());
+    // A change to the devices that brings none finds nothing to open.
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    CHECK(fix.engine().waitingForAudioDevice());
+    CHECK(processCount(fix.engine()) == 0);
 }
 
-TEST_CASE("NoAudioDevice: the waiting state does not fake playback (no ticks)",
-          "[NoAudioDevice]") {
-    NoDeviceEngine harness;
-    harness.init(nonHeadlessTestConfig());   // watchdog off in this config
+TEST_CASE("NoAudioDevice: a device plugged in while the engine waits is played "
+          "on as soon as the OS says so", "[NoAudioDevice]") {
+    auto sys = machineWithNothingPluggedIn();
+    EngineFixture fix(fakeEngineConfig(sys, ""));
+    REQUIRE(fix.engine().waitingForAudioDevice());
 
-    // With no device and no source, process_audio must not be running. A frozen
-    // processCount is the machine-checkable form of "not faking a session".
-    const uint32_t before = processCount(harness.engine());
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    CHECK(processCount(harness.engine()) == before);
+    sys->device("Fake Speakers")->hidden = false;        // plugged in, the default
+    REQUIRE(sys->reportListChanged());
+
+    const bool playing = playingOn(fix, "Fake Speakers");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(playing);
+    CHECK_FALSE(fix.engine().waitingForAudioDevice());
+    CHECK(fix.waitForBlocks(20));
 }
 
-TEST_CASE("NoAudioDevice: device manager survives and reports no current device",
-          "[NoAudioDevice]") {
-    NoDeviceEngine harness;
-    harness.init(nonHeadlessTestConfig());
-
-    // mDeviceManager STAYS alive, so currentDevice() reports an empty device
-    // (no crash, no fake) and a device can be opened later — by the watchdog's
-    // recovery, or a device-switch once audio is draining again.
-    auto dev = harness.engine().currentDevice();
-    CHECK(dev.name.empty());
-    CHECK(dev.activeSampleRate == 0.0);
-}
-
-TEST_CASE("NoAudioDevice: shutdown from the waiting state is clean",
-          "[NoAudioDevice]") {
-    NoDeviceEngine harness;
-    harness.init(nonHeadlessTestConfig());
-    REQUIRE(harness.engine().isRunning());
-    // Destructor calls shutdown(); no source thread to join, must not hang.
-}
-
-// ── Headless is explicit-only: the two paths now DIVERGE ──────────────────────
-
-TEST_CASE("NoAudioDevice: explicit headless ticks; no-device non-headless stays idle",
-          "[NoAudioDevice]") {
-    {
-        // Explicit headless (Config::headless=true) — tests / non-JUCE backends.
-        EngineFixture fix;  // default fixture sets headless=true
-        CHECK(fix.engine().audioSource() == ClockworkEngine::AudioSource::Headless);
-        CHECK(pollUntil([&] { return processCount(fix.engine()) > 20; }, 30000));
-    }
-    {
-        // Default engine, no device — idle, no headless, no ticks.
-        NoDeviceEngine harness;
-        harness.init(nonHeadlessTestConfig());
-        CHECK(harness.engine().audioSource() != ClockworkEngine::AudioSource::Headless);
-        CHECK(harness.engine().audioSource() == ClockworkEngine::AudioSource::None);
-    }
-}
-
-// ── The watchdog self-heals out of the waiting state ──────────────────────────
-
-TEST_CASE("NoAudioDevice: the watchdog keeps trying to open a device",
-          "[NoAudioDevice]") {
-    NoDeviceEngine harness;
+TEST_CASE("NoAudioDevice: a device plugged in while the engine waits is found "
+          "by the watchdog when the OS says nothing", "[NoAudioDevice]") {
+    auto sys = machineWithNothingPluggedIn();
     auto clockMs = std::make_shared<std::atomic<int64_t>>(0);
-    auto cfg = nonHeadlessTestConfig();
+    auto cfg = fakeEngineConfig(sys, "");
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 250;
     cfg.watchdogPollMs   = 50;
     cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };   // polled by the case
-    harness.init(cfg);
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().waitingForAudioDevice());
 
-    // The watchdog fires recovery to open a device. On a machine with hardware
-    // it climbs back to a real source; on a headless CI runner the attempts keep
-    // failing — either way an attempt happens at its first poll.
+    sys->device("Fake Speakers")->hidden = false;        // and no word of it
     clockMs->fetch_add(50);
-    harness.engine().watchdogPoll();
-    CHECK((harness.engine().watchdogRecoveryCount() >= 1
-           || harness.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback));
-    REQUIRE(pollUntil([&] { return !harness.engine().recoveryInFlight(); }, 30000));
+    fix.engine().watchdogPoll();
 
-    CHECK(harness.engine().audioSource() != ClockworkEngine::AudioSource::Headless);
+    const bool playing = playingOn(fix, "Fake Speakers");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(playing);
+    CHECK(fix.waitForBlocks(20));
 }
 
-// ── Regression (W1): the waiting branch must honour an in-flight swap ──────────
-
-// A normal switchDevice holds mSwapMutex across a transient mActiveSource==None
-// window (stopAudioSource → cold swap → startAudioSource). The watchdog's benign
-// block already treats "swap in flight" as a reason to skip a recovery, but the
-// waitingForAudioDevice() branch ABOVE it does not. During that window it fires a
-// recovery which recreates the device manager and reopens the SYSTEM DEFAULT —
-// silently reverting the device the switch just selected.
-//
-// Deterministic without hardware: hold the swap gate from BEFORE the watchdog
-// starts, so every recovery attempt is refused the gate and takes recoverAudio's
-// "device busy" path, which (by design) does NOT stamp the cooldown — so the
-// cooldown can never mask the defect after a first attempt. A correct watchdog
-// launches ZERO recoveries while a swap is in flight.
-TEST_CASE("NoAudioDevice: watchdog defers recovery while a device swap holds the gate",
+// A swap holds the gate across a moment with no audio source (stop, rebuild,
+// start). A watchdog that took that moment for "waiting for a device" would
+// recover onto the system default and undo the switch. Held from before the
+// watchdog starts, so every poll sees a swap in flight.
+TEST_CASE("NoAudioDevice: the watchdog leaves a device swap in flight alone",
           "[NoAudioDevice]") {
-    NoDeviceEngine harness;
-
-    // Hold the gate before init() spins up the watchdog thread.
-    auto gate = harness.engine().testHoldSwapGate();
-
+    auto sys = machineWithNothingPluggedIn();
     auto clockMs = std::make_shared<std::atomic<int64_t>>(0);
-    auto cfg = nonHeadlessTestConfig();
+    auto cfg = fakeEngineConfig(sys, "");
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 100;
     cfg.watchdogPollMs   = 20;
-    cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };   // polled by the case
-    harness.init(cfg);
+    cfg.watchdogClockMs  = [clockMs] { return clockMs->load(); };
+    std::optional<ClockworkEngine::TestSwapHold> swap;
+    EngineFixture fix(cfg, [&](ClockworkEngine& engine) {
+        swap.emplace(engine.testHoldSwapGate());
+    });
+    REQUIRE(fix.engine().waitingForAudioDevice());
 
-    REQUIRE(harness.engine().waitingForAudioDevice());
-
-    // Several poll windows elapse with the swap in flight the whole time.
+    sys->device("Fake Speakers")->hidden = false;        // there to recover onto
     for (int i = 0; i < 20; ++i) {
         clockMs->fetch_add(20);
-        harness.engine().watchdogPoll();
+        fix.engine().watchdogPoll();
     }
-
-    // No recovery should have launched: a swap is in flight, exactly the state
-    // the benign block skips. (Fails today — the waiting branch fires anyway.)
-    CHECK(harness.engine().watchdogRecoveryCount() == 0);
-
-    gate.unlock();
+    CHECK(fix.engine().watchdogRecoveryCount() == 0);
+    swap.reset();
 }

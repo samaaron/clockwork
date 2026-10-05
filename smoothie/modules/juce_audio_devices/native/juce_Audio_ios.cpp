@@ -434,7 +434,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         updateAvailableBufferSizes();
 
         if (deviceType != nullptr)
-            deviceType->callDeviceChangeListeners();
+            deviceType->reportDeviceChange (AudioIODeviceType::DeviceChange::list);
     }
 
     void setTargetSampleRateAndBufferSize()
@@ -1480,7 +1480,7 @@ void iOSAudioIODeviceType::handleRouteChange (AVAudioSessionRouteChangeReason)
 
 void iOSAudioIODeviceType::handleAsyncUpdate()
 {
-    callDeviceChangeListeners();
+    reportDeviceChange (AudioIODeviceType::DeviceChange::list);
 }
 
 //==============================================================================

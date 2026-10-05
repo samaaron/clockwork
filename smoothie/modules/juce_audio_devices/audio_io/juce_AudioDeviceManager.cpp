@@ -62,8 +62,7 @@ bool AudioDeviceManager::AudioDeviceSetup::operator!= (const AudioDeviceManager:
 
 //==============================================================================
 class AudioDeviceManager::CallbackHandler final : public AudioIODeviceCallback,
-                                                  public MidiInputCallback,
-                                                  public AudioIODeviceType::Listener
+                                                  public MidiInputCallback
 {
 public:
     CallbackHandler (AudioDeviceManager& adm) noexcept  : owner (adm) {}
@@ -97,11 +96,6 @@ private:
     void handleIncomingMidiMessage (MidiInput* source, const MidiMessage& message) override
     {
         owner.handleIncomingMidiMessageInt (source, message);
-    }
-
-    void audioDeviceListChanged() override
-    {
-        owner.audioDeviceListChanged();
     }
 
     AudioDeviceManager& owner;
@@ -178,48 +172,6 @@ void AudioDeviceManager::updateCurrentSetup()
     }
 }
 
-void AudioDeviceManager::audioDeviceListChanged()
-{
-    if (currentAudioDevice != nullptr)
-    {
-        auto currentDeviceStillAvailable = [&]
-        {
-            auto currentTypeName = currentAudioDevice->getTypeName();
-            auto currentDeviceName = currentAudioDevice->getName();
-
-            for (auto* deviceType : availableDeviceTypes)
-            {
-                if (currentTypeName == deviceType->getTypeName())
-                {
-                    for (auto& deviceName : deviceType->getDeviceNames (true))
-                        if (currentDeviceName == deviceName)
-                            return true;
-
-                    for (auto& deviceName : deviceType->getDeviceNames (false))
-                        if (currentDeviceName == deviceName)
-                            return true;
-                }
-            }
-
-            return false;
-        }();
-
-        if (! currentDeviceStillAvailable)
-        {
-            closeAudioDevice();
-
-            if (auto e = createStateXml())
-                initialiseFromXML (*e, true, preferredDeviceName, &currentSetup);
-            else
-                initialiseDefault (preferredDeviceName, &currentSetup);
-        }
-
-        updateCurrentSetup();
-    }
-
-    sendChangeMessage();
-}
-
 void AudioDeviceManager::midiDeviceListChanged()
 {
     openLastRequestedMidiDevices (midiDeviceInfosFromXml, defaultMidiOutputDeviceInfo);
@@ -259,16 +211,13 @@ void AudioDeviceManager::addAudioDeviceType (std::unique_ptr<AudioIODeviceType> 
         availableDeviceTypes.add (newDeviceType.release());
         lastDeviceTypeConfigs.add (new AudioDeviceSetup());
 
-        // smoothie: the sink first — a change reported between the two
-        // must not reach the listener.
+        // smoothie: the sink is how the type's device changes leave it.
         if (deviceChangeSink != nullptr)
             availableDeviceTypes.getLast()->setDeviceChangeSink (deviceChangeSink);
-
-        availableDeviceTypes.getLast()->addListener (callbackHandler.get());
     }
 }
 
-void AudioDeviceManager::setDeviceChangeSink (std::function<void()> sink)
+void AudioDeviceManager::setDeviceChangeSink (std::function<void (AudioIODeviceType::DeviceChange)> sink)
 {
     deviceChangeSink = std::move (sink);
 
@@ -285,10 +234,7 @@ void AudioDeviceManager::removeAudioDeviceType (AudioIODeviceType* deviceTypeToR
         auto index = availableDeviceTypes.indexOf (deviceTypeToRemove);
 
         if (auto removed = std::unique_ptr<AudioIODeviceType> (availableDeviceTypes.removeAndReturn (index)))
-        {
-            removed->removeListener (callbackHandler.get());
             lastDeviceTypeConfigs.remove (index, true);
-        }
     }
 }
 

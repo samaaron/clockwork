@@ -199,7 +199,10 @@ ClockworkEngine::makeDeviceManager() {
     // Device-list changes come to the engine, not to the manager: left to
     // itself the manager closes and reopens devices on whatever thread the
     // OS reports a change, under the device lane's feet.
-    manager->setDeviceChangeSink([this] { devicesChanged(); });
+    manager->setDeviceChangeSink([this](juce::AudioIODeviceType::DeviceChange change) {
+        devicesChanged(change == juce::AudioIODeviceType::DeviceChange::list
+                           ? kListChanged : kOpenDeviceChanged);
+    });
     return manager;
 }
 
@@ -1574,17 +1577,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // client API reads both), in the drain above or in the host's — there is
     // no separate drain of it here any more.
 
-    // Test hook: close the device before the source decision so
-    // startAudioSource() sees no current device and enters the "waiting for
-    // audio device" state (the default engine never falls back to a silent
-    // driver — see desiredAudioSource).
-    if (testForceNoCurrentDeviceAfterInit && mDeviceManager) {
-        clockwork_log(
-                "[engine] testForceNoCurrentDeviceAfterInit: closing device "
-                "to exercise the no-audio-device path");
-        mDeviceManager->closeAudioDevice();
-    }
-
     // -- Audio callback wiring ---------------------------------------------
     mAudioCallback.setClockworkClock(&mClockworkClock);
     mAudioCallback.setLinkAudio(&mLinkAudio);
@@ -1704,7 +1696,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mRunning.store(true);
     // A change to the devices that came while booting, looked at now (see
     // reconcileDevices).
-    if (mReconcileAfterBoot.exchange(false)) devicesChanged();
+    if (mReconcileAfterBoot.exchange(false)) devicesChanged(0);
     // An engine whose build left no guest is not running a guest, and says so:
     // in error, with the reason the build gave, which every client that
     // registers is told (snapshotStateTo). It stays up — its transport and its
@@ -3138,12 +3130,10 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
 
     // Cache hit — see ClockworkEngine.h for the rationale (JUCE WASAPI
     // probing is ~10 s for a typical device set, called multiple times
-    // during boot). Skip the cache when rescan=true (explicit refresh) or
-    // when the cache has been invalidated by an audioDeviceListChanged.
+    // during boot). rescan=true refreshes it.
     if (!rescan) {
         std::lock_guard<std::mutex> lk(mListDevicesMutex);
-        if (!mCachedDevices.empty()
-            && mCachedDevicesAt.time_since_epoch().count() != 0)
+        if (!mCachedDevices.empty())
             return mCachedDevices;
     }
 
@@ -3437,7 +3427,6 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
     {
         std::lock_guard<std::mutex> lk(mListDevicesMutex);
         mCachedDevices = result;
-        mCachedDevicesAt = std::chrono::steady_clock::now();
     }
     return result;
 }
@@ -5267,21 +5256,23 @@ SwapResult ClockworkEngine::switchDriver(const std::string& driverName) {
 
 // --- Device change detection ---
 
-void ClockworkEngine::devicesChanged() {
-    // Any thread, at the OS's moment: only queue. A pass already queued
-    // has yet to look, so it will see this change too.
-    if (!mDevicesChangedQueued.exchange(true))
+void ClockworkEngine::devicesChanged(unsigned changes) {
+    // Any thread, at the OS's moment: only note it and queue. A pass already
+    // queued has yet to look, so it will see this change too.
+    if (!(mDeviceChanges.fetch_or(changes | kPassQueued) & kPassQueued))
         postDeviceTask([this] { reconcileDevices(); });
 }
 
 void ClockworkEngine::reconcileDevices() {
-    // Cleared before looking: a change from here on queues another pass.
-    mDevicesChangedQueued.store(false);
-    // Booting: init runs a pass once the engine is running. The flag is set
-    // before running is looked at again, and init sets running before it
-    // reads the flag, so at least one of them sees the other — both, at
-    // worst, and the second pass finds nothing to do.
+    // Taken before looking: a change from here on queues another pass.
+    const unsigned changes = mDeviceChanges.exchange(0) & ~kPassQueued;
+    // Booting: init runs a pass once the engine is running, and the changes
+    // wait for it. The flag is set before running is looked at again, and
+    // init sets running before it reads the flag, so at least one of them
+    // sees the other — both, at worst, and the second pass finds nothing to
+    // do.
     if (!mRunning.load()) {
+        mDeviceChanges.fetch_or(changes);
         mReconcileAfterBoot.store(true);
         if (!mRunning.load()) return;
     }
@@ -5294,14 +5285,16 @@ void ClockworkEngine::reconcileDevices() {
     std::unique_lock<std::recursive_mutex> gate;
     if (!tryAcquireSwapGate(gate, 30, 100)) {
         clockwork_log("[devices] changed, gate busy for 3 s — looking again");
-        devicesChanged();
+        devicesChanged(changes);
         return;
     }
     if (!mDeviceManager) return;
 
     // MIDI hot-plug is the MIDI subsystem's own (rust/clockwork-midi's
-    // watcher); this is audio devices only.
-    auto devices = listDevices(true);   // rescans: the lists are this thread's
+    // watcher); this is audio devices only. The lists are rescanned (they are
+    // this thread's) only when they changed: a rescan just after a switch
+    // can close a CoreAudio device just opened.
+    auto devices = listDevices((changes & kListChanged) != 0);
     auto* dev = mDeviceManager->getCurrentAudioDevice();
 
     // Active channel counts track the current device's live mask, not the
@@ -5342,13 +5335,7 @@ void ClockworkEngine::reconcileDevices() {
     // A swap or a reopen reports for itself. An output the user chose comes
     // first; only without one does the system default decide.
     if (decision.reopen) {
-        // A recovery already claimed is queued behind this pass and will
-        // find the device gone itself.
-        bool expected = false;
-        if (mReopenInProgress.compare_exchange_strong(expected, true)) {
-            clockwork_log("[hotplug] '%s' has gone — reopening", currentOutput.c_str());
-            recoverAudio({});
-        }
+        recoverLostDevice(currentOutput, "has gone from the list");
     } else if (decision.switchOutput) {
         clockwork_log("[hotplug] preferred output '%s' is here — switching to it "
                 "(preferred input='%s')", decision.outputName.c_str(),
@@ -5363,9 +5350,60 @@ void ClockworkEngine::reconcileDevices() {
             switchDevice("", 0, 0, false, decision.inputName, SwapOrigin::Internal);
             acted = true;
         }
-        if (followDefaultOutput()) acted = true;
+        // A follow opens another device; only without one is the device
+        // played on looked at as it stands.
+        if (followDefaultOutput() || reconcileOpenDevice()) acted = true;
         if (!acted && listChanged) printDeviceList();
     }
+}
+
+void ClockworkEngine::recoverLostDevice(const std::string& name, const char* how) {
+    // A recovery already claimed is queued behind this pass and will find
+    // the device gone itself.
+    bool expected = false;
+    if (mReopenInProgress.compare_exchange_strong(expected, true)) {
+        clockwork_log("[devices] '%s' %s — reopening", name.c_str(), how);
+        recoverAudio({});
+    }
+}
+
+bool ClockworkEngine::reconcileOpenDevice() {
+    // A queued recovery opens a device anew anyway.
+    if (!mDeviceManager || mReopenInProgress.load()) return false;
+    auto* dev = mDeviceManager->getCurrentAudioDevice();
+    if (!dev) return false;
+
+    const std::string name = dev->getName().toStdString();
+    const auto live = dev->readLiveState();
+    if (!live.alive) {
+        recoverLostDevice(name, "has stopped where it stands");
+        return true;
+    }
+
+    // Its channels as opened, against its driver's now (-1: can't say).
+    const int outs = dev->getOutputChannelNames().size();
+    const int ins  = dev->getInputChannelNames().size();
+    const bool channelsChanged =
+        (live.numOutputChannels >= 0 && live.numOutputChannels != outs)
+        || (live.numInputChannels >= 0 && live.numInputChannels != ins);
+
+    // Its rate is not taken from the report: CoreAudio reports a rate the
+    // engine has itself just set only some time later, and a report read
+    // in between would switch the engine back to the rate it left. A rate
+    // another app sets is caught by the watchdog, which measures the rate
+    // the device delivers (rate skew) and reopens at it. Said here, for the
+    // log.
+    const int liveRate = static_cast<int>(live.sampleRate);
+    if (liveRate > 0 && liveRate != mCurrentConfig.sampleRate)
+        clockwork_log("[devices] '%s' reports %d Hz; the engine runs at %d Hz",
+                name.c_str(), liveRate, mCurrentConfig.sampleRate);
+
+    if (!channelsChanged) return false;
+    clockwork_log("[devices] '%s' now has %d out / %d in (opened with %d / %d) "
+            "— opening it again", name.c_str(), live.numOutputChannels,
+            live.numInputChannels, outs, ins);
+    reopenCurrentDevice(0);
+    return true;
 }
 
 bool ClockworkEngine::followDefaultOutput() {
@@ -5378,6 +5416,8 @@ bool ClockworkEngine::followDefaultOutput() {
     const std::string currentOutput = mRealOutputDeviceName.empty()
         ? (dev ? dev->getName().toStdString() : std::string())
         : mRealOutputDeviceName;
+    const bool moved = def.name != mDefaultSeen;
+    mDefaultSeen = def.name;
     if (def.name.empty() || def.name == currentOutput) {
         mUnopenableDefault.clear();
         return false;
@@ -5393,10 +5433,11 @@ bool ClockworkEngine::followDefaultOutput() {
         mPreferredOutputDevice.empty() ? mDeviceMode : mPreferredOutputDevice;
     if (!clockwork::device::shouldFollowDefaultOutputChange(
             def.name, currentOutput, def.isVirtual, sPublishedAppName, chosen)) {
-        clockwork_log("[device-setup] system default is '%s' (virtual=%d, "
-                "pinned='%s'); not following (staying on '%s')",
-                def.name.c_str(), def.isVirtual ? 1 : 0, chosen.c_str(),
-                currentOutput.c_str());
+        if (moved)
+            clockwork_log("[device-setup] system default is '%s' (virtual=%d, "
+                    "pinned='%s'); not following (staying on '%s')",
+                    def.name.c_str(), def.isVirtual ? 1 : 0, chosen.c_str(),
+                    currentOutput.c_str());
         return false;
     }
     if (def.name == mUnopenableDefault) return false;   // tried since it moved here
@@ -5418,13 +5459,13 @@ OSStatus ClockworkEngine::defaultDevicePropertyListenerProc(
 {
     clockwork_log("[default-output-listener] fired");
     // The same pass a device coming or going starts, on the device lane.
-    static_cast<ClockworkEngine*>(inClientData)->devicesChanged();
+    static_cast<ClockworkEngine*>(inClientData)->devicesChanged(kDefaultChanged);
     return noErr;
 }
 #endif
 
 void ClockworkEngine::testSystemDefaultOutputChanged() {
-    devicesChanged();
+    devicesChanged(kDefaultChanged);
 }
 
 ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {

@@ -1988,7 +1988,7 @@ private:
         if (std::exchange (devices, newDevices) != newDevices)
         {
             hasScanned = true;
-            callDeviceChangeListeners();
+            reportDeviceChange (AudioIODeviceType::DeviceChange::list);
         }
     }
 

@@ -145,3 +145,71 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     INFO(fix.debugMessagesDump());
     REQUIRE(answered);
 }
+
+// ── The device played on, changing where it stands ──────────────────────────
+// It can die while still listed, or its driver can change its channels (an
+// interface's control panel turning outputs on or off). The OS says so on a
+// thread of its own; the engine looks at the device as its driver reports
+// it now and acts where that differs from what it is playing. The device
+// layer no longer restarts the device by itself behind the engine's back.
+
+TEST_CASE("DeviceEvents: the device played on dying where it stands is left "
+          "for one that plays", "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();               // the default is Fake Speakers
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+
+    sys->device("Fake Interface")->dead = true;  // still listed, gone all the same
+    REQUIRE(sys->reportOpenDeviceChanged());
+
+    const bool moved = playingOn(fix, "Fake Speakers");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(moved);
+    CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("DeviceEvents: the device played on losing channels is played on "
+          "with the channels it has", "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();
+    auto interface = sys->device("Fake Interface");
+    interface->maxOutputChannels = 4;
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.numOutputChannels = 4;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().activeOutputChannels == 4);
+
+    {   // its control panel turns two of its outputs off
+        auto hold = fix.engine().testHoldSwapGate();
+        interface->maxOutputChannels = 2;
+    }
+    REQUIRE(sys->reportOpenDeviceChanged());
+
+    const bool narrowed = fix.pollUntil(
+        [&] { return fix.engine().currentDevice().activeOutputChannels == 2; }, 10000);
+    INFO(fix.debugMessagesDump());
+    CHECK(narrowed);
+    CHECK(fix.engine().currentDevice().name == "Fake Interface");
+    CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
+          "rebuilds nothing more", "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+    subscribe(fix);
+    REQUIRE(switchWhenFree(fix, "Fake Interface", 44100.0).success);
+    OscReply ownRebuild;                         // the switch's own
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("setup"), ownRebuild, 10000));
+    deviceLaneDone(fix.engine());
+    fix.clearReplies();
+
+    // What CoreAudio says after a switch: the rate, the buffer, the format.
+    for (int i = 0; i < 3; ++i) REQUIRE(sys->reportOpenDeviceChanged());
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    INFO(fix.debugMessagesDump());
+    int rebuilds = 0;
+    for (auto& r : fix.allReplies())
+        if (r.address == CLOCKWORK_SYS("setup")) ++rebuilds;
+    CHECK(rebuilds == 0);
+    CHECK(fix.waitForBlocks(20));
+}

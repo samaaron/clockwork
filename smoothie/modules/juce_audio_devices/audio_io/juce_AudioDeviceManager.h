@@ -405,13 +405,12 @@ public:
     /** Removes a previously added device type from the manager. */
     void removeAudioDeviceType (AudioIODeviceType* deviceTypeToRemove);
 
-    /** smoothie addition: hands every device type's list changes to `sink`
-        (see AudioIODeviceType::setDeviceChangeSink), including types added
-        later. While a sink is set the manager no longer hears of them, so it
-        never closes or reopens a device by itself: the sink's owner decides,
-        on its own thread. Pass nullptr to go back.
+    /** smoothie addition: hands every device type's changes to `sink` (see
+        AudioIODeviceType::setDeviceChangeSink), including types added later.
+        The manager never hears of them: it never closes or reopens a device
+        by itself, and the sink's owner decides, on its own thread.
     */
-    void setDeviceChangeSink (std::function<void()> sink);
+    void setDeviceChangeSink (std::function<void (AudioIODeviceType::DeviceChange)> sink);
 
     //==============================================================================
     /** Plays a beep through the current audio device.
@@ -501,7 +500,7 @@ private:
     //==============================================================================
     OwnedArray<AudioIODeviceType> availableDeviceTypes;
     OwnedArray<AudioDeviceSetup> lastDeviceTypeConfigs;
-    std::function<void()> deviceChangeSink;
+    std::function<void (AudioIODeviceType::DeviceChange)> deviceChangeSink;
 
     AudioDeviceSetup currentSetup;
     std::unique_ptr<AudioIODevice> currentAudioDevice;
@@ -552,7 +551,6 @@ private:
     void audioDeviceStoppedInt();
     void audioDeviceErrorInt (const String&);
     void handleIncomingMidiMessageInt (MidiInput*, const MidiMessage&);
-    void audioDeviceListChanged();
     void midiDeviceListChanged();
 
     String restartDevice (int blockSizeToUse, double sampleRateToUse,

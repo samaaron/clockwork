@@ -29,7 +29,6 @@
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
 #include <chrono>
-#include <future>
 #include <memory>
 #include <string>
 
@@ -39,15 +38,6 @@ using fake_audio::FakeDeviceSpec;
 using fake_audio::FakeSystem;
 
 namespace {
-
-// Everything the device lane was given before this has run: it runs its
-// tasks in order.
-void laneDone(ClockworkEngine& engine) {
-    std::promise<void> done;
-    auto finished = done.get_future();
-    engine.postDeviceTask([&] { done.set_value(); });
-    REQUIRE(finished.wait_for(std::chrono::seconds(30)) == std::future_status::ready);
-}
 
 bool playingOn(EngineFixture& fix, const std::string& name, int timeoutMs = 10000) {
     return fix.pollUntil([&] { return fix.engine().currentDevice().name == name; },
@@ -164,7 +154,7 @@ TEST_CASE("SystemDefault: a chosen output stays put when the default moves",
     setDefault(fix, *sys, 0);
     fix.engine().testSystemDefaultOutputChanged();
     REQUIRE(sys->reportListChanged());
-    laneDone(fix.engine());
+    deviceLaneDone(fix.engine());
     INFO(fix.debugMessagesDump());
     CHECK(fix.engine().currentDevice().name == "Fake Interface");
     CHECK(fix.engine().preferredOutputDevice() == "Fake Interface");
@@ -187,24 +177,24 @@ TEST_CASE("SystemDefault: a default that will not open is tried once each time "
         sys->types[0].defaultDeviceIndex = 2;
     }
     REQUIRE(sys->reportListChanged());
-    laneDone(fix.engine());
+    deviceLaneDone(fix.engine());
     const int tried = phones->opens.load();
     INFO(fix.debugMessagesDump());
     REQUIRE(tried > 0);
 
     for (int i = 0; i < 3; ++i) REQUIRE(sys->reportListChanged());
     fix.engine().testSystemDefaultOutputChanged();
-    laneDone(fix.engine());
+    deviceLaneDone(fix.engine());
     CHECK(phones->opens.load() == tried);
     CHECK(fix.waitForBlocks(20));                // still playing, somewhere
 
     // The default moves away and back: a move, so it is tried again.
     setDefault(fix, *sys, 0);
     fix.engine().testSystemDefaultOutputChanged();
-    laneDone(fix.engine());
+    deviceLaneDone(fix.engine());
     setDefault(fix, *sys, 2);
     fix.engine().testSystemDefaultOutputChanged();
-    laneDone(fix.engine());
+    deviceLaneDone(fix.engine());
     CHECK(phones->opens.load() > tried);
 }
 
@@ -218,7 +208,7 @@ TEST_CASE("SystemDefault: a default that moves while the engine boots is followe
         engine.testInitFailure = [&engine, sys] {
             sys->types[0].defaultDeviceIndex = 1;
             engine.testSystemDefaultOutputChanged();
-            laneDone(engine);
+            deviceLaneDone(engine);
             return std::string();
         };
     });

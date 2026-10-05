@@ -33,32 +33,18 @@ AudioIODeviceType::~AudioIODeviceType()
 }
 
 //==============================================================================
-void AudioIODeviceType::addListener (Listener* l)      { listeners.add (l); }
-void AudioIODeviceType::removeListener (Listener* l)   { listeners.remove (l); }
-
-void AudioIODeviceType::callDeviceChangeListeners()
-{
-    if (deliverToDeviceChangeSink())
-        return;
-
-    listeners.call ([] (Listener& l) { l.audioDeviceListChanged(); });
-}
-
-void AudioIODeviceType::setDeviceChangeSink (std::function<void()> sink)
+void AudioIODeviceType::setDeviceChangeSink (std::function<void (DeviceChange)> sink)
 {
     const ScopedLock sl (sinkLock);
     deviceChangeSink = std::move (sink);
 }
 
-bool AudioIODeviceType::deliverToDeviceChangeSink()
+void AudioIODeviceType::reportDeviceChange (DeviceChange change)
 {
     const ScopedLock sl (sinkLock);
 
-    if (deviceChangeSink == nullptr)
-        return false;
-
-    deviceChangeSink();
-    return true;
+    if (deviceChangeSink != nullptr)
+        deviceChangeSink (change);
 }
 
 //==============================================================================

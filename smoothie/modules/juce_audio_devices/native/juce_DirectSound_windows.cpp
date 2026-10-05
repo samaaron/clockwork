@@ -1283,7 +1283,7 @@ private:
         newList.scan();
 
         if (std::exchange (deviceList, newList) != newList)
-            callDeviceChangeListeners();
+            reportDeviceChange (AudioIODeviceType::DeviceChange::list);
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DSoundAudioIODeviceType)

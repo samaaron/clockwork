@@ -63,6 +63,9 @@ struct FakeDeviceSpec {
     std::atomic<bool> hidden { false };
     // Times the engine has tried to open it, failed or not.
     std::atomic<int> opens { 0 };
+    // Gone where it stands: still listed, but its driver says it is no
+    // longer alive, and it cannot be opened.
+    std::atomic<bool> dead { false };
 };
 
 class FakeAudioIODevice;
@@ -97,6 +100,9 @@ struct FakeSystem {
     // against that type being destroyed mid-call, as CoreAudio's listener is
     // (LiveInternalRegistry). False when no manager exists.
     bool reportListChanged();
+    // The OS reporting a change to an open device (its channels, whether it
+    // is alive), the same way.
+    bool reportOpenDeviceChanged();
 
     // ── Time the case keeps ──────────────────────────────────────────────
     // A device keeps wall time until the case takes the clock. From then on
@@ -137,11 +143,25 @@ public:
 
     ~FakeAudioIODevice() override { close(); }
 
+    // Open, the channels it was opened with — a driver's are read when it
+    // opens, as CoreAudio's are — until it opens again.
     juce::StringArray getOutputChannelNames() override {
-        return channelNames(mOut ? mOut->maxOutputChannels : 0, "Out");
+        return channelNames(mOpen ? mOpenOuts : liveOuts(), "Out");
     }
     juce::StringArray getInputChannelNames() override {
-        return channelNames(mIn ? mIn->maxInputChannels : 0, "In");
+        return channelNames(mOpen ? mOpenIns : liveIns(), "In");
+    }
+
+    // What its driver says now (FakeDeviceSpec::dead, its channels).
+    LiveState readLiveState() override {
+        LiveState state;
+        state.alive = !primary()->dead.load();
+        if (state.alive) {
+            state.sampleRate        = mRate;
+            state.numOutputChannels = liveOuts();
+            state.numInputChannels  = liveIns();
+        }
+        return state;
     }
     juce::Array<double> getAvailableSampleRates() override {
         juce::Array<double> r;
@@ -163,16 +183,18 @@ public:
         // Error strings mimic real JUCE drivers, which name the device.
         // Nothing reads the wording: the engine attributes input-side
         // failures by retrying output-only, not by parsing these.
-        if (primary()->failOpen)
+        if (primary()->failOpen || primary()->dead.load())
             return "Failed to open device: " + juce::String(primary()->name);
         if (mIn && mIn->failInputOpen && inputChannels.countNumberOfSetBits() > 0)
             return "Failed to open input device: " + juce::String(mIn->name);
 
         // Clamp requested bits to capacity — CoreAudio semantics.
+        mOpenOuts = liveOuts();
+        mOpenIns  = liveIns();
         mActiveOut = outputChannels;
-        mActiveOut.setRange(mOut ? mOut->maxOutputChannels : 0, 256, false);
+        mActiveOut.setRange(mOpenOuts, 256, false);
         mActiveIn = inputChannels;
-        mActiveIn.setRange(mIn ? mIn->maxInputChannels : 0, 256, false);
+        mActiveIn.setRange(mOpenIns, 256, false);
 
         mRate = pickNearest(primary()->sampleRates, sampleRate);
         mBufferSize = pickNearest(primary()->bufferSizes,
@@ -249,6 +271,9 @@ private:
     const std::shared_ptr<FakeDeviceSpec>& primary() const {
         return mOut ? mOut : mIn;
     }
+
+    int liveOuts() const { return mOut ? mOut->maxOutputChannels : 0; }
+    int liveIns()  const { return mIn  ? mIn->maxInputChannels   : 0; }
 
     static juce::StringArray channelNames(int count, const char* stem) {
         juce::StringArray names;
@@ -344,6 +369,7 @@ private:
     bool   mJoinedVirtual = false;
     double mNextUs = 0;
     juce::BigInteger mActiveOut, mActiveIn;
+    int mOpenOuts = 0, mOpenIns = 0;
     std::thread mThread;
     std::recursive_mutex mLifecycle;
     std::atomic<bool> mPlaying { false };
@@ -368,8 +394,10 @@ public:
         v.erase(std::remove(v.begin(), v.end(), this), v.end());
     }
 
-    // What a real type does when the OS tells it the list changed.
-    void reportListChanged() { callDeviceChangeListeners(); }
+    // What a real type does when the OS tells it the list changed, or that
+    // an open device changed where it stands.
+    void reportListChanged() { reportDeviceChange(DeviceChange::list); }
+    void reportOpenDeviceChanged() { reportDeviceChange(DeviceChange::openDevice); }
 
     void scanForDevices() override { mScanned = true; }
 
@@ -452,6 +480,13 @@ inline bool FakeSystem::reportListChanged() {
     std::lock_guard<std::mutex> lk(liveTypesMutex);
     if (liveTypes.empty()) return false;
     liveTypes.back()->reportListChanged();
+    return true;
+}
+
+inline bool FakeSystem::reportOpenDeviceChanged() {
+    std::lock_guard<std::mutex> lk(liveTypesMutex);
+    if (liveTypes.empty()) return false;
+    liveTypes.back()->reportOpenDeviceChanged();
     return true;
 }
 

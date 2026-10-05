@@ -344,6 +344,24 @@ public:
     virtual int getXRunCount() const noexcept;
 
     //==============================================================================
+    /** smoothie addition: the device as its driver reports it now, read
+        fresh — not what it was opened with. */
+    struct LiveState
+    {
+        bool alive = true;            /**< false once the driver says it has gone */
+        double sampleRate = 0;        /**< 0 when the driver can't say */
+        int numOutputChannels = -1;   /**< -1 when the driver can't say */
+        int numInputChannels = -1;    /**< -1 when the driver can't say */
+    };
+
+    /** smoothie addition: reads the device's LiveState from its driver,
+        without touching it: an open device keeps running as it was opened.
+        For a sink's owner deciding what an AudioIODeviceType::DeviceChange
+        means. The default can say only whether the device is open.
+    */
+    virtual LiveState readLiveState();
+
+    //==============================================================================
 protected:
     /** Creates a device, setting its name and type member variables. */
     AudioIODevice (const String& deviceName,

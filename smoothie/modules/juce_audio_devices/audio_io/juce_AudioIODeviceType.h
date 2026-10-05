@@ -113,41 +113,28 @@ public:
                                          const String& inputDeviceName) = 0;
 
     //==============================================================================
-    /**
-        A class for receiving events when audio devices are inserted or removed.
-
-        You can register an AudioIODeviceType::Listener with an AudioIODeviceType object
-        using the AudioIODeviceType::addListener() method, and it will be called when
-        devices of that type are added or removed.
-
-        @see AudioIODeviceType::addListener, AudioIODeviceType::removeListener
-    */
-    class Listener
+    /** smoothie addition: what a device-change sink is told changed. */
+    enum class DeviceChange
     {
-    public:
-        virtual ~Listener() = default;
-
-        /** Called when the list of available audio devices changes. */
-        virtual void audioDeviceListChanged() = 0;
+        list,       /**< Devices came or went: the lists need rescanning. */
+        openDevice  /**< An open device of this type changed where it stands
+                         (its channels, its rate) or stopped being alive. The
+                         device does nothing about it by itself: the sink's
+                         owner looks (AudioIODevice::readLiveState) and
+                         decides. */
     };
 
-    /** Adds a listener that will be called when this type of device is added or
-        removed from the system.
+    /** smoothie addition: the one way this type's device changes leave it.
+        Nothing in Smoothie reacts to a change by itself — no rescan on the
+        message thread, no device reopening or restarting itself — so a type
+        with no sink keeps its changes to itself. A type that hears from its
+        OS callback (CoreAudio) delivers on the OS's thread, the moment it
+        reports, and leaves the rescan to the sink's owner, so its lists are
+        only touched by the thread that owns the device. Setting nullptr waits
+        for a delivery in progress, so once it returns the old sink is never
+        called again.
     */
-    void addListener (Listener* listener);
-
-    /** Removes a listener that was previously added with addListener(). */
-    void removeListener (Listener* listener);
-
-    /** smoothie addition: hands this type's device-list changes to `sink`
-        instead of its listeners. A type that delivers from its OS callback
-        (CoreAudio) does so on the OS's thread, the moment it reports, with no
-        message loop, and leaves the rescan to the sink's owner, so its lists
-        are only touched by the thread that owns the device. Pass nullptr to
-        go back to the listeners; that waits for a delivery in progress, so
-        once it returns the sink is never called again.
-    */
-    void setDeviceChangeSink (std::function<void()> sink);
+    void setDeviceChangeSink (std::function<void (DeviceChange)> sink);
 
     //==============================================================================
     /** Destructor. */
@@ -185,22 +172,16 @@ public:
 protected:
     explicit AudioIODeviceType (const String& typeName);
 
-    /** Synchronously calls all the registered device list change listeners,
-        or the sink when one is set (see setDeviceChangeSink).
+    /** smoothie addition: tells the sink, if one is set, on the calling
+        thread (see setDeviceChangeSink). Replaces JUCE's
+        callDeviceChangeListeners.
     */
-    void callDeviceChangeListeners();
-
-    /** smoothie addition: calls the sink if one is set, and says whether it
-        did. A type whose OS callback would otherwise rescan and notify on the
-        message thread calls this from the callback first.
-    */
-    bool deliverToDeviceChangeSink();
+    void reportDeviceChange (DeviceChange change);
 
 private:
     String typeName;
-    ListenerList<Listener> listeners;
     CriticalSection sinkLock;
-    std::function<void()> deviceChangeSink;
+    std::function<void (DeviceChange)> deviceChangeSink;
 
     JUCE_DECLARE_NON_COPYABLE (AudioIODeviceType)
 };

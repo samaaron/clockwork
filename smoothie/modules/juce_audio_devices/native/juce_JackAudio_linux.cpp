@@ -654,7 +654,7 @@ public:
 
         if (inputIndex >= 0 || outputIndex >= 0)
             return new JackAudioIODevice (inputDeviceName, outputDeviceName,
-                                          [this] { callDeviceChangeListeners(); });
+                                          [this] { reportDeviceChange (AudioIODeviceType::DeviceChange::list); });
 
         return nullptr;
     }

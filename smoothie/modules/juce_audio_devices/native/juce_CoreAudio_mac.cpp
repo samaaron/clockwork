@@ -226,13 +226,6 @@ template <typename T, typename OnError = IgnoreUnused>
     return result;
 }
 
-//==============================================================================
-struct AsyncRestarter
-{
-    virtual ~AsyncRestarter() = default;
-    virtual void restartAsync() = 0;
-};
-
 struct SystemVol
 {
     explicit SystemVol (AudioObjectPropertySelector selector) noexcept
@@ -291,16 +284,13 @@ class CoreAudioIODevice;
 
 //==============================================================================
 // smoothie addition: shared live-object fence for OS callbacks that can
-// outlive their targets (observed here as the restartAsync → close SIGSEGV
-// on a torn-down combiner, and listener bodies dereferencing dying
-// internals during Bluetooth profile churn). See the header for the
-// contract.
+// outlive their targets (listener bodies dereferencing dying internals
+// during Bluetooth profile churn). See the header for the contract.
 #include "juce_LiveObjectRegistry.h"
 using LiveInternalRegistry = LiveObjectRegistry;
 
 //==============================================================================
-class CoreAudioInternal final : private Timer,
-                                private AsyncUpdater
+class CoreAudioInternal final
 {
 private:
     // members with deduced return types need to be defined before they
@@ -336,11 +326,9 @@ public:
 
     // smoothie: stop HAL listener callbacks reaching this instance —
     // including bodies already in flight (the registry remove blocks on
-    // them) and the system-object listener CoreAudioIODevice registers
-    // with this instance as its cookie. Idempotent; called from
-    // ~CoreAudioIODevice (before teardown starts), from the combiner's
-    // destructor (before it closes its sub-devices), and from our own
-    // destructor as the backstop.
+    // them). Idempotent; called from ~CoreAudioIODevice (before teardown
+    // starts), from the combiner's destructor (before it closes its
+    // sub-devices), and from our own destructor as the backstop.
     void detachListener()
     {
         LiveInternalRegistry::get().remove (this);
@@ -353,11 +341,8 @@ public:
         AudioObjectRemovePropertyListener (deviceID, &pa, deviceListenerProc, this);
     }
 
-    ~CoreAudioInternal() override
+    ~CoreAudioInternal()
     {
-        stopTimer();
-        cancelPendingUpdate();
-
         detachListener();
 
         stop (false);
@@ -475,8 +460,6 @@ public:
 
     bool updateDetailsFromDevice (const BigInteger& activeIns, const BigInteger& activeOuts)
     {
-        stopTimer();
-
         if (! isDeviceAlive())
             return false;
 
@@ -571,6 +554,24 @@ public:
         return input ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput;
     }
 
+    // smoothie: the channels a device has now, in one direction.
+    static int getNumChannels (AudioDeviceID deviceID, bool input)
+    {
+        int total = 0;
+
+        if (auto bufList = audioObjectGetProperty<AudioBufferList> (deviceID, { kAudioDevicePropertyStreamConfiguration,
+                                                                                getScope (input),
+                                                                                juceAudioObjectPropertyElementMain }))
+        {
+            auto numStreams = (int) bufList->mNumberBuffers;
+
+            for (int i = 0; i < numStreams; ++i)
+                total += bufList->mBuffers[i].mNumberChannels;
+        }
+
+        return total;
+    }
+
     //==============================================================================
     StringArray getSources (bool input)
     {
@@ -663,11 +664,6 @@ public:
     //==============================================================================
     String reopen (const BigInteger& ins, const BigInteger& outs, double newSampleRate, int bufferSizeSamples)
     {
-        callbacksAllowed = false;
-        const ScopeGuard scope { [&] { callbacksAllowed = true; } };
-
-        stopTimer();
-
         stop (false);
 
         if (! setNominalSampleRate (newSampleRate))
@@ -920,20 +916,6 @@ public:
         for (auto* stream : getStreams())
             if (stream != nullptr)
                 stream->previousSampleTime += static_cast<Float64> (bufferSize);
-    }
-
-    // called by callbacks (possibly off the main thread)
-    void deviceDetailsChanged()
-    {
-        if (callbacksAllowed.get() == 1)
-            startTimer (100);
-    }
-
-    // called by callbacks (possibly off the main thread)
-    void deviceRequestedRestart()
-    {
-        owner.restart();
-        triggerAsyncUpdate();
     }
 
     bool isPlaying() const { return playing.load(); }
@@ -1193,36 +1175,6 @@ private:
     // allocateTempBuffers — the callback clamp reads it (see there).
     int tempBufferSamples = 0;
     HeapBlock<float> audioBuffer;
-    Atomic<int> callbacksAllowed { 1 };
-
-    //==============================================================================
-    void timerCallback() override
-    {
-        // smoothie: fenced — this debounce fires on the message thread
-        // while devices may be torn down on another (the embedder's swap
-        // lane); owner.restart()/stopInternal() on a dying device is the
-        // same hazard as the HAL listener bodies. detachListener()'s
-        // registry remove blocks until an in-flight body completes.
-        LiveInternalRegistry::get().ifLive (this, [&]
-        {
-            JUCE_COREAUDIOLOG ("Device changed");
-
-            stopTimer();
-            auto oldSampleRate = sampleRate;
-            auto oldBufferSize = bufferSize;
-
-            if (! updateDetailsFromDevice())
-                owner.stopInternal();
-            else if ((oldBufferSize != bufferSize || ! approximatelyEqual (oldSampleRate, sampleRate)) && owner.shouldRestartDevice())
-                owner.restart();
-        });
-    }
-
-    void handleAsyncUpdate() override
-    {
-        if (owner.deviceType != nullptr)
-            owner.deviceType->audioDeviceListChanged();
-    }
 
     static OSStatus audioIOProc (AudioDeviceID /*inDevice*/,
                                  [[maybe_unused]] const AudioTimeStamp* inNow,
@@ -1280,11 +1232,11 @@ private:
                 return std::find (std::begin (selectors), std::end (selectors), x.mSelector) != std::end (selectors);
             });
 
-            if (detailsChanged)
-                intern.deviceDetailsChanged();
-
-            if (requestedRestart)
-                intern.deviceRequestedRestart();
+            // smoothie: the owner hears of it through the sink, here, on
+            // CoreAudio's thread, and looks at the device itself
+            // (readLiveState). The device does nothing about it.
+            if (detailsChanged || requestedRestart)
+                intern.owner.reportOpenDeviceChange();
         });
 
         return noErr;
@@ -1310,8 +1262,7 @@ private:
 
 
 //==============================================================================
-class CoreAudioIODevice final : public AudioIODevice,
-                                private Timer
+class CoreAudioIODevice final : public AudioIODevice
 {
 public:
     CoreAudioIODevice (CoreAudioIODeviceType* dt,
@@ -1333,30 +1284,15 @@ public:
         }();
 
         jassert (internal != nullptr);
-
-        AudioObjectPropertyAddress pa;
-        pa.mSelector = kAudioObjectPropertySelectorWildcard;
-        pa.mScope    = kAudioObjectPropertyScopeWildcard;
-        pa.mElement  = kAudioObjectPropertyElementWildcard;
-
-        AudioObjectAddPropertyListener (kAudioObjectSystemObject, &pa, hardwareListenerProc, internal.get());
     }
 
     ~CoreAudioIODevice() override
     {
-        // smoothie: detach the HAL listeners BEFORE teardown starts —
-        // deregistration blocks on in-flight listener bodies, so nothing
-        // can call restart()/deviceDetailsChanged() against a
-        // half-destroyed device (Bluetooth churn fires these listeners
-        // exactly when devices are being torn down).
+        // smoothie: detach the HAL listener BEFORE teardown starts —
+        // deregistration blocks on in-flight listener bodies, so none reaches
+        // the sink through a half-destroyed device (Bluetooth churn fires the
+        // listener exactly when devices are being torn down).
         internal->detachListener();
-
-        AudioObjectPropertyAddress pa;
-        pa.mSelector = kAudioObjectPropertySelectorWildcard;
-        pa.mScope = kAudioObjectPropertyScopeWildcard;
-        pa.mElement = kAudioObjectPropertyElementWildcard;
-
-        AudioObjectRemovePropertyListener (kAudioObjectSystemObject, &pa, hardwareListenerProc, internal.get());
 
         close();
     }
@@ -1396,9 +1332,6 @@ public:
         isOpen_ = true;
         internal->xruns = 0;
 
-        inputChannelsRequested = inputChannels;
-        outputChannelsRequested = outputChannels;
-
         if (bufferSizeSamples <= 0)
             bufferSizeSamples = getDefaultBufferSize();
 
@@ -1426,30 +1359,13 @@ public:
 
     void start (AudioIODeviceCallback* callback) override
     {
-        if (internal->start (callback))
-            previousCallback = callback;
+        internal->start (callback);
     }
 
     void stop() override
     {
-        restartDevice = false;
-        stopAndGetLastCallback();
-    }
-
-    AudioIODeviceCallback* stopAndGetLastCallback() const
-    {
-        auto* lastCallback = internal->stop (true);
-
-        if (lastCallback != nullptr)
+        if (auto* lastCallback = internal->stop (true))
             lastCallback->audioDeviceStopped();
-
-        return lastCallback;
-    }
-
-    AudioIODeviceCallback* stopInternal()
-    {
-        restartDevice = true;
-        return stopAndGetLastCallback();
     }
 
     AudioWorkgroup getWorkgroup() const override
@@ -1467,37 +1383,9 @@ public:
         return lastError;
     }
 
-    void audioDeviceListChanged()
-    {
-        if (deviceType != nullptr)
-            deviceType->audioDeviceListChanged();
-    }
-
-    // called by callbacks (possibly off the main thread)
-    void restart()
-    {
-        if (restarter != nullptr)
-        {
-            restarter->restartAsync();
-            return;
-        }
-
-        {
-            const ScopedLock sl (closeLock);
-            previousCallback = stopInternal();
-        }
-
-        startTimer (100);
-    }
-
     bool setCurrentSampleRate (double newSampleRate)
     {
         return internal->setNominalSampleRate (newSampleRate);
-    }
-
-    void setAsyncRestarter (AsyncRestarter* restarterIn)
-    {
-        restarter = restarterIn;
     }
 
     // smoothie: lets an owner (the combiner) fence HAL listeners before
@@ -1507,111 +1395,64 @@ public:
         internal->detachListener();
     }
 
-    bool shouldRestartDevice() const noexcept    { return restartDevice; }
+    // smoothie: a change to this device, to its type's sink. The type
+    // outlives its devices, and the listener reaching here is fenced
+    // against this device's teardown (LiveInternalRegistry).
+    void reportOpenDeviceChange()
+    {
+        if (deviceType != nullptr)
+            deviceType->reportOpenDeviceChange();
+    }
+
+    LiveState readLiveState() override
+    {
+        LiveState state;
+        state.alive = internal->isDeviceAlive();
+
+        if (state.alive)
+        {
+            state.sampleRate        = internal->getNominalSampleRate();
+            state.numOutputChannels = internal->outStream != nullptr ? CoreAudioInternal::getNumChannels (internal->deviceID, false) : 0;
+            state.numInputChannels  = internal->inStream  != nullptr ? CoreAudioInternal::getNumChannels (internal->deviceID, true)  : 0;
+        }
+
+        return state;
+    }
 
     WeakReference<CoreAudioIODeviceType> deviceType;
     bool hadDiscontinuity;
 
 private:
     std::unique_ptr<CoreAudioInternal> internal;
-    bool isOpen_ = false, restartDevice = true;
+    bool isOpen_ = false;
     String lastError;
-    AudioIODeviceCallback* previousCallback = nullptr;
-    AsyncRestarter* restarter = nullptr;
-    BigInteger inputChannelsRequested, outputChannelsRequested;
-    CriticalSection closeLock;
-
-    void timerCallback() override
-    {
-        stopTimer();
-
-        stopInternal();
-
-        // smoothie: fenced on the internal (registered for us) — this
-        // timer fires on the message thread while the device may be torn
-        // down on another thread; ~CoreAudioIODevice detaches the internal
-        // FIRST, which blocks on an in-flight body here.
-        LiveInternalRegistry::get().ifLive (internal.get(), [&]
-        {
-            // smoothie: the deferred restart can outlive its device —
-            // Bluetooth profile churn and aggregate teardown invalidate
-            // CoreAudio objects between restart() and this timer firing.
-            // updateDetailsFromDevice() reports a dead device; reopening
-            // one walks into freed CoreAudio state (observed SIGSEGV
-            // inside open()). Tell the type the list changed and stay
-            // closed — the application layer decides what to open next.
-            if (! internal->updateDetailsFromDevice())
-            {
-                audioDeviceListChanged();
-                return;
-            }
-
-            open (inputChannelsRequested, outputChannelsRequested,
-                  getCurrentSampleRate(), getCurrentBufferSizeSamples());
-            start (previousCallback);
-        });
-    }
-
-    static OSStatus hardwareListenerProc (AudioDeviceID /*inDevice*/,
-                                          UInt32 numAddresses,
-                                          const AudioObjectPropertyAddress* pa,
-                                          void* inClientData)
-    {
-        const auto detailsChanged = std::any_of (pa, pa + numAddresses, [] (const AudioObjectPropertyAddress& x)
-        {
-            return x.mSelector == kAudioHardwarePropertyDevices;
-        });
-
-        if (detailsChanged)
-        {
-            // smoothie: fenced — same lifecycle hazard as
-            // deviceListenerProc (the cookie is the internal).
-            LiveInternalRegistry::get().ifLive (inClientData, [&]
-            {
-                static_cast<CoreAudioInternal*> (inClientData)->deviceDetailsChanged();
-            });
-        }
-
-        return noErr;
-    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CoreAudioIODevice)
 };
 
 
 //==============================================================================
-class AudioIODeviceCombiner final : public AudioIODevice,
-                                    private AsyncRestarter,
-                                    private Timer
+class AudioIODeviceCombiner final : public AudioIODevice
 {
 public:
-    AudioIODeviceCombiner (const String& deviceName, CoreAudioIODeviceType* deviceType,
+    AudioIODeviceCombiner (const String& deviceName,
                            std::unique_ptr<CoreAudioIODevice>&& inputDevice,
                            std::unique_ptr<CoreAudioIODevice>&& outputDevice)
         : AudioIODevice (deviceName, "CoreAudio"),
-          owner (deviceType),
           currentSampleRate (inputDevice->getCurrentSampleRate()),
           currentBufferSize (inputDevice->getCurrentBufferSizeSamples()),
           inputWrapper  (*this, std::move (inputDevice),  true),
           outputWrapper (*this, std::move (outputDevice), false)
     {
-        // smoothie: fence for the deferred-restart timer (see
-        // timerCallback / LiveInternalRegistry).
-        LiveInternalRegistry::get().add (this);
-
         if (getAvailableSampleRates().isEmpty())
             lastError = TRANS ("The input and output devices don't share a common sample rate!");
     }
 
     ~AudioIODeviceCombiner() override
     {
-        // smoothie: fence the combiner's own deferred-restart timer,
-        // then the sub-devices' HAL listeners — deregistration blocks on
-        // in-flight bodies, so no timerCallback or
-        // deviceRequestedRestart → restartAsync() can land on this
-        // combiner once teardown begins (observed SIGSEGV:
-        // restartAsync → close on a dying combiner, #3554).
-        LiveInternalRegistry::get().remove (this);
+        // smoothie: fence the sub-devices' HAL listeners — deregistration
+        // blocks on in-flight bodies, so none lands on this combiner once
+        // teardown begins (observed SIGSEGV on a dying combiner, #3554).
         inputWrapper.detachHardwareListener();
         outputWrapper.detachHardwareListener();
 
@@ -1672,11 +1513,6 @@ public:
                  const BigInteger& outputChannels,
                  double sampleRate, int bufferSize) override
     {
-        inputChannelsRequested = inputChannels;
-        outputChannelsRequested = outputChannels;
-        sampleRateRequested = sampleRate;
-        bufferSizeRequested = bufferSize;
-
         close();
         active = true;
 
@@ -1729,69 +1565,6 @@ public:
             d->close();
     }
 
-    void restart (AudioIODeviceCallback* cb)
-    {
-        const ScopedLock sl (closeLock);
-
-        close();
-
-        auto newSampleRate = sampleRateRequested;
-        auto newBufferSize = bufferSizeRequested;
-
-        for (auto& d : getDeviceWrappers())
-        {
-            auto deviceSampleRate = d->getCurrentSampleRate();
-
-            if (! approximatelyEqual (deviceSampleRate, sampleRateRequested))
-            {
-                if (! getAvailableSampleRates().contains (deviceSampleRate))
-                    return;
-
-                for (auto& d2 : getDeviceWrappers())
-                    if (&d2 != &d)
-                        d2->setCurrentSampleRate (deviceSampleRate);
-
-                newSampleRate = deviceSampleRate;
-                break;
-            }
-        }
-
-        for (auto& d : getDeviceWrappers())
-        {
-            auto deviceBufferSize = d->getCurrentBufferSizeSamples();
-
-            if (deviceBufferSize != bufferSizeRequested)
-            {
-                if (! getAvailableBufferSizes().contains (deviceBufferSize))
-                    return;
-
-                newBufferSize = deviceBufferSize;
-                break;
-            }
-        }
-
-        open (inputChannelsRequested, outputChannelsRequested, newSampleRate, newBufferSize);
-
-        start (cb);
-    }
-
-    void restartAsync() override
-    {
-        {
-            const ScopedLock sl (closeLock);
-
-            if (active)
-            {
-                if (callback != nullptr)
-                    previousCallback = callback;
-
-                close();
-            }
-        }
-
-        startTimer (100);
-    }
-
     int getOutputLatencyInSamples() override
     {
         return targetLatency - getInputLatencyInSamples();
@@ -1829,11 +1602,26 @@ public:
             }
 
             const ScopedLock sl (callbackLock);
-            previousCallback = callback = newCallback;
+            callback = newCallback;
         }
     }
 
     void stop() override    { shutdown ({}); }
+
+    // smoothie: alive while both are; the input side's inputs, the output
+    // side's outputs, and the output's rate (the clock it plays to).
+    LiveState readLiveState() override
+    {
+        const auto in  = inputWrapper.readLiveState();
+        const auto out = outputWrapper.readLiveState();
+
+        LiveState state;
+        state.alive             = in.alive && out.alive;
+        state.sampleRate        = out.sampleRate;
+        state.numOutputChannels = out.numOutputChannels;
+        state.numInputChannels  = in.numInputChannels;
+        return state;
+    }
 
     String getLastError() override
     {
@@ -1848,36 +1636,16 @@ public:
 private:
     static constexpr auto invalidSampleTime = std::numeric_limits<std::uint64_t>::max();
 
-    WeakReference<CoreAudioIODeviceType> owner;
     CriticalSection callbackLock;
     AudioIODeviceCallback* callback = nullptr;
-    AudioIODeviceCallback* previousCallback = nullptr;
     double currentSampleRate = 0;
     int currentBufferSize = 0;
     bool active = false;
     String lastError;
     AudioSampleBuffer fifo, scratchBuffer;
-    CriticalSection closeLock;
     int targetLatency = 0;
     std::atomic<int> xruns { -1 };
     std::atomic<uint64_t> lastValidReadPosition { invalidSampleTime };
-
-    BigInteger inputChannelsRequested, outputChannelsRequested;
-    double sampleRateRequested = 44100;
-    int bufferSizeRequested = 512;
-
-    void timerCallback() override
-    {
-        stopTimer();
-
-        // smoothie: fenced — the deferred restart fires on the message
-        // thread while the combiner may be torn down on another thread
-        // (see ~AudioIODeviceCombiner and LiveInternalRegistry).
-        LiveInternalRegistry::get().ifLive (this, [&]
-        {
-            restart (previousCallback);
-        });
-    }
 
     void shutdown (const String& error)
     {
@@ -1889,7 +1657,7 @@ private:
         }
 
         for (auto& d : getDeviceWrappers())
-            d->stopInternal();
+            d->stop();
 
         if (lastCallback != nullptr)
         {
@@ -2079,19 +1847,10 @@ private:
         }
 
         currentSampleRate = newSampleRate;
-        bool anySampleRateChanges = false;
 
         for (auto& d : getDeviceWrappers())
-        {
             if (! approximatelyEqual (d->getCurrentSampleRate(), currentSampleRate))
-            {
                 d->setCurrentSampleRate (currentSampleRate);
-                anySampleRateChanges = true;
-            }
-        }
-
-        if (anySampleRateChanges && owner != nullptr)
-            owner->audioDeviceListChanged();
 
         if (callback != nullptr)
             callback->audioDeviceAboutToStart (device);
@@ -2108,7 +1867,6 @@ private:
               device (std::move (d)),
               input (shouldBeInput)
         {
-            device->setAsyncRestarter (&owner);
         }
 
         ~DeviceWrapper() override
@@ -2161,7 +1919,8 @@ private:
         int getCurrentBitDepth()                                  const { return device->getCurrentBitDepth(); }
         int getDefaultBufferSize()                                const { return device->getDefaultBufferSize(); }
         void start (AudioIODeviceCallback* callbackToNotify)      const { return device->start (callbackToNotify); }
-        AudioIODeviceCallback* stopInternal()                     const { return device->stopInternal(); }
+        void stop()                                               const { device->stop(); }
+        LiveState readLiveState()                                 const { return device->readLiveState(); }
         void close()                                              const { return device->close(); }
         AudioWorkgroup getWorkgroup()                             const { return device->getWorkgroup(); }
 
@@ -2265,8 +2024,7 @@ private:
 
 
 //==============================================================================
-class CoreAudioIODeviceType final : public AudioIODeviceType,
-                                    private AsyncUpdater
+class CoreAudioIODeviceType final : public AudioIODeviceType
 {
 public:
     CoreAudioIODeviceType()  : AudioIODeviceType ("CoreAudio")
@@ -2287,8 +2045,6 @@ public:
     ~CoreAudioIODeviceType() override
     {
         LiveInternalRegistry::get().remove (this);
-
-        cancelPendingUpdate();
 
         AudioObjectPropertyAddress pa;
         pa.mSelector = kAudioHardwarePropertyDevices;
@@ -2419,14 +2175,14 @@ public:
         if (in  == nullptr)  return out.release();
         if (out == nullptr)  return in.release();
 
-        auto combo = std::make_unique<AudioIODeviceCombiner> (combinedName, this, std::move (in), std::move (out));
+        auto combo = std::make_unique<AudioIODeviceCombiner> (combinedName, std::move (in), std::move (out));
         return combo.release();
     }
 
-    void audioDeviceListChanged()
+    // smoothie: an open device's change, to the sink.
+    void reportOpenDeviceChange()
     {
-        scanForDevices();
-        callDeviceChangeListeners();
+        reportDeviceChange (DeviceChange::openDevice);
     }
 
     //==============================================================================
@@ -2436,40 +2192,19 @@ private:
 
     bool hasScanned = false;
 
-    void handleAsyncUpdate() override
-    {
-        audioDeviceListChanged();
-    }
-
     static int getNumChannels (AudioDeviceID deviceID, bool input)
     {
-        int total = 0;
-
-        if (auto bufList = audioObjectGetProperty<AudioBufferList> (deviceID, { kAudioDevicePropertyStreamConfiguration,
-                                                                                CoreAudioInternal::getScope (input),
-                                                                                juceAudioObjectPropertyElementMain }))
-        {
-            auto numStreams = (int) bufList->mNumberBuffers;
-
-            for (int i = 0; i < numStreams; ++i)
-                total += bufList->mBuffers[i].mNumberChannels;
-        }
-
-        return total;
+        return CoreAudioInternal::getNumChannels (deviceID, input);
     }
 
     static OSStatus hardwareListenerProc (AudioDeviceID, UInt32, const AudioObjectPropertyAddress*, void* clientData)
     {
         // smoothie: fenced — the type may be mid-destruction (see
-        // LiveInternalRegistry). An owner with a device-change sink hears
-        // here, on CoreAudio's thread, and rescans on its own; without one
-        // the message thread rescans and tells the listeners.
+        // LiveInternalRegistry). The sink's owner hears here, on CoreAudio's
+        // thread, and rescans on its own.
         LiveInternalRegistry::get().ifLive (clientData, [&]
         {
-            auto* type = static_cast<CoreAudioIODeviceType*> (clientData);
-
-            if (! type->deliverToDeviceChangeSink())
-                type->triggerAsyncUpdate();
+            static_cast<CoreAudioIODeviceType*> (clientData)->reportDeviceChange (DeviceChange::list);
         });
 
         return noErr;

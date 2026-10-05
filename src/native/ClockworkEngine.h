@@ -551,15 +551,6 @@ public:
     // cleanup path.
     std::function<std::string()> testInitFailure;
 
-    // Test-only: when true, init() closes the audio device immediately
-    // after the JUCE init block, before deciding which audio source to start.
-    // This reproduces the "device manager exists but no current device"
-    // state real users hit when JUCE/ALSA returns "no channels" against
-    // PipeWire's default sink (issue #3526). Used to verify the headless
-    // fallback path actually starts and that process_audio runs so OSC
-    // commands aren't queued forever in the IN ring buffer.
-    bool testForceNoCurrentDeviceAfterInit = false;
-
     // Times the callback watchdog has recovered a stalled audio source
     // (restarted the headless driver / requested a device reopen). See
     // Config::callbackWatchdog.
@@ -690,24 +681,34 @@ private:
     // Config::deviceManagerFactory boundary when set (tests), else a plain
     // manager. Both boot (init) and recovery (recreateDeviceManager) go
     // through this so a recovered engine keeps its injected fakes, and
-    // every manager hands its device-list changes to devicesChanged().
+    // every manager hands its device changes to devicesChanged().
     std::unique_ptr<juce::AudioDeviceManager> makeDeviceManager();
 
-    // Something about the devices changed: one came or went (the device
-    // layer), or the OS default output moved (macOS's HAL listener). Called
-    // on whatever thread the OS reports it, the moment it does; queues one
-    // pass of reconcileDevices on the device lane, which owns the device
-    // manager. A burst of reports is one pass.
-    void devicesChanged();
+    // What changed about the devices, as a pass of reconcileDevices is told.
+    enum DeviceChanges : unsigned {
+        kListChanged       = 1u << 0,   // devices came or went: rescan the lists
+        kDefaultChanged    = 1u << 1,   // the OS default output moved
+        kOpenDeviceChanged = 1u << 2,   // the device played on changed where it stands
+        kPassQueued        = 1u << 31,
+    };
+    // Something about the devices changed: the device layer's report (a
+    // device came or went, or the open device changed), or macOS's that the
+    // default output moved. Called on whatever thread the OS reports it, the
+    // moment it does; queues one pass of reconcileDevices on the device
+    // lane, which owns the device manager. A burst of reports is one pass.
+    void devicesChanged(unsigned changes);
     // On the device lane: compares what the devices are with what the
     // engine plays on, and acts only where they differ — so a report of a
     // change the engine made itself finds nothing to do, and no report needs
     // to be dropped.
     void reconcileDevices();
-    std::atomic<bool> mDevicesChangedQueued{false};
+    std::atomic<unsigned> mDeviceChanges{0};   // DeviceChanges not yet looked at
     // A pass that came while the engine was booting: init runs one once
     // the engine is running.
     std::atomic<bool> mReconcileAfterBoot{false};
+    // The device played on has gone: recover onto what should play now,
+    // unless a recovery is already on its way.
+    void recoverLostDevice(const std::string& name, const char* how);
     // System mode: when the default output differs from the device played
     // on, open the default (openSystemDefault). True if it tried.
     bool followDefaultOutput();
@@ -716,6 +717,13 @@ private:
     // aggregate device, which changes the list again. Device lane, under
     // the gate.
     std::string mUnopenableDefault;
+    // The default output as the last pass saw it, so a decision not to
+    // follow it is said once, not on every pass. Device lane.
+    std::string mDefaultSeen;
+    // The device played on, as its driver reports it now: gone where it
+    // stands, or with other channels than it was opened with, it is opened
+    // again. True if it acted.
+    bool reconcileOpenDevice();
 
     // Destroy and recreate mDeviceManager, then re-open the default device and
     // re-attach the audio callback. Unlike a reopen (which reuses the existing
@@ -1191,10 +1199,10 @@ private:
     // With ~150 device/type combinations on a typical machine the call takes
     // ~10 s, which during boot starves the OSC thread and causes the client's
     // /clockwork/notify handshake to time out. Refreshed by listDevices(true),
-    // which every device change runs (reconcileDevices).
+    // which a pass runs when the list changed (reconcileDevices). Empty until
+    // the first scan.
     mutable std::mutex                           mListDevicesMutex;
     mutable std::vector<DeviceInfo>              mCachedDevices;
-    mutable std::chrono::steady_clock::time_point mCachedDevicesAt{};
     // The audio device list as reconcileDevices last reported it, so
     // a change that leaves the list as it was (a device's own property, our
     // own aggregate work) doesn't re-send the device report. Device lane only.

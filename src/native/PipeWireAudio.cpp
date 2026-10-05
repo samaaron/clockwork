@@ -1573,7 +1573,7 @@ public:
 private:
     // Registry changed on the loop thread; refresh the snapshot before
     // notifying so listeners compare against the post-change device lists.
-    void handleAsyncUpdate() override { scanForDevices(); callDeviceChangeListeners(); }
+    void handleAsyncUpdate() override { scanForDevices(); reportDeviceChange(DeviceChange::list); }
 
     juce::StringArray outputNames, inputNames;
     std::vector<PwNodeInfo> mOutputs, mInputs;
