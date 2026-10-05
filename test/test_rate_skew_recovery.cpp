@@ -23,6 +23,7 @@
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
 #include <mutex>
+#include <string>
 #include <vector>
 
 using fake_audio::fakeEngineConfig;
@@ -72,6 +73,22 @@ void flushLog(EngineFixture& fix) {
     fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
     OscReply r;
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
+}
+
+// Subscribed to the engine's broadcasts as a GUI is: a recovery says so with
+// /clockwork/devices/reopen.done, a rebuild with /clockwork/setup.
+void subscribe(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    fix.clearReplies();
+}
+
+std::vector<osc_test::ParsedReply> said(EngineFixture& fix, const std::string& address) {
+    std::vector<osc_test::ParsedReply> out;
+    for (auto& r : fix.allReplies())
+        if (r.address == address) out.push_back(r.parsed());
+    return out;
 }
 
 } // namespace
@@ -164,4 +181,57 @@ TEST_CASE("RateSkew: an honest device is never recovered", "[RateSkew][Watchdog]
     REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 1500));   // five windows, once Live
     CHECK(fix.engine().rateSkewRecoveryCount() == 0);
     CHECK(sessionRate(fix) == 48000);
+}
+
+TEST_CASE("RateSkew: a device racing at nearly five times its rate is recovered, and "
+          "the engine keeps playing", "[RateSkew][Watchdog]") {
+    // The other way round from the mixer: a driver's timer free-running fast
+    // (seen just before a wake), so every scheduled note comes early.
+    auto sys = makeSimpleSystem();
+    sys->device("Fake Speakers")->deliveredRate = 230400.0;   // 4.8x its 48000
+    EngineFixture fix(lyingDeviceConfig(sys));
+    subscribe(fix);
+
+    sys->useVirtualTime();
+    const bool recovered = runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
+        for (auto& r : said(fix, CLOCKWORK_SYS("devices/reopen.done")))
+            if (r.argInt(0) == 1) return true;
+        return false;
+    });
+    INFO(fix.debugMessagesDump());
+    REQUIRE(recovered);
+
+    // Nothing it advertises is true either, so the engine gives up asking and
+    // plays on at the nearest rate it has.
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 3000));
+    sys->useWallTime();
+    CHECK(fix.engine().engineState() == EngineState::Running);
+    OscReply r;
+    fix.send(osc_test::message("/dummy/ping"));
+    REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));
+}
+
+TEST_CASE("RateSkew: the user changing the session's rate is not mistaken for a "
+          "device keeping the wrong time", "[RateSkew][Watchdog]") {
+    // The frames delivered at 48k, measured against 44.1k, would read as a
+    // device running 9% fast.
+    auto sys = makeSimpleSystem();                 // honest
+    EngineFixture fix(lyingDeviceConfig(sys));
+    subscribe(fix);
+
+    sys->useVirtualTime();
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 1000));   // measuring it
+    sys->useWallTime();                            // a switch waits for the device's ticks
+    REQUIRE(switchWhenFree(fix, "", 44100.0).success);
+    sys->useVirtualTime();
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 1500));
+    sys->useWallTime();
+
+    flushLog(fix);
+    INFO(fix.debugMessagesDump());
+    CHECK(said(fix, CLOCKWORK_SYS("devices/reopen.done")).empty());
+    const auto rebuilt = said(fix, CLOCKWORK_SYS("setup"));
+    REQUIRE(rebuilt.size() == 1);                  // the switch's own
+    CHECK(rebuilt.front().argInt(0) == 44100);
+    CHECK(sessionRate(fix) == 44100);
 }

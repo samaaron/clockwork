@@ -494,26 +494,6 @@ std::string resolveBootHardwareMatch(
     return fuzzyMatch(requested, combine(false));
 }
 
-HardwareFlagRequest parseHardwareFlag(const std::string& first,
-                                      const char* secondToken) {
-    HardwareFlagRequest r;
-    const bool secondIsName =
-        secondToken && secondToken[0] != '\0' && secondToken[0] != '-';
-    if (secondIsName) {
-        r.inputDevice     = first;
-        r.outputDevice    = secondToken;
-        r.secondTokenUsed = true;
-        return r;
-    }
-    // Direction-scoped sentinels don't cross over.
-    if (first == "__none__")   { r.inputDevice  = first; return r; }
-    if (first == "__system__") { r.outputDevice = first; return r; }
-    // Upstream parity: a single real name serves both directions.
-    r.outputDevice = first;
-    r.inputDevice  = first;
-    return r;
-}
-
 std::vector<int> usableAggregateRates(const std::vector<int>& outputRates,
                                       const std::vector<int>& inputRates) {
     if (outputRates.empty()) return inputRates;

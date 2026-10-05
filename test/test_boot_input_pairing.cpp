@@ -10,11 +10,17 @@
  * intermittent RC6 boot SIGSEGV / distorted-audio reports. The engine's
  * contract: input pairing is always an explicit engine decision (same-device
  * full duplex at open, or aggregate promotion after it).
+ *
+ * The explicit decision has its own failures: the user's saved microphone has
+ * to be the one paired, an unplugged one must not cost the boot its output,
+ * and neither must one saved under another driver's name for the same box.
  */
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
 #include "OscTestUtils.h"
 #include <catch2/catch_test_macros.hpp>
+#include <memory>
+#include <string>
 
 using fake_audio::fakeEngineConfig;
 using fake_audio::makeSimpleSystem;
@@ -51,3 +57,107 @@ TEST_CASE("Boot: -H full-duplex device with matching input pref keeps its input"
     REQUIRE(cur.name == "Fake Interface");
     REQUIRE(cur.activeInputChannels > 0);
 }
+
+// ── A saved microphone, paired with the output as the engine comes up ───────
+// Off macOS a driver opens the output and the input as separate devices, and
+// the boot pairs the saved one itself; otherwise a GUI would find its choice
+// not honoured on every launch and correct it with a needless rebuild. macOS
+// pairs through an aggregate device, which the fakes cannot build yet.
+
+#ifndef __APPLE__
+namespace {
+
+// The driver the engine says it is on, as the GUI's driver menu reads it.
+std::string driverInUse(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("drivers/list")));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("drivers/list.reply"), r, 10000));
+    return r.parsed().argString(0);
+}
+
+std::shared_ptr<fake_audio::FakeDeviceSpec> device(const std::string& name, int outs, int ins) {
+    auto d = std::make_shared<fake_audio::FakeDeviceSpec>();
+    d->name = name;
+    d->maxOutputChannels = outs;
+    d->maxInputChannels  = ins;
+    return d;
+}
+
+}  // namespace
+
+TEST_CASE("Boot: a saved microphone is recorded from as the engine comes up, and a "
+          "saved one that is unplugged leaves the output playing",
+          "[DeviceSelection][boot]") {
+    auto withSavedMic = [](std::shared_ptr<fake_audio::FakeSystem> sys) {
+        auto cfg = fakeEngineConfig(std::move(sys), "Fake Speakers");
+        cfg.numInputChannels = 2;
+        cfg.inputDevice = "Fake Microphone";
+        return cfg;
+    };
+    {
+        auto sys = makeSimpleSystem();
+        EngineFixture fix(withSavedMic(sys));
+        const auto cur = fix.engine().currentDevice();
+        INFO(fix.debugMessagesDump());
+        CHECK(cur.name == "Fake Speakers");
+        CHECK(cur.inputDeviceName == "Fake Microphone");
+        CHECK(cur.activeInputChannels == 2);
+        fix.send(osc_test::message(CLOCKWORK_SYS("devices/report")));
+        OscReply inputs;
+        REQUIRE(fix.waitForReply(CLOCKWORK_SYS("input-devices"), inputs, 10000));
+        CHECK(inputs.parsed().argString(0) == "Fake Microphone");
+    }
+    {
+        auto sys = makeSimpleSystem();
+        sys->device("Fake Microphone")->hidden = true;   // unplugged since it was saved
+        EngineFixture fix(withSavedMic(sys));
+        const auto cur = fix.engine().currentDevice();
+        CHECK(cur.name == "Fake Speakers");
+        CHECK(cur.activeInputChannels == 0);
+        CHECK(fix.waitForBlocks(20));
+    }
+}
+
+TEST_CASE("Boot: a saved microphone known by another driver's name doesn't cost the "
+          "output on the driver in use", "[DeviceSelection][boot]") {
+    // One MOTU box as Windows lists it: "MOTU Pro Audio" under ASIO, where
+    // the input menu mirrors the output, and "Speakers (MOTU)" and "In 1-2
+    // (MOTU)" under Windows Audio. The microphone was saved while on ASIO.
+    // Tried under Windows Audio, it was "No such device" with the output
+    // already open, and the engine came up with no device at all.
+    auto machine = [] {
+        auto sys = std::make_shared<fake_audio::FakeSystem>();
+        sys->types.push_back({ "Windows Audio", { device("Speakers (MOTU)", 2, 0),
+                                                  device("In 1-2 (MOTU)", 0, 2) }, 0 });
+        sys->types.push_back({ "ASIO", { device("MOTU Pro Audio", 2, 2) }, 0 });
+        return sys;
+    };
+    auto boot = [](std::shared_ptr<fake_audio::FakeSystem> sys, const std::string& savedMic) {
+        auto cfg = fakeEngineConfig(std::move(sys), "Speakers (MOTU)");
+        cfg.audioDriver = "Windows Audio";
+        cfg.numInputChannels = 2;
+        cfg.inputDevice = savedMic;
+        return cfg;
+    };
+
+    // How often a boot with no saved microphone opens the output.
+    int cleanBootOpens = 0;
+    {
+        auto sys = machine();
+        EngineFixture fix(boot(sys, ""));
+        cleanBootOpens = sys->device("Speakers (MOTU)")->opens.load();
+    }
+
+    auto sys = machine();
+    EngineFixture fix(boot(sys, "MOTU Pro Audio"));
+    INFO(fix.debugMessagesDump());
+    CHECK(driverInUse(fix) == "Windows Audio");
+    CHECK(fix.engine().currentDevice().name == "Speakers (MOTU)");
+    CHECK(fix.engine().currentDevice().activeInputChannels == 0);
+    CHECK(sys->device("MOTU Pro Audio")->opens.load() == 0);
+    // Not tried at all: a pairing that fails takes the output down with it,
+    // and the output is opened again — a dropout at every launch.
+    CHECK(sys->device("Speakers (MOTU)")->opens.load() == cleanBootOpens);
+    CHECK(fix.waitForBlocks(20));
+}
+#endif

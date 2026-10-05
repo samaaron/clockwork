@@ -219,8 +219,7 @@ std::vector<std::string> scopeInputsToDriver(
     const std::string& driver);
 
 // Decide which input device the boot open pairs with the opened output.
-// The embedder passes the user's saved input via -H (see parseHardwareFlag);
-// The embedder passes the user's saved input via -H (see parseHardwareFlag).
+// The embedder passes the user's saved input (scsynth's -H, for SuperSonic).
 //   - requestedInput visible (exact or JUCE
 //     "<name> (N)" form, resolveJuceDeviceName) and suitable → the
 //     resolved name
@@ -306,24 +305,6 @@ std::string resolveBootHardwareMatch(
     const std::string& requested,
     const std::string& preferredDriver,
     const std::vector<std::pair<std::string, std::string>>& deviceTable);
-
-// -H flag semantics, scsynth-compatible (upstream scsynth_main.cpp): one
-// name serves BOTH directions; two names are "<input> <output>". An
-// embedder's launcher may send any of the three shapes (-H <in> <out>,
-// -H <in>, -H <out>).
-// `secondToken` is the next argv token or nullptr; it counts as a device
-// name only when non-empty and not flag-shaped (leading '-') — a real
-// device name starting with '-' therefore can't be passed second, the same
-// ambiguity upstream has. Sentinels stay direction-scoped: "__system__"
-// (follow default output) is never mirrored to input, "__none__" (disable
-// input) never hijacks output.
-struct HardwareFlagRequest {
-    std::string outputDevice;      // empty = default output
-    std::string inputDevice;       // empty = default input
-    bool secondTokenUsed = false;  // caller advances argv one extra slot
-};
-HardwareFlagRequest parseHardwareFlag(const std::string& first,
-                                      const char* secondToken);
 
 // Validate device names against a visible-device list BEFORE any destructive swap
 // work. Returns empty on success, or an error naming the bad argument. Empty

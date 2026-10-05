@@ -25,6 +25,7 @@
 #include "FakeAudioDevice.h"
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -54,6 +55,40 @@ bool reported(EngineFixture& fix, const std::string& name) {
 bool playingOn(EngineFixture& fix, const std::string& name, int timeoutMs = 10000) {
     return fix.pollUntil([&] { return fix.engine().currentDevice().name == name; },
                          timeoutMs);
+}
+
+// Whether the engine has told its clients it records from `name`: the report
+// a GUI fills its input menu from.
+bool reportedInput(EngineFixture& fix, const std::string& name) {
+    for (auto& r : fix.allReplies())
+        if (r.address == CLOCKWORK_SYS("input-devices") && r.parsed().argString(0) == name)
+            return true;
+    return false;
+}
+
+bool recordingFrom(EngineFixture& fix, const std::string& output,
+                   const std::string& input, int timeoutMs = 10000) {
+    return fix.pollUntil([&] {
+        const auto cur = fix.engine().currentDevice();
+        return cur.name == output && cur.inputDeviceName == input
+            && cur.activeInputChannels > 0;
+    }, timeoutMs);
+}
+
+// Everything the engine has sent so far has arrived: this reply comes back
+// through the same ring, after it.
+void flushReplies(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
+}
+
+std::shared_ptr<fake_audio::FakeDeviceSpec> device(const std::string& name, int outs, int ins) {
+    auto d = std::make_shared<fake_audio::FakeDeviceSpec>();
+    d->name = name;
+    d->maxOutputChannels = outs;
+    d->maxInputChannels  = ins;
+    return d;
 }
 
 }  // namespace
@@ -95,6 +130,47 @@ TEST_CASE("DeviceEvents: the user's device plugged back in is played on again, "
     INFO(fix.debugMessagesDump());
     REQUIRE(back);
     CHECK(fix.pollUntil([&] { return reported(fix, "Fake Interface"); }, 10000));
+    CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from again, "
+          "and one already recording is left alone", "[DeviceEvents]") {
+    auto sys = std::make_shared<fake_audio::FakeSystem>();
+    auto speakers = device("Fake Speakers", 2, 0);
+    auto mic = device("Fake Microphone", 0, 2);   // no other input to stand in for it
+    mic->hidden = true;
+    sys->types.push_back({ "FakeDriver", { speakers, mic }, 0 });
+    auto cfg = fakeEngineConfig(sys, "Fake Speakers");
+    cfg.numInputChannels = 2;
+    cfg.inputDevice = "Fake Microphone";          // saved, and not plugged in
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().activeInputChannels == 0);
+    subscribe(fix);
+
+    mic->hidden = false;
+    REQUIRE(sys->reportListChanged());
+    const bool recording = recordingFrom(fix, "Fake Speakers", "Fake Microphone");
+    INFO(fix.debugMessagesDump());
+    REQUIRE(recording);
+    CHECK(fix.engine().currentDevice().activeInputChannels == 2);
+    CHECK(fix.pollUntil([&] { return reportedInput(fix, "Fake Microphone"); }, 10000));
+
+    // The list changing again while it records costs it nothing: the devices
+    // are not opened again (a pair opens through its output) and nothing is
+    // rebuilt.
+    deviceLaneDone(fix.engine());
+    flushReplies(fix);
+    fix.clearReplies();
+    const int opened = speakers->opens.load();
+    REQUIRE(sys->reportListChanged());
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    flushReplies(fix);
+    int rebuilds = 0;
+    for (auto& r : fix.allReplies())
+        if (r.address == CLOCKWORK_SYS("setup")) ++rebuilds;
+    CHECK(rebuilds == 0);
+    CHECK(speakers->opens.load() == opened);
     CHECK(fix.waitForBlocks(20));
 }
 

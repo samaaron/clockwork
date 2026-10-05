@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,29 @@ void subscribe(EngineFixture& fix) {
     OscReply ack;
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
     fix.clearReplies();
+}
+
+// Everything the engine has sent so far has arrived: this reply comes back
+// through the same ring, after it.
+void flushReplies(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
+}
+
+int rebuilds(EngineFixture& fix) {
+    int n = 0;
+    for (auto& r : fix.allReplies())
+        if (r.address == CLOCKWORK_SYS("setup")) ++n;
+    return n;
+}
+
+// Sonic Pi's "Enable audio inputs": 0 off, -1 back on; the engine's answer.
+osc_test::ParsedReply enableInputs(EngineFixture& fix, int channels) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("inputs/enable"), channels));
+    OscReply reply;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("inputs/enable.reply"), reply, 10000));
+    return reply.parsed();
 }
 
 }  // namespace
@@ -112,6 +136,40 @@ TEST_CASE("SwitchVerb: picking a device ends in switch.done", "[SwitchVerb]") {
     CHECK(dones.front().argString(3) == "Fake Interface");
 }
 
+TEST_CASE("SwitchVerb: a menu label sent as the input, such as '-- None --', is "
+          "refused by name and the engine plays on where it was", "[SwitchVerb]") {
+    // Seen from the field: the GUI's display string for "no input" leaked onto
+    // the wire. Refused before anything is torn down, with the name in the
+    // error, rather than failing halfway through a swap.
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    for (const char* input : { "-- None --", "Phantom Mic" }) {
+        INFO("input: " << input);
+        fix.send(switchTo("", input));
+        OscReply reply;
+        REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+        CHECK(reply.parsed().argInt(0) == 1);
+
+        const bool done = fix.pollUntil([&] { return !switchDones(fix).empty(); }, 10000);
+        INFO(fix.debugMessagesDump());
+        REQUIRE(done);
+        flushReplies(fix);
+        const auto dones = switchDones(fix);
+        CHECK(dones.size() == 1);
+        const auto& d = dones.front();
+        CHECK(d.argInt(0) == 0);
+        CHECK(d.argString(2) == input);
+        CHECK(d.argString(5).find(input) != std::string::npos);
+        CHECK(d.argString(5).find("input") != std::string::npos);
+        CHECK(rebuilds(fix) == 0);
+        CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+        CHECK(fix.waitForBlocks(20));
+        fix.clearReplies();
+    }
+}
+
 TEST_CASE("SwitchVerb: turning inputs off while following the system default "
           "keeps following it", "[SwitchVerb]") {
     // Turning the mic off is not choosing an output. It used to lock the
@@ -143,4 +201,40 @@ TEST_CASE("InputsVerb: turning inputs off while following the system default "
     REQUIRE(replied);
     CHECK(reply.parsed().argInt(0) == 1);
     CHECK(fix.engine().deviceMode().empty());
+}
+
+TEST_CASE("InputsVerb: turning inputs on for an eight-input interface opens all eight, "
+          "and turning them back on after off opens all eight again", "[SwitchVerb]") {
+    // Sonic Pi boots with inputs off (-i 0), which says nothing about how many
+    // the user wants once they turn them on. Capping at stereo left an
+    // eight-input interface at two.
+    auto sys = std::make_shared<fake_audio::FakeSystem>();
+    auto box = std::make_shared<fake_audio::FakeDeviceSpec>();
+    box->name = "Fake 8in Interface";
+    box->maxOutputChannels = 2;
+    box->maxInputChannels  = 8;
+    sys->types.push_back({ "FakeDriver", { box }, 0 });
+    EngineFixture fix(fakeEngineConfig(sys, "Fake 8in Interface"));
+    subscribe(fix);
+
+    fix.send(switchTo("", "Fake 8in Interface"));
+    const bool done = fix.pollUntil([&] { return !switchDones(fix).empty(); }, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(done);
+    const auto d = switchDones(fix).front();
+    CHECK(d.argInt(0) == 1);
+    CHECK(d.argString(4) == "Fake 8in Interface");
+    OscReply rebuilt;                      // the engine rebuilt with input channels
+    CHECK(fix.waitForReply(CLOCKWORK_SYS("setup"), rebuilt, 10000));
+    CHECK(fix.engine().currentDevice().activeInputChannels == 8);
+
+    auto off = enableInputs(fix, 0);
+    CHECK(off.argInt(0) == 1);
+    CHECK(off.argInt(1) == 0);
+    CHECK(fix.engine().currentDevice().activeInputChannels == 0);
+
+    auto on = enableInputs(fix, -1);
+    CHECK(on.argInt(0) == 1);
+    CHECK(on.argInt(1) == -1);
+    CHECK(fix.engine().currentDevice().activeInputChannels == 8);
 }

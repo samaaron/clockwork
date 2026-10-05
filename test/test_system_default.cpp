@@ -51,15 +51,20 @@ void setDefault(EngineFixture& fix, FakeSystem& sys, int outputIndex) {
     sys.types[0].defaultDeviceIndex = outputIndex;
 }
 
+// An output, not plugged in yet, listed after those already there.
+std::shared_ptr<FakeDeviceSpec> addUnpluggedOutput(FakeSystem& sys, const std::string& name) {
+    auto out = std::make_shared<FakeDeviceSpec>();
+    out->name = name;
+    out->maxInputChannels = 0;
+    out->hidden = true;
+    sys.types[0].devices.push_back(out);
+    return out;
+}
+
 // Headphones, not plugged in yet: outputs are then Fake Speakers, Fake
 // Interface, Fake Headphones.
 std::shared_ptr<FakeDeviceSpec> addHeadphones(FakeSystem& sys) {
-    auto phones = std::make_shared<FakeDeviceSpec>();
-    phones->name = "Fake Headphones";
-    phones->maxInputChannels = 0;
-    phones->hidden = true;
-    sys.types[0].devices.push_back(phones);
-    return phones;
+    return addUnpluggedOutput(sys, "Fake Headphones");
 }
 
 }  // namespace
@@ -143,6 +148,44 @@ TEST_CASE("SystemDefault: a default that moves with the device list is followed 
     REQUIRE(sys->reportListChanged());
     INFO(fix.debugMessagesDump());
     CHECK(playingOn(fix, "Fake Headphones"));
+    CHECK(fix.engine().preferredOutputDevice().empty());
+}
+
+TEST_CASE("SystemDefault: the engine's own aggregate becoming the default is not "
+          "followed, but a real device whose name starts with the app's name is",
+          "[SystemDefault]") {
+    // On macOS the engine pairs a separate microphone through an aggregate
+    // device it names "<app name>#N", and building one can briefly make it the
+    // default. Following it would nest the engine inside its own device, and
+    // each rebuild would move the default again. Only that name is the
+    // engine's own: the app name is the embedder's, not a fixed word.
+    auto sys = makeSimpleSystem();
+    auto own  = addUnpluggedOutput(*sys, "TestApp#1");
+    auto real = addUnpluggedOutput(*sys, "TestApp Audio Interface");
+    auto cfg = fakeEngineConfig(sys, "Fake Speakers");
+    cfg.appName = "TestApp";
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().setDeviceMode("system").empty());
+    REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
+
+    {   // outputs: Fake Speakers, Fake Interface, TestApp#1
+        auto hold = fix.engine().testHoldSwapGate();
+        own->hidden = false;
+        sys->types[0].defaultDeviceIndex = 2;
+    }
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    CHECK(own->opens.load() == 0);
+
+    {   // ...and TestApp Audio Interface, a real one
+        auto hold = fix.engine().testHoldSwapGate();
+        real->hidden = false;
+        sys->types[0].defaultDeviceIndex = 3;
+    }
+    REQUIRE(sys->reportListChanged());
+    INFO(fix.debugMessagesDump());
+    CHECK(playingOn(fix, "TestApp Audio Interface"));
     CHECK(fix.engine().preferredOutputDevice().empty());
 }
 

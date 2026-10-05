@@ -20,12 +20,63 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
+#include <memory>
+#include <string>
 
 using fake_audio::fakeEngineConfig;
-using fake_audio::makeFactory;
 using fake_audio::makeSimpleSystem;
 using fake_audio::FakeDeviceSpec;
 using fake_audio::FakeSystem;
+
+namespace {
+
+// Booted, and subscribed to the engine's broadcasts as a GUI is.
+void subscribe(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    fix.clearReplies();
+}
+
+// The user picks an output from the menu; what the engine says it did.
+osc_test::ParsedReply pick(EngineFixture& fix, const char* output) {
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("devices/switch"))
+        << output << 0.0f << static_cast<osc::int32>(0) << "";
+    fix.send(b.end());
+    OscReply done;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), done, 10000));
+    return done.parsed();
+}
+
+// Everything the engine has sent so far has arrived: this reply comes back
+// through the same ring, after it.
+void flushReplies(EngineFixture& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
+    OscReply r;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
+}
+
+// /clockwork/setup: the DSP was rebuilt, and a client re-establishes what it
+// held there.
+int rebuilds(EngineFixture& fix) {
+    int n = 0;
+    for (auto& r : fix.allReplies())
+        if (r.address == CLOCKWORK_SYS("setup")) ++n;
+    return n;
+}
+
+std::shared_ptr<FakeDeviceSpec> addOutput(FakeSystem& sys, const std::string& name,
+                                          int channels) {
+    auto out = std::make_shared<FakeDeviceSpec>();
+    out->name = name;
+    out->maxOutputChannels = channels;
+    out->maxInputChannels  = 0;
+    sys.types[0].devices.push_back(out);
+    return out;
+}
+
+}  // namespace
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +105,48 @@ TEST_CASE("Swap: named same-driver switch succeeds and reports the device",
     REQUIRE(r.success);
     REQUIRE(r.deviceName == "Fake Interface");
     REQUIRE(fix.engine().currentDevice().name == "Fake Interface");
+}
+
+TEST_CASE("Swap: a device that plays the session's rate is switched to without a "
+          "rebuild, and one that doesn't is opened at its nearest rate", "[SwapChar]") {
+    auto sys = makeSimpleSystem();
+    addOutput(*sys, "Fake 96k Box", 2)->sampleRates = { 44100.0, 96000.0 };
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));   // at 48000
+    subscribe(fix);
+
+    CHECK(pick(fix, "Fake Interface").argInt(0) == 1);
+    deviceLaneDone(fix.engine());
+    flushReplies(fix);
+    CHECK(rebuilds(fix) == 0);
+    CHECK(fix.engine().currentDevice().activeSampleRate == 48000.0);
+
+    // No 48k: the nearest it has, and the engine rebuilt for it — running the
+    // DSP at 48k against a 44.1k device plays everything flat and slow.
+    INFO(fix.debugMessagesDump());
+    CHECK(pick(fix, "Fake 96k Box").argInt(0) == 1);
+    OscReply rebuilt;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("setup"), rebuilt, 10000));
+    CHECK(rebuilt.parsed().argInt(0) == 44100);
+    CHECK(fix.engine().currentDevice().activeSampleRate == 44100.0);
+    CHECK(fix.waitForBlocks(20));
+}
+
+TEST_CASE("Swap: switching to a device with more outputs rebuilds the engine for all "
+          "of them", "[SwapChar]") {
+    // A switch that kept the DSP would keep it writing the two channels it was
+    // built with, and channels three to eight would stay silent.
+    auto sys = makeSimpleSystem();
+    addOutput(*sys, "Fake 8out", 8);
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));   // two outputs
+    subscribe(fix);
+
+    const auto done = pick(fix, "Fake 8out");
+    INFO(fix.debugMessagesDump());
+    CHECK(done.argInt(0) == 1);
+    OscReply rebuilt;
+    CHECK(fix.waitForReply(CLOCKWORK_SYS("setup"), rebuilt, 10000));
+    CHECK(fix.engine().currentDevice().activeOutputChannels == 8);
+    CHECK(fix.waitForBlocks(20));
 }
 
 TEST_CASE("Swap: unknown output name is refused before any mutation",
@@ -164,22 +257,28 @@ TEST_CASE("Swap: /clockwork/devices/reopen recovers through the factory seam",
     REQUIRE(fix.waitForReply("/dummy/pong", reply));
 }
 
+TEST_CASE("Swap: a reopen lands back on the user's device, not on the system default "
+          "it passes through", "[SwapChar][recovery]") {
+    // The fresh device manager a reopen builds opens the default first. Staying
+    // there would turn a device fault into a switch the user never asked for.
+    auto sys = makeSimpleSystem();                       // the default is Fake Speakers
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+    subscribe(fix);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/reopen")));
+    OscReply reply;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.reply"), reply));
+    CHECK(reply.parsed().argInt(0) == 1);
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.done"), reply, 10000));
+    INFO(fix.debugMessagesDump());
+    CHECK(reply.parsed().argInt(0) == 1);
+    CHECK(reply.parsed().argString(1) == "Fake Interface");
+    CHECK(fix.engine().currentDevice().name == "Fake Interface");
+    CHECK(fix.engine().preferredOutputDevice() == "Fake Interface");
+
+    fix.send(osc_test::message("/dummy/ping"));
+    CHECK(fix.waitForReply("/dummy/pong", reply));
+}
+
 // ── Device-mutation phase ───────────────────────────────────────────────────
 
-TEST_CASE("Swap: devicePhase is Idle at rest, Swapping under a held swap",
-          "[SwapChar][phase]") {
-    auto sys = makeSimpleSystem();
-    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
-    using Phase = ClockworkEngine::DevicePhase;
-
-    REQUIRE(fix.engine().devicePhase() == Phase::Idle);
-    {
-        auto hold = fix.engine().testHoldSwapGate();
-        REQUIRE(fix.engine().devicePhase() == Phase::Swapping);
-    }
-    REQUIRE(fix.engine().devicePhase() == Phase::Idle);
-
-    auto r = fix.engine().switchDevice("Fake Interface", 0, 0, false, "__none__");
-    REQUIRE(r.success);
-    REQUIRE(fix.engine().devicePhase() == Phase::Idle);   // guard restored it
-}

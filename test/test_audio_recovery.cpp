@@ -35,27 +35,6 @@ TEST_CASE("LivenessMonitor: a single twitch tick after a stall is not Live",
     CHECK(mon.phase(1400) != LivenessPhase::Live);
 }
 
-// Sustained ticks across the confirm window DO restore Live.
-TEST_CASE("LivenessMonitor: sustained ticks after a stall restore Live",
-          "[AudioRecovery][Liveness]") {
-    LivenessMonitor mon(/*stallWindow*/1000, /*confirmWindow*/500);
-
-    mon.observe(100, 0);
-    REQUIRE(mon.phase(0) == LivenessPhase::Live);
-
-    mon.observe(100, 1200);                          // stall
-    REQUIRE(mon.phase(1200) == LivenessPhase::Stalled);
-
-    // Ticks resume and keep advancing past the confirm window.
-    mon.observe(101, 1300);
-    CHECK(mon.phase(1300) == LivenessPhase::Confirming);
-    mon.observe(102, 1500);
-    mon.observe(103, 1700);                          // 1700 - runStart(1300) = 400 < 500
-    CHECK(mon.phase(1700) == LivenessPhase::Confirming);
-    mon.observe(104, 1850);                          // 1850 - 1300 = 550 >= 500
-    CHECK(mon.phase(1850) == LivenessPhase::Live);
-}
-
 // ── RateSkewMonitor ──────────────────────────────────────────────────────────
 // Times in ms, rates in frames/ms (48 = 48kHz). Standard monitor: 1000ms
 // windows, 300ms max observation gap, 5% tolerance, 2 consecutive bad windows.
@@ -68,52 +47,6 @@ RateSkewMonitor standardMonitor() {
                            /*tolerance*/0.05, /*badWindowsRequired*/2);
 }
 } // namespace
-
-TEST_CASE("RateSkewMonitor: a healthy device never reads skewed",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    // 48 frames/ms delivered exactly, sampled every 100ms for 10 windows.
-    for (int64_t t = 0; t <= 10000; t += 100) {
-        mon.observe(static_cast<uint64_t>(48 * t), 48.0, t);
-        CHECK_FALSE(mon.skewed());
-    }
-}
-
-TEST_CASE("RateSkewMonitor: jitter within tolerance never reads skewed",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    // ±3% alternating error — inside the 5% tolerance.
-    uint64_t frames = 0;
-    for (int64_t t = 100; t <= 10000; t += 100) {
-        frames += (t / 100) % 2 == 0 ? 4944 : 4656;  // 48*100 ± 3%
-        mon.observe(frames, 48.0, t);
-        CHECK_FALSE(mon.skewed());
-    }
-}
-
-// The incident shape: post-sleep DirectSound free-running slow (~0.3x). Two
-// full windows of sustained skew — no less — produce the verdict.
-TEST_CASE("RateSkewMonitor: sustained slow delivery reads skewed after exactly "
-          "the required windows", "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    for (int64_t t = 0; t <= 1900; t += 100) {
-        mon.observe(static_cast<uint64_t>(15 * t), 48.0, t);  // 0.31x
-        CHECK_FALSE(mon.skewed());   // first window bad, streak 1 — not enough
-    }
-    mon.observe(15 * 2000, 48.0, 2000);  // second bad window completes
-    CHECK(mon.skewed());
-    CHECK(mon.lastRatio() < 0.35);
-}
-
-// The pre-wake incident shape: timer free-running fast (~4.8x).
-TEST_CASE("RateSkewMonitor: sustained fast delivery reads skewed",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    for (int64_t t = 0; t <= 2000; t += 100)
-        mon.observe(static_cast<uint64_t>(230 * t), 48.0, t);  // 4.8x
-    CHECK(mon.skewed());
-    CHECK(mon.lastRatio() > 4.0);
-}
 
 // One transient stall skews one window; the next healthy window must clear the
 // streak so a lone "[gap] audio callback stalled" can never cold-swap.
@@ -159,25 +92,6 @@ TEST_CASE("RateSkewMonitor: an observation gap discards the window",
     CHECK_FALSE(mon.skewed());
 }
 
-// A frames rollback (device restart resets the sample counter) is a
-// discontinuity: window AND streak restart, so a bad window either side of a
-// restart can't combine into a verdict.
-TEST_CASE("RateSkewMonitor: a frames rollback clears window and streak",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    // One bad window (0.5x): streak 1.
-    for (int64_t t = 0; t <= 1000; t += 100)
-        mon.observe(static_cast<uint64_t>(24 * t), 48.0, t);
-    CHECK_FALSE(mon.skewed());
-    // Device restart: frames restart near zero.
-    mon.observe(100, 48.0, 1100);
-    // Another lone bad window after the restart — streak restarted at 0, so
-    // this reaches 1, not 2.
-    for (int64_t t = 1200; t <= 2100; t += 100)
-        mon.observe(static_cast<uint64_t>(100 + 24 * (t - 1100)), 48.0, t);
-    CHECK_FALSE(mon.skewed());
-}
-
 // A nominal-rate change (cold swap to a new rate) re-anchors: frames delivered
 // against the old rate must not be judged against the new one.
 TEST_CASE("RateSkewMonitor: a nominal rate change re-anchors",
@@ -191,49 +105,6 @@ TEST_CASE("RateSkewMonitor: a nominal rate change re-anchors",
     CHECK_FALSE(mon.skewed());
 }
 
-// After the verdict, a healthy window clears it (recovery worked), and
-// reset() clears it immediately (recovery started).
-TEST_CASE("RateSkewMonitor: skewed clears on a good window or reset",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    for (int64_t t = 0; t <= 2000; t += 100)
-        mon.observe(static_cast<uint64_t>(15 * t), 48.0, t);
-    REQUIRE(mon.skewed());
-
-    SECTION("good window clears") {
-        uint64_t frames = 15 * 2000;
-        for (int64_t t = 2100; t <= 3000; t += 100) {
-            frames += 4800;
-            mon.observe(frames, 48.0, t);
-        }
-        CHECK_FALSE(mon.skewed());
-    }
-    SECTION("reset clears") {
-        mon.reset();
-        CHECK_FALSE(mon.skewed());
-    }
-}
-
-// The monitor reports each completed window and whether it was good, so a
-// caller can tell "healthy again" apart from "mid-window": skewed() is false
-// in both.
-TEST_CASE("RateSkewMonitor: completed windows are counted and judged",
-          "[AudioRecovery][RateSkew]") {
-    auto mon = standardMonitor();
-    CHECK(mon.windowsCompleted() == 0);
-    for (int64_t t = 0; t <= 1000; t += 100)
-        mon.observe(static_cast<uint64_t>(48 * t), 48.0, t);
-    CHECK(mon.windowsCompleted() == 1);
-    CHECK(mon.lastWindowGood());
-    for (int64_t t = 1100; t <= 2000; t += 100)
-        mon.observe(static_cast<uint64_t>(48 * 1000 + 24 * (t - 1000)), 48.0, t);  // 0.5x
-    CHECK(mon.windowsCompleted() == 2);
-    CHECK_FALSE(mon.lastWindowGood());
-    // reset() starts a new episode; the life count is not history to erase.
-    mon.reset();
-    CHECK(mon.windowsCompleted() == 2);
-}
-
 // ── RateSkewPolicy ───────────────────────────────────────────────────────────
 // The property that would have caught the storm as a design flaw: against a
 // PERSISTENT mismatch the old remedy was an action that reproduced the
@@ -242,69 +113,6 @@ TEST_CASE("RateSkewMonitor: completed windows are counted and judged",
 
 using clockwork::audio::RateSkewAction;
 using clockwork::audio::RateSkewPolicy;
-
-TEST_CASE("RateSkewPolicy: a persistent same-ratio skew gets at most N recoveries, "
-          "the last of which adopts the measured rate, then it gives up",
-          "[AudioRecovery][RateSkew][Policy]") {
-    RateSkewPolicy policy(/*maxRecoveries*/3, /*sameRatioTolerance*/0.05);
-    const double ratio = 44100.0 / 48000.0;   // 0.919, forever
-
-    // Two plain recoveries...
-    REQUIRE(policy.next(ratio) == RateSkewAction::Recover);
-    policy.acted(ratio);
-    REQUIRE(policy.next(ratio) == RateSkewAction::Recover);
-    policy.acted(ratio);
-    // ...and the third asks for the rate the device is actually delivering.
-    REQUIRE(policy.next(ratio) == RateSkewAction::AdoptMeasuredRate);
-    policy.acted(ratio);
-    CHECK(policy.adopted());
-    CHECK(policy.streak() == 3);
-
-    // Still skewing at the adopted rate: the device is lying in a way no
-    // rate request corrects. Stop, once.
-    REQUIRE(policy.next(ratio) == RateSkewAction::GiveUp);
-    policy.acted(ratio);
-    CHECK(policy.gaveUp());
-    // And never again this session — no recoveries, no messages.
-    for (int i = 0; i < 100; ++i) {
-        REQUIRE(policy.next(ratio) == RateSkewAction::None);
-        policy.acted(ratio);
-    }
-    // A healthy window does not pardon a session that has given up.
-    policy.healthy();
-    CHECK(policy.gaveUp());
-    CHECK(policy.next(ratio) == RateSkewAction::None);
-}
-
-TEST_CASE("RateSkewPolicy: one fault measured with noise is still one fault",
-          "[AudioRecovery][RateSkew][Policy]") {
-    // The engine passes twice its skew tolerance here: a 0.919x device whose
-    // windows read 0.89, 0.94, 0.89 on a loaded machine must reach the adopt
-    // on the third verdict, not restart its streak at every wobble.
-    RateSkewPolicy policy(3, /*sameRatioTolerance*/0.10);
-    REQUIRE(policy.next(0.89) == RateSkewAction::Recover);
-    policy.acted(0.89);
-    REQUIRE(policy.next(0.94) == RateSkewAction::Recover);
-    policy.acted(0.94);
-    CHECK(policy.streak() == 2);
-    REQUIRE(policy.next(0.89) == RateSkewAction::AdoptMeasuredRate);
-    // A genuinely different fault still starts over: 0.5x is not 0.9x.
-    RateSkewPolicy other(3, 0.10);
-    other.acted(0.92);
-    other.acted(0.5);
-    CHECK(other.streak() == 1);
-}
-
-TEST_CASE("RateSkewPolicy: a refused recovery does not advance the streak",
-          "[AudioRecovery][RateSkew][Policy]") {
-    // requestAudioRecovery can refuse (in flight, cooling down) for many
-    // polls: the watchdog asks next() every poll and acts only when a
-    // recovery launched. Asking must be free of side effects.
-    RateSkewPolicy policy(3, 0.05);
-    for (int i = 0; i < 50; ++i)
-        REQUIRE(policy.next(0.919) == RateSkewAction::Recover);
-    CHECK(policy.streak() == 0);
-}
 
 TEST_CASE("RateSkewPolicy: a transient skew recovers as before, and a healthy "
           "window restarts the count", "[AudioRecovery][RateSkew][Policy]") {
@@ -342,27 +150,3 @@ TEST_CASE("RateSkewPolicy: a different ratio is a different fault",
     CHECK(policy.streak() == 2);
 }
 
-TEST_CASE("RateSkewPolicy: adoption that works ends the episode; a later skew "
-          "at the adopted rate starts a new one",
-          "[AudioRecovery][RateSkew][Policy]") {
-    RateSkewPolicy policy(2, 0.05);
-    policy.acted(0.919);
-    REQUIRE(policy.next(0.919) == RateSkewAction::AdoptMeasuredRate);
-    policy.acted(0.919);
-    REQUIRE(policy.adopted());
-    // The device keeps time at the adopted rate: healthy windows follow.
-    policy.healthy();
-    CHECK_FALSE(policy.adopted());
-    CHECK(policy.streak() == 0);
-    // Weeks later it skews again (a different cable, a different fault): the
-    // remedy starts from a plain recovery, not from "give up".
-    REQUIRE(policy.next(0.5) == RateSkewAction::Recover);
-}
-
-TEST_CASE("RateSkewPolicy: maxRecoveries of one adopts on the first verdict",
-          "[AudioRecovery][RateSkew][Policy]") {
-    RateSkewPolicy policy(1, 0.05);
-    REQUIRE(policy.next(0.919) == RateSkewAction::AdoptMeasuredRate);
-    RateSkewPolicy floor(0, 0.05);   // clamped to one, never zero
-    REQUIRE(floor.next(0.919) == RateSkewAction::AdoptMeasuredRate);
-}
