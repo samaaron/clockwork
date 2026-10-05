@@ -21,6 +21,9 @@
  * with both threads' stacks even when the timing does not happen to crash.
  */
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
+#include "DeviceInvariants.h"
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
 #include <atomic>
@@ -29,7 +32,12 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <vector>
 
+using Catch::Generators::from_range;
+using fake_audio::Driver;
+using fake_audio::FakeSystem;
+using fake_audio::Says;
 using fake_audio::fakeEngineConfig;
 using fake_audio::makeSimpleSystem;
 
@@ -69,10 +77,6 @@ int playsAtTheRate(EngineFixture& fix, const std::string& name) {
     return result;
 }
 
-bool playingOn(EngineFixture& fix, const std::string& name, int timeoutMs = 10000) {
-    return fix.pollUntil([&] { return fix.engine().currentDevice().name == name; },
-                         timeoutMs);
-}
 
 // Whether the engine has told its clients it records from `name`: the report
 // a GUI fills its input menu from.
@@ -108,6 +112,13 @@ std::shared_ptr<fake_audio::FakeDeviceSpec> device(const std::string& name, int 
     return d;
 }
 
+// The simple machine (makeSimpleSystem), on `driver`.
+std::shared_ptr<FakeSystem> systemOn(Driver driver) {
+    auto sys = makeSimpleSystem();
+    fake_audio::behaveLike(sys->types[0], driver);
+    return sys;
+}
+
 }  // namespace
 
 TEST_CASE("DeviceEvents: unplugging the device the engine plays on moves it to "
@@ -119,11 +130,8 @@ TEST_CASE("DeviceEvents: unplugging the device the engine plays on moves it to "
     sys->device("Fake Interface")->hidden = true;  // unplugged
     REQUIRE(sys->reportListChanged());
 
-    const bool moved = playingOn(fix, "Fake Speakers");
-    INFO(fix.debugMessagesDump());
-    REQUIRE(moved);
+    checkPlayingOn(fix, "Fake Speakers");
     CHECK(fix.pollUntil([&] { return reported(fix, "Fake Speakers"); }, 10000));
-    CHECK(fix.waitForBlocks(20));
     // Still the user's device: it is where the engine goes when it is back.
     CHECK(fix.engine().preferredOutputDevice() == "Fake Interface");
 }
@@ -137,17 +145,14 @@ TEST_CASE("DeviceEvents: the user's device plugged back in is played on again, "
 
     interface->hidden = true;
     REQUIRE(sys->reportListChanged());
-    REQUIRE(playingOn(fix, "Fake Speakers"));
+    checkPlayingOn(fix, "Fake Speakers");
     fix.clearReplies();
 
     interface->hidden = false;                     // plugged back in
     REQUIRE(sys->reportListChanged());
 
-    const bool back = playingOn(fix, "Fake Interface");
-    INFO(fix.debugMessagesDump());
-    REQUIRE(back);
+    checkPlayingOn(fix, "Fake Interface");
     CHECK(fix.pollUntil([&] { return reported(fix, "Fake Interface"); }, 10000));
-    CHECK(fix.waitForBlocks(20));
 }
 
 TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from again, "
@@ -188,7 +193,7 @@ TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from 
         if (r.address == CLOCKWORK_SYS("setup")) ++rebuilds;
     CHECK(rebuilds == 0);
     CHECK(speakers->opens.load() == opened);
-    CHECK(fix.waitForBlocks(20));
+    checkCoherent(fix);
 }
 
 TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
@@ -248,16 +253,19 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
 
 TEST_CASE("DeviceEvents: the device played on dying where it stands is left "
           "for one that plays", "[DeviceEvents]") {
-    auto sys = makeSimpleSystem();               // the default is Fake Speakers
+    // On a driver with a default, and on one without (ASIO): the device the
+    // engine moves to is the default where there is one.
+    const Driver driver = GENERATE(from_range(fake_audio::onePerWay(
+        [](const FakeSystem::TypeSpec& t) { return t.openDeviceChanges != Says::nothing; },
+        [](const FakeSystem::TypeSpec& t) { return t.namesDefault; })));
+    CAPTURE(fake_audio::driverName(driver));
+    auto sys = systemOn(driver);               // the default is Fake Speakers
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
 
     sys->device("Fake Interface")->dead = true;  // still listed, gone all the same
     REQUIRE(sys->reportOpenDeviceChanged());
 
-    const bool moved = playingOn(fix, "Fake Speakers");
-    INFO(fix.debugMessagesDump());
-    REQUIRE(moved);
-    CHECK(fix.waitForBlocks(20));
+    checkPlayingOn(fix, "Fake Speakers");
 }
 
 TEST_CASE("DeviceEvents: the device played on losing channels is played on "
@@ -281,7 +289,7 @@ TEST_CASE("DeviceEvents: the device played on losing channels is played on "
     INFO(fix.debugMessagesDump());
     CHECK(narrowed);
     CHECK(fix.engine().currentDevice().name == "Fake Interface");
-    CHECK(fix.waitForBlocks(20));
+    checkCoherent(fix);
 }
 
 TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
@@ -304,7 +312,7 @@ TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
     for (auto& r : fix.allReplies())
         if (r.address == CLOCKWORK_SYS("setup")) ++rebuilds;
     CHECK(rebuilds == 0);
-    CHECK(fix.waitForBlocks(20));
+    checkCoherent(fix);
 }
 
 TEST_CASE("DeviceEvents: the device played on is played on at the rate the "
@@ -326,7 +334,7 @@ TEST_CASE("DeviceEvents: the device played on is played on at the rate the "
     REQUIRE(rebuilt);
     CHECK(setup.parsed().argInt(0) == 44100);
     CHECK(fix.engine().currentDevice().name == "Fake Interface");
-    CHECK(fix.waitForBlocks(20));
+    checkCoherent(fix);
 }
 
 TEST_CASE("DeviceEvents: a device plugged back in is reported as it is now, "
@@ -404,5 +412,5 @@ TEST_CASE("DeviceEvents: the user's microphone coming back joins the default out
     CHECK(recordingFrom(fix, "Fake Headphones", "Fake Microphone"));
     CHECK(fix.pollUntil([&] { return reported(fix, "Fake Headphones"); }, 10000));
     CHECK(fix.engine().preferredOutputDevice() == "Fake Headphones");
-    CHECK(fix.waitForBlocks(20));
+    checkCoherent(fix);
 }
