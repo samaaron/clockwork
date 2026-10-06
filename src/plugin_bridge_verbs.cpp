@@ -787,8 +787,10 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
             broadcastFolders();
             return true;
         }
+    } catch (const std::exception& e) {
+        mEmit->debug(std::string("a track verb could not be read, refused: ") + e.what());
     } catch (...) {
-        // fall through to the refusal
+        mEmit->debug("a track verb could not be read, refused");
     }
     clockwork_sys_refuse(data, size, "unknown track verb",
                    [this, token](const uint8_t* d, uint32_t n) { mEmit->reply(token, d, n); });

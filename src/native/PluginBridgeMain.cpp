@@ -524,5 +524,14 @@ int main(int argc, char** argv) {
     }
     const long pid = std::strtol(argv[1], nullptr, 10);
     if (pid <= 0) { std::fprintf(stderr, "bad engine pid: %s\n", argv[1]); return 1; }
-    return run(static_cast<int32_t>(pid));
+    // Nothing escapes main: an exception out of it is std::terminate with no
+    // line in the log, and the engine sees only a host that stopped.
+    try {
+        return run(static_cast<int32_t>(pid));
+    } catch (const std::exception& e) {
+        log("the plugin host stopped on an exception: %s", e.what());
+    } catch (...) {
+        log("the plugin host stopped on an exception");
+    }
+    return 2;
 }

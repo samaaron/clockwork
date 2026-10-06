@@ -395,7 +395,15 @@ void ClockworkEngine::snapshotStateTo(uint32_t token) {
 }
 
 ClockworkEngine::~ClockworkEngine() {
-    shutdown();
+    // A destructor that throws ends the process, and there is no one left to
+    // answer: what shutdown could not do is logged and let go.
+    try {
+        shutdown();
+    } catch (const std::exception& e) {
+        clockwork_log("[engine] shutdown threw in the destructor: %s", e.what());
+    } catch (...) {
+        clockwork_log("[engine] shutdown threw in the destructor");
+    }
 }
 
 
@@ -2430,7 +2438,13 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
         // default build enters the "waiting for audio device" state, and the
         // watchdog keeps retrying until a device appears.
         if (mActiveSource.load() == AudioSource::None) {
-            try { startAudioSource(); } catch (...) {}
+            try {
+                startAudioSource();
+            } catch (const std::exception& e) {
+                clockwork_log("[recovery] no audio source after the failed recovery: %s", e.what());
+            } catch (...) {
+                clockwork_log("[recovery] no audio source after the failed recovery");
+            }
         }
     }   // release the gate before sendDeviceReport (which re-takes it)
 

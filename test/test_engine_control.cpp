@@ -13,6 +13,8 @@
 #include "clockwork_prefix.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstring>
+#include <vector>
 
 using engine_test::Engine;
 
@@ -57,4 +59,33 @@ TEST_CASE("clock/meter sets the session meter and the query reads it back",
     CHECK(r.argInt(2) == 7);
     CHECK(r.argInt(3) == 8);
     CHECK(r.argInt(4) == 43);
+}
+
+// A command the engine cannot read is refused, and the log says which and
+// why. It was refused and nothing said: the catch that stopped it reaching
+// the parser swallowed the reason, so a client sending something broken saw
+// only an unknown-verb error, and the log showed nothing had arrived.
+TEST_CASE("a malformed engine command is refused, and the log names it",
+          "[engine][control]") {
+    EngineFixture fix;
+    fix.clearDebugMessages();
+    // "/clockwork/notify" with a type tag declaring an int32 that is not there.
+    std::vector<uint8_t> bad;
+    const char* addr = CLOCKWORK_SYS("notify");
+    bad.insert(bad.end(), addr, addr + std::strlen(addr));
+    bad.push_back(0);
+    while (bad.size() % 4u) bad.push_back(0);
+    bad.push_back(','); bad.push_back('i'); bad.push_back(0); bad.push_back(0);
+    fix.send(bad.data(), static_cast<uint32_t>(bad.size()));
+
+    OscReply err;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("error"), err));
+    CHECK(err.parsed().argString(0) == CLOCKWORK_SYS("notify"));
+    const bool said = fix.pollUntil([&] {
+        for (const auto& m : fix.debugMessages())
+            if (m.find("malformed /clockwork/notify") != std::string::npos) return true;
+        return false;
+    }, 2000);
+    INFO(fix.debugMessagesDump());
+    CHECK(said);
 }

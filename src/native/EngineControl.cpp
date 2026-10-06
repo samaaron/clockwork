@@ -16,6 +16,7 @@
 #include "clock/ClockworkClock.h"
 #include "LinkAudioHost.h"
 #include "clockwork_sys.h"
+#include "clockwork_config.h"   // clockwork_log
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
@@ -796,8 +797,16 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         }
+    } catch (const std::exception& e) {
+        // Malformed: refused below, as an unknown verb is, and said here with
+        // the address, which is the packet's first string.
+        clockwork_log("[control] malformed %.*s (%u bytes): %s",
+                      static_cast<int>(strnlen(reinterpret_cast<const char*>(data), size)),
+                      reinterpret_cast<const char*>(data), size, e.what());
     } catch (...) {
-        // Don't let parsing errors crash the server
+        clockwork_log("[control] malformed %.*s (%u bytes)",
+                      static_cast<int>(strnlen(reinterpret_cast<const char*>(data), size)),
+                      reinterpret_cast<const char*>(data), size);
     }
 
     refuseUnknown(token, data, size);

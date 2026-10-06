@@ -187,8 +187,10 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             mLoopback = argBool(it, end, mLoopback);
             applyCueConfig();
         }
+    } catch (const std::exception& e) {
+        clockwork_log("[osc] malformed %s (%u bytes), ignored: %s", addr, size, e.what());
     } catch (...) {
-        // Malformed /clockwork/osc/ control message — ignore.
+        clockwork_log("[osc] malformed %s (%u bytes), ignored", addr, size);
     }
     return true;
 }

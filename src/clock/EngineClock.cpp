@@ -4,6 +4,7 @@
  * EngineClock.cpp — see EngineClock.h. The clock-core /clock verbs, once.
  */
 #include "clockwork_prefix.h"
+#include "clockwork_config.h"   // clockwork_log
 #include "clock/EngineClock.h"
 
 #include "clock/ClockworkClock.h"
@@ -422,7 +423,12 @@ void replyClockUnsupported(const uint8_t* data, uint32_t size,
         s << osc::EndMessage;
         reply(reinterpret_cast<const uint8_t*>(s.Data()),
               static_cast<uint32_t>(s.Size()));
+    } catch (const std::exception& e) {
+        // Unparseable: nothing truthful to answer with, so it is said here.
+        clockwork_log("[clock] no clock/unsupported reply for a malformed message "
+                      "(%u bytes): %s", size, e.what());
     } catch (...) {
-        // Unparseable or oversized address — drop rather than reply.
+        clockwork_log("[clock] no clock/unsupported reply for a malformed message (%u bytes)",
+                      size);
     }
 }
