@@ -69,3 +69,35 @@ extern "C" void  objc_autoreleasePoolPop(void* pool);
 
 extern "C" void* clockwork_autorelease_pool_push(void) { return objc_autoreleasePoolPush(); }
 extern "C" void  clockwork_autorelease_pool_pop(void* pool) { objc_autoreleasePoolPop(pool); }
+
+// The activity assertion App Nap honours. The token owns a reference: this
+// file is compiled without ARC, so the object beginActivity returns is
+// autoreleased and would go with the pool, and the hold with it.
+extern "C" void* clockwork_hold_latency_critical(const char* why) {
+    @autoreleasepool {
+        NSString* reason = why ? [NSString stringWithUTF8String:why] : @"renders audio";
+        id activity = [[NSProcessInfo processInfo]
+            beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep
+                                      | NSActivityLatencyCritical)
+                              reason:reason];
+#if __has_feature(objc_arc)
+        return (__bridge_retained void*)activity;
+#else
+        return (void*)[activity retain];
+#endif
+    }
+}
+
+extern "C" void clockwork_release_latency_critical(void* token) {
+    if (!token) return;
+    @autoreleasepool {
+#if __has_feature(objc_arc)
+        id activity = (__bridge_transfer id)token;
+        [[NSProcessInfo processInfo] endActivity:activity];
+#else
+        id activity = (id)token;
+        [[NSProcessInfo processInfo] endActivity:activity];
+        [activity release];
+#endif
+    }
+}

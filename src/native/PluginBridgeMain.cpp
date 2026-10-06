@@ -324,6 +324,15 @@ void onSignal(int) {
 #endif
 
 int run(int32_t enginePid) {
+#ifdef __APPLE__
+    // This process plays nothing macOS can hear (its audio goes to the engine
+    // over shared memory) and shows no window, so without saying otherwise it
+    // is a candidate for App Nap, which throttles its timers and can hold its
+    // render thread for longer than the engine waits (TrackControl's
+    // HUNG_BLOCKS) before replacing it. Seen 2026-10-05: an idle host replaced
+    // twice in forty minutes with nothing in its log. Held for the run.
+    const ClockworkLatencyCritical latencyCritical("renders the engine's plugin tracks");
+#endif
     Bridge b;
     g_bridge = &b;
     b.enginePid = enginePid;

@@ -32,6 +32,15 @@ void clockwork_pump_cocoa_events(void);
 void* clockwork_autorelease_pool_push(void);
 void  clockwork_autorelease_pool_pop(void* pool);
 
+/* macOS is told this process does latency-critical work (NSProcessInfo's
+ * activity API: NSActivityLatencyCritical, user-initiated, the system still
+ * free to sleep when idle) until the token is released. Without it a
+ * background app with no window, playing nothing the OS can hear, is one App
+ * Nap may put to sleep and whose timers it may throttle. `why` is the reason
+ * Activity Monitor shows. NULL where there is nothing to hold. */
+void* clockwork_hold_latency_critical(const char* why);
+void  clockwork_release_latency_critical(void* token);
+
 #ifdef __cplusplus
 }
 
@@ -42,6 +51,15 @@ struct ClockworkAutoreleasePool {
     ~ClockworkAutoreleasePool() { clockwork_autorelease_pool_pop(pool); }
     ClockworkAutoreleasePool(const ClockworkAutoreleasePool&) = delete;
     ClockworkAutoreleasePool& operator=(const ClockworkAutoreleasePool&) = delete;
+};
+
+/* The hold, for a scope: a main, for the process's life. */
+struct ClockworkLatencyCritical {
+    void* token;
+    explicit ClockworkLatencyCritical(const char* why) : token(clockwork_hold_latency_critical(why)) {}
+    ~ClockworkLatencyCritical() { clockwork_release_latency_critical(token); }
+    ClockworkLatencyCritical(const ClockworkLatencyCritical&) = delete;
+    ClockworkLatencyCritical& operator=(const ClockworkLatencyCritical&) = delete;
 };
 #endif
 
