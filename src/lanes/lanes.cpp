@@ -152,6 +152,10 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
                              g_nrt_drain_state, m, fn, ctx, max_frames);
 }
 
+uint32_t clockwork_egress_nrt_max_frame(void) {
+    return kNrtEgressMax - EGRESS_ROUTE_SIZE;
+}
+
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len) {
     if (!memory_initialized || !shared_memory || !control || !osc || len == 0)

@@ -21,6 +21,7 @@
 extern "C" const char* clockwork_app_name();
 #include "clock/MidiClockOut.h"
 #include "osc/OscReceivedElements.h"
+#include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 
 #include <atomic>
@@ -188,14 +189,14 @@ bool MidiControl::handleClockOutVerb(const uint8_t* data, uint32_t size) {
         }
     } catch (...) { return true; }  // malformed — swallow, as the beat verb always has
 
-    char buf[2048];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
+    // The reply carries the names the client sent, at whatever length it
+    // sent them (oscPacketOf), with its token echoed last.
     auto finish = [&](osc::OutboundPacketStream& out) {
         if (hasToken) out << static_cast<osc::int32>(token);
         out << osc::EndMessage;
-        if (mEgress)
-            mEgress->reply(mReplyToken, reinterpret_cast<const uint8_t*>(out.Data()),
-                           static_cast<uint32_t>(out.Size()));
+    };
+    auto send = [&](const OscPacket& packet) {
+        if (mEgress) mEgress->reply(mReplyToken, packet.ptr(), packet.size());
     };
 
     switch (verb) {
@@ -219,23 +220,29 @@ bool MidiControl::handleClockOutVerb(const uint8_t* data, uint32_t size) {
                     addr, MidiClockOut::kMaxFollowers, port.c_str());
             return true;
         }
-        s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/follow.reply"))
-          << port.c_str() << timeline.c_str();
-        finish(s);
+        send(oscPacketOf(256 + port.size() + timeline.size(), [&](osc::OutboundPacketStream& s) {
+            s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/follow.reply"))
+              << port.c_str() << timeline.c_str();
+            finish(s);
+        }));
         return true;
     }
 
     case Unfollow:
         mClockOut->unfollow(port);
-        s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/unfollow.reply")) << port.c_str();
-        finish(s);
+        send(oscPacketOf(256 + port.size(), [&](osc::OutboundPacketStream& s) {
+            s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/unfollow.reply")) << port.c_str();
+            finish(s);
+        }));
         return true;
 
     case Followers:
-        s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/followers.reply"));
-        for (const auto& f : mClockOut->followers())
-            s << f.port.c_str() << f.timeline.c_str();
-        finish(s);
+        send(oscPacketOf(2048, [&](osc::OutboundPacketStream& s) {
+            s << osc::BeginMessage(CLOCKWORK_SYS("midi/clock/followers.reply"));
+            for (const auto& f : mClockOut->followers())
+                s << f.port.c_str() << f.timeline.c_str();
+            finish(s);
+        }));
         return true;
     }
     return true;
@@ -324,12 +331,11 @@ void MidiControl::transportCb(void* ctx, const uint8_t* norm, uint32_t normLen,
 void MidiControl::broadcastTimelines() {
     if (!mEgress || !mClock) return;
     const auto tls = mClock->listTimelines();
-    char buf[2048];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
-    s << osc::BeginMessage(CLOCKWORK_SYS("clock/timelines"));
-    appendTimelineRows(s, tls);
-    s << osc::EndMessage;
-    mEgress->broadcastLinkNotify(reinterpret_cast<const uint8_t*>(s.Data()),
-                                 static_cast<uint32_t>(s.Size()));
+    const OscPacket packet = oscPacketOf(2048, [&](osc::OutboundPacketStream& s) {
+        s << osc::BeginMessage(CLOCKWORK_SYS("clock/timelines"));
+        appendTimelineRows(s, tls);
+        s << osc::EndMessage;
+    });
+    mEgress->broadcastLinkNotify(packet.ptr(), packet.size());
 }
 

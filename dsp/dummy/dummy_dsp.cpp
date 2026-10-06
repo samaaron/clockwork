@@ -131,6 +131,12 @@
  *
  * A heap that cannot hold it refuses the boot with this guest's reason, which
  * is the path a host has to size its heap for and report when it has not.
+ *
+ * AND ITS REASON CAN BE ANY LENGTH. A guest's words are its own, and a host
+ * carries them to every client however long they are. Another line replaces
+ * the dummy's words when it refuses for want of its pool:
+ *
+ *   refusalReason=<text>
  */
 
 #include "dsp_api.h"
@@ -140,6 +146,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <new>
+#include <string>
+#include <string_view>
 
 namespace {
 
@@ -713,10 +721,10 @@ const DspInfo* dsp_describe(void) {
     return &info;
 }
 
-// The number set for `name` in the guest config's `name=value` lines, or 0.
+// The text set for `name` in the guest config's `name=value` lines, or empty.
 // The block is NUL-terminated text when a host wrote any (GuestConfigText.h).
-static uint64_t configNumber(const DspConfig* config, const char* name) {
-    if (!config->guest_config || config->guest_config_bytes == 0) return 0;
+static std::string_view configText(const DspConfig* config, const char* name) {
+    if (!config->guest_config || config->guest_config_bytes == 0) return {};
     const char* text = static_cast<const char*>(config->guest_config);
     const char* end  = text + strnlen(text, config->guest_config_bytes);
     const size_t n   = std::strlen(name);
@@ -724,10 +732,26 @@ static uint64_t configNumber(const DspConfig* config, const char* name) {
         const char* eol = static_cast<const char*>(std::memchr(line, '\n', end - line));
         if (!eol) eol = end;
         if (static_cast<size_t>(eol - line) > n && std::memcmp(line, name, n) == 0 && line[n] == '=')
-            return std::strtoull(line + n + 1, nullptr, 10);
+            return {line + n + 1, static_cast<size_t>(eol - line) - n - 1};
         line = eol + 1;
     }
-    return 0;
+    return {};
+}
+
+// The number set for `name`, or 0.
+static uint64_t configNumber(const DspConfig* config, const char* name) {
+    const std::string_view v = configText(config, name);
+    return v.empty() ? 0 : std::strtoull(std::string(v).c_str(), nullptr, 10);
+}
+
+// The words this guest refuses with: refusalReason's, or its own. dsp_api.h
+// has the guest own them; they last until the next refusal.
+static const char* refusal(const DspConfig* config, const char* own) {
+    static std::string reason;
+    const std::string_view asked = configText(config, "refusalReason");
+    if (asked.empty()) return own;
+    reason.assign(asked);
+    return reason.c_str();
 }
 
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err) {
@@ -746,7 +770,7 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
         if (d->host.alloc_bytes) d->rt_pool = d->host.alloc_bytes(d->host.ctx, want);
         if (!d->rt_pool) {
             delete d;
-            if (err) *err = "dummy dsp: the host's heap cannot hold the real-time pool rtPoolBytes asks for";
+            if (err) *err = refusal(config, "dummy dsp: the host's heap cannot hold the real-time pool rtPoolBytes asks for");
             return nullptr;
         }
     }

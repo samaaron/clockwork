@@ -16,6 +16,7 @@
 #include "clock/ClockworkClock.h"
 #include "LinkAudioHost.h"
 #include "clockwork_sys.h"
+#include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 #include "DevicePolicy.h"
@@ -119,14 +120,13 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
         }
 
         if (std::strcmp(addr, CLOCKWORK_SYS("clock/peer_name/get")) == 0) {
-            char buf[512];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("clock/peer_name.reply"))
-              << mClockworkClock->peerName();
-            if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            const OscPacket packet = oscPacketOf(512, [&](osc::OutboundPacketStream& s) {
+                s << osc::BeginMessage(CLOCKWORK_SYS("clock/peer_name.reply"))
+                  << mClockworkClock->peerName();
+                if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
+                s << osc::EndMessage;
+            });
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -134,17 +134,16 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             // Reply /clockwork/clock/audio/channels.reply <count> [channelId channelName
             //   peerId peerName] * count.
             auto chs = mLinkAudio->listChannels();
-            std::vector<char> buf(8192);
-            osc::OutboundPacketStream s(buf.data(), buf.size());
-            s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/channels.reply"))
-              << static_cast<int32_t>(chs.size());
-            for (const auto& c : chs) {
-                s << c.channelId.c_str() << c.channelName.c_str()
-                  << c.peerId.c_str() << c.peerName.c_str();
-            }
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            const OscPacket packet = oscPacketOf(8192, [&](osc::OutboundPacketStream& s) {
+                s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/channels.reply"))
+                  << static_cast<int32_t>(chs.size());
+                for (const auto& c : chs) {
+                    s << c.channelId.c_str() << c.channelName.c_str()
+                      << c.peerId.c_str() << c.peerName.c_str();
+                }
+                s << osc::EndMessage;
+            });
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -297,19 +296,18 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             // Reply /clockwork/clock/audio/sinks.reply <count>
             //   [name busIdx numChans hasSubscriber:int 0|1]*
             auto sinks = mLinkAudio->listSinks();
-            std::vector<char> buf(4096);
-            osc::OutboundPacketStream s(buf.data(), buf.size());
-            s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/sinks.reply"))
-              << static_cast<int32_t>(sinks.size());
-            for (const auto& as : sinks) {
-                s << as.name.c_str()
-                  << static_cast<int32_t>(as.busIdx)
-                  << static_cast<int32_t>(as.numChannels)
-                  << static_cast<int32_t>(as.hasSubscriber ? 1 : 0);
-            }
-            s << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            const OscPacket packet = oscPacketOf(4096, [&](osc::OutboundPacketStream& s) {
+                s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/sinks.reply"))
+                  << static_cast<int32_t>(sinks.size());
+                for (const auto& as : sinks) {
+                    s << as.name.c_str()
+                      << static_cast<int32_t>(as.busIdx)
+                      << static_cast<int32_t>(as.numChannels)
+                      << static_cast<int32_t>(as.hasSubscriber ? 1 : 0);
+                }
+                s << osc::EndMessage;
+            });
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -462,6 +460,16 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
 // "/clockwork/error ,ss <address> <reason>" — clockwork refusing one of its own
 // addresses. Byte-identical to the audio thread's refusal (clockwork_sys.h owns the
 // shape); only the thread it is emitted from differs.
+// The first 64 bytes of a name, on a UTF-8 boundary, with "…" when there was
+// more: enough to recognise in a reply, without carrying all of it.
+static std::string cutName(const std::string& name) {
+    constexpr size_t kKeep = 64;
+    if (name.size() <= kKeep) return name;
+    size_t n = kKeep;
+    while (n > 0 && (static_cast<unsigned char>(name[n]) & 0xC0) == 0x80) --n;
+    return name.substr(0, n) + "\xE2\x80\xA6";
+}
+
 void EngineControl::refuseUnknown(uint32_t token, const uint8_t* data, uint32_t size) {
     if (!mEgress) return;
     clockwork_sys_refuse(data, size, "unknown clockwork verb",
@@ -536,18 +544,17 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             mEngine->postDeviceTask([this, token] {
                 for (auto& dev : mEngine->listDevices()) {
                     if (dev.wireless) continue;
-                    char buf[4096];
-                    osc::OutboundPacketStream s(buf, sizeof(buf));
-                    s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.reply"))
-                      << dev.name.c_str()
-                      << dev.typeName.c_str()
-                      << static_cast<osc::int32>(dev.maxOutputChannels)
-                      << static_cast<osc::int32>(dev.maxInputChannels);
-                    for (auto r : dev.availableSampleRates)
-                        s << static_cast<float>(r);
-                    s << osc::EndMessage;
-                    mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                              static_cast<uint32_t>(s.Size()));
+                    const OscPacket packet = oscPacketOf(4096, [&](osc::OutboundPacketStream& s) {
+                        s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.reply"))
+                          << dev.name.c_str()
+                          << dev.typeName.c_str()
+                          << static_cast<osc::int32>(dev.maxOutputChannels)
+                          << static_cast<osc::int32>(dev.maxInputChannels);
+                        for (auto r : dev.availableSampleRates)
+                            s << static_cast<float>(r);
+                        s << osc::EndMessage;
+                    });
+                    mEgress->reply(token, packet.ptr(), packet.size());
                 }
                 // Done marker
                 char buf[256];
@@ -561,18 +568,17 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/current")) == 0) {
             mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
                 auto dev = mEngine->currentDevice();
-                char buf[1024];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("devices/current.reply"))
-                  << dev.name.c_str()
-                  << dev.typeName.c_str()
-                  << static_cast<float>(dev.activeSampleRate)
-                  << static_cast<osc::int32>(dev.activeBufferSize)
-                  << static_cast<osc::int32>(dev.activeOutputChannels)
-                  << static_cast<osc::int32>(dev.activeInputChannels)
-                  << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
+                const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
+                    s << osc::BeginMessage(CLOCKWORK_SYS("devices/current.reply"))
+                      << dev.name.c_str()
+                      << dev.typeName.c_str()
+                      << static_cast<float>(dev.activeSampleRate)
+                      << static_cast<osc::int32>(dev.activeBufferSize)
+                      << static_cast<osc::int32>(dev.activeOutputChannels)
+                      << static_cast<osc::int32>(dev.activeInputChannels)
+                      << osc::EndMessage;
+                });
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
@@ -607,6 +613,18 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
                   << static_cast<osc::int32>(1) << osc::EndMessage;
                 mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
+            }
+
+            // No device has a name of a kilobyte. A longer one is refused
+            // here, and echoed cut: every switch ends in a switch.done, and
+            // one carrying a name that long three times would not fit an
+            // egress frame (OscEgress::frame), so the client would never hear.
+            constexpr size_t kLongestDeviceName = 1024;
+            if (devName.size() > kLongestDeviceName || inputDevName.size() > kLongestDeviceName) {
+                SwapResult result;
+                result.error = "no audio device has a name that long";
+                finishSwitch(result, cutName(devName), cutName(inputDevName));
+                return true;
             }
 
             // Follow the system default: the "__system__" sentinel, or the
@@ -651,13 +669,12 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // rate, buffer, error) when the swap finishes.
             std::string reason;
             const bool accepted = mEngine->requestAudioRecovery(reason);
-            char buf[512];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("devices/reopen.reply"))
-              << static_cast<osc::int32>(accepted ? 1 : 0)
-              << reason.c_str() << osc::EndMessage;
-            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                      static_cast<uint32_t>(s.Size()));
+            const OscPacket packet = oscPacketOf(512, [&](osc::OutboundPacketStream& s) {
+                s << osc::BeginMessage(CLOCKWORK_SYS("devices/reopen.reply"))
+                  << static_cast<osc::int32>(accepted ? 1 : 0)
+                  << reason.c_str() << osc::EndMessage;
+            });
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/report")) == 0) {
@@ -693,16 +710,15 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // Off the gateway: setDeviceMode reinitialises the device.
             mEngine->postDeviceTask([this, token, mode] {
                 auto error = mEngine->setDeviceMode(mode);
-                char buf[1024];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("devices/mode.reply"))
-                  << mEngine->deviceMode().c_str()
-                  << static_cast<osc::int32>(error.empty() ? 1 : 0);
-                if (!error.empty())
-                    s << error.c_str();
-                s << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
+                const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
+                    s << osc::BeginMessage(CLOCKWORK_SYS("devices/mode.reply"))
+                      << mEngine->deviceMode().c_str()
+                      << static_cast<osc::int32>(error.empty() ? 1 : 0);
+                    if (!error.empty())
+                        s << error.c_str();
+                    s << osc::EndMessage;
+                });
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
@@ -710,15 +726,14 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
                 auto drivers = mEngine->listDrivers();
                 auto current = mEngine->currentDriver();
-                char buf[4096];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("drivers/list.reply"));
-                s << current.c_str();
-                for (auto& d : drivers)
-                    s << d.c_str();
-                s << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
+                const OscPacket packet = oscPacketOf(4096, [&](osc::OutboundPacketStream& s) {
+                    s << osc::BeginMessage(CLOCKWORK_SYS("drivers/list.reply"));
+                    s << current.c_str();
+                    for (auto& d : drivers)
+                        s << d.c_str();
+                    s << osc::EndMessage;
+                });
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
@@ -732,20 +747,19 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // device layer itself waits 1.5 s between drivers).
             mEngine->postDeviceTask([this, token, driverName] {
                 auto result = mEngine->switchDriver(driverName);
-                char buf[1024];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("drivers/switch.reply"));
-                if (result.success) {
-                    s << static_cast<osc::int32>(1)
-                      << mEngine->currentDriver().c_str()
-                      << static_cast<float>(result.sampleRate)
-                      << static_cast<osc::int32>(result.bufferSize);
-                } else {
-                    s << static_cast<osc::int32>(0) << result.error.c_str();
-                }
-                s << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
+                const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
+                    s << osc::BeginMessage(CLOCKWORK_SYS("drivers/switch.reply"));
+                    if (result.success) {
+                        s << static_cast<osc::int32>(1)
+                          << mEngine->currentDriver().c_str()
+                          << static_cast<float>(result.sampleRate)
+                          << static_cast<osc::int32>(result.bufferSize);
+                    } else {
+                        s << static_cast<osc::int32>(0) << result.error.c_str();
+                    }
+                    s << osc::EndMessage;
+                });
+                mEgress->reply(token, packet.ptr(), packet.size());
                 if (result.success)
                     mEngine->sendDeviceReport();
             });
@@ -765,18 +779,17 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // following the default.
             mEngine->postDeviceTask([this, token, numChannels] {
                 auto result = mEngine->enableInputChannels(numChannels);
-                char buf[1024];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
-                s << osc::BeginMessage(CLOCKWORK_SYS("inputs/enable.reply"));
-                if (result.success) {
-                    s << static_cast<osc::int32>(1)
-                      << static_cast<osc::int32>(numChannels);
-                } else {
-                    s << static_cast<osc::int32>(0) << result.error.c_str();
-                }
-                s << osc::EndMessage;
-                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-                          static_cast<uint32_t>(s.Size()));
+                const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
+                    s << osc::BeginMessage(CLOCKWORK_SYS("inputs/enable.reply"));
+                    if (result.success) {
+                        s << static_cast<osc::int32>(1)
+                          << static_cast<osc::int32>(numChannels);
+                    } else {
+                        s << static_cast<osc::int32>(0) << result.error.c_str();
+                    }
+                    s << osc::EndMessage;
+                });
+                mEgress->reply(token, packet.ptr(), packet.size());
                 if (result.success)
                     mEngine->sendDeviceReport();
             });

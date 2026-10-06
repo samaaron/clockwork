@@ -172,3 +172,37 @@ TEST_CASE("midi/clock/follow refuses a name that is nothing, and claims a midi:<
     CHECK(r.argString(0) == "*");
     CHECK(r.argString(1) == "midi:never-seen");
 }
+
+// A port name is whatever a client sends, and each of these replies echoes
+// it. They were built in a fixed 2 KB buffer outside the parse's try, so a
+// longer name threw on the engine's control thread, where nothing catches:
+// std::terminate, from one message on a local socket, and any host the
+// engine is embedded in with it.
+TEST_CASE("midi/clock/follow, followers and unfollow answer a port name of any length",
+          "[engine][midi][clock]") {
+    Engine e;
+    osc_test::ParsedReply r;
+    const std::string port = "port " + std::string(4096, 'p');
+
+    auto pkt = follow(port.c_str(), "link", 21);
+    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/follow.reply"), 21, r));
+    CHECK(r.argString(0) == port);
+    CHECK(r.argString(1) == "link");
+
+    pkt = followers(22);
+    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 22, r));
+    REQUIRE(r.argCount() == 3);
+    CHECK(r.argString(0) == port);
+
+    pkt = unfollow(port.c_str(), 23);
+    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/unfollow.reply"), 23, r));
+    CHECK(r.argString(0) == port);
+
+    pkt = followers(24);
+    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 24, r));
+    CHECK(r.argCount() == 1);
+}

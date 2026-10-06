@@ -30,9 +30,15 @@
 extern "C" {
 #endif
 
-/* token is the origin sourceId the frame replies to (broadcasts ignore it). */
+/* token is the origin sourceId the frame replies to (broadcasts ignore it).
+   False when the ring is full, or when len is more than a frame can carry
+   (clockwork_egress_nrt_max_frame): the ring is a fixed size, and a frame
+   has to be able to drain. */
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len);
+
+/* The most OSC bytes one NRT egress frame carries. */
+uint32_t clockwork_egress_nrt_max_frame(void);
 
 void clockwork_lanes_reset_drains(void);
 

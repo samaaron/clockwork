@@ -23,6 +23,30 @@ struct OscPacket {
     uint32_t       size() const { return static_cast<uint32_t>(data.size()); }
 };
 
+// A packet of the size what it carries needs, built off the audio thread.
+// oscpack writes into a buffer fixed before the first byte and throws past
+// its end, so a reply built in a fixed buffer on the stack threw whenever a
+// client's string (a port name, a device name) or an error was longer than
+// the author guessed — and nothing on the thread that built it caught, so one
+// message from a client ended the process. `write` builds the whole message
+// (BeginMessage through EndMessage) into the stream it is given; the buffer
+// starts at `firstTry` bytes and doubles until the message fits. It
+// allocates, so never from the audio thread.
+template <typename Write>
+OscPacket oscPacketOf(size_t firstTry, Write&& write) {
+    std::vector<uint8_t> buf(firstTry < 64 ? 64 : firstTry);
+    for (;;) {
+        try {
+            osc::OutboundPacketStream s(reinterpret_cast<char*>(buf.data()), buf.size());
+            write(s);
+            buf.resize(s.Size());
+            return OscPacket{std::move(buf)};
+        } catch (const osc::OutOfBufferMemoryException&) {
+            buf.assign(buf.size() * 2, 0);
+        }
+    }
+}
+
 class OscBuilder {
 public:
     // Blob wrapper — explicitly marks binary data for OSC blob encoding

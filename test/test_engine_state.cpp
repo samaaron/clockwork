@@ -125,6 +125,30 @@ TEST_CASE("EngineState: a guest that does not come up leaves the engine in error
     CHECK(s.argString(1).find("rtPoolBytes") != std::string::npos);
 }
 
+// A guest's reason is its own, at any length the boot keeps (511 bytes, with
+// "<guest> did not start: " in front), and a client that registers is told it
+// whole. One too long for a fixed reply buffer threw inside the notify
+// handler: the client was answered notify.reply, then refused the verb as
+// unknown, and never learned the engine was in error.
+TEST_CASE("EngineState: a guest that refuses at length: a client that registers is told the whole reason",
+          "[EngineState][guest-failed]") {
+    const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";
+    auto cfg = askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u);
+    cfg.guestConfig += "refusalReason=" + reason + "\n";
+    EngineFixture fix(cfg);
+    CHECK(fix.engine().engineState() == EngineState::Error);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    OscReply state;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
+    const auto s = state.parsed();
+    REQUIRE(s.argCount() >= 2);
+    CHECK(s.argString(0) == "error");
+    CHECK(s.argString(1).find(reason) != std::string::npos);
+}
+
 TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's own verbs still answer",
           "[EngineState][guest-failed]") {
     EngineFixture fix(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));

@@ -9,6 +9,7 @@
 #include "clock/ClockworkClock.h"
 #include "clock/clock_math.h"
 #include "clock/timeline_osc.h"
+#include "native/OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 #include <cmath>
@@ -326,11 +327,14 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         // "midi:<handle>"); `raw` is the original OS device name for display.
         if (std::strcmp(verb, "timelines/get") == 0) {
             const auto tls = clock.listTimelines();
-            char buf[2048];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(CLOCKWORK_SYS("clock/timelines.reply"));
-            appendTimelineRows(s, tls);
-            finish(s);
+            // As many rows, with names as long, as there are (oscPacketOf).
+            const OscPacket packet = oscPacketOf(2048, [&](osc::OutboundPacketStream& s) {
+                s << osc::BeginMessage(CLOCKWORK_SYS("clock/timelines.reply"));
+                appendTimelineRows(s, tls);
+                if (hasToken) s << static_cast<osc::int32>(echoToken);
+                s << osc::EndMessage;
+            });
+            reply(packet.ptr(), packet.size());
             return true;
         }
 

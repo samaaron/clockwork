@@ -5,12 +5,15 @@
  * injected IOscTransport on the gateway side. No address/socket knowledge here.
  */
 #include "clockwork_prefix.h"
+#include "clockwork_sys.h"
+#include "clockwork_config.h"   // clockwork_log
 #include "OscEgress.h"
 
 #include "IOscTransport.h"
 #include "comms/EgressRouter.h"
 #include "osc_debug.h"
 #include "lanes/lanes_internal.h"  // clockwork_egress_nrt_write (NRT egress producer)
+#include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include <cstring>
 
@@ -25,7 +28,29 @@ void OscEgress::init(IOscTransport*                                  transport,
 void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t size) {
     // The lanes NRT egress producer (src/lanes/lanes.cpp) owns the NRT-out
     // ring location and the producer lock.
-    clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, osc, size);
+    if (clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, osc, size)) return;
+
+    // Never silently. A frame the ring refuses is logged, and one too big for
+    // a frame ever to carry is answered with an error in its place, so the
+    // caller is not left waiting for a reply that cannot come. (A ring that is
+    // full is back-pressure, and the message was not lost for its size: the
+    // next pass has room.) The address is the packet's first string.
+    const char* address = reinterpret_cast<const char*>(osc);
+    const size_t addressLen = strnlen(address, size);
+    const uint32_t most = clockwork_egress_nrt_max_frame();
+    if (size <= most) {
+        clockwork_log("[egress] ring full: %.*s (%u bytes) dropped",
+                      static_cast<int>(addressLen), address, size);
+        return;
+    }
+    clockwork_log("[egress] %.*s is %u bytes, more than the %u a frame carries — "
+                  "answered with an error instead",
+                  static_cast<int>(addressLen), address, size, most);
+    if (addressLen == size) return;   // no address to answer to
+    clockwork_sys_refuse(osc, size, "the reply is too big for the engine's egress",
+        [&](const uint8_t* d, uint32_t n) {
+            clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, d, n);
+        });
 }
 
 void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
@@ -137,16 +162,22 @@ void OscEgress::unsubscribeCallerFromOscNotify(uint32_t token) {
 
 // ── Small generic lifecycle broadcasts (gated by an audience) ────────────────
 
+// The reason is a guest's words, at any length it gave them (a boot error,
+// up to the 511 bytes the boot keeps): the packet takes them whole.
+static OscPacket stateChange(const char* state, const char* reason) {
+    return oscPacketOf(128 + std::strlen(state) + std::strlen(reason),
+                       [&](osc::OutboundPacketStream& s) {
+        s << osc::BeginMessage(CLOCKWORK_SYS("statechange"))
+          << state
+          << reason
+          << osc::EndMessage;
+    });
+}
+
 void OscEgress::sendStateChange(const char* state, const char* reason) {
     if (!hasSubscribers()) return;
-    char buf[512];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
-    s << osc::BeginMessage(CLOCKWORK_SYS("statechange"))
-      << state
-      << reason
-      << osc::EndMessage;
-    broadcastToTargets(reinterpret_cast<const uint8_t*>(s.Data()),
-                       static_cast<uint32_t>(s.Size()));
+    const OscPacket packet = stateChange(state, reason);
+    broadcastToTargets(packet.ptr(), packet.size());
 }
 
 void OscEgress::sendSetup(int sampleRate, int bufferSize, uint32_t generation) {
@@ -170,14 +201,8 @@ void OscEgress::sendSetup(int sampleRate, int bufferSize, uint32_t generation) {
 // needed this. Deliberately state-only: /clockwork/setup is a rebuild
 // EVENT and must never be replayed to late joiners.
 void OscEgress::sendStateChangeTo(uint32_t token, const char* state, const char* reason) {
-    char buf[512];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
-    s << osc::BeginMessage(CLOCKWORK_SYS("statechange"))
-      << state
-      << reason
-      << osc::EndMessage;
+    const OscPacket packet = stateChange(state, reason);
     // reply routing: this is part of the direct response to the caller's
     // /clockwork/notify, and must also reach in-process (embedder) callers.
-    reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
-          static_cast<uint32_t>(s.Size()));
+    reply(token, packet.ptr(), packet.size());
 }

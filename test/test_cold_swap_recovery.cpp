@@ -147,3 +147,49 @@ TEST_CASE("ColdSwapRecovery: a rebuild whose guest does not come up leaves the e
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
     CHECK(state.parsed().argString(0) == "error");
 }
+
+// The same failure with a reason at length, a client listening, and the swap
+// asked for as a client asks: devices/switch, so the work runs on the device
+// lane. Broadcasting the error state threw there (a fixed reply buffer), and
+// nothing on the lane catches, so std::terminate took the process, and any
+// host the engine is embedded in.
+TEST_CASE("ColdSwapRecovery: a rebuild that refuses at length tells a listening client why, and the engine answers on",
+          "[ColdSwapRecovery][guest-failed]") {
+    const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";
+    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\n"
+                    + "refusalReason=" + reason + "\n";
+    cfg.heapBytes   = pool + 8u * 1024u * 1024u;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().engineState() == EngineState::Running);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    fix.clearReplies();
+
+    clockwork_set_heap_bytes(0);
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("devices/switch")) << "" << 44100.0f << static_cast<osc::int32>(0);
+    fix.send(b.end());
+
+    OscReply done;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), done, 30000));
+    INFO(fix.repliesDump());
+    CHECK(done.parsed().argString(5).find(reason) != std::string::npos);
+    bool toldWhy = false;
+    for (const auto& r : fix.allReplies()) {
+        if (r.address != CLOCKWORK_SYS("statechange")) continue;
+        const auto s = r.parsed();
+        if (s.argCount() >= 2 && s.argString(0) == "error"
+            && s.argString(1).find(reason) != std::string::npos)
+            toldWhy = true;
+    }
+    CHECK(toldWhy);
+    CHECK(fix.engine().engineState() == EngineState::Error);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 777));
+    OscReply tempo;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), tempo));
+}

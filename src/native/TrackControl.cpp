@@ -22,6 +22,7 @@
 #include "clockwork_product.h"
 #include "clockwork_sys.h"
 #include "workers/RingBufferWriter.h"
+#include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
@@ -599,15 +600,16 @@ std::vector<uint8_t> TrackControl::resolveTimelineVerb(
         const char* name = it->AsStringUnchecked();
         if (std::strcmp(name, "link") == 0) return asIs;   // the bridge knows this one
 
-        char buf[512];
-        osc::OutboundPacketStream s(buf, sizeof buf);
-        s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline"));
-        if (track->IsInt32()) s << static_cast<osc::int32>(track->AsInt32Unchecked());
-        else if (track->IsString()) s << track->AsStringUnchecked();
-        else return asIs;
-        s << name << static_cast<osc::int32>(resolve(name)) << osc::EndMessage;
-        return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(s.Data()),
-                                    reinterpret_cast<const uint8_t*>(s.Data()) + s.Size());
+        if (!track->IsInt32() && !track->IsString()) return asIs;
+        // The track's and the timeline's names as the client sent them, at
+        // any length (oscPacketOf).
+        OscPacket packet = oscPacketOf(size + 64, [&](osc::OutboundPacketStream& s) {
+            s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline"));
+            if (track->IsInt32()) s << static_cast<osc::int32>(track->AsInt32Unchecked());
+            else                  s << track->AsStringUnchecked();
+            s << name << static_cast<osc::int32>(resolve(name)) << osc::EndMessage;
+        });
+        return std::move(packet.data);
     } catch (...) {
         return asIs;   // malformed: the bridge refuses it as it would have
     }

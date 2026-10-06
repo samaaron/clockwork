@@ -170,6 +170,40 @@ TEST_CASE("SwitchVerb: a menu label sent as the input, such as '-- None --', is 
     }
 }
 
+TEST_CASE("SwitchVerb: an output name longer than any device's is refused in "
+          "switch.done, and the engine plays on where it was", "[SwitchVerb]") {
+    // A name is whatever a client sends. Refusing this one built a switch.done
+    // carrying it twice (asked for, and in the error) in a fixed 2 KB buffer.
+    // That threw on the device lane, where nothing catches: std::terminate,
+    // and any host the engine is embedded in with it. Then, built to fit, the
+    // switch.done was bigger than an egress frame and was dropped unsaid.
+    // Now no device lane is troubled with it: refused at once, echoed cut.
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    const std::string name = "Phantom " + std::string(3000, 'x');
+    fix.send(switchTo(name.c_str(), ""));
+    OscReply reply;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+    CHECK(reply.parsed().argInt(0) == 1);
+
+    const bool done = fix.pollUntil([&] { return !switchDones(fix).empty(); }, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(done);
+    flushReplies(fix);
+    const auto dones = switchDones(fix);
+    CHECK(dones.size() == 1);
+    const auto& d = dones.front();
+    CHECK(d.argInt(0) == 0);
+    CHECK(d.argString(1).rfind("Phantom xxxx", 0) == 0);
+    CHECK(d.argString(1).size() < 80);
+    CHECK(d.argString(5).find("that long") != std::string::npos);
+    CHECK(rebuilds(fix) == 0);
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    CHECK(fix.waitForBlocks(20));
+}
+
 TEST_CASE("SwitchVerb: turning inputs off while following the system default "
           "keeps following it", "[SwitchVerb]") {
     // Turning the mic off is not choosing an output. It used to lock the

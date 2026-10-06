@@ -22,6 +22,7 @@
 #include "clock/clock_math.h"
 #include "native/AudioBlockClock.h"
 #include "osc/OscReceivedElements.h"
+#include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "RingBufferWriter.h"
 #include "IngressCallCtx.h"
@@ -2468,17 +2469,16 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
 void ClockworkEngine::broadcastReopenDone(bool success, const std::string& deviceName,
                                            double sampleRate, int bufferSize,
                                            const std::string& error) {
-    char buf[1024];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
-    s << osc::BeginMessage(CLOCKWORK_SYS("devices/reopen.done"))
-      << static_cast<osc::int32>(success ? 1 : 0)
-      << deviceName.c_str()
-      << static_cast<float>(sampleRate)
-      << static_cast<osc::int32>(bufferSize)
-      << (error.empty() ? "" : error.c_str())
-      << osc::EndMessage;
-    mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(s.Data()),
-                               static_cast<uint32_t>(s.Size()));
+    const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
+        s << osc::BeginMessage(CLOCKWORK_SYS("devices/reopen.done"))
+          << static_cast<osc::int32>(success ? 1 : 0)
+          << deviceName.c_str()
+          << static_cast<float>(sampleRate)
+          << static_cast<osc::int32>(bufferSize)
+          << (error.empty() ? "" : error.c_str())
+          << osc::EndMessage;
+    });
+    mEgress.broadcastToTargets(packet.ptr(), packet.size());
 }
 
 void ClockworkEngine::sendSwitchDone(const SwapResult& result,
@@ -2493,20 +2493,19 @@ void ClockworkEngine::sendSwitchDone(const SwapResult& result,
     //   error(str),                  ← top-level error, "" on success
     //   inputUnavailable(int32),     ← 1 = output opened, input fell back
     //   inputUnavailableReason(str)  ← JUCE verbatim, "" otherwise
-    char buf[2048];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
-    s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.done"))
-      << static_cast<osc::int32>(result.success ? 1 : 0)
-      << requestedOutput.c_str()
-      << requestedInput.c_str()
-      << result.deviceName.c_str()
-      << result.inputDeviceName.c_str()
-      << result.error.c_str()
-      << static_cast<osc::int32>(result.inputUnavailable ? 1 : 0)
-      << result.inputUnavailableReason.c_str()
-      << osc::EndMessage;
-    mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(s.Data()),
-                               static_cast<uint32_t>(s.Size()));
+    const OscPacket packet = oscPacketOf(2048, [&](osc::OutboundPacketStream& s) {
+        s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.done"))
+          << static_cast<osc::int32>(result.success ? 1 : 0)
+          << requestedOutput.c_str()
+          << requestedInput.c_str()
+          << result.deviceName.c_str()
+          << result.inputDeviceName.c_str()
+          << result.error.c_str()
+          << static_cast<osc::int32>(result.inputUnavailable ? 1 : 0)
+          << result.inputUnavailableReason.c_str()
+          << osc::EndMessage;
+    });
+    mEgress.broadcastToTargets(packet.ptr(), packet.size());
 }
 
 void ClockworkEngine::sendDeviceReport() {
@@ -2609,12 +2608,10 @@ void ClockworkEngine::sendDeviceReport() {
     //         numInputs(int32),  then per input:  name(str), flags(str).
     //         Flags are comma-separated capability tokens
     //         ("follows-default", "exclusive-duplex", "synthetic"), "" = plain.
-    // Counts-first throughout so parsers never type-sniff. Overflow skips just
-    // this message — oscpack's throw must never reach mBootDeviceReportThread.
-    char tableBuf[8192];
-    osc::OutboundPacketStream tableMsg(tableBuf, sizeof(tableBuf));
-    bool tableOk = true;
-    try {
+    // Counts-first throughout so parsers never type-sniff. The packet is the
+    // size the table needs (oscPacketOf): a table too big for a fixed buffer
+    // used to be dropped, and before that threw into the reporting thread.
+    const OscPacket tablePacket = oscPacketOf(8192, [&](osc::OutboundPacketStream& tableMsg) {
         tableMsg << osc::BeginMessage(CLOCKWORK_SYS("device-table"))
                  << currentDriver().c_str()
                  << mIntendedDriver.c_str()
@@ -2633,10 +2630,7 @@ void ClockworkEngine::sendDeviceReport() {
             }
         }
         tableMsg << osc::EndMessage;
-    } catch (osc::OutOfBufferMemoryException&) {
-        clockwork_log("device-table dropped: exceeds %d bytes", (int) sizeof(tableBuf));
-        tableOk = false;
-    }
+    });
 
     // Build output device list message
     // Format: mode(str), current(str), device1(str), ..., deviceN(str),
@@ -2645,40 +2639,40 @@ void ClockworkEngine::sendDeviceReport() {
     //   compat: 1 = device supports current rate, 0 = rate change needed
     //   type:   driver type per device, enables the GUI's per-driver
     //           dropdown filter
-    char devBuf[8192];
-    osc::OutboundPacketStream devMsg(devBuf, sizeof(devBuf));
-    devMsg << osc::BeginMessage(CLOCKWORK_SYS("devices"))
-           << (mode.empty() ? "system" : mode.c_str())
-           << current.name.c_str();
-    for (auto& dev : outputDevices)
-        devMsg << dev.name.c_str();
-    devMsg << static_cast<osc::int32>(current.activeSampleRate);
-    int curRate = static_cast<int>(current.activeSampleRate);
-    for (auto& dev : outputDevices) {
-        bool compat = false;
-        for (auto r : dev.availableSampleRates)
-            if (static_cast<int>(r) == curRate)
-                compat = true;
-        devMsg << static_cast<osc::int32>(compat ? 1 : 0);
-    }
-    for (auto& dev : outputDevices)
-        devMsg << dev.typeName.c_str();
-    devMsg << osc::EndMessage;
+    const OscPacket devPacket = oscPacketOf(8192, [&](osc::OutboundPacketStream& devMsg) {
+        devMsg << osc::BeginMessage(CLOCKWORK_SYS("devices"))
+               << (mode.empty() ? "system" : mode.c_str())
+               << current.name.c_str();
+        for (auto& dev : outputDevices)
+            devMsg << dev.name.c_str();
+        devMsg << static_cast<osc::int32>(current.activeSampleRate);
+        int curRate = static_cast<int>(current.activeSampleRate);
+        for (auto& dev : outputDevices) {
+            bool compat = false;
+            for (auto r : dev.availableSampleRates)
+                if (static_cast<int>(r) == curRate)
+                    compat = true;
+            devMsg << static_cast<osc::int32>(compat ? 1 : 0);
+        }
+        for (auto& dev : outputDevices)
+            devMsg << dev.typeName.c_str();
+        devMsg << osc::EndMessage;
+    });
 
     // Build input device list message
     // Format: currentInput(str), numDevices(int32),
     //         name1(str), ..., nameN(str),
     //         type1(str), ..., typeN(str)
-    char inDevBuf[2048];
-    osc::OutboundPacketStream inDevMsg(inDevBuf, sizeof(inDevBuf));
-    inDevMsg << osc::BeginMessage(CLOCKWORK_SYS("input-devices"))
-             << current.inputDeviceName.c_str()
-             << static_cast<osc::int32>(inputDevices.size());
-    for (auto& dev : inputDevices)
-        inDevMsg << dev.name.c_str();
-    for (auto& dev : inputDevices)
-        inDevMsg << dev.typeName.c_str();
-    inDevMsg << osc::EndMessage;
+    const OscPacket inDevPacket = oscPacketOf(2048, [&](osc::OutboundPacketStream& inDevMsg) {
+        inDevMsg << osc::BeginMessage(CLOCKWORK_SYS("input-devices"))
+                 << current.inputDeviceName.c_str()
+                 << static_cast<osc::int32>(inputDevices.size());
+        for (auto& dev : inputDevices)
+            inDevMsg << dev.name.c_str();
+        for (auto& dev : inputDevices)
+            inDevMsg << dev.typeName.c_str();
+        inDevMsg << osc::EndMessage;
+    });
 
     // Build hardware info message
     double sr = current.activeSampleRate;
@@ -2756,93 +2750,88 @@ void ClockworkEngine::sendDeviceReport() {
         }
     }
 
-    char infoBuf[4096];
-    osc::OutboundPacketStream infoMsg(infoBuf, sizeof(infoBuf));
-    infoMsg << osc::BeginMessage(CLOCKWORK_SYS("info"))
-            << info
-            << static_cast<osc::int32>(current.activeSampleRate)
-            << static_cast<osc::int32>(current.activeBufferSize)
-            << static_cast<osc::int32>(usableRates.size());
-    for (auto r : usableRates)
-        infoMsg << static_cast<osc::int32>(r);
+    const OscPacket infoPacket = oscPacketOf(4096, [&](osc::OutboundPacketStream& infoMsg) {
+        infoMsg << osc::BeginMessage(CLOCKWORK_SYS("info"))
+                << info
+                << static_cast<osc::int32>(current.activeSampleRate)
+                << static_cast<osc::int32>(current.activeBufferSize)
+                << static_cast<osc::int32>(usableRates.size());
+        for (auto r : usableRates)
+            infoMsg << static_cast<osc::int32>(r);
 
-    // Same intersection for buffer sizes.
-    std::vector<int> usableBufferSizes = current.availableBufferSizes;
-    if (!current.inputDeviceName.empty()) {
-        for (auto& dev : allDevices) {
-            if (dev.name == current.inputDeviceName) {
-                std::vector<int> intersection;
-                for (auto b : current.availableBufferSizes)
-                    for (auto ib : dev.availableBufferSizes)
-                        if (b == ib)
-                            intersection.push_back(b);
-                if (!intersection.empty())
-                    usableBufferSizes = intersection;
-                break;
+        // Same intersection for buffer sizes.
+        std::vector<int> usableBufferSizes = current.availableBufferSizes;
+        if (!current.inputDeviceName.empty()) {
+            for (auto& dev : allDevices) {
+                if (dev.name == current.inputDeviceName) {
+                    std::vector<int> intersection;
+                    for (auto b : current.availableBufferSizes)
+                        for (auto ib : dev.availableBufferSizes)
+                            if (b == ib)
+                                intersection.push_back(b);
+                    if (!intersection.empty())
+                        usableBufferSizes = intersection;
+                    break;
+                }
             }
         }
-    }
 
-    // Raw CoreAudio lists non-powers-of-two (14, 24, 48, 96) and extremes
-    // (16, 8192); the powers of two from 16 to 2048 are the useful ones. (A
-    // drift-compensated pair offers none below 256 already.)
-    //
-    // A DISPLAY filter, not a safety net: -Z / -z and sound_card_buffer_size
-    // still force any value.
-    {
-        static const std::set<int> canonical = {16, 32, 64, 128, 256, 512, 1024, 2048};
-        std::vector<int> filtered;
-        for (int b : usableBufferSizes)
-            if (canonical.count(b)) filtered.push_back(b);
-        if (!filtered.empty()) usableBufferSizes = std::move(filtered);
-        // Also ensure the currently-active buffer size is represented so
-        // the GUI dropdown can display the correct selection when a
-        // non-canonical size was forced via CLI / TOML.
-        if (current.activeBufferSize > 0) {
-            bool present = false;
+        // Raw CoreAudio lists non-powers-of-two (14, 24, 48, 96) and extremes
+        // (16, 8192); the powers of two from 16 to 2048 are the useful ones. (A
+        // drift-compensated pair offers none below 256 already.)
+        //
+        // A DISPLAY filter, not a safety net: -Z / -z and sound_card_buffer_size
+        // still force any value.
+        {
+            static const std::set<int> canonical = {16, 32, 64, 128, 256, 512, 1024, 2048};
+            std::vector<int> filtered;
             for (int b : usableBufferSizes)
-                if (b == current.activeBufferSize) { present = true; break; }
-            if (!present) {
-                usableBufferSizes.insert(usableBufferSizes.begin(), current.activeBufferSize);
+                if (canonical.count(b)) filtered.push_back(b);
+            if (!filtered.empty()) usableBufferSizes = std::move(filtered);
+            // Also ensure the currently-active buffer size is represented so
+            // the GUI dropdown can display the correct selection when a
+            // non-canonical size was forced via CLI / TOML.
+            if (current.activeBufferSize > 0) {
+                bool present = false;
+                for (int b : usableBufferSizes)
+                    if (b == current.activeBufferSize) { present = true; break; }
+                if (!present) {
+                    usableBufferSizes.insert(usableBufferSizes.begin(), current.activeBufferSize);
+                }
             }
         }
-    }
 
-    infoMsg << static_cast<osc::int32>(usableBufferSizes.size());
-    for (auto b : usableBufferSizes)
-        infoMsg << static_cast<osc::int32>(b);
-    infoMsg << static_cast<osc::int32>(drivers.size());
-    for (auto& d : drivers)
-        infoMsg << d.c_str();
-    infoMsg << curDriver.c_str();
-    // The device's counts (outCh/inCh), as the banner has them, so a GUI
-    // can render them directly.
-    infoMsg << static_cast<osc::int32>(outCh);
-    infoMsg << static_cast<osc::int32>(inCh);
-    // Device output latency: DSP-computed audio reaches the speaker this
-    // many samples later.
-    infoMsg << static_cast<osc::int32>(current.outputLatencySamples);
-    // Pending driver pick (switchDriver with no openable device yet).
-    // curDriver stays truthful about the audio path; this lets the GUI
-    // keep its driver dropdown on the user's uncommitted choice — and,
-    // when empty, tells it no pick is pending so a stale local override
-    // must follow curDriver instead of pinning forever.
-    infoMsg << mIntendedDriver.c_str();
-    infoMsg << osc::EndMessage;
+        infoMsg << static_cast<osc::int32>(usableBufferSizes.size());
+        for (auto b : usableBufferSizes)
+            infoMsg << static_cast<osc::int32>(b);
+        infoMsg << static_cast<osc::int32>(drivers.size());
+        for (auto& d : drivers)
+            infoMsg << d.c_str();
+        infoMsg << curDriver.c_str();
+        // The device's counts (outCh/inCh), as the banner has them, so a GUI
+        // can render them directly.
+        infoMsg << static_cast<osc::int32>(outCh);
+        infoMsg << static_cast<osc::int32>(inCh);
+        // Device output latency: DSP-computed audio reaches the speaker this
+        // many samples later.
+        infoMsg << static_cast<osc::int32>(current.outputLatencySamples);
+        // Pending driver pick (switchDriver with no openable device yet).
+        // curDriver stays truthful about the audio path; this lets the GUI
+        // keep its driver dropdown on the user's uncommitted choice — and,
+        // when empty, tells it no pick is pending so a stale local override
+        // must follow curDriver instead of pinning forever.
+        infoMsg << mIntendedDriver.c_str();
+        infoMsg << osc::EndMessage;
+    });
 
     // Fan out to all registered notify subscribers via the transport. The
     // table goes first so a client already holds the grouped lists when the
     // flat messages trigger its UI rebuild (relay order is not guaranteed;
     // clients must still tolerate either order).
-    if (tableOk)
-        mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(tableMsg.Data()),
-                                   static_cast<uint32_t>(tableMsg.Size()));
-    mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(devMsg.Data()),
-                               static_cast<uint32_t>(devMsg.Size()));
-    mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(inDevMsg.Data()),
-                               static_cast<uint32_t>(inDevMsg.Size()));
-    mEgress.broadcastToTargets(reinterpret_cast<const uint8_t*>(infoMsg.Data()),
-                               static_cast<uint32_t>(infoMsg.Size()));
+    mEgress.broadcastToTargets(tablePacket.ptr(), tablePacket.size());
+    mEgress.broadcastToTargets(devPacket.ptr(), devPacket.size());
+    mEgress.broadcastToTargets(inDevPacket.ptr(), inDevPacket.size());
+    mEgress.broadcastToTargets(infoPacket.ptr(), infoPacket.size());
 }
 
 bool ClockworkEngine::interceptBufferFreed(const uint8_t* /*data*/, uint32_t /*size*/) {
