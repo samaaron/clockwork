@@ -904,7 +904,7 @@ private:
 
         std::array<uint8_t, 1024> podBuf{};
         spa_pod_builder b = SPA_POD_BUILDER_INIT(podBuf.data(), podBuf.size());
-        const std::array<const spa_pod*, 1> params = { spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &fmt) };
+        std::array<const spa_pod*, 1> params = { spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &fmt) };
 
         const int res = A.stream_connect(
             s, playback ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT, PW_ID_ANY,
