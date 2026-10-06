@@ -130,7 +130,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             // the rpc verbs' times; an int32 here is the reply token): the
             // beat playing then is held. Without one, now.
             double atNtp = 0.0;
-            if (++it != msg.ArgumentsEnd() && it->IsInt64())
+            ++it;
+            if (it != msg.ArgumentsEnd() && it->IsInt64())
                 atNtp = static_cast<double>(it->AsInt64Unchecked()) * 1e-6;
             if (id == 0) {
                 clock.setBpm(bpm, atNtp);               // Link timeline

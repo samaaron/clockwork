@@ -16,9 +16,8 @@ namespace {
 void cueEmitNoop(void*, int32_t, const uint8_t*, uint32_t) {}
 }  // namespace
 
-UdpOscTransport::UdpOscTransport() {
-    mOsc = clockwork_osc_create(nullptr, &cueEmitNoop);  // outbound sockets for clockwork_osc_send
-}
+UdpOscTransport::UdpOscTransport()
+    : mOsc(clockwork_osc_create(nullptr, &cueEmitNoop)) {}   // outbound sockets for clockwork_osc_send
 
 UdpOscTransport::~UdpOscTransport() {
     stop();

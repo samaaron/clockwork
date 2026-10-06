@@ -3,6 +3,7 @@
 // clockwork_embed_boot: the device host. Clockwork opens the audio device
 // and the hardware callback ticks the guest; the embedder gets the engine's
 // own client and never touches the audio thread.
+#include <cmath>
 #include <cstring>
 #include "embed/clockwork_embed_impl.h"
 #include "native/ClockworkEngine.h"
@@ -70,7 +71,7 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     d->engine->onReply = [](const uint8_t*, uint32_t) {};
 
     ClockworkEngine::Config cfg;
-    if (config->sample_rate > 0) cfg.sampleRate = static_cast<int>(config->sample_rate + 0.5);
+    if (config->sample_rate > 0) cfg.sampleRate = static_cast<int>(std::lround(config->sample_rate));
     if (config->block_size)      cfg.bufferSize = static_cast<int>(config->block_size);
     if (config->input_channels)  cfg.numInputChannels  = static_cast<int>(config->input_channels);
     if (config->flags & CLOCKWORK_EMBED_NO_INPUT) cfg.numInputChannels = 0;   // the engine's own "none"

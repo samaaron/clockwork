@@ -31,7 +31,7 @@ void put(char* dst, size_t cap, const char* src) {
 }
 
 std::string home() {
-    if (const char* h = std::getenv("HOME")) return h;
+    if (const char* h = std::getenv("HOME")) return h;   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
     return {};
 }
 

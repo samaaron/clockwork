@@ -215,10 +215,10 @@ void fixedResidual(const int32_t* x, uint32_t n, int order, int64_t* out) {
 
 FlacEncoder::FlacEncoder(uint32_t channels, uint32_t sampleRate,
                          uint32_t bitsPerSample)
-    : mChannels(channels), mSampleRate(sampleRate), mBps(bitsPerSample) {
-    mValid = channels >= 1 && channels <= 8
-          && sampleRate >= 1 && sampleRate < (1u << 20)
-          && (bitsPerSample == 16 || bitsPerSample == 24);
+    : mChannels(channels), mSampleRate(sampleRate), mBps(bitsPerSample),
+      mValid(channels >= 1 && channels <= 8
+             && sampleRate >= 1 && sampleRate < (1u << 20)
+             && (bitsPerSample == 16 || bitsPerSample == 24)) {
     if (!mValid) return;
 
     mChannel.resize(kBlockSize);

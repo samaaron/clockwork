@@ -12,6 +12,7 @@
 #include "clockwork_config.h"   // clockwork_log
 #include "lanes/lanes.h"
 #include "dsp_api.h"            // DspFpEnv: what this host declares about its audio thread
+#include <cmath>
 #include <algorithm>
 #include <cstring>
 
@@ -144,7 +145,7 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 
     // Resize mPrefetchBuf if the new device exposes more output channels
     // than we allocated at initialiseDsp. mPrefetchBuf is indexed per
-    // channel as prefBase + ch * mBufLen — writing to a ch beyond the
+    // channel as prefBase + static_cast<size_t>(ch) * mBufLen — writing to a ch beyond the
     // original allocation corrupts memory after the HW-buffer < mBufLen
     // prefetch path runs. Example: boot on a 2-ch device (buffer sized
     // for 2), cold-swap to 4-ch Loopback, prefetch writes at ch=2 / ch=3
@@ -398,8 +399,8 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             int keep = std::max(0, mInputAccumCount - drop);
             if (keep > 0) {
                 for (int ch = 0; ch < nIn; ++ch)
-                    std::memmove(accumBase + ch * accumPerChanCap,
-                                 accumBase + ch * accumPerChanCap + drop,
+                    std::memmove(accumBase + static_cast<size_t>(ch) * accumPerChanCap,
+                                 accumBase + static_cast<size_t>(ch) * accumPerChanCap + drop,
                                  static_cast<size_t>(keep) * sizeof(float));
             }
             mInputAccumCount = keep;
@@ -408,11 +409,11 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         int srcOffset = numSamples - inSamples;
         for (int ch = 0; ch < nIn; ++ch) {
             if (inputChannelData[ch])
-                std::memcpy(accumBase + ch * accumPerChanCap + mInputAccumCount,
+                std::memcpy(accumBase + static_cast<size_t>(ch) * accumPerChanCap + mInputAccumCount,
                             inputChannelData[ch] + srcOffset,
                             static_cast<size_t>(inSamples) * sizeof(float));
             else
-                std::memset(accumBase + ch * accumPerChanCap + mInputAccumCount,
+                std::memset(accumBase + static_cast<size_t>(ch) * accumPerChanCap + mInputAccumCount,
                             0, static_cast<size_t>(inSamples) * sizeof(float));
         }
         mInputAccumCount += inSamples;
@@ -424,13 +425,13 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         for (int ch = 0; ch < nOut; ++ch)
             if (outputChannelData[ch])
                 std::memcpy(outputChannelData[ch],
-                            prefBase + ch * mBufLen,
+                            prefBase + static_cast<size_t>(ch) * mBufLen,
                             static_cast<size_t>(toDrain) * sizeof(float));
         if (toDrain < mPrefetchCount) {
             int remaining = mPrefetchCount - toDrain;
             for (int ch = 0; ch < nOut; ++ch)
-                std::memmove(prefBase + ch * mBufLen,
-                             prefBase + ch * mBufLen + toDrain,
+                std::memmove(prefBase + static_cast<size_t>(ch) * mBufLen,
+                             prefBase + static_cast<size_t>(ch) * mBufLen + toDrain,
                              static_cast<size_t>(remaining) * sizeof(float));
         }
         mPrefetchCount -= toDrain;
@@ -471,19 +472,19 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             int inCh = std::min(nIn, mDspInputChannels);
             for (int ch = 0; ch < inCh; ++ch) {
                 if (usable > 0)
-                    std::memcpy(inputBus + ch * mBufLen,
-                                accumBase + ch * accumPerChanCap,
+                    std::memcpy(inputBus + static_cast<size_t>(ch) * mBufLen,
+                                accumBase + static_cast<size_t>(ch) * accumPerChanCap,
                                 static_cast<size_t>(usable) * sizeof(float));
                 if (usable < mBufLen)
-                    std::memset(inputBus + ch * mBufLen + usable, 0,
+                    std::memset(inputBus + static_cast<size_t>(ch) * mBufLen + usable, 0,
                                 static_cast<size_t>(mBufLen - usable) * sizeof(float));
             }
             if (usable > 0) {
                 int remaining = mInputAccumCount - usable;
                 if (remaining > 0) {
                     for (int ch = 0; ch < nIn; ++ch)
-                        std::memmove(accumBase + ch * accumPerChanCap,
-                                     accumBase + ch * accumPerChanCap + usable,
+                        std::memmove(accumBase + static_cast<size_t>(ch) * accumPerChanCap,
+                                     accumBase + static_cast<size_t>(ch) * accumPerChanCap + usable,
                                      static_cast<size_t>(remaining) * sizeof(float));
                 }
                 mInputAccumCount = remaining;
@@ -534,7 +535,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             for (int ch = 0; ch < nOut; ++ch)
                 if (outputChannelData[ch])
                     std::memcpy(outputChannelData[ch] + outputFilled,
-                                outputBus + ch * mBufLen,
+                                outputBus + static_cast<size_t>(ch) * mBufLen,
                                 static_cast<size_t>(toCopy) * sizeof(float));
             outputFilled += toCopy;
 
@@ -542,8 +543,8 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             int leftover = mBufLen - toCopy;
             if (leftover > 0) {
                 for (int ch = 0; ch < nOut; ++ch)
-                    std::memcpy(prefBase + ch * mBufLen,
-                                outputBus + ch * mBufLen + toCopy,
+                    std::memcpy(prefBase + static_cast<size_t>(ch) * mBufLen,
+                                outputBus + static_cast<size_t>(ch) * mBufLen + toCopy,
                                 static_cast<size_t>(leftover) * sizeof(float));
                 mPrefetchCount = leftover;
             }
@@ -594,8 +595,8 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         const double instPct = (cbUs / budgetUs) * 100.0;
         mLoadAvgPct  += (instPct - mLoadAvgPct) * 0.1;            // ~10-callback EMA
         mLoadPeakPct = std::max(instPct, mLoadPeakPct * 0.95);   // decaying peak
-        clockwork_publish_audio_load(static_cast<uint32_t>(mLoadAvgPct * 100.0 + 0.5),
-                               static_cast<uint32_t>(mLoadPeakPct * 100.0 + 0.5),
+        clockwork_publish_audio_load(static_cast<uint32_t>(std::lround(mLoadAvgPct * 100.0)),
+                               static_cast<uint32_t>(std::lround(mLoadPeakPct * 100.0)),
                                mOverrunCount);
     }
 

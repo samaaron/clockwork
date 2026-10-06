@@ -425,7 +425,12 @@ void ClockworkEngine::init(const Config& cfg) {
     // moment init_memory has built it (see clockwork_log). The guard covers
     // every way out of here, including a throw before the ring exists.
     clockwork_log_hold();
-    struct ReleaseLog { ~ReleaseLog() { clockwork_log_release(); } } releaseLog;
+    struct ReleaseLog {
+        ReleaseLog() = default;
+        ~ReleaseLog() { clockwork_log_release(); }
+        ReleaseLog(const ReleaseLog&) = delete;
+        ReleaseLog& operator=(const ReleaseLog&) = delete;
+    } releaseLog;
 #if CLOCKWORK_RUST_LOG
     // The Rust subsystems log onto the same ring from here on (a no-op after
     // the first engine in the process; the sink forwards to whichever ring
@@ -1048,7 +1053,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // not depend on the segment: a guest needs working memory whether or not
     // anything is watching it, and dsp_process may not allocate either way.
     if (!mGuestArena)
-        mGuestArena.reset(new (std::nothrow) uint8_t[CLOCKWORK_ARENA_BYTES]);
+        mGuestArena.reset(new (std::nothrow) uint8_t[static_cast<size_t>(CLOCKWORK_ARENA_BYTES)]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
     uint8_t* guestArena      = mGuestArena.get();
     uint32_t guestArenaBytes = mGuestArena ? CLOCKWORK_ARENA_BYTES : 0u;
 
@@ -1069,7 +1074,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (!mShmemCreator
         && (!mGuestLanes || mGuestLanesInboxBytes != laneGeom.inbox_size
                          || mGuestLanesOutboxBytes != laneGeom.outbox_size)) {
-        mGuestLanes.reset(new (std::nothrow) uint8_t[laneGeom.inbox_size + laneGeom.outbox_size]);
+        mGuestLanes.reset(new (std::nothrow) uint8_t[laneGeom.inbox_size + laneGeom.outbox_size]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
         mGuestLanesInboxBytes  = mGuestLanes ? laneGeom.inbox_size  : 0;
         mGuestLanesOutboxBytes = mGuestLanes ? laneGeom.outbox_size : 0;
     }
@@ -2133,7 +2138,7 @@ ClockworkEngine::WatchdogState::WatchdogState(const Config& cfg)
       rateCheck(cfg.watchdogRateWindowMs > 0),
       liveness(stallMs, stallMs),
       rateSkew(cfg.watchdogRateWindowMs,
-               /*maxGap*/ std::max<int64_t>(3 * pollMs, 1000),
+               /*maxGap*/ std::max<int64_t>(3LL * pollMs, 1000),
                cfg.watchdogRateTolerance,
                std::max(1, cfg.watchdogRateBadWindows)),
       skewPolicy(std::max(1, cfg.watchdogRateMaxRecoveries),
@@ -3649,7 +3654,10 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         bool parked = false;
         void park(ClockworkEngine* e) { parked = e->parkControlPass(); engine = e; }
         void resumeNow() { if (engine) engine->resumeControlPass(); engine = nullptr; }
+        ControlPark() = default;
         ~ControlPark()   { resumeNow(); }
+        ControlPark(const ControlPark&) = delete;
+        ControlPark& operator=(const ControlPark&) = delete;
     } controlPark;
     if (isCold) {
         controlPark.park(this);

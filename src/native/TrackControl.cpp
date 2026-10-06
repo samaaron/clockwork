@@ -178,7 +178,7 @@ bool TrackControl::createSegment() {
 
 uint32_t TrackControl::slackFor(uint32_t bufferFrames, uint32_t block) {
     uint32_t override = 0;
-    if (const char* s = std::getenv("CLOCKWORK_PLUGIN_BRIDGE_SLACK")) {
+    if (const char* s = std::getenv("CLOCKWORK_PLUGIN_BRIDGE_SLACK")) {   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
         const long v = std::strtol(s, nullptr, 10);
         if (v >= 1) override = static_cast<uint32_t>(v);
     }
@@ -356,7 +356,7 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
 // ── The bridge's life ────────────────────────────────────────────────────────
 
 std::string TrackControl::findBridge() const {
-    if (const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE")) {
+    if (const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE")) {   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
         if (*env && juce::File(env).existsAsFile()) return env;
     }
     const juce::File self = juce::File::getSpecialLocation(juce::File::currentExecutableFile);

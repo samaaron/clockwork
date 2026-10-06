@@ -163,6 +163,8 @@ std::atomic_flag g_lock = ATOMIC_FLAG_INIT;
 struct Guard {
     Guard()  { while (g_lock.test_and_set(std::memory_order_acquire)) { } }
     ~Guard() { g_lock.clear(std::memory_order_release); }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
 };
 
 constexpr size_t round_up(size_t n) { return (n + kAlign - 1) & ~(kAlign - 1); }

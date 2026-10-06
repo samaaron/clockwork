@@ -41,7 +41,7 @@
 #ifdef CLOCKWORK_SYSTEM_STB
 #  include <stb/stb_vorbis.h>
 #else
-#  include "vendor/stb/stb_vorbis.c"
+#  include "vendor/stb/stb_vorbis.c"   // NOLINT(bugprone-suspicious-include): a single-file library, built here
 #endif
 
 #include <algorithm>
@@ -266,7 +266,7 @@ ClockworkStatus readOgg(const uint8_t* d, size_t n,
                 v, vi.channels, buf, static_cast<int>(count));
             if (got >= 0 && static_cast<unsigned>(got) < frames)
                 std::memset(buf + static_cast<size_t>(got) * info.channels, 0,
-                            (frames - got) * info.channels * sizeof(float));
+                            static_cast<size_t>(frames - got) * info.channels * sizeof(float));
             *samples = buf;
         }
     }

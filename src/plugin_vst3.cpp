@@ -153,6 +153,8 @@ struct RtSuspend {
     bool prev;
     RtSuspend() : prev(rt_alloc::g_in_rt) { rt_alloc::g_in_rt = false; }
     ~RtSuspend() { rt_alloc::g_in_rt = prev; }
+    RtSuspend(const RtSuspend&) = delete;
+    RtSuspend& operator=(const RtSuspend&) = delete;
 };
 
 // void* signature so both TUID (int8[16]) and FIDString (char*) callers fit.
@@ -165,8 +167,8 @@ std::string tuidToHex(const TUID t) {
     std::string s(32, '0');
     for (int i = 0; i < 16; ++i) {
         const unsigned char b = static_cast<unsigned char>(t[i]);
-        s[i * 2]     = kHex[b >> 4];
-        s[i * 2 + 1] = kHex[b & 0x0F];
+        s[static_cast<size_t>(i) * 2]     = kHex[b >> 4];
+        s[static_cast<size_t>(i) * 2 + 1] = kHex[b & 0x0F];
     }
     return s;
 }
@@ -194,6 +196,9 @@ const char* fail(const char** err, const std::string& msg) {
 // refused honestly rather than half-implemented. A plugin that insists on
 // them will fail at initialize, which is a real answer.
 class HostContext : public IHostApplication {
+public:
+    virtual ~HostContext() = default;
+private:
 public:
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
         if (!obj) return kInvalidArgument;
@@ -230,6 +235,9 @@ HostContext& hostContext() {
 // release are formalities; a plugin that retained the stream past the call
 // would be violating the contract anyway.
 class MemStream : public IBStream {
+public:
+    virtual ~MemStream() = default;
+private:
 public:
     MemStream() = default;
     explicit MemStream(const uint8_t* d, uint32_t n) : mBuf(d, d + n) {}
@@ -295,6 +303,9 @@ private:
 // so nothing here allocates during process, whatever the plugin does.
 class HostParamQueue : public IParamValueQueue {
 public:
+    virtual ~HostParamQueue() = default;
+private:
+public:
     void init(uint32_t capacity) { mPts.reserve(capacity); mCap = capacity; }
     void reset(ParamID id) { mId = id; mPts.clear(); }
     bool full() const { return mPts.size() >= mCap; }
@@ -345,6 +356,9 @@ private:
  * thread the plugin edits on, which for a GUI is the main thread.
  */
 class HostComponentHandler : public IComponentHandler {
+public:
+    virtual ~HostComponentHandler() = default;
+private:
 public:
     void setOwner(Instance* p) { mOwner = p; }
     void setListener(void (*fn)(void*, uint32_t, double), void* ctx) {
@@ -405,6 +419,9 @@ private:
  */
 class HostEventList : public IEventList {
 public:
+    virtual ~HostEventList() = default;
+private:
+public:
     void init(uint32_t cap) { mEvents.assign(std::max<uint32_t>(cap, 1), Event{}); mUsed = 0; }
     void clear() { mUsed = 0; }
     bool any() const { return mUsed != 0; }
@@ -462,6 +479,9 @@ private:
 };
 
 class HostParamChanges : public IParameterChanges {
+public:
+    virtual ~HostParamChanges() = default;
+private:
 public:
     void init(uint32_t maxParams, uint32_t pointsPerParam) {
         mQueues.resize(std::max<uint32_t>(maxParams, 1));
@@ -711,7 +731,7 @@ std::string resolveModulePath(const std::string& path) {
         const std::string macos = path + "/Contents/MacOS";
         if (DIR* md = opendir(macos.c_str())) {
             std::string exe;
-            while (struct dirent* e = readdir(md)) {
+            while (struct dirent* e = readdir(md)) {   // NOLINT(concurrency-mt-unsafe): this thread's own DIR
                 const std::string n = e->d_name;
                 if (n == "." || n == "..") continue;
                 struct stat es {};
@@ -733,13 +753,13 @@ std::string resolveModulePath(const std::string& path) {
     DIR* d = opendir(contents.c_str());
     if (!d) return path;
     std::string found;
-    while (struct dirent* e = readdir(d)) {
+    while (struct dirent* e = readdir(d)) {   // NOLINT(concurrency-mt-unsafe): this thread's own DIR
         const std::string sub = e->d_name;
         if (sub == "." || sub == "..") continue;
         const std::string archDir = contents + "/" + sub;
         DIR* a = opendir(archDir.c_str());
         if (!a) continue;
-        while (struct dirent* f = readdir(a)) {
+        while (struct dirent* f = readdir(a)) {   // NOLINT(concurrency-mt-unsafe): this thread's own DIR
             const std::string name = f->d_name;
             if (name.size() > 3 && name.compare(name.size() - 3, 3, ".so") == 0) {
                 found = archDir + "/" + name;
@@ -759,7 +779,7 @@ bool loadModule(const char* path, Module& m, std::string& err) {
 
     m.handle = dlopen(real.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!m.handle) {
-        const char* e = dlerror();
+        const char* e = dlerror();   // NOLINT(concurrency-mt-unsafe): thread-local on macOS and glibc
         err = std::string("dlopen failed: ") + (e ? e : "unknown");
         return false;
     }
@@ -890,7 +910,7 @@ struct Instance {
     // lock-free, and a full ring drops rather than blocks.
     struct PendNote { uint16_t on; int16_t channel, pitch; float velocity; uint32_t offset; };
     static constexpr uint32_t kNoteCap = 256;
-    PendNote note[kNoteCap];
+    PendNote note[kNoteCap] = {};
     std::atomic<uint32_t> noteHead{0};
     std::atomic<uint32_t> noteTail{0};
 
@@ -901,7 +921,7 @@ struct Instance {
     // into the controller. kNoParamId where the plugin maps nothing.
     static constexpr uint32_t kMidiChannels = 16;
     static constexpr uint32_t kMidiCtrls    = kCountCtrlNumber;   // 0..127 + aftertouch, bend, …
-    uint32_t midiMap[kMidiChannels][kMidiCtrls];
+    uint32_t midiMap[kMidiChannels][kMidiCtrls] = {};
     bool     hasMidiMap = false;
 
     // Cached parameter descriptions. Names are borrowed by PluginParam, so
@@ -916,7 +936,7 @@ struct Instance {
     // than blocks — one dropped automation point beats a stalled callback.
     struct Pending { uint32_t id; double norm; uint32_t offset; };
     static constexpr uint32_t kPendCap = 512;
-    Pending pend[kPendCap];
+    Pending pend[kPendCap] = {};
     std::atomic<uint32_t> pendHead{0};
     std::atomic<uint32_t> pendTail{0};
 
@@ -925,7 +945,7 @@ struct Instance {
     // editor is a second producer on a different thread. Offset is always 0
     // — a hand on a knob has no sample to be accurate to.
     static constexpr uint32_t kEditCap = 256;
-    Pending edit[kEditCap];
+    Pending edit[kEditCap] = {};
     std::atomic<uint32_t> editHead{0};
     std::atomic<uint32_t> editTail{0};
 

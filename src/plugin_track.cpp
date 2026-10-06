@@ -626,8 +626,8 @@ struct JVal {
 };
 
 struct JParser {
-    const char* p;
-    const char* end;
+    const char* p   = nullptr;
+    const char* end = nullptr;
     bool ok = true;
 
     void ws() { while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) ++p; }
@@ -909,6 +909,8 @@ ClockworkTrackHandle clockwork_track_add_plugin(ClockworkTrackId id, const char*
         const char* path;
         explicit Loading(const char* p) : path(p) { if (g_load_fn) g_load_fn(g_load_ctx, path); }
         ~Loading() { if (g_load_fn) g_load_fn(g_load_ctx, nullptr); }
+        Loading(const Loading&) = delete;
+        Loading& operator=(const Loading&) = delete;
     } loading(path);
     PluginDesc d[16] {};
     const uint32_t nd = plugin_scan(path, d, 16);

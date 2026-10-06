@@ -99,6 +99,8 @@ struct SuspendRtGuard {
     bool prev;
     SuspendRtGuard()  : prev(rt_alloc::g_in_rt) { rt_alloc::g_in_rt = false; }
     ~SuspendRtGuard() { rt_alloc::g_in_rt = prev; }
+    SuspendRtGuard(const SuspendRtGuard&) = delete;
+    SuspendRtGuard& operator=(const SuspendRtGuard&) = delete;
 };
 
 /* ── DSO handling ─────────────────────────────────────────────────────────── */
@@ -150,7 +152,7 @@ const char* dso_error() {
     text = "LoadLibrary failed: " + clockwork_path::last_error_text(::GetLastError());
     return text.c_str();
 #else
-    const char* e = ::dlerror();
+    const char* e = ::dlerror();   // NOLINT(concurrency-mt-unsafe): thread-local on macOS and glibc
     return e ? e : "dlopen failed";
 #endif
 }
@@ -905,7 +907,7 @@ void note(Instance* p, bool on, int16_t channel, int16_t pitch,
         ev.velocity        = velocity;
         p->ev_head.store(head + 1, std::memory_order_release);
     } else if (p->note_dialects & CLAP_NOTE_DIALECT_MIDI) {
-        const uint8_t v = static_cast<uint8_t>(velocity <= 0.f ? 0 : velocity >= 1.f ? 127 : velocity * 127.f + 0.5f);
+        const uint8_t v = static_cast<uint8_t>(velocity <= 0.f ? 0 : velocity >= 1.f ? 127 : std::lround(velocity * 127.f));
         midi_bytes(p, static_cast<uint8_t>((on ? 0x90 : 0x80) | channel),
                    static_cast<uint8_t>(pitch), v, frame_offset);
     }
@@ -918,7 +920,7 @@ void note(Instance* p, bool on, int16_t channel, int16_t pitch,
 void cc(Instance* p, int16_t channel, uint8_t number, float value, uint32_t frame_offset) {
     if (!p || !p->has_note_port || !(p->note_dialects & CLAP_NOTE_DIALECT_MIDI)) return;
     if (channel < 0 || channel > 15) return;
-    const uint8_t v = static_cast<uint8_t>(value <= 0.f ? 0 : value >= 1.f ? 127 : value * 127.f + 0.5f);
+    const uint8_t v = static_cast<uint8_t>(value <= 0.f ? 0 : value >= 1.f ? 127 : std::lround(value * 127.f));
     midi_bytes(p, static_cast<uint8_t>(0xB0 | channel), number & 0x7F, v, frame_offset);
 }
 
@@ -927,7 +929,7 @@ void pitch_bend(Instance* p, int16_t channel, float bend, uint32_t frame_offset)
     if (channel < 0 || channel > 15) return;
     if (bend < -1.f) bend = -1.f;
     if (bend >  1.f) bend =  1.f;
-    const uint32_t v = static_cast<uint32_t>((bend + 1.f) * 0.5f * 16383.f + 0.5f);
+    const uint32_t v = static_cast<uint32_t>(std::lround((bend + 1.f) * 0.5f * 16383.f));
     midi_bytes(p, static_cast<uint8_t>(0xE0 | channel), v & 0x7F, (v >> 7) & 0x7F, frame_offset);
 }
 

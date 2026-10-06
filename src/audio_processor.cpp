@@ -480,6 +480,8 @@ extern "C" {
     struct PortCtlLock {
         PortCtlLock()  { while (g_port_ctl.exchange(1, std::memory_order_acquire)) {} }
         ~PortCtlLock() { g_port_ctl.store(0, std::memory_order_release); }
+        PortCtlLock(const PortCtlLock&) = delete;
+        PortCtlLock& operator=(const PortCtlLock&) = delete;
     };
 
 
@@ -544,6 +546,8 @@ extern "C" {
     struct AudioThreadScope {
         AudioThreadScope()  { t_on_audio_thread = true;  }
         ~AudioThreadScope() { t_on_audio_thread = false; }
+        AudioThreadScope(const AudioThreadScope&) = delete;
+        AudioThreadScope& operator=(const AudioThreadScope&) = delete;
     };
 
     // File-scope state shared across threads: written by clear_scheduler()
@@ -1928,7 +1932,7 @@ extern "C" {
         // exists. Runs on every runtime — native's initialiseDsp() also
         // routes through init_memory().
         metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
-        metrics->audio_sample_rate.store(static_cast<uint32_t>(sample_rate + 0.5), std::memory_order_relaxed);
+        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
         metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
         metrics->audio_output_channels.store(config.max_output_channels, std::memory_order_relaxed);
         metrics->audio_input_channels.store(config.max_input_channels, std::memory_order_relaxed);
@@ -1969,7 +1973,7 @@ extern "C" {
         g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
 
         metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
-        metrics->audio_sample_rate.store(static_cast<uint32_t>(sample_rate + 0.5), std::memory_order_relaxed);
+        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
         metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
 
 #if CLOCKWORK_SCHEDULER
@@ -2722,7 +2726,7 @@ bool ring_buffer_write(
 ) {
     // Egress frame: Message{sourceId = token} + [route:u32][osc]; the route word
     // counts toward the message length.
-    Message header;
+    Message header{};
     header.magic = MESSAGE_MAGIC;
     header.length = sizeof(Message) + static_cast<uint32_t>(sizeof(uint32_t)) + data_size;
     header.sequence = static_cast<uint32_t>(sequence->fetch_add(1, std::memory_order_relaxed));
@@ -3115,6 +3119,8 @@ struct ColdWrite {
     ~ColdWrite() {
         if (m) m->generation.fetch_add(1, std::memory_order_release);   // -> even
     }
+    ColdWrite(const ColdWrite&) = delete;
+    ColdWrite& operator=(const ColdWrite&) = delete;
 };
 
 // What a channel is when no port covers it: the device's, or nothing.
@@ -3175,7 +3181,7 @@ void channel_map_bind(ClockworkPort port, uint32_t first) {
     }
     std::atomic<uint32_t>* side = channel_side(m, dir);
     const uint32_t word = channelWord(CLOCKWORK_CH_PORT, slot);
-    for (uint32_t c = 0; c < count && first + c < CLOCKWORK_MAX_CHANNELS; ++c)
+    for (uint32_t c = 0; c < count && first + c < CLOCKWORK_MAX_CHANNELS; ++c)   // NOLINT(modernize-loop-convert): the index is the channel
         side[first + c].store(word, std::memory_order_release);
 }
 
@@ -3183,8 +3189,7 @@ void channel_map_unbind(ClockworkPort port) {
     ClockworkChannelMapState* m = channelMap();
     if (!m || port == CLOCKWORK_PORT_NONE) return;
     ColdWrite guard(m);
-    for (uint32_t i = 0; i < CHANNEL_MAP_MAX_STREAMS; ++i) {
-        ClockworkStreamEntry& e = m->streams[i];
+    for (ClockworkStreamEntry& e : m->streams) {
         if (e.port != port) continue;
         const uint32_t width = e.direction == kClockworkPortSource
                              ? m->device_in.load(std::memory_order_relaxed)

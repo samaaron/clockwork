@@ -43,7 +43,7 @@
 
 // Growth increment when the pool is exhausted. Default 16MB; sized per device
 // via memory_profile.h (the ESP32-S3 profile shrinks it to 256KB).
-static constexpr size_t HEAP_GROWTH_SIZE = CLOCKWORK_HEAP_GROWTH_SIZE;
+static constexpr size_t HEAP_GROWTH_SIZE = static_cast<size_t>(CLOCKWORK_HEAP_GROWTH_SIZE);
 
 // The pool itself is Rust (rust/clockwork-heap/src/lib.rs); this is the
 // opaque handle it hands back. An allocator is exactly the kind of pointer
