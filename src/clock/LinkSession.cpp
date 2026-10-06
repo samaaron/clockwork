@@ -45,6 +45,7 @@ extern "C" const char* clockwork_app_name();
 #include <mutex>
 #include <string>
 #include <thread>
+#include <stop_token>
 
 using clockwork::doubleToBits;
 
@@ -115,11 +116,10 @@ struct LinkSession::Impl {
 
     // Deferred Link enable/disable for audio-thread callers.
     // -1 = no request, 0 = disable, 1 = enable.
-    std::thread             deferredWorker;
-    std::mutex              deferredMtx;
-    std::condition_variable deferredCv;
-    std::atomic<int>        deferredLinkEnableReq{-1};
-    std::atomic<bool>       deferredQuit{false};
+    std::jthread                deferredWorker;
+    std::mutex                  deferredMtx;
+    std::condition_variable_any deferredCv;   // waits on the worker's stop_token too
+    std::atomic<int>            deferredLinkEnableReq{-1};
 
     // App tempo-changed callback (→ /clockwork/clock/notify/tempo broadcast). Set once at
     // boot; invoked for BOTH remote peer changes (via Link's setTempoCallback)
@@ -178,22 +178,23 @@ LinkSession::LinkSession(ClockworkClock& clock, std::function<void()> periodicTi
 
 void LinkSession::startWorker() {
     auto* impl = mImpl.get();
-    // Guard against a double-start: the worker owns a std::thread and assigning
-    // over a joinable one calls std::terminate. ClockworkClock starts it exactly once,
-    // after its mImpl is live (see the header note on the construction-order race).
+    // Guard against a double-start: assigning over a joinable worker would
+    // first join it. ClockworkClock starts it exactly once, after its mImpl is
+    // live (see the header note on the construction-order race).
     if (impl->deferredWorker.joinable()) return;
-    impl->deferredWorker = std::thread([impl] {
+    impl->deferredWorker = std::jthread([impl](const std::stop_token& stop) {
         for (;;) {
             {
                 std::unique_lock<std::mutex> lk(impl->deferredMtx);
-                // Wake on a request/quit, or every ~250 ms to sweep midi
+                // Wake on a request or a stop, or every ~250 ms to sweep midi
                 // timeline staleness (freeze stale tempo, free after grace).
-                impl->deferredCv.wait_for(lk, std::chrono::milliseconds(250), [impl] {
-                    return impl->deferredQuit.load(std::memory_order_acquire)
-                        || impl->deferredLinkEnableReq.load(
+                // The wait takes the stop token itself, so request_stop() can
+                // never be lost between the predicate and the park.
+                impl->deferredCv.wait_for(lk, stop, std::chrono::milliseconds(250), [impl] {
+                    return impl->deferredLinkEnableReq.load(
                                std::memory_order_acquire) != -1;
                 });
-                if (impl->deferredQuit.load(std::memory_order_acquire)) return;
+                if (stop.stop_requested()) return;
                 const int req = impl->deferredLinkEnableReq.exchange(
                     -1, std::memory_order_acq_rel);
                 lk.unlock();
@@ -221,17 +222,13 @@ LinkSession::~LinkSession() {
 }
 
 void LinkSession::stopWorker() {
-    // Set the quit flag under the same mutex the worker waits on: a notify_all()
-    // issued in the window between the worker's predicate check and its park in
-    // wait() would otherwise be lost, leaving the worker asleep forever and this
-    // join() hung. Idempotent: once joined, joinable() is false and re-entry is
-    // a cheap flag-set + notify with nothing to join.
-    {
-        std::lock_guard<std::mutex> lk(mImpl->deferredMtx);
-        mImpl->deferredQuit.store(true, std::memory_order_release);
-    }
-    mImpl->deferredCv.notify_all();
-    if (mImpl->deferredWorker.joinable()) mImpl->deferredWorker.join();
+    // request_stop() wakes the worker through the wait's own stop_callback
+    // (condition_variable_any takes the token), so no notify can be lost
+    // between its predicate check and its park. Idempotent: once joined,
+    // joinable() is false and re-entry has nothing to do.
+    if (!mImpl->deferredWorker.joinable()) return;
+    mImpl->deferredWorker.request_stop();
+    mImpl->deferredWorker.join();
 }
 
 // ─── Session mutators (mirror into the SAB) ──────────────────────────────────

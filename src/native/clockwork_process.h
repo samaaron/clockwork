@@ -36,7 +36,7 @@ extern char** environ;
 class ClockworkProcess {
 public:
     ClockworkProcess() = default;
-    ~ClockworkProcess() { detach(); }
+    ~ClockworkProcess() { forget(); }
     ClockworkProcess(const ClockworkProcess&) = delete;
     ClockworkProcess& operator=(const ClockworkProcess&) = delete;
 
@@ -44,7 +44,7 @@ public:
     // environment and the standard streams, so its stderr lands in the
     // engine's log. False if it could not be started.
     bool spawn(const std::string& exe, const std::vector<std::string>& args) {
-        detach();
+        forget();
 #if defined(_WIN32)
         std::wstring cmd = quote(exe);
         for (const auto& a : args) { cmd += L' '; cmd += quote(a); }
@@ -166,7 +166,7 @@ public:
 
     // Forget the child without ending it (a child that is still running is
     // left to the OS to reap).
-    void detach() {
+    void forget() {
 #if defined(_WIN32)
         if (mHandle) CloseHandle(mHandle);
         mHandle = nullptr;

@@ -8,23 +8,27 @@
 
 void RingReader::start() {
     if (mThread.joinable()) return;
-    mExit.store(false, std::memory_order_release);
-    mThread = std::thread([this] { run(); });
+    mThread = std::jthread([this](const std::stop_token& stop) { run(stop); });
 }
 
+// request_stop() runs wakeForStop through the loop's stop_callback, so the
+// thread wakes and leaves; the destructor does the same without stop().
 void RingReader::stop() {
     if (!mThread.joinable()) return;
-    mExit.store(true, std::memory_order_release);
+    mThread.request_stop();
+    mThread.join();
+}
+
+void RingReader::wakeForStop() {
     // A bare notify cannot break std::atomic::wait(old): the wait only returns
     // when the value DIFFERS from old, so the value must change first. Bump-then-
-    // notify (exit already set) guarantees the run loop wakes, sees mExit, and
-    // exits with no dependence on an external processCount tick.
+    // notify guarantees the run loop wakes, sees the stop, and exits with no
+    // dependence on an external processCount tick.
     if (mWake) {
         mWake->fetch_add(1, std::memory_order_release);
         mWake->notify_all();
     }
-    resume();  // release a thread parked on mPauseRequest before joining
-    mThread.join();
+    resume();  // release a thread parked on mPauseRequest
 }
 
 bool RingReader::pause() {
@@ -99,10 +103,11 @@ void RingReader::drainOne(Drain& d) {
                   });
 }
 
-void RingReader::run() {
+void RingReader::run(const std::stop_token& stop) {
+    const std::stop_callback wake(stop, [this] { wakeForStop(); });
     if (mWake) mLastWake = mWake->load(std::memory_order_relaxed);
 
-    while (!mExit.load(std::memory_order_acquire)) {
+    while (!stop.stop_requested()) {
         if (mWake) {
             mWake->wait(mLastWake);  // C++20 equivalent of Atomics.wait()
             mLastWake = mWake->load(std::memory_order_acquire);
@@ -110,7 +115,7 @@ void RingReader::run() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        if (mExit.load(std::memory_order_acquire)) break;
+        if (stop.stop_requested()) break;
 
         if (mPauseRequest.load(std::memory_order_acquire)) {
             // Acknowledge between drain passes — the release-store makes every
@@ -118,7 +123,7 @@ void RingReader::run() {
             // resume() (or exit) clears the request.
             mParked.store(1, std::memory_order_release);
             while (mPauseRequest.load(std::memory_order_acquire) &&
-                   !mExit.load(std::memory_order_acquire))
+                   !stop.stop_requested())
                 mPauseRequest.wait(1, std::memory_order_acquire);
             mParked.store(0, std::memory_order_relaxed);
             continue;

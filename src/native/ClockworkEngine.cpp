@@ -1532,10 +1532,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // A test that owns the watchdog's clock polls it itself.
     if (mCurrentConfig.callbackWatchdog && !mCurrentConfig.manualAudioPump) {
         mWatchdog = std::make_unique<WatchdogState>(mCurrentConfig);
-        if (!mCurrentConfig.watchdogClockMs) {
-            mWatchdogStop.store(false);
-            mWatchdogThread = std::thread(&ClockworkEngine::watchdogLoop, this);
-        }
+        if (!mCurrentConfig.watchdogClockMs)
+            mWatchdogThread = std::jthread([this](const std::stop_token& stop) { watchdogLoop(stop); });
     }
 }
 
@@ -1619,11 +1617,11 @@ void ClockworkEngine::shutdown() {
 #endif
 
     // Stop the watchdog before tearing down — it can launch a recovery right up
-    // until it observes mWatchdogStop, and the device task lane that runs recovery
+    // until it observes its stop, and the device task lane that runs recovery
     // is freed below. The NRT gateway, the other requester, is already stopped, so
     // once the watchdog joins no new recovery can start; one already past its
     // mRunning check runs to completion and is waited on here.
-    mWatchdogStop.store(true);
+    mWatchdogThread.request_stop();
     if (mWatchdogThread.joinable()) mWatchdogThread.join();
     mWatchdog.reset();   // a poll after this does nothing
 
@@ -1632,8 +1630,8 @@ void ClockworkEngine::shutdown() {
     // device manager or the egress it reports through.
     mDebounceSwitchStop.store(true);
     if (mDeviceManager) runOnDeviceLane([this] { teardownDeviceManager(); });
-    mDeviceTaskStop.store(true);
-    mDeviceLane.wake();
+    mDeviceTaskStop.store(true);   // no more work accepted
+    mDeviceTaskThread.request_stop();   // the lane wakes through the loop's stop_callback
     if (mDeviceTaskThread.joinable()) mDeviceTaskThread.join();
 
     mHeadlessDriver.signalThreadShouldExit();
@@ -1983,13 +1981,14 @@ bool ClockworkEngine::postDeviceTask(std::function<void()> task) {
         if (mDeviceTaskStop.load()) return false;   // shutting down: drop rather than queue
         mDeviceTasks.push_back(std::move(task));
         if (!mDeviceTaskThread.joinable())
-            mDeviceTaskThread = std::thread(&ClockworkEngine::deviceTaskLoop, this);
+            mDeviceTaskThread = std::jthread([this](const std::stop_token& stop) { deviceTaskLoop(stop); });
     }
     mDeviceLane.wake();
     return true;
 }
 
-void ClockworkEngine::deviceTaskLoop() {
+void ClockworkEngine::deviceTaskLoop(const std::stop_token& stop) {
+    const std::stop_callback wake(stop, [this] { mDeviceLane.wake(); });
     mDeviceLane.enter();
     for (;;) {
         // A pass that is due runs before the next task: a task posted after
@@ -2004,7 +2003,7 @@ void ClockworkEngine::deviceTaskLoop() {
             if (!mDeviceTasks.empty()) {
                 task = std::move(mDeviceTasks.front());
                 mDeviceTasks.pop_front();
-            } else if (mDeviceTaskStop.load()) {
+            } else if (stop.stop_requested()) {
                 // Drained: work accepted before shutdown has run, and replied.
                 break;
             }
@@ -2155,14 +2154,14 @@ int64_t ClockworkEngine::watchdogNowMs() const {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-void ClockworkEngine::watchdogLoop() {
+void ClockworkEngine::watchdogLoop(const std::stop_token& stop) {
     const int pollMs = mWatchdog->pollMs;
-    while (!mWatchdogStop.load()) {
+    while (!stop.stop_requested()) {
         // Sleep in small slices so shutdown joins quickly.
-        for (int slept = 0; slept < pollMs && !mWatchdogStop.load(); slept += 20)
+        for (int slept = 0; slept < pollMs && !stop.stop_requested(); slept += 20)
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(std::min(20, pollMs - slept)));
-        if (mWatchdogStop.load()) return;
+        if (stop.stop_requested()) return;
         watchdogPoll();
     }
 }

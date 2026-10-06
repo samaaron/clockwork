@@ -348,8 +348,8 @@ struct LifecycleCmd {
 // std::condition_variable here would reach its destructor with the worker still
 // parked in wait(): glibc's pthread_cond_destroy then blocks forever on the live
 // waiter, wedging process exit (Linux only; macOS and Windows do not wait). A
-// std::thread member would likewise reach its destructor still-joinable and
-// std::terminate(). Leaking the whole struct sidesteps every such teardown: the
+// thread member (even a std::jthread, which would block in its join) would
+// likewise reach its destructor with the worker parked. Leaking the whole struct sidesteps every such teardown: the
 // OS reclaims it at exit, no destructor runs. on_unload, when it does run, still
 // wakes + joins the worker through these fields; it just never destroys them.
 struct WorkerState {
@@ -357,7 +357,7 @@ struct WorkerState {
     std::condition_variable  cv;
     std::deque<LifecycleCmd> queue;
     bool                     exit = false;
-    std::thread*             thread = nullptr;
+    std::thread*             thread = nullptr;   // thread-guard: allow — leaked on purpose, see above
 };
 static WorkerState* const       g_worker = new WorkerState;
 
@@ -541,7 +541,7 @@ static int on_load(ErlNifEnv*, void**, ERL_NIF_TERM) {
     // Spin up the lifecycle worker (idle until the first start). JUCE/audio init
     // is deferred to the worker on the first boot.
     g_worker->exit = false;
-    g_worker->thread = new std::thread(worker_loop);
+    g_worker->thread = new std::thread(worker_loop);   // thread-guard: allow — see WorkerState
     return 0;
 }
 

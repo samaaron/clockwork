@@ -133,6 +133,7 @@ constexpr double kMaxInputLatencySeconds = 2.0;
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <stop_token>
 
 class LinkAudioBridge {
 public:
@@ -280,7 +281,7 @@ private:
     // in rust/clockwork-ports-disk.
     void startEndpoint();
     void stopEndpoint();
-    void endpointLoop();
+    void endpointLoop(const std::stop_token& stop);
     // Detach then close. Call with mInputSubMutex held.
     void closePort(InputSubscription& sub);
 
@@ -292,7 +293,7 @@ private:
     // an unbounded stretch while others wait.
     static constexpr uint32_t kEndpointChunkFrames = 512;
 
-    std::thread             mEndpointThread;
+    std::jthread            mEndpointThread;
     std::atomic<bool>       mEndpointRun{false};
     std::atomic<uint32_t>   mSampleRate{0};
     // The engine's input channel count: the ceiling a subscription's

@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <stop_token>
 #include <utility>
 #include <vector>
 #include "RingReader.h"
@@ -996,13 +997,13 @@ private:
     // recovery, and shutdown's close — serialised, on one thread, in the
     // apartment the device layer needs (DeviceLaneApartment.h). Started on
     // first use (a device boot's open) and joined in shutdown().
-    std::thread                        mDeviceTaskThread;
+    std::jthread                       mDeviceTaskThread;
     std::mutex                         mDeviceTaskMutex;
     std::deque<std::function<void()>>  mDeviceTasks;
     std::atomic<bool>                  mDeviceTaskStop{false};
     clockwork::device::DeviceLaneApartment mDeviceLane;   // its apartment and its wake
     clockwork::device::ProcessComApartment mProcessCom;   // any other thread's COM
-    void deviceTaskLoop();
+    void deviceTaskLoop(const std::stop_token& stop);
     // `work` on the device lane, waited for; its exception, if any, rethrown
     // here. On the calling thread when the lane has stopped (shutdown).
     void runOnDeviceLane(const std::function<void()>& work);
@@ -1085,11 +1086,10 @@ private:
         bool     skewGiveUpLogged = false;
     };
     std::unique_ptr<WatchdogState> mWatchdog;
-    std::thread                mWatchdogThread;
-    std::atomic<bool>          mWatchdogStop{false};
+    std::jthread               mWatchdogThread;
     std::atomic<uint32_t>      mWatchdogRecoveries{0};
     std::atomic<uint32_t>      mRateSkewRecoveries{0};
-    void watchdogLoop();
+    void watchdogLoop(const std::stop_token& stop);
     int64_t watchdogNowMs() const;   // Config::watchdogClockMs, else steady_clock
 
     HeadlessDriver               mHeadlessDriver;

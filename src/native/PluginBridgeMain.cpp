@@ -76,6 +76,7 @@ extern "C" {
 #include <cstring>
 #include <string>
 #include <thread>
+#include <stop_token>
 #include <vector>
 
 namespace {
@@ -161,7 +162,7 @@ struct Bridge {
 
     std::atomic<bool> stop{false};
     std::atomic<bool> changed{false};
-    std::thread audio;
+    std::jthread audio;   // the render thread; joins in its destructor
 
     // Staging for the block walk: LANES channels each, planar.
     std::vector<float> sendBuf, retBuf;
@@ -254,7 +255,10 @@ void renderOne(Bridge& b, uint32_t frames, bool applyEvents) {
     b.h->bridge_heartbeat.fetch_add(1, std::memory_order_release);
 }
 
-void audioMain(Bridge& b) {
+void audioMain(Bridge& b, const std::stop_token& stop) {
+    // request_stop() rings the doorbell through this, so the thread wakes
+    // and leaves without anyone else posting.
+    const std::stop_callback wake(stop, [&b] { b.bell.post(); });
     {
         const double sr = clockwork::bitsToDouble(b.h->sample_rate_bits.load(std::memory_order_relaxed));
         const uint32_t block = b.h->block_size.load(std::memory_order_relaxed);
@@ -263,9 +267,9 @@ void audioMain(Bridge& b) {
         if (rt.status == clockwork::RealtimeStatus::Failed)
             log("the render thread could not be made realtime (error %d)", rt.error);
     }
-    while (!b.stop.load(std::memory_order_relaxed)) {
+    while (!stop.stop_requested()) {
         if (!b.bell.wait()) break;
-        if (b.stop.load(std::memory_order_relaxed)) break;
+        if (stop.stop_requested()) break;
         // A burst of posts is one wake: whatever is in the ring is rendered
         // below, however many bells announced it.
         while (b.bell.try_wait()) {}
@@ -441,7 +445,7 @@ int run(int32_t enginePid) {
         clockwork_drain_ring(rt_ring(b.seg.ptr), RT_RING_SIZE, &r.head, &r.tail, st, ClockworkDrainMetrics{}, 0,
             [](uint32_t, const uint8_t*, uint32_t, uint32_t) { return ClockworkDrainVerdict::Consume; });
     }
-    b.audio = std::thread([&b]() { audioMain(b); });
+    b.audio = std::jthread([&b](const std::stop_token& stop) { audioMain(b, stop); });
     b.h->bridge_ready.store(1, std::memory_order_release);
     // What is loaded, unasked: a client that was waiting on the last bridge
     // learns what this one has.
@@ -496,8 +500,8 @@ int run(int32_t enginePid) {
 
     b.stop.store(true, std::memory_order_relaxed);
     b.h->bridge_ready.store(0, std::memory_order_release);
-    // The audio thread is asleep on the doorbell; wake it so it can see stop.
-    b.bell.post();
+    // The render thread is asleep on the doorbell; its stop_callback rings it.
+    b.audio.request_stop();
     if (b.audio.joinable()) b.audio.join();
     b.verbs.shutdown();
     clockwork_track_set_load_listener(nullptr, nullptr);

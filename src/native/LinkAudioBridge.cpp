@@ -429,11 +429,12 @@ void LinkAudioBridge::setAudioFormat(uint32_t sampleRate, uint32_t allocatedInpu
 
 void LinkAudioBridge::startEndpoint() {
     if (mEndpointRun.exchange(true, std::memory_order_acq_rel)) return;
-    mEndpointThread = std::thread([this] { endpointLoop(); });
+    mEndpointThread = std::jthread([this](const std::stop_token& stop) { endpointLoop(stop); });
 }
 
 void LinkAudioBridge::stopEndpoint() {
     if (!mEndpointRun.exchange(false, std::memory_order_acq_rel)) return;
+    mEndpointThread.request_stop();
     if (mEndpointThread.joinable()) mEndpointThread.join();
 }
 
@@ -454,11 +455,11 @@ void LinkAudioBridge::stopEndpoint() {
  * run down and the audio thread read silence, counted, as the substrate
  * intends.
  */
-void LinkAudioBridge::endpointLoop() {
+void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
     using namespace std::chrono_literals;
     constexpr double kQuantum = 4.0;
 
-    while (mEndpointRun.load(std::memory_order_acquire)) {
+    while (!stop.stop_requested()) {
         const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);
         if (sr == 0) { std::this_thread::sleep_for(2ms); continue; }
 

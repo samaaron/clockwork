@@ -36,6 +36,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Forbid raw stdio in engine-side native code
         run: scripts/check-logging.sh
+      - name: Forbid std::thread and detach() in engine-side native code
+        run: scripts/check-threads.sh
 
   # ------------------------------------------------------------------ tidy --
   # clang-tidy over Clockwork's own sources (.clang-tidy: the crash classes

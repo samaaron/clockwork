@@ -40,6 +40,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <stop_token>
 
 #ifdef _WIN32
 #  include <sddl.h>
@@ -182,7 +183,6 @@ public:
         mEndpoint = endpoint;
         mSegment  = segment;
         mSize     = size;
-        mStop.store(false);
 #ifdef _WIN32
         mPipeName = pipe_path(endpoint);
         mSd = owner_only_sd();
@@ -195,7 +195,7 @@ public:
             LocalFree(mSd); mSd = nullptr;
             return false;
         }
-        mThread = std::thread([this, first] { serve_loop(first); });
+        mThread = std::jthread([this, first](const std::stop_token& stop) { serve_loop(first, stop); });
 #else
         sockaddr_un addr {};
         if (!fill_sockaddr(endpoint, &addr)) {
@@ -242,21 +242,18 @@ public:
             return false;
         }
         mListen = fd;
-        mThread = std::thread([this] { serve_loop(); });
+        mThread = std::jthread([this](const std::stop_token& stop) { serve_loop(stop); });
 #endif
         return true;
     }
 
     void stop() {
         if (!mThread.joinable()) return;
-        mStop.store(true);
+        // request_stop() wakes the loop through its own stop_callback (on
+        // Windows a connect to the pipe; on POSIX the poll's timeout), so the
+        // destructor's join needs nothing more than this.
+        mThread.request_stop();
 #ifdef _WIN32
-        // Wake a blocked ConnectNamedPipe by connecting to it ourselves; the
-        // loop sees the flag and leaves. A failed connect is fine: the
-        // thread was between instances, and checks the flag before it
-        // blocks on the next one.
-        HANDLE h = CreateFileW(mPipeName.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         mThread.join();
         if (mSd) { LocalFree(mSd); mSd = nullptr; }
 #else
@@ -281,19 +278,26 @@ private:
             PIPE_UNLIMITED_INSTANCES, sizeof(hello), sizeof(hello), 0, &sa);
     }
 
-    void serve_loop(HANDLE instance) {
+    void serve_loop(HANDLE instance, const std::stop_token& stop) {
+        // A stop wakes a blocked ConnectNamedPipe by connecting to it; a
+        // failed connect is fine: the thread was between instances, and
+        // reads the token before it blocks on the next one.
+        const std::stop_callback wake(stop, [this] {
+            HANDLE h = CreateFileW(mPipeName.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        });
         while (true) {
             if (instance == INVALID_HANDLE_VALUE) {
                 instance = make_instance(false);
-                if (instance == INVALID_HANDLE_VALUE) { Sleep(50); if (mStop.load()) break; continue; }
+                if (instance == INVALID_HANDLE_VALUE) { Sleep(50); if (stop.stop_requested()) break; continue; }
             }
-            // stop() wakes us by connecting to an instance, but it finds none
-            // while we are between one and the next. Look at the flag once the
-            // instance exists: if stop() came after this, its connect finds it.
-            if (mStop.load()) { CloseHandle(instance); break; }
+            // The stop's connect finds no instance while we are between one
+            // and the next. Read the token once the instance exists: a stop
+            // after this connects to it.
+            if (stop.stop_requested()) { CloseHandle(instance); break; }
             const BOOL connected = ConnectNamedPipe(instance, nullptr)
                                    || GetLastError() == ERROR_PIPE_CONNECTED;
-            if (mStop.load()) { CloseHandle(instance); break; }
+            if (stop.stop_requested()) { CloseHandle(instance); break; }
             // The next instance BEFORE this one is served, so the name always
             // has an instance behind it. Made only after, there was a moment
             // between closing this one and making the next with none, and a
@@ -330,8 +334,8 @@ private:
     std::wstring         mPipeName;
     PSECURITY_DESCRIPTOR mSd = nullptr;
 #else
-    void serve_loop() {
-        while (!mStop.load()) {
+    void serve_loop(const std::stop_token& stop) {
+        while (!stop.stop_requested()) {   // the poll's 200 ms timeout is the wake
             pollfd p { mListen, POLLIN, 0 };
             const int n = ::poll(&p, 1, 200);
             if (n <= 0) continue;
@@ -380,8 +384,7 @@ private:
     std::string        mEndpoint;
     shm_native_handle  mSegment = shm_invalid_handle;
     uint64_t           mSize = 0;
-    std::atomic<bool>  mStop { false };
-    std::thread        mThread;
+    std::jthread       mThread;   // joins in its destructor; stop() is request_stop + join
 };
 
 // ── Client: the reader's side ─────────────────────────────────────────────

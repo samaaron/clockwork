@@ -406,6 +406,7 @@ add_executable(clockwork_engine_tests
     test_master_tap.cpp
     test_assets.cpp
     test_shm_peer_crash.cpp
+    test_thread_lifetime.cpp
     test_gamepad.cpp
     test_midi.cpp
     test_osc.cpp

@@ -453,7 +453,7 @@ void TrackControl::stopBridge(const char* why) {
         mProcess.kill();
     }
     mProcess.wait();
-    mProcess.detach();
+    mProcess.forget();
     if (mHeader) mHeader->bridge_ready.store(0, std::memory_order_release);
 }
 
@@ -537,7 +537,7 @@ void TrackControl::watchLiveness() {
         const int code = mProcess.exitCode();
         if (code < 0) std::snprintf(how.data(), how.size(), "crashed (signal %d)", -code);
         else          std::snprintf(how.data(), how.size(), "exited (code %d)", code);
-        mProcess.detach();
+        mProcess.forget();
         onBridgeDied(how.data());
         return;
     }
@@ -550,13 +550,13 @@ void TrackControl::watchLiveness() {
         } else if (blocks - mBlocksAtLastHeartbeat > HUNG_BLOCKS) {
             mProcess.kill();
             mProcess.wait();
-            mProcess.detach();
+            mProcess.forget();
             onBridgeDied("stopped rendering");
         }
     } else if (std::chrono::steady_clock::now() - mSpawnedAt > START_TIMEOUT) {
         mProcess.kill();
         mProcess.wait();
-        mProcess.detach();
+        mProcess.forget();
         onBridgeDied("did not start");
     }
 }

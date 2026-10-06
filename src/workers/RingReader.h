@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <functional>
 #include <thread>
+#include <stop_token>
 #include <vector>
 #include "lanes/ring_drain.h"
 
@@ -133,7 +134,8 @@ public:
     void setClock(std::function<uint64_t()> clock) { mClock = std::move(clock); }
 
 private:
-    void run();
+    void run(const std::stop_token& stop);
+    void wakeForStop();   // the stop_callback: break the wait word, release a park
     uint64_t nowUs() const;
     std::function<uint64_t()> mClock;
 
@@ -153,7 +155,6 @@ private:
     std::atomic<uint32_t>* mWake     = nullptr;
     uint32_t               mLastWake = 0;
     std::vector<Drain>     mDrains;
-    std::atomic<bool>      mExit{false};
 
     // pause()/resume() handshake. mPauseRequest is the caller's ask; mParked
     // acknowledges that the run loop is outside any drain pass.
@@ -175,5 +176,5 @@ private:
     uint32_t               mSlowPassThresholdUs = 250'000;   // 250 ms
     std::function<void(uint32_t)> mOnSlowPass;
 
-    std::thread            mThread;
+    std::jthread           mThread;   // joins in its destructor; stop() is request_stop + join
 };
