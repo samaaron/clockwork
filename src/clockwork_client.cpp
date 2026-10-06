@@ -12,6 +12,7 @@
  * checking a public boundary owes its callers.
  */
 #include "clockwork_client.h"
+#include "owner.h"
 
 #include "shared_memory.h"
 #include "clockwork_config.h"
@@ -20,6 +21,7 @@
 #include "shm_scope_stream.hpp"
 
 #include <cstring>
+#include <memory>
 #include <new>
 
 #if !defined(__EMSCRIPTEN__)
@@ -31,7 +33,7 @@ namespace {
 
 // Everything a handle needs, and nothing that belongs to one transport.
 //
-// `owns_mapping` is the only place the transports differ after open: a shm
+// `mapping` is the only place the transports differ after open: a shm
 // handle unmaps on close, an in-process one hands the memory back untouched.
 struct ClientImpl {
     uint8_t* base   = nullptr;
@@ -40,7 +42,6 @@ struct ClientImpl {
     // whichever way the handle was opened. Nothing below addresses the arena
     // through a constant.
     ShmReaderLayout L;
-    bool     owns_mapping = false;
     bool     owns_storage = true;   // false when opened into caller storage
 
     // Sequence-gap tracking, which is per handle. The ring's read CURSOR is
@@ -55,7 +56,7 @@ struct ClientImpl {
     RingBufferWriter::Reservation pending{};
 
 #if !defined(__EMSCRIPTEN__)
-    detail_shm_segment::shm_segment_client* mapping = nullptr;
+    std::unique_ptr<detail_shm_segment::shm_segment_client> mapping;   // the segment, when this handle mapped it
 #endif
 
     ControlPointers* control() const {
@@ -114,13 +115,13 @@ ClockworkClient* clockwork_client_open_memory(void* base, uint32_t bytes,
     ShmReaderLayout L;
     const ClockworkStatus st = readTable(static_cast<const uint8_t*>(base), bytes, L);
     if (st != CLOCKWORK_OK) { fail(out_status, st); return nullptr; }
-    auto* c = new (std::nothrow) ClientImpl();
+    std::unique_ptr<ClientImpl> c(new (std::nothrow) ClientImpl());
     if (!c) { fail(out_status, CLOCKWORK_E_NOMEM); return nullptr; }
     c->base  = static_cast<uint8_t*>(base);
     c->bytes = L.blob_size;
     c->L     = L;
     fail(out_status, CLOCKWORK_OK);
-    return reinterpret_cast<ClockworkClient*>(c);
+    return reinterpret_cast<ClockworkClient*>(c.release());
 }
 
 ClockworkClient* clockwork_client_open_memory_in(void* storage, size_t storage_bytes,
@@ -135,7 +136,7 @@ ClockworkClient* clockwork_client_open_memory_in(void* storage, size_t storage_b
     if (st != CLOCKWORK_OK) { fail(out_status, st); return nullptr; }
     // Constructed in place: no allocator is touched, which is the entire point
     // for a caller sharing a heap it must not allocate from.
-    auto* c = new (storage) ClientImpl();
+    auto* c = new (storage) ClientImpl();   // NOLINT(cppcoreguidelines-owning-memory): the caller's storage
     c->base          = static_cast<uint8_t*>(base);
     c->bytes         = L.blob_size;
     c->L             = L;
@@ -152,7 +153,7 @@ ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
 #else
     const auto h = static_cast<detail_shm_segment::shm_native_handle>(native_handle);
 #endif
-    auto* c = new (std::nothrow) ClientImpl();
+    std::unique_ptr<ClientImpl> c(new (std::nothrow) ClientImpl());
     if (!c) {
         detail_shm_segment::shm_close_native(h);
         fail(out_status, CLOCKWORK_E_NOMEM);
@@ -160,21 +161,19 @@ ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
     }
     try {
         // Takes the handle on every path, so nothing leaks on a refusal.
-        c->mapping = new detail_shm_segment::shm_segment_client(h);
+        c->mapping = std::make_unique<detail_shm_segment::shm_segment_client>(h);
     } catch (const std::exception&) {
         // The segment is truncated, unpublished, or built by an engine whose
         // layout this build does not recognise. shm_segment_client refuses
         // all three by throwing; a boundary in C reports rather than unwinds.
-        delete c;
         fail(out_status, CLOCKWORK_E_NOT_FOUND);
         return nullptr;
     }
     c->base         = c->mapping->get_base();
     c->L            = c->mapping->layout();   // the ENGINE's layout, not this build's
     c->bytes        = c->L.blob_size;
-    c->owns_mapping = true;
     fail(out_status, CLOCKWORK_OK);
-    return reinterpret_cast<ClockworkClient*>(c);
+    return reinterpret_cast<ClockworkClient*>(c.release());
 }
 
 ClockworkClient* clockwork_client_open_shm(const char* endpoint, ClockworkStatus* out_status) {
@@ -220,11 +219,8 @@ uint32_t clockwork_client_default_endpoint(uint32_t, char* buf, uint32_t cap) {
 #endif
 
 void clockwork_client_close(ClockworkClient* handle) {
-    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    gsl::owner<ClientImpl*> c = reinterpret_cast<ClientImpl*>(handle);   // NOLINT(cppcoreguidelines-owning-memory): the caller's handle, given back here
     if (!c) return;
-#if !defined(__EMSCRIPTEN__)
-    if (c->owns_mapping) delete c->mapping;
-#endif
     if (c->owns_storage) delete c;
     else                 c->~ClientImpl();   // caller keeps the storage
 }
@@ -597,7 +593,7 @@ ClockworkClientTap* clockwork_client_tap_open_in(void* storage, size_t storage_b
     if (!c || !storage || storage_bytes < sizeof(TapImpl))
         return fail(CLOCKWORK_E_ARG);
 
-    auto* t = new (storage) TapImpl();
+    auto* t = new (storage) TapImpl();   // NOLINT(cppcoreguidelines-owning-memory): the caller's storage
     if (!tapBind(t, c, ring)) {
         t->~TapImpl();
         return fail(CLOCKWORK_E_ARG);
@@ -616,18 +612,15 @@ ClockworkClientTap* clockwork_client_tap_open(ClockworkClient* handle, uint32_t 
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c) return fail(CLOCKWORK_E_ARG);
 
-    auto* t = new (std::nothrow) TapImpl();
+    std::unique_ptr<TapImpl> t(new (std::nothrow) TapImpl());
     if (!t) return fail(CLOCKWORK_E_NOMEM);
-    if (!tapBind(t, c, ring)) {
-        delete t;
-        return fail(CLOCKWORK_E_ARG);
-    }
+    if (!tapBind(t.get(), c, ring)) return fail(CLOCKWORK_E_ARG);
     if (out_status) *out_status = CLOCKWORK_OK;
-    return reinterpret_cast<ClockworkClientTap*>(t);
+    return reinterpret_cast<ClockworkClientTap*>(t.release());
 }
 
 void clockwork_client_tap_close(ClockworkClientTap* handle) {
-    auto* t = reinterpret_cast<TapImpl*>(handle);
+    gsl::owner<TapImpl*> t = reinterpret_cast<TapImpl*>(handle);   // NOLINT(cppcoreguidelines-owning-memory): the caller's handle, given back here
     if (!t) return;
     if (t->owns_storage) delete t;
     else                 t->~TapImpl();

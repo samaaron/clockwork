@@ -57,6 +57,7 @@
  * rt_alloc guard across exactly that call and nothing else — see plugin_host.h.
  */
 #include "plugin_clap.h"
+#include "owner.h"
 #include "plugin_transport.h"   // the block's musical position, shared with VST3
 #include "shared_memory.h"      // ClockworkClockState
 #include "clockwork_product.h"
@@ -72,6 +73,7 @@
 #include <map>
 #include <mutex>
 #include <functional>   // std::hash — CLAP names groups, so the id is a hash of the name
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -519,31 +521,39 @@ uint32_t scan(const char* path, PluginDesc* out, uint32_t cap) {
 
 /* ── Lifecycle ────────────────────────────────────────────────────────────── */
 
+void close(Instance* p);
+
+// What an instance that never finished opening gets (open's unique_ptr).
+struct Closed {
+    void operator()(Instance* p) const { close(p); }
+};
+
 Instance* open(const char* path, uint32_t index,
                double sample_rate, uint32_t max_block,
                const char** err) {
-    auto fail = [&](std::string msg, Instance* p) -> Instance* {
+    auto fail = [&](std::string msg) -> Instance* {
         if (err) *err = set_err(std::move(msg));
-        if (p) clockwork_plugin_clap::close(p);
         return nullptr;
     };
 
-    if (!path || !*path)              return fail("plugin_open: empty path", nullptr);
-    if (max_block == 0)               return fail("plugin_open: max_block must be non-zero", nullptr);
-    if (!(sample_rate > 0.0))         return fail("plugin_open: sample_rate must be positive", nullptr);
+    if (!path || !*path)              return fail("plugin_open: empty path");
+    if (max_block == 0)               return fail("plugin_open: max_block must be non-zero");
+    if (!(sample_rate > 0.0))         return fail("plugin_open: sample_rate must be positive");
 
     void* dso = dso_open(path);
     if (!dso)
-        return fail(std::string("plugin_open: cannot load '") + path + "': " + dso_error(), nullptr);
+        return fail(std::string("plugin_open: cannot load '") + path + "': " + dso_error());
 
     auto* entry = static_cast<const clap_plugin_entry_t*>(dso_sym(dso, "clap_entry"));
     if (!entry || !clap_version_is_compatible(entry->clap_version)) {
         dso_close(dso);
-        return fail(std::string("plugin_open: '") + path + "' is not a compatible CLAP plugin",
-                    nullptr);
+        return fail(std::string("plugin_open: '") + path + "' is not a compatible CLAP plugin");
     }
 
-    auto* p = new Instance();
+    // Owned until it is handed back: every way out before the end closes it
+    // (Closed), so a throw between — build_ports, refresh_params or a reserve
+    // that cannot allocate — leaks neither the instance nor the library.
+    std::unique_ptr<Instance, Closed> p(new Instance());
     p->dso         = dso;
     p->entry       = entry;
     p->sample_rate = sample_rate;
@@ -551,25 +561,25 @@ Instance* open(const char* path, uint32_t index,
 
     if (!entry->init(path)) {
         p->entry = nullptr;   /* deinit must not be called when init failed */
-        return fail(std::string("plugin_open: clap_entry.init failed for '") + path + "'", p);
+        return fail(std::string("plugin_open: clap_entry.init failed for '") + path + "'");
     }
     p->entry_inited = true;
 
     auto* factory =
         static_cast<const clap_plugin_factory_t*>(entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
     if (!factory)
-        return fail(std::string("plugin_open: '") + path + "' has no clap.plugin-factory", p);
+        return fail(std::string("plugin_open: '") + path + "' has no clap.plugin-factory");
 
     const uint32_t count = factory->get_plugin_count(factory);
     if (index >= count)
-        return fail("plugin_open: plugin index out of range", p);
+        return fail("plugin_open: plugin index out of range");
 
     const clap_plugin_descriptor_t* desc = factory->get_plugin_descriptor(factory, index);
     if (!desc || !desc->id)
-        return fail("plugin_open: no descriptor at that index", p);
+        return fail("plugin_open: no descriptor at that index");
 
     p->host.clap_version      = CLAP_VERSION;
-    p->host.host_data         = p;
+    p->host.host_data         = p.get();
     p->host.name              = CLOCKWORK_PRODUCT_NAME;
     p->host.vendor            = "Clockwork";
     p->host.url               = "";
@@ -581,11 +591,11 @@ Instance* open(const char* path, uint32_t index,
 
     p->plugin = factory->create_plugin(factory, &p->host, desc->id);
     if (!p->plugin)
-        return fail(std::string("plugin_open: create_plugin failed for '") + desc->id + "'", p);
+        return fail(std::string("plugin_open: create_plugin failed for '") + desc->id + "'");
 
     if (!p->plugin->init(p->plugin)) {
         /* Failed init: destroy is still the way to release it. */
-        return fail(std::string("plugin_open: plugin init failed for '") + desc->id + "'", p);
+        return fail(std::string("plugin_open: plugin init failed for '") + desc->id + "'");
     }
 
     p->params  = static_cast<const clap_plugin_params_t*>(
@@ -610,32 +620,32 @@ Instance* open(const char* path, uint32_t index,
         }
     }
 
-    build_ports(p);
-    refresh_params(p);
+    build_ports(p.get());
+    refresh_params(p.get());
 
     p->block_events.reserve(Instance::kEventCap);
-    p->in_events.ctx  = p;
+    p->in_events.ctx  = p.get();
     p->in_events.size = in_events_size;
     p->in_events.get  = in_events_get;
-    p->out_events.ctx = p;
+    p->out_events.ctx = p.get();
     p->out_events.try_push = out_events_try_push;
 
     if (!p->plugin->activate(p->plugin, sample_rate, 1, max_block))
-        return fail(std::string("plugin_open: activate failed for '") + desc->id + "'", p);
+        return fail(std::string("plugin_open: activate failed for '") + desc->id + "'");
     p->activated = true;
 
     if (p->latency)   /* [main-thread & active] — both true right here */
         p->latency_frames.store(p->latency->get(p->plugin), std::memory_order_relaxed);
 
     if (!p->plugin->start_processing(p->plugin))
-        return fail(std::string("plugin_open: start_processing failed for '") + desc->id + "'", p);
+        return fail(std::string("plugin_open: start_processing failed for '") + desc->id + "'");
     p->processing = true;
 
     if (err) *err = nullptr;
-    return p;
+    return p.release();
 }
 
-void close(Instance* p) {
+void close(gsl::owner<Instance*> p) {   // the caller's, given back here
     if (!p) return;
     if (p->plugin) {
         if (p->processing) p->plugin->stop_processing(p->plugin);

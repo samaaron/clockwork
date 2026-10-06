@@ -30,6 +30,7 @@
  * operations in remove() guarantees.
  */
 #include "plugin_track.h"
+#include "owner.h"
 
 #include "clock/timeline_mirror.h"
 #include "plugin_discovery.h"
@@ -139,7 +140,7 @@ struct Snapshot {
     SnapTrack* bySlot[CLOCKWORK_TRACK_MAX] {};
 };
 
-std::atomic<Snapshot*> g_snap{nullptr};   // what the audio thread reads
+std::atomic<gsl::owner<Snapshot*>> g_snap{nullptr};   // what the audio thread reads
 std::atomic<uint64_t>  g_epoch{0};        // bumped by the audio thread per block
 
 std::mutex g_mu;                          // control-thread mutations only
@@ -368,7 +369,7 @@ void node_param_set_by_name(const SnapNode& n, const ParamName& p, double value,
 // advances the epoch; there the old snapshot is provably unreachable and
 // freeing is right. An epoch of zero means no block has ever run: free at
 // once rather than pay the timeout on every edit before the device opens.
-void retire(Snapshot* old) {
+void retire(gsl::owner<Snapshot*> old) {
     if (!old) return;
     const uint64_t start = g_epoch.load(std::memory_order_acquire);
     if (start == 0) { delete old; return; }
@@ -382,7 +383,7 @@ void retire(Snapshot* old) {
 
 // Build and publish from g_tracks. Caller holds g_mu.
 void republish() {
-    Snapshot* next = new Snapshot();
+    gsl::owner<Snapshot*> next = new Snapshot();
     for (const auto& t : g_tracks) {
         if (next->count >= CLOCKWORK_TRACK_MAX) break;
         SnapTrack& st = next->track[next->count++];
@@ -406,7 +407,7 @@ void republish() {
         }
         next->bySlot[t->slot] = &st;
     }
-    Snapshot* old = g_snap.exchange(next, std::memory_order_acq_rel);
+    gsl::owner<Snapshot*> old = g_snap.exchange(next, std::memory_order_acq_rel);   // NOLINT(cppcoreguidelines-owning-memory): the atomic holds the owner; a template erases the alias
     retire(old);
 }
 

@@ -203,7 +203,7 @@ void set_arena(void* base, size_t bytes) {
     g_arena = reinterpret_cast<uint8_t*>(aligned);
     g_arena_size = (bytes - lost) & ~(size_t)(kAlign - 1);
 
-    g_head = new (g_arena) Block{};
+    g_head = new (g_arena) Block{};   // NOLINT(cppcoreguidelines-owning-memory): placed in the arena, which owns it
     g_head->prev  = nullptr;
     g_head->next  = nullptr;
     g_head->size  = g_arena_size - sizeof(Block);
@@ -234,6 +234,8 @@ size_t arena_available() {
 // std::malloc already returns max_align_t-aligned memory (16 on 64-bit targets),
 // satisfying the alignment contract; both tiers map to it with no wrapper. There
 // is no second tier to spill to, so allow_spill is irrelevant.
+// NOLINTBEGIN(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory): the
+// allocator itself, whose job is the manual memory everything else is spared.
 void* alloc(Tier, size_t bytes, bool /*allow_spill*/) {
     if (bytes == 0)
         return nullptr;
@@ -290,6 +292,7 @@ void free(void* ptr) {
     if (b->prev && b->prev->free)
         coalesce_forward(b->prev);
 }
+// NOLINTEND(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory)
 
 size_t in_use(Tier) { return g_head ? g_arena_used : 0; }
 

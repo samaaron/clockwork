@@ -4,6 +4,7 @@
 // lies between them. First fit; freeing is removing a slot, which is what
 // makes neighbours coalesce for nothing.
 #include "clockwork_asset_pool.h"
+#include "owner.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -21,15 +22,17 @@ struct ClockworkAssetPool {
     std::vector<Slot> live;   // sorted by start
 };
 
-ClockworkAssetPool* clockwork_asset_pool_open(uint32_t bytes) {
+gsl::owner<ClockworkAssetPool*> clockwork_asset_pool_open(uint32_t bytes) {
     if (bytes == 0) return nullptr;
-    auto* p = new (std::nothrow) ClockworkAssetPool();
+    gsl::owner<ClockworkAssetPool*> p = new (std::nothrow) ClockworkAssetPool();
     if (!p) return nullptr;
     p->size = bytes;
     return p;
 }
 
-void clockwork_asset_pool_close(ClockworkAssetPool* pool) { delete pool; }
+void clockwork_asset_pool_close(gsl::owner<ClockworkAssetPool*> pool) {   // the caller's, given back here
+    delete pool;
+}
 
 int clockwork_asset_pool_alloc(ClockworkAssetPool* pool, uint32_t bytes, uint32_t* offset_out) {
     if (!pool || !offset_out || bytes == 0) return 1;

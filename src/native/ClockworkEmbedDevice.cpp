@@ -6,6 +6,7 @@
 #include <cstring>
 #include "embed/clockwork_embed_impl.h"
 #include "native/ClockworkEngine.h"
+#include "owner.h"
 #include "lanes/lanes.h"
 #include <juce_events/juce_events.h>
 #include <memory>
@@ -21,7 +22,7 @@ struct DeviceEngine {
 };
 
 void closeDevice(void* p) {
-    auto* d = static_cast<DeviceEngine*>(p);
+    gsl::owner<DeviceEngine*> d = static_cast<gsl::owner<DeviceEngine*>>(p);
     if (!d) return;
     if (d->engine) d->engine->shutdown();
     d->engine.reset();
@@ -54,12 +55,14 @@ static ClockworkStatus deviceInfoOf(void* p, ClockworkEmbedDevice* out) {
     return CLOCKWORK_OK;
 }
 
-extern "C" ClockworkEmbed* clockwork_embed_boot(const ClockworkEmbedConfig* config, ClockworkStatus* status) {
+extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbedConfig* config, ClockworkStatus* status) {
     const auto fail = [status](ClockworkStatus s) { if (status) *status = s; return static_cast<ClockworkEmbed*>(nullptr); };
     if (!config || config->struct_bytes < sizeof(ClockworkEmbedConfig)) return fail(CLOCKWORK_E_ARG);
     if (g_clockwork_embed.load(std::memory_order_acquire)) return fail(CLOCKWORK_E_PERM);
 
-    auto* d = new (std::nothrow) DeviceEngine();
+    // Owned here until the handle has it: a boot that throws (init) takes
+    // the engine and the JUCE initialiser down with this, not leaves them.
+    std::unique_ptr<DeviceEngine> d(new (std::nothrow) DeviceEngine());
     if (!d) return fail(CLOCKWORK_E_NOMEM);
     d->juce   = std::make_unique<juce::ScopedJuceInitialiser_GUI>();
     d->engine = std::make_unique<ClockworkEngine>();
@@ -80,13 +83,14 @@ extern "C" ClockworkEmbed* clockwork_embed_boot(const ClockworkEmbedConfig* conf
     cfg.callbackWatchdog = true;
     d->engine->init(cfg);          // opens the device; the callback ticks from here
 
-    auto* h = new (std::nothrow) ClockworkEmbed();
-    if (!h) { closeDevice(d); return fail(CLOCKWORK_E_NOMEM); }
+    gsl::owner<ClockworkEmbed*> h = new (std::nothrow) ClockworkEmbed();
+    if (!h) { closeDevice(d.release()); return fail(CLOCKWORK_E_NOMEM); }
+    DeviceEngine* dev = d.release();   // closeDevice's from here, through the handle
     h->kind        = ClockworkEmbed::Kind::Booted;
-    h->engine      = d;
+    h->engine      = dev;
     h->closeEngine = closeDevice;
     h->deviceInfo  = deviceInfoOf;
-    h->client      = d->engine->egressClient();   // the engine's; closed with it
+    h->client      = dev->engine->egressClient();   // the engine's; closed with it
     h->ownsClient  = false;
     h->sampleRate  = clockwork_sample_rate();
     h->block       = clockwork_block_size();

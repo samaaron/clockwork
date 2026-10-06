@@ -24,6 +24,7 @@
  */
 
 #include "plugin_host.h"
+#include "owner.h"
 
 #if CLOCKWORK_PLUGIN_VST3
 #  include "plugin_vst3.h"
@@ -79,14 +80,14 @@ uint32_t plugin_scan(const char* path, PluginDesc* out, uint32_t cap) {
     return 0;
 }
 
-struct HostedPlugin* plugin_open(const char* path, uint32_t index,
-                                 double sample_rate, uint32_t max_block,
-                                 const char** err) {
+gsl::owner<struct HostedPlugin*> plugin_open(const char* path, uint32_t index,
+                                             double sample_rate, uint32_t max_block,
+                                             const char** err) {
     if (err) *err = nullptr;
 #if CLOCKWORK_PLUGIN_CLAP
     if (clockwork_plugin_clap::scan(path, nullptr, 0) > index) {
         if (auto* i = clockwork_plugin_clap::open(path, index, sample_rate, max_block, err)) {
-            auto* h = new (std::nothrow) HostedPlugin();
+            gsl::owner<HostedPlugin*> h = new (std::nothrow) HostedPlugin();
             if (h) { h->format = kPluginFormatClap; h->impl = i;
                      h->sample_rate = sample_rate; recordName(h, path, index); return h; }
             clockwork_plugin_clap::close(i);
@@ -96,7 +97,7 @@ struct HostedPlugin* plugin_open(const char* path, uint32_t index,
 #endif
 #if CLOCKWORK_PLUGIN_VST3
     if (auto* i = clockwork_plugin_vst3::open(path, index, sample_rate, max_block, err)) {
-        auto* h = new (std::nothrow) HostedPlugin();
+        gsl::owner<HostedPlugin*> h = new (std::nothrow) HostedPlugin();
         if (h) { h->format = kPluginFormatVst3; h->impl = i;
                  h->sample_rate = sample_rate; recordName(h, path, index); }
         if (h) return h;
@@ -121,7 +122,7 @@ struct HostedPlugin* plugin_open(const char* path, uint32_t index,
 #endif
 }
 
-void plugin_close(struct HostedPlugin* p) {
+void plugin_close(gsl::owner<struct HostedPlugin*> p) {   // the caller's, given back here
     if (!p) return;
 #if CLOCKWORK_PLUGIN_CLAP
     if (p->format == kPluginFormatClap)

@@ -77,6 +77,7 @@
  */
 
 #include "plugin_vst3.h"
+#include "owner.h"
 #include "clockwork_product.h"
 
 #include "plugin_transport.h"   // the block's musical position, shared with CLAP
@@ -105,6 +106,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -974,6 +976,11 @@ void teardown(Instance* p) {
     unloadModule(p->mod);
 }
 
+// What an instance that never finished opening gets (open's unique_ptr).
+struct TornDown {
+    void operator()(gsl::owner<Instance*> p) const { teardown(p); delete p; }
+};
+
 }  // namespace
 
 // ── Discovery ────────────────────────────────────────────────────────────────
@@ -1051,15 +1058,18 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
     if (max_block == 0)       { fail(err, "max_block must be non-zero"); return nullptr; }
     if (!(sample_rate > 0.0)) { fail(err, "sample_rate must be positive"); return nullptr; }
 
-    auto* p = new Instance();
+    // Owned until it is handed back: every way out before the end tears it
+    // down (TornDown), so a throw between — a buffer that cannot be
+    // allocated, a plugin that throws from a call — leaks neither the
+    // instance nor the module it loaded, as the matching deletes used to.
+    std::unique_ptr<Instance, TornDown> p(new Instance());
     p->sampleRate = sample_rate;
     p->maxBlock   = max_block;
 
     std::string loadErr;
     if (!loadModule(path, p->mod, loadErr)) {
         fail(err, std::string(path) + ": " + loadErr);
-        delete p;
-        return nullptr;
+        return nullptr;   // TornDown unloads whatever loadModule had taken
     }
 
     // Which class: the index-th AUDIO MODULE, matching what scan reported —
@@ -1080,7 +1090,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
     if (!haveCid) {
         fail(err, std::string(path) + ": no audio module at index "
                   + std::to_string(index));
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
 
     if (p->mod.factory->createInstance(reinterpret_cast<FIDString>(cid),
@@ -1088,21 +1098,21 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
                                        reinterpret_cast<void**>(&p->component))
             != kResultOk || !p->component) {
         fail(err, std::string(path) + ": createInstance(IComponent) failed");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
     if (p->component->initialize(&hostContext()) != kResultOk) {
         fail(err, std::string(path) + ": IComponent::initialize failed");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
     if (p->component->queryInterface(IAudioProcessor_iid,
                                      reinterpret_cast<void**>(&p->processor))
             != kResultOk || !p->processor) {
         fail(err, std::string(path) + ": component is not an IAudioProcessor");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
     if (p->processor->canProcessSampleSize(kSample32) != kResultTrue) {
         fail(err, std::string(path) + ": plugin cannot process 32-bit float");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
 
     // The controller: its own class where the plugin declares one (the normal
@@ -1116,11 +1126,11 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
                 == kResultOk && p->controller) {
             p->controllerIsSeparate = true;
             // Before initialize: some plugins query the handler during it.
-            p->handler.setOwner(p);
+            p->handler.setOwner(p.get());
             p->controller->setComponentHandler(&p->handler);
             if (p->controller->initialize(&hostContext()) != kResultOk) {
                 fail(err, std::string(path) + ": IEditController::initialize failed");
-                teardown(p); delete p; return nullptr;
+                return nullptr;
             }
         }
     }
@@ -1130,7 +1140,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
         // The single-object shape has a handler to be given too, or its
         // editor's edits have nowhere to go.
         if (p->controller) {
-            p->handler.setOwner(p);
+            p->handler.setOwner(p.get());
             p->controller->setComponentHandler(&p->handler);
         }
     }
@@ -1176,7 +1186,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
     }
     if (p->busOut <= 0) {
         fail(err, std::string(path) + ": plugin has no audio output bus");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
 
     // EVENT INPUT BUSES, or the instrument never hears a note.
@@ -1203,7 +1213,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
         fail(err, std::string(path) + ": setupProcessing refused "
                   + std::to_string(sample_rate) + " Hz / "
                   + std::to_string(max_block) + " frames");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
 
     // Every buffer the audio thread will touch, allocated here and never again.
@@ -1288,10 +1298,10 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
 
     if (p->component->setActive(true) != kResultOk) {
         fail(err, std::string(path) + ": setActive(true) failed");
-        teardown(p); delete p; return nullptr;
+        return nullptr;
     }
     p->processor->setProcessing(true);
-    return p;
+    return p.release();
 }
 
 // ── Editor ───────────────────────────────────────────────────────────────────
@@ -1379,7 +1389,7 @@ bool editor_set_size(Instance* p, uint32_t w, uint32_t h) {
     return p->view->onSize(&r) == kResultOk;
 }
 
-void close(Instance* p) {
+void close(gsl::owner<Instance*> p) {   // the caller's, given back here
     if (!p) return;
     // Before teardown: the view holds a reference back into the controller and
     // must not outlive it.
