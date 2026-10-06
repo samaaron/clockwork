@@ -140,7 +140,10 @@ jobs:
             platform: linux-arm64
           - os: macos-latest
             platform: macos-arm64
-          - os: macos-15-intel
+          # macos-26-intel, not macos-15-intel: the macOS 15 image defaults
+          # to Xcode 16.4, whose libc++ has no std::jthread (CMakeLists.txt
+          # says so at configure). macOS 26 carries Xcode 26.6, as macos-latest.
+          - os: macos-26-intel
             platform: macos-x64
           - os: windows-latest
             platform: windows-x64
@@ -353,7 +356,7 @@ jobs:
             platform: linux-arm64
           - os: macos-latest
             platform: macos-arm64
-          - os: macos-15-intel
+          - os: macos-26-intel
             platform: macos-x64
           - os: windows-latest
             platform: windows-x64
@@ -389,7 +392,7 @@ jobs:
             platform: linux-arm64
           - os: macos-latest
             platform: macos-arm64
-          - os: macos-15-intel
+          - os: macos-26-intel
             platform: macos-x64
           - os: windows-latest
             platform: windows-x64

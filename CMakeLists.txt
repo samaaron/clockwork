@@ -48,6 +48,28 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Every thread is a std::jthread with a std::stop_token, and that is the one
+# C++20 library feature a current-looking toolchain can still lack: libc++
+# kept <stop_token> behind -fexperimental-library until libc++ 20, so Apple
+# clang up to Xcode 16.4 fails on the first jthread with a page of errors
+# from deep inside a header. Say it once, here, in plain words instead.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+#include <stop_token>
+#include <thread>
+int main() {
+    std::jthread t([](const std::stop_token& st) { while (!st.stop_requested()) {} });
+    t.request_stop();
+    return 0;
+}
+" CLOCKWORK_HAS_STD_JTHREAD)
+if(NOT CLOCKWORK_HAS_STD_JTHREAD)
+    message(FATAL_ERROR
+        "Clockwork needs std::jthread and std::stop_token (C++20). This standard "
+        "library does not provide them: libc++ 20 or later (Xcode 26.6 or later on "
+        "macOS), libstdc++ 10 or later, or MSVC 2019 16.10 or later.")
+endif()
+
 # ─── The web target ──────────────────────────────────────────────────────────
 # `emcmake cmake -B build/web` builds this same tree for the AudioWorklet:
 # the same C++ core, the same Rust subsystems, the same DSP boundary, from the
