@@ -102,10 +102,12 @@ jobs:
             echo
             echo "| count | check |"
             echo "|------:|-------|"
-            grep -o '\[[a-z]*-[a-z0-9.-]*\]$' tidy.log | sort | uniq -c | sort -rn \
+            # grep exits 1 when there is nothing to find, which with pipefail
+            # would fail the job for being at zero; an empty table is the aim.
+            { grep -o '\[[a-z]*-[a-z0-9.-]*\]$' tidy.log || true; } | sort | uniq -c | sort -rn \
               | awk '{ printf "| %s | %s |\n", $1, $2 }'
             echo
-            echo "$(grep -c 'warning:' tidy.log) warnings, $(grep -c 'clang-diagnostic-error' tidy.log) files not compiled by clang-tidy"
+            echo "$(grep -c 'warning:' tidy.log || true) warnings, $(grep -c 'clang-diagnostic-error' tidy.log || true) files not compiled by clang-tidy"
           } >> "$GITHUB_STEP_SUMMARY"
           # Only what .clang-tidy says is an error fails the job.
           if grep -q '\[-warnings-as-errors\]' tidy.log; then

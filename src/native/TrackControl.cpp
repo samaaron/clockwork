@@ -109,7 +109,7 @@ constexpr uint32_t kMirroredTimelines =
 
 // Scratch the audio thread reads a surplus return block into, to discard it.
 std::array<std::array<float, MAX_BLOCK>, LANES> g_trim{};
-std::array<float*, LANES> g_trimPtrs = [] {
+std::array<float*, LANES> g_trimPtrs = []() noexcept {
     std::array<float*, LANES> ptrs{};
     for (uint32_t c = 0; c < LANES; ++c) ptrs[c] = g_trim[c].data();
     return ptrs;
