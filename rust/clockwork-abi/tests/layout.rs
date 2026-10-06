@@ -55,7 +55,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_config, guest_config_bytes, deterministic_seed, fp_env,
     });
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release,
-        alloc_bytes, scope_open, scope_write, scope_close });
+        alloc_bytes, scope_open, scope_write, scope_close, flush_schedule });
     expect!(mine, DspScopeHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
         name, version, holds_schedule, arena_bytes_wanted, arena_bulk_bytes_wanted, wants_events,

@@ -137,6 +137,9 @@ pub struct DspHost {
     >,
     /// Give the slot back.
     pub scope_close: Option<unsafe extern "C" fn(ctx: *mut c_void, hnd: *mut DspScopeHandle)>,
+    /// Drops the bundles clockwork holds for this DSP ahead of their time
+    /// (a DSP's own "clear the schedule" verb). Callable from `dsp_process`.
+    pub flush_schedule: Option<unsafe extern "C" fn(ctx: *mut c_void)>,
 }
 
 /// What `dsp_describe` answers. Static: describable before any instance.

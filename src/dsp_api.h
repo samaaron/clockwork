@@ -350,6 +350,16 @@ typedef struct DspHost {
     void (*scope_write)(void* ctx, DspScopeHandle* hnd, const float* const* channels,
                         uint32_t n_channels, uint32_t frames);
     void (*scope_close)(void* ctx, DspScopeHandle* hnd);
+    /* Drop every message clockwork holds for this DSP ahead of its time: the
+     * timestamped bundles a client sent early, which clockwork keeps and
+     * delivers to dsp_osc when each falls due. For a DSP's own "clear the
+     * schedule" verb (scsynth's /clearSched), which would otherwise clear
+     * nothing, since the DSP holds none of them. Nothing already delivered
+     * is affected, and clockwork's own scheduled events (its /clockwork/
+     * schedule verb, the clock) are not a DSP's to drop.
+     *
+     * CALLABLE FROM dsp_process: it runs where the schedule is driven. */
+    void (*flush_schedule)(void* ctx);
 } DspHost;
 
 /* ── What the DSP says about itself ─────────────────────────────────────── */

@@ -38,6 +38,8 @@ scope_open(ctx, index,            claim a scope slot to publish audio into
 scope_write(ctx, hnd, channels,   append a block to a claimed scope
             n_channels, frames)
 scope_close(ctx, hnd)             give the slot back
+flush_schedule(ctx)               drop the bundles clockwork holds for this DSP
+                                  ahead of their time (its "clear the schedule")
 ```
 
 Not all callbacks can be called from all threads:
@@ -52,6 +54,7 @@ Not all callbacks can be called from all threads:
 | `open_sink`  | control thread only                                     |
 | `asset_release` | `dsp_process` and `dsp_osc` — one short message, nothing else |
 | `scope_open` / `scope_write` / `scope_close` | any, including the audio thread; none allocates |
+| `flush_schedule` | `dsp_process` and `dsp_osc`, where the schedule is driven |
 
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
 drops and counts rather than blocking, so a refusal is visible.

@@ -28,6 +28,7 @@ int main(void) {
     F(DspHost, ctx); F(DspHost, emit_osc); F(DspHost, log); F(DspHost, open_sink);
     F(DspHost, send_sink); F(DspHost, free_bytes); F(DspHost, asset_release);
     F(DspHost, alloc_bytes); F(DspHost, scope_open); F(DspHost, scope_write); F(DspHost, scope_close);
+    F(DspHost, flush_schedule);
     S(DspScopeHandle);
     F(DspScopeHandle, slot); F(DspScopeHandle, data); F(DspScopeHandle, channels); F(DspScopeHandle, max_frames);
 

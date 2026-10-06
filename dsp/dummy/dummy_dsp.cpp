@@ -50,6 +50,7 @@
  *   /dummy/tone
  *   /dummy/echo
  *   /dummy/ping                 -> /dummy/pong
+ *   /dummy/flush                drops what clockwork holds for it ahead of time
  *   /dummy/when                 -> /dummy/when-was ,h <timetag>
  *   /dummy/log ,s <text>        -> DspHost::log, framed as /clockwork/debug
  *
@@ -961,6 +962,11 @@ void dsp_osc(struct Dsp* dsp,
                 }
             }
         }
+        return;
+    }
+    // The guest's own "clear my schedule": what scsynth's /clearSched does.
+    if (addressIs(bytes, len, "/dummy/flush")) {
+        if (d->host.flush_schedule) d->host.flush_schedule(d->host.ctx);
         return;
     }
     if (addressIs(bytes, len, "/dummy/ping")) {

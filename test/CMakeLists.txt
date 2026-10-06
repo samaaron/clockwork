@@ -396,6 +396,7 @@ add_executable(clockwork_engine_tests
     test_guest_config_layout.cpp
     test_in_ring_drain.cpp
     test_shm_repro.cpp
+    test_guest_schedule_flush.cpp
     test_metrics_shm.cpp
     test_scope_stream_reader.cpp
     test_shm_peer_plane.cpp

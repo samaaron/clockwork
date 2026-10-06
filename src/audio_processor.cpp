@@ -856,12 +856,21 @@ extern "C" {
         }
     }
 
+    // DspHost::flush_schedule — the bundles held for the guest (SCHED_TAG_SYNTH),
+    // dropped. Not the default tag: that is clockwork's own schedule verb,
+    // and not the guest's to clear.
+    static void dsp_host_flush_schedule(void* /*ctx*/) {
+#if CLOCKWORK_SCHEDULER
+        clockwork_engine_schedule().flush(SCHED_TAG_SYNTH);
+#endif
+    }
+
     const DspHost g_dsp_host = { /*ctx*/ nullptr, &dsp_host_emit_osc, &dsp_host_log,
                                  &dsp_host_open_sink, &dsp_host_send_sink,
                                  &dsp_host_free_bytes, &dsp_host_asset_release,
                                  &dsp_host_alloc_bytes,
                                  &dsp_host_scope_open, &dsp_host_scope_write,
-                                 &dsp_host_scope_close };
+                                 &dsp_host_scope_close, &dsp_host_flush_schedule };
 
 #if CLOCKWORK_WORKLET_CLOCK && CLOCKWORK_SYNTH
     // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
