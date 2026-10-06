@@ -98,6 +98,7 @@ jobs:
         run: |
           set +e
           scripts/tidy.sh build > tidy.log 2> tidy.err
+          rc=$?
           set -e
           {
             echo "## clang-tidy (${{ matrix.platform }})"
@@ -110,7 +111,20 @@ jobs:
               | awk '{ printf "| %s | %s |\n", $1, $2 }'
             echo
             echo "$(grep -c 'warning:' tidy.log || true) warnings, $(grep -c 'clang-diagnostic-error' tidy.log || true) files not compiled by clang-tidy"
+            echo
+            # The script's own account of the run: files analysed of files
+            # asked for, the canary, and what was suppressed outside our
+            # sources — an empty table above is only clean if this line says
+            # every file was looked at.
+            grep '^tidy:' tidy.log || echo "tidy.sh gave no account of the run (exit $rc)"
           } >> "$GITHUB_STEP_SUMMARY"
+          # 2: no compile database or clang-tidy; 3: the canary reported
+          # nothing; 4: not every file was analysed. Each means the run is
+          # not evidence of anything, and the job must say so.
+          if [ "$rc" -ge 2 ]; then
+            echo "tidy.sh exit $rc:"; cat tidy.err | tail -20
+            exit "$rc"
+          fi
           # Only what .clang-tidy says is an error fails the job.
           if grep -q '\[-warnings-as-errors\]' tidy.log; then
             grep -B1 '\[-warnings-as-errors\]' tidy.log | head -40
