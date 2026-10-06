@@ -37,6 +37,90 @@ jobs:
       - name: Forbid raw stdio in engine-side native code
         run: scripts/check-logging.sh
 
+  # ------------------------------------------------------------------ tidy --
+  # clang-tidy over Clockwork's own sources (.clang-tidy: the crash classes
+  # the engine has had, and the shapes that rule them out), as a list per
+  # platform: Linux sees the shared code and the ALSA, JACK and PipeWire
+  # paths, macOS the CoreAudio and Cocoa ones. Windows's own branches are
+  # not analysed yet (clang-tidy driving clang-cl is its own job). The
+  # counts per check go in the job summary and the whole log is an artifact.
+  # What fails the job is .clang-tidy's WarningsAsErrors, nothing else.
+  tidy:
+    name: tidy (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: macos-arm64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config clang-tidy \
+            libasound2-dev libudev-dev libjack-jackd2-dev \
+            libpipewire-0.3-dev
+
+      - name: Install clang-tidy (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+
+      # The library target alone: tidy needs the compile database and the
+      # generated headers, not the tests.
+      - name: Configure and build the library
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build --target clockwork --parallel 2
+
+      - name: clang-tidy
+        shell: bash
+        run: |
+          set +e
+          scripts/tidy.sh build > tidy.log 2> tidy.err
+          set -e
+          {
+            echo "## clang-tidy (${{ matrix.platform }})"
+            echo
+            echo "| count | check |"
+            echo "|------:|-------|"
+            grep -o '\[[a-z]*-[a-z0-9.-]*\]$' tidy.log | sort | uniq -c | sort -rn \
+              | awk '{ printf "| %s | %s |\n", $1, $2 }'
+            echo
+            echo "$(grep -c 'warning:' tidy.log) warnings, $(grep -c 'clang-diagnostic-error' tidy.log) files not compiled by clang-tidy"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Only what .clang-tidy says is an error fails the job.
+          if grep -q '\[-warnings-as-errors\]' tidy.log; then
+            grep -B1 '\[-warnings-as-errors\]' tidy.log | head -40
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tidy-${{ matrix.platform }}
+          path: |
+            tidy.log
+            tidy.err
+
   # ---------------------------------------------------------------- native --
   native:
     name: native (${{ matrix.platform }})

@@ -111,6 +111,22 @@ cmake --build build-nif --target clockwork_nif
 cd test/nif && CLOCKWORK_NIF_PATH=../../build-nif mix test
 ```
 
+clang-tidy runs over Clockwork's own sources with the checks in `.clang-tidy`
+(the crash classes the engine has had: owning raw memory, empty catches,
+exceptions out of threads, destructors that should be virtual) against the
+compile database of a build:
+
+```sh
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON .
+scripts/tidy.sh build                                  # every file
+scripts/tidy.sh build src/native/ClockworkEngine.cpp   # one file
+```
+
+CI runs it on Linux and macOS and puts the counts per check in the job
+summary; what fails the job is `WarningsAsErrors` in `.clang-tidy`. Vendored
+code and smoothie are not tidied: smoothie is JUCE's code, fixed in tree
+only where Clockwork touches it.
+
 `CLOCKWORK_HEADLESS=1` boots without an audio device. The engine logs through
 `clockwork_log` only (`clockwork_log::log!` on the Rust side), onto its debug
 ring: a host prints those lines (or not), the test fixture captures them and
