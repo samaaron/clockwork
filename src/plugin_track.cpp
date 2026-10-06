@@ -47,6 +47,8 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <array>
+#include <string_view>
 #include <string>
 #include <thread>
 #include <vector>
@@ -127,17 +129,17 @@ struct SnapTrack {
     ClockworkTrackId id;
     uint32_t   slot;
     Track*     track;
-    char       name[CLOCKWORK_TRACK_NAME_MAX];
+    std::array<char, CLOCKWORK_TRACK_NAME_MAX> name;
     int32_t    timeline_id;
     uint32_t   count;
-    SnapNode   node[CLOCKWORK_TRACK_MAX_NODES];
+    std::array<SnapNode, CLOCKWORK_TRACK_MAX_NODES> node;
 };
 
 // Immutable once published.
 struct Snapshot {
     uint32_t   count = 0;
-    SnapTrack  track[CLOCKWORK_TRACK_MAX] {};
-    SnapTrack* bySlot[CLOCKWORK_TRACK_MAX] {};
+    std::array<SnapTrack, CLOCKWORK_TRACK_MAX>  track {};
+    std::array<SnapTrack*, CLOCKWORK_TRACK_MAX> bySlot {};
 };
 
 std::atomic<gsl::owner<Snapshot*>> g_snap{nullptr};   // what the audio thread reads
@@ -147,7 +149,7 @@ std::mutex g_mu;                          // control-thread mutations only
 std::vector<std::unique_ptr<Track>> g_tracks;   // display order
 ClockworkTrackId     g_nextTrack  = 1;          // 0 is "nothing"; never reused
 ClockworkTrackHandle g_nextHandle = 1;
-bool           g_slotUsed[CLOCKWORK_TRACK_MAX] {};
+std::array<bool, CLOCKWORK_TRACK_MAX> g_slotUsed {};
 
 const ClockworkClockState* g_clock = nullptr;
 
@@ -159,9 +161,9 @@ std::atomic<uint32_t>                     g_timeline_slots{0};
 // Scratch, static because this is the audio thread. `work` holds the track
 // being processed; `gen` whichever instrument is generating right now — one
 // buffer reused down the chain, since instruments are summed one at a time.
-alignas(16) float g_work[kChans * kMaxBlock];
-alignas(16) float g_gen[kChans * kMaxBlock];
-alignas(16) float g_silence[kMaxBlock];
+alignas(16) std::array<float, static_cast<size_t>(kChans) * kMaxBlock> g_work;
+alignas(16) std::array<float, static_cast<size_t>(kChans) * kMaxBlock> g_gen;
+alignas(16) std::array<float, kMaxBlock>          g_silence;
 
 void put(char* dst, size_t cap, const std::string& src) {
     std::snprintf(dst, cap, "%s", src.c_str());
@@ -192,8 +194,8 @@ const ClockworkTimeline* track_timeline(const SnapTrack& st, ClockworkTimeline& 
 }
 
 void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, int64_t block_time) {
-    const float* ins[kChans];
-    float*       gen[kChans] = { g_gen, g_gen + kMaxBlock };
+    std::array<const float*, kChans> ins {};
+    std::array<float*, kChans>       gen { g_gen.data(), g_gen.data() + kMaxBlock };
 
     ClockworkTimeline bound;
     const ClockworkTimeline* timeline = track_timeline(st, bound);
@@ -211,9 +213,9 @@ void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, int64_t
             // unintended effect.
             for (uint32_t ch = 0; ch < kChans; ++ch) {
                 std::memset(gen[ch], 0, sizeof(float) * frames);
-                ins[ch] = g_silence;
+                ins[ch] = g_silence.data();
             }
-            plugin_process(n.plugin, ins, kChans, gen, kChans, frames, block_time);
+            plugin_process(n.plugin, ins.data(), kChans, gen.data(), kChans, frames, block_time);
             for (uint32_t ch = 0; ch < kChans; ++ch) {
                 float* dst = work[ch];
                 const float* src = gen[ch];
@@ -223,7 +225,7 @@ void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, int64_t
             for (uint32_t ch = 0; ch < kChans; ++ch) ins[ch] = work[ch];
             // Same buffers in and out. Both formats permit it, and the
             // alternative is a second copy of the block for no benefit.
-            plugin_process(n.plugin, ins, kChans, work, kChans, frames, block_time);
+            plugin_process(n.plugin, ins.data(), kChans, work, kChans, frames, block_time);
         }
     }
 }
@@ -238,12 +240,12 @@ void track_process_at(float* const* in, uint32_t n_in, float* const* out, uint32
     if (frames > kMaxBlock) frames = kMaxBlock;
 
     const Snapshot* s = g_snap.load(std::memory_order_acquire);
-    float* work[kChans] = { g_work, g_work + kMaxBlock };
+    std::array<float*, kChans> work { g_work.data(), g_work.data() + kMaxBlock };
 
     for (uint32_t slot = 0; slot < CLOCKWORK_TRACK_MAX; ++slot) {
         const uint32_t ch = base + 2 * slot;
         if (ch + 1 >= n_in) break;                 // no return lane for this slot
-        float* ret[kChans] = { in[ch], in[ch + 1] };
+        std::array<float*, kChans> ret { in[ch], in[ch + 1] };
         if (!ret[0] || !ret[1]) continue;
 
         const SnapTrack* st = s ? s->bySlot[slot] : nullptr;
@@ -263,7 +265,7 @@ void track_process_at(float* const* in, uint32_t n_in, float* const* out, uint32
             else     std::memset(work[c], 0, sizeof(float) * frames);
         }
 
-        run_chain(*st, work, frames, block_time);
+        run_chain(*st, work.data(), frames, block_time);
 
         // Post-chain gain, ramped across the block so a fader move does not
         // step. Mute is a gain of zero with the same ramp: no click either way.
@@ -390,7 +392,7 @@ void republish() {
         st.id    = t->id;
         st.slot  = t->slot;
         st.track = t.get();
-        put(st.name, sizeof st.name, t->name);
+        put(st.name.data(), st.name.size(), t->name);
         st.timeline_id = t->timeline;
         st.count = 0;
         for (const auto& n : t->nodes) {
@@ -500,37 +502,37 @@ const Snapshot* current() { return g_snap.load(std::memory_order_acquire); }
 // and a dependency on a JSON library for a few hundred bytes of structure is
 // not worth what it costs a build that has to carry it to three platforms.
 
-const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+constexpr std::string_view kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 std::string b64_encode(const uint8_t* d, size_t n) {
     std::string o;
     o.reserve((n + 2) / 3 * 4);
     for (size_t i = 0; i < n; i += 3) {
-        const uint32_t v = (static_cast<uint32_t>(d[i]) << 16)
-                         | (i + 1 < n ? static_cast<uint32_t>(d[i + 1]) << 8 : 0)
-                         | (i + 2 < n ? static_cast<uint32_t>(d[i + 2]) : 0);
-        o += kB64[(v >> 18) & 63];
-        o += kB64[(v >> 12) & 63];
-        o += i + 1 < n ? kB64[(v >> 6) & 63] : '=';
-        o += i + 2 < n ? kB64[v & 63] : '=';
+        const uint32_t v = (static_cast<uint32_t>(d[i]) << 16u)
+                         | (i + 1 < n ? static_cast<uint32_t>(d[i + 1]) << 8u : 0u)
+                         | (i + 2 < n ? static_cast<uint32_t>(d[i + 2]) : 0u);
+        o += kB64[(v >> 18u) & 63u];
+        o += kB64[(v >> 12u) & 63u];
+        o += i + 1 < n ? kB64[(v >> 6u) & 63u] : '=';
+        o += i + 2 < n ? kB64[v & 63u] : '=';
     }
     return o;
 }
 
 std::vector<uint8_t> b64_decode(const std::string& s) {
     std::vector<uint8_t> o;
-    uint32_t acc = 0; int bits = 0;
+    uint32_t acc = 0; unsigned bits = 0;
     for (char c : s) {
-        int v;
-        if (c >= 'A' && c <= 'Z') v = c - 'A';
-        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        uint32_t v;
+        if (c >= 'A' && c <= 'Z') v = static_cast<uint32_t>(c - 'A');
+        else if (c >= 'a' && c <= 'z') v = static_cast<uint32_t>(c - 'a' + 26);
+        else if (c >= '0' && c <= '9') v = static_cast<uint32_t>(c - '0' + 52);
         else if (c == '+') v = 62;
         else if (c == '/') v = 63;
         else continue;   // '=' and whitespace
-        acc = (acc << 6) | static_cast<uint32_t>(v);
+        acc = (acc << 6u) | v;
         bits += 6;
-        if (bits >= 8) { bits -= 8; o.push_back(static_cast<uint8_t>((acc >> bits) & 0xFF)); }
+        if (bits >= 8) { bits -= 8; o.push_back(static_cast<uint8_t>((acc >> bits) & 0xFFu)); }
     }
     return o;
 }
@@ -545,7 +547,7 @@ void json_str(std::string& o, const std::string& s) {
             case '\r': o += "\\r";  break;
             case '\t': o += "\\t";  break;
             default:
-                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+                if (c < 0x20) { std::array<char, 8> b{}; std::snprintf(b.data(), b.size(), "\\u%04x", c); o += b.data(); }
                 else o += static_cast<char>(c);
         }
     }
@@ -566,10 +568,10 @@ std::string rig_to_json() {
         o += firstT ? "\n    {" : ",\n    {";
         firstT = false;
         o += "\"name\": "; json_str(o, t->name);
-        char num[64];
-        std::snprintf(num, sizeof num, ", \"gain\": %.6g, \"mute\": %s, \"chain\": [",
+        std::array<char, 64> num{};
+        std::snprintf(num.data(), num.size(), ", \"gain\": %.6g, \"mute\": %s, \"chain\": [",
                       static_cast<double>(t->gain.load()), t->mute.load() ? "true" : "false");
-        o += num;
+        o += num.data();
         bool firstN = true;
         for (const auto& n : t->nodes) {
             o += firstN ? "\n      {" : ",\n      {";
@@ -579,9 +581,9 @@ std::string rig_to_json() {
             o += ", \"name\": ";   json_str(o, n->name);
             o += ", \"vendor\": "; json_str(o, n->vendor);
             o += ", \"path\": ";   json_str(o, n->path);
-            std::snprintf(num, sizeof num, ", \"index\": %u, \"bypass\": %s, \"channel\": %d",
+            std::snprintf(num.data(), num.size(), ", \"index\": %u, \"bypass\": %s, \"channel\": %d",
                           n->index, n->bypass ? "true" : "false", static_cast<int>(n->channel));
-            o += num;
+            o += num.data();
             if (n->plugin) {
                 const uint32_t need = plugin_state_save(n->plugin, nullptr, 0);
                 if (need > 0) {
@@ -601,19 +603,17 @@ std::string rig_to_json() {
 }
 
 // A minimal JSON reader: enough for a rig, and strict about it.
+struct JMember;
 struct JVal {
     enum Kind { Null, Bool, Num, Str, Arr, Obj } kind = Null;
     bool        b = false;
     double      n = 0;
     std::string s;
-    std::vector<JVal> arr;
-    std::vector<std::pair<std::string, JVal>> obj;
+    std::vector<JVal>    arr;
+    std::vector<JMember> obj;   // JMember is complete below: a vector may name
+                                // an incomplete type, a pair of one may not
 
-    const JVal* get(const char* k) const {
-        if (kind != Obj) return nullptr;
-        for (const auto& kv : obj) if (kv.first == k) return &kv.second;
-        return nullptr;
-    }
+    const JVal* get(const char* k) const;
     std::string str(const char* k, const std::string& d = {}) const {
         const JVal* v = get(k); return (v && v->kind == Str) ? v->s : d;
     }
@@ -624,6 +624,13 @@ struct JVal {
         const JVal* v = get(k); return (v && v->kind == Bool) ? v->b : d;
     }
 };
+struct JMember { std::string key; JVal val; };
+
+const JVal* JVal::get(const char* k) const {
+    if (kind != Obj) return nullptr;
+    for (const auto& kv : obj) if (kv.key == k) return &kv.val;
+    return nullptr;
+}
 
 struct JParser {
     const char* p   = nullptr;
@@ -650,7 +657,7 @@ struct JParser {
                         if (end - p < 5) return false;
                         unsigned cp = 0;
                         for (int i = 1; i <= 4; ++i) {
-                            const char c = p[i]; cp <<= 4;
+                            const char c = p[i]; cp <<= 4u;
                             if (c >= '0' && c <= '9') cp |= static_cast<unsigned>(c - '0');
                             else if (c >= 'a' && c <= 'f') cp |= static_cast<unsigned>(c - 'a' + 10);
                             else if (c >= 'A' && c <= 'F') cp |= static_cast<unsigned>(c - 'A' + 10);
@@ -661,8 +668,8 @@ struct JParser {
                         // the BMP that a plugin put in a name survives a
                         // round trip only as its escaped form, which is fine.
                         if (cp < 0x80) out += static_cast<char>(cp);
-                        else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-                        else { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+                        else if (cp < 0x800) { out += static_cast<char>(0xC0u | (cp >> 6u)); out += static_cast<char>(0x80u | (cp & 0x3Fu)); }
+                        else { out += static_cast<char>(0xE0u | (cp >> 12u)); out += static_cast<char>(0x80u | ((cp >> 6u) & 0x3Fu)); out += static_cast<char>(0x80u | (cp & 0x3Fu)); }
                         break;
                     }
                     default: return false;
@@ -688,7 +695,7 @@ struct JParser {
                 if (!string(k) || !take(':')) return false;
                 JVal child;
                 if (!value(child)) return false;
-                v.obj.emplace_back(std::move(k), std::move(child));
+                v.obj.push_back({std::move(k), std::move(child)});
                 if (take(',')) continue;
                 return take('}');
             }
@@ -785,7 +792,7 @@ void clockwork_track_clear(void) {
             for (auto& n : t->nodes) dead.push_back(std::move(n));
         gone = std::move(g_tracks);
         g_tracks.clear();
-        std::memset(g_slotUsed, 0, sizeof g_slotUsed);
+        g_slotUsed.fill(false);
         republish();
     }
     close_all(dead);
@@ -828,7 +835,7 @@ ClockworkTrackId clockwork_track_resolve(const char* name) {
     const Snapshot* s = current();
     if (!s) return CLOCKWORK_TRACK_NONE;
     for (uint32_t i = 0; i < s->count; ++i)
-        if (std::strcmp(s->track[i].name, name) == 0) return s->track[i].id;
+        if (std::strcmp(s->track[i].name.data(), name) == 0) return s->track[i].id;
     return CLOCKWORK_TRACK_NONE;
 }
 

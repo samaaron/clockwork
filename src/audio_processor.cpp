@@ -7,6 +7,7 @@
 #include "audio_config.h"
 #include "lanes/lanes.h"    // clockwork_reserve_lanes / clockwork_lane_base, defined below
 
+#include <array>
 #include <atomic>
 
 namespace {
@@ -405,7 +406,7 @@ extern "C" {
     // flag the audio thread reads to know the instance is not coming. The first
     // reason wins: what stopped the build, not what went wrong because of it.
     // A fixed buffer, so recording a failure allocates nothing.
-    static char g_boot_error[512] = {0};
+    static std::array<char, 512> g_boot_error{};
     static std::atomic<bool> g_boot_failed{false};
 
     static void clear_boot_error() {
@@ -417,13 +418,13 @@ extern "C" {
         if (g_boot_failed.load(std::memory_order_relaxed)) return;
         va_list args;
         va_start(args, fmt);
-        vsnprintf(g_boot_error, sizeof(g_boot_error), fmt, args);
+        vsnprintf(g_boot_error.data(), g_boot_error.size(), fmt, args);
         va_end(args);
         g_boot_failed.store(true, std::memory_order_release);
     }
 
     const char* clockwork_last_boot_error() {
-        return g_boot_failed.load(std::memory_order_acquire) ? g_boot_error : nullptr;
+        return g_boot_failed.load(std::memory_order_acquire) ? g_boot_error.data() : nullptr;
     }
 
     // The heap this build takes: what the host asked for, else the profile's.
@@ -498,13 +499,13 @@ extern "C" {
             uint32_t n = clockwork_port_channels(p);
             if (n > g_in_channels - first) n = g_in_channels - first;
             if (n == 0) continue;
-            float* ch[clockwork::kMaxChannels];
+            std::array<float*, clockwork::kMaxChannels> ch{};
             for (uint32_t c = 0; c < n; ++c)
                 ch[c] = static_audio_in + static_cast<size_t>(first + c) * g_block_size;
             // The return value is deliberately ignored: the shortfall is
             // already silence in the buffer and already counted on the port,
             // and there is nothing useful the audio thread could do with it.
-            (void)clockwork_port_read(p, ch, n, frames);
+            (void)clockwork_port_read(p, ch.data(), n, frames);
         }
     }
 
@@ -520,10 +521,10 @@ extern "C" {
             uint32_t n = clockwork_port_channels(p);
             if (n > g_out_channels - first) n = g_out_channels - first;
             if (n == 0) continue;
-            const float* ch[clockwork::kMaxChannels];
+            std::array<const float*, clockwork::kMaxChannels> ch{};
             for (uint32_t c = 0; c < n; ++c)
                 ch[c] = static_audio_bus + static_cast<size_t>(first + c) * g_block_size;
-            (void)clockwork_port_write(p, ch, n, frames);
+            (void)clockwork_port_write(p, ch.data(), n, frames);
         }
     }
 
@@ -787,11 +788,11 @@ extern "C" {
         if (!hnd || !hnd->slot || !channels || n_channels == 0 || frames == 0) return;
         // The writer takes a full set of channel pointers; short by some, the
         // last one given fills the rest, as ScopeOut2 always did.
-        const float* padded[SHM_SCOPE_STREAM_CHANNELS];
+        std::array<const float*, SHM_SCOPE_STREAM_CHANNELS> padded{};
         for (uint32_t c = 0; c < SHM_SCOPE_STREAM_CHANNELS; ++c)
             padded[c] = channels[c < n_channels ? c : n_channels - 1];
         shm_scope_stream_writer writer(static_cast<shm_scope_stream*>(hnd->slot));
-        writer.write(padded, frames, g_engine_frames.load(std::memory_order_relaxed));
+        writer.write(padded.data(), frames, g_engine_frames.load(std::memory_order_relaxed));
     }
 
     static void dsp_host_scope_close(void* /*ctx*/, DspScopeHandle* hnd) {
@@ -2443,8 +2444,8 @@ extern "C" {
         if (!memory_initialized) return;
         if (len > 960) len = 960;  // matches buildDebugOsc's clamp; keeps the metric in sync
 
-        char pkt[1024];
-        uint32_t p = clockwork::buildDebugOsc(pkt, text, len);
+        std::array<char, 1024> pkt{};
+        uint32_t p = clockwork::buildDebugOsc(pkt.data(), text, len);
 
         // The audio thread owns the lock-free RT-out ring, so it logs there. Any
         // other thread routes to the locked NRT-out ring instead — but only where a
@@ -2461,10 +2462,10 @@ extern "C" {
                 shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
                 &control->out_head, &control->out_tail, &control->out_sequence,
                 EGRESS_BROADCAST_NOTIFY, 0,  // route, source_id (debug broadcasts)
-                pkt, p, &control->status_flags);
+                pkt.data(), p, &control->status_flags);
         } else {
             clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 0,
-                                reinterpret_cast<const uint8_t*>(pkt), p);
+                                reinterpret_cast<const uint8_t*>(pkt.data()), p);
         }
 
         // Count the debug line for the metrics view.
@@ -2490,18 +2491,18 @@ extern "C" {
      * matters here.
      */
     static void clockwork_boot_fail(const char* fmt, ...) {
-        char buffer[512];
+        std::array<char, 512> buffer{};
         va_list args;
         va_start(args, fmt);
-        vsnprintf(buffer, sizeof(buffer), fmt, args);
+        vsnprintf(buffer.data(), buffer.size(), fmt, args);
         va_end(args);
         // And kept, for the host to hand its clients: a reason on stderr is a
         // reason only someone reading the terminal ever sees.
-        record_boot_error("%s", buffer);
+        record_boot_error("%s", buffer.data());
 #ifdef __EMSCRIPTEN__
-        emscripten_console_error(buffer);
+        emscripten_console_error(buffer.data());
 #else
-        fprintf(stderr, "%s\n", buffer);   // stdio-ok: reporting a boot that produced no ring
+        fprintf(stderr, "%s\n", buffer.data());   // stdio-ok: reporting a boot that produced no ring
 #endif
     }
 
@@ -2553,19 +2554,19 @@ extern "C" {
 #endif
 
     static int clockwork_log_impl(const char* fmt, va_list args) {
-        char buffer[1024];
-        int result = vsnprintf(buffer, sizeof(buffer), fmt, args);
+        std::array<char, 1024> buffer{};
+        int result = vsnprintf(buffer.data(), buffer.size(), fmt, args);
         if (!memory_initialized) {
 #ifdef __EMSCRIPTEN__
-            emscripten_console_log(buffer);
+            emscripten_console_log(buffer.data());
 #else
-            clockwork_log_no_ring(buffer);
+            clockwork_log_no_ring(buffer.data());
 #endif
             return result;
         }
         uint32_t len = 0;
-        while (buffer[len] != '\0' && len < sizeof(buffer)) len++;
-        emit_debug_osc(buffer, len);
+        while (len < buffer.size() && buffer[len] != '\0') len++;
+        emit_debug_osc(buffer.data(), len);
         return result;
     }
 
@@ -2926,8 +2927,8 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
 static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element, uint32_t len) {
     using namespace engine;
     static constexpr uint32_t kHeader = 8 + 8 + 4;
-    static uint8_t frame[kHeader + 66560];
-    if (len > sizeof(frame) - kHeader) {
+    static std::array<uint8_t, kHeader + 66560> frame;
+    if (len > frame.size() - kHeader) {
         if (oversize_forward_log_count.fetch_add(1, std::memory_order_relaxed) < 8)
             clockwork_log("WARNING: %s of %u bytes dropped — wider than the host forward carries",
                           reinterpret_cast<const char*>(element), static_cast<unsigned>(len));
@@ -2935,11 +2936,11 @@ static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element
     }
     if (when == 0) when = 1;   // both spell "immediately"; the wire form is 1
     const uint64_t tt = static_cast<uint64_t>(when);
-    std::memcpy(frame, "#bundle", 8);
-    for (int i = 0; i < 8; ++i) frame[8 + i]  = static_cast<uint8_t>(tt >> (56 - 8 * i));
-    for (int i = 0; i < 4; ++i) frame[16 + i] = static_cast<uint8_t>(len >> (24 - 8 * i));
-    std::memcpy(frame + kHeader, element, len);
-    emit_osc_out(token, frame, kHeader + len);
+    std::memcpy(frame.data(), "#bundle", 8);
+    for (unsigned i = 0; i < 8; ++i) frame[8 + i]  = static_cast<uint8_t>(tt >> (56u - 8u * i));
+    for (unsigned i = 0; i < 4; ++i) frame[16 + i] = static_cast<uint8_t>(len >> (24u - 8u * i));
+    std::memcpy(frame.data() + kHeader, element, len);
+    emit_osc_out(token, frame.data(), kHeader + len);
 }
 
 // An inbound event, on the audio thread, on every host (clockwork_sys.h).
@@ -2971,9 +2972,9 @@ bool clockwork_event_route(void* /*routeCtx*/, const void* callCtx,
 static int clockwork_sink_host_emit(uint32_t kind, const char* target,
                                     const uint8_t* bytes, uint32_t len, int64_t when) {
     if (kind != kClockworkSinkMidi || !target || !bytes || len == 0) return 0;
-    static char element[64 + 256 + 66560];
+    static std::array<char, 64 + 256 + 66560> element;
     try {
-        osc::OutboundPacketStream ps(element, sizeof(element));
+        osc::OutboundPacketStream ps(element.data(), element.size());
         ps << osc::BeginMessage(CLOCKWORK_SYS("midi/sink/send"))
            << target
            << osc::Blob(bytes, static_cast<osc::osc_bundle_element_size_t>(len))

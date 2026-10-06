@@ -23,6 +23,7 @@
 #include "DevicePolicy.h"
 #include "clockwork_config.h"  // CLOCKWORK_COMMIT
 #include <juce_core/juce_core.h>
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -80,8 +81,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
 
         if (std::strcmp(addr, CLOCKWORK_SYS("clock/visibility/get")) == 0) {
             // Read: reply /clockwork/clock/visibility.reply <int> to the sender.
-            char buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/visibility.reply"))
               << static_cast<int32_t>(mClockworkClock->getLinkVisibility());
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
@@ -100,8 +101,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
         }
 
         if (std::strcmp(addr, CLOCKWORK_SYS("clock/audio/publish/get")) == 0) {
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/publish.reply"))
               << static_cast<int32_t>(mLinkAudio->isPublishEnabled() ? 1 : 0);
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
@@ -193,8 +194,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                           && mLinkAudio->addInput(
                                  peerName, channelName,
                                  static_cast<uint32_t>(busIdx));
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/input/add.reply"))
               << static_cast<int32_t>(ok ? 1 : 0)
               << osc::EndMessage;
@@ -245,8 +246,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             const bool ok = peerName && channelName && seconds >= 0.0f
                 && mLinkAudio->setInputLatencySeconds(
                        peerName, channelName, seconds);
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/input/latency/set.reply"))
               << static_cast<int32_t>(ok ? 1 : 0)
               << osc::EndMessage;
@@ -275,8 +276,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                 && mLinkAudio->addSink(name,
                                                   static_cast<uint32_t>(busIdx),
                                                   static_cast<uint32_t>(numChans));
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/sink/add.reply"))
               << static_cast<int32_t>(ok ? 1 : 0)
               << osc::EndMessage;
@@ -391,16 +392,16 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             const double initTempo = mClockworkClock->getBpm();
             const int32_t initPeers = static_cast<int32_t>(mClockworkClock->numPeers());
             {
-                char buf[64];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
+                std::array<char, 64> buf{};
+                osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << initTempo
                   << osc::EndMessage;
                 mEgress->sendToCaller(token, reinterpret_cast<const uint8_t*>(s.Data()),
                                    static_cast<uint32_t>(s.Size()));
             }
             {
-                char buf[64];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
+                std::array<char, 64> buf{};
+                osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers")) << initPeers
                   << osc::EndMessage;
                 mEgress->sendToCaller(token, reinterpret_cast<const uint8_t*>(s.Data()),
@@ -467,7 +468,7 @@ static std::string cutName(const std::string& name) {
     constexpr size_t kKeep = 64;
     if (name.size() <= kKeep) return name;
     size_t n = kKeep;
-    while (n > 0 && (static_cast<unsigned char>(name[n]) & 0xC0) == 0x80) --n;
+    while (n > 0 && (static_cast<unsigned>(static_cast<unsigned char>(name[n])) & 0xC0u) == 0x80u) --n;
     return name.substr(0, n) + "\xE2\x80\xA6";
 }
 
@@ -512,8 +513,8 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // of the client's boot handshake. Clients that want the
             // device list ask for it with /clockwork/devices/report.
             mEgress->subscribeCaller(token);
-            char buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("notify.reply"))
               << static_cast<osc::int32>(1)
               << CLOCKWORK_COMMIT   // which Clockwork (it has no version number: clockwork_config.h)
@@ -558,8 +559,8 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
                     mEgress->reply(token, packet.ptr(), packet.size());
                 }
                 // Done marker
-                char buf[256];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
+                std::array<char, 256> buf{};
+                osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.done")) << osc::EndMessage;
                 mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
@@ -608,8 +609,8 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // switch.done broadcast: what was asked for, where the engine is
             // now, and why not when it failed.
             {
-                char buf[128];
-                osc::OutboundPacketStream s(buf, sizeof(buf));
+                std::array<char, 128> buf{};
+                osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.reply"))
                   << static_cast<osc::int32>(1) << osc::EndMessage;
                 mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),

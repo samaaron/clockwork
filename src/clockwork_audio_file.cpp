@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -73,7 +74,7 @@ bool startsWith(const uint8_t* d, size_t n, size_t at, const char* tag) {
 }
 
 // The first sixteen bytes of a Wave64 file: the RIFF GUID.
-const uint8_t kW64Riff[16] = {
+constexpr std::array<uint8_t, 16> kW64Riff = {
     0x72,0x69,0x66,0x66, 0x2E,0x91, 0xCF,0x11, 0xA5,0xD6,
     0x28,0xDB,0x04,0xC1,0x00,0x00
 };
@@ -84,7 +85,7 @@ ClockworkAudioFormat sniff(const uint8_t* d, size_t n) {
     if (startsWith(d, n, 0, "fLaC")) return CLOCKWORK_AUDIO_FORMAT_FLAC;
     if (startsWith(d, n, 0, "OggS")) return CLOCKWORK_AUDIO_FORMAT_OGG;
     if (startsWith(d, n, 0, "RF64")) return CLOCKWORK_AUDIO_FORMAT_RF64;
-    if (n >= 16 && std::memcmp(d, kW64Riff, 16) == 0)
+    if (n >= 16 && std::memcmp(d, kW64Riff.data(), kW64Riff.size()) == 0)
         return CLOCKWORK_AUDIO_FORMAT_W64;
     if ((startsWith(d, n, 0, "RIFF") || startsWith(d, n, 0, "RIFX"))
         && startsWith(d, n, 8, "WAVE"))
@@ -97,8 +98,9 @@ ClockworkAudioFormat sniff(const uint8_t* d, size_t n) {
     // layer III version that is not the reserved one, is as much as there is
     // to go on — and it is what every player uses.
     if (startsWith(d, n, 0, "ID3")) return CLOCKWORK_AUDIO_FORMAT_MP3;
-    if (n >= 2 && d[0] == 0xFF && (d[1] & 0xE0) == 0xE0
-        && (d[1] & 0x18) != 0x08 && (d[1] & 0x06) == 0x02)
+    if (n >= 2 && d[0] == 0xFF && (static_cast<uint32_t>(d[1]) & 0xE0u) == 0xE0u
+        && (static_cast<uint32_t>(d[1]) & 0x18u) != 0x08u
+        && (static_cast<uint32_t>(d[1]) & 0x06u) == 0x02u)
         return CLOCKWORK_AUDIO_FORMAT_MP3;
 
     return CLOCKWORK_AUDIO_FORMAT_UNKNOWN;
@@ -581,10 +583,10 @@ ClockworkStatus clockwork_audio_writer_write(ClockworkAudioWriter* w,
             w->scratch.resize(samples * 3);
             uint8_t* p = w->scratch.data();
             for (size_t i = 0; i < samples; ++i) {
-                const int32_t v = quantize(interleaved[i], 8388607);
-                p[i * 3 + 0] = static_cast<uint8_t>(v & 0xFF);
-                p[i * 3 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-                p[i * 3 + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+                const uint32_t v = static_cast<uint32_t>(quantize(interleaved[i], 8388607));
+                p[i * 3 + 0] = static_cast<uint8_t>(v & 0xFFu);
+                p[i * 3 + 1] = static_cast<uint8_t>((v >> 8u) & 0xFFu);
+                p[i * 3 + 2] = static_cast<uint8_t>((v >> 16u) & 0xFFu);
             }
             src = w->scratch.data();
         }

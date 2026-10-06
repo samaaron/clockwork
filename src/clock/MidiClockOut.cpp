@@ -10,6 +10,7 @@
 #include "clock/clock_math.h"
 #include "clockwork_clock.h"
 
+#include <array>
 #include <algorithm>
 
 // The sink's shape is the MIDI profile's (CLOCKWORK_MIDI_SINK_CLASSES in
@@ -29,8 +30,8 @@ ClockworkSink midi_clock_sink_for_port(const std::string& port) {
 ClockworkSink midi_sink_for_port(const std::string& port) {
     // Reuse the sink already open on this port. Opening a second one would
     // double every tick on the wire.
-    ClockworkSink open[MidiClockOut::kMaxFanout];
-    const uint32_t n = clockwork_sink_list(open, MidiClockOut::kMaxFanout);
+    std::array<ClockworkSink, MidiClockOut::kMaxFanout> open{};
+    const uint32_t n = clockwork_sink_list(open.data(), MidiClockOut::kMaxFanout);
     for (uint32_t i = 0; i < n && i < MidiClockOut::kMaxFanout; ++i) {
         if (clockwork_sink_kind(open[i]) != kClockworkSinkMidi) continue;
         const char* target = clockwork_sink_target(open[i]);
@@ -127,7 +128,7 @@ void MidiClockOut::tick(ClockworkClock& clock, double nowNtp) {
         ClockworkSink sink;
         uint8_t byte;
     };
-    Pending  batch[kMaxFollowers * (kMaxPulsesPerTick + 1)];
+    std::array<Pending, static_cast<size_t>(kMaxFollowers) * (kMaxPulsesPerTick + 1)> batch{};
     uint32_t n = 0;
     const double floor = mFollowFloorNtp;
 
@@ -164,7 +165,7 @@ void MidiClockOut::tick(ClockworkClock& clock, double nowNtp) {
 
     // Time order; a transport byte ahead of a pulse at the same instant, as
     // a receiver expects Start before the pulse it starts on.
-    std::sort(batch, batch + n, [](const Pending& a, const Pending& b) {
+    std::sort(batch.begin(), batch.begin() + n, [](const Pending& a, const Pending& b) {
         if (a.atNtp != b.atNtp) return a.atNtp < b.atNtp;
         return a.byte > b.byte;   // 0xFA / 0xFC before 0xF8
     });
@@ -205,8 +206,8 @@ void MidiClockOut::generate(double nowNtp) {
         } else {
             // Every open MIDI sink. Listing writes into this stack array and
             // allocates nothing, which is what makes the fan-out RT-safe.
-            ClockworkSink open[kMaxFanout];
-            const uint32_t n = clockwork_sink_list(open, kMaxFanout);
+            std::array<ClockworkSink, kMaxFanout> open{};
+            const uint32_t n = clockwork_sink_list(open.data(), kMaxFanout);
             uint32_t matched = 0;
             for (uint32_t i = 0; i < n && i < kMaxFanout; ++i) {
                 if (clockwork_sink_kind(open[i]) != kClockworkSinkMidi) continue;

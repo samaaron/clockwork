@@ -84,7 +84,7 @@ static int64_t timespecToNs(const struct timespec& ts) {
     return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
 }
 static struct timespec nsToTimespec(int64_t ns) {
-    struct timespec ts;
+    struct timespec ts{};
     ts.tv_sec  = static_cast<time_t>(ns / 1'000'000'000LL);
     ts.tv_nsec = static_cast<long>(ns % 1'000'000'000LL);
     return ts;
@@ -92,14 +92,14 @@ static struct timespec nsToTimespec(int64_t ns) {
 
 void HeadlessDriver::run() {
     const int64_t blockNs = 1'000'000'000LL * mBlockSize / mSampleRate;
-    struct timespec next;
+    struct timespec next{};
     clock_gettime(CLOCK_MONOTONIC, &next);
     double samplePos = 0.0;
     clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate);
 
     while (!threadShouldExit()) {
         processBlock(samplePos);
-        struct timespec nowTs;
+        struct timespec nowTs{};
         clock_gettime(CLOCK_MONOTONIC, &nowTs);
         next = nsToTimespec(cappedNextWake(timespecToNs(next) + blockNs,
                                            timespecToNs(nowTs), blockNs));

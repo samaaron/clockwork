@@ -36,6 +36,7 @@
 
 #include "mem_region.h"
 #include "platform.h"
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
@@ -123,8 +124,8 @@ static void deferred_drain_on_engine_thread() {
 // pool. Append-only; written by the thread that created the area (engine or
 // boot), read lock-free from anywhere.
 static constexpr int kMaxAreas = 32;
-static std::atomic<uintptr_t> g_area_base[kMaxAreas];
-static std::atomic<uintptr_t> g_area_end[kMaxAreas];
+static std::array<std::atomic<uintptr_t>, kMaxAreas> g_area_base{};
+static std::array<std::atomic<uintptr_t>, kMaxAreas> g_area_end{};
 static std::atomic<int> g_area_count{0};
 
 static void record_area(void* base, size_t size) {

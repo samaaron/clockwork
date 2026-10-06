@@ -65,6 +65,7 @@ extern "C" {
 #  include <unistd.h>
 #endif
 
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -122,10 +123,10 @@ public:
     // Over the ring only: the engine prints its debug channel to the same
     // stderr this process inherited, so a copy here would appear twice.
     void debug(const std::string& line) override {
-        char pkt[1024];
-        const uint32_t n = clockwork::buildDebugOsc(pkt, line.data(), static_cast<uint32_t>(line.size()));
+        std::array<char, 1024> pkt{};
+        const uint32_t n = clockwork::buildDebugOsc(pkt.data(), line.data(), static_cast<uint32_t>(line.size()));
         put(EGRESS_BROADCAST_NOTIFY, BRIDGE_ORIGIN_TOKEN,
-            reinterpret_cast<const uint8_t*>(pkt), n);
+            reinterpret_cast<const uint8_t*>(pkt.data()), n);
     }
 
 private:

@@ -33,6 +33,7 @@
 #  include "plugin_clap.h"
 #endif
 
+#include <array>
 #include <new>
 #include <cstdio>
 #include <cstring>
@@ -46,7 +47,7 @@ struct HostedPlugin {
     // plugin_process and read from a control thread; plain integers rather
     // than atomics because a torn read of a diagnostic counter is worth less
     // than an atomic on the audio path, and the numbers are advisory.
-    char        name[96] = {};
+    std::array<char, 96> name {};
     uint64_t    calls = 0, max_ns = 0, total_ns = 0, budget_overruns = 0;
     uint64_t    budget_ns = 0;          // set per call from frames / rate
     double      sample_rate = 0.0;
@@ -59,11 +60,11 @@ namespace {
 void recordName(HostedPlugin* h, const char* path, uint32_t index) {
     PluginDesc d{};
     if (plugin_scan(path, &d, 1) > index && d.name && d.name[0]) {
-        std::snprintf(h->name, sizeof h->name, "%s", d.name);
+        std::snprintf(h->name.data(), h->name.size(), "%s", d.name);
         return;
     }
     const char* base = path ? std::strrchr(path, '/') : nullptr;
-    std::snprintf(h->name, sizeof h->name, "%s", base ? base + 1 : (path ? path : "?"));
+    std::snprintf(h->name.data(), h->name.size(), "%s", base ? base + 1 : (path ? path : "?"));
 }
 } // namespace
 
@@ -183,7 +184,7 @@ void plugin_process(struct HostedPlugin* p,
 
 int plugin_health(const struct HostedPlugin* p, PluginHealth* out) {
     if (!p || !out) return 0;
-    out->name            = p->name[0] ? p->name : "(unnamed)";
+    out->name            = p->name[0] ? p->name.data() : "(unnamed)";
     out->calls           = p->calls;
     out->max_ns          = p->max_ns;
     out->total_ns        = p->total_ns;

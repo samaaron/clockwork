@@ -15,6 +15,7 @@
 #include "lanes/lanes_internal.h"  // clockwork_egress_nrt_write (NRT egress producer)
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
+#include <array>
 #include <cstring>
 
 void OscEgress::init(IOscTransport*                                  transport,
@@ -82,9 +83,9 @@ void OscEgress::broadcastOscNotify(const uint8_t* data, uint32_t size) {
 }
 
 void OscEgress::debug(const char* text, uint32_t len) {
-    char pkt[1024];
-    uint32_t p = clockwork::buildDebugOsc(pkt, text, len);
-    frame(BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(pkt), p);
+    std::array<char, 1024> pkt{};
+    uint32_t p = clockwork::buildDebugOsc(pkt.data(), text, len);
+    frame(BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(pkt.data()), p);
 }
 
 // ── Gateway side: dispatch one framed message to the transport / onDebug ─────
@@ -182,8 +183,8 @@ void OscEgress::sendStateChange(const char* state, const char* reason) {
 
 void OscEgress::sendSetup(int sampleRate, int bufferSize, uint32_t generation) {
     if (!hasSubscribers()) return;
-    char buf[256];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
+    std::array<char, 256> buf{};
+    osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(CLOCKWORK_SYS("setup"))
       << static_cast<osc::int32>(sampleRate)
       << static_cast<osc::int32>(bufferSize)

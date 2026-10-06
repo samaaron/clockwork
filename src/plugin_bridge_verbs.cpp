@@ -11,6 +11,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
+#include <array>
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
@@ -100,7 +101,7 @@ bool TrackVerbs::applyRealtime(const uint8_t* data, uint32_t len, uint32_t frame
             const int pitch = intArg(it, end, 60);
             const float vel = unitArg(it, end, 0.8f);
             const int ch = intArg(it, end, 0);
-            clockwork_track_note(t, on, static_cast<int16_t>(ch & 15), static_cast<int16_t>(pitch), vel, off);
+            clockwork_track_note(t, on, static_cast<int16_t>(static_cast<unsigned>(ch) & 15u), static_cast<int16_t>(pitch), vel, off);
             return true;
         }
         if (std::strcmp(verb, "cc") == 0) {
@@ -109,7 +110,7 @@ bool TrackVerbs::applyRealtime(const uint8_t* data, uint32_t len, uint32_t frame
             const int num = intArg(it, end, 1);
             const float v = unitArg(it, end, 0.0f);
             const int ch = intArg(it, end, 0);
-            clockwork_track_cc(t, static_cast<int16_t>(ch & 15), static_cast<uint8_t>(num & 127), v, off);
+            clockwork_track_cc(t, static_cast<int16_t>(static_cast<unsigned>(ch) & 15u), static_cast<uint8_t>(static_cast<unsigned>(num) & 127u), v, off);
             return true;
         }
         if (std::strcmp(verb, "bend") == 0) {
@@ -117,7 +118,7 @@ bool TrackVerbs::applyRealtime(const uint8_t* data, uint32_t len, uint32_t frame
             const ClockworkTrackId t = trackArg(it, end);
             const float b = static_cast<float>(numArg(it, end, 0.0));
             const int ch = intArg(it, end, 0);
-            clockwork_track_pitch_bend(t, static_cast<int16_t>(ch & 15), b, off);
+            clockwork_track_pitch_bend(t, static_cast<int16_t>(static_cast<unsigned>(ch) & 15u), b, off);
             return true;
         }
         if (std::strcmp(verb, "notes_off") == 0) {
@@ -167,8 +168,8 @@ void TrackVerbs::onParamEdit(void* ctx, ClockworkTrackHandle h, uint32_t id, dou
     // Configure armed takes one as "put this control on the face"; a
     // `value` is the host's, set by name from code (track/param), and says
     // only what the parameter is now.
-    char buf[128];
-    osc::OutboundPacketStream s(buf, sizeof buf);
+    std::array<char, 128> buf{};
+    osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(own ? CLOCKWORK_SYS("track/plugin/param/edit")
                                : CLOCKWORK_SYS("track/plugin/param/value"))
       << static_cast<osc::int32>(h)
@@ -273,8 +274,8 @@ void TrackVerbs::broadcastState(ClockworkTrackId t) {
     // /clockwork/track/state <id:int> <gain:float> <mute:int> <timeline:string>
     // The timeline is appended, after the two fields the readers of this
     // message already count, for the reason sendTracks gives.
-    char buf[256];
-    osc::OutboundPacketStream s(buf, sizeof buf);
+    std::array<char, 256> buf{};
+    osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(CLOCKWORK_SYS("track/state"))
       << static_cast<osc::int32>(info.id) << info.gain << static_cast<osc::int32>(info.mute)
       << info.timeline
@@ -435,8 +436,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
             const char* err = nullptr;
             const ClockworkTrackId t = clockwork_track_create(name.c_str(), &err);
             log("[track] create " + name + (t ? " -> id " + std::to_string(t) : std::string(" FAILED: ") + (err ? err : "")));
-            char buf[256];
-            osc::OutboundPacketStream s(buf, sizeof buf);
+            std::array<char, 256> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("track/create.reply"))
               << static_cast<osc::int32>(t) << (t ? 1 : 0)
               << (t ? name.c_str() : (err ? err : "create failed"))
@@ -450,8 +451,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
             // /clockwork/track/remove <track> → /clockwork/track/remove.reply <id:int> <removed:int>
             const ClockworkTrackId t = trackArg(it, end);
             const int removed = clockwork_track_remove(t);
-            char buf[128];
-            osc::OutboundPacketStream s(buf, sizeof buf);
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("track/remove.reply"))
               << static_cast<osc::int32>(t) << static_cast<osc::int32>(removed)
               << osc::EndMessage;
@@ -466,8 +467,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
             const std::string name = strArg(it, end);
             const char* err = nullptr;
             const int ok = clockwork_track_rename(t, name.c_str(), &err);
-            char buf[256];
-            osc::OutboundPacketStream s(buf, sizeof buf);
+            std::array<char, 256> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("track/rename.reply"))
               << static_cast<osc::int32>(t) << static_cast<osc::int32>(ok)
               << (ok ? name.c_str() : (err ? err : "rename failed"))
@@ -530,8 +531,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
                 else if (!clockwork_track_set_timeline(t, id, name.c_str())) { ok = 0; detail = "timeline not set"; }
                 else clockwork_track_info(t, &info);
             }
-            char buf[256];
-            osc::OutboundPacketStream s(buf, sizeof buf);
+            std::array<char, 256> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline.reply"))
               << static_cast<osc::int32>(t) << static_cast<osc::int32>(ok)
               << (ok ? info.timeline : detail)
@@ -589,8 +590,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
             //   → /clockwork/track/plugin/remove.reply <handle:int> <removed:int>
             const int h = intArg(it, end, 0);
             const int removed = clockwork_track_remove_plugin(static_cast<ClockworkTrackHandle>(h));
-            char buf[128];
-            osc::OutboundPacketStream s(buf, sizeof buf);
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("track/plugin/remove.reply"))
               << static_cast<osc::int32>(h) << static_cast<osc::int32>(removed)
               << osc::EndMessage;

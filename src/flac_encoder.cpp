@@ -18,15 +18,15 @@ public:
 
     void write(uint64_t value, int bits) {
         if (bits <= 0) return;
-        if (bits < 64) value &= (uint64_t(1) << bits) - 1;
-        while (bits > 0) {
-            const int take = std::min(bits, 8 - mBitsInByte);
-            const int shift = bits - take;
-            const uint8_t chunk =
-                static_cast<uint8_t>((value >> shift) & ((1u << take) - 1u));
-            mByte = static_cast<uint8_t>((mByte << take) | chunk);
+        unsigned left = static_cast<unsigned>(bits);
+        if (left < 64) value &= (uint64_t(1) << left) - 1;
+        while (left > 0) {
+            const unsigned take  = std::min(left, 8u - mBitsInByte);
+            const unsigned shift = left - take;
+            const uint32_t chunk = static_cast<uint32_t>(value >> shift) & ((1u << take) - 1u);
+            mByte = static_cast<uint8_t>((static_cast<uint32_t>(mByte) << take) | chunk);
             mBitsInByte += take;
-            bits -= take;
+            left -= take;
             if (mBitsInByte == 8) {
                 mOut.push_back(mByte);
                 mByte = 0;
@@ -41,51 +41,50 @@ public:
 
     // Rice: `quotient` zeros, a stop bit, then the remainder.
     void rice(uint64_t folded, int param) {
-        const uint64_t q = folded >> param;
+        const unsigned p = static_cast<unsigned>(param);
+        const uint64_t q = folded >> p;
         for (uint64_t i = 0; i < q; ++i) write(0, 1);
         write(1, 1);
-        if (param > 0) write(folded & ((uint64_t(1) << param) - 1), param);
+        if (param > 0) write(folded & ((uint64_t(1) << p) - 1), param);
     }
 
     // Zero-pad to the next byte, as a frame requires before its CRC.
     void flushToByte() {
-        if (mBitsInByte > 0) write(0, 8 - mBitsInByte);
+        if (mBitsInByte > 0) write(0, static_cast<int>(8 - mBitsInByte));
     }
 
 private:
     std::vector<uint8_t>& mOut;
-    uint8_t mByte = 0;
-    int     mBitsInByte = 0;
+    uint8_t  mByte = 0;
+    unsigned mBitsInByte = 0;
 };
 
 // ── Checksums ────────────────────────────────────────────────────────────────
 uint8_t crc8(const uint8_t* data, size_t n) {
-    uint8_t crc = 0;
+    uint32_t crc = 0;
     for (size_t i = 0; i < n; ++i) {
         crc ^= data[i];
         for (int b = 0; b < 8; ++b)
-            crc = static_cast<uint8_t>((crc & 0x80) ? ((crc << 1) ^ 0x07)
-                                                    : (crc << 1));
+            crc = ((crc & 0x80u) != 0 ? ((crc << 1u) ^ 0x07u) : (crc << 1u)) & 0xFFu;
     }
-    return crc;
+    return static_cast<uint8_t>(crc);
 }
 
 uint16_t crc16(const uint8_t* data, size_t n) {
-    uint16_t crc = 0;
+    uint32_t crc = 0;
     for (size_t i = 0; i < n; ++i) {
-        crc ^= static_cast<uint16_t>(data[i]) << 8;
+        crc ^= static_cast<uint32_t>(data[i]) << 8u;
         for (int b = 0; b < 8; ++b)
-            crc = static_cast<uint16_t>((crc & 0x8000) ? ((crc << 1) ^ 0x8005)
-                                                       : (crc << 1));
+            crc = ((crc & 0x8000u) != 0 ? ((crc << 1u) ^ 0x8005u) : (crc << 1u)) & 0xFFFFu;
     }
-    return crc;
+    return static_cast<uint16_t>(crc);
 }
 
 // The frame number, in the UTF-8-shaped coding FLAC borrows for it.
 void putUtf8(std::vector<uint8_t>& out, uint64_t value) {
     if (value < 0x80u) { out.push_back(static_cast<uint8_t>(value)); return; }
 
-    int bytes;
+    unsigned bytes;
     if      (value < 0x800u)        bytes = 2;
     else if (value < 0x10000u)      bytes = 3;
     else if (value < 0x200000u)     bytes = 4;
@@ -93,16 +92,16 @@ void putUtf8(std::vector<uint8_t>& out, uint64_t value) {
     else if (value < 0x80000000u)   bytes = 6;
     else                            bytes = 7;
 
-    const uint8_t lead = static_cast<uint8_t>(0xFEu << (7 - bytes));
-    out.push_back(static_cast<uint8_t>(lead | (value >> ((bytes - 1) * 6))));
-    for (int i = bytes - 2; i >= 0; --i)
-        out.push_back(static_cast<uint8_t>(0x80u | ((value >> (i * 6)) & 0x3Fu)));
+    const uint32_t lead = (0xFEu << (7u - bytes)) & 0xFFu;
+    out.push_back(static_cast<uint8_t>(lead | (value >> ((bytes - 1u) * 6u))));
+    for (unsigned i = bytes - 1; i-- > 0;)
+        out.push_back(static_cast<uint8_t>(0x80u | ((value >> (i * 6u)) & 0x3Fu)));
 }
 
 // Rice folds a signed residual onto the naturals, small magnitudes first.
 inline uint64_t fold(int64_t v) {
-    return v < 0 ? (static_cast<uint64_t>(-(v + 1)) << 1) | 1u
-                 : static_cast<uint64_t>(v) << 1;
+    return v < 0 ? (static_cast<uint64_t>(-(v + 1)) << 1u) | 1u
+                 : static_cast<uint64_t>(v) << 1u;
 }
 
 constexpr int kMaxRiceParam   = 30;   // the escape codes sit one above these
@@ -112,8 +111,9 @@ constexpr int kMaxFixedOrder  = 4;
 
 // Bits a partition costs at a given Rice parameter.
 uint64_t partitionBits(const int64_t* r, uint32_t n, int param) {
-    uint64_t bits = static_cast<uint64_t>(n) * (1u + param);
-    for (uint32_t i = 0; i < n; ++i) bits += fold(r[i]) >> param;
+    const unsigned p = static_cast<unsigned>(param);
+    uint64_t bits = static_cast<uint64_t>(n) * (1u + p);
+    for (uint32_t i = 0; i < n; ++i) bits += fold(r[i]) >> p;
     return bits;
 }
 
@@ -125,7 +125,7 @@ int bestParam(const int64_t* r, uint32_t n, uint64_t* bitsOut) {
     for (uint32_t i = 0; i < n; ++i) sum += fold(r[i]);
 
     int p = 0;
-    while (p < kMaxRiceParam && (static_cast<uint64_t>(n) << p) < sum) ++p;
+    while (p < kMaxRiceParam && (static_cast<uint64_t>(n) << static_cast<unsigned>(p)) < sum) ++p;
 
     int bestP = p;
     uint64_t bestBits = partitionBits(r, n, p);
@@ -153,7 +153,7 @@ Partitioning choosePartitioning(const int64_t* residual, uint32_t blockSize,
     std::vector<int> params;
 
     for (int order = 0; order <= kMaxPartOrder; ++order) {
-        const uint32_t parts = 1u << order;
+        const uint32_t parts = 1u << static_cast<unsigned>(order);
         if (blockSize % parts != 0) continue;
         const uint32_t psize = blockSize / parts;
         if (psize <= static_cast<uint32_t>(predictorOrder)) continue;
@@ -217,7 +217,7 @@ FlacEncoder::FlacEncoder(uint32_t channels, uint32_t sampleRate,
                          uint32_t bitsPerSample)
     : mChannels(channels), mSampleRate(sampleRate), mBps(bitsPerSample),
       mValid(channels >= 1 && channels <= 8
-             && sampleRate >= 1 && sampleRate < (1u << 20)
+             && sampleRate >= 1 && sampleRate < (1u << 20u)
              && (bitsPerSample == 16 || bitsPerSample == 24)) {
     if (!mValid) return;
 
@@ -255,7 +255,7 @@ std::vector<uint8_t> FlacEncoder::finalStreamInfo() const {
     bw.write(mSampleRate, 20);
     bw.write(mChannels - 1, 3);
     bw.write(mBps - 1, 5);
-    bw.write(mTotalFrames & ((uint64_t(1) << 36) - 1), 36);
+    bw.write(mTotalFrames & ((uint64_t(1) << 36u) - 1), 36);
     // The MD5 of the unencoded audio, left at zero: the format defines that as
     // "not computed", and every decoder treats it so.
     for (int i = 0; i < 16; ++i) bw.write(0, 8);
@@ -291,8 +291,8 @@ void FlacEncoder::encodeBlock(const int32_t* interleaved, uint32_t frames,
 
         putUtf8(hdr, mFrameNumber);
         if (!wholeBlock) {
-            hdr.push_back(static_cast<uint8_t>((frames - 1) >> 8));
-            hdr.push_back(static_cast<uint8_t>((frames - 1) & 0xFF));
+            hdr.push_back(static_cast<uint8_t>((frames - 1) >> 8u));
+            hdr.push_back(static_cast<uint8_t>((frames - 1) & 0xFFu));
         }
         hdr.push_back(crc8(hdr.data(), hdr.size()));
         out.insert(out.end(), hdr.begin(), hdr.end());
@@ -332,7 +332,7 @@ void FlacEncoder::encodeBlock(const int32_t* interleaved, uint32_t frames,
             // not carry; the next order, or verbatim, takes it instead.
             bool codable = true;
             for (uint32_t i = 0; i < n && codable; ++i)
-                codable = fold(mResidual[i]) <= (std::numeric_limits<uint64_t>::max() >> 1);
+                codable = fold(mResidual[i]) <= (std::numeric_limits<uint64_t>::max() >> 1u);
             if (!codable) continue;
 
             Partitioning part = choosePartitioning(mResidual.data(), frames, order);
@@ -366,7 +366,7 @@ void FlacEncoder::encodeBlock(const int32_t* interleaved, uint32_t frames,
         bw.write(static_cast<uint32_t>(bestPart.method), 2);
         bw.write(static_cast<uint32_t>(bestPart.order), 4);
 
-        const uint32_t parts = 1u << bestPart.order;
+        const uint32_t parts = 1u << static_cast<unsigned>(bestPart.order);
         const uint32_t psize = frames / parts;
         const int      pbits = bestPart.method == 0 ? 4 : 5;
         uint32_t at = 0;
@@ -384,8 +384,8 @@ void FlacEncoder::encodeBlock(const int32_t* interleaved, uint32_t frames,
 
     // ── Frame checksum ──────────────────────────────────────────────────────
     const uint16_t sum = crc16(out.data() + frameStart, out.size() - frameStart);
-    out.push_back(static_cast<uint8_t>(sum >> 8));
-    out.push_back(static_cast<uint8_t>(sum & 0xFF));
+    out.push_back(static_cast<uint8_t>(static_cast<uint32_t>(sum) >> 8u));
+    out.push_back(static_cast<uint8_t>(sum & 0xFFu));
 
     const uint32_t frameBytes =
         static_cast<uint32_t>(out.size() - frameStart);

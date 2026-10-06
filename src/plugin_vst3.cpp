@@ -106,6 +106,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -167,8 +168,8 @@ std::string tuidToHex(const TUID t) {
     std::string s(32, '0');
     for (int i = 0; i < 16; ++i) {
         const unsigned char b = static_cast<unsigned char>(t[i]);
-        s[static_cast<size_t>(i) * 2]     = kHex[b >> 4];
-        s[static_cast<size_t>(i) * 2 + 1] = kHex[b & 0x0F];
+        s[static_cast<size_t>(i) * 2]     = kHex[static_cast<unsigned>(b) >> 4u];
+        s[static_cast<size_t>(i) * 2 + 1] = kHex[static_cast<unsigned>(b) & 0x0Fu];
     }
     return s;
 }
@@ -910,7 +911,7 @@ struct Instance {
     // lock-free, and a full ring drops rather than blocks.
     struct PendNote { uint16_t on; int16_t channel, pitch; float velocity; uint32_t offset; };
     static constexpr uint32_t kNoteCap = 256;
-    PendNote note[kNoteCap] = {};
+    std::array<PendNote, kNoteCap> note {};
     std::atomic<uint32_t> noteHead{0};
     std::atomic<uint32_t> noteTail{0};
 
@@ -921,7 +922,7 @@ struct Instance {
     // into the controller. kNoParamId where the plugin maps nothing.
     static constexpr uint32_t kMidiChannels = 16;
     static constexpr uint32_t kMidiCtrls    = kCountCtrlNumber;   // 0..127 + aftertouch, bend, …
-    uint32_t midiMap[kMidiChannels][kMidiCtrls] = {};
+    std::array<std::array<uint32_t, kMidiCtrls>, kMidiChannels> midiMap {};
     bool     hasMidiMap = false;
 
     // Cached parameter descriptions. Names are borrowed by PluginParam, so
@@ -936,7 +937,7 @@ struct Instance {
     // than blocks — one dropped automation point beats a stalled callback.
     struct Pending { uint32_t id; double norm; uint32_t offset; };
     static constexpr uint32_t kPendCap = 512;
-    Pending pend[kPendCap] = {};
+    std::array<Pending, kPendCap> pend {};
     std::atomic<uint32_t> pendHead{0};
     std::atomic<uint32_t> pendTail{0};
 
@@ -945,7 +946,7 @@ struct Instance {
     // editor is a second producer on a different thread. Offset is always 0
     // — a hand on a knob has no sample to be accurate to.
     static constexpr uint32_t kEditCap = 256;
-    Pending edit[kEditCap] = {};
+    std::array<Pending, kEditCap> edit {};
     std::atomic<uint32_t> editHead{0};
     std::atomic<uint32_t> editTail{0};
 
@@ -1288,7 +1289,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
                                  std::min(a, b), std::max(a, b),
                                  static_cast<int32_t>(pi.unitId),
                                  un != unitNames.end() ? un->second : std::string(),
-                                 (pi.flags & ParameterInfo::kCanAutomate) != 0});
+                                 (static_cast<uint32_t>(pi.flags) & static_cast<uint32_t>(ParameterInfo::kCanAutomate)) != 0});
         }
     }
     // The MIDI controller map (see Instance::midiMap). Optional in the

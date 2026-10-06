@@ -202,11 +202,11 @@ typedef struct ClockworkClientInfo {
 /* Feature bits. A client asks rather than assumes: an engine built for an
  * embedded target may have no scope, no taps and no bulk lanes, and a client
  * that renders a scope should grey the control rather than read zeros. */
-#define CLOCKWORK_FEATURE_SCOPE      (1u << 0)
-#define CLOCKWORK_FEATURE_AUDIO_TAPS (1u << 1)
-#define CLOCKWORK_FEATURE_BULK       (1u << 2)   /* inbox + outbox */
-#define CLOCKWORK_FEATURE_WINDOW     (1u << 3)   /* the guest publishes one */
-#define CLOCKWORK_FEATURE_SCHEDULER  (1u << 4)   /* timed messages are held */
+#define CLOCKWORK_FEATURE_SCOPE      (1u << 0u)
+#define CLOCKWORK_FEATURE_AUDIO_TAPS (1u << 1u)
+#define CLOCKWORK_FEATURE_BULK       (1u << 2u)   /* inbox + outbox */
+#define CLOCKWORK_FEATURE_WINDOW     (1u << 3u)   /* the guest publishes one */
+#define CLOCKWORK_FEATURE_SCHEDULER  (1u << 4u)   /* timed messages are held */
 
 ClockworkStatus clockwork_client_info(ClockworkClient* c, ClockworkClientInfo* out);
 

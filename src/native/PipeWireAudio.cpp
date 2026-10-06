@@ -21,8 +21,10 @@
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
 
 #include "PipeWireAudio.h"
+#include "owner.h"
 
 #include <dlfcn.h>
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -219,7 +221,7 @@ struct PwNodeInfo {
 class PipeWireSystem {
 public:
     static PipeWireSystem& instance() {
-        static PipeWireSystem* s = new PipeWireSystem();
+        static gsl::owner<PipeWireSystem*> s = new PipeWireSystem();   // the process's, never freed (see above)
         return *s;
     }
 
@@ -869,17 +871,17 @@ private:
             // process callback, so a suspended stream reads as a dead device.
             PW_KEY_NODE_ALWAYS_PROCESS, "true",
             nullptr);
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "%d/%d", mBufFrames, mRate);
-        A.properties_set(props, PW_KEY_NODE_LATENCY, tmp);
+        std::array<char, 64> tmp{};
+        snprintf(tmp.data(), tmp.size(), "%d/%d", mBufFrames, mRate);
+        A.properties_set(props, PW_KEY_NODE_LATENCY, tmp.data());
         // Cap the quantum the graph may schedule us at: without a ceiling
         // the session manager can run the stream at its global maximum
         // (8192 frames = 170ms at 48k), far beyond
         // anything the engine asked for.
-        snprintf(tmp, sizeof(tmp), "%d/%d", std::max(mBufFrames * 2, 2048), mRate);
-        A.properties_set(props, PW_KEY_NODE_MAX_LATENCY, tmp);
-        snprintf(tmp, sizeof(tmp), "1/%d", mRate);
-        A.properties_set(props, PW_KEY_NODE_RATE, tmp);
+        snprintf(tmp.data(), tmp.size(), "%d/%d", std::max(mBufFrames * 2, 2048), mRate);
+        A.properties_set(props, PW_KEY_NODE_MAX_LATENCY, tmp.data());
+        snprintf(tmp.data(), tmp.size(), "1/%d", mRate);
+        A.properties_set(props, PW_KEY_NODE_RATE, tmp.data());
         if (!node.serial.empty())
             A.properties_set(props, PW_KEY_TARGET_OBJECT, node.serial.c_str());
 
@@ -900,18 +902,18 @@ private:
         fmt.channels = (uint32_t) channels;
         fillPositions(fmt, node, channels);
 
-        uint8_t podBuf[1024];
-        spa_pod_builder b = SPA_POD_BUILDER_INIT(podBuf, sizeof(podBuf));
-        const spa_pod* params[1] = { spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &fmt) };
+        std::array<uint8_t, 1024> podBuf{};
+        spa_pod_builder b = SPA_POD_BUILDER_INIT(podBuf.data(), podBuf.size());
+        const std::array<const spa_pod*, 1> params = { spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &fmt) };
 
         const int res = A.stream_connect(
             s, playback ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT, PW_ID_ANY,
             (pw_stream_flags) (PW_STREAM_FLAG_AUTOCONNECT
                                | PW_STREAM_FLAG_MAP_BUFFERS
                                | PW_STREAM_FLAG_RT_PROCESS),
-            params, 1);
+            params.data(), 1);
         if (res < 0)
-            err = "pw_stream_connect failed: " + juce::String(spa_strerror(res));
+            err = "pw_stream_connect failed: " + juce::String(spa_strerror(res));   // NOLINT(concurrency-mt-unsafe): spa_strerror answers from a constant table
         return s;
     }
 
@@ -1023,7 +1025,7 @@ private:
         spa_buffer* sb = b->buffer;
         const int nCh = std::min((int) sb->n_datas, mNumIn);
         if (nCh > 0) {
-            const float* planes[SPA_AUDIO_MAX_CHANNELS];
+            std::array<const float*, SPA_AUDIO_MAX_CHANNELS> planes{};
             uint32_t frames = UINT32_MAX;
             for (int ch = 0; ch < nCh; ++ch) {
                 const auto& d = sb->datas[ch];
@@ -1035,12 +1037,12 @@ private:
             }
             if (frames > 0 && frames != UINT32_MAX) {
                 if (mOutStream != nullptr) {
-                    mRing.write(planes, nCh, frames);
+                    mRing.write(planes.data(), nCh, frames);
                 } else {
                     // Input-only device: the capture stream is the clock.
                     const juce::ScopedLock sl(mCallbackLock);
                     if (mCallback != nullptr)
-                        mCallback->audioDeviceIOCallbackWithContext(planes, nCh, nullptr, 0,
+                        mCallback->audioDeviceIOCallbackWithContext(planes.data(), nCh, nullptr, 0,
                                                                     (int) frames, {});
                 }
             }
@@ -1147,12 +1149,12 @@ public:
             PW_KEY_NODE_NAME, clockwork_app_name(),
             PW_KEY_NODE_ALWAYS_PROCESS, "true",
             nullptr);
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "%d/%d", mBufFrames, mRate);
-        A.properties_set(props, PW_KEY_NODE_LATENCY, tmp);
+        std::array<char, 64> tmp{};
+        snprintf(tmp.data(), tmp.size(), "%d/%d", mBufFrames, mRate);
+        A.properties_set(props, PW_KEY_NODE_LATENCY, tmp.data());
         // Same quantum ceiling as the stream devices (see makeStream).
-        snprintf(tmp, sizeof(tmp), "%d/%d", std::max(mBufFrames * 2, 2048), mRate);
-        A.properties_set(props, PW_KEY_NODE_MAX_LATENCY, tmp);
+        snprintf(tmp.data(), tmp.size(), "%d/%d", std::max(mBufFrames * 2, 2048), mRate);
+        A.properties_set(props, PW_KEY_NODE_MAX_LATENCY, tmp.data());
 
         mFilter = A.filter_new(sys.core(), clockwork_app_name(), props);
         if (mFilter == nullptr) {
@@ -1178,7 +1180,7 @@ public:
             for (int i = 0; i < mNumOut + mNumIn && err.isEmpty(); ++i) {
                 const bool playback = i < mNumOut;
                 const int idx = playback ? i : i - mNumOut;
-                snprintf(tmp, sizeof(tmp), "%s%d", playback ? "out_" : "in_", idx + 1);
+                snprintf(tmp.data(), tmp.size(), "%s%d", playback ? "out_" : "in_", idx + 1);
                 void* port = A.filter_add_port(
                     mFilter,
                     playback ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
@@ -1199,7 +1201,7 @@ public:
             if (err.isEmpty()) {
                 const int res = A.filter_connect(mFilter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0);
                 if (res < 0)
-                    err = "pw_filter_connect failed: " + juce::String(spa_strerror(res));
+                    err = "pw_filter_connect failed: " + juce::String(spa_strerror(res));   // NOLINT(concurrency-mt-unsafe): spa_strerror answers from a constant table
             }
         }
         sys.unlock();
@@ -1385,15 +1387,15 @@ private:
         auto& sys = PipeWireSystem::instance();
         auto& A = sys.api;
         pw_properties* p = A.properties_new(nullptr, nullptr);
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%u", outNode);
-        A.properties_set(p, PW_KEY_LINK_OUTPUT_NODE, buf);
-        snprintf(buf, sizeof(buf), "%u", outPort);
-        A.properties_set(p, PW_KEY_LINK_OUTPUT_PORT, buf);
-        snprintf(buf, sizeof(buf), "%u", inNode);
-        A.properties_set(p, PW_KEY_LINK_INPUT_NODE, buf);
-        snprintf(buf, sizeof(buf), "%u", inPort);
-        A.properties_set(p, PW_KEY_LINK_INPUT_PORT, buf);
+        std::array<char, 16> buf{};
+        snprintf(buf.data(), buf.size(), "%u", outNode);
+        A.properties_set(p, PW_KEY_LINK_OUTPUT_NODE, buf.data());
+        snprintf(buf.data(), buf.size(), "%u", outPort);
+        A.properties_set(p, PW_KEY_LINK_OUTPUT_PORT, buf.data());
+        snprintf(buf.data(), buf.size(), "%u", inNode);
+        A.properties_set(p, PW_KEY_LINK_INPUT_NODE, buf.data());
+        snprintf(buf.data(), buf.size(), "%u", inPort);
+        A.properties_set(p, PW_KEY_LINK_INPUT_PORT, buf.data());
         auto* proxy = (pw_proxy*) pw_core_create_object(
             sys.core(), "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
             &p->dict, 0);
@@ -1563,7 +1565,7 @@ public:
         const int inIdx = inputNames.indexOf(inputDeviceName);
         if (outIdx < 0 && inIdx < 0)
             return nullptr;
-        return new PipeWireAudioIODevice(
+        return new PipeWireAudioIODevice(   // NOLINT(cppcoreguidelines-owning-memory): JUCE's factory contract, the manager owns it
             outIdx >= 0 ? outputDeviceName : juce::String(),
             inIdx >= 0 ? inputDeviceName : juce::String(),
             outIdx >= 0 ? mOutputs[(size_t) outIdx] : PwNodeInfo{},

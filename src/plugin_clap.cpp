@@ -73,6 +73,7 @@
 #include <map>
 #include <mutex>
 #include <functional>   // std::hash — CLAP names groups, so the id is a hash of the name
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -236,7 +237,7 @@ struct Instance {
         clap_event_note_t        note;
         clap_event_midi_t        midi;
     };
-    Event                     evq[kEventCap]{};
+    std::array<Event, kEventCap> evq{};
     std::atomic<uint32_t>     ev_head{0};
     std::atomic<uint32_t>     ev_tail{0};
     std::vector<Event>        block_events;   /* reserved at open */
@@ -363,7 +364,8 @@ void refresh_params(Instance* p) {
 
 void CLAP_ABI host_params_rescan(const clap_host_t* h, clap_param_rescan_flags flags) {
     /* [main-thread] */
-    if (flags & (CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_ALL))
+    if (flags & (static_cast<clap_param_rescan_flags>(CLAP_PARAM_RESCAN_INFO)
+                 | static_cast<clap_param_rescan_flags>(CLAP_PARAM_RESCAN_ALL)))
         refresh_params(self(h));
 }
 
@@ -687,9 +689,12 @@ bool pr_transport(Instance* p, int64_t block_time) {
     t.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
     t.header.type     = CLAP_EVENT_TRANSPORT;
     t.header.flags    = 0;
-    t.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
-            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
-            | (bt.playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+    // The flag constants are a signed enum; the field is unsigned.
+    t.flags = static_cast<uint32_t>(CLAP_TRANSPORT_HAS_TEMPO)
+            | static_cast<uint32_t>(CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
+            | static_cast<uint32_t>(CLAP_TRANSPORT_HAS_SECONDS_TIMELINE)
+            | static_cast<uint32_t>(CLAP_TRANSPORT_HAS_TIME_SIGNATURE)
+            | (bt.playing ? static_cast<uint32_t>(CLAP_TRANSPORT_IS_PLAYING) : 0u);
     t.song_pos_beats   = to_beattime(bt.beat);
     t.song_pos_seconds = to_sectime(bt.beat * 60.0 / bt.bpm);
     t.tempo            = bt.bpm;
@@ -908,7 +913,7 @@ void note(Instance* p, bool on, int16_t channel, int16_t pitch,
         p->ev_head.store(head + 1, std::memory_order_release);
     } else if (p->note_dialects & CLAP_NOTE_DIALECT_MIDI) {
         const uint8_t v = static_cast<uint8_t>(velocity <= 0.f ? 0 : velocity >= 1.f ? 127 : std::lround(velocity * 127.f));
-        midi_bytes(p, static_cast<uint8_t>((on ? 0x90 : 0x80) | channel),
+        midi_bytes(p, static_cast<uint8_t>((on ? 0x90u : 0x80u) | static_cast<unsigned>(channel)),
                    static_cast<uint8_t>(pitch), v, frame_offset);
     }
 }
@@ -921,7 +926,8 @@ void cc(Instance* p, int16_t channel, uint8_t number, float value, uint32_t fram
     if (!p || !p->has_note_port || !(p->note_dialects & CLAP_NOTE_DIALECT_MIDI)) return;
     if (channel < 0 || channel > 15) return;
     const uint8_t v = static_cast<uint8_t>(value <= 0.f ? 0 : value >= 1.f ? 127 : std::lround(value * 127.f));
-    midi_bytes(p, static_cast<uint8_t>(0xB0 | channel), number & 0x7F, v, frame_offset);
+    midi_bytes(p, static_cast<uint8_t>(0xB0u | static_cast<unsigned>(channel)),
+               static_cast<uint8_t>(number & 0x7Fu), v, frame_offset);
 }
 
 void pitch_bend(Instance* p, int16_t channel, float bend, uint32_t frame_offset) {
@@ -930,14 +936,15 @@ void pitch_bend(Instance* p, int16_t channel, float bend, uint32_t frame_offset)
     if (bend < -1.f) bend = -1.f;
     if (bend >  1.f) bend =  1.f;
     const uint32_t v = static_cast<uint32_t>(std::lround((bend + 1.f) * 0.5f * 16383.f));
-    midi_bytes(p, static_cast<uint8_t>(0xE0 | channel), v & 0x7F, (v >> 7) & 0x7F, frame_offset);
+    midi_bytes(p, static_cast<uint8_t>(0xE0u | static_cast<unsigned>(channel)),
+               static_cast<uint8_t>(v & 0x7Fu), static_cast<uint8_t>((v >> 7u) & 0x7Fu), frame_offset);
 }
 
 void all_notes_off(Instance* p, uint32_t frame_offset) {
     if (!p || !p->has_note_port) return;
     if (p->note_dialects & CLAP_NOTE_DIALECT_MIDI) {
         for (uint8_t ch = 0; ch < 16; ++ch)
-            midi_bytes(p, static_cast<uint8_t>(0xB0 | ch), 123, 0, frame_offset);
+            midi_bytes(p, static_cast<uint8_t>(0xB0u | ch), 123, 0, frame_offset);
     }
     if (p->note_dialects & CLAP_NOTE_DIALECT_CLAP) {
         /* CLAP_EVENT_NOTE_CHOKE with key -1 / channel -1 addresses every

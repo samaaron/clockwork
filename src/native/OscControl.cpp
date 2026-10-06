@@ -18,6 +18,7 @@
 #include "clockwork_config.h"   // clockwork_log
 #include "osc/OscReceivedElements.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -79,8 +80,8 @@ void OscControl::applyCueConfig() {
 ClockworkSink OscControl::sinkFor(const std::string& host, int port) {
     const std::string target = (host.find(':') != std::string::npos ? "[" + host + "]" : host)
                              + ":" + std::to_string(port);
-    ClockworkSink open[kMaxSinks];
-    const uint32_t n = clockwork_sink_list(open, kMaxSinks);
+    std::array<ClockworkSink, kMaxSinks> open{};
+    const uint32_t n = clockwork_sink_list(open.data(), kMaxSinks);
     for (uint32_t i = 0; i < n && i < kMaxSinks; ++i) {
         if (clockwork_sink_kind(open[i]) != kClockworkSinkOsc) continue;
         const char* t = clockwork_sink_target(open[i]);
@@ -154,21 +155,21 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                 // Say why, to the log AND to the caller: a message that never
                 // left is the client's problem to know about, and a debug line
                 // nobody is watching is not telling them.
-                char reason[128];
+                std::array<char, 128> reason{};
                 const uint32_t widest = sink == CLOCKWORK_SINK_NONE
                                       ? 0 : clockwork_sink_max_message_bytes(sink);
                 if (sink == CLOCKWORK_SINK_NONE)
-                    std::snprintf(reason, sizeof reason, "host does not resolve");
+                    std::snprintf(reason.data(), reason.size(), "host does not resolve");
                 else if (static_cast<uint32_t>(innerLen) > widest)
-                    std::snprintf(reason, sizeof reason,
+                    std::snprintf(reason.data(), reason.size(),
                                   "message of %u bytes exceeds the sink's widest cell (%u bytes)",
                                   static_cast<unsigned>(innerLen), static_cast<unsigned>(widest));
                 else
-                    std::snprintf(reason, sizeof reason, "sink full");
+                    std::snprintf(reason.data(), reason.size(), "sink full");
                 clockwork_log("WARNING: /clockwork/osc/send to %s:%d dropped — %s",
-                       host.c_str(), port, reason);
+                       host.c_str(), port, reason.data());
                 if (mEgress)
-                    clockwork_sys_refuse(data, size, reason,
+                    clockwork_sys_refuse(data, size, reason.data(),
                         [this, &meta](const uint8_t* d, uint32_t n) {
                             mEgress->reply(meta.sourceId, d, n);
                         });

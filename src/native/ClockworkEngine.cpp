@@ -26,6 +26,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "RingBufferWriter.h"
 #include "IngressCallCtx.h"
+#include <array>
 #include <chrono>
 #include <cstdarg>
 #include <cstdlib>
@@ -69,10 +70,13 @@ inline uint8_t* sp_arena() { return static_cast<uint8_t*>(get_shared_memory_base
 // macOS aggregate devices, Link peers). Written once in init() from
 // cfg.appName before any device manager or MIDI subsystem exists, read-only
 // after; consumers declare `extern "C" const char* clockwork_app_name()`.
-std::string sPublishedAppName = CLOCKWORK_PRODUCT_NAME;
+std::string& publishedAppName() {
+    static std::string name = CLOCKWORK_PRODUCT_NAME;
+    return name;
+}
 }
 
-extern "C" const char* clockwork_app_name() { return sPublishedAppName.c_str(); }
+extern "C" const char* clockwork_app_name() { return publishedAppName().c_str(); }
 
 namespace {
 using clockwork::device::sameDeviceName;
@@ -222,7 +226,7 @@ ClockworkEngine::makeDeviceManager() {
     });
     // What the device layer names in the OS after the app: a CoreAudio
     // aggregate device pairing an output with an input, a PipeWire node.
-    manager->setClientName(juce::String(sPublishedAppName));
+    manager->setClientName(juce::String(publishedAppName()));
     return manager;
 }
 
@@ -443,7 +447,7 @@ void ClockworkEngine::init(const Config& cfg) {
     setEngineState(EngineState::Booting, "init");
 
     if (!cfg.appName.empty())
-        sPublishedAppName = cfg.appName;
+        publishedAppName() = cfg.appName;
 
     mHeadless = cfg.headless;
     mClockworkClock.setFreewheelClock(cfg.freewheelClock);
@@ -1446,8 +1450,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             if (nowSec != prev && lastLogSec.compare_exchange_strong(prev, nowSec)) {
                 clockwork_log("[link] tempo -> %.2f bpm", bpm);
             }
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << bpm << osc::EndMessage;
             egr->broadcastLinkNotify(
                 reinterpret_cast<const uint8_t*>(s.Data()),
@@ -1456,8 +1460,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         mClockworkClock.setNumPeersChangedCallback([egr, alive](std::size_t n) {
             if (!alive->load(std::memory_order_acquire)) return;
             clockwork_log("[link] peers -> %zu", n);
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers"))
               << static_cast<int32_t>(n) << osc::EndMessage;
             egr->broadcastLinkNotify(
@@ -1467,8 +1471,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         mClockworkClock.setStartStopChangedCallback([egr, alive](bool playing, double atNtp) {
             if (!alive->load(std::memory_order_acquire)) return;
             clockwork_log("[link] transport -> %s", playing ? "playing" : "stopped");
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             // Timestamp in NTP micros, like every other /clock wire time.
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/transport"))
               << static_cast<int32_t>(playing ? 1 : 0)
@@ -1785,13 +1789,13 @@ void ClockworkEngine::drainEgressNow() {
     if (!client) return;
     // A batch at a time until the rings are empty. Bounded per call because
     // the array is the caller's, which is the ABI's rule.
-    ClockworkClientMessage batch[64];
+    std::array<ClockworkClientMessage, 64> batch{};
     for (;;) {
-        const uint32_t n = clockwork_client_poll(client, batch, sizeof batch / sizeof batch[0]);
+        const uint32_t n = clockwork_client_poll(client, batch.data(), batch.size());
         for (uint32_t i = 0; i < n; ++i)
             mEgress.dispatchEgress(batch[i].origin, batch[i].route,
                                    batch[i].bytes, batch[i].length);
-        if (n < sizeof batch / sizeof batch[0]) break;
+        if (n < batch.size()) break;
     }
 }
 
@@ -2351,10 +2355,10 @@ bool ClockworkEngine::requestAudioRecovery(std::string& reason,
     const int64_t sinceLast = last != kNeverMs ? now - last : kRecoveryCooldownMs;
     if (sinceLast < kRecoveryCooldownMs) {
         mReopenInProgress.store(false);   // release the slot we just claimed
-        char msg[96];
-        snprintf(msg, sizeof(msg), "cooldown (%lld ms since last)",
+        std::array<char, 96> msg{};
+        snprintf(msg.data(), msg.size(), "cooldown (%lld ms since last)",
                  (long long)sinceLast);
-        reason = msg;
+        reason = msg.data();
         return false;
     }
 
@@ -2710,9 +2714,9 @@ void ClockworkEngine::sendDeviceReport() {
               : current.maxInputChannels  > 0    ? current.maxInputChannels
                                                  : current.activeInputChannels;
 
-    char info[1024];
+    std::array<char, 1024> info{};
     if (!current.inputDeviceName.empty() && inCh > 0) {
-        snprintf(info, sizeof(info),
+        snprintf(info.data(), info.size(),
                  "Output:      %s (%d ch)\n"
                  "Input:       %s (%d ch)\n"
                  "Driver:      %s\n"
@@ -2726,7 +2730,7 @@ void ClockworkEngine::sendDeviceReport() {
                  current.activeBufferSize,
                  outLatMs, inLatMs);
     } else {
-        snprintf(info, sizeof(info),
+        snprintf(info.data(), info.size(),
                  "Output:      %s (%d ch)\n"
                  "Driver:      %s\n"
                  "Sample Rate: %.0f Hz\n"
@@ -2771,7 +2775,7 @@ void ClockworkEngine::sendDeviceReport() {
 
     const OscPacket infoPacket = oscPacketOf(4096, [&](osc::OutboundPacketStream& infoMsg) {
         infoMsg << osc::BeginMessage(CLOCKWORK_SYS("info"))
-                << info
+                << info.data()
                 << static_cast<osc::int32>(current.activeSampleRate)
                 << static_cast<osc::int32>(current.activeBufferSize)
                 << static_cast<osc::int32>(usableRates.size());

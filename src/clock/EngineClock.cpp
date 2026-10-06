@@ -13,6 +13,7 @@
 #include "native/OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -100,15 +101,15 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         // ⇒ link (back-compat: /clockwork/clock/tempo/get ≡ /clockwork/clock/link/tempo/get).
         // Parsed allocation-free (WASM runs this on the audio thread).
         int  id = 0;
-        char tlname[64] = {0};   // bare segment ("link"/"midi"/"midi:<handle>"), "" = none
+        std::array<char, 64> tlname{};   // bare segment ("link"/"midi"/"midi:<handle>"), "" = none
         const char* verb = addr + CLOCKWORK_SYS_LEN("clock/");  // past the namespace
         if (const char* slash = std::strchr(verb, '/')) {
             const size_t n = static_cast<size_t>(slash - verb);
             const bool isTl = clockwork_timeline_is_name(verb, static_cast<uint32_t>(n)) != 0;
-            if (isTl && n + 1 <= sizeof(tlname)) {
-                std::memcpy(tlname, verb, n);
+            if (isTl && n + 1 <= tlname.size()) {
+                std::memcpy(tlname.data(), verb, n);
                 tlname[n] = '\0';
-                id = clock.resolveTimeline(tlname);
+                id = clock.resolveTimeline(tlname.data());
                 verb = slash + 1;
             }
         }
@@ -116,7 +117,7 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         // Build a "/clockwork/clock/<tlname>/<suffix>" reply address (omit the segment for
         // the bare/link case so /clockwork/clock/tempo.reply stays wire-compatible).
         auto replyAddr = [&](const char* suffix, char* out, size_t cap) -> const char* {
-            if (tlname[0]) std::snprintf(out, cap, CLOCKWORK_SYS("clock/%s/%s"), tlname, suffix);
+            if (tlname[0]) std::snprintf(out, cap, CLOCKWORK_SYS("clock/%s/%s"), tlname.data(), suffix);
             else           std::snprintf(out, cap, CLOCKWORK_SYS("clock/%s"), suffix);
             return out;
         };
@@ -139,15 +140,16 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
                 // Manual set on a midi timeline (claim the slot if this port
                 // hasn't clocked yet). A live external clock pulse overrides it
                 // on its next tick — this is the manual-override / test hook.
-                const int wid = clock.resolveOrClaimTimeline(tlname);
+                const int wid = clock.resolveOrClaimTimeline(tlname.data());
                 if (wid > 0) clock.setMidiTimelineTempo(wid, bpm);
             }
             return true;
         }
         if (std::strcmp(verb, "tempo/get") == 0) {
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("tempo.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("tempo.reply", ra.data(), ra.size()))
               << clock.timelineBpm(id);
             finish(s);
             return true;
@@ -165,7 +167,7 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             } else {
                 // Manual transport on a midi timeline (claim if needed): play →
                 // START at beat 0, stop → STOP. A live clock overrides.
-                const int wid = clock.resolveOrClaimTimeline(tlname);
+                const int wid = clock.resolveOrClaimTimeline(tlname.data());
                 if (wid > 0)
                     clock.setMidiTimelineTransport(wid, playing ? 0 : 2, 0.0);
             }
@@ -174,9 +176,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         if (std::strcmp(verb, "transport/get") == 0) {
             // Reply: playing(i), anchored(i). Anchored = START/SPP has defined
             // the beat origin (always 1 for Link); clients gate MIDI sync on it.
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("transport.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("transport.reply", ra.data(), ra.size()))
               << static_cast<int32_t>(clock.timelineIsPlaying(id) ? 1 : 0)
               << static_cast<int32_t>(clock.timelineIsAnchored(id) ? 1 : 0);
             finish(s);
@@ -184,9 +187,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         }
         if (std::strcmp(verb, "transport/time/get") == 0) {
             // 0 = no transition yet; the sentinel goes out as itself.
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("transport/time.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("transport/time.reply", ra.data(), ra.size()))
               << static_cast<osc::int64>(ntpMicros(clock.timeline(id).transition_ntp));
             finish(s);
             return true;
@@ -209,15 +213,16 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
                 if (id == 0) {
                     clock.setMeter(num, den);
                 } else {
-                    const int wid = clock.resolveOrClaimTimeline(tlname);
+                    const int wid = clock.resolveOrClaimTimeline(tlname.data());
                     if (wid > 0) clock.setMidiTimelineMeter(wid, num, den);
                 }
                 return true;
             }
             const clockwork::Timeline t = clock.timeline(id);
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("meter.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("meter.reply", ra.data(), ra.size()))
               << static_cast<osc::int32>(t.meter_num)
               << static_cast<osc::int32>(t.meter_den);
             finish(s);
@@ -230,9 +235,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         if (std::strcmp(verb, "bar") == 0) {
             const clockwork::Timeline t = clock.timeline(id);
             const double now = wallClockNTP();
-            char ra[96], buf[160];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("bar.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 160> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("bar.reply", ra.data(), ra.size()))
               << t.barAt(now) << t.beatInBarAt(now)
               << static_cast<osc::int32>(t.meter_num)
               << static_cast<osc::int32>(t.meter_den);
@@ -249,9 +255,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             if (it == msg.ArgumentsEnd() || !it->IsFloat()) return true;
             const float q = it->AsFloatUnchecked();
             (void)q;   // a beat is a beat; the quantum only shapes the phase
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("rpc/beat_at_time.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("rpc/beat_at_time.reply", ra.data(), ra.size()))
               << clock.timeline(id).beatAt(ntpSeconds(t));
             finish(s);
             return true;
@@ -262,9 +269,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             const int64_t t = it->AsInt64Unchecked(); ++it;
             if (it == msg.ArgumentsEnd() || !it->IsFloat()) return true;
             const float q = it->AsFloatUnchecked();
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("rpc/phase_at_time.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("rpc/phase_at_time.reply", ra.data(), ra.size()))
               << clock.timeline(id).phaseAt(ntpSeconds(t), q);
             finish(s);
             return true;
@@ -285,9 +293,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             ++it;
             if (it == msg.ArgumentsEnd() || !it->IsFloat()) return true;
             (void)it->AsFloatUnchecked();   // quantum: accepted, not needed
-            char ra[96], buf[128];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("rpc/time_at_beat.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 128> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("rpc/time_at_beat.reply", ra.data(), ra.size()))
               << static_cast<osc::int64>(ntpMicros(clock.timeline(id).timeAtBeat(b)));
             finish(s);
             return true;
@@ -301,9 +310,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             if (it == msg.ArgumentsEnd() || !it->IsFloat()) return true;
             const float q = it->AsFloatUnchecked();
             const double beat = clock.timeline(id).beatAt(ntpSeconds(t));
-            char ra[96], buf[160];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("rpc/beat_phase_at_time.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 160> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("rpc/beat_phase_at_time.reply", ra.data(), ra.size()))
               << beat << clockwork::wrapPhase(beat, q);
             finish(s);
             return true;
@@ -314,9 +324,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             const float q = it->AsFloatUnchecked();
             const int64_t t = ntpMicros(wallClockNTP());
             const double beat = clock.timeline(id).beatAt(ntpSeconds(t));
-            char ra[96], buf[160];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
-            s << osc::BeginMessage(replyAddr("rpc/beat_phase_now.reply", ra, sizeof(ra)))
+            std::array<char, 96> ra{};
+            std::array<char, 160> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(replyAddr("rpc/beat_phase_now.reply", ra.data(), ra.size()))
               << static_cast<osc::int64>(t) << beat << clockwork::wrapPhase(beat, q);
             finish(s);
             return true;
@@ -348,8 +359,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             return true;
         }
         if (std::strcmp(verb, "start_stop_sync/get") == 0) {
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/start_stop_sync.reply"))
               << static_cast<int32_t>(clock.isStartStopSyncEnabled() ? 1 : 0);
             finish(s);
@@ -358,24 +369,24 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
 
         // ── Queries: enabled / time-now / peer-count (Link-global) ───────
         if (std::strcmp(verb, "enabled/get") == 0) {
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/enabled.reply"))
               << static_cast<int32_t>(clock.isLinkEnabled() ? 1 : 0);
             finish(s);
             return true;
         }
         if (std::strcmp(verb, "time/now/get") == 0) {
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/time/now.reply"))
               << static_cast<osc::int64>(ntpMicros(wallClockNTP()));
             finish(s);
             return true;
         }
         if (std::strcmp(verb, "peers/count/get") == 0) {
-            char buf[64];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 64> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/peers/count.reply"))
               << static_cast<int32_t>(clock.numPeers());
             finish(s);
@@ -387,8 +398,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
         // notify verbs); link_audio = the /clockwork/clock/audio/* surface; midi = the
         // MIDI subsystem feeding the follower timelines.
         if (std::strcmp(verb, "capabilities/get") == 0) {
-            char buf[192];
-            osc::OutboundPacketStream s(buf, sizeof(buf));
+            std::array<char, 192> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/capabilities.reply"))
               << "link"       << kCapLink
               << "link_audio" << kCapLinkAudio
@@ -417,8 +428,8 @@ void replyClockUnsupported(const uint8_t* data, uint32_t size,
                 echoToken = it->AsInt32Unchecked();
             }
         }
-        char buf[192];
-        osc::OutboundPacketStream s(buf, sizeof(buf));
+        std::array<char, 192> buf{};
+        osc::OutboundPacketStream s(buf.data(), buf.size());
         s << osc::BeginMessage(CLOCKWORK_SYS("clock/unsupported")) << msg.AddressPattern();
         if (hasToken) s << static_cast<osc::int32>(echoToken);
         s << osc::EndMessage;

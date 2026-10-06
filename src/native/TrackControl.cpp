@@ -28,6 +28,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <array>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -107,9 +108,12 @@ constexpr uint32_t kMirroredTimelines =
     CLOCKWORK_MAX_TIMELINES < TIMELINE_SLOTS ? CLOCKWORK_MAX_TIMELINES : TIMELINE_SLOTS;
 
 // Scratch the audio thread reads a surplus return block into, to discard it.
-float  g_trim[LANES][MAX_BLOCK];
-float* g_trimPtrs[LANES];
-struct TrimInit { TrimInit() { for (uint32_t c = 0; c < LANES; ++c) g_trimPtrs[c] = g_trim[c]; } } g_trimInit;
+std::array<std::array<float, MAX_BLOCK>, LANES> g_trim{};
+std::array<float*, LANES> g_trimPtrs = [] {
+    std::array<float*, LANES> ptrs{};
+    for (uint32_t c = 0; c < LANES; ++c) ptrs[c] = g_trim[c].data();
+    return ptrs;
+}();
 
 }  // namespace
 
@@ -285,11 +289,11 @@ void TrackControl::tapReturns() {
         }
         if (!tap.writer.valid() || !bus || frames == 0) continue;
         // The return lanes are channel-major on the bus, a block apart.
-        const float* ch[SHM_SCOPE_STREAM_CHANNELS] = {
+        const std::array<const float*, SHM_SCOPE_STREAM_CHANNELS> ch = {
             bus + static_cast<size_t>(mBoundBase + 2 * slot) * frames,
             bus + static_cast<size_t>(mBoundBase + 2 * slot + 1) * frames,
         };
-        tap.writer.write(ch, frames, at);
+        tap.writer.write(ch.data(), frames, at);
     }
 }
 
@@ -345,7 +349,7 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
     uint32_t readable = clockwork_port_readable(self->mReturn);
     while (readable > keep) {
         const uint32_t n = std::min<uint32_t>(readable - keep, MAX_BLOCK);
-        clockwork_port_read(self->mReturn, g_trimPtrs, LANES, n);
+        clockwork_port_read(self->mReturn, g_trimPtrs.data(), LANES, n);
         readable -= n;
     }
 
@@ -529,12 +533,12 @@ void TrackControl::relayOut() {
 void TrackControl::watchLiveness() {
     if (!mProcess.running()) return;
     if (!mProcess.alive()) {
-        char how[96];
+        std::array<char, 96> how{};
         const int code = mProcess.exitCode();
-        if (code < 0) std::snprintf(how, sizeof how, "crashed (signal %d)", -code);
-        else          std::snprintf(how, sizeof how, "exited (code %d)", code);
+        if (code < 0) std::snprintf(how.data(), how.size(), "crashed (signal %d)", -code);
+        else          std::snprintf(how.data(), how.size(), "exited (code %d)", code);
         mProcess.detach();
-        onBridgeDied(how);
+        onBridgeDied(how.data());
         return;
     }
     const uint64_t hb = mHeader->bridge_heartbeat.load(std::memory_order_acquire);
@@ -648,14 +652,14 @@ bool TrackControl::audioSink(void* ctx, const void* callCtx, const uint8_t* data
     static const DrainCallCtx kEmpty{};
     const DrainCallCtx& meta = callCtx ? *static_cast<const DrainCallCtx*>(callCtx) : kEmpty;
     // [frame offset][osc], joined on the stack: a track event is small.
-    uint8_t frame[2048];
-    if (sizeof(Prefixed) + len > sizeof frame) return true;
+    std::array<uint8_t, 2048> frame{};
+    if (sizeof(Prefixed) + len > frame.size()) return true;
     const uint32_t off = frameOffset(meta);
-    std::memcpy(frame, &off, sizeof off);
-    std::memcpy(frame + sizeof(Prefixed), data, len);
+    std::memcpy(frame.data(), &off, sizeof off);
+    std::memcpy(frame.data() + sizeof(Prefixed), data, len);
     MsgRing& r = h->rt;
     if (!RingBufferWriter::write(rt_ring(self->mSeg.ptr), RT_RING_SIZE, &r.head, &r.tail, &r.sequence,
-                                 &r.write_lock, frame, static_cast<uint32_t>(sizeof(Prefixed) + len),
+                                 &r.write_lock, frame.data(), static_cast<uint32_t>(sizeof(Prefixed) + len),
                                  meta.sourceId)) {
         r.dropped.fetch_add(1, std::memory_order_relaxed);
         self->mRtDropped.fetch_add(1, std::memory_order_relaxed);
