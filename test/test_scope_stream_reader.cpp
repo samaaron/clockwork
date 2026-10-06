@@ -321,3 +321,61 @@ TEST_CASE("scope-stream: copy_triggered_window zero-fills like copy_window",
     CHECK(std::all_of(out.begin(), out.begin() + (frames - real) * 2,
                       [](float v) { return v == 0.0f; }));
 }
+
+// A wireless output (AirPlay 2026-10-06: a DMP-A6 at 44.1 kHz reporting
+// 88712 frames, two seconds, of output latency) puts the audible window two
+// seconds behind the writer. A ring sized only for the display window had
+// overwritten that window long before anyone read it: copy_window handed
+// back nothing and every scope, in every client, drew a flat line while the
+// engine rendered perfectly. The ring must cover the latency a real device
+// reports, plus the longest window a consumer draws, plus the read margin —
+// and the rule is a pure function the engine checks at every device start.
+TEST_CASE("scope-stream: the ring covers a two-second output latency",
+          "[scope][stream][sampleclock][latency]") {
+    constexpr uint32_t kRate    = 44100;
+    constexpr uint32_t kLatency = 88712;   // frames, as the device reported
+    constexpr uint32_t kWindow  = kRate / 4;   // the 250 ms scrolling strip
+
+    CHECK(shm_scope_ring_covers(kLatency, kRate));
+    CHECK_FALSE(shm_scope_ring_covers(SHM_SCOPE_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
+
+    auto slot = makeSlot();
+    shm_scope_stream_writer w(slot.get());
+    w.activate(2);
+    shm_scope_stream_reader r(slot.get());
+
+    // Three seconds rendered, 512 frames a block, anchored at engine frame 0.
+    const uint32_t kBlocks = (kRate * 3) / 512;
+    for (uint32_t b = 0; b < kBlocks; ++b)
+        writeIndexedBlock(w, uint64_t(b) * 512, 512, uint64_t(b) * 512);
+    const uint64_t writer = r.write_position();
+    REQUIRE(writer == uint64_t(kBlocks) * 512);
+
+    // The clock as the engine publishes it after that last block: frame
+    // `writer` reaches the speaker one latency from now.
+    sample_clock_view v;
+    v.valid = true;
+    v.sample_rate = kRate;
+    v.engine_frames = writer;
+    v.output_latency_frames = kLatency;
+    const double now = 1000.0;
+    v.dac_ntp = now + double(kLatency) / kRate;
+
+    const uint64_t end = v.audible_end(r, now);
+    // One frame of float rounding in the wall-clock mapping is fine.
+    CHECK(end <= writer - kLatency);
+    CHECK(end + 1 >= writer - kLatency);
+
+    std::vector<float> out(kWindow * 2);
+    uint32_t ch = 0;
+    const uint32_t got = r.copy_window(end, kWindow, out.data(), &ch);
+    CHECK(ch == 2);
+    CHECK(got == kWindow);
+    // And it is the audible audio, not whatever the ring held: frame
+    // indices end-kWindow .. end-1, left positive, right negative.
+    if (got == kWindow) {
+        CHECK(out[0] == float(end - kWindow));
+        CHECK(out[(kWindow - 1) * 2] == float(end - 1));
+        CHECK(out[(kWindow - 1) * 2 + 1] == -float(end - 1));
+    }
+}

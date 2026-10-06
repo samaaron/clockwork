@@ -4123,6 +4123,22 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                     result.sampleRate, result.bufferSize,
                     mCurrentConfig.numOutputChannels);
 
+            // Scopes draw the window being heard, which this device's output
+            // latency puts behind the writer. A ring that cannot hold that
+            // window leaves every scope flat while the audio is fine — say
+            // so here, where the latency is first known, rather than let it
+            // read as a scope bug.
+            {
+                const int outLat = finalDev->getOutputLatencyInSamples();
+                if (outLat > 0 && result.sampleRate > 0
+                    && !shm_scope_ring_covers(static_cast<uint32_t>(outLat), result.sampleRate))
+                    clockwork_log("[device-setup] WARNING: output latency %d frames (%.0f ms) "
+                            "is more than the scope ring covers (%u frames): scopes "
+                            "will show nothing on this device",
+                            outLat, outLat * 1000.0 / result.sampleRate,
+                            static_cast<unsigned>(SHM_SCOPE_RING_FRAMES));
+            }
+
             // Remember the rate of the last non-wireless settle so a
             // future detour through AirPlay/Bluetooth doesn't leave the
             // engine stuck at the wireless receiver's negotiated rate.

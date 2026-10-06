@@ -40,6 +40,29 @@ inline constexpr uint32_t SHM_SCOPE_STREAM_CHANNELS = 2;  // streams are stereo
 // js/clockwork.js getScope applies the same formula — keep them in step.
 inline constexpr uint32_t SHM_SCOPE_READ_MARGIN_FRAMES = 2048;
 
+// The longest window a consumer draws from a stream: a client's inline
+// scopes scroll the last 250 ms. The display reads this far back from the
+// audible cursor.
+inline constexpr uint32_t SHM_SCOPE_DISPLAY_WINDOW_MS = 250;
+
+// Whether the ring can serve a consumer on a device with this output
+// latency. The audible cursor sits `latency_frames` behind the writer (the
+// sample clock anchors at speaker time); the consumer's window reaches a
+// further SHM_SCOPE_DISPLAY_WINDOW_MS back from it; and the reader keeps
+// SHM_SCOPE_READ_MARGIN_FRAMES clear of the ring's oldest edge. The sum must
+// fit in the ring, or the audible window is overwritten before anyone reads
+// it and copy_window has nothing to hand back: every scope flat while the
+// engine renders perfectly (an AirPlay output reporting two seconds of
+// latency, 2026-10-06). The engine checks this at every device start and
+// says so when it fails.
+inline constexpr bool shm_scope_ring_covers(uint32_t latency_frames, double sample_rate) {
+    constexpr uint32_t cap = SHM_SCOPE_RING_FRAMES;
+    constexpr uint32_t margin =   // as copy_window clamps it for small rings
+        (cap / 4 < SHM_SCOPE_READ_MARGIN_FRAMES) ? cap / 4 : SHM_SCOPE_READ_MARGIN_FRAMES;
+    const double window = sample_rate * SHM_SCOPE_DISPLAY_WINDOW_MS / 1000.0;
+    return double(latency_frames) + window + double(margin) <= double(cap);
+}
+
 // copy_triggered_window's trigger_offset when no rising crossing was found
 // (distinct from every real offset, including one at the window boundary).
 inline constexpr uint32_t SHM_SCOPE_TRIGGER_NONE = UINT32_MAX;
@@ -326,6 +349,8 @@ using detail_shm_scope::SHM_SCOPE_STREAM_CHANNELS;
 using detail_shm_scope::SHM_SCOPE_STREAM_HEADER_SIZE;
 using detail_shm_scope::SHM_SCOPE_STREAM_SLOT_SIZE;
 using detail_shm_scope::SHM_SCOPE_TRIGGER_NONE;
+using detail_shm_scope::SHM_SCOPE_DISPLAY_WINDOW_MS;
+using detail_shm_scope::shm_scope_ring_covers;
 
 // Engine sample position at the start of the block currently being rendered.
 // Advanced by ClockworkClock::publishSampleClock / advanceEngineFrames; a stream's

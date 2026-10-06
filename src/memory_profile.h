@@ -310,12 +310,25 @@
   #endif
 #endif
 #define SHM_SCOPE_TRACK_SLOT_BASE SHM_SCOPE_MAX_SCOPES
-// Per-slot scope stream ring, in frames. Sized for the longest display window
-// a consumer draws (a client's inline scopes scroll ~250ms) plus output
-// latency and reader slack: 16384 ≈ 340ms @ 48k, 128KB per stereo slot
-// (4 MB for the guest's 32, and 2 MB more for the 16 track taps natively).
+// Per-slot scope stream ring, in frames. A consumer draws the window being
+// HEARD, which sits the device's output latency behind the writer, so the
+// ring must hold that latency plus the longest display window (a client's
+// inline scopes scroll ~250ms) plus the reader's margin — the rule is
+// shm_scope_ring_covers (shm_scope_stream.hpp), checked at every device
+// start. Natively a wireless output can report two seconds (an AirPlay
+// receiver: 88712 frames @ 44.1k, 2026-10-06; a 16384 ring had every scope
+// flat while the engine rendered): 131072 ≈ 2.7s @ 48k, 1 MB per stereo
+// slot, and the segment is anonymous memory committed only as a slot is
+// written, so idle slots cost nothing. The web renders into a worklet with
+// tens of ms of latency and budgets its arena to the byte
+// (js/memory_layout.js): 16384 ≈ 340ms @ 48k, 128KB per slot, 4 MB for the
+// guest's 32.
 #ifndef SHM_SCOPE_RING_FRAMES
-#define SHM_SCOPE_RING_FRAMES 16384
+  #if defined(__EMSCRIPTEN__)
+  #define SHM_SCOPE_RING_FRAMES 16384
+  #else
+  #define SHM_SCOPE_RING_FRAMES 131072
+  #endif
 #endif
 
 // Max MIDI-clock follower timelines in the ClockworkClock registry (slot 0 is
