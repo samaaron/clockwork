@@ -41,10 +41,11 @@
 
 namespace {
 
-// The resident set as it stands, in bytes: what the process has touched and
-// still holds. A lane that is only reserved does not move it; one that was
-// cleared at boot does. 0 where it cannot be read (Windows), which the case
-// below takes as "nothing to measure here".
+// The memory the process holds as it stands, in bytes: what it has touched
+// and not given back (the footprint on macOS, the resident set on Linux). A
+// lane that is only reserved does not move it; one that was cleared at boot
+// does. 0 where it cannot be read (Windows), which the case below takes as
+// "nothing to measure here".
 //
 // NOT THE PEAK. This read ru_maxrss, the process's high-water mark, which
 // only moves when the process goes higher than it has ever been — so in a
@@ -53,12 +54,17 @@ namespace {
 // passed without measuring anything. Alone, it measured the boot and failed.
 uint64_t residentBytes() {
 #if defined(__APPLE__)
-    mach_task_basic_info_data_t info {};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+    // The footprint, not the resident set: under memory pressure macOS
+    // compresses pages straight out of the resident set, and a lane just
+    // written then reads as half its size (seen on a CI runner, 2026-10-07).
+    // The footprint is what the system itself accounts a process by, and it
+    // counts a compressed page as still the process's.
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO,
                   reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
         return 0;
-    return static_cast<uint64_t>(info.resident_size);
+    return static_cast<uint64_t>(info.phys_footprint);
 #elif defined(_WIN32)
     return 0;
 #else
