@@ -62,10 +62,6 @@ extern "C" {
 }
 
 namespace {
-// Arena base for engine-region access in this file. Valid after init_memory()
-// (i.e. once the DSP has booted), which all callers below satisfy.
-inline uint8_t* sp_arena() { return static_cast<uint8_t*>(get_shared_memory_base()); }
-
 // Name published to OS registries (PipeWire nodes, ALSA seq MIDI clients,
 // macOS aggregate devices, Link peers). Written once in init() from
 // cfg.appName before any device manager or MIDI subsystem exists, read-only
