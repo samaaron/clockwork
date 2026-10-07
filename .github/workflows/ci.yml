@@ -377,7 +377,6 @@ jobs:
           build/test/clockwork_lanes_reserved_tests
           build/test/clockwork_attach_tests
           build/test/clockwork_engine_tests
-          build/test/clockwork_engine_tests
 
   # -------------------------------------------------------------------- nif --
   # The Erlang NIF build. Build-only: clockwork vendors the erl_nif headers,
