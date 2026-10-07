@@ -98,7 +98,7 @@ ClockworkAudioFormat sniff(const uint8_t* d, size_t n) {
     // layer III version that is not the reserved one, is as much as there is
     // to go on — and it is what every player uses.
     if (startsWith(d, n, 0, "ID3")) return CLOCKWORK_AUDIO_FORMAT_MP3;
-    if (n >= 2 && d[0] == 0xFF && (static_cast<uint32_t>(d[1]) & 0xE0u) == 0xE0u
+    if (d[0] == 0xFF && (static_cast<uint32_t>(d[1]) & 0xE0u) == 0xE0u
         && (static_cast<uint32_t>(d[1]) & 0x18u) != 0x08u
         && (static_cast<uint32_t>(d[1]) & 0x06u) == 0x02u)
         return CLOCKWORK_AUDIO_FORMAT_MP3;
@@ -402,7 +402,7 @@ struct ClockworkAudioWriter {
     // or a caller that never closed — gives back what it holds.
     ~ClockworkAudioWriter() {
         if (wavOpen) drwav_uninit(&wav);
-        if (wavMemory) std::free(wavMemory);   // NOLINT(cppcoreguidelines-no-malloc): dr_wav's, by its own contract
+        std::free(wavMemory);   // NOLINT(cppcoreguidelines-no-malloc): dr_wav's, by its own contract
         if (fp) std::fclose(fp);
     }
     ClockworkAudioWriter() = default;

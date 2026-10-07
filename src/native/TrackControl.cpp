@@ -271,16 +271,15 @@ void TrackControl::tapReturns() {
     const float* bus = reinterpret_cast<const float*>(get_audio_input_bus());
     const uint32_t frames = clockwork_block_size();
     const uint64_t at = g_engine_frames.load(std::memory_order_relaxed);
-    constexpr uint32_t slots = LANES / 2;
+    // Only the slots this build carved: a profile with none has nothing to
+    // claim, and its tracks simply have no scope.
+    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, SHM_SCOPE_TRACK_SLOTS);
     for (uint32_t slot = 0; slot < slots; ++slot) {
         ScopeTap& tap = mScopes[slot];
         const bool want = (live >> slot) & 1u;
         if (want && !tap.writer.valid()) {
-            // Past the region on a build that carved no track slots: the
-            // claim is refused and the track simply has no scope.
-            if (slot < SHM_SCOPE_TRACK_SLOTS
-                && clockwork_scope_get(nullptr, static_cast<int>(SHM_SCOPE_TRACK_SLOT_BASE + slot),
-                                 static_cast<int>(SHM_SCOPE_STREAM_CHANNELS), 0, &tap.claim))
+            if (clockwork_scope_get(nullptr, static_cast<int>(SHM_SCOPE_TRACK_SLOT_BASE + slot),
+                                   static_cast<int>(SHM_SCOPE_STREAM_CHANNELS), 0, &tap.claim))
                 tap.writer = shm_scope_stream_writer(
                     static_cast<shm_scope_stream*>(tap.claim.internalData));
         } else if (!want && tap.writer.valid()) {

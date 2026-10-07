@@ -218,6 +218,7 @@ int  clockwork_scope_get(void* ctx, int index, int channels, int max_frames, voi
 void clockwork_scope_release(void* ctx, void* hnd);
 }
 
+#if CLOCKWORK_WORKLET_CLOCK
 // Audio-thread /clock handler (the wasm ingress route). Handles the cheap
 // clock-core verbs inline and replies via the OUT ring. /clockwork/clock is
 // clockwork's own namespace and is always consumed here — it never reaches the
@@ -261,6 +262,7 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
     }
     return true;
 }
+#endif  // CLOCKWORK_WORKLET_CLOCK
 
 // The engine namespace. Kept declared in both builds so the `using namespace
 // engine;` in the scheduler-bridge functions below resolves either way.
@@ -288,7 +290,7 @@ bool ring_buffer_write(
     const void* data,
     uint32_t data_size,
     std::atomic<uint32_t>* status_flags = nullptr,
-    PerformanceMetrics* metrics = nullptr
+    PerformanceMetrics* pm = nullptr
 );
 
 // Custom errno implementation for single-threaded AudioWorklet
@@ -1524,11 +1526,11 @@ extern "C" {
         // the base up rather than letting the device overlap the lanes.
         g_lane_base = 0;
         if (g_reserved_lanes > 0) {
-            const uint32_t base = lane_base_for(config.max_input_channels,
-                                                config.max_output_channels);
-            const uint32_t top  = base + g_reserved_lanes;
+            const uint32_t first = lane_base_for(config.max_input_channels,
+                                                 config.max_output_channels);
+            const uint32_t top   = first + g_reserved_lanes;
             if (top <= clockwork::kMaxChannels) {
-                g_lane_base = base;
+                g_lane_base = first;
                 if (config.max_output_channels < top) config.max_output_channels = top;
                 if (config.max_input_channels  < top) config.max_input_channels  = top;
             } else {
@@ -2723,7 +2725,7 @@ bool ring_buffer_write(
     const void* data,
     uint32_t data_size,
     std::atomic<uint32_t>* status_flags,
-    PerformanceMetrics* metrics
+    PerformanceMetrics* pm
 ) {
     // Egress frame: Message{sourceId = token} + [route:u32][osc]; the route word
     // counts toward the message length.
@@ -2744,7 +2746,7 @@ bool ring_buffer_write(
     uint32_t available = (buffer_size - 1 - current_head + current_tail) % buffer_size;
 
     if (available < footprint) {
-        if (metrics) metrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
+        if (pm) pm->messages_dropped.fetch_add(1, std::memory_order_relaxed);
         if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
         return false;
     }
@@ -2759,7 +2761,7 @@ bool ring_buffer_write(
         // Verify space at front after wrap (tail-1 to avoid head==tail ambiguity)
         uint32_t space_at_front = (current_tail > 0) ? (current_tail - 1) : 0;
         if (space_at_front < footprint) {
-            if (metrics) metrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
+            if (pm) pm->messages_dropped.fetch_add(1, std::memory_order_relaxed);
             if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
             return false;
         }
@@ -2794,11 +2796,11 @@ bool ring_buffer_write(
 
     // Track peak buffer usage at write time — the reader may drain the
     // buffer before the periodic metrics sampling sees the fill level.
-    if (metrics) {
+    if (pm) {
         uint32_t used = (new_head - current_tail + buffer_size) % buffer_size;
-        uint32_t prev = metrics->out_buffer_peak_bytes.load(std::memory_order_relaxed);
+        uint32_t prev = pm->out_buffer_peak_bytes.load(std::memory_order_relaxed);
         while (used > prev) {
-            if (metrics->out_buffer_peak_bytes.compare_exchange_weak(
+            if (pm->out_buffer_peak_bytes.compare_exchange_weak(
                     prev, used, std::memory_order_relaxed))
                 break;
         }

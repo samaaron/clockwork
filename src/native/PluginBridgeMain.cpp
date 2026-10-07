@@ -160,7 +160,6 @@ struct Bridge {
     TrackVerbs  verbs;
     RingEmit*   emit = nullptr;
 
-    std::atomic<bool> stop{false};
     std::atomic<bool> changed{false};
     std::jthread audio;   // the render thread; joins in its destructor
 
@@ -173,7 +172,9 @@ struct Bridge {
 #endif
 };
 
-Bridge* g_bridge = nullptr;
+// The run ends when this is set: by the main loop when the engine goes, or by
+// a signal, whose handler can do no more than set a flag.
+std::atomic<bool> g_stop{false};
 
 bool engineAlive(const Bridge& b) {
 #if defined(_WIN32)
@@ -324,7 +325,7 @@ void pumpEvents() {
 
 #if !defined(_WIN32)
 void onSignal(int) {
-    if (g_bridge) g_bridge->stop.store(true, std::memory_order_relaxed);
+    g_stop.store(true, std::memory_order_relaxed);
 }
 #endif
 
@@ -339,7 +340,6 @@ int run(int32_t enginePid) {
     const ClockworkLatencyCritical latencyCritical("renders the engine's plugin tracks");
 #endif
     Bridge b;
-    g_bridge = &b;
     b.enginePid = enginePid;
 
     try {
@@ -461,7 +461,7 @@ int run(int32_t enginePid) {
 
     int reason = 0;
     auto lastParentCheck = std::chrono::steady_clock::now();
-    while (!b.stop.load(std::memory_order_relaxed)) {
+    while (!g_stop.load(std::memory_order_relaxed)) {
 #if defined(__APPLE__)
         // One pool per turn: plugin loads, editor windows and the event pump
         // all autorelease into it, and it drains here. See cocoa_event_pump.h.
@@ -498,7 +498,7 @@ int run(int32_t enginePid) {
         pumpEvents();
     }
 
-    b.stop.store(true, std::memory_order_relaxed);
+    g_stop.store(true, std::memory_order_relaxed);
     b.h->bridge_ready.store(0, std::memory_order_release);
     // The render thread is asleep on the doorbell; its stop_callback rings it.
     b.audio.request_stop();
@@ -515,7 +515,6 @@ int run(int32_t enginePid) {
 #if defined(_WIN32)
     if (b.parent) CloseHandle(b.parent);
 #endif
-    g_bridge = nullptr;
     return reason;
 }
 
