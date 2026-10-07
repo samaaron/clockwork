@@ -23,6 +23,7 @@
  * short of bit-identical is a bug rather than a tolerance.
  */
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "clockwork_audio_file.h"
 #include "flac_encoder.h"
 
@@ -33,6 +34,9 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -365,20 +369,24 @@ TEST_CASE("audio file: samples past full scale clamp rather than wrap",
 TEST_CASE("audio file: a writer's memory and its file agree byte for byte",
           "[audio][file]") {
     // The two destinations are one encoder. If they ever diverge, a browser
-    // and a desktop would produce different files from the same take.
+    // and a desktop would produce different files from the same take. Both
+    // formats: the WAV's file goes through dr_wav's callbacks, the FLAC's is
+    // written here, and either is the writer's own file.
+    const uint32_t format = GENERATE(CLOCKWORK_AUDIO_FORMAT_WAV, CLOCKWORK_AUDIO_FORMAT_FLAC);
+    const bool wav = format == CLOCKWORK_AUDIO_FORMAT_WAV;
+    INFO((wav ? "wav" : "flac"));
     const auto pcm = signal(5000, 2);
-    const auto mem = encodeToMemory(CLOCKWORK_AUDIO_FORMAT_FLAC,
-                                    CLOCKWORK_AUDIO_ENCODING_PCM_S16,
+    const auto mem = encodeToMemory(format, CLOCKWORK_AUDIO_ENCODING_PCM_S16,
                                     2, 44100, pcm);
     REQUIRE(mem.status == CLOCKWORK_OK);
 
     const auto path = std::filesystem::temp_directory_path()
-                    / "clockwork_audio_file_pair.flac";
+                    / (wav ? "clockwork_audio_file_pair.wav" : "clockwork_audio_file_pair.flac");
     std::filesystem::remove(path);
 
     ClockworkAudioWriterConfig cfg{};
     cfg.struct_bytes = sizeof(cfg);
-    cfg.format = CLOCKWORK_AUDIO_FORMAT_FLAC;
+    cfg.format = format;
     cfg.encoding = CLOCKWORK_AUDIO_ENCODING_PCM_S16;
     cfg.channels = 2; cfg.sample_rate = 44100;
     ClockworkStatus st = CLOCKWORK_E_ARG;
@@ -400,6 +408,17 @@ TEST_CASE("audio file: a writer's memory and its file agree byte for byte",
         std::fclose(f);
     }
     CHECK(onDisk == mem.bytes);
+
+#if !defined(_WIN32)
+    // The file is the user's: readable by all, written by its owner, and no
+    // wider, whatever a library's default would have been — under the umask,
+    // as any file of theirs.
+    const mode_t mask = ::umask(0);
+    ::umask(mask);
+    struct stat made {};
+    REQUIRE(::stat(path.string().c_str(), &made) == 0);
+    CHECK((made.st_mode & 0777u) == (0644u & ~mask));
+#endif
     std::filesystem::remove(path);
 }
 

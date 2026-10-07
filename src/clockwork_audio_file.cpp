@@ -49,6 +49,10 @@
 #include <cstdio>
 #include <cstring>
 #include <array>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <memory>
 #include <vector>
 
@@ -385,17 +389,20 @@ struct ClockworkAudioWriter {
     ClockworkStatus status = CLOCKWORK_OK;
 
     // WAV. dr_wav owns the growing buffer for a memory writer and hands it
-    // back at uninit; for a path writer it owns the file.
+    // back at uninit; a path writer's file is `fp` below, reached through
+    // callbacks, so a WAV and a FLAC are created the same way.
     drwav  wav{};
     bool   wavOpen = false;
     gsl::owner<void*> wavMemory = nullptr;   // dr_wav's, freed with free()
     size_t wavMemoryLen = 0;
     std::vector<uint8_t> scratch;
 
+    // The file, for a path writer of either format.
+    gsl::owner<std::FILE*> fp = nullptr;
+
     // FLAC. A path writer streams frames out as they are encoded; a memory
     // writer keeps them, since the stream info at the front is patched at the
     // end either way.
-    gsl::owner<std::FILE*> fp = nullptr;
     std::unique_ptr<FlacEncoder> flac;
 
     // A writer dropped before close — open() failing after it took a file,
@@ -493,6 +500,36 @@ bool startFlac(ClockworkAudioWriter* w) {
     return true;
 }
 
+#if !defined(CLOCKWORK_AUDIO_NO_STDIO)
+// A file of the user's, created readable by all and written by its owner
+// (0644, under the umask), said here rather than left to a library's default
+// of writable by all. Windows has no mode to give: a new file takes its ACL
+// from its folder.
+gsl::owner<std::FILE*> createFile(const char* path) {
+#if defined(_WIN32)
+    return std::fopen(path, "wb");
+#else
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return nullptr;
+    const gsl::owner<std::FILE*> f{::fdopen(fd, "wb")};   // the descriptor is the stream's now
+    if (f == nullptr) ::close(fd);
+    return f;
+#endif
+}
+
+// dr_wav's way to the writer's file; the RIFF sizes are patched at close
+// through the seek.
+size_t wavWrite(void* user, const void* data, size_t bytes) {
+    return std::fwrite(data, 1, bytes, static_cast<ClockworkAudioWriter*>(user)->fp);
+}
+drwav_bool32 wavSeek(void* user, int offset, drwav_seek_origin origin) {
+    const int whence = origin == DRWAV_SEEK_SET ? SEEK_SET
+                     : origin == DRWAV_SEEK_CUR ? SEEK_CUR : SEEK_END;
+    return std::fseek(static_cast<ClockworkAudioWriter*>(user)->fp, offset, whence) == 0
+         ? DRWAV_TRUE : DRWAV_FALSE;
+}
+#endif
+
 } // namespace
 
 gsl::owner<ClockworkAudioWriter*> clockwork_audio_writer_open(
@@ -513,17 +550,18 @@ gsl::owner<ClockworkAudioWriter*> clockwork_audio_writer_open(
     std::unique_ptr<ClockworkAudioWriter> w(validateAndMake(config, status));
     if (w == nullptr) return nullptr;
 
-    if (w->format == CLOCKWORK_AUDIO_FORMAT_WAV) {
+    const bool wav = w->format == CLOCKWORK_AUDIO_FORMAT_WAV;
+    if (!wav && !startFlac(w.get())) return fail(CLOCKWORK_E_ARG);
+
+    w->fp = createFile(path);
+    if (w->fp == nullptr) return fail(CLOCKWORK_E_PERM);   // nothing created to clean up
+
+    if (wav) {
         const drwav_data_format fmt = wavFormat(w.get());
-        if (!drwav_init_file_write(&w->wav, path, &fmt, nullptr))
-            return fail(CLOCKWORK_E_PERM);
+        if (!drwav_init_write(&w->wav, &fmt, &wavWrite, &wavSeek, w.get(), nullptr))
+            return fail(CLOCKWORK_E_PERM);   // the writer closes its file
         w->wavOpen = true;
     } else {
-        if (!startFlac(w.get())) return fail(CLOCKWORK_E_ARG);
-
-        w->fp = std::fopen(path, "wb");
-        if (w->fp == nullptr) return fail(CLOCKWORK_E_PERM);
-
         const auto hdr = w->flac->header();
         if (std::fwrite(hdr.data(), 1, hdr.size(), w->fp) != hdr.size())
             return fail(CLOCKWORK_E_PERM);   // the writer closes its file
@@ -643,6 +681,11 @@ ClockworkStatus clockwork_audio_writer_close(ClockworkAudioWriter* w,
         // where the finished buffer appears.
         if (w->wavOpen) drwav_uninit(&w->wav);
         w->wavOpen = false;
+        if (w->fp != nullptr) {
+            if (std::fclose(w->fp) != 0 && w->status == CLOCKWORK_OK)
+                w->status = CLOCKWORK_E_PERM;
+            w->fp = nullptr;
+        }
         if (w->toMemory) {
             if (out_bytes != nullptr && out_bytes_len != nullptr) {
                 *out_bytes = w->wavMemory;

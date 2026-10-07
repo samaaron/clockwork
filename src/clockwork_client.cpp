@@ -347,19 +347,20 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
 
     // Egress frames are [route:u32][osc]; the route is peeled here so a
     // client sees the address it sent to, not a length-prefixed blob.
-    uint32_t n = 0;
+    ClockworkClientMessage* next = out;   // where the next message goes
     auto take = [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
         if (len < EGRESS_ROUTE_SIZE) return ClockworkDrainVerdict::Consume;
         uint32_t route = 0;
         std::memcpy(&route, payload, sizeof(route));
-        out[n].bytes    = payload + EGRESS_ROUTE_SIZE;
-        out[n].length   = len - EGRESS_ROUTE_SIZE;
-        out[n].origin   = sourceId;
-        out[n].route    = route;
-        out[n].sequence = seq;
-        ++n;
+        next->bytes    = payload + EGRESS_ROUTE_SIZE;
+        next->length   = len - EGRESS_ROUTE_SIZE;
+        next->origin   = sourceId;
+        next->route    = route;
+        next->sequence = seq;
+        ++next;
         return ClockworkDrainVerdict::Consume;
     };
+    const auto taken = [&] { return static_cast<uint32_t>(next - out); };
     // THE LAST BATCH'S SPACE GOES BACK FIRST, AND THIS ONE'S NOT YET. The
     // messages point into the ring, so each ring is read against its read
     // cursor, and its tail — the one the writer measures free space against
@@ -380,12 +381,12 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
         c->base + c->L.out_ring_offset, c->L.out_ring_size,
         &ctl->out_head, &ctl->out_read,
         c->drain, dm, max, take);
-    if (n < max && c->L.nrt_out_ring_size > 0)
+    if (taken() < max && c->L.nrt_out_ring_size > 0)
         clockwork_drain_ring(
             c->base + c->L.nrt_out_ring_offset, c->L.nrt_out_ring_size,
             &ctl->nrt_out_head, &ctl->nrt_out_read,
-            c->nrtDrain, dm, max - n, take);
-    return n;
+            c->nrtDrain, dm, max - taken(), take);
+    return taken();
 }
 
 ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegionId id,

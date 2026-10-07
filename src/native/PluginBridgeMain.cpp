@@ -78,6 +78,7 @@ extern "C" {
 #include <thread>
 #include <stop_token>
 #include <vector>
+#include <memory>
 
 namespace {
 
@@ -339,7 +340,8 @@ int run(int32_t enginePid) {
     // twice in forty minutes with nothing in its log. Held for the run.
     const ClockworkLatencyCritical latencyCritical("renders the engine's plugin tracks");
 #endif
-    Bridge b;
+    const auto bridge = std::make_unique<Bridge>();   // its verbs object is handed to the track layer, so not on this stack
+    Bridge& b = *bridge;
     b.enginePid = enginePid;
 
     try {
