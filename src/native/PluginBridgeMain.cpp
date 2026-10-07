@@ -159,7 +159,7 @@ struct Bridge {
     int32_t     enginePid = 0;
 
     TrackVerbs  verbs;
-    RingEmit*   emit = nullptr;
+    std::unique_ptr<RingEmit> emit;   // made once the segment is mapped, which it needs
 
     std::atomic<bool> changed{false};
     std::jthread audio;   // the render thread; joins in its destructor
@@ -418,8 +418,7 @@ int run(int32_t enginePid) {
         b.retPtrs.push_back(b.retBuf.data() + size_t(c) * MAX_BLOCK);
     }
 
-    RingEmit emit(b.h, out_ring(b.seg.ptr));
-    b.emit = &emit;
+    b.emit = std::make_unique<RingEmit>(b.h, out_ring(b.seg.ptr));
     const double sr = clockwork::bitsToDouble(b.h->sample_rate_bits.load(std::memory_order_relaxed));
     uint32_t laneBase = b.h->lane_base.load(std::memory_order_relaxed);
     uint64_t srBits = b.h->sample_rate_bits.load(std::memory_order_relaxed);
@@ -428,7 +427,7 @@ int run(int32_t enginePid) {
     clockwork_track_set_timelines(b.h->timelines.data(), TIMELINE_SLOTS);
     clockwork_track_set_load_listener(&onLoad, b.h);
     plugin_set_scan_listener(&onLoad, b.h);      // a scan opens plugins too
-    b.verbs.init(&emit, sr);
+    b.verbs.init(b.emit.get(), sr);
     b.verbs.setChangeListener([&b]() { b.changed.store(true, std::memory_order_relaxed); });
 
     if (b.h->restore.load(std::memory_order_acquire)) {
@@ -512,7 +511,7 @@ int run(int32_t enginePid) {
     clockwork_port_close(b.ret);
     b.bell.close();
     b.h->bridge_pid.store(0, std::memory_order_release);
-    b.emit = nullptr;
+    b.emit.reset();
     shm_close(b.seg);
 #if defined(_WIN32)
     if (b.parent) CloseHandle(b.parent);
