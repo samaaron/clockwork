@@ -23,6 +23,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "lanes/lanes.h"            // the host ABI under test (self-guards extern "C")
+#include "clockwork_client.h"       // the other way of taking egress, which shares its cursor
 #include "lanes/lanes_internal.h"   // clockwork_egress_nrt_write — inject NRT frames for the drain test
 #include "shared_memory.h"          // arena layout + EgressRoute
 #include "lanes/ring_drain.h"       // clockwork_drain_ring — the walker under test
@@ -97,6 +98,23 @@ void capture(void* ctx, uint32_t sourceId, uint32_t route,
     auto* c = static_cast<Captured*>(ctx);
     c->frames++; c->sourceId = sourceId; c->route = route; c->seq = seq;
     c->osc.assign(osc, osc + len);
+}
+
+// RT egress is written inside clockwork_tick; this puts one [route][payload]
+// frame on the OUT ring directly, as the audio thread would. "/test/filler"
+// is an arbitrary address that no handler owns — it exists only to prove the
+// lane carries bytes.
+constexpr char kFiller[] = "/test/filler";
+bool writeRtFrame(uint32_t sourceId) {
+    std::atomic<int32_t> lock{0};
+    uint8_t framed[EGRESS_ROUTE_SIZE + sizeof(kFiller)];
+    const uint32_t route = EGRESS_REPLY;
+    std::memcpy(framed, &route, sizeof(route));
+    std::memcpy(framed + EGRESS_ROUTE_SIZE, kFiller, sizeof(kFiller));
+    return RingBufferWriter::write(
+        shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
+        &control->out_head, &control->out_tail, &control->out_sequence, &lock,
+        framed, sizeof(framed), sourceId);
 }
 
 // A standalone test ring: buffer + cursors + a writer, independent of the
@@ -443,25 +461,70 @@ TEST_CASE("lanes ABI: NRT egress write -> drain round-trips route, token, payloa
 
 TEST_CASE("lanes ABI: RT egress drain delivers a framed OUT frame", "[lanes][abi]") {
     LanesArena arena;
-    // RT egress is written inside clockwork_tick; inject one [route][payload] frame
-    // directly. "/test/filler" is an arbitrary address that no handler owns —
-    // it exists only to prove the lane carries bytes.
-    std::atomic<int32_t> lock{0};
-    const char kFiller[] = "/test/filler";
-    uint8_t framed[EGRESS_ROUTE_SIZE + sizeof(kFiller)];
-    uint32_t route = EGRESS_REPLY;
-    std::memcpy(framed, &route, sizeof(route));
-    std::memcpy(framed + EGRESS_ROUTE_SIZE, kFiller, sizeof(kFiller));
-    REQUIRE(RingBufferWriter::write(
-        shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
-        &control->out_head, &control->out_tail, &control->out_sequence, &lock,
-        framed, sizeof(framed), 99));
+    REQUIRE(writeRtFrame(99));
 
     Captured cap;
     REQUIRE(clockwork_egress_rt_drain(capture, &cap, 0) == 1);
     REQUIRE(cap.route == static_cast<uint32_t>(EGRESS_REPLY));
     REQUIRE(cap.sourceId == 99);
     REQUIRE(std::string(reinterpret_cast<const char*>(cap.osc.data())) == kFiller);
+}
+
+// The egress rings have one read cursor, and both ways of taking from them
+// move it: these drains, and clockwork_client_poll. A host may hand the
+// stream from one to the other — a fixture that drains and then attaches a
+// client, a host that opens a client after draining at boot — and the one
+// that takes over must start where the other stopped, neither handing out
+// again what was taken nor reading bytes already given back to the writer.
+TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing they took", "[lanes][abi]") {
+    LanesArena arena;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    REQUIRE(c != nullptr);
+
+    const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
+    REQUIRE(writeRtFrame(1));
+    REQUIRE(clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
+    Captured rt, nrt;
+    REQUIRE(clockwork_egress_rt_drain(capture, &rt, 0) == 1);
+    REQUIRE(clockwork_egress_nrt_drain(capture, &nrt, 0) == 1);
+
+    ClockworkClientMessage m[8];
+    CHECK(clockwork_client_poll(c, m, 8) == 0);
+
+    // And what arrives after the handover is the client's, once.
+    REQUIRE(writeRtFrame(3));
+    const uint32_t n = clockwork_client_poll(c, m, 8);
+    REQUIRE(n == 1);
+    CHECK(m[0].origin == 3);
+    CHECK(clockwork_client_poll(c, m, 8) == 0);
+    clockwork_client_close(c);
+}
+
+TEST_CASE("lanes ABI: the egress drains after a client poll take nothing it took", "[lanes][abi]") {
+    LanesArena arena;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    REQUIRE(c != nullptr);
+
+    const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
+    REQUIRE(writeRtFrame(1));
+    REQUIRE(clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
+    ClockworkClientMessage m[8];
+    REQUIRE(clockwork_client_poll(c, m, 8) == 2);
+    clockwork_client_close(c);
+
+    Captured again;
+    CHECK(clockwork_egress_rt_drain(capture, &again, 0) == 0);
+    CHECK(clockwork_egress_nrt_drain(capture, &again, 0) == 0);
+    CHECK(again.frames == 0);
+
+    // And what arrives after the handover is the drain's, once.
+    REQUIRE(writeRtFrame(3));
+    Captured next;
+    REQUIRE(clockwork_egress_rt_drain(capture, &next, 0) == 1);
+    CHECK(next.sourceId == 3);
+    CHECK(clockwork_egress_rt_drain(capture, &next, 0) == 0);
 }
 
 TEST_CASE("lanes ABI: ingress/egress reject bad input and empty drains", "[lanes][abi]") {

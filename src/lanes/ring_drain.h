@@ -74,6 +74,19 @@ struct ClockworkDrainState {
     int32_t lastSeq = -1;
 };
 
+// A ring read through a second cursor. The egress rings carry two: READ,
+// where the walk has got to, and TAIL, which the writer measures free space
+// against. Every egress consumer walks from READ (passing it as the walk's
+// tail below) and gives space back through this, which brings TAIL up to
+// READ: clockwork_client_poll a poll late, since it hands frames out where
+// they lie, and the lanes drains as soon as the walk ends, since theirs are
+// only lent for the callback. One cursor, so the stream can pass from one
+// consumer to the other with nothing taken twice.
+inline void clockwork_ring_give_back(std::atomic<int32_t>* tail,
+                                     const std::atomic<int32_t>* read) {
+    tail->store(read->load(std::memory_order_relaxed), std::memory_order_release);
+}
+
 // Walk one ring, delivering each frame that carries a payload to
 //   onMessage(sourceId, payload, payloadSize, sequence) -> ClockworkDrainVerdict.
 // (A frame whose length is header-only is counted and consumed, not delivered.)

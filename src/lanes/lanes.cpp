@@ -102,14 +102,18 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
 
 // Both egress rings carry Message frames whose payload is [route:u32][osc];
 // the drains peel the route word before the callback sees the OSC bytes.
+// They walk from the ring's read cursor, as clockwork_client_poll does, and
+// give the space back as soon as the walk ends (clockwork_ring_give_back).
 static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
                                   std::atomic<int32_t>* head,
                                   std::atomic<int32_t>* tail,
+                                  std::atomic<int32_t>* read,
                                   ClockworkDrainState& st,
                                   const ClockworkDrainMetrics& m,
                                   ClockworkEgressFn fn, void* ctx,
                                   uint32_t max_frames) {
-    return clockwork_drain_ring(buffer, size, head, tail, st, m, max_frames,
+    clockwork_ring_give_back(tail, read);   // a client's last batch, if it had one
+    const uint32_t delivered = clockwork_drain_ring(buffer, size, head, read, st, m, max_frames,
         [fn, ctx](uint32_t sourceId, const uint8_t* payload, uint32_t n, uint32_t seq) {
             if (n >= EGRESS_ROUTE_SIZE) {
                 uint32_t route;
@@ -119,6 +123,8 @@ static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
             }
             return ClockworkDrainVerdict::Consume;
         });
+    clockwork_ring_give_back(tail, read);
+    return delivered;
 }
 
 uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
@@ -133,7 +139,7 @@ uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max
         m.seqGaps   = &metrics->messages_sequence_gaps;
     }
     return drain_egress_ring(shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
-                             &control->out_head, &control->out_tail,
+                             &control->out_head, &control->out_tail, &control->out_read,
                              g_rt_drain_state, m, fn, ctx, max_frames);
 }
 
@@ -150,7 +156,7 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
         m.corrupted = &metrics->osc_in_corrupted;
     }
     return drain_egress_ring(shared_memory + NRT_OUT_BUFFER_START, NRT_OUT_BUFFER_SIZE,
-                             &control->nrt_out_head, &control->nrt_out_tail,
+                             &control->nrt_out_head, &control->nrt_out_tail, &control->nrt_out_read,
                              g_nrt_drain_state, m, fn, ctx, max_frames);
 }
 

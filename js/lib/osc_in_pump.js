@@ -10,7 +10,7 @@
  *
  * So the pump is a function. A host that consumes the egress in a worker of its own — a language runtime, say,
  * that wants inbound MIDI where it can act on it — runs this there and forwards to the main thread whatever
- * the client still needs. The ring has ONE reader (a single OUT_TAIL, and a sequence gap means it lapped), so
+ * the client still needs. The ring has ONE reader (a single read cursor, and a sequence gap means it lapped), so
  * whoever runs it owns the whole stream and must pass on the rest.
  *
  * The draining itself is clockwork_client_poll through this module's own client instance (lib/wasm_client.js),

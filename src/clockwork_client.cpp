@@ -370,8 +370,8 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     // live in the ring's control block, so a rebuild resets them together and
     // a client that comes back after a crash simply polls on.
     ControlPointers* ctl = c->control();
-    ctl->out_tail.store(ctl->out_read.load(std::memory_order_relaxed), std::memory_order_release);
-    ctl->nrt_out_tail.store(ctl->nrt_out_read.load(std::memory_order_relaxed), std::memory_order_release);
+    clockwork_ring_give_back(&ctl->out_tail, &ctl->out_read);
+    clockwork_ring_give_back(&ctl->nrt_out_tail, &ctl->nrt_out_read);
 
     // TWO RINGS, ONE READ. The audio thread answers on the OUT ring; the NRT
     // gateway — the subsystems, the state changes, every broadcast — on the

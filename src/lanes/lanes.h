@@ -104,9 +104,11 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
  *         EngineControl, MIDI, Link, device …) under the egress lock:
  *         async command replies, broadcasts.
  *
- * Each ring must have exactly one draining thread (they may be the same
- * thread — the native NRT gateway drains both). The callback receives one
- * frame at a time; route is an EgressRoute value, source_id the origin
+ * Each ring must have exactly one draining thread at a time (it may be the
+ * same thread for both). These drains and clockwork_client_poll move the
+ * same read cursor, so a host may hand the stream from one to the other and
+ * the one taking over starts where the other stopped. The callback receives
+ * one frame at a time; route is an EgressRoute value, source_id the origin
  * token the reply targets, seq the ring sequence number (gap detection is
  * the caller's choice). Payload points into the ring itself (frames are
  * contiguous by wire invariant) and is valid only for the duration of the

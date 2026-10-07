@@ -20,6 +20,7 @@
 #include <cmath>
 #include <numeric>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
@@ -48,6 +49,24 @@ shm_audio_buffer* outTap() {
     REQUIRE(e != nullptr);
     return reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(clockwork_lanes_base()) + e->offset) + CLOCKWORK_TAP_OUT;
 }
+// The reply at `address` that answers `origin`, read off a client or a tap
+// by `poll`. The egress is one stream for everything that talks to the
+// engine, and in this binary for every test before this one too: whatever is
+// ahead of the reply is not this test's, so it reads until the reply or the
+// end of what is there, and says what it passed if the reply never came.
+template <typename Poll>
+bool takeReply(Poll poll, uint32_t origin, const std::string& address) {
+    ClockworkClientMessage m[64];
+    std::string passed;
+    for (uint32_t n; (n = poll(m, 64)) > 0;)
+        for (uint32_t i = 0; i < n; ++i) {
+            const auto a = osc_test::parseAddress(m[i].bytes, m[i].length);
+            if (a == address && m[i].origin == origin) return true;
+            passed += a + " (" + std::to_string(m[i].origin) + ") ";
+        }
+    UNSCOPED_INFO("no " << address << " answering " << origin << "; passed: " << passed);
+    return false;
+}
 }
 
 TEST_CASE("embed: attach hands back a handle with the engine's geometry and a working client", "[embed]") {
@@ -70,14 +89,8 @@ TEST_CASE("embed: attach hands back a handle with the engine's geometry and a wo
     dev.struct_bytes = sizeof dev;
     CHECK(clockwork_embed_device(e.h, &dev) == CLOCKWORK_E_ARG);
     lanes_test::ticked(64);
-    ClockworkClientMessage m[8];
-    uint32_t n = 0;
-    for (int i = 0; i < 4 && n == 0; ++i) n = clockwork_client_poll(c, m, 8);
-    REQUIRE(n >= 1);
-    bool pong = false;
-    for (uint32_t i = 0; i < n; ++i)
-        if (osc_test::parseAddress(m[i].bytes, m[i].length) == "/dummy/pong") pong = true;
-    CHECK(pong);
+    CHECK(takeReply([c](ClockworkClientMessage* m, uint32_t max) { return clockwork_client_poll(c, m, max); },
+                    0x5a5a, "/dummy/pong"));
 }
 
 TEST_CASE("embed: a second attach while one holds the engine is refused, and possible after close", "[embed]") {
@@ -120,18 +133,12 @@ TEST_CASE("embed: a tap on the handle's client watches both rings without taking
     float* o[2] = { l, r };
     REQUIRE(clockwork_embed_render(e.h, o, 2, nullptr, 0, 64) == 64);
     lanes_test::ticked(64);
-    auto sawPong = [&](uint32_t count) {
-        for (uint32_t i = 0; i < count; ++i)
-            if (osc_test::parseAddress(m[i].bytes, m[i].length) == "/dummy/pong" && m[i].origin == origin)
-                return true;
-        return false;
-    };
-    n = clockwork_client_tap_poll(out, m, 8);
-    CHECK(sawPong(n));
+    CHECK(takeReply([out](ClockworkClientMessage* msgs, uint32_t max) { return clockwork_client_tap_poll(out, msgs, max); },
+                    origin, "/dummy/pong"));
     CHECK(clockwork_client_tap_missed(in) + clockwork_client_tap_missed(out) == 0);
     // Watching took nothing: the consumer still gets the reply.
-    n = clockwork_client_poll(c, m, 8);
-    CHECK(sawPong(n));
+    CHECK(takeReply([c](ClockworkClientMessage* msgs, uint32_t max) { return clockwork_client_poll(c, msgs, max); },
+                    origin, "/dummy/pong"));
 
     clockwork_client_tap_close(in);
     clockwork_client_tap_close(out);
