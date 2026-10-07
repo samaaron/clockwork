@@ -37,6 +37,19 @@ import urllib.request
 
 SMOOTHIE = ("smoothie/",)
 SET_ASIDE = ("src/vendor/", "plugins/", "build/", "node_modules/", "rust/target/")
+
+# A rule that cannot judge the code it is run on, by rule id and the path it
+# does not suit, with the check that does the job instead:
+#   rust/access-invalid-pointer over rust/: the crates are an allocator and
+#   ring readers over the shared arena, where every pointer is an offset the
+#   arena published and the rule can prove none of them, so it flags each
+#   dereference in each SAFETY block. Their validity is executed, not
+#   inferred: the invariant checker in clockwork-heap and the Miri job in CI.
+UNSUITED = (("rust/access-invalid-pointer", "rust/"),)
+
+
+def unsuited(rule, path):
+    return any(rule == r and path.startswith(p) for r, p in UNSUITED)
 FAILING = ("error", "warning")
 ORDER = {"error": 0, "?": 1, "warning": 2, "note": 3}
 
@@ -74,10 +87,10 @@ def location(result):
 
 
 def with_results(sarif, keep):
-    """A copy of the SARIF holding only the results `keep` says to."""
+    """A copy of the SARIF holding only the results `keep(rule, path)` says to."""
     out = json.loads(json.dumps(sarif))
     for run in out.get("runs", []):
-        run["results"] = [r for r in run.get("results", []) if keep(location(r)[0])]
+        run["results"] = [r for r in run.get("results", []) if keep(r.get("ruleId"), location(r)[0])]
     return out
 
 
@@ -91,7 +104,7 @@ def trim(src, ours_path, smoothie_path=None):
             if path.startswith(SMOOTHIE):
                 smoothie += 1
                 continue
-            if path.startswith(SET_ASIDE):
+            if path.startswith(SET_ASIDE) or unsuited(r.get("ruleId"), path):
                 aside += 1
                 continue
             level = r.get("level") or levels.get(r.get("ruleId"))
@@ -100,9 +113,10 @@ def trim(src, ours_path, smoothie_path=None):
                 level = "?"
             rows.append((level, r.get("ruleId"), f"{path}:{line}",
                          r.get("message", {}).get("text", "").split("\n")[0][:120]))
-    json.dump(with_results(sarif, lambda p: not p.startswith(SMOOTHIE + SET_ASIDE)), open(ours_path, "w"))
+    json.dump(with_results(sarif, lambda rule, p: not p.startswith(SMOOTHIE + SET_ASIDE) and not unsuited(rule, p)),
+              open(ours_path, "w"))
     if smoothie_path:
-        json.dump(with_results(sarif, lambda p: p.startswith(SMOOTHIE)), open(smoothie_path, "w"))
+        json.dump(with_results(sarif, lambda rule, p: p.startswith(SMOOTHIE)), open(smoothie_path, "w"))
 
     rows.sort(key=lambda x: (ORDER.get(x[0], 9), x[1], x[2]))
     seen = rows or smoothie or aside
@@ -159,7 +173,8 @@ def judge():
                 f"{loc['path']}:{loc['start_line']}",
                 a["most_recent_instance"]["message"]["text"].split("\n")[0][:120])
 
-    ours = [a for a in open_alerts if not path(a).startswith(SMOOTHIE + SET_ASIDE)]
+    ours = [a for a in open_alerts
+            if not path(a).startswith(SMOOTHIE + SET_ASIDE) and not unsuited(a["rule"]["id"], path(a))]
     smoothie = [a for a in open_alerts if path(a).startswith(SMOOTHIE)]
     failing = sorted((row(a) for a in ours if a["rule"]["severity"] in FAILING),
                      key=lambda x: (ORDER.get(x[0], 9), x[1], x[2]))

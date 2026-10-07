@@ -1,13 +1,14 @@
 // A canary for audio-thread-forbidden-calls.ql: an audio entry point that
 // reaches, two calls deep, an allocation, a lock and a file write, and one
 // placement new that it must not report.
-extern "C" void* malloc(unsigned long);
+using size_t = decltype(sizeof 0);   // as the compiler defines it: not unsigned long on Windows
+extern "C" void* malloc(size_t);
 extern "C" int fprintf(void*, const char*, ...);
 extern void* stderr_stream;
 
 struct mutex { void lock(); void unlock(); };
 struct lock_guard { explicit lock_guard(mutex& m) : m(m) { m.lock(); } ~lock_guard() { m.unlock(); } mutex& m; };
-inline void* operator new(unsigned long, void* where) { return where; }
+inline void* operator new(size_t, void* where) { return where; }
 
 struct Voice { int gain; };
 static mutex g_mutex;

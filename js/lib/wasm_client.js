@@ -169,7 +169,9 @@ function moduleImports(memory, label) {
                     written += len;
                 }
                 if (pnum) view.setUint32(pnum, written, true);
-                const line = text.replace(/\n+$/, '');
+                let end = text.length;   // trailing newlines off, without a regex that backtracks over a long run of them
+                while (end > 0 && text[end - 1] === '\n') end--;
+                const line = text.slice(0, end);
                 if (line) (fd === 2 ? console.error : console.log)(`[${label}] ${line}`);
                 return 0;
             },

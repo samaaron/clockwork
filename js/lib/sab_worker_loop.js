@@ -170,6 +170,8 @@ export function runSabWorker(config) {
     }
 
     endpoint.addEventListener('message', async (event) => {
+        // A worker's messages carry no origin; a window's must be our own.
+        if (event.origin && event.origin !== self.location.origin) return;
         const { data } = event;
         try {
             if (extraHandlers?.[data.type]) {
