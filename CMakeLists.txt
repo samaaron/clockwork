@@ -157,6 +157,19 @@ set(CLOCKWORK_DSP_DIR "" CACHE PATH
 #
 # It also removes clockwork's only JUCE dependency, and with it the ISC/AGPL
 # question smoothie exists to answer.
+option(CLOCKWORK_WERROR  "Compiler warnings in Clockwork's own targets are errors (CI sets it)" OFF)
+# A sanitizer for the whole tree: "address,undefined" or "thread". One knob,
+# applied to every language and the link, because a flag handed to CMAKE_C_FLAGS
+# and CMAKE_CXX_FLAGS alone misses the Objective-C++ that smoothie's JUCE
+# compiles as on macOS — and a thread stop whose atomics are not instrumented
+# reads to ThreadSanitizer as no synchronisation at all (2026-10-07: hundreds
+# of "races" across stopThread, every one an artefact of that gap).
+set(CLOCKWORK_SANITIZE "" CACHE STRING "Sanitizer(s) to build the whole tree with: address,undefined or thread (empty for none)")
+if(CLOCKWORK_SANITIZE)
+    add_compile_options(-fsanitize=${CLOCKWORK_SANITIZE} -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=${CLOCKWORK_SANITIZE})
+    message(STATUS "Clockwork sanitizer: ${CLOCKWORK_SANITIZE} (C, C++, Objective-C++ and the link)")
+endif()
 option(CLOCKWORK_DEVICE  "Build the native audio device layer (smoothie/JUCE)" ON)
 
 option(CLOCKWORK_MIDI    "Integrate the Rust/midir MIDI subsystem"        ON)

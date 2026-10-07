@@ -75,8 +75,18 @@ void dropPausedReader() {
 
 }  // namespace
 
+// Under ThreadSanitizer the forked child is not a program it can follow (the
+// runtime warns and its reports in the child read as a failure), so these two
+// run in the plain, ASan and UBSan builds and are skipped there.
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#define CLOCKWORK_SKIP_UNDER_TSAN() SKIP("fork is outside what ThreadSanitizer can follow")
+#else
+#define CLOCKWORK_SKIP_UNDER_TSAN() ((void)0)
+#endif
+
 TEST_CASE("a ring reader dropped while parked on its wake word joins, never terminates",
           "[threads][lifetime]") {
+    CLOCKWORK_SKIP_UNDER_TSAN();
     const int outcome = dropInChild(&dropParkedReader);
     INFO("child outcome " << outcome << " (0 = joined and returned; " << SIGABRT
                           << " = std::terminate; -1 = hung)");
@@ -85,6 +95,7 @@ TEST_CASE("a ring reader dropped while parked on its wake word joins, never term
 
 TEST_CASE("a ring reader dropped while paused is released and joined",
           "[threads][lifetime]") {
+    CLOCKWORK_SKIP_UNDER_TSAN();
     const int outcome = dropInChild(&dropPausedReader);
     INFO("child outcome " << outcome);
     CHECK(outcome == 0);

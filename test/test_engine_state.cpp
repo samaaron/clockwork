@@ -181,14 +181,14 @@ TEST_CASE("EngineState: a host that sizes the heap for its guest's pool boots th
 
 TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying why",
           "[EngineState][heap]") {
-    // AddressSanitizer's allocator aborts the process on a request this size
-    // rather than answering NULL (allocation-size-too-big), so under it the
+    // The sanitizers' allocators abort the process on a request this size
+    // rather than answering NULL (allocation-size-too-big), so under them the
     // failure this case is about cannot happen; the plain builds run it.
-#if defined(__SANITIZE_ADDRESS__)
-    SKIP("ASan aborts on an impossible allocation instead of failing it");
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    SKIP("a sanitizer aborts on an impossible allocation instead of failing it");
 #elif defined(__has_feature)
-#  if __has_feature(address_sanitizer)
-    SKIP("ASan aborts on an impossible allocation instead of failing it");
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+    SKIP("a sanitizer aborts on an impossible allocation instead of failing it");
 #  endif
 #endif
     auto cfg = EngineFixture::defaultConfig();
