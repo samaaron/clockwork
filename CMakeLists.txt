@@ -1405,7 +1405,7 @@ if(CLOCKWORK_PLUGINS)
         target_sources(clockwork_plugin_host PRIVATE ${CLOCKWORK_SRC}/native/PluginEditorWindow.mm)
         target_link_libraries(clockwork_plugin_host PRIVATE "-framework Cocoa")
     elseif(WIN32)
-        # Not yet compiled or run on Windows: see the file's header.
+        # Compiled by CI, not yet run on Windows: see the file's header.
         target_sources(clockwork_plugin_host PRIVATE ${CLOCKWORK_SRC}/native/PluginEditorWindowWin.cpp)
         # user32 for the window itself. PRIVATE on a static library still
         # reaches whoever links it, so the bridge and the tests get it too.

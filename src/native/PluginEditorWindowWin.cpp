@@ -38,19 +38,27 @@
  * process blocking stalls the other). The window floats, as a DAW's plugin
  * editor does, and a plugin that crashes takes this process and not the GUI.
  *
- * WRITTEN AGAINST THE WIN32 API ON A MAC. This file has not yet been compiled
- * or run on Windows. docs/TRACKS.md says so; when it has been, that
- * sentence and this one should go.
+ * WRITTEN AGAINST THE WIN32 API ON A MAC. CI compiles it on Windows, warnings
+ * as errors, but it has never been run there and no test opens an editor;
+ * when one does, this paragraph should go.
  */
 #if defined(_WIN32)
 
 // Built as part of clockwork_plugin_host, which does not inherit clockwork's
 // compile definitions; windows.h is tamed here as plugin_vst3.cpp tames it.
+// UNICODE because every call below is to a W entry point, so the stock
+// resource names (IDC_ARROW, IDI_APPLICATION) must be the wide ones too.
 #ifndef NOMINMAX
 #  define NOMINMAX 1
 #endif
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef UNICODE
+#  define UNICODE 1
+#endif
+#ifndef _UNICODE
+#  define _UNICODE 1
 #endif
 #include <windows.h>
 
@@ -170,16 +178,12 @@ bool ensureClasses() {
     editor.cbSize        = sizeof editor;
     editor.lpfnWndProc   = editorProc;
     editor.hInstance     = GetModuleHandleW(nullptr);
-    // IDC_ARROW is MAKEINTRESOURCE, which is the ANSI form unless UNICODE is
-    // defined — and this file calls the W entry points explicitly rather than
-    // relying on that macro. The value is an atom, not a string, so widening
-    // the pointer type is all that is meant here.
-    editor.hCursor       = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    editor.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     // The product's icon, if the build gave this binary one (resource id 1,
     // clockwork_version.rc.in), else the stock application icon rather than
     // the blank the taskbar shows for a class with none.
     editor.hIcon         = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
-    if (!editor.hIcon) editor.hIcon = LoadIconW(nullptr, reinterpret_cast<LPCWSTR>(IDI_APPLICATION));
+    if (!editor.hIcon) editor.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     editor.hIconSm       = editor.hIcon;
     editor.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW + 1));
     editor.lpszClassName = kEditorClass;
