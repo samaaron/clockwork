@@ -1142,6 +1142,11 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (mShmemCreator)
         mShmemCreator->publish();
 
+    // The engine's own client handle over the arena, opened once, here: the
+    // gateway thread below and any caller's ingest both use it, and opening it
+    // on first use from whichever came first was a race between the two.
+    openClient();
+
     // Publish the peer command plane only when enabled: the gateway task below
     // drains its command ring and ShmTransport sends through this slot.
     // Disabled (or no segment) ⇒ the slot stays null and both sides are inert.
@@ -1771,19 +1776,17 @@ void ClockworkEngine::noteInFlightCommand(const uint8_t* data, uint32_t size) {
     mInFlightCommand[i] = '\0';
 }
 
-ClockworkClient* ClockworkEngine::ensureClient() {
-    if (!mClientHandle && shared_memory) {
-        ClockworkStatus st = CLOCKWORK_OK;
-        mClientHandle = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
-        if (!mClientHandle)
-            clockwork_log("[engine] client boundary unavailable: %s",
-                    clockwork_client_status_text(st));
-    }
-    return mClientHandle;
+void ClockworkEngine::openClient() {
+    if (mClientHandle || !shared_memory) return;
+    ClockworkStatus st = CLOCKWORK_OK;
+    mClientHandle = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    if (!mClientHandle)
+        clockwork_log("[engine] client boundary unavailable: %s",
+                clockwork_client_status_text(st));
 }
 
 void ClockworkEngine::drainEgressNow() {
-    ClockworkClient* client = ensureClient();
+    ClockworkClient* client = mClientHandle;
     if (!client) return;
     // A batch at a time until the rings are empty. Bounded per call because
     // the array is the caller's, which is the ABI's rule.
@@ -1807,7 +1810,7 @@ void ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t origin
     // The audio thread drains, classifies, and either performs the audio plane
     // inline or forwards control to the NRT thread, which resolves the token
     // back to a reply address. Token 0 is in-process and replies via onReply.
-    ClockworkClient* client = ensureClient();
+    ClockworkClient* client = mClientHandle;
     const bool written = client
         && clockwork_client_send(client, data, size, originToken) == CLOCKWORK_OK;
     if (mMetrics) {

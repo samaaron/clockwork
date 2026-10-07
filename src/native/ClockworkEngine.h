@@ -285,7 +285,7 @@ public:
     // egress itself (Config::hostDrainsEgress): clockwork_client_poll takes
     // from both egress rings. ONE CONSUMER — the host's drain thread and no
     // other. Null before init.
-    struct ClockworkClient* egressClient() { return ensureClient(); }
+    struct ClockworkClient* egressClient() { return mClientHandle; }
 
     // ONE pass of the control plane, on the calling thread, for a host that
     // runs it (Config::hostDrivesControl): the control-ring drain — every
@@ -1221,7 +1221,8 @@ private:
     // Opened on first use by whichever side gets there first — ingest or the
     // egress gateway. Not at construction: `shared_memory` is not chosen until
     // init_memory() runs.
-    struct ClockworkClient* ensureClient();
+    // Opened once in bringUp, after the arena is published and before any thread can ask for it.
+    void openClient();
 
     // The guest's arena (DspConfig::arena). NOT in the shared segment: no
     // client maps it, and while it lived there it existed only when a client
