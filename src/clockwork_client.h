@@ -299,12 +299,19 @@ typedef struct ClockworkClientMessage {
 /* Take up to `max` messages. Returns how many were written to `out`, which the
  * caller owns and sizes.
  *
+ * THE BYTES ARE THE RING'S, AND THE CALLER'S UNTIL THE NEXT POLL. Nothing is
+ * copied: each message points at its frame where it lies, so the space the
+ * batch occupies is not given back to the engine when this returns but at the
+ * start of the next poll. A writer that fills the ring in between is refused,
+ * as any full ring refuses it, rather than let on to bytes still being read.
+ *
  * SINGLE CONSUMER, AND THE RING HAS ONE. Polling TAKES: it advances the
  * egress ring's own read cursor, which lives in the engine's control block and
  * is shared by every handle onto that engine. Two handles polling therefore
  * take from each other — whoever calls first gets the message and the other
- * never sees it. That is what a queue is, and it is what a client draining
- * replies wants.
+ * never sees it, and a batch one handle still holds is given back by
+ * whichever handle polls next. That is what a queue is, and it is what a
+ * client draining replies wants: one handle.
  *
  * A second reader that wants to WATCH rather than take opens a tap instead;
  * see clockwork_client_tap_open below. Watching is the other shape, and it is

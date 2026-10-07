@@ -76,11 +76,13 @@ void clockwork_lanes_reset_rings(void) {
     spin_acquire(g_nrt_egress_lock);
     control->nrt_out_head.store(0, std::memory_order_relaxed);
     control->nrt_out_tail.store(0, std::memory_order_relaxed);
+    control->nrt_out_read.store(0, std::memory_order_relaxed);
     control->nrt_out_sequence.store(0, std::memory_order_relaxed);
     g_nrt_egress_lock.store(0, std::memory_order_release);
 
     control->out_head.store(0, std::memory_order_relaxed);
     control->out_tail.store(0, std::memory_order_relaxed);
+    control->out_read.store(0, std::memory_order_relaxed);
     control->out_sequence.store(0, std::memory_order_relaxed);
 }
 

@@ -360,18 +360,30 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
         ++n;
         return ClockworkDrainVerdict::Consume;
     };
+    // THE LAST BATCH'S SPACE GOES BACK FIRST, AND THIS ONE'S NOT YET. The
+    // messages point into the ring, so each ring is read against its read
+    // cursor, and its tail — the one the writer measures free space against
+    // — is brought up to the read cursor only here, at the next poll. A writer
+    // that fills the ring in between is refused, as any full ring refuses it,
+    // rather than let on to bytes the caller is still reading. Both cursors
+    // live in the ring's control block, so a rebuild resets them together and
+    // a client that comes back after a crash simply polls on.
+    ControlPointers* ctl = c->control();
+    ctl->out_tail.store(ctl->out_read.load(std::memory_order_relaxed), std::memory_order_release);
+    ctl->nrt_out_tail.store(ctl->nrt_out_read.load(std::memory_order_relaxed), std::memory_order_release);
+
     // TWO RINGS, ONE READ. The audio thread answers on the OUT ring; the NRT
     // gateway — the subsystems, the state changes, every broadcast — on the
     // NRT-out ring. A client does not care which; it takes from both, OUT
     // first, and a ring's sequence numbers stay its own.
     clockwork_drain_ring(
         c->base + c->L.out_ring_offset, c->L.out_ring_size,
-        &c->control()->out_head, &c->control()->out_tail,
+        &ctl->out_head, &ctl->out_read,
         c->drain, dm, max, take);
     if (n < max && c->L.nrt_out_ring_size > 0)
         clockwork_drain_ring(
             c->base + c->L.nrt_out_ring_offset, c->L.nrt_out_ring_size,
-            &c->control()->nrt_out_head, &c->control()->nrt_out_tail,
+            &ctl->nrt_out_head, &ctl->nrt_out_read,
             c->nrtDrain, dm, max - n, take);
     return n;
 }

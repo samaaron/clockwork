@@ -44,7 +44,7 @@
 constexpr uint32_t IN_BUFFER_SIZE     = CLOCKWORK_IN_BUFFER_SIZE;    // OSC messages from host to the engine (large for bulk payloads)
 constexpr uint32_t OUT_BUFFER_SIZE    = CLOCKWORK_OUT_BUFFER_SIZE;   // OSC replies from the engine to host (prevent drops)
 constexpr uint32_t NRT_OUT_BUFFER_SIZE  = CLOCKWORK_NRT_OUT_BUFFER_SIZE; // NRT-thread egress ring (replies, notifications, debug)
-constexpr uint32_t CONTROL_SIZE       = 48;    // Atomic control pointers & flags (11 fields × 4 bytes + 4 padding for 8-byte alignment)
+constexpr uint32_t CONTROL_SIZE       = 56;    // Atomic control pointers & flags (13 fields × 4 bytes + 4 padding for 8-byte alignment)
 constexpr uint32_t METRICS_SIZE       = 208;   // Performance metrics: 52 fields * 4 bytes = 208 bytes (multiple of 8)
 constexpr uint32_t NTP_START_TIME_SIZE = 8;    // NTP time when AudioContext started (double, 8-byte aligned, write-once)
 constexpr uint32_t DRIFT_OFFSET_SIZE = 4;      // Drift offset in microseconds (int32, atomic)
@@ -485,7 +485,7 @@ enum EgressRoute : uint32_t {
 };
 constexpr uint32_t EGRESS_ROUTE_SIZE = sizeof(uint32_t);  // leading route word
 
-// Control pointers structure (4-byte aligned for atomics, padded to 48 bytes for 8-byte alignment)
+// Control pointers structure (4-byte aligned for atomics, padded to 56 bytes for 8-byte alignment)
 struct alignas(4) ControlPointers {
     std::atomic<int32_t> in_head;
     std::atomic<int32_t> in_tail;
@@ -498,6 +498,12 @@ struct alignas(4) ControlPointers {
     std::atomic<int32_t> nrt_out_sequence;  // Sequence counter for the NRT-out buffer
     std::atomic<uint32_t> status_flags;
     std::atomic<int32_t> in_write_lock;   // Spinlock for IN buffer writes (0=unlocked, 1=locked)
+    // Where a poll has read each egress ring to. Poll hands out the frames
+    // where they lie, so the tail — what the writer measures free space
+    // against — follows this one poll late: a batch's space goes back when
+    // the next poll takes the read cursor as the tail. Reset with the rings.
+    std::atomic<int32_t> out_read;
+    std::atomic<int32_t> nrt_out_read;
     int32_t _padding;                     // Padding to maintain 8-byte alignment for subsequent Float64
 };
 
@@ -1011,7 +1017,9 @@ CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_sequence,   28, "js/lib/control_off
 CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_sequence, 32, "js/lib/control_offsets.js NRT_OUT_SEQUENCE");
 CLOCKWORK_ASSERT_OFFSET(ControlPointers, status_flags,   36, "js/lib/control_offsets.js STATUS_FLAGS");
 CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_write_lock,  40, "js/lib/control_offsets.js IN_WRITE_LOCK");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, _padding,       44, "js/lib/control_offsets.js padding");
+CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_read,       44, "js/lib/control_offsets.js OUT_READ");
+CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_read,   48, "js/lib/control_offsets.js NRT_OUT_READ");
+CLOCKWORK_ASSERT_OFFSET(ControlPointers, _padding,       52, "js/lib/control_offsets.js padding");
 
 // PerformanceMetrics ↔ js/lib/metrics_offsets.js (all fields uint32; JS uses array index)
 CLOCKWORK_ASSERT_METRIC(process_count,                   0);

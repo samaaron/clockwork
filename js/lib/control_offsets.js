@@ -19,7 +19,9 @@
  *       std::atomic<int32_t> nrt_out_sequence; // offset 32
  *       std::atomic<uint32_t> status_flags;  // offset 36
  *       std::atomic<int32_t> in_write_lock;  // offset 40
- *       int32_t _padding;              // offset 44
+ *       std::atomic<int32_t> out_read;       // offset 44
+ *       std::atomic<int32_t> nrt_out_read;   // offset 48
+ *       int32_t _padding;              // offset 52
  *   };
  */
 
@@ -47,6 +49,11 @@ export const NRT_OUT_SEQUENCE = 32;
 // Status and synchronization
 export const STATUS_FLAGS = 36;
 export const IN_WRITE_LOCK = 40;
+
+// Where clockwork_client_poll has read each egress ring to; the tail follows
+// it one poll late, so a polled frame's bytes stay the caller's until then.
+export const OUT_READ = 44;
+export const NRT_OUT_READ = 48;
 
 // =============================================================================
 // Helper functions

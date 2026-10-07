@@ -18,10 +18,22 @@
 #include "clockwork_client.h"
 #include "shared_memory.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <thread>
 #include <vector>
+
+// The engine's arena, as audio_processor.cpp publishes it, and the OUT ring's
+// writer: the audio thread's, driven by hand below so the ring fills exactly
+// when the case says so.
+extern "C" { extern uint8_t* shared_memory; }
+extern bool ring_buffer_write(
+    uint8_t* buffer_start, uint32_t buffer_size,
+    std::atomic<int32_t>* head, std::atomic<int32_t>* tail, std::atomic<int32_t>* sequence,
+    uint32_t route, uint32_t source_id, const void* data, uint32_t data_size,
+    std::atomic<uint32_t>* status_flags, PerformanceMetrics* metrics);
 
 namespace {
 
@@ -105,4 +117,80 @@ TEST_CASE("client egress: without it, the engine delivers as it always did", "[c
     fx.send(osc_test::message("/dummy/ping"));
     OscReply r;
     CHECK(fx.waitForReply("/dummy/pong", r));
+}
+
+TEST_CASE("client egress: a polled message is the caller's until the next poll, however full the ring gets meanwhile",
+          "[client][egress]") {
+    // WHAT A POINTER INTO THE RING PROMISES. Poll hands back the bytes where
+    // they lie rather than a copy, and every caller — the engine's own egress
+    // thread, the Rust client, the worklet — reads them after poll returns.
+    // That is only sound if the space stays the caller's until it polls
+    // again: a tail given back to the writer at poll time lets the audio
+    // thread lap the ring and write a new reply over the one still being read.
+    // Seen once under TSan on a loaded CI runner (2026-10-07), never locally:
+    // the window is microseconds wide, so the ring is filled by hand here.
+    engine_test::Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrainsEgress = true; });
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+    takeAll(c);   // boot's broadcasts
+
+    // Put the reply half-way round the ring, where the writer will wrap on to
+    // it: at the ring's start the front has no room for a frame and the
+    // writer refuses before it ever reaches the held bytes.
+    auto* ctl = reinterpret_cast<ControlPointers*>(shared_memory + CONTROL_START);
+    const auto fill = [&](const std::vector<uint8_t>& payload) {
+        return ring_buffer_write(shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
+                                 &ctl->out_head, &ctl->out_tail, &ctl->out_sequence,
+                                 EGRESS_REPLY, 7, payload.data(), static_cast<uint32_t>(payload.size()),
+                                 nullptr, nullptr);
+    };
+    const std::vector<uint8_t> coarse(200, 0xEE);
+    while (static_cast<uint32_t>(ctl->out_head.load()) < OUT_BUFFER_SIZE / 2) REQUIRE(fill(coarse));
+    takeAll(c);
+
+    // One reply on the OUT ring, taken and held. Written by hand, and long,
+    // so that a lap cannot stop short of its bytes by the luck of a frame
+    // boundary: whatever ends up written last ends within a frame of the
+    // tail, and this payload reaches two hundred bytes back from it.
+    const std::vector<uint8_t> mark(200, 0xAB);
+    REQUIRE(fill(mark));
+    ClockworkClientMessage batch[64];
+    REQUIRE(clockwork_client_poll(c, batch, 64) == 1);
+    const ClockworkClientMessage held = batch[0];
+    REQUIRE(held.length == mark.size());
+    CHECK(std::vector<uint8_t>(held.bytes, held.bytes + held.length) == mark);
+
+    // The audio thread writes replies behind it until the ring is full, which
+    // takes it past the end and round to the front. In frames smaller than the
+    // held one, so the writer packs right up to whatever it takes the tail to
+    // be: short of the held bytes, or into them.
+    const int32_t headBefore = ctl->out_head.load();
+    const std::vector<uint8_t> fine(8, 0xEE);
+    uint32_t written = 0;
+    while (fill(fine)) {
+        ++written;
+        REQUIRE(written < 100000);   // a ring that never fills is a failure, not a hang
+    }
+    CHECK(written > 0);
+    CHECK(ctl->out_head.load() < headBefore);   // it came round
+
+    // The held bytes are untouched: the writer stopped short of them.
+    CHECK(std::vector<uint8_t>(held.bytes, held.bytes + held.length) == mark);
+
+    // And the ring goes on working: the next poll takes the filler, which
+    // gives the space back, and a fresh ping is answered.
+    uint32_t taken = 0;
+    for (;;) {
+        const uint32_t m = clockwork_client_poll(c, batch, 64);
+        taken += m;
+        if (m < 64) break;
+    }
+    CHECK(taken == written);
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 7) == CLOCKWORK_OK);
+    e.pump(0.1);
+    Frame pong;
+    CHECK(waitForFrame(c, "/dummy/pong", &pong, 200));
+    clockwork_client_close(c);
 }

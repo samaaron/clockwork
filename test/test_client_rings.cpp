@@ -146,7 +146,8 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
 TEST_CASE("client rings: a second handle polling takes from the first",
           "[client][rings]") {
     // WHAT POLLING IS. The egress ring has one read cursor and it lives in the
-    // engine's control block, so polling MOVES it for everybody. Two handles
+    // engine's control block, so polling MOVES it for everybody (and the
+    // tail follows a poll late, when the batch's bytes are given back). Two handles
     // are two ways of reaching the same queue, not two copies of the stream.
     //
     // This replaced a case that asserted the opposite. It passed for two
