@@ -31,7 +31,7 @@ namespace juce
     time or length, so the PositionableAudioSource is used for a finite stream
     that has a current read position.
 
-    @see AudioSource, AudioTransportSource
+    @see AudioSource
 
     @tags{Audio}
 */

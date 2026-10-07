@@ -17,7 +17,9 @@ and hack on directly; the name is JUCE, blended.
   — all ISC. `juce_audio_formats` (GPL-dual) was deliberately NOT vendored; the
   recorder uses `src/clockwork_audio_file.h` instead.
 - Pruned relative to upstream: Android glue (`native/java*`, oboe) — Smoothie
-  targets macOS / Windows / Linux only.
+  targets macOS / Windows / Linux only; and `AudioSourcePlayer` and
+  `AudioTransportSource` (`juce_audio_devices/sources`), which Clockwork never
+  uses: it drives the device through its own callback.
 - The `juce` namespace and per-file copyright headers are retained, as the ISC
   licence requires. Smoothie is the subproject/target name, not a rename.
 

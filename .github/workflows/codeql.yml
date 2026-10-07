@@ -47,9 +47,13 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             category: /language:c-cpp
+          # The tracer runs the system shell under Rosetta, so the C++ build
+          # would target x86_64 while cargo, a native arm64 binary, builds
+          # the Rust for arm64, and the two do not link: name the target.
           - os: macos-latest
             platform: macos
             category: /language:c-cpp/os:macos
+            configure: -DCMAKE_OSX_ARCHITECTURES=arm64
           - os: windows-latest
             platform: windows
             category: /language:c-cpp/os:windows
@@ -66,27 +70,31 @@ jobs:
             libasound2-dev libudev-dev libjack-jackd2-dev \
             libpipewire-0.3-dev
 
+      # Each of our queries has a source file with a known violation and the
+      # result it must report: a query that stops seeing fails here, before
+      # a quiet green could pass for a clean engine. Run before init begins
+      # tracing, which on Windows takes in every process the job starts,
+      # the test's own extraction too, and leaves its database empty.
+      - uses: github/codeql-action/setup-codeql@v3
+        id: setup
+
+      - name: Query tests
+        shell: bash
+        run: |
+          "${{ steps.setup.outputs.codeql-path }}" test run .github/codeql/queries/test
+
       # GitHub's suite and Clockwork's own queries (.github/codeql/queries):
       # the rules the compiler cannot state, such as nothing on the audio
       # thread that allocates, locks, sleeps or touches a file.
       - uses: github/codeql-action/init@v3
-        id: init
         with:
           languages: c-cpp
           build-mode: manual
           queries: security-and-quality,./.github/codeql/queries
 
-      # Each of our queries has a source file with a known violation and the
-      # result it must report: a query that stops seeing fails here, before
-      # a quiet green could pass for a clean engine.
-      - name: Query tests
-        shell: bash
-        run: |
-          "${{ steps.init.outputs.codeql-path }}" test run .github/codeql/queries/test
-
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF ${{ matrix.configure }}
           cmake --build build --config Release --parallel 2
 
       - uses: github/codeql-action/analyze@v3

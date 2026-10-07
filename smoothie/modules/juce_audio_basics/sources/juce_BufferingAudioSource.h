@@ -28,10 +28,9 @@ namespace juce
     An AudioSource which takes another source as input, and buffers it using a thread.
 
     Create this as a wrapper around another thread, and it will read-ahead with
-    a background thread to smooth out playback. You can either create one of these
-    directly, or use it indirectly using an AudioTransportSource.
+    a background thread to smooth out playback.
 
-    @see PositionableAudioSource, AudioTransportSource
+    @see PositionableAudioSource
 
     @tags{Audio}
 */

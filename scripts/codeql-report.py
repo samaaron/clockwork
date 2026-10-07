@@ -46,12 +46,12 @@ SET_ASIDE = ("src/vendor/", "plugins/", "build/", "node_modules/", "rust/target/
 #   dereference in each SAFETY block. Their validity is executed, not
 #   inferred: the invariant checker in clockwork-heap and the Miri job in CI.
 UNSUITED = (("rust/access-invalid-pointer", "rust/"),)
+FAILING = ("error", "warning")
+ORDER = {"error": 0, "?": 1, "warning": 2, "note": 3}
 
 
 def unsuited(rule, path):
     return any(rule == r and path.startswith(p) for r, p in UNSUITED)
-FAILING = ("error", "warning")
-ORDER = {"error": 0, "?": 1, "warning": 2, "note": 3}
 
 
 def report(title, lines):
@@ -87,10 +87,14 @@ def location(result):
 
 
 def with_results(sarif, keep):
-    """A copy of the SARIF holding only the results `keep(rule, path)` says to."""
+    """A copy of the SARIF holding only the results `keep(rule, path)` says to.
+    The analysis's own category is dropped: a category in the file overrides
+    the upload's, and two files from one analysis would then upload under one
+    category, which GitHub refuses."""
     out = json.loads(json.dumps(sarif))
     for run in out.get("runs", []):
         run["results"] = [r for r in run.get("results", []) if keep(r.get("ruleId"), location(r)[0])]
+        run.pop("automationDetails", None)
     return out
 
 
