@@ -33,6 +33,7 @@ add_executable(clockwork_tests
     # The rings and the lanes ABI — how bytes get in and out.
     test_ring_writer.cpp
     test_ring_buffer_write.cpp
+    test_ring_exhaustive.cpp
     test_ring_reader.cpp
     test_ring_concurrency.cpp
     test_lanes.cpp
