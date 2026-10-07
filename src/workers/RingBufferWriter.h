@@ -164,7 +164,7 @@ public:
 
         // Header: length is the EXACT frame size; readers advance by its
         // 4-byte-aligned footprint.
-        Message hdr;
+        Message hdr{};
         hdr.magic    = MESSAGE_MAGIC;
         hdr.length   = total_size;
         hdr.sequence = seq;

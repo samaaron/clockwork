@@ -33,6 +33,10 @@
 
 class StreamOscTransport : public IOscTransport {
 public:
+    StreamOscTransport() = default;
+    // A transport owns a socket and a thread: not a thing to copy or move.
+    StreamOscTransport(const StreamOscTransport&) = delete;
+    StreamOscTransport& operator=(const StreamOscTransport&) = delete;
     // Called per inbound packet: (osc, len, originToken). Set before start().
     using IngestFn = std::function<void(const uint8_t*, uint32_t, uint32_t)>;
 

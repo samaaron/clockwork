@@ -127,7 +127,7 @@ TEST_CASE("DeviceEvents: unplugging the device the engine plays on moves it to "
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
     subscribe(fix);
 
-    sys->device("Fake Interface")->hidden = true;  // unplugged
+    sys->at("Fake Interface").hidden = true;  // unplugged
     REQUIRE(sys->reportListChanged());
 
     checkPlayingOn(fix, "Fake Speakers");

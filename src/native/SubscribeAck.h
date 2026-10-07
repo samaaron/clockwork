@@ -10,6 +10,7 @@
 #include "osc/OscReceivedElements.h"
 
 #include <cstdint>
+#include <array>
 
 // The subsystem subscribe verbs (/midi, /gamepad, /osc, /clock +
 // /notify/subscribe) are fire-and-forget UDP from the client's point of
@@ -44,8 +45,8 @@ inline void ackSubscribeIfTokened(OscEgress* egress, uint32_t callerToken,
     }
     if (!haveToken) return;
 
-    char buf[96];
-    osc::OutboundPacketStream s(buf, sizeof(buf));
+    std::array<char, 96> buf{};
+    osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(replyAddr) << rpcToken << osc::EndMessage;
     // reply(), not sendToCaller(): an ack is the direct response to a
     // request, and reply's routing also reaches in-process (embedder)

@@ -39,6 +39,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <system_error>
+#include <array>
+
+#include "process_env.h"
 #include <thread>
 #include <stop_token>
 
@@ -80,12 +84,15 @@ static_assert(sizeof(hello) == 24, "hello is a wire format");
 // The endpoint an engine on `port` uses unless told otherwise. A per-user
 // location: on Linux the session runtime dir, on macOS the per-user TMPDIR,
 // and a uid-tagged /tmp path only where neither is set.
+// errno's text, from the standard library's thread-safe table: strerror's is not.
+inline std::string errnoText() { return std::system_category().message(errno); }
+
 inline std::string default_endpoint(unsigned port) {
 #ifdef _WIN32
     return "\\\\.\\pipe\\clockwork-shm-" + std::to_string(port);
 #else
     auto dir_from = [](const char* var) -> std::string {
-        const char* v = std::getenv(var);
+        const char* v = clockwork::processEnv(var);
         if (!v || !*v) return {};
         std::string d(v);
         while (d.size() > 1 && d.back() == '/') d.pop_back();
@@ -203,7 +210,7 @@ public:
             return false;
         }
         const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) { if (err) *err = "socket: " + std::string(std::strerror(errno)); return false; }
+        if (fd < 0) { if (err) *err = "socket: " + errnoText(); return false; }
         ::fcntl(fd, F_SETFD, FD_CLOEXEC);
         // A socket already at the path is either a leftover from a crashed
         // engine or a LIVE engine's — and only the first may be replaced. Two
@@ -230,13 +237,13 @@ public:
         const int bound = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr);
         ::umask(old);
         if (bound != 0) {
-            if (err) *err = "bind " + endpoint + ": " + std::strerror(errno);
+            if (err) *err = "bind " + endpoint + ": " + errnoText();
             ::close(fd);
             return false;
         }
         ::chmod(endpoint.c_str(), 0600);
         if (::listen(fd, 8) != 0) {
-            if (err) *err = "listen " + endpoint + ": " + std::strerror(errno);
+            if (err) *err = "listen " + endpoint + ": " + errnoText();
             ::close(fd);
             ::unlink(endpoint.c_str());
             return false;
@@ -360,13 +367,12 @@ private:
 
         hello h { MAGIC, VERSION, mSize, 0 };
         iovec iov { &h, sizeof h };
-        alignas(cmsghdr) char ctl[CMSG_SPACE(sizeof(int))];
-        std::memset(ctl, 0, sizeof ctl);
+        alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> ctl{};
         msghdr msg {};
         msg.msg_iov        = &iov;
         msg.msg_iovlen     = 1;
-        msg.msg_control    = ctl;
-        msg.msg_controllen = sizeof ctl;
+        msg.msg_control    = ctl.data();
+        msg.msg_controllen = ctl.size();
         cmsghdr* c = CMSG_FIRSTHDR(&msg);
         c->cmsg_level = SOL_SOCKET;
         c->cmsg_type  = SCM_RIGHTS;
@@ -429,10 +435,10 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
         return shm_invalid_handle;
     }
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) { if (err) *err = "socket: " + std::string(std::strerror(errno)); return -1; }
+    if (fd < 0) { if (err) *err = "socket: " + errnoText(); return -1; }
     ::fcntl(fd, F_SETFD, FD_CLOEXEC);
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
-        if (err) *err = "connect " + endpoint + ": " + std::strerror(errno);
+        if (err) *err = "connect " + endpoint + ": " + errnoText();
         ::close(fd);
         return -1;
     }
@@ -449,13 +455,12 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
 
     hello h {};
     iovec iov { &h, sizeof h };
-    alignas(cmsghdr) char ctl[CMSG_SPACE(sizeof(int))];
-    std::memset(ctl, 0, sizeof ctl);
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> ctl{};
     msghdr msg {};
     msg.msg_iov        = &iov;
     msg.msg_iovlen     = 1;
-    msg.msg_control    = ctl;
-    msg.msg_controllen = sizeof ctl;
+    msg.msg_control    = ctl.data();
+    msg.msg_controllen = ctl.size();
     const ssize_t got = ::recvmsg(fd, &msg, 0);
     ::close(fd);
 
@@ -465,7 +470,7 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
             && c->cmsg_len >= CMSG_LEN(sizeof(int)))
             std::memcpy(&received, CMSG_DATA(c), sizeof(int));
     }
-    if (got != static_cast<ssize_t>(sizeof h) || (msg.msg_flags & MSG_CTRUNC)
+    if (got != static_cast<ssize_t>(sizeof h) || (static_cast<unsigned>(msg.msg_flags) & static_cast<unsigned>(MSG_CTRUNC)) != 0u
         || h.magic != MAGIC || h.version != VERSION || received < 0) {
         if (received >= 0) ::close(received);
         if (err) *err = "malformed hand-off from " + endpoint;

@@ -6,6 +6,7 @@
 
 #include "clock/clock_math.h"   // beatAt, for ClockworkClockSnapshot
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -314,17 +315,17 @@ constexpr uint32_t CHANNEL_MAP_NAME_BYTES  = 64;
 // Kind in the low byte; the stream's slot PLUS ONE in the next 16 bits, so
 // zero means "no stream" and a device channel needs no slot at all.
 constexpr uint32_t channelWord(uint32_t kind, uint32_t slotPlusOne) {
-    return (kind & 0xFFu) | ((slotPlusOne & 0xFFFFu) << 8);
+    return (kind & 0xFFu) | ((slotPlusOne & 0xFFFFu) << 8u);
 }
 constexpr uint32_t channelKind(uint32_t w)   { return w & 0xFFu; }
-constexpr uint32_t channelSlot(uint32_t w)   { return (w >> 8) & 0xFFFFu; }  // 0 = none
+constexpr uint32_t channelSlot(uint32_t w)   { return (w >> 8u) & 0xFFFFu; }  // 0 = none
 
 struct ClockworkStreamEntry {
     uint32_t port;        // ClockworkPort; 0 when the slot is free
     uint32_t direction;   // kClockworkPortSource (1) / kClockworkPortSink (2)
     uint32_t first;       // first channel of the range
     uint32_t count;       // how many
-    char     name[CHANNEL_MAP_NAME_BYTES];   // NUL-terminated, truncated to fit
+    std::array<char, CHANNEL_MAP_NAME_BYTES> name;   // NUL-terminated, truncated to fit
 };
 
 struct alignas(16) ClockworkChannelMapState {
@@ -334,11 +335,11 @@ struct alignas(16) ClockworkChannelMapState {
     std::atomic<uint32_t> max_channels;  // how much of in/out is meaningful
 
     // Hot: indexed by channel, read at the point of use.
-    std::atomic<uint32_t> in [CLOCKWORK_MAX_CHANNELS];
-    std::atomic<uint32_t> out[CLOCKWORK_MAX_CHANNELS];
+    std::array<std::atomic<uint32_t>, CLOCKWORK_MAX_CHANNELS> in;
+    std::array<std::atomic<uint32_t>, CLOCKWORK_MAX_CHANNELS> out;
 
     // Cold: guarded by `generation`.
-    ClockworkStreamEntry  streams[CHANNEL_MAP_MAX_STREAMS];
+    std::array<ClockworkStreamEntry, CHANNEL_MAP_MAX_STREAMS> streams;
 };
 
 constexpr uint32_t CHANNEL_MAP_SIZE  = sizeof(ClockworkChannelMapState);
@@ -641,10 +642,10 @@ static_assert(sizeof(ClockworkClockState) == CLOCK_STATE_SIZE,
 
 enum StatusFlags : uint32_t {
     STATUS_OK = 0,
-    STATUS_BUFFER_FULL = 1 << 0,
-    STATUS_OVERRUN = 1 << 1,
-    STATUS_WASM_ERROR = 1 << 2,
-    STATUS_FRAGMENTED_MSG = 1 << 3
+    STATUS_BUFFER_FULL = 1u << 0u,
+    STATUS_OVERRUN = 1u << 1u,
+    STATUS_WASM_ERROR = 1u << 2u,
+    STATUS_FRAGMENTED_MSG = 1u << 3u
 };
 
 // Constants

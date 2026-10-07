@@ -161,8 +161,9 @@ public:
     using LinkVisibility = ClockworkClock::LinkVisibility;
     using PeerInfo       = ClockworkClock::PeerInfo;
 
-    explicit LinkSession(ClockworkClock& clock, std::function<void()> /*periodicTick*/)
+    explicit LinkSession(ClockworkClock& clock, const std::function<void()>& /*periodicTick*/)
         : mClock(clock) {}
+    ~LinkSession() = default;
 
     LinkSession(const LinkSession&) = delete;
     LinkSession& operator=(const LinkSession&) = delete;
@@ -247,7 +248,7 @@ public:
         requestBeatAtTime(beat, atNtpSeconds, quantum);
     }
 
-    void setApplyVisibility(std::function<void(LinkVisibility)>) {}
+    void setApplyVisibility(const std::function<void(LinkVisibility)>&) {}
     void requestSetLinkEnabledAsync(bool) {}
     LinkVisibility lastNonOffVisibility() const { return LinkVisibility::LoopbackOnly; }
     void           setLastNonOffVisibility(LinkVisibility) {}
@@ -277,7 +278,7 @@ public:
 
     void setTempoChangedCallback(std::function<void(double)> cb) { mTempoCb = std::move(cb); }
     // Never fired: a session of one has no peers to count.
-    void setNumPeersChangedCallback(std::function<void(std::size_t)>) {}
+    void setNumPeersChangedCallback(const std::function<void(std::size_t)>&) {}
     void setStartStopChangedCallback(std::function<void(bool, double)> cb) { mStartStopCb = std::move(cb); }
 
     int64_t linkClockMicrosRaw() const { return 0; }

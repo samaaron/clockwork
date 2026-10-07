@@ -346,6 +346,7 @@ public:
 
     LinkAudioBridge(const LinkAudioBridge&) = delete;
     LinkAudioBridge& operator=(const LinkAudioBridge&) = delete;
+    ~LinkAudioBridge() = default;
 
     void setPublishEnabled(bool publish, bool) { mAudioPublishEnabled = publish; }
     bool isPublishEnabled() const { return mAudioPublishEnabled; }

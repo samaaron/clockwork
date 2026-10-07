@@ -466,7 +466,7 @@ void TrackControl::onBridgeDied(const char* how) {
     std::string culprit;
     if (mHeader->loading_seq.load(std::memory_order_acquire) & 1u) {
         mHeader->loading_plugin[PATH_MAX_BYTES - 1] = '\0';
-        culprit = mHeader->loading_plugin;
+        culprit = mHeader->loading_plugin.data();
     }
     // Every ring the bridge read is reset: the counters it left mean nothing
     // to its successor.

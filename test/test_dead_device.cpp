@@ -51,7 +51,7 @@ TEST_CASE("DeadDevice: a switch to a device that never delivers audio fails, and
 TEST_CASE("DeadDevice: a cold switch to a device that never delivers audio goes "
           "back to the old device at the old rate", "[DeadDevice]") {
     auto sys = makeSimpleSystem();
-    sys->device("Fake Interface")->failStart = true;
+    sys->at("Fake Interface").failStart = true;
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     REQUIRE(static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 48000);
 
@@ -89,7 +89,7 @@ TEST_CASE("DeadDevice: a recovery onto a device that never delivers audio is not
 
     // The speakers stop answering, and the user asks for a reopen: it is
     // heard (the device still ticks when it arrives) and runs onto silence.
-    sys->device("Fake Speakers")->failStart = true;
+    sys->at("Fake Speakers").failStart = true;
     OscReply reply;
     fix.send(osc_test::message("/clockwork/devices/reopen"));
     REQUIRE(fix.waitForReply("/clockwork/devices/reopen.done", reply, 15000));
@@ -103,7 +103,7 @@ TEST_CASE("DeadDevice: a recovery onto a device that never delivers audio is not
 
     // While nothing ticks the engine hears no commands: the watchdog's
     // recovery is the way out. The speakers come back, and it finds them.
-    sys->device("Fake Speakers")->failStart = false;
+    sys->at("Fake Speakers").failStart = false;
     sys->useVirtualTime();
     REQUIRE(fake_audio::runWatchdogUntil(fix.engine(), *sys, 50, 20000, [&] {
         for (auto& r : fix.allReplies())

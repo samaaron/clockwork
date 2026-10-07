@@ -106,6 +106,13 @@ Packet message(const char* address, int32_t a) {
     return streamToPacket(s);
 }
 
+Packet message(const char* address, float a) {
+    char buf[256];
+    osc::OutboundPacketStream s(buf, sizeof(buf));
+    s << osc::BeginMessage(address) << a << osc::EndMessage;
+    return streamToPacket(s);
+}
+
 Packet message(const char* address, int32_t a, int32_t b) {
     char buf[256];
     osc::OutboundPacketStream s(buf, sizeof(buf));

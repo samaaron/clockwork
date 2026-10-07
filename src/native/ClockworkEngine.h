@@ -7,6 +7,7 @@
 
 #include "clockwork_product.h"
 #include <juce_audio_devices/juce_audio_devices.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -59,6 +60,11 @@
 class ClockworkEngine {
     friend class EngineFixture;  // test fixture needs access to mAudioCallback
 public:
+    // One engine per process half: its threads, device and segment are not things to copy or move.
+    ClockworkEngine(const ClockworkEngine&) = delete;
+    ClockworkEngine& operator=(const ClockworkEngine&) = delete;
+    ClockworkEngine(ClockworkEngine&&) = delete;
+    ClockworkEngine& operator=(ClockworkEngine&&) = delete;
     // Channel-count sentinel: negative means "open the device with all its
     // channels active (let JUCE/CoreAudio clamp to the hardware max)".
     // 0 still means "disabled" for inputs; positive N means "exactly N".
@@ -98,8 +104,8 @@ public:
         // Address space, not memory — pages are committed as they are
         // written — so a host sizes them for the largest set it expects,
         // not the smallest. A host exposes them as a launch option.
-        size_t inboxBytes               = CLOCKWORK_INBOX_BYTES;
-        size_t outboxBytes              = CLOCKWORK_OUTBOX_BYTES;
+        size_t inboxBytes               = static_cast<size_t>(CLOCKWORK_INBOX_BYTES);
+        size_t outboxBytes              = static_cast<size_t>(CLOCKWORK_OUTBOX_BYTES);
         // The heap the guest takes its larger allocations from
         // (DspHost::alloc_bytes) — a server guest's real-time pool among
         // them. Taken once, at each build, and never grown on the audio
@@ -587,6 +593,9 @@ public:
             : mLock(std::move(o.mLock)), mPhase(o.mPhase) {
             o.mPhase = nullptr;
         }
+        TestSwapHold(const TestSwapHold&) = delete;
+        TestSwapHold& operator=(const TestSwapHold&) = delete;
+        TestSwapHold& operator=(TestSwapHold&&) = delete;
         ~TestSwapHold() { unlock(); }
         void unlock() {
             if (mPhase) { mPhase->store(DevicePhase::Idle); mPhase = nullptr; }
@@ -655,10 +664,10 @@ private:
 
     // What changed about the devices, as a pass of reconcileDevices is told.
     enum DeviceChanges : unsigned {
-        kListChanged       = 1u << 0,   // devices came or went: rescan the lists
-        kDefaultChanged    = 1u << 1,   // the OS default output moved
-        kOpenDeviceChanged = 1u << 2,   // the device played on changed where it stands
-        kPassQueued        = 1u << 31,
+        kListChanged       = 1u << 0u,   // devices came or went: rescan the lists
+        kDefaultChanged    = 1u << 1u,   // the OS default output moved
+        kOpenDeviceChanged = 1u << 2u,   // the device played on changed where it stands
+        kPassQueued        = 1u << 31u,
     };
     // Something about the devices changed: the device layer's report (a
     // device came or went, or the open device changed), or macOS's that the
@@ -863,7 +872,7 @@ private:
     ClockworkSysRoutes      mControlRoutes;  // NRT thread: subsystem commands by sub-namespace
     // OSC address currently being handled on the NRT gateway, for the slow-pass
     // report. Written and read on that thread only; empty between commands.
-    char              mInFlightCommand[64] = {0};
+    std::array<char, 64> mInFlightCommand{};
     void              noteInFlightCommand(const uint8_t* data, uint32_t size);
     EngineControl     mEngineControl;
 #ifdef CLOCKWORK_MIDI
@@ -915,7 +924,7 @@ private:
     // room for a few more behind it. A frame that will not fit is dropped and
     // counted, and the log says so.
     static constexpr uint32_t kNrtRingSize = 262144;
-    uint8_t                   mNrtBuffer[kNrtRingSize] = {};
+    std::array<uint8_t, kNrtRingSize> mNrtBuffer{};
     // What the audio thread prefixes each control frame with, so the call's
     // time survives the hop (the ring header carries only the origin token).
     struct NrtEnvelope {
@@ -928,7 +937,7 @@ private:
     // ring's only producer (nrtForwardSink is an audio route), so one buffer
     // it owns is enough, and 64 KB is not something to put on a stack.
     static constexpr uint32_t kNrtMaxCommand = 66560;
-    alignas(8) uint8_t        mNrtFrame[sizeof(NrtEnvelope) + kNrtMaxCommand] = {};
+    alignas(8) std::array<uint8_t, sizeof(NrtEnvelope) + kNrtMaxCommand> mNrtFrame{};
     // How many over-wide control messages this engine has said it dropped;
     // it says so eight times and then keeps count in the metrics alone.
     std::atomic<uint32_t>     mNrtOversizeLogged{0};
@@ -1031,6 +1040,8 @@ private:
         DevicePhase prev;
         PhaseGuard(std::atomic<DevicePhase>& p, DevicePhase v)
             : phase(p), prev(p.load()) { p.store(v); }
+        PhaseGuard(const PhaseGuard&) = delete;
+        PhaseGuard& operator=(const PhaseGuard&) = delete;
         ~PhaseGuard() { phase.store(prev); }
     };
 
@@ -1229,12 +1240,12 @@ private:
     // did — an engine embedded with no segment handed its guest no working
     // memory at all. Allocated once and reused across cold swaps;
     // audio_processor zeroes it at every dsp_new.
-    std::unique_ptr<uint8_t[]> mGuestArena;
+    std::unique_ptr<uint8_t[]> mGuestArena;   // NOLINT(modernize-avoid-c-arrays): a raw block got with nothrow new and refused on failure (bringUp), not a container
 
     // The inbox and outbox when there is no segment to carve them from — one
     // block, inbox first. A plugin has no public segment and still has a
     // client: the host process itself, reading in place.
-    std::unique_ptr<uint8_t[]> mGuestLanes;
+    std::unique_ptr<uint8_t[]> mGuestLanes;   // NOLINT(modernize-avoid-c-arrays): as mGuestArena
     size_t mGuestLanesInboxBytes  = 0;   // how mGuestLanes is split
     size_t mGuestLanesOutboxBytes = 0;
     // Where the inbox ended up, whichever of the two above supplied it.

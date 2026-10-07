@@ -49,7 +49,7 @@ fi
 CANARY=scripts/tidy-canary.cpp
 CANARY_OUT="$("$TIDY" "${EXTRA[@]}" "$CANARY" -- -std=c++20 2>/dev/null || true)"
 for check in cppcoreguidelines-no-malloc cppcoreguidelines-owning-memory; do
-    if ! grep -q "\[$check\]" <<< "$CANARY_OUT"; then
+    if ! grep -q "\[$check[],]" <<< "$CANARY_OUT"; then   # "[check]", or "[check,-warnings-as-errors]" with the gate on
         echo "tidy: the canary ($CANARY) did not report $check — clang-tidy is not analysing" >&2
         echo "$CANARY_OUT" >&2
         exit 3

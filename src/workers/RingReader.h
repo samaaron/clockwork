@@ -28,6 +28,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -171,8 +172,8 @@ private:
     // and by resetMaxPassUs(); relaxed loads elsewhere (display-only).
     static constexpr uint32_t kRecentBuckets  = 12;
     static constexpr uint64_t kRecentBucketUs = 5'000'000;   // 12 x 5 s = 60 s window
-    std::atomic<uint64_t>  mRecentEpoch[kRecentBuckets] {};
-    std::atomic<uint32_t>  mRecentMaxUs[kRecentBuckets] {};
+    std::array<std::atomic<uint64_t>, kRecentBuckets> mRecentEpoch{};
+    std::array<std::atomic<uint32_t>, kRecentBuckets> mRecentMaxUs{};
     uint32_t               mSlowPassThresholdUs = 250'000;   // 250 ms
     std::function<void(uint32_t)> mOnSlowPass;
 

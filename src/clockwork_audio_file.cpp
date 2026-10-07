@@ -24,14 +24,14 @@
 
 #define DR_WAV_IMPLEMENTATION
 #define DRWAV_NO_STDIO_WARNINGS
-#include "vendor/dr_libs/dr_wav.h"
+#include <dr_libs/dr_wav.h>
 
 #define DR_FLAC_IMPLEMENTATION
 #define DR_FLAC_NO_OGG
-#include "vendor/dr_libs/dr_flac.h"
+#include <dr_libs/dr_flac.h>
 
 #define DR_MP3_IMPLEMENTATION
-#include "vendor/dr_libs/dr_mp3.h"
+#include <dr_libs/dr_mp3.h>
 
 // stb_vorbis is compiled as its own translation unit; this pulls in only its
 // declarations — from the system stb when the build asked for it
@@ -41,7 +41,7 @@
 #ifdef CLOCKWORK_SYSTEM_STB
 #  include <stb/stb_vorbis.h>
 #else
-#  include "vendor/stb/stb_vorbis.c"   // NOLINT(bugprone-suspicious-include): a single-file library, built here
+#  include <stb/stb_vorbis.c>   // NOLINT(bugprone-suspicious-include): a single-file library, built here
 #endif
 
 #include <algorithm>

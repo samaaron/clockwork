@@ -169,7 +169,7 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
             break;
         }
 
-        Message hdr;
+        Message hdr{};
         std::memcpy(&hdr, buffer + ut, sizeof(Message));
 
         // Length sanity, including the never-wrap invariant: the frame's
@@ -222,10 +222,10 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
         if (metrics.seqGaps) {
             int32_t seq = static_cast<int32_t>(hdr.sequence);
             if (st.lastSeq >= 0) {
-                int32_t expected = (st.lastSeq + 1) & 0x7FFFFFFF;
+                const int32_t expected = static_cast<int32_t>(static_cast<uint32_t>(st.lastSeq + 1) & 0x7FFFFFFFu);
                 if (seq != expected) {
-                    int32_t gap = static_cast<int32_t>(
-                        (static_cast<int64_t>(seq) - expected + 0x80000000LL) & 0x7FFFFFFF);
+                    const int32_t gap = static_cast<int32_t>(
+                        static_cast<uint64_t>(static_cast<int64_t>(seq) - expected + 0x80000000LL) & 0x7FFFFFFFu);
                     // Sanity bound — a huge "gap" is a counter reset, not loss.
                     if (gap > 0 && gap < 1000)
                         metrics.seqGaps->fetch_add(static_cast<uint32_t>(gap),

@@ -59,8 +59,8 @@ static inline uint32_t clockwork_parse_sink_classes(const char* spec,
  * installed; zero for a string that does not parse or a shape the sink
  * substrate refuses, in which case the built-in shape stands. */
 static inline int clockwork_install_sink_classes(ClockworkSinkKind kind, const char* spec) {
-    uint32_t widths[CLOCKWORK_SINK_CLASSES_MAX];
-    uint32_t depths[CLOCKWORK_SINK_CLASSES_MAX];
+    uint32_t widths[CLOCKWORK_SINK_CLASSES_MAX];   /* NOLINT(modernize-avoid-c-arrays): a C header */
+    uint32_t depths[CLOCKWORK_SINK_CLASSES_MAX];   /* NOLINT(modernize-avoid-c-arrays): a C header */
     const uint32_t n = clockwork_parse_sink_classes(spec, widths, depths,
                                                     CLOCKWORK_SINK_CLASSES_MAX);
     return n != 0 && clockwork_sink_profile(kind, n, widths, depths);

@@ -52,6 +52,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 
 // Ring capacities. The command ring is sized for the largest payloads a client
@@ -91,7 +92,7 @@ struct alignas(8) ShmPeerPlaneHeader {
     uint32_t cmd_ring_size;
     uint32_t rep_ring_size;
 
-    uint32_t _reserved[4];
+    std::array<uint32_t, 4> _reserved;
 };
 static_assert(sizeof(ShmPeerPlaneHeader) == 64,
               "ShmPeerPlaneHeader must stay 64 bytes — the rings follow at fixed offsets");

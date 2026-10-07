@@ -2420,7 +2420,7 @@ extern "C" {
                     const float* channel_data[SHM_AUDIO_CHANNELS];
                     for (uint32_t c = 0; c < ch; ++c)
                         channel_data[c] = bus + static_cast<size_t>(c) * QUANTUM_SIZE;
-                    shm_audio_buffer_writer(t).write(channel_data, QUANTUM_SIZE);
+                    shm_audio_buffer_writer(t).write(channel_data, ch, QUANTUM_SIZE);
                 };
                 tap(SHM_AUDIO_OUT_SLOT, static_audio_bus);
                 tap(SHM_AUDIO_IN_SLOT,  static_audio_in);
@@ -3151,7 +3151,7 @@ void channel_map_set_device(uint32_t in_width, uint32_t out_width) {
 // OUTPUT channels (it takes what the DSP wrote). Same rule pull_port_sources
 // and push_port_sinks follow.
 std::atomic<uint32_t>* channel_side(ClockworkChannelMapState* m, uint32_t direction) {
-    return direction == kClockworkPortSource ? m->in : m->out;
+    return direction == kClockworkPortSource ? m->in.data() : m->out.data();
 }
 
 void channel_map_bind(ClockworkPort port, uint32_t first) {
@@ -3167,8 +3167,8 @@ void channel_map_bind(ClockworkPort port, uint32_t first) {
         if (m->streams[i].port != 0) continue;
         ClockworkStreamEntry& e = m->streams[i];
         e.port = port; e.direction = dir; e.first = first; e.count = count;
-        std::memset(e.name, 0, sizeof e.name);
-        if (name) std::strncpy(e.name, name, sizeof(e.name) - 1);
+        std::memset(e.name.data(), 0, sizeof e.name);
+        if (name) std::strncpy(e.name.data(), name, e.name.size() - 1);
         slot = i + 1;   // stored plus one; 0 means no stream
         break;
     }
@@ -3200,7 +3200,7 @@ void channel_map_unbind(ClockworkPort port) {
             side[e.first + c].store(bare_channel_word(e.first + c, width),
                                     std::memory_order_release);
         e.port = 0; e.direction = 0; e.first = 0; e.count = 0;
-        std::memset(e.name, 0, sizeof e.name);
+        std::memset(e.name.data(), 0, sizeof e.name);
         return;
     }
 }

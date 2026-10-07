@@ -72,6 +72,7 @@
 #include "clockwork_ports.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -183,7 +184,7 @@ private:
                        uint32_t channels = 0; uint32_t maxFrames = 0; } claim;
         shm_scope_stream_writer writer;
     };
-    ScopeTap mScopes[clockwork_bridge::LANES / 2];
+    std::array<ScopeTap, clockwork_bridge::LANES / 2> mScopes{};
 
     ClockworkProcess mProcess;
     std::string mExe;

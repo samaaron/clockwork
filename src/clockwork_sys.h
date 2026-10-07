@@ -55,6 +55,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <array>
 
 #include "OscIngress.h"
 #include "shared_memory.h"   // ClockworkClockState, readClockworkClock
@@ -66,18 +67,27 @@
 // Refuse one claimed address: "/clockwork/error ,ss <address> <reason>". Split
 // out of the handler because on a host with an NRT thread the refusal is
 // decided at the END of clockwork's own chain, not at its front.
+// Refusals that could not be encoded (clockwork_sys_refuse): a count, for the metrics.
+inline std::atomic<uint32_t>& clockwork_sys_refusals_dropped() {
+    static std::atomic<uint32_t> count{0};
+    return count;
+}
+
 template <class Emit>
 void clockwork_sys_refuse(const uint8_t* data, uint32_t /*len*/, const char* reason, Emit&& emit) {
-    char buf[512];
+    std::array<char, 512> buf{};
     try {
-        osc::OutboundPacketStream ps(buf, sizeof(buf));
+        osc::OutboundPacketStream ps(buf.data(), buf.size());
         ps << osc::BeginMessage(CLOCKWORK_SYS("error"))
            << reinterpret_cast<const char*>(data) << reason << osc::EndMessage;
         emit(reinterpret_cast<const uint8_t*>(ps.Data()),
              static_cast<uint32_t>(ps.Size()));
     } catch (...) {
-        // A refusal that will not encode is dropped: there is nothing truthful
-        // left to say, and this runs on the audio thread.
+        // A refusal that will not encode (an address longer than the buffer)
+        // is dropped: there is nothing truthful left to say, and this runs on
+        // the audio thread. Counted, so a client that sends such things can
+        // be seen doing it.
+        clockwork_sys_refusals_dropped().fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -136,7 +146,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
     // 512 bytes: /clockwork/echo is the only verb that carries a payload back,
     // and one that does not fit is refused rather than truncated into
     // something a client would misread.
-    char buf[512];
+    std::array<char, 512> buf{};
     const char* verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
 
     try {
@@ -146,7 +156,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
         const auto end = msg.ArgumentsEnd();
 
         if (std::strcmp(verb, "ping") == 0) {
-            osc::OutboundPacketStream ps(buf, sizeof(buf));
+            osc::OutboundPacketStream ps(buf.data(), buf.size());
             ps << osc::BeginMessage(CLOCKWORK_SYS("pong"));
             if (arg != end && arg->IsInt32()) ps << arg->AsInt32Unchecked();
             ps << osc::EndMessage;
@@ -163,7 +173,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
         // the guest's word for it. Answered on the audio thread, where the
         // hand-off happens: an NRT hop would put it out of order.
         if (std::strcmp(verb, "sync") == 0) {
-            osc::OutboundPacketStream ps(buf, sizeof(buf));
+            osc::OutboundPacketStream ps(buf.data(), buf.size());
             ps << osc::BeginMessage(CLOCKWORK_SYS("synced"));
             ps << ((arg != end && arg->IsInt32()) ? arg->AsInt32Unchecked() : 0);
             ps << osc::EndMessage;
@@ -187,7 +197,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
         if (std::strcmp(verb, "clock/state/get") == 0) {
             if (!clock) return ClockworkSysRt::UnknownVerb;
             const auto c = readClockworkClock(clock);
-            osc::OutboundPacketStream ps(buf, sizeof(buf));
+            osc::OutboundPacketStream ps(buf.data(), buf.size());
             ps << osc::BeginMessage(CLOCKWORK_SYS("clock/state.reply"))
                << c.bpm
                << (c.is_playing ? 1 : 0)
@@ -205,7 +215,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
         }
 
         if (std::strcmp(verb, "echo") == 0) {
-            osc::OutboundPacketStream ps(buf, sizeof(buf));
+            osc::OutboundPacketStream ps(buf.data(), buf.size());
             ps << osc::BeginMessage(CLOCKWORK_SYS("echo.reply"));
             if (arg == end) {
                 clockwork_sys_refuse(data, len, "echo takes one string or blob", emit);
@@ -347,13 +357,13 @@ public:
     // goes to its own handler, not the namespace's.
     bool add(const char* suffix, Handler h, void* ctx) noexcept {
         if (suffix == nullptr) return false;
-        char full[kMaxAddr];
+        std::array<char, kMaxAddr> full{};
         size_t n = 0;
         while (suffix[n] != '\0') { if (++n > kMaxAddr - CLOCKWORK_SYS_PREFIX_LEN - 1) return false; }
         if (n == 0) return false;   // the bare prefix would swallow every verb
-        std::memcpy(full, CLOCKWORK_SYS_PREFIX, CLOCKWORK_SYS_PREFIX_LEN);
-        std::memcpy(full + CLOCKWORK_SYS_PREFIX_LEN, suffix, n + 1);
-        return mRoutes.registerRoute(full, h, ctx);
+        std::memcpy(full.data(), CLOCKWORK_SYS_PREFIX, CLOCKWORK_SYS_PREFIX_LEN);
+        std::memcpy(full.data() + CLOCKWORK_SYS_PREFIX_LEN, suffix, n + 1);
+        return mRoutes.registerRoute(full.data(), h, ctx);
     }
 
     // Where a claimed address that matched no route goes. On a host with no

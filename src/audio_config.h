@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include "process_env.h"
 
 #include "memory_profile.h"
 #include "clockwork_config.h"   // clockwork_log, for DEV_LOG
@@ -32,7 +33,7 @@ namespace clockwork {
 // support requests, which is a worse tradeoff.
 inline bool devLogEnabled() {
     static const bool enabled = []() {
-        const char* v = std::getenv("CLOCKWORK_DEV_LOG");
+        const char* v = clockwork::processEnv("CLOCKWORK_DEV_LOG");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     return enabled;

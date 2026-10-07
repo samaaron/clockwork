@@ -108,7 +108,7 @@ TEST_CASE("Boot: a saved microphone is recorded from as the engine comes up, and
     }
     {
         auto sys = makeSimpleSystem();
-        sys->device("Fake Microphone")->hidden = true;   // unplugged since it was saved
+        sys->at("Fake Microphone").hidden = true;   // unplugged since it was saved
         EngineFixture fix(withSavedMic(sys));
         const auto cur = fix.engine().currentDevice();
         CHECK(cur.name == "Fake Speakers");
@@ -144,7 +144,7 @@ TEST_CASE("Boot: a saved microphone known by another driver's name doesn't cost 
     {
         auto sys = machine();
         EngineFixture fix(boot(sys, ""));
-        cleanBootOpens = sys->device("Speakers (MOTU)")->opens.load();
+        cleanBootOpens = sys->at("Speakers (MOTU)").opens.load();
     }
 
     auto sys = machine();

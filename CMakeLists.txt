@@ -877,6 +877,11 @@ elseif(UNIX)
     target_link_libraries(clockwork PUBLIC Threads::Threads rt ${CMAKE_DL_LIBS})
 endif()
 
+# The vendored single-file libraries (dr_libs, stb) are system headers to this
+# build: included as <dr_libs/...>, they warn as their authors left them and the
+# analyzer leaves them be — they are not ours to fix.
+target_include_directories(clockwork SYSTEM PRIVATE ${CLOCKWORK_SRC}/vendor)
+
 if(MSVC)
     target_compile_options(clockwork PRIVATE
         /W1 /wd4244 /wd4267 /wd4305 /wd4800 /wd4996 /permissive-)
@@ -1519,4 +1524,25 @@ endif()
 if(BUILD_TESTS AND CLOCKWORK_STANDALONE)
     enable_testing()
     add_subdirectory(test)
+endif()
+
+# ─── Warnings as errors, for Clockwork's own targets ─────────────────────────
+# CI configures with CLOCKWORK_WERROR=ON: a warning in our sources fails the
+# build there, where a count of them would otherwise drift unread. Only our
+# targets — the fetched dependencies warn as they will, and are not ours to
+# fix — and not MSVC, whose /W1 is a different conversation.
+if(CLOCKWORK_WERROR AND NOT MSVC)
+    foreach(_t clockwork clockwork_comms)
+        if(TARGET ${_t})
+            target_compile_options(${_t} PRIVATE -Werror)
+        endif()
+    endforeach()
+    # The vendored sources compiled into the library (stb_vorbis, oscpack) warn
+    # as their authors left them: theirs to fix, not ours to fail on.
+    set_source_files_properties(
+        ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c
+        ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
+        ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
+        ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp
+        PROPERTIES COMPILE_OPTIONS -Wno-error)
 endif()

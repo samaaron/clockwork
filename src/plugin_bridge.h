@@ -81,6 +81,7 @@
 #include "clockwork_path.h"                // the doorbell's name, UTF-16 for Win32
 
 #include <cerrno>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -157,7 +158,7 @@ struct MsgRing {
     std::atomic<int32_t> sequence{0};
     std::atomic<int32_t> write_lock{0};
     std::atomic<uint32_t> dropped{0};   // frames that did not fit
-    uint32_t _pad[3] {};
+    std::array<uint32_t, 3> _pad{};
 };
 static_assert(sizeof(MsgRing) == 32, "MsgRing is laid out by hand");
 
@@ -212,13 +213,13 @@ struct alignas(64) Header {
     // to timeline id k renders against timelines[k - 1]; an unheld slot
     // carries the id -1 placeholder. What lets a track follow a MIDI clock
     // the engine hears, from a process that never sees the registry.
-    ClockworkTimelineMirrorSlot timelines[TIMELINE_SLOTS];
+    std::array<ClockworkTimelineMirrorSlot, TIMELINE_SLOTS> timelines;
 
     // The path of the plugin the bridge is opening, empty when it is not
     // opening one. Written by the bridge before plugin_open and cleared
     // after; if the bridge dies in between, this is the culprit.
     std::atomic<uint32_t> loading_seq;
-    char loading_plugin[PATH_MAX_BYTES];
+    std::array<char, PATH_MAX_BYTES> loading_plugin;
 };
 
 // ── Layout ─────────────────────────────────────────────────────────────────
@@ -267,14 +268,14 @@ constexpr uint32_t BRIDGE_ORIGIN_TOKEN = 0x54425247;
 // 31 characters including the slash; these leave room for a 10-digit pid.
 
 inline std::string segment_name(int32_t engine_pid) {
-    char buf[64];
-    std::snprintf(buf, sizeof buf, "clockwork_bridge_%d", static_cast<int>(engine_pid));
-    return buf;
+    std::array<char, 64> buf{};
+    std::snprintf(buf.data(), buf.size(), "clockwork_bridge_%d", static_cast<int>(engine_pid));
+    return buf.data();
 }
 inline std::string doorbell_name(int32_t engine_pid) {
-    char buf[64];
-    std::snprintf(buf, sizeof buf, "/clockwork_bell_%d", static_cast<int>(engine_pid));
-    return buf;
+    std::array<char, 64> buf{};
+    std::snprintf(buf.data(), buf.size(), "/clockwork_bell_%d", static_cast<int>(engine_pid));
+    return buf.data();
 }
 
 // ── The engine's side of the header ─────────────────────────────────────────

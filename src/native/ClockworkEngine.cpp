@@ -501,11 +501,14 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     int reqIn  = resolveReq(cfg.numInputChannels);
     int reqOut = resolveReq(cfg.numOutputChannels);
 
-    // Every platform-specific piece of bring-up is skipped under the
-    // deviceManagerFactory boundary — an injected (fake-device) manager
-    // must not touch real CoreAudio/PipeWire/DirectSound state.
-    const bool platformSetup = !cfg.deviceManagerFactory;
     mDeviceManager = makeDeviceManager();
+#if defined(__linux__) || defined(_WIN32)
+    // Every platform-specific piece of bring-up below is skipped under the
+    // deviceManagerFactory boundary — an injected (fake-device) manager
+    // must not touch real PipeWire or DirectSound state. macOS has no such
+    // step: CoreAudio needs nothing of the engine before a device opens.
+    const bool platformSetup = !cfg.deviceManagerFactory;
+#endif
 
 #ifdef __linux__
     if (platformSetup) {
@@ -1380,7 +1383,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // its subsystem handler, off the audio thread. The control dispatcher takes
     // "clock/" to the Link surface and everything unclaimed to the engine's own.
     mNrtGateway.addDrain(
-        mNrtBuffer, kNrtRingSize, &mNrtHead, &mNrtTail,
+        mNrtBuffer.data(), kNrtRingSize, &mNrtHead, &mNrtTail,
         [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
             // Thread the origin AND the time to the handler as metadata: the
             // audio thread prefixed the frame with NrtEnvelope (nrtForwardSink).
@@ -1415,7 +1418,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mNrtGateway.onSlowPass([this](uint32_t us) {
         clockwork_log("[nrt] control drain blocked %.1fs%s%s", us / 1'000'000.0,
                mInFlightCommand[0] ? " handling " : "",
-               mInFlightCommand[0] ? mInFlightCommand : "");
+               mInFlightCommand[0] ? mInFlightCommand.data() : "");
     });
 
     // The NRT egress lane is taken by the same poll as the OUT ring (the
@@ -1769,7 +1772,7 @@ void ClockworkEngine::pumpAudioBlock() {
 void ClockworkEngine::noteInFlightCommand(const uint8_t* data, uint32_t size) {
     mInFlightCommand[0] = '\0';
     if (!data || size == 0 || data[0] != '/') return;
-    const uint32_t max = std::min<uint32_t>(size, sizeof(mInFlightCommand) - 1);
+    const uint32_t max = std::min<uint32_t>(size, static_cast<uint32_t>(mInFlightCommand.size()) - 1);
     uint32_t i = 0;
     for (; i < max && data[i] != '\0'; ++i)
         mInFlightCommand[i] = static_cast<char>(data[i]);
@@ -1907,12 +1910,12 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
         // mNrtFrame is this thread's: the audio thread is the ring's only
         // producer (see the header), so filling it before the locked write
         // races nothing.
-        uint8_t* frame = self->mNrtFrame;
+        uint8_t* frame = self->mNrtFrame.data();
         NrtEnvelope env{ cc ? cc->when : 0, cc ? cc->blockTime : 0 };
         std::memcpy(frame, &env, sizeof env);
         std::memcpy(frame + sizeof env, data, len);
         ok = RingBufferWriter::write(
-            self->mNrtBuffer, kNrtRingSize,
+            self->mNrtBuffer.data(), kNrtRingSize,
             &self->mNrtHead, &self->mNrtTail, &self->mNrtSeq, &self->mNrtLock,
             frame, static_cast<uint32_t>(sizeof env + len), cc ? cc->sourceId : 0);
     } else {

@@ -35,6 +35,10 @@
 
 class UdsDgramOscTransport : public IOscTransport {
 public:
+    UdsDgramOscTransport() = default;
+    // A transport owns a socket and a thread: not a thing to copy or move.
+    UdsDgramOscTransport(const UdsDgramOscTransport&) = delete;
+    UdsDgramOscTransport& operator=(const UdsDgramOscTransport&) = delete;
     // Called per inbound datagram: (osc, len, originToken). Set before start().
     using IngestFn = std::function<void(const uint8_t*, uint32_t, uint32_t)>;
 

@@ -28,6 +28,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <cstring>
 
@@ -56,7 +57,7 @@ public:
         while (len <= kMaxPrefix && prefix[len] != '\0') ++len;
         if (len == 0 || len > kMaxPrefix) return false;
         Route& r = mRoutes[mCount];
-        std::memcpy(r.prefix, prefix, len);
+        std::memcpy(r.prefix.data(), prefix, len);
         r.len = len;
         r.dest = { h, ctx };
         ++mCount;
@@ -81,7 +82,7 @@ public:
         for (size_t i = 0; i < mCount; ++i) {
             const Route& r = mRoutes[i];
             if (r.len <= bestLen || r.len > addr) continue;
-            if (std::memcmp(data, r.prefix, r.len) != 0) continue;
+            if (std::memcmp(data, r.prefix.data(), r.len) != 0) continue;
             // A match must end on a segment boundary: at the end of the
             // address, at a '/', or on a prefix that supplied the '/' itself.
             if (r.len < addr && data[r.len] != '/' && r.prefix[r.len - 1] != '/') continue;
@@ -104,13 +105,13 @@ private:
     static constexpr size_t kMaxRoutes = 32;
     static constexpr size_t kMaxPrefix = 63;
     struct Route {
-        char   prefix[kMaxPrefix];
+        std::array<char, kMaxPrefix> prefix{};
         size_t len = 0;
         Dest   dest;
     };
 
     Dest   mDefault;
-    Route  mRoutes[kMaxRoutes] = {};
+    std::array<Route, kMaxRoutes> mRoutes{};
     size_t mCount = 0;
 };
 

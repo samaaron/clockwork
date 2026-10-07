@@ -31,6 +31,7 @@
 #include <condition_variable>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -116,6 +117,13 @@ struct FakeSystem {
             for (auto& d : t.devices)
                 if (d->name == name) return d;
         return nullptr;
+    }
+    // The device, which the case has made: a wrong name is the case's bug, said
+    // at once rather than as a write through null (and GCC's warning of one).
+    FakeDeviceSpec& at(const std::string& name) {
+        auto d = device(name);
+        if (!d) throw std::runtime_error("no fake device named " + name);
+        return *d;
     }
 
     // The device types alive right now. Each manager owns its own, and

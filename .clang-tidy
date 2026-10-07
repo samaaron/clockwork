@@ -8,6 +8,9 @@
 # CI runs it over every file a change touches.
 Checks: >
   -*,
+  clang-analyzer-*,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-security.ArrayBound,
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
@@ -29,8 +32,16 @@ Checks: >
   performance-unnecessary-copy-initialization,
   performance-unnecessary-value-param,
   readability-container-size-empty
-WarningsAsErrors: ''
-HeaderFilterRegex: '^(?!.*(vendor|smoothie|_deps)).*src/.*'
+WarningsAsErrors: '*'   # at zero on Linux and macOS (CI tidy): the next finding fails the job
+# Our headers, named by where they are: src/*.h, src/*.hpp and our subdirectories. A positive list, since the
+# regex engine here (llvm::Regex, POSIX ERE) has no lookahead: a "not vendor" written as one let the vendored
+# dr_flac.h through to the analyzer.
+HeaderFilterRegex: '/src/([^/]+\.(h|hpp)|(clock|comms|embed|host|lanes|native|nif|ring|scheduler|workers)/)'
+# The analyzer reports a path's finding wherever it lands — this exclusion, the header filter and a system
+# include all leave it be — and its one finding is inside the vendored FLAC decoder (dr_flac.h, not ours to fix),
+# from security.ArrayBound; that check is off above until a toolchain can keep vendored code out of the analyzer.
+# Needs clang-tidy 19 or later, which CI installs (ci.yml tidy job).
+ExcludeHeaderFilterRegex: '.*/(vendor|smoothie|_deps)/.*'
 CheckOptions:
   cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor: true
   cppcoreguidelines-special-member-functions.AllowMissingMoveFunctions: true

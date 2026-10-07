@@ -69,6 +69,7 @@
 #include "clockwork_event_sink.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -190,12 +191,12 @@ private:
     };
     Follower* followerFor(const std::string& port);
 
-    Follower              mFollowers[kMaxFollowers];
+    std::array<Follower, kMaxFollowers> mFollowers{};
     // The latest time the follow path has recorded: what a starting follower
     // begins after, and what a pulse is held to, so the ring stays in order.
     double                mFollowFloorNtp = 0.0;
 
-    Slot                  mRing[kSlots];
+    std::array<Slot, kSlots> mRing{};
     std::atomic<uint32_t> mHead{0};       // producer writes, consumer reads
     std::atomic<uint32_t> mTail{0};       // consumer writes, producer reads
     std::atomic<bool>     mResetPending{false};

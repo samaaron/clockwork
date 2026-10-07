@@ -61,7 +61,7 @@
  * MODULE LOADING IS THE ONE PLATFORM-SPECIFIC PART, and it is three loaders
  * behind one interface (Module, loadModule, unloadModule, resolveModulePath).
  * Linux and macOS share dlopen and differ in two ways: the binary inside a
- * .vst3 bundle is Contents/<arch>-linux/*.so on one and Contents/MacOS/<name>
+ * .vst3 bundle is Contents/<arch>-linux/<name>.so on one and Contents/MacOS/<name>
  * with NO EXTENSION on the other, and the initialiser is ModuleEntry(void*)
  * against bundleEntry(CFBundleRef). The CFBundle is not decorative — a plugin
  * uses it to find the resources beside its binary, and Surge will not produce

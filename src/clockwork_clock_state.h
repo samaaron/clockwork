@@ -119,9 +119,9 @@ struct alignas(8) ClockworkClockState {
     // The meter as one word, so the two halves are read together. Both
     // halves fit 16 bits with room to spare (a meter is small integers).
     static uint32_t packMeter(int32_t num, int32_t den) {
-        return (static_cast<uint32_t>(num) << 16) | (static_cast<uint32_t>(den) & 0xFFFFu);
+        return (static_cast<uint32_t>(num) << 16u) | (static_cast<uint32_t>(den) & 0xFFFFu);
     }
-    static int32_t meterNum(uint32_t packed) { return static_cast<int32_t>(packed >> 16); }
+    static int32_t meterNum(uint32_t packed) { return static_cast<int32_t>(packed >> 16u); }
     static int32_t meterDen(uint32_t packed) { return static_cast<int32_t>(packed & 0xFFFFu); }
 
     static void initDefaults(ClockworkClockState& s) {
@@ -258,8 +258,8 @@ inline void ClockworkClockState::copyFrom(const ClockworkClockState& src) {
 // Bit positions inside ClockworkClockState::flags. Single atomic uint32 so
 // readers can snapshot all flags in one load; writers use fetch_or /
 // fetch_and to mutate individual bits without stomping siblings.
-constexpr uint32_t SC_FLAG_LINK_ENABLED         = 1u << 0;
-constexpr uint32_t SC_FLAG_START_STOP_SYNC      = 1u << 1;
-constexpr uint32_t SC_FLAG_LINK_AUDIO_PUBLISH   = 1u << 2;
+constexpr uint32_t SC_FLAG_LINK_ENABLED         = 1u << 0u;
+constexpr uint32_t SC_FLAG_START_STOP_SYNC      = 1u << 1u;
+constexpr uint32_t SC_FLAG_LINK_AUDIO_PUBLISH   = 1u << 2u;
 
 #endif /* CLOCKWORK_CLOCK_STATE_H */

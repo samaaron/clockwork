@@ -107,7 +107,7 @@ TEST_CASE("channel map: a source claims input channels and names itself",
     CHECK(e->direction == static_cast<uint32_t>(kClockworkPortSource));
     CHECK(e->first     == first);
     CHECK(e->count     == 2);
-    CHECK(std::string(e->name) == "link:FakeLive/Main");
+    CHECK(std::string(e->name.data()) == "link:FakeLive/Main");
 
     // A source occupies INPUT channels only — the same side pull_port_sources
     // reads. Its number on the output side is untouched.
@@ -131,7 +131,7 @@ TEST_CASE("channel map: a sink claims output channels, not input",
     const ClockworkStreamEntry* e = streamOf(outWord(first));
     REQUIRE(e != nullptr);
     CHECK(e->direction == static_cast<uint32_t>(kClockworkPortSink));
-    CHECK(std::string(e->name) == "disk-out");
+    CHECK(std::string(e->name.data()) == "disk-out");
 }
 
 TEST_CASE("channel map: detaching gives the channels back to what they were",
@@ -176,15 +176,15 @@ TEST_CASE("channel map: two streams get distinct slots and do not collide",
     REQUIRE(clockwork_port_bus_attach(pb, b) == 1);
 
     REQUIRE(channelSlot(inWord(a)) != channelSlot(inWord(b)));
-    CHECK(std::string(streamOf(inWord(a))->name) == "peer-a");
-    CHECK(std::string(streamOf(inWord(b))->name) == "peer-b");
+    CHECK(std::string(streamOf(inWord(a))->name.data()) == "peer-a");
+    CHECK(std::string(streamOf(inWord(b))->name.data()) == "peer-b");
 
     // Detaching one leaves the other exactly where it was — the failure this
     // guards is a slot being reused or cleared by its neighbour.
     clockwork_port_bus_detach(pa);
     CHECK(channelKind(inWord(a)) == CLOCKWORK_CH_NONE);
     REQUIRE(channelKind(inWord(b)) == CLOCKWORK_CH_PORT);
-    CHECK(std::string(streamOf(inWord(b))->name) == "peer-b");
+    CHECK(std::string(streamOf(inWord(b))->name.data()) == "peer-b");
 }
 
 TEST_CASE("channel map: the generation is even at rest and moves across a change",
@@ -216,7 +216,7 @@ TEST_CASE("channel map: a long name is truncated, not overrun",
 
     const ClockworkStreamEntry* e = streamOf(inWord(lanes_test::kInChannels + 1));
     REQUIRE(e != nullptr);
-    CHECK(std::strlen(e->name) == CHANNEL_MAP_NAME_BYTES - 1);   // NUL-terminated
+    CHECK(std::strlen(e->name.data()) == CHANNEL_MAP_NAME_BYTES - 1);   // NUL-terminated
     CHECK(e->name[CHANNEL_MAP_NAME_BYTES - 1] == '\0');
 }
 

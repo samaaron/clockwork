@@ -191,7 +191,7 @@ bool engineAlive(const Bridge& b) {
 void onLoad(void* ctx, const char* path) {
     Header* h = static_cast<Header*>(ctx);
     if (path) {
-        std::strncpy(h->loading_plugin, path, PATH_MAX_BYTES - 1);
+        std::strncpy(h->loading_plugin.data(), path, PATH_MAX_BYTES - 1);
         h->loading_plugin[PATH_MAX_BYTES - 1] = '\0';
     }
     h->loading_seq.fetch_add(1, std::memory_order_release);
@@ -423,7 +423,7 @@ int run(int32_t enginePid) {
     uint64_t srBits = b.h->sample_rate_bits.load(std::memory_order_relaxed);
     clockwork_track_set_lane_base(laneBase);
     clockwork_track_set_clock(&b.h->clock);
-    clockwork_track_set_timelines(b.h->timelines, TIMELINE_SLOTS);
+    clockwork_track_set_timelines(b.h->timelines.data(), TIMELINE_SLOTS);
     clockwork_track_set_load_listener(&onLoad, b.h);
     plugin_set_scan_listener(&onLoad, b.h);      // a scan opens plugins too
     b.verbs.init(&emit, sr);

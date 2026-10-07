@@ -54,6 +54,8 @@ inline std::atomic<int64_t> g_frees{0};
 struct Guard {
     bool prev;
     Guard()  : prev(g_in_rt) { g_in_rt = true; }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
     ~Guard() { g_in_rt = prev; }
 };
 

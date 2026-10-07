@@ -41,6 +41,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <new>
 #include <type_traits>
@@ -108,7 +109,7 @@ public:
         static_cast<size_t>(DataPoolSize) + static_cast<size_t>(SlotCount) * 128u + 4096u;
 
     Scheduler()
-        : mStore(clockwork_sched_new_in_place(mArena, kArenaBytes,
+        : mStore(clockwork_sched_new_in_place(mArena.data(), kArenaBytes,
                                         static_cast<uint32_t>(SlotCount),
                                         static_cast<uint32_t>(DataPoolSize),
                                         static_cast<uint32_t>(sizeof(Meta)),
@@ -208,6 +209,6 @@ private:
      * queue in BSS — which is exactly where the C++ scheduler this replaced
      * kept its storage, and why that one could not fail to exist.
      */
-    alignas(16) uint8_t mArena[kArenaBytes];
+    alignas(16) std::array<uint8_t, kArenaBytes> mArena{};
     ClockworkSched* mStore;
 };

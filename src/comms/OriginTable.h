@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <mutex>
 #include <string>
 
@@ -73,7 +74,7 @@ private:
     };
     static constexpr uint32_t kSize = 1024;   // max distinct clients
 
-    Entry              mTable[kSize];
+    std::array<Entry, kSize> mTable{};
     uint32_t           mUsed    = 0;   // entries in use (packed prefix)
     uint32_t           mCounter = 0;   // next token
     uint64_t           mClock   = 0;   // LRU stamp source

@@ -10,6 +10,8 @@
 
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscTypes.h"
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -58,8 +60,8 @@ public:
     // Build a single OSC message with typed args
     template<typename... Args>
     static OscPacket message(const char* address, Args&&... args) {
-        thread_local char buf[65536];
-        osc::OutboundPacketStream s(buf, sizeof(buf));
+        thread_local std::array<char, 65536> buf;
+        osc::OutboundPacketStream s(buf.data(), buf.size());
         s << osc::BeginMessage(address);
         (append(s, std::forward<Args>(args)), ...);
         s << osc::EndMessage;
@@ -81,28 +83,29 @@ public:
         std::vector<uint8_t> result(total);
         uint8_t* p = result.data();
 
-        // Write "#bundle\0"
-        std::memcpy(p, "#bundle\0", 8);
+        // Write "#bundle" and its NUL: eight bytes, binary, not a string
+        static constexpr std::array<uint8_t, 8> kBundleTag{ '#', 'b', 'u', 'n', 'd', 'l', 'e', 0 };
+        std::copy(kBundleTag.begin(), kBundleTag.end(), p);
         p += 8;
 
         // Write timetag (big-endian uint64)
-        p[0] = static_cast<uint8_t>((ntpTimeTag >> 56) & 0xFF);
-        p[1] = static_cast<uint8_t>((ntpTimeTag >> 48) & 0xFF);
-        p[2] = static_cast<uint8_t>((ntpTimeTag >> 40) & 0xFF);
-        p[3] = static_cast<uint8_t>((ntpTimeTag >> 32) & 0xFF);
-        p[4] = static_cast<uint8_t>((ntpTimeTag >> 24) & 0xFF);
-        p[5] = static_cast<uint8_t>((ntpTimeTag >> 16) & 0xFF);
-        p[6] = static_cast<uint8_t>((ntpTimeTag >> 8) & 0xFF);
-        p[7] = static_cast<uint8_t>(ntpTimeTag & 0xFF);
+        p[0] = static_cast<uint8_t>((ntpTimeTag >> 56u) & 0xFFu);
+        p[1] = static_cast<uint8_t>((ntpTimeTag >> 48u) & 0xFFu);
+        p[2] = static_cast<uint8_t>((ntpTimeTag >> 40u) & 0xFFu);
+        p[3] = static_cast<uint8_t>((ntpTimeTag >> 32u) & 0xFFu);
+        p[4] = static_cast<uint8_t>((ntpTimeTag >> 24u) & 0xFFu);
+        p[5] = static_cast<uint8_t>((ntpTimeTag >> 16u) & 0xFFu);
+        p[6] = static_cast<uint8_t>((ntpTimeTag >> 8u) & 0xFFu);
+        p[7] = static_cast<uint8_t>(ntpTimeTag & 0xFFu);
         p += 8;
 
         // Write each message with size prefix
         for (auto& m : messages) {
             uint32_t sz = m.size();
-            p[0] = static_cast<uint8_t>((sz >> 24) & 0xFF);
-            p[1] = static_cast<uint8_t>((sz >> 16) & 0xFF);
-            p[2] = static_cast<uint8_t>((sz >> 8) & 0xFF);
-            p[3] = static_cast<uint8_t>(sz & 0xFF);
+            p[0] = static_cast<uint8_t>((sz >> 24u) & 0xFFu);
+            p[1] = static_cast<uint8_t>((sz >> 16u) & 0xFFu);
+            p[2] = static_cast<uint8_t>((sz >> 8u) & 0xFFu);
+            p[3] = static_cast<uint8_t>(sz & 0xFFu);
             p += 4;
             std::memcpy(p, m.ptr(), sz);
             p += sz;

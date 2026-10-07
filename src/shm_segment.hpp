@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -60,7 +61,7 @@ namespace detail_shm_segment {
 // segment carries for the instant before it is unlinked.
 inline uint64_t detail_random_u64() {
     std::random_device rd;
-    return (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+    return (static_cast<uint64_t>(rd()) << 32u) ^ static_cast<uint64_t>(rd());
 }
 
 // The sample clock is declared with the layout it reads (shared_memory.h);
@@ -100,11 +101,11 @@ static constexpr size_t SHM_PEER_OFFSET = (SHM_BLOB_OFFSET + TOTAL_BUFFER_SIZE +
 // engine's own allocation rather than a region of this segment.
 static constexpr size_t SHM_INBOX_OFFSET =
     (SHM_PEER_OFFSET + SHM_PEER_PLANE_TOTAL_SIZE + 15u) & ~size_t{15};
-static constexpr size_t SHM_INBOX_SIZE   = CLOCKWORK_INBOX_BYTES;
+static constexpr size_t SHM_INBOX_SIZE   = static_cast<size_t>(CLOCKWORK_INBOX_BYTES);
 
 static constexpr size_t SHM_OUTBOX_OFFSET =
     (SHM_INBOX_OFFSET + SHM_INBOX_SIZE + 15u) & ~size_t{15};
-static constexpr size_t SHM_OUTBOX_SIZE   = CLOCKWORK_OUTBOX_BYTES;
+static constexpr size_t SHM_OUTBOX_SIZE   = static_cast<size_t>(CLOCKWORK_OUTBOX_BYTES);
 
 static constexpr size_t SEGMENT_SIZE = SHM_OUTBOX_OFFSET + SHM_OUTBOX_SIZE;
 
@@ -301,12 +302,12 @@ inline shm_handle shm_create_anonymous(size_t size) {
         // (or a planted name) the loop simply tries another.
         for (int attempt = 0; attempt < 16 && h.fd < 0; ++attempt) {
             const uint64_t r = detail_random_u64();
-            char name[48];
-            std::snprintf(name, sizeof name, "/cw-%d-%08x%08x",
+            std::array<char, 48> name{};
+            std::snprintf(name.data(), name.size(), "/cw-%d-%08x%08x",
                           static_cast<int>(::getpid()),
-                          static_cast<unsigned>(r >> 32), static_cast<unsigned>(r));
-            h.fd = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
-            if (h.fd >= 0) ::shm_unlink(name);
+                          static_cast<unsigned>(r >> 32u), static_cast<unsigned>(r));
+            h.fd = ::shm_open(name.data(), O_CREAT | O_EXCL | O_RDWR, 0600);
+            if (h.fd >= 0) ::shm_unlink(name.data());
             else if (errno != EEXIST) break;
         }
         if (h.fd < 0)
@@ -391,7 +392,7 @@ inline shm_handle shm_open_existing(const string& name) {
     h.fd = ::shm_open(posix_name.c_str(), O_RDWR, 0);
     if (h.fd < 0)
         throw std::runtime_error("shm_open(open) failed for " + name);
-    struct stat st;
+    struct stat st{};
     fstat(h.fd, &st);
     h.size = static_cast<size_t>(st.st_size);
     h.ptr = ::mmap(nullptr, h.size, PROT_READ | PROT_WRITE, MAP_SHARED, h.fd, 0);
@@ -707,8 +708,11 @@ public:
             shm_close(handle);
             throw std::runtime_error("shared memory lanes exceed what the header can address (4 GB)");
         }
-        shm = new shm_segment(handle.ptr, true, lanes_);
+        shm = std::make_unique<shm_segment>(handle.ptr, true, lanes_);
     }
+    // The segment's one creator: its handle and mapping are not things to copy.
+    shm_segment_creator(const shm_segment_creator&) = delete;
+    shm_segment_creator& operator=(const shm_segment_creator&) = delete;
 
     ~shm_segment_creator() {
         if (shm)
@@ -719,8 +723,7 @@ public:
     // the memory itself goes when the last of them does.
     void disconnect() {
         shm_close(handle);
-        delete shm;
-        shm = nullptr;
+        shm.reset();
     }
 
     // The object itself, for the attach endpoint to duplicate into readers
@@ -767,7 +770,7 @@ public:
 private:
     shm_lane_geometry lanes_;   // declared before handle: it sizes the mapping
     shm_handle            handle;
-    shm_segment* shm = nullptr;
+    std::unique_ptr<shm_segment> shm;
 };
 
 
@@ -835,7 +838,7 @@ public:
                                          header->blob_size, L, &why))
             throw std::runtime_error(std::string("Shared memory layout unusable by this reader: ") + why);
 
-        shm.reset(new shm_segment(handle.ptr, false));
+        shm = std::make_unique<shm_segment>(handle.ptr, false);
     }
     // Only a real handle. Before the segment was anonymous this took a PORT,
     // and a port converts silently to an int — which then fails at fstat

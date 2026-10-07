@@ -34,6 +34,7 @@ struct Packet {
 
 Packet message(const char* address);
 Packet message(const char* address, int32_t a);
+Packet message(const char* address, float a);
 Packet message(const char* address, int32_t a, int32_t b);
 Packet message(const char* address, int32_t a, int32_t b, int32_t c);
 Packet message(const char* address, const char* s);

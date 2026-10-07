@@ -23,6 +23,7 @@
 #include "clockwork_clock.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstring>
 
@@ -34,7 +35,7 @@ static_assert(sizeof(ClockworkTimeline) == kClockworkTimelineMirrorWords * sizeo
 struct alignas(8) ClockworkTimelineMirrorSlot {
     std::atomic<uint32_t> seq{0};    // odd while a write is in progress
     uint32_t              _pad{0};
-    std::atomic<uint64_t> w[kClockworkTimelineMirrorWords];
+    std::array<std::atomic<uint64_t>, kClockworkTimelineMirrorWords> w;
 };
 static_assert(sizeof(ClockworkTimelineMirrorSlot) == 8 + sizeof(ClockworkTimeline),
               "ClockworkTimelineMirrorSlot is laid out by hand: it lives in shared memory");
@@ -42,8 +43,8 @@ static_assert(sizeof(ClockworkTimelineMirrorSlot) == 8 + sizeof(ClockworkTimelin
 namespace clockwork {
 
 inline void timelineMirrorWrite(ClockworkTimelineMirrorSlot& s, const ClockworkTimeline& t) {
-    uint64_t words[kClockworkTimelineMirrorWords];
-    std::memcpy(words, &t, sizeof words);
+    std::array<uint64_t, kClockworkTimelineMirrorWords> words{};
+    std::memcpy(words.data(), &t, sizeof words);
     const uint32_t s0 = s.seq.load(std::memory_order_relaxed);
     s.seq.store(s0 + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
@@ -63,12 +64,12 @@ inline bool timelineMirrorRead(const ClockworkTimelineMirrorSlot& s, ClockworkTi
     for (int tries = 0; tries < kTimelineMirrorReadTries; ++tries) {
         const uint32_t s1 = s.seq.load(std::memory_order_acquire);
         if (s1 & 1u) continue;
-        uint64_t words[kClockworkTimelineMirrorWords];
+        std::array<uint64_t, kClockworkTimelineMirrorWords> words{};
         for (uint32_t i = 0; i < kClockworkTimelineMirrorWords; ++i)
             words[i] = s.w[i].load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (s.seq.load(std::memory_order_relaxed) != s1) continue;
-        std::memcpy(&out, words, sizeof out);
+        std::memcpy(&out, words.data(), sizeof out);
         return true;
     }
     return false;

@@ -76,9 +76,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config clang-tidy \
+          sudo apt-get install -y build-essential cmake pkg-config \
             libasound2-dev libudev-dev libjack-jackd2-dev \
             libpipewire-0.3-dev
+          # clang-tidy 20 from apt.llvm.org: the image's 18 has no ExcludeHeaderFilterRegex (.clang-tidy), and
+          # the two platforms should run the same checks
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y clang-tidy-20
+          echo "CLANG_TIDY=/usr/bin/clang-tidy-20" >> "$GITHUB_ENV"
 
       - name: Install clang-tidy (macOS)
         if: runner.os == 'macOS'
@@ -185,7 +190,7 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DCLOCKWORK_WERROR=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel 2
@@ -349,7 +354,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
@@ -369,6 +375,7 @@ jobs:
           build/test/clockwork_tests
           build/test/clockwork_lanes_reserved_tests
           build/test/clockwork_attach_tests
+          build/test/clockwork_engine_tests
           build/test/clockwork_engine_tests
 
   # -------------------------------------------------------------------- nif --

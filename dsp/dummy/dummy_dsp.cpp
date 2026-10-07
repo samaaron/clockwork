@@ -576,14 +576,14 @@ uint32_t writeEntry(uint8_t* buf, uint32_t cap, const ClockworkStreamEntry& e) {
     const char* addr = "/dummy/stream/entry";
     const uint32_t need = padded(static_cast<uint32_t>(std::strlen(addr)))
                         + padded(6)                       // ",isiii"
-                        + 4 + padded(static_cast<uint32_t>(std::strlen(e.name)))
+                        + 4 + padded(static_cast<uint32_t>(std::strlen(e.name.data())))
                         + 12;
     if (need > cap) return 0;
     uint32_t off = 0;
     off = putStr(buf, off, addr);
     off = putStr(buf, off, ",isiii");
     off = putInt(buf, off, e.port);
-    off = putStr(buf, off, e.name);
+    off = putStr(buf, off, e.name.data());
     off = putInt(buf, off, e.direction);
     off = putInt(buf, off, e.first);
     off = putInt(buf, off, e.count);

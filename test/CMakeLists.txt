@@ -464,3 +464,12 @@ if(APPLE)
     target_link_libraries(clockwork_engine_tests PRIVATE "-framework CoreMIDI")
 endif()
 endif()
+
+# The tests are ours too: with CLOCKWORK_WERROR (the top-level CMakeLists.txt) a warning in one fails the build.
+if(CLOCKWORK_WERROR AND NOT MSVC)
+    foreach(_t clockwork_tests clockwork_attach_tests clockwork_lanes_reserved_tests clockwork_engine_tests clockwork_test_shm_peer)
+        if(TARGET ${_t})
+            target_compile_options(${_t} PRIVATE -Werror)
+        endif()
+    endforeach()
+endif()

@@ -33,6 +33,7 @@
 #include <cstddef>   // size_t: used unqualified below, and <vector> happens
                      // to drag it in on libc++ and MSVC but not on libstdc++
 #include <cstdint>
+#include <array>
 #include <vector>
 
 class FlacEncoder {
@@ -86,7 +87,7 @@ private:
     uint32_t mFrameNumber = 0;
     uint32_t mMinBlock = 0, mMaxBlock = 0;
     uint32_t mMinFrame = 0, mMaxFrame = 0;
-    uint64_t mKinds[7] = {0, 0, 0, 0, 0, 0, 0};
+    std::array<uint64_t, 7> mKinds{};
 
     // Scratch, reused across blocks so a recording does not allocate per frame.
     std::vector<int32_t> mChannel;

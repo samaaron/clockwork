@@ -21,6 +21,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -87,7 +88,7 @@ struct alignas(16) shm_scope_stream {
 
     // Interleaved float ring [ch0_f0, ch1_f0, ch0_f1, ...], wraps modulo
     // capacity_frames.
-    float data[SHM_SCOPE_RING_FRAMES * SHM_SCOPE_STREAM_CHANNELS];
+    std::array<float, static_cast<size_t>(SHM_SCOPE_RING_FRAMES) * SHM_SCOPE_STREAM_CHANNELS> data;
 };
 
 static_assert(std::is_trivially_destructible<shm_scope_stream>::value,
@@ -151,13 +152,13 @@ public:
             channels = SHM_SCOPE_STREAM_CHANNELS;
         uint32_t at = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - at < num_frames) ? (cap - at) : num_frames;
-        float* dst = _slot->data + static_cast<size_t>(at) * channels;
+        float* dst = _slot->data.data() + static_cast<size_t>(at) * channels;
         for (uint32_t f = 0; f < first; ++f)
             for (uint32_t c = 0; c < channels; ++c)
                 dst[f * channels + c] = channel_data[c][f];
         if (first < num_frames) {
             const uint32_t wrap = num_frames - first;
-            dst = _slot->data;
+            dst = _slot->data.data();
             for (uint32_t f = 0; f < wrap; ++f)
                 for (uint32_t c = 0; c < channels; ++c)
                     dst[f * channels + c] = channel_data[c][first + f];
@@ -257,10 +258,10 @@ public:
         float* dst = out + static_cast<size_t>(fill) * channels;
         uint32_t at = static_cast<uint32_t>(start % cap);
         uint32_t first = (cap - at < real) ? (cap - at) : real;
-        std::memcpy(dst, _slot->data + static_cast<size_t>(at) * channels,
+        std::memcpy(dst, _slot->data.data() + static_cast<size_t>(at) * channels,
                     static_cast<size_t>(first) * channels * sizeof(float));
         if (first < real)
-            std::memcpy(dst + static_cast<size_t>(first) * channels, _slot->data,
+            std::memcpy(dst + static_cast<size_t>(first) * channels, _slot->data.data(),
                         static_cast<size_t>(real - first) * channels * sizeof(float));
         return real;
     }
@@ -285,7 +286,7 @@ public:
         // Degenerate requests fall back to the rolling window. The span cap
         // keeps `frames + search` — and the scratch element count on 32-bit
         // size_t targets — wrap-free.
-        constexpr uint32_t kMaxSpanFrames = 1u << 29;
+        constexpr uint32_t kMaxSpanFrames = 1u << 29u;
         if (search == 0 || frames == 0 ||
             frames > kMaxSpanFrames || search > kMaxSpanFrames) {
             if (trigger_offset) *trigger_offset = SHM_SCOPE_TRIGGER_NONE;

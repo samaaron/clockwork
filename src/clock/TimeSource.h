@@ -93,6 +93,7 @@ public:
 
     TimeSource(const TimeSource&) = delete;
     TimeSource& operator=(const TimeSource&) = delete;
+    ~TimeSource() = default;
 
     // Bind the host's SAB offset pointers (NTP start / drift µs / global ms).
     // Called once at boot before the audio thread runs — no concurrency.
@@ -136,6 +137,7 @@ public:
 
     TimeSource(const TimeSource&) = delete;
     TimeSource& operator=(const TimeSource&) = delete;
+    ~TimeSource() = default;
 
     // App-thread read: the latest audio-thread NTP cached by the most recent
     // update call. Falls back to a fresh wall-clock read before the first update.

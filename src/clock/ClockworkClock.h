@@ -189,7 +189,7 @@ public:
     // network thread). At most one callback per kind; setting replaces.
 
     void setTempoChangedCallback(std::function<void(double bpm)> cb);
-    void setNumPeersChangedCallback(std::function<void(std::size_t)> cb);
+    void setNumPeersChangedCallback(const std::function<void(std::size_t)>& cb);
     void setStartStopChangedCallback(std::function<void(bool playing, double atNtp)> cb);
 
     // ─── Link: visibility + peer name ────────────────────────────────────

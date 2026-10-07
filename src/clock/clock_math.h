@@ -89,7 +89,7 @@ inline double wrapPhase(double beat, double quantum) {
 inline int64_t ntpToOscTimetag(double ntpSeconds) {
     const uint32_t s = static_cast<uint32_t>(ntpSeconds);
     const uint32_t f = static_cast<uint32_t>((ntpSeconds - s) * kNtpUnitsPerSecond);
-    return static_cast<int64_t>((static_cast<uint64_t>(s) << 32) | f);
+    return static_cast<int64_t>((static_cast<uint64_t>(s) << 32u) | f);
 }
 
 // The inverse: an OSC timetag → NTP seconds. Not a round trip to the bit —
@@ -97,7 +97,7 @@ inline int64_t ntpToOscTimetag(double ntpSeconds) {
 // block times the hosts stamp, which come from this pair.
 inline double oscTimetagToNtp(int64_t timetag) {
     const uint64_t u = static_cast<uint64_t>(timetag);
-    return static_cast<double>(u >> 32)
+    return static_cast<double>(u >> 32u)
          + static_cast<double>(u & 0xFFFFFFFFu) / kNtpUnitsPerSecond;
 }
 

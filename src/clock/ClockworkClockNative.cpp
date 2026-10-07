@@ -311,7 +311,7 @@ void ClockworkClock::setTempoChangedCallback(std::function<void(double)> cb) {
     mImpl->linkSession.setTempoChangedCallback(std::move(cb));
 }
 
-void ClockworkClock::setNumPeersChangedCallback(std::function<void(std::size_t)> cb) {
+void ClockworkClock::setNumPeersChangedCallback(const std::function<void(std::size_t)>& cb) {
     mImpl->linkSession.setNumPeersChangedCallback(std::move(cb));
 }
 

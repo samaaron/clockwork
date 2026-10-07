@@ -244,10 +244,12 @@ static inline uint32_t clockwork_arena_audience(const ClockworkArenaEntry* e) {
 static inline const ClockworkArenaEntry*
 clockwork_arena_find(const ClockworkArenaHeader* h, uint32_t id) {
     uint32_t i;
+    /* NOLINTBEGIN(modernize-use-nullptr): a C header, compiled as C by the ABI probe (rust/clockwork-abi/tests/probe.c) */
     if (!h) return (const ClockworkArenaEntry*)0;
     for (i = 0; i < h->entry_count && i < CLOCKWORK_ARENA_MAX_ENTRIES; ++i)
         if (h->entries[i].id == id) return &h->entries[i];
     return (const ClockworkArenaEntry*)0;
+    /* NOLINTEND(modernize-use-nullptr) */
 }
 
 /* True when the arena has region `id` and it is a data contract a client may
@@ -255,7 +257,7 @@ clockwork_arena_find(const ClockworkArenaHeader* h, uint32_t id) {
  * private, and one from a writer that never said. */
 static inline int clockwork_arena_published(const ClockworkArenaHeader* h, uint32_t id) {
     const ClockworkArenaEntry* e = clockwork_arena_find(h, id);
-    return e != 0 && (clockwork_arena_audience(e) & CLOCKWORK_AUDIENCE_PUBLISHED) != 0u;
+    return e != 0 && (clockwork_arena_audience(e) & CLOCKWORK_AUDIENCE_PUBLISHED) != 0u;   /* NOLINT(modernize-use-nullptr): C, as above */
 }
 
 /* True when the first `bytes` of `base` carry a header this reader can use:

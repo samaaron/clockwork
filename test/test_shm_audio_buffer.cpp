@@ -49,7 +49,7 @@ void writeBlock(shm_audio_buffer_writer& w, uint64_t from, uint32_t frames) {
         r[i] = sampleAt(from + i, 1);
     }
     const float* ptrs[2] = { l.data(), r.data() };
-    w.write(ptrs, frames);
+    w.write(ptrs, 2, frames);
 }
 
 } // namespace
@@ -226,4 +226,25 @@ TEST_CASE("shm audio: an oversized capacity is refused, not clamped silently",
 
     REQUIRE(w.activate(2, 48000, SHM_AUDIO_FRAMES));
     REQUIRE(r.is_active());
+}
+
+// The writer takes the caller's count of channel pointers and never reads
+// past it: a slot formatted for more channels than the caller supplied is
+// left as it was, cursor included, rather than read from pointers the
+// caller never set (clang-analyzer's finding on the device tap, 2026-10-07).
+TEST_CASE("audio buffer: a write with fewer channels than the slot's writes nothing", "[shm][audio]") {
+    auto mem = std::make_unique<shm_audio_buffer>();
+    memset(static_cast<void*>(mem.get()), 0, sizeof(shm_audio_buffer));
+    shm_audio_buffer_writer w(mem.get());
+    REQUIRE(w.activate(2, 48000, 4096));
+    std::vector<float> mono(64, 1.0f);
+    const float* one[1] = { mono.data() };
+    w.write(one, 1, 64);
+    shm_audio_buffer_reader r(mem.get());
+    CHECK(r.writer_position() == 0);
+    // and with the slot's own count it writes, as ever
+    std::vector<float> l(64, 1.0f), rr(64, 2.0f);
+    const float* two[2] = { l.data(), rr.data() };
+    w.write(two, 2, 64);
+    CHECK(r.writer_position() == 64);
 }

@@ -5,7 +5,7 @@
  *
  * A fixed K-slot registry of midi:<port> follower timelines, independent of
  * Ableton Link. The MIDI subsystem feeds pulses / transport per port; OSC
- * clients read the timelines via /clockwork/clock/midi:<port>/*. Slot
+ * clients read the timelines via /clockwork/clock/midi:<port>/<verb>. Slot
  * assignment, tempo estimation, primary selection and staleness all live in
  * Rust (rust/clockwork-clock, `Registry`); this is the C++ face of that handle:
  * it supplies "now" (wall-clock NTP), sizes the registry to the platform's

@@ -21,6 +21,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -85,11 +86,11 @@ struct alignas(16) shm_audio_buffer {
     std::atomic<uint64_t> write_position;
 
     // Pad to 32 bytes (header) so data starts at a 16-aligned offset.
-    uint32_t              _reserved[2];
+    std::array<uint32_t, 2> _reserved;
 
     // Interleaved float ring [ch0_f0, ch1_f0, ch0_f1, ch1_f1, ...].
     // Wraps modulo capacity_frames.
-    float                 data[SHM_AUDIO_FRAMES * SHM_AUDIO_CHANNELS];
+    std::array<float, static_cast<size_t>(SHM_AUDIO_FRAMES) * SHM_AUDIO_CHANNELS> data;
 };
 
 static_assert(std::is_trivially_destructible<shm_audio_buffer>::value,
@@ -126,26 +127,32 @@ public:
         _buf->sample_rate = sample_rate;
         _buf->capacity_frames = capacity_frames;
         _buf->write_position.store(0, std::memory_order_relaxed);
-        memset(_buf->data, 0, sizeof(_buf->data));
+        memset(_buf->data.data(), 0, sizeof(_buf->data));
         _buf->enabled.store(1, std::memory_order_release);
         return true;
     }
 
-    void write(const float* const* channel_data, uint32_t num_frames) {
+    // Appends num_frames of num_channels: the caller's count of the pointers
+    // it passes, read once from the slot it filled them for. A slot wanting
+    // more channels than that is not written — never read past what the
+    // caller filled (the analyzer's finding, 2026-10-07: the slot's count
+    // read a second time here could, in principle, exceed the first).
+    void write(const float* const* channel_data, uint32_t num_channels, uint32_t num_frames) {
         if (!_buf || num_frames == 0) return;
         uint64_t pos = _buf->write_position.load(std::memory_order_relaxed);
         uint32_t cap = _buf->capacity_frames;
         uint32_t channels = _buf->channels;
+        if (channels > num_channels) return;
         uint32_t slot = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - slot < num_frames) ? (cap - slot) : num_frames;
-        float* dst = _buf->data + slot * channels;
+        float* dst = _buf->data.data() + static_cast<size_t>(slot) * channels;
         for (uint32_t f = 0; f < first; ++f) {
             for (uint32_t c = 0; c < channels; ++c)
                 dst[f * channels + c] = channel_data[c][f];
         }
         if (first < num_frames) {
             uint32_t wrap = num_frames - first;
-            dst = _buf->data;
+            dst = _buf->data.data();
             for (uint32_t f = 0; f < wrap; ++f) {
                 for (uint32_t c = 0; c < channels; ++c)
                     dst[f * channels + c] = channel_data[c][first + f];
@@ -162,10 +169,10 @@ public:
         uint32_t channels = _buf->channels;
         uint32_t slot = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - slot < num_frames) ? (cap - slot) : num_frames;
-        memcpy(_buf->data + slot * channels, data,
+        memcpy(_buf->data.data() + static_cast<size_t>(slot) * channels, data,
                static_cast<size_t>(first) * channels * sizeof(float));
         if (first < num_frames) {
-            memcpy(_buf->data, data + first * channels,
+            memcpy(_buf->data.data(), data + static_cast<size_t>(first) * channels,
                    static_cast<size_t>(num_frames - first) * channels * sizeof(float));
         }
         _buf->write_position.store(pos + num_frames, std::memory_order_release);
@@ -255,10 +262,10 @@ public:
 
         uint32_t slot = static_cast<uint32_t>(_last_read_pos % cap);
         uint32_t first = (cap - slot < to_read) ? (cap - slot) : to_read;
-        memcpy(out, _buf->data + slot * channels,
+        memcpy(out, _buf->data.data() + static_cast<size_t>(slot) * channels,
                static_cast<size_t>(first) * channels * sizeof(float));
         if (first < to_read) {
-            memcpy(out + first * channels, _buf->data,
+            memcpy(out + static_cast<size_t>(first) * channels, _buf->data.data(),
                    static_cast<size_t>(to_read - first) * channels * sizeof(float));
         }
         _last_read_pos += to_read;
