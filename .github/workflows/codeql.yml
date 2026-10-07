@@ -2,7 +2,9 @@
 # and pull request and weekly, with its findings in the Security tab. An alert
 # at warning or error level that is still open fails the job, the bar -Werror
 # sets for the compiler; a finding that stands by design is dismissed once,
-# in the Security tab with its reason, and stays dismissed.
+# in the Security tab with its reason, and stays dismissed. A path one of our
+# own queries cannot rule out but the engine's ordering does is stated in the
+# query instead, with its reason, where review sees it.
 #
 # The C and C++ are analysed on each platform Clockwork is built for, since
 # the device code is three codebases behind one interface: the CoreAudio and

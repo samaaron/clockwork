@@ -1,17 +1,17 @@
 edges
-| AudioThread.cpp:10:30:10:39 | lock_guard | AudioThread.cpp:9:21:9:24 | lock |
-| AudioThread.cpp:10:72:10:82 | ~lock_guard | AudioThread.cpp:9:34:9:39 | unlock |
-| AudioThread.cpp:17:13:17:16 | grow | AudioThread.cpp:5:18:5:23 | malloc |
-| AudioThread.cpp:18:13:18:17 | guard | AudioThread.cpp:10:30:10:39 | lock_guard |
-| AudioThread.cpp:18:13:18:17 | guard | AudioThread.cpp:10:72:10:82 | ~lock_guard |
-| AudioThread.cpp:19:13:19:15 | say | AudioThread.cpp:6:16:6:22 | fprintf |
-| AudioThread.cpp:20:13:20:17 | place | AudioThread.cpp:11:14:11:25 | operator new |
-| AudioThread.cpp:22:13:22:15 | mix | AudioThread.cpp:17:13:17:16 | grow |
-| AudioThread.cpp:22:13:22:15 | mix | AudioThread.cpp:18:13:18:17 | guard |
-| AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:19:13:19:15 | say |
-| AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:20:13:20:17 | place |
-| AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:22:13:22:15 | mix |
+| AudioThread.cpp:11:30:11:39 | lock_guard | AudioThread.cpp:10:21:10:24 | lock |
+| AudioThread.cpp:11:72:11:82 | ~lock_guard | AudioThread.cpp:10:34:10:39 | unlock |
+| AudioThread.cpp:18:13:18:16 | grow | AudioThread.cpp:6:18:6:23 | malloc |
+| AudioThread.cpp:19:13:19:17 | guard | AudioThread.cpp:11:30:11:39 | lock_guard |
+| AudioThread.cpp:19:13:19:17 | guard | AudioThread.cpp:11:72:11:82 | ~lock_guard |
+| AudioThread.cpp:20:13:20:15 | say | AudioThread.cpp:7:16:7:22 | fprintf |
+| AudioThread.cpp:21:13:21:17 | place | AudioThread.cpp:12:14:12:25 | operator new |
+| AudioThread.cpp:24:13:24:15 | mix | AudioThread.cpp:18:13:18:16 | grow |
+| AudioThread.cpp:24:13:24:15 | mix | AudioThread.cpp:19:13:19:17 | guard |
+| AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:20:13:20:15 | say |
+| AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:21:13:21:17 | place |
+| AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:24:13:24:15 | mix |
 #select
-| AudioThread.cpp:10:62:10:65 | call to lock | AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:10:30:10:39 | lock_guard | On the audio thread: $@ may block on a lock. | AudioThread.cpp:9:21:9:24 | lock | mutex::lock |
-| AudioThread.cpp:17:22:17:27 | call to malloc | AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:17:13:17:16 | grow | On the audio thread: $@ allocates. | AudioThread.cpp:5:18:5:23 | malloc | malloc |
-| AudioThread.cpp:19:21:19:27 | call to fprintf | AudioThread.cpp:24:6:24:21 | renderAudioBlock | AudioThread.cpp:19:13:19:15 | say | On the audio thread: $@ does file IO. | AudioThread.cpp:6:16:6:22 | fprintf | fprintf |
+| AudioThread.cpp:11:62:11:65 | call to lock | AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:11:30:11:39 | lock_guard | On the audio thread: $@ may block on a lock. | AudioThread.cpp:10:21:10:24 | lock | mutex::lock |
+| AudioThread.cpp:18:22:18:27 | call to malloc | AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:18:13:18:16 | grow | On the audio thread: $@ allocates. | AudioThread.cpp:6:18:6:23 | malloc | malloc |
+| AudioThread.cpp:20:21:20:27 | call to fprintf | AudioThread.cpp:26:6:26:21 | renderAudioBlock | AudioThread.cpp:20:13:20:15 | say | On the audio thread: $@ does file IO. | AudioThread.cpp:7:16:7:22 | fprintf | fprintf |

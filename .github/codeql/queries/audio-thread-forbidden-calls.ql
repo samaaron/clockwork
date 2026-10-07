@@ -90,10 +90,22 @@ predicate outside(Function f) {
   f.getFile().getBaseName() = ["function.h", "invoke.h", "functional", "__functional_base"]
 }
 
+/** Functions the audio thread never runs although its graph calls them,
+ *  each with the reason: the engine's own ordering rules them out, which a
+ *  walk of calls cannot see. Stated here once, in review, rather than
+ *  dismissed alert by alert. */
+predicate neverOnTheAudioThread(Function f) {
+  // The logger's no-ring path, taken only while memory_initialized is false.
+  // The audio thread never runs then: the device callback is attached after
+  // init_memory builds the ring and its device closed before teardown_memory,
+  // and process_audio returns before logging when there is no ring.
+  f.hasName("clockwork_log_no_ring")
+}
+
 /** A call edge, with virtual dispatch widened to every override: a call
  *  through a base class may land on any of them. */
 predicate calls(Function caller, Function callee) {
-  not outside(caller) and not outside(callee) and
+  not outside(caller) and not outside(callee) and not neverOnTheAudioThread(callee) and
   exists(Call c | c.getEnclosingFunction() = caller |
     callee = c.getTarget() or
     callee.(MemberFunction).overrides+(c.getTarget()))
