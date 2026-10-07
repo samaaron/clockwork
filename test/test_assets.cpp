@@ -274,7 +274,14 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     const uint64_t grew = grownSince(before);
     INFO("an ordinary boot grew the resident set by " << (ordinary >> 20)
          << " MB, this one by " << (grew >> 20) << " MB");
-#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__SANITIZE_THREAD__)
+#  define CLOCKWORK_UNDER_TSAN 1
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define CLOCKWORK_UNDER_TSAN 1
+#  endif
+#endif
+#ifdef CLOCKWORK_UNDER_TSAN
     INFO("not judged under ThreadSanitizer: its shadow memory grows the resident set many times over");
 #else
     CHECK(grew < ordinary + 64u * 1024u * 1024u);

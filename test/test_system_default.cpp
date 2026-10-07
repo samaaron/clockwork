@@ -102,8 +102,8 @@ TEST_CASE("SystemDefault: choosing the system default pins nothing",
     // It plays only at 44.1k and the session is at 48k, so the switch to it
     // changes the rate however it is opened: by its name when it is wired,
     // through the driver's own default when it is wireless.
-    sys->device("Fake Speakers")->sampleRates = { 44100.0 };
-    sys->device("Fake Speakers")->wireless = wireless;
+    sys->at("Fake Speakers").sampleRates = { 44100.0 };
+    sys->at("Fake Speakers").wireless = wireless;
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
     REQUIRE(fix.engine().preferredOutputDevice() == "Fake Interface");   // -H is a pick
 

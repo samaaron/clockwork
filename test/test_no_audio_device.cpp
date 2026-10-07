@@ -133,7 +133,7 @@ TEST_CASE("NoAudioDevice: the watchdog leaves a device swap in flight alone",
     REQUIRE(fix.engine().waitingForAudioDevice());
 
     auto swap = fix.engine().testHoldSwapGate();
-    sys->device("Fake Speakers")->hidden = false;        // there to recover onto
+    sys->at("Fake Speakers").hidden = false;        // there to recover onto
     for (int i = 0; i < 20; ++i) {
         clockMs->fetch_add(20);
         fix.engine().watchdogPoll();

@@ -28,7 +28,7 @@ using fake_audio::makeSimpleSystem;
 TEST_CASE("DeadDevice: a switch to a device that never delivers audio fails, and "
           "the engine plays on the device it had", "[DeadDevice]") {
     auto sys = makeSimpleSystem();
-    sys->device("Fake Interface")->failStart = true;
+    sys->at("Fake Interface").failStart = true;
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
 
     auto r = fix.engine().switchDevice("Fake Interface", 0, 0, false, "__none__");
@@ -134,7 +134,7 @@ TEST_CASE("DeadDevice: a recovery whose pinned device delivers no audio, while t
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().preferredOutputDevice() == "Fake Interface");
 
-    sys->device("Fake Interface")->failStart = true;
+    sys->at("Fake Interface").failStart = true;
     OscReply reply;
     fix.send(osc_test::message("/clockwork/devices/reopen"));
     REQUIRE(fix.waitForReply("/clockwork/devices/reopen.done", reply, 20000));

@@ -206,7 +206,7 @@ TEST_CASE("Swap: input-side open failure keeps the output and flags the input",
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
 
-    sys->device("Fake Microphone")->failInputOpen = true;
+    sys->at("Fake Microphone").failInputOpen = true;
 
     auto r = fix.engine().switchDevice("Fake Speakers", 0, 0, false,
                                        "Fake Microphone");

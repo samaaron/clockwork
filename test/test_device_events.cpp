@@ -262,7 +262,7 @@ TEST_CASE("DeviceEvents: the device played on dying where it stands is left "
     auto sys = systemOn(driver);               // the default is Fake Speakers
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
 
-    sys->device("Fake Interface")->dead = true;  // still listed, gone all the same
+    sys->at("Fake Interface").dead = true;  // still listed, gone all the same
     REQUIRE(sys->reportOpenDeviceChanged());
 
     checkPlayingOn(fix, "Fake Speakers");
@@ -325,7 +325,7 @@ TEST_CASE("DeviceEvents: the device played on is played on at the rate the "
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));    // at 48k
     subscribe(fix);
 
-    sys->device("Fake Interface")->systemRate = 44100.0;
+    sys->at("Fake Interface").systemRate = 44100.0;
     REQUIRE(sys->reportOpenDeviceChanged());
 
     OscReply setup;

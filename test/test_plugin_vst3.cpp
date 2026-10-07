@@ -36,7 +36,7 @@
 #include "shared_memory.h"      // ClockworkClockState: the clock the musical-time case hands in
 
 #include <catch2/catch_test_macros.hpp>
-#include <unistd.h>
+#include <random>
 #include <filesystem>
 #include <catch2/catch_approx.hpp>
 
@@ -131,8 +131,8 @@ TEST_CASE("vst3: scan reports the count even when it cannot fit it", "[plugin][v
 }
 
 TEST_CASE("vst3: scanning something that is not a plugin returns 0", "[plugin][vst3]") {
-    // a file of our own in the temp directory, named for this process: no tmpnam, whose name can be taken between the call and the open
-    const std::string path = (std::filesystem::temp_directory_path() / ("clockwork-not-a-plugin-" + std::to_string(::getpid()) + ".vst3")).string();
+    // a file of our own in the temp directory, with a random name: no tmpnam, whose name can be taken between the call and the open
+    const std::string path = (std::filesystem::temp_directory_path() / ("clockwork-not-a-plugin-" + std::to_string(std::random_device{}()) + ".vst3")).string();
     {
         FILE* f = std::fopen(path.c_str(), "wb");
         REQUIRE(f != nullptr);

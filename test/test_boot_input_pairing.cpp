@@ -153,10 +153,10 @@ TEST_CASE("Boot: a saved microphone known by another driver's name doesn't cost 
     CHECK(driverInUse(fix) == "Windows Audio");
     CHECK(fix.engine().currentDevice().name == "Speakers (MOTU)");
     CHECK(fix.engine().currentDevice().activeInputChannels == 0);
-    CHECK(sys->device("MOTU Pro Audio")->opens.load() == 0);
+    CHECK(sys->at("MOTU Pro Audio").opens.load() == 0);
     // Not tried at all: a pairing that fails takes the output down with it,
     // and the output is opened again — a dropout at every launch.
-    CHECK(sys->device("Speakers (MOTU)")->opens.load() == cleanBootOpens);
+    CHECK(sys->at("Speakers (MOTU)").opens.load() == cleanBootOpens);
     CHECK(fix.waitForBlocks(20));
 }
 
@@ -184,7 +184,7 @@ TEST_CASE("Boot: a saved microphone its driver won't pair with the output isn't 
     {
         auto sys = machine();
         EngineFixture fix(boot(sys, ""));
-        cleanBootOpens = sys->device("Fake Speakers")->opens.load();
+        cleanBootOpens = sys->at("Fake Speakers").opens.load();
     }
 
     auto sys = machine();
@@ -192,7 +192,7 @@ TEST_CASE("Boot: a saved microphone its driver won't pair with the output isn't 
     INFO(fix.debugMessagesDump());
     CHECK(fix.engine().currentDevice().name == "Fake Speakers");
     CHECK(fix.engine().currentDevice().activeInputChannels == 0);
-    CHECK(sys->device("Fake AirPods")->opens.load() == 0);
-    CHECK(sys->device("Fake Speakers")->opens.load() == cleanBootOpens);
+    CHECK(sys->at("Fake AirPods").opens.load() == 0);
+    CHECK(sys->at("Fake Speakers").opens.load() == cleanBootOpens);
     CHECK(fix.waitForBlocks(20));
 }

@@ -78,7 +78,14 @@ void dropPausedReader() {
 // Under ThreadSanitizer the forked child is not a program it can follow (the
 // runtime warns and its reports in the child read as a failure), so these two
 // run in the plain, ASan and UBSan builds and are skipped there.
-#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__SANITIZE_THREAD__)
+#  define CLOCKWORK_UNDER_TSAN 1
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define CLOCKWORK_UNDER_TSAN 1
+#  endif
+#endif
+#ifdef CLOCKWORK_UNDER_TSAN
 #define CLOCKWORK_SKIP_UNDER_TSAN() SKIP("fork is outside what ThreadSanitizer can follow")
 #else
 #define CLOCKWORK_SKIP_UNDER_TSAN() ((void)0)

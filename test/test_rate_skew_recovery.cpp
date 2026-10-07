@@ -97,7 +97,7 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
           "most N times, ends at the measured rate, and keeps playing",
           "[RateSkew][Watchdog]") {
     auto sys = makeSimpleSystem();
-    sys->device("Fake Speakers")->deliveredRate = 44100.0;   // reports 48000, ticks at 44100
+    sys->at("Fake Speakers").deliveredRate = 44100.0;   // reports 48000, ticks at 44100
     EngineFixture fix(lyingDeviceConfig(sys));
 
     SwapLog log;
@@ -152,7 +152,7 @@ TEST_CASE("RateSkew: a device that skews at the measured rate too gets no furthe
           "recoveries this session", "[RateSkew][Watchdog]") {
     auto sys = makeSimpleSystem();
     // Delivers 40k whatever it is opened at: nothing it advertises is true.
-    sys->device("Fake Speakers")->deliveredRate = 40000.0;
+    sys->at("Fake Speakers").deliveredRate = 40000.0;
     EngineFixture fix(lyingDeviceConfig(sys));
 
     sys->useVirtualTime();
@@ -188,7 +188,7 @@ TEST_CASE("RateSkew: a device racing at nearly five times its rate is recovered,
     // The other way round from the mixer: a driver's timer free-running fast
     // (seen just before a wake), so every scheduled note comes early.
     auto sys = makeSimpleSystem();
-    sys->device("Fake Speakers")->deliveredRate = 230400.0;   // 4.8x its 48000
+    sys->at("Fake Speakers").deliveredRate = 230400.0;   // 4.8x its 48000
     EngineFixture fix(lyingDeviceConfig(sys));
     subscribe(fix);
 

@@ -181,7 +181,7 @@ TEST_CASE("DeviceReport: every driver but ASIO offers a System Default row, and 
 TEST_CASE("DeviceReport: a microphone that failed to open is still offered, so the "
           "user can try it again", "[DeviceReport]") {
     auto sys = makeSimpleSystem();
-    sys->device("Fake Microphone")->failInputOpen = true;
+    sys->at("Fake Microphone").failInputOpen = true;
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
 
