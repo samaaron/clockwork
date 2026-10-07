@@ -1,0 +1,87 @@
+# CodeQL over Clockwork's C and C++: GitHub's own semantic analysis, run on
+# every push and pull request and weekly, with its findings in the Security
+# tab. A finding at error level fails the job here, so it is seen in the same
+# place as a failing test rather than only on a page nobody is sent to.
+#
+# The build is Clockwork's own (manual build mode): the Linux native
+# configure with the tests off, which compiles every source the analysis
+# should see. Smoothie (JUCE) and the vendored libraries are compiled with
+# it and so are analysed too; their findings are filed where they are found.
+
+name: codeql
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # Mondays, early: the query packs move under us
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: codeql (c-cpp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev \
+            libpipewire-0.3-dev
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+          queries: security-and-quality
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+          cmake --build build --parallel 2
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
+          output: codeql-results
+
+      # What the analysis found, as a table in the job summary, and a failure
+      # for anything at error level: the same bar as a compiler error.
+      - name: Report
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import json, glob, os, sys
+          results = []
+          for f in glob.glob("codeql-results/*.sarif"):
+              sarif = json.load(open(f))
+              for run in sarif.get("runs", []):
+                  rules = {r["id"]: r for r in run.get("tool", {}).get("driver", {}).get("rules", [])}
+                  for r in run.get("results", []):
+                      rule = rules.get(r.get("ruleId"), {})
+                      level = r.get("level") or rule.get("defaultConfiguration", {}).get("level", "warning")
+                      loc = r.get("locations", [{}])[0].get("physicalLocation", {})
+                      path = loc.get("artifactLocation", {}).get("uri", "?")
+                      line = loc.get("region", {}).get("startLine", 0)
+                      results.append((level, r.get("ruleId"), f"{path}:{line}", r.get("message", {}).get("text", "")[:120]))
+          errors = [x for x in results if x[0] == "error"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("## CodeQL (c-cpp)\n\n")
+              s.write(f"{len(results)} findings, {len(errors)} at error level\n\n")
+              if results:
+                  s.write("| level | rule | where | message |\n|---|---|---|---|\n")
+                  for level, rule, where, msg in sorted(results):
+                      s.write(f"| {level} | {rule} | {where} | {msg.replace('|', '/')} |\n")
+          for e in errors:
+              print("error:", *e)
+          sys.exit(1 if errors else 0)
+          EOF
