@@ -34,6 +34,37 @@ permissions:
   security-events: write
 
 jobs:
+  # Each of our queries has a source file with a known violation and the
+  # result it must report: a query that stops seeing fails here, so a quiet
+  # green cannot pass for a clean engine. A job of its own, away from init:
+  # init's tracer on Windows takes in every process the job starts, the
+  # test's own extraction too, and leaves its database empty; and init
+  # refuses to run in a job that has run setup-codeql.
+  queries:
+    name: codeql (queries, ${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: github/codeql-action/setup-codeql@v3
+        id: setup
+
+      - name: Query tests
+        shell: bash
+        run: |
+          "${{ steps.setup.outputs.codeql-path }}" test run .github/codeql/queries/test
+
   cpp:
     name: codeql (c-cpp, ${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
@@ -69,19 +100,6 @@ jobs:
           sudo apt-get install -y build-essential cmake pkg-config \
             libasound2-dev libudev-dev libjack-jackd2-dev \
             libpipewire-0.3-dev
-
-      # Each of our queries has a source file with a known violation and the
-      # result it must report: a query that stops seeing fails here, before
-      # a quiet green could pass for a clean engine. Run before init begins
-      # tracing, which on Windows takes in every process the job starts,
-      # the test's own extraction too, and leaves its database empty.
-      - uses: github/codeql-action/setup-codeql@v3
-        id: setup
-
-      - name: Query tests
-        shell: bash
-        run: |
-          "${{ steps.setup.outputs.codeql-path }}" test run .github/codeql/queries/test
 
       # GitHub's suite and Clockwork's own queries (.github/codeql/queries):
       # the rules the compiler cannot state, such as nothing on the audio
