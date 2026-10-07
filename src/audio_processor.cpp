@@ -1536,7 +1536,7 @@ extern "C" {
             } else {
                 clockwork_log("WARNING: %u reserved lanes above channel %u do not fit "
                         "kMaxChannels=%d; no lanes reserved",
-                        g_reserved_lanes, base, (int)clockwork::kMaxChannels);
+                        g_reserved_lanes, first, (int)clockwork::kMaxChannels);
             }
         }
         // ── The guest's memory region ──────────────────────────────────────
