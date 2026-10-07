@@ -370,7 +370,8 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-          TSAN_OPTIONS: halt_on_error=1:report_signal_unsafe=0
+          # suppressions: races with a Rust frame on one side (test/tsan.supp says why)
+          TSAN_OPTIONS: halt_on_error=1:report_signal_unsafe=0:suppressions=${{ github.workspace }}/test/tsan.supp
         run: |
           build/test/clockwork_tests
           build/test/clockwork_lanes_reserved_tests

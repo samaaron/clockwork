@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for Clockwork's tests (CLOCKWORK_SANITIZE=thread).
+#
+# Rust is built with the stable toolchain, which cannot instrument for
+# ThreadSanitizer, so the synchronisation inside the Rust subsystems — an
+# Arc's reference count, a Mutex, a channel — is invisible to it. A C++ access
+# ordered against a Rust thread by one of those reads as a race with no
+# happens-before, however sound it is: the stream transport's connection
+# writer dropped on its thread after the engine's send on another (an Arc,
+# 2026-10-07, test_transports.cpp). Races with a Rust frame (a v0-mangled
+# symbol) on one side are therefore not judged here. Everything on the C++
+# side alone is, and a race between two C++ threads is never hidden by this.
+#
+# To judge the Rust side too: build it with a nightly toolchain and
+# -Zsanitizer=thread, which this file would then make unnecessary.
+race:^_RNv
+race:^_R
