@@ -1,0 +1,9 @@
+# Clockwork's own CodeQL queries: the rules the compiler cannot state, run
+# with GitHub's security-and-quality suite by .github/workflows/codeql.yml.
+# Locally: codeql pack install .github/codeql/queries, then
+# codeql database analyze <db> .github/codeql/queries --format=sarif-latest.
+name: clockwork/queries
+version: 0.1.0
+library: false
+dependencies:
+  codeql/cpp-all: "*"

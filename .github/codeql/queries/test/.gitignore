@@ -1,0 +1,3 @@
+# what codeql test run leaves behind
+*.testproj/
+*.actual

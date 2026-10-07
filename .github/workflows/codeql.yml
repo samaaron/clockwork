@@ -1,16 +1,24 @@
-# CodeQL over Clockwork's C and C++: GitHub's own semantic analysis, run on
-# every push and pull request and weekly, with its findings in the Security
-# tab. An alert at warning or error level that is still open fails the job,
-# the bar -Werror sets for the compiler; a finding that stands by design is
-# dismissed once, in the Security tab with its reason, and stays dismissed.
+# CodeQL over Clockwork: GitHub's own semantic analysis, run on every push
+# and pull request and weekly, with its findings in the Security tab. An alert
+# at warning or error level that is still open fails the job, the bar -Werror
+# sets for the compiler; a finding that stands by design is dismissed once,
+# in the Security tab with its reason, and stays dismissed.
 #
-# The build is Clockwork's own (manual build mode): the Linux native
-# configure with the tests off, which compiles every source the analysis
-# should see. Smoothie (JUCE), the vendored libraries, the plugin SDKs and the
-# fetched dependencies are compiled with it and so are analysed too; their
-# findings are their authors', and scripts/codeql-report.py sets them aside
-# before the results are uploaded (CodeQL's own paths-ignore does not reach a
-# compiled language built by hand).
+# The C and C++ are analysed on each platform Clockwork is built for, since
+# the device code is three codebases behind one interface: the CoreAudio and
+# Objective-C++ paths only exist on macOS, the WASAPI and ASIO ones only on
+# Windows, and an analysis of the Linux configure never sees either. Each is
+# Clockwork's own build (manual build mode), the tests off, which compiles
+# every source the analysis should see. Smoothie (JUCE), the vendored
+# libraries, the plugin SDKs and the fetched dependencies are compiled with it
+# and so are analysed too: scripts/codeql-report.py gives Smoothie's findings
+# a category of their own (the fork is ours to work down) and sets the rest
+# aside, since CodeQL's own paths-ignore does not reach a compiled language
+# built by hand.
+#
+# The JavaScript (the worklet, the pump, the transports) and the Rust
+# subsystems are the same boundary from the other side, and are analysed on
+# Linux without a build.
 
 name: codeql
 
@@ -26,53 +34,126 @@ permissions:
   security-events: write
 
 jobs:
-  analyze:
-    name: codeql (c-cpp)
-    runs-on: ubuntu-latest
+  cpp:
+    name: codeql (c-cpp, ${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the Linux category keeps the name the analysis has always had, so
+          # its alerts carry on rather than start again under a new one
+          - os: ubuntu-latest
+            platform: linux
+            category: /language:c-cpp
+          - os: macos-latest
+            platform: macos
+            category: /language:c-cpp/os:macos
+          - os: windows-latest
+            platform: windows
+            category: /language:c-cpp/os:windows
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
             libasound2-dev libudev-dev libjack-jackd2-dev \
             libpipewire-0.3-dev
 
+      # GitHub's suite and Clockwork's own queries (.github/codeql/queries):
+      # the rules the compiler cannot state, such as nothing on the audio
+      # thread that allocates, locks, sleeps or touches a file.
       - uses: github/codeql-action/init@v3
+        id: init
         with:
           languages: c-cpp
           build-mode: manual
-          queries: security-and-quality
+          queries: security-and-quality,./.github/codeql/queries
+
+      # Each of our queries has a source file with a known violation and the
+      # result it must report: a query that stops seeing fails here, before
+      # a quiet green could pass for a clean engine.
+      - name: Query tests
+        shell: bash
+        run: |
+          "${{ steps.init.outputs.codeql-path }}" test run .github/codeql/queries/test
 
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
-          cmake --build build --parallel 2
+          cmake --build build --config Release --parallel 2
 
       - uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:c-cpp"
+          category: ${{ matrix.category }}
           output: codeql-results
           upload: false
 
-      # Clockwork's own findings, in the log and the job summary, and the
-      # trimmed file the upload sends; a failure for a file that does not show
-      # an analysis happened.
+      # Clockwork's own findings, in the log and the job summary, and the two
+      # files the uploads send; a failure for a file that does not show an
+      # analysis happened.
       - name: Findings
-        run: python3 scripts/codeql-report.py trim codeql-results/cpp.sarif codeql-results/clockwork.sarif
+        shell: bash
+        run: python3 scripts/codeql-report.py trim codeql-results/cpp.sarif codeql-results/clockwork.sarif codeql-results/smoothie.sarif
 
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: codeql-results/clockwork.sarif
-          category: "/language:c-cpp"
+          category: ${{ matrix.category }}
+          wait-for-processing: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: codeql-results/smoothie.sarif
+          category: "/smoothie/os:${{ matrix.platform }}"
           wait-for-processing: true
 
       # Judged once GitHub has the alerts: open at warning or error fails,
       # dismissed stands.
+      - name: Verdict
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/codeql-report.py judge
+
+  other:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: codeql-results
+          upload: false
+
+      - name: Findings
+        run: python3 scripts/codeql-report.py trim codeql-results/*.sarif codeql-results/clockwork.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: codeql-results/clockwork.sarif
+          category: "/language:${{ matrix.language }}"
+          wait-for-processing: true
+
       - name: Verdict
         env:
           GITHUB_TOKEN: ${{ github.token }}

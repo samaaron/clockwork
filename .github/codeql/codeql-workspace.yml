@@ -1,0 +1,5 @@
+# The packs under this directory, so the tests resolve the queries they test
+# without a registry: codeql test run .github/codeql/queries/test
+provide:
+  - "queries/qlpack.yml"
+  - "queries/test/qlpack.yml"

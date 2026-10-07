@@ -1,0 +1,9 @@
+# Tests for Clockwork's queries: each directory holds a source file with a
+# known violation and the result the query must report for it, so a query
+# that stops seeing is a failing test rather than a quiet green.
+# Locally: codeql test run .github/codeql/queries/test
+name: clockwork/queries-tests
+version: 0.1.0
+extractor: cpp
+dependencies:
+  clockwork/queries: "*"
