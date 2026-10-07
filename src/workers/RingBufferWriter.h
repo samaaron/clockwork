@@ -225,7 +225,8 @@ public:
         if (!r.valid())
             return false;
 
-        std::memcpy(r.payload, data, data_size);
+        // a header-only frame carries nothing to copy, and its caller may well pass no pointer
+        if (data_size > 0) std::memcpy(r.payload, data, data_size);
         commit(buffer_start, buffer_size, head, sequence, write_lock,
                r, data_size, source_id);
         return true;
