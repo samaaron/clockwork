@@ -421,7 +421,10 @@ jobs:
   rust:
     name: rust (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 45, not 30: clippy and the release tests are two full builds, and the
+    # Intel macOS runner took 7, 15 and then over 30 minutes for the same code
+    # (2026-10-07). The target cache below keeps the usual run well under it.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -441,6 +444,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # The cargo target directory between runs, keyed by the lock file and
+      # the toolchain: the engine's Rust is most of what clippy and the tests
+      # compile, and it rarely changes with a push.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
       # The native job's list, not the crates' alone: clockwork-sys builds
       # the engine from its build script, so the workspace now needs what
       # the C++ needs — cmake, and JACK's and PipeWire's headers for the
