@@ -4,7 +4,7 @@
 """Judge a CodeQL analysis by Clockwork's own code, in two steps around the upload.
 
     codeql-report.py trim IN.sarif OURS.sarif [SMOOTHIE.sarif]
-    codeql-report.py judge
+    codeql-report.py judge CATEGORY
 
 TRIM runs before the upload. A C++ analysis compiles everything, so its
 results cover Smoothie (our JUCE fork), the vendored single-file libraries,
@@ -20,14 +20,16 @@ prove an analysis happened: no results at all, or a rule whose severity
 cannot be found, is not a clean bill of health.
 
 JUDGE runs after the upload has been processed, and asks GitHub rather than
-the file: every alert still OPEN on this ref at warning or error level in
-Clockwork's code fails the job, the same bar as a compiler warning under
--Werror, whichever language or platform found it. Smoothie's alerts are
-counted and shown, not judged. Asking GitHub is what lets a finding that is
-there by design be dismissed once, in the Security tab with its reason,
-instead of being argued with on every push. Needs GITHUB_TOKEN,
-GITHUB_REPOSITORY and GITHUB_REF; exit 2 without them, or when the listing
-cannot be read.
+the file: every alert at warning or error level in Clockwork's code that is
+still OPEN in this job's own analysis (CATEGORY, the upload's) fails the job,
+the same bar as a compiler warning under -Werror. An alert open only in
+another category is that job's to fail on: judged here as well, it would fail
+this job on an analysis still running elsewhere, or one that has since closed
+it. Smoothie's alerts are counted and shown, not judged. Asking GitHub is
+what lets a finding that is there by design be dismissed once, in the
+Security tab with its reason, instead of being argued with on every push.
+Needs GITHUB_TOKEN, GITHUB_REPOSITORY and GITHUB_REF; exit 2 without them, or
+when the listing cannot be read.
 """
 import json
 import os
@@ -137,13 +139,13 @@ def trim(src, ours_path, smoothie_path=None):
     return 2 if (not seen or unknown) else 0
 
 
-def alerts(repo, token, ref, state):
-    """Every alert in one state on one ref, through the paged listing."""
+def listing(repo, token, path, **query):
+    """Every entry of one of the code-scanning listings, through its pages."""
     out, page = [], 1
     while True:
-        q = urllib.parse.urlencode({"ref": ref, "state": state, "per_page": 100, "page": page})
+        q = urllib.parse.urlencode({**query, "per_page": 100, "page": page})
         req = urllib.request.Request(
-            f"https://api.github.com/repos/{repo}/code-scanning/alerts?{q}",
+            f"https://api.github.com/repos/{repo}/code-scanning/{path}?{q}",
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28"})
@@ -155,17 +157,24 @@ def alerts(repo, token, ref, state):
         page += 1
 
 
-def judge():
+def alerts(repo, token, ref, state):
+    """Every alert in one state on one ref."""
+    return listing(repo, token, "alerts", ref=ref, state=state)
+
+
+def open_in(repo, token, ref, alert, category):
+    """Whether one analysis, by its category, still reports the alert: an
+    alert carries an instance, with its own state, per category that saw it."""
+    return any(i.get("category", "").rstrip("/") == category and i.get("state") == "open"
+               for i in listing(repo, token, f"alerts/{alert['number']}/instances", ref=ref))
+
+
+def judge(category):
+    category = category.rstrip("/")
     repo, token, ref = (os.environ.get(k) for k in ("GITHUB_REPOSITORY", "GITHUB_TOKEN", "GITHUB_REF"))
     if not (repo and token and ref):
         report("CodeQL: the verdict",
                ["cannot ask GitHub for the alerts: GITHUB_REPOSITORY, GITHUB_TOKEN and GITHUB_REF are needed"])
-        return 2
-    try:
-        open_alerts = alerts(repo, token, ref, "open")
-        dismissed = alerts(repo, token, ref, "dismissed")
-    except OSError as e:
-        report("CodeQL: the verdict", [f"cannot read the alerts for {ref}: {e}"])
         return 2
 
     def path(a):
@@ -177,14 +186,22 @@ def judge():
                 f"{loc['path']}:{loc['start_line']}",
                 a["most_recent_instance"]["message"]["text"].split("\n")[0][:120])
 
-    ours = [a for a in open_alerts
-            if not path(a).startswith(SMOOTHIE + SET_ASIDE) and not unsuited(a["rule"]["id"], path(a))]
-    smoothie = [a for a in open_alerts if path(a).startswith(SMOOTHIE)]
-    failing = sorted((row(a) for a in ours if a["rule"]["severity"] in FAILING),
-                     key=lambda x: (ORDER.get(x[0], 9), x[1], x[2]))
-    notes = len(ours) - len(failing)
-    lines = [f"{len(ours)} alerts open on {ref} in Clockwork's code: {len(failing)} at warning or error, "
-             f"{notes} notes; {len(dismissed)} dismissed as by design or false",
+    try:
+        open_alerts = alerts(repo, token, ref, "open")
+        dismissed = alerts(repo, token, ref, "dismissed")
+        ours = [a for a in open_alerts
+                if not path(a).startswith(SMOOTHIE + SET_ASIDE) and not unsuited(a["rule"]["id"], path(a))]
+        smoothie = [a for a in open_alerts if path(a).startswith(SMOOTHIE)]
+        serious = [a for a in ours if a["rule"]["severity"] in FAILING]
+        mine = [a for a in serious if open_in(repo, token, ref, a, category)]
+    except OSError as e:
+        report("CodeQL: the verdict", [f"cannot read the alerts for {ref}: {e}"])
+        return 2
+
+    failing = sorted((row(a) for a in mine), key=lambda x: (ORDER.get(x[0], 9), x[1], x[2]))
+    lines = [f"{len(failing)} alerts at warning or error open in this analysis ({category}) in Clockwork's code",
+             f"{len(ours)} open on {ref} across every analysis: {len(serious)} at warning or error, "
+             f"{len(ours) - len(serious)} notes; {len(dismissed)} dismissed as by design or false",
              f"{len(smoothie)} open in Smoothie, our fork to work down, not judged here"]
     if failing:
         lines += table(failing)
@@ -196,6 +213,6 @@ def judge():
 if __name__ == "__main__":
     if sys.argv[1:2] == ["trim"] and len(sys.argv) in (4, 5):
         sys.exit(trim(*sys.argv[2:]))
-    if sys.argv[1:] == ["judge"]:
-        sys.exit(judge())
+    if sys.argv[1:2] == ["judge"] and len(sys.argv) == 3:
+        sys.exit(judge(sys.argv[2]))
     sys.exit(__doc__)

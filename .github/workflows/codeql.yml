@@ -1,7 +1,7 @@
 # CodeQL over Clockwork: GitHub's own semantic analysis, run on every push
 # and pull request and weekly, with its findings in the Security tab. An alert
-# at warning or error level that is still open fails the job, the bar -Werror
-# sets for the compiler; a finding that stands by design is dismissed once,
+# at warning or error level that a job's own analysis still reports fails that
+# job, the bar -Werror sets for the compiler; a finding that stands by design is dismissed once,
 # in the Security tab with its reason, and stays dismissed. A path one of our
 # own queries cannot rule out but the engine's ordering does is stated in the
 # query instead, with its reason, where review sees it.
@@ -142,13 +142,13 @@ jobs:
           category: "/smoothie/os:${{ matrix.platform }}"
           wait-for-processing: true
 
-      # Judged once GitHub has the alerts: open at warning or error fails,
-      # dismissed stands.
+      # Judged once GitHub has the alerts: open in this analysis at warning
+      # or error fails, dismissed stands, and another job's is that job's.
       - name: Verdict
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/codeql-report.py judge
+        run: python3 scripts/codeql-report.py judge "${{ matrix.category }}"
 
   other:
     name: codeql (${{ matrix.language }})
@@ -185,4 +185,4 @@ jobs:
       - name: Verdict
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/codeql-report.py judge
+        run: python3 scripts/codeql-report.py judge "/language:${{ matrix.language }}"
