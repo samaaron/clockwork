@@ -33,6 +33,9 @@ public:
     // ── Producer side: frame into the NRT-out ring (never delivers here) ──────
     // reply/sendToCaller route to `token` (the origin threaded from the call ctx).
     void reply(uint32_t token, const uint8_t* data, uint32_t size);
+    // Answer the verb in `data` with "/clockwork/error <address> <reason>",
+    // to the caller that sent it.
+    void refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason);
     void sendToCaller(uint32_t token, const uint8_t* data, uint32_t size);
     void broadcastToTargets(const uint8_t* data, uint32_t size);
     void broadcastLinkNotify(const uint8_t* data, uint32_t size);

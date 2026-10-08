@@ -14,7 +14,7 @@
 #include "SubscribeAck.h"
 #include "clockwork_osc.h"
 #include "clockwork_event_sink.h"
-#include "clockwork_sys.h"        // clockwork_sys_refuse
+#include "clockwork_sys.h"        // CLOCKWORK_REFUSED_*
 #include "clockwork_config.h"   // clockwork_log
 #include "osc/OscReceivedElements.h"
 
@@ -140,6 +140,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                 clockwork_log("WARNING: /clockwork/osc/send dropped — bad host/port/blob "
                        "(host='%s' port=%d innerLen=%d)",
                        host.c_str(), port, static_cast<int>(innerLen));
+                if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
                 return true;
             }
             // Through the sink for the endpoint, carrying the message's time:
@@ -168,11 +169,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                     std::snprintf(reason.data(), reason.size(), "sink full");
                 clockwork_log("WARNING: /clockwork/osc/send to %s:%d dropped — %s",
                        host.c_str(), port, reason.data());
-                if (mEgress)
-                    clockwork_sys_refuse(data, size, reason.data(),
-                        [this, &meta](const uint8_t* d, uint32_t n) {
-                            mEgress->reply(meta.sourceId, d, n);
-                        });
+                if (mEgress) mEgress->refuse(token, data, size, reason.data());
             }
         } else
 #endif // CLOCKWORK_CLIENT_VERBS
@@ -187,11 +184,15 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
         } else if (std::strcmp(addr, CLOCKWORK_SYS("osc/cue-server/loopback")) == 0) {
             mLoopback = argBool(it, end, mLoopback);
             applyCueConfig();
+        } else if (mEgress) {
+            mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
         }
     } catch (const std::exception& e) {
-        clockwork_log("[osc] malformed %s (%u bytes), ignored: %s", addr, size, e.what());
+        clockwork_log("[osc] malformed %s (%u bytes): %s", addr, size, e.what());
+        if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
     } catch (...) {
-        clockwork_log("[osc] malformed %s (%u bytes), ignored", addr, size);
+        clockwork_log("[osc] malformed %s (%u bytes)", addr, size);
+        if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
     }
     return true;
 }

@@ -45,3 +45,26 @@ pub mod osc;
 
 pub use normalize::{assign_handle, normalize_ports, safe_osc_name, PortInfo};
 pub use osc::{decode, decode_packet, encode, encode_packet, OscArg, OscBundle, OscMessage, OscPacket};
+
+/// Why a subsystem refused one of its verbs. The engine answers it with
+/// `/clockwork/error <address> <reason>`, in the words the web's host front
+/// uses (`js/lib/host_front.js`), so a client reads the same refusal on every
+/// host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Under the subsystem's namespace, but not one of its verbs: a typo, or
+    /// a verb from a newer client.
+    Unknown,
+    /// One of its verbs, with arguments it cannot read.
+    Malformed,
+}
+
+impl Refusal {
+    /// The reason, NUL-terminated so a C caller can send it as it is.
+    pub const fn reason(self) -> &'static core::ffi::CStr {
+        match self {
+            Refusal::Unknown => c"unknown clockwork verb",
+            Refusal::Malformed => c"malformed",
+        }
+    }
+}

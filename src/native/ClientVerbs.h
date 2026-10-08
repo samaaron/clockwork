@@ -15,7 +15,7 @@
 
 #include "OscEgress.h"
 #include "clockwork_config.h"   // clockwork_log
-#include "clockwork_sys.h"      // clockwork_sys_refuse, CLOCKWORK_CLIENT_VERBS_ABSENT
+#include "clockwork_sys.h"      // CLOCKWORK_CLIENT_VERBS_ABSENT
 
 #include <atomic>
 #include <cstdint>
@@ -28,10 +28,6 @@ inline void refuseClientVerb(OscEgress* egress, uint32_t token,
     if (n == 0 || n % 100 == 0)
         clockwork_log("ERROR: %s refused — %s [%u so far]",
                       reinterpret_cast<const char*>(data), CLOCKWORK_CLIENT_VERBS_ABSENT, n + 1);
-    if (!egress) return;
-    clockwork_sys_refuse(data, size, CLOCKWORK_CLIENT_VERBS_ABSENT,
-                         [egress, token](const uint8_t* d, uint32_t len) {
-                             egress->reply(token, d, len);
-                         });
+    if (egress) egress->refuse(token, data, size, CLOCKWORK_CLIENT_VERBS_ABSENT);
 }
 #endif

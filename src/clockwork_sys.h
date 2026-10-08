@@ -124,6 +124,13 @@ inline bool clockwork_sys_is_client_verb(const char* addr) {
 inline constexpr const char* CLOCKWORK_CLIENT_VERBS_ABSENT =
     "client verb: this build has none (CLOCKWORK_CLIENT_VERBS=OFF)";
 
+// The reasons any verb is refused with: an address under the prefix that is
+// not a verb, and a verb whose arguments cannot be read. The web's host front
+// (js/lib/host_front.js) and the Rust subsystems (clockwork_osc::Refusal)
+// say the same, so a client reads the same refusal on every host.
+inline constexpr const char* CLOCKWORK_REFUSED_UNKNOWN   = "unknown clockwork verb";
+inline constexpr const char* CLOCKWORK_REFUSED_MALFORMED = "malformed";
+
 // What the audio-thread half of clockwork did with a packet.
 enum class ClockworkSysRt {
     NotClaimed,   // not a /clockwork/ address at all -- the DSP's
@@ -238,7 +245,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             return ClockworkSysRt::Answered;
         }
     } catch (...) {
-        clockwork_sys_refuse(data, len, "malformed", emit);
+        clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, emit);
         return ClockworkSysRt::Answered;
     }
 
@@ -259,7 +266,7 @@ bool handle_clockwork_sys_osc(const uint8_t* data, uint32_t len, Emit&& emit,
         case ClockworkSysRt::Answered:    return true;
         case ClockworkSysRt::UnknownVerb: break;
     }
-    clockwork_sys_refuse(data, len, "unknown clockwork verb", emit);
+    clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_UNKNOWN, emit);
     return true;
 }
 

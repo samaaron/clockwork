@@ -57,7 +57,10 @@ bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_
         return true;
     }
 
-    if (mGamepad) clockwork_gamepad_handle_osc(mGamepad, data, size);
+    // Everything else is the subsystem's to take or refuse.
+    if (!mGamepad) return true;
+    if (const char* refusal = clockwork_gamepad_handle_osc(mGamepad, data, size); refusal && mEgress)
+        mEgress->refuse(token, data, size, refusal);
     return true;
 }
 

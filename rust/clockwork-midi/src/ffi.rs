@@ -17,7 +17,8 @@
 //! must be thread-safe.
 
 use std::collections::HashSet;
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
+use std::ptr;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,7 @@ use crate::sync::{transport_event, TransportEvent};
 // kind codes and panic fence: shared across the subsystem C ABIs — see
 // clockwork_osc::ffi.
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST, EMIT_REPLY};
+use clockwork_osc::Refusal;
 /// One MIDI clock pulse (0xF8) for an input port → the engine, which anchors the
 /// timeline beat on the pulse count and estimates tempo engine-side (not here).
 /// `norm` is the normalised handle the engine keys the timeline on; `raw` is the
@@ -374,7 +376,7 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
             cb(ctx, port.as_ptr(), port.len() as u32, wire.as_ptr(), wire.len() as u32, when);
         };
         match decode_out(bytes) {
-            Some(OutCommand::Send { port, msg, when }) => {
+            Ok(OutCommand::Send { port, msg, when }) => {
                 if msg.channel() == Some(0) {
                     for ch in 1..=16 {
                         emit(&port, &msg.with_channel(ch).encode(), when);
@@ -384,7 +386,7 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
                 }
                 1
             }
-            Some(OutCommand::SendRaw { port, bytes, when }) => {
+            Ok(OutCommand::SendRaw { port, bytes, when }) => {
                 emit(&port, &bytes, when);
                 1
             }
@@ -394,24 +396,28 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
 }
 
 /// Feed one decoded `/clockwork/midi/*` OSC packet (the C++ boundary forwards these off the
-/// audio thread). Unknown/foreign addresses are ignored.
+/// audio thread). Returns null when the packet was a verb and was taken, else
+/// why it was refused, a static NUL-terminated string the caller answers with:
+/// "unknown clockwork verb" or "malformed" ([`Refusal`]).
 ///
 /// # Safety
 /// `handle` is null or a live handle; `data` is null or readable for `len`
 /// bytes.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_midi_handle_osc(handle: *mut ClockworkMidi, data: *const u8, len: u32) {
+pub unsafe extern "C" fn clockwork_midi_handle_osc(handle: *mut ClockworkMidi, data: *const u8, len: u32) -> *const c_char {
     if handle.is_null() || data.is_null() {
-        return;
+        return Refusal::Malformed.reason().as_ptr();
     }
     // SAFETY: a live handle and a readable byte string, per the contract;
     // nulls were refused above.
     let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
-    no_unwind((), || {
-        if let Some(cmd) = decode_out(bytes) {
+    no_unwind(ptr::null(), || match decode_out(bytes) {
+        Ok(cmd) => {
             me.handle(cmd);
+            ptr::null()
         }
-    });
+        Err(refusal) => refusal.reason().as_ptr(),
+    })
 }
 
 /// Emit a fresh `/clockwork/midi/ports.reply` to the caller — used by the C++ boundary to send

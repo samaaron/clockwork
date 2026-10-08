@@ -23,7 +23,8 @@
 //! [`clockwork_gamepad_handle_osc`] / [`clockwork_gamepad_emit_devices`] on the caller's
 //! thread, while the engine's origin token still identifies the caller.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
+use std::ptr;
 use std::slice;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,6 +39,7 @@ use crate::schema::{
 // packets), kind codes and panic fence: shared across the subsystem C ABIs —
 // see clockwork_osc::ffi.
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST, EMIT_REPLY};
+use clockwork_osc::Refusal;
 
 /// The host callback + opaque context, bundled and made Send/Sync so the poll
 /// thread can hold a copy.
@@ -224,24 +226,28 @@ pub unsafe extern "C" fn clockwork_gamepad_destroy(handle: *mut ClockworkGamepad
 }
 
 /// Feed one decoded `/clockwork/gamepad/*` OSC packet (the C++ boundary forwards these off
-/// the audio thread). Unknown/foreign addresses are ignored.
+/// the audio thread). Returns null when the packet was a verb and was taken,
+/// else why it was refused, a static NUL-terminated string the caller answers
+/// with: "unknown clockwork verb" or "malformed" ([`Refusal`]).
 ///
 /// # Safety
 /// `handle` is null or a live handle; `data` is null or readable for `len`
 /// bytes.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_gamepad_handle_osc(handle: *mut ClockworkGamepad, data: *const u8, len: u32) {
+pub unsafe extern "C" fn clockwork_gamepad_handle_osc(handle: *mut ClockworkGamepad, data: *const u8, len: u32) -> *const c_char {
     if handle.is_null() || data.is_null() {
-        return;
+        return Refusal::Malformed.reason().as_ptr();
     }
     // SAFETY: a live handle and a readable byte string, per the contract;
     // nulls were refused above.
     let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
-    no_unwind((), || {
-        if let Some(cmd) = decode_out(bytes) {
+    no_unwind(ptr::null(), || match decode_out(bytes) {
+        Ok(cmd) => {
             me.handle(cmd);
+            ptr::null()
         }
-    });
+        Err(refusal) => refusal.reason().as_ptr(),
+    })
 }
 
 /// Emit a fresh `/clockwork/gamepad/devices.reply` to the caller — used by the C++ boundary

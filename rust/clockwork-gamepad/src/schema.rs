@@ -8,7 +8,7 @@
 //! Pads are addressed by their normalised handle (see `clockwork_osc::normalize`);
 //! `pad == "*"` means "all connected pads". Rumble magnitudes are 0..=1.
 
-use clockwork_osc::clockwork_sys;
+use clockwork_osc::{clockwork_sys, Refusal};
 use crate::osc::{self, OscArg};
 
 /// A decoded client/VM request.
@@ -38,32 +38,35 @@ fn i_at(args: &[OscArg], i: usize) -> Option<i32> {
     args.get(i)?.as_i32()
 }
 
-/// Decode an outbound `/clockwork/gamepad/*` OSC message into an [`OutCommand`].
-/// Returns `None` for non-`/clockwork/gamepad/*` addresses or malformed args.
-pub fn decode_out(data: &[u8]) -> Option<OutCommand> {
-    let m = osc::decode(data)?;
-    let a = &m.args;
-
-    match m.addr.as_str() {
-        clockwork_sys!("gamepad/out/rumble") => Some(OutCommand::Rumble {
+/// Decode an outbound `/clockwork/gamepad/*` OSC message into an [`OutCommand`],
+/// or say why not: an address that is not one of the verbs is
+/// [`Refusal::Unknown`], and a verb whose arguments cannot be read is
+/// [`Refusal::Malformed`].
+///
+/// The match names the verbs, each with the reader for its arguments.
+pub fn decode_out(data: &[u8]) -> Result<OutCommand, Refusal> {
+    let m = osc::decode(data).ok_or(Refusal::Malformed)?;
+    let read: fn(&[OscArg]) -> Option<OutCommand> = match m.addr.as_str() {
+        clockwork_sys!("gamepad/out/rumble") => |a| Some(OutCommand::Rumble {
             pad: pad(a)?,
             strong: f_at(a, 1)?.clamp(0.0, 1.0),
             weak: f_at(a, 2)?.clamp(0.0, 1.0),
             duration_ms: i_at(a, 3)?,
         }),
-        clockwork_sys!("gamepad/out/rumble_stop") => Some(OutCommand::RumbleStop { pad: pad(a)? }),
+        clockwork_sys!("gamepad/out/rumble_stop") => |a| Some(OutCommand::RumbleStop { pad: pad(a)? }),
 
-        clockwork_sys!("gamepad/enable") => Some(OutCommand::Enable {
+        clockwork_sys!("gamepad/enable") => |a| Some(OutCommand::Enable {
             pad: pad(a)?,
             enabled: i_at(a, 1)? != 0,
         }),
 
-        clockwork_sys!("gamepad/devices/list") | clockwork_sys!("gamepad/devices/get") => Some(OutCommand::DevicesList),
-        clockwork_sys!("gamepad/refresh") => Some(OutCommand::Refresh),
-        clockwork_sys!("gamepad/notify/subscribe") => Some(OutCommand::Subscribe),
-        clockwork_sys!("gamepad/notify/unsubscribe") => Some(OutCommand::Unsubscribe),
-        _ => None,
-    }
+        clockwork_sys!("gamepad/devices/list") | clockwork_sys!("gamepad/devices/get") => |_| Some(OutCommand::DevicesList),
+        clockwork_sys!("gamepad/refresh") => |_| Some(OutCommand::Refresh),
+        clockwork_sys!("gamepad/notify/subscribe") => |_| Some(OutCommand::Subscribe),
+        clockwork_sys!("gamepad/notify/unsubscribe") => |_| Some(OutCommand::Unsubscribe),
+        _ => return Err(Refusal::Unknown),
+    };
+    read(&m.args).ok_or(Refusal::Malformed)
 }
 
 /// `/clockwork/gamepad/in/button <pad:s> <button:s> <pressed:i> <value:f>` — value is
@@ -153,7 +156,7 @@ mod tests {
         );
         assert_eq!(
             decode_out(&bytes),
-            Some(OutCommand::Rumble {
+            Ok(OutCommand::Rumble {
                 pad: "xbox_controller".into(),
                 strong: 0.8,
                 weak: 0.3,
@@ -175,7 +178,7 @@ mod tests {
         );
         assert_eq!(
             decode_out(&bytes),
-            Some(OutCommand::Rumble { pad: "*".into(), strong: 1.0, weak: 1.0, duration_ms: 0 })
+            Ok(OutCommand::Rumble { pad: "*".into(), strong: 1.0, weak: 1.0, duration_ms: 0 })
         );
     }
 
@@ -187,33 +190,36 @@ mod tests {
         );
         assert_eq!(
             decode_out(&en),
-            Some(OutCommand::Enable { pad: "*".into(), enabled: false })
+            Ok(OutCommand::Enable { pad: "*".into(), enabled: false })
         );
         assert_eq!(
             decode_out(&osc::encode(clockwork_sys!("gamepad/devices/list"), &[])),
-            Some(OutCommand::DevicesList)
+            Ok(OutCommand::DevicesList)
         );
         assert_eq!(
             decode_out(&osc::encode(clockwork_sys!("gamepad/refresh"), &[])),
-            Some(OutCommand::Refresh)
+            Ok(OutCommand::Refresh)
         );
         assert_eq!(
             decode_out(&osc::encode(clockwork_sys!("gamepad/notify/subscribe"), &[])),
-            Some(OutCommand::Subscribe)
+            Ok(OutCommand::Subscribe)
         );
         let stop = osc::encode(clockwork_sys!("gamepad/out/rumble_stop"), &[OscArg::Str("p".into())]);
-        assert_eq!(decode_out(&stop), Some(OutCommand::RumbleStop { pad: "p".into() }));
+        assert_eq!(decode_out(&stop), Ok(OutCommand::RumbleStop { pad: "p".into() }));
     }
 
     #[test]
-    fn malformed_and_foreign_decode_to_none() {
+    fn malformed_and_unknown_verbs_are_told_apart() {
         // Arity is checked before use: a bare address reaches the engine from
         // arbitrary OSC clients and must be rejected, not panic (a panic would
-        // unwind across the C ABI and abort the host process).
-        assert_eq!(decode_out(&osc::encode(clockwork_sys!("gamepad/out/rumble"), &[])), None);
-        assert_eq!(decode_out(&osc::encode(clockwork_sys!("gamepad/enable"), &[OscArg::Str("p".into())])), None);
-        assert_eq!(decode_out(&osc::encode(clockwork_sys!("midi/refresh"), &[])), None);
-        assert_eq!(decode_out(&[]), None);
+        // unwind across the C ABI and abort the host process). The engine
+        // answers each refusal with its own reason, so a client learns whether
+        // it misspelled the verb or sent it the wrong arguments.
+        assert_eq!(decode_out(&osc::encode(clockwork_sys!("gamepad/out/rumble"), &[])), Err(Refusal::Malformed));
+        assert_eq!(decode_out(&osc::encode(clockwork_sys!("gamepad/enable"), &[OscArg::Str("p".into())])), Err(Refusal::Malformed));
+        assert_eq!(decode_out(&osc::encode(clockwork_sys!("gamepad/bogus"), &[])), Err(Refusal::Unknown));
+        assert_eq!(decode_out(&osc::encode(clockwork_sys!("midi/refresh"), &[])), Err(Refusal::Unknown));
+        assert_eq!(decode_out(&[]), Err(Refusal::Malformed));
     }
 
     #[test]

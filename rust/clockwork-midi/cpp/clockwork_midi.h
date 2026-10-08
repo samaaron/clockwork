@@ -69,8 +69,11 @@ ClockworkMidi* clockwork_midi_create(void* ctx,
 /* Stop the clock thread, close all ports, free the instance. */
 void clockwork_midi_destroy(ClockworkMidi* handle);
 
-/* Feed one decoded "/clockwork/midi/" OSC packet (off the audio thread). */
-void clockwork_midi_handle_osc(ClockworkMidi* handle, const uint8_t* data, uint32_t len);
+/* Feed one decoded "/clockwork/midi/" OSC packet (off the audio thread).
+ * Returns NULL when it was a verb and was taken; otherwise why it was refused,
+ * a static string to answer the caller with: "unknown clockwork verb" or
+ * "malformed". */
+const char* clockwork_midi_handle_osc(ClockworkMidi* handle, const uint8_t* data, uint32_t len);
 
 /* One wire message from clockwork_midi_encode_out: the port ("*" = every open
  * output), the bytes, and the time the verb named with a trailing timetag (0 =

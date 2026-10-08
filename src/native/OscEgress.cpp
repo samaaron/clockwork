@@ -58,6 +58,11 @@ void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
     frame(REPLY, token, data, size);
 }
 
+void OscEgress::refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason) {
+    clockwork_sys_refuse(data, size, reason,
+        [this, token](const uint8_t* d, uint32_t n) { reply(token, d, n); });
+}
+
 void OscEgress::sendToCaller(uint32_t token, const uint8_t* data, uint32_t size) {
     frame(SEND_TO_CALLER, token, data, size);
 }

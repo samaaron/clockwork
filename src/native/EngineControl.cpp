@@ -16,12 +16,11 @@
 #include "clock/ClockworkClock.h"
 #include "LinkAudioHost.h"
 #include "clockwork_sys.h"
-#include "clockwork_config.h"   // clockwork_log
+#include "clockwork_config.h"   // clockwork_log, CLOCKWORK_COMMIT
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 #include "DevicePolicy.h"
-#include "clockwork_config.h"  // CLOCKWORK_COMMIT
 #include <juce_core/juce_core.h>
 #include <array>
 #include <algorithm>
@@ -473,9 +472,7 @@ static std::string cutName(const std::string& name) {
 }
 
 void EngineControl::refuseUnknown(uint32_t token, const uint8_t* data, uint32_t size) {
-    if (!mEgress) return;
-    clockwork_sys_refuse(data, size, "unknown clockwork verb",
-                   [this, token](const uint8_t* d, uint32_t n) { mEgress->reply(token, d, n); });
+    if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
 }
 
 void EngineControl::finishSwitch(SwapResult result, const std::string& requestedOutput,

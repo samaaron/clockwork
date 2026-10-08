@@ -75,7 +75,7 @@ pub fn midi_in_osc_at(port: &str, bytes: &[u8], when: u64) -> Option<Vec<u8>> {
 /// Until this carried `when`, every web send was immediate whatever the verb
 /// asked for.
 pub fn midi_out_decode(osc: &[u8]) -> Option<Vec<u8>> {
-    let (port, bytes, when) = match decode_out(osc)? {
+    let (port, bytes, when) = match decode_out(osc).ok()? {
         OutCommand::Send { port, msg, when } => {
             // channel 0 = "all channels" (wire channel -1): concatenate the 16
             // channel-voice messages — MIDIOutput.send accepts a multi-message

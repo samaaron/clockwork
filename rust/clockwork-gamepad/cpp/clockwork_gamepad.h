@@ -45,8 +45,11 @@ ClockworkGamepad* clockwork_gamepad_create(void* ctx, clockwork_gamepad_emit_fn 
  * returns. The poll thread parks until the next clockwork_gamepad_create. */
 void clockwork_gamepad_destroy(ClockworkGamepad* handle);
 
-/* Feed one decoded "/clockwork/gamepad/" OSC packet (off the audio thread). */
-void clockwork_gamepad_handle_osc(ClockworkGamepad* handle, const uint8_t* data, uint32_t len);
+/* Feed one decoded "/clockwork/gamepad/" OSC packet (off the audio thread).
+ * Returns NULL when it was a verb and was taken; otherwise why it was refused,
+ * a static string to answer the caller with: "unknown clockwork verb" or
+ * "malformed". */
+const char* clockwork_gamepad_handle_osc(ClockworkGamepad* handle, const uint8_t* data, uint32_t len);
 
 /* Emit a /clockwork/gamepad/devices.reply snapshot to the caller (e.g. on new
  * subscription). */

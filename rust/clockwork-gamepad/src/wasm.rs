@@ -154,7 +154,7 @@ pub fn gamepad_axis_osc_at(pad: &str, name: &str, value: f64, when: u64) -> Vec<
 /// `None` for non-output verbs (device management is handled JS-side).
 #[wasm_bindgen]
 pub fn gamepad_out_decode(osc: &[u8]) -> Option<Vec<JsValue>> {
-    match decode_out(osc)? {
+    match decode_out(osc).ok()? {
         OutCommand::Rumble { pad, strong, weak, duration_ms } => Some(vec![
             JsValue::from_str("rumble"),
             JsValue::from_str(&pad),

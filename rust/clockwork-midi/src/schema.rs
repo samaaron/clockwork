@@ -8,7 +8,7 @@
 //! Channels are 1-based (1..=16); `channel == -1` on the wire means "all 16",
 //! and `port == "*"` means "all enabled ports". Pitch bend is 14-bit (0..=16383).
 
-use clockwork_osc::clockwork_sys;
+use clockwork_osc::{clockwork_sys, Refusal};
 use crate::message::MidiMessage;
 use crate::osc::{self, OscArg};
 
@@ -56,8 +56,6 @@ fn ch_at(args: &[OscArg], i: usize) -> Option<u8> {
     })
 }
 
-/// Decode an outbound `/clockwork/midi/*` OSC message into an [`OutCommand`].
-/// Returns `None` for non-`/clockwork/midi/*` addresses or malformed args.
 /// A trailing OSC timetag, if the client sent one. Absent means now.
 ///
 /// Scanned from the end rather than by index: the verbs have different arities
@@ -69,24 +67,28 @@ fn trailing_when(args: &[OscArg]) -> u64 {
     }
 }
 
-pub fn decode_out(data: &[u8]) -> Option<OutCommand> {
+/// Decode an outbound `/clockwork/midi/*` OSC message into an [`OutCommand`],
+/// or say why not: an address that is not one of the verbs is
+/// [`Refusal::Unknown`], and a verb whose arguments cannot be read is
+/// [`Refusal::Malformed`].
+pub fn decode_out(data: &[u8]) -> Result<OutCommand, Refusal> {
     let cmd = decode_out_verb(data)?;
     let when = osc::decode(data).map(|m| trailing_when(&m.args)).unwrap_or(0);
-    Some(match cmd {
+    Ok(match cmd {
         OutCommand::Send { port, msg, .. } => OutCommand::Send { port, msg, when },
         OutCommand::SendRaw { port, bytes, .. } => OutCommand::SendRaw { port, bytes, when },
         other => other,
     })
 }
 
-fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
-    let m = osc::decode(data)?;
-    let a = &m.args;
-    let p = || port(a);
-
-    match m.addr.as_str() {
-        clockwork_sys!("midi/out/note_on") => Some(OutCommand::Send {
-            port: p()?,
+// The match names the verbs, each with the reader for its arguments: an
+// address it does not name is unknown, and a reader that cannot read what it
+// was sent makes the verb malformed.
+fn decode_out_verb(data: &[u8]) -> Result<OutCommand, Refusal> {
+    let m = osc::decode(data).ok_or(Refusal::Malformed)?;
+    let read: fn(&[OscArg]) -> Option<OutCommand> = match m.addr.as_str() {
+        clockwork_sys!("midi/out/note_on") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::NoteOn {
                 channel: ch_at(a, 1)?,
@@ -94,8 +96,8 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
                 velocity: i_at(a, 3)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/note_off") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/note_off") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::NoteOff {
                 channel: ch_at(a, 1)?,
@@ -103,8 +105,8 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
                 velocity: i_at(a, 3)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/control_change") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/control_change") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::ControlChange {
                 channel: ch_at(a, 1)?,
@@ -112,24 +114,24 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
                 value: i_at(a, 3)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/program_change") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/program_change") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::ProgramChange {
                 channel: ch_at(a, 1)?,
                 program: i_at(a, 2)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/channel_pressure") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/channel_pressure") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::ChannelPressure {
                 channel: ch_at(a, 1)?,
                 pressure: i_at(a, 2)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/poly_pressure") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/poly_pressure") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::PolyPressure {
                 channel: ch_at(a, 1)?,
@@ -137,8 +139,8 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
                 pressure: i_at(a, 3)? as u8,
             },
         }),
-        clockwork_sys!("midi/out/pitch_bend") => Some(OutCommand::Send {
-            port: p()?,
+        clockwork_sys!("midi/out/pitch_bend") => |a| Some(OutCommand::Send {
+            port: port(a)?,
             when: 0,
             msg: MidiMessage::PitchBend {
                 channel: ch_at(a, 1)?,
@@ -147,13 +149,13 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
         }),
         // Single-byte system real-time sends (clock tick, start, stop,
         // continue): port only.
-        clockwork_sys!("midi/out/clock") => Some(OutCommand::Send { port: p()?, msg: MidiMessage::Clock, when: 0 }),
-        clockwork_sys!("midi/out/start") => Some(OutCommand::Send { port: p()?, msg: MidiMessage::Start, when: 0 }),
-        clockwork_sys!("midi/out/continue") => Some(OutCommand::Send { port: p()?, msg: MidiMessage::Continue, when: 0 }),
-        clockwork_sys!("midi/out/stop") => Some(OutCommand::Send { port: p()?, msg: MidiMessage::Stop, when: 0 }),
+        clockwork_sys!("midi/out/clock") => |a| Some(OutCommand::Send { port: port(a)?, msg: MidiMessage::Clock, when: 0 }),
+        clockwork_sys!("midi/out/start") => |a| Some(OutCommand::Send { port: port(a)?, msg: MidiMessage::Start, when: 0 }),
+        clockwork_sys!("midi/out/continue") => |a| Some(OutCommand::Send { port: port(a)?, msg: MidiMessage::Continue, when: 0 }),
+        clockwork_sys!("midi/out/stop") => |a| Some(OutCommand::Send { port: port(a)?, msg: MidiMessage::Stop, when: 0 }),
 
         // raw/sysex: port followed by either int bytes or a single blob.
-        clockwork_sys!("midi/out/raw") | clockwork_sys!("midi/out/sysex") => {
+        clockwork_sys!("midi/out/raw") | clockwork_sys!("midi/out/sysex") => |a| {
             let bytes = if let Some(OscArg::Blob(b)) = a.get(1) {
                 b.clone()
             } else {
@@ -164,34 +166,35 @@ fn decode_out_verb(data: &[u8]) -> Option<OutCommand> {
                     .map(|v| (v & 0xff) as u8)
                     .collect()
             };
-            Some(OutCommand::SendRaw { port: p()?, bytes, when: 0 })
-        }
+            Some(OutCommand::SendRaw { port: port(a)?, bytes, when: 0 })
+        },
 
         // Continuous clock (start/stop/continue) + beat-bursts are handled
         // engine-side by MidiClockOut; the subsystem only sends single pulses.
-        clockwork_sys!("midi/clock/tick") => Some(OutCommand::ClockTick { port: p()? }),
-        clockwork_sys!("midi/clock/sync") => Some(OutCommand::ClockSync {
-            port: p()?,
+        clockwork_sys!("midi/clock/tick") => |a| Some(OutCommand::ClockTick { port: port(a)? }),
+        clockwork_sys!("midi/clock/sync") => |a| Some(OutCommand::ClockSync {
+            port: port(a)?,
             enabled: i_at(a, 1)? != 0,
         }),
 
-        clockwork_sys!("midi/in/enable") => Some(OutCommand::Enable {
-            port: p()?,
+        clockwork_sys!("midi/in/enable") => |a| Some(OutCommand::Enable {
+            port: port(a)?,
             input: true,
             enabled: i_at(a, 1)? != 0,
         }),
-        clockwork_sys!("midi/out/enable") => Some(OutCommand::Enable {
-            port: p()?,
+        clockwork_sys!("midi/out/enable") => |a| Some(OutCommand::Enable {
+            port: port(a)?,
             input: false,
             enabled: i_at(a, 1)? != 0,
         }),
 
-        clockwork_sys!("midi/ports/list") | clockwork_sys!("midi/ports/get") => Some(OutCommand::PortsList),
-        clockwork_sys!("midi/refresh") => Some(OutCommand::Refresh),
-        clockwork_sys!("midi/notify/subscribe") => Some(OutCommand::Subscribe),
-        clockwork_sys!("midi/notify/unsubscribe") => Some(OutCommand::Unsubscribe),
-        _ => None,
-    }
+        clockwork_sys!("midi/ports/list") | clockwork_sys!("midi/ports/get") => |_| Some(OutCommand::PortsList),
+        clockwork_sys!("midi/refresh") => |_| Some(OutCommand::Refresh),
+        clockwork_sys!("midi/notify/subscribe") => |_| Some(OutCommand::Subscribe),
+        clockwork_sys!("midi/notify/unsubscribe") => |_| Some(OutCommand::Unsubscribe),
+        _ => return Err(Refusal::Unknown),
+    };
+    read(&m.args).ok_or(Refusal::Malformed)
 }
 
 /// Encode an inbound hardware message as a `/clockwork/midi/in/*` OSC packet for injection
@@ -332,7 +335,7 @@ mod tests {
         );
         assert_eq!(
             decode_out(&bytes),
-            Some(OutCommand::Send {
+            Ok(OutCommand::Send {
                 port: "kbd".into(),
                 msg: MidiMessage::NoteOn { channel: 1, note: 60, velocity: 100 },
                 when: 0,
@@ -345,7 +348,7 @@ mod tests {
         let tick = osc::encode(clockwork_sys!("midi/clock/tick"), &[OscArg::Str("synth".into())]);
         assert_eq!(
             decode_out(&tick),
-            Some(OutCommand::ClockTick { port: "synth".into() })
+            Ok(OutCommand::ClockTick { port: "synth".into() })
         );
 
         let sync = osc::encode(
@@ -354,7 +357,7 @@ mod tests {
         );
         assert_eq!(
             decode_out(&sync),
-            Some(OutCommand::ClockSync { port: "in".into(), enabled: true })
+            Ok(OutCommand::ClockSync { port: "in".into(), enabled: true })
         );
 
         let en = osc::encode(
@@ -363,12 +366,12 @@ mod tests {
         );
         assert_eq!(
             decode_out(&en),
-            Some(OutCommand::Enable { port: "*".into(), input: true, enabled: false })
+            Ok(OutCommand::Enable { port: "*".into(), input: true, enabled: false })
         );
 
         assert_eq!(
             decode_out(&osc::encode(clockwork_sys!("midi/refresh"), &[])),
-            Some(OutCommand::Refresh)
+            Ok(OutCommand::Refresh)
         );
     }
 
@@ -383,7 +386,7 @@ mod tests {
             let bytes = osc::encode(addr, &[OscArg::Str("p".into())]);
             assert_eq!(
                 decode_out(&bytes),
-                Some(OutCommand::Send { port: "p".into(), msg, when: 0 })
+                Ok(OutCommand::Send { port: "p".into(), msg, when: 0 })
             );
         }
     }
@@ -396,24 +399,51 @@ mod tests {
         );
         assert_eq!(
             decode_out(&bytes),
-            Some(OutCommand::SendRaw { port: "p".into(), bytes: vec![0x90, 60, 64] , when: 0 })
+            Ok(OutCommand::SendRaw { port: "p".into(), bytes: vec![0x90, 60, 64] , when: 0 })
         );
     }
 
     #[test]
-    fn raw_and_sysex_with_missing_args_decode_to_none() {
+    fn raw_and_sysex_with_missing_args_are_malformed() {
         // Arity must be checked before the byte-collection slice: a bare
         // address with no args reaches the engine from arbitrary OSC clients
         // and must be rejected, not panic (a panic would unwind across the
         // C ABI and abort the host process).
         for addr in [clockwork_sys!("midi/out/raw"), clockwork_sys!("midi/out/sysex")] {
-            assert_eq!(decode_out(&osc::encode(addr, &[])), None);
+            assert_eq!(decode_out(&osc::encode(addr, &[])), Err(Refusal::Malformed));
         }
         // Port but no data bytes is well-formed: an empty send.
         assert_eq!(
             decode_out(&osc::encode(clockwork_sys!("midi/out/raw"), &[OscArg::Str("p".into())])),
-            Some(OutCommand::SendRaw { port: "p".into(), bytes: vec![] , when: 0 })
+            Ok(OutCommand::SendRaw { port: "p".into(), bytes: vec![] , when: 0 })
         );
+    }
+
+    #[test]
+    fn an_unknown_verb_is_told_from_a_malformed_one() {
+        // The engine answers each with its own reason, so a client learns
+        // whether it misspelled the verb or sent it the wrong arguments.
+        assert_eq!(
+            decode_out(&osc::encode(clockwork_sys!("midi/bogus"), &[])),
+            Err(Refusal::Unknown)
+        );
+        assert_eq!(
+            decode_out(&osc::encode(clockwork_sys!("gamepad/refresh"), &[])),
+            Err(Refusal::Unknown)
+        );
+        assert_eq!(
+            decode_out(&osc::encode(clockwork_sys!("midi/in/enable"), &[])),
+            Err(Refusal::Malformed)
+        );
+        assert_eq!(
+            decode_out(&osc::encode(
+                clockwork_sys!("midi/out/note_on"),
+                &[OscArg::Str("kbd".into()), OscArg::Int(1)],
+            )),
+            Err(Refusal::Malformed)
+        );
+        // Bytes that are not OSC at all name no verb anyone can answer.
+        assert_eq!(decode_out(&[]), Err(Refusal::Malformed));
     }
 
     #[test]
@@ -492,7 +522,7 @@ mod when_tests {
         // Every existing client sends four arguments and keeps working: an
         // absent time is 0, which is the OSC sentinel for immediately.
         match decode_out(&note_on_bytes(None)) {
-            Some(OutCommand::Send { when, .. }) => assert_eq!(when, 0),
+            Ok(OutCommand::Send { when, .. }) => assert_eq!(when, 0),
             other => panic!("expected a Send, got {other:?}"),
         }
     }
@@ -501,7 +531,7 @@ mod when_tests {
     fn a_trailing_timetag_is_the_time_to_send_it() {
         let t = 0xDEAD_BEEF_0000_0001u64;
         match decode_out(&note_on_bytes(Some(OscArg::TimeTag(t)))) {
-            Some(OutCommand::Send { when, port, .. }) => {
+            Ok(OutCommand::Send { when, port, .. }) => {
                 assert_eq!(when, t);
                 assert_eq!(port, "kbd", "the rest of the message is unchanged");
             }
@@ -514,7 +544,7 @@ mod when_tests {
         // Only a `t` counts. An int on the end is somebody else's argument, and
         // reading it as a time would send a note in the year 1900 or 5000.
         match decode_out(&note_on_bytes(Some(OscArg::Int(42)))) {
-            Some(OutCommand::Send { when, .. }) => assert_eq!(when, 0),
+            Ok(OutCommand::Send { when, .. }) => assert_eq!(when, 0),
             other => panic!("expected a Send, got {other:?}"),
         }
     }
@@ -528,7 +558,7 @@ mod when_tests {
             OscArg::TimeTag(t),
         ]);
         match decode_out(&bytes) {
-            Some(OutCommand::SendRaw { when, .. }) => assert_eq!(when, t),
+            Ok(OutCommand::SendRaw { when, .. }) => assert_eq!(when, t),
             other => panic!("expected a SendRaw, got {other:?}"),
         }
     }

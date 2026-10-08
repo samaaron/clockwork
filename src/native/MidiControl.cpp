@@ -90,7 +90,10 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
 #if CLOCKWORK_CLIENT_VERBS
     if (handleOutVerb(meta, data, size)) return true;
 #endif
-    if (mMidi) clockwork_midi_handle_osc(mMidi, data, size);
+    // Everything else is the subsystem's to take or refuse.
+    if (!mMidi) return true;
+    if (const char* refusal = clockwork_midi_handle_osc(mMidi, data, size); refusal && mEgress)
+        mEgress->refuse(token, data, size, refusal);
     return true;
 }
 
