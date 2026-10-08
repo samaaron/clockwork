@@ -30,7 +30,7 @@ struct Sink final : IOscTransport {
     void broadcastLink(const uint8_t* d, uint32_t n) override { log.push_back("link " + osc_test::parseAddress(d, n)); }
     bool hasNotifySubscribers() const override { return true; }
     bool subscribeNotify(uint32_t) override { return true; }
-    void subscribeNotifyPort(int) override {}
+    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t) override {}
     void clearNotify() override {}
     bool subscribeLink(uint32_t) override { return true; }

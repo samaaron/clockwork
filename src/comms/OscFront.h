@@ -63,7 +63,7 @@ public:
     void broadcastLink(const uint8_t* d, uint32_t n) override   { if (mInner) mInner->broadcastLink(d, n); }
     bool hasNotifySubscribers() const override { return mInner && mInner->hasNotifySubscribers(); }
     bool subscribeNotify(uint32_t t) override   { return mInner && mInner->subscribeNotify(t); }
-    void subscribeNotifyPort(int port) override { if (mInner) mInner->subscribeNotifyPort(port); }
+    bool subscribeNotifyPort(int port) override { return mInner && mInner->subscribeNotifyPort(port); }
     void unsubscribeNotify(uint32_t t) override { if (mInner) mInner->unsubscribeNotify(t); }
     void clearNotify() override                 { if (mInner) mInner->clearNotify(); }
     bool subscribeLink(uint32_t t) override     { return mInner && mInner->subscribeLink(t); }

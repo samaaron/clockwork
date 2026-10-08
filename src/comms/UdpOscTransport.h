@@ -52,7 +52,7 @@ public:
     void broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override { return !mNotifyTargets.empty(); }
     bool subscribeNotify(uint32_t token) override;
-    void subscribeNotifyPort(int port) override;
+    bool subscribeNotifyPort(int port) override;
     void unsubscribeNotify(uint32_t token) override;
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;

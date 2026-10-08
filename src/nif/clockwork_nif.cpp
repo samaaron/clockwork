@@ -63,7 +63,7 @@ static constexpr uint32_t kBeamToken = 1;
 // detected lazily — enif_send returns 0 — and only that pid is dropped, never the
 // whole audience.
 //
-// notifyTokens/notifyPorts/linkSubscribed mirror the transport's subscriber gates
+// notifyTokens/linkSubscribed mirror the transport's subscriber gates
 // so the engine knows whether to bother emitting device- and Link-notify traffic;
 // they don't change WHO receives (always the registered pids), only WHETHER the
 // engine produces the optional broadcasts. Touched from BEAM scheduler threads
@@ -73,7 +73,6 @@ struct Subscribers {
     mutable std::mutex   mutex;
     std::vector<ErlNifPid> pids;
     std::set<uint32_t>   notifyTokens;   // gates hasNotifySubscribers()
-    std::set<int>        notifyPorts;
     bool                 linkSubscribed = false;
     bool                 midiSubscribed = false;
     bool                 gamepadSubscribed = false;
@@ -93,7 +92,6 @@ struct Subscribers {
         std::lock_guard<std::mutex> lk(mutex);
         pids.clear();
         notifyTokens.clear();
-        notifyPorts.clear();
         linkSubscribed = false;
         midiSubscribed = false;
         gamepadSubscribed = false;
@@ -174,16 +172,14 @@ public:
 
     bool hasNotifySubscribers() const override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
-        return !mSubs->notifyTokens.empty() || !mSubs->notifyPorts.empty();
+        return !mSubs->notifyTokens.empty();
     }
     bool subscribeNotify(uint32_t token) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
         return mSubs->notifyTokens.insert(token).second;
     }
-    void subscribeNotifyPort(int port) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->notifyPorts.insert(port);
-    }
+    // A BEAM process has no port: the caller is subscribed instead.
+    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t token) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
         mSubs->notifyTokens.erase(token);
@@ -191,7 +187,6 @@ public:
     void clearNotify() override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
         mSubs->notifyTokens.clear();
-        mSubs->notifyPorts.clear();
     }
 
     // A BEAM caller is addressable (unlike a pure in-process observer), so Link

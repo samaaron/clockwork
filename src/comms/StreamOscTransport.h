@@ -63,7 +63,7 @@ public:
     void broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override;
     bool subscribeNotify(uint32_t token) override;
-    void subscribeNotifyPort(int port) override;  // UDP-specific — no-op here
+    bool subscribeNotifyPort(int port) override;  // UDP-specific — false here
     void unsubscribeNotify(uint32_t token) override;
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;

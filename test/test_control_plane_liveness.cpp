@@ -19,6 +19,11 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include "clockwork_prefix.h"
+#ifndef _WIN32
+#include "StreamTestClient.h"
+#include "comms/StreamOscTransport.h"
+#endif
 
 TEST_CASE("Notify registration is device-free", "[control][notify]") {
     EngineFixture fix;
@@ -59,6 +64,43 @@ TEST_CASE("Device report is still delivered when asked for", "[control][notify]"
     fix.send(osc_test::message("/clockwork/devices/report"));
     REQUIRE(fix.waitForReply("/clockwork/devices", r, 2000));
 }
+
+#ifndef _WIN32
+// A UDP client names the port it wants the list on, since it may listen on a
+// socket other than the one it sends from. A stream client (TCP, UDS, a pipe,
+// shared memory) has no port to name: its connection is what is subscribed.
+// One that names a port anyway — a client written for UDP, moved to TCP — was
+// subscribed to nothing, and never heard the list.
+TEST_CASE("Device report reaches a stream client that names a port",
+          "[control][notify][transport]") {
+    StreamOscTransport tcp;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    tcp.setIngest([&engine](const uint8_t* d, uint32_t n, uint32_t token) {
+        engine.ingest(d, n, token);
+    });
+    tcp.initialiseTcp(0, "127.0.0.1");
+    engine.setTransport(&tcp);
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.hostDrivesControl = false;   // the engine runs its own control pass
+    engine.init(cfg);
+    REQUIRE(tcp.start());
+
+    const int fd = connectTcp(tcp.boundPort());
+    writeFramed(fd, osc_test::message(CLOCKWORK_SYS("devices/report"), 57120).data);
+    bool heard = false;
+    while (!heard) {
+        const auto frame = readFramed(fd);   // empty after 2 s of nothing
+        if (frame.empty()) break;
+        heard = osc_test::parseAddress(frame.data(), static_cast<uint32_t>(frame.size()))
+             == CLOCKWORK_SYS("devices");
+    }
+    close(fd);
+    engine.shutdown();
+    tcp.stop();
+    CHECK(heard);
+}
+#endif
 
 // Device commands now run on the device worker rather than the gateway, so the
 // thing to pin is that their replies still arrive — an offloaded command that

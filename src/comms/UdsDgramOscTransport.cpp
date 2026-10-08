@@ -76,7 +76,7 @@ bool UdsDgramOscTransport::subscribeNotify(uint32_t token) {
 }
 // Registering an explicit localhost reply *port* is a UDP concept (the GUI's
 // /clockwork/devices/report path); a UDS peer subscribes caller-relative.
-void UdsDgramOscTransport::subscribeNotifyPort(int /*port*/) {}
+bool UdsDgramOscTransport::subscribeNotifyPort(int /*port*/) { return false; }
 void UdsDgramOscTransport::unsubscribeNotify(uint32_t token) {
     unsubscribeCallerFrom(mNotifyTargets, token);
 }

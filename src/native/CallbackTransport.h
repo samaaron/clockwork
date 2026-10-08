@@ -46,12 +46,13 @@ public:
     void broadcastLink(const uint8_t*, uint32_t) override {}  // no in-process Link audience
 
     bool hasNotifySubscribers() const override {
-        return !mNotify.empty() || !mNotifyPorts.empty();
+        return !mNotify.empty();
     }
     bool subscribeNotify(uint32_t token) override { return mNotify.insert(token).second; }
-    void subscribeNotifyPort(int port) override { mNotifyPorts.insert(port); }
+    // An in-process caller has no port: it is subscribed itself instead.
+    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t token) override { mNotify.erase(token); }
-    void clearNotify() override { mNotify.clear(); mNotifyPorts.clear(); }
+    void clearNotify() override { mNotify.clear(); }
 
     // An in-process caller has no port, so there is no Link-notify target.
     bool subscribeLink(uint32_t) override { return false; }
@@ -89,7 +90,6 @@ private:
     const std::function<void(const uint8_t*, uint32_t)>* mOnReply;
     const std::function<void(uint32_t, uint32_t, const uint8_t*, uint32_t)>* mOnRouted = nullptr;
     std::set<uint32_t> mNotify;
-    std::set<int>      mNotifyPorts;
     std::set<uint32_t> mMidi;
     std::set<uint32_t> mGamepad;
     std::set<uint32_t> mOsc;

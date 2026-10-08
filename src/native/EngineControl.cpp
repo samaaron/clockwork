@@ -679,24 +679,18 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/report")) == 0) {
-            // Register the caller for /clockwork/devices pushes. Two forms:
-            //   - port arg > 0: UDP legacy — send to that port
-            //   - no arg / 0:   connection-oriented transports (TCP/UDS/pipe)
-            //                   — subscribe the caller's own connection, since
-            //                   ports don't address a stream peer
+            // Register the caller for /clockwork/devices pushes. A UDP client
+            // may name the port it listens on (> 0); any other caller, and a
+            // port on a transport whose peers have none (TCP, UDS, a pipe,
+            // shared memory, in-process), subscribes the caller itself: the
+            // same audience as /clockwork/notify.
             auto it = msg.ArgumentsBegin();
             int replyPort = 0;
             if (it != msg.ArgumentsEnd() && it->IsInt32()) {
                 replyPort = it->AsInt32Unchecked();
             }
-            if (replyPort > 0) {
-                mEgress->subscribeNotifyPort(replyPort);
-            } else {
-                // Connection-oriented transports (TCP/UDS/pipe) have no
-                // addressable reply port — register the caller's own
-                // connection, same audience as /clockwork/notify.
+            if (replyPort <= 0 || !mEgress->subscribeNotifyPort(replyPort))
                 mEgress->subscribeCaller(token);
-            }
             // listDevices() is the ~10 s Windows COM probe — never inline here.
             mEngine->postDeviceTask([this] { mEngine->sendDeviceReport(); });
             return true;

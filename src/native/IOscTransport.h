@@ -39,11 +39,13 @@ public:
 
     // Notify-audience registry. subscribeNotify is caller-relative (resolve the
     // token); subscribeNotifyPort targets an explicit local port (the GUI's
-    // /clockwork/devices/report reply port). subscribe* return true if newly
-    // added. hasNotifySubscribers gates whether the engine bothers to emit.
+    // /clockwork/devices/report reply port), and returns false on a transport
+    // whose peers have no port, where the caller is subscribed instead.
+    // subscribeNotify and the others return true if newly added.
+    // hasNotifySubscribers gates whether the engine bothers to emit.
     virtual bool hasNotifySubscribers() const = 0;
     virtual bool subscribeNotify(uint32_t token) = 0;
-    virtual void subscribeNotifyPort(int port) = 0;
+    virtual bool subscribeNotifyPort(int port) = 0;
     virtual void unsubscribeNotify(uint32_t token) = 0;
     virtual void clearNotify() = 0;
 

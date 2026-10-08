@@ -83,8 +83,9 @@ bool UdpOscTransport::subscribeNotify(uint32_t token) {
     mOrigins.resolve(token, ip, port);
     return addTarget(mNotifyTargets, ip, port);
 }
-void UdpOscTransport::subscribeNotifyPort(int port) {
+bool UdpOscTransport::subscribeNotifyPort(int port) {
     addTarget(mNotifyTargets, "127.0.0.1", port);
+    return true;
 }
 void UdpOscTransport::unsubscribeNotify(uint32_t token) {
     std::string ip;

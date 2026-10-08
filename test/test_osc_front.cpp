@@ -27,7 +27,7 @@ struct Inner final : IOscTransport {
     void broadcastLink(const uint8_t*, uint32_t) override { log.push_back("link"); }
     bool hasNotifySubscribers() const override { return true; }
     bool subscribeNotify(uint32_t) override { log.push_back("subNotify"); return true; }
-    void subscribeNotifyPort(int) override { log.push_back("subNotifyPort"); }
+    bool subscribeNotifyPort(int) override { log.push_back("subNotifyPort"); return true; }
     void unsubscribeNotify(uint32_t) override { log.push_back("unsubNotify"); }
     void clearNotify() override { log.push_back("clearNotify"); }
     bool subscribeLink(uint32_t) override { log.push_back("subLink"); return true; }
@@ -86,7 +86,7 @@ TEST_CASE("fronted transport: every other method is the inner transport's", "[fr
     const uint8_t d[4] = {};
     t.broadcastNotify(d, 4); t.broadcastLink(d, 4);
     CHECK(t.hasNotifySubscribers());
-    CHECK(t.subscribeNotify(1)); t.subscribeNotifyPort(2); t.unsubscribeNotify(1); t.clearNotify();
+    CHECK(t.subscribeNotify(1)); CHECK(t.subscribeNotifyPort(2)); t.unsubscribeNotify(1); t.clearNotify();
     CHECK(t.subscribeLink(1)); t.unsubscribeLink(1);
     t.broadcastMidi(d, 4); CHECK(t.subscribeMidi(1)); t.unsubscribeMidi(1);
     t.broadcastGamepad(d, 4); CHECK(t.subscribeGamepad(1)); t.unsubscribeGamepad(1);

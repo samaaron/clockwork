@@ -126,8 +126,8 @@ void OscEgress::clearSubscribers() {
     if (mTransport) mTransport->clearNotify();
 }
 
-void OscEgress::subscribeNotifyPort(int port) {
-    if (mTransport) mTransport->subscribeNotifyPort(port);
+bool OscEgress::subscribeNotifyPort(int port) {
+    return mTransport && mTransport->subscribeNotifyPort(port);
 }
 
 bool OscEgress::hasSubscribers() const {

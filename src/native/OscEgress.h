@@ -67,7 +67,7 @@ public:
     bool subscribeCaller(uint32_t token);        // true if newly registered
     void unsubscribeCaller(uint32_t token);
     void clearSubscribers();
-    void subscribeNotifyPort(int port);   // explicit reply-port (devices/report)
+    bool subscribeNotifyPort(int port);   // explicit reply-port (devices/report)
     bool hasSubscribers() const;
     bool subscribeCallerToLinkNotify(uint32_t token);
     void unsubscribeCallerFromLinkNotify(uint32_t token);
