@@ -20,6 +20,7 @@
 #include "EngineFixture.h"
 #include "OscTestUtils.h"
 #include "clockwork_prefix.h"
+#include <juce_core/juce_core.h>   // DatagramSocket: the test speaks UDP to the engine
 
 #include <chrono>
 #include <string>

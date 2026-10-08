@@ -24,13 +24,16 @@ else()
     list(APPEND CMAKE_MODULE_PATH "${Catch2_DIR}")
 endif()
 
-# Headers that sit above Smoothie's worklet, compiled by a target that cannot
-# see JUCE: it takes clockwork's own include directories and does not link
-# smoothie, whose modules are where JUCE lives. A JUCE include in any of them
-# fails this build.
+# The headers a host includes, compiled by a target that cannot see JUCE: it
+# takes what clockwork exports to a host — its interface include directories
+# and definitions, and Smoothie's worklet — but not smoothie's modules, which
+# are where JUCE lives. A JUCE include in any of them fails this build.
 add_library(clockwork_juce_free_headers OBJECT juce_free_headers.cpp)
 target_include_directories(clockwork_juce_free_headers PRIVATE
-    ${CLOCKWORK_INCLUDE_DIRS} ${CLOCKWORK_SRC}/../smoothie/worklet)
+    $<FILTER:$<TARGET_PROPERTY:clockwork,INTERFACE_INCLUDE_DIRECTORIES>,EXCLUDE,smoothie/modules>
+    ${CLOCKWORK_SRC}/comms ${CLOCKWORK_SRC}/../smoothie/worklet)
+target_compile_definitions(clockwork_juce_free_headers PRIVATE
+    $<TARGET_PROPERTY:clockwork,INTERFACE_COMPILE_DEFINITIONS>)
 target_compile_features(clockwork_juce_free_headers PRIVATE cxx_std_20)
 
 add_executable(clockwork_tests

@@ -6,7 +6,6 @@
 #pragma once
 
 #include "clockwork_product.h"
-#include <juce_audio_devices/juce_audio_devices.h>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -45,7 +44,6 @@
 #include "TrackControl.h"
 #endif
 #include "ClockworkProcessor.h"
-#include "smoothie_juce_device_callback.h"
 #include "clock/MidiClockOut.h"
 #include "clock/ClockworkClock.h"
 #include "native/LinkAudioHost.h"
@@ -54,9 +52,16 @@
 #include "DeviceLaneApartment.h"
 #include "AudioRecovery.h"
 #include "OscBuilder.h"
-#include "HeadlessDriver.h"
 #include "engine_state.h"
 #include "shm_segment.hpp"
+#include <memory>
+
+// Held, not seen. Their headers bring JUCE, and a host that includes this one
+// must not need it: the engine uses JUCE inside, and none of it is a host's.
+namespace juce { class AudioDeviceManager; }
+namespace smoothie { class JuceDeviceCallback; }
+class HeadlessDriver;
+struct DeviceManagerFactory;   // DeviceManagerFactory.h
 
 class ClockworkEngine {
     friend class EngineFixture;
@@ -212,15 +217,15 @@ public:
                                                    // Link peers). Embedders pass their
                                                    // user-facing name.
 
-        // Test boundary: build the JUCE device manager. When set, the engine
-        // calls this instead of constructing a plain AudioDeviceManager —
-        // both at boot and in recovery's recreateDeviceManager — and skips
-        // every platform-specific piece of device bring-up (PipeWire
-        // registration, the Windows driver preference): the factory's
-        // manager owns its own device types, typically fakes
-        // (test/FakeAudioDevice.h). Production leaves it unset.
-        std::function<std::unique_ptr<juce::AudioDeviceManager>()>
-            deviceManagerFactory;
+        // Test boundary: what builds the device manager. When set, the engine
+        // builds its manager from this instead of a plain one — both at boot
+        // and in recovery's recreateDeviceManager — and skips every
+        // platform-specific piece of device bring-up (PipeWire registration,
+        // the Windows driver preference): the factory's manager owns its own
+        // device types, typically fakes (test/FakeAudioDevice.h). Opaque here,
+        // as the manager is JUCE's (DeviceManagerFactory.h). Production
+        // leaves it null.
+        std::shared_ptr<const DeviceManagerFactory> deviceManagerFactory;
     };
 
     ClockworkEngine();
@@ -640,7 +645,7 @@ public:
 private:
     bool interceptBufferFreed(const uint8_t* data, uint32_t size);
 
-    juce::String reinitialiseWithDefaultsPreservingConfig();
+    std::string reinitialiseWithDefaultsPreservingConfig();
     // A driver that names a default: the boot's when it does, otherwise the
     // first; empty when none does.
     std::string driverWithADefault();
@@ -711,7 +716,7 @@ private:
     // coreaudiod. Called only from recoverAudio() on the device task lane under the swap
     // gate — leaves the fresh manager initialised to the default device for the
     // cold swap that follows. Empty return on success.
-    juce::String recreateDeviceManager();
+    std::string recreateDeviceManager();
 
     // Detach listeners/callback, close the device, and release mDeviceManager.
     // Shared by shutdown() and recreateDeviceManager().
@@ -859,7 +864,7 @@ private:
 
     ClockworkProcessor mProcessor;
     // What the device manager calls: the processor behind Smoothie's worklet.
-    smoothie::JuceDeviceCallback mDeviceCallback{mProcessor};
+    std::unique_ptr<smoothie::JuceDeviceCallback> mDeviceCallback;
     // The default egress transport: in-process, replies via onReply. An embedder
     // injects a real transport via setTransport (a host that owns sockets
     // injects one from the comms client library). The engine owns no socket.
@@ -1106,7 +1111,7 @@ private:
     void watchdogLoop(const std::stop_token& stop);
     int64_t watchdogNowMs() const;   // Config::watchdogClockMs, else steady_clock
 
-    HeadlessDriver               mHeadlessDriver;
+    std::unique_ptr<HeadlessDriver> mHeadlessDriver;
     std::unique_ptr<juce::AudioDeviceManager> mDeviceManager;
     PerformanceMetrics*          mMetrics = nullptr;  // points into the shared arena; null before init()
     std::atomic<bool>        mRunning{false};

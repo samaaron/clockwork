@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 #include "ClockworkEngine.h"
+#include "DeviceManagerFactory.h"
+#include "HeadlessDriver.h"
+#include "smoothie_juce_device_callback.h"
+#include <juce_audio_devices/juce_audio_devices.h>
 #include "clockwork_product.h"
 #include "clockwork_sys.h"
 #include "clockwork_client.h"
@@ -102,7 +106,9 @@ void silenceJackLogsIfPossible() {
 #endif
 }
 
-ClockworkEngine::ClockworkEngine() = default;
+ClockworkEngine::ClockworkEngine()
+    : mDeviceCallback(std::make_unique<smoothie::JuceDeviceCallback>(mProcessor)),
+      mHeadlessDriver(std::make_unique<HeadlessDriver>()) {}
 
 void ClockworkEngine::recordSwapPreferences(const std::string& deviceName,
                                              const std::string& inputDeviceName,
@@ -209,7 +215,7 @@ std::unique_ptr<juce::AudioDeviceManager>
 ClockworkEngine::makeDeviceManager() {
     routeDeviceLayerLog();
     auto manager = mCurrentConfig.deviceManagerFactory
-        ? mCurrentConfig.deviceManagerFactory()
+        ? mCurrentConfig.deviceManagerFactory->make()
         : std::make_unique<juce::AudioDeviceManager>();
     // Device changes come to the engine, not to the manager: left to itself
     // the manager closes and reopens devices on whatever thread the OS
@@ -1642,14 +1648,14 @@ void ClockworkEngine::shutdown() {
     mDeviceTaskThread.request_stop();   // the lane wakes through the loop's stop_callback
     if (mDeviceTaskThread.joinable()) mDeviceTaskThread.join();
 
-    mHeadlessDriver.signalThreadShouldExit();
+    mHeadlessDriver->signalThreadShouldExit();
 
     // Wake the readers so they can exit. Both wait on processCount; bump it so
     // wait() sees a change and returns.
     mProcessor.processCount.fetch_add(1, std::memory_order_release);
     mProcessor.processCount.notify_all();
 
-    mHeadlessDriver.stopThread(2000);
+    mHeadlessDriver->stopThread(2000);
 
     // Unpublish from the /clockwork/clock queries only if we're the current
     // publisher — never stomp another engine's pointer.
@@ -1697,7 +1703,7 @@ void ClockworkEngine::shutdown() {
     // publish into nothing rather than the unmapped segment.
     mClockworkClock.bindSampleClockToShm(nullptr);
     mProcessor.setMetrics(nullptr);
-    mHeadlessDriver.setMetrics(nullptr);
+    mHeadlessDriver->setMetrics(nullptr);
     mPeerPlane.store(nullptr, std::memory_order_release);
     g_external_segment = nullptr;
     // The clock's state lives in this arena; point it back at its own copy
@@ -2400,7 +2406,7 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     // Hold the swap gate across the whole swap. It is recursive, so reopenCurrentDevice
     // re-taking it is fine — but it MUST be released before the reopen.done broadcast,
     // which re-takes it. Hence the inner scope.
-    juce::String err;
+    std::string err;
     bool restored = false;
     SwapResult swap;   // device name/rate/buffer from the cold swap — reused below
     {
@@ -2435,13 +2441,13 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
             }
             stopAudioSource();                      // detach the dead callback
             err = recreateDeviceManager();
-            if (err.isEmpty()) swap = reopenCurrentDevice(intent.adoptRate);
+            if (err.empty()) swap = reopenCurrentDevice(intent.adoptRate);
             // A pinned device that delivered nothing, with the engine back on
             // the default the fresh manager opened, is audio restored — there.
-            restored = err.isEmpty() && (swap.success || swap.fellBack)
+            restored = err.empty() && (swap.success || swap.fellBack)
                     && mActiveSource.load() == AudioSource::RealCallback;
         } catch (const std::exception& ex) {
-            err = juce::String("recovery exception: ") + ex.what();
+            err = std::string("recovery exception: ") + ex.what();
         } catch (...) {
             err = "recovery exception (unknown)";
         }
@@ -2464,11 +2470,11 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
 
     // The swap's own reason when the recreate went through: "No sound is coming
     // out of X…" says more than an empty err.
-    if (err.isEmpty() && !swap.success && !swap.error.empty())
-        err = juce::String(swap.error);
+    if (err.empty() && !swap.success && !swap.error.empty())
+        err = swap.error;
     clockwork_log("[recover] %s (err='%s')",
            restored ? "restored real audio" : "device down — watchdog will retry",
-           err.toRawUTF8());
+           err.c_str());
     if (restored && intent.adoptRate > 0)
         clockwork_log("[recover] session rate is now %.0f Hz (asked for the measured "
                "~%.0f Hz; the device reported %.0f Hz)",
@@ -2482,8 +2488,8 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
         broadcastReopenDone(true, swap.deviceName, swap.sampleRate, swap.bufferSize, {});
     else
         broadcastReopenDone(false, {}, 0, 0,
-                            err.isEmpty() ? "audio device not yet recovered"
-                                          : err.toStdString());
+                            err.empty() ? "audio device not yet recovered"
+                                          : err);
 
     if (restored) sendDeviceReport();
 
@@ -3200,20 +3206,20 @@ bool ClockworkEngine::startAudioSource() {
             clockwork_log("[engine] attaching audio callback to device '%s'",
                     dev ? dev->getName().toRawUTF8() : "(none)");
         }
-        mDeviceManager->addAudioCallback(&mDeviceCallback);
+        mDeviceManager->addAudioCallback(mDeviceCallback.get());
         clockwork_log("[engine] audio callback attached — waiting for first tick");
         mActiveSource.store(AudioSource::RealCallback, std::memory_order_release);
     } else if (desired == AudioSource::Headless) {
         // Explicit headless (mHeadless): tests and future non-JUCE backends.
-        mHeadlessDriver.configure(&mProcessor,
+        mHeadlessDriver->configure(&mProcessor,
                                    mCurrentConfig.sampleRate,
                                    mCurrentConfig.bufferSize,
                                    mCurrentConfig.numOutputChannels,
                                    mCurrentConfig.numInputChannels);
-        mHeadlessDriver.setClockworkClock(&mClockworkClock);
-        mHeadlessDriver.setLinkAudio(&mLinkAudio);
-        mHeadlessDriver.setMetrics(mMetrics);
-        mHeadlessDriver.startThread(juce::Thread::Priority::highest);
+        mHeadlessDriver->setClockworkClock(&mClockworkClock);
+        mHeadlessDriver->setLinkAudio(&mLinkAudio);
+        mHeadlessDriver->setMetrics(mMetrics);
+        mHeadlessDriver->startThread(juce::Thread::Priority::highest);
         mActiveSource.store(AudioSource::Headless, std::memory_order_release);
     } else {
         // No audio device on the default (JUCE) engine: stay sourceless and
@@ -3236,14 +3242,14 @@ void ClockworkEngine::stopAudioSource() {
         return;
     case AudioSource::RealCallback:
         if (mDeviceManager)
-            mDeviceManager->removeAudioCallback(&mDeviceCallback);
+            mDeviceManager->removeAudioCallback(mDeviceCallback.get());
         // Change listener is NOT removed here; it survives swaps and is
         // removed only in shutdown(). Removing it would lose hot-plug
         // events between stop and the next start.
         break;
     case AudioSource::Headless:
-        mHeadlessDriver.signalThreadShouldExit();
-        mHeadlessDriver.stopThread(2000);
+        mHeadlessDriver->signalThreadShouldExit();
+        mHeadlessDriver->stopThread(2000);
         break;
     }
     mActiveSource.store(AudioSource::None, std::memory_order_release);
@@ -3292,7 +3298,7 @@ std::string ClockworkEngine::driverWithADefault() {
     return {};
 }
 
-juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
+std::string ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     int prevRate = mCurrentConfig.sampleRate;
     auto prevSetup = mDeviceManager->getAudioDeviceSetup();
     int prevBufSize = prevSetup.bufferSize;
@@ -3314,7 +3320,7 @@ juce::String ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     auto err = mDeviceManager->initialiseWithDefaultDevices(0, 2);
     if (err.isNotEmpty())
         err = mDeviceManager->initialiseWithDefaultDevices(0, 0);
-    if (err.isNotEmpty()) return err;
+    if (err.isNotEmpty()) return err.toStdString();
 
     // An init that reports success but opens no device is still a failure
     // here: callers assume a current device afterwards, and without one the
@@ -4192,7 +4198,7 @@ void ClockworkEngine::teardownDeviceManager() {
     if (mDeviceManager) {
         // The sink stays to the end: a change reported while the manager goes
         // down only notes it for a pass on the lane, which finds no manager.
-        mDeviceManager->removeAudioCallback(&mDeviceCallback);
+        mDeviceManager->removeAudioCallback(mDeviceCallback.get());
         mDeviceManager->closeAudioDevice();
         mDeviceManager.reset();
     }
@@ -4224,7 +4230,7 @@ void ClockworkEngine::restoreBootDriver() {
 #endif
 }
 
-juce::String ClockworkEngine::recreateDeviceManager() {
+std::string ClockworkEngine::recreateDeviceManager() {
     // Release the stale, hibernate-killed CoreAudio/HAL client completely, then
     // build a fresh manager. A reopen keeps this same dead connection; only a
     // new manager gets a new IsolatedCoreAudioClient + AudioObjectIDs that
@@ -4237,8 +4243,8 @@ juce::String ClockworkEngine::recreateDeviceManager() {
 
     // Open the device via the shared system-default reinit: it preserves the
     // session sample rate.
-    juce::String err = reinitialiseWithDefaultsPreservingConfig();
-    if (err.isNotEmpty()) return err;
+    const std::string err = reinitialiseWithDefaultsPreservingConfig();
+    if (!err.empty()) return err;
     if (!mDeviceManager->getCurrentAudioDevice())
         return "recreate: opened no device";
 
@@ -4846,9 +4852,9 @@ std::string ClockworkEngine::openDriverDefault() {
     const juce::String wasDriver = mDeviceManager->getCurrentAudioDeviceType();
 
     auto err = reinitialiseWithDefaultsPreservingConfig();
-    if (err.isNotEmpty()) {
+    if (!err.empty()) {
         clockwork_log("[device-setup] system mode init failed: %s",
-                err.toRawUTF8());
+                err.c_str());
         // Back on what it played on, as switchDevice goes back when a device
         // won't open: the device, its rate and buffer, and its driver.
         if (wasOpen) {
@@ -4866,7 +4872,7 @@ std::string ClockworkEngine::openDriverDefault() {
         // it waits for one (waitingForAudioDevice).
         stopAudioSource();
         startAudioSource();
-        return err.toStdString();
+        return err;
     }
 
     std::string newDevName;

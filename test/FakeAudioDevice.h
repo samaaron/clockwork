@@ -25,6 +25,7 @@
 #pragma once
 
 #include "ClockworkEngine.h"
+#include "DeviceManagerFactory.h"
 #include <atomic>
 #include <chrono>
 #include <algorithm>
@@ -746,7 +747,8 @@ inline ClockworkEngine::Config fakeEngineConfig(
     cfg.numOutputChannels    = 2;
     cfg.numInputChannels     = 0;   // skip mac aggregate-promotion CoreAudio reads
     cfg.hardwareDevice       = bootOutput;  // skip mac default-output CoreAudio reads
-    cfg.deviceManagerFactory = makeFactory(std::move(system));
+    cfg.deviceManagerFactory = std::make_shared<DeviceManagerFactory>(
+        DeviceManagerFactory{ makeFactory(std::move(system)) });
     return cfg;
 }
 

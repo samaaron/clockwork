@@ -11,6 +11,7 @@
 #include "EngineFixture.h"
 #include "DebugTail.h"
 #include "ClockworkProcessor.h"
+#include "HeadlessDriver.h"
 #include "clockwork_event_sink.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -221,8 +222,8 @@ std::string EngineFixture::repliesDump() const {
 }
 
 void EngineFixture::stopHeadlessDriver() {
-    mEngine.mHeadlessDriver.signalThreadShouldExit();
-    mEngine.mHeadlessDriver.stopThread(2000);
+    mEngine.mHeadlessDriver->signalThreadShouldExit();
+    mEngine.mHeadlessDriver->stopThread(2000);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 
