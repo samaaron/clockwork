@@ -9,7 +9,6 @@
 #include "clockwork_sys.h"
 #include "clockwork_client.h"
 #include "../clockwork_heap.h"
-#include "../scheduler/engine_schedule.h"
 #include "clockwork_config.h"   // clockwork_log
 // MIDI clock out is ClockworkClock's, not the scheduler's: each tick carries its
 // own time to its sink, so it is present whatever this build decided about
@@ -1292,7 +1291,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // The barrier — on this thread, in the same drain as the guest's
     // messages, or it would answer before what it answers for.
     mAudioRoutes.add("sync", &clockwork_clockwork_sys_route, nullptr);
-    mAudioRoutes.add("sched/flush", &ClockworkEngine::schedFlushSink, this);
+    mAudioRoutes.add("sched/flush", &clockwork_sched_flush_route, nullptr);
     // The clock snapshot, from the published mirror, as on every host
     // (clockwork_sys.h): a caller that wants the clock this block renders
     // against cannot wait for the control thread.
@@ -1966,45 +1965,6 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
         self->mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
     return true;  // consumed — control never falls through to the DSP
 }
-
-#if !CLOCKWORK_SCHEDULER
-bool ClockworkEngine::schedFlushSink(void* /*ctx*/, const void* /*callCtx*/,
-                                      const uint8_t* /*data*/, std::size_t /*len*/) {
-    // Nothing is ever pending in a build with no store, so there is nothing to
-    // cancel. Answering "done" would be a lie by omission the first time
-    // someone relied on a flush to stop a note; say what this build is instead.
-    static std::atomic<uint32_t> refusals{0};
-    const uint32_t n = refusals.fetch_add(1, std::memory_order_relaxed);
-    if (n == 0 || n % 100 == 0)
-        clockwork_log("ERROR: " CLOCKWORK_SYS("sched/flush") " refused — this build has no "
-               "timed store (built with CLOCKWORK_SCHEDULER=OFF), so nothing "
-               "is ever pending to flush. [%u so far]", n + 1);
-    return true;  // consumed: clockwork claimed the prefix, so it answers
-}
-#else
-bool ClockworkEngine::schedFlushSink(void* /*ctx*/, const void* /*callCtx*/,
-                                      const uint8_t* data, std::size_t len) {
-    // /clockwork/sched/flush <tag> — drop pending scheduled events with this tag. An
-    // empty/missing tag defaults to the user-scheduled tag (not the wildcard),
-    // so a tagless flush can never wipe pending synth bundles or the clock.
-    // Runs on the audio thread, same as enqueue/tick.
-    uint32_t tag = SCHED_TAG_DEFAULT;
-    try {
-        osc::ReceivedMessage msg(osc::ReceivedPacket(
-            reinterpret_cast<const char*>(data),
-            static_cast<osc::osc_bundle_element_size_t>(len)));
-        auto it = msg.ArgumentsBegin();
-        if (it != msg.ArgumentsEnd() && it->IsString()) {
-            const char* t = it->AsStringUnchecked();
-            if (t && *t) tag = sched_tag_hash(t, std::strlen(t));
-        }
-    } catch (...) {
-        return true;
-    }
-    clockwork_engine_schedule().flush(tag);
-    return true;
-}
-#endif // CLOCKWORK_SCHEDULER
 
 // --- Device switch / reopen orchestration -------------------------------------
 

@@ -131,6 +131,10 @@ inline constexpr const char* CLOCKWORK_CLIENT_VERBS_ABSENT =
 inline constexpr const char* CLOCKWORK_REFUSED_UNKNOWN   = "unknown clockwork verb";
 inline constexpr const char* CLOCKWORK_REFUSED_MALFORMED = "malformed";
 
+// The reason the timed store's verbs are refused with in a build that has none.
+inline constexpr const char* CLOCKWORK_SCHEDULER_ABSENT =
+    "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)";
+
 // What the audio-thread half of clockwork did with a packet.
 enum class ClockworkSysRt {
     NotClaimed,   // not a /clockwork/ address at all -- the DSP's
@@ -298,6 +302,12 @@ bool clockwork_event_route(void* routeCtx, const void* callCtx,
 // the guest is only ever reached from there.
 bool clockwork_asset_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len);
+// "/clockwork/sched/flush [tag]": drop what the timed store holds under the
+// tag. Registered on the audio thread of every host, beside enqueue and tick,
+// so the store stays single-threaded. A build with no store refuses it to the
+// caller. Defined in audio_processor.cpp.
+bool clockwork_sched_flush_route(void* routeCtx, const void* callCtx,
+                                 const uint8_t* data, std::size_t len);
 
 // The DSP's route: every address the predicate did not claim, handed over
 // untouched. Defined in audio_processor.cpp.

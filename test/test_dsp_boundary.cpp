@@ -244,6 +244,67 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
             REQUIRE((out[i] != 0.0f) == onOld(at + i));
     }
 }
+
+TEST_CASE("dsp boundary: sched/flush drops what /clockwork/schedule holds, as natively",
+          "[boundary][lanes][scheduler]") {
+    // The flush is the store's, and the store is the same on every host, so
+    // every host answers it: a worklet once refused it as an unknown verb,
+    // leaving a client nothing to cancel a pending note with.
+    const uint32_t bl = lanes_test::boot();
+    lanes_test::drainRt();
+
+    constexpr int kBlocksAhead = 8;
+    const auto schedulePing = [&] {
+        const uint64_t due = lanes_test::position() + static_cast<uint64_t>(kBlocksAhead) * bl;
+        const auto inner = osc_test::message("/dummy/ping");
+        osc_test::Builder b;
+        b.begin("/clockwork/schedule")
+            << static_cast<osc::int64>(clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(due)))
+            << osc::Blob(inner.ptr(), static_cast<osc::osc_bundle_element_size_t>(inner.size()));
+        const auto pkt = b.end();
+        REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
+    };
+
+    // Held, then answered at its time: what the flush has to stop.
+    schedulePing();
+    auto frames = lanes_test::tickUntil(kBlocksAhead * 3, "/dummy/pong");
+    REQUIRE(findAddress(frames, "/dummy/pong") != nullptr);
+
+    // Held, then flushed: never answered, and the flush is not refused.
+    schedulePing();
+    lanes_test::tick();
+    const auto flush = osc_test::message("/clockwork/sched/flush");
+    REQUIRE(lanes_test::ingress(flush.ptr(), flush.size(), kClient));
+    frames = lanes_test::tickUntil(kBlocksAhead * 3, "/dummy/pong");
+    CHECK(findAddress(frames, "/clockwork/error") == nullptr);
+    CHECK(findAddress(frames, "/dummy/pong") == nullptr);
+}
+
+TEST_CASE("dsp boundary: a /clockwork/schedule it cannot read is refused to the sender",
+          "[boundary][lanes][scheduler]") {
+    // Counted in the drop metric as it always was, and now ALSO answered: the
+    // metric says something was lost, the refusal tells the client which
+    // message and why.
+    lanes_test::boot();
+    lanes_test::drainRt();
+
+    const auto inner = osc_test::message("/dummy/ping");
+    osc_test::Builder b;
+    b.begin("/clockwork/schedule")   // an int where the time goes
+        << static_cast<osc::int32>(7)
+        << osc::Blob(inner.ptr(), static_cast<osc::osc_bundle_element_size_t>(inner.size()));
+    const auto pkt = b.end();
+    REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
+
+    const auto frames = lanes_test::tickUntil(4, "/clockwork/error");
+    const auto* err = findAddress(frames, "/clockwork/error");
+    REQUIRE(err != nullptr);
+    CHECK(err->sourceId == kClient);
+    const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
+    CHECK(r.argString(0) == "/clockwork/schedule");
+    CHECK(r.argString(1) == "malformed");
+    CHECK(findAddress(frames, "/dummy/pong") == nullptr);
+}
 #endif // CLOCKWORK_SCHEDULER
 
 TEST_CASE("dsp boundary: input reaches the DSP on the channel the host filled",

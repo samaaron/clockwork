@@ -163,6 +163,7 @@ static ClockworkClock& clockworkClock() {
 // either, and for a sharper reason: a timestamped bundle is the DSP's, so even
 // a build with no store has to read its timetag to forward it honestly.
 #include "scheduler/engine_schedule.h"  // clockwork's own timed queue
+#include "host/osc_reader.h"            // sched/flush's tag, read without throwing
 #include "scheduler/schedule_parse.h"   // shared bundle / "/clockwork/schedule" parsing
 #if CLOCKWORK_SCHEDULER
 #include "scheduler/fire_due.h"         // shared scheduler fire loop
@@ -914,8 +915,8 @@ extern "C" {
 
 #if !CLOCKWORK_SCHEDULER
     // "/clockwork/schedule" arrived in a build with no timed store. It cannot be
-    // held and it cannot be delivered on time, so it is refused — and refused
-    // OUT LOUD, naming the switch, because the failure mode this option must
+    // held and it cannot be delivered on time, so it is refused to the client
+    // that sent it — and refused OUT LOUD, naming the switch, because the failure mode this option must
     // not have is a verb that silently stops working. Counted into the same
     // drop metric as a pool-full refusal, since to a client both mean "
     // clockwork did not take it".
@@ -923,8 +924,10 @@ extern "C" {
     // Rate-limited the way the LATE/SHED logs are: a client that schedules in
     // a loop would otherwise fill the debug stream with one identical line per
     // message, which buries the first one — the only one anybody reads.
-    static inline void refuse_schedule_verb() {
+    static inline void refuse_schedule_verb(const uint8_t* data, uint32_t len, uint32_t origin) {
         increment_scheduler_drop_metric();
+        clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT,
+            [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
         static std::atomic<uint32_t> refusals{0};
         const uint32_t n = refusals.fetch_add(1, std::memory_order_relaxed);
         if (n == 0 || n % 100 == 0)
@@ -1108,8 +1111,10 @@ extern "C" {
                    data[CLOCKWORK_SYS_LEN("schedule")] == '\0') {
 #if CLOCKWORK_SCHEDULER
             const SchedulePacket sp = clockwork_parse_schedule(data, len);
-            if (!sp.ok) {                       // malformed: counted, not silent
+            if (!sp.ok) {                       // malformed: counted, and its sender told
                 increment_scheduler_drop_metric();
+                clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED,
+                    [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
                 return;
             }
             body         = sp.blob;
@@ -1123,7 +1128,7 @@ extern "C" {
             // is the ONE thing that must not go quietly: a verb that vanishes
             // without explanation is worse than either holding it or refusing
             // it, so say what happened and name the switch that caused it.
-            refuse_schedule_verb();
+            refuse_schedule_verb(data, len, origin);
             return;
 #endif
         }
@@ -1326,6 +1331,7 @@ extern "C" {
             // The asset hand-off is audio-thread work on every host: the
             // guest is only ever reached from there.
             default_audio_routes.add("asset/", &clockwork_asset_route, nullptr);
+            default_audio_routes.add("sched/flush", &clockwork_sched_flush_route, nullptr);
             // Inbound events likewise: to their audience, and to the guest.
             default_audio_routes.add("midi/in/",         &clockwork_event_route, nullptr);
             default_audio_routes.add("midi/ports",       &clockwork_event_route, nullptr);
@@ -2874,6 +2880,34 @@ bool clockwork_clockwork_sys_route(void* /*routeCtx*/, const void* callCtx,
         [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); },
         clockState);
     return true;   // the prefix is claimed whole, answered or refused
+}
+
+bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
+                                 const uint8_t* data, std::size_t len) {
+    using namespace engine;
+    auto* cc = static_cast<const DrainCallCtx*>(callCtx);
+    const uint32_t token = cc ? cc->sourceId : 0;
+    const auto refuse = [&](const char* reason) {
+        clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason,
+            [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); });
+    };
+#if CLOCKWORK_SCHEDULER
+    // No tag, or "", is the user's tag rather than the wildcard, so a tagless
+    // flush can never wipe pending synth bundles or the clock. Read without
+    // oscpack: a malformed packet must not throw on this thread.
+    clockwork_host::OscReader r(data, len);
+    const char* tagName = nullptr;
+    if (!r.ok() || (r.peekType() != 0 && !r.readString(tagName))) {
+        refuse(CLOCKWORK_REFUSED_MALFORMED);
+        return true;
+    }
+    clockwork_engine_schedule().flush(tagName && *tagName
+        ? sched_tag_hash(tagName, std::strlen(tagName))
+        : SCHED_TAG_DEFAULT);
+#else
+    refuse(CLOCKWORK_SCHEDULER_ABSENT);
+#endif
+    return true;
 }
 
 // The other end of clockwork's chain on a host with no NRT thread: the HOST.

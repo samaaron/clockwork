@@ -342,11 +342,6 @@ public:
         return true;
     }
 
-    // Audio-thread route for "/clockwork/sched/flush" <tag>: cancels pending scheduled
-    // events with that tag (both MIDI and OSC). Runs on the RT thread alongside
-    // enqueue/tick, so the slot pool stays single-threaded and lock-free.
-    static bool schedFlushSink(void* ctx, const void* callCtx, const uint8_t* data, std::size_t len);
-
     // NRT control-thread blocking, milliseconds. maxPass is the high-water mark
     // since boot (or the last reset); recentWorst is the worst pass in the
     // trailing ~60 s window (decays back to quiet); inFlight is non-zero only

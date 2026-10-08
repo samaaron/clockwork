@@ -85,7 +85,7 @@ EngineScheduler& clockwork_engine_schedule();
 // absence is a compile error at any site that was not thought about.
 //
 // The reason a caller is missing here rather than answering differently is in
-// the block above; the refusal for /clockwork/schedule and /clockwork/sched/flush
-// is in audio_processor.cpp and ClockworkEngine.cpp respectively.
+// the block above; the refusals for /clockwork/schedule and /clockwork/sched/flush
+// are in audio_processor.cpp.
 
 #endif // CLOCKWORK_SCHEDULER

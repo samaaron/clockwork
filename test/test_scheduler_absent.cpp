@@ -218,6 +218,32 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
 
     // And the queue depth stays 0, because there is no queue.
     CHECK(metrics->scheduler_queue_depth.load(std::memory_order_relaxed) == 0u);
+
+    // The client that sent it is told, naming the switch: the metric says
+    // something was refused, this says what and why.
+    const auto* err = findAddress(frames, "/clockwork/error");
+    REQUIRE(err != nullptr);
+    CHECK(err->sourceId == kClient);
+    const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
+    CHECK(r.argString(0) == CLOCKWORK_SYS("schedule"));
+    CHECK(r.argString(1) == "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)");
+}
+
+TEST_CASE("no scheduler: sched/flush is refused to the caller", "[scheduler][absent][refusal]") {
+    // Nothing is ever pending in a build with no store, so a flush has nothing
+    // to do; answering nothing would let a client believe it cancelled a note.
+    lanes_test::boot();
+    lanes_test::drainRt();
+
+    const auto flush = osc_test::message(CLOCKWORK_SYS("sched/flush"), "default");
+    REQUIRE(lanes_test::ingress(flush.ptr(), flush.size(), kClient));
+    const auto frames = lanes_test::tickUntil(4, "/clockwork/error");
+    const auto* err = findAddress(frames, "/clockwork/error");
+    REQUIRE(err != nullptr);
+    CHECK(err->sourceId == kClient);
+    const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
+    CHECK(r.argString(0) == CLOCKWORK_SYS("sched/flush"));
+    CHECK(r.argString(1) == "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)");
 }
 
 TEST_CASE("no scheduler: a refused schedule does not disturb the next message",
