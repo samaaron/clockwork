@@ -15,9 +15,10 @@
  *   clockwork_bundle_timetag   reads that timetag big-endian out of offset 8;
  *   clockwork_ntp_to_timetag   packs NTP seconds into the OSC 32.32 fixed-point form;
  *   clockwork_parse_schedule   parses the flat twin, "/clockwork/schedule <timetag> <blob>", in
- *                       all three timetag spellings — 'h' (int64 OSC timetag,
- *                       full sub-sample resolution), 'd' (double NTP seconds)
- *                       and 'f' (float NTP seconds) — and refuses anything
+ *                       all four timetag spellings — 't' (OSC timetag) and
+ *                       'h' (int64), both at full sub-sample resolution, 'd'
+ *                       (double NTP seconds) and 'f' (float NTP seconds) —
+ *                       and refuses anything
  *                       malformed or truncated rather than reading past the end.
  *
  * The inner blob is opaque to the parser: it is handed back as a borrowed
@@ -161,7 +162,7 @@ TEST_CASE("schedule_parse - a flat schedule message is not a bundle",
     CHECK_FALSE(clockwork_is_bundle(m.data(), static_cast<uint32_t>(m.size())));
 }
 
-// ── clockwork_parse_schedule: the three timetag spellings ───────────────────────────
+// ── clockwork_parse_schedule: the four timetag spellings ────────────────────────────
 
 TEST_CASE("schedule_parse - 'h' carries the OSC int64 timetag verbatim",
           "[schedule_parse]") {
@@ -176,6 +177,20 @@ TEST_CASE("schedule_parse - 'h' carries the OSC int64 timetag verbatim",
     // The blob is borrowed from the caller's buffer, not copied.
     CHECK(r.blob >= m.data());
     CHECK(r.blob + r.blobLen <= m.data() + m.size());
+}
+
+TEST_CASE("schedule_parse - 't' carries the OSC timetag verbatim, as 'h' does",
+          "[schedule_parse]") {
+    // OSC's own type for a time: the same eight bytes as 'h', so a client
+    // whose library writes a time as a time is understood.
+    const int64_t when = (int64_t{0x00000123} << 32) | int64_t{0x456789ABu};
+    const auto m = scheduleMsg(",tb", beBytes(static_cast<uint64_t>(when), 8), kFiller);
+
+    const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
+    REQUIRE(r.ok);
+    CHECK(r.when == when);
+    REQUIRE(r.blobLen == kFiller.size());
+    CHECK(std::memcmp(r.blob, kFiller.data(), kFiller.size()) == 0);
 }
 
 TEST_CASE("schedule_parse - 'd' converts double NTP seconds to a timetag",
@@ -268,7 +283,7 @@ TEST_CASE("schedule_parse - malformed headers are refused", "[schedule_parse]") 
     }
 
     SECTION("an unsupported timetag type") {
-        for (char t : {'i', 's', 't', 'b', '\0'}) {
+        for (char t : {'i', 's', 'b', '\0'}) {
             auto m = good;
             m[kSchedPad + 1u] = t;
             CHECK_FALSE(clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size())).ok);

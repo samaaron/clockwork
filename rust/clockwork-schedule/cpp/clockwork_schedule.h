@@ -134,8 +134,8 @@ int32_t   clockwork_sched_is_bundle(const uint8_t* data, uint32_t size);
 /* That timetag, big-endian, from offset 8. Call clockwork_sched_is_bundle first. */
 uint64_t  clockwork_sched_bundle_timetag(const uint8_t* bundle);
 
-/* Parse "/clockwork/schedule <timetag> <blob>". The timetag is the OSC int64
- * 'h', or a 'd'/'f' NTP-seconds convenience. Every byte offset the parser uses
+/* Parse "/clockwork/schedule <timetag> <blob>". The timetag is an OSC timetag,
+ * as 't' or the int64 'h', or a 'd'/'f' NTP-seconds convenience. Every byte offset the parser uses
  * is derived from the reserved prefix, so it cannot fall out of step with it. */
 ClockworkSchedulePacket clockwork_sched_parse(const uint8_t* msg, uint32_t size);
 

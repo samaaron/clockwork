@@ -58,8 +58,9 @@ struct SchedulePacket {
     uint32_t       blobLen = 0;
 };
 
-// Parse "/clockwork/schedule <timetag> <blob>". `timetag` is the OSC int64 'h' (full
-// sub-sample resolution) or, as a convenience, a 'd'/'f' NTP-seconds value.
+// Parse "/clockwork/schedule <timetag> <blob>". `timetag` is an OSC timetag, as 't'
+// or the int64 'h' (full sub-sample resolution), or, as a convenience, a 'd'/'f'
+// NTP-seconds value.
 inline SchedulePacket clockwork_parse_schedule(const uint8_t* msg, uint32_t size) {
     const ClockworkSchedulePacket p = clockwork_sched_parse(msg, size);
     SchedulePacket r;

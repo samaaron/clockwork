@@ -86,8 +86,9 @@ pub fn bundle_timetag(bundle: &[u8]) -> u64 {
 
 /// Parse `"/clockwork/schedule <timetag> <blob>"`.
 ///
-/// The timetag is the OSC int64 `'h'` (full sub-sample resolution) or, as a
-/// convenience, a `'d'`/`'f'` NTP-seconds value. Anything malformed or
+/// The timetag is an OSC timetag, as `'t'` or the int64 `'h'` (full
+/// sub-sample resolution), or, as a convenience, a `'d'`/`'f'` NTP-seconds
+/// value. Anything malformed or
 /// truncated is refused; the parser never reads past `size`.
 pub fn parse(s: &[u8]) -> Packet {
     let miss = Packet::default();
@@ -107,7 +108,8 @@ pub fn parse(s: &[u8]) -> Packet {
         return miss;
     }
     let when = match tt[1] {
-        b'h' => {
+        // An OSC timetag, as `t` (OSC's own type) or `h` (an int64).
+        b'h' | b't' => {
             if p + 8 > end {
                 return miss;
             }
@@ -229,9 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn the_three_timetag_spellings() {
+    fn the_four_timetag_spellings() {
         let when = (0x123i64 << 32) | 0x4567_89AB;
         let r = run(&sched_msg(",hb", &(when as u64).to_be_bytes(), &FILLER));
+        assert!(r.ok);
+        assert_eq!(r.when, when);
+        assert_eq!(r.blob_len, 8);
+
+        // OSC's own timetag type: the same eight bytes as `h`, so a client
+        // whose library writes a time as a time is understood.
+        let r = run(&sched_msg(",tb", &(when as u64).to_be_bytes(), &FILLER));
         assert!(r.ok);
         assert_eq!(r.when, when);
         assert_eq!(r.blob_len, 8);
@@ -257,8 +266,8 @@ mod tests {
 
     #[test]
     fn every_truncation_is_refused_and_nothing_is_read_past_the_end() {
-        for spelling in [",hb", ",fb"] {
-            let time: Vec<u8> = if spelling == ",hb" {
+        for spelling in [",hb", ",tb", ",fb"] {
+            let time: Vec<u8> = if spelling != ",fb" {
                 1u64.to_be_bytes().to_vec()
             } else {
                 1.0f32.to_bits().to_be_bytes().to_vec()
@@ -306,7 +315,7 @@ mod tests {
         m[ADDR_PAD] = b';';
         assert!(!run(&m).ok);
 
-        for t in [b'i', b's', b't', b'b', 0u8] {
+        for t in [b'i', b's', b'b', 0u8] {
             let mut m = good.clone();
             m[ADDR_PAD + 1] = t;
             assert!(!run(&m).ok);
