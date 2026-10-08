@@ -49,7 +49,12 @@
 #include <cstdio>
 #include <cstring>
 #include <array>
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#include "clockwork_path.h"   // a path is UTF-8; Windows' own calls take UTF-16
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -130,9 +135,19 @@ ClockworkStatus slurp(const char*, std::vector<uint8_t>&) {
     return CLOCKWORK_E_ABSENT;
 }
 #else
+// A path is UTF-8 on every platform (clockwork_path.h). Windows' narrow
+// fopen would read it in the ANSI code page and open a different file.
+std::FILE* openToRead(const char* path) {
+#if defined(_WIN32)
+    return ::_wfopen(clockwork_path::to_wide(path).c_str(), L"rb");
+#else
+    return std::fopen(path, "rb");
+#endif
+}
+
 ClockworkStatus slurp(const char* path, std::vector<uint8_t>& out) {
     if (path == nullptr || *path == '\0') return CLOCKWORK_E_ARG;
-    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> f(std::fopen(path, "rb"), &std::fclose);
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> f(openToRead(path), &std::fclose);
     if (f == nullptr) return CLOCKWORK_E_NOT_FOUND;
 
     if (std::fseek(f.get(), 0, SEEK_END) != 0) return CLOCKWORK_E_ARG;
@@ -504,10 +519,17 @@ bool startFlac(ClockworkAudioWriter* w) {
 // A file of the user's, created readable by all and written by its owner
 // (0644, under the umask), said here rather than left to a library's default
 // of writable by all. Windows has no mode to give: a new file takes its ACL
-// from its folder.
+// from its folder, and _S_IWRITE only keeps it from being made read-only.
+// There the UTF-8 path goes through the wide call, as openToRead's does.
 gsl::owner<std::FILE*> createFile(const char* path) {
 #if defined(_WIN32)
-    return std::fopen(path, "wb");
+    const int fd = ::_wopen(clockwork_path::to_wide(path).c_str(),
+                            _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY | _O_NOINHERIT,
+                            _S_IREAD | _S_IWRITE);
+    if (fd < 0) return nullptr;
+    const gsl::owner<std::FILE*> f{::_fdopen(fd, "wb")};   // the descriptor is the stream's now
+    if (f == nullptr) ::_close(fd);
+    return f;
 #else
     const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return nullptr;

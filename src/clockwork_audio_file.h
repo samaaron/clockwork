@@ -131,6 +131,10 @@ double clockwork_audio_duration(const ClockworkAudioInfo* info);
 
 /* ── Reading ─────────────────────────────────────────────────────────────────
  *
+ * A path, here and for the writer, is UTF-8 on every platform: it arrives as
+ * an OSC string, and on Windows it reaches the file system through the wide
+ * calls rather than the ANSI code page.
+ *
  * Probe reads headers alone: enough to size a buffer, choose a target rate, or
  * show a user what a file is, without paying for the samples.
  *

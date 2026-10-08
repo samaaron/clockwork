@@ -25,6 +25,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "clockwork_audio_file.h"
+#include "clockwork_path.h"
 #include "flac_encoder.h"
 
 #include <algorithm>
@@ -391,7 +392,7 @@ TEST_CASE("audio file: a writer's memory and its file agree byte for byte",
     cfg.channels = 2; cfg.sample_rate = 44100;
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkAudioWriter* w =
-        clockwork_audio_writer_open(path.string().c_str(), &cfg, &st);
+        clockwork_audio_writer_open(clockwork_path::to_utf8(path).c_str(), &cfg, &st);
     REQUIRE(w != nullptr);
     REQUIRE(clockwork_audio_writer_write(w, pcm.data(), pcm.size() / 2)
             == CLOCKWORK_OK);
@@ -420,6 +421,48 @@ TEST_CASE("audio file: a writer's memory and its file agree byte for byte",
     CHECK((made.st_mode & 0777u) == (0644u & ~mask));
 #endif
     std::filesystem::remove(path);
+}
+
+TEST_CASE("audio file: a path is UTF-8 on every platform, so a name with an accent is the file it names",
+          "[audio][file]") {
+    // Paths arrive as OSC strings, and OSC strings are UTF-8 (clockwork_path.h).
+    // A take recorded into a folder with an accent in its name — or into the
+    // home of a user whose name has one — has to land in that folder, not in
+    // one spelled from the same bytes in the ANSI code page, which is what
+    // Windows makes of a narrow path. The names mix three scripts so that no
+    // single code page holds them all.
+    const std::string folder = "clockwork-t\xC3\xA9st-\xE5\xBD\x95\xE9\x9F\xB3";   // clockwork-tést-录音
+    const std::string name   = "take-\xC3\xA9\xE2\x99\xAA.wav";                     // take-é♪.wav
+    const auto dir = std::filesystem::temp_directory_path() / clockwork_path::from_utf8(folder);
+    std::filesystem::remove_all(dir);
+    REQUIRE(std::filesystem::create_directory(dir));
+    const std::string path = clockwork_path::to_utf8(dir / clockwork_path::from_utf8(name));
+
+    const auto pcm = signal(2000, 2);
+    ClockworkAudioWriterConfig cfg{};
+    cfg.struct_bytes = sizeof(cfg);
+    cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
+    cfg.encoding = CLOCKWORK_AUDIO_ENCODING_PCM_S16;
+    cfg.channels = 2; cfg.sample_rate = 44100;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkAudioWriter* w = clockwork_audio_writer_open(path.c_str(), &cfg, &st);
+    REQUIRE(w != nullptr);
+    REQUIRE(clockwork_audio_writer_write(w, pcm.data(), pcm.size() / 2) == CLOCKWORK_OK);
+    REQUIRE(clockwork_audio_writer_close(w, nullptr, nullptr) == CLOCKWORK_OK);
+
+    // Written where the name says, under that name.
+    CHECK(std::filesystem::exists(clockwork_path::from_utf8(path)));
+
+    // And read back by it.
+    ClockworkAudioInfo info{};
+    info.struct_bytes = sizeof(info);
+    float* got = nullptr;
+    REQUIRE(clockwork_audio_decode_file(path.c_str(), &info, &got) == CLOCKWORK_OK);
+    CHECK(info.frames == pcm.size() / 2);
+    CHECK(info.channels == 2);
+    clockwork_audio_free(got);
+
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("flac encoder: each fixed predictor is the one that gets chosen",
