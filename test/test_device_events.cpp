@@ -181,6 +181,41 @@ TEST_CASE("DeviceEvents: a device the user picks while theirs is unplugged is ke
     checkCoherent(fix);
 }
 
+// -H matches loosely ("motu" finds "motu-xaero"), and what it found is the
+// device: the server goes back to it after an unplug, by its name.
+TEST_CASE("DeviceEvents: a device -H matched loosely is remembered by its name and played on again",
+          "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "interface"));
+    checkPlayingOn(fix, "Fake Interface");
+    CHECK(fix.engine().preferredOutputDevice() == "Fake Interface");
+    auto interface = sys->device("Fake Interface");
+
+    interface->hidden = true;
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Speakers");
+
+    interface->hidden = false;                     // plugged back in
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Interface");
+}
+
+// The same -H with the device not there at boot: the default plays until a
+// device the words match appears, and then that device does.
+TEST_CASE("DeviceEvents: a device -H names loosely that is absent at boot is played on when it appears",
+          "[DeviceEvents]") {
+    auto sys = makeSimpleSystem();
+    auto interface = sys->device("Fake Interface");
+    interface->hidden = true;                      // not plugged in at boot
+    EngineFixture fix(fakeEngineConfig(sys, "interface"));
+    checkPlayingOn(fix, "Fake Speakers");
+
+    interface->hidden = false;                     // plugged in
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Interface");
+    CHECK(fix.engine().preferredOutputDevice() == "Fake Interface");
+}
+
 TEST_CASE("DeviceEvents: the session's buffer size is kept through an unplug and back",
           "[DeviceEvents]") {
     // Sonic Pi asks for 64 frames. With the interface unplugged the engine

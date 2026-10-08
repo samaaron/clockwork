@@ -1144,6 +1144,12 @@ private:
     // whether device is present"; mPreferredOutputDevice tracks "want to
     // use this device whenever it's available".
     std::string              mPreferredOutputDevice;
+    // The preferred output is still -H's words, not yet a device's name: no
+    // device they match has been seen. Matched the way -H matches ("motu"
+    // finds "motu-xaero") when the device list changes, and replaced by the
+    // name of the device they find. An exact name is never matched loosely:
+    // "USB Audio" absent must not become "USB Audio Pro" present.
+    bool                     mPreferredOutputIsWords = false;
     // Same for the input.
     std::string              mPreferredInputDevice;
     std::string              mLastInputDeviceName;    // saved on disable, restored on re-enable

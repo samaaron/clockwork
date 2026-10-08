@@ -138,8 +138,10 @@ void ClockworkEngine::recordSwapPreferences(const std::string& deviceName,
     // explicit deviceName means the caller picked it, so remember it even
     // across cycles where the device disappears. inputDeviceName ==
     // "__none__" means disable inputs, so clear the preferred input.
-    if (!deviceName.empty())
-        mPreferredOutputDevice = deviceName;
+    if (!deviceName.empty()) {
+        mPreferredOutputDevice  = deviceName;
+        mPreferredOutputIsWords = false;
+    }
     if (inputDeviceName == "__none__")
         mPreferredInputDevice.clear();
     else if (!inputDeviceName.empty())
@@ -474,8 +476,10 @@ void ClockworkEngine::init(const Config& cfg) {
     // device absent still remembers the user's intent — the device-list
     // listener auto-switches to it when it reappears. "__system__" means
     // follow the macOS default; leave the preferred empty.
-    if (!cfg.hardwareDevice.empty() && cfg.hardwareDevice != "__system__")
-        mPreferredOutputDevice = cfg.hardwareDevice;
+    if (!cfg.hardwareDevice.empty() && cfg.hardwareDevice != "__system__") {
+        mPreferredOutputDevice  = cfg.hardwareDevice;
+        mPreferredOutputIsWords = true;   // until boot or a device list finds it
+    }
     // -H's input name, remembered so boot pairing and hotplug both honour it.
     // ONLY when inputs are enabled: with -i 0, or the macOS mic-permission
     // guard's zeroing, a seeded preference lets decideHotplugAction reopen the
@@ -665,6 +669,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         } else {
             for (auto& e : entries) {
                 if (e.combined != matched) continue;
+                // What -H's words found is the device, by its name.
+                mPreferredOutputDevice  = e.devName;
+                mPreferredOutputIsWords = false;
 
                 mDeviceManager->setCurrentAudioDeviceType(
                     juce::String(e.typeName), true);
@@ -4657,6 +4664,23 @@ void ClockworkEngine::reconcileDevices() {
     std::vector<std::string> visibleNames;
     visibleNames.reserve(devices.size());
     for (auto& d : devices) visibleNames.push_back(d.name);
+
+    // -H's words that have not found a device yet: matched as -H matches them,
+    // against the outputs there now. A device they find is the preferred one
+    // from here on, by its name.
+    if (mPreferredOutputIsWords) {
+        std::vector<std::pair<std::string, std::string>> outputs;
+        for (auto& d : devices)
+            if (d.maxOutputChannels > 0) outputs.emplace_back(d.typeName, d.name);
+        const std::string matched = clockwork::device::resolveBootHardwareMatch(
+            mPreferredOutputDevice, dev ? dev->getTypeName().toStdString() : std::string(), outputs);
+        if (const auto at = matched.find(" : "); at != std::string::npos) {
+            mPreferredOutputDevice  = matched.substr(at + 3);
+            mPreferredOutputIsWords = false;
+            clockwork_log("[hotplug] -H's '%s' found '%s'", matched.c_str(), mPreferredOutputDevice.c_str());
+        }
+    }
+
     const auto decision = clockwork::device::decideHotplugAction(
         mPreferredOutputDevice, mPreferredInputDevice,
         currentOutput, currentActiveIn, visibleNames);
@@ -4939,6 +4963,7 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
         mDeviceMode = mode;
         mPreferredOutputDevice = mode;
     }
+    mPreferredOutputIsWords = false;
 
     if (!mRunning.load()) return "";
 
