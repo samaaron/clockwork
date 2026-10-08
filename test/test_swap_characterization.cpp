@@ -18,6 +18,7 @@
  * seam every engine device test ran with a null manager.
  */
 #include <catch2/catch_test_macros.hpp>
+#include "DeviceInvariants.h"
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
 #include <memory>
@@ -36,17 +37,6 @@ void subscribe(EngineFixture& fix) {
     OscReply ack;
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
     fix.clearReplies();
-}
-
-// The user picks an output from the menu; what the engine says it did.
-osc_test::ParsedReply pick(EngineFixture& fix, const char* output) {
-    osc_test::Builder b;
-    b.begin(CLOCKWORK_SYS("devices/switch"))
-        << output << 0.0f << static_cast<osc::int32>(0) << "";
-    fix.send(b.end());
-    OscReply done;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), done, 10000));
-    return done.parsed();
 }
 
 // Everything the engine has sent so far has arrived: this reply comes back
@@ -343,6 +333,51 @@ TEST_CASE("Swap: a reopen lands back on the user's device, not on the system def
 
     fix.send(osc_test::message("/dummy/ping"));
     CHECK(fix.waitForReply("/dummy/pong", reply));
+}
+
+TEST_CASE("Swap: a reopen keeps the session's buffer size", "[SwapChar][recovery]") {
+    // The fresh device manager a reopen builds knows nothing of the session;
+    // the engine does, and carries its rate over. Sonic Pi asks for 64 frames.
+    auto sys = makeSimpleSystem();                       // the fakes' own buffer is 128
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.bufferSize = 64;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().activeBufferSize == 64);
+    subscribe(fix);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/reopen")));
+    OscReply reply;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.done"), reply, 10000));
+    INFO(fix.debugMessagesDump());
+    CHECK(reply.parsed().argInt(0) == 1);
+    CHECK(fix.engine().currentDevice().name == "Fake Interface");
+    CHECK(fix.engine().currentDevice().activeBufferSize == 64);
+}
+
+TEST_CASE("Swap: a reopen keeps a buffer size the user chose after boot",
+          "[SwapChar][recovery]") {
+    // The size the session runs at is the last one chosen, not the one it
+    // booted with.
+    auto sys = makeSimpleSystem();
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.bufferSize = 64;
+    EngineFixture fix(cfg);
+    subscribe(fix);
+
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("devices/switch"))
+        << "Fake Interface" << 0.0f << static_cast<osc::int32>(256) << "";
+    fix.send(b.end());
+    OscReply reply;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), reply, 10000));
+    REQUIRE(reply.parsed().argInt(0) == 1);
+    REQUIRE(fix.engine().currentDevice().activeBufferSize == 256);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/reopen")));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.done"), reply, 10000));
+    INFO(fix.debugMessagesDump());
+    CHECK(reply.parsed().argInt(0) == 1);
+    CHECK(fix.engine().currentDevice().activeBufferSize == 256);
 }
 
 // ── Device-mutation phase ───────────────────────────────────────────────────

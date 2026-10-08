@@ -3299,9 +3299,10 @@ std::string ClockworkEngine::driverWithADefault() {
 }
 
 std::string ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
+    // The session's, from the engine's own record: recovery calls this on a
+    // device manager it has just made, which knows nothing of the session.
     int prevRate = mCurrentConfig.sampleRate;
-    auto prevSetup = mDeviceManager->getAudioDeviceSetup();
-    int prevBufSize = prevSetup.bufferSize;
+    int prevBufSize = mCurrentConfig.bufferSize;
 
     // "System default" means nothing on a driver with none (ASIO): JUCE's
     // default-device init stops the current device and opens nothing. Ask a
@@ -3452,6 +3453,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             result.deviceName = deviceName;
             result.sampleRate = mCurrentConfig.sampleRate;
             result.bufferSize = mCurrentConfig.bufferSize;
+            // Nothing to open, but a user's pick of the device already
+            // playing is their pick all the same: hot-plug follows it.
+            recordSwapPreferences(deviceName, inputDeviceName, result.sampleRate, origin);
             return result;
         }
     }
@@ -4109,6 +4113,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             result.sampleRate = finalDev->getCurrentSampleRate();
             result.bufferSize = finalDev->getCurrentBufferSizeSamples();
             mCurrentConfig.sampleRate = static_cast<int>(result.sampleRate);
+            mCurrentConfig.bufferSize = result.bufferSize;
             mCurrentConfig.numOutputChannels = finalDev->getActiveOutputChannels().countNumberOfSetBits();
             // Preserve the user's desired input channel count when we had to
             // drop inputs for an output that doesn't pair. Without this, a

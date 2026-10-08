@@ -155,6 +155,55 @@ TEST_CASE("DeviceEvents: the user's device plugged back in is played on again, "
     CHECK(fix.pollUntil([&] { return reported(fix, "Fake Interface"); }, 10000));
 }
 
+TEST_CASE("DeviceEvents: a device the user picks while theirs is unplugged is kept "
+          "when theirs comes back", "[DeviceEvents]") {
+    // Sonic Pi, 2026-10-08: the interface dropped out, the engine fell back to
+    // the speakers, the user picked the speakers in the menu, and the interface
+    // took the engine back with it when it returned. A pick of the device
+    // already playing is a pick all the same.
+    auto sys = makeSimpleSystem();                // the default is Fake Speakers
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
+    subscribe(fix);
+    auto interface = sys->device("Fake Interface");
+
+    interface->hidden = true;
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Speakers");
+
+    CHECK(pick(fix, "Fake Speakers").argInt(0) == 1);
+    CHECK(fix.engine().preferredOutputDevice() == "Fake Speakers");
+
+    interface->hidden = false;                     // plugged back in
+    REQUIRE(sys->reportListChanged());
+    deviceWorkDone(fix);
+    INFO(fix.debugMessagesDump());
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
+    checkCoherent(fix);
+}
+
+TEST_CASE("DeviceEvents: the session's buffer size is kept through an unplug and back",
+          "[DeviceEvents]") {
+    // Sonic Pi asks for 64 frames. With the interface unplugged the engine
+    // played on at the default device's own size, and kept it when the
+    // interface came back.
+    auto sys = makeSimpleSystem();                // the fakes' own buffer is 128
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.bufferSize = 64;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().activeBufferSize == 64);
+    auto interface = sys->device("Fake Interface");
+
+    interface->hidden = true;
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Speakers");
+    CHECK(fix.engine().currentDevice().activeBufferSize == 64);
+
+    interface->hidden = false;                     // plugged back in
+    REQUIRE(sys->reportListChanged());
+    checkPlayingOn(fix, "Fake Interface");
+    CHECK(fix.engine().currentDevice().activeBufferSize == 64);
+}
+
 TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from again, "
           "and one already recording is left alone", "[DeviceEvents]") {
     auto sys = std::make_shared<fake_audio::FakeSystem>();

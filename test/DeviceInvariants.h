@@ -20,6 +20,8 @@
 #pragma once
 
 #include "EngineFixture.h"
+#include "OscTestUtils.h"
+#include "clockwork_prefix.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -50,6 +52,17 @@ inline void checkCoherent(EngineFixture& fix) {
     CHECK((e.audioSource() == ClockworkEngine::AudioSource::RealCallback) == open);
     CHECK(e.waitingForAudioDevice() == !open);
     if (open) CHECK(fix.waitForBlocks(20));
+}
+
+// The user picks an output from the menu; what the engine says it did.
+inline osc_test::ParsedReply pick(EngineFixture& fix, const char* output) {
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("devices/switch"))
+        << output << 0.0f << static_cast<osc::int32>(0) << "";
+    fix.send(b.end());
+    OscReply done;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.done"), done, 10000));
+    return done.parsed();
 }
 
 // Playing on `name`, and coherent about it.
