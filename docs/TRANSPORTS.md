@@ -45,8 +45,9 @@ and UDS-dgram do not.
 ## The transports are a client library, not the engine's
 
 An engine has no sockets. It has one reply door, `IOscTransport`, and the
-in-process `CallbackTransport` behind it by default — which is all the
-worklet and the NIF ever have. The transports described in this file live in
+in-process `CallbackTransport` behind it by default. The NIF puts its own
+there, `NifTransport` (`src/nif/clockwork_nif.cpp`), which hands each reply to
+the registered Erlang processes. The transports described in this file live in
 `src/comms/` (`clockwork_comms.h`, CMake target `clockwork_comms`, Rust crate
 `clockwork-comms`) and are linked by a HOST that wants a wire: SuperSonic's
 own main (clockwork-supersonic/host/), a GUI that embeds the engine and opens

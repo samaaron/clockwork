@@ -6,15 +6,17 @@
 %% go in via {@link send_osc/1}, replies come back as Erlang messages
 %% to the registered processes (see {@link set_notification_pid/0}).
 %%
-%% The NIF is a first-class peer to the native UDP server: anything the
-%% UDP transport can do, BEAM can do without a socket. Device-notify and
+%% The NIF has no socket: it installs a transport of its own, which hands
+%% replies and broadcasts to the registered processes. Device-notify and
 %% Link-notify are subscribed to with the usual OSC commands sent through
 %% {@link send_osc/1} (e.g. `/clockwork/notify', `/clockwork/clock/notify/subscribe'),
 %% and their broadcasts arrive as ordinary `{osc_reply, Binary}' messages.
 %%
 %% Multiple processes may register; each receives every reply, broadcast
-%% and debug line. A registered process that dies is dropped automatically
-%% on the next delivery — the rest keep receiving.
+%% and debug line. A reply is not addressed to the process that sent the
+%% request: every registered process receives it, whoever asked. A
+%% registered process that dies is dropped automatically on the next
+%% delivery — the rest keep receiving.
 %%
 %% Every NIF call is non-blocking and never ties up a BEAM scheduler.
 %% {@link send_osc/1} is a ring-buffer write. {@link start/1} and {@link stop/0}
@@ -68,9 +70,10 @@
 
 -on_load(init/0).
 
-%% @private Load the NIF shared library.
-%% Checks CLOCKWORK_NIF_PATH env var first (for testing),
-%% then falls back to the application's priv directory.
+%% @private Load the NIF shared library, `clockwork' (the BEAM adds .so or
+%% .dll), from the directory named by the CLOCKWORK_NIF_PATH env var; else
+%% from the priv directory of the `clockwork' application; else from the
+%% directory this module's .beam is in.
 init() ->
     Path = case os:getenv("CLOCKWORK_NIF_PATH") of
         false ->
@@ -87,7 +90,9 @@ init() ->
     end,
     erlang:load_nif(Path, 0).
 
-%% @doc Returns `true' if the NIF is loaded, `false' otherwise.
+%% @doc Returns `true'. The module loads only with its NIF: if the library
+%% cannot be loaded, `-on_load' fails, the module is not loaded, and calling
+%% this raises `undef'.
 -spec is_nif_loaded() -> true | false.
 is_nif_loaded() -> false.
 
