@@ -20,7 +20,7 @@
 #include <juce_core/juce_core.h>
 #include <cstdint>
 
-class JuceAudioCallback;
+class ClockworkProcessor;
 class ClockworkClock;
 class LinkAudioHost;
 struct PerformanceMetrics;
@@ -29,7 +29,7 @@ class HeadlessDriver : public juce::Thread {
 public:
     HeadlessDriver();
 
-    void configure(JuceAudioCallback* callback,
+    void configure(ClockworkProcessor* callback,
                    int sampleRate,
                    int blockSize,
                    int numOutputChannels,
@@ -72,7 +72,7 @@ private:
     // have left on the audio callback (e.g. failed-init fallback path).
     int mBlockSize = 128;
 
-    JuceAudioCallback* mCallback         = nullptr;
+    ClockworkProcessor* mCallback         = nullptr;
     ClockworkClock*        mClockworkClock       = nullptr;
     LinkAudioHost*   mLinkAudio      = nullptr;
     PerformanceMetrics* mMetrics     = nullptr;

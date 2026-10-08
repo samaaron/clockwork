@@ -2617,7 +2617,7 @@ extern "C" {
     }
 
     // Live channel widths. A cold swap can rebuild at a different width than
-    // boot, so callers that cache channel counts (JuceAudioCallback's
+    // boot, so callers that cache channel counts (ClockworkProcessor's
     // output/input clamps) re-sync from these afterwards rather than trusting
     // boot-time values. Clockwork answers from what it CONFIGURED, never by
     // asking the DSP.

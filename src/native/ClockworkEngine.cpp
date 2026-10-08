@@ -409,6 +409,10 @@ ClockworkEngine::~ClockworkEngine() {
 
 void ClockworkEngine::init(const Config& cfg) {
     if (mRunning.load()) return;
+    // What the devices depend on, started from the thread that boots the
+    // engine: the one every host started it on, before the engine did it for
+    // them (smoothie_worklet.h).
+    smoothie::startPlatform();
     // The guest's config goes to it in a region of GUEST_CONFIG_SIZE bytes, its
     // NUL included. One that does not fit is refused here, before anything is
     // built, as the web side refuses it (writeGuestConfigToMemory): cut short
@@ -1102,7 +1106,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // process is never the one used.
     clockwork_set_heap_bytes(mCurrentConfig.heapBytes);
 
-    mAudioCallback.initialiseDsp(
+    mProcessor.initialiseDsp(
         arena,
         mCurrentConfig.sampleRate,
         mCurrentConfig.numOutputChannels,
@@ -1178,7 +1182,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     //    in-process client's therefore come off the ring by the same code, as
     //    they already go on by it (see ingest). (Drain #2 = the control ring,
     //    added with the NRT plane below.)
-    mNrtGateway.setWake(&mAudioCallback.processCount);
+    mNrtGateway.setWake(&mProcessor.processCount);
     // The egress rings' consumer is EITHER this pass or the host
     // (Config::hostDrainsEgress). Draining here goes through the client API
     // like any client's would — one poll, both rings — and routes through
@@ -1422,9 +1426,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // no separate drain of it here any more.
 
     // -- Audio callback wiring ---------------------------------------------
-    mAudioCallback.setClockworkClock(&mClockworkClock);
-    mAudioCallback.setLinkAudio(&mLinkAudio);
-    mAudioCallback.setMetrics(mMetrics);
+    mProcessor.setClockworkClock(&mClockworkClock);
+    mProcessor.setLinkAudio(&mLinkAudio);
+    mProcessor.setMetrics(mMetrics);
     // The Link input endpoint renders a peer's stream onto our timeline and needs to
     // know what a frame is worth.
     //
@@ -1435,7 +1439,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mLinkAudio.setAudioFormat(
         static_cast<uint32_t>(mCurrentConfig.sampleRate),
         clockworkLinkInputWidth(mCurrentConfig.numInputChannels));
-    mAudioCallback.onWake = [this]() { purge(); };
+    mProcessor.onWake = [this]() { purge(); };
 
     // Wire ClockworkClock's Link-event callbacks → OSC notify push.
     // Callbacks fire on Link's network thread; the egress serialises socket
@@ -1642,8 +1646,8 @@ void ClockworkEngine::shutdown() {
 
     // Wake the readers so they can exit. Both wait on processCount; bump it so
     // wait() sees a change and returns.
-    mAudioCallback.processCount.fetch_add(1, std::memory_order_release);
-    mAudioCallback.processCount.notify_all();
+    mProcessor.processCount.fetch_add(1, std::memory_order_release);
+    mProcessor.processCount.notify_all();
 
     mHeadlessDriver.stopThread(2000);
 
@@ -1692,7 +1696,7 @@ void ClockworkEngine::shutdown() {
     // the ClockworkClock sample-clock binding — a late pumpAudioBlock must
     // publish into nothing rather than the unmapped segment.
     mClockworkClock.bindSampleClockToShm(nullptr);
-    mAudioCallback.setMetrics(nullptr);
+    mProcessor.setMetrics(nullptr);
     mHeadlessDriver.setMetrics(nullptr);
     mPeerPlane.store(nullptr, std::memory_order_release);
     g_external_segment = nullptr;
@@ -1758,8 +1762,8 @@ void ClockworkEngine::pumpAudioBlock() {
                      static_cast<uint32_t>(mCurrentConfig.sampleRate), bt.ntp, bt.hostMicros);
     mManualSamplePos += blockSize;
 
-    mAudioCallback.processCount.fetch_add(1, std::memory_order_release);
-    mAudioCallback.processCount.notify_all();
+    mProcessor.processCount.fetch_add(1, std::memory_order_release);
+    mProcessor.processCount.notify_all();
 }
 
 // Copy the OSC address of the command about to be handled. Bounded copy off the
@@ -2213,7 +2217,7 @@ void ClockworkEngine::watchdogPoll() {
     if (benign) return;
 
     const int64_t  t     = watchdogNowMs();
-    const uint32_t count = mAudioCallback.processCount.load(std::memory_order_acquire);
+    const uint32_t count = mProcessor.processCount.load(std::memory_order_acquire);
     w.liveness.observe(count, t);
     const auto ph = w.liveness.phase(t);
 
@@ -2241,8 +2245,8 @@ void ClockworkEngine::watchdogPoll() {
         // pauses the callback briefly: ticks continue, frames freeze — a
         // false skew).
         if (w.rateCheck && ph == clockwork::audio::LivenessPhase::Live
-            && !mAudioCallback.isPaused()) {
-            const int nominal = mAudioCallback.nominalSampleRate();
+            && !mProcessor.isPaused()) {
+            const int nominal = mProcessor.nominalSampleRate();
             w.rateSkew.observe(mClockworkClock.engineFrames(),
                              static_cast<double>(nominal) / 1000.0, t);
             // Windows within tolerance end the skew episode for the
@@ -3104,7 +3108,7 @@ CurrentDeviceInfo ClockworkEngine::currentDevice() const {
     info.typeName = dev->getTypeName().toStdString();
     info.activeSampleRate    = dev->getCurrentSampleRate();
     info.activeBufferSize    = dev->getCurrentBufferSizeSamples();
-    info.controlBlockSize    = mAudioCallback.bufferLength();
+    info.controlBlockSize    = mProcessor.bufferLength();
     info.activeOutputChannels = dev->getActiveOutputChannels().countNumberOfSetBits();
     info.activeInputChannels  = dev->getActiveInputChannels().countNumberOfSetBits();
     info.outputLatencySamples = dev->getOutputLatencyInSamples();
@@ -3180,7 +3184,7 @@ bool ClockworkEngine::startAudioSource() {
         return true;
     }
 
-    uint32_t before = mAudioCallback.processCount.load(std::memory_order_acquire);
+    uint32_t before = mProcessor.processCount.load(std::memory_order_acquire);
 
     const AudioSource desired = desiredAudioSource();
     if (desired == AudioSource::RealCallback) {
@@ -3196,12 +3200,12 @@ bool ClockworkEngine::startAudioSource() {
             clockwork_log("[engine] attaching audio callback to device '%s'",
                     dev ? dev->getName().toRawUTF8() : "(none)");
         }
-        mDeviceManager->addAudioCallback(&mAudioCallback);
+        mDeviceManager->addAudioCallback(&mDeviceCallback);
         clockwork_log("[engine] audio callback attached — waiting for first tick");
         mActiveSource.store(AudioSource::RealCallback, std::memory_order_release);
     } else if (desired == AudioSource::Headless) {
         // Explicit headless (mHeadless): tests and future non-JUCE backends.
-        mHeadlessDriver.configure(&mAudioCallback,
+        mHeadlessDriver.configure(&mProcessor,
                                    mCurrentConfig.sampleRate,
                                    mCurrentConfig.bufferSize,
                                    mCurrentConfig.numOutputChannels,
@@ -3232,7 +3236,7 @@ void ClockworkEngine::stopAudioSource() {
         return;
     case AudioSource::RealCallback:
         if (mDeviceManager)
-            mDeviceManager->removeAudioCallback(&mAudioCallback);
+            mDeviceManager->removeAudioCallback(&mDeviceCallback);
         // Change listener is NOT removed here; it survives swaps and is
         // removed only in shutdown(). Removing it would lose hot-plug
         // events between stop and the next start.
@@ -3249,11 +3253,11 @@ bool ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     constexpr int kTimeoutMs = 5000;
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(kTimeoutMs);
-    while (mAudioCallback.processCount.load(std::memory_order_acquire) == before
+    while (mProcessor.processCount.load(std::memory_order_acquire) == before
            && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    bool ticked = mAudioCallback.processCount.load(std::memory_order_acquire) != before;
+    bool ticked = mProcessor.processCount.load(std::memory_order_acquire) != before;
     if (!ticked) {
         clockwork_log(
                 "[engine] WARNING: audio callbacks not firing after %d ms, "
@@ -3647,7 +3651,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
     // --- Pause and optionally capture state ---
     if (isCold) purge();
-    mAudioCallback.pause();
+    mProcessor.pause();
 
     // Cold swaps tear down and re-init the shared-memory arena (destroy_dsp
     // / rebuild_dsp → init_memory → clockwork_lanes_reset_drains) that the
@@ -3946,7 +3950,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         }
         controlPark.resumeNow();
         startAudioSource();
-        mAudioCallback.resume();
+        mProcessor.resume();
         result.error = errStr;
         if (isCold) {
             // The rollback rebuilt the guest too, and that can fail like any build.
@@ -4029,7 +4033,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // --- Restart audio (success path) ---
     controlPark.resumeNow();
     const bool delivered = startAudioSource();
-    mAudioCallback.resume();
+    mProcessor.resume();
 
     // A device that opened and started but never delivered a block is a failed
     // swap, as one that refused to open is: nothing is playing on it, whatever
@@ -4188,7 +4192,7 @@ void ClockworkEngine::teardownDeviceManager() {
     if (mDeviceManager) {
         // The sink stays to the end: a change reported while the manager goes
         // down only notes it for a pass on the lane, which finds no manager.
-        mDeviceManager->removeAudioCallback(&mAudioCallback);
+        mDeviceManager->removeAudioCallback(&mDeviceCallback);
         mDeviceManager->closeAudioDevice();
         mDeviceManager.reset();
     }

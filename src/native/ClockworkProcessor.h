@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 /*
- * JuceAudioCallback.h — JUCE audio driver bridge
+ * ClockworkProcessor.h — clockwork's processor on Smoothie's native worklet.
+ *
+ * What ClockworkProcessor in js/workers/clockwork_audio_worklet.js is to a
+ * browser's AudioWorklet, this is to Smoothie's (smoothie_worklet.h): the
+ * platform owns the device and hands this the hardware's buffers once per
+ * callback; this turns them into the engine's blocks. It sees no JUCE —
+ * the device reaches it as plain facts and plain buffers.
  */
 #pragma once
 
-#include <juce_audio_devices/juce_audio_devices.h>
+#include "smoothie_worklet.h"
 #include "clock/clock_math.h"
 #include <atomic>
 #include <chrono>
@@ -67,10 +73,9 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       double   ntp,
                       uint64_t hostMicros);
 
-class JuceAudioCallback : public juce::AudioIODeviceCallback {
+class ClockworkProcessor final : public smoothie::Processor {
 public:
-    JuceAudioCallback();
-    ~JuceAudioCallback() override = default;
+    ClockworkProcessor();
 
     // Boot the engine. The geometry here is the Clockwork's — what the device
     // opened — and it is passed as arguments because that is what it is.
@@ -113,7 +118,7 @@ public:
     std::atomic<uint32_t> processCount{0};
 
     // Nominal rate and buffer size of the currently-open device (set in
-    // audioDeviceAboutToStart; 0 before the first device). Atomic because the
+    // deviceStarting; 0 before the first device). Atomic because the
     // watchdog's rate-skew check and the control pass read them, and the
     // control pass must never wait for the swap gate to ask the device itself
     // (a cold swap holding the gate waits for the pass to park).
@@ -124,15 +129,13 @@ public:
         return mDeviceBufferSize.load(std::memory_order_relaxed);
     }
 
-    void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
-    void audioDeviceStopped() override;
-    void audioDeviceIOCallbackWithContext(
-        const float* const* inputChannelData,
-        int numInputChannels,
-        float* const* outputChannelData,
-        int numOutputChannels,
-        int numSamples,
-        const juce::AudioIODeviceCallbackContext& context) override;
+    // The worklet's calls (smoothie_worklet.h): a device starting, each of
+    // its blocks on the real-time thread, and its stopping.
+    void deviceStarting(const smoothie::DeviceInfo& device) override;
+    void process(const float* const* inputs, int numInputs,
+                 float* const* outputs, int numOutputs,
+                 int frames, const smoothie::BlockTime& time) override;
+    void deviceStopped() override;
 
     // --- Pause/resume for device swap ---
     void pause();
@@ -222,9 +225,9 @@ private:
     std::atomic<int>  mDeviceBufferSize{0};   // see deviceBufferSize()
 
     // One-shot guard for promoting the audio thread to realtime. Reset in
-    // audioDeviceAboutToStart (control thread) so each device (re)start
-    // re-promotes the possibly-new audio thread; acted on in the first
-    // audioDeviceIOCallbackWithContext, which runs on the audio thread itself.
+    // deviceStarting (control thread) so each device (re)start re-promotes
+    // the possibly-new audio thread; acted on in the first process call,
+    // which runs on the audio thread itself.
     std::atomic<bool> mRealtimeElevated{false};
 
     // One-shot per device start (same reset pattern as mRealtimeElevated):

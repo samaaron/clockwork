@@ -30,7 +30,7 @@ TEST_CASE("master tap: the OUT tap flows from boot on a device host and carries 
     CHECK(out->channels >= 1);
 
     // Flowing: every frame rendered is in the tap.
-    const uint32_t block  = static_cast<uint32_t>(fx.engine().audioCallback().bufferLength());
+    const uint32_t block  = static_cast<uint32_t>(fx.engine().processor().bufferLength());
     const uint32_t blocks = 48000 * 3 / 10 / block;   // 0.3 s
     const uint64_t a = out->write_position.load();
     fx.pumpBlock(blocks);

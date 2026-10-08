@@ -41,7 +41,7 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
     // It ticks: the process count climbs with no render from us. Polled
     // rather than slept on a fixed window, because the first blocks of a
     // device start are warmup callbacks that emit silence without ticking
-    // (JuceAudioCallback, mCallbackCount < 4), so how long the count takes
+    // (ClockworkProcessor, mCallbackCount < 4), so how long the count takes
     // to move is the hardware buffer's period times four — 43 ms on a
     // 512-frame device, 213 ms on the 2560-frame buffer Windows' DirectSound
     // default hands out, which a fixed 200 ms sleep loses to. The bound is

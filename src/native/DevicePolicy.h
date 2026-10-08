@@ -447,10 +447,10 @@ bool sameDeviceName(const std::string& a, const std::string& b);
 
 // Decide the DSP's block size at boot given the hardware callback buffer size.
 // Matching them means one DSP block per HW callback — no prefetch buffer, no
-// input accumulator. Diverging means JuceAudioCallback's decoupling machinery
+// input accumulator. Diverging means ClockworkProcessor's decoupling machinery
 // handles the mismatch: correct, but more memcpy.
 //
-// The clamp matches JuceAudioCallback::initialiseDsp's, so the two agree about
+// The clamp matches ClockworkProcessor::initialiseDsp's, so the two agree about
 // what is valid.
 int chooseBlockSize(int hwBufSize, int defaultBlockSize,
                     int minBlockSize, int maxBlockSize);

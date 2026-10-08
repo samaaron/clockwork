@@ -25,7 +25,6 @@
 #include "GuestConfigText.h"
 #include "IOscTransport.h"
 
-#include <juce_core/juce_core.h>
 
 #include <algorithm>
 #include <atomic>
@@ -47,8 +46,6 @@
 // uncontended-or-microseconds, even while a start/stop is in flight.
 static std::mutex g_engine_mutex;
 static std::unique_ptr<ClockworkEngine> g_engine;
-// JUCE runtime — initialised lazily on the lifecycle worker before the first boot.
-static std::atomic<bool> g_juce_initialised{false};
 
 // ─── Subscriber registry ────────────────────────────────────────────────────
 //
@@ -388,11 +385,6 @@ static void worker_do_start(const LifecycleCmd& cmd) {
                 });
             return;
         }
-    }
-
-    if (!g_juce_initialised.load()) {
-        juce::initialiseJuce_GUI();
-        g_juce_initialised.store(true);
     }
 
     std::unique_ptr<ClockworkEngine> engine;

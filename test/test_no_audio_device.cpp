@@ -53,7 +53,7 @@ ClockworkEngine::Config watchedByTheCase(std::shared_ptr<fake_audio::FakeSystem>
 }
 
 uint32_t processCount(ClockworkEngine& e) {
-    return e.audioCallback().processCount.load(std::memory_order_acquire);
+    return e.processor().processCount.load(std::memory_order_acquire);
 }
 
 

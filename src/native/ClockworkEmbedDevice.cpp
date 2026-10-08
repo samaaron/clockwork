@@ -9,16 +9,12 @@
 #include "native/ClockworkEngine.h"
 #include "owner.h"
 #include "lanes/lanes.h"
-#include <juce_events/juce_events.h>
 #include <memory>
 #include <new>
 
 namespace {
 
 struct DeviceEngine {
-    // JUCE's message machinery, for the device layer, for as long as the
-    // engine lives. One per process, like the engine.
-    std::unique_ptr<juce::ScopedJuceInitialiser_GUI> juce;
     std::unique_ptr<ClockworkEngine> engine;
 };
 
@@ -27,7 +23,6 @@ void closeDevice(void* p) {
     if (!d) return;
     if (d->engine) d->engine->shutdown();
     d->engine.reset();
-    d->juce.reset();
     delete d;
 }
 
@@ -62,10 +57,9 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     if (g_clockwork_embed.load(std::memory_order_acquire)) return fail(CLOCKWORK_E_PERM);
 
     // Owned here until the handle has it: a boot that throws (init) takes
-    // the engine and the JUCE initialiser down with this, not leaves them.
+    // the engine down with this, not leaves it.
     std::unique_ptr<DeviceEngine> d(new (std::nothrow) DeviceEngine());
     if (!d) return fail(CLOCKWORK_E_NOMEM);
-    d->juce   = std::make_unique<juce::ScopedJuceInitialiser_GUI>();
     d->engine = std::make_unique<ClockworkEngine>();
     d->engine->onDebug = [](const std::string&) {};
     d->engine->onReply = [](const uint8_t*, uint32_t) {};

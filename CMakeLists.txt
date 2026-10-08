@@ -651,7 +651,7 @@ endif()
 if(CLOCKWORK_DEVICE)
     list(APPEND CLOCKWORK_NATIVE_SOURCES
         ${NATIVE_SRC}/HeadlessDriver.cpp
-        ${NATIVE_SRC}/JuceAudioCallback.cpp
+        ${NATIVE_SRC}/ClockworkProcessor.cpp
         ${NATIVE_SRC}/RealtimeThread.cpp
         ${NATIVE_SRC}/EngineControl.cpp
         ${NATIVE_SRC}/ClockworkEngine.cpp

@@ -5,7 +5,7 @@
  */
 #include "HeadlessDriver.h"
 #include "clockwork_product.h"
-#include "JuceAudioCallback.h"
+#include "ClockworkProcessor.h"
 #include "clock/ClockworkClock.h"
 #include "native/AudioBlockClock.h"
 #include "native/LinkAudioHost.h"
@@ -22,12 +22,12 @@
   #include <windows.h>
 #endif
 
-// wallClockNTP() comes from clock_math.h (included via JuceAudioCallback.h).
+// wallClockNTP() comes from clock_math.h (included via ClockworkProcessor.h).
 
 HeadlessDriver::HeadlessDriver()
     : juce::Thread(CLOCKWORK_PRODUCT_NAME "-Headless") {}
 
-void HeadlessDriver::configure(JuceAudioCallback* callback,
+void HeadlessDriver::configure(ClockworkProcessor* callback,
                                 int sampleRate,
                                 int blockSize,
                                 int numOutputChannels,

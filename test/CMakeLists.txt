@@ -24,6 +24,15 @@ else()
     list(APPEND CMAKE_MODULE_PATH "${Catch2_DIR}")
 endif()
 
+# Headers that sit above Smoothie's worklet, compiled by a target that cannot
+# see JUCE: it takes clockwork's own include directories and does not link
+# smoothie, whose modules are where JUCE lives. A JUCE include in any of them
+# fails this build.
+add_library(clockwork_juce_free_headers OBJECT juce_free_headers.cpp)
+target_include_directories(clockwork_juce_free_headers PRIVATE
+    ${CLOCKWORK_INCLUDE_DIRS} ${CLOCKWORK_SRC}/../smoothie/worklet)
+target_compile_features(clockwork_juce_free_headers PRIVATE cxx_std_20)
+
 add_executable(clockwork_tests
     test_main.cpp
 
@@ -405,6 +414,7 @@ add_executable(clockwork_engine_tests
     test_client_egress.cpp
     test_host_control.cpp
     test_master_tap.cpp
+    test_audio_resume.cpp
     test_assets.cpp
     test_shm_peer_crash.cpp
     test_thread_lifetime.cpp

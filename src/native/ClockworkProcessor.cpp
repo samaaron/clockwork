@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
-#include "JuceAudioCallback.h"
+#include "ClockworkProcessor.h"
 #include "HardeningPolicy.h"
 #include "RealtimeThread.h"
 #include "clock/clock_math.h"
@@ -19,7 +19,7 @@
 extern "C" void clockwork_publish_audio_load(uint32_t cpuAvgCenti, uint32_t cpuPeakCenti,
                                        uint32_t callbackOverruns);
 
-// Shared per-DSP-block render (see JuceAudioCallback.h). One copy of the
+// Shared per-DSP-block render (see ClockworkProcessor.h). One copy of the
 // tick → publish sequence for both HeadlessDriver and the engine's manual
 // pump.
 void renderAudioBlock(LinkAudioHost& linkAudio,
@@ -44,9 +44,9 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
     }
 }
 
-JuceAudioCallback::JuceAudioCallback() = default;
+ClockworkProcessor::ClockworkProcessor() = default;
 
-void JuceAudioCallback::initialiseDsp(uint8_t* ringBufferStorage,
+void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
                                      int sampleRate,
                                      int numOutputChannels,
                                      int numInputChannels,
@@ -78,15 +78,15 @@ void JuceAudioCallback::initialiseDsp(uint8_t* ringBufferStorage,
 
     mPrefetchBuf.assign(static_cast<size_t>(numOutputChannels) * mBufLen, 0.0f);
 
-    // Initial accumulator: 2*mBufLen per channel. audioDeviceAboutToStart
-    // will grow it if the HW buffer size exceeds this.
+    // Initial accumulator: 2*mBufLen per channel. deviceStarting will grow
+    // it if the HW buffer size exceeds this.
     int inChans = std::max(1, numInputChannels);
     mAccumPerChanCap = mBufLen * 2;
     mInputAccum.assign(static_cast<size_t>(inChans) * mAccumPerChanCap, 0.0f);
     mInputAccumCount = 0;
 
     // This host arms denormal flush-to-zero on its audio thread every callback
-    // (ScopedNoDenormals in audioDeviceIOCallbackWithContext), so say so: the
+    // (Smoothie's device callback does, before each block), so say so: the
     // guest reads DspConfig::fp_env and must not discover the flag by rendering
     // a different filter tail here than it renders in a browser.
     clockwork_declare_fp_env(DSP_FP_ENV_FLUSH_TO_ZERO);
@@ -111,10 +111,10 @@ void JuceAudioCallback::initialiseDsp(uint8_t* ringBufferStorage,
              inbox, inboxBytes, outbox, outboxBytes);
 }
 
-void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
-    mSampleRate     = static_cast<int>(device->getCurrentSampleRate());
+void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
+    mSampleRate     = static_cast<int>(device.sampleRate);
     mNominalRate.store(mSampleRate, std::memory_order_relaxed);
-    mDeviceBufferSize.store(device->getCurrentBufferSizeSamples(), std::memory_order_relaxed);
+    mDeviceBufferSize.store(device.bufferFrames, std::memory_order_relaxed);
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;
@@ -133,13 +133,13 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 
     // Sync our internal channel counts from what the device actually opened.
     // mNumInput/OutputChannels are what we tell the DSP (via clockwork_tick's
-    // active-channel args) and what we clamp JUCE's channel arrays to.
+    // active-channel args) and what we clamp the device's channel arrays to.
     // Without this, initialiseDsp()'s boot-time values stick forever even
     // after cold swaps that change the channel count (e.g. re-enabling inputs
     // after a mic-permission grant). Result: hw mic delivers samples but
     // the DSP never sees them.
-    int activeIn  = device->getActiveInputChannels().countNumberOfSetBits();
-    int activeOutCount = device->getActiveOutputChannels().countNumberOfSetBits();
+    int activeIn  = device.inputChannels;
+    int activeOutCount = device.outputChannels;
     if (activeIn > 0)       mNumInputChannels  = activeIn;
     if (activeOutCount > 0) mNumOutputChannels = activeOutCount;
 
@@ -170,7 +170,7 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     // required total size; without a separate channel-count check,
     // the next callback's input memcpy would walk past the vector
     // end at ch >= old chans.
-    int hwBufSize = device->getCurrentBufferSizeSamples();
+    int hwBufSize = device.bufferFrames;
     int perChanNeeded = std::max(hwBufSize + mBufLen, 2 * mBufLen);
     int chans = std::max(1, std::max(activeIn, mNumInputChannels));
     if (perChanNeeded > mAccumPerChanCap)
@@ -189,30 +189,28 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     // Ordering matters: for an aggregate combining e.g. MBP Speakers +
     // MOTU, channels 0-1 might be MBP and 2-3 might be MOTU (or vice
     // versa, depending on sub-device list order). We write to
-    // whatever channels JUCE marks "active" — usually the first two.
+    // whatever channels the device marks active — usually the first two.
     // Channel-layout dump on every device open — kept always-on because
     // it's the one-shot output we need to diagnose "my MOTU output 5 has
     // the wrong thing" / aggregate-ordering issues in user bug reports.
     // One per device start, so the volume is bounded.
     {
-        auto outNames = device->getOutputChannelNames();
-        auto activeOut = device->getActiveOutputChannels();
-        clockwork_log("[juce] output channels (%d total):", outNames.size());
-        for (int i = 0; i < outNames.size(); ++i) {
-            clockwork_log("[juce]   [%d] %s%s", i,
-                    outNames[i].toRawUTF8(), activeOut[i] ? " (active)" : "");
+        clockwork_log("[juce] output channels (%d total):", static_cast<int>(device.outputs.size()));
+        for (size_t i = 0; i < device.outputs.size(); ++i) {
+            clockwork_log("[juce]   [%d] %s%s", static_cast<int>(i),
+                    device.outputs[i].name.c_str(), device.outputs[i].active ? " (active)" : "");
         }
     }
     clockwork_log("[juce] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
-            device->getName().toRawUTF8(),
-            device->getTypeName().toRawUTF8(),
+            device.name.c_str(),
+            device.driver.c_str(),
             mSampleRate,
             hwBufSize,
             activeOutCount, activeIn,
-            device->getOutputLatencyInSamples(),
-            device->getInputLatencyInSamples());
+            device.outputLatencyFrames,
+            device.inputLatencyFrames);
 
-    mOutputLatencySamples = device->getOutputLatencyInSamples();
+    mOutputLatencySamples = device.outputLatencyFrames;
 
     // Native timing: set ntp_start and drift to 0. NTP is derived from sample
     // position with slow drift correction (see ClockworkClock::updateAudioThreadNTP),
@@ -229,7 +227,7 @@ void JuceAudioCallback::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 
 }
 
-void JuceAudioCallback::audioDeviceStopped() {
+void ClockworkProcessor::deviceStopped() {
     clockwork_log("[juce] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
@@ -237,11 +235,11 @@ void JuceAudioCallback::audioDeviceStopped() {
 
 // --- Pause/resume ---
 
-void JuceAudioCallback::pause() {
+void ClockworkProcessor::pause() {
     mPaused.store(true, std::memory_order_release);
 }
 
-void JuceAudioCallback::resume() {
+void ClockworkProcessor::resume() {
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;      // discard stale mic samples from before pause
@@ -269,17 +267,17 @@ void JuceAudioCallback::resume() {
     mPaused.store(false, std::memory_order_release);
 }
 
-bool JuceAudioCallback::isPaused() const {
+bool ClockworkProcessor::isPaused() const {
     return mPaused.load(std::memory_order_acquire);
 }
 
-void JuceAudioCallback::audioDeviceIOCallbackWithContext(
+void ClockworkProcessor::process(
     const float* const* inputChannelData,
     int numInputChannels,
     float* const* outputChannelData,
     int numOutputChannels,
     int numSamples,
-    const juce::AudioIODeviceCallbackContext& context)
+    const smoothie::BlockTime& time)
 {
     // One-shot per device start: proves the device's IO thread actually
     // reached us. Deliberately the first statement — if the process dies
@@ -292,7 +290,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
     }
 
     // Promote the audio thread to realtime once per device start. Done here
-    // rather than in audioDeviceAboutToStart (control thread) because this
+    // rather than in deviceStarting (control thread) because this
     // callback runs on the audio thread. A denied request (no rtprio
     // permission) leaves the thread unchanged; see RealtimeThread.h.
     if (!mRealtimeElevated.exchange(true, std::memory_order_relaxed)) {
@@ -300,11 +298,6 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         clockwork_log("[juce] audio thread realtime: status=%d policy=%d prio=%d err=%d",
                static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
     }
-
-    // Denormal flush-to-zero is a per-thread flag, so a DSP that arms it at
-    // boot arms it only on the boot thread. Arm it on this audio thread too,
-    // else denormal reverb tails take the slow path and spike CPU.
-    const juce::ScopedNoDenormals scopedNoDenormals;
 
     // ── If paused, output silence and touch nothing else ──────────────────────
     // Placed before the warmup counter, mSamplePosition and mLastCbTime reads
@@ -324,13 +317,13 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         return;
     }
 
-    int nIn  = juce::jmin(numInputChannels,  mNumInputChannels);
+    int nIn  = std::min(numInputChannels,  mNumInputChannels);
     // Clamp to the DSP's output channel count as well as the live device count:
     // after a hot swap onto a wider device mNumOutputChannels exceeds what the
     // DSP renders, and the copy loops below would read staging rows the DSP
     // never writes (mirrors the mDspInputChannels clamp on the input side).
-    int nOut = juce::jmin(numOutputChannels,
-                          juce::jmin(mNumOutputChannels, mDspOutputChannels));
+    int nOut = std::min(numOutputChannels,
+                        std::min(mNumOutputChannels, mDspOutputChannels));
 
     const uint64_t engineBlockMicros = mSampleRate > 0
         ? static_cast<uint64_t>((static_cast<double>(mBufLen) * 1e6) / mSampleRate)
@@ -438,7 +431,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         outputFilled    = toDrain;
     }
 
-    // ── 2. Generate mBufLen-sized DSP blocks until the JUCE buffer is full ───
+    // ── 2. Generate mBufLen-sized DSP blocks until the device's buffer is full ───
     // One clock step per hardware callback: the sample-clock line is linear
     // across the sub-blocks, so one anchor serves them all (per-block cursor
     // advances happen in the loop). Negative latency reports from flaky
@@ -448,13 +441,13 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
         static_cast<uint32_t>(std::max(0, mOutputLatencySamples)), mMetrics);
     double wallNTP = bt.ntp;         // advanced per sub-block below
 
-    // hostTimeNs is the framework's "this buffer plays at T" timestamp (only
-    // JUCE's CoreAudio backend supplies it; every other JUCE backend and our
-    // own PipeWire backend pass an empty context). When absent, the block
+    // hostTimeNs is the driver's "this buffer plays at T" timestamp (only the
+    // CoreAudio backend supplies it; the others, our PipeWire backend among
+    // them, give none). When absent, the block
     // keeps ClockworkClock's jitter-free stamp rather than a jittery link.clock()
     // read here.
     uint64_t linkAudioBlockHostMicros =
-        context.hostTimeNs != nullptr ? (*context.hostTimeNs) / 1000ULL : bt.hostMicros;
+        time.hostTimeNs != 0 ? time.hostTimeNs / 1000ULL : bt.hostMicros;
 
 
     while (outputFilled < numSamples) {
@@ -511,7 +504,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
             // stereo when nOut >= 2, mono fallback for nOut == 1.
             // hostMicros is the audio-framework's playback timestamp
             // for THIS sub-block; advanced after each publish so
-            // consecutive sub-blocks within one JUCE callback get
+            // consecutive sub-blocks within one device callback get
             // correctly-spaced timestamps. No-op when LinkAudio off /
             // no subscriber.
             if (nOut >= 2) {
@@ -539,7 +532,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
                                 static_cast<size_t>(toCopy) * sizeof(float));
             outputFilled += toCopy;
 
-            // Save any leftover samples for the next JUCE callback
+            // Save any leftover samples for the next device callback
             int leftover = mBufLen - toCopy;
             if (leftover > 0) {
                 for (int ch = 0; ch < nOut; ++ch)
@@ -600,7 +593,7 @@ void JuceAudioCallback::audioDeviceIOCallbackWithContext(
                                mOverrunCount);
     }
 
-    // ── 5. Notify worker threads (one tick per JUCE callback) ─────────────────
+    // ── 5. Notify worker threads (one tick per device callback) ─────────────────
     processCount.fetch_add(1, std::memory_order_release);
     processCount.notify_all();
 }

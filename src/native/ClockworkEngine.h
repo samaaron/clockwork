@@ -44,7 +44,8 @@
 #if CLOCKWORK_HAS_PLUGIN_TRACKS
 #include "TrackControl.h"
 #endif
-#include "JuceAudioCallback.h"
+#include "ClockworkProcessor.h"
+#include "smoothie_juce_device_callback.h"
 #include "clock/MidiClockOut.h"
 #include "clock/ClockworkClock.h"
 #include "native/LinkAudioHost.h"
@@ -58,7 +59,7 @@
 #include "shm_segment.hpp"
 
 class ClockworkEngine {
-    friend class EngineFixture;  // test fixture needs access to mAudioCallback
+    friend class EngineFixture;
 public:
     // One engine per process half: its threads, device and segment are not things to copy or move.
     ClockworkEngine(const ClockworkEngine&) = delete;
@@ -608,7 +609,7 @@ public:
     TestSwapHold testHoldSwapGate();
 
     // --- Audio callback access (for preTick hook, pause/resume) ---
-    JuceAudioCallback& audioCallback() { return mAudioCallback; }
+    ClockworkProcessor& processor() { return mProcessor; }
 
     // CFRunLoop suppression (macOS). The host's run-loop pump calls
     // isRunLoopSuppressed() each tick and sleeps instead of pumping
@@ -725,7 +726,7 @@ private:
     // ── Audio source state machine ──────────────────────────────────────────
     //
     // process_audio() runs from exactly one of two drivers:
-    //   RealCallback: JUCE's AudioDeviceManager fires our JuceAudioCallback
+    //   RealCallback: JUCE's AudioDeviceManager fires Smoothie's device callback, which runs our ClockworkProcessor
     //                 when a device is open.
     //   Headless:     a high-priority timer thread (HeadlessDriver) fakes
     //                 the same contract when no device is available. Used
@@ -856,7 +857,9 @@ private:
     // onto a device (setDeviceMode, followDefaultOutput). Empty on success.
     std::string openSystemDefault();
 
-    JuceAudioCallback mAudioCallback;
+    ClockworkProcessor mProcessor;
+    // What the device manager calls: the processor behind Smoothie's worklet.
+    smoothie::JuceDeviceCallback mDeviceCallback{mProcessor};
     // The default egress transport: in-process, replies via onReply. An embedder
     // injects a real transport via setTransport (a host that owns sockets
     // injects one from the comms client library). The engine owns no socket.

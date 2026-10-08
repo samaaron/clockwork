@@ -20,7 +20,7 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
-#include "JuceAudioCallback.h"   // get_audio_buffer_samples
+#include "ClockworkProcessor.h"   // get_audio_buffer_samples
 #include "lanes/lanes.h"         // clockwork_audio_in
 #include <algorithm>
 #include <chrono>

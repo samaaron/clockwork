@@ -10,7 +10,7 @@
  */
 #include "EngineFixture.h"
 #include "DebugTail.h"
-#include "JuceAudioCallback.h"
+#include "ClockworkProcessor.h"
 #include "clockwork_event_sink.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -173,10 +173,10 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
 
 bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {
     const uint32_t start =
-        mEngine.audioCallback().processCount.load(std::memory_order_acquire);
+        mEngine.processor().processCount.load(std::memory_order_acquire);
     // Unsigned wrap is fine: (now - start) counts blocks since the snapshot.
     auto rendered = [&] {
-        return mEngine.audioCallback().processCount.load(std::memory_order_acquire) - start;
+        return mEngine.processor().processCount.load(std::memory_order_acquire) - start;
     };
     // Manual pump: the case is the clock. The blocks are rendered here, now,
     // however busy the machine is — no deadline to miss.

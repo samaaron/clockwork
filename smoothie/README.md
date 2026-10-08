@@ -8,6 +8,17 @@ negotiation, the audio callback — on macOS, Windows and Linux. A vendored,
 ISC-licensed fork of the four permissive modules of JUCE 7, which we maintain
 and hack on directly; the name is JUCE, blended.
 
+## The worklet
+
+Smoothie is to Clockwork what a browser's AudioWorklet is to it on the web:
+the platform owns the hardware and calls a processor with buffers.
+`worklet/smoothie_worklet.h` is that whole interface — a `Processor` handed
+plain facts about the device and plain buffers, and `startPlatform()` — and it
+contains no JUCE. JUCE is used here and nowhere above: the engine, its hosts
+and their tests reach the hardware through the worklet alone, and a JUCE type,
+include or initialiser outside this tree is a bug to move into it.
+`worklet/smoothie_juce_device_callback.h` is the worklet's JUCE side.
+
 ## Provenance
 
 - Source: JUCE tag **7.0.12** — the last JUCE whose core/audio modules are ISC.
@@ -34,5 +45,6 @@ and hack on directly; the name is JUCE, blended.
 
 `smoothie/CMakeLists.txt` builds one static library target `smoothie`
 that compiles each module's unity source with the module-format defines and
-exports `modules/` as the include root, so existing
-`#include <juce_audio_devices/juce_audio_devices.h>` lines work unchanged.
+the worklet, and exports `worklet/` and `modules/` as include roots. Code
+above Smoothie still includes JUCE in places while it moves behind the
+worklet; when none does, `modules/` stops being exported.

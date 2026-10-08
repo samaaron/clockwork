@@ -10,7 +10,7 @@
  * whole server deaf — commands pile up in the IN ring forever — while the
  * control socket stays superficially alive.
  *
- * The watchdog samples JuceAudioCallback::processCount; when it freezes for
+ * The watchdog samples ClockworkProcessor::processCount; when it freezes for
  * longer than the stall window (and no swap/reopen is in flight) it must
  * restart the audio source, after which queued commands drain and the
  * engine answers again.
