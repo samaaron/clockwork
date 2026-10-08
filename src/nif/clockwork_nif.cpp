@@ -24,6 +24,7 @@
 #include "ClockworkEngine.h"
 #include "GuestConfigText.h"
 #include "IOscTransport.h"
+#include "clockwork_nif_front.h"
 
 
 #include <algorithm>
@@ -46,6 +47,13 @@
 // uncontended-or-microseconds, even while a start/stop is in flight.
 static std::mutex g_engine_mutex;
 static std::unique_ptr<ClockworkEngine> g_engine;
+// The product's front, when it has one (clockwork_nif_front.h): published and
+// unpublished with g_engine, under the same lock.
+static std::unique_ptr<OscFront> g_front;
+// The BEAM is one client of the engine, and this is its token: non-zero, so the
+// engine answers it directly (a reply to the sender, where 0 would be a
+// broadcast to the notify audience), and a front is offered those replies.
+static constexpr uint32_t kBeamToken = 1;
 
 // ─── Subscriber registry ────────────────────────────────────────────────────
 //
@@ -148,7 +156,7 @@ class NifTransport : public IOscTransport {
 public:
     explicit NifTransport(Subscribers* subs) : mSubs(subs) {}
 
-    // token is always 0 (in-process); the audience is the registered pids.
+    // The token is always kBeamToken; the audience is the registered pids.
     // networkOnly is ignored: the NIF is a real peer, so Link snapshots ship.
     bool send(uint32_t, const uint8_t* data, uint32_t size, bool /*networkOnly*/) override {
         return mSubs->deliverOscReply(data, size);
@@ -233,6 +241,9 @@ private:
     Subscribers* mSubs;
 };
 static NifTransport g_transport(&g_subs);
+// What the engine's replies leave by: g_transport, with the front offered each
+// one first when there is a front.
+static FrontedTransport g_fronted;
 
 // ─── Debug callback (called from worker threads) ────────────────────────────
 // Debug rides the engine's onDebug channel (not the transport); fan it out to
@@ -281,13 +292,6 @@ static void parse_config(ErlNifEnv* env, ERL_NIF_TERM map,
                           ClockworkEngine::Config& cfg) {
     ERL_NIF_TERM key, value;
     ErlNifMapIterator iter;
-
-    // A native host has a filesystem, so the guest's definitions in its
-    // synthdef directory are loaded at boot, as the native process does
-    // (host/EngineHost.cpp) and as every native host did before the options
-    // moved into text. The map's own `load_graph_defs`, if given, comes after
-    // this line and wins: the guest takes the last value for a name.
-    clockwork::guest_config_text::set(cfg.guestConfig, "loadGraphDefs", "1");
 
     if (!enif_map_iterator_create(env, map, &iter, ERL_NIF_MAP_ITERATOR_FIRST))
         return;
@@ -388,11 +392,14 @@ static void worker_do_start(const LifecycleCmd& cmd) {
     }
 
     std::unique_ptr<ClockworkEngine> engine;
+    std::unique_ptr<OscFront> front;
     std::string err;
     try {
         engine = std::make_unique<ClockworkEngine>();
         engine->onDebug = on_debug;
-        engine->setTransport(&g_transport);
+        front = clockwork_nif_make_front(*engine, g_transport);
+        g_fronted.attach(&g_transport, front.get());
+        engine->setTransport(&g_fronted);
         engine->init(cmd.cfg);  // SLOW — no lock held
     } catch (const std::exception& e) {
         err = e.what();
@@ -401,6 +408,9 @@ static void worker_do_start(const LifecycleCmd& cmd) {
     }
 
     if (!err.empty()) {
+        if (engine) engine->shutdown();
+        g_fronted.detachFront();
+        front.reset();
         engine.reset();
         if (cmd.notify)
             notify_pid(cmd.pid, [&](ErlNifEnv* e) {
@@ -410,16 +420,35 @@ static void worker_do_start(const LifecycleCmd& cmd) {
         return;
     }
 
-    { std::lock_guard<std::mutex> lk(g_engine_mutex); g_engine = std::move(engine); }  // brief publish
+    {   // brief publish
+        std::lock_guard<std::mutex> lk(g_engine_mutex);
+        g_engine = std::move(engine);
+        g_front = std::move(front);
+    }
 
     if (cmd.notify)
         notify_pid(cmd.pid, [](ErlNifEnv* e) { return make_started(e, enif_make_atom(e, "ok")); });
 }
 
+// Unpublishes the engine and its front, then takes them down in the order they
+// need: the engine stops (no more replies offered to the front), then the front
+// (its thread joined while the engine it holds is still there), then the engine
+// object. SLOW — no lock held; nothing reaches either once unpublished.
+static void take_down_engine() {
+    std::unique_ptr<ClockworkEngine> engine;
+    std::unique_ptr<OscFront> front;
+    {
+        std::lock_guard<std::mutex> lk(g_engine_mutex);
+        engine = std::move(g_engine);
+        front = std::move(g_front);
+    }
+    if (engine) engine->shutdown();
+    g_fronted.detachFront();
+    front.reset();
+}
+
 static void worker_do_stop(const LifecycleCmd& cmd) {
-    std::unique_ptr<ClockworkEngine> local;
-    { std::lock_guard<std::mutex> lk(g_engine_mutex); local = std::move(g_engine); }  // brief unpublish
-    if (local) local->shutdown();  // SLOW — no lock held; engine already unreachable
+    take_down_engine();
     g_subs.clear();                // drop the BEAM audience along with the engine
 
     if (cmd.notify)
@@ -504,7 +533,12 @@ static ERL_NIF_TERM nif_send_osc(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
             enif_make_atom(env, "not_running"));
     }
 
-    g_engine->sendOSC(bin.data, static_cast<uint32_t>(bin.size));
+    // The front first, when the product has one: it answers what it takes
+    // (from its own thread, as a reply), and the rest goes on to the engine.
+    // Every reply reaches every registered process (NifTransport).
+    const auto size = static_cast<uint32_t>(bin.size);
+    if (!g_front || !g_front->ingress(bin.data, size, kBeamToken))
+        g_engine->ingest(bin.data, size, kBeamToken);
     return enif_make_atom(env, "ok");
 }
 
@@ -553,11 +587,7 @@ static void on_unload(ErlNifEnv*, void*) {
     }
 
     // Tear down a still-running engine inline (VM is exiting; blocking is fine).
-    std::unique_ptr<ClockworkEngine> local;
-    { std::lock_guard<std::mutex> lk(g_engine_mutex); local = std::move(g_engine); }
-    if (local)
-        local->shutdown();
-
+    take_down_engine();
     g_subs.clear();
 
     // shutdownJuce_GUI() is deliberately not called. on_unload runs on an

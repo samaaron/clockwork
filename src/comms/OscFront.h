@@ -21,7 +21,8 @@
  * A host that has a front installs it itself: FrontedTransport wraps the
  * transport the engine's replies leave by, and the host's ingest lambda asks
  * the front first. SuperSonic's main does both; a host with no front does
- * neither.
+ * neither. The NIF, a host clockwork builds, does both for the front a product
+ * gives it through clockwork_nif_front.h.
  */
 #pragma once
 

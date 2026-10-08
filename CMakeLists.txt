@@ -243,6 +243,7 @@ option(CLOCKWORK_LINK_AUDIO "Link peer audio in and publish out (needs CLOCKWORK
 # tests does. erl_int_sizes_config.h is generated for the target because the
 # sizes it records are the compiler's, not the header author's.
 option(CLOCKWORK_NIF "Build the BEAM NIF shared library" OFF)
+option(CLOCKWORK_NIF_FRONT "A product adds its own clockwork_nif_make_front to clockwork_nif (src/nif/clockwork_nif_front.h); off, the NIF has no front" OFF)
 
 # Windows-only; a no-op elsewhere. The Steinberg ASIO SDK is dual-licensed,
 # Steinberg-proprietary OR GPLv3. external/ASIOSDK2.3.4 is the SDK's source,
@@ -813,6 +814,9 @@ if(CLOCKWORK_NIF)
         ${CMAKE_CURRENT_BINARY_DIR}/erlang_generated/erl_int_sizes_config.h)
 
     add_library(clockwork_nif SHARED ${NATIVE_SRC}/../nif/clockwork_nif.cpp)
+    if(NOT CLOCKWORK_NIF_FRONT)
+        target_sources(clockwork_nif PRIVATE ${NATIVE_SRC}/../nif/clockwork_nif_no_front.cpp)
+    endif()
     set_target_properties(clockwork_nif PROPERTIES
         PREFIX ""
         # clockwork.erl resolves the library by this name; see load_nif there.
@@ -835,7 +839,8 @@ if(CLOCKWORK_NIF)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}")
     target_include_directories(clockwork_nif PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/erlang_generated
-        ${_clockwork_erl_headers})
+        ${_clockwork_erl_headers}
+        ${NATIVE_SRC}/../nif)
     target_link_libraries(clockwork_nif PRIVATE
         clockwork_comms
         clockwork_bundle)
