@@ -216,15 +216,6 @@ export class OscChannel {
         return success;
     }
 
-    /**
-     * Alias of {@link send} — kept for callers that used the explicit direct path.
-     * @param {Uint8Array} oscData
-     * @returns {boolean}
-     */
-    sendDirect(oscData) {
-        return this.send(oscData);
-    }
-
     // =========================================================================
     // The engine's clock
     // =========================================================================
@@ -430,10 +421,6 @@ export class OscChannel {
      * @returns {OscChannel}
      */
     static createPostMessage(config) {
-        // Support old API: createPostMessage(port)
-        if (config instanceof MessagePort) {
-            return new OscChannel('postMessage', { port: config });
-        }
         return new OscChannel('postMessage', config);
     }
 

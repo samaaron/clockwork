@@ -91,10 +91,10 @@ function formatOscArgHtml(arg, address, argIndex) {
   return `<span class="clockwork-osc-string">${escapeHtml(value)}</span>`;
 }
 
-function formatOscLineHtml(msg, sequence, timestamp, initTime, sourceId) {
+function formatOscLineHtml(msg, sequence, timestamp, startTime, sourceId) {
   const address = msg[0];
   const args = msg.slice(1);
-  const relTime = initTime && timestamp ? (timestamp - initTime).toFixed(2) : '';
+  const relTime = startTime && timestamp ? (timestamp - startTime).toFixed(2) : '';
   let html = `<span class="clockwork-osc-seq">[${sequence}]</span>`;
   if (relTime) html += ` <span class="clockwork-osc-time">${relTime}</span>`;
   if (sourceId !== undefined) html += ` <span class="clockwork-osc-source">ch${sourceId}</span>`;
@@ -106,10 +106,10 @@ function formatOscLineHtml(msg, sequence, timestamp, initTime, sourceId) {
   return html;
 }
 
-function formatBundleHtml(decoded, sequence, timestamp, initTime, sourceId) {
-  if (!decoded.packets) return formatOscLineHtml(decoded, sequence, timestamp, initTime, sourceId);
-  if (decoded.packets.length === 1) return formatOscLineHtml(decoded.packets[0], sequence, timestamp, initTime, sourceId);
-  const relTime = initTime && timestamp ? (timestamp - initTime).toFixed(2) : '';
+function formatBundleHtml(decoded, sequence, timestamp, startTime, sourceId) {
+  if (!decoded.packets) return formatOscLineHtml(decoded, sequence, timestamp, startTime, sourceId);
+  if (decoded.packets.length === 1) return formatOscLineHtml(decoded.packets[0], sequence, timestamp, startTime, sourceId);
+  const relTime = startTime && timestamp ? (timestamp - startTime).toFixed(2) : '';
   let html = `<span class="clockwork-osc-seq">[${sequence}]</span>`;
   if (relTime) html += ` <span class="clockwork-osc-time">${relTime}</span>`;
   if (sourceId !== undefined) html += ` <span class="clockwork-osc-source">ch${sourceId}</span>`;
@@ -146,11 +146,6 @@ export class Clockwork {
   static getMetricsSchema() {
     return METRICS_SCHEMA;
   }
-
-  /**
-   * Schema describing the node tree structure.
-   */
-
 
   #audioContext;
   #workletNode;
@@ -305,11 +300,6 @@ export class Clockwork {
     // What the guest declares about itself: its metrics (js/lib/guest_metrics.js).
     // Nothing else — clockwork holds no opinion about which engine is
     // underneath, and needs none: the sync barrier is its own verb.
-    if (options.dsp !== undefined) {
-      throw new TypeError("the `dsp` profile option is gone (2026-09-13): sync is clockwork's own "
-        + "(/clockwork/sync), declare metrics as `guestMetrics` / `guestMetricsPanels`, and refuse "
-        + "or name your engine's verbs in your own send() / request().");
-    }
     this.#guestMetrics = guestMetrics(options.guestMetrics);
     this.#guestMetricsPanels = Object.freeze([...(options.guestMetricsPanels ?? [])]);
     // After the declaration is resolved, because the reader needs what this
@@ -347,7 +337,6 @@ export class Clockwork {
         outputChannels: options.audio?.outputChannels ?? 2,
         inputChannels: options.audio?.inputChannels ?? 0,
       },
-      bypassLookaheadMs: options.bypassLookaheadMs ?? 500,
       activityEvent: {
         maxLineLength: options.activityEvent?.maxLineLength ?? 200,
         engineMaxLineLength: options.activityEvent?.engineMaxLineLength ?? null,
@@ -480,16 +469,6 @@ export class Clockwork {
     await this.#initializeFront();
     return this.midi;
   }
-
-  /**
-   * NTP time (seconds since 1900) when the AudioContext started.
-   *
-   * @deprecated Use `sonic.clock.getNTPStartTime()` for the same value, or
-   *   `sonic.clock.now()` to get the current audio-thread NTP. This getter
-   *   stays for backward compatibility with older callers that did
-   *   `event.timestamp - sonic.initTime`.
-   */
-  get initTime() { return this.#clock?.getNTPStartTime() ?? 0; }
 
   // ============================================================================
   // EVENT EMITTER DELEGATION
@@ -2021,7 +2000,6 @@ export class Clockwork {
     const transportConfig = {
       workerBaseURL: this.#config.workerBaseURL,
       snapshotIntervalMs: this.#config.snapshotIntervalMs,
-      bypassLookaheadS: this.#config.bypassLookaheadMs / 1000,
       getAudioContextTime: () => this.#audioContext?.currentTime ?? 0,
       getNTPStartTime: () => this.#clock?.getNTPStartTime() ?? 0,
     };
@@ -2119,7 +2097,7 @@ export class Clockwork {
             }
 
             if (this.#eventEmitter.hasListeners('out:html')) {
-              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.initTime, entry.sourceId);
+              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.#clock?.getNTPStartTime() ?? 0, entry.sourceId);
               this.#eventEmitter.emit('out:html', { html, sequence: entry.sequence, timestamp: entry.timestamp });
             }
           } catch (e) { /* skip decoded events on decode failure */ }
@@ -2230,7 +2208,7 @@ export class Clockwork {
       }
 
       if (this.#eventEmitter.hasListeners('in:html')) {
-        const html = formatOscLineHtml(msg, sequence, timestamp, this.initTime);
+        const html = formatOscLineHtml(msg, sequence, timestamp, this.#clock?.getNTPStartTime() ?? 0);
         this.#eventEmitter.emit('in:html', { html, sequence, timestamp });
       }
     } catch (e) {

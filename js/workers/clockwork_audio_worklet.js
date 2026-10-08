@@ -384,9 +384,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         }
     }
 
-    // Write a single OSC message directly to the IN ring buffer (postMessage mode)
-    // Called from onmessage handlers
-    // Note: new Uint8Array(oscData) creates a view (no copy), which is required to access ArrayBuffer bytes
     // Open the client boundary over the engine's own heap.
     //
     // A browser client is a client like any other; it simply happens to share
@@ -395,7 +392,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     // is the same code a GUI in another process runs.
     openClientBoundary() {
         this.wasmExports = this.wasmInstance.exports;
-        if (!this.wasmExports.clockwork_client_open_memory) return;   // older module
 
         const base  = this.wasmExports.get_ring_buffer_base();
         const bytes = this.bufferConstants.TOTAL_BUFFER_SIZE;

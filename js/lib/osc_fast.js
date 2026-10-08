@@ -106,10 +106,10 @@ function estimateBundleSize(packets) {
     size += 4; // size prefix
     if (Array.isArray(packet)) {
       size += estimateMessageSize(packet[0], packet, 1);
-    } else if (packet.packets !== undefined) {
+    } else if (packet?.packets !== undefined) {
       size += estimateBundleSize(packet.packets);
     } else {
-      size += estimateMessageSize(packet.address, packet.args || []);
+      throw new TypeError("a bundle packet is [address, ...args] or a nested { timeTag, packets }");
     }
   }
   return size;
@@ -163,7 +163,7 @@ export function encodeMessage(address, args = []) {
  * Returns a view into the shared encode buffer.
  *
  * @param {number} timeTag - NTP timestamp (seconds since 1900) or 1 for immediate
- * @param {Array} packets - Array of [address, ...args] arrays, {address, args} objects, or nested bundles
+ * @param {Array} packets - Array of [address, ...args] arrays, or nested { timeTag, packets } bundles
  * @returns {Uint8Array} - Encoded bundle (view into shared buffer)
  */
 export function encodeBundle(timeTag, packets) {
@@ -189,12 +189,9 @@ export function encodeBundle(timeTag, packets) {
     if (Array.isArray(packet)) {
       // Message as [address, ...args]
       pos = encodeMessageInto(packet[0], packet, pos, 1);
-    } else if (packet.packets !== undefined) {
-      // Nested bundle
-      pos = encodeBundleInto(packet.timeTag, packet.packets, pos);
     } else {
-      // Legacy object format { address, args }
-      pos = encodeMessageInto(packet.address, packet.args || [], pos);
+      // Nested bundle (estimateBundleSize has refused anything else)
+      pos = encodeBundleInto(packet.timeTag, packet.packets, pos);
     }
 
     const packetSize = pos - packetStart;
@@ -270,10 +267,8 @@ function encodeBundleInto(timeTag, packets, pos) {
 
     if (Array.isArray(packet)) {
       pos = encodeMessageInto(packet[0], packet, pos, 1);
-    } else if (packet.packets !== undefined) {
-      pos = encodeBundleInto(packet.timeTag, packet.packets, pos);
     } else {
-      pos = encodeMessageInto(packet.address, packet.args || [], pos);
+      pos = encodeBundleInto(packet.timeTag, packet.packets, pos);
     }
 
     encodeView.setUint32(sizePos, pos - packetStart, false);
