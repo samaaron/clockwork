@@ -428,6 +428,14 @@ typedef struct DspInfo {
    is linked against without booting audio. */
 const DspInfo* dsp_describe(void);
 
+/* The heap an instance built from this guest config will take from
+   (DspHost::alloc_bytes), in bytes: what its configuration makes it ask for — a
+   server guest's real-time pool is one of its options, and only the guest can
+   read that. Asked before the heap is taken, every build, so the heap holds it
+   on every host. 0: no claim beyond the memory profile's heap. Static, like
+   dsp_describe: no instance exists yet. `guest_config` is DspConfig's. */
+uint64_t dsp_heap_bytes(const void* guest_config, uint32_t guest_config_bytes);
+
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 
 /* Build an instance, or NULL with `err` set to a message the DSP owns. */

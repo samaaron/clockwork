@@ -106,11 +106,20 @@ ClockworkEngine::Config askingForAPool(size_t bytes) {
     cfg.guestConfig = "rtPoolBytes=" + std::to_string(bytes) + "\n";
     return cfg;
 }
+
+// The same, from a guest that does not declare the heap its pool needs
+// (dsp_heap_bytes says 0): the engine takes the profile's, and the pool does
+// not fit. The way to a guest that does not come up.
+ClockworkEngine::Config undeclaredPool(size_t bytes) {
+    auto cfg = askingForAPool(bytes);
+    cfg.guestConfig += "declareHeap=0\n";
+    return cfg;
+}
 }
 
 TEST_CASE("EngineState: a guest that does not come up leaves the engine in error, saying why",
           "[EngineState][guest-failed]") {
-    EngineFixture fix(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
     CHECK(fix.engine().engineState() == EngineState::Error);
 
     fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
@@ -133,7 +142,7 @@ TEST_CASE("EngineState: a guest that does not come up leaves the engine in error
 TEST_CASE("EngineState: a guest that refuses at length: a client that registers is told the whole reason",
           "[EngineState][guest-failed]") {
     const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";
-    auto cfg = askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u);
+    auto cfg = undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u);
     cfg.guestConfig += "refusalReason=" + reason + "\n";
     EngineFixture fix(cfg);
     CHECK(fix.engine().engineState() == EngineState::Error);
@@ -151,7 +160,7 @@ TEST_CASE("EngineState: a guest that refuses at length: a client that registers 
 
 TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's own verbs still answer",
           "[EngineState][guest-failed]") {
-    EngineFixture fix(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
     fix.send(osc_test::message("/dummy/ping"));
     fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 777));
     OscReply r;
@@ -160,19 +169,17 @@ TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's 
     CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 200));
 }
 
-// ── The heap is the host's to size ──────────────────────────────────────────
+// ── The heap is the guest's to declare ──────────────────────────────────────
 //
 // What a guest will take from the heap depends on its configuration — a
-// server guest's real-time pool is an option — and only the host that wrote
-// that configuration knows it. So the host says how big a heap to take, and
-// the boot either has it or says it could not get it.
+// server guest's real-time pool is an option — and only the guest can read
+// that. So the engine asks it (dsp_heap_bytes) before taking the heap, every
+// host gets the same answer, and the boot either has it or says it could not.
 
-TEST_CASE("EngineState: a host that sizes the heap for its guest's pool boots the guest",
+TEST_CASE("EngineState: a guest that declares its pool's heap boots, with no host sizing it",
           "[EngineState][heap]") {
     const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
-    auto cfg = askingForAPool(pool);
-    cfg.heapBytes = pool + 8u * 1024u * 1024u;
-    EngineFixture fix(cfg);
+    EngineFixture fix(askingForAPool(pool));
     CHECK(fix.engine().engineState() == EngineState::Running);
     fix.send(osc_test::message("/dummy/ping"));
     OscReply r;
@@ -191,14 +198,12 @@ TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying 
     SKIP("a sanitizer aborts on an impossible allocation instead of failing it");
 #  endif
 #endif
-    auto cfg = EngineFixture::defaultConfig();
-    // Past any address space, 32-bit as much as 64-bit: the most size_t can
-    // say. (1 << 60 is no size at all where size_t is 32 bits — the shift is
-    // undefined, and i386 booted a heap.) The engine caps a request to what
+    // Past any address space, 32-bit as much as 64-bit: near the most size_t
+    // can say. (1 << 60 is no size at all where size_t is 32 bits — the shift
+    // is undefined, and i386 booted a heap.) The engine caps a request to what
     // it can add its own bookkeeping to, so this cannot wrap to something
     // small; it is refused for being more than there is.
-    cfg.heapBytes = std::numeric_limits<size_t>::max();
-    EngineFixture fix(cfg);
+    EngineFixture fix(askingForAPool(std::numeric_limits<size_t>::max() - (64u << 20)));
     CHECK(fix.engine().engineState() == EngineState::Error);
 
     fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
@@ -213,17 +218,15 @@ TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying 
 }
 
 TEST_CASE("EngineState: the next engine takes the profile's heap again", "[EngineState][heap]") {
-    // heapBytes is one engine's, not the process's: a later boot that does
-    // not ask gets the default, and a pool that only the bigger heap held no
-    // longer fits.
+    // The heap is one engine's, not the process's: a later boot whose guest
+    // declares nothing gets the default, and a pool that only the bigger heap
+    // held no longer fits.
+    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
     {
-        const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
-        auto cfg = askingForAPool(pool);
-        cfg.heapBytes = pool + 8u * 1024u * 1024u;
-        EngineFixture fix(cfg);
+        EngineFixture fix(askingForAPool(pool));
         REQUIRE(fix.engine().engineState() == EngineState::Running);
     }
-    EngineFixture again(askingForAPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    EngineFixture again(undeclaredPool(pool));
     CHECK(again.engine().engineState() == EngineState::Error);
 }
 

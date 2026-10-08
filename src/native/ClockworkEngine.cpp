@@ -30,12 +30,14 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "RingBufferWriter.h"
 #include "IngressCallCtx.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <future>
 #include <thread>
 #ifdef __linux__
@@ -1107,10 +1109,17 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mGuestOutbox      = guestOutbox;
     mGuestOutboxBytes = guestOutboxBytes;
 
-    // The heap the guest allocates from, as this host sized it — every build,
-    // including 0 for the profile's, so an earlier engine's figure in this
-    // process is never the one used.
-    clockwork_set_heap_bytes(mCurrentConfig.heapBytes);
+    // The heap the guest takes its larger allocations from, sized for what
+    // this configuration asks of it (dsp_heap_bytes): taken once per build and
+    // never grown on the audio thread. Every build, including 0 for the
+    // profile's, so an earlier engine's figure in this process is never the
+    // one used. One the system cannot provide stops the boot with the reason.
+    {
+        const uint64_t wanted = dsp_heap_bytes(guestText.c_str(), guestBytes);
+        const uint64_t capped = std::min<uint64_t>(wanted, std::numeric_limits<size_t>::max());
+        clockwork_set_heap_bytes(capped > static_cast<uint64_t>(CLOCKWORK_HEAP_SIZE)
+                                 ? static_cast<size_t>(capped) : 0);
+    }
 
     mProcessor.initialiseDsp(
         arena,

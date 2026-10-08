@@ -130,7 +130,6 @@ TEST_CASE("ColdSwapRecovery: a rebuild whose guest does not come up leaves the e
     const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
     auto cfg = EngineFixture::defaultConfig();
     cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\n";
-    cfg.heapBytes   = pool + 8u * 1024u * 1024u;
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().engineState() == EngineState::Running);
 
@@ -160,7 +159,6 @@ TEST_CASE("ColdSwapRecovery: a rebuild that refuses at length tells a listening 
     auto cfg = EngineFixture::defaultConfig();
     cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\n"
                     + "refusalReason=" + reason + "\n";
-    cfg.heapBytes   = pool + 8u * 1024u * 1024u;
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().engineState() == EngineState::Running);
 

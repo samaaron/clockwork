@@ -130,8 +130,12 @@
  *
  *   rtPoolBytes=<bytes>
  *
- * A heap that cannot hold it refuses the boot with this guest's reason, which
- * is the path a host has to size its heap for and report when it has not.
+ * It declares the heap that pool needs (dsp_heap_bytes), as a guest should, so
+ * the engine takes a heap that holds it. Another line makes it declare nothing,
+ * like a guest that does not say what it will take — the heap is the profile's,
+ * the pool does not fit, and the boot is refused with this guest's reason:
+ *
+ *   declareHeap=0
  *
  * AND ITS REASON CAN BE ANY LENGTH. A guest's words are its own, and a host
  * carries them to every client however long they are. Another line replaces
@@ -753,6 +757,17 @@ static const char* refusal(const DspConfig* config, const char* own) {
     if (asked.empty()) return own;
     reason.assign(asked);
     return reason.c_str();
+}
+
+// The pool asked for, and room for the heap's own headers around it.
+uint64_t dsp_heap_bytes(const void* guest_config, uint32_t guest_config_bytes) {
+    DspConfig config{};
+    config.guest_config       = guest_config;
+    config.guest_config_bytes = guest_config_bytes;
+    if (configText(&config, "declareHeap") == "0") return 0;
+    const uint64_t pool = configNumber(&config, "rtPoolBytes");
+    constexpr uint64_t kHeadroom = 8u * 1024u * 1024u;
+    return pool == 0 ? 0 : (pool > UINT64_MAX - kHeadroom ? UINT64_MAX : pool + kHeadroom);
 }
 
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err) {

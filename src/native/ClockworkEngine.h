@@ -112,15 +112,6 @@ public:
         // not the smallest. A host exposes them as a launch option.
         size_t inboxBytes               = static_cast<size_t>(CLOCKWORK_INBOX_BYTES);
         size_t outboxBytes              = static_cast<size_t>(CLOCKWORK_OUTBOX_BYTES);
-        // The heap the guest takes its larger allocations from
-        // (DspHost::alloc_bytes) — a server guest's real-time pool among
-        // them. Taken once, at each build, and never grown on the audio
-        // thread, so it has to hold what this guest's configuration will ask
-        // for: only the host that wrote guestConfig knows that figure. 0: the
-        // memory profile's CLOCKWORK_HEAP_SIZE. One the system cannot provide
-        // stops the boot with the reason, rather than booting a guest that
-        // cannot allocate.
-        size_t heapBytes                = 0;
         bool   headless                 = false;   // skip audio device (for tests)
         bool   manualAudioPump          = false;   // skip the audio source entirely
                                                    // (no device, no headless driver):
