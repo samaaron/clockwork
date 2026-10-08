@@ -161,6 +161,19 @@ const SMALL_BLOCK: usize = 1 << FL_SHIFT;
 /// Enough first-level classes to index any block a 32-bit size can express.
 const FL_COUNT: usize = 25;
 
+/// The largest request the heap can meet: the first size whose class is past
+/// FL_COUNT, less the round-up mapping_search adds, so every request up to it
+/// rounds into a class that exists. Anything larger is a failed allocation —
+/// and refusing it before align_up is also what keeps a size near usize::MAX
+/// from wrapping round to a small one.
+const MAX_REQUEST: usize = {
+    let first_past = 1u64 << (FL_COUNT + FL_SHIFT - 1);
+    // The sizes just below it share its top bit, one lower; mapping_search
+    // rounds those up by 1 << (that bit - SL_LOG2).
+    let max = first_past - (1u64 << (FL_COUNT + FL_SHIFT - 2 - SL_LOG2));
+    if max > (usize::MAX - ALIGN) as u64 { usize::MAX - ALIGN } else { max as usize }
+};
+
 /// Index of the highest set bit.
 #[inline]
 fn fls(x: usize) -> usize {
@@ -419,7 +432,7 @@ impl HeapPool {
     /// Memory for `bytes`, or null when no area can be found or grown to hold
     /// it. The returned pointer is 16-byte aligned.
     pub fn alloc(&mut self, bytes: usize) -> *mut u8 {
-        if bytes == 0 {
+        if bytes == 0 || bytes > MAX_REQUEST {
             return core::ptr::null_mut();
         }
         let want = align_up(bytes);
@@ -914,6 +927,35 @@ mod tests {
     fn zero_bytes_is_not_an_allocation() {
         let mut p = pool(64 * 1024, 64 * 1024);
         assert!(p.alloc(0).is_null());
+    }
+
+    // A request bigger than any block this heap can hold — a guest asking for
+    // a real-time pool of most of the address space — is a failed allocation,
+    // like any other the heap cannot meet. It was a panic, in a function the
+    // C side calls, so the process aborted: a size class past FL_COUNT, or a
+    // size that wrapped round to a small one in align_up.
+    #[test]
+    fn a_request_larger_than_any_block_is_null_not_a_panic() {
+        let mut p = pool(64 * 1024, 64 * 1024);
+        let mut huge = vec![usize::MAX, usize::MAX - 15, usize::MAX - (64 << 20)];
+        if cfg!(target_pointer_width = "64") {
+            huge.push(1usize << 32);
+        }
+        for n in huge {
+            assert!(p.alloc(n).is_null(), "alloc({n})");
+        }
+        assert!(!p.alloc(100).is_null(), "the heap still works");
+    }
+
+    // MAX_REQUEST is the bound and not a guess: it rounds into the last class
+    // there is, and one more aligned step would not.
+    #[test]
+    fn max_request_is_the_last_size_with_a_class() {
+        assert_eq!(MAX_REQUEST % ALIGN, 0);
+        assert_eq!(mapping_search(MAX_REQUEST).0, FL_COUNT - 1);
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(mapping_search(MAX_REQUEST + ALIGN).0, FL_COUNT);
+        }
     }
 
     #[test]
