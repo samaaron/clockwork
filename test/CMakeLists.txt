@@ -425,6 +425,7 @@ add_executable(clockwork_engine_tests
     test_midi.cpp
     test_osc.cpp
     test_verb_refusals.cpp
+    test_clock_snapshot.cpp
 )
 
 # ─── The client half of the verb surface, or its absence ─────────────────────

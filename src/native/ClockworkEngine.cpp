@@ -1293,6 +1293,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // messages, or it would answer before what it answers for.
     mAudioRoutes.add("sync", &clockwork_clockwork_sys_route, nullptr);
     mAudioRoutes.add("sched/flush", &ClockworkEngine::schedFlushSink, this);
+    // The clock snapshot, from the published mirror, as on every host
+    // (clockwork_sys.h): a caller that wants the clock this block renders
+    // against cannot wait for the control thread.
+    mAudioRoutes.add("clock/state/get", &clockwork_clockwork_sys_route, nullptr);
     // The asset hand-off (dsp_api.h, "Assets"): audio-thread work everywhere.
     mAudioRoutes.add("asset/", &clockwork_asset_route, nullptr);
     // Inbound events (clockwork_sys.h, clockwork_event_route): a subsystem's
