@@ -2029,84 +2029,71 @@ void ClockworkEngine::runOnDeviceLane(const std::function<void()>& work) {
 void ClockworkEngine::scheduleDeviceSwitch(const std::string& devName,
                                             const std::string& inputDevName,
                                             double sampleRate, int bufferSize) {
-    // Rapid clicks replace the pending switch; only the last one executes
-    // after the debounce worker's quiet period.
+    // Rapid picks replace the pending one; only the last is switched to, after
+    // the debounce worker's quiet period, and only it ends in a switch.done.
+    bool startWorker = false;
     {
         std::lock_guard<std::mutex> lock(mPendingSwitchMutex);
-        mPendingSwitch.devName = devName;
-        mPendingSwitch.inputDevName = inputDevName;
-        mPendingSwitch.sampleRate = sampleRate;
-        mPendingSwitch.bufferSize = bufferSize;
-        mPendingSwitch.timestamp = std::chrono::steady_clock::now();
-        mPendingSwitch.active = true;
+        mPendingSwitch = { devName, inputDevName, sampleRate, bufferSize,
+                           std::chrono::steady_clock::now(), true };
+        // Decided under the lock the worker stops under, so a pick is never
+        // left to a worker that has already decided to stop.
+        startWorker = !mDebounceSwitchRunning;
+        mDebounceSwitchRunning = true;
     }
-    if (!mDebounceSwitchRunning.load()) {
-        mDebounceSwitchRunning.store(true);
-        postDeviceTask([this]() { executePendingSwitch(); });
-    }
+    if (startWorker) postDeviceTask([this] { executePendingSwitch(); });
 }
 
 void ClockworkEngine::executePendingSwitch() {
-    constexpr auto kDebounceMs = std::chrono::milliseconds(500);
+    constexpr auto kDebounce = std::chrono::milliseconds(500);
 
-    std::string devName, inputDevName;
-    double sr = 0;
-    int bufSz = 0;
-
-    while (!mDebounceSwitchStop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (mDebounceSwitchStop.load()) break;
-
-        std::lock_guard<std::mutex> lock(mPendingSwitchMutex);
-        if (!mPendingSwitch.active) {
-            mDebounceSwitchRunning.store(false);
-            return;
+    // Until nothing is pending: a pick made while another is switching is
+    // debounced and switched to in its turn.
+    for (;;) {
+        PendingSwitch pick;
+        for (;;) {
+            if (!mDebounceSwitchStop.load())
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::lock_guard<std::mutex> lock(mPendingSwitchMutex);
+            if (mDebounceSwitchStop.load() || !mPendingSwitch.active) {
+                mDebounceSwitchRunning = false;
+                return;
+            }
+            if (std::chrono::steady_clock::now() - mPendingSwitch.timestamp >= kDebounce) {
+                pick = mPendingSwitch;
+                mPendingSwitch.active = false;
+                break;
+            }
         }
 
-        auto elapsed = std::chrono::steady_clock::now() - mPendingSwitch.timestamp;
-        if (elapsed >= kDebounceMs) {
-            devName      = mPendingSwitch.devName;
-            inputDevName = mPendingSwitch.inputDevName;
-            sr           = mPendingSwitch.sampleRate;
-            bufSz        = mPendingSwitch.bufferSize;
-            mPendingSwitch.active = false;
-            break;
+        clockwork_log("[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d",
+                pick.devName.c_str(), pick.inputDevName.c_str(), pick.sampleRate, pick.bufferSize);
+
+        // An explicit pick of a device leaves system mode: the default-output
+        // listener must not take the engine off it.
+        if (!pick.devName.empty())
+            forceDeviceMode(pick.devName);
+
+        // Retry if a swap is already in progress (e.g. cascade from a
+        // device-change notification). Give it up to ~3 seconds.
+        SwapResult result;
+        int attempts = 0;
+        for (int attempt = 0; attempt < 30; ++attempt) {
+            attempts = attempt + 1;
+            result = switchDevice(pick.devName, pick.sampleRate, pick.bufferSize, false,
+                                  pick.inputDevName);
+            if (result.success || result.error != "swap already in progress") break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        if (!result.success) {
+            clockwork_log("[device-setup] debounced switch failed after %d attempts: %s",
+                    attempts, result.error.c_str());
+        }
+        // No sendDeviceReport() here — switchDevice's printDeviceList already
+        // broadcasts. A second call can race with JUCE's post-switch device-list
+        // rescan and report an empty snapshot. Push the truthful outcome instead.
+        sendSwitchDone(result, pick.devName, pick.inputDevName);
     }
-
-    if (mDebounceSwitchStop.load()) {
-        mDebounceSwitchRunning.store(false);
-        return;
-    }
-
-    clockwork_log("[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d",
-            devName.c_str(), inputDevName.c_str(), sr, bufSz);
-
-    // An explicit pick of a device leaves system mode: the default-output
-    // listener must not take the engine off it.
-    if (!devName.empty())
-        forceDeviceMode(devName);
-
-    // Retry if a swap is already in progress (e.g. cascade from a
-    // device-change notification). Give it up to ~3 seconds.
-    SwapResult result;
-    int attempts = 0;
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        attempts = attempt + 1;
-        result = switchDevice(devName, sr, bufSz, false, inputDevName);
-        if (result.success || result.error != "swap already in progress") break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (!result.success) {
-        clockwork_log("[device-setup] debounced switch failed after %d attempts: %s",
-                attempts, result.error.c_str());
-    }
-    // No sendDeviceReport() here — switchDevice's printDeviceList already
-    // broadcasts. A second call can race with JUCE's post-switch device-list
-    // rescan and report an empty snapshot. Push the truthful outcome instead.
-    sendSwitchDone(result, devName, inputDevName);
-
-    mDebounceSwitchRunning.store(false);
 }
 
 bool ClockworkEngine::tryAcquireSwapGate(std::unique_lock<std::recursive_mutex>& lk,

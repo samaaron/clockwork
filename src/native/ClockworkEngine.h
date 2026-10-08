@@ -997,9 +997,9 @@ private:
         std::chrono::steady_clock::time_point timestamp;
         bool active = false;
     };
-    PendingSwitch              mPendingSwitch;
     std::mutex                 mPendingSwitchMutex;
-    std::atomic<bool>          mDebounceSwitchRunning{false};
+    PendingSwitch              mPendingSwitch;                 // guarded by mPendingSwitchMutex
+    bool                       mDebounceSwitchRunning = false; // guarded by mPendingSwitchMutex
     std::atomic<bool>          mDebounceSwitchStop{false};
     void executePendingSwitch();   // runs on the device task lane
 

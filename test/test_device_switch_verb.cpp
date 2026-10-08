@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "FakeAudioDevice.h"
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -134,6 +135,78 @@ TEST_CASE("SwitchVerb: picking a device ends in switch.done", "[SwitchVerb]") {
     CHECK(dones.front().argInt(0) == 1);
     CHECK(dones.front().argString(1) == "Fake Interface");
     CHECK(dones.front().argString(3) == "Fake Interface");
+}
+
+TEST_CASE("SwitchVerb: rapid picks collapse to the last, which alone ends in "
+          "switch.done", "[SwitchVerb]") {
+    // The wait exists so a user moving through a menu causes one switch, not
+    // one per item. The pick a later one replaced never runs, so the only
+    // switch.done is the last pick's: a client (Sonic Pi) that pairs its
+    // pending pick with the next switch.done must not be handed another.
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    // Both picks wait behind this, so the second always replaces the first.
+    std::promise<void> release;
+    std::shared_future<void> released = release.get_future().share();
+    fix.engine().postDeviceTask([released] { released.wait(); });
+
+    OscReply reply;
+    fix.send(switchTo("Fake Microphone", ""));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+    fix.send(switchTo("Fake Interface", ""));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+    release.set_value();
+
+    const bool done = fix.pollUntil([&] { return !switchDones(fix).empty(); }, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(done);
+    flushReplies(fix);
+
+    const auto dones = switchDones(fix);
+    REQUIRE(dones.size() == 1);
+    CHECK(dones[0].argInt(0) == 1);
+    CHECK(dones[0].argString(1) == "Fake Interface");
+    CHECK(dones[0].argString(3) == "Fake Interface");
+}
+
+TEST_CASE("SwitchVerb: a pick made while another is switching is not lost",
+          "[SwitchVerb]") {
+    // The debounce worker had taken the first pick and was switching to it
+    // when the second came. The second found the worker running and left it
+    // to the worker, which then finished the first and stopped: the second
+    // was never switched to, and never answered, until the next pick.
+    auto sys = makeSimpleSystem();
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    auto gate = fix.engine().testHoldSwapGate();   // the first switch waits on it
+    OscReply reply;
+    fix.send(switchTo("Fake Interface", ""));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+    const bool taken = fix.pollUntil([&] {
+        for (const auto& line : fix.debugMessages())
+            if (line.find("debounced switch: out='Fake Interface'") != std::string::npos) return true;
+        return false;
+    }, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(taken);
+
+    fix.send(switchTo("Fake Speakers", ""));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/switch.reply"), reply));
+    // The reply is sent before the pick is handed to the worker; a verb behind
+    // it on the same control thread is answered after.
+    flushReplies(fix);
+    gate.unlock();
+
+    const bool done = fix.pollUntil([&] {
+        for (const auto& d : switchDones(fix))
+            if (d.argString(1) == "Fake Speakers") return true;
+        return false;
+    }, 10000);
+    REQUIRE(done);
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
 }
 
 TEST_CASE("SwitchVerb: a menu label sent as the input, such as '-- None --', is "

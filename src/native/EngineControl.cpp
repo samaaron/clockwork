@@ -600,11 +600,13 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
                 inputDevName = it->AsStringUnchecked();
             }
 
-            // Every switch is acknowledged here (switch.reply 1: heard), does
-            // its work on the device lane — a device change can take seconds
-            // and the control pass must not — and ends in exactly one
-            // switch.done broadcast: what was asked for, where the engine is
-            // now, and why not when it failed.
+            // Every switch is acknowledged here (switch.reply 1: heard) and
+            // does its work on the device lane — a device change can take
+            // seconds and the control pass must not. Each one that runs ends
+            // in exactly one switch.done broadcast: what was asked for, where
+            // the engine is now, and why not when it failed. A device pick
+            // that a later one replaces while it waits never runs, and gets
+            // none.
             {
                 std::array<char, 128> buf{};
                 osc::OutboundPacketStream s(buf.data(), buf.size());
