@@ -1818,7 +1818,7 @@ void ClockworkEngine::drainEgressNow() {
     }
 }
 
-void ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t originToken) {
+ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t originToken) {
     // THROUGH THE CLIENT BOUNDARY, not past it. A datagram from another machine
     // and a call from a GUI in this process arrive here alike, and both go on
     // through clockwork_client_send — so the ring arithmetic a remote peer's
@@ -1829,8 +1829,9 @@ void ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t origin
     // inline or forwards control to the NRT thread, which resolves the token
     // back to a reply address. Token 0 is in-process and replies via onReply.
     ClockworkClient* client = mClientHandle;
-    const bool written = client
-        && clockwork_client_send(client, data, size, originToken) == CLOCKWORK_OK;
+    const ClockworkStatus status = client ? clockwork_client_send(client, data, size, originToken)
+                                          : CLOCKWORK_E_CLOSED;
+    const bool written = status == CLOCKWORK_OK;
     if (mMetrics) {
         if (written) {
             mMetrics->osc_out_messages_sent.fetch_add(1, std::memory_order_relaxed);
@@ -1841,6 +1842,7 @@ void ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t origin
             mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    return status;
 }
 
 // --- The host's door onto the control pass (Config::hostDrivesControl). The

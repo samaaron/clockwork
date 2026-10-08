@@ -98,21 +98,22 @@ is_nif_loaded() -> false.
 
 %% @doc Boot the audio engine (asynchronous).
 %%
-%% Config is a map. The keys clockwork answers for itself are the device's:
-%%   sample_rate, num_output_channels, num_input_channels, buffer_size,
-%%   headless.
+%% Config is a map with atom keys. The keys clockwork answers for itself are
+%% the device's: sample_rate, num_output_channels, num_input_channels,
+%% buffer_size (integers) and headless (true or false).
 %% EVERY OTHER KEY IS THE GUEST'S, handed to it by name as `name=value'
 %% (integers, floats, booleans as 1/0, or a binary). Which names a guest
 %% takes is the guest's to say — scsynth lists its own in scsynth_options.h
 %% (max_nodes, num_buffers, real_time_memory_size, ...) — and a name it does
-%% not know refuses the boot with a message naming it.
+%% not know refuses the boot with a message naming it. A key or value the NIF
+%% cannot read is refused the same way; nothing is booted.
 %%
 %% `headless => true' skips audio device init (for testing/CI).
 %%
 %% Returns `ok' immediately. The boot runs on a dedicated engine thread (it never
 %% blocks a scheduler) and its outcome is sent to the calling process as
-%% `{clockwork_started, ok}' or `{clockwork_started, {error, Reason}}'
-%% (e.g. `Reason = already_running').
+%% `{clockwork_started, ok}' or `{clockwork_started, {error, Reason}}', where
+%% Reason is `already_running' or a charlist saying why nothing is running.
 -spec start(Config :: map()) -> ok.
 start(_Config) -> erlang:nif_error(nif_not_loaded).
 
@@ -124,7 +125,11 @@ start(_Config) -> erlang:nif_error(nif_not_loaded).
 stop() -> erlang:nif_error(nif_not_loaded).
 
 %% @doc Send a raw OSC binary message to the engine.
--spec send_osc(binary()) -> ok | {error, term()}.
+%%
+%% `{error, full}': the engine's input ring had no room this moment; it drains
+%% every block, so try again. `{error, too_big}': the packet can never fit.
+%% `{error, not_running}': no engine is running.
+-spec send_osc(binary()) -> ok | {error, full | too_big | not_running}.
 send_osc(_OscBinary) -> erlang:nif_error(nif_not_loaded).
 
 %% @doc Register the calling process to receive OSC replies.

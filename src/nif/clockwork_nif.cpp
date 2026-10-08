@@ -77,6 +77,7 @@ struct Subscribers {
     bool                 linkSubscribed = false;
     bool                 midiSubscribed = false;
     bool                 gamepadSubscribed = false;
+    bool                 oscSubscribed = false;
 
     void addPid(const ErlNifPid& p) {
         std::lock_guard<std::mutex> lk(mutex);
@@ -96,6 +97,7 @@ struct Subscribers {
         linkSubscribed = false;
         midiSubscribed = false;
         gamepadSubscribed = false;
+        oscSubscribed = false;
     }
 
     // Frame {osc_reply, <<bytes>>} and fan out to every registered pid.
@@ -237,6 +239,23 @@ public:
         mSubs->gamepadSubscribed = false;
     }
 
+    // OSC cues heard by the cue server (/external-osc-cue), once a process
+    // has subscribed (/clockwork/osc/notify/subscribe).
+    void broadcastOsc(const uint8_t* data, uint32_t size) override {
+        bool wanted;
+        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = mSubs->oscSubscribed; }
+        if (wanted) mSubs->deliverOscReply(data, size);
+    }
+    bool subscribeOsc(uint32_t) override {
+        std::lock_guard<std::mutex> lk(mSubs->mutex);
+        mSubs->oscSubscribed = true;
+        return true;
+    }
+    void unsubscribeOsc(uint32_t) override {
+        std::lock_guard<std::mutex> lk(mSubs->mutex);
+        mSubs->oscSubscribed = false;
+    }
+
 private:
     Subscribers* mSubs;
 };
@@ -288,39 +307,63 @@ static bool value_as_text(ErlNifEnv* env, ERL_NIF_TERM value, std::string& out) 
 // it (GuestConfigText.h): clockwork does not know the guest's words, and a
 // guest that does not know a name refuses the boot with the line, which is
 // the error a misspelt option deserves rather than silence.
-static void parse_config(ErlNifEnv* env, ERL_NIF_TERM map,
-                          ClockworkEngine::Config& cfg) {
+//
+// Returns "" when every key was read, else why the first that could not be was
+// refused: a key that is not an atom, a device value that is not an integer, a
+// headless that is not true or false, or a guest value that is not an integer,
+// a float, true, false or a binary. Nothing is left out of the boot quietly.
+static std::string parse_config(ErlNifEnv* env, ERL_NIF_TERM map,
+                                ClockworkEngine::Config& cfg) {
     ERL_NIF_TERM key, value;
     ErlNifMapIterator iter;
 
     if (!enif_map_iterator_create(env, map, &iter, ERL_NIF_MAP_ITERATOR_FIRST))
-        return;
+        return "start/1 takes a map";
 
-    while (enif_map_iterator_get_pair(env, &iter, &key, &value)) {
+    static const struct { const char* name; int ClockworkEngine::Config::* field; } kDeviceKeys[] = {
+        { "sample_rate",         &ClockworkEngine::Config::sampleRate },
+        { "num_output_channels", &ClockworkEngine::Config::numOutputChannels },
+        { "num_input_channels",  &ClockworkEngine::Config::numInputChannels },
+        { "buffer_size",         &ClockworkEngine::Config::bufferSize },
+    };
+
+    std::string refused;
+    for (; refused.empty() && enif_map_iterator_get_pair(env, &iter, &key, &value);
+         enif_map_iterator_next(env, &iter)) {
         char key_buf[64];
-        int int_val;
-        if (enif_get_atom(env, key, key_buf, sizeof(key_buf), ERL_NIF_LATIN1)) {
-            if (strcmp(key_buf, "sample_rate") == 0 && enif_get_int(env, value, &int_val))
-                cfg.sampleRate = int_val;
-            else if (strcmp(key_buf, "num_output_channels") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numOutputChannels = int_val;
-            else if (strcmp(key_buf, "num_input_channels") == 0 && enif_get_int(env, value, &int_val))
-                cfg.numInputChannels = int_val;
-            else if (strcmp(key_buf, "buffer_size") == 0 && enif_get_int(env, value, &int_val))
-                cfg.bufferSize = int_val;
-            else if (strcmp(key_buf, "headless") == 0) {
-                char atom_buf[16];
-                if (enif_get_atom(env, value, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1))
-                    cfg.headless = (strcmp(atom_buf, "true") == 0);
-            } else {
-                std::string text;
-                if (value_as_text(env, value, text))
-                    clockwork::guest_config_text::set(cfg.guestConfig, key_buf, text);
-            }
+        if (!enif_get_atom(env, key, key_buf, sizeof(key_buf), ERL_NIF_LATIN1)) {
+            char shown[96];
+            enif_snprintf(shown, sizeof(shown), "%T", key);
+            refused = std::string("start option ") + shown + ": a key is an atom";
+            continue;
         }
-        enif_map_iterator_next(env, &iter);
+        bool device = false;
+        for (const auto& k : kDeviceKeys) {
+            if (strcmp(key_buf, k.name) != 0) continue;
+            device = true;
+            int int_val;
+            if (enif_get_int(env, value, &int_val)) cfg.*k.field = int_val;
+            else refused = std::string("start option ") + key_buf + ": takes an integer";
+        }
+        if (device) continue;
+        if (strcmp(key_buf, "headless") == 0) {
+            char atom_buf[16];
+            if (enif_get_atom(env, value, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)
+                && (strcmp(atom_buf, "true") == 0 || strcmp(atom_buf, "false") == 0))
+                cfg.headless = strcmp(atom_buf, "true") == 0;
+            else
+                refused = "start option headless: takes true or false";
+            continue;
+        }
+        std::string text;
+        if (value_as_text(env, value, text))
+            clockwork::guest_config_text::set(cfg.guestConfig, key_buf, text);
+        else
+            refused = std::string("start option ") + key_buf
+                    + ": takes an integer, a float, true, false or a binary";
     }
     enif_map_iterator_destroy(env, &iter);
+    return refused;
 }
 
 // ─── Lifecycle worker ───────────────────────────────────────────────────────
@@ -339,6 +382,7 @@ enum class LifecycleOp { Start, Stop };
 struct LifecycleCmd {
     LifecycleOp              op;
     ClockworkEngine::Config cfg;     // Start only
+    std::string              refused; // Start only: why the options were refused
     ErlNifPid                pid;
     bool                     notify;  // false = post no outcome message
 };
@@ -377,6 +421,17 @@ static ERL_NIF_TERM make_started(ErlNifEnv* e, ERL_NIF_TERM result) {
 }
 
 static void worker_do_start(const LifecycleCmd& cmd) {
+    // Options start/1 could not read: nothing is booted, and the caller hears
+    // which one.
+    if (!cmd.refused.empty()) {
+        if (cmd.notify)
+            notify_pid(cmd.pid, [&](ErlNifEnv* e) {
+                return make_started(e, enif_make_tuple2(e, enif_make_atom(e, "error"),
+                    enif_make_string(e, cmd.refused.c_str(), ERL_NIF_LATIN1)));
+            });
+        return;
+    }
+
     // Serialised on this thread, so reading g_engine for the running-check needs
     // the lock only against a concurrent send_osc, not against another start.
     {
@@ -401,6 +456,12 @@ static void worker_do_start(const LifecycleCmd& cmd) {
         g_fronted.attach(&g_transport, front.get());
         engine->setTransport(&g_fronted);
         engine->init(cmd.cfg);  // SLOW — no lock held
+        // A boot the guest refused (an option, a heap it could not have)
+        // leaves the engine in Error with the reason: not a running engine.
+        if (engine->engineState() == EngineState::Error) {
+            err = engine->errorReason();
+            if (err.empty()) err = "the engine did not start";
+        }
     } catch (const std::exception& e) {
         err = e.what();
     } catch (...) {
@@ -488,13 +549,13 @@ static ERL_NIF_TERM nif_is_loaded(ErlNifEnv* env, int, const ERL_NIF_TERM[]) {
 // to the lifecycle worker. Returns `ok` immediately; the outcome arrives as
 // {clockwork_started, ok | {error, Reason}} to the calling process.
 static ERL_NIF_TERM nif_start(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
-    if (argc != 1) return enif_make_badarg(env);
+    if (argc != 1 || !enif_is_map(env, argv[0])) return enif_make_badarg(env);
 
     LifecycleCmd cmd;
     cmd.op = LifecycleOp::Start;
     cmd.cfg.udpPort = 0;  // NIF mode: egress is enif_send, not UDP; 0 also means
                           // no SHM segment (-u > 0 is what creates it)
-    parse_config(env, argv[0], cmd.cfg);
+    cmd.refused = parse_config(env, argv[0], cmd.cfg);
     enif_self(env, &cmd.pid);
     cmd.notify = true;
     worker_enqueue(std::move(cmd));
@@ -537,9 +598,18 @@ static ERL_NIF_TERM nif_send_osc(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     // (from its own thread, as a reply), and the rest goes on to the engine.
     // Every reply reaches every registered process (NifTransport).
     const auto size = static_cast<uint32_t>(bin.size);
-    if (!g_front || !g_front->ingress(bin.data, size, kBeamToken))
-        g_engine->ingest(bin.data, size, kBeamToken);
-    return enif_make_atom(env, "ok");
+    if (g_front && g_front->ingress(bin.data, size, kBeamToken))
+        return enif_make_atom(env, "ok");
+    const auto error = [env](const char* why) {
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), enif_make_atom(env, why));
+    };
+    switch (g_engine->ingest(bin.data, size, kBeamToken)) {
+        case CLOCKWORK_OK:        return enif_make_atom(env, "ok");
+        case CLOCKWORK_E_FULL:    return error("full");       // no room this moment
+        case CLOCKWORK_E_TOO_BIG: return error("too_big");    // never room: bulk goes in the inbox
+        case CLOCKWORK_E_ARG:     return enif_make_badarg(env);  // an empty packet
+        default:                  return error("not_running");
+    }
 }
 
 static ERL_NIF_TERM nif_set_notification_pid(ErlNifEnv* env, int, const ERL_NIF_TERM[]) {

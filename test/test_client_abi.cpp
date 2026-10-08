@@ -88,6 +88,24 @@ TEST_CASE("client abi: the engine's own ingest goes through the same door",
     clockwork_client_close(c);
 }
 
+// And it says what the door said: an embedder that hands it a packet learns
+// whether the packet went in, and why not — CLOCKWORK_E_TOO_BIG is a verdict
+// (the ring can never hold it), CLOCKWORK_E_FULL a moment.
+TEST_CASE("client abi: the engine's ingest returns what the door said, and counts a refusal as dropped",
+          "[client][abi]") {
+    Engine e;
+    const auto ping = osc_test::message("/dummy/ping");
+    CHECK(e.engine.ingest(ping.ptr(), ping.size(), 0xCCCC) == CLOCKWORK_OK);
+    osc_test::ParsedReply r;
+    REQUIRE(e.reply("/dummy/pong", r));
+
+    const uint32_t droppedBefore = e.engine.getMetrics().messages_dropped.load();
+    std::vector<uint8_t> huge(8u * 1024u * 1024u, 0);
+    std::memcpy(huge.data(), "/big\0\0\0\0,\0\0\0", 12);
+    CHECK(e.engine.ingest(huge.data(), static_cast<uint32_t>(huge.size()), 0xCCCC) == CLOCKWORK_E_TOO_BIG);
+    CHECK(e.engine.getMetrics().messages_dropped.load() == droppedBefore + 1);
+}
+
 TEST_CASE("client abi: a message built in the ring arrives like any other",
           "[client][abi][reserve]") {
     // A caller whose bytes do not exist yet reserves room and builds the frame

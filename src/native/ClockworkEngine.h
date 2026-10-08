@@ -6,6 +6,7 @@
 #pragma once
 
 #include "clockwork_product.h"
+#include "clockwork_client.h"   // ClockworkStatus
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -281,7 +282,10 @@ public:
     // internOrigin at its entry point) the egress later resolves to route replies
     // back; 0 means an anonymous in-process / embedder caller. No default — every
     // entry point assigns an origin, so an unstamped 0 can never sneak in.
-    void ingest(const uint8_t* data, uint32_t size, uint32_t originToken);
+    // Returns what the client door said (clockwork_client_send): CLOCKWORK_OK,
+    // CLOCKWORK_E_FULL (no room this moment), CLOCKWORK_E_TOO_BIG (never room),
+    // CLOCKWORK_E_CLOSED (no engine to send to). Anything but OK is a drop.
+    ClockworkStatus ingest(const uint8_t* data, uint32_t size, uint32_t originToken);
     bool isRunning() const { return mRunning.load(); }
 
     // The client handle over this engine's memory, for a host that drains
@@ -400,6 +404,11 @@ public:
     // --- Engine lifecycle state ---
     EngineState engineState() const { return mEngineState.load(); }
     void        setEngineState(EngineState state, const std::string& reason = "");
+    // Why the engine last went into Error ("" if it never has).
+    std::string errorReason() const {
+        std::lock_guard<std::mutex> lock(mErrorReasonMutex);
+        return mErrorReason;
+    }
 
     // --- Metrics ---
     // Shared PerformanceMetrics struct (defined in src/shared_memory.h).
@@ -1109,7 +1118,7 @@ private:
     std::atomic<EngineState> mEngineState{EngineState::Stopped};
     // Why the engine is in error, replayed to a client that registers after
     // the transition (snapshotStateTo). Set on every move into Error.
-    std::mutex               mErrorReasonMutex;
+    mutable std::mutex       mErrorReasonMutex;
     std::string              mErrorReason;
     // Read by Link network-thread callbacks before they touch the egress.
     // Cleared early in shutdown() so in-flight callbacks skip
