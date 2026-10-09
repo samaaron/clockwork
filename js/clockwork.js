@@ -353,7 +353,6 @@ export class Clockwork {
       debugEngine: options.debugEngine ?? false,
       debugOscIn: options.debugOscIn ?? false,
       debugOscOut: options.debugOscOut ?? false,
-      bufferGrowIncrement: options.bufferGrowIncrement ?? (32 * 1024 * 1024),
     };
 
     // The growth ceiling, resolved once: caller's option → layout default →
