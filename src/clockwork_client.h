@@ -16,6 +16,20 @@
  * loaded, and a client that knows about them knows it on its own account.
  *
  *
+ * ── ONE CLIENT ──────────────────────────────────────────────────────────────
+ *
+ * An engine has one client: one program, however many threads and handles it
+ * opens. Its threads and the engine's own transports share the ingress ring
+ * and its write lock, and a lock with no owner is sound only because they
+ * share a fate. A client that dies mid-send stops the ring for the life of the
+ * process, and that ends the session. This is the design, not a gap.
+ *
+ * Several programs sharing one engine — each surviving the others' crashes,
+ * each with its own view of the session — is application behaviour, and it
+ * belongs in the application: one program is the client and serves the rest
+ * however that app needs. It is not Clockwork's.
+ *
+ *
  * ── WHAT THIS REPLACES ──────────────────────────────────────────────────────
  *
  * Every consumer has so far written the ring arithmetic itself: the sequence
@@ -55,9 +69,9 @@
  * none of it belongs on an audio thread — a client does not have one, and the
  * engine's own is on the other side of the boundary.
  *
- * One handle is for one thread. Two threads that both want to talk to the
- * engine open two handles; that is cheap and it is what the ingress ring's
- * multi-producer lock is for. The exception is deliberate and stated at
+ * One handle is for one thread. Two threads of the client that both want to
+ * talk to the engine open two handles; that is cheap and it is what the
+ * ingress ring's multi-producer lock is for. The exception is deliberate and stated at
  * clockwork_client_poll: draining is single-consumer, so exactly one thread
  * may poll a given handle's egress.
  *

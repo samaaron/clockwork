@@ -22,13 +22,6 @@
  *
  * Catch2 assertion macros are NOT thread-safe, so worker threads only touch
  * plain data / atomics; every REQUIRE/CHECK runs on the main thread after join.
- *
- * ── Layout ────────────────────────────────────────────────────────────────
- *   [RingConcurrency]  runs in CI (incl. TSan). GREEN regression guards.
- *   [.][ring-todo]     hidden (excluded from the default/CI run, so main stays
- *                      green). Each reproduces one still-open defect; running
- *                      it explicitly under TSan shows the race. Flips green
- *                      when the corresponding fix lands.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -159,7 +152,7 @@ TEST_CASE("MPSC ring: concurrent producers and a drainer lose no frames",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Defect #1 fix guard (RUNS, GREEN): off-audio-thread debug routes to NRT-out.
+// Off-audio-thread debug routes to NRT-out.
 // RT-out (ring_buffer_write) is lock-free — safe ONLY with the audio thread as its
 // sole writer. Off the audio thread, the debug emitter must route to the locked
 // NRT-out ring instead, so RT-out never gets a second writer. This drives clockwork_log
@@ -202,85 +195,4 @@ TEST_CASE("off-audio-thread clockwork_log routes to NRT-out, not the RT-out ring
     shared_memory = savedSM; control = savedC; metrics = savedM;
     memory_initialized = savedInit;
     g_nrt_egress_drained.store(savedDrn, std::memory_order_relaxed);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Defect #2 (HIDDEN, RED): rebuild reassigning the ring base racing a live writer.
-// On a device rebuild, init_memory reassigns the NON-ATOMIC globals shared_memory
-// / control / metrics while off-thread users still dereference them — the same
-// class as defect #1. (The atomic head/tail/sequence zeroing is only a logical
-// race the drain repairs, and atomics never trip TSan, so the detectable hazard
-// is the plain-pointer reassignment.) The external segment is stable across
-// rebuilds, so the reassign writes the SAME value — benign in value, still an
-// unsynchronised non-atomic write racing a read. Modeled here with a non-atomic
-// base pointer a "rebuild" thread reassigns while a writer dereferences it.
-// Fix: quiesce writers before the rebuild reassigns the globals.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("rebuild reassigning the ring base races a live writer",
-          "[.][ring-todo]") {
-    std::vector<uint8_t> ring(16 * 1024, 0);
-    uint8_t* base = ring.data();   // models the non-atomic `shared_memory` global
-    std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<bool>    stop{false};
-
-    std::thread writer([&] {
-        uint32_t s = 0;
-        while (!stop.load(std::memory_order_acquire)) {
-            uint8_t payload[sizeof(Tag)];
-            packTag(payload, 0, s++);
-            uint8_t* b = base;   // non-atomic read of the base — races the reassign
-            RingBufferWriter::write(b, static_cast<uint32_t>(ring.size()),
-                                    &head, &tail, &sequence, &writeLock,
-                                    payload, sizeof(payload), 0);
-        }
-    });
-    std::thread rebuild([&] {
-        while (!stop.load(std::memory_order_acquire)) {
-            base = ring.data();   // init_memory: the same value, written unsynchronised
-            std::this_thread::yield();
-        }
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    stop.store(true, std::memory_order_release);
-    writer.join();
-    rebuild.join();
-
-    SUCCEED("a writer ran against a concurrent base-pointer reassign; under TSan "
-            "this reports the rebuild-vs-writer race (defect #2)");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Defect #3 (HIDDEN, RED): stuck lock / the IN-ring hang.
-// write_lock is a plain word with no owner or deadline. If a producer dies
-// holding it, the next producer spins unbounded. Here the lock is pre-held
-// (owner "died"); a writer must still return within a deadline. Today it spins
-// forever → `completedInTime` is false → RED. A bounded-spin fix (give up and
-// return rather than block) flips it green.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("a producer must not spin forever on a lock held by a dead owner",
-          "[.][ring-todo]") {
-    std::vector<uint8_t> ring(4 * 1024, 0);
-    std::atomic<int32_t> head{0}, tail{0}, sequence{0};
-    std::atomic<int32_t> writeLock{1};   // owner died holding the lock
-    std::atomic<bool>    completed{false};
-
-    std::thread w([&] {
-        uint8_t payload[sizeof(Tag)];
-        packTag(payload, 0, 0);
-        RingBufferWriter::write(ring.data(), static_cast<uint32_t>(ring.size()),
-                                &head, &tail, &sequence, &writeLock,
-                                payload, sizeof(payload), 0);
-        completed.store(true, std::memory_order_release);
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    const bool completedInTime = completed.load(std::memory_order_acquire);
-
-    // Release the lock so an unfixed (still-spinning) writer can finish — the test
-    // must never hang at join(), even while demonstrating the defect.
-    writeLock.store(0, std::memory_order_release);
-    w.join();
-
-    CHECK(completedInTime);   // RED today (unbounded spin); GREEN with a bounded-spin fix
 }

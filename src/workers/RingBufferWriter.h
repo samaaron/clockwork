@@ -21,7 +21,9 @@
  *    and so the cursor advance — is that length rounded up to 4 bytes, with
  *    the pad bytes zeroed. Payload sizes round-trip exactly (MIDI messages
  *    are not 4-byte multiples) while offsets stay 4-aligned.
- *  - producers serialise via the write_lock spinlock (compare_exchange)
+ *  - producers serialise via the write_lock spinlock (compare_exchange); it
+ *    has no owner because every producer is the engine's or its one client's
+ *    (clockwork_client.h, ONE CLIENT)
  *  - returns false when the frame doesn't fit (backpressure, no blocking)
  */
 #pragma once

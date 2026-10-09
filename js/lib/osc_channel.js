@@ -25,7 +25,10 @@ const CLOCK_HEARD_FOR_SECS = 0.1;
  * and a set of counters rather than a connection of its own.
  *
  * Works in both SAB and postMessage modes. Can be transferred to Web Workers
- * for direct communication with the AudioWorklet.
+ * for direct communication with the AudioWorklet. A worker holding a channel
+ * is a thread of the page, and the page is the engine's one client
+ * (src/clockwork_client.h, ONE CLIENT): in SAB mode a worker terminated
+ * mid-send leaves the IN ring locked for good, so close its channel first.
  */
 export class OscChannel {
     #mode;
