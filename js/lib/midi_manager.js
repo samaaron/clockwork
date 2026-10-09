@@ -215,11 +215,12 @@ export class MidiManager {
 
   // Send a /clockwork/midi/out/* OSC packet to hardware.
   //
-  // The time comes from the verb itself — the packed form is
-  // [when: 8 LE][portLen][port][bytes] — and is converted here from an OSC
-  // timetag to the DOMHighResTimeStamp the Web MIDI API wants. `timestampMs`
-  // remains an explicit override for a caller that has already decided —
-  // the host front, which carries the time of a verb the scheduler fired.
+  // The time is the verb's own when it names one — the packed form is
+  // [when: 8 LE][portLen][port][bytes] — converted here from an OSC timetag
+  // to the DOMHighResTimeStamp the Web MIDI API wants. It wins over
+  // `timestampMs`, the time of the call (the host front carries the moment a
+  // scheduled verb was fired for), as it does natively
+  // (MidiControl::handleOutVerb).
   //
   // This is where a timestamp is worth the most: the browser schedules the
   // send itself, so handing it a future time is tighter than racing to deliver
@@ -230,7 +231,8 @@ export class MidiManager {
     const packed = midi_out_decode(oscBytes);
     if (!packed) return false;
     const when = new DataView(packed.buffer, packed.byteOffset, 8).getBigUint64(0, true);
-    const at = timestampMs !== undefined ? timestampMs : timetagToPerfMs(when);
+    const own = timetagToPerfMs(when);   // undefined: the verb names no time
+    const at = own !== undefined ? own : timestampMs;
     const portLen = packed[8];
     const port = new TextDecoder().decode(packed.subarray(9, 9 + portLen));
     const raw = packed.subarray(9 + portLen);

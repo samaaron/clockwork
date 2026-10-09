@@ -138,6 +138,26 @@ test("a scheduled note reaches the port early, stamped with its moment", async (
   expect(r.sentAt[0], "the send was made after its moment, not held to it").toBeLessThan(timestamp);
 });
 
+test("a scheduled note that names its own moment is sent at that moment", async ({ page, clockworkConfig }) => {
+  // A send's trailing timetag is the message's own time and wins over the
+  // time it was scheduled for, as it does natively (MidiControl::handleOutVerb).
+  // The front once stamped such a note with the schedule's time instead.
+  const r = await run(page, clockworkConfig, async ({ clockwork, until }) => {
+    clockwork.send("/clockwork/midi/out/enable", "*", 1);
+    const now = window.Clockwork.osc.ntpNow();
+    const ownPerfMs = performance.now() + 600;
+    const inner = window.Clockwork.osc.encodeMessage("/clockwork/midi/out/note_on",
+      ["fake_synth", 1, 65, 80, { type: "timetag", value: now + 0.6 }]);
+    clockwork.send("/clockwork/schedule", { type: "double", value: now + 0.3 }, { type: "blob", value: inner });
+    const got = await until(() => window.__fakeMidi.synth.sent.length === 1, 3000);
+    return { got, sent: window.__fakeMidi.synth.sent, ownPerfMs };
+  });
+  expect(r.got, "the scheduled note never reached the port").toBe(true);
+  expect(r.sent[0].bytes).toEqual([0x90, 65, 80]);
+  const { timestamp } = r.sent[0];
+  expect(Math.abs(timestamp - r.ownPerfMs), `stamped ${timestamp - r.ownPerfMs} ms from its own moment`).toBeLessThan(30);
+});
+
 test("a note the guest sends itself reaches the port stamped with its moment", async ({ page, clockworkConfig }) => {
   // The self-directed guest's path: never through ingress, never through
   // the scheduler. The dummy opens a sink through DspHost and sends from
