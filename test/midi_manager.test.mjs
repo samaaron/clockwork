@@ -148,10 +148,13 @@ maybe("a timed send reaches the port with its time as a DOMHighResTimeStamp", as
   assert.equal(synth.sent.length, 1);
   assert.ok(Math.abs(synth.sent[0].timestamp - expect) < 1, `timestamp ${synth.sent[0].timestamp} vs ${expect}`);
 
-  // An explicit override — the host front carrying a scheduled verb's
-  // time — wins over the verb's own.
+  // The call's time — the host front carrying the moment a scheduled verb
+  // was fired for — is for a verb that names none: a verb's own wins, as it
+  // does natively (MidiControl::handleOutVerb).
   m.sendOut(timed, 1234.5);
-  assert.equal(synth.sent[1].timestamp, 1234.5);
+  assert.ok(Math.abs(synth.sent[1].timestamp - expect) < 1, `timestamp ${synth.sent[1].timestamp} vs ${expect}`);
+  m.sendOut(encode(clockworkSys("midi/out/note_on"), ["synth_1", 1, 64, 90]), 1234.5);
+  assert.equal(synth.sent[2].timestamp, 1234.5);
 });
 
 maybe("channel 0 fans a message out to all sixteen channels in one send", async () => {
