@@ -103,7 +103,6 @@ pub const FIELDS: &[FieldInfo] = &[
     FieldInfo { offset: 50, key: "driftOffsetMs", unit: "ms", description: "Clock drift between AudioContext and wall clock" },
     FieldInfo { offset: 51, key: "clockOffsetMs", unit: "ms", description: "Clock offset for multi-system sync" },
     FieldInfo { offset: 52, key: "audioContextState", unit: "", description: "AudioContext state" },
-    FieldInfo { offset: 57, key: "engineSchedulerCapacity", unit: "count", description: "Maximum scheduler queue size" },
     FieldInfo { offset: 58, key: "inBufferCapacity", unit: "bytes", description: "IN ring buffer capacity" },
     FieldInfo { offset: 59, key: "outBufferCapacity", unit: "bytes", description: "OUT ring buffer capacity" },
     FieldInfo { offset: 60, key: "nrtOutBufferCapacity", unit: "bytes", description: "NRT-out ring buffer capacity" },
@@ -187,8 +186,8 @@ pub enum Metric {
     LinkAudioPublish = 37,
     LinkAudioSinks = 38,
     ClockworkCommit = 39,
-    Reserved40 = 40,
-    Reserved41 = 41,
+    EngineSchedulerCapacity = 40,
+    EngineSchedulerPoolBytes = 41,
     AudioSampleRate = 42,
     AudioBlockSize = 43,
     AudioOutputChannels = 44,
@@ -200,7 +199,6 @@ pub enum Metric {
     DriftOffsetMs = 50,
     ClockOffsetMs = 51,
     AudioContextState = 52,
-    EngineSchedulerCapacity = 57,
     InBufferCapacity = 58,
     OutBufferCapacity = 59,
     NrtOutBufferCapacity = 60,
@@ -216,7 +214,7 @@ pub enum Metric {
 
 impl Metric {
     /// Every metric, in offset order.
-    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkCommit, Metric::Reserved40, Metric::Reserved41, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::DriftOffsetMs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::EngineSchedulerCapacity, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
+    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkCommit, Metric::EngineSchedulerCapacity, Metric::EngineSchedulerPoolBytes, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::DriftOffsetMs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
 
     /// The word this metric is, in the metrics array.
     pub const fn offset(self) -> u32 {
@@ -266,8 +264,8 @@ impl Metric {
             Metric::LinkAudioPublish => &FIELDS[37],
             Metric::LinkAudioSinks => &FIELDS[38],
             Metric::ClockworkCommit => &FIELDS[39],
-            Metric::Reserved40 => &FIELDS[40],
-            Metric::Reserved41 => &FIELDS[41],
+            Metric::EngineSchedulerCapacity => &FIELDS[40],
+            Metric::EngineSchedulerPoolBytes => &FIELDS[41],
             Metric::AudioSampleRate => &FIELDS[42],
             Metric::AudioBlockSize => &FIELDS[43],
             Metric::AudioOutputChannels => &FIELDS[44],
@@ -279,18 +277,17 @@ impl Metric {
             Metric::DriftOffsetMs => &FIELDS[50],
             Metric::ClockOffsetMs => &FIELDS[51],
             Metric::AudioContextState => &FIELDS[52],
-            Metric::EngineSchedulerCapacity => &FIELDS[53],
-            Metric::InBufferCapacity => &FIELDS[54],
-            Metric::OutBufferCapacity => &FIELDS[55],
-            Metric::NrtOutBufferCapacity => &FIELDS[56],
-            Metric::Mode => &FIELDS[57],
-            Metric::GlitchCount => &FIELDS[58],
-            Metric::GlitchDurationMs => &FIELDS[59],
-            Metric::AverageLatencyUs => &FIELDS[60],
-            Metric::MaxLatencyUs => &FIELDS[61],
-            Metric::AudioHealthPct => &FIELDS[62],
-            Metric::TotalFramesDurationMs => &FIELDS[63],
-            Metric::HasPlaybackStats => &FIELDS[64],
+            Metric::InBufferCapacity => &FIELDS[53],
+            Metric::OutBufferCapacity => &FIELDS[54],
+            Metric::NrtOutBufferCapacity => &FIELDS[55],
+            Metric::Mode => &FIELDS[56],
+            Metric::GlitchCount => &FIELDS[57],
+            Metric::GlitchDurationMs => &FIELDS[58],
+            Metric::AverageLatencyUs => &FIELDS[59],
+            Metric::MaxLatencyUs => &FIELDS[60],
+            Metric::AudioHealthPct => &FIELDS[61],
+            Metric::TotalFramesDurationMs => &FIELDS[62],
+            Metric::HasPlaybackStats => &FIELDS[63],
         }
     }
 

@@ -82,7 +82,6 @@ inline constexpr FieldInfo kFields[] = {
     { 50, "driftOffsetMs", "ms", "Clock drift between AudioContext and wall clock" },
     { 51, "clockOffsetMs", "ms", "Clock offset for multi-system sync" },
     { 52, "audioContextState", "", "AudioContext state" },
-    { 57, "engineSchedulerCapacity", "count", "Maximum scheduler queue size" },
     { 58, "inBufferCapacity", "bytes", "IN ring buffer capacity" },
     { 59, "outBufferCapacity", "bytes", "OUT ring buffer capacity" },
     { 60, "nrtOutBufferCapacity", "bytes", "NRT-out ring buffer capacity" },
