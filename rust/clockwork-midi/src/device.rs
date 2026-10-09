@@ -356,7 +356,7 @@ mod linux_ports {
         pub fn new(client_name: &str, on_input: InputCallback) -> Self {
             // One queue stamps every port, so one clock maps them all.
             let clock = std::sync::Mutex::new(crate::stamp::StampClock::new());
-            let stamped: SharedInputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, bytes: &[u8]| {
+            let stamped: SharedInputCallback = std::sync::Arc::new(move |norm: &str, raw: &str, ts: u64, bytes: &[u8]| {
                 let when = clock.lock().unwrap().timetag(ts, crate::stamp::now_unix_us());
                 on_input(norm, raw, ts, when, bytes)
             });
