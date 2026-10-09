@@ -892,6 +892,22 @@ extern "C" {
     ReplyChannel g_rt_reply{ &rt_reply_emit, nullptr };
 #endif
 
+    // The metrics that are constant for a session: which Clockwork, the rate
+    // and block it runs at, and how much its scheduler can hold — events and
+    // bytes, since it is full when it runs out of either.
+    static void publish_session_metrics(double sample_rate, int buf_length) {
+        metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
+        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
+        metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
+#if CLOCKWORK_SCHEDULER
+        metrics->scheduler_capacity.store(SCHEDULER_SLOT_COUNT, std::memory_order_relaxed);
+        metrics->scheduler_pool_bytes.store(SCHEDULER_DATA_POOL_SIZE, std::memory_order_relaxed);
+#else
+        metrics->scheduler_capacity.store(0, std::memory_order_relaxed);
+        metrics->scheduler_pool_bytes.store(0, std::memory_order_relaxed);
+#endif
+    }
+
     static inline void update_scheduler_depth_metric(uint32_t depth) {
         if (!metrics) {
             return;
@@ -1936,13 +1952,10 @@ extern "C" {
         g_osc_increment = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
         g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
 
-        // Publish cross-platform system info into the metrics struct (slots
-        // 58-64). Constant for the session; written once now that the DSP
-        // exists. Runs on every runtime — native's initialiseDsp() also
+        // Publish cross-platform system info into the metrics struct.
+        // Constant for the session; written once now that the DSP exists. Runs on every runtime — native's initialiseDsp() also
         // routes through init_memory().
-        metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
-        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
-        metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
+        publish_session_metrics(sample_rate, buf_length);
         metrics->audio_output_channels.store(config.max_output_channels, std::memory_order_relaxed);
         metrics->audio_input_channels.store(config.max_input_channels, std::memory_order_relaxed);
 
@@ -1981,9 +1994,7 @@ extern "C" {
         g_osc_increment = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
         g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
 
-        metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
-        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
-        metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
+        publish_session_metrics(sample_rate, buf_length);
 
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().clear();

@@ -105,8 +105,8 @@ export const LINK_AUDIO_SINKS        = 38;  // active output sinks
 // in shared_memory.h; asserted via CLOCKWORK_ASSERT_METRIC.
 // =============================================================================
 export const CLOCKWORK_COMMIT         = 39;  // CLOCKWORK_COMMIT_WORD: which Clockwork, its commit's first 8 hex digits (0: unknown)
-export const RESERVED_40              = 40;  // was the version's minor (Clockwork has no version); 0
-export const RESERVED_41              = 41;  // was the version's patch; 0
+export const SCHEDULER_CAPACITY       = 40;  // timed events the scheduler can hold (0: no scheduler)
+export const SCHEDULER_POOL_BYTES     = 41;  // bytes of timed messages the scheduler can hold (0: no scheduler)
 export const AUDIO_SAMPLE_RATE        = 42;  // output sample rate (Hz)
 export const AUDIO_BLOCK_SIZE         = 43;  // block size (frames; 128 on web)
 export const AUDIO_OUTPUT_CHANNELS    = 44;  // output bus channels
@@ -154,7 +154,9 @@ export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running
 // guest in the reserved guest range rather than sitting at a fixed offset in a
 // guest-agnostic file. Left as a hole for the same reason 53-55 are: these are
 // read by offset.
-export const CTX_ENGINE_SCHEDULER_CAPACITY = 57;   // Static from bufferConstants
+// 57 RESERVED. It held the scheduler's capacity, read from a constant the
+// arena never carried; the engine publishes it now (SCHEDULER_CAPACITY, 40).
+// Left as a hole for the same reason as 53-56.
 export const CTX_IN_BUFFER_CAPACITY = 58;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 59;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 60;        // Static from bufferConstants

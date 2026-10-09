@@ -614,8 +614,8 @@ struct alignas(4) PerformanceMetrics {
     // Engine identity + audio connection details. Written once at init by
     // init_memory() (audio_processor.cpp). Constant for the session.
     std::atomic<uint32_t> clockwork_commit;        // 39: CLOCKWORK_COMMIT_WORD, the commit's first 8 hex digits (0: unknown)
-    std::atomic<uint32_t> reserved_40;             // 40: was the version's minor (Clockwork has no version); 0
-    std::atomic<uint32_t> reserved_41;             // 41: was the version's patch; 0
+    std::atomic<uint32_t> scheduler_capacity;      // 40: timed events the scheduler can hold (0: no scheduler)
+    std::atomic<uint32_t> scheduler_pool_bytes;    // 41: bytes of timed messages the scheduler can hold (0: no scheduler)
     std::atomic<uint32_t> audio_sample_rate;        // 42: output sample rate (Hz)
     std::atomic<uint32_t> audio_block_size;         // 43: block size (frames; 128 on web)
     std::atomic<uint32_t> audio_output_channels;    // 44: output bus channels
@@ -1054,8 +1054,8 @@ CLOCKWORK_ASSERT_METRIC(ring_buffer_direct_write_fails,  26);
 // is written by shared C++ on every runtime and IS asserted against the JS
 // mirror in js/lib/metrics_offsets.js.
 CLOCKWORK_ASSERT_METRIC(clockwork_commit,               39);
-CLOCKWORK_ASSERT_METRIC(reserved_40,                    40);
-CLOCKWORK_ASSERT_METRIC(reserved_41,                    41);
+CLOCKWORK_ASSERT_METRIC(scheduler_capacity,             40);
+CLOCKWORK_ASSERT_METRIC(scheduler_pool_bytes,           41);
 CLOCKWORK_ASSERT_METRIC(audio_sample_rate,               42);
 CLOCKWORK_ASSERT_METRIC(audio_block_size,                43);
 CLOCKWORK_ASSERT_METRIC(audio_output_channels,           44);

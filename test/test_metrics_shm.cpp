@@ -121,3 +121,20 @@ TEST_CASE("metrics: a new engine's buffer peaks are its own",
     REQUIRE(second.waitForBlocks(64, 30000));   // a bound only a broken engine reaches
     CHECK(second.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
 }
+
+TEST_CASE("metrics: the engine publishes how much its scheduler holds",
+          "[metrics][scheduler]") {
+    // A reader that sees the queue's depth needs its capacity to know how
+    // close to full it is: events, and bytes, since it is full when it runs
+    // out of either. The web client once read both from constants the arena
+    // never carried, so every reader was told 0.
+    EngineFixture fix;
+    const auto& m = fix.engine().getMetrics();
+#if CLOCKWORK_SCHEDULER
+    CHECK(m.scheduler_capacity.load() == SCHEDULER_SLOT_COUNT);
+    CHECK(m.scheduler_pool_bytes.load() == SCHEDULER_DATA_POOL_SIZE);
+#else
+    CHECK(m.scheduler_capacity.load() == 0u);
+    CHECK(m.scheduler_pool_bytes.load() == 0u);
+#endif
+}

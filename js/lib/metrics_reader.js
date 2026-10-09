@@ -139,6 +139,8 @@ export class MetricsReader {
       engineSchedulerMaxLateMs: m[MetricsOffsets.ENGINE_SCHEDULER_MAX_LATE_MS],
       engineSchedulerLastLateMs: m[MetricsOffsets.ENGINE_SCHEDULER_LAST_LATE_MS],
       engineSchedulerLastLateTick: m[MetricsOffsets.ENGINE_SCHEDULER_LAST_LATE_TICK],
+      engineSchedulerCapacity: m[MetricsOffsets.SCHEDULER_CAPACITY],
+      engineSchedulerPoolBytes: m[MetricsOffsets.SCHEDULER_POOL_BYTES],
 
       // OSC In/Out metrics
       oscInMessagesReceived: m[MetricsOffsets.OSC_IN_MESSAGES_RECEIVED],
@@ -211,10 +213,6 @@ export class MetricsReader {
         peakPercentage: (m[MetricsOffsets.NRT_OUT_BUFFER_PEAK_BYTES] / bc.NRT_OUT_BUFFER_SIZE) * 100,
         capacity: bc.NRT_OUT_BUFFER_SIZE,
       };
-    }
-
-    if (bc?.scheduler_slot_count !== undefined) {
-      metrics.engineSchedulerCapacity = bc.scheduler_slot_count;
     }
 
     // Context-provided metrics
@@ -302,7 +300,6 @@ export class MetricsReader {
 
     // Static capacities from bufferConstants
     const bc = this.#bufferConstants;
-    arr[MetricsOffsets.CTX_ENGINE_SCHEDULER_CAPACITY] = bc?.scheduler_slot_count ?? 0;
     arr[MetricsOffsets.CTX_IN_BUFFER_CAPACITY] = bc?.IN_BUFFER_SIZE ?? 0;
     arr[MetricsOffsets.CTX_OUT_BUFFER_CAPACITY] = bc?.OUT_BUFFER_SIZE ?? 0;
     arr[MetricsOffsets.CTX_NRT_OUT_BUFFER_CAPACITY] = bc?.NRT_OUT_BUFFER_SIZE ?? 0;

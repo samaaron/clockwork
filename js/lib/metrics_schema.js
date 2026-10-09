@@ -101,8 +101,8 @@ export const METRICS_SCHEMA = {
 
     // System info [39-45] — cross-platform; written by shared C++ at init.
     clockworkCommit:              { offset: 39, type: 'constant', unit: 'commit', description: 'Which Clockwork: the commit it was built from (its first 8 hex digits; 0 when unknown)' },
-    reserved40:                   { offset: 40, type: 'constant', unit: 'count', description: 'Reserved (always 0)' },
-    reserved41:                   { offset: 41, type: 'constant', unit: 'count', description: 'Reserved (always 0)' },
+    engineSchedulerCapacity:      { offset: 40, type: 'constant', unit: 'count', description: 'Timed events the scheduler can hold (0 in a build with none)' },
+    engineSchedulerPoolBytes:     { offset: 41, type: 'constant', unit: 'bytes', description: 'Bytes of timed messages the scheduler can hold (0 in a build with none)' },
     audioSampleRate:              { offset: 42, type: 'constant', unit: 'Hz',    description: 'Output sample rate' },
     audioBlockSize:               { offset: 43, type: 'constant', unit: 'count', description: 'Audio block size in frames per callback' },
     audioOutputChannels:          { offset: 44, type: 'constant', unit: 'count', description: 'Output bus channels' },
@@ -118,7 +118,6 @@ export const METRICS_SCHEMA = {
     driftOffsetMs:                { offset: 50, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
     audioContextState:            { offset: 52, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
-    engineSchedulerCapacity:     { offset: 57, type: 'constant', unit: 'count', description: 'Maximum scheduler queue size' },
     inBufferCapacity:             { offset: 58, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
     outBufferCapacity:            { offset: 59, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
     nrtOutBufferCapacity:          { offset: 60, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
