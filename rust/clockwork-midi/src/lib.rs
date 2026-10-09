@@ -39,6 +39,8 @@ pub mod device;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod stamp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watcher;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

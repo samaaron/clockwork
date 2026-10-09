@@ -49,9 +49,12 @@ fn sequencer_present() -> bool {
 use per_port::{Inputs, Outputs};
 
 /// Invoked for each inbound message on midir's input thread:
-/// `(normalized_port, raw_os_name, timestamp_us, raw_bytes)`. The raw OS name
-/// rides along so the engine can label a clock timeline with the friendly name.
-pub type InputCallback = Arc<dyn Fn(&str, &str, u64, &[u8]) + Send + Sync + 'static>;
+/// `(normalized_port, raw_os_name, timestamp_us, when, raw_bytes)`. The raw OS
+/// name rides along so the engine can label a clock timeline with the
+/// friendly name. `timestamp_us` is the OS's stamp, in microseconds from an
+/// origin the OS picks; `when` is that stamp on the engine's clock, as an OSC
+/// timetag ([`crate::stamp`]).
+pub type InputCallback = Arc<dyn Fn(&str, &str, u64, u64, &[u8]) + Send + Sync + 'static>;
 
 /// Owns all open MIDI connections plus the last-enumerated port lists.
 pub struct MidiIo {
@@ -336,7 +339,7 @@ fn is_software_synth(raw: &str) -> bool {
 mod linux_ports {
     use std::collections::HashSet;
 
-    use midir::shared::{SharedInput, SharedOutput};
+    use midir::shared::{SharedInput, SharedInputCallback, SharedOutput};
     use midir::Ignore;
 
     use super::{normalize_ports, port_names_in, port_names_out, InputCallback, OWN_IN_PORT, OWN_OUT_PORT};
@@ -351,7 +354,13 @@ mod linux_ports {
 
     impl Inputs {
         pub fn new(client_name: &str, on_input: InputCallback) -> Self {
-            let shared = if super::sequencer_present() { SharedInput::new(client_name, Ignore::None, on_input).ok() } else { None };
+            // One queue stamps every port, so one clock maps them all.
+            let clock = std::sync::Mutex::new(crate::stamp::StampClock::new());
+            let stamped: SharedInputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, bytes: &[u8]| {
+                let when = clock.lock().unwrap().timetag(ts, crate::stamp::now_unix_us());
+                on_input(norm, raw, ts, when, bytes)
+            });
+            let shared = if super::sequencer_present() { SharedInput::new(client_name, Ignore::None, stamped).ok() } else { None };
             Inputs {
                 shared,
                 open: HashSet::new(),
@@ -553,10 +562,16 @@ mod per_port {
             let cb = self.on_input.clone();
             let name = norm.to_string();
             let raw = infos[idx].raw.clone();
+            // A clock per connection: an OS may start its stamps afresh when a
+            // port is opened again.
+            let mut clock = crate::stamp::StampClock::new();
             match midi_in.connect(
                 &ports[idx],
                 OWN_IN_PORT,
-                move |ts, bytes, _| cb(&name, &raw, ts, bytes),
+                move |ts, bytes, _| {
+                    let when = clock.timetag(ts, crate::stamp::now_unix_us());
+                    cb(&name, &raw, ts, when, bytes)
+                },
                 (),
             ) {
                 Ok(conn) => {

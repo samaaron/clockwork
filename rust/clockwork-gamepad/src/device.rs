@@ -17,6 +17,7 @@ use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Replay, Ticks
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 
 use crate::io::{assign_handle, Out, Registry};
+use crate::osc::timetag_of;
 use crate::state::{PadEvent, PadState};
 
 struct Pad {
@@ -63,13 +64,13 @@ impl GamepadIo {
         let mut out = Vec::new();
         let mut next = self.gilrs.next_event_blocking(Some(timeout));
         while let Some(ev) = next {
-            self.translate(ev.id, ev.event, &mut out);
+            self.translate(ev.id, ev.event, timetag_of(ev.time), &mut out);
             next = self.gilrs.next_event();
         }
         out
     }
 
-    fn translate(&mut self, id: GamepadId, ev: EventType, out: &mut Vec<Out>) {
+    fn translate(&mut self, id: GamepadId, ev: EventType, when: u64, out: &mut Vec<Out>) {
         match ev {
             EventType::Connected => {
                 if self.connect_pad(id) {
@@ -88,7 +89,7 @@ impl GamepadIo {
             // releases at the swept-down value (0.0 from full).
             EventType::ButtonPressed(b, _) => {
                 if let Some(idx) = button_index(b) {
-                    self.state_event(id, out, |s| {
+                    self.state_event(id, when, out, |s| {
                         let v = s.button_value(idx);
                         s.set_button(idx, true, if v > 0.0 { v } else { 1.0 })
                     });
@@ -96,7 +97,7 @@ impl GamepadIo {
             }
             EventType::ButtonReleased(b, _) => {
                 if let Some(idx) = button_index(b) {
-                    self.state_event(id, out, |s| {
+                    self.state_event(id, when, out, |s| {
                         let v = s.button_value(idx);
                         s.set_button(idx, false, if v < 1.0 { v } else { 0.0 })
                     });
@@ -104,12 +105,12 @@ impl GamepadIo {
             }
             EventType::ButtonChanged(b, value, _) => {
                 if let Some(idx) = button_index(b) {
-                    self.state_event(id, out, |s| s.set_button_value(idx, value));
+                    self.state_event(id, when, out, |s| s.set_button_value(idx, value));
                 }
             }
             EventType::AxisChanged(a, value, _) => {
                 if let Some(idx) = axis_index(a) {
-                    self.state_event(id, out, |s| s.set_axis(idx, value));
+                    self.state_event(id, when, out, |s| s.set_axis(idx, value));
                 }
             }
             // Repeats are filter-generated (we install none); Dropped is
@@ -127,6 +128,7 @@ impl GamepadIo {
     fn state_event(
         &mut self,
         id: GamepadId,
+        when: u64,
         out: &mut Vec<Out>,
         f: impl FnOnce(&mut PadState) -> Option<PadEvent>,
     ) {
@@ -135,7 +137,7 @@ impl GamepadIo {
         if !self.registry.lock().unwrap().enabled(&pad.handle) {
             return; // muted: state updated, event suppressed
         }
-        out.push(Out::from_pad_event(&pad.handle, ev));
+        out.push(Out::from_pad_event(&pad.handle, ev, when));
     }
 
     /// Register a newly-connected pad: assign a stable deduped handle and add

@@ -5,6 +5,7 @@
 //! evdev / XInput) and Apple's GameController framework (`gc.rs`: macOS) —
 //! behind one `GamepadIo` interface consumed by `ffi.rs`.
 
+use crate::schema::{encode_axis_at, encode_button_at};
 use crate::state::{axis_name, button_name, wire_name, PadEvent};
 
 // Stable handle assignment is shared protocol logic — the same rule names
@@ -73,27 +74,43 @@ impl Registry {
 /// `GamepadIo::poll`. Names are the canonical [`crate::state`] vocabulary.
 #[derive(Debug)]
 pub enum Out {
-    Button { handle: String, name: String, pressed: bool, value: f32 },
-    Axis { handle: String, name: String, value: f32 },
+    /// `when`: the moment the OS saw it, as an OSC timetag.
+    Button { handle: String, name: String, pressed: bool, value: f32, when: u64 },
+    Axis { handle: String, name: String, value: f32, when: u64 },
     DevicesChanged,
 }
 
 impl Out {
     /// Both native backends emit through this (and the wasm boundary shares
     /// [`wire_name`]), so the `/clockwork/gamepad/in/*` vocabulary cannot diverge.
-    pub fn from_pad_event(handle: &str, ev: PadEvent) -> Out {
+    pub fn from_pad_event(handle: &str, ev: PadEvent, when: u64) -> Out {
         match ev {
             PadEvent::Button { idx, pressed, value } => Out::Button {
                 handle: handle.to_string(),
                 name: wire_name(button_name(idx), "button", idx),
                 pressed,
                 value,
+                when,
             },
             PadEvent::Axis { idx, value } => Out::Axis {
                 handle: handle.to_string(),
                 name: wire_name(axis_name(idx), "axis", idx),
                 value,
+                when,
             },
+        }
+    }
+
+    /// A button or axis event's `/clockwork/gamepad/in/*` packet, carrying its
+    /// moment as the trailing timetag, as the web's does. None for a devices
+    /// change, whose payload is the registry's.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        match self {
+            Out::Button { handle, name, pressed, value, when } =>
+                Some(encode_button_at(handle, name, *pressed, *value, *when)),
+            Out::Axis { handle, name, value, when } =>
+                Some(encode_axis_at(handle, name, *value, *when)),
+            Out::DevicesChanged => None,
         }
     }
 }
@@ -131,13 +148,30 @@ mod tests {
 
     #[test]
     fn from_pad_event_names_canonical_and_generic() {
-        match Out::from_pad_event("p", PadEvent::Button { idx: 0, pressed: true, value: 1.0 }) {
+        match Out::from_pad_event("p", PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, 0) {
             Out::Button { name, .. } => assert_eq!(name, "south"),
             other => panic!("unexpected {other:?}"),
         }
-        match Out::from_pad_event("p", PadEvent::Axis { idx: 9, value: 0.5 }) {
+        match Out::from_pad_event("p", PadEvent::Axis { idx: 9, value: 0.5 }, 0) {
             Out::Axis { name, .. } => assert_eq!(name, "axis_9"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_event_carries_the_moment_it_was_seen() {
+        // The web stamps each pad event with when it arrived; natively the
+        // backend's moment rides on the event the same way, so a client reads
+        // one shape on every host.
+        use crate::osc::{self, OscArg};
+        let when = 0xE000_0000_4000_0000u64;
+        for out in [
+            Out::from_pad_event("p", PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, when),
+            Out::from_pad_event("p", PadEvent::Axis { idx: 0, value: 0.5 }, when),
+        ] {
+            let m = osc::decode(&out.encode().unwrap()).unwrap();
+            assert_eq!(m.args.last(), Some(&OscArg::TimeTag(when)), "{}", m.addr);
+        }
+        assert!(Out::DevicesChanged.encode().is_none());
     }
 }

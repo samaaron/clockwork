@@ -205,7 +205,8 @@ export class MidiManager {
     // The wire form carries the moment the bytes arrived (the event's own
     // timestamp, in performance.now() terms) as a trailing timetag: a guest
     // placing the note on its own timeline wants when it was played, not when
-    // it reached the audio thread. Both are the same shape natively.
+    // it reached the audio thread. Natively it is the OS's own stamp, carried
+    // the same way (rust/clockwork-midi/src/stamp.rs).
     const when = perfMsToTimetag(event.timeStamp ?? this._now());
     const osc = midi_in_osc_at(port, bytes, when);
     if (osc) this._onEvent(osc);

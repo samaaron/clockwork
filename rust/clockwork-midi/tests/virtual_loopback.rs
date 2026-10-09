@@ -20,8 +20,8 @@ use midir::{MidiInput, MidiOutput};
 use clockwork_midi::device::MidiIo;
 use clockwork_midi::message::MidiMessage;
 
-/// What the loopback captured: `(port, bytes)` per message.
-type Captured = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+/// What the loopback captured: `(port, bytes, when)` per message.
+type Captured = Arc<Mutex<Vec<(String, Vec<u8>, u64)>>>;
 
 #[test]
 #[ignore = "needs CoreMIDI/ALSA virtual ports; run with --ignored on a dev box"]
@@ -34,8 +34,8 @@ fn input_loopback_via_virtual_port() {
     let sink = got.clone();
     let mut io = MidiIo::new(
         "clockwork-test",
-        Arc::new(move |port: &str, _raw: &str, _ts, bytes: &[u8]| {
-            sink.lock().unwrap().push((port.to_string(), bytes.to_vec()));
+        Arc::new(move |port: &str, _raw: &str, _ts, when, bytes: &[u8]| {
+            sink.lock().unwrap().push((port.to_string(), bytes.to_vec(), when));
         }),
     );
     io.refresh();
@@ -50,15 +50,18 @@ fn input_loopback_via_virtual_port() {
     assert!(io.enable_input(&norm, true), "open virtual input port");
 
     let expected = MidiMessage::NoteOn { channel: 1, note: 60, velocity: 100 };
+    let sent_at = clockwork_midi::osc::now_timetag();
     vconn.send(&expected.encode()).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 
     let got = got.lock().unwrap();
-    assert!(
-        got.iter()
-            .any(|(p, b)| *p == norm && MidiMessage::parse(b) == Some(expected.clone())),
-        "expected note-on loopback, got {got:?}"
-    );
+    let (_, _, when) = got
+        .iter()
+        .find(|(p, b, _)| *p == norm && MidiMessage::parse(b) == Some(expected.clone()))
+        .unwrap_or_else(|| panic!("expected note-on loopback, got {got:?}"));
+    // The OS's stamp, on the engine's clock: within a few ms of the send.
+    let off_ms = (*when as i128 - sent_at as i128) * 1000 / (1i128 << 32);
+    assert!((-5..=20).contains(&off_ms), "stamped {off_ms} ms from the send");
 }
 
 #[test]
@@ -76,7 +79,7 @@ fn output_loopback_via_virtual_port() {
         )
         .unwrap();
 
-    let mut io = MidiIo::new("clockwork-test", Arc::new(|_, _, _, _: &[u8]| {}));
+    let mut io = MidiIo::new("clockwork-test", Arc::new(|_, _, _, _, _: &[u8]| {}));
     io.refresh();
     let (_, outs) = io.port_lists();
     let norm = outs

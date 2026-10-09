@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::device::{InputCallback, MidiIo};
 use crate::message::MidiMessage;
-use crate::schema::{decode_out, encode_in, encode_ports, encode_ports_reply, OutCommand};
+use crate::schema::{decode_out, encode_in_at, encode_ports, encode_ports_reply, OutCommand};
 use crate::sync::{transport_event, TransportEvent};
 
 // Emit-callback shape (here delivering `/clockwork/midi/in/*` + `/clockwork/midi/ports*` packets),
@@ -208,7 +208,7 @@ impl ClockworkMidi {
 /// normalised port handle (estimator key + /clockwork/midi/in address + timeline key);
 /// `raw` is the friendly OS name passed through for timeline labelling.
 fn handle_input(host: &Host, input: &Arc<Mutex<InputState>>,
-                norm: &str, raw: &str, ts_us: u64, bytes: &[u8]) {
+                norm: &str, raw: &str, ts_us: u64, when: u64, bytes: &[u8]) {
     let msg = match MidiMessage::parse(bytes) {
         Some(m) => m,
         None => return,
@@ -234,8 +234,9 @@ fn handle_input(host: &Host, input: &Arc<Mutex<InputState>>,
         }
     }
 
-    // Everything else surfaces as a /clockwork/midi/in/* event for the engine/clients.
-    if let Some(osc) = encode_in(norm, &msg) {
+    // Everything else surfaces as a /clockwork/midi/in/* event for the
+    // engine/clients, carrying the moment the OS stamped it, as on the web.
+    if let Some(osc) = encode_in_at(norm, &msg, when) {
         host.emit(EMIT_BROADCAST, &osc);
     }
 }
@@ -291,8 +292,8 @@ pub unsafe extern "C" fn clockwork_midi_create(
         // The input callback runs inside the OS MIDI stack's callback frame
         // (CoreMIDI read proc / WinRT handler), so it must never unwind.
         let in_state = input.clone();
-        let on_input: InputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, bytes: &[u8]| {
-            no_unwind((), || handle_input(&host, &in_state, norm, raw, ts, bytes));
+        let on_input: InputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, when: u64, bytes: &[u8]| {
+            no_unwind((), || handle_input(&host, &in_state, norm, raw, ts, when, bytes));
         });
         let io = Arc::new(Mutex::new(MidiIo::new(client_name, on_input)));
         // Published so another subsystem can send through the same
@@ -467,4 +468,38 @@ pub unsafe extern "C" fn clockwork_midi_refresh(handle: *mut ClockworkMidi) {
     // SAFETY: a live handle, per the contract.
     let me = unsafe { &*handle };
     no_unwind((), || refresh_and_broadcast(&me.host, &me.io));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::osc::{self, OscArg};
+    use std::sync::Mutex as StdMutex;
+
+    static EMITTED: StdMutex<Vec<Vec<u8>>> = StdMutex::new(Vec::new());
+
+    extern "C" fn capture(_: *mut c_void, _: i32, osc: *const u8, len: u32) {
+        // SAFETY: the bytes handle_input hands to Host::emit, for this call.
+        let bytes = unsafe { slice::from_raw_parts(osc, len as usize) };
+        EMITTED.lock().unwrap().push(bytes.to_vec());
+    }
+    extern "C" fn no_clock(_: *mut c_void, _: *const u8, _: u32, _: *const u8, _: u32, _: u64) {}
+    extern "C" fn no_transport(_: *mut c_void, _: *const u8, _: u32, _: *const u8, _: u32, _: i32, _: f64) {}
+
+    #[test]
+    fn an_event_carries_the_moment_the_os_stamped_it() {
+        // The web stamps each event with when it arrived; natively the OS
+        // stamps it at the system boundary, and that stamp rides on the event
+        // as its trailing timetag, so a client reads one shape on every host.
+        let host = Host { ctx: std::ptr::null_mut(), emit: capture, clock: no_clock, transport: no_transport };
+        let input = Arc::new(Mutex::new(InputState::default()));
+        EMITTED.lock().unwrap().clear();
+        let when = 0xE000_0000_8000_0000u64;
+        handle_input(&host, &input, "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
+        let sent = EMITTED.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        let m = osc::decode(&sent[0]).unwrap();
+        assert_eq!(m.addr, clockwork_osc::clockwork_sys!("midi/in/note_on"));
+        assert_eq!(m.args.last(), Some(&OscArg::TimeTag(when)));
+    }
 }

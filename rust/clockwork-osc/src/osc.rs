@@ -773,11 +773,16 @@ mod uuid_wire_tests {
 /// arrangement schedule_parse.h documents for its own copy.
 #[cfg(feature = "std")]
 pub fn now_timetag() -> u64 {
+    timetag_of(std::time::SystemTime::now())
+}
+
+/// A moment of the system clock, as an OSC 32.32 timetag: what an OS's own
+/// timestamp on an event (gilrs's, a SystemTime) becomes on the wire.
+#[cfg(feature = "std")]
+pub fn timetag_of(t: std::time::SystemTime) -> u64 {
     // Seconds between the NTP epoch (1900) and the Unix epoch (1970).
     const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs() + NTP_EPOCH_OFFSET;
     // 32 bits of seconds over 32 bits of fraction (RFC 5905 sec. 6).
     let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
@@ -809,6 +814,14 @@ pub fn delay_until(when: u64) -> Option<std::time::Duration> {
 #[cfg(all(test, feature = "std"))]
 mod timetag_tests {
     use super::*;
+
+    #[test]
+    fn a_system_time_is_its_ntp_timetag() {
+        // A second and a half past the Unix epoch: the NTP epoch's offset in
+        // seconds, then half a second as the fraction.
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1500);
+        assert_eq!(timetag_of(t), ((2_208_988_800u64 + 1) << 32) | 0x8000_0000);
+    }
 
     #[test]
     fn an_immediate_sentinel_is_never_a_delay() {

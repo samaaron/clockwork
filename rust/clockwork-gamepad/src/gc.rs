@@ -197,8 +197,11 @@ impl GamepadIo {
         if events.is_empty() || !self.registry.lock().unwrap().enabled(handle) {
             return; // muted: state updated, events suppressed
         }
+        // GameController keeps the elements' current values rather than
+        // handing over events, so the moment one was seen is when it is read.
+        let when = crate::osc::now_timetag();
         for ev in events {
-            out.push(Out::from_pad_event(handle, ev));
+            out.push(Out::from_pad_event(handle, ev, when));
         }
     }
 

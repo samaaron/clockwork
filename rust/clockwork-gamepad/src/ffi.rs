@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::GamepadIo;
-use crate::io::{Out, Registry};
+use crate::io::Registry;
 use crate::schema::{
-    decode_out, encode_axis, encode_button, encode_devices, encode_devices_reply, OutCommand,
+    decode_out, encode_devices, encode_devices_reply, OutCommand,
 };
 // Emit-callback shape (here delivering `/clockwork/gamepad/in/*` + `/clockwork/gamepad/devices*`
 // packets), kind codes and panic fence: shared across the subsystem C ABIs —
@@ -156,14 +156,9 @@ fn poll_loop(
         for out in io.poll(pace) {
             let guard = active.lock().unwrap();
             let Some(host) = *guard else { continue }; // parked: discard
-            match out {
-                Out::Button { ref handle, ref name, pressed, value } => {
-                    host.emit(EMIT_BROADCAST, &encode_button(handle, name, pressed, value));
-                }
-                Out::Axis { ref handle, ref name, value } => {
-                    host.emit(EMIT_BROADCAST, &encode_axis(handle, name, value));
-                }
-                Out::DevicesChanged => {
+            match out.encode() {
+                Some(event) => host.emit(EMIT_BROADCAST, &event),
+                None => {
                     let rows = registry.lock().unwrap().snapshot();
                     host.emit(EMIT_BROADCAST, &encode_devices(&rows));
                 }
