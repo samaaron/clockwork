@@ -166,6 +166,18 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.port.onmessage = this.handleMessage.bind(this);
     }
 
+    // The product's version as the build says it (clockwork_product_version),
+    // or null from a module that does not say. Read a byte at a time: the
+    // worklet scope has no TextDecoder, and the string is ASCII.
+    productVersion() {
+        const ptr = this.wasmInstance.exports.clockwork_product_version?.();
+        if (!ptr) return null;
+        const bytes = new Uint8Array(this.wasmMemory.buffer);
+        let version = '';
+        for (let i = ptr; bytes[i] !== 0; i++) version += String.fromCharCode(bytes[i]);
+        return version;
+    }
+
     // The arena's table of contents (js/lib/arena.js, src/clockwork_arena.h):
     // read from the front of the arena, by id, never by position. The
     // constants the rest of the runtime consumes are derived from it.
@@ -1030,6 +1042,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                 ringBufferBase: this.ringBufferBase,
                                 bufferConstants: this.bufferConstants,
                                 exports: Object.keys(this.wasmInstance.exports),
+                                version: this.productVersion(),
                                 initialSnapshot
                             };
                             this.port.postMessage(msg, initialSnapshot ? [initialSnapshot] : []);
@@ -1039,67 +1052,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             // client time out with no reason.
                             const why = 'clockwork_init is not exported by the module - '
                                       + 'the engine cannot be booted. Add _clockwork_init to '
-                                      + 'EXPORTED_FUNCTIONS in scripts/build-web.sh.';
+                                      + 'CLOCKWORK_WEB_EXPORTS in clockwork/CMakeLists.txt.';
                             console.error('[AudioWorklet] ' + why);
                             this.port.postMessage({ type: 'error', error: why });
-                        }
-                    }
-                } else if (data.wasmInstance) {
-                    // Pre-instantiated WASM (from Emscripten)
-                    this.wasmInstance = data.wasmInstance;
-
-                    if (this.wasmInstance.exports.get_ring_buffer_base) {
-                        this.ringBufferBase = this.wasmInstance.exports.get_ring_buffer_base();
-
-                        // Load buffer constants from WASM (single source of truth)
-                        this.loadBufferConstants();
-
-                        this.calculateBufferIndices(this.ringBufferBase);
-
-                        this.initPMPools();
-
-                        this.writeGuestConfigToMemory();
-
-                        // Boot the engine. Clockwork's geometry goes as
-                        // arguments; the guest's config block is already in
-                        // its region (writeGuestConfigToMemory above), so the
-                        // pointer pair is null — JavaScript has no C pointer
-                        // to hand over.
-                        //
-                        // Block size is 0 for "platform default", which on web
-                        // is the 128-sample render quantum and cannot be
-                        // anything else.
-                        if (this.wasmInstance.exports.clockwork_init) {
-                            console.log(`[clockwork] transport: ${this.mode === 'sab' ? 'SAB' : 'PM'}`);
-                            this.wasmInstance.exports.clockwork_init(
-                                this.sampleRate,
-                                0,
-                                this.inputChannels,
-                                this.outputChannels,
-                                0,
-                                this.guestMemoryOffset,
-                                this.guestMemorySize,
-                                0, 0,
-                                this.memArenaSize,
-                                this.inboxOffset,  this.inboxSize,
-                                this.outboxOffset, this.outboxSize);
-
-                            this.initNodeIdCounter();
-                            this.openClientBoundary();
-
-                            this.isInitialized = true;
-
-                            const initialSnapshot = this.mode === 'postMessage' ? this.readMetricsAndTreeBuffer() : undefined;
-
-                            const msg = {
-                                type: 'initialized',
-                                success: true,
-                                ringBufferBase: this.ringBufferBase,
-                                bufferConstants: this.bufferConstants,
-                                exports: Object.keys(this.wasmInstance.exports),
-                                initialSnapshot
-                            };
-                            this.port.postMessage(msg, initialSnapshot ? [initialSnapshot] : []);
                         }
                     }
                 }

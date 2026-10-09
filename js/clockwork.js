@@ -2267,6 +2267,7 @@ export class Clockwork {
            try {
             const ringBufferBase = event.data.ringBufferBase ?? 0;
             const bufferConstants = event.data.bufferConstants;
+            this.#version = event.data.version ?? null;
             const sharedBuffer = this.#config.mode === 'sab' ? this.#wasmMemory.buffer : null;
 
             this.#metricsReader.initSharedViews(sharedBuffer, ringBufferBase, bufferConstants);
@@ -2321,10 +2322,6 @@ export class Clockwork {
         case "error":
           console.error("[Worklet] Error:", data.error);
           this.#eventEmitter.emit('error', new Error(data.error));
-          break;
-
-        case "version":
-          this.#version = data.version;
           break;
 
         case "snapshot":

@@ -612,6 +612,13 @@ extern "C" {
             writeArenaHeader(ring_buffer_storage);
         return reinterpret_cast<int>(ring_buffer_storage);
     }
+
+    // The product's version as the build says it (clockwork_product.h): what
+    // the worklet hands its client, as getInfo().version.
+    EMSCRIPTEN_KEEPALIVE
+    const char* clockwork_product_version() {
+        return CLOCKWORK_PRODUCT_VERSION;
+    }
 #endif
 
     // Real-pointer base of the unified shared-memory arena, valid on every

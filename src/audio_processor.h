@@ -38,6 +38,7 @@ extern "C" {
 
     // Exported functions
     EMSCRIPTEN_KEEPALIVE int get_ring_buffer_base();
+    EMSCRIPTEN_KEEPALIVE const char* clockwork_product_version();
     // Real-pointer arena base, valid on every runtime (native + WASM).
     void* get_shared_memory_base();
     // Clockwork's own geometry, set by clockwork_init and re-read on every

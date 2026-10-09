@@ -1233,7 +1233,7 @@ if(EMSCRIPTEN)
     # worklet fails at run time, not at build time — so this list has to be
     # right, and it is clockwork's to keep: the worklet is clockwork's.
     set(CLOCKWORK_WEB_EXPORTS
-        ___wasm_call_ctors _clockwork_init _get_ring_buffer_base
+        ___wasm_call_ctors _clockwork_init _get_ring_buffer_base _clockwork_product_version
         _clockwork_tick _process_audio _get_audio_output_bus _get_audio_input_bus
         _get_audio_num_output_buses _get_audio_num_input_buses _get_audio_buffer_samples
         _clockwork_clock_wasm_init _set_time_offset _get_time_offset
