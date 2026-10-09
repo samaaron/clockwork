@@ -29,6 +29,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 struct PerformanceMetrics;
@@ -61,11 +62,11 @@ public:
     std::vector<Channel> listChannels() const;
 
     // Subscribe to one peer's named audio channel; received samples arrive
-    // on two consecutive input channels (busIdx, busIdx+1) — Link Audio caps
-    // a channel at stereo and mono sources are mirrored. (peerName,
-    // channelName) is the replacement key. True iff a matching channel was
-    // found at call time.
-    bool addInput(const char* peerName, const char* channelName, uint32_t busIdx);
+    // on a pair of input channels in the Link Audio lanes, which this chooses
+    // and returns — Link Audio caps a channel at stereo and mono sources are
+    // mirrored. (peerName, channelName) is the replacement key, and keeps its
+    // pair. Nothing if no such channel is published or no pair is free.
+    std::optional<uint32_t> addInput(const char* peerName, const char* channelName);
     void removeInput(const char* peerName, const char* channelName);
     void clearInputs();
     // Per-subscription playback lookahead in seconds, like Live's per-track

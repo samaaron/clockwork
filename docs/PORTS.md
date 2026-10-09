@@ -125,11 +125,14 @@ per block. The DSP needs no concept of Link, of disk, or of streaming — it
 sees channels appearing and disappearing, which it must handle anyway because
 a device switch does the same thing.
 
-This is also what would let `/clockwork/clock/audio/input/add` work again. It currently
-refuses: the old implementation needed the DSP's whole bus pool and scsynth's
-`[outputs][inputs][private]` layout, neither of which survives the boundary, and
-refusing loudly was better than registering a subscription that would silently
-never sound.
+This is what `/clockwork/clock/audio/input/add` rests on. A subscription used to
+name a bus in the DSP's private pool, which needed scsynth's
+`[outputs][inputs][private]` layout and survived neither the boundary nor a
+change of guest. Now the peer's audio arrives on a pair of Link Audio's own
+lanes, reserved above the host's (`clockwork_reserve_link_audio_lanes`), and
+the engine chooses the pair and says which in the reply: a client cannot choose
+for itself, because it does not know where the lanes are, and they move up when
+a wider device arrives.
 
 The plugin bridge is the proof that this generalises to a process boundary.
 `TrackControl` opens a sink (`tracks/send`) and a source (`tracks/return`)

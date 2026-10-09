@@ -50,6 +50,13 @@ inline constexpr uint32_t kBufLength   = 64;
 #endif
 inline constexpr uint32_t kReservedLanes = LANES_FIXTURE_RESERVED_LANES;
 
+// Link Audio's lanes, above the host's (clockwork_reserve_link_audio_lanes).
+// Zero in the main binary, for the same reason.
+#ifndef LANES_FIXTURE_LINK_AUDIO_LANES
+#define LANES_FIXTURE_LINK_AUDIO_LANES 0
+#endif
+inline constexpr uint32_t kLinkAudioLanes = LANES_FIXTURE_LINK_AUDIO_LANES;
+
 // ── The two regions the fixture supplies as a host ──────────────────────────
 //
 // A host that hands the guest neither a config block nor a memory region is a

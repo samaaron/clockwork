@@ -91,6 +91,11 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
     // a different filter tail here than it renders in a browser.
     clockwork_declare_fp_env(DSP_FP_ENV_FLUSH_TO_ZERO);
 
+    // Link Audio's lanes, which the bridge hands to subscriptions: the engine
+    // reserves them itself, before the boot that lays them out, so every
+    // native host has the same channels.
+    LinkAudioBridge::reserveLanes();
+
     // Boot through the lanes ABI. Clockwork's geometry travels as arguments;
     // the guest's block travels as bytes it copies without reading; the guest's
     // region travels as a base and a length. That region is NULL when there is

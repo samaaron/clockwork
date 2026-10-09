@@ -381,6 +381,16 @@ void     clockwork_reserve_lanes(uint32_t lanes);
 uint32_t clockwork_reserved_lanes(void);
 uint32_t clockwork_lane_base(void);
 
+/* Link Audio's lanes, directly above the host's, reserved the same way. A
+ * peer's channel arrives on a pair of them, and the engine hands out the pairs
+ * (/clockwork/clock/audio/input/add): a client cannot choose, because it does
+ * not know where they are, and they move up when a wider device arrives. The
+ * host's lanes keep the base. Both are 0 when none were reserved or they did
+ * not fit. */
+void     clockwork_reserve_link_audio_lanes(uint32_t lanes);
+uint32_t clockwork_link_audio_lanes(void);
+uint32_t clockwork_link_audio_lane_base(void);
+
 /* ── Layout ────────────────────────────────────────────────────────────────
  * The arena base pointer, for hosts that address the rings directly. The
  * arena's first bytes are its own table of contents (clockwork_arena.h):

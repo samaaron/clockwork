@@ -23,6 +23,7 @@
 #include "DevicePolicy.h"
 #include <juce_core/juce_core.h>
 #include <array>
+#include <optional>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -142,6 +143,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                     s << c.channelId.c_str() << c.channelName.c_str()
                       << c.peerId.c_str() << c.peerName.c_str();
                 }
+                if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
                 s << osc::EndMessage;
             });
             mEgress->reply(token, packet.ptr(), packet.size());
@@ -150,54 +152,32 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
 
         if (std::strcmp(addr, CLOCKWORK_SYS("clock/audio/input/add")) == 0) {
             // /clockwork/clock/audio/input/add <peerName:string> <channelName:string>
-            //   <busIdx:int32>
-            // Reply /clockwork/clock/audio/input/add.reply <success:int 0|1>.
-            // The arguments are still parsed so a client gets a
-            // well-formed reply, but the verb is refused unconditionally —
-            // see below for why.
+            // Reply /clockwork/clock/audio/input/add.reply <ok:int 0|1> <inputChannel:int>.
+            //
+            // THE ENGINE CHOOSES THE CHANNEL. The peer's audio arrives on a
+            // pair of the Link Audio lanes (LinkAudioBridge::addInput), and the
+            // reply names the first of them, so the client knows where to read
+            // it. A client cannot choose: it does not know where the lanes are,
+            // and they move up when a wider device arrives. -1 when refused,
+            // with the reason in the log.
             auto it = msg.ArgumentsBegin();
             const char* peerName = nullptr;
             const char* channelName = nullptr;
-            int32_t busIdx = -1;
             if (it != msg.ArgumentsEnd() && it->IsString()) {
                 peerName = it->AsStringUnchecked(); ++it;
             }
             if (it != msg.ArgumentsEnd() && it->IsString()) {
                 channelName = it->AsStringUnchecked(); ++it;
             }
-            if (it != msg.ArgumentsEnd() && it->IsInt32()) {
-                busIdx = it->AsInt32Unchecked(); ++it;
-            }
-            /*
-             * THE INDEX IS AN INPUT CHANNEL, and that is why this works again.
-             *
-             * It was refused unconditionally, and the reason was sound at the
-             * time: a subscription claimed a pair of the DSP's PRIVATE signal
-             * channels and had peer audio rendered into them each block. Both
-             * halves needed the guest's internal channels — the validation
-             * asked where the private region began, the render wrote straight
-             * into it — and dsp_api.h exposes no such channels, because a DSP
-             * need not have any addressable internal channels at all. There
-             * was no index clockwork could validate and nothing to render
-             * into, so accepting would have registered a subscription that
-             * silently never sounded.
-             *
-             * Peer audio arrives through a source port bound to an INPUT
-             * channel now (LinkAudioBridge), which is a thing clockwork owns
-             * and can check. The bridge refuses an index that is not a free
-             * channel pair, so a subscription that comes back 1 is one that
-             * will actually sound.
-             */
-            const bool ok = (busIdx >= 0) && peerName && channelName
-                          && mLinkAudio
-                          && mLinkAudio->addInput(
-                                 peerName, channelName,
-                                 static_cast<uint32_t>(busIdx));
+            const std::optional<uint32_t> pair = (peerName && channelName && mLinkAudio)
+                ? mLinkAudio->addInput(peerName, channelName) : std::nullopt;
             std::array<char, 64> buf{};
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/input/add.reply"))
-              << static_cast<int32_t>(ok ? 1 : 0)
-              << osc::EndMessage;
+              << static_cast<int32_t>(pair ? 1 : 0)
+              << static_cast<int32_t>(pair ? static_cast<int32_t>(*pair) : -1);
+            if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
+            s << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
@@ -248,8 +228,9 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             std::array<char, 64> buf{};
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/input/latency/set.reply"))
-              << static_cast<int32_t>(ok ? 1 : 0)
-              << osc::EndMessage;
+              << static_cast<int32_t>(ok ? 1 : 0);
+            if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
+            s << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
@@ -278,8 +259,11 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             std::array<char, 64> buf{};
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/sink/add.reply"))
-              << static_cast<int32_t>(ok ? 1 : 0)
-              << osc::EndMessage;
+              << static_cast<int32_t>(ok ? 1 : 0);
+            // The verb's own last argument is an int, so a trailing int is a
+            // token only past its three.
+            if (hasEchoToken && msg.ArgumentCount() > 3) s << static_cast<osc::int32>(echoToken);
+            s << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
@@ -306,6 +290,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                       << static_cast<int32_t>(as.numChannels)
                       << static_cast<int32_t>(as.hasSubscriber ? 1 : 0);
                 }
+                if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
                 s << osc::EndMessage;
             });
             mEgress->reply(token, packet.ptr(), packet.size());
@@ -353,6 +338,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                          static_cast<uint64_t>(INT32_MAX)))
                   << static_cast<float>(st.latencySeconds);
             }
+            if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
@@ -436,6 +422,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                   << p.audioIp.c_str()
                   << static_cast<int32_t>(p.audioPort);
             }
+            if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
             mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));

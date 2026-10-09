@@ -77,12 +77,26 @@ TEST_CASE("reserved lanes: the base sits above every device channel", "[lanes][r
     // And the engine allocated for them.
     const uint32_t allocatedIn  = static_cast<uint32_t>(get_audio_num_input_buses());
     const uint32_t allocatedOut = static_cast<uint32_t>(get_audio_num_output_buses());
-    REQUIRE(allocatedIn  == base + lanes_test::kReservedLanes);
-    REQUIRE(allocatedOut == base + lanes_test::kReservedLanes);
+    const uint32_t lanes = lanes_test::kReservedLanes + lanes_test::kLinkAudioLanes;
+    REQUIRE(allocatedIn  == base + lanes);
+    REQUIRE(allocatedOut == base + lanes);
 
     // The device's own width is strictly smaller — the two numbers a
     // subscription could be measured against, and they disagree.
     REQUIRE(allocatedIn > lanes_test::kInChannels);
+}
+
+// Link Audio has lanes of its own, so the engine can hand a subscription a pair
+// that no device channel and no host lane can ever hold. They sit directly
+// above the host's, which keep the base: a host's lane indices do not move
+// because Link Audio asked for room.
+TEST_CASE("reserved lanes: Link Audio's lanes sit above the host's", "[lanes][reserved][link-audio]") {
+    lanes_test::boot();
+    REQUIRE(lanes_test::kLinkAudioLanes > 0);
+    REQUIRE(clockwork_link_audio_lanes() == lanes_test::kLinkAudioLanes);
+    REQUIRE(clockwork_link_audio_lane_base() == clockwork_lane_base() + lanes_test::kReservedLanes);
+    REQUIRE(clockwork_link_audio_lane_base() + clockwork_link_audio_lanes()
+            == static_cast<uint32_t>(get_audio_num_input_buses()));
 }
 
 TEST_CASE("reserved lanes: a subscription is measured against the allocated width",

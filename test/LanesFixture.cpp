@@ -60,6 +60,7 @@ uint32_t boot() {
     // Before clockwork_init: the reservation is read at every init_memory, and
     // widens the channel counts the DSP is allocated for.
     if (kReservedLanes > 0) clockwork_reserve_lanes(kReservedLanes);
+    if (kLinkAudioLanes > 0) clockwork_reserve_link_audio_lanes(kLinkAudioLanes);
     // This fixture arms nothing on the thread that ticks, so denormals are
     // honoured, and it says so — the guest reports what it was told
     // (test_dsp_regions.cpp), which is the declaration's whole job.

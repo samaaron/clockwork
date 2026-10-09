@@ -120,7 +120,7 @@ TEST_CASE("link audio host: channels, inputs and sinks are empty and refuse unti
     CHECK(host.listChannels().empty());
     CHECK(host.listInputs().empty());
     CHECK(host.listSinks().empty());
-    CHECK_FALSE(host.addInput("nobody", "main", 0));
+    CHECK_FALSE(host.addInput("nobody", "main").has_value());
     CHECK_FALSE(host.setInputLatencySeconds("nobody", "main", 0.1));
     host.removeInput("nobody", "main");
     host.clearInputs();
@@ -170,6 +170,31 @@ TEST_CASE("link audio: no width admits any pair", "[link-audio]") {
     CHECK_FALSE(link_audio::channelPairFits(0, 0));
     CHECK_FALSE(link_audio::channelPairFits(1, 0));
     CHECK_FALSE(link_audio::channelPairFits(0, 1));
+}
+
+// ── Where a subscription lands ───────────────────────────────────────────────
+//
+// The engine chooses: a subscription gets the first pair of the Link Audio
+// lanes that no other subscription holds. A client cannot choose for itself,
+// because it does not know where the lanes are, and the base moves when a wider
+// device arrives. firstFreePair is the whole of the choice, and pure.
+
+TEST_CASE("link audio: a subscription gets the first pair nobody holds", "[link-audio]") {
+    CHECK(link_audio::firstFreePair(64, 16, {}) == 64u);
+    CHECK(link_audio::firstFreePair(64, 16, {64}) == 66u);
+    CHECK(link_audio::firstFreePair(64, 16, {64, 66, 68}) == 70u);
+    // A pair given back is the next one handed out.
+    CHECK(link_audio::firstFreePair(64, 16, {66}) == 64u);
+    CHECK(link_audio::firstFreePair(64, 16, {64, 68}) == 66u);
+}
+
+TEST_CASE("link audio: lanes with no pair free refuse", "[link-audio]") {
+    CHECK_FALSE(link_audio::firstFreePair(64, 4, {64, 66}).has_value());
+    CHECK_FALSE(link_audio::firstFreePair(64, 0, {}).has_value());
+    // One lane holds no stereo pair, and the odd lane at the top of three is
+    // never half of one.
+    CHECK_FALSE(link_audio::firstFreePair(64, 1, {}).has_value());
+    CHECK_FALSE(link_audio::firstFreePair(64, 3, {64}).has_value());
 }
 
 TEST_CASE("link audio: a busIdx near the integer ceiling cannot wrap into a pass",

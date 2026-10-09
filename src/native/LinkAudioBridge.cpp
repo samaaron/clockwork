@@ -16,6 +16,7 @@
 #include <ableton/util/FloatIntConversion.hpp>
 
 #include "clockwork_config.h"   // clockwork_log
+#include "lanes/lanes.h"         // clockwork_link_audio_lane_base
 
 #include <algorithm>
 #include <chrono>
@@ -100,11 +101,12 @@ std::vector<link_audio::Channel> LinkAudioBridge::listChannels() const {
     return out;
 }
 
+void LinkAudioBridge::reserveLanes() { clockwork_reserve_link_audio_lanes(kLanes); }
+
 // ─── Input subscriptions ──────────────────────────────────────────────────
 
-bool LinkAudioBridge::addInput(const char* peerName, const char* channelName,
-                               uint32_t busIdx) {
-    if (!peerName || !channelName) return false;
+std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const char* channelName) {
+    if (!peerName || !channelName) return std::nullopt;
 
     auto channels = mLink.channels();
     auto match = std::find_if(channels.begin(), channels.end(),
@@ -114,74 +116,53 @@ bool LinkAudioBridge::addInput(const char* peerName, const char* channelName,
     if (match == channels.end()) {
         clockwork_log("[link-audio] no channel '%s' published by peer '%s'",
                 channelName, peerName);
-        return false;
+        return std::nullopt;
     }
+    const ableton::ChannelId newChannelId = match->id;
 
     /*
-     * THE PAIR HAS TO FIT THE INPUT CHANNELS, and nothing else checks it.
-     *
-     * clockwork_port_bus_attach binds whatever it is given — it refuses a double
-     * attach and a full table, and takes no view on how many channels the
-     * engine opened. pull_port_sources then skips a binding that starts past
-     * the end, so a subscription bound out of range reports success and is
-     * silent for ever: the exact shape of failure a refusal exists to prevent.
-     *
-     * The width is the ALLOCATED one — device inputs plus the reserved lanes
-     * above them — because that is what pull_port_sources bounds against. A
-     * client subscribes into a reserved lane, which sits above every device
-     * channel, so measuring against the device refuses every real request.
-     *
-     * Checked on every add rather than once, because Link streams arrive and
-     * leave: the question is not "is there room" in the abstract but "is there
-     * room for THIS pair, now".
+     * THE BRIDGE CHOOSES THE PAIR. A client cannot: it does not know where
+     * the Link Audio lanes are, and they move up when a wider device arrives.
+     * A subscription that is already here keeps its pair; a new one gets the
+     * first the others do not hold.
      */
+    uint32_t busIdx = 0;
+    {
+        std::lock_guard<std::mutex> lk(mInputSubMutex);
+        std::vector<uint32_t> held;
+        const InputSubscription* existing = nullptr;
+        for (const auto& s : mInputSubs) {
+            if (s.peerName == peerName && s.channelName == channelName) existing = &s;
+            else held.push_back(s.busIdx);
+        }
+        // The same stream, already flowing.
+        if (existing && existing->channelId == newChannelId) return existing->busIdx;
+        const auto pair = existing ? std::optional<uint32_t>(existing->busIdx)
+                                   : link_audio::firstFreePair(mLaneBase, mLanes, held);
+        if (!pair) {
+            if (mLanes == 0)
+                clockwork_log("[link-audio] no Link Audio lanes reserved, so %s/%s has "
+                        "nowhere to arrive", peerName, channelName);
+            else
+                clockwork_log("[link-audio] no channel pair free for %s/%s: the %u Link "
+                        "Audio lanes are all in use", peerName, channelName, mLanes);
+            return std::nullopt;
+        }
+        busIdx = *pair;
+    }
+
+    // The lanes sit inside the allocated width by construction, but a pair
+    // outside it would be skipped by pull_port_sources and silent for ever,
+    // the exact shape of failure a refusal exists to prevent.
     const uint32_t inChannels = mInputChannels.load(std::memory_order_relaxed);
     if (!link_audio::channelPairFits(busIdx, inChannels)) {
         clockwork_log("[link-audio] channel pair %u/%u does not fit %u allocated "
                 "input channels", busIdx, busIdx + 1, inChannels);
-        return false;
+        return std::nullopt;
     }
-    const ableton::ChannelId newChannelId = match->id;
 
-    // First pass: re-arm short-circuit (matching channelId reuses the existing
-    // renderer + counters). Subscribe stays outside the lock — Link's
-    // source-callback interacts with its own threading.
-    {
-        std::lock_guard<std::mutex> lk(mInputSubMutex);
-        InputSubscription* existing = nullptr;
-        for (auto& s : mInputSubs) {
-            if (s.peerName == peerName && s.channelName == channelName) {
-                existing = &s;
-                continue;
-            }
-            const uint32_t sLo = s.busIdx;
-            const uint32_t sHi = s.busIdx + 1;
-            const uint32_t nLo = busIdx;
-            const uint32_t nHi = busIdx + 1;
-            if (sLo <= nHi && nLo <= sHi) {
-                clockwork_log("[link-audio] channel pair %u/%u overlaps %s/%s at %u/%u",
-                        nLo, nHi, s.peerName.c_str(), s.channelName.c_str(), sLo, sHi);
-                return false;
-            }
-        }
-        if (existing && existing->channelId == newChannelId) {
-            // Re-arm of the same channel at a possibly different pair. The
-            // BINDING is what decides where the audio lands, so moving busIdx
-            // without moving it would leave the stream on the old channels
-            // while every status reply named the new ones.
-            if (existing->busIdx != busIdx && existing->port != CLOCKWORK_PORT_NONE) {
-                clockwork_port_bus_detach(existing->port);
-                if (!clockwork_port_bus_attach(existing->port, busIdx)) {
-                    clockwork_log("[link-audio] could not move %s/%s to channel %u",
-                            peerName, channelName, busIdx);
-                    return false;
-                }
-            }
-            existing->busIdx = busIdx;
-            return true;
-        }
-    }
-    // Build a fresh renderer outside the lock.
+    // Build a fresh renderer outside the lock: Link's source callback
+    // interacts with its own threading.
     InputSubscription sub;
     sub.busIdx      = busIdx;
     sub.peerName    = peerName;
@@ -191,10 +172,10 @@ bool LinkAudioBridge::addInput(const char* peerName, const char* channelName,
         clockwork_link::LinkAudioInputRenderer<ableton::LinkAudio>>(mLink);
     sub.renderer->subscribe(newChannelId);
 
-    // The port this peer's audio arrives through, bound to the channel pair
-    // the caller asked for. Stereo always: the renderer mirrors a mono source
-    // to both, so the DSP sees a consistent shape whatever the peer publishes.
-    // Named for the peer and channel so a port listing says whose audio it is.
+    // The port this peer's audio arrives through, bound to the pair. Stereo
+    // always: the renderer mirrors a mono source to both, so the DSP sees a
+    // consistent shape whatever the peer publishes. Named for the peer and
+    // channel so a port listing says whose audio it is.
     const std::string portName = std::string("link:") + peerName + "/" + channelName;
     sub.port = clockwork_port_open(portName.c_str(), kClockworkPortSource, 2,
                              kInputPortCapacityFrames);
@@ -202,40 +183,38 @@ bool LinkAudioBridge::addInput(const char* peerName, const char* channelName,
     // and read to a client exactly like one that works.
     if (sub.port == CLOCKWORK_PORT_NONE) {
         clockwork_log("[link-audio] no port available for %s/%s", peerName, channelName);
-        return false;
+        return std::nullopt;
     }
     if (!clockwork_port_bus_attach(sub.port, busIdx)) {
         clockwork_log("[link-audio] could not bind %s/%s to channel %u",
                 peerName, channelName, busIdx);
         clockwork_port_close(sub.port);
         sub.port = CLOCKWORK_PORT_NONE;
-        return false;
+        return std::nullopt;
     }
 
     std::lock_guard<std::mutex> lk(mInputSubMutex);
-    // Re-validate under the lock; state may have shifted while we were building.
+    // Re-check under the lock: another add may have taken the pair meanwhile.
     InputSubscription* replaceSlot = nullptr;
     for (auto& s : mInputSubs) {
-        if (s.peerName == peerName && s.channelName == channelName) {
-            replaceSlot = &s;
-            continue;
+        if (s.peerName == peerName && s.channelName == channelName) replaceSlot = &s;
+        else if (s.busIdx == busIdx) {
+            clockwork_log("[link-audio] channel pair %u/%u was taken while %s/%s subscribed",
+                    busIdx, busIdx + 1, peerName, channelName);
+            closePort(sub);
+            return std::nullopt;
         }
-        const uint32_t sLo = s.busIdx;
-        const uint32_t sHi = s.busIdx + 1;
-        const uint32_t nLo = busIdx;
-        const uint32_t nHi = busIdx + 1;
-        if (sLo <= nHi && nLo <= sHi) return false;
     }
     if (replaceSlot) {
         closePort(*replaceSlot);
         *replaceSlot = std::move(sub);
-        return true;
+        return busIdx;
     }
     mInputSubs.push_back(std::move(sub));
     mInputSubCount.store(mInputSubs.size(), std::memory_order_relaxed);
     // First subscription: the worker has something to do now.
     if (mSampleRate.load(std::memory_order_relaxed) != 0) startEndpoint();
-    return true;
+    return busIdx;
 }
 
 // Detach before close, always: the binding names the slot, and a slot closed
@@ -423,8 +402,36 @@ void LinkAudioBridge::publishAuxSinks(const float* busPool, uint32_t blockSize,
 void LinkAudioBridge::setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels) {
     mSampleRate.store(sampleRate, std::memory_order_relaxed);
     mInputChannels.store(allocatedInputChannels, std::memory_order_relaxed);
+    moveToLanes(clockwork_link_audio_lane_base(), clockwork_link_audio_lanes());
     if (sampleRate != 0 && mInputSubCount.load(std::memory_order_relaxed) != 0)
         startEndpoint();
+}
+
+// A wider device moves the Link Audio lanes up, and every subscription moves
+// with them, keeping its place among them: left where it was, it would sit on
+// the device's own channels. A subscription the lanes no longer hold is
+// dropped, and says so.
+void LinkAudioBridge::moveToLanes(uint32_t base, uint32_t lanes) {
+    std::lock_guard<std::mutex> lk(mInputSubMutex);
+    const uint32_t from = mLaneBase;
+    mLaneBase = base;
+    mLanes    = lanes;
+    if (base == from) return;
+    auto& v = mInputSubs;
+    for (auto& s : v) {
+        const uint32_t offset = s.busIdx - from;
+        const uint32_t to     = base + offset;
+        if (offset + 2 <= lanes && s.port != CLOCKWORK_PORT_NONE) {
+            clockwork_port_bus_detach(s.port);
+            if (clockwork_port_bus_attach(s.port, to)) { s.busIdx = to; continue; }
+        }
+        clockwork_log("[link-audio] %s/%s dropped: the Link Audio lanes moved and "
+                "have no room for it", s.peerName.c_str(), s.channelName.c_str());
+        closePort(s);
+    }
+    v.erase(std::remove_if(v.begin(), v.end(),
+            [](const auto& s) { return s.port == CLOCKWORK_PORT_NONE; }), v.end());
+    mInputSubCount.store(v.size(), std::memory_order_relaxed);
 }
 
 void LinkAudioBridge::startEndpoint() {

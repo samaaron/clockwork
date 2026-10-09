@@ -36,8 +36,10 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,6 +95,21 @@ struct SinkInfo {
  */
 inline bool channelPairFits(uint32_t busIdx, uint32_t inChannels) {
     return busIdx < inChannels && (inChannels - busIdx) >= 2;
+}
+
+/*
+ * The pair a new subscription gets: the first of the Link Audio lanes
+ * (`lanes` channels from `base`, clockwork_link_audio_lane_base) that no
+ * subscription in `held` starts on. Nothing when every pair is held; an odd
+ * lane at the top is never half of one.
+ */
+inline std::optional<uint32_t> firstFreePair(uint32_t base, uint32_t lanes,
+                                             const std::vector<uint32_t>& held) {
+    for (uint32_t offset = 0; offset + 2 <= lanes; offset += 2) {
+        const uint32_t pair = base + offset;
+        if (std::find(held.begin(), held.end(), pair) == held.end()) return pair;
+    }
+    return std::nullopt;
 }
 
 // Per-subscription lookahead cap: the renderer's ring capacity.
@@ -166,8 +183,17 @@ public:
     bool isPublishEnabled() const { return mAudioPublishEnabled; }
     std::vector<link_audio::Channel> listChannels() const;
 
+    // The lanes subscriptions arrive on (clockwork_reserve_link_audio_lanes),
+    // reserved by the engine before the boot that lays them out: eight stereo
+    // peers at once.
+    static constexpr uint32_t kLanes = 16;
+    static void reserveLanes();
+
     // ─── Input subscriptions ──────────────────────────────────────────────
-    bool addInput(const char* peerName, const char* channelName, uint32_t busIdx);
+    // The peer's channel onto a pair of the Link Audio lanes, which the bridge
+    // chooses; the pair it chose, or nothing if refused (logged). Adding the
+    // same (peer, channel) again keeps its pair.
+    std::optional<uint32_t> addInput(const char* peerName, const char* channelName);
     void removeInput(const char* peerName, const char* channelName);
     void clearInputs();
     bool setInputLatencySeconds(const char* peerName, const char* channelName,
@@ -284,6 +310,7 @@ private:
     void endpointLoop(const std::stop_token& stop);
     // Detach then close. Call with mInputSubMutex held.
     void closePort(InputSubscription& sub);
+    void moveToLanes(uint32_t base, uint32_t lanes);
 
     // Opened per subscription; closed when it goes. Depth is scheduling slack
     // for THIS worker, not the renderer's musical latency — that is in beats
@@ -300,6 +327,12 @@ private:
     // channel pair has to fit under. Streams come and go, so this is
     // checked per add rather than assumed once.
     std::atomic<uint32_t>   mInputChannels{0};
+    // The Link Audio lanes (clockwork_link_audio_lane_base) as of the last
+    // setAudioFormat: the pairs addInput hands out, and what every
+    // subscription moves with when a wider device moves them. Under
+    // mInputSubMutex.
+    uint32_t                mLaneBase{0};
+    uint32_t                mLanes{0};
 
     // Worker-owned scratch: two planar doubles for the renderer, one
     // interleaved float for the port.
@@ -352,7 +385,8 @@ public:
     bool isPublishEnabled() const { return mAudioPublishEnabled; }
     std::vector<link_audio::Channel> listChannels() const { return {}; }
 
-    bool addInput(const char*, const char*, uint32_t) { return false; }
+    static void reserveLanes() {}
+    std::optional<uint32_t> addInput(const char*, const char*) { return std::nullopt; }
     void removeInput(const char*, const char*) {}
     void clearInputs() {}
     bool setInputLatencySeconds(const char*, const char*, double) { return false; }

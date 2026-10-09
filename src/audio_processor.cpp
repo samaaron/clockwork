@@ -17,7 +17,9 @@ namespace {
 // from, and neither may reach a speaker or arrive from a microphone. So the DSP
 // is built wider than the device, the backend copies only the channels it has,
 // and the block above is clockwork's alone. Both directions widen by the same
-// amount so a lane index means the same thing either way.
+// amount so a lane index means the same thing either way. A Link peer's audio
+// needs a channel of the same kind, so Link Audio has lanes of its own, directly
+// above the host's.
 //
 // The base is stable: 32, or the first multiple of 8 above a wider device. Stable
 // matters — a lane's index is published to clients as the channel they route to,
@@ -27,6 +29,8 @@ std::atomic<int64_t> g_block_osc_time{0};   // this block's start, in OSC time
 
 uint32_t g_reserved_lanes = 0;    // set before boot; read at every init_memory
 uint32_t g_lane_base      = 0;    // published after init_memory; 0 = none
+uint32_t g_link_audio_lanes     = 0;   // set before boot, as the host's are
+uint32_t g_link_audio_lane_base = 0;   // published after init_memory; 0 = none
 
 uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
     const uint32_t widest = device_in > device_out ? device_in : device_out;
@@ -43,6 +47,12 @@ void clockwork_reserve_lanes(uint32_t lanes) {
 }
 uint32_t clockwork_reserved_lanes(void) { return g_reserved_lanes; }
 uint32_t clockwork_lane_base(void)      { return g_lane_base; }
+void clockwork_reserve_link_audio_lanes(uint32_t lanes) {
+    if (lanes > CLOCKWORK_RESERVED_LANES_MAX) lanes = CLOCKWORK_RESERVED_LANES_MAX;
+    g_link_audio_lanes = lanes;
+}
+uint32_t clockwork_link_audio_lanes(void)     { return g_link_audio_lane_base ? g_link_audio_lanes : 0; }
+uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 }
 
 #include "clock/clock_math.h"
@@ -1552,20 +1562,24 @@ extern "C" {
         // file). Widen both directions to hold them; the device backend copies
         // only what the device has, so the extra channels never reach hardware.
         // Recomputed on every build so a cold swap onto a wider device moves
-        // the base up rather than letting the device overlap the lanes.
+        // the base up rather than letting the device overlap the lanes. The
+        // host's lanes start at the base and Link Audio's sit directly above.
         g_lane_base = 0;
-        if (g_reserved_lanes > 0) {
+        g_link_audio_lane_base = 0;
+        const uint32_t lanes = g_reserved_lanes + g_link_audio_lanes;
+        if (lanes > 0) {
             const uint32_t first = lane_base_for(config.max_input_channels,
                                                  config.max_output_channels);
-            const uint32_t top   = first + g_reserved_lanes;
+            const uint32_t top   = first + lanes;
             if (top <= clockwork::kMaxChannels) {
                 g_lane_base = first;
+                if (g_link_audio_lanes > 0) g_link_audio_lane_base = first + g_reserved_lanes;
                 if (config.max_output_channels < top) config.max_output_channels = top;
                 if (config.max_input_channels  < top) config.max_input_channels  = top;
             } else {
                 clockwork_log("WARNING: %u reserved lanes above channel %u do not fit "
                         "kMaxChannels=%d; no lanes reserved",
-                        g_reserved_lanes, first, (int)clockwork::kMaxChannels);
+                        lanes, first, (int)clockwork::kMaxChannels);
             }
         }
         // ── The guest's memory region ──────────────────────────────────────

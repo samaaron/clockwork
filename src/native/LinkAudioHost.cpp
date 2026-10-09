@@ -41,9 +41,8 @@ std::vector<LinkAudioHost::Channel> LinkAudioHost::listChannels() const {
     return mBridge.listChannels();
 }
 
-bool LinkAudioHost::addInput(const char* peerName, const char* channelName,
-                             uint32_t busIdx) {
-    return mBridge.addInput(peerName, channelName, busIdx);
+std::optional<uint32_t> LinkAudioHost::addInput(const char* peerName, const char* channelName) {
+    return mBridge.addInput(peerName, channelName);
 }
 
 void LinkAudioHost::removeInput(const char* peerName, const char* channelName) {

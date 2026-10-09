@@ -334,8 +334,8 @@ catch_discover_tests(clockwork_attach_tests PROPERTIES SKIP_RETURN_CODE 4)
 # kInChannels/kOutChannels, so a second geometry needs a second process rather
 # than a boot flag the other cases would have to know about.
 #
-# 8 lanes: enough for four stereo peers, and small enough that the widened
-# staging buffers stay trivial.
+# 8 lanes for the host and 4 for Link Audio above them: enough for two stereo
+# peers, and small enough that the widened staging buffers stay trivial.
 add_executable(clockwork_lanes_reserved_tests
     test_main.cpp
     OscTestUtils.cpp
@@ -347,6 +347,7 @@ add_dependencies(clockwork_lanes_reserved_tests ${CLOCKWORK_DSP})
 target_link_libraries(clockwork_lanes_reserved_tests PRIVATE ${CLOCKWORK_LIB_GROUP} Catch2::Catch2)
 target_compile_definitions(clockwork_lanes_reserved_tests PRIVATE
     LANES_FIXTURE_RESERVED_LANES=8
+    LANES_FIXTURE_LINK_AUDIO_LANES=4
     JUCE_APPLICATION_NAME_STRING="clockwork-lanes-reserved-tests"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
 if(MSVC)
