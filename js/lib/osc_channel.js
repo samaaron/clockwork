@@ -32,6 +32,7 @@ export class OscChannel {
     #directPort;         // postMessage mode: MessagePort to worklet
     #sabConfig;          // SAB mode: { sharedBuffer, ringBufferBase, bufferConstants, controlIndices }
     #wasmClient;         // SAB mode: this thread's way into the ingress ring
+    #ownsClient = false; // SAB mode: the client was opened for this channel (fromTransferable)
     #metricsView;        // SAB mode: Int32Array view into metrics region
     #sourceId;           // Numeric source ID (0 = main thread, 1+ = workers)
 
@@ -87,6 +88,7 @@ export class OscChannel {
                 wasmModule: config.wasmModule,
             };
             this.#wasmClient = config.wasmClient ?? null;
+            this.#ownsClient = config.ownsClient === true;
 
             // Create metrics view at correct offset within SharedArrayBuffer
             if (config.sharedBuffer && config.bufferConstants) {
@@ -406,6 +408,12 @@ export class OscChannel {
             this.#directPort.close();
             this.#directPort = null;
         }
+        // A client opened for this channel holds a slot until it is closed; a
+        // shared one belongs to the thread, which closes it.
+        if (this.#ownsClient && this.#wasmClient) {
+            this.#wasmClient.close();
+            this.#wasmClient = null;
+        }
     }
 
     // =========================================================================
@@ -491,6 +499,7 @@ export class OscChannel {
                 bufferConstants: data.bufferConstants,
                 controlIndices: data.controlIndices,
                 wasmClient,
+                ownsClient: true,
                 wasmMemory: data.wasmMemory,
                 wasmModule: data.wasmModule,
                 sourceId: data.sourceId,
