@@ -24,6 +24,7 @@
  */
 #pragma once
 
+#include "clock/BlockStamp.h"
 #include "clock/ClockworkClock.h"
 #include "native/LinkAudioBridge.h"
 
@@ -92,10 +93,10 @@ public:
     void setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels);
 
     // The block stamp, and the only place Link's own clock is spoken: Link
-    // Audio aligns peers' streams on Link's per-boot micros, not NTP. Derived
-    // from the sample counter and IIR-corrected toward the Link clock so a
-    // late wake does not move it. 0 without Link (the bridge reads 0 as
-    // "now"). Audio thread only.
+    // Audio aligns peers' streams on Link's per-boot micros, not NTP. By the
+    // samples, steered toward Link's clock so a late wake does not move it
+    // (clockwork::BlockStamp). 0 without Link (the bridge reads 0 as "now").
+    // Audio thread only.
     int64_t blockHostMicros(double samplePosition, double sampleRate);
     // Re-anchor on the next stamp — call wherever the driver resets the
     // clock's audio-thread time (device start, first manual pump).
@@ -127,9 +128,5 @@ private:
     ClockworkClock&       mClock;
     LinkAudioBridge mBridge;
 
-    // Block-clock anchor in Link's domain: sample-counter line + slow IIR,
-    // the same scheme TimeSource uses for audio-thread NTP.
-    double mHostBaseMicros{0.0};
-    double mLastOffsetMicros{0.0};   // the last block's place on the sample clock
-    bool   mHostAnchored{false};
+    clockwork::BlockStamp mBlockStamp;
 };
