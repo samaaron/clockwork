@@ -438,3 +438,7 @@ void ClockworkClock::resetAudioThreadTime(double samplePosition, double sampleRa
 void ClockworkClock::setFreewheelClock(bool enabled) {
     mImpl->timeSource.setFreewheelClock(enabled);
 }
+
+bool ClockworkClock::freewheelClock() const {
+    return mImpl->timeSource.freewheelClock();
+}

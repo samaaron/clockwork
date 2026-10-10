@@ -115,6 +115,7 @@ public:
     void   resetAudioThreadTime(double samplePosition, double sampleRate);
 
     void   setFreewheelClock(bool enabled);
+    bool   freewheelClock() const;
 
 private:
     const double*               mNtpStartTime{nullptr};
@@ -157,6 +158,7 @@ public:
     void   resetAudioThreadTime(double samplePosition, double sampleRate);
 
     void   setFreewheelClock(bool enabled);
+    bool   freewheelClock() const;
 
     // Test boundary: when non-zero, the IIR reads this instead of wallClockNTP(),
     // so scenario tests (test_time_source.cpp) can drive exact stall /

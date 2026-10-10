@@ -271,6 +271,7 @@ public:
     // device callback) never sees. Off by default; real devices and the
     // headless fallback keep drift compensation.
     void   setFreewheelClock(bool enabled);
+    bool   freewheelClock() const;
 
     // Mirror the current Link clock readouts (peers / tempo / beat / phase /
     // playing) into the dashboard metrics (relaxed atomics). RT-safe; called

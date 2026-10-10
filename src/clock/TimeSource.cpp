@@ -79,6 +79,8 @@ void TimeSource::setFreewheelClock(bool enabled) {
     (void)enabled;
 }
 
+bool TimeSource::freewheelClock() const { return false; }
+
 #else  // !CLOCKWORK_WORKLET_CLOCK
 
 double TimeSource::now() const {
@@ -157,6 +159,10 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) 
 
 void TimeSource::setFreewheelClock(bool enabled) {
     mFreewheelClock.store(enabled, std::memory_order_relaxed);
+}
+
+bool TimeSource::freewheelClock() const {
+    return mFreewheelClock.load(std::memory_order_relaxed);
 }
 
 #endif  // CLOCKWORK_WORKLET_CLOCK

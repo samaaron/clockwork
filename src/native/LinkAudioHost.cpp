@@ -96,19 +96,25 @@ int64_t LinkAudioHost::blockHostMicros(double samplePosition, double sampleRate)
     if (!mHostAnchored) {
         mHostBaseMicros = linkNow - sampleOffsetMicros;
         mHostAnchored = true;
-    } else {
+    } else if (!mClock.freewheelClock()) {
         // Steered toward Link's clock, never stepped onto it. The clock is read
         // when the callback runs, so a callback that runs late reads it late,
         // and following that would step every stamp by a share of the
         // lateness: a step in the timeline peers' audio is placed on, heard
         // as a bend. (The NTP in TimeSource follows the same IIR unbounded;
         // a scheduler can take a step that audio can't.) At most kMaxSteerPpm
-        // of each block's own length, more than any two crystals disagree by;
-        // past kStepMicros it is a jump, not drift, and taken whole.
+        // of each block's own length, more than any two crystals disagree by.
+        // Fallen past kStepMicros behind is time that went, and taken whole.
+        // Ahead is never stepped back: a host rendering early, or a burst
+        // after a late callback, has lost no time, and stepping back would
+        // stamp a later block no later than an earlier one.
+        //
+        // A freewheel clock (deterministic rendering) is the samples alone,
+        // from where the clock was last reset.
         constexpr double kMaxSteerPpm = 1000.0;
         constexpr double kStepMicros  = 50'000.0;
         const double drift = linkNow - (mHostBaseMicros + sampleOffsetMicros);
-        if (std::fabs(drift) > kStepMicros) {
+        if (drift > kStepMicros) {
             mHostBaseMicros += drift;
         } else {
             const double steer =
