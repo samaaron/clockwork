@@ -31,6 +31,16 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint64_t hostMicros) {
     clockwork_tick(ntp, numOutputChannels, numInputChannels);
 
+    // This block has read its ports (pull_port_sources, in the tick): what
+    // each is at now is read when the next block begins, a block on. Dated
+    // after the read, not before, because a block that found its port short
+    // reads silence for the rest and leaves the position where it was; dated
+    // before, the frames the endpoint then writes would be placed a block
+    // early, and the stream heard to skip on its way back in.
+    if (hostMicros != 0 && sampleRate != 0)
+        linkAudio.dateReads(hostMicros + static_cast<uint64_t>(
+            std::llround(1e6 * double(blockSize) / double(sampleRate))));
+
     // Publish the main sink (stereo when nOut >= 2, mono fallback for 1).
     // No-op when Link Audio is off / no subscriber.
     if (const float* outputBus = clockwork_audio_out()) {

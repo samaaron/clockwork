@@ -36,6 +36,8 @@
  */
 #pragma once
 
+#include "native/RealtimeThread.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -230,11 +232,11 @@ public:
     // plus reserved lanes), NOT the device's width — see channelPairFits.
     void setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels);
 
-    // Once per audio callback, before it renders: where each subscription's
-    // port is being read from, and the host time that block renders at — the
-    // date of every frame the endpoint writes after it. Audio thread only: no
+    // Once per block, after it has read its ports: where each subscription's
+    // port stands, and the host time the next block reads it at — the date
+    // of every frame the endpoint writes from there. Audio thread only: no
     // locks, no allocation.
-    void dateReads(uint64_t blockHostMicros);
+    void dateReads(uint64_t nextReadHostMicros);
 
     void publishAuxSinks(const float* busPool, uint32_t blockSize, uint32_t numBuses,
                          uint32_t sampleRate, uint64_t hostMicrosForBufferBegin,
@@ -266,6 +268,17 @@ public:
         uint32_t bufferedMs{0};
     };
     bool tryReadInputHealth(InputHealth& out) const;
+
+    // Whether the endpoint worker runs as a real-time thread: what the OS
+    // answered when the worker asked, once it has (nothing while it hasn't,
+    // or isn't running). It feeds the audio thread, so it is scheduled as
+    // one; the engine can only ask, and a refusal is reported here and in
+    // the log rather than hidden.
+    std::optional<clockwork::RealtimeStatus> endpointRealtime() const {
+        const int status = mEndpointRealtime.load(std::memory_order_acquire);
+        if (status < 0) return std::nullopt;
+        return static_cast<clockwork::RealtimeStatus>(status);
+    }
 
 private:
     // Up to 2048-frame stereo blocks; the DSP normally runs at 128.
@@ -344,12 +357,16 @@ private:
     // The clock cannot say when, read at the moment the endpoint writes: the
     // audio thread takes a whole device buffer at once and then nothing, so
     // "now plus what is queued" swings by up to a buffer from one write to the
-    // next. The audio thread knows, so it says: at the start of each callback,
-    // each port's read position and the time that block renders. A frame n
-    // past that position is read n frames after that time. One date per pair
-    // of lanes, since the audio thread cannot take the subscription lock and
-    // the pairs are fixed. A port number can come round again, so a date
-    // holds for the generation of the pair it was taken in, not the number.
+    // next. The audio thread knows, so it says: after each block has read,
+    // each port's read position and the time the next block reads from it.
+    // A frame n past that position is read n frames after that time — a
+    // block that found its port short read silence for the rest and left the
+    // position where it was, which is why the date is taken after the read:
+    // taken before, the frames written next would be placed a block early.
+    // One date per pair of lanes, since the audio thread cannot take the
+    // subscription lock and the pairs are fixed. A port number can come round
+    // again, so a date holds for the generation of the pair it was taken in,
+    // not the number.
     struct ReadDate {
         std::atomic<ClockworkPort> port{CLOCKWORK_PORT_NONE};  // set under mInputSubMutex
         std::atomic<uint32_t>      generation{0};              // up each time `port` changes
@@ -377,6 +394,7 @@ private:
 
     std::jthread            mEndpointThread;
     std::atomic<bool>       mEndpointRun{false};
+    std::atomic<int>        mEndpointRealtime{-1};   // RealtimeStatus, -1 until the worker asked
     std::atomic<uint32_t>   mSampleRate{0};
     // The engine's input channel count: the ceiling a subscription's
     // channel pair has to fit under. Streams come and go, so this is
@@ -468,6 +486,7 @@ public:
         int32_t  driftPpm{0};
         uint32_t bufferedMs{0};
     };
+    std::optional<clockwork::RealtimeStatus> endpointRealtime() const { return std::nullopt; }
     bool tryReadInputHealth(InputHealth&) const { return false; }
 
 private:

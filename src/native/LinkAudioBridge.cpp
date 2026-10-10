@@ -476,8 +476,8 @@ void LinkAudioBridge::forgetReadDates(ClockworkPort port) {
 }
 
 // A sequence lock: one writer, this; an odd count means it is mid-write.
-void LinkAudioBridge::dateReads(uint64_t blockHostMicros) {
-    if (blockHostMicros == 0) return;   // no Link clock: nothing to date by
+void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
+    if (nextReadHostMicros == 0) return;   // no Link clock: nothing to date by
     for (auto& d : mReadDates) {
         const uint32_t generation = d.generation.load(std::memory_order_acquire);
         const ClockworkPort port  = d.port.load(std::memory_order_relaxed);
@@ -487,7 +487,7 @@ void LinkAudioBridge::dateReads(uint64_t blockHostMicros) {
         d.seq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         d.datedGeneration.store(generation, std::memory_order_relaxed);
-        d.hostMicros.store(blockHostMicros, std::memory_order_relaxed);
+        d.hostMicros.store(nextReadHostMicros, std::memory_order_relaxed);
         d.readPosition.store(read, std::memory_order_relaxed);
         d.seq.store(seq + 2, std::memory_order_release);
     }
@@ -530,6 +530,7 @@ void LinkAudioBridge::stopEndpoint() {
     if (!mEndpointRun.exchange(false, std::memory_order_acq_rel)) return;
     mEndpointThread.request_stop();
     if (mEndpointThread.joinable()) mEndpointThread.join();
+    mEndpointRealtime.store(-1, std::memory_order_release);
 }
 
 /*
@@ -552,6 +553,20 @@ void LinkAudioBridge::stopEndpoint() {
 void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
     using namespace std::chrono_literals;
     constexpr double kQuantum = 4.0;
+
+    // Scheduled as the audio thread is: this feeds it, and from an ordinary
+    // thread's place in the queue it was tens of milliseconds late on a busy
+    // machine while the ring ran dry. Asked once, at this worker's own pace
+    // (a chunk at the sample rate), and answered in the log and through
+    // endpointRealtime(); the engine can only ask.
+    {
+        const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);
+        const clockwork::RealtimeResult rt = clockwork::elevateCurrentThreadToRealtime(
+            sr != 0 ? double(kEndpointChunkFrames) / double(sr) : 0.0);
+        clockwork_log("[link-audio] endpoint worker realtime: status=%d policy=%d prio=%d err=%d",
+                      static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
+        mEndpointRealtime.store(static_cast<int>(rt.status), std::memory_order_release);
+    }
 
     while (!stop.stop_requested()) {
         const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);

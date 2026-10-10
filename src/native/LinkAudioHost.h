@@ -101,9 +101,10 @@ public:
     // Re-anchor on the next stamp — call wherever the driver resets the
     // clock's audio-thread time (device start, first manual pump).
     void resetBlockClock();
-    // Date each subscription's next read by this block's stamp, so the
-    // endpoint knows when what it writes will be read. Audio thread only.
-    void dateReads(uint64_t blockHostMicros);
+    // After a block has read its ports: each subscription's port is read
+    // next at `nextReadHostMicros`, from where it stands now — so the
+    // endpoint knows when what it writes will be heard. Audio thread only.
+    void dateReads(uint64_t nextReadHostMicros);
 
     // Tap each aux sink's bus range and publish. RT-safe (try_lock; skips
     // the block if the sink list is mid-mutation).
@@ -119,6 +120,12 @@ public:
     // Mirror stream health (publish gate, sinks, underruns, input health)
     // into the dashboard metrics. RT-safe; once per callback. `m` may be null.
     void publishMetrics(PerformanceMetrics* m);
+
+    // Whether the endpoint worker, which feeds the audio thread peers' audio,
+    // runs as a real-time thread: see LinkAudioBridge::endpointRealtime.
+    std::optional<clockwork::RealtimeStatus> endpointRealtime() const {
+        return mBridge.endpointRealtime();
+    }
 
     // ─── ClockworkClock::LinkVisibilityListener ─────────────────────────────────
     void linkWillChangeVisibility() override;

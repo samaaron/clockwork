@@ -6,8 +6,7 @@
  * Three drivers render clockwork's audio blocks: the JUCE device callback, the
  * headless thread, and the engine's manual pump. Before a block each must
  * step the audio-thread NTP, publish the sample-clock anchor, take the Link
- * Audio stamp and date the Link Audio reads by it, and mirror the clock into
- * the dashboard metrics. Each used to
+ * Audio stamp, and mirror the clock into the dashboard metrics. Each used to
  * compose that by hand, with its own subset (the headless pair never
  * touched the dashboard, so clock slots 46-49 froze without a device). One
  * entry point keeps the three identical.
@@ -53,7 +52,6 @@ inline BlockTime beginAudioBlock(ClockworkClock& clock, LinkAudioHost& linkAudio
     clock.publishSampleClock(samplePos, sampleRate, ntp, outputLatencyFrames);
     const uint64_t hostMicros = static_cast<uint64_t>(
         std::max<int64_t>(0, linkAudio.blockHostMicros(samplePos, sampleRate)));
-    linkAudio.dateReads(hostMicros);
     if (metrics) {
         // One lock-free session capture for the Link readouts, the stream
         // health beside it, then the cross-platform tempo/beat/phase/playing

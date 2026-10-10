@@ -88,8 +88,8 @@ void LinkAudioHost::resetBlockClock() {
     mBlockStamp.reset();
 }
 
-void LinkAudioHost::dateReads(uint64_t blockHostMicros) {
-    mBridge.dateReads(blockHostMicros);
+void LinkAudioHost::dateReads(uint64_t nextReadHostMicros) {
+    mBridge.dateReads(nextReadHostMicros);
 }
 
 void LinkAudioHost::publishAuxSinks(const float* busPool, uint32_t blockSize,

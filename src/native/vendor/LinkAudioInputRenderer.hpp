@@ -11,8 +11,10 @@
  *
  * Modified for clockwork: the enclosing namespace is `clockwork_link`; the
  * diagnostics (drops, gaps, duplicates, resyncs, warps, drift) are clockwork's;
- * receive() renders only what has arrived; and the interpolation cache is
- * kept oldest first, as the interpolator reads it.
+ * receive() renders only what has arrived; a place the timeline has left
+ * behind is given up and found again rather than caught up with; and the
+ * interpolator reads the four source frames around the one it is at, so the
+ * stream lands where its stamps put it, sample for sample, from its first.
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -178,7 +180,59 @@ public:
   {
     mpSource = std::make_unique<ableton::LinkAudioSource>(
       mLink, channelId,
-      [this](ableton::LinkAudioSource::BufferHandle bh) { onSourceBuffer(bh); });
+      [this](ableton::LinkAudioSource::BufferHandle bh) { push(bh); });
+  }
+
+  // One of the peer's buffers, as the source delivers them (subscribe) or as
+  // a test hands them in. Link's thread, or whichever single thread feeds
+  // this renderer; never the one calling receive().
+  void push(const ableton::LinkAudioSource::BufferHandle& bh)
+  {
+    // Capture the latest peer-side info for diagnostics regardless of
+    // whether we successfully retain a queue slot.
+    mLastSampleRate.store(bh.info.sampleRate, std::memory_order_relaxed);
+    mLastNumChannels.store(static_cast<uint32_t>(bh.info.numChannels),
+                           std::memory_order_relaxed);
+
+    // Gap detection on Link's monotonic per-channel count — surfaces
+    // upstream loss before reaching this callback.
+    mTotalSourceBufferCalls.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t curCount  = bh.info.count;
+    const uint64_t prevCount = mLastSeenCount.load(std::memory_order_relaxed);
+    if (prevCount > 0 && curCount > prevCount + 1) {
+        mNetworkGapBuffers.fetch_add(curCount - prevCount - 1,
+                                      std::memory_order_relaxed);
+    } else if (prevCount > 0 && curCount == prevCount) {
+        mDuplicateCountCalls.fetch_add(1, std::memory_order_relaxed);
+    }
+    mLastSeenCount.store(curCount, std::memory_order_relaxed);
+
+    if (!mpQueueWriter->retainSlot()) {
+        mDroppedSourceBuffers.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    auto& buffer = *((*mpQueueWriter)[0]);
+    buffer.mInfo = bh.info;
+    // Source numChannels is 1 or 2 (Link's commit() rejects anything
+    // else). Mono → duplicate to both internal channels so receive()
+    // always emits stereo.
+    const size_t srcChans = bh.info.numChannels;
+    const size_t n = std::min(bh.info.numFrames, buffer.mSamplesL.size());
+    // Truncation would break Link's beat-time continuity (next
+    // buffer's sessionBeatTime advances by the untruncated count).
+    // kMaxFramesPerBuffer above is sized to avoid hitting this.
+    buffer.mInfo.numFrames = n;
+    for (size_t i = 0; i < n; ++i)
+    {
+      const double l = ableton::util::int16ToFloat<double>(
+        bh.samples[i * srcChans]);
+      const double r = (srcChans >= 2)
+        ? ableton::util::int16ToFloat<double>(bh.samples[i * srcChans + 1])
+        : l;
+      buffer.mSamplesL[i] = l;
+      buffer.mSamplesR[i] = r;
+    }
+    mpQueueWriter->releaseSlot();
   }
 
   void unsubscribe()
@@ -242,6 +296,33 @@ public:
                      std::chrono::duration<double>(double(numFrames) / sampleRate)),
         quantum) - kLatencyInBeats;
 
+    // The place that was kept, against where the timeline now is. They part
+    // when time went by without this being asked — a starved endpoint, a
+    // stalled device, a hole in the peer's stream — and the audio in between
+    // was never heard. It is not caught up with: bending the rate to meet the
+    // target in one render plays what was missed many times too fast, a
+    // chirp and a burst of clicks. The place is given up (a resync) and found
+    // again at the target, as it was found at the start. A few frames apart
+    // is the two clocks' disagreement, steered over the render as always.
+    if (moStartReadPos && mpQueueReader->numRetainedSlots() > 0)
+    {
+      const auto& info = (*mpQueueReader)[0]->mInfo;
+      const auto begin = info.beginBeats(sessionState, quantum);
+      const auto end = info.endBeats(sessionState, quantum);
+      if (!begin || !end)
+      {
+        lose();   // another session's buffers: nothing to hold a place in
+      }
+      else
+      {
+        const auto beatsAtRead =
+          *begin + (*end - *begin) * (*moStartReadPos / double(info.numFrames));
+        const auto secondsOff =
+          (targetBeatsAtBufferBegin - beatsAtRead) * 60.0 / safeBpm;
+        if (std::fabs(secondsOff) >= kLostSeconds) lose();
+      }
+    }
+
     // Drop too-old slots while we're not actively rendering.
     while (!moStartReadPos && mpQueueReader->numRetainedSlots() > 0)
     {
@@ -276,16 +357,19 @@ public:
       moStartReadPos = linearInterpolate(targetBeatsAtBufferBegin,
                                          startBufferBegin, startBufferEnd,
                                          0.0, double(info.numFrames));
-      // Prime the cubic-interp cache from the first samples so the
-      // initial output frames don't underweight a zero-init cache and
-      // click. Without this, only cache[0] gets a real sample on the
-      // first advance — cubicInterpolate weights [1] and [2] most so
-      // the very first output frame would be near-zero regardless of
-      // the actual source amplitude.
-      const auto seedL = (*mpQueueReader)[0]->mSamplesL[0];
-      const auto seedR = (*mpQueueReader)[0]->mSamplesR[0];
-      mReceiverSampleCache[0] = {{seedL, seedL, seedL, seedL}};
-      mReceiverSampleCache[1] = {{seedR, seedR, seedR, seedR}};
+      // The interpolator is primed with the four source frames around the
+      // start, so the first output frame is the stream there, not a click:
+      // primed from the slot's first frame it played that frame wherever
+      // the start fell in the slot, then slid to the stream over the next.
+      // Before the first frame there is nothing: the first stands in.
+      const auto startIdx = static_cast<size_t>(std::floor(*moStartReadPos));
+      for (size_t j = 0; j < 4; ++j)
+      {
+        const size_t idx = (startIdx + j >= 1) ? startIdx + j - 1 : 0;
+        for (size_t ch = 0; ch < kMaxChannels; ++ch)
+          mReceiverSampleCache[ch][j] = sampleAt(idx, ch);
+      }
+      moLastFrameIdx = startIdx;
     }
 
     const auto startFramePos = *moStartReadPos;
@@ -296,11 +380,31 @@ public:
     // Upstream is only ever asked for what has arrived, from the audio
     // callback a latency behind; clockwork's endpoint runs ahead to keep its
     // port full, so it asks for as much as there is room for.
+    //
+    // What has arrived is the run of buffers from the current one that
+    // follow on from each other. A buffer that does not — the peer's
+    // callback stalled, a packet was lost — is a hole, and the stream is
+    // rendered up to it and no further: the next call finds the place on
+    // the far side a lost one and starts again there. Rendered across it,
+    // the hole's edge would have been bent to, and the audio before it
+    // thrown away with the render.
     size_t frames = numFrames;
     auto targetBeatsAtEnd = targetBeatsAtBufferEnd;
     {
-      const auto& newest =
-        (*mpQueueReader)[mpQueueReader->numRetainedSlots() - 1]->mInfo;
+      size_t last = 0;
+      auto lastEnd = *(*mpQueueReader)[0]->mInfo.endBeats(sessionState, quantum);
+      for (size_t i = 1; i < mpQueueReader->numRetainedSlots(); ++i)
+      {
+        const auto& info = (*mpQueueReader)[i]->mInfo;
+        const auto begin = info.beginBeats(sessionState, quantum);
+        const auto end = info.endBeats(sessionState, quantum);
+        if (!begin || !end) break;   // another session's: not this stream
+        // Half a source frame apart is a rounding, not a hole.
+        if (std::fabs(*begin - lastEnd) > 0.5 * (*end - *begin) / double(info.numFrames)) break;
+        last = i;
+        lastEnd = *end;
+      }
+      const auto& newest = (*mpQueueReader)[last]->mInfo;
       const auto newestBegin = *newest.beginBeats(sessionState, quantum);
       const auto newestEnd = *newest.endBeats(sessionState, quantum);
       // Two source frames short of the end: the interpolator reads ahead.
@@ -368,47 +472,30 @@ public:
     }
     auto readPos = startFramePos;
 
-    auto getSample = [&](size_t idx, size_t ch) -> double {
-      size_t bufferIdx = 0;
-      while (bufferIdx < mpQueueReader->numRetainedSlots())
-      {
-        auto& cur = *((*mpQueueReader)[bufferIdx]);
-        if (idx < cur.mInfo.numFrames) {
-          return ch == 0 ? cur.mSamplesL[idx] : cur.mSamplesR[idx];
-        }
-        idx -= cur.mInfo.numFrames;
-        ++bufferIdx;
-      }
-      return 0.0;
-    };
-
     for (auto frame = 0u; frame < frames; ++frame)
     {
       const auto framePos = readPos + frame * frameIncrement;
       const auto frameIdx = static_cast<size_t>(std::floor(framePos));
       const auto t = framePos - std::floor(framePos);
 
-      while (!moLastFrameIdx || (moLastFrameIdx && frameIdx > *moLastFrameIdx))
+      // The cache is the four source frames around the one it is at:
+      // [idx − 1, idx, idx + 1, idx + 2], as cubicInterpolate takes them,
+      // running from [1] at t = 0 to [2] at t = 1. Advanced a frame at a time
+      // so a frameIncrement over 1 reads every source frame on the way.
+      // (Upstream kept the cache three frames behind, and shifted it the
+      // other way: a fixed delay, and a step between two frames that ran
+      // backwards in time and snapped forward at the next.)
+      while (frameIdx > *moLastFrameIdx)
       {
-        // newLast advances per iteration so frameIncrement > 1 reads
-        // successive source samples rather than repeating frameIdx-1.
-        const size_t newLast =
-          moLastFrameIdx ? (*moLastFrameIdx + 1) : frameIdx;
-        // Oldest first, as cubicInterpolate takes its four points: it runs
-        // from [1] at t = 0 to [2] at t = 1. Upstream shifts the other way,
-        // newest first, so each step between two samples ran backwards in
-        // time and snapped forward at the next: a fixed fractional delay
-        // while the rates match, and audible as soon as they don't.
+        const size_t idx = *moLastFrameIdx + 1;
         for (size_t ch = 0; ch < kMaxChannels; ++ch)
         {
           mReceiverSampleCache[ch][0] = mReceiverSampleCache[ch][1];
           mReceiverSampleCache[ch][1] = mReceiverSampleCache[ch][2];
           mReceiverSampleCache[ch][2] = mReceiverSampleCache[ch][3];
-          mReceiverSampleCache[ch][3] = (newLast > 0)
-            ? getSample(newLast - 1, ch)
-            : getSample(0, ch);
+          mReceiverSampleCache[ch][3] = sampleAt(idx + 2, ch);
         }
-        moLastFrameIdx = newLast;
+        moLastFrameIdx = idx;
       }
 
       outL[frame] = cubicInterpolate(mReceiverSampleCache[0], t);
@@ -450,6 +537,25 @@ private:
   // A render leaving the read position more than this many source frames off
   // where the rates put it is a warp.
   static constexpr double kWarpFrames = 1.0;
+  // A read position this far from the beat asked for, in seconds at the
+  // current tempo, is a place the timeline has left behind, not a clock's
+  // steering: given up and found again. Below it, a bend over one render is
+  // not heard; from it, a bend is a chirp and a jump is a click.
+  static constexpr double kLostSeconds = 0.001;
+
+  // Source frame `idx` of channel `ch`, counted across the retained slots
+  // from the oldest; silence past the newest.
+  double sampleAt(size_t idx, size_t ch) const
+  {
+    for (size_t slot = 0; slot < mpQueueReader->numRetainedSlots(); ++slot)
+    {
+      const auto& cur = *((*mpQueueReader)[slot]);
+      if (idx < cur.mInfo.numFrames)
+        return ch == 0 ? cur.mSamplesL[idx] : cur.mSamplesR[idx];
+      idx -= cur.mInfo.numFrames;
+    }
+    return 0.0;
+  }
   // Drift is the read rate over at least this many source frames, ~0.7 s at
   // 48 kHz: long enough to be the clocks' disagreement rather than the
   // steering of one callback.
@@ -463,55 +569,6 @@ private:
     moLastFrameIdx = std::nullopt;
     moStartReadPos = std::nullopt;
     mDriftFramesRead = mDriftFramesExpected = 0.0;
-  }
-
-  void onSourceBuffer(const ableton::LinkAudioSource::BufferHandle bh)
-  {
-    // Capture the latest peer-side info for diagnostics regardless of
-    // whether we successfully retain a queue slot.
-    mLastSampleRate.store(bh.info.sampleRate, std::memory_order_relaxed);
-    mLastNumChannels.store(static_cast<uint32_t>(bh.info.numChannels),
-                           std::memory_order_relaxed);
-
-    // Gap detection on Link's monotonic per-channel count — surfaces
-    // upstream loss before reaching this callback.
-    mTotalSourceBufferCalls.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t curCount  = bh.info.count;
-    const uint64_t prevCount = mLastSeenCount.load(std::memory_order_relaxed);
-    if (prevCount > 0 && curCount > prevCount + 1) {
-        mNetworkGapBuffers.fetch_add(curCount - prevCount - 1,
-                                      std::memory_order_relaxed);
-    } else if (prevCount > 0 && curCount == prevCount) {
-        mDuplicateCountCalls.fetch_add(1, std::memory_order_relaxed);
-    }
-    mLastSeenCount.store(curCount, std::memory_order_relaxed);
-
-    if (!mpQueueWriter->retainSlot()) {
-        mDroppedSourceBuffers.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    auto& buffer = *((*mpQueueWriter)[0]);
-    buffer.mInfo = bh.info;
-    // Source numChannels is 1 or 2 (Link's commit() rejects anything
-    // else). Mono → duplicate to both internal channels so receive()
-    // always emits stereo.
-    const size_t srcChans = bh.info.numChannels;
-    const size_t n = std::min(bh.info.numFrames, buffer.mSamplesL.size());
-    // Truncation would break Link's beat-time continuity (next
-    // buffer's sessionBeatTime advances by the untruncated count).
-    // kMaxFramesPerBuffer above is sized to avoid hitting this.
-    buffer.mInfo.numFrames = n;
-    for (size_t i = 0; i < n; ++i)
-    {
-      const double l = ableton::util::int16ToFloat<double>(
-        bh.samples[i * srcChans]);
-      const double r = (srcChans >= 2)
-        ? ableton::util::int16ToFloat<double>(bh.samples[i * srcChans + 1])
-        : l;
-      buffer.mSamplesL[i] = l;
-      buffer.mSamplesR[i] = r;
-    }
-    mpQueueWriter->releaseSlot();
   }
 
   Link& mLink;
