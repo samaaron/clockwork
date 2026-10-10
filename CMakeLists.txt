@@ -1036,6 +1036,17 @@ if(EMSCRIPTEN)
 else()
     set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE})
     set(CLOCKWORK_RUST_CARGO_ENV)
+    if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+        # rustc reads the deployment floor from the environment, as clang does
+        # from the flag: without it the crates' objects carry the SDK's version,
+        # and every link into a binary with a lower floor warns that the
+        # archive "was built for newer macOS". This covers clockwork's own
+        # crates; the standard library's objects are the toolchain's (a
+        # Homebrew rust is built on the host's SDK and still warns for std —
+        # a rustup toolchain's prebuilt std does not).
+        set(CLOCKWORK_RUST_CARGO_ENV ${CMAKE_COMMAND} -E env
+            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
 endif()
 set(CLOCKWORK_RUST_LIB
     ${CLOCKWORK_RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${CLOCKWORK_RUST_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
@@ -1478,7 +1489,7 @@ if(CLOCKWORK_PLUGINS)
             ${CLOCKWORK_RUST_DIR}/target/${CLOCKWORK_RUST_PROFILE}/${CMAKE_STATIC_LIBRARY_PREFIX}clockwork_bridge_native${CMAKE_STATIC_LIBRARY_SUFFIX})
         add_custom_target(clockwork_bridge_rust ALL
             BYPRODUCTS ${CLOCKWORK_BRIDGE_RUST_LIB}
-            COMMAND ${CARGO_EXECUTABLE} build ${CLOCKWORK_BRIDGE_CARGO_FLAGS} -p clockwork-bridge-native
+            COMMAND ${CLOCKWORK_RUST_CARGO_ENV} ${CARGO_EXECUTABLE} build ${CLOCKWORK_BRIDGE_CARGO_FLAGS} -p clockwork-bridge-native
             WORKING_DIRECTORY ${CLOCKWORK_RUST_DIR}
             COMMENT "Building Rust port substrate for the plugin bridge (cargo: clockwork-bridge-native)"
             VERBATIM)
@@ -1520,6 +1531,18 @@ if(CLOCKWORK_PLUGINS)
         set_target_properties(clockwork_plugin_bridge PROPERTIES
             OUTPUT_NAME "${CLOCKWORK_PLUGIN_BRIDGE_NAME}"
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        if(APPLE)
+            # The linker signs the executable ad hoc, but a bundle is signed as
+            # a bundle — its Info.plist sealed with it — or `codesign --verify`
+            # on the .app says "code has no resources but signature indicates
+            # they must be present", and a host that copies the bundle into its
+            # own and verifies (macdeployqt does) reports an error. An ad-hoc
+            # bundle signature here; a release re-signs with its identity.
+            add_custom_command(TARGET clockwork_plugin_bridge POST_BUILD
+                COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:clockwork_plugin_bridge>"
+                COMMENT "Signing the plugin bridge bundle (ad hoc)"
+                VERBATIM)
+        endif()
         # Anything that builds the host binary gets the bridge beside it.
     endif()
 endif()
