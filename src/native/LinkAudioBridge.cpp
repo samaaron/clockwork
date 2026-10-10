@@ -478,6 +478,7 @@ void LinkAudioBridge::forgetReadDates(ClockworkPort port) {
 // A sequence lock: one writer, this; an odd count means it is mid-write.
 void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
     if (nextReadHostMicros == 0) return;   // no Link clock: nothing to date by
+    mDatedBlocks.fetch_add(1, std::memory_order_relaxed);
     for (auto& d : mReadDates) {
         const uint32_t generation = d.generation.load(std::memory_order_acquire);
         const ClockworkPort port  = d.port.load(std::memory_order_relaxed);

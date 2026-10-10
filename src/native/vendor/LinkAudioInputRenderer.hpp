@@ -146,10 +146,10 @@ public:
   uint64_t resyncs() const {
       return mResyncs.load(std::memory_order_relaxed);
   }
-  // Renders that left the read position more than kWarpFrames source frames
-  // off where the two sample rates put it: audible as pitch bent, or a skip.
-  // The position, not the rate: a render of a few frames can be well off in
-  // rate and nowhere near a frame off in position.
+  // Renders that left the read position more than kWarpSeconds off where
+  // the two sample rates put it: audible as pitch bent, or a skip. The
+  // position, not the rate: a render of a few frames can be well off in
+  // rate and nowhere near that far off in position.
   uint64_t warps() const {
       return mWarps.load(std::memory_order_relaxed);
   }
@@ -340,10 +340,14 @@ public:
       return 0;
     }
 
-    // Wait for buffers to catch up to our target.
+    // Wait for buffers to catch up to our target. A target in the crack
+    // between two buffers' stamps — the one before dropped as too old, this
+    // one beginning a rounding later — is not ahead of what has arrived:
+    // this buffer's first frame is the place.
+    const auto slackBeats = kHoleSeconds * safeBpm / 60.0;
     if (!moStartReadPos
         && (*mpQueueReader)[0]->mInfo.beginBeats(sessionState, quantum)
-             > targetBeatsAtBufferBegin)
+             > targetBeatsAtBufferBegin + slackBeats)
     {
       lose();
       return 0;
@@ -354,9 +358,9 @@ public:
       const auto& info = (*mpQueueReader)[0]->mInfo;
       const auto startBufferBegin = *info.beginBeats(sessionState, quantum);
       const auto startBufferEnd = *info.endBeats(sessionState, quantum);
-      moStartReadPos = linearInterpolate(targetBeatsAtBufferBegin,
-                                         startBufferBegin, startBufferEnd,
-                                         0.0, double(info.numFrames));
+      moStartReadPos = std::max(0.0, linearInterpolate(targetBeatsAtBufferBegin,
+                                                       startBufferBegin, startBufferEnd,
+                                                       0.0, double(info.numFrames)));
       // The interpolator is primed with the four source frames around the
       // start, so the first output frame is the stream there, not a click:
       // primed from the slot's first frame it played that frame wherever
@@ -387,7 +391,10 @@ public:
     // rendered up to it and no further: the next call finds the place on
     // the far side a lost one and starts again there. Rendered across it,
     // the hole's edge would have been bent to, and the audio before it
-    // thrown away with the render.
+    // thrown away with the render. Following on is to within kHoleSeconds:
+    // a publisher's stamps pass through beats and microseconds and abut to
+    // within a frame or so, not exactly, and that is one stream, read by its
+    // frames as upstream reads it.
     size_t frames = numFrames;
     auto targetBeatsAtEnd = targetBeatsAtBufferEnd;
     {
@@ -399,8 +406,7 @@ public:
         const auto begin = info.beginBeats(sessionState, quantum);
         const auto end = info.endBeats(sessionState, quantum);
         if (!begin || !end) break;   // another session's: not this stream
-        // Half a source frame apart is a rounding, not a hole.
-        if (std::fabs(*begin - lastEnd) > 0.5 * (*end - *begin) / double(info.numFrames)) break;
+        if (std::fabs(*begin - lastEnd) * 60.0 / safeBpm > kHoleSeconds) break;
         last = i;
         lastEnd = *end;
       }
@@ -422,7 +428,11 @@ public:
       }
     }
 
-    // Sum total source frames spanning the target beat range.
+    // Sum total source frames spanning the target beat range: whole buffers
+    // up to the first whose stamped end is past the target end, and the
+    // target's place in that one. By its frames, not its stamps: a target
+    // end in the rounding crack between two buffers' stamps lands at the
+    // next one's first frame, not nowhere.
     auto totalFrames = 0.0;
     auto foundEnd = false;
     for (auto i = 0u; i < mpQueueReader->numRetainedSlots(); ++i)
@@ -430,11 +440,11 @@ public:
       const auto& info = (*mpQueueReader)[i]->mInfo;
       const auto bufferBegin = *info.beginBeats(sessionState, quantum);
       const auto bufferEnd = *info.endBeats(sessionState, quantum);
-      if (targetBeatsAtEnd >= bufferBegin
-          && targetBeatsAtEnd < bufferEnd)
+      if (targetBeatsAtEnd < bufferEnd)
       {
-        const auto targetBeatsFrame = linearInterpolate(
-          targetBeatsAtEnd, bufferBegin, bufferEnd, 0.0, double(info.numFrames));
+        const auto targetBeatsFrame = std::clamp(
+          linearInterpolate(targetBeatsAtEnd, bufferBegin, bufferEnd, 0.0, double(info.numFrames)),
+          0.0, double(info.numFrames));
         totalFrames += targetBeatsFrame;
         foundEnd = true;
         break;
@@ -449,17 +459,31 @@ public:
     }
 
     totalFrames -= startFramePos;
-    if (totalFrames <= 0.0)
-    {
-      lose();
-      return 0;
-    }
 
-    const auto frameIncrement = totalFrames / double(frames);
+    // Steered toward the target, never stepped onto it. The frames the rates
+    // call for are what the stream is; what the target asks beyond them —
+    // the two clocks' disagreement, Link correcting the session timeline by
+    // a millisecond or two under the stream — is taken at most kMaxBend of
+    // this render now and the rest in the renders after, so a correction is
+    // not heard. (Upstream bent the whole of it into one render: a yelp.)
+    // Only ever within what has arrived; the interpolator reads two ahead.
     const auto rateNeeded =
       double((*mpQueueReader)[0]->mInfo.sampleRate) / sampleRate;
     const auto framesExpected = rateNeeded * double(frames);
-    if (std::fabs(totalFrames - framesExpected) > kWarpFrames)
+    {
+      double retained = 0.0;
+      for (auto i = 0u; i < mpQueueReader->numRetainedSlots(); ++i)
+        retained += double((*mpQueueReader)[i]->mInfo.numFrames);
+      const auto arrived = retained - startFramePos - 2.0;
+      const auto most = std::min(framesExpected * (1.0 + kMaxBend), arrived);
+      const auto least = framesExpected * (1.0 - kMaxBend);
+      if (!(most >= least)) return 0;   // not even a bent render has arrived; the place is kept
+      totalFrames = std::clamp(totalFrames, least, most);
+    }
+
+    const auto frameIncrement = totalFrames / double(frames);
+    if (std::fabs(totalFrames - framesExpected)
+        > kWarpSeconds * double((*mpQueueReader)[0]->mInfo.sampleRate))
       mWarps.fetch_add(1, std::memory_order_relaxed);
     mDriftFramesRead += totalFrames;
     mDriftFramesExpected += framesExpected;
@@ -534,14 +558,23 @@ public:
   }
 
 private:
-  // A render leaving the read position more than this many source frames off
-  // where the rates put it is a warp.
-  static constexpr double kWarpFrames = 1.0;
+  // A render leaving the read position this far off where the rates put it,
+  // in seconds of the source, is a warp: a bend of a twentieth over a
+  // chunk, heard. A frame or two is a publisher's stamp rounding, the
+  // position taken from a stamp rather than the frames, and not heard.
+  static constexpr double kWarpSeconds = 0.0005;
   // A read position this far from the beat asked for, in seconds at the
-  // current tempo, is a place the timeline has left behind, not a clock's
-  // steering: given up and found again. Below it, a bend over one render is
-  // not heard; from it, a bend is a chirp and a jump is a click.
-  static constexpr double kLostSeconds = 0.001;
+  // current tempo, is a place the timeline has left behind — a stall, a
+  // hole, a device that jumped — not a correction to steer out: given up
+  // and found again. Below it the stream is bent toward the target by at
+  // most kMaxBend a render, a hundredth, and a two-millisecond correction
+  // is gone within a second with nothing heard.
+  static constexpr double kLostSeconds = 0.01;
+  static constexpr double kMaxBend = 0.01;
+  // Consecutive buffers whose stamps are this far apart, in seconds at the
+  // current tempo, have a hole between them; nearer is rounding, and the
+  // frames are trusted over the stamps.
+  static constexpr double kHoleSeconds = 0.001;
 
   // Source frame `idx` of channel `ch`, counted across the retained slots
   // from the oldest; silence past the newest.

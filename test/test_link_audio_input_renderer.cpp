@@ -66,6 +66,10 @@ struct Peer {
     uint64_t             frame = 0;
     uint64_t             count = 1;
     std::vector<int16_t> samples = std::vector<int16_t>(kPeerBlock * 2);
+    // Stamp jitter, in frames: a real publisher's stamps are rounded through
+    // beats and microseconds and do not abut exactly. Deterministic.
+    double               jitterFrames = 0.0;
+    uint32_t             lcg = 12345;
 
     static double sine(uint64_t frame) {
         return std::sin(kTau * kHz * double(frame) / double(kRate));
@@ -85,7 +89,13 @@ struct Peer {
             bh.info.numFrames       = kPeerBlock;
             bh.info.sampleRate      = kRate;
             bh.info.count           = count++;
-            bh.info.sessionBeatTime = session.beatAt(timeOf(frame));
+            double stampFrame = double(frame);
+            if (jitterFrames > 0.0) {
+                lcg = lcg * 1664525u + 1013904223u;
+                stampFrame += jitterFrames * (2.0 * double(lcg >> 8) / double(1u << 24) - 1.0);
+            }
+            bh.info.sessionBeatTime = session.beatAt(
+                t0 + Micros(static_cast<int64_t>(std::llround(1e6 * stampFrame / double(kRate)))));
             bh.info.tempo           = session.state.tempo();
             bh.info.sessionId       = session.id;
             renderer.push(bh);
@@ -169,6 +179,31 @@ TEST_CASE("input renderer: consecutive renders are one continuous stream",
     CHECK(renderer.warps() == 0);
 }
 
+TEST_CASE("input renderer: stamps that jitter by under a frame are one stream, not holes",
+          "[link-audio][renderer]") {
+    // A real publisher's stamps are rounded through beats and microseconds:
+    // consecutive buffers abut to within a frame, not exactly. That is one
+    // continuous stream, rendered by its frames, as upstream always did; a
+    // hole is a millisecond or more, a buffer that never came.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.jitterFrames = 0.9;
+    peer.publish(750);
+
+    Micros host = framesLater(peer.t0, 4800);
+    for (int block = 0; block < 60; ++block) {
+        const auto at = render(session, renderer, peer, host);
+        INFO("block " << block);
+        REQUIRE(at.frames == kRender);
+        CHECK(at.maxStep < kSineStep);
+        host = framesLater(host, double(kRender));
+    }
+    CHECK(renderer.resyncs() == 0);
+    CHECK(renderer.warps() == 0);
+}
+
 TEST_CASE("input renderer: a few frames' disagreement is steered over the render, not a lost place",
           "[link-audio][renderer]") {
     // Two sample clocks never quite agree; the block stamp steers. A render
@@ -187,6 +222,41 @@ TEST_CASE("input renderer: a few frames' disagreement is steered over the render
     CHECK(bent.frames == kRender);
     CHECK(bent.maxStep < kSineStep * 1.1);
     CHECK(renderer.resyncs() == 0);
+}
+
+TEST_CASE("input renderer: a step of a couple of milliseconds is steered out, not skipped",
+          "[link-audio][renderer]") {
+    // Link re-measures the clock offset to a peer every so often and corrects
+    // the session timeline by a millisecond or two: the target moves under
+    // the stream in one go. Bent into one render that is a yelp; skipped it
+    // is a click. It is steered: each render bends by a bounded share toward
+    // the target, and the stream is back in place within a second with
+    // nothing heard.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(750);
+
+    Micros host = framesLater(peer.t0, 4800);
+    for (int block = 0; block < 10; ++block) {
+        REQUIRE(render(session, renderer, peer, host).frames == kRender);
+        host = framesLater(host, double(kRender));
+    }
+    host = framesLater(host, 96.0);   // 2 ms on, in one go
+    double worstStep = 0.0;
+    for (int block = 0; block < 60; ++block) {   // 640 ms
+        const auto at = render(session, renderer, peer, host);
+        INFO("block " << block << " after the step");
+        REQUIRE(at.frames == kRender);
+        worstStep = std::max(worstStep, at.maxStep);
+        host = framesLater(host, double(kRender));
+    }
+    CHECK(worstStep < kSineStep * 1.05);   // bent by a hundredth at most
+    CHECK(renderer.resyncs() == 0);
+    CHECK(renderer.warps() == 0);
+    const auto settled = render(session, renderer, peer, host);
+    CHECK(settled.maxError < kExact);   // back in place
 }
 
 TEST_CASE("input renderer: after the host has gone on without it, the stream rejoins the present",

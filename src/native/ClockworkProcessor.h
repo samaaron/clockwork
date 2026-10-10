@@ -65,13 +65,20 @@ inline uint32_t clockworkLinkInputWidth(int deviceInputChannels) {
 // GAP: aux sinks tapping arbitrary buses. LinkAudioBridge::publishAuxSinks
 // takes the base of the DSP's signal-bus pool, which dsp_api.h does not
 // expose, so nothing calls it.
+//
+// `publishChannels` is how many output channels the main sink publishes
+// from: the channels the DSP rendered this block. The device path clamps it
+// below numOutputChannels while a hot swap onto a wider device leaves the
+// DSP rendering fewer than the staging buffer holds; the others render what
+// they allocated. 0 means numOutputChannels.
 void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t blockSize,
                       uint32_t numOutputChannels,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
                       double   ntp,
-                      uint64_t hostMicros);
+                      uint64_t hostMicros,
+                      uint32_t publishChannels = 0);
 
 class ClockworkProcessor final : public smoothie::Processor {
 public:

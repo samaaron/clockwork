@@ -126,6 +126,8 @@ public:
     std::optional<clockwork::RealtimeStatus> endpointRealtime() const {
         return mBridge.endpointRealtime();
     }
+    // Blocks that dated their reads so far: see LinkAudioBridge::datedBlocks.
+    uint64_t datedBlocks() const { return mBridge.datedBlocks(); }
 
     // ─── ClockworkClock::LinkVisibilityListener ─────────────────────────────────
     void linkWillChangeVisibility() override;

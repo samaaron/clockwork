@@ -280,6 +280,12 @@ public:
         return static_cast<clockwork::RealtimeStatus>(status);
     }
 
+    // Blocks that have dated their reads (dateReads with a Link clock), by
+    // whichever driver rendered them. Every driver must: a driver that does
+    // not leaves the endpoint waiting for a date that never comes, and a
+    // peer's audio dropped at the door. Subscriptions or none.
+    uint64_t datedBlocks() const { return mDatedBlocks.load(std::memory_order_relaxed); }
+
 private:
     // Up to 2048-frame stereo blocks; the DSP normally runs at 128.
     static constexpr size_t kSinkMaxSamples = 4096;
@@ -395,6 +401,7 @@ private:
     std::jthread            mEndpointThread;
     std::atomic<bool>       mEndpointRun{false};
     std::atomic<int>        mEndpointRealtime{-1};   // RealtimeStatus, -1 until the worker asked
+    std::atomic<uint64_t>   mDatedBlocks{0};
     std::atomic<uint32_t>   mSampleRate{0};
     // The engine's input channel count: the ceiling a subscription's
     // channel pair has to fit under. Streams come and go, so this is
@@ -487,6 +494,7 @@ public:
         uint32_t bufferedMs{0};
     };
     std::optional<clockwork::RealtimeStatus> endpointRealtime() const { return std::nullopt; }
+    uint64_t datedBlocks() const { return 0; }
     bool tryReadInputHealth(InputHealth&) const { return false; }
 
 private:

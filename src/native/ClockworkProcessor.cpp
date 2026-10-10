@@ -28,7 +28,9 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
                       double   ntp,
-                      uint64_t hostMicros) {
+                      uint64_t hostMicros,
+                      uint32_t publishChannels) {
+    if (publishChannels == 0) publishChannels = numOutputChannels;
     clockwork_tick(ntp, numOutputChannels, numInputChannels);
 
     // This block has read its ports (pull_port_sources, in the tick): what
@@ -44,10 +46,10 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
     // Publish the main sink (stereo when nOut >= 2, mono fallback for 1).
     // No-op when Link Audio is off / no subscriber.
     if (const float* outputBus = clockwork_audio_out()) {
-        if (numOutputChannels >= 2) {
+        if (publishChannels >= 2) {
             linkAudio.publishAudioBlock(outputBus, outputBus + blockSize,
                                         static_cast<size_t>(blockSize), sampleRate, hostMicros);
-        } else if (numOutputChannels == 1) {
+        } else if (publishChannels == 1) {
             linkAudio.publishAudioBlock(outputBus, nullptr,
                                         static_cast<size_t>(blockSize), sampleRate, hostMicros);
         }
@@ -502,41 +504,27 @@ void ClockworkProcessor::process(
         if (preTick)
             preTick(mSamplePosition, wallNTP * 1000.0 - clockwork::kNtpEpochOffset * 1000.0);
 
-        // Native timing: pass wall-clock NTP directly; the tick uses it as-is
-        // (only the WASM build converts its argument, from AudioContext time).
-        // Advance NTP by one block duration for each sub-block.
-        clockwork_tick(wallNTP,
-                static_cast<uint32_t>(mNumOutputChannels),
-                static_cast<uint32_t>(mNumInputChannels));
+        // The one per-block body every driver runs (renderAudioBlock): the
+        // tick, dating the Link Audio reads it made, publishing the block.
+        // Native timing: wall-clock NTP as-is (only the WASM build converts
+        // its argument, from AudioContext time), advanced a block per
+        // sub-block, as the Link Audio stamp is: the audio framework's
+        // playback timestamp for THIS sub-block.
+        renderAudioBlock(*mLinkAudio,
+                         static_cast<uint32_t>(mBufLen),
+                         static_cast<uint32_t>(mNumOutputChannels),
+                         static_cast<uint32_t>(mNumInputChannels),
+                         static_cast<uint32_t>(mSampleRate),
+                         wallNTP, linkAudioBlockHostMicros,
+                         static_cast<uint32_t>(nOut));
         wallNTP += static_cast<double>(mBufLen) / mSampleRate;
+        linkAudioBlockHostMicros += engineBlockMicros;
         mSamplePosition += mBufLen;
         // Keep scope-stream writes anchored to the block being rendered.
         mClockworkClock->advanceEngineFrames(mSamplePosition);
 
         const float* outputBus = clockwork_audio_out();
         if (outputBus) {
-            // Publish this DSP block to Link Audio. Main sink:
-            // stereo when nOut >= 2, mono fallback for nOut == 1.
-            // hostMicros is the audio-framework's playback timestamp
-            // for THIS sub-block; advanced after each publish so
-            // consecutive sub-blocks within one device callback get
-            // correctly-spaced timestamps. No-op when LinkAudio off /
-            // no subscriber.
-            if (nOut >= 2) {
-                mLinkAudio->publishAudioBlock(
-                    outputBus, outputBus + mBufLen,
-                    static_cast<size_t>(mBufLen),
-                    static_cast<uint32_t>(mSampleRate),
-                    linkAudioBlockHostMicros);
-            } else if (nOut == 1) {
-                mLinkAudio->publishAudioBlock(
-                    outputBus, nullptr,
-                    static_cast<size_t>(mBufLen),
-                    static_cast<uint32_t>(mSampleRate),
-                    linkAudioBlockHostMicros);
-            }
-            linkAudioBlockHostMicros += engineBlockMicros;
-
             int needed  = numSamples - outputFilled;
             int toCopy  = std::min(needed, mBufLen);
 

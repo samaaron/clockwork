@@ -403,6 +403,9 @@ add_executable(clockwork_engine_tests
     test_no_audio_device.cpp
     test_input_fallback.cpp
     test_boot_input_pairing.cpp
+    # Every driver dates the Link Audio reads it makes: the device callback,
+    # the headless thread, the manual pump. Compiles to nothing without Link Audio.
+    test_link_audio_drivers.cpp
     test_swap_characterization.cpp
     test_dead_device.cpp
     test_real_devices.cpp
