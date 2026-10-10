@@ -130,6 +130,8 @@ fn nothing_on_the_audio_thread_path_allocates() {
         clockwork_port_is_open(source);
         clockwork_port_underruns(source);
         clockwork_port_overruns(sink);
+        clockwork_port_read_position(source);
+        clockwork_port_write_position(source);
         clockwork_port_name(source);
         // SAFETY: `slots` has that many writable entries.
         unsafe { clockwork_port_list(slots.as_mut_ptr(), slots.len() as u32) };

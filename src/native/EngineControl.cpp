@@ -304,16 +304,21 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             //    bufferedMs:f connectionState:i (0..3)
             //    droppedSourceBuffers:i networkGapBuffers:i
             //    totalSourceBufferCalls:i duplicateCountCalls:i
-            //    latencySeconds:f]*
+            //    latencySeconds:f
+            //    underruns:i resyncs:i warps:i driftPpm:i]*
             auto inputs = mLinkAudio->listInputs();
             // Pre-size for the actual reply; 512 B/entry is a generous
-            // upper bound (two ≤64-char strings + 7 int32 + 2 floats +
+            // upper bound (two ≤64-char strings + 11 int32 + 2 floats +
             // tag/alignment). Avoids overflow when many subs or long
             // peer/channel names are present.
             constexpr size_t kBytesPerInputEntry = 512;
             const size_t bufSize = 1024 + inputs.size() * kBytesPerInputEntry;
             std::vector<char> buf(bufSize);
             osc::OutboundPacketStream s(buf.data(), buf.size());
+            // Counts go out as int32, saturating rather than wrapping.
+            const auto clampCount = [](uint64_t n) {
+                return static_cast<int32_t>(std::min<uint64_t>(n, static_cast<uint64_t>(INT32_MAX)));
+            };
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/audio/inputs.reply"))
               << static_cast<int32_t>(inputs.size());
             for (const auto& st : inputs) {
@@ -324,19 +329,15 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                   << static_cast<int32_t>(st.sourceNumChannels)
                   << (st.bufferedSeconds * 1000.0f)
                   << static_cast<int32_t>(st.state)
-                  << static_cast<int32_t>(std::min<uint64_t>(
-                         st.droppedSourceBuffers,
-                         static_cast<uint64_t>(INT32_MAX)))
-                  << static_cast<int32_t>(std::min<uint64_t>(
-                         st.networkGapBuffers,
-                         static_cast<uint64_t>(INT32_MAX)))
-                  << static_cast<int32_t>(std::min<uint64_t>(
-                         st.totalSourceBufferCalls,
-                         static_cast<uint64_t>(INT32_MAX)))
-                  << static_cast<int32_t>(std::min<uint64_t>(
-                         st.duplicateCountCalls,
-                         static_cast<uint64_t>(INT32_MAX)))
-                  << static_cast<float>(st.latencySeconds);
+                  << clampCount(st.droppedSourceBuffers)
+                  << clampCount(st.networkGapBuffers)
+                  << clampCount(st.totalSourceBufferCalls)
+                  << clampCount(st.duplicateCountCalls)
+                  << static_cast<float>(st.latencySeconds)
+                  << clampCount(st.underruns)
+                  << clampCount(st.resyncs)
+                  << clampCount(st.warps)
+                  << static_cast<int32_t>(st.driftPpm);
             }
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;

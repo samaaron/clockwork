@@ -1746,6 +1746,11 @@ void ClockworkEngine::sendOSC(const uint8_t* data, uint32_t size) {
 }
 
 void ClockworkEngine::pumpAudioBlock() {
+    pumpAudioCallback(static_cast<uint32_t>(get_audio_buffer_samples()));
+}
+
+void ClockworkEngine::pumpAudioCallback(uint32_t frames,
+                                        const std::function<void()>& afterEachBlock) {
     // One renderer at a time. With a source active — the device callback or
     // the headless driver on its own thread — a block rendered here would be
     // a second concurrent caller of process_audio, a data race across the
@@ -1753,7 +1758,7 @@ void ClockworkEngine::pumpAudioBlock() {
     // source first or boots with manualAudioPump.
     const AudioSource active = mActiveSource.load(std::memory_order_acquire);
     if (active != AudioSource::None) {
-        clockwork_log("[engine] pumpAudioBlock refused: the %s is rendering — stop it first, "
+        clockwork_log("[engine] manual pump refused: the %s is rendering — stop it first, "
                       "or boot with manualAudioPump",
                       active == AudioSource::RealCallback ? "device callback" : "headless driver");
         return;
@@ -1783,12 +1788,23 @@ void ClockworkEngine::pumpAudioBlock() {
     const uint32_t nIn  = mCurrentConfig.numInputChannels  > 0
                               ? static_cast<uint32_t>(mCurrentConfig.numInputChannels)  : 0;
 
-    renderAudioBlock(mLinkAudio, blockSize, nOut, nIn,
-                     static_cast<uint32_t>(mCurrentConfig.sampleRate), bt.ntp, bt.hostMicros);
-    mManualSamplePos += blockSize;
+    // A callback is whole blocks, stamped as the device path stamps them
+    // (ClockworkProcessor::process): from the one clock step, a block apart.
+    const double   blockSeconds = static_cast<double>(blockSize) / mCurrentConfig.sampleRate;
+    const uint64_t blockMicros  = static_cast<uint64_t>(blockSeconds * 1e6);
+    double   ntp  = bt.ntp;
+    uint64_t host = bt.hostMicros;
+    for (uint32_t rendered = 0; rendered < std::max(frames, blockSize); rendered += blockSize) {
+        renderAudioBlock(mLinkAudio, blockSize, nOut, nIn,
+                         static_cast<uint32_t>(mCurrentConfig.sampleRate), ntp, host);
+        mManualSamplePos += blockSize;
+        ntp += blockSeconds;
+        if (host != 0) host += blockMicros;
 
-    mProcessor.processCount.fetch_add(1, std::memory_order_release);
-    mProcessor.processCount.notify_all();
+        mProcessor.processCount.fetch_add(1, std::memory_order_release);
+        mProcessor.processCount.notify_all();
+        if (afterEachBlock) afterEachBlock();
+    }
 }
 
 // Copy the OSC address of the command about to be handled. Bounded copy off the

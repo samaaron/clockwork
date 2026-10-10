@@ -197,6 +197,18 @@ pub extern "C" fn clockwork_port_readable(port: c_uint) -> c_uint {
     registry::acquire(port).map_or(0, |h| h.get().ring.readable() as u32)
 }
 
+/// Frames read since the port opened, wrapping at 2^32: 0 for a closed port.
+#[no_mangle]
+pub extern "C" fn clockwork_port_read_position(port: c_uint) -> c_uint {
+    registry::acquire(port).map_or(0, |h| h.get().ring.read_position() as u32)
+}
+
+/// Frames written since the port opened, wrapping at 2^32: 0 for a closed port.
+#[no_mangle]
+pub extern "C" fn clockwork_port_write_position(port: c_uint) -> c_uint {
+    registry::acquire(port).map_or(0, |h| h.get().ring.write_position() as u32)
+}
+
 // ── Health ──────────────────────────────────────────────────────────────────
 
 #[no_mangle]

@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Sam Aaron
 #include "native/LinkAudioHost.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "clock/LinkSession.h"
 #include "clock/clock_math.h"
 #include "shared_memory.h"
@@ -94,14 +97,35 @@ int64_t LinkAudioHost::blockHostMicros(double samplePosition, double sampleRate)
         mHostBaseMicros = linkNow - sampleOffsetMicros;
         mHostAnchored = true;
     } else {
+        // Steered toward Link's clock, never stepped onto it. The clock is read
+        // when the callback runs, so a callback that runs late reads it late,
+        // and following that would step every stamp by a share of the
+        // lateness: a step in the timeline peers' audio is placed on, heard
+        // as a bend. (The NTP in TimeSource follows the same IIR unbounded;
+        // a scheduler can take a step that audio can't.) At most kMaxSteerPpm
+        // of each block's own length, more than any two crystals disagree by;
+        // past kStepMicros it is a jump, not drift, and taken whole.
+        constexpr double kMaxSteerPpm = 1000.0;
+        constexpr double kStepMicros  = 50'000.0;
         const double drift = linkNow - (mHostBaseMicros + sampleOffsetMicros);
-        mHostBaseMicros += drift * clockwork::kDriftIirGain;
+        if (std::fabs(drift) > kStepMicros) {
+            mHostBaseMicros += drift;
+        } else {
+            const double steer =
+                kMaxSteerPpm * 1e-6 * std::max(0.0, sampleOffsetMicros - mLastOffsetMicros);
+            mHostBaseMicros += std::clamp(drift * clockwork::kDriftIirGain, -steer, steer);
+        }
     }
+    mLastOffsetMicros = sampleOffsetMicros;
     return static_cast<int64_t>(mHostBaseMicros + sampleOffsetMicros);
 }
 
 void LinkAudioHost::resetBlockClock() {
     mHostAnchored = false;
+}
+
+void LinkAudioHost::dateReads(uint64_t blockHostMicros) {
+    mBridge.dateReads(blockHostMicros);
 }
 
 void LinkAudioHost::publishAuxSinks(const float* busPool, uint32_t blockSize,

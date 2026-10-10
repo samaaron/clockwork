@@ -149,6 +149,15 @@ uint32_t clockwork_port_consume(ClockworkPort port, float* interleaved, uint32_t
 uint32_t clockwork_port_writable(ClockworkPort port);
 uint32_t clockwork_port_readable(ClockworkPort port);
 
+/* How far the reader and the writer have got, in frames since the port
+   opened; 0 for a closed port. They wrap at 2^32, so only their differences
+   mean anything: write minus read is what lies between them, and a read
+   position taken together with a time dates every frame behind it — the
+   frame `n` past it is read `n` frames after that time, short of an underrun.
+   Lock-free, and safe on the audio thread. */
+uint32_t clockwork_port_read_position(ClockworkPort port);
+uint32_t clockwork_port_write_position(ClockworkPort port);
+
 /* ── Health ─────────────────────────────────────────────────────────────── */
 
 /*

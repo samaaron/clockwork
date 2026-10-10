@@ -218,7 +218,7 @@ TEST_CASE("Engine refuses a manual audio block while a driver is rendering", "[l
     fix.engine().pumpAudioBlock();
     const bool refused = fix.pollUntil([&] {
         for (auto& m : fix.debugMessages())
-            if (m.find("pumpAudioBlock refused") != std::string::npos) return true;
+            if (m.find("manual pump refused") != std::string::npos) return true;
         return false;
     });
     INFO("engine log:" << fix.debugMessagesDump());

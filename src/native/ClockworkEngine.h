@@ -271,6 +271,14 @@ public:
     // bus snapshot doesn't race a real-time audio thread). The first call anchors
     // the audio-thread clock; safe to call after stopping the HeadlessDriver.
     void pumpAudioBlock();
+    // Render one device callback of `frames` on the calling thread, as the
+    // device path does: one clock step for the whole callback, then its blocks
+    // back to back, `afterEachBlock` after each. For tests that need what a
+    // device buffer of that size does to timing, not only to audio.
+    void pumpAudioCallback(uint32_t frames, const std::function<void()>& afterEachBlock = {});
+    // The next manual pump starts the audio-thread clock afresh, as a device
+    // starting does.
+    void restartManualPump() { mManualPumpStarted = false; }
 
     // The OSC ingress: classify a raw packet at the boundary and hand it to its
     // side — clockwork's own dispatch for "/clockwork/...", the DSP for
@@ -419,6 +427,12 @@ public:
     // through are the platform's. Owned here; the render path reaches it
     // through g_active_midi_clock_out, MidiControl through init().
     MidiClockOut& midiClockOut() { return mMidiClockOut; }
+
+    // --- Link Audio ---
+    // The engine's Link Audio host, for what its subscriptions report: what a
+    // test reads mid-stream, where asking over OSC would pump a block out of
+    // time.
+    LinkAudioHost& linkAudio() { return mLinkAudio; }
 
     // --- Variadic OSC send (builds message + dispatches through sendOSC) ---
     template<typename... Args>

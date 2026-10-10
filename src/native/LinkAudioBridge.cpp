@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 
 namespace {
@@ -208,9 +209,11 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     if (replaceSlot) {
         closePort(*replaceSlot);
         *replaceSlot = std::move(sub);
+        dateReadsOf(busIdx, replaceSlot->port);
         return busIdx;
     }
     mInputSubs.push_back(std::move(sub));
+    dateReadsOf(busIdx, mInputSubs.back().port);
     mInputSubCount.store(mInputSubs.size(), std::memory_order_relaxed);
     // First subscription: the worker has something to do now.
     if (mSampleRate.load(std::memory_order_relaxed) != 0) startEndpoint();
@@ -221,6 +224,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
 // while still bound would leave the bus reading a port that no longer exists.
 void LinkAudioBridge::closePort(InputSubscription& sub) {
     if (sub.port == CLOCKWORK_PORT_NONE) return;
+    forgetReadDates(sub.port);
     clockwork_port_bus_detach(sub.port);
     clockwork_port_close(sub.port);
     sub.port = CLOCKWORK_PORT_NONE;
@@ -265,6 +269,15 @@ bool LinkAudioBridge::setInputLatencySeconds(const char* peerName,
     return false;
 }
 
+uint64_t LinkAudioBridge::underrunsSinceStart(const InputSubscription& sub) const {
+    if (!sub.underrunsAtStart || sub.port == CLOCKWORK_PORT_NONE) return 0;
+    return clockwork_port_underruns(sub.port) - *sub.underrunsAtStart;
+}
+
+uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {
+    return underrunsSinceStart(sub) + sub.renderer->resyncs() + sub.renderer->warps();
+}
+
 std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
     std::vector<link_audio::InputStatus> out;
     std::lock_guard<std::mutex> lk(mInputSubMutex);
@@ -282,6 +295,10 @@ std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
         s.totalSourceBufferCalls  = sub.renderer->totalSourceBufferCalls();
         s.duplicateCountCalls     = sub.renderer->duplicateCountCalls();
         s.latencySeconds          = sub.renderer->latencySeconds();
+        s.underruns               = underrunsSinceStart(sub);
+        s.resyncs                 = sub.renderer->resyncs();
+        s.warps                   = sub.renderer->warps();
+        s.driftPpm                = sub.renderer->lastDriftPpm();
 
         /*
          * THE BUFFER IS IN TWO PLACES NOW, so health has to count both.
@@ -304,11 +321,16 @@ std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
                 : 0.0;
         s.bufferedSeconds += static_cast<float>(portQueuedSeconds);
 
+        // A full buffer is not a stream that is being heard: a dropout is
+        // also one that has gapped, jumped or bent in the last second.
         constexpr float kMinHealthyBufferSeconds = 0.005f;
+        constexpr auto  kTroubleHold = std::chrono::seconds(1);
+        const bool troubledLately = sub.troubleSeen > 0
+            && std::chrono::steady_clock::now() - sub.troubleAt < kTroubleHold;
         const bool everReceived = sub.renderer->everReceived();
         if (!everReceived) {
             s.state = link_audio::ConnectionState::Connecting;
-        } else if (s.bufferedSeconds < kMinHealthyBufferSeconds) {
+        } else if (s.bufferedSeconds < kMinHealthyBufferSeconds || troubledLately) {
             s.state = link_audio::ConnectionState::Dropout;
         } else {
             s.state = link_audio::ConnectionState::Connected;
@@ -434,6 +456,71 @@ void LinkAudioBridge::moveToLanes(uint32_t base, uint32_t lanes) {
     mInputSubCount.store(v.size(), std::memory_order_relaxed);
 }
 
+// The port first, then the generation, released: an audio thread that sees
+// the new generation sees the new port.
+void LinkAudioBridge::dateReadsOf(uint32_t busIdx, ClockworkPort port) {
+    if (busIdx < mLaneBase || (busIdx - mLaneBase) / 2 >= mReadDates.size()) return;
+    auto& d = mReadDates[(busIdx - mLaneBase) / 2];
+    d.port.store(port, std::memory_order_relaxed);
+    d.generation.fetch_add(1, std::memory_order_release);
+}
+
+// By port, not by pair: a subscription leaving as the lanes move still names
+// the pair it had.
+void LinkAudioBridge::forgetReadDates(ClockworkPort port) {
+    for (auto& d : mReadDates) {
+        ClockworkPort expected = port;
+        if (d.port.compare_exchange_strong(expected, CLOCKWORK_PORT_NONE, std::memory_order_relaxed))
+            d.generation.fetch_add(1, std::memory_order_release);
+    }
+}
+
+// A sequence lock: one writer, this; an odd count means it is mid-write.
+void LinkAudioBridge::dateReads(uint64_t blockHostMicros) {
+    if (blockHostMicros == 0) return;   // no Link clock: nothing to date by
+    for (auto& d : mReadDates) {
+        const uint32_t generation = d.generation.load(std::memory_order_acquire);
+        const ClockworkPort port  = d.port.load(std::memory_order_relaxed);
+        if (port == CLOCKWORK_PORT_NONE) continue;
+        const uint32_t read = clockwork_port_read_position(port);
+        const uint32_t seq  = d.seq.load(std::memory_order_relaxed);
+        d.seq.store(seq + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        d.datedGeneration.store(generation, std::memory_order_relaxed);
+        d.hostMicros.store(blockHostMicros, std::memory_order_relaxed);
+        d.readPosition.store(read, std::memory_order_relaxed);
+        d.seq.store(seq + 2, std::memory_order_release);
+    }
+}
+
+std::optional<std::chrono::microseconds>
+LinkAudioBridge::nextWriteReadAt(const InputSubscription& sub, uint32_t sampleRate) const {
+    for (const auto& d : mReadDates) {
+        if (d.port.load(std::memory_order_relaxed) != sub.port) continue;
+        const uint32_t generation = d.generation.load(std::memory_order_acquire);
+        // A writer laps a reader only by rendering a whole block in between:
+        // a few tries always find a still moment.
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            const uint32_t before = d.seq.load(std::memory_order_acquire);
+            if (before & 1u) continue;
+            const uint32_t dated = d.datedGeneration.load(std::memory_order_relaxed);
+            const uint64_t host  = d.hostMicros.load(std::memory_order_relaxed);
+            const uint32_t read  = d.readPosition.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (d.seq.load(std::memory_order_relaxed) != before) continue;
+            if (dated != generation || host == 0) return std::nullopt;
+            // Frames between the dated read and the next write, wrapping as
+            // the positions do.
+            const uint32_t ahead = clockwork_port_write_position(sub.port) - read;
+            return std::chrono::microseconds(static_cast<int64_t>(host))
+                 + std::chrono::microseconds(static_cast<int64_t>(
+                       std::llround(1e6 * double(ahead) / double(sampleRate))));
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 void LinkAudioBridge::startEndpoint() {
     if (mEndpointRun.exchange(true, std::memory_order_acq_rel)) return;
     mEndpointThread = std::jthread([this](const std::stop_token& stop) { endpointLoop(stop); });
@@ -448,12 +535,12 @@ void LinkAudioBridge::stopEndpoint() {
 /*
  * Fill every subscription's port with as much as it has room for.
  *
- * THE HOST TIME IS THE ONE FOR THE FRAMES BEING WRITTEN, not for now: what is
- * already queued plays first, so these frames are heard that much later. The
- * renderer turns that into a beat range and reads the peer's buffers, which
- * carry beat ranges of their own — which is why running ahead of the audio
- * thread is safe. A tempo change moves time-per-beat for everyone at once, so
- * queued audio stays where it belongs on the timeline.
+ * THE HOST TIME IS WHEN THE FRAMES BEING WRITTEN WILL BE READ, as the audio
+ * thread dated it (dateReads), not now: what is already queued is read first.
+ * The renderer turns that into a beat range and reads the peer's buffers,
+ * which carry beat ranges of their own — which is why running ahead of the
+ * audio thread is safe. A tempo change moves time-per-beat for everyone at
+ * once, so queued audio stays where it belongs on the timeline.
  *
  * Short reads are NOT padded. A renderer that had less than was asked for
  * means the peer's queue is dry, and producing zeros would fill the ring with
@@ -480,19 +567,21 @@ void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
                 auto sessionState = mLink.captureAppSessionState();
                 for (auto& sub : mInputSubs) {
                     if (sub.port == CLOCKWORK_PORT_NONE || !sub.renderer) continue;
+                    if (const uint64_t trouble = troubleOf(sub); trouble > sub.troubleSeen) {
+                        sub.troubleSeen = trouble;
+                        sub.troubleAt   = std::chrono::steady_clock::now();
+                    }
 
                     uint32_t room = clockwork_port_writable(sub.port);
                     if (room == 0) continue;
                     if (room > kEndpointChunkFrames) room = kEndpointChunkFrames;
 
-                    const uint32_t queued = clockwork_port_readable(sub.port);
-                    const auto ahead = std::chrono::microseconds(
-                        static_cast<long long>(1e6 * double(queued) / double(sr)));
-                    const auto hostTime = mLink.clock().micros() + ahead;
+                    const auto hostTime = nextWriteReadAt(sub, sr);
+                    if (!hostTime) continue;   // not read yet: no date to write for
 
                     const size_t filled = sub.renderer->receive(
                         mScratchL, mScratchR, room, sessionState,
-                        static_cast<double>(sr), hostTime, kQuantum);
+                        static_cast<double>(sr), *hostTime, kQuantum);
                     if (filled == 0) continue;
 
                     for (size_t i = 0; i < filled; ++i) {
@@ -501,6 +590,8 @@ void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
                     }
                     clockwork_port_produce(sub.port, mScratchInterleaved,
                                      static_cast<uint32_t>(filled));
+                    if (!sub.underrunsAtStart)
+                        sub.underrunsAtStart = clockwork_port_underruns(sub.port);
                     produced = true;
                 }
             }

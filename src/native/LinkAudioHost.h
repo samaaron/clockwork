@@ -100,6 +100,9 @@ public:
     // Re-anchor on the next stamp — call wherever the driver resets the
     // clock's audio-thread time (device start, first manual pump).
     void resetBlockClock();
+    // Date each subscription's next read by this block's stamp, so the
+    // endpoint knows when what it writes will be read. Audio thread only.
+    void dateReads(uint64_t blockHostMicros);
 
     // Tap each aux sink's bus range and publish. RT-safe (try_lock; skips
     // the block if the sink list is mid-mutation).
@@ -127,5 +130,6 @@ private:
     // Block-clock anchor in Link's domain: sample-counter line + slow IIR,
     // the same scheme TimeSource uses for audio-thread NTP.
     double mHostBaseMicros{0.0};
+    double mLastOffsetMicros{0.0};   // the last block's place on the sample clock
     bool   mHostAnchored{false};
 };

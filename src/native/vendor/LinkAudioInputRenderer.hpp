@@ -9,8 +9,10 @@
  *
  * License inherited from upstream Link: GNU GPL v2 or later.
  *
- * Modified for clockwork: the enclosing namespace is `clockwork_link`; nothing
- * else is changed.
+ * Modified for clockwork: the enclosing namespace is `clockwork_link`; the
+ * diagnostics (drops, gaps, duplicates, resyncs, warps, drift) are clockwork's;
+ * receive() renders only what has arrived; and the interpolation cache is
+ * kept oldest first, as the interpolator reads it.
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -32,6 +34,7 @@
 #include <ableton/link_audio/Queue.hpp>
 #include <ableton/util/FloatIntConversion.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -129,10 +132,24 @@ public:
   float bufferedSeconds() const {
       return mBufferedSeconds.load(std::memory_order_relaxed);
   }
-  // Last read-rate deviation from 1.0, in ppm (signed): how hard the two
-  // machines' clocks are pulling the resampler. ~0 when perfectly synced.
+  // Read rate against the one the two sample rates call for, in ppm (signed),
+  // over the last kDriftWindowFrames source frames or more: how hard the two
+  // machines' clocks are pulling the resampler. ~0 when they agree, whatever
+  // the rates are.
   int32_t lastDriftPpm() const {
       return mLastDriftPpm.load(std::memory_order_relaxed);
+  }
+  // Times the stream's place on the timeline was lost while rendering and had
+  // to be found again: each is a jump in what is heard, or silence until it is.
+  uint64_t resyncs() const {
+      return mResyncs.load(std::memory_order_relaxed);
+  }
+  // Renders that left the read position more than kWarpFrames source frames
+  // off where the two sample rates put it: audible as pitch bent, or a skip.
+  // The position, not the rate: a render of a few frames can be well off in
+  // rate and nowhere near a frame off in position.
+  uint64_t warps() const {
+      return mWarps.load(std::memory_order_relaxed);
   }
   // True if we've received at least one buffer.
   bool everReceived() const {
@@ -196,8 +213,9 @@ public:
   // Audio-thread: fill outL[0..numFrames) and outR[0..numFrames) with
   // audio aligned to (hostTime − latencySeconds) on the Link beat-time
   // grid. Always stereo (mono sources are duplicated). Returns frames
-  // filled; un-filled tail is left untouched. Returns 0 when the
-  // queue is empty or buffers don't span the target beat range.
+  // filled, fewer than asked when the rest has not arrived yet; un-filled
+  // tail is left untouched. Returns 0 when the queue is empty, nothing new
+  // has arrived, or buffers don't span the target beat range.
   size_t receive(double* outL,
                  double* outR,
                  size_t numFrames,
@@ -237,8 +255,7 @@ public:
 
     if (mpQueueReader->numRetainedSlots() == 0)
     {
-      moLastFrameIdx = std::nullopt;
-      moStartReadPos = std::nullopt;
+      lose();
       return 0;
     }
 
@@ -247,8 +264,7 @@ public:
         && (*mpQueueReader)[0]->mInfo.beginBeats(sessionState, quantum)
              > targetBeatsAtBufferBegin)
     {
-      moLastFrameIdx = std::nullopt;
-      moStartReadPos = std::nullopt;
+      lose();
       return 0;
     }
 
@@ -274,6 +290,34 @@ public:
 
     const auto startFramePos = *moStartReadPos;
 
+    // Render what has arrived and no further. Asking past the newest buffer is
+    // not a place lost but a place not reached yet: the frames that fit are
+    // rendered, the rest wait for the next call, and the read position stays.
+    // Upstream is only ever asked for what has arrived, from the audio
+    // callback a latency behind; clockwork's endpoint runs ahead to keep its
+    // port full, so it asks for as much as there is room for.
+    size_t frames = numFrames;
+    auto targetBeatsAtEnd = targetBeatsAtBufferEnd;
+    {
+      const auto& newest =
+        (*mpQueueReader)[mpQueueReader->numRetainedSlots() - 1]->mInfo;
+      const auto newestBegin = *newest.beginBeats(sessionState, quantum);
+      const auto newestEnd = *newest.endBeats(sessionState, quantum);
+      // Two source frames short of the end: the interpolator reads ahead.
+      const auto arrivedUntil =
+        newestEnd - 2.0 * (newestEnd - newestBegin) / double(newest.numFrames);
+      if (targetBeatsAtEnd > arrivedUntil)
+      {
+        const auto beatsPerFrame =
+          (targetBeatsAtBufferEnd - targetBeatsAtBufferBegin) / double(numFrames);
+        const auto fit =
+          std::floor((arrivedUntil - targetBeatsAtBufferBegin) / beatsPerFrame);
+        if (!(fit >= 1.0)) return 0;   // nothing new to render yet; the place is kept
+        frames = std::min(numFrames, static_cast<size_t>(fit));
+        targetBeatsAtEnd = targetBeatsAtBufferBegin + beatsPerFrame * double(frames);
+      }
+    }
+
     // Sum total source frames spanning the target beat range.
     auto totalFrames = 0.0;
     auto foundEnd = false;
@@ -282,11 +326,11 @@ public:
       const auto& info = (*mpQueueReader)[i]->mInfo;
       const auto bufferBegin = *info.beginBeats(sessionState, quantum);
       const auto bufferEnd = *info.endBeats(sessionState, quantum);
-      if (targetBeatsAtBufferEnd >= bufferBegin
-          && targetBeatsAtBufferEnd < bufferEnd)
+      if (targetBeatsAtEnd >= bufferBegin
+          && targetBeatsAtEnd < bufferEnd)
       {
         const auto targetBeatsFrame = linearInterpolate(
-          targetBeatsAtBufferEnd, bufferBegin, bufferEnd, 0.0, double(info.numFrames));
+          targetBeatsAtEnd, bufferBegin, bufferEnd, 0.0, double(info.numFrames));
         totalFrames += targetBeatsFrame;
         foundEnd = true;
         break;
@@ -296,22 +340,32 @@ public:
 
     if (!foundEnd)
     {
-      moLastFrameIdx = std::nullopt;
-      moStartReadPos = std::nullopt;
+      lose();
       return 0;
     }
 
     totalFrames -= startFramePos;
     if (totalFrames <= 0.0)
     {
-      moLastFrameIdx = std::nullopt;
-      moStartReadPos = std::nullopt;
+      lose();
       return 0;
     }
 
-    const auto frameIncrement = totalFrames / double(numFrames);
-    mLastDriftPpm.store(static_cast<int32_t>((frameIncrement - 1.0) * 1e6),
-                        std::memory_order_relaxed);
+    const auto frameIncrement = totalFrames / double(frames);
+    const auto rateNeeded =
+      double((*mpQueueReader)[0]->mInfo.sampleRate) / sampleRate;
+    const auto framesExpected = rateNeeded * double(frames);
+    if (std::fabs(totalFrames - framesExpected) > kWarpFrames)
+      mWarps.fetch_add(1, std::memory_order_relaxed);
+    mDriftFramesRead += totalFrames;
+    mDriftFramesExpected += framesExpected;
+    if (mDriftFramesExpected >= kDriftWindowFrames)
+    {
+      const auto bend = mDriftFramesRead / mDriftFramesExpected - 1.0;
+      mLastDriftPpm.store(static_cast<int32_t>(std::clamp(bend * 1e6, -2e9, 2e9)),
+                          std::memory_order_relaxed);
+      mDriftFramesRead = mDriftFramesExpected = 0.0;
+    }
     auto readPos = startFramePos;
 
     auto getSample = [&](size_t idx, size_t ch) -> double {
@@ -328,7 +382,7 @@ public:
       return 0.0;
     };
 
-    for (auto frame = 0u; frame < numFrames; ++frame)
+    for (auto frame = 0u; frame < frames; ++frame)
     {
       const auto framePos = readPos + frame * frameIncrement;
       const auto frameIdx = static_cast<size_t>(std::floor(framePos));
@@ -340,12 +394,17 @@ public:
         // successive source samples rather than repeating frameIdx-1.
         const size_t newLast =
           moLastFrameIdx ? (*moLastFrameIdx + 1) : frameIdx;
+        // Oldest first, as cubicInterpolate takes its four points: it runs
+        // from [1] at t = 0 to [2] at t = 1. Upstream shifts the other way,
+        // newest first, so each step between two samples ran backwards in
+        // time and snapped forward at the next: a fixed fractional delay
+        // while the rates match, and audible as soon as they don't.
         for (size_t ch = 0; ch < kMaxChannels; ++ch)
         {
-          mReceiverSampleCache[ch][3] = mReceiverSampleCache[ch][2];
-          mReceiverSampleCache[ch][2] = mReceiverSampleCache[ch][1];
-          mReceiverSampleCache[ch][1] = mReceiverSampleCache[ch][0];
-          mReceiverSampleCache[ch][0] = (newLast > 0)
+          mReceiverSampleCache[ch][0] = mReceiverSampleCache[ch][1];
+          mReceiverSampleCache[ch][1] = mReceiverSampleCache[ch][2];
+          mReceiverSampleCache[ch][2] = mReceiverSampleCache[ch][3];
+          mReceiverSampleCache[ch][3] = (newLast > 0)
             ? getSample(newLast - 1, ch)
             : getSample(0, ch);
         }
@@ -364,7 +423,7 @@ public:
       }
     }
 
-    *moStartReadPos = readPos + double(numFrames) * frameIncrement;
+    *moStartReadPos = readPos + double(frames) * frameIncrement;
 
     // Buffered-seconds gauge: frames remaining in the current buffer
     // (numFrames - readPos) plus full duration of every queued buffer
@@ -384,10 +443,28 @@ public:
       mBufferedSeconds.store(0.0f, std::memory_order_relaxed);
     }
 
-    return numFrames;
+    return frames;
   }
 
 private:
+  // A render leaving the read position more than this many source frames off
+  // where the rates put it is a warp.
+  static constexpr double kWarpFrames = 1.0;
+  // Drift is the read rate over at least this many source frames, ~0.7 s at
+  // 48 kHz: long enough to be the clocks' disagreement rather than the
+  // steering of one callback.
+  static constexpr double kDriftWindowFrames = 32768.0;
+
+  // The read position is given up: the next receive finds it from the queue.
+  // A resync if it was rendering — then the place was lost, not waited for.
+  void lose()
+  {
+    if (moStartReadPos) mResyncs.fetch_add(1, std::memory_order_relaxed);
+    moLastFrameIdx = std::nullopt;
+    moStartReadPos = std::nullopt;
+    mDriftFramesRead = mDriftFramesExpected = 0.0;
+  }
+
   void onSourceBuffer(const ableton::LinkAudioSource::BufferHandle bh)
   {
     // Capture the latest peer-side info for diagnostics regardless of
@@ -445,6 +522,10 @@ private:
                                                                             {0.0, 0.0, 0.0, 0.0}}};
   std::optional<size_t> moLastFrameIdx;
   std::optional<double> moStartReadPos;
+  // Source frames read, and the frames the rates called for, since drift was
+  // last published. receive() only.
+  double mDriftFramesRead = 0.0;
+  double mDriftFramesExpected = 0.0;
 
   // Diagnostics — updated by the Link-thread callback / audio thread,
   // read by app-thread status queries. Atomic for safe cross-thread reads.
@@ -452,6 +533,8 @@ private:
   std::atomic<uint32_t> mLastNumChannels{0};
   std::atomic<float>    mBufferedSeconds{0.0f};
   std::atomic<int32_t>  mLastDriftPpm{0};
+  std::atomic<uint64_t> mResyncs{0};
+  std::atomic<uint64_t> mWarps{0};
   std::atomic<uint64_t> mDroppedSourceBuffers{0};
   std::atomic<uint64_t> mNetworkGapBuffers{0};
   std::atomic<uint64_t> mLastSeenCount{0};

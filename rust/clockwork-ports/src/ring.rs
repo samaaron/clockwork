@@ -231,6 +231,17 @@ impl FrameRing {
         self.cap_frames - self.readable()
     }
 
+    /// Frames read since the ring was made: where the consumer has got to.
+    /// It wraps, so only differences between positions mean anything.
+    pub fn read_position(&self) -> usize {
+        self.read_counter().load(Ordering::Acquire)
+    }
+
+    /// Frames written since the ring was made: where the producer has got to.
+    pub fn write_position(&self) -> usize {
+        self.write_counter().load(Ordering::Acquire)
+    }
+
     #[inline]
     fn slots(&self) -> *mut f32 {
         match &self.storage {

@@ -72,6 +72,12 @@ struct InputStatus {
     uint64_t        totalSourceBufferCalls{0}; // diagnostic: raw onSourceBuffer invocations
     uint64_t        duplicateCountCalls{0};    // diagnostic: invocations with repeated count
     double          latencySeconds{0.0};       // current playback lookahead
+    // What reached the audio thread, which the counters above cannot see: a
+    // stream can arrive whole and still be heard broken.
+    uint64_t        underruns{0};   // frames the audio thread found missing, since audio began
+    uint64_t        resyncs{0};     // times the stream's place was lost and found again
+    uint64_t        warps{0};       // renders that left the read position a frame or more off
+    int32_t         driftPpm{0};    // the read rate against the rates' ratio, lately
 };
 
 struct SinkInfo {
@@ -145,7 +151,9 @@ constexpr double kMaxInputLatencySeconds = 2.0;
 
 #include <ableton/LinkAudio.hpp>
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -222,6 +230,12 @@ public:
     // plus reserved lanes), NOT the device's width — see channelPairFits.
     void setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels);
 
+    // Once per audio callback, before it renders: where each subscription's
+    // port is being read from, and the host time that block renders at — the
+    // date of every frame the endpoint writes after it. Audio thread only: no
+    // locks, no allocation.
+    void dateReads(uint64_t blockHostMicros);
+
     void publishAuxSinks(const float* busPool, uint32_t blockSize, uint32_t numBuses,
                          uint32_t sampleRate, uint64_t hostMicrosForBufferBegin,
                          double quantum);
@@ -289,7 +303,17 @@ private:
         // publishes a new id. Same-id replacements reuse the existing renderer
         // so diagnostic counters survive.
         ableton::ChannelId channelId{};
+        // The port counts every frame the audio thread found missing, the
+        // wait before the first audio included. A gap is one after the stream
+        // began, so its count starts at the worker's first offer.
+        std::optional<uint64_t> underrunsAtStart;
+        // Underruns, resyncs and warps as the worker last saw them, and when
+        // that last went up: a stream in trouble lately reads as a dropout.
+        uint64_t troubleSeen{0};
+        std::chrono::steady_clock::time_point troubleAt{};
     };
+    uint64_t underrunsSinceStart(const InputSubscription& sub) const;
+    uint64_t troubleOf(const InputSubscription& sub) const;
     std::vector<InputSubscription> mInputSubs;
     // Lock-free fast path for the empty case.
     std::atomic<size_t> mInputSubCount{0};
@@ -310,6 +334,37 @@ private:
     void endpointLoop(const std::stop_token& stop);
     // Detach then close. Call with mInputSubMutex held.
     void closePort(InputSubscription& sub);
+
+    // ─── When each port is read ───────────────────────────────────────────
+    //
+    // The renderer places what it writes at the host time those frames will
+    // be read, and successive writes must follow on in time exactly as they
+    // do in the port, or each one bends the audio to fit: it reads faster to
+    // catch up, or loses its place and goes silent until it finds it again.
+    // The clock cannot say when, read at the moment the endpoint writes: the
+    // audio thread takes a whole device buffer at once and then nothing, so
+    // "now plus what is queued" swings by up to a buffer from one write to the
+    // next. The audio thread knows, so it says: at the start of each callback,
+    // each port's read position and the time that block renders. A frame n
+    // past that position is read n frames after that time. One date per pair
+    // of lanes, since the audio thread cannot take the subscription lock and
+    // the pairs are fixed. A port number can come round again, so a date
+    // holds for the generation of the pair it was taken in, not the number.
+    struct ReadDate {
+        std::atomic<ClockworkPort> port{CLOCKWORK_PORT_NONE};  // set under mInputSubMutex
+        std::atomic<uint32_t>      generation{0};              // up each time `port` changes
+        std::atomic<uint32_t>      seq{0};                     // odd while the date is written
+        std::atomic<uint32_t>      datedGeneration{0};
+        std::atomic<uint64_t>      hostMicros{0};
+        std::atomic<uint32_t>      readPosition{0};
+    };
+    std::array<ReadDate, kLanes / 2> mReadDates;
+    void dateReadsOf(uint32_t busIdx, ClockworkPort port);
+    void forgetReadDates(ClockworkPort port);
+    // When the next frame written to `sub`'s port will be read; nothing until
+    // the audio thread has dated a read of it.
+    std::optional<std::chrono::microseconds> nextWriteReadAt(const InputSubscription& sub,
+                                                             uint32_t sampleRate) const;
     void moveToLanes(uint32_t base, uint32_t lanes);
 
     // Opened per subscription; closed when it goes. Depth is scheduling slack
@@ -397,6 +452,7 @@ public:
     std::vector<link_audio::SinkInfo> listSinks() const { return {}; }
 
     void setAudioFormat(uint32_t, uint32_t) {}
+    void dateReads(uint64_t) {}
     void publishAuxSinks(const float*, uint32_t, uint32_t, uint32_t, uint64_t, double) {}
     bool publishAudioBlock(const float*, const float*, size_t, uint32_t, uint64_t,
                            double) { return false; }

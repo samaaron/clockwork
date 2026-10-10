@@ -31,7 +31,8 @@ inline constexpr double kMicrobeatsPerBeat = 1.0e6;
 // Gain of the slow drift-correction IIRs (audio-thread NTP in TimeSource,
 // Link-domain block stamp in LinkAudioHost::blockHostMicros): converge toward
 // the reference at ~1% per audio callback — fast enough to track real drift,
-// slow enough to reject callback-wake jitter.
+// slow enough to damp callback-wake jitter. The block stamp also bounds each
+// step, since audio placed by it hears every one.
 inline constexpr double kDriftIirGain = 0.01;
 
 inline double beatAt(double t, double origin, double bpm) {
