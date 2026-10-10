@@ -215,6 +215,9 @@ if(TARGET clockwork_plugin_vst3)
     # crosses the segment under, and the engine-side rewrite that puts a
     # resolved id on the bind verb. Pure, so it needs no engine and no bridge.
     target_sources(clockwork_tests PRIVATE test_track_timeline.cpp)
+    # Where the bridge is found: the host's configured path, the environment
+    # override, the search beside the executable. Pure; no bridge is run.
+    target_sources(clockwork_tests PRIVATE test_track_bridge_path.cpp)
     # The bridge as a process: these cases stand in for the engine, spawn the
     # real binary over a segment they made, and read back what it rendered.
     if(TARGET clockwork_plugin_bridge)

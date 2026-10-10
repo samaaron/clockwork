@@ -359,11 +359,21 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
 // ── The bridge's life ────────────────────────────────────────────────────────
 
 std::string TrackControl::findBridge() const {
-    if (const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE")) {   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
-        if (*env && juce::File(env).existsAsFile()) return env;
-    }
+    const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE");   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
     const juce::File self = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
-    return findBridgeBeside(self.getParentDirectory().getFullPathName().toStdString());
+    return resolveBridge(mConfiguredExe, env ? env : "", self.getParentDirectory().getFullPathName().toStdString());
+}
+
+std::string TrackControl::resolveBridge(const std::string& configured, const std::string& envOverride,
+                                        const std::string& exeDir) {
+    // the host's word first: a path it was given is one it put the bridge at
+    if (!configured.empty()) {
+        if (juce::File(configured).existsAsFile()) return configured;
+        clockwork_log("[tracks] the configured plugin bridge is not there: %s (looking beside the executable instead)",
+                      configured.c_str());
+    }
+    if (!envOverride.empty() && juce::File(envOverride).existsAsFile()) return envOverride;
+    return findBridgeBeside(exeDir);
 }
 
 std::string TrackControl::findBridgeBeside(const std::string& exeDir) {

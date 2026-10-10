@@ -126,10 +126,21 @@ public:
     int  bridgePid() const { return mProcess.pid(); }
     uint32_t generation() const;
     std::string bridgeExecutable() const { return mExe; }
+    // Where the bridge is, said by the host (ClockworkEngine::Config::pluginBridgePath):
+    // an application that puts the bridge where its own layout wants it names
+    // it here, before init(), and nothing is searched for. Empty: the search
+    // below. An embedder whose executable is not the engine's own binary (a
+    // GUI with the engine linked in) has no "beside the engine" to rely on.
+    void setBridgeExecutable(std::string path) { mConfiguredExe = std::move(path); }
+    // The bridge for init() to spawn, in order: `configured` (the host's word,
+    // when it names a file that exists), `envOverride` (CLOCKWORK_PLUGIN_BRIDGE,
+    // when it does), then findBridgeBeside(exeDir). "" when none is found.
+    // Pure, so a test can hand it every input.
+    static std::string resolveBridge(const std::string& configured, const std::string& envOverride,
+                                     const std::string& exeDir);
     // Where the bridge is, given the directory the engine's executable is in:
     // beside it first, then CLOCKWORK_PLUGIN_BRIDGE_DIR (an installed layout),
-    // else empty. What findBridge() does after CLOCKWORK_PLUGIN_BRIDGE (the
-    // environment override); split out so a test can hand it a directory.
+    // else empty. Split out so a test can hand it a directory.
     static std::string findBridgeBeside(const std::string& exeDir);
     // Skip the spawn (a test that drives the segment itself).
     void setSpawnEnabled(bool on) { mSpawnEnabled = on; }
@@ -188,6 +199,7 @@ private:
 
     ClockworkProcess mProcess;
     std::string mExe;
+    std::string mConfiguredExe;   // setBridgeExecutable
     bool mSpawnEnabled = true;
     bool mSpawnFailedReported = false;
     std::chrono::steady_clock::time_point mSpawnedAt {};

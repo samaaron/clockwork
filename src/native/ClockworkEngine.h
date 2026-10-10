@@ -208,6 +208,13 @@ public:
                                                    // MIDI clients, macOS aggregate devices,
                                                    // Link peers). Embedders pass their
                                                    // user-facing name.
+        // The plugin bridge's executable, when the host knows where it put it
+        // (on macOS the binary inside the .app). Empty: found beside this
+        // process's executable, as before (TrackControl::resolveBridge). An
+        // application with the engine linked in sets this: "beside the
+        // executable" is then the application's own layout, which the engine
+        // cannot know.
+        std::string pluginBridgePath;
 
         // Test boundary: what builds the device manager. When set, the engine
         // builds its manager from this instead of a plain one — both at boot

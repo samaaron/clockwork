@@ -1352,6 +1352,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // to the bridge's control ring. Longest match wins, so "plugin/params" is the
     // gateway's and not "plugin/param"'s. The gateway task relays the bridge's
     // answers and watches its life, once per block wake.
+    mTrackControl.setBridgeExecutable(cfg.pluginBridgePath);
     mTrackControl.init(this, &mEgress, &mClockworkClock);
     mNrtGateway.addTask([this]() { mTrackControl.gatewayPass(); });
     mAudioRoutes.add("track/note",         &TrackControl::audioSink, &mTrackControl);

@@ -195,6 +195,18 @@ is no longer its parent, or when `generation` — bumped by the engine on
 every spawn — is not the one it joined with. Its editor windows are its
 own, on its own run loop; closing the bridge closes them.
 
+**Where it is.** `TrackControl::resolveBridge`, in order: the path the host
+configured (`ClockworkEngine::Config::pluginBridgePath` — on macOS the binary
+inside the `.app`), the `CLOCKWORK_PLUGIN_BRIDGE` environment variable, then
+beside the process's own executable (`<name>.app/Contents/MacOS/<name>` or
+`<name>` on macOS, `<name>.exe` on Windows, `<name>` elsewhere), then
+`CLOCKWORK_PLUGIN_BRIDGE_DIR` for an installed layout. A host that is not the
+engine's own binary — an application with the engine linked in — has a layout
+the engine cannot guess, and names the bridge in its config rather than
+arranging its files to be found. A configured path that names no file is
+logged and the search carries on, so a stale setting degrades to the default
+rather than to no plugins.
+
 ## Discovery
 
 `plugin_discovery` knows the platform folders (`~/Library/Audio/Plug-Ins`,
