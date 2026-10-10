@@ -507,6 +507,12 @@ int clockwork_client_scope_valid(const ClockworkScopeReader* r) {
     return rd.valid() ? 1 : 0;
 }
 
+uint32_t clockwork_client_scope_activations(const ClockworkScopeReader* r) {
+    if (!r || !r->_internal) return 0;
+    return shm_scope_stream_reader(static_cast<shm_scope_stream*>(r->_internal), nullptr,
+                                   r->_ring_frames).activations();
+}
+
 uint64_t clockwork_client_scope_audible_end(ClockworkClient* handle,
                                             const ClockworkScopeReader* r) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);

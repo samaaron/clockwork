@@ -167,7 +167,11 @@ struct SlotHeader {
     state: AtomicU32,
     channels: u32,
     capacity_frames: u32,
-    _pad0: u32,
+    /// Times the slot has been claimed: bumped by every claim, before it
+    /// publishes `state`, and never by a release. A reader polls, and a slot
+    /// can be claimed and released between two polls; the count is how the
+    /// reader knows. Wraps, so readers compare for change only.
+    activations: AtomicU32,
     /// Total frames written since activation.
     write_position: AtomicU64,
     /// Engine sample position of frame 0 of this stream.
@@ -175,6 +179,34 @@ struct SlotHeader {
 }
 
 const _: () = assert!(std::mem::size_of::<SlotHeader>() == 32);
+const _: () = assert!(std::mem::offset_of!(SlotHeader, activations) == 12);
+
+/// Claim slot `index` and format it for `channels` (zero, or more than the
+/// ring interleaves, is all of them): every way a slot is claimed comes here,
+/// so each counts as one live spell and moves the region's counters.
+///
+/// # Safety
+/// As [`slot_ptr`]: `base` is the mapped region `g` describes and `index` is
+/// inside it.
+unsafe fn claim_slot(base: *mut u8, g: &Geometry, index: usize, channels: u32) -> *mut SlotHeader {
+    let channels = if channels > 0 && channels <= g.channels { channels } else { g.channels };
+    // SAFETY: per the contract; the region is mapped for the life of the
+    // process.
+    unsafe {
+        let slot = slot_ptr(base, g, index);
+        (*slot).channels = channels;
+        (*slot).capacity_frames = g.ring_frames;
+        (*slot).write_position.store(0, Ordering::Relaxed);
+        (*slot).base_engine_frames.store(0, Ordering::Relaxed);
+        // Counted before the state publishes it, so a reader that sees the
+        // slot live sees this claim in the count.
+        (*slot).activations.fetch_add(1, Ordering::Relaxed);
+        (*slot).state.store(1, Ordering::Release);
+        header_field(base, g, HDR_ACTIVE_COUNT).fetch_add(1, Ordering::Relaxed);
+        header_field(base, g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
+        slot
+    }
+}
 
 /// A counter in the scope region's global header.
 ///
@@ -246,26 +278,11 @@ pub unsafe extern "C" fn clockwork_scope_get(
     }
     let index = index as usize;
 
-    // Format the slot. The one authority on channel sanitisation is here and
-    // in the writer, and they agree: zero or more than the ring interleaves
-    // means "all of them".
-    let channels = match u32::try_from(channels).ok() {
-        Some(c) if c > 0 && c <= g.channels => c,
-        _ => g.channels,
-    };
+    // A negative channel count is as unusable as zero: all of them.
+    let channels = u32::try_from(channels).unwrap_or(0);
     // SAFETY: the index is inside the geometry the host reported, and the
     // region it describes is mapped for the life of the process.
-    let slot = unsafe {
-        let slot = slot_ptr(base, &g, index);
-        (*slot).channels = channels;
-        (*slot).capacity_frames = g.ring_frames;
-        (*slot).write_position.store(0, Ordering::Relaxed);
-        (*slot).base_engine_frames.store(0, Ordering::Relaxed);
-        (*slot).state.store(1, Ordering::Release);
-        header_field(base, &g, HDR_ACTIVE_COUNT).fetch_add(1, Ordering::Relaxed);
-        header_field(base, &g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
-        slot
-    };
+    let slot = unsafe { claim_slot(base, &g, index, channels) };
 
     // The handle carries the slot's identity so release can check ownership,
     // and nothing else. `data` stays null: the legacy region-pointer contract
@@ -390,17 +407,7 @@ pub fn stream_activate(index: usize, channels: u32) -> bool {
     }
     // SAFETY: the index is inside the geometry the host reported, and the
     // region it describes is mapped for the life of the process.
-    unsafe {
-        let slot = slot_ptr(base, &g, index);
-        let channels = if channels > 0 && channels <= g.channels { channels } else { g.channels };
-        (*slot).channels = channels;
-        (*slot).capacity_frames = g.ring_frames;
-        (*slot).write_position.store(0, Ordering::Relaxed);
-        (*slot).base_engine_frames.store(0, Ordering::Relaxed);
-        (*slot).state.store(1, Ordering::Release);
-        header_field(base, &g, HDR_ACTIVE_COUNT).fetch_add(1, Ordering::Relaxed);
-        header_field(base, &g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
-    }
+    unsafe { claim_slot(base, &g, index, channels) };
     true
 }
 

@@ -1251,6 +1251,7 @@ if(EMSCRIPTEN)
         _clockwork_client_tap_open_in _clockwork_client_tap_close
         _clockwork_client_tap_poll _clockwork_client_tap_missed
         _clockwork_client_scope_open _clockwork_client_scope_valid
+        _clockwork_client_scope_activations
         _clockwork_client_scope_audible_end _clockwork_client_scope_read)
     if(CLOCKWORK_WEB_AUDIO_FILES)
         list(APPEND CLOCKWORK_WEB_EXPORTS

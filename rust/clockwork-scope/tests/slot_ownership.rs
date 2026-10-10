@@ -26,7 +26,9 @@ use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use clockwork_scope::{clockwork_scope_get, clockwork_scope_release, ScopeBufferHnd};
+use clockwork_scope::{
+    clockwork_scope_get, clockwork_scope_release, stream_activate, stream_release, ScopeBufferHnd,
+};
 
 // Geometry the fake host reports. Small, but the same SHAPE as production:
 // a global header, then fixed-size slots each holding a header and a ring.
@@ -114,6 +116,16 @@ fn slot_state(index: usize) -> u32 {
         region_u32(START + HEADER_SIZE + SLOT_SIZE * index)
     } else {
         region_u32(TRACK_START + SLOT_SIZE * (index - MAX_SCOPES))
+    }
+}
+
+/// How many times slot `index` has gone live: the u32 after `capacity_frames`
+/// in the slot header.
+fn slot_activations(index: usize) -> u32 {
+    if index < MAX_SCOPES {
+        region_u32(START + HEADER_SIZE + SLOT_SIZE * index + 12)
+    } else {
+        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_SCOPES) + 12)
     }
 }
 
@@ -292,4 +304,33 @@ fn a_track_tap_is_a_scope_slot_numbered_after_the_guests_in_its_own_span() {
     assert!(claim(MAX_SCOPES + TRACK_SLOTS - 1, &mut last));
     assert!(h.internalData.is_null());
     release(&mut last);
+}
+
+#[test]
+fn every_claim_counts_once_on_the_slot() {
+    // A reader polls the state; a loop can claim a slot and release it between
+    // two polls. The slot's count is how the reader knows it went live anyway,
+    // so every way a slot is claimed must count, and nothing else may.
+    let _g = lock();
+    for index in [0, MAX_SCOPES] {   // a guest slot and a track tap
+        let before = slot_activations(index);
+        let mut h = handle();
+        assert!(claim(index, &mut h));
+        assert_eq!(slot_activations(index), before.wrapping_add(1), "a claim must count");
+
+        let mut again = handle();
+        assert!(claim(index, &mut again));
+        assert_eq!(slot_activations(index), before.wrapping_add(2), "a re-claim is another live spell");
+
+        release(&mut h);
+        release(&mut again);
+        assert_eq!(slot_state(index), 0);
+        assert_eq!(slot_activations(index), before.wrapping_add(2), "a release must not count");
+
+        // A Rust writer's claim counts the same.
+        assert!(stream_activate(index, CHANNELS));
+        assert_eq!(slot_activations(index), before.wrapping_add(3), "a Rust writer's claim must count");
+        stream_release(index);
+        assert_eq!(slot_activations(index), before.wrapping_add(3));
+    }
 }

@@ -21,6 +21,7 @@ import { METRICS_SCHEMA } from "./lib/metrics_schema.js";
 import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
+import { scopeSlotViews, scopeSlotLive, scopeSlotActivations, readScopeSlot } from "./lib/scope_slot.js";
 import * as oscFast from "./lib/osc_fast.js";
 // Timeout waiting for the DSP profile's synced reply from the engine
 const SYNC_TIMEOUT_MS = 10000;
@@ -1116,18 +1117,11 @@ export class Clockwork {
     const slotOffset = scopeNum < bc.SHM_SCOPE_MAX_SCOPES
       ? base + bc.SHM_SCOPE_START + bc.SHM_SCOPE_HEADER_SIZE + scopeNum * bc.SHM_SCOPE_SLOT_SIZE
       : base + bc.SHM_TRACK_TAPS_START + (scopeNum - bc.SHM_SCOPE_MAX_SCOPES) * bc.SHM_SCOPE_SLOT_SIZE;
-    const ringFrames = bc.SHM_SCOPE_RING_FRAMES;
-
-    // shm_scope_stream layout (shm_scope_stream.hpp): state u32, channels u32,
-    // capacity u32, pad u32, write_position u64, base_engine_frames u64, then
-    // an interleaved float ring of ringFrames * channels.
-    views = {
-      meta: new Uint32Array(sab, slotOffset, 4),
-      cursor: new BigUint64Array(sab, slotOffset + 16, 2), // [write_position, base_engine_frames]
-      data: new Float32Array(sab, slotOffset + bc.SHM_SCOPE_SLOT_HEADER_SIZE,
-                             ringFrames * bc.SHM_SCOPE_CHANNELS),
-      ringFrames,
-    };
+    views = scopeSlotViews(sab, slotOffset, {
+      headerBytes: bc.SHM_SCOPE_SLOT_HEADER_SIZE,
+      ringFrames: bc.SHM_SCOPE_RING_FRAMES,
+      channels: bc.SHM_SCOPE_CHANNELS,
+    });
     this.#scopeViews[scopeNum] = views;
     return views;
   }
@@ -1153,40 +1147,25 @@ export class Clockwork {
     // TODO: PM mode — read from latest heartbeat snapshot
     if (!this.#metricsReader.sharedBuffer) return null;
 
-    const views = this.#getScopeSlotViews(scopeNum);
-    if (Atomics.load(views.meta, 0) !== 1) return null;  // free/inactive
+    return readScopeSlot(this.#getScopeSlotViews(scopeNum), frames);
+  }
 
-    // Untrusted runtime value: clamp so a corrupt slot can't index outside
-    // the ring views.
-    const channels = Math.min(Math.max(views.meta[1], 1), bc.SHM_SCOPE_CHANNELS);
-    const cap = views.ringFrames;
-    const writer = Atomics.load(views.cursor, 0);
-    if (writer === 0n) return null;
-
-    const want = Math.min(frames, cap);
-    const end = writer;
-    let start = end > BigInt(want) ? end - BigInt(want) : 0n;
-    // Stay clear of the region the writer may currently be overwriting.
-    // Same margin formula as the native copy_window: the writer can append
-    // several blocks back-to-back per hardware callback, so stay
-    // SHM_SCOPE_READ_MARGIN_FRAMES (2048, clamped to cap/4 for small rings)
-    // behind the ring's oldest edge — keep in step with shm_scope_stream.hpp.
-    const margin = BigInt(Math.min(cap >> 2, 2048));
-    const oldest = end > BigInt(cap) ? end - BigInt(cap) + margin : 0n;
-    if (start < oldest) start = oldest;
-
-    const real = Number(end - start);
-    const out = new Float32Array(want * channels); // zero-filled lead-in
-    const fill = want - real;
-    let at = Number(start % BigInt(cap));
-    for (let i = 0; i < real; i++) {
-      for (let c = 0; c < channels; c++) {
-        out[(fill + i) * channels + c] = views.data[at * channels + c];
-      }
-      at = (at + 1) % cap;
-    }
-
-    return { frames: want, channels, writePosition: writer, interleaved: out };
+  /**
+   * How many times a scope slot has gone live. A reader polls, and a slot can
+   * be claimed and released between two polls (a loop started and stopped in
+   * a moment); a reader that noted this and sees another number knows the
+   * slot went live in between. Wraps: compare for change only. SAB mode only.
+   *
+   * @param {number} scopeNum - Scope slot index (0 to maxScopes-1)
+   * @returns {number|null} null when uninitialised, out of range, or not SAB
+   */
+  getScopeActivations(scopeNum) {
+    if (!this.#initialized) return null;
+    const bc = this.#metricsReader.bufferConstants;
+    if (!bc || bc.SHM_SCOPE_START == null || bc.SHM_SCOPE_SLOT_COUNT == null) return null;
+    if (scopeNum < 0 || scopeNum >= bc.SHM_SCOPE_SLOT_COUNT) return null;
+    if (!this.#metricsReader.sharedBuffer) return null;
+    return scopeSlotActivations(this.#getScopeSlotViews(scopeNum));
   }
 
   /**
@@ -1203,7 +1182,7 @@ export class Clockwork {
     const scopes = [];
     for (let i = 0; i < bc.SHM_SCOPE_SLOT_COUNT; i++) {
       const views = this.#getScopeSlotViews(i);
-      if (views.meta[0] !== 0) {
+      if (scopeSlotLive(views)) {
         scopes.push({ index: i, channels: views.meta[1] });
       }
     }

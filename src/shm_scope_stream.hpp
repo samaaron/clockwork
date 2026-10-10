@@ -6,7 +6,7 @@
 //  audio, one per scope slot, appended per-block by the stream's producer and
 //  read by visualisers (a GUI's scopes, JS getScope, tests). Same protocol as
 //  shm_audio_buffer (monotonic 64-bit write cursor, lossless catch-up reads),
-//  with two scope-specific additions:
+//  with three scope-specific additions:
 //
 //   - base_engine_frames anchors the slot-local cursor to the engine's global
 //     sample position, so a reader can combine it with the sample clock
@@ -17,6 +17,11 @@
 //
 //   - the ring is sized by SHM_SCOPE_RING_FRAMES (memory_profile.h), decoupled
 //     from the capture taps' much larger CLOCKWORK_SHM_AUDIO_FRAMES.
+//
+//   - activations counts the slot's live spells. A reader polls, and a slot
+//     can be claimed and released between two polls (a loop started and
+//     stopped in a moment); the state word alone never shows it. A reader
+//     that noted the count and sees another knows the slot went live.
 
 #pragma once
 
@@ -75,7 +80,9 @@ struct alignas(16) shm_scope_stream {
     std::atomic<uint32_t> state;
     uint32_t              channels;
     uint32_t              capacity_frames;
-    uint32_t              _pad0;
+    // Times the slot has been claimed, bumped before every claim publishes
+    // state = 1 and never by a release; wraps, so compare for change only.
+    std::atomic<uint32_t> activations;
 
     // Total frames written since activation. Reader subtracts
     // capacity_frames for the oldest still-readable frame.
@@ -93,6 +100,8 @@ struct alignas(16) shm_scope_stream {
 
 static_assert(std::is_trivially_destructible<shm_scope_stream>::value,
               "shm_scope_stream must be trivially destructible (lives in shm)");
+static_assert(offsetof(shm_scope_stream, activations) == 12,
+              "activations is the header's fourth u32 (rust/clockwork-scope, js/lib/scope_slot.js)");
 static_assert(offsetof(shm_scope_stream, data) == 32,
               "shm_scope_stream header must be 32 bytes (data 16-aligned)");
 
@@ -120,6 +129,7 @@ public:
         _slot->capacity_frames = SHM_SCOPE_RING_FRAMES;
         _slot->write_position.store(0, std::memory_order_relaxed);
         _slot->base_engine_frames.store(0, std::memory_order_relaxed);
+        _slot->activations.fetch_add(1, std::memory_order_relaxed);
         _slot->state.store(1, std::memory_order_release);
     }
 
@@ -210,6 +220,12 @@ public:
     }
     uint64_t base_engine_frames() const {
         return _slot ? _slot->base_engine_frames.load(std::memory_order_relaxed) : 0;
+    }
+    // Times the slot has gone live (see shm_scope_stream::activations): a
+    // reader notes it, and any change since says the slot was claimed in
+    // between, however briefly.
+    uint32_t activations() const {
+        return _slot ? _slot->activations.load(std::memory_order_acquire) : 0;
     }
 
     // Copy the window of `frames` frames ENDING at slot-local cursor

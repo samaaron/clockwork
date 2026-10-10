@@ -393,8 +393,11 @@ fn a_scope_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written
     // Too small a buffer reads nothing rather than past its end.
     assert_eq!(scope.read_newest(256, &mut out[..1]), ScopeRead::default());
 
-    // Now a writer claims the slot and writes a ramp, as a guest does.
+    // Now a writer claims the slot and writes a ramp, as a guest does. The
+    // claim counts as a live spell.
+    let went_live = scope.activations();
     assert!(clockwork_scope::stream_activate(0, 2));
+    assert_eq!(scope.activations(), went_live.wrapping_add(1));
     let n = 1024usize;
     let mut ramp = vec![0.0f32; n * 2];
     for f in 0..n {
@@ -423,6 +426,9 @@ fn a_scope_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written
 
     clockwork_scope::stream_release(0);
     assert!(!scope.is_valid());
+    // Released, it still says it went live: a reader that polled only after
+    // the release can tell.
+    assert_eq!(scope.activations(), went_live.wrapping_add(1));
     let got = scope.read_newest(256, &mut out);
     assert_eq!(got.frames, 0);
     assert!(out.iter().all(|&s| s == 0.0));

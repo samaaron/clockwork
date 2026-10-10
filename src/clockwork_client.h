@@ -495,6 +495,12 @@ ClockworkStatus clockwork_client_scope_open(ClockworkClient* c, uint32_t slot,
  * stale audio, so a caller re-opens when this turns false. */
 int clockwork_client_scope_valid(const ClockworkScopeReader* r);
 
+/* How many times the slot has gone live. A reader polls, and a slot can be
+ * claimed and released between two polls; a reader that noted this and sees
+ * another number knows the slot went live in between. Wraps: compare for
+ * change only. 0 for a reader bound to nothing. */
+uint32_t clockwork_client_scope_activations(const ClockworkScopeReader* r);
+
 /* How far the audible edge has reached, in frames since the engine started.
  * Unchanged between calls means nothing new has been rendered — which is the
  * cheap way to skip a redraw. */

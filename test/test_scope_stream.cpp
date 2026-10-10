@@ -36,6 +36,10 @@
  *   - corrupt geometry is CLAMPED, not trusted. The slot lives in shared
  *     memory that another process can write, so channels and capacity are
  *     attacker-influenced from the reader's point of view.
+ *
+ *   - a slot COUNTS the times it went live. A reader polls; a loop can claim
+ *     a slot and release it between two polls, and the state word alone then
+ *     never shows it. The count does.
  */
 #include "shm_scope_stream.hpp"
 
@@ -263,4 +267,33 @@ TEST_CASE("scope stream: an inactive or absent slot yields silence, not stale me
     Slot slot;                       // zeroed: state == 0, never activated
     shm_scope_stream_reader idle(slot.get());
     REQUIRE_FALSE(idle.valid());
+}
+
+TEST_CASE("scope stream: a slot counts the times it went live", "[scope]") {
+    // A reader that only sampled the state could miss a live spell shorter
+    // than its poll: a loop that starts and is stopped in between. It notes
+    // the count instead, and any change since says the slot went live.
+    Slot slot;
+    shm_scope_stream_reader r(slot.get());
+    REQUIRE(r.activations() == 0);   // the arena hands it over zeroed
+
+    shm_scope_stream_writer w(slot.get());
+    w.activate(2);
+    REQUIRE(r.valid());
+    REQUIRE(r.activations() == 1);
+    writeBlock(w, 0, 64);
+    REQUIRE(r.activations() == 1);   // writing is not going live again
+
+    // A re-run claims the slot again: another live spell.
+    w.activate(2);
+    REQUIRE(r.activations() == 2);
+
+    // Released (the scope crate frees a slot by clearing its state): the
+    // count stays, so a reader arriving later still sees it was live.
+    slot.get()->state.store(0);
+    REQUIRE_FALSE(r.valid());
+    REQUIRE(r.activations() == 2);
+
+    // No slot, no count.
+    REQUIRE(shm_scope_stream_reader(nullptr).activations() == 0);
 }

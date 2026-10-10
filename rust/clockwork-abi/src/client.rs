@@ -186,6 +186,7 @@ extern "C" {
 
     pub fn clockwork_client_scope_open(c: *mut ClockworkClient, slot: u32, out: *mut ClockworkScopeReader) -> ClockworkStatus;
     pub fn clockwork_client_scope_valid(r: *const ClockworkScopeReader) -> c_int;
+    pub fn clockwork_client_scope_activations(r: *const ClockworkScopeReader) -> u32;
     pub fn clockwork_client_scope_audible_end(c: *mut ClockworkClient, r: *const ClockworkScopeReader) -> u64;
     pub fn clockwork_client_scope_read(
         c: *mut ClockworkClient,

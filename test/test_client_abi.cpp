@@ -380,6 +380,34 @@ TEST_CASE("client abi: a scope slot reads as silence unless it is live", "[clien
     clockwork_client_close(c);
 }
 
+TEST_CASE("client abi: a scope slot says how many times it went live", "[client][abi]") {
+    // A client polls; a live spell can fall between two polls. The count
+    // changes for every one, so a client that noted it can tell.
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    ClockworkScopeReader r{};
+    r.struct_bytes = sizeof(r);
+    REQUIRE(clockwork_client_scope_open(c, 1, &r) == CLOCKWORK_OK);
+    const uint32_t before = clockwork_client_scope_activations(&r);
+
+    auto* slot = reinterpret_cast<shm_scope_stream*>(shared_memory + SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE
+                                                      + SHM_SCOPE_SLOT_SIZE);
+    shm_scope_stream_writer w(slot);
+    w.activate(2);
+    slot->state.store(0, std::memory_order_release);   // and gone again, unseen
+    CHECK(clockwork_client_scope_valid(&r) == 0);
+    CHECK(clockwork_client_scope_activations(&r) == before + 1);
+
+    ClockworkScopeReader none{};
+    CHECK(clockwork_client_scope_activations(&none) == 0);
+    CHECK(clockwork_client_scope_activations(nullptr) == 0);
+
+    clockwork_client_close(c);
+}
+
 TEST_CASE("client abi: the clock arrives as one snapshot", "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;

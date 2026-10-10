@@ -7,8 +7,9 @@
 //! are here, over a reader the C library fills.
 
 use clockwork_abi::client::{
-    clockwork_client_scope_audible_end, clockwork_client_scope_open, clockwork_client_scope_read,
-    clockwork_client_scope_valid, ClockworkScopeReader,
+    clockwork_client_scope_activations, clockwork_client_scope_audible_end,
+    clockwork_client_scope_open, clockwork_client_scope_read, clockwork_client_scope_valid,
+    ClockworkScopeReader,
 };
 
 use crate::client::Client;
@@ -59,6 +60,15 @@ impl<'c> Scope<'c> {
     pub fn is_valid(&self) -> bool {
         // SAFETY: the reader was filled by scope_open on a live handle.
         unsafe { clockwork_client_scope_valid(&self.reader) != 0 }
+    }
+
+    /// How many times the slot has gone live. A reader polls, and a slot can
+    /// be claimed and released between two polls; a reader that noted this
+    /// and sees another number knows the slot went live in between. Wraps:
+    /// compare for change only.
+    pub fn activations(&self) -> u32 {
+        // SAFETY: the reader was filled by scope_open on a live handle.
+        unsafe { clockwork_client_scope_activations(&self.reader) }
     }
 
     /// How far the audible edge has reached, in frames since the engine
