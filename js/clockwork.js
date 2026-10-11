@@ -22,6 +22,9 @@ import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
 import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
+import { readArena, regionBytes, REGION, REGION_NAMES } from "./lib/arena.js";
+import { controlReader } from "./lib/control_reader.js";
+import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
 // Timeout waiting for the DSP profile's synced reply from the engine
 const SYNC_TIMEOUT_MS = 10000;
@@ -1124,6 +1127,74 @@ export class Clockwork {
     });
     this.#tapViews[tapNum] = views;
     return views;
+  }
+
+  // ============================================================================
+  // THE ARENA, AS A CLIENT SEES IT
+  //
+  // What the C ABI gives a native client (clockwork_client_region and the
+  // readers over it), here for the browser: a region by id with its bytes as a
+  // view, every region with its name, the control plane's cursors, and the
+  // rings' levels. SAB mode only: in postMessage mode a client has no view of
+  // the engine's memory and these answer null.
+  // ============================================================================
+
+  /**
+   * A region of the arena, by id (REGION in lib/arena.js): its entry from the
+   * table — offset, bytes, owner, audience, geometry words — its name in the
+   * arena doc's words, and `bytes`, a Uint8Array over the shared buffer. The
+   * table is read each call, so a reload's new arena is seen as soon as it is
+   * published. Null when the region is not carved in this build, or not SAB.
+   * @param {number} id
+   * @returns {null|{ id: number, name: string, offset: number, bytes: Uint8Array, byteLength: number, owner: number, audience: number, geom: Uint32Array }}
+   */
+  region(id) {
+    const arena = this.#arena();
+    const e = arena?.entries.get(id);
+    if (!e) return null;
+    return { id, name: REGION_NAMES[id] ?? `region ${id}`, offset: e.offset, byteLength: e.bytes, owner: e.owner, audience: e.audience, geom: e.geom,
+             bytes: regionBytes(this.sharedBuffer, this.ringBufferBase, e) };
+  }
+
+  /** Every region the arena carves, as region() gives them, in table order. */
+  regions() {
+    const arena = this.#arena();
+    return arena ? [...arena.entries.keys()].map((id) => this.region(id)) : [];
+  }
+
+  /** The arena's header and table (lib/arena.js readArena), or null when not SAB or not yet published. */
+  arena() { return this.#arena(); }
+
+  #arena() {
+    const buf = this.sharedBuffer, base = this.ringBufferBase;
+    if (!buf || base == null) return null;
+    try { return readArena(buf, base); } catch { return null; }
+  }
+
+  /**
+   * The control plane's cursors (lib/control_reader.js): each ring's head and
+   * tail, the last sequence number either way, the status flags. Null when not SAB.
+   */
+  control(into = {}) {
+    const r = this.region(REGION.CONTROL);
+    if (!r) return null;
+    return controlReader(this.sharedBuffer, this.ringBufferBase + r.offset)(into);
+  }
+
+  /**
+   * The three rings' levels, in bytes and sequence numbers: what is in flight
+   * now, the most ever, the capacity, and the sequence of the last message.
+   * From the metrics (used, peak, capacity) and the control plane (sequence).
+   * @returns {null|{ in: RingLevel, out: RingLevel, nrtOut: RingLevel }} where RingLevel is { used, peak, capacity, sequence }
+   */
+  ringLevels() {
+    const mx = this.getMetricsArray(), c = this.control();
+    if (!mx || !c) return null;
+    return {
+      in: { used: mx[IN_BUFFER_USED_BYTES], peak: mx[IN_BUFFER_PEAK_BYTES], capacity: mx[CTX_IN_BUFFER_CAPACITY], sequence: c.inSequence },
+      out: { used: mx[OUT_BUFFER_USED_BYTES], peak: mx[OUT_BUFFER_PEAK_BYTES], capacity: mx[CTX_OUT_BUFFER_CAPACITY], sequence: c.outSequence },
+      nrtOut: { used: mx[NRT_OUT_BUFFER_USED_BYTES], peak: mx[NRT_OUT_BUFFER_PEAK_BYTES], capacity: mx[CTX_NRT_OUT_BUFFER_CAPACITY], sequence: c.nrtOutSequence },
+    };
   }
 
   /**

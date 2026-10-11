@@ -58,6 +58,22 @@ export const GEOM = Object.freeze({
  * @param {ArrayBuffer|SharedArrayBuffer} buffer
  * @param {number} base byte offset of the arena
  */
+/** The regions' names, in the words the arena doc uses, by id. */
+export const REGION_NAMES = Object.freeze(Object.fromEntries(Object.entries(REGION).map(([k, v]) => [v, k.toLowerCase().replace(/_/g, ' ')])));
+
+/**
+ * A region's bytes, as a view over `buffer`: what the C ABI's clockwork_client_region hands a
+ * client, base and length, for a reader that wants the memory itself (a memory viewer, a dump).
+ * @param {ArrayBufferLike} buffer
+ * @param {number} base  the arena's base in the buffer
+ * @param {{ offset: number, bytes: number }} entry  from readArena's entries
+ */
+export function regionBytes(buffer, base, entry) {
+  const at = base + entry.offset;
+  if (at + entry.bytes > buffer.byteLength) throw new Error(`region at ${at} runs past the buffer (${entry.bytes} bytes)`);
+  return new Uint8Array(buffer, at, entry.bytes);
+}
+
 export function readArena(buffer, base) {
   if (base % 4 !== 0) throw new Error(`arena base ${base} is not 4-byte aligned`);
   const words = new Uint32Array(buffer, base, HEADER_WORDS);

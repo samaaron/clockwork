@@ -88,8 +88,9 @@ export class AudioCapture {
    * The frames written since start() — or, with no capture running, the
    * newest ring's worth. Deinterleaved into per-channel arrays; `lost` is
    * how many frames the ring overwrote before they were read.
+   * @param {{ frames?: number }} [options] `frames`: at most the newest that many
    */
-  read() {
+  read({ frames: newest } = {}) {
     if (!this.isAvailable()) throw new Error('AudioCapture not initialized');
     const bc = this.#bufferConstants;
     const h = this.#header();
@@ -101,6 +102,10 @@ export class AudioCapture {
     let lost = 0;
     let start = from;
     if (writer - start > capacity) { lost = writer - start - capacity; start = writer - capacity; }
+    // `frames`: only the newest that many, for a reader that draws a window
+    // rather than keeps everything (a scope). What a capture would have
+    // handed over before them is not lost, just not asked for.
+    if (newest !== undefined && writer - start > newest) start = writer - Math.max(0, newest | 0);
     const frames = Math.max(0, writer - start);
     const data = new Float32Array(this.#sharedBuffer, this.#slotOffset() + bc.SHM_AUDIO_HEADER_SIZE,
                                   capacity * channels);
@@ -112,6 +117,7 @@ export class AudioCapture {
     }
     return {
       sampleRate, channels, frames, lost,
+      capacity,   // the ring's length in frames: what a reader could ask for at most
       channelData: out,
       // The names a stereo reader has always used.
       left: out[0] ?? new Float32Array(0),

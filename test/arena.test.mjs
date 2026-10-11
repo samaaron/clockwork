@@ -69,3 +69,14 @@ test("a writer that said nothing about runs is read, and publishes nothing", () 
   assert.equal(a.header.blockPublishedEnd, 0);
   assert.ok(!a.published(REGION.METRICS));
 });
+
+test("regionBytes is the region's bytes as a view, and refuses one past the buffer", async () => {
+  const { regionBytes } = await import("../js/lib/arena.js");
+  const { buf } = table();
+  const a = readArena(buf, 0), e = a.region(REGION.METRICS);
+  const v = regionBytes(buf, 0, e);
+  assert.equal(v.byteOffset, 4096); assert.equal(v.byteLength, 1024);
+  new Uint8Array(buf)[4096] = 0x5a;
+  assert.equal(v[0], 0x5a, "a view, not a copy");
+  assert.throws(() => regionBytes(buf, 0, { offset: 12000, bytes: 1024 }));
+});
