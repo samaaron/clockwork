@@ -18,7 +18,7 @@
 //!   ring without taking ([`Tap`]); reach a [`Region`]; read the counters as
 //!   a block ([`Metrics`], [`NativeStats`]) and ask for them by name
 //!   ([`Metric`], [`NativeStat`], generated from the schema); take one
-//!   coherent [`Clock`] snapshot; read a [`Scope`] slot.
+//!   coherent [`Clock`] snapshot; read a [`AudioTap`] slot.
 //! * [`Embed`] — an engine in this process: [`Embed::boot`] opens the audio
 //!   device and ticks itself; [`Embed::attach`] opens nothing and you render
 //!   ([`Embed::render`], or a [`Renderer`] on the audio thread while the
@@ -45,7 +45,7 @@ mod embed;
 mod error;
 mod metrics;
 pub mod metrics_schema;
-mod scope;
+mod audio_tap;
 pub mod time;
 
 pub use clockwork_abi as abi;
@@ -58,4 +58,4 @@ pub use embed::{Device, Embed, EmbedConfig, Renderer, RENDER_MAX_CHANNELS};
 pub use error::{Error, Result};
 pub use metrics::{Metrics, NativeStats, METRICS_WORDS_MAX, NATIVE_STATS_WORDS_MAX};
 pub use metrics_schema::{Metric, NativeStat};
-pub use scope::{Scope, ScopeRead, SCOPE_MAX_CHANNELS};
+pub use audio_tap::{AudioTap, AudioTapRead, AUDIO_TAP_MAX_CHANNELS};

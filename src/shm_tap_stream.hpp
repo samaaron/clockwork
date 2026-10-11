@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
-//  Scope stream — shared protocol header.
+//  Tap stream — shared protocol header.
 //
 //  Fixed-layout single-producer / single-consumer ring of interleaved float
-//  audio, one per scope slot, appended per-block by the stream's producer and
-//  read by visualisers (a GUI's scopes, JS getScope, tests). Same protocol as
+//  audio, one per tap slot, appended per-block by the stream's producer and
+//  read by visualisers (a GUI's scopes, JS getTap, tests). Same protocol as
 //  shm_audio_buffer (monotonic 64-bit write cursor, lossless catch-up reads),
-//  with three scope-specific additions:
+//  with three tap-specific additions:
 //
 //   - base_engine_frames anchors the slot-local cursor to the engine's global
 //     sample position, so a reader can combine it with the sample clock
@@ -15,7 +15,7 @@
 //     what the listener hears, not to when DSP ran. See
 //     docs/PORTS.md.
 //
-//   - the ring is sized by SHM_SCOPE_RING_FRAMES (memory_profile.h), decoupled
+//   - the ring is sized by SHM_TAP_RING_FRAMES (memory_profile.h), decoupled
 //     from the capture taps' much larger CLOCKWORK_SHM_AUDIO_FRAMES.
 //
 //   - activations counts the slot's live spells. A reader polls, and a slot
@@ -35,45 +35,45 @@
 
 #include "memory_profile.h"
 
-namespace detail_shm_scope {
+namespace detail_shm_tap {
 
-inline constexpr uint32_t SHM_SCOPE_STREAM_CHANNELS = 2;  // streams are stereo
+inline constexpr uint32_t SHM_TAP_STREAM_CHANNELS = 2;  // streams are stereo
 
 // Frames a reader must stay behind the ring's oldest edge: a hardware
 // callback appends several engine blocks back-to-back (up to
 // CLOCKWORK_MAX_BLOCK_SIZE frames each), so a one-block margin is not
 // enough. copy_window clamps this to a quarter of small (embedded) rings.
-// js/clockwork.js getScope applies the same formula — keep them in step.
-inline constexpr uint32_t SHM_SCOPE_READ_MARGIN_FRAMES = 2048;
+// js/clockwork.js getTap applies the same formula — keep them in step.
+inline constexpr uint32_t SHM_TAP_READ_MARGIN_FRAMES = 2048;
 
 // The longest window a consumer draws from a stream: a client's inline
 // scopes scroll the last 250 ms. The display reads this far back from the
 // audible cursor.
-inline constexpr uint32_t SHM_SCOPE_DISPLAY_WINDOW_MS = 250;
+inline constexpr uint32_t SHM_TAP_DISPLAY_WINDOW_MS = 250;
 
 // Whether the ring can serve a consumer on a device with this output
 // latency. The audible cursor sits `latency_frames` behind the writer (the
 // sample clock anchors at speaker time); the consumer's window reaches a
-// further SHM_SCOPE_DISPLAY_WINDOW_MS back from it; and the reader keeps
-// SHM_SCOPE_READ_MARGIN_FRAMES clear of the ring's oldest edge. The sum must
+// further SHM_TAP_DISPLAY_WINDOW_MS back from it; and the reader keeps
+// SHM_TAP_READ_MARGIN_FRAMES clear of the ring's oldest edge. The sum must
 // fit in the ring, or the audible window is overwritten before anyone reads
 // it and copy_window has nothing to hand back: every scope flat while the
 // engine renders perfectly (an AirPlay output reporting two seconds of
 // latency, 2026-10-06). The engine checks this at every device start and
 // says so when it fails.
-inline constexpr bool shm_scope_ring_covers(uint32_t latency_frames, double sample_rate) {
-    constexpr uint32_t cap = SHM_SCOPE_RING_FRAMES;
+inline constexpr bool shm_tap_ring_covers(uint32_t latency_frames, double sample_rate) {
+    constexpr uint32_t cap = SHM_TAP_RING_FRAMES;
     constexpr uint32_t margin =   // as copy_window clamps it for small rings
-        (cap / 4 < SHM_SCOPE_READ_MARGIN_FRAMES) ? cap / 4 : SHM_SCOPE_READ_MARGIN_FRAMES;
-    const double window = sample_rate * SHM_SCOPE_DISPLAY_WINDOW_MS / 1000.0;
+        (cap / 4 < SHM_TAP_READ_MARGIN_FRAMES) ? cap / 4 : SHM_TAP_READ_MARGIN_FRAMES;
+    const double window = sample_rate * SHM_TAP_DISPLAY_WINDOW_MS / 1000.0;
     return double(latency_frames) + window + double(margin) <= double(cap);
 }
 
 // copy_triggered_window's trigger_offset when no rising crossing was found
 // (distinct from every real offset, including one at the window boundary).
-inline constexpr uint32_t SHM_SCOPE_TRIGGER_NONE = UINT32_MAX;
+inline constexpr uint32_t SHM_TAP_TRIGGER_NONE = UINT32_MAX;
 
-struct alignas(16) shm_scope_stream {
+struct alignas(16) shm_tap_stream {
     // 0 = free, 1 = active. Claim/release is owner-guarded by whichever
     // producer holds the slot: a superseded producer tearing down late must
     // not stomp a slot that has since been re-claimed.
@@ -95,38 +95,38 @@ struct alignas(16) shm_scope_stream {
 
     // Interleaved float ring [ch0_f0, ch1_f0, ch0_f1, ...], wraps modulo
     // capacity_frames.
-    std::array<float, static_cast<size_t>(SHM_SCOPE_RING_FRAMES) * SHM_SCOPE_STREAM_CHANNELS> data;
+    std::array<float, static_cast<size_t>(SHM_TAP_RING_FRAMES) * SHM_TAP_STREAM_CHANNELS> data;
 };
 
-static_assert(std::is_trivially_destructible<shm_scope_stream>::value,
-              "shm_scope_stream must be trivially destructible (lives in shm)");
-static_assert(offsetof(shm_scope_stream, activations) == 12,
-              "activations is the header's fourth u32 (rust/clockwork-scope, js/lib/scope_slot.js)");
-static_assert(offsetof(shm_scope_stream, data) == 32,
-              "shm_scope_stream header must be 32 bytes (data 16-aligned)");
+static_assert(std::is_trivially_destructible<shm_tap_stream>::value,
+              "shm_tap_stream must be trivially destructible (lives in shm)");
+static_assert(offsetof(shm_tap_stream, activations) == 12,
+              "activations is the header's fourth u32 (rust/clockwork-taps, js/lib/tap_slot.js)");
+static_assert(offsetof(shm_tap_stream, data) == 32,
+              "shm_tap_stream header must be 32 bytes (data 16-aligned)");
 
-inline constexpr uint32_t SHM_SCOPE_STREAM_HEADER_SIZE = 32;
-inline constexpr uint32_t SHM_SCOPE_STREAM_SLOT_SIZE = sizeof(shm_scope_stream);
+inline constexpr uint32_t SHM_TAP_STREAM_HEADER_SIZE = 32;
+inline constexpr uint32_t SHM_TAP_STREAM_SLOT_SIZE = sizeof(shm_tap_stream);
 
 // ──── Producer side ─────────────────────────────────────────────────────
 //
-// Slot claim/ownership lives in rust/clockwork-scope; this class only formats the
+// Slot claim/ownership lives in rust/clockwork-taps; this class only formats the
 // slot and appends blocks. Real-time safe: no allocation, lock-free.
 
-class shm_scope_stream_writer {
+class shm_tap_stream_writer {
 public:
-    shm_scope_stream_writer() = default;
-    explicit shm_scope_stream_writer(shm_scope_stream* slot) : _slot(slot) {}
+    shm_tap_stream_writer() = default;
+    explicit shm_tap_stream_writer(shm_tap_stream* slot) : _slot(slot) {}
 
     bool valid() const { return _slot != nullptr; }
-    shm_scope_stream* slot() const { return _slot; }
+    shm_tap_stream* slot() const { return _slot; }
 
     void activate(uint32_t channels) {
         if (!_slot) return;
-        if (channels == 0 || channels > SHM_SCOPE_STREAM_CHANNELS)
-            channels = SHM_SCOPE_STREAM_CHANNELS;
+        if (channels == 0 || channels > SHM_TAP_STREAM_CHANNELS)
+            channels = SHM_TAP_STREAM_CHANNELS;
         _slot->channels = channels;
-        _slot->capacity_frames = SHM_SCOPE_RING_FRAMES;
+        _slot->capacity_frames = SHM_TAP_RING_FRAMES;
         _slot->write_position.store(0, std::memory_order_relaxed);
         _slot->base_engine_frames.store(0, std::memory_order_relaxed);
         _slot->activations.fetch_add(1, std::memory_order_relaxed);
@@ -155,11 +155,11 @@ public:
         // hostile mapper can rewrite them under a live writer): clamp so the
         // audio thread can never divide by zero or index past the inline ring.
         uint32_t cap = _slot->capacity_frames;
-        if (cap == 0 || cap > SHM_SCOPE_RING_FRAMES)
-            cap = SHM_SCOPE_RING_FRAMES;
+        if (cap == 0 || cap > SHM_TAP_RING_FRAMES)
+            cap = SHM_TAP_RING_FRAMES;
         uint32_t channels = _slot->channels;
-        if (channels == 0 || channels > SHM_SCOPE_STREAM_CHANNELS)
-            channels = SHM_SCOPE_STREAM_CHANNELS;
+        if (channels == 0 || channels > SHM_TAP_STREAM_CHANNELS)
+            channels = SHM_TAP_STREAM_CHANNELS;
         uint32_t at = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - at < num_frames) ? (cap - at) : num_frames;
         float* dst = _slot->data.data() + static_cast<size_t>(at) * channels;
@@ -177,26 +177,26 @@ public:
     }
 
 private:
-    shm_scope_stream* _slot = nullptr;
+    shm_tap_stream* _slot = nullptr;
 };
 
 // ──── Consumer side ─────────────────────────────────────────────────────
 
-class shm_scope_stream_reader {
+class shm_tap_stream_reader {
 public:
-    shm_scope_stream_reader() = default;
+    shm_tap_stream_reader() = default;
     // keepalive pins the mapping the slot pointer reaches into (see
     // shm_segment_client); reader copies survive the client that
     // minted them. Engine-side/test readers pass nothing.
     // `max_frames` is the ring capacity the slot's ENGINE allocated — a
     // cross-process reader passes the engine's published value, since its own
-    // SHM_SCOPE_RING_FRAMES may be another profile's. Engine-side readers
+    // SHM_TAP_RING_FRAMES may be another profile's. Engine-side readers
     // take this build's.
-    explicit shm_scope_stream_reader(shm_scope_stream* slot,
+    explicit shm_tap_stream_reader(shm_tap_stream* slot,
                                      std::shared_ptr<const void> keepalive = nullptr,
-                                     uint32_t max_frames = SHM_SCOPE_RING_FRAMES)
+                                     uint32_t max_frames = SHM_TAP_RING_FRAMES)
         : _slot(slot), _keepalive(std::move(keepalive)),
-          _max_frames(max_frames == 0 ? SHM_SCOPE_RING_FRAMES : max_frames) {}
+          _max_frames(max_frames == 0 ? SHM_TAP_RING_FRAMES : max_frames) {}
 
     bool valid() const {
         return _slot && _slot->state.load(std::memory_order_acquire) == 1;
@@ -207,8 +207,8 @@ public:
     uint32_t channels() const {
         if (!_slot) return 0;
         const uint32_t ch = _slot->channels;
-        return (ch == 0 || ch > SHM_SCOPE_STREAM_CHANNELS)
-            ? SHM_SCOPE_STREAM_CHANNELS : ch;
+        return (ch == 0 || ch > SHM_TAP_STREAM_CHANNELS)
+            ? SHM_TAP_STREAM_CHANNELS : ch;
     }
     uint32_t capacity_frames() const {
         if (!_slot) return 0;
@@ -221,7 +221,7 @@ public:
     uint64_t base_engine_frames() const {
         return _slot ? _slot->base_engine_frames.load(std::memory_order_relaxed) : 0;
     }
-    // Times the slot has gone live (see shm_scope_stream::activations): a
+    // Times the slot has gone live (see shm_tap_stream::activations): a
     // reader notes it, and any change since says the slot was claimed in
     // between, however briefly.
     uint32_t activations() const {
@@ -234,13 +234,13 @@ public:
     // position) are zero-filled, so `out` is always fully written and stays
     // window-aligned. Returns the number of real (non-fill) frames.
     //
-    // `out` MUST hold frames * SHM_SCOPE_STREAM_CHANNELS floats: the slot's
+    // `out` MUST hold frames * SHM_TAP_STREAM_CHANNELS floats: the slot's
     // channel count is re-read (and clamped) here, so sizing the buffer from
     // a separate earlier channels() read races a slot re-activation. The
     // stride actually written is reported via `used_channels`.
     uint32_t copy_window(uint64_t end_cursor, uint32_t frames, float* out,
                          uint32_t* used_channels = nullptr) const {
-        const uint32_t channels = _slot ? this->channels() : SHM_SCOPE_STREAM_CHANNELS;
+        const uint32_t channels = _slot ? this->channels() : SHM_TAP_STREAM_CHANNELS;
         if (used_channels) *used_channels = channels;
         if (frames == 0) return 0;
         if (!_slot) {
@@ -260,8 +260,8 @@ public:
         // callback renders several engine blocks back-to-back). Clamped for
         // small embedded rings.
         const uint32_t margin =
-            (cap / 4 < SHM_SCOPE_READ_MARGIN_FRAMES) ? cap / 4
-                                                     : SHM_SCOPE_READ_MARGIN_FRAMES;
+            (cap / 4 < SHM_TAP_READ_MARGIN_FRAMES) ? cap / 4
+                                                     : SHM_TAP_READ_MARGIN_FRAMES;
         const uint64_t oldest = (writer > cap) ? writer - cap + margin : 0;
         if (start < oldest) start = oldest;
         if (start > end_cursor) start = end_cursor;
@@ -290,11 +290,11 @@ public:
     // No crossing (silence, noise, DC) degrades to exactly the rolling
     // window. Returns the number of real frames inside the emitted window;
     // the crossing's offset into the search region is reported via
-    // `trigger_offset` (SHM_SCOPE_TRIGGER_NONE when no crossing was found).
+    // `trigger_offset` (SHM_TAP_TRIGGER_NONE when no crossing was found).
     //
     // Display-side helper: allocates scratch for frames + search frames, so
     // it is not for audio threads. `out` MUST hold
-    // frames * SHM_SCOPE_STREAM_CHANNELS floats, as copy_window.
+    // frames * SHM_TAP_STREAM_CHANNELS floats, as copy_window.
     uint32_t copy_triggered_window(uint64_t end_cursor, uint32_t frames,
                                    uint32_t search, float* out,
                                    uint32_t* used_channels = nullptr,
@@ -305,12 +305,12 @@ public:
         constexpr uint32_t kMaxSpanFrames = 1u << 29u;
         if (search == 0 || frames == 0 ||
             frames > kMaxSpanFrames || search > kMaxSpanFrames) {
-            if (trigger_offset) *trigger_offset = SHM_SCOPE_TRIGGER_NONE;
+            if (trigger_offset) *trigger_offset = SHM_TAP_TRIGGER_NONE;
             return copy_window(end_cursor, frames, out, used_channels);
         }
         const uint32_t total = frames + search;
         std::vector<float> scratch(static_cast<size_t>(total) *
-                                   SHM_SCOPE_STREAM_CHANNELS);
+                                   SHM_TAP_STREAM_CHANNELS);
         uint32_t ch = 0;
         const uint32_t real = copy_window(end_cursor, total, scratch.data(), &ch);
         if (used_channels) *used_channels = ch;
@@ -337,7 +337,7 @@ public:
             prev = cur;
         }
         if (trigger_offset)
-            *trigger_offset = found ? offset : SHM_SCOPE_TRIGGER_NONE;
+            *trigger_offset = found ? offset : SHM_TAP_TRIGGER_NONE;
 
         std::memcpy(out, scratch.data() + static_cast<size_t>(offset) * ch,
                     static_cast<size_t>(frames) * ch * sizeof(float));
@@ -352,22 +352,22 @@ public:
     }
 
 private:
-    shm_scope_stream* _slot = nullptr;
+    shm_tap_stream* _slot = nullptr;
     std::shared_ptr<const void> _keepalive;
-    uint32_t _max_frames = SHM_SCOPE_RING_FRAMES;
+    uint32_t _max_frames = SHM_TAP_RING_FRAMES;
 };
 
-} // namespace detail_shm_scope
+} // namespace detail_shm_tap
 
-using detail_shm_scope::shm_scope_stream;
-using detail_shm_scope::shm_scope_stream_writer;
-using detail_shm_scope::shm_scope_stream_reader;
-using detail_shm_scope::SHM_SCOPE_STREAM_CHANNELS;
-using detail_shm_scope::SHM_SCOPE_STREAM_HEADER_SIZE;
-using detail_shm_scope::SHM_SCOPE_STREAM_SLOT_SIZE;
-using detail_shm_scope::SHM_SCOPE_TRIGGER_NONE;
-using detail_shm_scope::SHM_SCOPE_DISPLAY_WINDOW_MS;
-using detail_shm_scope::shm_scope_ring_covers;
+using detail_shm_tap::shm_tap_stream;
+using detail_shm_tap::shm_tap_stream_writer;
+using detail_shm_tap::shm_tap_stream_reader;
+using detail_shm_tap::SHM_TAP_STREAM_CHANNELS;
+using detail_shm_tap::SHM_TAP_STREAM_HEADER_SIZE;
+using detail_shm_tap::SHM_TAP_STREAM_SLOT_SIZE;
+using detail_shm_tap::SHM_TAP_TRIGGER_NONE;
+using detail_shm_tap::SHM_TAP_DISPLAY_WINDOW_MS;
+using detail_shm_tap::shm_tap_ring_covers;
 
 // Engine sample position at the start of the block currently being rendered.
 // Advanced by ClockworkClock::publishSampleClock / advanceEngineFrames; a stream's

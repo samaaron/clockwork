@@ -10,7 +10,7 @@
  *
  * `readArena(buffer, base)` returns the header, a `region(id)` lookup, and
  * `constants` — the flat object the rest of the JS has always consumed
- * (IN_BUFFER_START, METRICS_SIZE, SHM_SCOPE_MAX_SCOPES, …), now derived from
+ * (IN_BUFFER_START, METRICS_SIZE, SHM_TAP_MAX_TAPS, …), now derived from
  * the table rather than declared beside it.
  */
 
@@ -30,8 +30,8 @@ export const AUDIENCE = Object.freeze({ PUBLISHED: 1, GUEST: 2, HOST: 4, TRANSPO
 export const REGION = Object.freeze({
   CONTROL: 1, METRICS: 2, NATIVE_STATS: 3, CLOCK_STATE: 4, CLOCK_ANCHORS: 5,
   SAMPLE_CLOCK: 6, CHANNEL_MAP: 7, NODE_ID_COUNTER: 8, IN_RING: 9, OUT_RING: 10,
-  NRT_OUT_RING: 11, AUDIO_TAPS: 12, CLIENT_SLOTS: 13, GUEST_CONFIG: 14,
-  GUEST_WINDOW: 15, SCOPE: 16, GUEST_PERSIST: 17, TRACK_TAPS: 18,
+  NRT_OUT_RING: 11, RAW_SCOPE: 12, CLIENT_SLOTS: 13, GUEST_CONFIG: 14,
+  GUEST_WINDOW: 15, TAPS: 16, GUEST_PERSIST: 17, TRACK_TAPS: 18,
 });
 
 // Geometry word indices, per region (ClockworkArenaGeom).
@@ -39,8 +39,8 @@ export const GEOM = Object.freeze({
   RING_MAX_MESSAGE: 0, RING_MESSAGE_MAGIC: 1, RING_PADDING_MAGIC: 2, RING_PADDING_MARKER: 3, RING_HEADER_BYTES: 4,
   METRICS_FIELDS: 0,
   ANCHOR_NTP_START: 0, ANCHOR_DRIFT: 1, ANCHOR_GLOBAL: 2,
-  TAPS_SLOTS: 0, TAPS_SLOT_BYTES: 1, TAPS_HEADER_BYTES: 2, TAPS_FRAMES: 3, TAPS_CHANNELS: 4, TAPS_SAMPLE_RATE: 5,
-  SCOPE_SLOTS: 0, SCOPE_HEADER_BYTES: 1, SCOPE_SLOT_BYTES: 2, SCOPE_SLOT_HEADER: 3, SCOPE_RING_FRAMES: 4, SCOPE_CHANNELS: 5,
+  RAW_SCOPE_SLOTS: 0, RAW_SCOPE_SLOT_BYTES: 1, RAW_SCOPE_HEADER_BYTES: 2, RAW_SCOPE_FRAMES: 3, RAW_SCOPE_CHANNELS: 4, RAW_SCOPE_SAMPLE_RATE: 5,
+  TAP_SLOTS: 0, TAP_HEADER_BYTES: 1, TAP_SLOT_BYTES: 2, TAP_SLOT_HEADER: 3, TAP_RING_FRAMES: 4, TAP_CHANNELS: 5,
   TRACK_SLOTS: 0, TRACK_SLOT_BYTES: 1, TRACK_SLOT_HEADER: 2, TRACK_RING_FRAMES: 3, TRACK_CHANNELS: 4, TRACK_FIRST_INDEX: 5,
   SLOTS_COUNT: 0, SLOTS_SLOT_BYTES: 1, SLOTS_HEADER_BYTES: 2, SLOTS_STRUCTS_OFF: 3, SLOTS_STRUCTS_BYTES: 4,
   SLOTS_STACK_OFF: 5, SLOTS_STACK_BYTES: 6,
@@ -129,8 +129,8 @@ function constantsFrom(region, entries, h) {
   const track = entries.get(REGION.TRACK_TAPS) || { offset: 0, bytes: 0, geom: [] };
   const inRing = region(REGION.IN_RING), outRing = region(REGION.OUT_RING), nrt = region(REGION.NRT_OUT_RING);
   const control = region(REGION.CONTROL), metrics = region(REGION.METRICS), window = region(REGION.GUEST_WINDOW);
-  const anchors = region(REGION.CLOCK_ANCHORS), clock = region(REGION.CLOCK_STATE), taps = region(REGION.AUDIO_TAPS);
-  const nodeId = region(REGION.NODE_ID_COUNTER), config = region(REGION.GUEST_CONFIG), scope = region(REGION.SCOPE);
+  const anchors = region(REGION.CLOCK_ANCHORS), clock = region(REGION.CLOCK_STATE), raw = region(REGION.RAW_SCOPE);
+  const nodeId = region(REGION.NODE_ID_COUNTER), config = region(REGION.GUEST_CONFIG), taps = region(REGION.TAPS);
   const sample = region(REGION.SAMPLE_CLOCK), persist = region(REGION.GUEST_PERSIST), map = region(REGION.CHANNEL_MAP);
   const slots = region(REGION.CLIENT_SLOTS);
   return {
@@ -157,31 +157,31 @@ function constantsFrom(region, entries, h) {
     DRIFT_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_DRIFT], DRIFT_OFFSET_SIZE: 4,
     GLOBAL_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_GLOBAL], GLOBAL_OFFSET_SIZE: 4,
     CLOCK_STATE_START: clock.offset, CLOCK_STATE_SIZE: clock.bytes,
-    SHM_AUDIO_START: taps.offset, SHM_AUDIO_TOTAL_SIZE: taps.bytes,
-    SHM_AUDIO_SLOTS: taps.geom[GEOM.TAPS_SLOTS],
+    SHM_AUDIO_START: raw.offset, SHM_AUDIO_TOTAL_SIZE: raw.bytes,
+    SHM_AUDIO_SLOTS: raw.geom[GEOM.RAW_SCOPE_SLOTS],
     SHM_AUDIO_OUT_SLOT: 0,   // CLOCKWORK_TAP_OUT: what left for the device
     SHM_AUDIO_IN_SLOT: 1,    // CLOCKWORK_TAP_IN: what arrived from it
-    SHM_AUDIO_SLOT_SIZE: taps.geom[GEOM.TAPS_SLOT_BYTES],
-    SHM_AUDIO_HEADER_SIZE: taps.geom[GEOM.TAPS_HEADER_BYTES],
-    SHM_AUDIO_FRAMES: taps.geom[GEOM.TAPS_FRAMES],
-    SHM_AUDIO_CHANNELS: taps.geom[GEOM.TAPS_CHANNELS],
-    SHM_AUDIO_SAMPLE_RATE: taps.geom[GEOM.TAPS_SAMPLE_RATE],
+    SHM_AUDIO_SLOT_SIZE: raw.geom[GEOM.RAW_SCOPE_SLOT_BYTES],
+    SHM_AUDIO_HEADER_SIZE: raw.geom[GEOM.RAW_SCOPE_HEADER_BYTES],
+    SHM_AUDIO_FRAMES: raw.geom[GEOM.RAW_SCOPE_FRAMES],
+    SHM_AUDIO_CHANNELS: raw.geom[GEOM.RAW_SCOPE_CHANNELS],
+    SHM_AUDIO_SAMPLE_RATE: raw.geom[GEOM.RAW_SCOPE_SAMPLE_RATE],
     NODE_ID_COUNTER_START: nodeId.offset, NODE_ID_COUNTER_SIZE: nodeId.bytes,
     GUEST_CONFIG_START: config.offset, GUEST_CONFIG_SIZE: config.bytes,
-    SHM_SCOPE_START: scope.offset, SHM_SCOPE_TOTAL_SIZE: scope.bytes,
-    SHM_SCOPE_MAX_SCOPES: scope.geom[GEOM.SCOPE_SLOTS],
-    SHM_SCOPE_HEADER_SIZE: scope.geom[GEOM.SCOPE_HEADER_BYTES],
-    SHM_SCOPE_SLOT_SIZE: scope.geom[GEOM.SCOPE_SLOT_BYTES],
-    SHM_SCOPE_SLOT_HEADER_SIZE: scope.geom[GEOM.SCOPE_SLOT_HEADER],
-    SHM_SCOPE_RING_FRAMES: scope.geom[GEOM.SCOPE_RING_FRAMES],
-    SHM_SCOPE_CHANNELS: scope.geom[GEOM.SCOPE_CHANNELS],
-    // The engine's track taps: scope slots numbered after the guest's.
+    SHM_TAP_START: taps.offset, SHM_TAP_TOTAL_SIZE: taps.bytes,
+    SHM_TAP_MAX_TAPS: taps.geom[GEOM.TAP_SLOTS],
+    SHM_TAP_HEADER_SIZE: taps.geom[GEOM.TAP_HEADER_BYTES],
+    SHM_TAP_SLOT_SIZE: taps.geom[GEOM.TAP_SLOT_BYTES],
+    SHM_TAP_SLOT_HEADER_SIZE: taps.geom[GEOM.TAP_SLOT_HEADER],
+    SHM_TAP_RING_FRAMES: taps.geom[GEOM.TAP_RING_FRAMES],
+    SHM_TAP_CHANNELS: taps.geom[GEOM.TAP_CHANNELS],
+    // The engine's track taps: tap slots numbered after the guest's.
     SHM_TRACK_TAPS_START: track.offset,
     SHM_TRACK_TAPS_SIZE: track.bytes,
     SHM_TRACK_TAPS_SLOTS: track.geom[GEOM.TRACK_SLOTS] || 0,
-    SHM_TRACK_TAPS_FIRST_INDEX: track.geom[GEOM.TRACK_FIRST_INDEX] || scope.geom[GEOM.SCOPE_SLOTS],
+    SHM_TRACK_TAPS_FIRST_INDEX: track.geom[GEOM.TRACK_FIRST_INDEX] || taps.geom[GEOM.TAP_SLOTS],
     // Every slot a client can number: the guest's, then the track taps.
-    SHM_SCOPE_SLOT_COUNT: scope.geom[GEOM.SCOPE_SLOTS] + (track.geom[GEOM.TRACK_SLOTS] || 0),
+    SHM_TAP_SLOT_COUNT: taps.geom[GEOM.TAP_SLOTS] + (track.geom[GEOM.TRACK_SLOTS] || 0),
     SAMPLE_CLOCK_START: sample.offset, SAMPLE_CLOCK_SIZE: sample.bytes,
     GUEST_PERSIST_START: persist.offset, GUEST_PERSIST_SIZE: persist.bytes,
     CHANNEL_MAP_START: map.offset, CHANNEL_MAP_SIZE: map.bytes,

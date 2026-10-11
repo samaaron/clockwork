@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_master_tap.cpp — the OUT tap on a device host: clockwork writes the
+ * test_master_tap.cpp — the OUT slot on a device host: clockwork writes the
  * master mix into it from the device callback, from boot, held by nobody.
  * The previous protocol had the guest write slot 0 while a client held it;
  * a client now finds the mix in the tap with no verb sent to anyone.
@@ -15,7 +15,7 @@
 #include <cmath>
 #include <vector>
 
-TEST_CASE("master tap: the OUT tap flows from boot on a device host and carries the guest's tone",
+TEST_CASE("raw scope OUT slot: the OUT slot flows from boot on a device host and carries the guest's tone",
           "[tap][engine]") {
     // The case renders every block itself: the tap is measured against what
     // was rendered, not against how much time a thread was given.
@@ -24,7 +24,7 @@ TEST_CASE("master tap: the OUT tap flows from boot on a device host and carries 
     cfg.freewheelClock  = true;
     EngineFixture fx(cfg);
     ClockworkRegion taps {};
-    REQUIRE(clockwork_client_region(fx.engine().egressClient(), CLOCKWORK_REGION_AUDIO_TAPS, &taps) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_region(fx.engine().egressClient(), CLOCKWORK_REGION_RAW_SCOPE, &taps) == CLOCKWORK_OK);
     auto* out = static_cast<shm_audio_buffer*>(taps.base) + CLOCKWORK_TAP_OUT;
     CHECK(out->enabled.load() == 1);
     CHECK(out->channels >= 1);

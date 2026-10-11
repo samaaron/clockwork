@@ -38,7 +38,7 @@ exceptions = [
     { crate = "clockwork-ports", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-ports-disk", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-schedule", allow = ["AGPL-3.0-or-later"] },
-    { crate = "clockwork-scope", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-taps", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-sinks", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-slots", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-sys", allow = ["AGPL-3.0-or-later"] },

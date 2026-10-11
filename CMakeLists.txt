@@ -603,7 +603,7 @@ set(CLOCKWORK_COMPILE_DEFS
     CACHE INTERNAL "Compile definitions a header-only consumer must match")
 
 # ─── Host sources ────────────────────────────────────────────────────────────
-# The core: the ingress/egress lanes, the block driver, the heap, the scope
+# The core: the ingress/egress lanes, the block driver, the heap, the taps
 # planes and the region arithmetic.
 # CACHE INTERNAL, like the include directories and compile definitions above:
 # a freestanding or embedded target compiles clockwork with its OWN defines — no
@@ -622,7 +622,7 @@ set(CLOCKWORK_CORE_SOURCES
     ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp
     ${CLOCKWORK_SRC}/lanes/lanes.cpp
     ${CLOCKWORK_SRC}/clockwork_heap.cpp
-    ${CLOCKWORK_SRC}/scope_streams.cpp
+    ${CLOCKWORK_SRC}/tap_streams.cpp
     ${CLOCKWORK_SRC}/mem_region.cpp
     ${CLOCKWORK_SRC}/engine_support.cpp
     # MIDI clock out is ClockworkClock's: 24 ticks a beat, each carrying its own
@@ -1062,7 +1062,7 @@ if(CLOCKWORK_RUST)
     add_dependencies(clockwork clockwork_rust)
 endif()
 
-# The Rust archive and the C++ host reference each other — Rust's scope plane
+# The Rust archive and the C++ host reference each other — Rust's tap plane
 # calls back into the C++ shm base, the C++ control surfaces call into Rust —
 # and one left-to-right link pass cannot resolve that. State the cycle as a
 # target dependency so CMake repeats the archives.
@@ -1178,7 +1178,7 @@ else()
     # $<TARGET_FILE:clockwork>, not the target NAME. CMake reorders a named
     # target by its own dependency rules and hoisted libtau.a OUT of
     # the group — so the Rust staticlib, still inside it, could not reach back
-    # for the C++ symbols it calls (clockwork_shm_base, clockwork_scope_geometry) and the
+    # for the C++ symbols it calls (clockwork_shm_base, clockwork_tap_geometry) and the
     # link failed. A file path stays where it is put. The DSP was already
     # pinned this way; clockwork was not.
     # BOTH forms of clockwork, deliberately. The target carries the usage
@@ -1261,9 +1261,9 @@ if(EMSCRIPTEN)
         _clockwork_client_tap_sizeof _clockwork_client_tap_open
         _clockwork_client_tap_open_in _clockwork_client_tap_close
         _clockwork_client_tap_poll _clockwork_client_tap_missed
-        _clockwork_client_scope_open _clockwork_client_scope_valid
-        _clockwork_client_scope_activations
-        _clockwork_client_scope_audible_end _clockwork_client_scope_read)
+        _clockwork_client_audio_tap_open _clockwork_client_audio_tap_valid
+        _clockwork_client_audio_tap_activations
+        _clockwork_client_audio_tap_audible_end _clockwork_client_audio_tap_read)
     if(CLOCKWORK_WEB_AUDIO_FILES)
         list(APPEND CLOCKWORK_WEB_EXPORTS
             _clockwork_audio_probe_memory _clockwork_audio_decode_memory

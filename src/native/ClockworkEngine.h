@@ -536,7 +536,7 @@ public:
     void snapshotStateTo(uint32_t token);
 
     // No recording API: the engine opens no files. Its master mix leaves
-    // through the audio taps (shm_audio_buffer slot 0), and a client that
+    // through the raw scope (shm_audio_buffer slot 0), and a client that
     // wants a session recording reads that slot and writes the file itself
     // (SuperSonic's front does).
 

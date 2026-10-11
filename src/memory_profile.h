@@ -60,11 +60,11 @@
   #ifndef CLOCKWORK_WINDOW_BYTES
   #define CLOCKWORK_WINDOW_BYTES 12304
   #endif
-  #ifndef SHM_SCOPE_MAX_SCOPES
-  #define SHM_SCOPE_MAX_SCOPES 1
+  #ifndef SHM_TAP_MAX_TAPS
+  #define SHM_TAP_MAX_TAPS 1
   #endif
-  #ifndef SHM_SCOPE_RING_FRAMES
-  #define SHM_SCOPE_RING_FRAMES 512
+  #ifndef SHM_TAP_RING_FRAMES
+  #define SHM_TAP_RING_FRAMES 512
   #endif
   #ifndef CLOCKWORK_MAX_TIMELINES
   #define CLOCKWORK_MAX_TIMELINES 2
@@ -163,11 +163,11 @@
   #ifndef CLOCKWORK_WINDOW_BYTES
   #define CLOCKWORK_WINDOW_BYTES 12304
   #endif
-  #ifndef SHM_SCOPE_MAX_SCOPES
-  #define SHM_SCOPE_MAX_SCOPES 1
+  #ifndef SHM_TAP_MAX_TAPS
+  #define SHM_TAP_MAX_TAPS 1
   #endif
-  #ifndef SHM_SCOPE_RING_FRAMES
-  #define SHM_SCOPE_RING_FRAMES 512
+  #ifndef SHM_TAP_RING_FRAMES
+  #define SHM_TAP_RING_FRAMES 512
   #endif
   #ifndef CLOCKWORK_MAX_TIMELINES
   #define CLOCKWORK_MAX_TIMELINES 2
@@ -289,32 +289,32 @@
 #ifndef CLOCKWORK_WINDOW_BYTES
 #define CLOCKWORK_WINDOW_BYTES 98320
 #endif
-// The scope-stream slots. SHM_SCOPE_MAX_SCOPES are the GUEST's, in the guest
+// The tap-stream slots. SHM_TAP_MAX_TAPS are the GUEST's, in the guest
 // region: a client numbers them as it likes and a ScopeOut2 claims one.
-// SHM_SCOPE_TRACK_SLOTS are the ENGINE's, in the clockwork block (the
+// SHM_TAP_TRACK_SLOTS are the ENGINE's, in the clockwork block (the
 // TRACK_TAPS region, clockwork_arena.h): one per plugin track lane pair
 // (plugin_bridge.h LANES / 2), written from the track's return lane
 // (src/native/TrackControl.cpp) so a panel can draw what a track is putting
 // out without a scope node in the graph. A client numbers the two as one
-// index space, the track slots after the guest's (SHM_SCOPE_TRACK_SLOT_BASE).
+// index space, the track slots after the guest's (SHM_TAP_TRACK_SLOT_BASE).
 // No track slots on the web, which hosts no plugins and whose arena is
 // budgeted to the byte (js/memory_layout.js), nor on the embedded profiles.
-#ifndef SHM_SCOPE_MAX_SCOPES
-#define SHM_SCOPE_MAX_SCOPES 32
+#ifndef SHM_TAP_MAX_TAPS
+#define SHM_TAP_MAX_TAPS 32
 #endif
-#ifndef SHM_SCOPE_TRACK_SLOTS
+#ifndef SHM_TAP_TRACK_SLOTS
   #if defined(__EMSCRIPTEN__)
-  #define SHM_SCOPE_TRACK_SLOTS 0
+  #define SHM_TAP_TRACK_SLOTS 0
   #else
-  #define SHM_SCOPE_TRACK_SLOTS 16
+  #define SHM_TAP_TRACK_SLOTS 16
   #endif
 #endif
-#define SHM_SCOPE_TRACK_SLOT_BASE SHM_SCOPE_MAX_SCOPES
-// Per-slot scope stream ring, in frames. A consumer draws the window being
+#define SHM_TAP_TRACK_SLOT_BASE SHM_TAP_MAX_TAPS
+// Per-slot tap stream ring, in frames. A consumer draws the window being
 // HEARD, which sits the device's output latency behind the writer, so the
 // ring must hold that latency plus the longest display window (a client's
 // inline scopes scroll ~250ms) plus the reader's margin — the rule is
-// shm_scope_ring_covers (shm_scope_stream.hpp), checked at every device
+// shm_tap_ring_covers (shm_tap_stream.hpp), checked at every device
 // start. Natively a wireless output can report two seconds (an AirPlay
 // receiver: 88712 frames @ 44.1k, 2026-10-06; a 16384 ring had every scope
 // flat while the engine rendered): 131072 ≈ 2.7s @ 48k, 1 MB per stereo
@@ -323,11 +323,11 @@
 // tens of ms of latency and budgets its arena to the byte
 // (js/memory_layout.js): 16384 ≈ 340ms @ 48k, 128KB per slot, 4 MB for the
 // guest's 32.
-#ifndef SHM_SCOPE_RING_FRAMES
+#ifndef SHM_TAP_RING_FRAMES
   #if defined(__EMSCRIPTEN__)
-  #define SHM_SCOPE_RING_FRAMES 16384
+  #define SHM_TAP_RING_FRAMES 16384
   #else
-  #define SHM_SCOPE_RING_FRAMES 131072
+  #define SHM_TAP_RING_FRAMES 131072
   #endif
 #endif
 
@@ -436,7 +436,7 @@
 #define CLOCKWORK_MAX_CHANNELS 128
 #endif
 
-// The audio taps (shm_audio_buffer.hpp): two slots, out and in, written by
+// The raw scope (shm_audio_buffer.hpp): two slots, out and in, written by
 // clockwork at the device edge. Each slot's ring is sized for this many
 // channels and carries the device's live count up to it: a stereo interface
 // fills two, an eight-out interface fills eight, anything wider is tapped to

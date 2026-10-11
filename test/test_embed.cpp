@@ -45,7 +45,7 @@ struct Handle {
     ClockworkEmbedConfig cfg = config();
 };
 shm_audio_buffer* outTap() {
-    const auto* e = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_AUDIO_TAPS);
+    const auto* e = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_RAW_SCOPE);
     REQUIRE(e != nullptr);
     return reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(clockwork_lanes_base()) + e->offset) + CLOCKWORK_TAP_OUT;
 }
@@ -147,7 +147,7 @@ TEST_CASE("embed: a tap on the handle's client watches both rings without taking
 TEST_CASE("embed: render answers any buffer size with exactly the engine's output stream", "[embed]") {
     Handle e;
     REQUIRE(e.h != nullptr);
-    // The dummy's pulse is on by default; whatever it renders, the OUT tap
+    // The dummy's pulse is on by default; whatever it renders, the OUT slot
     // holds the stream block by block, and render must hand back that
     // stream cut at the host's sizes — no frame dropped, doubled or shifted.
     shm_audio_buffer_reader tap(outTap());
@@ -186,9 +186,9 @@ TEST_CASE("embed: host input reaches the guest, a block late at most", "[embed]"
     Handle e;
     REQUIRE(e.h != nullptr);
     const uint32_t block = clockwork_embed_block_size(e.h);
-    // Constant input on both channels; after a few blocks the IN tap's newest
+    // Constant input on both channels; after a few blocks the IN slot's newest
     // block is that constant (the first block may be padded with silence).
-    const auto* te = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_AUDIO_TAPS);
+    const auto* te = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_RAW_SCOPE);
     auto* inTap = reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(clockwork_lanes_base()) + te->offset) + CLOCKWORK_TAP_IN;
     shm_audio_buffer_reader reader(inTap);
     reader.seek_to_live();

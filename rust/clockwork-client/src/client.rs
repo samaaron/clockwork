@@ -17,14 +17,14 @@ use clockwork_abi::client::{
     clockwork_client_tap_close, clockwork_client_tap_missed, clockwork_client_tap_open,
     clockwork_client_tap_poll, ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
     ClockworkClientMessage, ClockworkClientTap, ClockworkRegion, ClockworkRegionId,
-    ClockworkStatus, CLOCKWORK_FEATURE_AUDIO_TAPS, CLOCKWORK_FEATURE_BULK,
-    CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_SCOPE, CLOCKWORK_FEATURE_WINDOW,
+    ClockworkStatus, CLOCKWORK_FEATURE_RAW_SCOPE, CLOCKWORK_FEATURE_BULK,
+    CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_TAPS, CLOCKWORK_FEATURE_WINDOW,
     CLOCKWORK_ROUTE_NOTIFY, CLOCKWORK_ROUTE_REPLY,
 };
 
 use crate::error::{check, refused, Error, Result};
 use crate::metrics::{Metrics, NativeStats};
-use crate::scope::Scope;
+use crate::audio_tap::AudioTap;
 
 /// How many messages one [`Client::poll`] takes at most, unless
 /// [`Client::set_poll_batch`] says otherwise.
@@ -311,10 +311,10 @@ impl Client {
         Ok(Clock { raw })
     }
 
-    /// A reader on scope slot `slot`. [`Error::Absent`] when the engine has
+    /// A reader on raw scope slot `slot`. [`Error::Absent`] when the engine has
     /// no such slot.
-    pub fn scope(&self, slot: u32) -> Result<Scope<'_>> {
-        Scope::open(self, slot)
+    pub fn audio_tap(&self, slot: u32) -> Result<AudioTap<'_>> {
+        AudioTap::open(self, slot)
     }
 }
 
@@ -348,7 +348,7 @@ impl Drop for Reservation<'_> {
 
 /// What an engine has: `CLOCKWORK_FEATURE_*` bits. A client asks rather
 /// than assumes — an engine built for an embedded target may have no
-/// scope, no taps and no bulk lanes.
+/// raw taps, no raw scope and no bulk lanes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Features(pub u32);
 
@@ -357,13 +357,13 @@ impl Features {
     pub const fn bits(self) -> u32 {
         self.0
     }
-    /// Scope slots.
-    pub const fn scope(self) -> bool {
-        self.0 & CLOCKWORK_FEATURE_SCOPE != 0
+    /// AudioTap slots.
+    pub const fn taps(self) -> bool {
+        self.0 & CLOCKWORK_FEATURE_TAPS != 0
     }
-    /// The audio taps: what left for the device and what arrived from it.
-    pub const fn audio_taps(self) -> bool {
-        self.0 & CLOCKWORK_FEATURE_AUDIO_TAPS != 0
+    /// The raw scope: what left for the device and what arrived from it.
+    pub const fn raw_scope(self) -> bool {
+        self.0 & CLOCKWORK_FEATURE_RAW_SCOPE != 0
     }
     /// Inbox and outbox.
     pub const fn bulk(self) -> bool {
@@ -573,8 +573,8 @@ pub enum RegionId {
     Inbox,
     /// Bulk out: the guest writes, the client reads.
     Outbox,
-    Scope,
-    AudioTaps,
+    Taps,
+    RawScope,
     /// The ring clients write and the engine reads.
     Ingress,
     /// The ring the engine writes and clients read.
@@ -591,8 +591,8 @@ impl RegionId {
             RegionId::Window => ClockworkRegionId::WINDOW,
             RegionId::Inbox => ClockworkRegionId::INBOX,
             RegionId::Outbox => ClockworkRegionId::OUTBOX,
-            RegionId::Scope => ClockworkRegionId::SCOPE,
-            RegionId::AudioTaps => ClockworkRegionId::AUDIO_TAPS,
+            RegionId::Taps => ClockworkRegionId::TAPS,
+            RegionId::RawScope => ClockworkRegionId::RAW_SCOPE,
             RegionId::Ingress => ClockworkRegionId::INGRESS,
             RegionId::Egress => ClockworkRegionId::EGRESS,
             RegionId::NativeStats => ClockworkRegionId::NATIVE_STATS,
@@ -737,9 +737,9 @@ mod tests {
 
     #[test]
     fn features_are_bits() {
-        let f = Features(CLOCKWORK_FEATURE_SCOPE | CLOCKWORK_FEATURE_WINDOW);
-        assert!(f.scope() && f.window());
-        assert!(!f.audio_taps() && !f.bulk() && !f.scheduler());
+        let f = Features(CLOCKWORK_FEATURE_TAPS | CLOCKWORK_FEATURE_WINDOW);
+        assert!(f.taps() && f.window());
+        assert!(!f.raw_scope() && !f.bulk() && !f.scheduler());
         assert_eq!(Features::default().bits(), 0);
     }
 

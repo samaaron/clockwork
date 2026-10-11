@@ -214,10 +214,10 @@ typedef struct ClockworkClientInfo {
 } ClockworkClientInfo;
 
 /* Feature bits. A client asks rather than assumes: an engine built for an
- * embedded target may have no scope, no taps and no bulk lanes, and a client
+ * embedded target may have no taps, no raw scope and no bulk lanes, and a client
  * that renders a scope should grey the control rather than read zeros. */
-#define CLOCKWORK_FEATURE_SCOPE      (1u << 0u)
-#define CLOCKWORK_FEATURE_AUDIO_TAPS (1u << 1u)
+#define CLOCKWORK_FEATURE_TAPS      (1u << 0u)
+#define CLOCKWORK_FEATURE_RAW_SCOPE (1u << 1u)
 #define CLOCKWORK_FEATURE_BULK       (1u << 2u)   /* inbox + outbox */
 #define CLOCKWORK_FEATURE_WINDOW     (1u << 3u)   /* the guest publishes one */
 #define CLOCKWORK_FEATURE_SCHEDULER  (1u << 4u)   /* timed messages are held */
@@ -411,8 +411,8 @@ typedef enum ClockworkRegionId {
                                    * is contract, and it is all of it. */
     CLOCKWORK_REGION_INBOX,       /* bulk in: the client writes, the guest reads */
     CLOCKWORK_REGION_OUTBOX,      /* bulk out: the guest writes, the client reads */
-    CLOCKWORK_REGION_SCOPE,
-    CLOCKWORK_REGION_AUDIO_TAPS,
+    CLOCKWORK_REGION_TAPS,
+    CLOCKWORK_REGION_RAW_SCOPE,
     CLOCKWORK_REGION_INGRESS,     /* the ring clients write and the engine reads */
     CLOCKWORK_REGION_EGRESS,      /* the ring the engine writes and clients read */
     CLOCKWORK_REGION_NATIVE_STATS /* the device layer's own account of its callback:
@@ -466,9 +466,9 @@ ClockworkStatus clockwork_client_clock(ClockworkClient* c, ClockworkClientClock*
  * re-derive it, and so they all agree to the bit. */
 double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_seconds);
 
-/* ── Scopes ──────────────────────────────────────────────────────────────────
+/* ── Taps ──────────────────────────────────────────────────────────────────
  *
- * A scope is a ring of audio the engine keeps filling, and reading one is the
+ * A tap is a ring of audio the engine keeps filling, and reading one is the
  * same three steps wherever it is done: find the slot, ask how far the audible
  * edge has reached, copy a window back from it. Every consumer that has drawn
  * a waveform has written those steps itself against the ring's internals; this
@@ -477,35 +477,35 @@ double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_se
  * A slot is a small integer. Which slot carries what is between the engine's
  * embedder and its guest — clockwork numbers them and does not name them.
  */
-typedef struct ClockworkScopeReader {
+typedef struct ClockworkAudioTapReader {
     uint32_t struct_bytes;
     uint32_t slot;
     void*    _internal;   /* the mapped slot; do not touch */
     uint32_t _ring_frames; /* the engine's ring capacity for the slot; do not touch */
-} ClockworkScopeReader;
+} ClockworkAudioTapReader;
 
 /* Bind a reader to a slot. CLOCKWORK_E_ABSENT when the engine has no such slot
  * — a constrained profile may carry none at all, and a client greys the
  * control rather than drawing zeros. */
-ClockworkStatus clockwork_client_scope_open(ClockworkClient* c, uint32_t slot,
-                                            ClockworkScopeReader* out);
+ClockworkStatus clockwork_client_audio_tap_open(ClockworkClient* c, uint32_t slot,
+                                            ClockworkAudioTapReader* out);
 
 /* Is the slot still live? A slot deactivates across a device switch and comes
  * back; a reader that keeps drawing through that reads silence rather than
  * stale audio, so a caller re-opens when this turns false. */
-int clockwork_client_scope_valid(const ClockworkScopeReader* r);
+int clockwork_client_audio_tap_valid(const ClockworkAudioTapReader* r);
 
 /* How many times the slot has gone live. A reader polls, and a slot can be
  * claimed and released between two polls; a reader that noted this and sees
  * another number knows the slot went live in between. Wraps: compare for
  * change only. 0 for a reader bound to nothing. */
-uint32_t clockwork_client_scope_activations(const ClockworkScopeReader* r);
+uint32_t clockwork_client_audio_tap_activations(const ClockworkAudioTapReader* r);
 
 /* How far the audible edge has reached, in frames since the engine started.
  * Unchanged between calls means nothing new has been rendered — which is the
  * cheap way to skip a redraw. */
-uint64_t clockwork_client_scope_audible_end(ClockworkClient* c,
-                                            const ClockworkScopeReader* r);
+uint64_t clockwork_client_audio_tap_audible_end(ClockworkClient* c,
+                                            const ClockworkAudioTapReader* r);
 
 /* Copy `frames` ending at `end` into `out`, interleaved.
  *
@@ -517,7 +517,7 @@ uint64_t clockwork_client_scope_audible_end(ClockworkClient* c,
  * through `out_channels`, because sizing a buffer from an earlier read races a
  * slot that reactivated with a different width.
  */
-uint32_t clockwork_client_scope_read(ClockworkClient* c, const ClockworkScopeReader* r,
+uint32_t clockwork_client_audio_tap_read(ClockworkClient* c, const ClockworkAudioTapReader* r,
                                      uint64_t end, uint32_t frames,
                                      float* out, uint32_t* out_channels);
 

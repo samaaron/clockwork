@@ -16,7 +16,7 @@
 #include "clockwork_arena.h"   // the table every reader takes the layout from
 #include "ring/ring.h"   // Message, MESSAGE_MAGIC, PADDING_MAGIC
 #include "shm_audio_buffer.hpp"
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 
 // The bit-pattern helpers, the default tempo and the session clock's state
 // live in clockwork_clock_state.h: the one header a DSP includes to read
@@ -60,7 +60,7 @@ constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 ato
 // leaves it alone.
 constexpr uint32_t SHM_WINDOW_SIZE = CLOCKWORK_WINDOW_BYTES;
 
-// The audio taps: two shm_audio_buffer slots, out and in, written by
+// The raw scope: two shm_audio_buffer slots, out and in, written by
 // clockwork at the device edge inside every tick on every host
 // (shm_audio_buffer.hpp). Per-slot ring duration is CLOCKWORK_SHM_AUDIO_SECONDS
 // (1s in production, larger in test builds so captures don't wrap).
@@ -82,36 +82,36 @@ constexpr uint32_t NODE_ID_COUNTER_SIZE  = 4;     // Int32, atomic — for nextN
 // different config and the guest cannot tell.
 constexpr uint32_t GUEST_CONFIG_SIZE  = 1024;  // bytes: room for a page of name=value lines
 
-// Scope streams — per-slot lossless audio rings for visualisation.
+// Tap streams — per-slot lossless audio rings for visualisation.
 // Protocol (struct layout, writer/reader) lives in
-// shm_scope_stream.hpp; rationale in docs/PORTS.md.
+// shm_tap_stream.hpp; rationale in docs/PORTS.md.
 // The stream's producer appends every block; readers combine a slot's cursor with the
 // sample-clock region (below) and their own wall clock to display exactly what
-// the listener is hearing. SHM_SCOPE_MAX_SCOPES / SHM_SCOPE_RING_FRAMES sized
+// the listener is hearing. SHM_TAP_MAX_TAPS / SHM_TAP_RING_FRAMES sized
 // per device via memory_profile.h: 32 slots for the guest here, in the guest
 // region; the 16 track-tap slots the ENGINE writes natively (TrackControl.cpp)
 // are the TRACK_TAPS region in the clockwork block, numbered after these in
-// one index space (scopeSlotAt below); 16384 frames per slot.
-constexpr uint32_t SHM_SCOPE_CHANNELS = SHM_SCOPE_STREAM_CHANNELS;
-constexpr uint32_t SHM_SCOPE_HEADER_SIZE = 32;  // Global header (16-aligned)
-constexpr uint32_t SHM_SCOPE_SLOT_HEADER_SIZE = SHM_SCOPE_STREAM_HEADER_SIZE;
-constexpr uint32_t SHM_SCOPE_SLOT_SIZE = SHM_SCOPE_STREAM_SLOT_SIZE;
-constexpr uint32_t SHM_SCOPE_TOTAL_SIZE = SHM_SCOPE_HEADER_SIZE + (SHM_SCOPE_MAX_SCOPES * SHM_SCOPE_SLOT_SIZE);
+// one index space (tapSlotAt below); 16384 frames per slot.
+constexpr uint32_t SHM_TAP_CHANNELS = SHM_TAP_STREAM_CHANNELS;
+constexpr uint32_t SHM_TAP_HEADER_SIZE = 32;  // Global header (16-aligned)
+constexpr uint32_t SHM_TAP_SLOT_HEADER_SIZE = SHM_TAP_STREAM_HEADER_SIZE;
+constexpr uint32_t SHM_TAP_SLOT_SIZE = SHM_TAP_STREAM_SLOT_SIZE;
+constexpr uint32_t SHM_TAP_TOTAL_SIZE = SHM_TAP_HEADER_SIZE + (SHM_TAP_MAX_TAPS * SHM_TAP_SLOT_SIZE);
 
-// Track taps: the engine's scope-stream slots (memory_profile.h), the same
+// Track taps: the engine's tap-stream slots (memory_profile.h), the same
 // slot shape as the guest's, no global header — the arena table carries the
-// geometry. Slot index SHM_SCOPE_TRACK_SLOT_BASE + i lives here.
-constexpr uint32_t SHM_TRACK_TAPS_SLOTS = SHM_SCOPE_TRACK_SLOTS;
-constexpr uint32_t SHM_TRACK_TAPS_SIZE  = SHM_TRACK_TAPS_SLOTS * SHM_SCOPE_SLOT_SIZE;
+// geometry. Slot index SHM_TAP_TRACK_SLOT_BASE + i lives here.
+constexpr uint32_t SHM_TRACK_TAPS_SLOTS = SHM_TAP_TRACK_SLOTS;
+constexpr uint32_t SHM_TRACK_TAPS_SIZE  = SHM_TRACK_TAPS_SLOTS * SHM_TAP_SLOT_SIZE;
 
-// Scope header layout (at SHM_SCOPE_START):
-//   [0..3]   u32  maxScopes
+// Tap header layout (at SHM_TAP_START):
+//   [0..3]   u32  maxTaps
 //   [4..7]   u32  activeCount
 //   [8..11]  u32  ringFrames (per-slot capacity)
-//   [12..15] u32  version (increments on scope add/remove)
+//   [12..15] u32  version (increments on tap add/remove)
 //   [16..31] reserved
 //
-// Per-scope slot: a shm_scope_stream (see shm_scope_stream.hpp).
+// Per-tap slot: a shm_tap_stream (see shm_tap_stream.hpp).
 
 // Native-only live engine stats. Kept apart from PerformanceMetrics so that
 // struct stays a clean cross-platform surface rather than a pile of fields
@@ -144,7 +144,7 @@ constexpr uint32_t NATIVE_STAT_NRT_RECENT_WORST_US = 20;
 //   visible = engine_frames + (now_ntp - dac_ntp) * sample_rate
 // Published once per hardware callback via ClockworkClock::publishSampleClock
 // (seqlock: odd SEQ, fields, even SEQ with release ordering). Consumers:
-// scope streams, plus anything needing audible-time alignment (recording
+// tap streams, plus anything needing audible-time alignment (recording
 // markers, visual sync). See docs/PORTS.md.
 constexpr uint32_t SAMPLE_CLOCK_SIZE  = 32;
 // Field byte offsets within the sample-clock region.
@@ -196,10 +196,10 @@ constexpr uint32_t SAMPLE_CLOCK_OUT_LATENCY    = 24;  // u32 device output laten
 #ifndef GUEST_PERSIST_BYTES
 #define GUEST_PERSIST_BYTES (64u * 1024u)
 #endif
-// ── The sample clock, and the window end every scope consumer wants ─────────
+// ── The sample clock, and the window end every tap consumer wants ─────────
 //
 // Here rather than with the segment because it is pure arithmetic over the
-// offsets above and a scope reader: no mapping, no POSIX, nothing a browser
+// offsets above and a tap reader: no mapping, no POSIX, nothing a browser
 // build cannot have. shm_segment.hpp re-exports it for callers that knew it
 // there.
 struct sample_clock_view {
@@ -215,14 +215,14 @@ struct sample_clock_view {
              + (now_ntp - dac_ntp) * static_cast<double>(sample_rate);
     }
 
-    // Slot-local cursor of the newest AUDIBLE sample of a scope stream —
-    // the canonical window end for every scope consumer. Clamped to the
+    // Slot-local cursor of the newest AUDIBLE sample of a tap stream —
+    // the canonical window end for every tap consumer. Clamped to the
     // stream's write position; a mapping that lands before the stream's
     // anchor (engine counter reset, wall-clock step) yields 0 so consumers
     // show silence rather than not-yet-heard audio. Falls back to the raw
     // write position when this view is invalid (no publisher yet:
     // headless engines, older builds).
-    uint64_t audible_end(const shm_scope_stream_reader& r, double now_ntp) const {
+    uint64_t audible_end(const shm_tap_stream_reader& r, double now_ntp) const {
         const uint64_t writer = r.write_position();
         if (!valid)
             return writer;
@@ -236,7 +236,7 @@ struct sample_clock_view {
     // Readers share the host — and so the system clock — with the engine,
     // which anchors against the same wallClockNTP(): no cross-process
     // handshake needed.
-    uint64_t audible_end(const shm_scope_stream_reader& r) const {
+    uint64_t audible_end(const shm_tap_stream_reader& r) const {
         return audible_end(r, wallClockNTP());
     }
 };
@@ -442,8 +442,8 @@ constexpr uint32_t CLOCKWORK_BLOCK_SIZE = alignArena16(CLIENT_SLOTS_START + CLIE
 // ── the guest region: the published run ──
 constexpr uint32_t GUEST_REGION_START   = CLOCKWORK_BLOCK_SIZE;
 constexpr uint32_t SHM_WINDOW_START     = GUEST_REGION_START;
-constexpr uint32_t SHM_SCOPE_START      = alignArena16(SHM_WINDOW_START + SHM_WINDOW_SIZE);
-constexpr uint32_t GUEST_PUBLISHED_END  = alignArena16(SHM_SCOPE_START + SHM_SCOPE_TOTAL_SIZE);
+constexpr uint32_t SHM_TAP_START      = alignArena16(SHM_WINDOW_START + SHM_WINDOW_SIZE);
+constexpr uint32_t GUEST_PUBLISHED_END  = alignArena16(SHM_TAP_START + SHM_TAP_TOTAL_SIZE);
 
 // ── the guest region: the guest's own ──
 constexpr uint32_t GUEST_CONFIG_START   = GUEST_PUBLISHED_END;
@@ -458,7 +458,7 @@ static_assert(SAMPLE_CLOCK_START % 16 == 0, "the sample clock is read as 64-bit 
 static_assert(CHANNEL_MAP_START % 16 == 0,  "ClockworkChannelMapState is alignas(16)");
 static_assert(IN_BUFFER_START % 16 == 0,    "rings start 16-aligned");
 static_assert(SHM_AUDIO_START % 16 == 0,    "shm_audio_buffer is alignas(16)");
-static_assert(SHM_TRACK_TAPS_START % 16 == 0, "shm_scope_stream is alignas(16)");
+static_assert(SHM_TRACK_TAPS_START % 16 == 0, "shm_tap_stream is alignas(16)");
 static_assert(CLIENT_SLOTS_START % 16 == 0, "client slots are 16-byte aligned");
 static_assert(GUEST_REGION_START % 16 == 0, "the guest region starts 16-aligned");
 static_assert(CLOCKWORK_BLOCK_PUBLISHED_END % 16 == 0 && CLOCKWORK_BLOCK_PUBLISHED_END <= CLOCKWORK_BLOCK_SIZE,
@@ -466,8 +466,8 @@ static_assert(CLOCKWORK_BLOCK_PUBLISHED_END % 16 == 0 && CLOCKWORK_BLOCK_PUBLISH
 static_assert(GUEST_PUBLISHED_END % 16 == 0 && GUEST_PUBLISHED_END <= TOTAL_BUFFER_SIZE,
               "the guest's published run ends 16-aligned, inside the arena");
 static_assert(SHM_WINDOW_START % 16 == 0,   "the guest window starts 16-aligned");
-static_assert((SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE) % 16 == 0,
-              "scope slots must be 16-byte aligned for shm_scope_stream");
+static_assert((SHM_TAP_START + SHM_TAP_HEADER_SIZE) % 16 == 0,
+              "tap slots must be 16-byte aligned for shm_tap_stream");
 static_assert(GUEST_PERSIST_START % 16 == 0, "the guest's persistent bytes start 16-aligned");
 
 // Message frame (magic/length/sequence/sourceId) is defined in ring/ring.h.
@@ -707,8 +707,8 @@ struct ShmReaderLayout {
     uint32_t clock_state_offset = 0,  clock_state_bytes = 0;
     uint32_t audio_offset = 0, audio_slot_count = 0, audio_slot_bytes = 0;
     uint32_t audio_header_bytes = 0, audio_frames = 0, audio_channels = 0, audio_sample_rate = 0;
-    uint32_t scope_offset = 0, scope_max = 0, scope_header_bytes = 0, scope_slot_bytes = 0;
-    uint32_t scope_slot_header = 0, scope_ring_frames = 0, scope_channels = 0;
+    uint32_t tap_offset = 0, tap_max = 0, tap_header_bytes = 0, tap_slot_bytes = 0;
+    uint32_t tap_slot_header = 0, tap_ring_frames = 0, tap_channels = 0;
     // The engine's track-tap slots: the same shape, numbered from track_first.
     // Zero slots on a build that carves none.
     uint32_t track_offset = 0, track_slots = 0, track_first = 0;
@@ -734,16 +734,16 @@ struct ShmReaderLayout {
         L.audio_frames        = SHM_AUDIO_FRAMES;
         L.audio_channels      = SHM_AUDIO_CHANNELS;
         L.audio_sample_rate   = SHM_AUDIO_SAMPLE_RATE;
-        L.scope_offset        = SHM_SCOPE_START;
-        L.scope_max           = SHM_SCOPE_MAX_SCOPES;
-        L.scope_header_bytes  = SHM_SCOPE_HEADER_SIZE;
-        L.scope_slot_bytes    = SHM_SCOPE_SLOT_SIZE;
-        L.scope_slot_header   = SHM_SCOPE_SLOT_HEADER_SIZE;
-        L.scope_ring_frames   = SHM_SCOPE_RING_FRAMES;
-        L.scope_channels      = SHM_SCOPE_CHANNELS;
+        L.tap_offset        = SHM_TAP_START;
+        L.tap_max           = SHM_TAP_MAX_TAPS;
+        L.tap_header_bytes  = SHM_TAP_HEADER_SIZE;
+        L.tap_slot_bytes    = SHM_TAP_SLOT_SIZE;
+        L.tap_slot_header   = SHM_TAP_SLOT_HEADER_SIZE;
+        L.tap_ring_frames   = SHM_TAP_RING_FRAMES;
+        L.tap_channels      = SHM_TAP_CHANNELS;
         L.track_offset        = SHM_TRACK_TAPS_START;
         L.track_slots         = SHM_TRACK_TAPS_SLOTS;
-        L.track_first         = SHM_SCOPE_TRACK_SLOT_BASE;
+        L.track_first         = SHM_TAP_TRACK_SLOT_BASE;
         L.native_stats_offset = NATIVE_STATS_START;   L.native_stats_bytes = NATIVE_STATS_SIZE;
         L.sample_clock_offset = SAMPLE_CLOCK_START;   L.sample_clock_bytes = SAMPLE_CLOCK_SIZE;
         L.channel_map_offset  = CHANNEL_MAP_START;    L.channel_map_bytes  = CHANNEL_MAP_SIZE;
@@ -772,8 +772,8 @@ struct ShmReaderLayout {
         const auto* met  = need(CLOCKWORK_ARENA_METRICS,      "arena has no metrics");
         const auto* win  = need(CLOCKWORK_ARENA_GUEST_WINDOW, "arena has no guest window");
         const auto* clk  = need(CLOCKWORK_ARENA_CLOCK_STATE,  "arena has no clock state");
-        const auto* taps = need(CLOCKWORK_ARENA_AUDIO_TAPS,   "arena has no audio taps");
-        const auto* sc   = need(CLOCKWORK_ARENA_SCOPE,        "arena has no scope streams");
+        const auto* taps = need(CLOCKWORK_ARENA_RAW_SCOPE,   "arena has no raw scope");
+        const auto* sc   = need(CLOCKWORK_ARENA_TAPS,        "arena has no tap streams");
         const auto* ns   = need(CLOCKWORK_ARENA_NATIVE_STATS, "arena has no native stats");
         const auto* smp  = need(CLOCKWORK_ARENA_SAMPLE_CLOCK, "arena has no sample clock");
         const auto* cm   = need(CLOCKWORK_ARENA_CHANNEL_MAP,  "arena has no channel map");
@@ -788,19 +788,19 @@ struct ShmReaderLayout {
         L.window_offset       = win->offset;  L.window_bytes      = win->bytes;
         L.clock_state_offset  = clk->offset;  L.clock_state_bytes = clk->bytes;
         L.audio_offset        = taps->offset;
-        L.audio_slot_count    = taps->geom[CLOCKWORK_GEOM_TAPS_SLOTS];
-        L.audio_slot_bytes    = taps->geom[CLOCKWORK_GEOM_TAPS_SLOT_BYTES];
-        L.audio_header_bytes  = taps->geom[CLOCKWORK_GEOM_TAPS_HEADER_BYTES];
-        L.audio_frames        = taps->geom[CLOCKWORK_GEOM_TAPS_FRAMES];
-        L.audio_channels      = taps->geom[CLOCKWORK_GEOM_TAPS_CHANNELS];
-        L.audio_sample_rate   = taps->geom[CLOCKWORK_GEOM_TAPS_SAMPLE_RATE];
-        L.scope_offset        = sc->offset;
-        L.scope_max           = sc->geom[CLOCKWORK_GEOM_SCOPE_SLOTS];
-        L.scope_header_bytes  = sc->geom[CLOCKWORK_GEOM_SCOPE_HEADER_BYTES];
-        L.scope_slot_bytes    = sc->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES];
-        L.scope_slot_header   = sc->geom[CLOCKWORK_GEOM_SCOPE_SLOT_HEADER];
-        L.scope_ring_frames   = sc->geom[CLOCKWORK_GEOM_SCOPE_RING_FRAMES];
-        L.scope_channels      = sc->geom[CLOCKWORK_GEOM_SCOPE_CHANNELS];
+        L.audio_slot_count    = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS];
+        L.audio_slot_bytes    = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOT_BYTES];
+        L.audio_header_bytes  = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_HEADER_BYTES];
+        L.audio_frames        = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_FRAMES];
+        L.audio_channels      = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_CHANNELS];
+        L.audio_sample_rate   = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SAMPLE_RATE];
+        L.tap_offset        = sc->offset;
+        L.tap_max           = sc->geom[CLOCKWORK_GEOM_TAP_SLOTS];
+        L.tap_header_bytes  = sc->geom[CLOCKWORK_GEOM_TAP_HEADER_BYTES];
+        L.tap_slot_bytes    = sc->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES];
+        L.tap_slot_header   = sc->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER];
+        L.tap_ring_frames   = sc->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES];
+        L.tap_channels      = sc->geom[CLOCKWORK_GEOM_TAP_CHANNELS];
         // Optional: an arena with no track taps has no entry, and that is
         // zero slots, not a refusal.
         if (const auto* tr = clockwork_arena_find(h, CLOCKWORK_ARENA_TRACK_TAPS)) {
@@ -814,17 +814,17 @@ struct ShmReaderLayout {
         return L.check(why);
     }
 
-    // Scope-stream slot `index` in ONE index space: the guest's slots first,
+    // Tap-stream slot `index` in ONE index space: the guest's slots first,
     // then the engine's track taps. nullptr past the end of both.
-    uint8_t* scopeSlotAt(uint8_t* base, uint32_t index) const {
-        if (index < scope_max)
-            return base + scope_offset + scope_header_bytes + size_t(index) * scope_slot_bytes;
-        const uint32_t t = index - scope_max;
+    uint8_t* tapSlotAt(uint8_t* base, uint32_t index) const {
+        if (index < tap_max)
+            return base + tap_offset + tap_header_bytes + size_t(index) * tap_slot_bytes;
+        const uint32_t t = index - tap_max;
         if (t < track_slots)
-            return base + track_offset + size_t(t) * scope_slot_bytes;
+            return base + track_offset + size_t(t) * tap_slot_bytes;
         return nullptr;
     }
-    uint32_t scopeSlotCount() const { return scope_max + track_slots; }
+    uint32_t tapSlotCount() const { return tap_max + track_slots; }
 
     // True when a reader built from THIS tree can address the segment the
     // table describes. `why` names the first failed check, for a log line.
@@ -842,17 +842,17 @@ struct ShmReaderLayout {
         if (metrics_bytes < sizeof(PerformanceMetrics) || !inside(metrics_offset, metrics_bytes)) return fail("metrics smaller than this reader's PerformanceMetrics, or outside the blob");
         if (!inside(window_offset, window_bytes)) return fail("window outside the blob");
         if (clock_state_bytes < sizeof(ClockworkClockState) || !inside(clock_state_offset, clock_state_bytes)) return fail("clock state too small or outside the blob");
-        if (audio_header_bytes != SHM_AUDIO_HEADER_SIZE) return fail("audio tap slot shape differs from this reader's");
-        if (audio_channels > SHM_AUDIO_CHANNELS) return fail("audio taps wider than this reader can interleave");
-        if (audio_slot_count < SHM_AUDIO_SLOTS) return fail("arena has fewer audio taps than out and in");
-        if (audio_slot_bytes < uint64_t(SHM_AUDIO_HEADER_SIZE) + uint64_t(audio_frames) * audio_channels * sizeof(float)) return fail("audio tap slot smaller than its declared ring");
-        if (!inside(audio_offset, uint64_t(audio_slot_count) * audio_slot_bytes)) return fail("audio taps outside the blob");
-        if (scope_slot_header != SHM_SCOPE_STREAM_HEADER_SIZE || scope_channels != SHM_SCOPE_STREAM_CHANNELS) return fail("scope slot shape differs from this reader's");
-        if (scope_slot_bytes < uint64_t(SHM_SCOPE_STREAM_HEADER_SIZE) + uint64_t(scope_ring_frames) * scope_channels * sizeof(float)) return fail("scope slot smaller than its declared ring");
-        if (!inside(scope_offset, uint64_t(scope_header_bytes) + uint64_t(scope_max) * scope_slot_bytes)) return fail("scope streams outside the blob");
+        if (audio_header_bytes != SHM_AUDIO_HEADER_SIZE) return fail("raw scope slot shape differs from this reader's");
+        if (audio_channels > SHM_AUDIO_CHANNELS) return fail("raw scope wider than this reader can interleave");
+        if (audio_slot_count < SHM_AUDIO_SLOTS) return fail("arena has fewer raw scope slots than out and in");
+        if (audio_slot_bytes < uint64_t(SHM_AUDIO_HEADER_SIZE) + uint64_t(audio_frames) * audio_channels * sizeof(float)) return fail("raw scope slot smaller than its declared ring");
+        if (!inside(audio_offset, uint64_t(audio_slot_count) * audio_slot_bytes)) return fail("raw scope outside the blob");
+        if (tap_slot_header != SHM_TAP_STREAM_HEADER_SIZE || tap_channels != SHM_TAP_STREAM_CHANNELS) return fail("tap slot shape differs from this reader's");
+        if (tap_slot_bytes < uint64_t(SHM_TAP_STREAM_HEADER_SIZE) + uint64_t(tap_ring_frames) * tap_channels * sizeof(float)) return fail("tap slot smaller than its declared ring");
+        if (!inside(tap_offset, uint64_t(tap_header_bytes) + uint64_t(tap_max) * tap_slot_bytes)) return fail("tap streams outside the blob");
         if (track_slots != 0) {
-            if (!inside(track_offset, uint64_t(track_slots) * scope_slot_bytes)) return fail("track taps outside the blob");
-            if (track_first != scope_max) return fail("track taps are not numbered after the scope slots");
+            if (!inside(track_offset, uint64_t(track_slots) * tap_slot_bytes)) return fail("track taps outside the blob");
+            if (track_first != tap_max) return fail("track taps are not numbered after the tap slots");
         }
         if (native_stats_bytes < NATIVE_STATS_SIZE || !inside(native_stats_offset, native_stats_bytes)) return fail("native stats too small or outside the blob");
         if (sample_clock_bytes < SAMPLE_CLOCK_SIZE || !inside(sample_clock_offset, sample_clock_bytes)) return fail("sample clock too small or outside the blob");
@@ -908,12 +908,12 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     put(CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublished);
     put(CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
         kPublished | CLOCKWORK_AUDIENCE_GUEST);
-    put(CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kPublished,
+    put(CLOCKWORK_ARENA_RAW_SCOPE,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kPublished,
         { SHM_AUDIO_SLOTS, SHM_AUDIO_SLOT_SIZE, SHM_AUDIO_HEADER_SIZE, SHM_AUDIO_FRAMES,
           SHM_AUDIO_CHANNELS, SHM_AUDIO_SAMPLE_RATE });
     put(CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kPublished,
-        { SHM_TRACK_TAPS_SLOTS, SHM_SCOPE_SLOT_SIZE, SHM_SCOPE_SLOT_HEADER_SIZE, SHM_SCOPE_RING_FRAMES,
-          SHM_SCOPE_CHANNELS, SHM_SCOPE_TRACK_SLOT_BASE });
+        { SHM_TRACK_TAPS_SLOTS, SHM_TAP_SLOT_SIZE, SHM_TAP_SLOT_HEADER_SIZE, SHM_TAP_RING_FRAMES,
+          SHM_TAP_CHANNELS, SHM_TAP_TRACK_SLOT_BASE });
     // the block, the transport run: the command plane
     put(CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kTransport);
     put(CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kTransport);
@@ -930,9 +930,9 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     // The window's identity (magic, version) is the guest's to declare and is
     // written when it binds — arenaSetGuestWindowIdentity — so it is 0 here.
     put(CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     kPublished);
-    put(CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     kPublished,
-        { SHM_SCOPE_MAX_SCOPES, SHM_SCOPE_HEADER_SIZE, SHM_SCOPE_SLOT_SIZE, SHM_SCOPE_SLOT_HEADER_SIZE,
-          SHM_SCOPE_RING_FRAMES, SHM_SCOPE_CHANNELS });
+    put(CLOCKWORK_ARENA_TAPS,           SHM_TAP_START,       SHM_TAP_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     kPublished,
+        { SHM_TAP_MAX_TAPS, SHM_TAP_HEADER_SIZE, SHM_TAP_SLOT_SIZE, SHM_TAP_SLOT_HEADER_SIZE,
+          SHM_TAP_RING_FRAMES, SHM_TAP_CHANNELS });
     // the guest region, the guest's own
     put(CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
         CLOCKWORK_AUDIENCE_GUEST | CLOCKWORK_AUDIENCE_HOST);

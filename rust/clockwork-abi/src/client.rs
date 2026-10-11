@@ -56,8 +56,8 @@ pub struct ClockworkClientInfo {
     pub output_channels: u32,
 }
 
-pub const CLOCKWORK_FEATURE_SCOPE: u32 = 1 << 0;
-pub const CLOCKWORK_FEATURE_AUDIO_TAPS: u32 = 1 << 1;
+pub const CLOCKWORK_FEATURE_TAPS: u32 = 1 << 0;
+pub const CLOCKWORK_FEATURE_RAW_SCOPE: u32 = 1 << 1;
 pub const CLOCKWORK_FEATURE_BULK: u32 = 1 << 2;
 pub const CLOCKWORK_FEATURE_WINDOW: u32 = 1 << 3;
 pub const CLOCKWORK_FEATURE_SCHEDULER: u32 = 1 << 4;
@@ -89,8 +89,8 @@ impl ClockworkRegionId {
     pub const WINDOW: ClockworkRegionId = ClockworkRegionId(2);
     pub const INBOX: ClockworkRegionId = ClockworkRegionId(3);
     pub const OUTBOX: ClockworkRegionId = ClockworkRegionId(4);
-    pub const SCOPE: ClockworkRegionId = ClockworkRegionId(5);
-    pub const AUDIO_TAPS: ClockworkRegionId = ClockworkRegionId(6);
+    pub const TAPS: ClockworkRegionId = ClockworkRegionId(5);
+    pub const RAW_SCOPE: ClockworkRegionId = ClockworkRegionId(6);
     pub const INGRESS: ClockworkRegionId = ClockworkRegionId(7);
     pub const EGRESS: ClockworkRegionId = ClockworkRegionId(8);
     pub const NATIVE_STATS: ClockworkRegionId = ClockworkRegionId(9);
@@ -117,22 +117,22 @@ pub struct ClockworkClientClock {
     pub meter_den: i32,
 }
 
-/// A scope slot reader. Fill `struct_bytes` with `size_of::<Self>()` and
-/// `slot`; `clockwork_client_scope_open` fills the rest.
+/// A tap slot reader. Fill `struct_bytes` with `size_of::<Self>()` and
+/// `slot`; `clockwork_client_audio_tap_open` fills the rest.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct ClockworkScopeReader {
+pub struct ClockworkAudioTapReader {
     pub struct_bytes: u32,
     pub slot: u32,
     pub _internal: *mut c_void,
     pub _ring_frames: u32,
 }
 
-impl ClockworkScopeReader {
-    /// A reader for `slot`, ready to hand to `clockwork_client_scope_open`.
-    pub const fn for_slot(slot: u32) -> ClockworkScopeReader {
-        ClockworkScopeReader {
-            struct_bytes: core::mem::size_of::<ClockworkScopeReader>() as u32,
+impl ClockworkAudioTapReader {
+    /// A reader for `slot`, ready to hand to `clockwork_client_audio_tap_open`.
+    pub const fn for_slot(slot: u32) -> ClockworkAudioTapReader {
+        ClockworkAudioTapReader {
+            struct_bytes: core::mem::size_of::<ClockworkAudioTapReader>() as u32,
             slot,
             _internal: core::ptr::null_mut(),
             _ring_frames: 0,
@@ -184,13 +184,13 @@ extern "C" {
     pub fn clockwork_client_clock(c: *mut ClockworkClient, out: *mut ClockworkClientClock) -> ClockworkStatus;
     pub fn clockwork_client_beat_at(clock: *const ClockworkClientClock, ntp_seconds: f64) -> f64;
 
-    pub fn clockwork_client_scope_open(c: *mut ClockworkClient, slot: u32, out: *mut ClockworkScopeReader) -> ClockworkStatus;
-    pub fn clockwork_client_scope_valid(r: *const ClockworkScopeReader) -> c_int;
-    pub fn clockwork_client_scope_activations(r: *const ClockworkScopeReader) -> u32;
-    pub fn clockwork_client_scope_audible_end(c: *mut ClockworkClient, r: *const ClockworkScopeReader) -> u64;
-    pub fn clockwork_client_scope_read(
+    pub fn clockwork_client_audio_tap_open(c: *mut ClockworkClient, slot: u32, out: *mut ClockworkAudioTapReader) -> ClockworkStatus;
+    pub fn clockwork_client_audio_tap_valid(r: *const ClockworkAudioTapReader) -> c_int;
+    pub fn clockwork_client_audio_tap_activations(r: *const ClockworkAudioTapReader) -> u32;
+    pub fn clockwork_client_audio_tap_audible_end(c: *mut ClockworkClient, r: *const ClockworkAudioTapReader) -> u64;
+    pub fn clockwork_client_audio_tap_read(
         c: *mut ClockworkClient,
-        r: *const ClockworkScopeReader,
+        r: *const ClockworkAudioTapReader,
         end: u64,
         frames: u32,
         out: *mut f32,

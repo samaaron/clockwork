@@ -51,13 +51,13 @@ using detail_shm_segment::shm_create;
 using detail_shm_segment::shm_close;
 using detail_shm_segment::shm_remove;
 
-// The scope slot claim and release (rust/clockwork-scope). Declared here rather
+// The tap slot claim and release (rust/clockwork-taps). Declared here rather
 // than through dsp/scsynth/scsynth_scope.h, whose declaration names scsynth's
-// World and ScopeBufferHnd: the Rust side takes an opaque context it never
-// reads and a handle of the four-field shape ScopeTap::Claim spells out.
+// World and TapBufferHnd: the Rust side takes an opaque context it never
+// reads and a handle of the four-field shape TrackTap::Claim spells out.
 extern "C" {
-int  clockwork_scope_get(void* ctx, int index, int channels, int max_frames, void* hnd);
-void clockwork_scope_release(void* ctx, void* hnd);
+int  clockwork_tap_get(void* ctx, int index, int channels, int max_frames, void* hnd);
+void clockwork_tap_release(void* ctx, void* hnd);
 }
 
 namespace {
@@ -145,7 +145,7 @@ void TrackControl::shutdown() {
         // The signal is gone and the bindings with it; give the audio thread
         // a block to be out of the last signal before the pages go.
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        releaseScopes();
+        releaseTaps();
         mHeader = nullptr;
         shm_close(mSeg);
         shm_remove(segment_name(ownPid()));
@@ -265,30 +265,30 @@ void TrackControl::tapReturns() {
     Header* h = mHeader;
     if (!h || mBoundBase == 0) return;
     // Keep the claims in step with the bridge's word on which slots hold a
-    // track. A lane pair with no track reads as silence, and a scope stream
+    // track. A lane pair with no track reads as silence, and a tap stream
     // of silence would show a track that is not there.
     const uint32_t live = h->slots_live.load(std::memory_order_relaxed);
     const float* bus = reinterpret_cast<const float*>(get_audio_input_bus());
     const uint32_t frames = clockwork_block_size();
     const uint64_t at = g_engine_frames.load(std::memory_order_relaxed);
     // Only the slots this build carved: a profile with none has nothing to
-    // claim, and its tracks simply have no scope.
-    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, SHM_SCOPE_TRACK_SLOTS);
+    // claim, and its tracks simply have no tap.
+    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, SHM_TAP_TRACK_SLOTS);
     for (uint32_t slot = 0; slot < slots; ++slot) {
-        ScopeTap& tap = mScopes[slot];
+        TrackTap& tap = mTaps[slot];
         const bool want = (live >> slot) & 1u;
         if (want && !tap.writer.valid()) {
-            if (clockwork_scope_get(nullptr, static_cast<int>(SHM_SCOPE_TRACK_SLOT_BASE + slot),
-                                   static_cast<int>(SHM_SCOPE_STREAM_CHANNELS), 0, &tap.claim))
-                tap.writer = shm_scope_stream_writer(
-                    static_cast<shm_scope_stream*>(tap.claim.internalData));
+            if (clockwork_tap_get(nullptr, static_cast<int>(SHM_TAP_TRACK_SLOT_BASE + slot),
+                                   static_cast<int>(SHM_TAP_STREAM_CHANNELS), 0, &tap.claim))
+                tap.writer = shm_tap_stream_writer(
+                    static_cast<shm_tap_stream*>(tap.claim.internalData));
         } else if (!want && tap.writer.valid()) {
-            clockwork_scope_release(nullptr, &tap.claim);
-            tap.writer = shm_scope_stream_writer();
+            clockwork_tap_release(nullptr, &tap.claim);
+            tap.writer = shm_tap_stream_writer();
         }
         if (!tap.writer.valid() || !bus || frames == 0) continue;
         // The return lanes are channel-major on the bus, a block apart.
-        const std::array<const float*, SHM_SCOPE_STREAM_CHANNELS> ch = {
+        const std::array<const float*, SHM_TAP_STREAM_CHANNELS> ch = {
             bus + static_cast<size_t>(mBoundBase + 2 * slot) * frames,
             bus + static_cast<size_t>(mBoundBase + 2 * slot + 1) * frames,
         };
@@ -298,11 +298,11 @@ void TrackControl::tapReturns() {
 
 // Control thread, once the return's signal is gone and the audio thread has
 // had a block to leave it.
-void TrackControl::releaseScopes() {
-    for (ScopeTap& tap : mScopes) {
+void TrackControl::releaseTaps() {
+    for (TrackTap& tap : mTaps) {
         if (!tap.writer.valid()) continue;
-        clockwork_scope_release(nullptr, &tap.claim);
-        tap.writer = shm_scope_stream_writer();
+        clockwork_tap_release(nullptr, &tap.claim);
+        tap.writer = shm_tap_stream_writer();
     }
 }
 

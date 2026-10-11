@@ -15,7 +15,7 @@
 //  both segments are flat fixed-layout regions with no dynamic allocator.
 //
 //  The two slots are clockwork's taps — see "The taps" below. A guest's own
-//  taps are its scope streams (shm_scope_stream.hpp); nothing of a guest's
+//  taps are its tap streams (shm_tap_stream.hpp); nothing of a guest's
 //  is written here.
 
 #pragma once
@@ -48,7 +48,7 @@ namespace detail_shm_audio {
 //   IN  — what arrived from the device this block, as the guest saw it.
 // The same on every host: the native callback, the worklet's quantum, a
 // DAW's process. A client always has the master mix, and the input, with no
-// guest cooperation, through the AUDIO_TAPS entry of the arena table
+// guest cooperation, through the RAW_SCOPE entry of the arena table
 // (clockwork_arena.h). Each slot carries `channels` live device channels, up
 // to CLOCKWORK_TAP_CHANNELS (memory_profile.h); `enabled` says the tap is
 // live (the device has that direction); the cursor is monotonic and a

@@ -520,7 +520,7 @@ void ClockworkProcessor::process(
         wallNTP += static_cast<double>(mBufLen) / mSampleRate;
         linkAudioBlockHostMicros += engineBlockMicros;
         mSamplePosition += mBufLen;
-        // Keep scope-stream writes anchored to the block being rendered.
+        // Keep tap-stream writes anchored to the block being rendered.
         mClockworkClock->advanceEngineFrames(mSamplePosition);
 
         const float* outputBus = clockwork_audio_out();
@@ -557,7 +557,7 @@ void ClockworkProcessor::process(
         }
     }
 
-    // (No recording tap here: the master mix leaves through the audio taps
+    // (No recording tap here: the master mix leaves through the raw scope
     // a client reads — shm_audio_buffer slot 0 — and a client records it.)
 
     // ── 4. Timing stats (no I/O on audio thread — store atomically for external query) ──

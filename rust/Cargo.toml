@@ -16,7 +16,7 @@
 # * `clockwork-schedule` — the timed-event store and the wire forms that carry
 #                          a time. The implementation of src/scheduler/*.
 # * `clockwork-heap`    — the growable pool the host suballocates from.
-# * `clockwork-scope`   — scope slot claim/release over the shared-memory plane.
+# * `clockwork-taps`   — tap slot claim/release over the shared-memory plane.
 # * `clockwork-clock`  — a beat grid as a value (the Timeline snapshot) and the
 #                          MIDI-clock follower registry that produces them.
 # * `clockwork-slots`   — the stable-slot table: a generation-tagged handle,
@@ -52,7 +52,7 @@
 # * `clockwork-client`  — the client boundary as SAFE Rust: a handle that
 #                          closes itself, send and poll over slices, regions,
 #                          metrics by name (generated from the schema), the
-#                          clock, scopes, and the embed door (boot or attach
+#                          clock, taps, and the embed door (boot or attach
 #                          an engine in this process). Built on clockwork-abi;
 #                          tested against a headless engine linked through
 #                          clockwork-sys with the dummy DSP.
@@ -76,7 +76,7 @@ members = [
     "clockwork-native",
     "clockwork-bridge-native",
     "clockwork-heap",
-    "clockwork-scope",
+    "clockwork-taps",
     "clockwork-clock",
     "clockwork-sys",
     "clockwork-client",

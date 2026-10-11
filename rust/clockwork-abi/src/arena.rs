@@ -60,18 +60,18 @@ impl ClockworkArenaRegion {
     pub const IN_RING: Self = Self(9);
     pub const OUT_RING: Self = Self(10);
     pub const NRT_OUT_RING: Self = Self(11);
-    pub const AUDIO_TAPS: Self = Self(12);
+    pub const RAW_SCOPE: Self = Self(12);
     pub const CLIENT_SLOTS: Self = Self(13);
     pub const GUEST_CONFIG: Self = Self(14);
     pub const GUEST_WINDOW: Self = Self(15);
-    pub const SCOPE: Self = Self(16);
+    pub const TAPS: Self = Self(16);
     pub const GUEST_PERSIST: Self = Self(17);
-    /// Scope-stream slots the engine writes from plugin-track returns,
-    /// numbered after the guest's scope slots in one index space.
+    /// Tap-stream slots the engine writes from plugin-track returns,
+    /// numbered after the guest's tap slots in one index space.
     pub const TRACK_TAPS: Self = Self(18);
 }
 
-/// The two audio taps, as slot indices into `AUDIO_TAPS`: what left for the
+/// The two raw scope slots, as slot indices into `RAW_SCOPE`: what left for the
 /// device this block, and what arrived from it. Written by clockwork inside
 /// every tick, on every host.
 pub const CLOCKWORK_TAP_OUT: u32 = 0;
@@ -88,18 +88,18 @@ pub mod geom {
     pub const ANCHOR_NTP_START: usize = 0;
     pub const ANCHOR_DRIFT: usize = 1;
     pub const ANCHOR_GLOBAL: usize = 2;
-    pub const TAPS_SLOTS: usize = 0;
-    pub const TAPS_SLOT_BYTES: usize = 1;
-    pub const TAPS_HEADER_BYTES: usize = 2;
-    pub const TAPS_FRAMES: usize = 3;
-    pub const TAPS_CHANNELS: usize = 4;
-    pub const TAPS_SAMPLE_RATE: usize = 5;
-    pub const SCOPE_SLOTS: usize = 0;
-    pub const SCOPE_HEADER_BYTES: usize = 1;
-    pub const SCOPE_SLOT_BYTES: usize = 2;
-    pub const SCOPE_SLOT_HEADER: usize = 3;
-    pub const SCOPE_RING_FRAMES: usize = 4;
-    pub const SCOPE_CHANNELS: usize = 5;
+    pub const RAW_SCOPE_SLOTS: usize = 0;
+    pub const RAW_SCOPE_SLOT_BYTES: usize = 1;
+    pub const RAW_SCOPE_HEADER_BYTES: usize = 2;
+    pub const RAW_SCOPE_FRAMES: usize = 3;
+    pub const RAW_SCOPE_CHANNELS: usize = 4;
+    pub const RAW_SCOPE_SAMPLE_RATE: usize = 5;
+    pub const TAP_SLOTS: usize = 0;
+    pub const TAP_HEADER_BYTES: usize = 1;
+    pub const TAP_SLOT_BYTES: usize = 2;
+    pub const TAP_SLOT_HEADER: usize = 3;
+    pub const TAP_RING_FRAMES: usize = 4;
+    pub const TAP_CHANNELS: usize = 5;
     pub const TRACK_SLOTS: usize = 0;
     pub const TRACK_SLOT_BYTES: usize = 1;
     pub const TRACK_SLOT_HEADER: usize = 2;
@@ -278,7 +278,7 @@ mod tests {
         assert!(h.published(ClockworkArenaRegion::GUEST_WINDOW));
         assert!(!h.published(ClockworkArenaRegion::IN_RING));
         assert!(!h.published(ClockworkArenaRegion::GUEST_PERSIST));
-        assert!(!h.published(ClockworkArenaRegion::SCOPE)); // absent
+        assert!(!h.published(ClockworkArenaRegion::TAPS)); // absent
         assert_eq!(h.find(ClockworkArenaRegion::CLOCK_STATE).unwrap().audience() & ClockworkArenaAudience::GUEST.0, 2);
     }
 

@@ -91,7 +91,7 @@ TEST_CASE("shm audio: a pull spanning the ring wrap is contiguous",
     // A capacity the block size does NOT divide, so a write straddles the
     // boundary rather than always landing on it — the arrangement in which a
     // dropped modulo still places every sample correctly and the test proves
-    // nothing. (It caught exactly that in the scope-stream ring.)
+    // nothing. (It caught exactly that in the tap-stream ring.)
     const uint32_t cap = 3000;
     REQUIRE(w.activate(2, 48000, cap));
     REQUIRE(cap % 512 != 0);

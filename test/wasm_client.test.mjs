@@ -91,7 +91,7 @@ async function bootEngine() {
   // in each half's published run; the command plane is transport, after it.
   assert.ok(arena.published(REGION.METRICS), "metrics are a published contract");
   assert.ok(arena.published(REGION.CLOCK_STATE), "the clock state is a published contract");
-  assert.ok(arena.published(REGION.AUDIO_TAPS), "the audio taps are a published contract");
+  assert.ok(arena.published(REGION.RAW_SCOPE), "the raw scope is a published contract");
   assert.ok(arena.published(REGION.GUEST_WINDOW), "the guest window is a published contract");
   assert.ok(!arena.published(REGION.IN_RING), "the ingress ring is transport");
   assert.ok(!arena.published(REGION.CONTROL), "the control block is transport");

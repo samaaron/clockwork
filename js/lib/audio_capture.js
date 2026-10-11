@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
 /**
- * AudioCapture — a client's reader of an audio tap (shm_audio_buffer.hpp).
+ * AudioCapture — a client's reader of a raw scope (shm_audio_buffer.hpp).
  *
- * The taps are clockwork's and flow from boot: the OUT tap is what left for
- * the device each block, the IN tap what arrived. A capture is therefore a
+ * The raw scope is clockwork's and flow from boot: the OUT slot is what left for
+ * the device each block, the IN slot what arrived. A capture is therefore a
  * READER'S notion: start() notes where the writer's cursor is, read()
  * returns the frames written since, and nothing is toggled in the engine.
  * The ring holds SHM_AUDIO_FRAMES (a second in production); a capture that
@@ -22,7 +22,7 @@ export class AudioCapture {
 
   /**
    * @param {object} [options]
-   * @param {number} [options.slot] 0 for the OUT tap (default), 1 for the IN tap
+   * @param {number} [options.slot] 0 for the OUT slot (default), 1 for the IN slot
    */
   constructor(options = {}) {
     this.#sharedBuffer = options.sharedBuffer || null;

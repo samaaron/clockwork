@@ -179,8 +179,8 @@ dependencies = [
  "clockwork-ports",
  "clockwork-ports-disk",
  "clockwork-schedule",
- "clockwork-scope",
  "clockwork-sinks",
+ "clockwork-taps",
 ]
 
 [[package]]
@@ -222,13 +222,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clockwork-scope"
-version = "0.1.0"
-dependencies = [
- "portable-atomic",
-]
-
-[[package]]
 name = "clockwork-sinks"
 version = "0.1.0"
 dependencies = [
@@ -250,6 +243,13 @@ dependencies = [
 [[package]]
 name = "clockwork-sys"
 version = "0.1.0"
+
+[[package]]
+name = "clockwork-taps"
+version = "0.1.0"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "combine"

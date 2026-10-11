@@ -17,7 +17,7 @@
 #include "clockwork_client.h"
 #include "lanes/lanes.h"
 #include "shared_memory.h"
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -324,12 +324,12 @@ TEST_CASE("client abi: an older caller's struct is not written past",
     CHECK(full.sample_rate == Catch::Approx(clockwork_sample_rate()));
     CHECK(full.block_frames == clockwork_block_size());
     CHECK(full.output_channels > 0);
-    CHECK(full.features & CLOCKWORK_FEATURE_SCOPE);
+    CHECK(full.features & CLOCKWORK_FEATURE_TAPS);
 
     clockwork_client_close(c);
 }
 
-TEST_CASE("client abi: a scope slot reads as silence unless it is live", "[client][abi]") {
+TEST_CASE("client abi: a tap slot reads as silence unless it is live", "[client][abi]") {
     // A slot that was never claimed, or was released, still holds whatever
     // its ring last carried. The header promises a reader silence for it —
     // `out` always fully written — so a display never draws a dead slot's
@@ -339,30 +339,30 @@ TEST_CASE("client abi: a scope slot reads as silence unless it is live", "[clien
     ClockworkClient* c = openInProcess(&st);
     REQUIRE(st == CLOCKWORK_OK);
 
-    ClockworkScopeReader r{};
+    ClockworkAudioTapReader r{};
     r.struct_bytes = sizeof(r);
-    REQUIRE(clockwork_client_scope_open(c, 0, &r) == CLOCKWORK_OK);
-    CHECK(clockwork_client_scope_valid(&r) == 0);
+    REQUIRE(clockwork_client_audio_tap_open(c, 0, &r) == CLOCKWORK_OK);
+    CHECK(clockwork_client_audio_tap_valid(&r) == 0);
 
     const uint32_t frames = 64;
-    std::vector<float> out(frames * SHM_SCOPE_STREAM_CHANNELS, 7.0f);
+    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, 7.0f);
     uint32_t channels = 0;
-    CHECK(clockwork_client_scope_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == 0);
-    CHECK(channels == SHM_SCOPE_STREAM_CHANNELS);
+    CHECK(clockwork_client_audio_tap_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == 0);
+    CHECK(channels == SHM_TAP_STREAM_CHANNELS);
     for (float s : out) REQUIRE(s == 0.0f);
 
     // The slot's producer claims it and writes a ramp: the reader sees the
     // ramp, right-aligned to the write edge.
-    auto* slot = reinterpret_cast<shm_scope_stream*>(shared_memory + SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE);
-    shm_scope_stream_writer w(slot);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
+    shm_tap_stream_writer w(slot);
     w.activate(2);
     std::vector<float> l(256), rr(256);
     for (uint32_t i = 0; i < 256; ++i) { l[i] = static_cast<float>(i); rr[i] = -static_cast<float>(i); }
     const float* block[2] = { l.data(), rr.data() };
     w.write(block, 256, 0);
-    CHECK(clockwork_client_scope_valid(&r) == 1);
+    CHECK(clockwork_client_audio_tap_valid(&r) == 1);
     std::fill(out.begin(), out.end(), 7.0f);
-    REQUIRE(clockwork_client_scope_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == frames);
+    REQUIRE(clockwork_client_audio_tap_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == frames);
     CHECK(channels == 2);
     for (uint32_t f = 0; f < frames; ++f) {
         INFO("frame " << f);
@@ -372,15 +372,15 @@ TEST_CASE("client abi: a scope slot reads as silence unless it is live", "[clien
 
     // Released: the ring still holds the ramp, and the reader reports none of it.
     slot->state.store(0, std::memory_order_release);
-    CHECK(clockwork_client_scope_valid(&r) == 0);
+    CHECK(clockwork_client_audio_tap_valid(&r) == 0);
     std::fill(out.begin(), out.end(), 7.0f);
-    CHECK(clockwork_client_scope_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == 0);
+    CHECK(clockwork_client_audio_tap_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == 0);
     for (float s : out) REQUIRE(s == 0.0f);
 
     clockwork_client_close(c);
 }
 
-TEST_CASE("client abi: a scope slot says how many times it went live", "[client][abi]") {
+TEST_CASE("client abi: a tap slot says how many times it went live", "[client][abi]") {
     // A client polls; a live spell can fall between two polls. The count
     // changes for every one, so a client that noted it can tell.
     Engine e;
@@ -388,22 +388,22 @@ TEST_CASE("client abi: a scope slot says how many times it went live", "[client]
     ClockworkClient* c = openInProcess(&st);
     REQUIRE(st == CLOCKWORK_OK);
 
-    ClockworkScopeReader r{};
+    ClockworkAudioTapReader r{};
     r.struct_bytes = sizeof(r);
-    REQUIRE(clockwork_client_scope_open(c, 1, &r) == CLOCKWORK_OK);
-    const uint32_t before = clockwork_client_scope_activations(&r);
+    REQUIRE(clockwork_client_audio_tap_open(c, 1, &r) == CLOCKWORK_OK);
+    const uint32_t before = clockwork_client_audio_tap_activations(&r);
 
-    auto* slot = reinterpret_cast<shm_scope_stream*>(shared_memory + SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE
-                                                      + SHM_SCOPE_SLOT_SIZE);
-    shm_scope_stream_writer w(slot);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + SHM_TAP_START + SHM_TAP_HEADER_SIZE
+                                                      + SHM_TAP_SLOT_SIZE);
+    shm_tap_stream_writer w(slot);
     w.activate(2);
     slot->state.store(0, std::memory_order_release);   // and gone again, unseen
-    CHECK(clockwork_client_scope_valid(&r) == 0);
-    CHECK(clockwork_client_scope_activations(&r) == before + 1);
+    CHECK(clockwork_client_audio_tap_valid(&r) == 0);
+    CHECK(clockwork_client_audio_tap_activations(&r) == before + 1);
 
-    ClockworkScopeReader none{};
-    CHECK(clockwork_client_scope_activations(&none) == 0);
-    CHECK(clockwork_client_scope_activations(nullptr) == 0);
+    ClockworkAudioTapReader none{};
+    CHECK(clockwork_client_audio_tap_activations(&none) == 0);
+    CHECK(clockwork_client_audio_tap_activations(nullptr) == 0);
 
     clockwork_client_close(c);
 }

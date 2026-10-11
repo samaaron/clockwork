@@ -192,7 +192,7 @@ struct alignas(64) Header {
     // Which lane pairs carry a track, bit k for slot k (clockwork_track_slot_mask),
     // written by the bridge every block it renders. The engine never sees
     // the track model; this is how it knows which return lanes are worth
-    // tapping — one scope stream per track (TrackControl, the return port's
+    // tapping — one tap stream per track (TrackControl, the return port's
     // transfer signal) — and which are silence it can leave alone.
     std::atomic<uint32_t> slots_live;
 

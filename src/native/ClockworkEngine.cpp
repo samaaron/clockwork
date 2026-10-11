@@ -54,7 +54,7 @@ extern "C" {
 
     // Unified-arena base. When non-null, init_memory() points the engine's
     // whole shared_memory.h blob (rings, control, metrics, node-tree, audio
-    // taps, scope) at this address — the public POSIX segment — instead of the
+    // raw scope, taps) at this address — the public POSIX segment — instead of the
     // process-local ring_buffer_storage. Everything is observable for free.
     extern uint8_t* g_external_segment;
 
@@ -1020,7 +1020,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         try {
             mShmemCreator = std::make_unique<shm_segment_creator>(cfg.inboxBytes, cfg.outboxBytes);
             // Point the engine's whole shared_memory.h arena at the public
-            // segment: rings, control, metrics, node-tree, audio taps and
+            // segment: rings, control, metrics, node-tree, raw scope and
             // scope all live there, observable cross-process for free.
             g_external_segment = mShmemCreator->get_base();
         } catch (const std::exception& e) {
@@ -1085,7 +1085,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // THE SEGMENT PUBLISHES THESE, IT DOES NOT CREATE THEM, which is how the
     // rest of the layout works: shared_memory is the public segment when there
     // is one and process-local ring_buffer_storage when there is not, so
-    // metrics, the scope and the node-tree window are there either way. An
+    // metrics, the taps and the node-tree window are there either way. An
     // engine embedded with no UDP port still has a client — the host
     // application, in this process, reading in place — and a plugin's GUI
     // reads what the guest publishes through the outbox.
@@ -3652,7 +3652,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // Cold swaps tear down and re-init the shared-memory arena (destroy_dsp
     // / rebuild_dsp → init_memory → clockwork_lanes_reset_drains) that the
     // control pass drains — park it until the arena is back, whoever runs it.
-    // Scope guard so every exit path below resumes it; the happy paths
+    // Tap guard so every exit path below resumes it; the happy paths
     // resume explicitly just before audio restarts.
     struct ControlPark {
         ClockworkEngine* engine = nullptr;
@@ -4126,7 +4126,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                     result.sampleRate, result.bufferSize,
                     mCurrentConfig.numOutputChannels);
 
-            // Scopes draw the window being heard, which this device's output
+            // Taps draw the window being heard, which this device's output
             // latency puts behind the writer. A ring that cannot hold that
             // window leaves every scope flat while the audio is fine — say
             // so here, where the latency is first known, rather than let it
@@ -4134,12 +4134,12 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             {
                 const int outLat = finalDev->getOutputLatencyInSamples();
                 if (outLat > 0 && result.sampleRate > 0
-                    && !shm_scope_ring_covers(static_cast<uint32_t>(outLat), result.sampleRate))
+                    && !shm_tap_ring_covers(static_cast<uint32_t>(outLat), result.sampleRate))
                     clockwork_log("[device-setup] WARNING: output latency %d frames (%.0f ms) "
-                            "is more than the scope ring covers (%u frames): scopes "
+                            "is more than the tap ring covers (%u frames): scopes "
                             "will show nothing on this device",
                             outLat, outLat * 1000.0 / result.sampleRate,
-                            static_cast<unsigned>(SHM_SCOPE_RING_FRAMES));
+                            static_cast<unsigned>(SHM_TAP_RING_FRAMES));
             }
 
             // Remember the rate of the last non-wireless settle so a

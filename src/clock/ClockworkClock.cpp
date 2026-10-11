@@ -12,7 +12,7 @@
 #include "clock/ClockworkClock.h"
 #include "clock/clock_math.h"
 #include "shared_memory.h"
-#include "shm_scope_stream.hpp"  // g_engine_frames (stream anchor)
+#include "shm_tap_stream.hpp"  // g_engine_frames (stream anchor)
 
 #include <atomic>
 #include <cmath>

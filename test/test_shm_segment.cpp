@@ -122,7 +122,7 @@ TEST_CASE("shm-security: stream readers pin the client mapping (no dangling read
     // 2026-07-11 this exact sequence was a GUI segfault (poll timer → atomic
     // load through the munmapped slot pointer).
     auto client = std::make_unique<shm_segment_client>(shm_dup_handle(creator.native_handle()));
-    auto reader = client->get_scope_stream_reader(0);
+    auto reader = client->get_tap_stream_reader(0);
     client.reset();
 
     float scratch[64 * 2] = {};
@@ -137,22 +137,22 @@ TEST_CASE("shm-security: stream reader clamps corrupt slot geometry",
     shm_segment_creator creator;
     creator.publish();
     shm_segment_client client(shm_dup_handle(creator.native_handle()));
-    auto reader = client.get_scope_stream_reader(0);
+    auto reader = client.get_tap_stream_reader(0);
 
     // channels/capacity_frames are re-read from shared memory on every
     // copy_window and index into the inline data array; a corrupt or hostile
     // slot must clamp to the compile-time ring geometry rather than push
     // reads out of bounds (or divide by a zero capacity).
-    auto* slot = reinterpret_cast<shm_scope_stream*>(
-        creator.get_base() + SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(
+        creator.get_base() + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 0xFFFFu;
     slot->capacity_frames = 0;
     slot->write_position.store(1u << 20, std::memory_order_release);
 
-    CHECK(reader.channels() == SHM_SCOPE_STREAM_CHANNELS);
-    CHECK(reader.capacity_frames() == SHM_SCOPE_RING_FRAMES);
-    std::vector<float> scratch(1024 * SHM_SCOPE_STREAM_CHANNELS, 0.0f);
+    CHECK(reader.channels() == SHM_TAP_STREAM_CHANNELS);
+    CHECK(reader.capacity_frames() == SHM_TAP_RING_FRAMES);
+    std::vector<float> scratch(1024 * SHM_TAP_STREAM_CHANNELS, 0.0f);
     (void)reader.copy_window(reader.write_position(), 1024, scratch.data());
     SUCCEED("copy_window stayed inside the inline ring under corrupt geometry");
 
@@ -183,9 +183,9 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     auto* moved = reinterpret_cast<std::atomic<uint32_t>*>(creator.get_base() + movedStats);
     moved[NATIVE_STAT_CPU_AVG_CENTI / 4].store(4242, std::memory_order_relaxed);
 
-    // The engine claims a smaller scope ring than this build's: the reader
+    // The engine claims a smaller tap ring than this build's: the reader
     // clamps a slot's self-declared capacity to the ENGINE's, not to ours.
-    entry(CLOCKWORK_ARENA_SCOPE)->geom[CLOCKWORK_GEOM_SCOPE_RING_FRAMES] = 64;
+    entry(CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES] = 64;
 
     // And more metrics fields than this build names: the count is the engine's.
     entry(CLOCKWORK_ARENA_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = METRICS_SIZE / 4 + 8;
@@ -195,12 +195,12 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     CHECK(client.metrics_field_count() == METRICS_SIZE / 4 + 8);
     CHECK(client.layout().window_offset == movedStats);
 
-    auto* slot = reinterpret_cast<shm_scope_stream*>(
-        creator.get_base() + SHM_SCOPE_START + SHM_SCOPE_HEADER_SIZE);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(
+        creator.get_base() + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 2;
-    slot->capacity_frames = SHM_SCOPE_RING_FRAMES;   // more than the engine says it has
-    CHECK(client.get_scope_stream_reader(0).capacity_frames() == 64);
+    slot->capacity_frames = SHM_TAP_RING_FRAMES;   // more than the engine says it has
+    CHECK(client.get_tap_stream_reader(0).capacity_frames() == 64);
 }
 
 TEST_CASE("shm-security: client refuses a layout that runs past the segment or shrinks a struct",
@@ -229,11 +229,11 @@ TEST_CASE("shm-security: client refuses a layout that runs past the segment or s
         return const_cast<ClockworkArenaEntry*>(clockwork_arena_find(a, id));
     };
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_METRICS)->offset = a->arena_bytes; }));                       // past the blob
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_SCOPE)->geom[CLOCKWORK_GEOM_SCOPE_SLOTS] = 0x00FFFFFFu; }));  // scope array overruns the blob
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_AUDIO_TAPS)->geom[CLOCKWORK_GEOM_TAPS_SLOTS] = 0xFFFFFFFFu; })); // count × stride overflow
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOTS] = 0x00FFFFFFu; }));  // scope array overruns the blob
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_RAW_SCOPE)->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS] = 0xFFFFFFFFu; })); // count × stride overflow
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = 4; }));      // smaller than PerformanceMetrics
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCK_STATE)->bytes = 8; }));                                 // smaller than ClockworkClockState
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_SCOPE)->geom[CLOCKWORK_GEOM_SCOPE_SLOT_HEADER] = 16; }));     // a slot shape we do not know
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER] = 16; }));     // a slot shape we do not know
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { a->version = CLOCKWORK_ARENA_VERSION + 1; }));                                        // a table we were not written for
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { a->magic = 0; }));                                                                     // not an arena at all
     CHECK(refused([&](H* h, ClockworkArenaHeader*) { h->blob_size = 0x7FFFFFFFu; }));                                                      // blob larger than the mapping

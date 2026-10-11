@@ -63,8 +63,8 @@ void midi_transport_noop(void*, const uint8_t*, uint32_t, const uint8_t*, uint32
 
 // ── Engine-side externs the umbrella staticlib references ───────────────────
 // The lean host builds the umbrella with only the osc/midi subsystems, but
-// the archive's shared support code (buffers, scope) still names the engine's
-// logging and shm boundaries. The host has neither an engine log ring nor a scope
+// the archive's shared support code (buffers, taps) still names the engine's
+// logging and shm boundaries. The host has neither an engine log ring nor a tap
 // shm segment, so these are honest stand-ins: log to stderr, publish no shm.
 extern "C" int clockwork_log(const char* fmt, ...) {
     va_list args;
@@ -75,7 +75,7 @@ extern "C" int clockwork_log(const char* fmt, ...) {
     return n;
 }
 extern "C" void* clockwork_shm_base(void) { return nullptr; }
-extern "C" int clockwork_scope_geometry(size_t*, size_t*, size_t*, size_t*, unsigned*, unsigned*) { return 0; }
+extern "C" int clockwork_tap_geometry(size_t*, size_t*, size_t*, size_t*, unsigned*, unsigned*) { return 0; }
 
 int main(int argc, char** argv) {
     int control_port = argc > 1 ? std::atoi(argv[1]) : 4560;

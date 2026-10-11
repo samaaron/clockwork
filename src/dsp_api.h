@@ -138,7 +138,7 @@ typedef struct DspConfig {
      * behind 8 MiB of slower PSRAM) hands the guest two arenas: `arena` is
      * placed in the fast tier and `arena_bulk` in the bulk tier, so a guest can
      * carve its hot state — VM slots, kernel state, wires — from the one and its
-     * cold, large state — loop cells, sample data, scope rings — from the other,
+     * cold, large state — loop cells, sample data, tap rings — from the other,
      * and the placement is decided by the host's memory profile rather than
      * inside each guest crate.
      *
@@ -204,17 +204,17 @@ typedef enum DspFpEnv {
     DSP_FP_ENV_FLUSH_TO_ZERO      = 2   /* FTZ/DAZ armed on the audio thread by the host */
 } DspFpEnv;
 
-/* A DSP's hold on a scope slot (DspHost::scope_open). Four words, the shape
-   the scope substrate spells out (rust/clockwork-scope), and a DSP treats it
+/* A DSP's hold on a tap slot (DspHost::tap_open). Four words, the shape
+   the tap substrate spells out (rust/clockwork-taps), and a DSP treats it
    as opaque apart from two reads: `slot` is non-NULL while the handle owns a
    slot, and `channels` is how many channels that slot carries, as clamped by
    the host. The other two are historical and 0. */
-typedef struct DspScopeHandle {
+typedef struct DspTapHandle {
     void*    slot;
     float*   data;
     uint32_t channels;
     uint32_t max_frames;
-} DspScopeHandle;
+} DspTapHandle;
 
 /* What the DSP may call back into. Every entry may be NULL; a DSP must check.
    `ctx` is clockwork's own and is passed back untouched. */
@@ -325,14 +325,14 @@ typedef struct DspHost {
      * bytes. */
     void* (*alloc_bytes)(void* ctx, size_t bytes);
 
-    /* ── Scopes ────────────────────────────────────────────────────────────
+    /* ── Taps ────────────────────────────────────────────────────────────
      *
-     * A scope is a stream of audio a client reads out of shared memory to
+     * A tap is a stream of audio a client reads out of shared memory to
      * draw. Clockwork owns the slots and the ring format; a DSP that wants to
      * publish one claims a slot here and appends blocks to it, and never
      * learns the layout.
      *
-     * scope_open claims slot `index` for `channels` channels — clamped to
+     * tap_open claims slot `index` for `channels` channels — clamped to
      * what a slot carries, and the clamped count is written back into the
      * handle — and returns non-zero if it did. The handle is the DSP's, and
      * it is the handle's ADDRESS that owns the slot: a slot may be re-claimed
@@ -340,16 +340,16 @@ typedef struct DspHost {
      * rebuilt under a running client), and a late close from the old handle
      * then does nothing. Callable from the audio thread; never allocates.
      *
-     * scope_write appends `frames` frames from `n_channels` channel buffers.
+     * tap_write appends `frames` frames from `n_channels` channel buffers.
      * Fewer channels than the slot carries fill the rest with the last one
      * given. Clockwork anchors the block on its own sample clock, so the DSP
      * has no position to pass. Audio thread; never allocates or blocks.
      *
-     * scope_close gives the slot back, if `hnd` still owns it. */
-    int  (*scope_open)(void* ctx, uint32_t index, uint32_t channels, DspScopeHandle* hnd);
-    void (*scope_write)(void* ctx, DspScopeHandle* hnd, const float* const* channels,
+     * tap_close gives the slot back, if `hnd` still owns it. */
+    int  (*tap_open)(void* ctx, uint32_t index, uint32_t channels, DspTapHandle* hnd);
+    void (*tap_write)(void* ctx, DspTapHandle* hnd, const float* const* channels,
                         uint32_t n_channels, uint32_t frames);
-    void (*scope_close)(void* ctx, DspScopeHandle* hnd);
+    void (*tap_close)(void* ctx, DspTapHandle* hnd);
     /* Drop every message clockwork holds for this DSP ahead of its time: the
      * timestamped bundles a client sent early, which clockwork keeps and
      * delivers to dsp_osc when each falls due. For a DSP's own "clear the

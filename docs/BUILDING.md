@@ -254,7 +254,7 @@ clockwork alone the subsystem crates in `rust/`, with the features
 `DEP_CLOCKWORK_FEATURES` names for the tree's options. Both are named with
 `extern crate` from the binary, which is what gets a crate linked.
 
-Two things matter to a Rust host and to nothing else. `clockwork-scope`'s
+Two things matter to a Rust host and to nothing else. `clockwork-taps`'s
 `host` feature leaves out the hostless defaults its own tests link, which
 would otherwise sit ahead of the engine on the line and answer first. And
 the guest wants whole-program LTO in the host's release profile: its kernels
@@ -270,7 +270,7 @@ the cargo profile). rerezzed is the worked example.
 What such a host then CALLS is `rust/clockwork-client`: the client boundary
 (`clockwork_client.h`) and the embed door (`clockwork_embed.h`) as safe
 Rust — `Embed::boot` or `Embed::attach`, then `send`, `poll`, `tap`,
-`region`, `metrics` (by name, from the schema), `clock` and `scope` on the
+`region`, `metrics` (by name, from the schema), `clock` and `tap` on the
 client it owns, every handle closing itself. It stands on `clockwork-abi`,
 which the layout probe holds to the headers, and carries the crate's only
 `unsafe`, each block with its reason. Its tests are a Rust host of exactly
@@ -278,7 +278,7 @@ this shape — the dummy DSP attached headless through `clockwork-sys`, with
 `clockwork-native`'s `host` feature for the subsystems — so `cargo test`
 in `rust/` builds the engine's CMake tree once and exercises the whole
 boundary against it: pings answered, rings filled and drained, taps
-watching without taking, a scope slot claimed and read back. A build
+watching without taking, a tap slot claimed and read back. A build
 without a device layer skips only the boot case.
 
 ## Web

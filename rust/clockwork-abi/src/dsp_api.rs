@@ -71,14 +71,14 @@ pub struct DspConfig {
     pub fp_env: i32,
 }
 
-/// A DSP's hold on a scope slot (`DspHost::scope_open`): four words, the
-/// shape the scope substrate spells out (rust/clockwork-scope). Opaque to a
+/// A DSP's hold on a tap slot (`DspHost::tap_open`): four words, the
+/// shape the tap substrate spells out (rust/clockwork-taps). Opaque to a
 /// DSP apart from two reads: `slot` is non-NULL while the handle owns a slot,
 /// and `channels` is how many that slot carries, as the host clamped it. The
 /// other two are historical and 0.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct DspScopeHandle {
+pub struct DspTapHandle {
     pub slot: *mut c_void,
     pub data: *mut f32,
     pub channels: u32,
@@ -122,21 +122,21 @@ pub struct DspHost {
     /// Memory from the heap clockwork owns, given back through `free_bytes`.
     /// Audio thread callable; lock-free, and NULL rather than blocking.
     pub alloc_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, bytes: usize) -> *mut c_void>,
-    /// Claim scope slot `index` to publish `channels` channels into. Non-zero on success.
-    pub scope_open:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, index: u32, channels: u32, hnd: *mut DspScopeHandle) -> c_int>,
-    /// Append a block to a claimed scope. Audio thread callable; never allocates.
-    pub scope_write: Option<
+    /// Claim tap slot `index` to publish `channels` channels into. Non-zero on success.
+    pub tap_open:
+        Option<unsafe extern "C" fn(ctx: *mut c_void, index: u32, channels: u32, hnd: *mut DspTapHandle) -> c_int>,
+    /// Append a block to a claimed tap. Audio thread callable; never allocates.
+    pub tap_write: Option<
         unsafe extern "C" fn(
             ctx: *mut c_void,
-            hnd: *mut DspScopeHandle,
+            hnd: *mut DspTapHandle,
             channels: *const *const f32,
             n_channels: u32,
             frames: u32,
         ),
     >,
     /// Give the slot back.
-    pub scope_close: Option<unsafe extern "C" fn(ctx: *mut c_void, hnd: *mut DspScopeHandle)>,
+    pub tap_close: Option<unsafe extern "C" fn(ctx: *mut c_void, hnd: *mut DspTapHandle)>,
     /// Drops the bundles clockwork holds for this DSP ahead of their time
     /// (a DSP's own "clear the schedule" verb). Callable from `dsp_process`.
     pub flush_schedule: Option<unsafe extern "C" fn(ctx: *mut c_void)>,

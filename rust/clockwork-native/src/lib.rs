@@ -16,9 +16,9 @@
 /// whatever else this build turned off.
 pub use clockwork_heap;
 
-/// Scope slot claim and release, for the same reason: clockwork's, and used
+/// Tap slot claim and release, for the same reason: clockwork's, and used
 /// by whichever guest is attached.
-pub use clockwork_scope;
+pub use clockwork_taps;
 
 /// The beat grid as a value (`clockwork_timeline_*`) and the MIDI-clock follower
 /// registry (`clockwork_midi_timelines_*`, src/clock/MidiTimelines.h wraps it).

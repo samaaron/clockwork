@@ -55,8 +55,8 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_config, guest_config_bytes, deterministic_seed, fp_env,
     });
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release,
-        alloc_bytes, scope_open, scope_write, scope_close, flush_schedule });
-    expect!(mine, DspScopeHandle { slot, data, channels, max_frames });
+        alloc_bytes, tap_open, tap_write, tap_close, flush_schedule });
+    expect!(mine, DspTapHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
         name, version, holds_schedule, arena_bytes_wanted, arena_bulk_bytes_wanted, wants_events,
         window_magic, window_version,
@@ -73,7 +73,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkClientClock {
         struct_bytes, bpm, beat_origin_ntp, is_playing_at_ntp, is_playing, flags, meter_num, meter_den,
     });
-    expect!(mine, ClockworkScopeReader { struct_bytes, slot, _internal, _ring_frames });
+    expect!(mine, ClockworkAudioTapReader { struct_bytes, slot, _internal, _ring_frames });
     expect!(mine, ClockworkSinkStats { sent, dropped, late, scheduled, cancelled });
     expect!(mine, ClockworkStatus {});
     expect!(mine, ClockworkRegionId {});
@@ -115,7 +115,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         ("CLOCKWORK_ARENA_VERSION", CLOCKWORK_ARENA_VERSION as i64),
         ("CLOCKWORK_ARENA_HEADER_BYTES", CLOCKWORK_ARENA_HEADER_BYTES as i64),
         ("CLOCKWORK_ARENA_MAX_ENTRIES", CLOCKWORK_ARENA_MAX_ENTRIES as i64),
-        ("CLOCKWORK_ARENA_SCOPE", ClockworkArenaRegion::SCOPE.0 as i64),
+        ("CLOCKWORK_ARENA_TAPS", ClockworkArenaRegion::TAPS.0 as i64),
         ("CLOCKWORK_OWNER_HOST", ClockworkArenaOwner::HOST.0 as i64),
         ("CLOCKWORK_GEOM_SLOTS_STACK_BYTES", geom::SLOTS_STACK_BYTES as i64),
         ("CLOCKWORK_ARENA_TRACK_TAPS", ClockworkArenaRegion::TRACK_TAPS.0 as i64),

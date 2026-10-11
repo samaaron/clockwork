@@ -18,7 +18,7 @@
 #include "clockwork_config.h"
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 
 #include <cstring>
 #include <memory>
@@ -239,8 +239,8 @@ ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientIn
 #if CLOCKWORK_SCHEDULER
                       | CLOCKWORK_FEATURE_SCHEDULER
 #endif
-                      | CLOCKWORK_FEATURE_SCOPE
-                      | CLOCKWORK_FEATURE_AUDIO_TAPS;
+                      | CLOCKWORK_FEATURE_TAPS
+                      | CLOCKWORK_FEATURE_RAW_SCOPE;
     // The geometry, from the words the engine wrote once at init
     // (init_memory, audio_processor.cpp) — the same ones a metrics reader
     // finds at the schema's audioSampleRate..audioInputChannels, read here
@@ -401,11 +401,11 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
         case CLOCKWORK_REGION_WINDOW:
             *out = { c->base + c->L.window_offset, c->L.window_bytes, 0 };
             return CLOCKWORK_OK;
-        case CLOCKWORK_REGION_SCOPE:
-            *out = { c->base + c->L.scope_offset,
-                     c->L.scope_header_bytes + c->L.scope_max * c->L.scope_slot_bytes, 0 };
+        case CLOCKWORK_REGION_TAPS:
+            *out = { c->base + c->L.tap_offset,
+                     c->L.tap_header_bytes + c->L.tap_max * c->L.tap_slot_bytes, 0 };
             return CLOCKWORK_OK;
-        case CLOCKWORK_REGION_AUDIO_TAPS:
+        case CLOCKWORK_REGION_RAW_SCOPE:
             *out = { c->base + c->L.audio_offset,
                      c->L.audio_slot_count * c->L.audio_slot_bytes, 0 };
             return CLOCKWORK_OK;
@@ -486,38 +486,38 @@ ClockworkStatus clockwork_client_clock(ClockworkClient* handle, ClockworkClientC
     return CLOCKWORK_OK;
 }
 
-ClockworkStatus clockwork_client_scope_open(ClockworkClient* handle, uint32_t slot,
-                                            ClockworkScopeReader* out) {
+ClockworkStatus clockwork_client_audio_tap_open(ClockworkClient* handle, uint32_t slot,
+                                            ClockworkAudioTapReader* out) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out) return CLOCKWORK_E_ARG;
-    uint8_t* at = c->L.scopeSlotAt(c->base, slot);
+    uint8_t* at = c->L.tapSlotAt(c->base, slot);
     if (!at) return CLOCKWORK_E_ABSENT;
 
-    out->struct_bytes = sizeof(ClockworkScopeReader);
+    out->struct_bytes = sizeof(ClockworkAudioTapReader);
     out->slot         = slot;
     out->_internal    = at;
-    out->_ring_frames = c->L.scope_ring_frames;
+    out->_ring_frames = c->L.tap_ring_frames;
     return CLOCKWORK_OK;
 }
 
-int clockwork_client_scope_valid(const ClockworkScopeReader* r) {
+int clockwork_client_audio_tap_valid(const ClockworkAudioTapReader* r) {
     if (!r || !r->_internal) return 0;
-    shm_scope_stream_reader rd(static_cast<shm_scope_stream*>(r->_internal), nullptr,
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
                                r->_ring_frames);
     return rd.valid() ? 1 : 0;
 }
 
-uint32_t clockwork_client_scope_activations(const ClockworkScopeReader* r) {
+uint32_t clockwork_client_audio_tap_activations(const ClockworkAudioTapReader* r) {
     if (!r || !r->_internal) return 0;
-    return shm_scope_stream_reader(static_cast<shm_scope_stream*>(r->_internal), nullptr,
+    return shm_tap_stream_reader(static_cast<shm_tap_stream*>(r->_internal), nullptr,
                                    r->_ring_frames).activations();
 }
 
-uint64_t clockwork_client_scope_audible_end(ClockworkClient* handle,
-                                            const ClockworkScopeReader* r) {
+uint64_t clockwork_client_audio_tap_audible_end(ClockworkClient* handle,
+                                            const ClockworkAudioTapReader* r) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !r || !r->_internal) return 0;
-    shm_scope_stream_reader rd(static_cast<shm_scope_stream*>(r->_internal), nullptr,
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
                                r->_ring_frames);
     // The AUDIBLE edge, not the write head: the engine writes a buffer ahead of
     // what has left the speakers, so a window ending at the write position
@@ -525,7 +525,7 @@ uint64_t clockwork_client_scope_audible_end(ClockworkClient* handle,
     return read_sample_clock(c->base + c->L.sample_clock_offset).audible_end(rd);
 }
 
-uint32_t clockwork_client_scope_read(ClockworkClient* handle, const ClockworkScopeReader* r,
+uint32_t clockwork_client_audio_tap_read(ClockworkClient* handle, const ClockworkAudioTapReader* r,
                                      uint64_t end, uint32_t frames,
                                      float* out, uint32_t* out_channels) {
     (void)handle;
@@ -533,7 +533,7 @@ uint32_t clockwork_client_scope_read(ClockworkClient* handle, const ClockworkSco
         if (out_channels) *out_channels = 0;
         return 0;
     }
-    shm_scope_stream_reader rd(static_cast<shm_scope_stream*>(r->_internal), nullptr,
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
                                r->_ring_frames);
     if (!rd.valid()) {
         // The slot is not live — never claimed, or released since the reader

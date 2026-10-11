@@ -14,8 +14,8 @@ in at least seven places, and every one of them invented its own plumbing:
 | | direction | lines | mechanism |
 |---|---|---|---|
 | `RecordWriter` | sink | 48 + .cpp | lock-free FIFO → `TimeSliceThread` → `clockwork_audio_file.h` |
-| `shm_audio_buffer` | sink | 283 | SPSC ring in shared memory, monotonic write cursor — now the two audio taps clockwork writes at the device edge (docs/ARENA.md) |
-| `shm_scope_stream` | sink | 332 | SPSC ring per scope slot, same protocol plus extras |
+| `shm_audio_buffer` | sink | 283 | SPSC ring in shared memory, monotonic write cursor — now the two raw scope slots clockwork writes at the device edge (docs/ARENA.md) |
+| `shm_tap_stream` | sink | 332 | SPSC ring per tap slot, same protocol plus extras |
 | Link aux publish | sink | (in the 232) | bus range → Link, per block |
 | device output | sink | — | the backend's own callback |
 | device input | source | — | the backend's own callback |
@@ -36,7 +36,7 @@ independently:
 - **event rings** (`ring/ring.h`) — variable-length framed payloads, a 16-byte
   header, a padding marker rather than a frame straddling the wrap. Carries
   OSC ingress and egress, the shm peer plane, the transports.
-- **frame rings** (`shm_audio_buffer`, `shm_scope_stream`) — fixed-size
+- **frame rings** (`shm_audio_buffer`, `shm_tap_stream`) — fixed-size
   interleaved float frames, a monotonic write cursor, lossless catch-up reads.
 
 They share everything that is hard: single producer, single consumer,

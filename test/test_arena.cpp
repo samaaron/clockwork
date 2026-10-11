@@ -59,7 +59,7 @@ const Expect kExpect[] = {
     { CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, PUB | GUEST },
     { CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, PUB },
     { CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, PUB | GUEST },
-    { CLOCKWORK_ARENA_AUDIO_TAPS,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, PUB },
+    { CLOCKWORK_ARENA_RAW_SCOPE,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, PUB },
     { CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, PUB },
     // the block's transport run: the command plane, touched through the client ABI only
     { CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
@@ -70,7 +70,7 @@ const Expect kExpect[] = {
     { CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT },
     // the guest's published run: what the guest shows its clients
     { CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     PUB },
-    { CLOCKWORK_ARENA_SCOPE,           SHM_SCOPE_START,       SHM_SCOPE_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     PUB },
+    { CLOCKWORK_ARENA_TAPS,           SHM_TAP_START,       SHM_TAP_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     PUB },
     // the guest's own: nobody else's business
     { CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,      GUEST | HOST },
     { CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,     GUEST },
@@ -120,16 +120,16 @@ TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     CHECK(in->geom[CLOCKWORK_GEOM_RING_PADDING_MAGIC]  == PADDING_MAGIC);
     CHECK(in->geom[CLOCKWORK_GEOM_RING_PADDING_MARKER] == RING_PADDING_MARKER);
     CHECK(in->geom[CLOCKWORK_GEOM_RING_HEADER_BYTES]   == sizeof(Message));
-    const auto* taps = entry(a, CLOCKWORK_ARENA_AUDIO_TAPS);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAPS_SLOTS]      == SHM_AUDIO_SLOTS);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAPS_SLOTS]      > CLOCKWORK_TAP_IN);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAPS_SLOT_BYTES] == SHM_AUDIO_SLOT_SIZE);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAPS_FRAMES]     == SHM_AUDIO_FRAMES);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAPS_CHANNELS]   == SHM_AUDIO_CHANNELS);
-    const auto* sc = entry(a, CLOCKWORK_ARENA_SCOPE);
-    CHECK(sc->geom[CLOCKWORK_GEOM_SCOPE_SLOTS]       == SHM_SCOPE_MAX_SCOPES);
-    CHECK(sc->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES]  == SHM_SCOPE_SLOT_SIZE);
-    CHECK(sc->geom[CLOCKWORK_GEOM_SCOPE_RING_FRAMES] == SHM_SCOPE_RING_FRAMES);
+    const auto* taps = entry(a, CLOCKWORK_ARENA_RAW_SCOPE);
+    CHECK(taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS]      == SHM_AUDIO_SLOTS);
+    CHECK(taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS]      > CLOCKWORK_TAP_IN);
+    CHECK(taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOT_BYTES] == SHM_AUDIO_SLOT_SIZE);
+    CHECK(taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_FRAMES]     == SHM_AUDIO_FRAMES);
+    CHECK(taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_CHANNELS]   == SHM_AUDIO_CHANNELS);
+    const auto* sc = entry(a, CLOCKWORK_ARENA_TAPS);
+    CHECK(sc->geom[CLOCKWORK_GEOM_TAP_SLOTS]       == SHM_TAP_MAX_TAPS);
+    CHECK(sc->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES]  == SHM_TAP_SLOT_SIZE);
+    CHECK(sc->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES] == SHM_TAP_RING_FRAMES);
     const auto* anchors = entry(a, CLOCKWORK_ARENA_CLOCK_ANCHORS);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_NTP_START] == NTP_START_TIME_START);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_DRIFT]     == DRIFT_OFFSET_START);
@@ -140,28 +140,28 @@ TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     // The track taps are the same slot shape as the guest's, numbered after them.
     const auto* tr = entry(a, CLOCKWORK_ARENA_TRACK_TAPS);
     CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_SLOTS]       == SHM_TRACK_TAPS_SLOTS);
-    CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_SLOT_BYTES]  == SHM_SCOPE_SLOT_SIZE);
-    CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_FIRST_INDEX] == SHM_SCOPE_MAX_SCOPES);
-    CHECK(tr->bytes == SHM_TRACK_TAPS_SLOTS * SHM_SCOPE_SLOT_SIZE);
+    CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_SLOT_BYTES]  == SHM_TAP_SLOT_SIZE);
+    CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_FIRST_INDEX] == SHM_TAP_MAX_TAPS);
+    CHECK(tr->bytes == SHM_TRACK_TAPS_SLOTS * SHM_TAP_SLOT_SIZE);
 }
 
-TEST_CASE("arena: one scope slot index space across the guest's slots and the track taps", "[arena]") {
+TEST_CASE("arena: one tap slot index space across the guest's slots and the track taps", "[arena]") {
     auto a = arena();
     ShmReaderLayout L;
     const char* why = "";
     REQUIRE(ShmReaderLayout::from_arena(a.data(), a.size(), L, &why));
-    CHECK(L.scopeSlotCount() == SHM_SCOPE_MAX_SCOPES + SHM_TRACK_TAPS_SLOTS);
+    CHECK(L.tapSlotCount() == SHM_TAP_MAX_TAPS + SHM_TRACK_TAPS_SLOTS);
     // The guest's last slot is in the guest region; the first track tap is in the block.
-    const uint8_t* lastGuest = L.scopeSlotAt(a.data(), SHM_SCOPE_MAX_SCOPES - 1);
+    const uint8_t* lastGuest = L.tapSlotAt(a.data(), SHM_TAP_MAX_TAPS - 1);
     REQUIRE(lastGuest != nullptr);
     CHECK(lastGuest - a.data() >= GUEST_REGION_START);
     if (SHM_TRACK_TAPS_SLOTS > 0) {
-        const uint8_t* firstTrack = L.scopeSlotAt(a.data(), SHM_SCOPE_MAX_SCOPES);
+        const uint8_t* firstTrack = L.tapSlotAt(a.data(), SHM_TAP_MAX_TAPS);
         REQUIRE(firstTrack != nullptr);
         CHECK(firstTrack - a.data() == SHM_TRACK_TAPS_START);
-        CHECK(firstTrack - a.data() + SHM_SCOPE_SLOT_SIZE <= CLOCKWORK_BLOCK_SIZE);
+        CHECK(firstTrack - a.data() + SHM_TAP_SLOT_SIZE <= CLOCKWORK_BLOCK_SIZE);
     }
-    CHECK(L.scopeSlotAt(a.data(), L.scopeSlotCount()) == nullptr);
+    CHECK(L.tapSlotAt(a.data(), L.tapSlotCount()) == nullptr);
 }
 
 TEST_CASE("arena: a reader's table round-trips through the header", "[arena]") {
@@ -227,8 +227,8 @@ TEST_CASE("arena: the audience word is the last geometry word of every entry", "
     // A region's own geometry never reaches the audience word.
     CHECK(CLOCKWORK_GEOM_SLOTS_STACK_BYTES < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_TRACK_FIRST_INDEX < CLOCKWORK_GEOM_AUDIENCE);
-    CHECK(CLOCKWORK_GEOM_SCOPE_CHANNELS   < CLOCKWORK_GEOM_AUDIENCE);
-    CHECK(CLOCKWORK_GEOM_TAPS_SAMPLE_RATE < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_TAP_CHANNELS   < CLOCKWORK_GEOM_AUDIENCE);
+    CHECK(CLOCKWORK_GEOM_RAW_SCOPE_SAMPLE_RATE < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_WINDOW_VERSION   < CLOCKWORK_GEOM_AUDIENCE);
 }
 
@@ -237,8 +237,8 @@ TEST_CASE("arena: what a client may read by hand is published, and only that", "
     // The data contracts: read by the GUI, a spider, the web client, by hand.
     for (uint32_t id : { CLOCKWORK_ARENA_METRICS, CLOCKWORK_ARENA_NATIVE_STATS, CLOCKWORK_ARENA_CLOCK_ANCHORS,
                          CLOCKWORK_ARENA_CLOCK_STATE, CLOCKWORK_ARENA_SAMPLE_CLOCK, CLOCKWORK_ARENA_CHANNEL_MAP,
-                         CLOCKWORK_ARENA_AUDIO_TAPS, CLOCKWORK_ARENA_TRACK_TAPS,
-                         CLOCKWORK_ARENA_GUEST_WINDOW, CLOCKWORK_ARENA_SCOPE }) {
+                         CLOCKWORK_ARENA_RAW_SCOPE, CLOCKWORK_ARENA_TRACK_TAPS,
+                         CLOCKWORK_ARENA_GUEST_WINDOW, CLOCKWORK_ARENA_TAPS }) {
         INFO("region " << id);
         CHECK(clockwork_arena_published(arenaHeader(a.data()), id));
     }

@@ -27,10 +27,10 @@ int main(void) {
     S(DspHost);
     F(DspHost, ctx); F(DspHost, emit_osc); F(DspHost, log); F(DspHost, open_sink);
     F(DspHost, send_sink); F(DspHost, free_bytes); F(DspHost, asset_release);
-    F(DspHost, alloc_bytes); F(DspHost, scope_open); F(DspHost, scope_write); F(DspHost, scope_close);
+    F(DspHost, alloc_bytes); F(DspHost, tap_open); F(DspHost, tap_write); F(DspHost, tap_close);
     F(DspHost, flush_schedule);
-    S(DspScopeHandle);
-    F(DspScopeHandle, slot); F(DspScopeHandle, data); F(DspScopeHandle, channels); F(DspScopeHandle, max_frames);
+    S(DspTapHandle);
+    F(DspTapHandle, slot); F(DspTapHandle, data); F(DspTapHandle, channels); F(DspTapHandle, max_frames);
 
     S(DspInfo);
     F(DspInfo, name); F(DspInfo, version); F(DspInfo, holds_schedule);
@@ -62,9 +62,9 @@ int main(void) {
     F(ClockworkClientClock, is_playing); F(ClockworkClientClock, flags);
     F(ClockworkClientClock, meter_num); F(ClockworkClientClock, meter_den);
 
-    S(ClockworkScopeReader);
-    F(ClockworkScopeReader, struct_bytes); F(ClockworkScopeReader, slot);
-    F(ClockworkScopeReader, _internal); F(ClockworkScopeReader, _ring_frames);
+    S(ClockworkAudioTapReader);
+    F(ClockworkAudioTapReader, struct_bytes); F(ClockworkAudioTapReader, slot);
+    F(ClockworkAudioTapReader, _internal); F(ClockworkAudioTapReader, _ring_frames);
 
     S(ClockworkSinkStats);
     F(ClockworkSinkStats, sent); F(ClockworkSinkStats, dropped); F(ClockworkSinkStats, late);
@@ -114,7 +114,7 @@ int main(void) {
     printf("const CLOCKWORK_ARENA_VERSION %d\n", (int)CLOCKWORK_ARENA_VERSION);
     printf("const CLOCKWORK_ARENA_HEADER_BYTES %d\n", (int)CLOCKWORK_ARENA_HEADER_BYTES);
     printf("const CLOCKWORK_ARENA_MAX_ENTRIES %d\n", (int)CLOCKWORK_ARENA_MAX_ENTRIES);
-    printf("const CLOCKWORK_ARENA_SCOPE %d\n", (int)CLOCKWORK_ARENA_SCOPE);
+    printf("const CLOCKWORK_ARENA_TAPS %d\n", (int)CLOCKWORK_ARENA_TAPS);
     printf("const CLOCKWORK_OWNER_HOST %d\n", (int)CLOCKWORK_OWNER_HOST);
     printf("const CLOCKWORK_GEOM_SLOTS_STACK_BYTES %d\n", (int)CLOCKWORK_GEOM_SLOTS_STACK_BYTES);
     printf("const CLOCKWORK_ARENA_TRACK_TAPS %d\n", (int)CLOCKWORK_ARENA_TRACK_TAPS);

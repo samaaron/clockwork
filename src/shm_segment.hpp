@@ -19,7 +19,7 @@
 
 #include "shm_audio_buffer.hpp"
 #include "clockwork_product.h"
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 #include "clock/clock_math.h"   // wallClockNTP, kNtpEpochOffset
 #include "shared_memory.h"
 #include "shm_peer_plane.h"
@@ -437,7 +437,7 @@ inline void shm_remove(const string& name) {
 //   shared_memory.h arena blob (TOTAL_BUFFER_SIZE) — the *same* layout the
 //   engine uses in ring_buffer_storage / the WASM SAB. The engine points its
 //   `shared_memory` base at this blob, so rings, control pointers, metrics,
-//   node-tree, audio taps and scope streams are all addressed by their
+//   node-tree, raw scope and tap streams are all addressed by their
 //   shared_memory.h offsets and observable cross-process for free.
 //
 // MAGIC history:
@@ -449,13 +449,13 @@ inline void shm_remove(const string& name) {
 //   0x5C09E006  + Link metrics fields (METRICS_SIZE 184→232)
 //   0x5C09E007  appended the peer command plane after the arena blob
 //               (shm_peer_plane.h: SPSC command + reply rings)
-//   0x5C09E008  scope slots became lossless cursor-ring streams
-//               (shm_scope_stream.hpp) + ClockworkClock sample-clock region appended
+//   0x5C09E008  tap slots became lossless cursor-ring streams
+//               (shm_tap_stream.hpp) + ClockworkClock sample-clock region appended
 //               to the arena (engine-frames ↔ DAC-NTP mapping)
 //   0x5C09E009  guest memory regions (inbox/outbox) after the plane
 //   0x5C09E00A  channel map region
 //   0x5C09E00B  self-describing for readers: control/clock-state/native-stats/
-//               sample-clock/channel-map sizes and the audio tap geometry
+//               sample-clock/channel-map sizes and the raw scope geometry
 //               appended, and readers (shm_segment_client, clockwork_client)
 //               address every region through the header (ShmReaderLayout)
 //               instead of their own build's constants. The segment is also
@@ -467,7 +467,7 @@ inline void shm_remove(const string& name) {
 //
 // Publication: the creator zeroes the whole segment and writes the header
 // geometry, but defers the MAGIC store. The engine then populates the arena
-// (init_memory(): node-tree empty-slot markers = 0xFF, metrics, scope headers,
+// (init_memory(): node-tree empty-slot markers = 0xFF, metrics, tap headers,
 // …) and only afterwards calls publish(), which stores MAGIC last behind a
 // release fence. So a reader that observes MAGIC (after an acquire fence) sees
 // both the geometry AND a fully-populated arena — never a half-zeroed one where
@@ -476,7 +476,7 @@ inline void shm_remove(const string& name) {
 
 // Self-describing handshake: the creator publishes every region's offset and
 // geometry, so a reader needs no compile-time knowledge of the
-// arena layout — it locates metrics, rings, node-tree, audio taps and scope
+// arena layout — it locates metrics, rings, node-tree, raw scope and taps
 // purely from these fields. This makes the consumer drift-proof: layout/size
 // changes propagate through the header rather than requiring a hand-synced copy.
 // All offsets are relative to the arena blob base (segment + blob_offset).
@@ -624,9 +624,9 @@ public:
         return nullptr;
     }
 
-    // Base of a scope-stream slot, or nullptr if out of range.
+    // Base of a tap-stream slot, or nullptr if out of range.
     // The guest's slots, then the engine's track taps, as one index space.
-    uint8_t* get_scope_slot(unsigned int index) { return L_.scopeSlotAt(blob_, index); }
+    uint8_t* get_tap_slot(unsigned int index) { return L_.tapSlotAt(blob_, index); }
 
     // Peer command plane (after the arena blob; see shm_peer_plane.h).
     ShmPeerPlaneHeader* get_peer_plane() { return peer_; }
@@ -949,10 +949,10 @@ public:
     // The reader clamps a slot's self-declared capacity to the ENGINE's ring
     // size, not this build's, which is what keeps a corrupt slot inside the
     // engine's actual allocation.
-    shm_scope_stream_reader get_scope_stream_reader(unsigned int index) {
-        return shm_scope_stream_reader(
-            reinterpret_cast<shm_scope_stream*>(shm->get_scope_slot(index)), map_,
-            layout().scope_ring_frames);
+    shm_tap_stream_reader get_tap_stream_reader(unsigned int index) {
+        return shm_tap_stream_reader(
+            reinterpret_cast<shm_tap_stream*>(shm->get_tap_slot(index)), map_,
+            layout().tap_ring_frames);
     }
 
     sample_clock_view get_sample_clock() {

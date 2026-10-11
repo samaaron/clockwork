@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
 /*
- * test_scope_stream.cpp — the guest→client audio publishing region.
+ * test_tap_stream.cpp — the guest→client audio publishing region.
  *
- * `shm_scope_stream.hpp` is a whole IO path with no test: a guest writes
+ * `shm_tap_stream.hpp` is a whole IO path with no test: a guest writes
  * blocks of audio into a shared ring at its own rate and a client copies
  * windows out of it whenever it likes, with no lock between them and no
  * message carrying a sample. It is how a waveform gets on screen, and it is
- * the largest region in the arena (4 MB) — SHM_SCOPE is bigger than the OSC
+ * the largest region in the arena (4 MB) — SHM_TAP is bigger than the OSC
  * rings and the node-tree mirror put together.
  *
  * It went untested because it is header-only and its only in-tree writer lives
@@ -41,7 +41,7 @@
  *     a slot and release it between two polls, and the state word alone then
  *     never shows it. The count does.
  */
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -55,9 +55,9 @@ namespace {
 // A slot on the heap, as the arena would hold it. Zeroed, because that is what
 // the arena hands over and what activate() has to cope with.
 struct Slot {
-    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[sizeof(shm_scope_stream)] };
-    shm_scope_stream* get() { return reinterpret_cast<shm_scope_stream*>(bytes.get()); }
-    Slot() { std::memset(bytes.get(), 0, sizeof(shm_scope_stream)); }
+    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[sizeof(shm_tap_stream)] };
+    shm_tap_stream* get() { return reinterpret_cast<shm_tap_stream*>(bytes.get()); }
+    Slot() { std::memset(bytes.get(), 0, sizeof(shm_tap_stream)); }
 };
 
 // Sample value as a pure function of absolute frame and channel, so any
@@ -67,7 +67,7 @@ float sampleAt(uint64_t frame, uint32_t ch) {
 }
 
 // Write `frames` frames starting at absolute engine position `from`.
-void writeBlock(shm_scope_stream_writer& w, uint64_t from, uint32_t frames,
+void writeBlock(shm_tap_stream_writer& w, uint64_t from, uint32_t frames,
                 uint32_t channels = 2) {
     std::vector<float> l(frames), r(frames);
     for (uint32_t i = 0; i < frames; ++i) {
@@ -81,12 +81,12 @@ void writeBlock(shm_scope_stream_writer& w, uint64_t from, uint32_t frames,
 
 } // namespace
 
-TEST_CASE("scope stream: a window comes back exactly as it was written",
-          "[scope]") {
+TEST_CASE("tap stream: a window comes back exactly as it was written",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
     REQUIRE(r.valid());
     REQUIRE(r.channels() == 2);
 
@@ -94,7 +94,7 @@ TEST_CASE("scope stream: a window comes back exactly as it was written",
     REQUIRE(r.write_position() == 512);
 
     uint32_t used = 0;
-    std::vector<float> out(256 * SHM_SCOPE_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(256 * SHM_TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(512, 256, out.data(), &used);
 
     REQUIRE(used == 2);
@@ -106,12 +106,12 @@ TEST_CASE("scope stream: a window comes back exactly as it was written",
     }
 }
 
-TEST_CASE("scope stream: a window straddling the ring wrap is still in order",
-          "[scope]") {
+TEST_CASE("tap stream: a window straddling the ring wrap is still in order",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // Fill past capacity so the ring has wrapped and the newest frames live at
     // the front of the buffer while the older half of the window is still at
@@ -140,7 +140,7 @@ TEST_CASE("scope stream: a window straddling the ring wrap is still in order",
 
     const uint32_t frames = 1024;
     uint32_t used = 0;
-    std::vector<float> out(frames * SHM_SCOPE_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(pos, frames, out.data(), &used);
     REQUIRE(real == frames);
 
@@ -151,12 +151,12 @@ TEST_CASE("scope stream: a window straddling the ring wrap is still in order",
     }
 }
 
-TEST_CASE("scope stream: history the ring no longer holds is zero-filled, not short",
-          "[scope]") {
+TEST_CASE("tap stream: history the ring no longer holds is zero-filled, not short",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // Only 64 frames exist, but ask for 256 ending at 64. The 192 frames
     // before the stream began never existed.
@@ -164,7 +164,7 @@ TEST_CASE("scope stream: history the ring no longer holds is zero-filled, not sh
 
     const uint32_t frames = 256;
     uint32_t used = 0;
-    std::vector<float> out(frames * SHM_SCOPE_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(64, frames, out.data(), &used);
 
     // Fewer real frames than asked for...
@@ -184,12 +184,12 @@ TEST_CASE("scope stream: history the ring no longer holds is zero-filled, not sh
     }
 }
 
-TEST_CASE("scope stream: the stream anchors on engine frames",
-          "[scope]") {
+TEST_CASE("tap stream: the stream anchors on engine frames",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // The first write anchors: a stream that starts an hour into the session
     // reports that hour as its base, so a client can map an engine sample
@@ -201,12 +201,12 @@ TEST_CASE("scope stream: the stream anchors on engine frames",
     REQUIRE(r.write_position() == 128);
 }
 
-TEST_CASE("scope stream: a gap in the source moves the cursor rather than sliding time",
-          "[scope]") {
+TEST_CASE("tap stream: a gap in the source moves the cursor rather than sliding time",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeBlock(w, 0, 128);
     REQUIRE(r.write_position() == 128);
@@ -220,12 +220,12 @@ TEST_CASE("scope stream: a gap in the source moves the cursor rather than slidin
     REQUIRE(r.write_position() == 4096 + 128);
 }
 
-TEST_CASE("scope stream: corrupt geometry is clamped rather than believed",
-          "[scope]") {
+TEST_CASE("tap stream: corrupt geometry is clamped rather than believed",
+          "[tap]") {
     Slot slot;
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
     writeBlock(w, 0, 256);
 
     // The slot is in shared memory that another process can write, so these
@@ -233,8 +233,8 @@ TEST_CASE("scope stream: corrupt geometry is clamped rather than believed",
     // to index the inline data array.
     slot.get()->channels        = 9999;
     slot.get()->capacity_frames = 0xFFFFFFFFu;
-    REQUIRE(r.channels() <= SHM_SCOPE_STREAM_CHANNELS);
-    REQUIRE(r.capacity_frames() <= SHM_SCOPE_RING_FRAMES);
+    REQUIRE(r.channels() <= SHM_TAP_STREAM_CHANNELS);
+    REQUIRE(r.capacity_frames() <= SHM_TAP_RING_FRAMES);
 
     slot.get()->channels        = 0;
     slot.get()->capacity_frames = 0;
@@ -244,40 +244,40 @@ TEST_CASE("scope stream: corrupt geometry is clamped rather than believed",
     // And a copy against the corrupt slot still writes the whole buffer
     // without reading outside the ring.
     uint32_t used = 0;
-    std::vector<float> out(64 * SHM_SCOPE_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(64 * SHM_TAP_STREAM_CHANNELS, -1.0f);
     r.copy_window(256, 64, out.data(), &used);
-    REQUIRE(used <= SHM_SCOPE_STREAM_CHANNELS);
+    REQUIRE(used <= SHM_TAP_STREAM_CHANNELS);
 }
 
-TEST_CASE("scope stream: an inactive or absent slot yields silence, not stale memory",
-          "[scope]") {
+TEST_CASE("tap stream: an inactive or absent slot yields silence, not stale memory",
+          "[tap]") {
     // Contract from copy_window: `out` is always fully written. A reader
     // holding a slot that was never activated, or none at all, must not leave
     // the caller's buffer as it found it — that buffer is the previous frame's
     // audio, and returning it would draw a picture that looks alive.
-    shm_scope_stream_reader none(nullptr);
+    shm_tap_stream_reader none(nullptr);
     REQUIRE_FALSE(none.valid());
 
     uint32_t used = 0;
-    std::vector<float> out(32 * SHM_SCOPE_STREAM_CHANNELS, 7.0f);
+    std::vector<float> out(32 * SHM_TAP_STREAM_CHANNELS, 7.0f);
     const uint32_t real = none.copy_window(0, 32, out.data(), &used);
     REQUIRE(real == 0);
     for (float v : out) REQUIRE(v == 0.0f);
 
     Slot slot;                       // zeroed: state == 0, never activated
-    shm_scope_stream_reader idle(slot.get());
+    shm_tap_stream_reader idle(slot.get());
     REQUIRE_FALSE(idle.valid());
 }
 
-TEST_CASE("scope stream: a slot counts the times it went live", "[scope]") {
+TEST_CASE("tap stream: a slot counts the times it went live", "[tap]") {
     // A reader that only sampled the state could miss a live spell shorter
     // than its poll: a loop that starts and is stopped in between. It notes
     // the count instead, and any change since says the slot went live.
     Slot slot;
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
     REQUIRE(r.activations() == 0);   // the arena hands it over zeroed
 
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
     REQUIRE(r.valid());
     REQUIRE(r.activations() == 1);
@@ -288,12 +288,12 @@ TEST_CASE("scope stream: a slot counts the times it went live", "[scope]") {
     w.activate(2);
     REQUIRE(r.activations() == 2);
 
-    // Released (the scope crate frees a slot by clearing its state): the
+    // Released (the tap crate frees a slot by clearing its state): the
     // count stays, so a reader arriving later still sees it was live.
     slot.get()->state.store(0);
     REQUIRE_FALSE(r.valid());
     REQUIRE(r.activations() == 2);
 
     // No slot, no count.
-    REQUIRE(shm_scope_stream_reader(nullptr).activations() == 0);
+    REQUIRE(shm_tap_stream_reader(nullptr).activations() == 0);
 }

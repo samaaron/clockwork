@@ -20,7 +20,7 @@
 //! `CLOCKWORK_RUST=OFF` tells the tree so, and it builds no umbrella.
 //!
 //! The one thing that crosses back over: the C++ calls into the Rust
-//! subsystems — ports, sinks, the scope plane, the DSP entry points — some
+//! subsystems — ports, sinks, the tap plane, the DSP entry points — some
 //! hundred and fifty `#[no_mangle]` symbols defined in crates of the same
 //! graph, the cycle a C++ host closes with `--start-group`. Here rustc owns
 //! the line, the archives ride inside this crate's rlib, and the link

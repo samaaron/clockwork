@@ -13,7 +13,7 @@
  *
  * Above the boot line the two are identical: clockwork_embed_client hands
  * back a client (clockwork_client.h) over the engine's memory, and sending,
- * polling, scopes, metrics and the audio taps are the client's. A product
+ * polling, taps, metrics and the raw scope is the client's. A product
  * that plays the same piece as an app and as a plugin writes its playing
  * once, against the client, and only the boot differs.
  *

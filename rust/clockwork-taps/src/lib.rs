@@ -4,7 +4,7 @@
 //!
 //! The ugen publishes audio into a ring in shared memory for the browser to
 //! draw. Appending is the ugen's own business — it writes through
-//! `shm_scope_stream_writer`, which has to stay next to the ugens. What lives
+//! `shm_tap_stream_writer`, which has to stay next to the ugens. What lives
 //! here is everything around that: which slot a unit gets, when a slot becomes
 //! free again, and the counters a reader uses to notice either.
 //!
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 /// run time without allocating on a path that must not allocate.
 const MAX_SLOTS: usize = 64;
 
-/// Where the scope region is and how it is carved up.
+/// Where the tap region is and how it is carved up.
 ///
 /// Read from the host rather than restated here: the numbers are build-time
 /// constants that change with the memory profile — an embedded build shrinks
@@ -36,14 +36,14 @@ const MAX_SLOTS: usize = 64;
 /// is two too many.
 #[derive(Clone, Copy, Default)]
 struct Geometry {
-    /// Offset of the scope region from the base of shared memory.
+    /// Offset of the tap region from the base of shared memory.
     start: usize,
     /// Bytes of global header before the first slot.
     header_size: usize,
     /// Bytes per slot, header and ring together.
     slot_size: usize,
     /// How many slots this build has.
-    max_scopes: usize,
+    max_taps: usize,
     /// Frames in one slot's ring.
     ring_frames: u32,
     /// Channels a slot's ring interleaves.
@@ -57,7 +57,7 @@ struct Geometry {
 impl Geometry {
     /// Every slot a client can number: the guest's, then the track taps.
     fn slots(&self) -> usize {
-        self.max_scopes + self.track_slots
+        self.max_taps + self.track_slots
     }
 }
 
@@ -66,13 +66,13 @@ extern "C" {
     /// call rather than cached: the segment is created and destroyed with the
     /// engine, and a stale base is a wild pointer.
     fn clockwork_shm_base() -> *mut c_void;
-    /// The scope region's geometry, filled by the host. Returns zero if the
-    /// build has no scope region.
-    fn clockwork_scope_geometry(
+    /// The tap region's geometry, filled by the host. Returns zero if the
+    /// build has no tap region.
+    fn clockwork_tap_geometry(
         start: *mut usize,
         header_size: *mut usize,
         slot_size: *mut usize,
-        max_scopes: *mut usize,
+        max_taps: *mut usize,
         ring_frames: *mut u32,
         channels: *mut u32,
         track_start: *mut usize,
@@ -86,42 +86,42 @@ static GEOMETRY_KNOWN: AtomicU32 = AtomicU32::new(0);
 
 fn geometry() -> Option<Geometry> {
     if GEOMETRY_KNOWN.load(Ordering::Acquire) == 0 {
-        let (mut start, mut header_size, mut slot_size, mut max_scopes) = (0usize, 0, 0, 0);
+        let (mut start, mut header_size, mut slot_size, mut max_taps) = (0usize, 0, 0, 0);
         let (mut ring_frames, mut channels) = (0u32, 0u32);
         let (mut track_start, mut track_slots) = (0usize, 0usize);
         // SAFETY: eight live out-pointers, which is all the host's function
         // asks for.
         let ok = unsafe {
-            clockwork_scope_geometry(
+            clockwork_tap_geometry(
                 &mut start,
                 &mut header_size,
                 &mut slot_size,
-                &mut max_scopes,
+                &mut max_taps,
                 &mut ring_frames,
                 &mut channels,
                 &mut track_start,
                 &mut track_slots,
             )
         };
-        if ok == 0 || slot_size == 0 || max_scopes == 0 {
+        if ok == 0 || slot_size == 0 || max_taps == 0 {
             return None;
         }
         GEOMETRY_CACHE[0].store(start, Ordering::Relaxed);
         GEOMETRY_CACHE[1].store(header_size, Ordering::Relaxed);
         GEOMETRY_CACHE[2].store(slot_size, Ordering::Relaxed);
-        GEOMETRY_CACHE[3].store(max_scopes.min(MAX_SLOTS), Ordering::Relaxed);
+        GEOMETRY_CACHE[3].store(max_taps.min(MAX_SLOTS), Ordering::Relaxed);
         GEOMETRY_CACHE[4].store(ring_frames as usize, Ordering::Relaxed);
         GEOMETRY_CACHE[5].store(channels as usize, Ordering::Relaxed);
         GEOMETRY_CACHE[6].store(track_start, Ordering::Relaxed);
         // Both spans together must fit the owner table.
-        GEOMETRY_CACHE[7].store(track_slots.min(MAX_SLOTS - max_scopes.min(MAX_SLOTS)), Ordering::Relaxed);
+        GEOMETRY_CACHE[7].store(track_slots.min(MAX_SLOTS - max_taps.min(MAX_SLOTS)), Ordering::Relaxed);
         GEOMETRY_KNOWN.store(1, Ordering::Release);
     }
     Some(Geometry {
         start: GEOMETRY_CACHE[0].load(Ordering::Relaxed),
         header_size: GEOMETRY_CACHE[1].load(Ordering::Relaxed),
         slot_size: GEOMETRY_CACHE[2].load(Ordering::Relaxed),
-        max_scopes: GEOMETRY_CACHE[3].load(Ordering::Relaxed),
+        max_taps: GEOMETRY_CACHE[3].load(Ordering::Relaxed),
         ring_frames: GEOMETRY_CACHE[4].load(Ordering::Relaxed) as u32,
         channels: GEOMETRY_CACHE[5].load(Ordering::Relaxed) as u32,
         track_start: GEOMETRY_CACHE[6].load(Ordering::Relaxed),
@@ -137,11 +137,11 @@ fn geometry() -> Option<Geometry> {
 /// memory and because a race here is silent rather than loud.
 static SLOT_OWNERS: [AtomicUsize; MAX_SLOTS] = [const { AtomicUsize::new(0) }; MAX_SLOTS];
 
-/// The header field offsets, from the scope region's start.
+/// The header field offsets, from the tap region's start.
 const HDR_ACTIVE_COUNT: usize = 4;
 const HDR_VERSION: usize = 12;
 
-/// The handle a scope ugen holds on a claimed scope slot.
+/// The handle a scope ugen holds on a claimed tap slot.
 ///
 /// Declared here rather than imported from the ugen ABI crate: that crate is
 /// part of a guest's DSP surface and no guest lives in this repository. The
@@ -150,7 +150,7 @@ const HDR_VERSION: usize = 12;
 /// the other way round hands back something that is never valid.
 #[repr(C)]
 #[allow(non_snake_case)]
-pub struct ScopeBufferHnd {
+pub struct TapBufferHnd {
     pub internalData: *mut c_void,
     pub data: *mut f32,
     pub channels: u32,
@@ -159,7 +159,7 @@ pub struct ScopeBufferHnd {
 
 /// A slot's header, at the start of every slot. The ring follows it.
 ///
-/// Mirrors `shm_scope_stream`, whose header is asserted to be 32 bytes with
+/// Mirrors `shm_tap_stream`, whose header is asserted to be 32 bytes with
 /// the ring 16-byte aligned after it.
 #[repr(C, align(16))]
 struct SlotHeader {
@@ -208,7 +208,7 @@ unsafe fn claim_slot(base: *mut u8, g: &Geometry, index: usize, channels: u32) -
     }
 }
 
-/// A counter in the scope region's global header.
+/// A counter in the tap region's global header.
 ///
 /// # Safety
 /// `base` must be the mapped shared memory the geometry describes.
@@ -224,10 +224,10 @@ unsafe fn header_field(base: *mut u8, g: &Geometry, offset: usize) -> &'static A
 /// `index` less than `g.slots()`: the guest's slots first, then the track
 /// taps, as one index space.
 unsafe fn slot_ptr(base: *mut u8, g: &Geometry, index: usize) -> *mut SlotHeader {
-    let at = if index < g.max_scopes {
+    let at = if index < g.max_taps {
         g.start + g.header_size + index * g.slot_size
     } else {
-        g.track_start + (index - g.max_scopes) * g.slot_size
+        g.track_start + (index - g.max_taps) * g.slot_size
     };
     // SAFETY: the slot lies inside one of the two regions, per the contract.
     unsafe { base.add(at).cast::<SlotHeader>() }
@@ -238,13 +238,13 @@ fn slot_index_of(base: *mut u8, g: &Geometry, slot: *const SlotHeader) -> Option
     let p = slot as usize;
     let guest = base as usize + g.start + g.header_size;
     let off = p.wrapping_sub(guest);
-    if off < g.max_scopes * g.slot_size && off % g.slot_size == 0 {
+    if off < g.max_taps * g.slot_size && off % g.slot_size == 0 {
         return Some(off / g.slot_size);
     }
     let track = base as usize + g.track_start;
     let off = p.wrapping_sub(track);
     if g.track_slots > 0 && off < g.track_slots * g.slot_size && off % g.slot_size == 0 {
-        return Some(g.max_scopes + off / g.slot_size);
+        return Some(g.max_taps + off / g.slot_size);
     }
     None
 }
@@ -257,12 +257,12 @@ fn slot_index_of(base: *mut u8, g: &Geometry, slot: *const SlotHeader) -> Option
 /// # Safety
 /// `hnd` must point at a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_scope_get(
+pub unsafe extern "C" fn clockwork_tap_get(
     _ctx: *mut c_void,
     index: c_int,
     channels: c_int,
     _max_frames: c_int,
-    hnd: *mut ScopeBufferHnd,
+    hnd: *mut TapBufferHnd,
 ) -> c_int {
     if hnd.is_null() {
         return 0;
@@ -295,19 +295,19 @@ pub unsafe extern "C" fn clockwork_scope_get(
     1
 }
 
-/// Nothing to do: scope streams publish on every write.
+/// Nothing to do: tap streams publish on every write.
 ///
 /// The entry exists because the interface table has the slot, and a ugen built
 /// against an older engine may still call it.
 #[no_mangle]
-pub extern "C" fn clockwork_scope_push(_ctx: *mut c_void, _hnd: *mut ScopeBufferHnd, _frames: c_int) {}
+pub extern "C" fn clockwork_tap_push(_ctx: *mut c_void, _hnd: *mut TapBufferHnd, _frames: c_int) {}
 
 /// Give a slot back.
 ///
 /// # Safety
 /// `hnd` must point at a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_scope_release(_ctx: *mut c_void, hnd: *mut ScopeBufferHnd) {
+pub unsafe extern "C" fn clockwork_tap_release(_ctx: *mut c_void, hnd: *mut TapBufferHnd) {
     if hnd.is_null() {
         return;
     }
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn clockwork_scope_release(_ctx: *mut c_void, hnd: *mut Sc
 // `unsafe`, so it cannot touch shared memory itself.
 //
 // So the same three operations are offered here as safe functions. The ring
-// format is not re-derived — it is the one `shm_scope_stream::write` uses,
+// format is not re-derived — it is the one `shm_tap_stream::write` uses,
 // because the JavaScript that draws the scope reads that format and does not
 // care which language filled it.
 
@@ -512,11 +512,11 @@ mod hostless {
     /// # Safety
     /// Nothing is written: the out-pointers are not touched, and 0 says so.
     #[no_mangle]
-    pub unsafe extern "C" fn clockwork_scope_geometry(
+    pub unsafe extern "C" fn clockwork_tap_geometry(
         _start: *mut usize,
         _header_size: *mut usize,
         _slot_size: *mut usize,
-        _max_scopes: *mut usize,
+        _max_taps: *mut usize,
         _ring_frames: *mut u32,
         _channels: *mut u32,
         _track_start: *mut usize,

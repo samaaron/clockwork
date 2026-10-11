@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 //! Hostless defaults for the two services this crate calls out to —
-//! `clockwork_shm_base` and `clockwork_scope_geometry` (src/lib.rs) — for the
+//! `clockwork_shm_base` and `clockwork_tap_geometry` (src/lib.rs) — for the
 //! binaries that have no host to provide them.
 //!
 //! WHY THIS IS NEEDED, and only on Windows: a `cargo test` binary built from
@@ -55,19 +55,19 @@ fn main() {
     let src = format!(
         "#include <stddef.h>\n\
          {decl}void* clockwork_shm_base(void) {{ return 0; }}\n\
-         {decl}int clockwork_scope_geometry(size_t* start, size_t* header_size,\n\
-         \x20                              size_t* slot_size, size_t* max_scopes,\n\
+         {decl}int clockwork_tap_geometry(size_t* start, size_t* header_size,\n\
+         \x20                              size_t* slot_size, size_t* max_taps,\n\
          \x20                              unsigned* ring_frames, unsigned* channels,\n\
          \x20                              size_t* track_start, size_t* track_slots) {{\n\
-         \x20   (void)start; (void)header_size; (void)slot_size; (void)max_scopes;\n\
+         \x20   (void)start; (void)header_size; (void)slot_size; (void)max_taps;\n\
          \x20   (void)ring_frames; (void)channels; (void)track_start; (void)track_slots;\n\
          \x20   return 0;\n\
          }}\n"
     );
 
-    let c = out.join("scope_hostless.c");
-    std::fs::write(&c, src).expect("write the hostless scope defaults");
-    let obj = out.join(if msvc { "scope_hostless.obj" } else { "scope_hostless.o" });
+    let c = out.join("tap_hostless.c");
+    std::fs::write(&c, src).expect("write the hostless tap defaults");
+    let obj = out.join(if msvc { "tap_hostless.obj" } else { "tap_hostless.o" });
     let cc = std::env::var("CC")
         .unwrap_or_else(|_| if msvc { "cl.exe".into() } else { "cc".into() });
     let mut cc_cmd = Command::new(&cc);
@@ -82,10 +82,10 @@ fn main() {
     } else {
         cc_cmd.args(["-c", "-fPIC", "-O2", "-o"]).arg(&obj).arg(&c);
     }
-    run(cc_cmd, "could not compile the hostless scope defaults");
+    run(cc_cmd, "could not compile the hostless tap defaults");
 
     // `-l static=NAME` looks for NAME.lib on MSVC and libNAME.a elsewhere.
-    const NAME: &str = "clockwork_scope_hostless";
+    const NAME: &str = "clockwork_tap_hostless";
     let lib = out.join(if msvc { format!("{NAME}.lib") } else { format!("lib{NAME}.a") });
     let _ = std::fs::remove_file(&lib); // ar appends to an existing archive
     let ar = std::env::var("AR")
@@ -96,7 +96,7 @@ fn main() {
     } else {
         ar_cmd.arg("crs").arg(&lib).arg(&obj);
     }
-    run(ar_cmd, "could not archive the hostless scope defaults");
+    run(ar_cmd, "could not archive the hostless tap defaults");
     assert!(lib.is_file(), "no archive at {}", lib.display());
 
     println!("cargo:rustc-link-search=native={}", out.display());

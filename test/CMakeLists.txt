@@ -50,7 +50,7 @@ add_executable(clockwork_tests
     test_ring_concurrency.cpp
     test_lanes.cpp
     test_arena.cpp
-    test_audio_taps.cpp
+    test_raw_scope.cpp
     test_embed.cpp
 
     # OSC: the codec, the ingress router, and the one prefix clockwork keeps.
@@ -172,10 +172,10 @@ add_executable(clockwork_tests
     # asymmetry (ingress ring 6x the RT egress ring) as a measured fact.
     test_dsp_blobs.cpp
 
-    # The guest to client audio-publishing region (shm_scope_stream.hpp): the
+    # The guest to client audio-publishing region (shm_tap_stream.hpp): the
     # ring a waveform display reads. Header-only and lock-free, so both halves
     # of the contract are testable here without a device or a guest.
-    test_scope_stream.cpp
+    test_tap_stream.cpp
 
     # The audio capture region (shm_audio_buffer.hpp): the rolling window a
     # recorder or a meter pulls from. Its real contract is what happens when
@@ -422,7 +422,7 @@ add_executable(clockwork_engine_tests
     test_shm_repro.cpp
     test_guest_schedule_flush.cpp
     test_metrics_shm.cpp
-    test_scope_stream_reader.cpp
+    test_tap_stream_reader.cpp
     test_shm_peer_plane.cpp
     test_shm_attach.cpp
     test_client_egress.cpp

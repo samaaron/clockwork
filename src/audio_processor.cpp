@@ -70,7 +70,7 @@ uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 // places the ring arena + scheduler pool in bulk RAM on tiered targets.
 #include "platform.h"
 #include "dsp_api.h"  // the contract with the DSP
-#include "shm_scope_stream.hpp"   // the scope slots DspHost::scope_* hand a DSP
+#include "shm_tap_stream.hpp"   // the tap slots DspHost::scope_* hand a DSP
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
 #include "clockwork_port_bus.h" // ...and which DSP channels they occupy
 #include "clockwork_event_sink.h" // events leaving clockwork, on a stable slot
@@ -219,14 +219,14 @@ void clockwork_sched_warm();
 shm_audio_buffer* g_shm_audio_buffers = nullptr;
 
 // Engine sample position of the block being rendered (declared in
-// shm_scope_stream.hpp): anchors scope-stream writes on the sample clock.
+// shm_tap_stream.hpp): anchors tap-stream writes on the sample clock.
 std::atomic<uint64_t> g_engine_frames{0};
 
-// The scope substrate (rust/clockwork-scope): an opaque context it never
-// reads, and a handle of the four-field shape DspScopeHandle spells out.
+// The tap substrate (rust/clockwork-taps): an opaque context it never
+// reads, and a handle of the four-field shape DspTapHandle spells out.
 extern "C" {
-int  clockwork_scope_get(void* ctx, int index, int channels, int max_frames, void* hnd);
-void clockwork_scope_release(void* ctx, void* hnd);
+int  clockwork_tap_get(void* ctx, int index, int channels, int max_frames, void* hnd);
+void clockwork_tap_release(void* ctx, void* hnd);
 }
 
 #if CLOCKWORK_WORKLET_CLOCK
@@ -391,7 +391,7 @@ extern "C" {
     // (native backend with a public POSIX shm segment), init_memory() points
     // `shared_memory` here instead of the process-local ring_buffer_storage, so
     // the entire shared_memory.h blob — rings, control, metrics, node-tree,
-    // audio taps and scope — lives in the segment and is observable
+    // raw scope and taps — lives in the segment and is observable
     // cross-process.
     uint8_t* g_external_segment = nullptr;
 
@@ -635,7 +635,7 @@ extern "C" {
     // runtime (the int-returning get_ring_buffer_base() above is WASM-only and
     // would truncate a 64-bit native pointer). Returns the arena base set by
     // init_memory(): ring_buffer_storage locally, or the public segment when an
-    // external arena was supplied. Used by the scope-stream claim path.
+    // external arena was supplied. Used by the tap-stream claim path.
     void* get_shared_memory_base() {
         return shared_memory;
     }
@@ -786,37 +786,37 @@ extern "C" {
         return bytes ? clockwork_heap_alloc(bytes) : nullptr;
     }
 
-    // ── Scopes (dsp_api.h, "Scopes") ───────────────────────────────────────
+    // ── Taps (dsp_api.h, "Taps") ───────────────────────────────────────
     //
-    // A DSP publishes a scope by claiming a slot and appending blocks; the
-    // slot's layout (shm_scope_stream) and the anchor every block is stamped
+    // A DSP publishes a tap by claiming a slot and appending blocks; the
+    // slot's layout (shm_tap_stream) and the anchor every block is stamped
     // with (g_engine_frames) stay on this side. The handle passes straight
     // through to the substrate, which owns slots by the handle's address.
-    static int dsp_host_scope_open(void* /*ctx*/, uint32_t index, uint32_t channels,
-                                   DspScopeHandle* hnd) {
+    static int dsp_host_tap_open(void* /*ctx*/, uint32_t index, uint32_t channels,
+                                   DspTapHandle* hnd) {
         if (!hnd) return 0;
         if (index > (uint32_t)INT32_MAX || channels > (uint32_t)INT32_MAX) return 0;
-        if (!clockwork_scope_get(nullptr, (int)index, (int)channels, 0, hnd)) return 0;
-        auto* slot = static_cast<shm_scope_stream*>(hnd->slot);
+        if (!clockwork_tap_get(nullptr, (int)index, (int)channels, 0, hnd)) return 0;
+        auto* slot = static_cast<shm_tap_stream*>(hnd->slot);
         hnd->channels = slot ? slot->channels : 0;
         return 1;
     }
 
-    static void dsp_host_scope_write(void* /*ctx*/, DspScopeHandle* hnd,
+    static void dsp_host_tap_write(void* /*ctx*/, DspTapHandle* hnd,
                                      const float* const* channels, uint32_t n_channels,
                                      uint32_t frames) {
         if (!hnd || !hnd->slot || !channels || n_channels == 0 || frames == 0) return;
         // The writer takes a full set of channel pointers; short by some, the
         // last one given fills the rest, as ScopeOut2 always did.
-        std::array<const float*, SHM_SCOPE_STREAM_CHANNELS> padded{};
-        for (uint32_t c = 0; c < SHM_SCOPE_STREAM_CHANNELS; ++c)
+        std::array<const float*, SHM_TAP_STREAM_CHANNELS> padded{};
+        for (uint32_t c = 0; c < SHM_TAP_STREAM_CHANNELS; ++c)
             padded[c] = channels[c < n_channels ? c : n_channels - 1];
-        shm_scope_stream_writer writer(static_cast<shm_scope_stream*>(hnd->slot));
+        shm_tap_stream_writer writer(static_cast<shm_tap_stream*>(hnd->slot));
         writer.write(padded.data(), frames, g_engine_frames.load(std::memory_order_relaxed));
     }
 
-    static void dsp_host_scope_close(void* /*ctx*/, DspScopeHandle* hnd) {
-        if (hnd) clockwork_scope_release(nullptr, hnd);
+    static void dsp_host_tap_close(void* /*ctx*/, DspTapHandle* hnd) {
+        if (hnd) clockwork_tap_release(nullptr, hnd);
     }
 
 
@@ -894,8 +894,8 @@ extern "C" {
                                  &dsp_host_open_sink, &dsp_host_send_sink,
                                  &dsp_host_free_bytes, &dsp_host_asset_release,
                                  &dsp_host_alloc_bytes,
-                                 &dsp_host_scope_open, &dsp_host_scope_write,
-                                 &dsp_host_scope_close, &dsp_host_flush_schedule };
+                                 &dsp_host_tap_open, &dsp_host_tap_write,
+                                 &dsp_host_tap_close, &dsp_host_flush_schedule };
 
 #if CLOCKWORK_WORKLET_CLOCK && CLOCKWORK_SYNTH
     // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
@@ -1431,7 +1431,7 @@ extern "C" {
         // and a wipe that assumed one would be a guess about its empty value.
         memset(shared_memory + SHM_WINDOW_START, 0, SHM_WINDOW_SIZE);
 
-        // The audio taps: out and in, formatted here at the device's live
+        // The raw scope: out and in, formatted here at the device's live
         // channel count (up to the slot's ceiling) and written by the tick
         // from then on. A tap for a direction the device has not got is
         // formatted with no channels and left disabled, so a reader sees
@@ -1455,19 +1455,19 @@ extern "C" {
         // opens get the shape too.
         install_sink_profiles();
 
-        // Scope streams: global header (geometry for cross-process observers)
+        // Tap streams: global header (geometry for cross-process observers)
         // then the slot array. Slots start zeroed (state=free); the producer
-        // claims and activates them on demand (rust/clockwork-scope).
+        // claims and activates them on demand (rust/clockwork-taps).
         {
-            uint8_t* scopeBase = shared_memory + SHM_SCOPE_START;
-            memset(scopeBase, 0, SHM_SCOPE_TOTAL_SIZE);
-            reinterpret_cast<std::atomic<uint32_t>*>(scopeBase + 0)->store(
-                SHM_SCOPE_MAX_SCOPES, std::memory_order_relaxed);   // maxScopes
-            reinterpret_cast<std::atomic<uint32_t>*>(scopeBase + 4)->store(
+            uint8_t* tapBase = shared_memory + SHM_TAP_START;
+            memset(tapBase, 0, SHM_TAP_TOTAL_SIZE);
+            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 0)->store(
+                SHM_TAP_MAX_TAPS, std::memory_order_relaxed);   // maxTaps
+            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 4)->store(
                 0, std::memory_order_relaxed);                      // activeCount
-            reinterpret_cast<std::atomic<uint32_t>*>(scopeBase + 8)->store(
-                SHM_SCOPE_RING_FRAMES, std::memory_order_relaxed);  // ringFrames
-            reinterpret_cast<std::atomic<uint32_t>*>(scopeBase + 12)->store(
+            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(
+                SHM_TAP_RING_FRAMES, std::memory_order_relaxed);  // ringFrames
+            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(
                 0, std::memory_order_relaxed);                      // version
             // The engine's track taps, in the block: slots only, start free.
             if (SHM_TRACK_TAPS_SIZE)
@@ -2446,7 +2446,7 @@ extern "C" {
                 // docs/PORTS.md for the only tap that exists so far.
                 push_port_sinks(QUANTUM_SIZE);
             }
-            // The audio taps, at the device edge: what leaves for the device
+            // The raw scope, at the device edge: what leaves for the device
             // this block (after the guest, after the port sinks) and what
             // arrived from it (as the guest saw it). Every host, every
             // block, at the channel count the slot was formatted with. A

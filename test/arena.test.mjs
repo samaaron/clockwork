@@ -41,7 +41,7 @@ test("the audience word is the last geometry word, and published() reads it", ()
   assert.ok(a.published(REGION.GUEST_WINDOW));
   assert.ok(!a.published(REGION.IN_RING));
   assert.ok(!a.published(REGION.GUEST_PERSIST));
-  assert.ok(!a.published(REGION.SCOPE), "an absent region is not published");
+  assert.ok(!a.published(REGION.TAPS), "an absent region is not published");
   assert.equal(a.region(REGION.CLOCK_STATE).audience & AUDIENCE.GUEST, AUDIENCE.GUEST);
 });
 

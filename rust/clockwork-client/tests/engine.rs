@@ -21,10 +21,10 @@ use std::time::Duration;
 use clockwork_abi::arena::{geom, ClockworkArenaRegion};
 use clockwork_abi::client::CLOCKWORK_CLIENT_ABI_VERSION;
 use clockwork_client::{
-    Client, Embed, EmbedConfig, Error, Metric, NativeStat, RegionId, Ring, Route, ScopeRead,
-    SCOPE_MAX_CHANNELS,
+    Client, Embed, EmbedConfig, Error, Metric, NativeStat, RegionId, Ring, Route, AudioTapRead,
+    AUDIO_TAP_MAX_CHANNELS,
 };
-use clockwork_native::clockwork_scope;
+use clockwork_native::clockwork_taps;
 
 /// Our origin token: non-zero, so replies come back to us rather than to
 /// the notification audience.
@@ -95,7 +95,7 @@ fn attach_reports_the_geometry_it_runs_at_and_has_no_device() {
     assert_eq!(info.output_channels, 2);
     assert_eq!(info.abi_version, CLOCKWORK_CLIENT_ABI_VERSION);
     assert_eq!(Client::abi_version(), CLOCKWORK_CLIENT_ABI_VERSION);
-    assert!(info.features.scope(), "the default build carries scope slots: {:?}", info.features);
+    assert!(info.features.taps(), "the default build carries raw scope slots: {:?}", info.features);
     // No device behind an attached handle, and the read-back says so.
     assert_eq!(e.device().err(), Some(Error::Arg));
 }
@@ -249,7 +249,7 @@ fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
     let block = e.block_size() as usize;
     let (mut renderer, client) = e.split();
     let stop = AtomicBool::new(false);
-    std::thread::scope(|s| {
+    std::thread::raw scope(|s| {
         let stop = &stop;
         s.spawn(move || {
             let (mut l, mut r) = (vec![0.0f32; block], vec![0.0f32; block]);
@@ -313,8 +313,8 @@ fn regions_are_named_and_absent_is_an_answer() {
     assert!(e.region(RegionId::Ingress).unwrap().is_writable());
     assert!(!e.region(RegionId::Egress).unwrap().is_writable());
     assert!(!e.region(RegionId::Window).unwrap().is_empty());
-    assert!(!e.region(RegionId::Scope).unwrap().is_empty());
-    assert!(!e.region(RegionId::AudioTaps).unwrap().is_empty());
+    assert!(!e.region(RegionId::Taps).unwrap().is_empty());
+    assert!(!e.region(RegionId::RawScope).unwrap().is_empty());
     let stats = e.region(RegionId::NativeStats).unwrap();
     assert!(stats.len() >= 4 * clockwork_client::metrics_schema::NATIVE_STATS.len());
     assert!(!stats.is_writable());
@@ -371,7 +371,7 @@ fn the_clock_is_one_snapshot_and_beats_follow_its_tempo() {
 }
 
 #[test]
-fn a_scope_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written() {
+fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written() {
     let g = engine();
     let e = g.as_ref().unwrap();
     // The buffer-sizing constant is the engine's own geometry, or the read
@@ -379,57 +379,57 @@ fn a_scope_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written
     // SAFETY: the engine is attached, so the arena header is mapped and
     // published; read only.
     let header = unsafe { &*clockwork_abi::lanes::clockwork_arena_header() };
-    let scope_entry = header.find(ClockworkArenaRegion::SCOPE).expect("the arena has a scope region");
-    assert_eq!(scope_entry.geom[geom::SCOPE_CHANNELS] as usize, SCOPE_MAX_CHANNELS);
+    let tap_entry = header.find(ClockworkArenaRegion::TAPS).expect("the arena has a raw scope region");
+    assert_eq!(tap_entry.geom[geom::TAP_CHANNELS] as usize, AUDIO_TAP_MAX_CHANNELS);
 
-    assert_eq!(e.scope(1_000_000).err(), Some(Error::Absent));
-    let scope = e.scope(0).unwrap();
-    assert_eq!(scope.slot(), 0);
-    assert!(!scope.is_valid());
-    let mut out = vec![7.0f32; 256 * SCOPE_MAX_CHANNELS];
-    let got = scope.read_newest(256, &mut out);
+    assert_eq!(e.audio_tap(1_000_000).err(), Some(Error::Absent));
+    let tap = e.audio_tap(0).unwrap();
+    assert_eq!(tap.slot(), 0);
+    assert!(!tap.is_valid());
+    let mut out = vec![7.0f32; 256 * AUDIO_TAP_MAX_CHANNELS];
+    let got = tap.read_newest(256, &mut out);
     assert_eq!(got.frames, 0);
     assert!(out.iter().all(|&s| s == 0.0), "an unclaimed slot yields silence, not the buffer's past");
     // Too small a buffer reads nothing rather than past its end.
-    assert_eq!(scope.read_newest(256, &mut out[..1]), ScopeRead::default());
+    assert_eq!(tap.read_newest(256, &mut out[..1]), AudioTapRead::default());
 
     // Now a writer claims the slot and writes a ramp, as a guest does. The
     // claim counts as a live spell.
-    let went_live = scope.activations();
-    assert!(clockwork_scope::stream_activate(0, 2));
-    assert_eq!(scope.activations(), went_live.wrapping_add(1));
+    let went_live = tap.activations();
+    assert!(clockwork_taps::stream_activate(0, 2));
+    assert_eq!(tap.activations(), went_live.wrapping_add(1));
     let n = 1024usize;
     let mut ramp = vec![0.0f32; n * 2];
     for f in 0..n {
         ramp[f * 2] = f as f32;
         ramp[f * 2 + 1] = -(f as f32);
     }
-    clockwork_scope::stream_write(0, &ramp, n, 0);
-    assert!(scope.is_valid());
-    let got = scope.read_newest(256, &mut out);
-    assert_eq!(got, ScopeRead { frames: 256, channels: 2 });
+    clockwork_taps::stream_write(0, &ramp, n, 0);
+    assert!(tap.is_valid());
+    let got = tap.read_newest(256, &mut out);
+    assert_eq!(got, AudioTapRead { frames: 256, channels: 2 });
     for f in 0..256 {
         assert_eq!(out[f * 2], (768 + f) as f32, "frame {f} left");
         assert_eq!(out[f * 2 + 1], -((768 + f) as f32), "frame {f} right");
     }
     // The audible edge never runs past what was written, and a window that
     // reaches before the ring's start is silence at the front.
-    assert!(scope.audible_end() <= n as u64);
-    let mut wide = vec![7.0f32; 2048 * SCOPE_MAX_CHANNELS];
-    let got = scope.read_newest(2048, &mut wide);
+    assert!(tap.audible_end() <= n as u64);
+    let mut wide = vec![7.0f32; 2048 * AUDIO_TAP_MAX_CHANNELS];
+    let got = tap.read_newest(2048, &mut wide);
     assert_eq!(got.frames, n);
     assert!(wide[..(2048 - n) * 2].iter().all(|&s| s == 0.0));
     assert_eq!(wide[(2048 - n) * 2], 0.0);
     assert_eq!(wide[(2048 - n + 1) * 2], 1.0);
-    let got = scope.read_audible(64, &mut out);
+    let got = tap.read_audible(64, &mut out);
     assert!(got.frames <= 64);
 
-    clockwork_scope::stream_release(0);
-    assert!(!scope.is_valid());
+    clockwork_taps::stream_release(0);
+    assert!(!tap.is_valid());
     // Released, it still says it went live: a reader that polled only after
     // the release can tell.
-    assert_eq!(scope.activations(), went_live.wrapping_add(1));
-    let got = scope.read_newest(256, &mut out);
+    assert_eq!(tap.activations(), went_live.wrapping_add(1));
+    let got = tap.read_newest(256, &mut out);
     assert_eq!(got.frames, 0);
     assert!(out.iter().all(|&s| s == 0.0));
 }

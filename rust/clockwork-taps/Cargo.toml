@@ -1,5 +1,5 @@
 [package]
-name = "clockwork-scope"
+name = "clockwork-taps"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
@@ -14,11 +14,11 @@ crate-type = ["rlib"]
 
 [features]
 # Linked into a real host: one that defines `clockwork_shm_base` and
-# `clockwork_scope_geometry` itself — the engine, through clockwork-sys — so
+# `clockwork_tap_geometry` itself — the engine, through clockwork-sys — so
 # the hostless defaults build.rs makes stay out of the link. They must: they
 # are an archive that sits AHEAD of the engine's on rustc's line, and an
 # archive answers the first unresolved reference, so with both present the
-# defaults would win and the scope plane would quietly read from nowhere.
+# defaults would win and the tap plane would quietly read from nowhere.
 host = []
 
 [dependencies]

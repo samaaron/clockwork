@@ -311,7 +311,7 @@ public:
     // The clock's sample↔time line, published for cross-process readers: one
     // anchor (samplePosition, renderNtp + outputLatency/rate) plus the rate
     // defines dac_time(frame) for every frame, like the beat↔time
-    // timelines above. Consumers (scope streams, any audible-time query)
+    // timelines above. Consumers (tap streams, any audible-time query)
     // convert cursors through it via sample_clock_view (shm_segment.hpp).
     // Region layout: SAMPLE_CLOCK_* in shared_memory.h. Bind once at engine
     // init; the driver publishes an anchor once per hardware callback and
@@ -320,7 +320,7 @@ public:
     void bindSampleClockToShm(uint8_t* region);
     void publishSampleClock(double samplePosition, double sampleRate,
                             double renderNtp, uint32_t outputLatencyFrames);
-    // Advance the engine-frame counter that anchors scope-stream writes,
+    // Advance the engine-frame counter that anchors tap-stream writes,
     // without republishing the anchor. Drivers that render several engine
     // blocks per publishSampleClock call this per block; the sample-clock
     // line is linear, so one anchor per hardware callback suffices.

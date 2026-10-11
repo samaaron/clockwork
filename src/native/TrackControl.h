@@ -19,7 +19,7 @@
  *
  *   THE SCOPES. The source's transfer signal fires once the return block is
  *   on the input bus, and that is where each track's output is tapped into
- *   a scope stream of its own (memory_profile.h SHM_SCOPE_TRACK_SLOT_BASE +
+ *   a tap stream of its own (memory_profile.h SHM_TAP_TRACK_SLOT_BASE +
  *   slot), so a panel can draw what a track is putting out without a scope
  *   node in the graph. Which lanes carry a track the bridge says each block
  *   (Header::slots_live); a slot that gains a track claims its stream on the
@@ -66,7 +66,7 @@
 
 #include "plugin_bridge.h"
 #include "lanes/ring_drain.h"
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 #include "shm_segment.hpp"
 #include "clockwork_process.h"
 #include "clockwork_ports.h"
@@ -157,7 +157,7 @@ private:
     uint32_t mDeviceBufferFrames = 0;   // what the slack was last sized for
     static void onReturnTransfer(ClockworkPort port, void* ctx);
     void tapReturns();
-    void releaseScopes();
+    void releaseTaps();
 
     bool createSegment();
     bool openPorts(bool reset);
@@ -185,17 +185,17 @@ private:
     uint32_t mBoundBase = 0;          // where the ports are bound; 0 = not bound
     const ClockworkClockState* mClock = nullptr;
 
-    // One scope stream per track slot, held while the slot has a track. The
-    // handle is the slot's claim (rust/clockwork-scope: the same shape scsynth's
+    // One tap stream per track slot, held while the slot has a track. The
+    // handle is the slot's claim (rust/clockwork-taps: the same shape scsynth's
     // ScopeOut2 claims with, so the owner-only release rule holds for these
     // too); the writer appends the return block. Audio thread only, between
     // the signal's install and its removal.
-    struct ScopeTap {
+    struct TrackTap {
         struct Claim { void* internalData = nullptr; float* data = nullptr;
                        uint32_t channels = 0; uint32_t maxFrames = 0; } claim;
-        shm_scope_stream_writer writer;
+        shm_tap_stream_writer writer;
     };
-    std::array<ScopeTap, clockwork_bridge::LANES / 2> mScopes{};
+    std::array<TrackTap, clockwork_bridge::LANES / 2> mTaps{};
 
     ClockworkProcess mProcess;
     std::string mExe;

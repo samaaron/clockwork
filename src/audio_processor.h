@@ -25,8 +25,8 @@ extern "C" {
     // TOTAL_BUFFER_SIZE is computed in shared_memory.h from the build's
     // sizing flags; do not restate it here as a number. The figures that used
     // to sit on this line ("~1.4MB ... audio capture ~375KB") were wrong by
-    // more than 4x and omitted the scope region entirely. On the web build it
-    // measures 6.72MB, of which SHM_SCOPE is 4.1MB.
+    // more than 4x and omitted the tap region entirely. On the web build it
+    // measures 6.72MB, of which SHM_TAP is 4.1MB.
     extern uint8_t ring_buffer_storage[TOTAL_BUFFER_SIZE];
 
     // Global state

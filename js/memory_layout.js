@@ -117,7 +117,7 @@ export const MemoryLayout = {
      * region).
      *
      * DO NOT LIST THE FIGURES HERE OR RE-DERIVE THE TOTAL BY HAND — a written
-     * total drifts from the build it describes, and SHM_SCOPE, the largest
+     * total drifts from the build it describes, and SHM_TAP, the largest
      * region of the lot, is the one most easily forgotten. The regions are
      * laid out by
      * src/shared_memory.h from the build's own -D flags, and the module
@@ -125,7 +125,7 @@ export const MemoryLayout = {
      * (`sonic.bufferConstants`) and measure.
      *
      * Measured on the web build, 2026-08-22: the regions span 6.474MB from
-     * `ringBufferBase`, of which SHM_SCOPE is 4.097MB, SHM_AUDIO 1.500MB and
+     * `ringBufferBase`, of which SHM_TAP is 4.097MB, SHM_AUDIO 1.500MB and
      * the OSC rings 1.125MB (IN 1MB + OUT 128KB). They sit inside the WASM
      * heap below, not in the reservation named here.
      */

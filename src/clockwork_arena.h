@@ -29,13 +29,13 @@
  *                                        clients of an engine: the control
  *                                        block, metrics, the clocks, the
  *                                        channel map, the three rings, the
- *                                        audio taps, the client slots. The
+ *                                        raw scope, the client slots. The
  *                                        guest is never handed a pointer into
  *                                        it that it may write through.
  *   [guest_offset, guest_offset+bytes)   THE GUEST REGION. What the guest
  *                                        is given base and length to: its
  *                                        config, its publish window, its
- *                                        scope slots, its persistent bytes.
+ *                                        tap slots, its persistent bytes.
  *                                        Clockwork lays it out and never
  *                                        reads a byte of what the guest puts
  *                                        there.
@@ -116,8 +116,8 @@ enum ClockworkArenaAudience {
 };
 
 /* The regions. Stable numbers: a reader looks these up, never a position.
- * The scope-stream slots a client numbers are ONE index space across two of
- * them: the guest's SCOPE region carries indices [0, slots), and the
+ * The tap-stream slots a client numbers are ONE index space across two of
+ * them: the guest's TAPS region carries indices [0, slots), and the
  * engine's TRACK_TAPS region carries [first_index, first_index + slots) —
  * the same slot shape, a different owner, a different half of the arena. */
 enum ClockworkArenaRegion {
@@ -133,21 +133,21 @@ enum ClockworkArenaRegion {
     CLOCKWORK_ARENA_IN_RING         = 9,   /* OSC into the engine */
     CLOCKWORK_ARENA_OUT_RING        = 10,  /* RT egress, written inside the tick */
     CLOCKWORK_ARENA_NRT_OUT_RING    = 11,  /* control-thread egress */
-    CLOCKWORK_ARENA_AUDIO_TAPS      = 12,  /* shm_audio_buffer slots: OUT then IN, written in the tick */
+    CLOCKWORK_ARENA_RAW_SCOPE      = 12,  /* shm_audio_buffer slots: OUT then IN, written in the tick */
     CLOCKWORK_ARENA_CLIENT_SLOTS    = 13,  /* a co-resident client's handle and stack */
-    CLOCKWORK_ARENA_TRACK_TAPS      = 18,  /* scope-stream slots the engine writes from plugin-track
-                                              returns; numbered after the guest's scope slots */
+    CLOCKWORK_ARENA_TRACK_TAPS      = 18,  /* tap-stream slots the engine writes from plugin-track
+                                              returns; numbered after the guest's tap slots */
     /* ── the guest region ── */
     CLOCKWORK_ARENA_GUEST_CONFIG    = 14,  /* host -> guest, copied at boot */
     CLOCKWORK_ARENA_GUEST_WINDOW    = 15,  /* DspConfig::shm_window */
-    CLOCKWORK_ARENA_SCOPE           = 16,  /* scope streams: global header, then slots */
+    CLOCKWORK_ARENA_TAPS           = 16,  /* tap streams: global header, then slots */
     CLOCKWORK_ARENA_GUEST_PERSIST   = 17,  /* DspConfig::persistent */
 };
 
-/* The two audio taps, as slot indices into AUDIO_TAPS: what left for the
+/* The two raw scope slots, as slot indices into RAW_SCOPE: what left for the
  * device this block, and what arrived from it. Clockwork writes both inside
  * every tick, on every host, at the device's live channel count up to the
- * slot's ceiling (CLOCKWORK_GEOM_TAPS_CHANNELS). */
+ * slot's ceiling (CLOCKWORK_GEOM_RAW_SCOPE_CHANNELS). */
 #define CLOCKWORK_TAP_OUT 0u
 #define CLOCKWORK_TAP_IN  1u
 
@@ -170,21 +170,21 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_ANCHOR_NTP_START    = 0,   /* f64 */
     CLOCKWORK_GEOM_ANCHOR_DRIFT        = 1,   /* i32, microseconds */
     CLOCKWORK_GEOM_ANCHOR_GLOBAL       = 2,   /* i32, milliseconds */
-    /* audio taps */
-    CLOCKWORK_GEOM_TAPS_SLOTS          = 0,
-    CLOCKWORK_GEOM_TAPS_SLOT_BYTES     = 1,
-    CLOCKWORK_GEOM_TAPS_HEADER_BYTES   = 2,
-    CLOCKWORK_GEOM_TAPS_FRAMES         = 3,
-    CLOCKWORK_GEOM_TAPS_CHANNELS       = 4,
-    CLOCKWORK_GEOM_TAPS_SAMPLE_RATE    = 5,
-    /* scope streams */
-    CLOCKWORK_GEOM_SCOPE_SLOTS         = 0,
-    CLOCKWORK_GEOM_SCOPE_HEADER_BYTES  = 1,
-    CLOCKWORK_GEOM_SCOPE_SLOT_BYTES    = 2,
-    CLOCKWORK_GEOM_SCOPE_SLOT_HEADER   = 3,
-    CLOCKWORK_GEOM_SCOPE_RING_FRAMES   = 4,
-    CLOCKWORK_GEOM_SCOPE_CHANNELS      = 5,
-    /* track taps: scope-stream slots, same shape as the guest's */
+    /* raw scope */
+    CLOCKWORK_GEOM_RAW_SCOPE_SLOTS          = 0,
+    CLOCKWORK_GEOM_RAW_SCOPE_SLOT_BYTES     = 1,
+    CLOCKWORK_GEOM_RAW_SCOPE_HEADER_BYTES   = 2,
+    CLOCKWORK_GEOM_RAW_SCOPE_FRAMES         = 3,
+    CLOCKWORK_GEOM_RAW_SCOPE_CHANNELS       = 4,
+    CLOCKWORK_GEOM_RAW_SCOPE_SAMPLE_RATE    = 5,
+    /* tap streams */
+    CLOCKWORK_GEOM_TAP_SLOTS         = 0,
+    CLOCKWORK_GEOM_TAP_HEADER_BYTES  = 1,
+    CLOCKWORK_GEOM_TAP_SLOT_BYTES    = 2,
+    CLOCKWORK_GEOM_TAP_SLOT_HEADER   = 3,
+    CLOCKWORK_GEOM_TAP_RING_FRAMES   = 4,
+    CLOCKWORK_GEOM_TAP_CHANNELS      = 5,
+    /* track taps: tap-stream slots, same shape as the guest's */
     CLOCKWORK_GEOM_TRACK_SLOTS         = 0,
     CLOCKWORK_GEOM_TRACK_SLOT_BYTES    = 1,
     CLOCKWORK_GEOM_TRACK_SLOT_HEADER   = 2,

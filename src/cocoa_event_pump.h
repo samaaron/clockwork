@@ -44,7 +44,7 @@ void  clockwork_release_latency_critical(void* token);
 #ifdef __cplusplus
 }
 
-/* Scope guard for the C++ callers: one per loop turn. */
+/* Tap guard for the C++ callers: one per loop turn. */
 struct ClockworkAutoreleasePool {
     void* pool;
     ClockworkAutoreleasePool() : pool(clockwork_autorelease_pool_push()) {}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_scope_stream.cpp — shm_scope_stream protocol + sample clock.
+ * test_tap_stream.cpp — shm_tap_stream protocol + sample clock.
  *
  * Unit-level: writer/reader round-trip, ring wrap, engine-frame anchoring and
  * gap healing (paused node groups skip blocks), copy_window clamping and
@@ -12,7 +12,7 @@
 #include "EngineFixture.h"
 #include "OscTestUtils.h"
 
-#include "shm_scope_stream.hpp"
+#include "shm_tap_stream.hpp"
 #include "shm_segment.hpp"
 
 #include <algorithm>
@@ -31,9 +31,9 @@ using detail_shm_segment::sample_clock_view;
 
 namespace {
 
-std::unique_ptr<shm_scope_stream> makeSlot() {
-    auto slot = std::make_unique<shm_scope_stream>();
-    memset(static_cast<void*>(slot.get()), 0, sizeof(shm_scope_stream));
+std::unique_ptr<shm_tap_stream> makeSlot() {
+    auto slot = std::make_unique<shm_tap_stream>();
+    memset(static_cast<void*>(slot.get()), 0, sizeof(shm_tap_stream));
     return slot;
 }
 
@@ -41,7 +41,7 @@ std::unique_ptr<shm_scope_stream> makeSlot() {
 // absolute frame index, so windows read back from any cursor position
 // self-identify.
 template <typename GenL, typename GenR>
-void writeGeneratedBlock(shm_scope_stream_writer& w, uint64_t engineFrames,
+void writeGeneratedBlock(shm_tap_stream_writer& w, uint64_t engineFrames,
                          uint32_t n, uint64_t indexBase, GenL genLeft,
                          GenR genRight) {
     std::vector<float> left(n), right(n);
@@ -54,7 +54,7 @@ void writeGeneratedBlock(shm_scope_stream_writer& w, uint64_t engineFrames,
     w.write(ch, n, engineFrames);
 }
 
-void writeIndexedBlock(shm_scope_stream_writer& w, uint64_t engineFrames,
+void writeIndexedBlock(shm_tap_stream_writer& w, uint64_t engineFrames,
                        uint32_t n, uint64_t indexBase) {
     writeGeneratedBlock(
         w, engineFrames, n, indexBase,
@@ -71,7 +71,7 @@ constexpr float kTracerScale = 1.0f / 65536.0f;
 // Left channel: sine with period 100 frames (rising zero-crossing at every
 // multiple of 100). Right channel: index tracer, so triggered windows
 // self-identify their alignment.
-void writeSineIndexedBlock(shm_scope_stream_writer& w, uint64_t engineFrames,
+void writeSineIndexedBlock(shm_tap_stream_writer& w, uint64_t engineFrames,
                            uint32_t n, uint64_t indexBase) {
     writeGeneratedBlock(
         w, engineFrames, n, indexBase,
@@ -83,16 +83,16 @@ void writeSineIndexedBlock(shm_scope_stream_writer& w, uint64_t engineFrames,
 
 }  // namespace
 
-TEST_CASE("scope-stream: writer/reader round-trip with interleaved windows",
-          "[scope][stream]") {
+TEST_CASE("tap-stream: writer/reader round-trip with interleaved windows",
+          "[tap][stream]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     REQUIRE(r.valid());
     CHECK(r.channels() == 2);
-    CHECK(r.capacity_frames() == SHM_SCOPE_RING_FRAMES);
+    CHECK(r.capacity_frames() == SHM_TAP_RING_FRAMES);
     CHECK(r.write_position() == 0);
 
     writeIndexedBlock(w, 5000, 128, 0);
@@ -110,12 +110,12 @@ TEST_CASE("scope-stream: writer/reader round-trip with interleaved windows",
     }
 }
 
-TEST_CASE("scope-stream: short history zero-fills the window lead-in",
-          "[scope][stream]") {
+TEST_CASE("tap-stream: short history zero-fills the window lead-in",
+          "[tap][stream]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeIndexedBlock(w, 100, 32, 0);
     std::vector<float> out(128 * 2, -1.0f);
@@ -130,15 +130,15 @@ TEST_CASE("scope-stream: short history zero-fills the window lead-in",
     CHECK(out[127 * 2] == 31.0f);     // frame index 31
 }
 
-TEST_CASE("scope-stream: ring wrap preserves window continuity",
-          "[scope][stream]") {
+TEST_CASE("tap-stream: ring wrap preserves window continuity",
+          "[tap][stream]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // Write ~1.5 rings in 512-frame blocks.
-    const uint32_t cap = SHM_SCOPE_RING_FRAMES;
+    const uint32_t cap = SHM_TAP_RING_FRAMES;
     const uint64_t total = cap + cap / 2;
     uint64_t engine = 0;
     for (uint64_t at = 0; at < total; at += 512) {
@@ -155,12 +155,12 @@ TEST_CASE("scope-stream: ring wrap preserves window continuity",
         CHECK(out[i * 2] == static_cast<float>(total - 1024 + i));
 }
 
-TEST_CASE("scope-stream: engine-frame gaps heal the cursor mapping",
-          "[scope][stream]") {
+TEST_CASE("tap-stream: engine-frame gaps heal the cursor mapping",
+          "[tap][stream]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeIndexedBlock(w, 1000, 128, 0);
     // A paused node group skips ten blocks: the next write arrives with an
@@ -171,12 +171,12 @@ TEST_CASE("scope-stream: engine-frame gaps heal the cursor mapping",
     CHECK(r.write_position() == 128 + 1280 + 128);
 }
 
-TEST_CASE("scope-stream: copy_window clamps a cursor beyond the writer",
-          "[scope][stream]") {
+TEST_CASE("tap-stream: copy_window clamps a cursor beyond the writer",
+          "[tap][stream]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeIndexedBlock(w, 0, 256, 0);
     std::vector<float> out(64 * 2, -1.0f);
@@ -186,12 +186,12 @@ TEST_CASE("scope-stream: copy_window clamps a cursor beyond the writer",
     CHECK(out[63 * 2] == 255.0f);
 }
 
-TEST_CASE("scope-stream: audible_end windows streams on the sample clock",
-          "[scope][stream][sampleclock]") {
+TEST_CASE("tap-stream: audible_end windows streams on the sample clock",
+          "[tap][stream][sampleclock]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
     writeIndexedBlock(w, 10000, 1024, 0);  // base=10000, writer=1024
 
     sample_clock_view v;
@@ -207,8 +207,8 @@ TEST_CASE("scope-stream: audible_end windows streams on the sample clock",
     CHECK(sample_clock_view().audible_end(r, 100.0) == 1024);  // no clock: writer
 }
 
-TEST_CASE("scope-stream: headless engine publishes an advancing sample clock",
-          "[scope][stream][sampleclock]") {
+TEST_CASE("tap-stream: headless engine publishes an advancing sample clock",
+          "[tap][stream][sampleclock]") {
     ClockworkEngine::Config cfg;
     cfg.sampleRate        = 48000;
     cfg.bufferSize        = 128;
@@ -247,17 +247,17 @@ TEST_CASE("scope-stream: headless engine publishes an advancing sample clock",
     CHECK(std::abs(vis - double(b.engine_frames)) < 1.0);
 }
 
-TEST_CASE("scope-stream: copy_triggered_window aligns to a rising zero-crossing",
-          "[scope][stream][trigger]") {
+TEST_CASE("tap-stream: copy_triggered_window aligns to a rising zero-crossing",
+          "[tap][stream][trigger]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeSineIndexedBlock(w, 0, 1000, 0);
 
     const uint32_t frames = 300, search = 150;
-    std::vector<float> out(frames * SHM_SCOPE_STREAM_CHANNELS);
+    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS);
     uint32_t ch = 0, trig = 0;
     const uint32_t real =
         r.copy_triggered_window(1000, frames, search, out.data(), &ch, &trig);
@@ -272,12 +272,12 @@ TEST_CASE("scope-stream: copy_triggered_window aligns to a rising zero-crossing"
     CHECK(out[(frames - 1) * 2 + 1] == 899.0f * kTracerScale); // last frame
 }
 
-TEST_CASE("scope-stream: copy_triggered_window without a crossing matches the rolling window",
-          "[scope][stream][trigger]") {
+TEST_CASE("tap-stream: copy_triggered_window without a crossing matches the rolling window",
+          "[tap][stream][trigger]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // All-positive DC left, index tracer right: the L+R mix never goes
     // negative, so there is no rising zero-crossing anywhere.
@@ -286,28 +286,28 @@ TEST_CASE("scope-stream: copy_triggered_window without a crossing matches the ro
         [](uint64_t idx) { return static_cast<float>(idx); });
 
     const uint32_t frames = 200, search = 100;
-    std::vector<float> triggered(frames * SHM_SCOPE_STREAM_CHANNELS);
-    std::vector<float> rolling(frames * SHM_SCOPE_STREAM_CHANNELS);
+    std::vector<float> triggered(frames * SHM_TAP_STREAM_CHANNELS);
+    std::vector<float> rolling(frames * SHM_TAP_STREAM_CHANNELS);
     uint32_t trig = 999;
     r.copy_triggered_window(800, frames, search, triggered.data(), nullptr, &trig);
     r.copy_window(800, frames, rolling.data());
 
-    CHECK(trig == SHM_SCOPE_TRIGGER_NONE);
+    CHECK(trig == SHM_TAP_TRIGGER_NONE);
     CHECK(std::memcmp(triggered.data(), rolling.data(),
                       frames * 2 * sizeof(float)) == 0);
 }
 
-TEST_CASE("scope-stream: copy_triggered_window zero-fills like copy_window",
-          "[scope][stream][trigger]") {
+TEST_CASE("tap-stream: copy_triggered_window zero-fills like copy_window",
+          "[tap][stream][trigger]") {
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     writeSineIndexedBlock(w, 0, 100, 0);   // only 100 real frames
 
     const uint32_t frames = 300, search = 100;
-    std::vector<float> out(frames * SHM_SCOPE_STREAM_CHANNELS, 42.0f);
+    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, 42.0f);
     uint32_t trig = 0;
     const uint32_t real =
         r.copy_triggered_window(100, frames, search, out.data(), nullptr, &trig);
@@ -315,7 +315,7 @@ TEST_CASE("scope-stream: copy_triggered_window zero-fills like copy_window",
     // The whole search region is zero-fill, so no crossing can be found and
     // exactly the ring's 100 frames land in the emitted window.
     REQUIRE(real == 100);
-    CHECK(trig == SHM_SCOPE_TRIGGER_NONE);
+    CHECK(trig == SHM_TAP_TRIGGER_NONE);
     // The 200-frame lead-in must be zeroed, never left holding the caller's
     // prior buffer contents.
     CHECK(std::all_of(out.begin(), out.begin() + (frames - real) * 2,
@@ -330,19 +330,19 @@ TEST_CASE("scope-stream: copy_triggered_window zero-fills like copy_window",
 // engine rendered perfectly. The ring must cover the latency a real device
 // reports, plus the longest window a consumer draws, plus the read margin —
 // and the rule is a pure function the engine checks at every device start.
-TEST_CASE("scope-stream: the ring covers a two-second output latency",
-          "[scope][stream][sampleclock][latency]") {
+TEST_CASE("tap-stream: the ring covers a two-second output latency",
+          "[tap][stream][sampleclock][latency]") {
     constexpr uint32_t kRate    = 44100;
     constexpr uint32_t kLatency = 88712;   // frames, as the device reported
     constexpr uint32_t kWindow  = kRate / 4;   // the 250 ms scrolling strip
 
-    CHECK(shm_scope_ring_covers(kLatency, kRate));
-    CHECK_FALSE(shm_scope_ring_covers(SHM_SCOPE_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
+    CHECK(shm_tap_ring_covers(kLatency, kRate));
+    CHECK_FALSE(shm_tap_ring_covers(SHM_TAP_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
 
     auto slot = makeSlot();
-    shm_scope_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get());
     w.activate(2);
-    shm_scope_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get());
 
     // Three seconds rendered, 512 frames a block, anchored at engine frame 0.
     const uint32_t kBlocks = (kRate * 3) / 512;

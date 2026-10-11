@@ -3,7 +3,7 @@
 //! The slot ownership rule, which is the one thing in this crate that is not
 //! incidental — and had no test.
 //!
-//! A scope slot can be re-claimed by a new unit while a superseded one is
+//! A tap slot can be re-claimed by a new unit while a superseded one is
 //! still alive under an FX tail. The older unit's late destructor must not
 //! mark the slot free underneath the new writer: readers gate on
 //! `state == 1`, so the scope would grey out while audio kept playing, and
@@ -13,7 +13,7 @@
 //! # Standing in for the host
 //!
 //! The crate reaches shared memory through two symbols the host defines —
-//! `clockwork_shm_base` and `clockwork_scope_geometry`. A test can define them, which is
+//! `clockwork_shm_base` and `clockwork_tap_geometry`. A test can define them, which is
 //! why this is testable in Rust at all: the region is a plain buffer here, laid
 //! out exactly as `shared_memory.h` describes, and the crate cannot tell the
 //! difference.
@@ -26,8 +26,8 @@ use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use clockwork_scope::{
-    clockwork_scope_get, clockwork_scope_release, stream_activate, stream_release, ScopeBufferHnd,
+use clockwork_taps::{
+    clockwork_tap_get, clockwork_tap_release, stream_activate, stream_release, TapBufferHnd,
 };
 
 // Geometry the fake host reports. Small, but the same SHAPE as production:
@@ -38,13 +38,13 @@ const RING_FRAMES: u32 = 256;
 const CHANNELS: u32 = 2;
 const SLOT_HEADER: usize = 32;
 const SLOT_SIZE: usize = SLOT_HEADER + (RING_FRAMES as usize) * (CHANNELS as usize) * 4;
-const MAX_SCOPES: usize = 4;
+const MAX_TAPS: usize = 4;
 // The engine's track taps: a second span of the same slot shape, numbered
 // after the guest's, in what would be the clockwork block. Here it simply
-// follows the scope region, with a gap so the two cannot be confused for
+// follows the tap region, with a gap so the two cannot be confused for
 // one contiguous array.
 const TRACK_SLOTS: usize = 2;
-const TRACK_START: usize = START + HEADER_SIZE + SLOT_SIZE * MAX_SCOPES + 256;
+const TRACK_START: usize = START + HEADER_SIZE + SLOT_SIZE * MAX_TAPS + 256;
 const REGION: usize = TRACK_START + SLOT_SIZE * TRACK_SLOTS;
 
 fn region() -> &'static Mutex<Vec<u8>> {
@@ -71,11 +71,11 @@ pub extern "C" fn clockwork_shm_base() -> *mut c_void {
 /// Every out-pointer is valid for one write; this is the host-side symbol the
 /// crate links against, and the crate calls it with its own locals.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_scope_geometry(
+pub unsafe extern "C" fn clockwork_tap_geometry(
     start: *mut usize,
     header_size: *mut usize,
     slot_size: *mut usize,
-    max_scopes: *mut usize,
+    max_taps: *mut usize,
     ring_frames: *mut u32,
     channels: *mut u32,
     track_start: *mut usize,
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn clockwork_scope_geometry(
         *start = START;
         *header_size = HEADER_SIZE;
         *slot_size = SLOT_SIZE;
-        *max_scopes = MAX_SCOPES;
+        *max_taps = MAX_TAPS;
         *ring_frames = RING_FRAMES;
         *channels = CHANNELS;
         *track_start = TRACK_START;
@@ -110,22 +110,22 @@ fn region_u32(offset: usize) -> u32 {
 }
 
 fn slot_state(index: usize) -> u32 {
-    // `state` is the first u32 of the slot header (shm_scope_stream). One
+    // `state` is the first u32 of the slot header (shm_tap_stream). One
     // index space: the guest's slots, then the track taps.
-    if index < MAX_SCOPES {
+    if index < MAX_TAPS {
         region_u32(START + HEADER_SIZE + SLOT_SIZE * index)
     } else {
-        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_SCOPES))
+        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_TAPS))
     }
 }
 
 /// How many times slot `index` has gone live: the u32 after `capacity_frames`
 /// in the slot header.
 fn slot_activations(index: usize) -> u32 {
-    if index < MAX_SCOPES {
+    if index < MAX_TAPS {
         region_u32(START + HEADER_SIZE + SLOT_SIZE * index + 12)
     } else {
-        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_SCOPES) + 12)
+        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_TAPS) + 12)
     }
 }
 
@@ -134,20 +134,20 @@ fn active_count() -> u32 {
     region_u32(START + 4)
 }
 
-fn claim(index: usize, hnd: &mut ScopeBufferHnd) -> bool {
+fn claim(index: usize, hnd: &mut TapBufferHnd) -> bool {
     // SAFETY: `hnd` is a live handle.
     unsafe {
-        clockwork_scope_get(std::ptr::null_mut(), index as c_int, CHANNELS as c_int,
+        clockwork_tap_get(std::ptr::null_mut(), index as c_int, CHANNELS as c_int,
                       RING_FRAMES as c_int, hnd) != 0
     }
 }
 
-fn release(hnd: &mut ScopeBufferHnd) {
+fn release(hnd: &mut TapBufferHnd) {
     // SAFETY: `hnd` is a live handle.
-    unsafe { clockwork_scope_release(std::ptr::null_mut(), hnd) }
+    unsafe { clockwork_tap_release(std::ptr::null_mut(), hnd) }
 }
 
-fn handle() -> ScopeBufferHnd {
+fn handle() -> TapBufferHnd {
     // Zeroed, as a ugen's would be before its first claim.
     // SAFETY: two null pointers and two zero counts are a valid handle.
     unsafe { std::mem::zeroed() }
@@ -215,14 +215,14 @@ fn releasing_twice_is_harmless() {
 fn an_out_of_range_slot_is_refused_rather_than_indexed() {
     let _g = lock();
     let mut h = handle();
-    assert!(!claim(MAX_SCOPES + TRACK_SLOTS, &mut h), "a slot past both spans was claimed");
+    assert!(!claim(MAX_TAPS + TRACK_SLOTS, &mut h), "a slot past both spans was claimed");
     assert!(h.internalData.is_null());
 
     let mut neg = handle();
     assert!(
         // SAFETY: `neg` is a live handle.
         unsafe {
-            clockwork_scope_get(std::ptr::null_mut(), -1, CHANNELS as c_int,
+            clockwork_tap_get(std::ptr::null_mut(), -1, CHANNELS as c_int,
                           RING_FRAMES as c_int, &mut neg) == 0
         },
         "a negative slot index was claimed"
@@ -280,28 +280,28 @@ fn a_handle_whose_slot_is_outside_the_region_touches_nothing() {
 }
 
 #[test]
-fn a_track_tap_is_a_scope_slot_numbered_after_the_guests_in_its_own_span() {
+fn a_track_tap_is_a_tap_slot_numbered_after_the_guests_in_its_own_span() {
     let _g = lock();
     // The first index past the guest's slots lands in the track span, at
     // the track region's start, not one stride past the guest's last slot.
     let mut h = handle();
-    assert!(claim(MAX_SCOPES, &mut h), "the first track tap was refused");
+    assert!(claim(MAX_TAPS, &mut h), "the first track tap was refused");
     assert_eq!(h.internalData as usize, base_ptr() as usize + TRACK_START);
-    assert_eq!(slot_state(MAX_SCOPES), 1);
-    assert_eq!(slot_state(MAX_SCOPES - 1), 0, "the guest's last slot was not touched");
+    assert_eq!(slot_state(MAX_TAPS), 1);
+    assert_eq!(slot_state(MAX_TAPS - 1), 0, "the guest's last slot was not touched");
 
     // Ownership holds across the span boundary: a later claimant of the
     // same tap supersedes, and the old handle's release is a no-op.
     let mut later = handle();
-    assert!(claim(MAX_SCOPES, &mut later));
+    assert!(claim(MAX_TAPS, &mut later));
     release(&mut h);
-    assert_eq!(slot_state(MAX_SCOPES), 1, "a superseded handle freed a track tap");
+    assert_eq!(slot_state(MAX_TAPS), 1, "a superseded handle freed a track tap");
     release(&mut later);
-    assert_eq!(slot_state(MAX_SCOPES), 0);
+    assert_eq!(slot_state(MAX_TAPS), 0);
 
     // The last tap is the last slot there is.
     let mut last = handle();
-    assert!(claim(MAX_SCOPES + TRACK_SLOTS - 1, &mut last));
+    assert!(claim(MAX_TAPS + TRACK_SLOTS - 1, &mut last));
     assert!(h.internalData.is_null());
     release(&mut last);
 }
@@ -312,7 +312,7 @@ fn every_claim_counts_once_on_the_slot() {
     // two polls. The slot's count is how the reader knows it went live anyway,
     // so every way a slot is claimed must count, and nothing else may.
     let _g = lock();
-    for index in [0, MAX_SCOPES] {   // a guest slot and a track tap
+    for index in [0, MAX_TAPS] {   // a guest slot and a track tap
         let before = slot_activations(index);
         let mut h = handle();
         assert!(claim(index, &mut h));

@@ -23,7 +23,7 @@ lives outside this span — see BOUNDARY.md. The word predates both uses.)
   │   metrics · stats            │
   │   clock anchors · clock state│
   │   sample clock · channel map │
-  │   audio taps · track taps    │
+  │   raw scope · track taps     │
   ├ · · · · · · · · · · · · · · ·┤ block_published_end
   │  transport:                  │  ── the command plane, through the client ABI only
   │   control · node id counter  │
@@ -32,7 +32,7 @@ lives outside this span — see BOUNDARY.md. The word predates both uses.)
   ├──────────────────────────────┤ block_bytes == guest_offset
   │ THE GUEST REGION             │  what the guest is handed base and length to
   │  published:                  │  ── what the guest shows its clients
-  │   window · scope streams     │
+  │   window · tap streams       │
   ├ · · · · · · · · · · · · · · ·┤ guest_published_end
   │  the guest's own:            │  ── config (host → guest) · persist
   │   guest config · persist     │
@@ -43,7 +43,7 @@ The line between them is the fence. The guest is in-process, on the audio
 thread, and a SharedArrayBuffer has no page protection, so ownership is a
 matter of which pointers are handed out: the guest receives base and length
 of the regions in its half (`DspConfig::guest_config`, `shm_window`,
-`persistent`, and the scope slots it claims), plus read-only pointers to two
+`persistent`, and the tap slots it claims), plus read-only pointers to two
 things in the block it needs every block (`clock`, `channel_map`). It is
 never given a pointer it may write through into the block.
 
@@ -74,10 +74,10 @@ The published regions, in order of the table:
 | clock state | clockwork | the Link timeline: tempo, beat origin, transport, meter — also handed to the guest |
 | sample clock | clockwork | sample position to DAC time, seqlocked |
 | channel map | clockwork | live channel widths — also handed to the guest |
-| audio taps | clockwork | what left for the device and what arrived, every tick |
-| track taps | clockwork | scope streams from plugin-track returns |
+| raw scope | clockwork | what left for the device and what arrived, every tick |
+| track taps | clockwork | tap streams from plugin-track returns |
 | guest window | guest | whatever the guest publishes (SuperSonic: its node tree); its identity is in the entry's geometry, see below |
-| scope streams | guest | the guest's scope slots |
+| tap streams | guest | the guest's tap slots |
 
 Everything else — the control block, the counter, the three rings, the client
 slots, the guest's config and persistent bytes — is not for reading by hand.
@@ -118,7 +118,7 @@ mean the guest has not declared, or has not bound yet.
 
 Regions are looked up **by id** (`ClockworkArenaRegion`), never by position.
 
-The **audio taps** are the block's reason to exist for most clients: two
+The **raw scope** is the block's reason to exist for most clients: two
 `shm_audio_buffer` slots, `CLOCKWORK_TAP_OUT` (what left for the device this
 block, after the guest and after clockwork's own routing) and
 `CLOCKWORK_TAP_IN` (what arrived from the device, as the guest saw it),
@@ -129,17 +129,17 @@ client draws the master mix, records it, or meters the input from these and
 asks the guest for nothing. A reader keeps its own cursor and catches up
 losslessly; the ring holds a second.
 
-One region deserves a note. The scope-stream slots a client numbers are one
-index space across two regions: the guest's `SCOPE` region carries indices
+One region deserves a note. The tap-stream slots a client numbers are one
+index space across two regions: the guest's `TAPS` region carries indices
 `[0, slots)` in the guest region, and the engine's `TRACK_TAPS` region — the
 slots it writes from plugin-track returns, natively — carries
 `[first_index, first_index + slots)` in the block. Same slot shape, different
 owner, different half. A reader resolves an index through both
-(`ShmReaderLayout::scopeSlotAt`, `getScope` in JS, `slot_ptr` in the scope
+(`ShmReaderLayout::tapSlotAt`, `getTap` in JS, `slot_ptr` in the tap
 crate); a build that carves no track taps has no entry, which reads as zero.
 The geometry words carry what a reader needs to walk a region without the
 engine's constants: a ring's frame magic and header size, a slot array's
-count and stride, the scope ring's frames per slot. `ClockworkArenaGeom`
+count and stride, the tap ring's frames per slot. `ClockworkArenaGeom`
 names each word per region.
 
 ## Who writes it, and when

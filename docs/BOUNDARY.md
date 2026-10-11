@@ -33,11 +33,11 @@ free_bytes(ctx, ptr)              hand back memory clockwork allocated
 asset_release(ctx, id)            done with an asset taken through dsp_asset;
                                   the client's slot goes back
 alloc_bytes(ctx, bytes)           take memory from the heap clockwork owns
-scope_open(ctx, index,            claim a scope slot to publish audio into
+tap_open(ctx, index,            claim a tap slot to publish audio into
            channels, hnd)
-scope_write(ctx, hnd, channels,   append a block to a claimed scope
+tap_write(ctx, hnd, channels,   append a block to a claimed tap
             n_channels, frames)
-scope_close(ctx, hnd)             give the slot back
+tap_close(ctx, hnd)             give the slot back
 flush_schedule(ctx)               drop the bundles clockwork holds for this DSP
                                   ahead of their time (its "clear the schedule")
 ```
@@ -53,7 +53,7 @@ Not all callbacks can be called from all threads:
 | `log`        | any, including the audio thread, where it is lock-free and drops when the ring is full; formats nothing |
 | `open_sink`  | control thread only                                     |
 | `asset_release` | `dsp_process` and `dsp_osc` — one short message, nothing else |
-| `scope_open` / `scope_write` / `scope_close` | any, including the audio thread; none allocates |
+| `tap_open` / `tap_write` / `tap_close` | any, including the audio thread; none allocates |
 | `flush_schedule` | `dsp_process` and `dsp_osc`, where the schedule is driven |
 
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
@@ -62,14 +62,14 @@ drops and counts rather than blocking, so a refusal is visible.
 A DSP's larger allocations come from `alloc_bytes` and go back through
 `free_bytes`: the heap is clockwork's, pre-claimed and lock-free, so a DSP
 never has to know which heap a host built, and never reaches past this header
-for one. `scope_open`, `scope_write` and `scope_close` are the same idea for
-scopes: clockwork owns the slots and the ring a client reads, and a DSP that
+for one. `tap_open`, `tap_write` and `tap_close` are the same idea for
+taps: clockwork owns the slots and the ring a client reads, and a DSP that
 publishes one claims a slot and appends blocks without learning the layout.
 
 **Those are the only doors.** A DSP includes `dsp_api.h`, the sink header it
 pulls in, and `clockwork_clock_state.h` to read `DspConfig::clock`, and
 nothing else of clockwork's: not the arena layout, not the heap, not the
-scope rings, not a global. SuperSonic's suite checks this against the scsynth
+tap rings, not a global. SuperSonic's suite checks this against the scsynth
 guest's sources (`scripts/check-guest-boundary.sh`), because every reach past
 the header is a breakage waiting for the day the layout moves.
 
@@ -135,7 +135,7 @@ A device with two kinds of RAM — the ESP32-S3 has ~512 KiB of internal SRAM
 behind 8 MiB of slower PSRAM — hands the DSP two arenas. `arena` is placed in
 the **fast** tier and `DspConfig::arena_bulk` in the **bulk** tier, so a DSP
 carves its hot state (VM slots, kernel state, wires) from one and its cold,
-large state (loop cells, sample data, scope rings) from the other, and which
+large state (loop cells, sample data, tap rings) from the other, and which
 RAM is which is the host's memory profile's decision rather than something
 each DSP crate works out for itself. Both follow `arena`'s rules: the DSP's
 alone, zeroed at every `dsp_new`.

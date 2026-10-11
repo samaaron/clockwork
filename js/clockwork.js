@@ -21,7 +21,7 @@ import { METRICS_SCHEMA } from "./lib/metrics_schema.js";
 import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
-import { scopeSlotViews, scopeSlotLive, scopeSlotActivations, readScopeSlot } from "./lib/scope_slot.js";
+import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
 import * as oscFast from "./lib/osc_fast.js";
 // Timeout waiting for the DSP profile's synced reply from the engine
 const SYNC_TIMEOUT_MS = 10000;
@@ -210,8 +210,8 @@ export class Clockwork {
   #earlyDebugMessages = [];
   #debugRawHandler = null;
 
-  // Cached TypedArray views for scope slots (lazily initialized, avoids per-frame allocations)
-  #scopeViews = null;
+  // Cached TypedArray views for tap slots (lazily initialized, avoids per-frame allocations)
+  #tapViews = null;
 
   /* Guest options are the product's to validate — clockwork enforces its own
    * rules (128-frame blocks and the rest) through its own `audio` options.
@@ -979,7 +979,7 @@ export class Clockwork {
     await this.#releaseAudioContext();
 
     this.#initialized = false;
-    this.#scopeViews = null;
+    this.#tapViews = null;
     this.#initPromise = null;
     this.#oscChannel = null;
     this.#clock?.reset();
@@ -1098,106 +1098,106 @@ export class Clockwork {
   }
 
   // ============================================================================
-  // SCOPE API
+  // TAPS API
   // ============================================================================
 
-  /** @returns {object} Cached TypedArray views for a scope stream slot (lazily created) */
-  #getScopeSlotViews(scopeNum) {
-    if (!this.#scopeViews) {
-      this.#scopeViews = new Array(this.#metricsReader.bufferConstants.SHM_SCOPE_SLOT_COUNT);
+  /** @returns {object} Cached TypedArray views for a tap stream slot (lazily created) */
+  #getTapSlotViews(tapNum) {
+    if (!this.#tapViews) {
+      this.#tapViews = new Array(this.#metricsReader.bufferConstants.SHM_TAP_SLOT_COUNT);
     }
-    let views = this.#scopeViews[scopeNum];
+    let views = this.#tapViews[tapNum];
     if (views) return views;
 
     const bc = this.#metricsReader.bufferConstants;
     const sab = this.#metricsReader.sharedBuffer;
     const base = this.#metricsReader.ringBufferBase;
-    // One index space: the guest's slots in the scope region, then the
+    // One index space: the guest's slots in the tap region, then the
     // engine's track taps in the clockwork block (docs/ARENA.md).
-    const slotOffset = scopeNum < bc.SHM_SCOPE_MAX_SCOPES
-      ? base + bc.SHM_SCOPE_START + bc.SHM_SCOPE_HEADER_SIZE + scopeNum * bc.SHM_SCOPE_SLOT_SIZE
-      : base + bc.SHM_TRACK_TAPS_START + (scopeNum - bc.SHM_SCOPE_MAX_SCOPES) * bc.SHM_SCOPE_SLOT_SIZE;
-    views = scopeSlotViews(sab, slotOffset, {
-      headerBytes: bc.SHM_SCOPE_SLOT_HEADER_SIZE,
-      ringFrames: bc.SHM_SCOPE_RING_FRAMES,
-      channels: bc.SHM_SCOPE_CHANNELS,
+    const slotOffset = tapNum < bc.SHM_TAP_MAX_TAPS
+      ? base + bc.SHM_TAP_START + bc.SHM_TAP_HEADER_SIZE + tapNum * bc.SHM_TAP_SLOT_SIZE
+      : base + bc.SHM_TRACK_TAPS_START + (tapNum - bc.SHM_TAP_MAX_TAPS) * bc.SHM_TAP_SLOT_SIZE;
+    views = tapSlotViews(sab, slotOffset, {
+      headerBytes: bc.SHM_TAP_SLOT_HEADER_SIZE,
+      ringFrames: bc.SHM_TAP_RING_FRAMES,
+      channels: bc.SHM_TAP_CHANNELS,
     });
-    this.#scopeViews[scopeNum] = views;
+    this.#tapViews[tapNum] = views;
     return views;
   }
 
   /**
-   * Get the newest `frames` frames of a scope stream.
+   * Get the newest `frames` frames of a tap stream.
    *
    * The stream is a lossless interleaved ring with a monotonic write cursor
    * (see docs/PORTS.md); this copies out the window ending at
    * the current cursor. SAB mode only for now.
    *
-   * @param {number} scopeNum - Scope slot index (0 to maxScopes-1)
+   * @param {number} tapNum - Tap slot index (0 to maxTaps-1)
    * @param {number} [frames] - Window length; defaults to 1024
    * @returns {{ frames: number, channels: number, writePosition: bigint, interleaved: Float32Array }|null}
    */
-  getScope(scopeNum, frames = 1024) {
+  getTap(tapNum, frames = 1024) {
     if (!this.#initialized) return null;
 
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_SCOPE_START == null || bc.SHM_SCOPE_SLOT_COUNT == null) return null;
-    if (scopeNum < 0 || scopeNum >= bc.SHM_SCOPE_SLOT_COUNT) return null;
+    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return null;
+    if (tapNum < 0 || tapNum >= bc.SHM_TAP_SLOT_COUNT) return null;
 
     // TODO: PM mode — read from latest heartbeat snapshot
     if (!this.#metricsReader.sharedBuffer) return null;
 
-    return readScopeSlot(this.#getScopeSlotViews(scopeNum), frames);
+    return readTapSlot(this.#getTapSlotViews(tapNum), frames);
   }
 
   /**
-   * How many times a scope slot has gone live. A reader polls, and a slot can
+   * How many times a tap slot has gone live. A reader polls, and a slot can
    * be claimed and released between two polls (a loop started and stopped in
    * a moment); a reader that noted this and sees another number knows the
    * slot went live in between. Wraps: compare for change only. SAB mode only.
    *
-   * @param {number} scopeNum - Scope slot index (0 to maxScopes-1)
+   * @param {number} tapNum - Tap slot index (0 to maxTaps-1)
    * @returns {number|null} null when uninitialised, out of range, or not SAB
    */
-  getScopeActivations(scopeNum) {
+  getScopeActivations(tapNum) {
     if (!this.#initialized) return null;
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_SCOPE_START == null || bc.SHM_SCOPE_SLOT_COUNT == null) return null;
-    if (scopeNum < 0 || scopeNum >= bc.SHM_SCOPE_SLOT_COUNT) return null;
+    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return null;
+    if (tapNum < 0 || tapNum >= bc.SHM_TAP_SLOT_COUNT) return null;
     if (!this.#metricsReader.sharedBuffer) return null;
-    return scopeSlotActivations(this.#getScopeSlotViews(scopeNum));
+    return tapSlotActivations(this.#getTapSlotViews(tapNum));
   }
 
   /**
-   * Get all active scope slots.
+   * Get all active tap slots.
    * @returns {Array<{ index: number, channels: number }>}
    */
   getScopes() {
     if (!this.#initialized) return [];
 
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_SCOPE_START == null || bc.SHM_SCOPE_SLOT_COUNT == null) return [];
+    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return [];
     if (!this.#metricsReader.sharedBuffer) return [];
 
-    const scopes = [];
-    for (let i = 0; i < bc.SHM_SCOPE_SLOT_COUNT; i++) {
-      const views = this.#getScopeSlotViews(i);
-      if (scopeSlotLive(views)) {
-        scopes.push({ index: i, channels: views.meta[1] });
+    const taps = [];
+    for (let i = 0; i < bc.SHM_TAP_SLOT_COUNT; i++) {
+      const views = this.#getTapSlotViews(i);
+      if (tapSlotLive(views)) {
+        taps.push({ index: i, channels: views.meta[1] });
       }
     }
-    return scopes;
+    return taps;
   }
 
   /**
-   * Get scope schema (capacity, ring frames per slot, channels).
-   * @returns {{ maxScopes: number, ringFrames: number, channels: number }|null}
+   * Get tap schema (capacity, ring frames per slot, channels).
+   * @returns {{ maxTaps: number, ringFrames: number, channels: number }|null}
    */
   static getScopeSchema() {
     // Compile-time defaults — matches shared_memory.h SCOPE_ constants.
     // A proper implementation would read from the WASM buffer layout.
     return {
-      maxScopes: 32,
+      maxTaps: 32,
       ringFrames: 16384,
       channels: 2,
     };
@@ -1206,9 +1206,9 @@ export class Clockwork {
   // ============================================================================
   // AUDIO CAPTURE API
   //
-  // The audio taps are clockwork's and flow from boot: the OUT tap is what
+  // The raw scope is clockwork's and flow from boot: the OUT slot is what
   // left for the device each block, written by the tick at the device edge
-  // (audio_processor.cpp), the IN tap what arrived. A capture is a reader's
+  // (audio_processor.cpp), the IN slot what arrived. A capture is a reader's
   // notion — startCapture notes the writer's cursor, stopCapture returns
   // what was written since — and toggles nothing in the engine. See
   // js/lib/audio_capture.js and docs/ARENA.md.
@@ -1727,7 +1727,7 @@ export class Clockwork {
 
     this.#oscChannel = null;
     this.#initialized = false;
-    this.#scopeViews = null;
+    this.#tapViews = null;
     this.#initPromise = null;
     this.#wasmMemory = null;
     this.#clock?.reset();

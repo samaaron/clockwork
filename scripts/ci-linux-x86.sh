@@ -44,7 +44,7 @@ setup_paths() {
         . "${CARGO_HOME:-$HOME/.cargo}/env"
     fi
     # CI runs the container as root against a workspace owned by the runner's
-    # uid, which git otherwise refuses to touch. Scope it to the environment
+    # uid, which git otherwise refuses to touch. Tap it to the environment
     # rather than rewriting a global gitconfig.
     export GIT_CONFIG_COUNT=1
     export GIT_CONFIG_KEY_0=safe.directory
