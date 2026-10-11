@@ -54,6 +54,14 @@ BUILD_DIR="$ROOT/build/web"
 mkdir -p "$ROOT/build"   # the configure log goes beside the build dir, on a fresh checkout too
 CMAKE_BUILD_TYPE=Release
 [ "$OPT" = "-O0 -g" ] && CMAKE_BUILD_TYPE=Debug
+# A guest outside this tree, and the Rust umbrella that carries it, from the
+# environment. Each is a CACHE variable, so one build that set it would leave it
+# set for the next, which then looks for the dummy in another project's guest
+# directory: unset here means cleared there, back to clockwork's default.
+GUEST_ARGS=()
+for var in CLOCKWORK_DSP_DIR CLOCKWORK_RUST_WORKSPACE CLOCKWORK_RUST_PACKAGE CLOCKWORK_RUST_LIB_NAME; do
+    if [ -n "${!var}" ]; then GUEST_ARGS+=("-D$var=${!var}"); else GUEST_ARGS+=("-U$var"); fi
+done
 echo "clockwork → wasm   dsp=$DSP scheduler=$SCHEDULER ($CMAKE_BUILD_TYPE)"
 emcc --version | head -1
 emcmake cmake -B "$BUILD_DIR" -S "$ROOT" \
@@ -62,10 +70,7 @@ emcmake cmake -B "$BUILD_DIR" -S "$ROOT" \
     -DCLOCKWORK_SCHEDULER="$([ "$SCHEDULER" = 1 ] && echo ON || echo OFF)" \
     -DCLOCKWORK_WEB_AUDIO_FILES="$([ "${CLOCKWORK_WEB_AUDIO_FILES:-0}" = 1 ] && echo ON || echo OFF)" \
     ${CLOCKWORK_RUST_NIGHTLY:+-DCLOCKWORK_RUST_NIGHTLY="$CLOCKWORK_RUST_NIGHTLY"} \
-    ${CLOCKWORK_DSP_DIR:+-DCLOCKWORK_DSP_DIR="$CLOCKWORK_DSP_DIR"} \
-    ${CLOCKWORK_RUST_WORKSPACE:+-DCLOCKWORK_RUST_WORKSPACE="$CLOCKWORK_RUST_WORKSPACE"} \
-    ${CLOCKWORK_RUST_PACKAGE:+-DCLOCKWORK_RUST_PACKAGE="$CLOCKWORK_RUST_PACKAGE"} \
-    ${CLOCKWORK_RUST_LIB_NAME:+-DCLOCKWORK_RUST_LIB_NAME="$CLOCKWORK_RUST_LIB_NAME"} \
+    "${GUEST_ARGS[@]}" \
     > "$BUILD_DIR.configure.log" 2>&1 || { cat "$BUILD_DIR.configure.log"; exit 1; }
 cmake --build "$BUILD_DIR" --parallel
 
