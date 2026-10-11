@@ -95,7 +95,7 @@ fn attach_reports_the_geometry_it_runs_at_and_has_no_device() {
     assert_eq!(info.output_channels, 2);
     assert_eq!(info.abi_version, CLOCKWORK_CLIENT_ABI_VERSION);
     assert_eq!(Client::abi_version(), CLOCKWORK_CLIENT_ABI_VERSION);
-    assert!(info.features.taps(), "the default build carries raw scope slots: {:?}", info.features);
+    assert!(info.features.taps(), "the default build carries tap slots: {:?}", info.features);
     // No device behind an attached handle, and the read-back says so.
     assert_eq!(e.device().err(), Some(Error::Arg));
 }
@@ -249,7 +249,7 @@ fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
     let block = e.block_size() as usize;
     let (mut renderer, client) = e.split();
     let stop = AtomicBool::new(false);
-    std::thread::raw scope(|s| {
+    std::thread::scope(|s| {
         let stop = &stop;
         s.spawn(move || {
             let (mut l, mut r) = (vec![0.0f32; block], vec![0.0f32; block]);
@@ -379,7 +379,7 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
     // SAFETY: the engine is attached, so the arena header is mapped and
     // published; read only.
     let header = unsafe { &*clockwork_abi::lanes::clockwork_arena_header() };
-    let tap_entry = header.find(ClockworkArenaRegion::TAPS).expect("the arena has a raw scope region");
+    let tap_entry = header.find(ClockworkArenaRegion::TAPS).expect("the arena has a tap region");
     assert_eq!(tap_entry.geom[geom::TAP_CHANNELS] as usize, AUDIO_TAP_MAX_CHANNELS);
 
     assert_eq!(e.audio_tap(1_000_000).err(), Some(Error::Absent));

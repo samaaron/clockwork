@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
-//! A raw scope slot: a ring of audio the engine keeps filling.
+//! A tap slot: a ring of audio the engine keeps filling.
 //!
 //! Reading one is three steps wherever it is done — find the slot, ask how
 //! far the audible edge has reached, copy a window back from it — and they
@@ -15,7 +15,7 @@ use clockwork_abi::client::{
 use crate::client::Client;
 use crate::error::{check, Result};
 
-/// The most channels a raw scope slot carries — `SHM_TAP_STREAM_CHANNELS` in
+/// The most channels a tap slot carries — `SHM_TAP_STREAM_CHANNELS` in
 /// `src/shm_tap_stream.hpp`, which the engine clamps every slot's channel
 /// count to. A read buffer is sized by this, because the count a slot
 /// actually has is re-read as the copy happens and may differ from one read

@@ -311,7 +311,7 @@ impl Client {
         Ok(Clock { raw })
     }
 
-    /// A reader on raw scope slot `slot`. [`Error::Absent`] when the engine has
+    /// A reader on tap slot `slot`. [`Error::Absent`] when the engine has
     /// no such slot.
     pub fn audio_tap(&self, slot: u32) -> Result<AudioTap<'_>> {
         AudioTap::open(self, slot)
@@ -348,7 +348,7 @@ impl Drop for Reservation<'_> {
 
 /// What an engine has: `CLOCKWORK_FEATURE_*` bits. A client asks rather
 /// than assumes — an engine built for an embedded target may have no
-/// raw taps, no raw scope and no bulk lanes.
+/// taps, no raw scope and no bulk lanes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Features(pub u32);
 
