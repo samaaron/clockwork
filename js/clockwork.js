@@ -1159,7 +1159,7 @@ export class Clockwork {
    * @param {number} tapNum - Tap slot index (0 to maxTaps-1)
    * @returns {number|null} null when uninitialised, out of range, or not SAB
    */
-  getScopeActivations(tapNum) {
+  getTapActivations(tapNum) {
     if (!this.#initialized) return null;
     const bc = this.#metricsReader.bufferConstants;
     if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return null;
@@ -1172,7 +1172,7 @@ export class Clockwork {
    * Get all active tap slots.
    * @returns {Array<{ index: number, channels: number }>}
    */
-  getScopes() {
+  getTaps() {
     if (!this.#initialized) return [];
 
     const bc = this.#metricsReader.bufferConstants;
@@ -1193,7 +1193,7 @@ export class Clockwork {
    * Get tap schema (capacity, ring frames per slot, channels).
    * @returns {{ maxTaps: number, ringFrames: number, channels: number }|null}
    */
-  static getScopeSchema() {
+  static getTapSchema() {
     // Compile-time defaults — matches shared_memory.h SCOPE_ constants.
     // A proper implementation would read from the WASM buffer layout.
     return {
