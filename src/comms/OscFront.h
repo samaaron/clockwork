@@ -44,6 +44,12 @@ public:
     // True: taken (the front may have sent something else in its place).
     virtual bool egress(uint32_t token, const uint8_t* data, uint32_t size) = 0;
 
+    // A push to every notify target (/clockwork/statechange, /clockwork/setup
+    // ...), as it goes by. Never taken: the front hears it, the targets get
+    // it. A front that stages state in the engine (samples in a lane) learns
+    // here that a rebuild dropped it all.
+    virtual void notice(const uint8_t* /*data*/, uint32_t /*size*/) {}
+
     // One line for the boot log.
     virtual const char* describe() const = 0;
 };
@@ -59,9 +65,15 @@ public:
         if (mFront && mFront->egress(token, data, size)) return true;
         return mInner && mInner->send(token, data, size, networkOnly);
     }
-    void broadcastNotify(const uint8_t* d, uint32_t n) override { if (mInner) mInner->broadcastNotify(d, n); }
+    void broadcastNotify(const uint8_t* d, uint32_t n) override {
+        if (mFront) mFront->notice(d, n);
+        if (mInner) mInner->broadcastNotify(d, n);
+    }
     void broadcastLink(const uint8_t* d, uint32_t n) override   { if (mInner) mInner->broadcastLink(d, n); }
-    bool hasNotifySubscribers() const override { return mInner && mInner->hasNotifySubscribers(); }
+    // A front is a notify target: the engine builds a push only for an
+    // audience, and a host whose clients never subscribe still has a front
+    // that must hear a rebuild.
+    bool hasNotifySubscribers() const override { return mFront || (mInner && mInner->hasNotifySubscribers()); }
     bool subscribeNotify(uint32_t t) override   { return mInner && mInner->subscribeNotify(t); }
     bool subscribeNotifyPort(int port) override { return mInner && mInner->subscribeNotifyPort(port); }
     void unsubscribeNotify(uint32_t t) override { if (mInner) mInner->unsubscribeNotify(t); }
