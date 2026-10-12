@@ -12,7 +12,9 @@
 # Exempt: src/host (clockwork's own reference host — a process main, whose
 # stderr is its own), PluginBridgeMain.cpp and PluginEditorWindow{Win.cpp,.mm} (the
 # plugin bridge, a separate process with a stderr of its own and no engine
-# ring to reach).
+# ring to reach), and src/vendor/libsamplerate (kept byte for byte: of its
+# two printfs one is inside a comment and the other under SRC_DEBUG, which
+# src_linear.c sets to 0, so it never writes to stdio).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +22,7 @@ hits=$(grep -RnE '^[^/]*(\b(printf|fprintf|vprintf|vfprintf|puts|fputs|fputc|put
     src \
     --include='*.c' --include='*.cpp' --include='*.h' --include='*.hpp' --include='*.mm' \
     --exclude-dir=host \
+    --exclude-dir=libsamplerate \
     --exclude=PluginBridgeMain.cpp \
     --exclude=PluginEditorWindowWin.cpp \
     --exclude=PluginEditorWindow.mm \
