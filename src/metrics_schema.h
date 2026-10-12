@@ -64,7 +64,7 @@ inline constexpr FieldInfo kFields[] = {
     { 32, "linkAudioInChannels", "count", "Active received Link Audio channels" },
     { 33, "linkAudioStreamRate", "Hz", "Received Link Audio stream sample rate" },
     { 34, "linkAudioUnderruns", "count", "Link Audio input frames that arrived too late to play, every input together" },
-    { 35, "linkAudioBufferedMs", "ms", "Received Link Audio queued in the receiver (ms)" },
+    { 35, "linkAudioBufferedMs", "ms", "Received Link Audio held ahead of playback, the most of any input (ms)" },
     { 36, "linkAudioDriftPpm", "ppm", "Read-rate deviation from the sender's clock (parts per million)" },
     { 37, "linkAudioPublish", "bool", "Link Audio publishing enabled (0/1)" },
     { 38, "linkAudioSinks", "count", "Active Link Audio output sinks" },

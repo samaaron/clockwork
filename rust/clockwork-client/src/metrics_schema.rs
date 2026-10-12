@@ -85,7 +85,7 @@ pub const FIELDS: &[FieldInfo] = &[
     FieldInfo { offset: 32, key: "linkAudioInChannels", unit: "count", description: "Active received Link Audio channels" },
     FieldInfo { offset: 33, key: "linkAudioStreamRate", unit: "Hz", description: "Received Link Audio stream sample rate" },
     FieldInfo { offset: 34, key: "linkAudioUnderruns", unit: "count", description: "Link Audio input frames that arrived too late to play, every input together" },
-    FieldInfo { offset: 35, key: "linkAudioBufferedMs", unit: "ms", description: "Received Link Audio queued in the receiver (ms)" },
+    FieldInfo { offset: 35, key: "linkAudioBufferedMs", unit: "ms", description: "Received Link Audio held ahead of playback, the most of any input (ms)" },
     FieldInfo { offset: 36, key: "linkAudioDriftPpm", unit: "ppm", description: "Read-rate deviation from the sender's clock (parts per million)" },
     FieldInfo { offset: 37, key: "linkAudioPublish", unit: "bool", description: "Link Audio publishing enabled (0/1)" },
     FieldInfo { offset: 38, key: "linkAudioSinks", unit: "count", description: "Active Link Audio output sinks" },

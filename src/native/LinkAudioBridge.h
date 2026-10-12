@@ -335,6 +335,7 @@ private:
     };
     uint64_t underrunsSinceStart(const InputSubscription& sub) const;
     uint64_t troubleOf(const InputSubscription& sub) const;
+    float bufferedSecondsOf(const InputSubscription& sub) const;
     // A subscription's end, however it comes (removed, cleared, replaced,
     // dropped by a lane move or a visibility change, refused as it was added):
     // its underruns stay counted in mRetiredUnderruns, and its port is

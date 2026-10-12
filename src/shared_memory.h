@@ -605,7 +605,7 @@ struct alignas(4) PerformanceMetrics {
     std::atomic<uint32_t> link_audio_in_channels;  // 32: active received channels
     std::atomic<uint32_t> link_audio_stream_rate;  // 33: received stream sample rate (Hz)
     std::atomic<uint32_t> link_audio_underruns;    // 34: Link Audio input frames that arrived too late to play
-    std::atomic<uint32_t> link_audio_buffered_ms;  // 35: receiver queue depth (ms)
+    std::atomic<uint32_t> link_audio_buffered_ms;  // 35: Link Audio held ahead of playback, the most of any input (ms)
     std::atomic<int32_t>  link_audio_drift_ppm;    // 36: read-rate deviation from 1.0 (ppm, signed)
     std::atomic<uint32_t> link_audio_publish;      // 37: publishing enabled 0/1
     std::atomic<uint32_t> link_audio_sinks;        // 38: active output sinks

@@ -280,6 +280,24 @@ uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {
     return underrunsSinceStart(sub) + sub.renderer->resyncs() + sub.renderer->warps();
 }
 
+/*
+ * How much audio stands between a subscription and a gap, which is in two
+ * places: what the renderer holds (peer buffers its network thread has
+ * delivered and it has not yet resampled) and what the port holds (resampled,
+ * waiting for the audio thread). The endpoint drains the renderer into the
+ * port as fast as there is room, so the renderer alone sits near empty while
+ * the stream is perfectly healthy: counted alone, a working subscription
+ * reported Dropout for ever, and the metric read 0 ms. Lock-free, so the
+ * audio thread's metrics read it too.
+ */
+float LinkAudioBridge::bufferedSecondsOf(const InputSubscription& sub) const {
+    const uint32_t rate = mSampleRate.load(std::memory_order_relaxed);
+    const double portSeconds = (sub.port != CLOCKWORK_PORT_NONE && rate != 0)
+        ? double(clockwork_port_readable(sub.port)) / double(rate)
+        : 0.0;
+    return sub.renderer->bufferedSeconds() + static_cast<float>(portSeconds);
+}
+
 std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
     std::vector<link_audio::InputStatus> out;
     std::lock_guard<std::mutex> lk(mInputSubMutex);
@@ -291,7 +309,7 @@ std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
         s.busIdx            = sub.busIdx;
         s.sampleRate        = sub.renderer->lastSampleRate();
         s.sourceNumChannels = sub.renderer->lastNumChannels();
-        s.bufferedSeconds      = sub.renderer->bufferedSeconds();
+        s.bufferedSeconds         = bufferedSecondsOf(sub);
         s.droppedSourceBuffers    = sub.renderer->droppedSourceBuffers();
         s.networkGapBuffers       = sub.renderer->networkGapBuffers();
         s.totalSourceBufferCalls  = sub.renderer->totalSourceBufferCalls();
@@ -301,27 +319,6 @@ std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
         s.resyncs                 = sub.renderer->resyncs();
         s.warps                   = sub.renderer->warps();
         s.driftPpm                = sub.renderer->lastDriftPpm();
-
-        /*
-         * THE BUFFER IS IN TWO PLACES NOW, so health has to count both.
-         *
-         * bufferedSeconds is what the RENDERER holds — peer buffers its
-         * network thread has delivered and it has not yet resampled. That used
-         * to be the whole of it, because the audio thread pulled straight from
-         * the renderer one block at a time. The endpoint drains it into the
-         * port ring as fast as there is room, so the renderer now sits near
-         * empty while the stream is perfectly healthy, and a subscription that
-         * was working reported Dropout for ever.
-         *
-         * What a client wants to know is how much audio stands between it and
-         * a gap, which is both stages.
-         */
-        const double portQueuedSeconds =
-            (sub.port != CLOCKWORK_PORT_NONE && mSampleRate.load(std::memory_order_relaxed) != 0)
-                ? double(clockwork_port_readable(sub.port))
-                      / double(mSampleRate.load(std::memory_order_relaxed))
-                : 0.0;
-        s.bufferedSeconds += static_cast<float>(portQueuedSeconds);
 
         // A full buffer is not a stream that is being heard: a dropout is
         // also one that has gapped, jumped or bent in the last second.
@@ -694,7 +691,7 @@ bool LinkAudioBridge::tryReadInputHealth(link_audio::InputHealth& out) const {
         inCh += sub.renderer->lastNumChannels();
         rate  = sub.renderer->lastSampleRate();
         drift = sub.renderer->lastDriftPpm();
-        bufMs = std::max(bufMs, sub.renderer->bufferedSeconds() * 1000.0f);
+        bufMs = std::max(bufMs, bufferedSecondsOf(sub) * 1000.0f);
         underruns += underrunsSinceStart(sub);
     }
     out.inChannels = inCh;
