@@ -244,6 +244,7 @@ public:
     while (mpQueueReader->numRetainedSlots() > 0) mpQueueReader->releaseSlot();
     moLastFrameIdx = std::nullopt;
     moStartReadPos = std::nullopt;
+    moFollowOnMicros = std::nullopt;
   }
 
   // Playback lookahead in wall-clock seconds — consumer plays buffers
@@ -278,6 +279,20 @@ public:
                  std::chrono::microseconds hostTime,
                  double quantum)
   {
+    // Whether the host went on with the stream: this render asks for the
+    // host time the stream's audio so far ends at. A render that gave nothing
+    // moved the stream on by nothing, so asks made meanwhile add up, and a
+    // host that went on without the stream a device block at a time is told
+    // from one that went on with it, however small its steps. Kept on every
+    // way out.
+    const bool hostFollowedOn = moFollowOnMicros
+      && std::fabs(double(hostTime.count()) - *moFollowOnMicros) / 1e6 <= kHostSlackSeconds;
+    const auto rendered = [&](size_t frames) {
+      if (frames > 0)
+        moFollowOnMicros = double(hostTime.count()) + 1e6 * double(frames) / sampleRate;
+      return frames;
+    };
+
     // Drain all available slots into our reader half.
     while (mpQueueReader->retainSlot()) {}
 
@@ -297,13 +312,24 @@ public:
         quantum) - kLatencyInBeats;
 
     // The place that was kept, against where the timeline now is. They part
-    // when time went by without this being asked — a starved endpoint, a
-    // stalled device, a hole in the peer's stream — and the audio in between
-    // was never heard. It is not caught up with: bending the rate to meet the
-    // target in one render plays what was missed many times too fast, a
-    // chirp and a burst of clicks. The place is given up (a resync) and found
-    // again at the target, as it was found at the start. A few frames apart
-    // is the two clocks' disagreement, steered over the render as always.
+    // two ways, and only one is a place lost.
+    //
+    // Time went by without this being asked — a starved endpoint, a stalled
+    // device, a hole in the peer's stream, where renders gave nothing while
+    // the host went on — and the audio in between was never heard. It is not
+    // caught up with: bending the rate to meet the target in one render plays
+    // what was missed many times too fast, a chirp and a burst of clicks. The
+    // place is given up (a resync) and found again at the target, as it was
+    // found at the start.
+    //
+    // Or the host went on with the stream, asking for where the last render
+    // ended, and the timeline moved under it: Link re-measuring the clock to a
+    // peer, which over WiFi with a second peer in the session moves it tens of
+    // milliseconds at a time. Nothing was missed and the stream is whole; given
+    // up, every measurement was a resync and a hole, a glitch every few seconds
+    // through a jam. It is steered to, like the two clocks' disagreement, by
+    // at most kMaxBend a render. A move past kMovedSeconds is no measurement
+    // but the session itself jumping, and is found again at once.
     if (moStartReadPos && mpQueueReader->numRetainedSlots() > 0)
     {
       const auto& info = (*mpQueueReader)[0]->mInfo;
@@ -319,7 +345,7 @@ public:
           *begin + (*end - *begin) * (*moStartReadPos / double(info.numFrames));
         const auto secondsOff =
           (targetBeatsAtBufferBegin - beatsAtRead) * 60.0 / safeBpm;
-        if (std::fabs(secondsOff) >= kLostSeconds) lose();
+        if (std::fabs(secondsOff) >= (hostFollowedOn ? kMovedSeconds : kLostSeconds)) lose();
       }
     }
 
@@ -337,7 +363,7 @@ public:
     if (mpQueueReader->numRetainedSlots() == 0)
     {
       lose();
-      return 0;
+      return rendered(0);
     }
 
     // Wait for buffers to catch up to our target. A target in the crack
@@ -350,7 +376,7 @@ public:
              > targetBeatsAtBufferBegin + slackBeats)
     {
       lose();
-      return 0;
+      return rendered(0);
     }
 
     if (!moStartReadPos)
@@ -422,7 +448,7 @@ public:
           (targetBeatsAtBufferEnd - targetBeatsAtBufferBegin) / double(numFrames);
         const auto fit =
           std::floor((arrivedUntil - targetBeatsAtBufferBegin) / beatsPerFrame);
-        if (!(fit >= 1.0)) return 0;   // nothing new to render yet; the place is kept
+        if (!(fit >= 1.0)) return rendered(0);   // nothing new to render yet; the place is kept
         frames = std::min(numFrames, static_cast<size_t>(fit));
         targetBeatsAtEnd = targetBeatsAtBufferBegin + beatsPerFrame * double(frames);
       }
@@ -455,7 +481,7 @@ public:
     if (!foundEnd)
     {
       lose();
-      return 0;
+      return rendered(0);
     }
 
     totalFrames -= startFramePos;
@@ -477,7 +503,7 @@ public:
       const auto arrived = retained - startFramePos - 2.0;
       const auto most = std::min(framesExpected * (1.0 + kMaxBend), arrived);
       const auto least = framesExpected * (1.0 - kMaxBend);
-      if (!(most >= least)) return 0;   // not even a bent render has arrived; the place is kept
+      if (!(most >= least)) return rendered(0);   // not even a bent render has arrived; the place is kept
       totalFrames = std::clamp(totalFrames, least, most);
     }
 
@@ -554,7 +580,7 @@ public:
       mBufferedSeconds.store(0.0f, std::memory_order_relaxed);
     }
 
-    return frames;
+    return rendered(frames);
   }
 
 private:
@@ -571,6 +597,16 @@ private:
   // is gone within a second with nothing heard.
   static constexpr double kLostSeconds = 0.01;
   static constexpr double kMaxBend = 0.01;
+  // A render that asks for the host time the stream's audio so far ends at,
+  // to within this, follows on: the endpoint dates each render from the reads
+  // it fills, to the microsecond, and a device's dates wander a little around
+  // that.
+  static constexpr double kHostSlackSeconds = 0.002;
+  // How far the timeline can move under a stream the host followed on with
+  // and still be steered to: a clock re-measurement is tens of milliseconds.
+  // At kMaxBend that is ten seconds' bending at most; further is the session
+  // itself jumping, and found again at once.
+  static constexpr double kMovedSeconds = 0.1;
   // Consecutive buffers whose stamps are this far apart, in seconds at the
   // current tempo, have a hole between them; nearer is rounding, and the
   // frames are trusted over the stamps.
@@ -612,6 +648,9 @@ private:
                                                                             {0.0, 0.0, 0.0, 0.0}}};
   std::optional<size_t> moLastFrameIdx;
   std::optional<double> moStartReadPos;
+  // The host time, in microseconds, the stream's audio so far ends at: the
+  // next render follows on by asking for it. receive() only.
+  std::optional<double> moFollowOnMicros;
   // Source frames read, and the frames the rates called for, since drift was
   // last published. receive() only.
   double mDriftFramesRead = 0.0;

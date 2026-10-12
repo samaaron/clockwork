@@ -18,9 +18,12 @@
  *     dry — the stream rejoins the present: the audio of now, not the audio
  *     that was missed played fast to catch up; one resync, no warp;
  *   - a hole in the peer's stream is nothing to render, then the stream as it
- *     resumes; one resync, no warp.
+ *     resumes; one resync, no warp;
+ *   - a clock re-measurement that moves the timeline under a stream by tens
+ *     of milliseconds is steered to, not a lost place: no resync, no warp.
  */
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "native/LinkAudioBridge.h"   // decides CLOCKWORK_LINK_AUDIO
 
@@ -128,6 +131,33 @@ Rendered render(Session& session, Renderer& renderer, const Peer& peer, Micros h
         if (i > 0) out.maxStep = std::max(out.maxStep, std::fabs(l[i] - l[i - 1]));
     }
     return out;
+}
+
+// As render(), against a session state the case has moved, with the stream
+// expected `offFrames` earlier than the peer's clock says.
+Rendered renderOn(const ableton::LinkAudio::SessionState& state, Renderer& renderer,
+                  const Peer& peer, Micros hostTime, double offFrames) {
+    std::vector<double> l(kRender), r(kRender);
+    Rendered out;
+    out.frames = renderer.receive(l.data(), r.data(), kRender, state, double(kRate), hostTime, kQuantum);
+    const double frameAtHost = double((hostTime - peer.t0).count()) * double(kRate) / 1e6 - offFrames;
+    for (size_t i = 0; i < out.frames; ++i) {
+        const double want = std::sin(kTau * kHz * (frameAtHost + double(i)) / double(kRate));
+        out.maxError = std::max(out.maxError, std::fabs(l[i] - want));
+        if (i > 0) out.maxStep = std::max(out.maxStep, std::fabs(l[i] - l[i - 1]));
+    }
+    return out;
+}
+
+// The session state as a clock re-measurement leaves it. Link builds the
+// state a client sees from the session's tempo and beat origin and a time
+// origin put through the ghost transform (Controller.hpp): a new measurement
+// against a peer moves that time origin and nothing else, so the beat at a
+// host time moves while a buffer's stamp, a session beat, maps as before.
+ableton::LinkAudio::SessionState remeasured(ableton::LinkAudio::SessionState state, Micros by) {
+    auto& api = const_cast<ableton::link::ApiState&>(ableton::detail::linkApiState(state));
+    api.timeline.timeOrigin += by;
+    return state;
 }
 
 // The most two consecutive samples of this sine differ by, with a little room.
@@ -294,6 +324,130 @@ TEST_CASE("input renderer: after the host has gone on without it, the stream rej
     CHECK(renderer.warps() == 0);
 }
 
+TEST_CASE("input renderer: a re-measured clock that moves the timeline tens of milliseconds is steered to, not a lost place",
+          "[link-audio][renderer]") {
+    // Over WiFi, with a second peer in the session, Link's measurements of the
+    // clock offset move the timeline under a stream by tens of milliseconds
+    // at a time, not one or two. Nothing was missed and nothing stalled: the
+    // stream is whole, the target moved. Given up as lost, that is a resync
+    // and a hole in the audio at every measurement — a glitch every few
+    // seconds through a whole jam. It is steered to, as a small step is, and
+    // the stream is in its new place within a few seconds with nothing heard.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    // A second ahead, and a render's worth more with every render, as a peer
+    // publishes: the queue holds under three seconds, not the whole case.
+    peer.publish(750);
+    constexpr size_t kPerRender = kRender / kPeerBlock;
+
+    Micros host = framesLater(peer.t0, 4800);
+    for (int block = 0; block < 10; ++block) {
+        REQUIRE(render(session, renderer, peer, host).frames == kRender);
+        peer.publish(kPerRender);
+        host = framesLater(host, double(kRender));
+    }
+    // Either way: the measurement can put the session's clock ahead of where
+    // it was thought to be, or behind.
+    const double kMovedMs = GENERATE(20.0, -20.0);
+    INFO("the timeline moved " << kMovedMs << " ms");
+    const auto moved = remeasured(session.state, Micros(static_cast<int64_t>(kMovedMs * 1000)));
+    const double movedFrames = kMovedMs * double(kRate) / 1000.0;
+
+    double worstStep = 0.0;
+    for (int block = 0; block < 240; ++block) {   // 2.5 s
+        const auto at = renderOn(moved, renderer, peer, host, movedFrames);
+        INFO("block " << block << " after the timeline moved");
+        REQUIRE(at.frames == kRender);
+        worstStep = std::max(worstStep, at.maxStep);
+        peer.publish(kPerRender);
+        host = framesLater(host, double(kRender));
+    }
+    CHECK(worstStep < kSineStep * 1.05);   // bent by a hundredth at most, never stepped
+    CHECK(renderer.resyncs() == 0);
+    CHECK(renderer.warps() == 0);
+    const auto settled = renderOn(moved, renderer, peer, host, movedFrames);
+    CHECK(settled.maxError < kExact);   // in its new place
+}
+
+TEST_CASE("input renderer: a clock re-measured again and again is one stream, never a lost place",
+          "[link-audio][renderer]") {
+    // What a jam over WiFi with a second peer does: Link re-measures the clock
+    // to its peers over and over, and the timeline swings under the stream,
+    // one way and back, tens of milliseconds at a time. Each swing given up as
+    // a lost place was a resync; on a real session that was 79 in ten seconds.
+    // The stream is steered through every swing and never stepped, and once
+    // the timeline is back where it began the stream is back in its place.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(750);
+    constexpr size_t kPerRender = kRender / kPeerBlock;
+
+    Micros host = framesLater(peer.t0, 4800);
+    for (int block = 0; block < 10; ++block) {
+        REQUIRE(render(session, renderer, peer, host).frames == kRender);
+        peer.publish(kPerRender);
+        host = framesLater(host, double(kRender));
+    }
+    // Where each measurement leaves the timeline, from where it began, in ms;
+    // the last puts it back.
+    const double kMovesMs[] = { 15.0, -5.0, 20.0, 0.0, -15.0, 10.0, 0.0 };
+    double worstStep = 0.0;
+    for (size_t m = 0; m < std::size(kMovesMs); ++m) {
+        const double movedMs = kMovesMs[m];
+        const auto moved = remeasured(session.state, Micros(static_cast<int64_t>(movedMs * 1000)));
+        const double movedFrames = movedMs * double(kRate) / 1000.0;
+        // ~0.4 s at each; at the last, back where it began, long enough to settle.
+        const int renders = (m + 1 == std::size(kMovesMs)) ? 400 : 40;
+        for (int block = 0; block < renders; ++block) {
+            const auto at = renderOn(moved, renderer, peer, host, movedFrames);
+            INFO("timeline at " << movedMs << " ms, block " << block);
+            REQUIRE(at.frames == kRender);
+            worstStep = std::max(worstStep, at.maxStep);
+            peer.publish(kPerRender);
+            host = framesLater(host, double(kRender));
+        }
+    }
+    CHECK(worstStep < kSineStep * 1.05);   // bent by a hundredth at most, never stepped
+    CHECK(renderer.resyncs() == 0);
+    CHECK(renderer.warps() == 0);
+    const auto settled = render(session, renderer, peer, host);
+    CHECK(settled.maxError < kExact);   // back in its place
+}
+
+TEST_CASE("input renderer: a timeline that jumps further than a clock measurement moves it is found again at once",
+          "[link-audio][renderer]") {
+    // Half a second is no measurement but the session itself jumping, and the
+    // stream is found again where the timeline now is, not bent toward it for
+    // a minute. Later, so the audio there has arrived; half a second earlier
+    // was played and let go, and is found again when the target reaches what
+    // is still held.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(750);
+    constexpr size_t kPerRender = kRender / kPeerBlock;
+
+    Micros host = framesLater(peer.t0, 4800);
+    for (int block = 0; block < 10; ++block) {
+        REQUIRE(render(session, renderer, peer, host).frames == kRender);
+        peer.publish(kPerRender);
+        host = framesLater(host, double(kRender));
+    }
+    constexpr double kJumpedMs = -500.0;
+    const auto jumped = remeasured(session.state, Micros(static_cast<int64_t>(kJumpedMs * 1000)));
+    const double jumpedFrames = kJumpedMs * double(kRate) / 1000.0;
+    const auto rejoined = renderOn(jumped, renderer, peer, host, jumpedFrames);
+    CHECK(rejoined.frames == kRender);
+    CHECK(rejoined.maxError < kExact);
+    CHECK(renderer.resyncs() == 1);
+    CHECK(renderer.warps() == 0);
+}
+
 TEST_CASE("input renderer: a hole in the peer's stream is nothing to render, then the stream resumes",
           "[link-audio][renderer]") {
     // The peer's callback stalled for 100 ms: those frames were never made,
@@ -338,4 +492,38 @@ TEST_CASE("input renderer: a hole in the peer's stream is nothing to render, the
     CHECK(renderer.resyncs() == 1);
 }
 
+
+TEST_CASE("input renderer: a short hole asked across a device's block at a time is found again on its far side",
+          "[link-audio][renderer]") {
+    // The endpoint asks again as each device block is read. Inside a hole
+    // nothing renders while the host goes on a block at a time, each step
+    // smaller than the slack a render that follows on is allowed. The steps
+    // add up: the host went on without the stream, which is a place lost, and
+    // the stream is found again on the far side as soon as it is there, not
+    // steered across the hole as a timeline that moved would be.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    constexpr size_t kDeviceBlock = 64;
+    peer.publish(150);   // 200 ms
+    const uint64_t holeAt = peer.frame;
+    peer.skip(23 * kDeviceBlock);   // 30.7 ms never made
+    peer.publish(600);
+    const uint64_t holeEnd = holeAt + 23 * kDeviceBlock;
+
+    uint64_t at = 4800;
+    for (; at + kDeviceBlock < holeAt; at += kDeviceBlock) {   // up to the hole's edge
+        REQUIRE(render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock).frames
+                == kDeviceBlock);
+    }
+    for (; at < holeEnd; at += kDeviceBlock) {   // into it and across: the edge, then nothing
+        render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock);
+    }
+    const auto resumed = render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock);
+    CHECK(resumed.frames == kDeviceBlock);
+    CHECK(resumed.maxError < kExact);
+    CHECK(renderer.resyncs() == 1);
+    CHECK(renderer.warps() == 0);
+}
 #endif  // CLOCKWORK_LINK_AUDIO
