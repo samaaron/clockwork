@@ -435,13 +435,6 @@ private:
     // Lock-free fast path for the empty case.
     std::atomic<size_t>     mAuxSinkCount{0};
 
-    // Audio-thread scratch for drainInputsToBuses. Held on the bridge to avoid
-    // 64 KiB of stack per call (some Windows ASIO threads have <128 KiB stacks).
-    // Single-thread access.
-    static constexpr size_t kDrainScratchFrames = 4096;
-    double mDrainScratchL[kDrainScratchFrames]{};
-    double mDrainScratchR[kDrainScratchFrames]{};
-
     // Cumulative Link Audio receive underruns (a block the renderer couldn't
     // fully fill). Bumped in drainInputsToBuses, mirrored to metrics.
     std::atomic<uint32_t> mLinkAudioUnderruns{0};

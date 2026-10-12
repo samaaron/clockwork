@@ -1409,7 +1409,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // its subsystem handler, off the audio thread. The control dispatcher takes
     // "clock/" to the Link surface and everything unclaimed to the engine's own.
     mNrtGateway.addDrain(
-        mNrtBuffer.data(), kNrtRingSize, &mNrtHead, &mNrtTail,
+        mNrtBuffer->data(), kNrtRingSize, &mNrtHead, &mNrtTail,
         [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
             // Thread the origin AND the time to the handler as metadata: the
             // audio thread prefixed the frame with NrtEnvelope (nrtForwardSink).
@@ -1954,12 +1954,12 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
         // mNrtFrame is this thread's: the audio thread is the ring's only
         // producer (see the header), so filling it before the locked write
         // races nothing.
-        uint8_t* frame = self->mNrtFrame.data();
+        uint8_t* frame = self->mNrtFrame->data();
         NrtEnvelope env{ cc ? cc->when : 0, cc ? cc->blockTime : 0 };
         std::memcpy(frame, &env, sizeof env);
         std::memcpy(frame + sizeof env, data, len);
         ok = RingBufferWriter::write(
-            self->mNrtBuffer.data(), kNrtRingSize,
+            self->mNrtBuffer->data(), kNrtRingSize,
             &self->mNrtHead, &self->mNrtTail, &self->mNrtSeq, &self->mNrtLock,
             frame, static_cast<uint32_t>(sizeof env + len), cc ? cc->sourceId : 0);
     } else {

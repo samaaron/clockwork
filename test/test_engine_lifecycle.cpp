@@ -10,6 +10,7 @@
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
 #include "lanes/lanes.h"   // post-shutdown ABI guard tests
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 
@@ -20,6 +21,41 @@
 TEST_CASE("Engine starts in non-running state before init", "[lifecycle]") {
     ClockworkEngine engine;
     CHECK_FALSE(engine.isRunning());
+}
+
+// =============================================================================
+// THE ENGINE OBJECT — a client holds it on its stack
+// =============================================================================
+//
+// SuperSonic's main does, and so does every test here. An engine with its big
+// buffers inside it was 340 KB or more: most of a 512 KB macOS thread stack, and
+// on arm64 Ubuntu's gcc 13 and 14 describe the prologue of a frame that big
+// wrongly, so an exception thrown through it found no handler and terminated.
+
+namespace {
+// Called through volatile pointers, so neither is inlined into the test: the
+// engine sits in a frame of its own, between the throw and the catch.
+void throwBelowTheEngine() { throw std::runtime_error("thrown below a frame holding an engine"); }
+void (*volatile gThrowBelowTheEngine)() = &throwBelowTheEngine;
+void holdAnEngineAndThrow() {
+    ClockworkEngine engine;
+    gThrowBelowTheEngine();
+}
+void (*volatile gHoldAnEngineAndThrow)() = &holdAnEngineAndThrow;
+}  // namespace
+
+TEST_CASE("An exception thrown below a frame holding an engine reaches its handler", "[lifecycle]") {
+    bool caught = false;
+    try {
+        gHoldAnEngineAndThrow();
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    CHECK(caught);
+}
+
+TEST_CASE("An engine allocates its large buffers instead of holding them inside it", "[lifecycle]") {
+    CHECK(sizeof(ClockworkEngine) <= 64 * 1024);
 }
 
 TEST_CASE("isRunning returns true after init", "[lifecycle]") {

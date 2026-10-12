@@ -946,9 +946,11 @@ private:
     // Sized so a whole UDP datagram inside /clockwork/osc/send — the widest
     // control message a client can put on the wire — crosses this hop with
     // room for a few more behind it. A frame that will not fit is dropped and
-    // counted, and the log says so.
+    // counted, and the log says so. Allocated with the engine, not held in it:
+    // a client holds the engine on its stack (test_engine_lifecycle says why).
     static constexpr uint32_t kNrtRingSize = 262144;
-    std::array<uint8_t, kNrtRingSize> mNrtBuffer{};
+    using NrtRing = std::array<uint8_t, kNrtRingSize>;
+    const std::unique_ptr<NrtRing> mNrtBuffer = std::make_unique<NrtRing>();
     // What the audio thread prefixes each control frame with, so the call's
     // time survives the hop (the ring header carries only the origin token).
     struct NrtEnvelope {
@@ -956,12 +958,13 @@ private:
         int64_t blockTime = 0;   // the block it was fired in
     };
     // The widest command the hop carries: a datagram (65507) and the verb
-    // that wraps it, rounded up. The frame the envelope is prefixed in is
-    // this object's, not the audio thread's stack: the audio thread is the
-    // ring's only producer (nrtForwardSink is an audio route), so one buffer
-    // it owns is enough, and 64 KB is not something to put on a stack.
+    // that wraps it, rounded up. The frame the envelope is prefixed in is the
+    // engine's, not the audio thread's stack: the audio thread is the ring's
+    // only producer (nrtForwardSink is an audio route), so one buffer is
+    // enough. Allocated with the engine, as the ring is.
     static constexpr uint32_t kNrtMaxCommand = 66560;
-    alignas(8) std::array<uint8_t, sizeof(NrtEnvelope) + kNrtMaxCommand> mNrtFrame{};
+    using NrtFrame = std::array<uint8_t, sizeof(NrtEnvelope) + kNrtMaxCommand>;
+    const std::unique_ptr<NrtFrame> mNrtFrame = std::make_unique<NrtFrame>();
     // How many over-wide control messages this engine has said it dropped;
     // it says so eight times and then keeps count in the metrics alone.
     std::atomic<uint32_t>     mNrtOversizeLogged{0};
