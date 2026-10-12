@@ -93,7 +93,7 @@ export const METRICS_SCHEMA = {
     // Link Audio stream health [32-38] — native-only (no web writer)
     linkAudioInChannels:          { offset: 32, type: 'gauge',    unit: 'count', nativeOnly: true, description: 'Active received Link Audio channels' },
     linkAudioStreamRate:          { offset: 33, type: 'gauge',    unit: 'Hz',    nativeOnly: true, description: 'Received Link Audio stream sample rate' },
-    linkAudioUnderruns:           { offset: 34, type: 'counter',  unit: 'count', nativeOnly: true, description: 'Receiver queue underruns (stream audio arrived too late to play)' },
+    linkAudioUnderruns:           { offset: 34, type: 'counter',  unit: 'count', nativeOnly: true, description: 'Link Audio input frames that arrived too late to play, every input together' },
     linkAudioBufferedMs:          { offset: 35, type: 'gauge',    unit: 'ms',    nativeOnly: true, description: 'Received Link Audio queued in the receiver (ms)' },
     linkAudioDriftPpm:            { offset: 36, type: 'gauge',    unit: 'ppm',   signed: true, nativeOnly: true, description: "Read-rate deviation from the sender's clock (parts per million)" },
     linkAudioPublish:             { offset: 37, type: 'gauge',    unit: 'bool',  nativeOnly: true, description: 'Link Audio publishing enabled (0/1)' },

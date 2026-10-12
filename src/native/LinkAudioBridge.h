@@ -82,6 +82,17 @@ struct InputStatus {
     int32_t         driftPpm{0};    // the read rate against the rates' ratio, lately
 };
 
+// Every input taken together, as the metrics carry it.
+struct InputHealth {
+    uint32_t inChannels{0};
+    uint32_t streamRate{0};
+    int32_t  driftPpm{0};
+    uint32_t bufferedMs{0};
+    // Every input's underruns (InputStatus::underruns), those of inputs since
+    // removed included: a count that only goes up.
+    uint64_t underruns{0};
+};
+
 struct SinkInfo {
     std::string name;
     uint32_t    busIdx{0};
@@ -255,19 +266,10 @@ public:
     void ensureMainSink();
 
     // ─── Metrics (read by LinkAudioHost::publishMetrics) ─────────────────
-    uint32_t underruns() const {
-        return mLinkAudioUnderruns.load(std::memory_order_relaxed);
-    }
     // RT-safe try_lock reads of the aux-sink count and aggregated input health.
     // Each returns false (writing nothing) when the lock is contended.
     bool tryReadSinkCount(uint32_t& outCount) const;
-    struct InputHealth {
-        uint32_t inChannels{0};
-        uint32_t streamRate{0};
-        int32_t  driftPpm{0};
-        uint32_t bufferedMs{0};
-    };
-    bool tryReadInputHealth(InputHealth& out) const;
+    bool tryReadInputHealth(link_audio::InputHealth& out) const;
 
     // Whether the endpoint worker runs as a real-time thread: what the OS
     // answered when the worker asked, once it has (nothing while it hasn't,
@@ -333,7 +335,15 @@ private:
     };
     uint64_t underrunsSinceStart(const InputSubscription& sub) const;
     uint64_t troubleOf(const InputSubscription& sub) const;
+    // A subscription's end, however it comes (removed, cleared, replaced,
+    // dropped by a lane move or a visibility change, refused as it was added):
+    // its underruns stay counted in mRetiredUnderruns, and its port is
+    // detached and closed, since the port registry is the process's and
+    // outlives the engine. Call with mInputSubMutex held.
+    void endInput(InputSubscription& sub);
     std::vector<InputSubscription> mInputSubs;
+    // The underruns of subscriptions since removed. Under mInputSubMutex.
+    uint64_t mRetiredUnderruns{0};
     // Lock-free fast path for the empty case.
     std::atomic<size_t> mInputSubCount{0};
     // Serialises mInputSubs mutation against the endpoint worker and the
@@ -351,8 +361,6 @@ private:
     void startEndpoint();
     void stopEndpoint();
     void endpointLoop(const std::stop_token& stop);
-    // Detach then close. Call with mInputSubMutex held.
-    void closePort(InputSubscription& sub);
 
     // ─── When each port is read ───────────────────────────────────────────
     //
@@ -434,10 +442,6 @@ private:
     std::vector<ActiveSink> mAuxSinks;
     // Lock-free fast path for the empty case.
     std::atomic<size_t>     mAuxSinkCount{0};
-
-    // Cumulative Link Audio receive underruns (a block the renderer couldn't
-    // fully fill). Bumped in drainInputsToBuses, mirrored to metrics.
-    std::atomic<uint32_t> mLinkAudioUnderruns{0};
 };
 
 #else  // !CLOCKWORK_LINK_AUDIO
@@ -478,17 +482,10 @@ public:
     void resetForVisibilityChange() {}
     void ensureMainSink() {}
 
-    uint32_t underruns() const { return 0; }
     bool tryReadSinkCount(uint32_t&) const { return false; }
-    struct InputHealth {
-        uint32_t inChannels{0};
-        uint32_t streamRate{0};
-        int32_t  driftPpm{0};
-        uint32_t bufferedMs{0};
-    };
     std::optional<clockwork::RealtimeStatus> endpointRealtime() const { return std::nullopt; }
     uint64_t datedBlocks() const { return 0; }
-    bool tryReadInputHealth(InputHealth&) const { return false; }
+    bool tryReadInputHealth(link_audio::InputHealth&) const { return false; }
 
 private:
     bool mAudioPublishEnabled{false};

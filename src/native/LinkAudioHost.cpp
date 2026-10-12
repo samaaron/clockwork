@@ -5,6 +5,9 @@
 #include "clock/LinkSession.h"
 #include "shared_memory.h"
 
+#include <algorithm>
+#include <cstdint>
+
 #if CLOCKWORK_LINK_AUDIO
 LinkAudioHost::LinkAudioHost(ClockworkClock& clock)
     : mClock(clock), mBridge(clock.linkSession().linkAudio()) {
@@ -115,13 +118,17 @@ void LinkAudioHost::publishMetrics(PerformanceMetrics* m) {
     uint32_t sinkCount = 0;
     if (mBridge.tryReadSinkCount(sinkCount))
         m->link_audio_sinks.store(sinkCount, std::memory_order_relaxed);
-    m->link_audio_underruns.store(mBridge.underruns(), std::memory_order_relaxed);
-    LinkAudioBridge::InputHealth health;
+    link_audio::InputHealth health;
     if (mBridge.tryReadInputHealth(health)) {
         m->link_audio_in_channels.store(health.inChannels, std::memory_order_relaxed);
         m->link_audio_stream_rate.store(health.streamRate, std::memory_order_relaxed);
         m->link_audio_drift_ppm.store(health.driftPpm, std::memory_order_relaxed);
         m->link_audio_buffered_ms.store(health.bufferedMs, std::memory_order_relaxed);
+        // The slot is 32 bits: a day of missing audio at 48 kHz fills it, and
+        // it stays full rather than starting again from nothing.
+        m->link_audio_underruns.store(
+            static_cast<uint32_t>(std::min<uint64_t>(health.underruns, UINT32_MAX)),
+            std::memory_order_relaxed);
     }
 }
 

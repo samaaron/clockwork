@@ -386,7 +386,7 @@ void LinkSession::publishLinkClockMetrics(PerformanceMetrics* m, double quantum)
     // below. This MUST use captureAudioSessionState() (the audio-thread variant):
     // captureAppSessionState() takes a lock and must never run on the audio
     // thread. Beat/phase are queried in Link's own clock domain at "now",
-    // mirroring drainLinkAudioInputsToBuses / the tempo-changed callback.
+    // as the tempo-changed callback does.
     const auto st = mImpl->link.captureAudioSessionState();
     const auto nowMicros = mImpl->link.clock().micros();
 

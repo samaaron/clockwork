@@ -202,12 +202,12 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
         else if (s.busIdx == busIdx) {
             clockwork_log("[link-audio] channel pair %u/%u was taken while %s/%s subscribed",
                     busIdx, busIdx + 1, peerName, channelName);
-            closePort(sub);
+            endInput(sub);
             return std::nullopt;
         }
     }
     if (replaceSlot) {
-        closePort(*replaceSlot);
+        endInput(*replaceSlot);
         *replaceSlot = std::move(sub);
         dateReadsOf(busIdx, replaceSlot->port);
         return busIdx;
@@ -220,9 +220,11 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     return busIdx;
 }
 
-// Detach before close, always: the binding names the slot, and a slot closed
-// while still bound would leave the bus reading a port that no longer exists.
-void LinkAudioBridge::closePort(InputSubscription& sub) {
+// The port is detached before it is closed, always: the binding names the
+// slot, and a slot closed while still bound would leave the bus reading a port
+// that no longer exists. The count first, while the port can still say it.
+void LinkAudioBridge::endInput(InputSubscription& sub) {
+    mRetiredUnderruns += underrunsSinceStart(sub);
     if (sub.port == CLOCKWORK_PORT_NONE) return;
     forgetReadDates(sub.port);
     clockwork_port_bus_detach(sub.port);
@@ -235,7 +237,7 @@ void LinkAudioBridge::removeInput(const char* peerName, const char* channelName)
     std::lock_guard<std::mutex> lk(mInputSubMutex);
     auto& v = mInputSubs;
     for (auto& s : v)
-        if (s.peerName == peerName && s.channelName == channelName) closePort(s);
+        if (s.peerName == peerName && s.channelName == channelName) endInput(s);
     v.erase(std::remove_if(v.begin(), v.end(),
             [&](const auto& s) {
                 return s.peerName == peerName && s.channelName == channelName;
@@ -246,7 +248,7 @@ void LinkAudioBridge::removeInput(const char* peerName, const char* channelName)
 
 void LinkAudioBridge::clearInputs() {
     std::lock_guard<std::mutex> lk(mInputSubMutex);
-    for (auto& s : mInputSubs) closePort(s);
+    for (auto& s : mInputSubs) endInput(s);
     mInputSubs.clear();
     mInputSubCount.store(0, std::memory_order_relaxed);
 }
@@ -449,7 +451,7 @@ void LinkAudioBridge::moveToLanes(uint32_t base, uint32_t lanes) {
         }
         clockwork_log("[link-audio] %s/%s dropped: the Link Audio lanes moved and "
                 "have no room for it", s.peerName.c_str(), s.channelName.c_str());
-        closePort(s);
+        endInput(s);
     }
     v.erase(std::remove_if(v.begin(), v.end(),
             [](const auto& s) { return s.port == CLOCKWORK_PORT_NONE; }), v.end());
@@ -651,6 +653,7 @@ bool LinkAudioBridge::publishAudioBlock(const float* leftChannel,
 void LinkAudioBridge::resetForVisibilityChange() {
     {
         std::lock_guard<std::mutex> lk(mInputSubMutex);
+        for (auto& s : mInputSubs) endInput(s);
         mInputSubs.clear();
         mInputSubCount.store(0, std::memory_order_relaxed);
     }
@@ -680,22 +683,25 @@ bool LinkAudioBridge::tryReadSinkCount(uint32_t& outCount) const {
     return true;
 }
 
-bool LinkAudioBridge::tryReadInputHealth(InputHealth& out) const {
+bool LinkAudioBridge::tryReadInputHealth(link_audio::InputHealth& out) const {
     std::unique_lock<std::mutex> lk(mInputSubMutex, std::try_to_lock);
     if (!lk.owns_lock()) return false;
     uint32_t inCh = 0, rate = 0;
     int32_t  drift = 0;
     float    bufMs = 0.0f;
-    for (auto& sub : mInputSubs) {
+    uint64_t underruns = mRetiredUnderruns;
+    for (const auto& sub : mInputSubs) {
         inCh += sub.renderer->lastNumChannels();
         rate  = sub.renderer->lastSampleRate();
         drift = sub.renderer->lastDriftPpm();
         bufMs = std::max(bufMs, sub.renderer->bufferedSeconds() * 1000.0f);
+        underruns += underrunsSinceStart(sub);
     }
     out.inChannels = inCh;
     out.streamRate = rate;
     out.driftPpm   = drift;
     out.bufferedMs = static_cast<uint32_t>(bufMs);
+    out.underruns  = underruns;
     return true;
 }
 
