@@ -3367,6 +3367,30 @@ std::string ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
     return {};
 }
 
+double ClockworkEngine::takeOpenDeviceGeometry(double fallbackRate, bool inputWasDropped) {
+    auto* dev = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
+    const double rate = dev ? dev->getCurrentSampleRate() : fallbackRate;
+    mCurrentConfig.sampleRate = static_cast<int>(rate);
+
+    // Aim the DSP's channel ceilings at the device. The rebuild is built at
+    // whatever these say; without the update it stays at the boot-time count,
+    // so audio written to a higher channel (e.g. channel 2 with 4-channel
+    // Loopback) lands on an internal private channel instead of on hardware.
+    if (dev) {
+        const int newOut = dev->getActiveOutputChannels().countNumberOfSetBits();
+        const int newIn  = dev->getActiveInputChannels().countNumberOfSetBits();
+        if (newOut > 0) mCurrentConfig.numOutputChannels = newOut;
+        // Respect inputWasDropped: when we've dropped input because the new
+        // output doesn't pair with it, keep the previously-remembered input
+        // count in config but build the DSP with zero inputs for this rebuild.
+        if (!inputWasDropped || newIn > 0) mCurrentConfig.numInputChannels = newIn;
+        clockwork_set_channel_ceilings(
+            static_cast<uint32_t>(inputWasDropped ? 0 : newIn),
+            static_cast<uint32_t>(mCurrentConfig.numOutputChannels));
+    }
+    return rate;
+}
+
 SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                                            double sampleRate,
                                            int bufferSize,
@@ -3901,7 +3925,6 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
 
     if (!errStr.empty()) {
-        if (isCold) { rebuild_dsp(currentRate); mDspRebuilt = true; }
         // --- Restart audio (failure path) ---
         if (mDeviceManager) {
             // Restore the previous device setup. A failed setAudioDeviceSetup
@@ -3944,6 +3967,14 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 }
             }
         }
+        // Built for whatever is open now: the device that was playing, put
+        // back, or the default when that has gone too, which can run at
+        // another rate. Built at the old rate, a default at another played
+        // everything at the wrong speed and pitch.
+        if (isCold) {
+            rebuild_dsp(takeOpenDeviceGeometry(currentRate, false));
+            mDspRebuilt = true;
+        }
         controlPark.resumeNow();
         startAudioSource();
         mProcessor.resume();
@@ -3956,40 +3987,25 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 setEngineState(EngineState::Running, "swap-failed-rollback");
         }
         if (onSwapEvent) onSwapEvent("swap:failed", result);
+
+        // A hot swap keeps the DSP as it was, so a way back that ended on a
+        // device at another rate is a rate change still to make.
+        if (!isCold) {
+            auto* dev = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
+            if (dev && dev->getCurrentSampleRate() != clockwork_sample_rate()) {
+                clockwork_log("[device-setup] '%s' plays at %.0f Hz, the DSP at %.0f Hz "
+                        "— rebuilding it at the device's rate",
+                        dev->getName().toRawUTF8(), dev->getCurrentSampleRate(),
+                        clockwork_sample_rate());
+                reopenCurrentDevice(dev->getCurrentSampleRate());
+            }
+        }
         return result;
     }
 
     if (isCold) {
-        double newRate = (sampleRate > 0) ? sampleRate : currentRate;
-        if (mDeviceManager) {
-            auto* newDev = mDeviceManager->getCurrentAudioDevice();
-            newRate = newDev ? newDev->getCurrentSampleRate() : newRate;
-        }
-        mCurrentConfig.sampleRate = static_cast<int>(newRate);
-
-        // Aim the DSP's channel ceilings at the new device. The rebuild is
-        // built at whatever these say; without the update it stays at the
-        // boot-time count, so audio written to a higher channel (e.g. channel
-        // 2 with 4-channel Loopback) lands on an internal private channel
-        // instead of on hardware. The new sample rate reaches the DSP as
-        // rebuild_dsp's argument.
-        if (mDeviceManager) {
-            if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
-                int newOut = dev->getActiveOutputChannels().countNumberOfSetBits();
-                int newIn  = dev->getActiveInputChannels().countNumberOfSetBits();
-                if (newOut > 0) mCurrentConfig.numOutputChannels = newOut;
-                // Respect inputWasDropped: when we've dropped input because
-                // the new output doesn't pair with it, keep the previously-
-                // remembered input count in config but build the DSP with
-                // zero inputs for this rebuild.
-                if (!inputWasDropped || newIn > 0) {
-                    mCurrentConfig.numInputChannels = newIn;
-                }
-                clockwork_set_channel_ceilings(
-                    static_cast<uint32_t>(inputWasDropped ? 0 : newIn),
-                    static_cast<uint32_t>(mCurrentConfig.numOutputChannels));
-            }
-        }
+        const double newRate = takeOpenDeviceGeometry(
+            (sampleRate > 0) ? sampleRate : currentRate, inputWasDropped);
 
         try {
             if (testRebuildFailure) {

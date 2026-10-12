@@ -738,6 +738,13 @@ private:
     // Shared by shutdown() and recreateDeviceManager().
     void teardownDeviceManager();
 
+    // What a swap rebuilds the DSP for: the device open now, however it came
+    // to be open (the swap, its way back, or the default when that failed
+    // too). Its rate, or `fallbackRate` with none open, and its channels, into
+    // the config and the channel ceilings the DSP is built at. Returns the
+    // rate.
+    double takeOpenDeviceGeometry(double fallbackRate, bool inputWasDropped);
+
     // On a fresh device manager, the driver boot settled on: recovery must
     // not change the driver the user chose (a fresh manager starts on JUCE's
     // first type). Not under the factory boundary — an injected manager owns

@@ -8,11 +8,17 @@
  *   a device is open  <=>  its callback is the engine's source
  *                     <=>  the engine is not waiting for a device
  *                      =>  blocks keep coming
+ *                      =>  the DSP is built at the device's rate
  *
  * The two cases Linux CI failed on 2026-10-05 broke it: the engine named the
  * device it had opened, still said it was waiting for one, and rendered
  * nothing. A case that checks this after each step catches that wherever it
  * happens, not only where a case thought to look.
+ *
+ * Sonic Pi broke the last on 2026-10-12: a failed swap fell back to a 48 kHz
+ * interface with the DSP still built at 44.1 kHz, and for two hours everything
+ * played 8.8% fast and sharp while the clock kept the device's time, so a
+ * two-second loop finished early and left a gap.
  *
  * Fake-device engines only: a headless or manual-pump engine has no device by
  * design.
@@ -22,6 +28,7 @@
 #include "EngineFixture.h"
 #include "OscTestUtils.h"
 #include "clockwork_prefix.h"
+#include "lanes/lanes.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -51,7 +58,11 @@ inline void checkCoherent(EngineFixture& fix) {
     INFO(fix.debugMessagesDump());
     CHECK((e.audioSource() == ClockworkEngine::AudioSource::RealCallback) == open);
     CHECK(e.waitingForAudioDevice() == !open);
-    if (open) CHECK(fix.waitForBlocks(20));
+    if (open) {
+        CHECK(fix.waitForBlocks(20));
+        INFO("the device plays at " << e.currentDevice().activeSampleRate << " Hz");
+        CHECK(clockwork_sample_rate() == e.currentDevice().activeSampleRate);
+    }
 }
 
 // The user picks an output from the menu; what the engine says it did.

@@ -376,6 +376,60 @@ TEST_CASE("DeviceEvents: the device played on losing channels is played on "
     checkCoherent(fix);
 }
 
+TEST_CASE("DeviceEvents: a device that cannot be opened again leaves the engine "
+          "on the default at the default's rate", "[DeviceEvents]") {
+    // Sonic Pi, 2026-10-12: headphones at 44.1 kHz reported no channels, so
+    // the engine opened them again; that failed, putting them back failed
+    // too, and it fell back to the default, an interface running at 48 kHz,
+    // with the DSP still built at 44.1 kHz.
+    auto sys = makeSimpleSystem();                // the default is Fake Speakers
+    sys->at("Fake Speakers").sampleRates = { 48000.0 };
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.sampleRate = 44100;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().activeSampleRate == 44100.0);
+    REQUIRE(clockwork_sample_rate() == 44100.0);
+
+    {   // going: no channels, and it will not open
+        auto hold = fix.engine().testHoldSwapGate();
+        auto& phones = sys->at("Fake Interface");
+        phones.maxOutputChannels = 0;
+        phones.maxInputChannels  = 0;
+        phones.failOpen          = true;
+    }
+    REQUIRE(sys->reportOpenDeviceChanged());
+
+    checkPlayingOn(fix, "Fake Speakers");
+    CHECK(clockwork_sample_rate() == 48000.0);
+}
+
+TEST_CASE("DeviceEvents: a switch at the same rate that fails while the device "
+          "that was playing has gone leaves the engine on the default at the "
+          "default's rate", "[DeviceEvents]") {
+    // The same way back, from a switch that kept the DSP as it was: a device
+    // picked at the rate already playing, which will not open, while the
+    // device that was playing has gone too.
+    auto sys = makeSimpleSystem();                // the default is Fake Speakers
+    sys->at("Fake Speakers").sampleRates = { 48000.0 };
+    sys->types[0].devices.push_back(device("Fake Dock", 2, 0));
+    sys->at("Fake Dock").failOpen = true;
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.sampleRate = 44100;
+    EngineFixture fix(cfg);
+    subscribe(fix);
+    REQUIRE(clockwork_sample_rate() == 44100.0);
+
+    {   // the device playing goes as the switch begins
+        auto hold = fix.engine().testHoldSwapGate();
+        sys->at("Fake Interface").failOpen = true;
+    }
+    const auto done = pick(fix, "Fake Dock");
+    INFO("the switch said: " << done.argString(5));
+
+    checkPlayingOn(fix, "Fake Speakers");
+    CHECK(clockwork_sample_rate() == 48000.0);
+}
+
 TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "
           "rebuilds nothing more", "[DeviceEvents]") {
     auto sys = makeSimpleSystem();
