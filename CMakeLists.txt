@@ -276,6 +276,11 @@ option(CLOCKWORK_SYSTEM_ZLIB    "Link the system zlib instead of the copy inside
 # so the copy here is not compiled and the system library is linked. The other
 # codecs (dr_wav, dr_flac, dr_mp3) have no distro package and stay vendored.
 option(CLOCKWORK_SYSTEM_STB     "Use the system stb (pkg-config: stb) for stb_vorbis instead of the vendored copy" OFF)
+# libsamplerate is vendored unmodified (src/vendor/libsamplerate, 0.2.2, its
+# medium sinc converter: see CLOCKWORK.md there) for the Link Audio input
+# renderer. A distro build can link the packaged one instead — Debian's
+# libsamplerate0-dev, pkg-config samplerate — and the copy is not compiled.
+option(CLOCKWORK_SYSTEM_SAMPLERATE "Use the system libsamplerate (pkg-config: samplerate) instead of the vendored copy" OFF)
 
 # ── Plugin hosting ───────────────────────────────────────────────────────────
 # Clockwork as a HOST of plugins rather than as one — see src/plugin_host.h
@@ -461,6 +466,13 @@ set(CLOCKWORK_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust")
 # Both lists are CACHE INTERNAL because they are part of clockwork's contract with an
 # embedder — see "The compile profile" below — and a consumer may be a sibling
 # directory rather than a child, which PARENT_SCOPE does not reach.
+#
+# libsamplerate's header is on it with Link: the Link Audio renderer includes
+# it, and LinkAudioBridge.h, which an embedder includes, includes the renderer.
+set(CLOCKWORK_SAMPLERATE_INCLUDE_DIR)
+if(CLOCKWORK_LINK AND NOT CLOCKWORK_SYSTEM_SAMPLERATE)
+    set(CLOCKWORK_SAMPLERATE_INCLUDE_DIR ${CLOCKWORK_SRC}/vendor/libsamplerate/include)
+endif()
 set(CLOCKWORK_INCLUDE_DIRS
     ${NATIVE_SRC}/NativeShim   # first: shims emscripten/ on native builds
     ${NATIVE_SRC}
@@ -468,6 +480,7 @@ set(CLOCKWORK_INCLUDE_DIRS
     ${CLOCKWORK_SRC}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CLOCKWORK_SRC}/vendor/oscpack
+    ${CLOCKWORK_SAMPLERATE_INCLUDE_DIR}
     CACHE INTERNAL "Include directories clockwork's sources need")
 
 # Event-sink size classes, "<cell bytes>:<cells>,..." per kind. Empty means
@@ -692,6 +705,24 @@ if(CLOCKWORK_LINK)
         ${NATIVE_SRC}/LinkAudioBridge.cpp)
 endif()
 
+# libsamplerate (BSD-2-Clause, src/vendor/libsamplerate), which the Link Audio
+# renderer reads a peer's stream through: the medium sinc converter alone, and
+# no config.h (see CLOCKWORK.md there).
+set(CLOCKWORK_SAMPLERATE_SOURCES)
+if(CLOCKWORK_LINK AND CLOCKWORK_SYSTEM_SAMPLERATE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SAMPLERATE REQUIRED IMPORTED_TARGET samplerate)
+    message(STATUS "clockwork: system libsamplerate ${SAMPLERATE_VERSION} (CLOCKWORK_SYSTEM_SAMPLERATE)")
+elseif(CLOCKWORK_LINK)
+    set(CLOCKWORK_SAMPLERATE_SOURCES
+        ${CLOCKWORK_SRC}/vendor/libsamplerate/src/samplerate.c
+        ${CLOCKWORK_SRC}/vendor/libsamplerate/src/src_sinc.c
+        ${CLOCKWORK_SRC}/vendor/libsamplerate/src/src_linear.c
+        ${CLOCKWORK_SRC}/vendor/libsamplerate/src/src_zoh.c)
+    set_source_files_properties(${CLOCKWORK_SAMPLERATE_SOURCES} PROPERTIES
+        COMPILE_DEFINITIONS "ENABLE_SINC_MEDIUM_CONVERTER;HAVE_STDBOOL_H;PACKAGE=\"libsamplerate\";VERSION=\"0.2.2\"")
+endif()
+
 # Audio file reading and writing (src/clockwork_audio_file.h). The decoders are
 # vendored single-file libraries; flac_encoder.cpp is clockwork's own, because
 # the permissive single-file codecs decode and do not encode.
@@ -721,6 +752,7 @@ add_library(clockwork STATIC
     ${CLOCKWORK_NATIVE_SOURCES}
     ${CLOCKWORK_CLOCK_SOURCES}
     ${CLOCKWORK_AUDIO_FILE_SOURCES}
+    ${CLOCKWORK_SAMPLERATE_SOURCES}
     ${OSCPACK_SOURCES})
 
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_INCLUDE_DIRS})
@@ -730,6 +762,9 @@ endif()
 if(CLOCKWORK_SYSTEM_STB)
     target_compile_definitions(clockwork PRIVATE CLOCKWORK_SYSTEM_STB=1)
     target_link_libraries(clockwork PUBLIC PkgConfig::STB)
+endif()
+if(CLOCKWORK_LINK AND CLOCKWORK_SYSTEM_SAMPLERATE)
+    target_link_libraries(clockwork PUBLIC PkgConfig::SAMPLERATE)
 endif()
 target_compile_definitions(clockwork PUBLIC ${CLOCKWORK_COMPILE_DEFS})
 
@@ -1566,12 +1601,14 @@ if(CLOCKWORK_WERROR AND NOT MSVC)
             target_compile_options(${_t} PRIVATE -Werror)
         endif()
     endforeach()
-    # The vendored sources compiled into the library (stb_vorbis, oscpack) warn
-    # as their authors left them: theirs to fix, not ours to fail on.
+    # The vendored sources compiled into the library (stb_vorbis, oscpack,
+    # libsamplerate) warn as their authors left them: theirs to fix, not ours
+    # to fail on.
     set_source_files_properties(
         ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp
+        ${CLOCKWORK_SAMPLERATE_SOURCES}
         PROPERTIES COMPILE_OPTIONS -Wno-error)
 endif()

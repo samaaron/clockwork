@@ -36,6 +36,10 @@ Third-party components, under their own licences:
   src/vendor/stb/stb_vorbis.c                Public domain or MIT, (c) Sean
                                              Barrett.
 
+  src/vendor/libsamplerate/                  BSD-2-Clause, (c) Erik de Castro
+                                             Lopo. Compiled only when
+                                             CLOCKWORK_LINK=ON.
+
   external/erlang_headers/                   Apache-2.0, (c) Ericsson AB. The
                                              OTP headers the NIF compiles
                                              against.

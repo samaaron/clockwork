@@ -33,8 +33,10 @@
 
 #include <ableton/LinkAudio.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <vector>
 
@@ -74,8 +76,10 @@ struct Peer {
     double               jitterFrames = 0.0;
     uint32_t             lcg = 12345;
 
-    static double sine(uint64_t frame) {
-        return std::sin(kTau * kHz * double(frame) / double(kRate));
+    double               hz = kHz;   // the sine the peer plays
+
+    double sine(uint64_t frame) const {
+        return std::sin(kTau * hz * double(frame) / double(kRate));
     }
     Micros timeOf(uint64_t f) const {
         return t0 + Micros(static_cast<int64_t>(std::llround(1e6 * double(f) / double(kRate))));
@@ -171,7 +175,149 @@ Micros framesLater(Micros t, double frames) {
     return t + Micros(static_cast<int64_t>(std::llround(1e6 * frames / double(kRate))));
 }
 
+
+// ── What else the stream carries ──────────────────────────────────────────
+//
+// A sine at a frequency no simple fraction of the rates, rendered for a while,
+// and the loudest tone in what came out that is not that sine. A resampler
+// that only looks a frame or two around the read position puts the stream's
+// high frequencies back out as other tones, faint and inharmonic: bells over
+// every hi-hat. Measured by an FFT under a Blackman-Harris window, which keeps
+// the sine's own skirt narrow.
+
+// Renders `frames` of output at `outRate`, consecutive renders of kRender, the
+// peer publishing a second ahead of what is read. Against `state`, the
+// session's or one the case has moved.
+std::vector<double> renderRun(const ableton::LinkAudio::SessionState& state, Renderer& renderer,
+                              Peer& peer, Micros& host, double outRate, size_t frames) {
+    std::vector<double> l(kRender), r(kRender), out;
+    out.reserve(frames + kRender);
+    while (out.size() < frames) {
+        const double readTo = double((host - peer.t0).count()) * double(kRate) / 1e6;
+        while (double(peer.frame) < readTo + double(kRate)) peer.publish(1);
+        const size_t got = renderer.receive(l.data(), r.data(), kRender, state, outRate, host, kQuantum);
+        REQUIRE(got == kRender);
+        out.insert(out.end(), l.begin(), l.end());
+        host += Micros(static_cast<int64_t>(std::llround(1e6 * double(kRender) / outRate)));
+    }
+    out.resize(frames);
+    return out;
+}
+
+void fft(std::vector<std::complex<double>>& a) {
+    const size_t n = a.size();
+    for (size_t i = 1, j = 0; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const std::complex<double> step(std::cos(-kTau / double(len)), std::sin(-kTau / double(len)));
+        for (size_t i = 0; i < n; i += len) {
+            std::complex<double> w(1.0);
+            for (size_t j = 0; j < len / 2; ++j) {
+                const auto u = a[i + j], v = a[i + j + len / 2] * w;
+                a[i + j] = u + v;
+                a[i + j + len / 2] = u - v;
+                w *= step;
+            }
+        }
+    }
+}
+
+// The loudest tone in `x` (a power of two long) that is not the sine at
+// `hz`, in dB relative to the sine; and where it is, in Hz.
+struct Spur { double db = 0.0; double hz = 0.0; };
+Spur loudestOtherTone(const std::vector<double>& x, double rate, double hz) {
+    const size_t n = x.size();
+    std::vector<std::complex<double>> a(n);
+    for (size_t k = 0; k < n; ++k) {
+        const double p = kTau * double(k) / double(n - 1);
+        const double w = 0.35875 - 0.48829 * std::cos(p) + 0.14128 * std::cos(2 * p) - 0.01168 * std::cos(3 * p);
+        a[k] = w * x[k];
+    }
+    fft(a);
+    const auto sineBin = static_cast<size_t>(std::llround(hz / rate * double(n)));
+    constexpr size_t kSkirt = 12;   // the window's main lobe and then some
+    double sine = 0.0, other = 0.0;
+    size_t otherBin = 0;
+    for (size_t b = 1; b < n / 2; ++b) {
+        const double m = std::abs(a[b]);
+        if (b + kSkirt >= sineBin && b <= sineBin + kSkirt) { sine = std::max(sine, m); continue; }
+        if (m > other) { other = m; otherBin = b; }
+    }
+    return { 20.0 * std::log10(other / sine), double(otherBin) * rate / double(n) };
+}
+
+// A high sine, no simple fraction of either rate, and how quietly anything
+// else may come out with it: int16 on the wire is near -100 dB.
+constexpr double kHighHz      = 12345.0;
+constexpr double kCleanDb     = -90.0;
+constexpr size_t kSpectrumLen = size_t{1} << 16;
+
 }  // namespace
+
+TEST_CASE("input renderer: a stream at another rate is converted without tones of its own",
+          "[link-audio][renderer]") {
+    // A peer at 48 kHz heard by an engine at 44.1: every frame resampled.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.hz = kHighHz;
+    peer.publish(750);
+    constexpr double kOutRate = 44100.0;
+    Micros host = framesLater(peer.t0, 4800);
+    renderRun(session.state, renderer, peer, host, kOutRate, 11025);   // settled
+    const auto heard = renderRun(session.state, renderer, peer, host, kOutRate, kSpectrumLen);
+    const auto spur = loudestOtherTone(heard, kOutRate, kHighHz);
+    INFO("the loudest other tone: " << spur.db << " dB, at " << spur.hz << " Hz");
+    CHECK(spur.db < kCleanDb);
+    CHECK(renderer.resyncs() == 0);
+}
+
+TEST_CASE("input renderer: a stream being steered is bent without tones of its own",
+          "[link-audio][renderer]") {
+    // The timeline moved 20 ms under the stream (a clock re-measurement): it
+    // is read a hundredth fast for two seconds, and every frame of that is
+    // between the stream's own.
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.hz = kHighHz;
+    peer.publish(750);
+    Micros host = framesLater(peer.t0, 4800);
+    renderRun(session.state, renderer, peer, host, double(kRate), 4800);
+    const auto moved = remeasured(session.state, Micros(-20'000));
+    const auto heard = renderRun(moved, renderer, peer, host, double(kRate), kSpectrumLen);
+    const auto spur = loudestOtherTone(heard, double(kRate), kHighHz * 1.01);
+    INFO("the loudest other tone: " << spur.db << " dB, at " << spur.hz << " Hz");
+    CHECK(spur.db < kCleanDb);
+    CHECK(renderer.resyncs() == 0);
+}
+
+// The converter reads the stream ahead of where it is, further the lower the
+// rate it is read into, and a stream is rendered only as far as that reach
+// has arrived. Run short, libsamplerate takes the stream as ended and pads it
+// with silence. At every rate an engine runs at, steered as hard as it is
+// ever steered: every render whole, and the place never lost.
+TEST_CASE("input renderer: a stream is read at any engine rate without running the converter short",
+          "[link-audio][renderer]") {
+    const double outRate = GENERATE(16000.0, 22050.0, 44100.0, 96000.0, 192000.0);
+    CAPTURE(outRate);
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(750);
+    Micros host = framesLater(peer.t0, 4800);
+    renderRun(session.state, renderer, peer, host, outRate, size_t(outRate / 4));
+    const auto moved = remeasured(session.state, Micros(-20'000));   // steered a hundredth fast
+    renderRun(moved, renderer, peer, host, outRate, size_t(outRate));
+    CHECK(renderer.resyncs() == 0);
+}
 
 TEST_CASE("input renderer: a stream is rendered from where its stamps put it",
           "[link-audio][renderer]") {
@@ -468,14 +614,13 @@ TEST_CASE("input renderer: a hole in the peer's stream is nothing to render, the
         REQUIRE(render(session, renderer, peer, framesLater(peer.t0, double(at))).frames == kRender);
     }
     // Up to the hole and into it: everything before the hole is rendered, to
-    // two frames of its edge (the interpolator's reach), and nothing from
-    // inside it.
+    // the interpolator's reach short of its edge, and nothing from inside it.
     const uint64_t edge = at;
     size_t beforeHole = 0;
     for (; at < holeEnd; at += kRender) {
         beforeHole += render(session, renderer, peer, framesLater(peer.t0, double(at))).frames;
     }
-    CHECK(beforeHole == holeAt - edge - 2);
+    CHECK(beforeHole == holeAt - edge - Renderer::reach(kRate, double(kRate)));
     CHECK(renderer.warps() == 0);
 
     // Past the hole: the stream as the peer resumed it, and on from there.
@@ -513,7 +658,7 @@ TEST_CASE("input renderer: a short hole asked across a device's block at a time 
     const uint64_t holeEnd = holeAt + 23 * kDeviceBlock;
 
     uint64_t at = 4800;
-    for (; at + kDeviceBlock < holeAt; at += kDeviceBlock) {   // up to the hole's edge
+    for (; at + kDeviceBlock + Renderer::reach(kRate, double(kRate)) < holeAt; at += kDeviceBlock) {   // up to the hole's edge
         REQUIRE(render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock).frames
                 == kDeviceBlock);
     }
