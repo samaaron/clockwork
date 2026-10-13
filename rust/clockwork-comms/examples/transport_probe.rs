@@ -15,6 +15,7 @@
 //! big-endian length-prefixed framing; datagram transports send raw packets.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use clockwork_osc::{decode, encode, OscArg};
@@ -22,6 +23,12 @@ use clockwork_osc::{decode, encode, OscArg};
 const TIMEOUT: Duration = Duration::from_secs(3);
 // Load runs blast many messages through the real engine; give it wall-clock room.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+// At most this many /clockwork/sync ids unanswered at once in a stream load.
+// The engine takes what its command ring holds and drops the rest, counting
+// them (engineMessagesDropped): a client that sends more than it can take is
+// in error, and this probe measures transports, not the engine's limits. All
+// 5000 at once filled the ring on a loaded runner and lost commands.
+const STREAM_WINDOW: i64 = 256;
 // How long one datagram read waits before the load loop looks at the clock.
 const DGRAM_POLL: Duration = Duration::from_millis(100);
 // At most this many /clockwork/sync ids unanswered at once in a datagram
@@ -156,6 +163,22 @@ fn run(proto: &str, target: &str, probe: &[u8]) -> Result<Vec<u8>, String> {
 
 // ── load mode ────────────────────────────────────────────────────────────────
 
+// How far a stream load got: ids written, replies read and the last of them.
+// What a load that stalls says it was doing, wherever it stalled — in a write
+// the server stopped taking, or in a read for replies that never came.
+static SENT: AtomicI64 = AtomicI64::new(0);
+static GOT: AtomicI64 = AtomicI64::new(0);
+static LAST_ID: AtomicI32 = AtomicI32::new(0);
+
+fn progress() -> String {
+    format!(
+        "{} sent, {} replies, last reply id {}",
+        SENT.load(Ordering::Relaxed),
+        GOT.load(Ordering::Relaxed),
+        LAST_ID.load(Ordering::Relaxed)
+    )
+}
+
 fn sync_msg(id: i32) -> Vec<u8> {
     encode("/clockwork/sync", &[OscArg::Int(id)])
 }
@@ -193,8 +216,9 @@ impl CloneStream for std::fs::File {
     }
 }
 
-/// Blast `count` /clockwork/sync ids down a reliable stream while a reader thread collects
-/// the /clockwork/synced replies; every id must come back exactly once, in order.
+/// Send `count` /clockwork/sync ids down a reliable stream, at most STREAM_WINDOW
+/// unanswered at once, while a reader thread collects the /clockwork/synced
+/// replies; every id must come back exactly once, in order.
 fn stream_load<S: CloneStream>(mut writer: S, count: i32) -> Result<String, String> {
     let reader_conn = writer.clone_stream().map_err(|e| format!("clone: {e}"))?;
     let t0 = Instant::now();
@@ -202,13 +226,15 @@ fn stream_load<S: CloneStream>(mut writer: S, count: i32) -> Result<String, Stri
         let mut r = reader_conn;
         let (mut got, mut last) = (0i64, 0i32);
         while got < count as i64 {
-            let body = read_frame(&mut r).map_err(|e| format!("recv after {got}: {e}"))?;
+            let body = read_frame(&mut r).map_err(|e| format!("recv: {e} ({})", progress()))?;
             if let Some(id) = synced_id(&body) {
                 if id <= last {
                     return Err(format!("out-of-order reply: {id} after {last}"));
                 }
                 last = id;
                 got += 1;
+                GOT.store(got, Ordering::Relaxed);
+                LAST_ID.store(id, Ordering::Relaxed);
             }
         }
         Ok(got)
@@ -217,10 +243,15 @@ fn stream_load<S: CloneStream>(mut writer: S, count: i32) -> Result<String, Stri
     // is always joined (a broken connection makes its read fail promptly too).
     let mut write_err = None;
     for id in 1..=count {
+        // Wait for room in the window, or for the reader to have given up.
+        while id as i64 - GOT.load(Ordering::Relaxed) > STREAM_WINDOW && !reader.is_finished() {
+            std::thread::sleep(Duration::from_micros(100));
+        }
         if let Err(e) = writer.write_all(&frame(&sync_msg(id))) {
             write_err = Some(format!("send {id}: {e}"));
             break;
         }
+        SENT.store(id as i64, Ordering::Relaxed);
     }
     writer.flush().ok();
     let reader_res = reader.join().map_err(|_| "reader panicked".to_string())?;
@@ -229,7 +260,7 @@ fn stream_load<S: CloneStream>(mut writer: S, count: i32) -> Result<String, Stri
     }
     let got = reader_res?;
     if got != count as i64 {
-        return Err(format!("only {got}/{count} replies"));
+        return Err(format!("only {got}/{count} replies ({})", progress()));
     }
     let secs = t0.elapsed().as_secs_f64();
     Ok(format!("{count} in {secs:.2}s = {:.0} msg/s", count as f64 / secs))
@@ -498,7 +529,7 @@ fn main() {
                 std::process::exit(1);
             }
             Err(_) => {
-                eprintln!("LOAD FAIL {} {}: timed out", args[2], args[3]);
+                eprintln!("LOAD FAIL {} {}: timed out ({})", args[2], args[3], progress());
                 std::process::exit(1);
             }
         }

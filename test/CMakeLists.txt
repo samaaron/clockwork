@@ -395,6 +395,7 @@ add_executable(clockwork_engine_tests
     test_config_validation.cpp
     test_engine_state.cpp
     test_control_plane_liveness.cpp
+    test_ingest_overload.cpp
     test_callback_watchdog.cpp
     test_cold_swap_recovery.cpp
     test_rate_skew_recovery.cpp
