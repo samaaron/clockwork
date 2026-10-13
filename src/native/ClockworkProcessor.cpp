@@ -15,6 +15,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <numeric>
 
 extern "C" void clockwork_publish_audio_load(uint32_t cpuAvgCenti, uint32_t cpuPeakCenti,
                                        uint32_t callbackOverruns);
@@ -199,6 +200,18 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
                 mInputAccum.size(), neededSize, mAccumPerChanCap, chans,
                 hwBufSize, activeIn, mNumInputChannels);
         mInputAccum.assign(neededSize, 0.0f);
+    }
+
+    // Primed with silence: block − gcd(buffer, block) frames, the most the
+    // accumulator falls short by on a buffer that is not a multiple of the
+    // block. Every block the DSP is then handed is a whole one of input, and
+    // the latency such a device needs is taken once, here, rather than as
+    // short gaps of silence through its first callbacks — the latency it
+    // used to settle at, without the clicks on the way. A buffer that is a
+    // multiple of the block primes nothing.
+    if (hwBufSize > 0 && mBufLen > 0) {
+        std::fill(mInputAccum.begin(), mInputAccum.end(), 0.0f);
+        mInputAccumCount = mBufLen - std::gcd(hwBufSize, mBufLen);
     }
 
     // Log the full output channel layout so we can verify which physical

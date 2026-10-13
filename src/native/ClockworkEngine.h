@@ -290,6 +290,19 @@ public:
     // The next manual pump starts the audio-thread clock afresh, as a device
     // starting does.
     void restartManualPump() { mManualPumpStarted = false; }
+    // A device of the caller's, on the caller's thread: `frames` of input in
+    // and of output out, any size, through the worklet the device layer drives
+    // (ClockworkProcessor) — the input accumulator, the output prefetch, the
+    // warmup, all of it. Manual pump only. The device's buffer is
+    // Config::bufferSize — what a headless engine chooses its block from, as
+    // a real device's does — or, unset, the first call's size; a call larger
+    // than it is refused, as no driver hands over more than its buffer. The
+    // first call starts the device with the inputs and outputs it is given;
+    // from then the engine is pumped as a device and a block pump is refused:
+    // one renderer, one sample count. The caller's thread is not made
+    // real-time — a caller that wants it asks (RealtimeThread.h).
+    void pumpDevice(const float* const* inputs, int numInputs,
+                    float* const* outputs, int numOutputs, int frames);
 
     // The OSC ingress: classify a raw packet at the boundary and hand it to its
     // side — clockwork's own dispatch for "/clockwork/...", the DSP for
@@ -937,6 +950,8 @@ private:
     // the first pump.
     double mManualSamplePos    = 0.0;
     bool   mManualPumpStarted  = false;
+    bool   mPumpedDevice       = false;   // pumpDevice started a device
+    int    mPumpedBufferFrames = 0;       // its buffer: no callback is larger
 
     // Audio-plane ingress: the default OscIngress route writes the IN ring
     // directly. The ring pointers moved off the transport so it stays a dumb

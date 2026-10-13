@@ -112,7 +112,8 @@ public:
     double updateAudioThreadNTP(double samplePosition,
                                 double sampleRate,
                                 double audioCurrentTime);
-    void   resetAudioThreadTime(double samplePosition, double sampleRate);
+    void   resetAudioThreadTime(double samplePosition, double sampleRate,
+                                double renderedFrames = 0.0);
 
     void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
@@ -155,7 +156,8 @@ public:
     double updateAudioThreadNTP(double samplePosition,
                                 double sampleRate,
                                 double audioCurrentTime);
-    void   resetAudioThreadTime(double samplePosition, double sampleRate);
+    void   resetAudioThreadTime(double samplePosition, double sampleRate,
+                                double renderedFrames = 0.0);
 
     void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
@@ -184,8 +186,10 @@ private:
     // returns a pure sample-derived NTP (deterministic; see setFreewheelClock).
     std::atomic<bool>     mFreewheelClock{false};
     // With it, the NTP frame 0 is heard at, in place of the wall clock at a
-    // reset (0: the wall clock).
+    // reset (0: the wall clock); and whether the clock has started from it,
+    // after which a reset goes on from where the rendering ended.
     std::atomic<uint64_t> mFreewheelOriginBits{0};
+    std::atomic<bool>     mFreewheelAnchored{false};
     // Drift-step logging state (audio-thread only).
     clockwork::DriftLogGate mDriftLogGate;
 };

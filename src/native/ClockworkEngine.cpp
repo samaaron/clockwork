@@ -1764,6 +1764,10 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
                       active == AudioSource::RealCallback ? "device callback" : "headless driver");
         return;
     }
+    if (mPumpedDevice) {
+        clockwork_log("[engine] manual pump refused: the engine is pumped as a device");
+        return;
+    }
 
     // Anchor the audio-thread clock on the first manual block (mirrors what
     // HeadlessDriver::run does at thread start). Safe to call after stopping the
@@ -1799,6 +1803,9 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
         renderAudioBlock(mLinkAudio, blockSize, nOut, nIn,
                          static_cast<uint32_t>(mCurrentConfig.sampleRate), ntp, host);
         mManualSamplePos += blockSize;
+        // Rendered to here, as the device path keeps it (tap streams anchor
+        // on it, and a restart goes on from it).
+        mClockworkClock.advanceEngineFrames(mManualSamplePos);
         ntp += blockSeconds;
         if (host != 0) host += blockMicros;
 
@@ -1806,6 +1813,34 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
         mProcessor.processCount.notify_all();
         if (afterEachBlock) afterEachBlock();
     }
+}
+
+void ClockworkEngine::pumpDevice(const float* const* inputs, int numInputs,
+                                 float* const* outputs, int numOutputs, int frames) {
+    if (!mCurrentConfig.manualAudioPump) {
+        clockwork_log("[engine] pumpDevice refused: the engine was not booted with manualAudioPump");
+        return;
+    }
+    if (frames <= 0) return;
+    if (!mPumpedDevice) {
+        mPumpedBufferFrames = mCurrentConfig.bufferSize > 0 ? mCurrentConfig.bufferSize : frames;
+        smoothie::DeviceInfo device;
+        device.driver         = "pump";
+        device.name           = "pumped device";
+        device.sampleRate     = static_cast<double>(mCurrentConfig.sampleRate);
+        device.bufferFrames   = mPumpedBufferFrames;
+        device.inputChannels  = numInputs;
+        device.outputChannels = numOutputs;
+        mProcessor.deviceStarting(device);
+        mProcessor.leaveThreadPriority();
+        mPumpedDevice = true;
+    }
+    if (frames > mPumpedBufferFrames) {
+        clockwork_log("[engine] pumpDevice refused: %d frames is more than the device's %d-frame buffer",
+                      frames, mPumpedBufferFrames);
+        return;
+    }
+    mProcessor.process(inputs, numInputs, outputs, numOutputs, frames, smoothie::BlockTime{});
 }
 
 // Copy the OSC address of the command about to be handled. Bounded copy off the

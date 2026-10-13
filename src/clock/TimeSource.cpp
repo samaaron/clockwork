@@ -68,9 +68,11 @@ double TimeSource::updateAudioThreadNTP(double samplePosition,
     return nowAt(audioCurrentTime);
 }
 
-void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) {
+void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate,
+                                      double renderedFrames) {
     (void)samplePosition;
     (void)sampleRate;
+    (void)renderedFrames;
 }
 
 void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
@@ -149,15 +151,24 @@ double TimeSource::updateAudioThreadNTP(double samplePosition,
     return wallNTP;
 }
 
-void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) {
+void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate,
+                                      double renderedFrames) {
     const double sampleOffsetSec = samplePosition / sampleRate;
-    // A freewheel clock from an origin is the sample count from that origin,
-    // through every reset: no wall clock in it at all.
+    // A freewheel clock from an origin is the frames rendered since it, with
+    // no wall clock in it at all: the first start puts frame 0 at the origin,
+    // and every later one goes on from where the rendering ended (`renderedFrames`
+    // on the old count), so a restart's frame 0 is the next instant, never the
+    // origin again — time going back would hold everything scheduled.
     const uint64_t originBits = mFreewheelOriginBits.load(std::memory_order_relaxed);
-    const double newBaseNTP =
-        (mFreewheelClock.load(std::memory_order_relaxed) && originBits != 0)
-            ? bitsToDouble(originBits)
-            : readWallClock() - sampleOffsetSec;
+    double newBaseNTP = 0.0;
+    if (mFreewheelClock.load(std::memory_order_relaxed) && originBits != 0) {
+        newBaseNTP = mFreewheelAnchored.exchange(true, std::memory_order_relaxed)
+            ? bitsToDouble(mBaseNTPBits.load(std::memory_order_relaxed))
+                  + renderedFrames / sampleRate - sampleOffsetSec
+            : bitsToDouble(originBits);
+    } else {
+        newBaseNTP = readWallClock() - sampleOffsetSec;
+    }
     mBaseNTPBits.store(doubleToBits(newBaseNTP), std::memory_order_relaxed);
     mCurrentAudioThreadNTPBits.store(
         doubleToBits(newBaseNTP + sampleOffsetSec),
@@ -166,6 +177,7 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) 
 
 void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
     mFreewheelOriginBits.store(doubleToBits(originNtp), std::memory_order_relaxed);
+    mFreewheelAnchored.store(false, std::memory_order_relaxed);
     mFreewheelClock.store(enabled, std::memory_order_relaxed);
 }
 

@@ -384,6 +384,7 @@ add_executable(clockwork_engine_tests
     test_engine_control.cpp
     test_engine_lanes.cpp
     test_client_abi.cpp
+    test_pumped_device.cpp
     test_embed_device.cpp
     test_client_rings.cpp
     # The engine as a whole: lifecycle, config, state machine, the control

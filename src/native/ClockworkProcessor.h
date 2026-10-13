@@ -144,6 +144,10 @@ public:
                  int frames, const smoothie::BlockTime& time) override;
     void deviceStopped() override;
 
+    // A device whose thread is its caller's (ClockworkEngine::pumpDevice):
+    // after deviceStarting, its first callback leaves the thread as it is.
+    void leaveThreadPriority() { mRealtimeElevated.store(true, std::memory_order_relaxed); }
+
     // --- Pause/resume for device swap ---
     void pause();
     void resume();

@@ -432,7 +432,10 @@ double ClockworkClock::updateAudioThreadNTP(double samplePosition,
 }
 
 void ClockworkClock::resetAudioThreadTime(double samplePosition, double sampleRate) {
-    mImpl->timeSource.resetAudioThreadTime(samplePosition, sampleRate);
+    // The frames rendered so far, on the count being left: where a freewheel
+    // clock from an origin goes on from.
+    mImpl->timeSource.resetAudioThreadTime(samplePosition, sampleRate,
+                                           static_cast<double>(engineFrames()));
 }
 
 void ClockworkClock::setFreewheelClock(bool enabled, double originNtp) {
