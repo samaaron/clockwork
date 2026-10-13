@@ -459,7 +459,7 @@ void ClockworkEngine::init(const Config& cfg) {
         publishedAppName() = cfg.appName;
 
     mHeadless = cfg.headless;
-    mClockworkClock.setFreewheelClock(cfg.freewheelClock);
+    mClockworkClock.setFreewheelClock(cfg.freewheelClock, cfg.freewheelOriginNtp);
     mCurrentConfig = cfg;
     // mBootInputChannels may be kAutoChannelCount (-1) here — resolved to a
     // concrete count when enableInputChannels() is eventually called.

@@ -51,8 +51,8 @@ pub mod time;
 pub use clockwork_abi as abi;
 
 pub use client::{
-    Client, Clock, Features, Info, Message, Messages, Region, RegionId, Ring, Route, Tap,
-    POLL_BATCH,
+    Client, Clock, Features, Info, Message, Messages, Region, RegionId, Ring, Route,
+    SampleClock, Tap, POLL_BATCH,
 };
 pub use embed::{Device, Embed, EmbedConfig, Renderer, RENDER_MAX_CHANNELS};
 pub use error::{Error, Result};

@@ -70,8 +70,9 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
     h->rendered = 0;
 
     ClockworkStatus st = CLOCKWORK_OK;
-    h->client = clockwork_client_open_memory(clockwork_lanes_base(),
-                                             arenaHeader(clockwork_lanes_base())->arena_bytes, &st);
+    uint8_t* const base = static_cast<uint8_t*>(clockwork_lanes_base());
+    const uint32_t arenaBytes = arenaHeader(base)->arena_bytes;
+    h->client = clockwork_client_open_memory(base, arenaBytes, &st);
     if (!h->client) {
         clockwork_detach();
         delete h;
@@ -79,6 +80,10 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         return nullptr;
     }
     h->ownsClient = true;
+    // The clock this render keeps, published where a client reads which
+    // frame is heard when, as a device host's is.
+    if (ShmReaderLayout L; ShmReaderLayout::from_arena(base, arenaBytes, L, nullptr))
+        h->sampleClock = base + L.sample_clock_offset;
     g_clockwork_embed.store(h, std::memory_order_release);
     fail(status, CLOCKWORK_OK);
     return h;
@@ -141,6 +146,8 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
                 h->inCount -= have;
             }
             const double ntp = h->ntpBase + static_cast<double>(h->rendered) / h->sampleRate;
+            // Rendered is heard: the host's buffer is its own business.
+            write_sample_clock(h->sampleClock, h->rendered, static_cast<uint32_t>(h->sampleRate), ntp, 0);
             clockwork_tick(ntp, h->outChannels, h->inChannels);
             h->rendered += block;
 

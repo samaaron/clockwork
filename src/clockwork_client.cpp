@@ -486,6 +486,25 @@ ClockworkStatus clockwork_client_clock(ClockworkClient* handle, ClockworkClientC
     return CLOCKWORK_OK;
 }
 
+ClockworkStatus clockwork_client_sample_clock(ClockworkClient* handle,
+                                              ClockworkClientSampleClock* out) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || out->struct_bytes < sizeof(uint32_t)) return CLOCKWORK_E_ARG;
+
+    const auto snap = read_sample_clock(c->base + c->L.sample_clock_offset);
+    if (!snap.valid) return CLOCKWORK_E_ABSENT;
+
+    ClockworkClientSampleClock v{};
+    v.struct_bytes          = out->struct_bytes;
+    v.sample_rate           = snap.sample_rate;
+    v.engine_frames         = snap.engine_frames;
+    v.dac_ntp               = snap.dac_ntp;
+    v.output_latency_frames = snap.output_latency_frames;
+    const size_t n = out->struct_bytes < sizeof(v) ? out->struct_bytes : sizeof(v);
+    std::memcpy(out, &v, n);
+    return CLOCKWORK_OK;
+}
+
 ClockworkStatus clockwork_client_audio_tap_open(ClockworkClient* handle, uint32_t slot,
                                             ClockworkAudioTapReader* out) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
@@ -551,6 +570,16 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* handle, const Clockwor
 double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_seconds) {
     if (!clock) return 0.0;
     return clockwork::beatAt(ntp_seconds, clock->beat_origin_ntp, clock->bpm);
+}
+
+double clockwork_client_ntp_at_frame(const ClockworkClientSampleClock* clock, uint64_t frame) {
+    if (!clock || clock->sample_rate == 0) return 0.0;
+    // The distance as an exact integer first: two frame counts near 2^53
+    // would lose it as doubles.
+    const double frames = frame >= clock->engine_frames
+                              ? static_cast<double>(frame - clock->engine_frames)
+                              : -static_cast<double>(clock->engine_frames - frame);
+    return clock->dac_ntp + frames / static_cast<double>(clock->sample_rate);
 }
 
 // ── Watching a ring ─────────────────────────────────────────────────────────

@@ -123,6 +123,10 @@ public:
         bool   freewheelClock           = false;   // deterministic sample-derived
                                                    // NTP (no wall-clock drift IIR);
                                                    // for offline/accuracy tests.
+        double freewheelOriginNtp       = 0.0;     // with freewheelClock: the NTP
+                                                   // frame 0 is heard at, so every
+                                                   // run renders the same (0: the
+                                                   // wall clock at the start).
         double defaultBpm               = clockwork::kDefaultBpm;  // tempo the engine
                                                    // opens at; embedders (e.g. Sonic
                                                    // Pi) override. Seeded at init so

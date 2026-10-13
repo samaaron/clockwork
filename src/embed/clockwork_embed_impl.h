@@ -30,6 +30,8 @@ struct ClockworkEmbed {
     uint32_t inHead = 0,  inCount = 0;    // received, not yet ticked
     double   ntpBase = 0;
     uint64_t rendered = 0;
+    // Where the frame-to-NTP pair is published for clients (null: nowhere).
+    uint8_t* sampleClock = nullptr;
 
     // Owned by this handle; the single attachment it holds.
     bool attached = false;

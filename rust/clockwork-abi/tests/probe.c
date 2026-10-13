@@ -62,6 +62,11 @@ int main(void) {
     F(ClockworkClientClock, is_playing); F(ClockworkClientClock, flags);
     F(ClockworkClientClock, meter_num); F(ClockworkClientClock, meter_den);
 
+    S(ClockworkClientSampleClock);
+    F(ClockworkClientSampleClock, struct_bytes); F(ClockworkClientSampleClock, sample_rate);
+    F(ClockworkClientSampleClock, engine_frames); F(ClockworkClientSampleClock, dac_ntp);
+    F(ClockworkClientSampleClock, output_latency_frames);
+
     S(ClockworkAudioTapReader);
     F(ClockworkAudioTapReader, struct_bytes); F(ClockworkAudioTapReader, slot);
     F(ClockworkAudioTapReader, _internal); F(ClockworkAudioTapReader, _ring_frames);

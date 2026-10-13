@@ -466,6 +466,32 @@ ClockworkStatus clockwork_client_clock(ClockworkClient* c, ClockworkClientClock*
  * re-derive it, and so they all agree to the bit. */
 double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_seconds);
 
+/* ── The sample clock ────────────────────────────────────────────────────────
+ *
+ * Which frame is heard at which NTP instant, as one snapshot: the engine's
+ * frame count where its latest block began, and the NTP at which that frame
+ * reaches the listener (rendered output_latency_frames earlier). A client that
+ * places a timed message at an exact frame stamps it from these rather than
+ * from its own wall clock:
+ *
+ *   ntp(frame) = dac_ntp + (frame - engine_frames) / sample_rate
+ *
+ * CLOCKWORK_E_ABSENT until the engine's first block. */
+typedef struct ClockworkClientSampleClock {
+    uint32_t struct_bytes;
+
+    uint32_t sample_rate;
+    uint64_t engine_frames;
+    double   dac_ntp;
+    uint32_t output_latency_frames;
+} ClockworkClientSampleClock;
+
+ClockworkStatus clockwork_client_sample_clock(ClockworkClient* c, ClockworkClientSampleClock* out);
+
+/* The NTP instant `frame` is heard at, under a snapshot the caller already
+ * has: the formula above, here so that every binding agrees to the bit. */
+double clockwork_client_ntp_at_frame(const ClockworkClientSampleClock* clock, uint64_t frame);
+
 /* ── Taps ──────────────────────────────────────────────────────────────────
  *
  * A tap is a ring of audio the engine keeps filling, and reading one is the

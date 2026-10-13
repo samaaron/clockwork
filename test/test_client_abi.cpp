@@ -26,8 +26,11 @@
 // in-process client addresses.
 extern "C" { extern uint8_t* shared_memory; }
 
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 using engine_test::Engine;
@@ -430,6 +433,77 @@ TEST_CASE("client abi: the clock arrives as one snapshot", "[client][abi]") {
     CHECK(b1 - b0 == Catch::Approx(1.0).epsilon(1e-9));
 
     clockwork_client_close(c);
+}
+
+// A client that places a timed message at an exact frame needs to know which
+// frame is heard when, and the two read together: a frame count from one
+// block beside an NTP from the next is a block out.
+TEST_CASE("client abi: the sample clock says which frame is heard at which NTP, as one snapshot",
+          "[client][abi]") {
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    ClockworkClientSampleClock a{};
+    a.struct_bytes = sizeof(a);
+    REQUIRE(clockwork_client_sample_clock(c, &a) == CLOCKWORK_OK);
+    CHECK(a.sample_rate == static_cast<uint32_t>(engine_test::kSampleRate));
+    CHECK(a.output_latency_frames == 0);   // pumped: rendered is heard
+
+    // A block later, the pair has moved together: a block's frames, and that
+    // many frames' worth of NTP — to within what a double holds at NTP's
+    // size (about 4e9 seconds, so steps of 0.48 us, a fiftieth of a frame).
+    e.engine.pumpAudioBlock();
+    ClockworkClientSampleClock b{};
+    b.struct_bytes = sizeof(b);
+    REQUIRE(clockwork_client_sample_clock(c, &b) == CLOCKWORK_OK);
+    CHECK(b.engine_frames == a.engine_frames + clockwork_block_size());
+    CHECK(b.dac_ntp - a.dac_ntp
+          == Catch::Approx(double(clockwork_block_size()) / engine_test::kSampleRate).margin(1e-6));
+
+    // The frame-to-NTP arithmetic is the library's, so every binding agrees
+    // to the bit: the snapshot's own frame is its own NTP, and either way of
+    // reading the frame a block on gives the same instant.
+    CHECK(clockwork_client_ntp_at_frame(&b, b.engine_frames) == b.dac_ntp);
+    CHECK(clockwork_client_ntp_at_frame(&a, b.engine_frames)
+          == Catch::Approx(b.dac_ntp).margin(1e-6));
+    CHECK(clockwork_client_ntp_at_frame(&b, b.engine_frames + engine_test::kSampleRate)
+          == Catch::Approx(b.dac_ntp + 1.0).margin(1e-6));
+
+    clockwork_client_close(c);
+}
+
+// A pumped engine on a freewheel clock from a given origin hears frame f at
+// origin + f / rate, in every run, whatever the wall clock says: what lets a
+// client stamp a timed message for an exact frame and get the same render
+// twice. Without an origin the clock starts where the wall clock is.
+TEST_CASE("clock: from a freewheel origin, frame f is heard at origin + f / rate, run after run",
+          "[client][abi][clock]") {
+    constexpr double kOrigin = 3976214400.0;   // 2026-01-01T00:00:00Z, in NTP seconds
+    const auto heard = [](double origin) {
+        Engine e([origin](ClockworkEngine::Config& cfg) { cfg.freewheelOriginNtp = origin; });
+        ClockworkStatus st = CLOCKWORK_E_ARG;
+        ClockworkClient* c = openInProcess(&st);
+        REQUIRE(st == CLOCKWORK_OK);
+        e.pump(0.25);
+        ClockworkClientSampleClock sc{};
+        sc.struct_bytes = sizeof(sc);
+        REQUIRE(clockwork_client_sample_clock(c, &sc) == CLOCKWORK_OK);
+        clockwork_client_close(c);
+        return sc;
+    };
+
+    const auto a = heard(kOrigin);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));   // another wall clock
+    const auto b = heard(kOrigin);
+    CHECK(a.engine_frames > 0);
+    CHECK(a.dac_ntp == kOrigin + double(a.engine_frames) / engine_test::kSampleRate);   // exactly
+    CHECK(b.engine_frames == a.engine_frames);
+    CHECK(b.dac_ntp == a.dac_ntp);
+
+    const auto wall = heard(0.0);
+    CHECK(std::abs(wall.dac_ntp - wallClockNTP()) < 5.0);
 }
 
 TEST_CASE("client abi: opening rejects memory that cannot hold an engine",

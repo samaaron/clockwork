@@ -269,8 +269,11 @@ public:
     // can be preempted by the OS on a busy machine, and chasing that as
     // "drift" injects scheduling jitter that real hardware (driven by the
     // device callback) never sees. Off by default; real devices and the
-    // headless fallback keep drift compensation.
-    void   setFreewheelClock(bool enabled);
+    // headless fallback keep drift compensation. With a non-zero `originNtp`
+    // the wall clock is not read even at a reset: frame f is heard at
+    // originNtp + f / rate, the same in every run, so a client can stamp a
+    // timed message for an exact frame and get the same render twice.
+    void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
 
     // Mirror the current Link clock readouts (peers / tempo / beat / phase /

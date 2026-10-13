@@ -73,10 +73,11 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) 
     (void)sampleRate;
 }
 
-void TimeSource::setFreewheelClock(bool enabled) {
+void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
     // No-op: the worklet evaluates the SAB time formula in nowAt() and has no
-    // headless driver / drift IIR to bypass.
+    // headless driver / drift IIR to bypass; its host sets the NTP start time.
     (void)enabled;
+    (void)originNtp;
 }
 
 bool TimeSource::freewheelClock() const { return false; }
@@ -150,14 +151,21 @@ double TimeSource::updateAudioThreadNTP(double samplePosition,
 
 void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate) {
     const double sampleOffsetSec = samplePosition / sampleRate;
-    const double newBaseNTP = readWallClock() - sampleOffsetSec;
+    // A freewheel clock from an origin is the sample count from that origin,
+    // through every reset: no wall clock in it at all.
+    const uint64_t originBits = mFreewheelOriginBits.load(std::memory_order_relaxed);
+    const double newBaseNTP =
+        (mFreewheelClock.load(std::memory_order_relaxed) && originBits != 0)
+            ? bitsToDouble(originBits)
+            : readWallClock() - sampleOffsetSec;
     mBaseNTPBits.store(doubleToBits(newBaseNTP), std::memory_order_relaxed);
     mCurrentAudioThreadNTPBits.store(
         doubleToBits(newBaseNTP + sampleOffsetSec),
         std::memory_order_release);
 }
 
-void TimeSource::setFreewheelClock(bool enabled) {
+void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
+    mFreewheelOriginBits.store(doubleToBits(originNtp), std::memory_order_relaxed);
     mFreewheelClock.store(enabled, std::memory_order_relaxed);
 }
 

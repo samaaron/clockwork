@@ -38,10 +38,6 @@ uint64_t ClockworkClock::engineFrames() const {
     return g_engine_frames.load(std::memory_order_relaxed);
 }
 
-// Seqlock writer: odd seq, release fence (orders the odd store before the
-// field stores for any reader that sees them), relaxed atomic field stores,
-// even seq with release. Fields are atomics so no read tears; the seq guards
-// cross-field consistency. Audio thread only — single writer by construction.
 void ClockworkClock::publishSampleClock(double samplePosition, double sampleRate,
                                     double renderNtp,
                                     uint32_t outputLatencyFrames) {
@@ -50,28 +46,12 @@ void ClockworkClock::publishSampleClock(double samplePosition, double sampleRate
     // region is bound (headless/unit contexts).
     g_engine_frames.store(frames, std::memory_order_relaxed);
 
-    uint8_t* sc = mSampleClockRegion;
-    if (!sc || sampleRate <= 0.0) return;
-    auto* seq = reinterpret_cast<std::atomic<uint32_t>*>(sc + SAMPLE_CLOCK_SEQ);
-    auto* sr  = reinterpret_cast<std::atomic<uint32_t>*>(sc + SAMPLE_CLOCK_SAMPLE_RATE);
-    auto* fr  = reinterpret_cast<std::atomic<uint64_t>*>(sc + SAMPLE_CLOCK_ENGINE_FRAMES);
-    auto* nb  = reinterpret_cast<std::atomic<uint64_t>*>(sc + SAMPLE_CLOCK_DAC_NTP);
-    auto* lat = reinterpret_cast<std::atomic<uint32_t>*>(sc + SAMPLE_CLOCK_OUT_LATENCY);
-
+    if (sampleRate <= 0.0) return;
     // The anchor is speaker-time: render NTP plus the device output latency
     // (Link convention — "host time at speaker").
-    const double dacNtp = renderNtp
-        + static_cast<double>(outputLatencyFrames) / sampleRate;
-    const uint64_t ntpBits = clockwork::doubleToBits(dacNtp);
-
-    const uint32_t s = seq->load(std::memory_order_relaxed);
-    seq->store(s + 1, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
-    sr->store(static_cast<uint32_t>(sampleRate), std::memory_order_relaxed);
-    fr->store(frames, std::memory_order_relaxed);
-    nb->store(ntpBits, std::memory_order_relaxed);
-    lat->store(outputLatencyFrames, std::memory_order_relaxed);
-    seq->store(s + 2, std::memory_order_release);
+    write_sample_clock(mSampleClockRegion, frames, static_cast<uint32_t>(sampleRate),
+                       renderNtp + static_cast<double>(outputLatencyFrames) / sampleRate,
+                       outputLatencyFrames);
 }
 
 // ── NTP-domain getters ──────────────────────────────────────────────────

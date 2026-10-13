@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 
 use clockwork_abi::client::{
     clockwork_client_abi_version, clockwork_client_beat_at, clockwork_client_clock,
+    clockwork_client_ntp_at_frame, clockwork_client_sample_clock,
     clockwork_client_close, clockwork_client_default_endpoint, clockwork_client_info,
     clockwork_client_open_memory, clockwork_client_open_shm, clockwork_client_open_shm_handle,
     clockwork_client_poll, clockwork_client_region, clockwork_client_send,
     clockwork_client_send_abort, clockwork_client_send_begin, clockwork_client_send_commit,
     clockwork_client_tap_close, clockwork_client_tap_missed, clockwork_client_tap_open,
     clockwork_client_tap_poll, ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
+    ClockworkClientSampleClock,
     ClockworkClientMessage, ClockworkClientTap, ClockworkRegion, ClockworkRegionId,
     ClockworkStatus, CLOCKWORK_FEATURE_RAW_SCOPE, CLOCKWORK_FEATURE_BULK,
     CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_TAPS, CLOCKWORK_FEATURE_WINDOW,
@@ -309,6 +311,19 @@ impl Client {
         // SAFETY: a live handle and a struct that says its own size.
         check(unsafe { clockwork_client_clock(self.raw.as_ptr(), &mut raw) })?;
         Ok(Clock { raw })
+    }
+
+    /// Which frame is heard at which NTP instant, as one snapshot: what a
+    /// client stamps a timed message from to place it at an exact frame.
+    /// [`Error::Absent`] before the engine's first block.
+    pub fn sample_clock(&self) -> Result<SampleClock> {
+        let mut raw = ClockworkClientSampleClock {
+            struct_bytes: core::mem::size_of::<ClockworkClientSampleClock>() as u32,
+            ..ClockworkClientSampleClock::default()
+        };
+        // SAFETY: a live handle and a struct that says its own size.
+        check(unsafe { clockwork_client_sample_clock(self.raw.as_ptr(), &mut raw) })?;
+        Ok(SampleClock { raw })
     }
 
     /// A reader on tap slot `slot`. [`Error::Absent`] when the engine has
@@ -703,6 +718,41 @@ impl Clock {
     /// The beat now, under this snapshot.
     pub fn beat_now(&self) -> f64 {
         self.beat_at(crate::time::ntp_now())
+    }
+}
+
+/// Which frame is heard at which NTP instant, as one snapshot.
+#[derive(Clone, Copy, Debug)]
+pub struct SampleClock {
+    raw: ClockworkClientSampleClock,
+}
+
+impl SampleClock {
+    pub fn sample_rate(&self) -> u32 {
+        self.raw.sample_rate
+    }
+    /// The engine's frame count where its latest block began.
+    pub fn engine_frames(&self) -> u64 {
+        self.raw.engine_frames
+    }
+    /// The NTP instant `engine_frames` is heard at.
+    pub fn dac_ntp(&self) -> f64 {
+        self.raw.dac_ntp
+    }
+    /// How long before it is heard a frame is rendered.
+    pub fn output_latency_frames(&self) -> u32 {
+        self.raw.output_latency_frames
+    }
+    /// The ABI's struct.
+    pub fn raw(&self) -> &ClockworkClientSampleClock {
+        &self.raw
+    }
+
+    /// The NTP instant `frame` is heard at, under this snapshot. The
+    /// library's own arithmetic, so every binding agrees to the bit.
+    pub fn ntp_at_frame(&self, frame: u64) -> f64 {
+        // SAFETY: a live struct of our own.
+        unsafe { clockwork_client_ntp_at_frame(&self.raw, frame) }
     }
 }
 

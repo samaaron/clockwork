@@ -274,6 +274,28 @@ inline sample_clock_view read_sample_clock(const uint8_t* tl) {
     return v;
 }
 
+// The writer, once for every host that renders: odd seq, release fence
+// (orders the odd store before the field stores for any reader that sees
+// them), relaxed atomic field stores, even seq with release. The audio
+// thread's only — a single writer by construction.
+inline void write_sample_clock(uint8_t* tl, uint64_t engine_frames, uint32_t sample_rate,
+                               double dac_ntp, uint32_t output_latency_frames) {
+    if (!tl || sample_rate == 0) return;
+    auto* seq = reinterpret_cast<std::atomic<uint32_t>*>(tl + SAMPLE_CLOCK_SEQ);
+    auto* sr  = reinterpret_cast<std::atomic<uint32_t>*>(tl + SAMPLE_CLOCK_SAMPLE_RATE);
+    auto* fr  = reinterpret_cast<std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_ENGINE_FRAMES);
+    auto* nb  = reinterpret_cast<std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_DAC_NTP);
+    auto* lat = reinterpret_cast<std::atomic<uint32_t>*>(tl + SAMPLE_CLOCK_OUT_LATENCY);
+    const uint32_t s = seq->load(std::memory_order_relaxed);
+    seq->store(s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    sr->store(sample_rate, std::memory_order_relaxed);
+    fr->store(engine_frames, std::memory_order_relaxed);
+    nb->store(clockwork::doubleToBits(dac_ntp), std::memory_order_relaxed);
+    lat->store(output_latency_frames, std::memory_order_relaxed);
+    seq->store(s + 2, std::memory_order_release);
+}
+
 constexpr uint32_t GUEST_PERSIST_SIZE  = GUEST_PERSIST_BYTES;
 
 // ── The channel map ─────────────────────────────────────────────────────────

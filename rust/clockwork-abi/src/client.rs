@@ -117,6 +117,18 @@ pub struct ClockworkClientClock {
     pub meter_den: i32,
 }
 
+/// Which frame is heard at which NTP instant, as one snapshot. Fill
+/// `struct_bytes` with `size_of::<Self>()`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClockworkClientSampleClock {
+    pub struct_bytes: u32,
+    pub sample_rate: u32,
+    pub engine_frames: u64,
+    pub dac_ntp: f64,
+    pub output_latency_frames: u32,
+}
+
 /// A tap slot reader. Fill `struct_bytes` with `size_of::<Self>()` and
 /// `slot`; `clockwork_client_audio_tap_open` fills the rest.
 #[repr(C)]
@@ -183,6 +195,8 @@ extern "C" {
     pub fn clockwork_client_metrics(c: *mut ClockworkClient, out: *mut u32, max: u32) -> u32;
     pub fn clockwork_client_clock(c: *mut ClockworkClient, out: *mut ClockworkClientClock) -> ClockworkStatus;
     pub fn clockwork_client_beat_at(clock: *const ClockworkClientClock, ntp_seconds: f64) -> f64;
+    pub fn clockwork_client_sample_clock(c: *mut ClockworkClient, out: *mut ClockworkClientSampleClock) -> ClockworkStatus;
+    pub fn clockwork_client_ntp_at_frame(clock: *const ClockworkClientSampleClock, frame: u64) -> f64;
 
     pub fn clockwork_client_audio_tap_open(c: *mut ClockworkClient, slot: u32, out: *mut ClockworkAudioTapReader) -> ClockworkStatus;
     pub fn clockwork_client_audio_tap_valid(r: *const ClockworkAudioTapReader) -> c_int;

@@ -73,6 +73,9 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkClientClock {
         struct_bytes, bpm, beat_origin_ntp, is_playing_at_ntp, is_playing, flags, meter_num, meter_den,
     });
+    expect!(mine, ClockworkClientSampleClock {
+        struct_bytes, sample_rate, engine_frames, dac_ntp, output_latency_frames,
+    });
     expect!(mine, ClockworkAudioTapReader { struct_bytes, slot, _internal, _ring_frames });
     expect!(mine, ClockworkSinkStats { sent, dropped, late, scheduled, cancelled });
     expect!(mine, ClockworkStatus {});

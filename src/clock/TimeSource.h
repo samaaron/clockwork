@@ -114,7 +114,7 @@ public:
                                 double audioCurrentTime);
     void   resetAudioThreadTime(double samplePosition, double sampleRate);
 
-    void   setFreewheelClock(bool enabled);
+    void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
 
 private:
@@ -157,7 +157,7 @@ public:
                                 double audioCurrentTime);
     void   resetAudioThreadTime(double samplePosition, double sampleRate);
 
-    void   setFreewheelClock(bool enabled);
+    void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
 
     // Test boundary: when non-zero, the IIR reads this instead of wallClockNTP(),
@@ -183,6 +183,9 @@ private:
     // When true, updateAudioThreadNTP skips the wall-clock drift IIR and
     // returns a pure sample-derived NTP (deterministic; see setFreewheelClock).
     std::atomic<bool>     mFreewheelClock{false};
+    // With it, the NTP frame 0 is heard at, in place of the wall clock at a
+    // reset (0: the wall clock).
+    std::atomic<uint64_t> mFreewheelOriginBits{0};
     // Drift-step logging state (audio-thread only).
     clockwork::DriftLogGate mDriftLogGate;
 };

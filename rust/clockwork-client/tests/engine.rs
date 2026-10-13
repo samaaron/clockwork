@@ -371,6 +371,17 @@ fn the_clock_is_one_snapshot_and_beats_follow_its_tempo() {
 }
 
 #[test]
+fn the_sample_clock_pairs_a_frame_with_the_ntp_it_is_heard_at() {
+    let g = engine();
+    let e = g.as_ref().unwrap();
+    let c = e.sample_clock().unwrap();
+    assert!(c.sample_rate() > 0, "{c:?}");
+    assert_eq!(c.ntp_at_frame(c.engine_frames()), c.dac_ntp());
+    let a_second_on = c.ntp_at_frame(c.engine_frames() + u64::from(c.sample_rate()));
+    assert!((a_second_on - c.dac_ntp() - 1.0).abs() < 1e-6, "{a_second_on} vs {}", c.dac_ntp());
+}
+
+#[test]
 fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written() {
     let g = engine();
     let e = g.as_ref().unwrap();
