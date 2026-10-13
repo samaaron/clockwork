@@ -1287,8 +1287,8 @@ if(EMSCRIPTEN)
         _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
         _clear_scheduler _clockwork_host_forward _clockwork_host_forwards _malloc _free
         _clockwork_client_abi_version _clockwork_client_status_text
-        _clockwork_client_open_memory _clockwork_client_open_memory_in
-        _clockwork_client_sizeof _clockwork_client_close _clockwork_client_info
+        _clockwork_client_open_memory
+        _clockwork_client_close _clockwork_client_info
         _clockwork_client_send _clockwork_client_send_begin
         _clockwork_client_send_commit _clockwork_client_send_abort
         _clockwork_client_poll _clockwork_client_region

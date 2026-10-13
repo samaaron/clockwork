@@ -61,7 +61,7 @@ impl ClockworkArenaRegion {
     pub const OUT_RING: Self = Self(10);
     pub const NRT_OUT_RING: Self = Self(11);
     pub const RAW_SCOPE: Self = Self(12);
-    pub const CLIENT_SLOTS: Self = Self(13);
+    // 13 was the client slots (docs/THREADS.md): retired, not reused.
     pub const GUEST_CONFIG: Self = Self(14);
     pub const GUEST_WINDOW: Self = Self(15);
     pub const TAPS: Self = Self(16);
@@ -106,13 +106,6 @@ pub mod geom {
     pub const TRACK_RING_FRAMES: usize = 3;
     pub const TRACK_CHANNELS: usize = 4;
     pub const TRACK_FIRST_INDEX: usize = 5;
-    pub const SLOTS_COUNT: usize = 0;
-    pub const SLOTS_SLOT_BYTES: usize = 1;
-    pub const SLOTS_HEADER_BYTES: usize = 2;
-    pub const SLOTS_STRUCTS_OFF: usize = 3;
-    pub const SLOTS_STRUCTS_BYTES: usize = 4;
-    pub const SLOTS_STACK_OFF: usize = 5;
-    pub const SLOTS_STACK_BYTES: usize = 6;
     /// The guest window: what the guest declared its window to be
     /// (`DspInfo::window_magic`, `window_version`), 0 until it binds.
     pub const WINDOW_MAGIC: usize = 0;
@@ -125,7 +118,6 @@ pub mod geom {
 // The audience word is the last geometry word, and no region's own geometry
 // reaches it. Pinned at compile time, where the C header pins the same.
 const _: () = assert!(geom::AUDIENCE == CLOCKWORK_ARENA_GEOM_WORDS - 1);
-const _: () = assert!(geom::SLOTS_STACK_BYTES < geom::AUDIENCE);
 const _: () = assert!(geom::TRACK_FIRST_INDEX < geom::AUDIENCE);
 const _: () = assert!(geom::WINDOW_VERSION < geom::AUDIENCE);
 

@@ -333,6 +333,13 @@ origin for the sender and calls `clockwork_client_send`, exactly as an
 in-process GUI does. One ingress path, one implementation of the ring
 arithmetic.
 
+**Except in a browser, outside the worklet.** The worklet runs the engine's
+module, so it calls this. The page's other threads (the main thread, a worker
+given a channel, the reply pump, the traffic logger) cannot run that code
+without a stack inside the engine's memory, so they write, read and watch the
+same rings with `js/lib/ring.js`, which restates this arithmetic in JavaScript
+and is tested against it. THREADS.md says why that is the better trade.
+
 Polling TAKES — the egress ring has one read cursor, shared by every handle, so
 two handles polling take from each other. A reader that wants to watch rather
 than take opens a tap, which carries a cursor of its own and may be lapped.

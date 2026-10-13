@@ -42,7 +42,6 @@ struct ClientImpl {
     // whichever way the handle was opened. Nothing below addresses the arena
     // through a constant.
     ShmReaderLayout L;
-    bool     owns_storage = true;   // false when opened into caller storage
 
     // Sequence-gap tracking, which is per handle. The ring's read CURSOR is
     // not here: it lives in the control block and is shared, because polling
@@ -104,8 +103,6 @@ const char* clockwork_client_status_text(ClockworkStatus s) {
     return "unknown status";
 }
 
-size_t clockwork_client_sizeof(void) { return sizeof(ClientImpl); }
-
 ClockworkClient* clockwork_client_open_memory(void* base, uint32_t bytes,
                                               ClockworkStatus* out_status) {
     if (!base || bytes == 0) { fail(out_status, CLOCKWORK_E_ARG); return nullptr; }
@@ -122,27 +119,6 @@ ClockworkClient* clockwork_client_open_memory(void* base, uint32_t bytes,
     c->L     = L;
     fail(out_status, CLOCKWORK_OK);
     return reinterpret_cast<ClockworkClient*>(c.release());
-}
-
-ClockworkClient* clockwork_client_open_memory_in(void* storage, size_t storage_bytes,
-                                                 void* base, uint32_t bytes,
-                                                 ClockworkStatus* out_status) {
-    if (!storage || storage_bytes < sizeof(ClientImpl) || !base || bytes == 0) {
-        fail(out_status, CLOCKWORK_E_ARG);
-        return nullptr;
-    }
-    ShmReaderLayout L;
-    const ClockworkStatus st = readTable(static_cast<const uint8_t*>(base), bytes, L);
-    if (st != CLOCKWORK_OK) { fail(out_status, st); return nullptr; }
-    // Constructed in place: no allocator is touched, which is the entire point
-    // for a caller sharing a heap it must not allocate from.
-    auto* c = new (storage) ClientImpl();   // NOLINT(cppcoreguidelines-owning-memory): the caller's storage
-    c->base          = static_cast<uint8_t*>(base);
-    c->bytes         = L.blob_size;
-    c->L             = L;
-    c->owns_storage  = false;
-    fail(out_status, CLOCKWORK_OK);
-    return reinterpret_cast<ClockworkClient*>(c);
 }
 
 #if !defined(__EMSCRIPTEN__)
@@ -220,9 +196,7 @@ uint32_t clockwork_client_default_endpoint(uint32_t, char* buf, uint32_t cap) {
 
 void clockwork_client_close(ClockworkClient* handle) {
     gsl::owner<ClientImpl*> c = reinterpret_cast<ClientImpl*>(handle);   // NOLINT(cppcoreguidelines-owning-memory): the caller's handle, given back here
-    if (!c) return;
-    if (c->owns_storage) delete c;
-    else                 c->~ClientImpl();   // caller keeps the storage
+    delete c;
 }
 
 ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientInfo* out) {

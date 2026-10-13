@@ -67,7 +67,6 @@ const Expect kExpect[] = {
     { CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT,    TRANSPORT },
     { CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
     { CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT },
-    { CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT },
     // the guest's published run: what the guest shows its clients
     { CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     PUB },
     { CLOCKWORK_ARENA_TAPS,           SHM_TAP_START,       SHM_TAP_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     PUB },
@@ -134,9 +133,8 @@ TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_NTP_START] == NTP_START_TIME_START);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_DRIFT]     == DRIFT_OFFSET_START);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_GLOBAL]    == GLOBAL_OFFSET_START);
-    const auto* slots = entry(a, CLOCKWORK_ARENA_CLIENT_SLOTS);
-    CHECK(slots->geom[CLOCKWORK_GEOM_SLOTS_COUNT]      == CLIENT_SLOT_COUNT);
-    CHECK(slots->geom[CLOCKWORK_GEOM_SLOTS_SLOT_BYTES] == CLIENT_SLOT_SIZE);
+    // 13 was the client slots: retired, so no arena carries it.
+    CHECK(entry(a, 13) == nullptr);
     // The track taps are the same slot shape as the guest's, numbered after them.
     const auto* tr = entry(a, CLOCKWORK_ARENA_TRACK_TAPS);
     CHECK(tr->geom[CLOCKWORK_GEOM_TRACK_SLOTS]       == SHM_TRACK_TAPS_SLOTS);
@@ -225,7 +223,6 @@ TEST_CASE("arena: the audience word is the last geometry word of every entry", "
         CHECK(clockwork_arena_audience(&h->entries[i]) == h->entries[i].geom[CLOCKWORK_GEOM_AUDIENCE]);
     }
     // A region's own geometry never reaches the audience word.
-    CHECK(CLOCKWORK_GEOM_SLOTS_STACK_BYTES < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_TRACK_FIRST_INDEX < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_TAP_CHANNELS   < CLOCKWORK_GEOM_AUDIENCE);
     CHECK(CLOCKWORK_GEOM_RAW_SCOPE_SAMPLE_RATE < CLOCKWORK_GEOM_AUDIENCE);
@@ -244,7 +241,7 @@ TEST_CASE("arena: what a client may read by hand is published, and only that", "
     }
     // The command plane: only the client ABI touches it. The guest's own: only the guest.
     for (uint32_t id : { CLOCKWORK_ARENA_CONTROL, CLOCKWORK_ARENA_NODE_ID_COUNTER, CLOCKWORK_ARENA_IN_RING,
-                         CLOCKWORK_ARENA_OUT_RING, CLOCKWORK_ARENA_NRT_OUT_RING, CLOCKWORK_ARENA_CLIENT_SLOTS,
+                         CLOCKWORK_ARENA_OUT_RING, CLOCKWORK_ARENA_NRT_OUT_RING,
                          CLOCKWORK_ARENA_GUEST_CONFIG, CLOCKWORK_ARENA_GUEST_PERSIST }) {
         INFO("region " << id);
         CHECK_FALSE(clockwork_arena_published(arenaHeader(a.data()), id));

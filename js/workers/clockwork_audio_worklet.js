@@ -7,7 +7,11 @@
  */
 
 import * as MetricsOffsets from '../lib/metrics_offsets.js';
-import { REGION_INGRESS, CLIENT_MESSAGE_BYTES } from '../lib/wasm_client.js';
+// From src/clockwork_client.h, for the client this worklet opens on its own
+// instance: the ring a tap watches (ClockworkRegionId), and the size of one
+// ClockworkClientMessage (bytes, length, origin, route, sequence).
+const REGION_INGRESS = 7;
+const CLIENT_MESSAGE_BYTES = 20;
 import { calculateAllControlIndices } from '../lib/control_offsets.js';
 import { readArena } from '../lib/arena.js';
 import { sampleClockReader } from '../lib/sample_clock.js';
@@ -456,16 +460,15 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     writeOscToRingBuffer(oscData, sourceId = 0) {
         // THROUGH THE CLIENT BOUNDARY (src/clockwork_client.h), not around it.
         //
-        // This used to frame the message here: read the head and tail, decide
-        // whether it fits before the end or after a wrap, bump the sequence,
-        // lay out the header, copy the payload, publish the head. That is the
-        // same page of arithmetic the engine has in C, and keeping a second
-        // copy of it in JavaScript meant the two could drift — silently, since
-        // a mistake in it yields a torn frame rather than an error.
+        // The worklet runs the engine's own instance, so it frames the message
+        // with the engine's C rather than restating it. Threads outside the
+        // worklet cannot run that C without a stack in the engine's memory,
+        // so they restate it in JavaScript instead (js/lib/ring.js), held to
+        // this C by test/ring_cross.test.mjs.
         //
-        // Now the module does it. The handle is opened once over the same heap
-        // the engine addresses, so there is nothing to marshal: the bytes are
-        // already where the C will read them.
+        // The handle is opened once over the same heap the engine addresses,
+        // so there is nothing to marshal: the bytes are already where the C
+        // will read them.
         if (!this.clientHandle) return false;
 
         const len = oscData.byteLength;

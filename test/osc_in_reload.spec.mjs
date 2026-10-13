@@ -33,8 +33,8 @@ test("a reader the host runs on a port of its own, yielding between frames, hear
     const cw = new window.Clockwork({ ...config, oscInEndpoint: channel.port1 });
     const init = await within(cw.init(), 10000);
     if (init.error || !init.settled) { host.terminate(); return { init }; }
-    // more reloads than there are client slots: a slot leaked, or given back twice, by any reload shows up here
-    const reloads = (cw.bufferConstants?.CLIENT_SLOT_COUNT ?? 4) + 2;
+    // several reloads: a reader loop, a ring position or a write lock left over from any of them shows up here
+    const reloads = 10;
     for (let i = 0; i < reloads; i++) if (!(await cw.reload())) { host.terminate(); return { init, reloadFailed: i }; }
     let synced = 0;
     const decoder = new TextDecoder();
@@ -46,7 +46,7 @@ test("a reader the host runs on a port of its own, yielding between frames, hear
     return { init, synced };
   }, [clockworkConfig, within]);
   expect(r.init.error ?? null).toBeNull();
-  expect(r.reloadFailed ?? null, "a reload failed: client slots ran out, or two clients were given one").toBeNull();
+  expect(r.reloadFailed ?? null, "a reload failed").toBeNull();
   expect(r.synced, "one reply was heard more than once: a reader loop from before a reload is still reading").toBe(1);
 });
 
@@ -62,16 +62,19 @@ test("a reader the host runs on a port of its own has one loop reading, however 
       self.onmessage = async ({ data }) => {
         const { runSabWorker } = await import("${location.origin}/js/lib/sab_worker_loop.js");
         const { calculateOutControlIndices } = await import("${location.origin}/js/lib/control_offsets.js");
+        const { EgressReader } = await import("${location.origin}/js/lib/ring.js");
         const port = data.port;
         let passes = 0;
+        let reader = null;
         runSabWorker({
           name: "CountingReader", endpoint: port, initMetrics: false,
           calculateControlIndices: calculateOutControlIndices,
           headIndex: (idx) => idx.OUT_HEAD, tailIndex: (idx) => idx.OUT_TAIL,
-          readMessages: (ctx) => {
+          onInit: (ctx) => { reader = new EgressReader(ctx.rings); },
+          readMessages: () => {
             passes++;
             const messages = [];
-            ctx.client?.poll((bytes, origin, route, sequence) => messages.push({ oscData: bytes.slice(), sequence, timestamp: 0 }));
+            reader?.poll(0, (bytes, origin, route, sequence) => messages.push({ oscData: bytes.slice(), sequence, timestamp: 0 }));
             return messages;
           },
           postResults: (messages) => port.postMessage({ type: "messages", messages }),

@@ -12,9 +12,9 @@
  * tracking, tail resync on corruption). The single C++ implementation of
  * the read side: used by the audio-thread IN drain (process_audio), the
  * lanes egress drains (lanes.cpp) and the native RingReader thread. A browser
- * reader is this code too, reached through clockwork_client_poll and
- * clockwork_client_tap_poll; the separate JavaScript walk that used to shadow
- * it is gone.
+ * thread outside the audio worklet reads with js/lib/ring.js instead, which
+ * restates this walk step for step and is held to it by
+ * test/ring_wire.test.mjs and test/ring_cross.test.mjs.
  * Header-only; standard C++ and ring/ring.h only, no platform
  * dependencies, no allocation, no copying.
  *

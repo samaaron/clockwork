@@ -13,13 +13,14 @@
  * the client still needs. The ring has ONE reader (a single read cursor, and a sequence gap means it lapped), so
  * whoever runs it owns the whole stream and must pass on the rest.
  *
- * The draining itself is clockwork_client_poll through this module's own client instance (lib/wasm_client.js),
- * so there is one implementation of walking the ring rather than two that can disagree.
+ * The draining itself is lib/ring.js's EgressReader, which reads both egress rings as clockwork_client_poll does
+ * and is held to it by test/ring_cross.test.mjs.
  */
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateOutControlIndices } from './control_offsets.js';
 import { getCurrentNTPFromPerformance as getCurrentNTP } from './osc_classifier.js';
 import { runSabWorker } from './sab_worker_loop.js';
+import { EgressReader } from './ring.js';
 
 /**
  * Run the egress reader.
@@ -35,12 +36,27 @@ export function runOscInPump({ onFrames, endpoint, name = 'OSCInPump' } = {}) {
   // A gap in the sequence means the ring lapped this reader. The library counts the frames that went by; this
   // counter is the one the metrics HUD reads, so it is kept here where the numbers it reports are.
   let lastSequenceReceived = -1;
+  let reader = null;
+
+  // A reader per ring, made when the worker is handed one (and again after a reload). It counts into the
+  // engine's own counters, the ones the engine's client counts into, so the HUD reads the same either way.
+  function openReader(ctx) {
+    const v = ctx.metricsView;
+    reader = new EgressReader(ctx.rings, v && {
+      view: v,
+      received: MetricsOffsets.OSC_IN_MESSAGES_RECEIVED,
+      bytes: MetricsOffsets.OSC_IN_BYTES_RECEIVED,
+      corrupted: MetricsOffsets.OSC_IN_CORRUPTED,
+      seqGaps: MetricsOffsets.ENGINE_SEQUENCE_GAPS,
+    });
+    lastSequenceReceived = -1;
+  }
 
   function readOscMessages(ctx) {
-    const { client, metricsView } = ctx;
-    if (!client) return [];
+    const { metricsView } = ctx;
+    if (!reader) return [];
     const messages = [];
-    client.poll((bytes, origin, route, sequence) => {
+    reader.poll(0, (bytes, origin, route, sequence) => {
       if (lastSequenceReceived >= 0) {
         const expectedSeq = (lastSequenceReceived + 1) & 0xFFFFFFFF;
         if (sequence !== expectedSeq) {
@@ -67,6 +83,7 @@ export function runOscInPump({ onFrames, endpoint, name = 'OSCInPump' } = {}) {
     tailIndex: (idx) => idx.OUT_TAIL,
     readMessages: readOscMessages,
     postResults: onFrames,
+    onInit: openReader,
     endpoint,
   });
 }

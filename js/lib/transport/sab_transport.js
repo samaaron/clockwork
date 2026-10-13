@@ -5,7 +5,7 @@ import { Transport } from './transport.js';
 import { createWorker } from '../worker_loader.js';
 import { OscChannel } from '../osc_channel.js';
 import { calculateInControlIndices } from '../control_offsets.js';
-import { WasmClient, releaseClientSlot } from '../wasm_client.js';
+import { engineRings } from '../ring.js';
 
 /**
  * SAB (SharedArrayBuffer) Transport
@@ -23,13 +23,9 @@ export class SABTransport extends Transport {
     #ringBufferBase;
     #bufferConstants;
 
-    // The engine's module and memory, so this thread can run the client
-    // boundary rather than reimplement the ring. One client serves every
-    // main-thread channel: the source id travels with each send, so they do
-    // not need one each, and slots are few.
-    #wasmMemory;
-    #wasmModule;
-    #wasmClient = null;
+    // The engine's ingress ring, which every channel on this thread writes
+    // (js/lib/ring.js). The source id travels with each send.
+    #ingress = null;
 
     // Cached views for ring buffer access
     #atomicView;
@@ -41,9 +37,6 @@ export class SABTransport extends Transport {
     #oscInWorker;
     #oscInIsOurs = true;   // false when the host named its own reader: it is not ours to terminate
     #oscOutLogWorker;
-    // The client slots the workers claimed (they report them on 'initialized'):
-    // released on dispose, since a terminated worker cannot release its own.
-    #workerSlots = [];
     #workerBaseURL;
     #oscInEndpoint;
 
@@ -88,8 +81,6 @@ export class SABTransport extends Transport {
         // ones it did not keep. The ring has one reader, so naming one here means the default pump is not
         // spawned at all.
         this.#oscInEndpoint = config.oscInEndpoint ?? null;
-        this.#wasmMemory = config.wasmMemory;
-        this.#wasmModule = config.wasmModule;
 
         // Validate SAB requirements
         if (!(this.#sharedBuffer instanceof SharedArrayBuffer)) {
@@ -109,15 +100,6 @@ export class SABTransport extends Transport {
             return;
         }
 
-        // The main thread's way into the rings, opened before anything can ask
-        // to send. Without it a channel has nothing to frame messages with.
-        this.#wasmClient = await WasmClient.open({
-            wasmModule: this.#wasmModule,
-            wasmMemory: this.#wasmMemory,
-            ringBufferBase: this.#ringBufferBase,
-            bufferConstants: this.#bufferConstants,
-            label: 'SABTransport',
-        });
         // Spawn workers (uses Blob URL if cross-origin). OSC OUT is gone: the
         // producer writes the IN ring directly (OscChannel); nothing sits in
         // between.
@@ -134,7 +116,7 @@ export class SABTransport extends Transport {
         this.#setupWorkerHandlers();
 
         // Initialize workers with shared buffer
-        this.#workerSlots = await Promise.all([
+        await Promise.all([
             this.#initWorker(this.#oscInWorker, 'OSC IN'),
             this.#initWorker(this.#oscOutLogWorker, 'OSC OUT LOG'),
         ]);
@@ -196,9 +178,7 @@ export class SABTransport extends Transport {
             ringBufferBase: this.#ringBufferBase,
             bufferConstants: this.#bufferConstants,
             controlIndices: this.#controlIndices,
-            wasmClient: this.#wasmClient,
-            wasmMemory: this.#wasmMemory,
-            wasmModule: this.#wasmModule,
+            ingress: this.#ingress,
             sourceId,
         });
     }
@@ -257,17 +237,6 @@ export class SABTransport extends Transport {
             this.#oscOutLogWorker = null;
         }
 
-        // Give back every client slot this transport's contexts held. The SAB
-        // (and its slot bitmask) outlives a reload, and there are only a few
-        // slots: without this each reload leaked three — the two workers', and
-        // this thread's own client — and the second reload found none free.
-        for (const slot of this.#workerSlots) {
-            releaseClientSlot(this.#atomicView, this.#ringBufferBase, this.#bufferConstants, slot);
-        }
-        this.#workerSlots = [];
-        this.#wasmClient?.close();
-        this.#wasmClient = null;
-
         this.#initialized = false;
         super.dispose();
     }
@@ -285,6 +254,7 @@ export class SABTransport extends Transport {
             this.#ringBufferBase,
             this.#bufferConstants.CONTROL_START
         );
+        this.#ingress = engineRings(this.#sharedBuffer, this.#ringBufferBase, this.#bufferConstants).ingress;
     }
 
     #initWorker(worker, name, extraConfig = {}) {
@@ -295,14 +265,14 @@ export class SABTransport extends Transport {
 
             const handler = (event) => {
                 if (event.data.type === 'error') {
-                    // e.g. no client slot free: say so now rather than time out
+                    // e.g. rings in a format it does not read: say so now rather than time out
                     clearTimeout(timeout);
                     worker.removeEventListener('message', handler);
                     reject(new Error(`${name} worker failed to initialize: ${event.data.error}`));
                 } else if (event.data.type === 'initialized') {
                     clearTimeout(timeout);
                     worker.removeEventListener('message', handler);
-                    resolve(event.data.slot ?? -1);
+                    resolve();
                 }
             };
 
@@ -312,10 +282,6 @@ export class SABTransport extends Transport {
                 sharedBuffer: this.#sharedBuffer,
                 ringBufferBase: this.#ringBufferBase,
                 bufferConstants: this.#bufferConstants,
-                // Both are structured-cloneable, so a worker gets the engine's
-                // own memory and the module already compiled for it.
-                wasmMemory: this.#wasmMemory,
-                wasmModule: this.#wasmModule,
                 ...extraConfig,
             });
         });

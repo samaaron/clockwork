@@ -121,7 +121,6 @@ int main(void) {
     printf("const CLOCKWORK_ARENA_MAX_ENTRIES %d\n", (int)CLOCKWORK_ARENA_MAX_ENTRIES);
     printf("const CLOCKWORK_ARENA_TAPS %d\n", (int)CLOCKWORK_ARENA_TAPS);
     printf("const CLOCKWORK_OWNER_HOST %d\n", (int)CLOCKWORK_OWNER_HOST);
-    printf("const CLOCKWORK_GEOM_SLOTS_STACK_BYTES %d\n", (int)CLOCKWORK_GEOM_SLOTS_STACK_BYTES);
     printf("const CLOCKWORK_ARENA_TRACK_TAPS %d\n", (int)CLOCKWORK_ARENA_TRACK_TAPS);
     printf("const CLOCKWORK_GEOM_TRACK_FIRST_INDEX %d\n", (int)CLOCKWORK_GEOM_TRACK_FIRST_INDEX);
     printf("const CLOCKWORK_TAP_IN %d\n", (int)CLOCKWORK_TAP_IN);

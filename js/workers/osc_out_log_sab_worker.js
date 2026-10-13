@@ -6,8 +6,8 @@
  *
  * It watches the IN ring rather than draining it. The engine is that ring's
  * consumer, and a second reader taking from it would be eating the engine's
- * input, so this opens a TAP (src/clockwork_client.h): a cursor of its own
- * over the same bytes, which takes nothing.
+ * input, so this opens a TAP (lib/ring.js, the tap of src/clockwork_client.h
+ * restated): a cursor of its own over the same bytes, which takes nothing.
  *
  * Being overtaken is normal and expected. Writers reserve space against the
  * ENGINE's position and know nothing about a watcher, so a logger that falls
@@ -19,24 +19,25 @@
 import { calculateInControlIndices } from '../lib/control_offsets.js';
 import { getCurrentNTPFromPerformance as getCurrentNTP } from '../lib/osc_classifier.js';
 import { runSabWorker } from '../lib/sab_worker_loop.js';
-import { REGION_INGRESS } from '../lib/wasm_client.js';
+import { RingTap } from '../lib/ring.js';
 
+let tap = null;
 let reportedMissed = 0;
 
 /**
  * Read whatever has been sent since this worker last looked.
  */
 function readLogMessages(ctx) {
-    const { client } = ctx;
-    if (!client) return [];
+    if (!tap) return [];
 
     const entries = [];
+    const bytes = ctx.rings.ingress.bytes;
 
-    client.tapPoll((bytes, origin, route, sequence) => {
+    tap.poll(0, (origin, offset, length, sequence) => {
         // Posted to the main thread, so they outlive the ring's copy.
         entries.push({
             sourceId: origin,
-            oscData: bytes.slice(),
+            oscData: bytes.slice(offset, offset + length),
             sequence,
             timestamp: getCurrentNTP(),
         });
@@ -44,7 +45,7 @@ function readLogMessages(ctx) {
 
     // Say so once per burst rather than per frame: a logger that cannot keep
     // up would otherwise spend its time reporting that it cannot keep up.
-    const missed = client.tapMissed();
+    const missed = tap.missed;
     if (missed > reportedMissed) {
         if (__DEV__) {
             console.warn(`[OSCOutLogWorker] ${missed - reportedMissed} messages`
@@ -68,12 +69,11 @@ runSabWorker({
     postResults: (entries) => self.postMessage({ type: 'oscLog', entries }),
     initMetrics: false,
     onInit: (ctx) => {
-        if (!ctx.client) return;
         // Watching starts now: a tap opens at the ring's present head, so the
-        // log shows what happens from here rather than replaying the past.
-        if (!ctx.client.openTap(REGION_INGRESS))
-            console.error('[OSCOutLogWorker] could not watch the ingress ring');
-        else if (__DEV__)
-            console.log('[OSCOutLogWorker] watching the ingress ring');
+        // log shows what happens from here rather than replaying the past. A
+        // new tap after a reload counts what it misses from zero again.
+        tap = new RingTap(ctx.rings.ingress);
+        reportedMissed = 0;
+        if (__DEV__) console.log('[OSCOutLogWorker] watching the ingress ring');
     },
 });

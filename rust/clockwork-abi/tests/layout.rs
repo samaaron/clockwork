@@ -96,7 +96,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_bytes, entry_count, entry_bytes, state, block_published_end, guest_published_end,
         reserved, entries,
     });
-    let consts: [(&str, i64); 27] = [
+    let consts: [(&str, i64); 26] = [
         ("CLOCKWORK_AUDIENCE_PUBLISHED", ClockworkArenaAudience::PUBLISHED.0 as i64),
         ("CLOCKWORK_AUDIENCE_TRANSPORT", ClockworkArenaAudience::TRANSPORT.0 as i64),
         ("CLOCKWORK_GEOM_AUDIENCE", geom::AUDIENCE as i64),
@@ -120,7 +120,6 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         ("CLOCKWORK_ARENA_MAX_ENTRIES", CLOCKWORK_ARENA_MAX_ENTRIES as i64),
         ("CLOCKWORK_ARENA_TAPS", ClockworkArenaRegion::TAPS.0 as i64),
         ("CLOCKWORK_OWNER_HOST", ClockworkArenaOwner::HOST.0 as i64),
-        ("CLOCKWORK_GEOM_SLOTS_STACK_BYTES", geom::SLOTS_STACK_BYTES as i64),
         ("CLOCKWORK_ARENA_TRACK_TAPS", ClockworkArenaRegion::TRACK_TAPS.0 as i64),
         ("CLOCKWORK_GEOM_TRACK_FIRST_INDEX", geom::TRACK_FIRST_INDEX as i64),
         ("CLOCKWORK_TAP_IN", CLOCKWORK_TAP_IN as i64),

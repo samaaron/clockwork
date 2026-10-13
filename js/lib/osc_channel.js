@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 
-import { WasmClient } from './wasm_client.js';
+import { engineRings, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateInControlIndices } from './control_offsets.js';
 import { sampleClockReader } from './sample_clock.js';
@@ -19,10 +19,11 @@ const CLOCK_HEARD_FOR_SECS = 0.1;
  * scheduling happens on the audio thread (the engine's OscIngress + scheduler);
  * the producer never classifies.
  *
- * In SAB mode the framing is clockwork_client_send, reached through a
- * WasmClient (js/lib/wasm_client.js). One client serves every channel on a
- * thread: the source id travels with each send, so a channel is a source id
- * and a set of counters rather than a connection of its own.
+ * In SAB mode the channel frames the message onto the ingress ring itself,
+ * with js/lib/ring.js: the ring code of clockwork_client_send, restated, and
+ * held to it by test/ring_cross.test.mjs. Nothing compiled runs on the
+ * channel's thread, so it needs nothing of the engine's but the memory the
+ * rings are in (docs/THREADS.md).
  *
  * Works in both SAB and postMessage modes. Can be transferred to Web Workers
  * for direct communication with the AudioWorklet. A worker holding a channel
@@ -34,8 +35,7 @@ export class OscChannel {
     #mode;
     #directPort;         // postMessage mode: MessagePort to worklet
     #sabConfig;          // SAB mode: { sharedBuffer, ringBufferBase, bufferConstants, controlIndices }
-    #wasmClient;         // SAB mode: this thread's way into the ingress ring
-    #ownsClient = false; // SAB mode: the client was opened for this channel (fromTransferable)
+    #ingress;            // SAB mode: the engine's ingress ring (js/lib/ring.js)
     #metricsView;        // SAB mode: Int32Array view into metrics region
     #sourceId;           // Numeric source ID (0 = main thread, 1+ = workers)
 
@@ -85,13 +85,12 @@ export class OscChannel {
                 ringBufferBase: config.ringBufferBase,
                 bufferConstants: config.bufferConstants,
                 controlIndices: config.controlIndices,
-                // Carried so this channel can be handed to a worker, which
-                // opens a client of its own from them.
-                wasmMemory: config.wasmMemory,
-                wasmModule: config.wasmModule,
             };
-            this.#wasmClient = config.wasmClient ?? null;
-            this.#ownsClient = config.ownsClient === true;
+            // The transport hands its own; a channel rebuilt in a worker finds
+            // the ring from the table, as everything else here does.
+            this.#ingress = config.ingress ?? (config.sharedBuffer && config.bufferConstants
+                ? engineRings(config.sharedBuffer, config.ringBufferBase, config.bufferConstants).ingress
+                : null);
 
             // Create metrics view at correct offset within SharedArrayBuffer
             if (config.sharedBuffer && config.bufferConstants) {
@@ -193,10 +192,10 @@ export class OscChannel {
      * the worklet (PM). Classification and scheduling happen on the audio thread
      * (the engine's OscIngress + BundleScheduler) — the producer never classifies.
      *
-     * In SAB mode a send fails only when the ring is FULL. Producers serialise
-     * on the writer's own spinlock, which waits rather than giving up, so
-     * contention between a worker and the main thread costs a moment instead
-     * of a dropped message — the critical section is a header and a memcpy.
+     * In SAB mode a send fails only when the ring is FULL. Producers take turns
+     * on the ring's write lock, waiting rather than giving up, so contention
+     * between a worker and the main thread costs a moment instead of a
+     * dropped message — the turn is a header and a copy.
      *
      * @param {Uint8Array} oscData - OSC message bytes
      * @returns {boolean} true if sent
@@ -209,9 +208,11 @@ export class OscChannel {
             return true;
         }
 
-        if (!this.#wasmClient) return false;
+        if (!this.#ingress) return false;
 
-        const success = this.#wasmClient.send(oscData, this.#sourceId);
+        const bytes = oscData instanceof Uint8Array ? oscData : new Uint8Array(oscData);
+        if (bytes.length === 0) return false;
+        const success = ringWrite(this.#ingress, bytes, this.#sourceId);
         if (success) {
             this.#recordSend(oscData.length);
         } else if (this.#metricsView) {
@@ -379,10 +380,6 @@ export class OscChannel {
                 ringBufferBase: this.#sabConfig.ringBufferBase,
                 bufferConstants: this.#sabConfig.bufferConstants,
                 controlIndices: this.#sabConfig.controlIndices,
-                // The receiving worker opens its own client from these: a
-                // client carries a stack, and a stack belongs to one thread.
-                wasmMemory: this.#sabConfig.wasmMemory,
-                wasmModule: this.#sabConfig.wasmModule,
             };
         }
     }
@@ -411,12 +408,7 @@ export class OscChannel {
             this.#directPort.close();
             this.#directPort = null;
         }
-        // A client opened for this channel holds a slot until it is closed; a
-        // shared one belongs to the thread, which closes it.
-        if (this.#ownsClient && this.#wasmClient) {
-            this.#wasmClient.close();
-            this.#wasmClient = null;
-        }
+        this.#ingress = null;
     }
 
     // =========================================================================
@@ -461,9 +453,7 @@ export class OscChannel {
             ringBufferBase: config.ringBufferBase,
             bufferConstants: config.bufferConstants,
             controlIndices,
-            wasmClient: config.wasmClient,
-            wasmMemory: config.wasmMemory,
-            wasmModule: config.wasmModule,
+            ingress: config.ingress,
             sourceId: config.sourceId,
         });
     }
@@ -471,11 +461,6 @@ export class OscChannel {
     /**
      * Reconstruct an OscChannel from transferred data.
      * Use in worker: const channel = await OscChannel.fromTransferable(event.data.channel)
-     *
-     * AWAITED, because a SAB channel in a worker opens a module instance of
-     * its own over the engine's memory, and instantiating one is asynchronous.
-     * The worker gets its own stack that way, which is the only safe way for a
-     * second context to run the ring code at all.
      *
      * @param {Object} data - Data from transferable getter
      * @returns {Promise<OscChannel>}
@@ -489,22 +474,11 @@ export class OscChannel {
                 nodeIdPort: data.nodeIdPort,
             });
         } else {
-            const wasmClient = await WasmClient.open({
-                wasmModule: data.wasmModule,
-                wasmMemory: data.wasmMemory,
-                ringBufferBase: data.ringBufferBase,
-                bufferConstants: data.bufferConstants,
-                label: `OscChannel(source ${data.sourceId})`,
-            });
             return new OscChannel('sab', {
                 sharedBuffer: data.sharedBuffer,
                 ringBufferBase: data.ringBufferBase,
                 bufferConstants: data.bufferConstants,
                 controlIndices: data.controlIndices,
-                wasmClient,
-                ownsClient: true,
-                wasmMemory: data.wasmMemory,
-                wasmModule: data.wasmModule,
                 sourceId: data.sourceId,
             });
         }

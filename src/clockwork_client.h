@@ -39,6 +39,14 @@
  * yields a torn message, or a reader that stalls, at a moment nobody can
  * reproduce. Once is enough.
  *
+ * With one exception, made on purpose (docs/THREADS.md). In a browser, a
+ * thread other than the audio worklet cannot run this code without a stack
+ * inside the engine's memory, so it reaches the rings through js/lib/ring.js
+ * instead: the same arithmetic in JavaScript. That copy is held to this one
+ * by test/ring_wire.test.mjs, which replays the ring corpus, and by
+ * test/ring_cross.test.mjs, which runs the two against each other on a booted
+ * engine's rings.
+ *
  *
  * ── TRANSPORTS ──────────────────────────────────────────────────────────────
  *
@@ -169,31 +177,8 @@ ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
 ClockworkClient* clockwork_client_open_memory(void* base, uint32_t bytes,
                                               ClockworkStatus* out_status);
 
-/* How much storage a handle needs, for the placement open below. Constant for
- * a given build; ask rather than hard-code it. */
-size_t clockwork_client_sizeof(void);
-
-/* Open into storage the CALLER owns, allocating nothing.
- *
- * For anyone who cannot or will not have this library call malloc:
- *
- *   - a second wasm instance sharing one heap with the engine, where the
- *     allocator is not thread-safe and two callers into it corrupt it
- *     intermittently rather than loudly;
- *   - an embedded target with no heap at all;
- *   - a caller that pools its handles.
- *
- * `storage` must be at least clockwork_client_sizeof() bytes and aligned for
- * a pointer. It must outlive the handle. Close is still required — it
- * releases whatever the handle attached to — but it will not free `storage`.
- */
-ClockworkClient* clockwork_client_open_memory_in(void* storage, size_t storage_bytes,
-                                                 void* base, uint32_t bytes,
-                                                 ClockworkStatus* out_status);
-
 /* Release the handle. Safe on NULL. Regions handed out by this handle are
- * invalid afterwards. A handle opened in caller storage is detached, not
- * freed. */
+ * invalid afterwards. */
 void clockwork_client_close(ClockworkClient* c);
 
 /* ── What is on the other end ────────────────────────────────────────────────
@@ -367,7 +352,9 @@ uint32_t clockwork_client_poll(ClockworkClient* c,
  */
 typedef struct ClockworkClientTap ClockworkClientTap;
 
-/* Storage for the placement open, as clockwork_client_sizeof is for a handle. */
+/* How much storage a tap needs, for clockwork_client_tap_open_in: a caller
+ * that keeps its taps in storage of its own rather than have this library
+ * allocate one. Constant for a given build; ask rather than hard-code it. */
 size_t clockwork_client_tap_sizeof(void);
 
 /* Watch `ring`, which is CLOCKWORK_REGION_INGRESS or CLOCKWORK_REGION_EGRESS.

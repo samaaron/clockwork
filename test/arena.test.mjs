@@ -3,7 +3,7 @@
 //
 // js/lib/arena.js against a table built by hand, the shape writeArenaHeader
 // writes: the audience word, the published runs, and the refusals. No wasm:
-// the reader's rules are the C header's, and wasm_client.test.mjs holds the
+// the reader's rules are the C header's, and engine_boot.mjs holds the
 // reader to a real engine's table.
 import { test } from "node:test";
 import assert from "node:assert/strict";

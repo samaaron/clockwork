@@ -29,7 +29,7 @@
  *                                        clients of an engine: the control
  *                                        block, metrics, the clocks, the
  *                                        channel map, the three rings, the
- *                                        raw scope, the client slots. The
+ *                                        raw scope. The
  *                                        guest is never handed a pointer into
  *                                        it that it may write through.
  *   [guest_offset, guest_offset+bytes)   THE GUEST REGION. What the guest
@@ -134,7 +134,7 @@ enum ClockworkArenaRegion {
     CLOCKWORK_ARENA_OUT_RING        = 10,  /* RT egress, written inside the tick */
     CLOCKWORK_ARENA_NRT_OUT_RING    = 11,  /* control-thread egress */
     CLOCKWORK_ARENA_RAW_SCOPE      = 12,  /* shm_audio_buffer slots: OUT then IN, written in the tick */
-    CLOCKWORK_ARENA_CLIENT_SLOTS    = 13,  /* a co-resident client's handle and stack */
+    /* 13 was the client slots (docs/THREADS.md): retired, not reused */
     CLOCKWORK_ARENA_TRACK_TAPS      = 18,  /* tap-stream slots the engine writes from plugin-track
                                               returns; numbered after the guest's tap slots */
     /* ── the guest region ── */
@@ -191,14 +191,6 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_TRACK_RING_FRAMES   = 3,
     CLOCKWORK_GEOM_TRACK_CHANNELS      = 4,
     CLOCKWORK_GEOM_TRACK_FIRST_INDEX   = 5,   /* the slot index the region begins at */
-    /* client slots */
-    CLOCKWORK_GEOM_SLOTS_COUNT         = 0,
-    CLOCKWORK_GEOM_SLOTS_SLOT_BYTES    = 1,
-    CLOCKWORK_GEOM_SLOTS_HEADER_BYTES  = 2,
-    CLOCKWORK_GEOM_SLOTS_STRUCTS_OFF   = 3,
-    CLOCKWORK_GEOM_SLOTS_STRUCTS_BYTES = 4,
-    CLOCKWORK_GEOM_SLOTS_STACK_OFF     = 5,
-    CLOCKWORK_GEOM_SLOTS_STACK_BYTES   = 6,
     /* EVERY region: the audience (ClockworkArenaAudience), in the last word.
      * A region's own geometry stops short of it. */
     CLOCKWORK_GEOM_AUDIENCE            = CLOCKWORK_ARENA_GEOM_WORDS - 1,

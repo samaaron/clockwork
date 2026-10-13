@@ -2061,14 +2061,6 @@ export class Clockwork {
       transportConfig.ringBufferBase = ringBufferBase;
       transportConfig.bufferConstants = bc;
 
-      // Every SAB context reaches the rings by running the engine's own C over
-      // this memory (js/lib/wasm_client.js), so it needs the module and the
-      // memory rather than just the bytes behind them. Compiled once here and
-      // shared: a WebAssembly.Module is cloneable, so workers are handed this
-      // one instead of compiling their own copy.
-      transportConfig.wasmMemory = this.#wasmMemory;
-      transportConfig.wasmModule = await WebAssembly.compile(this.#cachedWasmBytes);
-
       // Initialize node ID counter in shared memory.
       // Starts at 1000: 0 is the root group and
       // 1–999 are left free for the client to assign by hand.

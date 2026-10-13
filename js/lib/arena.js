@@ -30,8 +30,9 @@ export const AUDIENCE = Object.freeze({ PUBLISHED: 1, GUEST: 2, HOST: 4, TRANSPO
 export const REGION = Object.freeze({
   CONTROL: 1, METRICS: 2, NATIVE_STATS: 3, CLOCK_STATE: 4, CLOCK_ANCHORS: 5,
   SAMPLE_CLOCK: 6, CHANNEL_MAP: 7, NODE_ID_COUNTER: 8, IN_RING: 9, OUT_RING: 10,
-  NRT_OUT_RING: 11, RAW_SCOPE: 12, CLIENT_SLOTS: 13, GUEST_CONFIG: 14,
+  NRT_OUT_RING: 11, RAW_SCOPE: 12, GUEST_CONFIG: 14,
   GUEST_WINDOW: 15, TAPS: 16, GUEST_PERSIST: 17, TRACK_TAPS: 18,
+  // 13 was the client slots (docs/THREADS.md): retired, not reused.
 });
 
 // Geometry word indices, per region (ClockworkArenaGeom).
@@ -42,8 +43,6 @@ export const GEOM = Object.freeze({
   RAW_SCOPE_SLOTS: 0, RAW_SCOPE_SLOT_BYTES: 1, RAW_SCOPE_HEADER_BYTES: 2, RAW_SCOPE_FRAMES: 3, RAW_SCOPE_CHANNELS: 4, RAW_SCOPE_SAMPLE_RATE: 5,
   TAP_SLOTS: 0, TAP_HEADER_BYTES: 1, TAP_SLOT_BYTES: 2, TAP_SLOT_HEADER: 3, TAP_RING_FRAMES: 4, TAP_CHANNELS: 5,
   TRACK_SLOTS: 0, TRACK_SLOT_BYTES: 1, TRACK_SLOT_HEADER: 2, TRACK_RING_FRAMES: 3, TRACK_CHANNELS: 4, TRACK_FIRST_INDEX: 5,
-  SLOTS_COUNT: 0, SLOTS_SLOT_BYTES: 1, SLOTS_HEADER_BYTES: 2, SLOTS_STRUCTS_OFF: 3, SLOTS_STRUCTS_BYTES: 4,
-  SLOTS_STACK_OFF: 5, SLOTS_STACK_BYTES: 6,
   // the guest window: what the guest declared its window to be, 0 until it binds
   WINDOW_MAGIC: 0, WINDOW_VERSION: 1,
   // EVERY region: the audience, in the last word (ENTRY_WORDS - 4 geometry words)
@@ -148,7 +147,6 @@ function constantsFrom(region, entries, h) {
   const anchors = region(REGION.CLOCK_ANCHORS), clock = region(REGION.CLOCK_STATE), raw = region(REGION.RAW_SCOPE);
   const nodeId = region(REGION.NODE_ID_COUNTER), config = region(REGION.GUEST_CONFIG), taps = region(REGION.TAPS);
   const sample = region(REGION.SAMPLE_CLOCK), persist = region(REGION.GUEST_PERSIST), map = region(REGION.CHANNEL_MAP);
-  const slots = region(REGION.CLIENT_SLOTS);
   return {
     ARENA_VERSION: h.version,
     ARENA_INSTANCE_ID: h.instanceId,
@@ -201,13 +199,5 @@ function constantsFrom(region, entries, h) {
     SAMPLE_CLOCK_START: sample.offset, SAMPLE_CLOCK_SIZE: sample.bytes,
     GUEST_PERSIST_START: persist.offset, GUEST_PERSIST_SIZE: persist.bytes,
     CHANNEL_MAP_START: map.offset, CHANNEL_MAP_SIZE: map.bytes,
-    CLIENT_SLOTS_START: slots.offset, CLIENT_SLOTS_SIZE: slots.bytes,
-    CLIENT_SLOT_COUNT: slots.geom[GEOM.SLOTS_COUNT],
-    CLIENT_SLOT_SIZE: slots.geom[GEOM.SLOTS_SLOT_BYTES],
-    CLIENT_SLOTS_HEADER_SIZE: slots.geom[GEOM.SLOTS_HEADER_BYTES],
-    CLIENT_SLOT_STRUCTS_OFFSET: slots.geom[GEOM.SLOTS_STRUCTS_OFF],
-    CLIENT_SLOT_STRUCTS_SIZE: slots.geom[GEOM.SLOTS_STRUCTS_BYTES],
-    CLIENT_SLOT_STACK_OFFSET: slots.geom[GEOM.SLOTS_STACK_OFF],
-    CLIENT_SLOT_STACK_SIZE: slots.geom[GEOM.SLOTS_STACK_BYTES],
   };
 }

@@ -8,10 +8,12 @@
 /*
  * RingBufferWriter.h — Multi-producer ring buffer write (header-only)
  *
- * THE ONLY WRITER. A JavaScript copy of this arithmetic used to live beside
- * it, kept byte-identical by hand and pinned by nothing; a browser client now
- * calls this through clockwork_client_send instead, so there is one
- * implementation and no way for two of them to drift.
+ * THE WRITER, AND ONE RESTATEMENT. Everything in C writes a ring through
+ * this. A browser thread outside the audio worklet cannot run it (it would need
+ * a stack inside the engine's memory), so js/lib/ring.js restates it in
+ * JavaScript, step for step, and is held to it by test/ring_wire.test.mjs (the
+ * corpus) and test/ring_cross.test.mjs (both on a booted engine's rings). A
+ * change here is a change there; one made in only one place fails those.
  *
  *  - 16-byte message header: magic(4) + length(4) + sequence(4) + sourceId(4)
  *  - frames NEVER wrap: a frame that doesn't fit before the end of the ring

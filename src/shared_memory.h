@@ -366,59 +366,12 @@ struct alignas(16) ClockworkChannelMapState {
 
 constexpr uint32_t CHANNEL_MAP_SIZE  = sizeof(ClockworkChannelMapState);
 
-// ── Client slots ────────────────────────────────────────────────────────────
-//
-// SOMEWHERE FOR A CLIENT TO STAND. A client that shares the engine's address
-// space still needs a few bytes of its own: somewhere to put the handle, and a
-// stack to run on. In a process that is trivial — it calls malloc. In a
-// WebAssembly build it is not, because "the engine's address space" is one
-// linear memory shared by the audio worklet and every worker, and a second
-// module instance over it starts life pointing at the SAME stack the worklet
-// is using. Its first call would run over the audio thread's frame.
-//
-// So the memory is laid out here instead, where it needs no allocator and no
-// handshake: a context claims a slot with one atomic compare-exchange, aims
-// its stack pointer at that slot, and opens its handle into it with
-// clockwork_client_open_memory_in. Nothing has to have booted first, and no
-// two contexts can be handed the same bytes.
-//
-// Native clients use none of this. They have a heap.
-// Three are spoken for in a browser — the main thread, the reply pump and the
-// traffic logger — and the rest are for workers an embedder gives a channel to.
-// Running out is reported at open rather than shared, so the ceiling is a
-// number to raise, never a corruption to debug.
-constexpr uint32_t CLIENT_SLOT_COUNT   = 8;
-
-// Handle, tap, out-parameters and a poll array, in that order.
-constexpr uint32_t CLIENT_SLOT_STRUCTS_SIZE = 8192;
-// The client path is shallow — frame a message, walk a ring — so this is
-// generous rather than tight.
-constexpr uint32_t CLIENT_SLOT_STACK_SIZE   = 64 * 1024;
-
-// There is no staging buffer here, and that is deliberate. A client builds its
-// message inside the ring through clockwork_client_send_begin, so the bytes
-// are written once, where they are going to live. A slot holding a buffer to
-// assemble messages in would be paying for a copy nobody needs.
-constexpr uint32_t CLIENT_SLOT_STRUCTS_OFFSET = 0;
-constexpr uint32_t CLIENT_SLOT_STACK_OFFSET =
-    CLIENT_SLOT_STRUCTS_OFFSET + CLIENT_SLOT_STRUCTS_SIZE;
-constexpr uint32_t CLIENT_SLOT_SIZE =
-    CLIENT_SLOT_STACK_OFFSET + CLIENT_SLOT_STACK_SIZE;
-
-// One uint32 of claim bits, and room to grow without moving the slots.
-constexpr uint32_t CLIENT_SLOTS_HEADER_SIZE = 16;
-constexpr uint32_t CLIENT_SLOTS_SIZE =
-    CLIENT_SLOTS_HEADER_SIZE + CLIENT_SLOT_COUNT * CLIENT_SLOT_SIZE;
-
-static_assert(CLIENT_SLOT_COUNT <= 32,
-              "the claim bitmap is one uint32");
-
 // ============================================================================
 // THE ARENA MAP
 // ============================================================================
 // Every region's place, in one list, in the order it lies in memory. Two
 // halves (clockwork_arena.h says why): the CLOCKWORK BLOCK first — the
-// header, the small engine state, the rings, the taps, the client slots — and
+// header, the small engine state, the rings, the taps — and
 // the GUEST REGION after it. Nothing here is read by anyone but the engine
 // and its tests: readers take the table the header carries (writeArenaHeader
 // below), which is filled from these.
@@ -426,7 +379,7 @@ static_assert(CLIENT_SLOT_COUNT <= 32,
 // The order is chosen, not accumulated. Each half is two contiguous runs
 // (clockwork_arena.h, "Audiences"): first what is PUBLISHED — the data
 // contracts a client reads by hand — then what is not: the block's transport
-// (the control block, the rings, the counter, the client slots), the guest's
+// (the control block, the rings, the counter), the guest's
 // own (its config, its persistent bytes). Within a run, small state sits
 // together at the front and the large arrays last, each 16-aligned because
 // their slot structs are alignas(16). The header carries where each run ends.
@@ -458,8 +411,7 @@ constexpr uint32_t NODE_ID_COUNTER_START = CONTROL_START + CONTROL_SIZE;
 constexpr uint32_t IN_BUFFER_START      = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
 constexpr uint32_t OUT_BUFFER_START     = IN_BUFFER_START + IN_BUFFER_SIZE;
 constexpr uint32_t NRT_OUT_BUFFER_START = OUT_BUFFER_START + OUT_BUFFER_SIZE;
-constexpr uint32_t CLIENT_SLOTS_START   = alignArena16(NRT_OUT_BUFFER_START + NRT_OUT_BUFFER_SIZE);
-constexpr uint32_t CLOCKWORK_BLOCK_SIZE = alignArena16(CLIENT_SLOTS_START + CLIENT_SLOTS_SIZE);
+constexpr uint32_t CLOCKWORK_BLOCK_SIZE = alignArena16(NRT_OUT_BUFFER_START + NRT_OUT_BUFFER_SIZE);
 
 // ── the guest region: the published run ──
 constexpr uint32_t GUEST_REGION_START   = CLOCKWORK_BLOCK_SIZE;
@@ -481,7 +433,6 @@ static_assert(CHANNEL_MAP_START % 16 == 0,  "ClockworkChannelMapState is alignas
 static_assert(IN_BUFFER_START % 16 == 0,    "rings start 16-aligned");
 static_assert(SHM_AUDIO_START % 16 == 0,    "shm_audio_buffer is alignas(16)");
 static_assert(SHM_TRACK_TAPS_START % 16 == 0, "shm_tap_stream is alignas(16)");
-static_assert(CLIENT_SLOTS_START % 16 == 0, "client slots are 16-byte aligned");
 static_assert(GUEST_REGION_START % 16 == 0, "the guest region starts 16-aligned");
 static_assert(CLOCKWORK_BLOCK_PUBLISHED_END % 16 == 0 && CLOCKWORK_BLOCK_PUBLISHED_END <= CLOCKWORK_BLOCK_SIZE,
               "the block's published run ends 16-aligned, inside the block");
@@ -945,9 +896,6 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     put(CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kTransport,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_CLIENT_SLOTS,    CLIENT_SLOTS_START,    CLIENT_SLOTS_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
-        { CLIENT_SLOT_COUNT, CLIENT_SLOT_SIZE, CLIENT_SLOTS_HEADER_SIZE, CLIENT_SLOT_STRUCTS_OFFSET,
-          CLIENT_SLOT_STRUCTS_SIZE, CLIENT_SLOT_STACK_OFFSET, CLIENT_SLOT_STACK_SIZE });
     // the guest region, the published run: what the guest shows its clients.
     // The window's identity (magic, version) is the guest's to declare and is
     // written when it binds — arenaSetGuestWindowIdentity — so it is 0 here.

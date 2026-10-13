@@ -7,7 +7,7 @@
  * Each worker calls runSabWorker() with configuration specifying which
  * ring buffer to read, how to process messages, and what to post back.
  */
-import { WasmClient } from './wasm_client.js';
+import { engineRings } from './ring.js';
 
 export function runSabWorker(config) {
     const {
@@ -41,9 +41,9 @@ export function runSabWorker(config) {
         uint8View: null,
         metricsView: null,
         CONTROL_INDICES: {},
-        // This worker's way into the rings: the engine's own C, running on
-        // this worker's own stack. See js/lib/wasm_client.js.
-        client: null,
+        // The engine's rings, for js/lib/ring.js to read. Nothing compiled
+        // runs here (docs/THREADS.md).
+        rings: null,
     };
 
     let running = false;
@@ -53,7 +53,7 @@ export function runSabWorker(config) {
     // keeps its own place, shown each frame by each of them).
     let generation = 0;
 
-    async function initRingBuffer(buffer, base, constants, wasmModule, wasmMemory) {
+    async function initRingBuffer(buffer, base, constants) {
         ctx.sharedBuffer = buffer;
         ctx.ringBufferBase = base;
         ctx.bufferConstants = constants;
@@ -66,15 +66,10 @@ export function runSabWorker(config) {
             ctx.metricsView = new Uint32Array(buffer, metricsBase, constants.METRICS_SIZE / 4);
         }
 
-        if (wasmModule && wasmMemory) {
-            // Throws if no slot is free; the handler below turns that into an
-            // error posted to the main thread rather than a worker that runs
-            // for ever delivering nothing.
-            ctx.client = await WasmClient.open({
-                wasmModule, wasmMemory, ringBufferBase: base,
-                bufferConstants: constants, label: name,
-            });
-        }
+        // Throws if the engine's rings are not in a format ring.js reads; the
+        // handler below turns that into an error posted to the main thread
+        // rather than a worker that runs for ever delivering nothing.
+        ctx.rings = engineRings(buffer, base, constants);
 
         await onInit?.(ctx);
     }
@@ -182,13 +177,9 @@ export function runSabWorker(config) {
                 case 'init':
                     if (data.sharedBuffer) {
                         await initRingBuffer(data.sharedBuffer, data.ringBufferBase,
-                                             data.bufferConstants, data.wasmModule,
-                                             data.wasmMemory);
+                                             data.bufferConstants);
                     }
-                    // The slot this worker's client claimed: the transport releases it
-                    // when it terminates the worker (a worker blocked in Atomics.wait never
-                    // runs a 'stop', so it cannot give the slot back itself).
-                    endpoint.postMessage({ type: 'initialized', slot: ctx.client?.slotIndex ?? -1 });
+                    endpoint.postMessage({ type: 'initialized' });
                     break;
                 case 'start':
                     if (ctx.sharedBuffer) start();

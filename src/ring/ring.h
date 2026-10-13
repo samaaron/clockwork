@@ -10,7 +10,9 @@
     (ring_drain.h). Frames never wrap the ring boundary — a frame that would cross
     the end is preceded by a PADDING_MAGIC marker and restarts at offset 0.
     This is the only definition of the frame. Clients in other languages reach
-    it through src/clockwork_client.h rather than restating it.
+    it through src/clockwork_client.h rather than restating it — except a
+    browser thread outside the audio worklet, which cannot run the C and uses
+    js/lib/ring.js (docs/THREADS.md), held to this by the ring tests.
 */
 
 #pragma once

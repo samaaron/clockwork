@@ -25,10 +25,9 @@ lives outside this span — see BOUNDARY.md. The word predates both uses.)
   │   sample clock · channel map │
   │   raw scope · track taps     │
   ├ · · · · · · · · · · · · · · ·┤ block_published_end
-  │  transport:                  │  ── the command plane, through the client ABI only
+  │  transport:                  │  ── the command plane, through the client ABI (ring.js on the web)
   │   control · node id counter  │
   │   IN ring · OUT · NRT-OUT    │
-  │   client slots               │
   ├──────────────────────────────┤ block_bytes == guest_offset
   │ THE GUEST REGION             │  what the guest is handed base and length to
   │  published:                  │  ── what the guest shows its clients
@@ -60,7 +59,7 @@ holds a `ClockworkArenaAudience` bit set.
 | audience | meaning |
 |---|---|
 | `PUBLISHED` | a data contract: stable, versioned by this table, read **by hand** by any reader in a client process — a GUI, a spider, the web client, a Rust host |
-| `TRANSPORT` | the command plane: written and read only through the client ABI, never parsed by anyone else |
+| `TRANSPORT` | the command plane: written and read only through the client ABI, or by a browser thread outside the worklet through `js/lib/ring.js`, its restatement (THREADS.md); never parsed by anyone else |
 | `GUEST` | the guest reads it, through a pointer clockwork hands it |
 | `HOST` | the host reads it |
 
@@ -79,8 +78,8 @@ The published regions, in order of the table:
 | guest window | guest | whatever the guest publishes (SuperSonic: its node tree); its identity is in the entry's geometry, see below |
 | tap streams | guest | the guest's tap slots |
 
-Everything else — the control block, the counter, the three rings, the client
-slots, the guest's config and persistent bytes — is not for reading by hand.
+Everything else — the control block, the counter, the three rings, the
+guest's config and persistent bytes — is not for reading by hand.
 A reader that wants to know asks `clockwork_arena_published(h, id)` (C),
 `header.published(id)` (Rust) or `arena.published(id)` (JS), and refuses a
 region that is not; a reader from before this word treats 0 as "not stated".
@@ -163,7 +162,9 @@ Everyone, the same way:
   segment header keeps only what is segment-relative: the blob, the peer
   plane, the inbox and outbox.
 - **The worklet** (`js/lib/arena.js`) reads it from the SharedArrayBuffer at
-  boot and derives the constants the JS runtime consumes.
+  boot and derives the constants the JS runtime consumes. The other browser
+  threads find the rings from those constants (`engineRings` in
+  `js/lib/ring.js`), which also refuses a frame format it does not write.
 - **Rust** (`clockwork-abi::arena`) declares the same structs, held to the C
   header by the compiled probe.
 - **A host on the lanes ABI** gets it from `clockwork_arena_header()`.
