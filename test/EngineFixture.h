@@ -232,17 +232,30 @@ public:
     // Poll `pred()` every few ms until true or timeout. In manual-pump mode
     // nothing advances the engine unless this thread does, so each poll
     // pumps a block first.
+    //
+    // Pumped, the wait has two budgets, and gives up only once both are
+    // spent: timeoutMs of audio, pumped a block a turn (what the audio thread
+    // answers after so many blocks arrives on audio time, however slow the
+    // machine), and timeoutMs of wall clock (what one of the engine's threads
+    // delivers once woken needs real time to run). One budget alone was
+    // wrong: the wall clock ran out before the audio on a loaded runner, each
+    // turn's sleep stretched (SuperSonic's SendReply at 2 Hz, macOS arm64 CI,
+    // 2026-10-14).
     template <typename Pred>
     bool pollUntil(Pred pred, int timeoutMs = 2000) {
         const auto deadline = std::chrono::steady_clock::now()
                             + std::chrono::milliseconds(timeoutMs);
+        uint32_t owed = mManualPump ? blocksOfAudio(timeoutMs) : 0;
         while (true) {
-            if (mManualPump) pumpBlock();
+            if (owed) { pumpBlock(); --owed; }
             if (pred()) return true;
-            if (std::chrono::steady_clock::now() >= deadline) return false;
+            if (!owed && std::chrono::steady_clock::now() >= deadline) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(mManualPump ? 3 : 2));
         }
     }
+
+    // The blocks the engine renders in `ms` of audio, at its rate and block size.
+    uint32_t blocksOfAudio(int ms) const;
 
     std::vector<OscReply> allReplies() const;
     void clearReplies();
@@ -263,6 +276,15 @@ public:
     // a config that sets it has the fixture run the host's thread
     // (HostControlThread), started before init and stopped before shutdown.
     static ClockworkEngine::Config defaultConfig();
+    // What defaultConfig() does to a config, for a case that builds its own
+    // from scratch: pumped (manualAudioPump + freewheelClock), unless
+    // CLOCKWORK_TEST_REALTIME=1 asks for the driver everywhere.
+    static void pumpByDefault(ClockworkEngine::Config& cfg);
+    // The same, rendered by the headless driver on a thread of its own rather
+    // than pumped: for a case whose claim is about a live audio thread (a
+    // stalled one, a second renderer refused), or about traffic arriving
+    // while nobody pumps. Such a case is tagged [rt] and run on its own.
+    static ClockworkEngine::Config driverConfig();
 
     // The host's control thread, when the config asked for one.
     bool hostDrivesControl() const { return mHostControl.running(); }
@@ -285,6 +307,7 @@ private:
     engine_test::HostControlThread mHostControl;
     std::thread                    mLateHostStart;
     bool            mManualPump = false;
+    int             mSampleRate = 48000;
 
     mutable std::mutex       mReplyMutex;
     std::condition_variable  mReplyCv;

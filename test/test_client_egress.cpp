@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include <functional>
 #include "OscTestUtils.h"
 #include "clockwork_client.h"
 #include "shared_memory.h"
@@ -52,10 +53,12 @@ std::vector<Frame> takeAll(ClockworkClient* c) {
     return out;
 }
 
-// Polls until a frame at `address` arrives, or gives up.
-bool waitForFrame(ClockworkClient* c, const char* address, Frame* out, int ms = 3000) {
+// Polls until a frame at `address` arrives, or gives up; `pump` renders a
+// block per poll, since nothing else renders what the audio thread answers.
+bool waitForFrame(const std::function<void()>& pump, ClockworkClient* c, const char* address, Frame* out, int ms = 3000) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < deadline) {
+        pump();
         for (const Frame& f : takeAll(c))
             if (f.address == address) { if (out) *out = f; return true; }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -83,7 +86,7 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
     const auto ping = osc_test::message("/dummy/ping");
     fx.engine().ingest(ping.ptr(), ping.size(), 7);
     Frame pong;
-    REQUIRE(waitForFrame(c, "/dummy/pong", &pong));
+    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/dummy/pong", &pong));
     CHECK(pong.origin == 7);
     CHECK(pong.route == EGRESS_REPLY);
 
@@ -92,7 +95,7 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
     const auto notify = osc_test::message("/clockwork/notify", int32_t{1});
     fx.engine().ingest(notify.ptr(), notify.size(), 9);
     Frame reply;
-    REQUIRE(waitForFrame(c, "/clockwork/notify.reply", &reply));
+    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/clockwork/notify.reply", &reply));
     CHECK(reply.origin == 9);
     CHECK(reply.route == EGRESS_REPLY);
 }
@@ -109,7 +112,7 @@ TEST_CASE("client egress: with the host draining, the engine's gateway leaves th
     OscReply r;
     CHECK_FALSE(fx.waitForReply("/dummy/pong", r, 400));
     Frame pong;
-    CHECK(waitForFrame(fx.engine().egressClient(), "/dummy/pong", &pong));
+    CHECK(waitForFrame([&] { fx.pumpBlock(); }, fx.engine().egressClient(), "/dummy/pong", &pong));
 }
 
 TEST_CASE("client egress: without it, the engine delivers as it always did", "[client][egress]") {
@@ -191,6 +194,6 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 7) == CLOCKWORK_OK);
     e.pump(0.1);
     Frame pong;
-    CHECK(waitForFrame(c, "/dummy/pong", &pong, 200));
+    CHECK(waitForFrame([&] { e.engine.pumpAudioBlock(); }, c, "/dummy/pong", &pong, 200));
     clockwork_client_close(c);
 }

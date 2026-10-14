@@ -62,6 +62,7 @@ TEST_CASE("isRunning returns true after init", "[lifecycle]") {
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
     CHECK(engine.isRunning());
@@ -72,6 +73,7 @@ TEST_CASE("isRunning returns false after shutdown", "[lifecycle]") {
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -83,6 +85,7 @@ TEST_CASE("Double init is safe", "[lifecycle]") {
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
 
     engine.init(cfg);
@@ -99,6 +102,7 @@ TEST_CASE("Double shutdown is safe", "[lifecycle]") {
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
 
     engine.init(cfg);
@@ -121,6 +125,7 @@ TEST_CASE("Lanes entry points reject after shutdown (process-local arena)",
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;   // process-local arena
 
     engine.init(cfg);
@@ -136,6 +141,7 @@ TEST_CASE("Lanes entry points reject after shutdown (shm-backed arena)",
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 57123;   // non-zero → arena lives in the public shm segment
 
     engine.init(cfg);
@@ -155,6 +161,7 @@ TEST_CASE("Null onReply callback does not crash", "[lifecycle]") {
 
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
 
@@ -174,6 +181,7 @@ TEST_CASE("Null onDebug callback does not crash", "[lifecycle]") {
 
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
 
@@ -246,11 +254,11 @@ TEST_CASE("/clockwork/notify is acknowledged after boot", "[lifecycle]") {
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("notify.reply"), r));
 }
 
-TEST_CASE("Engine refuses a manual audio block while a driver is rendering", "[lifecycle][pump]") {
-    // The default fixture runs the headless driver on its own thread. A block
-    // pumped from here would be a second renderer — the engine must refuse it
-    // and say so, rather than race the driver across the whole engine state.
-    EngineFixture fix;
+TEST_CASE("Engine refuses a manual audio block while a driver is rendering", "[lifecycle][pump][rt]") {
+    // The headless driver renders on its own thread. A block pumped from here
+    // would be a second renderer — the engine must refuse it and say so,
+    // rather than race the driver across the whole engine state.
+    EngineFixture fix(EngineFixture::driverConfig());
     fix.engine().pumpAudioBlock();
     const bool refused = fix.pollUntil([&] {
         for (auto& m : fix.debugMessages())

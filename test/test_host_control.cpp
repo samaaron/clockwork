@@ -202,6 +202,7 @@ TEST_CASE("host control: with the host draining egress too, no engine thread sta
     uint32_t origin = 0, route = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!found && std::chrono::steady_clock::now() < deadline) {
+        fx.pumpBlock();   // pumped: what the pass answers rides the ring the audio thread publishes
         ClockworkClientMessage batch[64];
         const uint32_t n = clockwork_client_poll(c, batch, 64);
         for (uint32_t i = 0; i < n && !found; ++i) {
@@ -229,6 +230,7 @@ TEST_CASE("host control: the peer command plane rides the host's pass",
     cfg.bufferSize        = 128;
     cfg.udpPort           = kPort;   // non-zero creates the public segment
     cfg.headless          = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmCommands       = true;
     cfg.hostDrivesControl = true;
     EngineFixture fx(cfg);

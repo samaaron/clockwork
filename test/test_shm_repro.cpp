@@ -8,6 +8,7 @@ TEST_CASE("Engine boots with udpPort > 0 (cross-process shm)", "[shm-repro]") {
     cfg.bufferSize       = 128;
     cfg.udpPort          = 30099;  // non-zero → creates POSIX shm
     cfg.headless         = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
 
     EngineFixture fx(cfg);
 

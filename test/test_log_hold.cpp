@@ -37,11 +37,14 @@ struct DebugCapture {
     }
 };
 
+// The engine is pumped (EngineFixture::defaultConfig), and this case has no
+// fixture to pump it: a block a poll, so the ring is drained.
 template <typename Pred>
-bool pollUntil(Pred pred, int timeoutMs = 2000) {
+bool pollUntil(ClockworkEngine& engine, Pred pred, int timeoutMs = 2000) {
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
+        engine.pumpAudioBlock();
         if (pred()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -70,7 +73,7 @@ TEST_CASE("a line logged before the ring exists reaches the debug channel once t
 
     // The DSP identity line is logged straight onto the ring right after it
     // is built; the held line must be on the channel too, and before it.
-    REQUIRE(pollUntil([&] { return cap.has("DSP: "); }));
+    REQUIRE(pollUntil(engine, [&] { return cap.has("DSP: "); }));
     INFO("debug lines seen:" << [&] {
         std::string out; std::lock_guard<std::mutex> lk(cap.mu);
         for (auto& l : cap.lines) out += "\n  | " + l; return out; }());

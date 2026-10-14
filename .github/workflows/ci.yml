@@ -202,15 +202,24 @@ jobs:
       # process — fails here and nowhere else. Two did, for months, with this
       # workflow green: a memory check against the process's high-water mark,
       # and a metric read before it was published.
+      #
+      # The pumped cases depend on no thread's timing, so they run in
+      # parallel; the real-time ones (label rt: [rt]) have a step of their
+      # own below, one at a time, with nothing beside them.
       - name: Test (each case on its own)
         shell: bash
         timeout-minutes: 15
-        run: ctest --test-dir build -C Release --output-on-failure -j 2 --timeout 300
+        run: ctest --test-dir build -C Release --output-on-failure -LE rt -j 4 --timeout 300
 
-      # All of them in one process, in a shuffled order: a case that leaves
-      # something behind for the next fails here and nowhere else. The seed
-      # is the run number: every run shuffles differently, and re-running a
-      # failed job runs the same order again. Catch2 prints it first
+      - name: Test real-time cases (one at a time)
+        shell: bash
+        timeout-minutes: 15
+        run: ctest --test-dir build -C Release --output-on-failure -L rt -j 1 --timeout 300
+
+      # Every pumped case in one process, in a shuffled order: a case that
+      # leaves something behind for the next fails here and nowhere else. The
+      # seed is the run number: every run shuffles differently, and re-running
+      # a failed job runs the same order again. Catch2 prints it first
       # ("Randomness seeded to"); locally, --order rand --rng-seed <that>.
       #
       # The engine suite hangs now and then on windows-x64. --durations prints
@@ -221,10 +230,10 @@ jobs:
         timeout-minutes: 15
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            build/test/Release/clockwork_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/Release/clockwork_lanes_reserved_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/Release/clockwork_attach_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/Release/clockwork_engine_tests.exe --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
+            build/test/Release/clockwork_tests.exe "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_lanes_reserved_tests.exe "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_attach_tests.exe "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/Release/clockwork_engine_tests.exe "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             # Same binaries, but a hang prints every thread's stack first.
             bash scripts/ci-run-tests-linux.sh \
@@ -233,10 +242,10 @@ jobs:
               build/test/clockwork_attach_tests \
               build/test/clockwork_engine_tests
           else
-            build/test/clockwork_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/clockwork_lanes_reserved_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/clockwork_attach_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER"
-            build/test/clockwork_engine_tests --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
+            build/test/clockwork_tests "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_lanes_reserved_tests "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_attach_tests "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"
+            build/test/clockwork_engine_tests "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
           fi
 
   # ------------------------------------------------- linux-x86 (i686, 32-bit) --
@@ -315,10 +324,12 @@ jobs:
       # Twice, as the native job and for its reasons: each case on its own,
       # then every case in one process in a shuffled order.
       - name: Test (each case on its own)
-        run: ctest --test-dir build --output-on-failure -j 2 --timeout 300
+        run: ctest --test-dir build --output-on-failure -LE rt -j 4 --timeout 300
+      - name: Test real-time cases (one at a time)
+        run: ctest --test-dir build --output-on-failure -L rt -j 1 --timeout 300
       - name: Test (one process, shuffled)
         run: |
-          for t in ${{ matrix.tests }}; do "$t" --order rand --rng-seed "$GITHUB_RUN_NUMBER"; done
+          for t in ${{ matrix.tests }}; do "$t" "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER"; done
 
   # ---------------------------------------------------------------- sanitize --
   # Plugin hosting is off here: the in-tree test plugins would be built

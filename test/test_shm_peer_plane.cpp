@@ -33,6 +33,7 @@ ClockworkEngine::Config planeConfig(unsigned port) {
     cfg.bufferSize   = 128;
     cfg.udpPort      = port;   // non-zero enables the public shm segment
     cfg.headless     = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmCommands  = true;
     return cfg;
 }
@@ -58,9 +59,12 @@ void drainReplies(ShmPeerPlaneHeader* plane, ClockworkDrainState& st,
         });
 }
 
-bool waitUntil(const std::function<bool()>& f, int ms = 3000) {
+// Pumped (planeConfig): the engine's pass drains the plane as the audio
+// thread ticks, so a block a turn, and the engine answers.
+bool waitUntil(ClockworkEngine& engine, const std::function<bool()>& f, int ms = 3000) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < deadline) {
+        engine.pumpAudioBlock();
         if (f()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -142,7 +146,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
 
     // tempo/get round trip through shared memory in both directions.
     REQUIRE(peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 7)));
-    bool got = waitUntil([&] {
+    bool got = waitUntil(engine, [&] {
         drainReplies(plane, repState, replies);
         return !replies.empty();
     });
@@ -155,7 +159,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     replies.clear();
     REQUIRE_FALSE(transport.hasNotifySubscribers());
     REQUIRE(peerWrite(plane, osc_test::message("/clockwork/notify")));
-    got = waitUntil([&] {
+    got = waitUntil(engine, [&] {
         drainReplies(plane, repState, replies);
         return !replies.empty() && transport.hasNotifySubscribers();
     });
@@ -207,6 +211,7 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
            && std::chrono::steady_clock::now() < deadline) {
         while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
             ++sent;
+        engine.pumpAudioBlock();   // pumped: the pass drains the ring as the audio thread ticks
         drainReplies(plane, repState, replies);
         if (static_cast<int>(replies.size()) < N)
             std::this_thread::sleep_for(std::chrono::microseconds(200));

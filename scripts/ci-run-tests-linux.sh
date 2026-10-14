@@ -37,10 +37,11 @@ for t in "$@"; do
     # Shuffled (ci.yml says why), seeded with the run number where there is
     # one, so a re-run of a failed job runs the same order. The seed is the
     # first thing the binary prints; --order rand --rng-seed <it> repeats it.
+    # The pumped cases only: the [rt] ones run through ctest, one at a time.
     if command -v setsid >/dev/null 2>&1; then
-        setsid "$t" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
+        setsid "$t" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
     else
-        "$t" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
+        "$t" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes &
     fi
     pid=$!
 

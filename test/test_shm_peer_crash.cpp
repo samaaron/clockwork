@@ -76,6 +76,7 @@ ClockworkEngine::Config crashConfig(unsigned port) {
     cfg.bufferSize   = 128;
     cfg.udpPort      = port;
     cfg.headless     = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmCommands  = true;
     return cfg;
 }

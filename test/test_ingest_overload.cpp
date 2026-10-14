@@ -87,7 +87,7 @@ Taken readTaken(ClockworkEngine& engine) {
 // sees it did, in the metrics; and between them, what was taken (every one
 // answered) and what was dropped account for every command sent.
 TEST_CASE("A client that overloads the engine sees it in the metrics and no command goes unaccounted",
-          "[transport][tcp][overload]") {
+          "[transport][tcp][overload][rt]") {
     constexpr int kCommands = 200000;
 
     StreamOscTransport tcp;
@@ -98,7 +98,7 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     engine.setTransport(&tcp);
-    auto cfg = EngineFixture::defaultConfig();
+    auto cfg = EngineFixture::driverConfig();   // the engine draining under load on its own: nobody here to pump it
     cfg.hostDrivesControl = false;   // the engine runs its own control pass
     engine.init(cfg);
     REQUIRE(tcp.start());

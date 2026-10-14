@@ -78,6 +78,7 @@ TEST_CASE("client verbs: an immediate OSC send reaches its endpoint", "[client_v
     bool got = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (!got && std::chrono::steady_clock::now() < deadline) {
+        fx.pumpBlock();   // pumped: the audio thread hands the sink the send
         if (listener.waitUntilReady(true, 50) == 1) {
             const int n = listener.read(buf, sizeof(buf), false, ip, fromPort);
             if (n > 0) {

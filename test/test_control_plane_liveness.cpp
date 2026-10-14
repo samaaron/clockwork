@@ -22,6 +22,7 @@
 #include "clockwork_prefix.h"
 #ifndef _WIN32
 #include "StreamTestClient.h"
+#include <poll.h>
 #include "comms/StreamOscTransport.h"
 #endif
 
@@ -88,9 +89,15 @@ TEST_CASE("Device report reaches a stream client that names a port",
 
     const int fd = connectTcp(tcp.boundPort());
     writeFramed(fd, osc_test::message(CLOCKWORK_SYS("devices/report"), 57120).data);
+    // Pumped: the list is published as the audio thread renders, so a block a
+    // poll until the socket has a frame, then the frame (readFramed blocks).
     bool heard = false;
-    while (!heard) {
-        const auto frame = readFramed(fd);   // empty after 2 s of nothing
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!heard && std::chrono::steady_clock::now() < deadline) {
+        engine.pumpAudioBlock();
+        pollfd pfd{ fd, POLLIN, 0 };
+        if (::poll(&pfd, 1, 2) <= 0) continue;
+        const auto frame = readFramed(fd);
         if (frame.empty()) break;
         heard = osc_test::parseAddress(frame.data(), static_cast<uint32_t>(frame.size()))
              == CLOCKWORK_SYS("devices");

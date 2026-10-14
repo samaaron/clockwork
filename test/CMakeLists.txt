@@ -315,7 +315,22 @@ set(_CATCH_DISCOVER_TESTS_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/CatchAddTestsUtf8.
 # discovered names travel through a CMake list, where an unbalanced `[`
 # swallows every `;` up to the next `]`, fusing the case and the ones after
 # it into a single entry that matches nothing. Tags are fine; prose is not.
-catch_discover_tests(clockwork_tests PROPERTIES SKIP_RETURN_CODE 4)
+#
+# Most cases are pumped by the test thread on a sample-count clock
+# (EngineFixture::defaultConfig) and depend on no thread's timing, so they run
+# in parallel. A case whose claim is about a live audio thread, or about real
+# traffic arriving while nobody pumps, boots the headless driver
+# (EngineFixture::driverConfig) and is tagged [rt]: labelled `rt`, it takes
+# turns with the others so tagged. CI runs them in a step of their own, one at
+# a time, beside nothing (`ctest -L rt -j 1`), and everything else with
+# `-LE rt`. Every binary is registered the same way, so a case tagged [rt]
+# anywhere is run that way.
+function(clockwork_discover_tests target)
+    catch_discover_tests(${target} TEST_SPEC "~[rt]" PROPERTIES SKIP_RETURN_CODE 4)
+    catch_discover_tests(${target} TEST_SPEC "[rt]"
+                         PROPERTIES LABELS rt RESOURCE_LOCK realtime SKIP_RETURN_CODE 4)
+endfunction()
+clockwork_discover_tests(clockwork_tests)
 
 # ─── Attaching ───────────────────────────────────────────────────────────────
 # More than one host in one process. Its own executable because it walks the
@@ -330,7 +345,7 @@ target_link_libraries(clockwork_attach_tests PRIVATE ${CLOCKWORK_LIB_GROUP} Catc
 target_compile_definitions(clockwork_attach_tests PRIVATE
     JUCE_APPLICATION_NAME_STRING="clockwork-attach-tests"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
-catch_discover_tests(clockwork_attach_tests PROPERTIES SKIP_RETURN_CODE 4)
+clockwork_discover_tests(clockwork_attach_tests)
 
 # ─── Reserved lanes ──────────────────────────────────────────────────────────
 # The channels above the device, where a Link peer's audio lands.
@@ -360,13 +375,14 @@ target_compile_definitions(clockwork_lanes_reserved_tests PRIVATE
 if(MSVC)
     target_compile_options(clockwork_lanes_reserved_tests PRIVATE /W1 /wd4244 /wd4267 /wd4305 /permissive-)
 endif()
-catch_discover_tests(clockwork_lanes_reserved_tests PROPERTIES SKIP_RETURN_CODE 4)
+clockwork_discover_tests(clockwork_lanes_reserved_tests)
 
 # ─── The engine, booted whole ────────────────────────────────────────────────
 # A ClockworkEngine and the lanes fixture both own the process-global
 # audio_processor state, and the fixture never shuts down, so cases that boot
 # an engine live in their own executable. No device: manualAudioPump +
-# freewheelClock, the test renders the blocks.
+# freewheelClock, the test renders the blocks; the [rt] cases boot the
+# headless driver instead (clockwork_discover_tests above).
 #
 # The scheduled-out cases schedule something and pin what happens when the
 # scheduler fires it, so the executable exists only when there is a
@@ -487,7 +503,7 @@ target_compile_definitions(clockwork_engine_tests PRIVATE
 if(WIN32)
     target_link_libraries(clockwork_engine_tests PRIVATE ws2_32)
 endif()
-catch_discover_tests(clockwork_engine_tests PROPERTIES SKIP_RETURN_CODE 4)
+clockwork_discover_tests(clockwork_engine_tests)
 if(APPLE)
     # The MIDI case receives on a CoreMIDI virtual destination of its own.
     target_link_libraries(clockwork_engine_tests PRIVATE "-framework CoreMIDI")

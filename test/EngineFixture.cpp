@@ -16,6 +16,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -46,6 +47,28 @@ ClockworkEngine::Config EngineFixture::defaultConfig() {
     cfg.numOutputChannels = 2;
     cfg.numInputChannels  = 2;
     cfg.hostDrivesControl = engine_test::hostDrivesControlByDefault();
+    pumpByDefault(cfg);
+    return cfg;
+}
+
+void EngineFixture::pumpByDefault(ClockworkEngine::Config& cfg) {
+    // Pumped: the test thread renders every block (manualAudioPump) on a
+    // clock that is the sample count (freewheelClock), so nothing a case
+    // asserts can depend on how a real-time driver was scheduled, or on a
+    // runner being busy. A case whose claim is about real time asks for the
+    // headless driver itself (driverConfig), and is tagged [rt].
+    // CLOCKWORK_TEST_REALTIME=1 runs the whole suite on the driver instead,
+    // the shape it once had.
+    const char* realtime = std::getenv("CLOCKWORK_TEST_REALTIME");
+    const bool pumped = !(realtime && *realtime == '1');
+    cfg.manualAudioPump = pumped;
+    cfg.freewheelClock  = pumped;
+}
+
+ClockworkEngine::Config EngineFixture::driverConfig() {
+    auto cfg = defaultConfig();
+    cfg.manualAudioPump = false;
+    cfg.freewheelClock  = false;
     return cfg;
 }
 
@@ -62,6 +85,7 @@ EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg,
 void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs,
                          const std::function<void(ClockworkEngine&)>& beforeInit) {
     mManualPump = cfg.manualAudioPump;
+    mSampleRate = cfg.sampleRate;
 
     mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
         OscReply r;
@@ -140,12 +164,14 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
     };
 
     // Manual pump: replies are delivered after the audio thread ticks, and
-    // nothing ticks unless this thread does.
+    // nothing ticks unless this thread does. Two budgets, audio and wall
+    // clock, both spent before giving up (pollUntil says why).
     if (mManualPump) {
+        uint32_t owed = blocksOfAudio(timeoutMs);
         while (true) {
-            pumpBlock();
+            if (owed) { pumpBlock(); --owed; }
             if (take()) return true;
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (!owed && std::chrono::steady_clock::now() >= deadline) {
                 UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after "
                               << timeoutMs << "ms; replies held:" << repliesDump());
                 return false;
@@ -170,6 +196,11 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
         }
         mReplyCv.wait_until(lk, deadline);
     }
+}
+
+uint32_t EngineFixture::blocksOfAudio(int ms) const {
+    const double frames = double(ms) * double(mSampleRate) / 1000.0;
+    return static_cast<uint32_t>(std::ceil(frames / double(get_audio_buffer_samples())));
 }
 
 bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {
@@ -222,6 +253,7 @@ std::string EngineFixture::repliesDump() const {
 }
 
 void EngineFixture::stopHeadlessDriver() {
+    if (mManualPump) return;   // pumped: there is no driver to stop
     mEngine.mHeadlessDriver->signalThreadShouldExit();
     mEngine.mHeadlessDriver->stopThread(2000);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));

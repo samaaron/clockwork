@@ -119,9 +119,10 @@ phase_test() {
     setup_paths
     # Twice, as ci.yml's native job and for its reasons: each case in a
     # process of its own, then every case in one process in a shuffled order.
-    ctest --test-dir "$BUILD_DIR" --output-on-failure -j 2 --timeout 300
-    "$BUILD_DIR/test/clockwork_tests" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
-    "$BUILD_DIR/test/clockwork_engine_tests" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
+    ctest --test-dir "$BUILD_DIR" --output-on-failure -LE rt -j 4 --timeout 300
+    ctest --test-dir "$BUILD_DIR" --output-on-failure -L rt -j 1 --timeout 300
+    "$BUILD_DIR/test/clockwork_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
+    "$BUILD_DIR/test/clockwork_engine_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
 }
 
 phase_rust() {

@@ -35,8 +35,10 @@ struct CaseClock {
 
 constexpr int kPollMs = 50;
 
+// The watchdog watches the driver's thread, and the cases stall it: a driver,
+// and the cases on their own ([rt]).
 ClockworkEngine::Config watchdogConfig(const CaseClock& clock) {
-    auto cfg = EngineFixture::defaultConfig();
+    auto cfg = EngineFixture::driverConfig();
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 250;  // fast for tests; production default is much larger
     cfg.watchdogPollMs   = kPollMs;
@@ -67,7 +69,7 @@ bool runUntil(EngineFixture& fix, CaseClock& clock, int forMs, const std::functi
 
 } // namespace
 
-TEST_CASE("Watchdog: silent during normal operation", "[Watchdog]") {
+TEST_CASE("Watchdog: silent during normal operation", "[Watchdog][rt]") {
     CaseClock clock;
     EngineFixture fix(watchdogConfig(clock));
 
@@ -81,7 +83,7 @@ TEST_CASE("Watchdog: silent during normal operation", "[Watchdog]") {
 }
 
 TEST_CASE("Watchdog: restarts a stalled audio source and the engine answers again",
-          "[Watchdog]") {
+          "[Watchdog][rt]") {
     CaseClock clock;
     EngineFixture fix(watchdogConfig(clock));
     runHealthy(fix, clock, 500);   // the watchdog has seen the source live
@@ -108,7 +110,7 @@ TEST_CASE("Watchdog: restarts a stalled audio source and the engine answers agai
             == ClockworkEngine::AudioSource::Headless);
 }
 
-TEST_CASE("Watchdog: holds fire while a device swap is in flight", "[Watchdog]") {
+TEST_CASE("Watchdog: holds fire while a device swap is in flight", "[Watchdog][rt]") {
     CaseClock clock;
     EngineFixture fix(watchdogConfig(clock));
     runHealthy(fix, clock, 500);
@@ -133,11 +135,11 @@ TEST_CASE("Watchdog: holds fire while a device swap is in flight", "[Watchdog]")
 }
 
 TEST_CASE("Watchdog: with no clock given, it polls on a thread of its own",
-          "[Watchdog]") {
+          "[Watchdog][rt]") {
     // Every other case here owns the watchdog's clock; a product does not, and
     // gets the engine's thread polling on steady_clock. Only that it runs is
     // asserted: a loaded machine can only make it recover sooner.
-    auto cfg = EngineFixture::defaultConfig();
+    auto cfg = EngineFixture::driverConfig();
     cfg.callbackWatchdog = true;
     cfg.watchdogStallMs  = 250;
     cfg.watchdogPollMs   = 50;

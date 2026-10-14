@@ -38,6 +38,7 @@ TEST_CASE("EngineState: Running after init", "[EngineState]") {
     engine.onReply = [](const uint8_t*, uint32_t) {};
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
     CHECK(engine.engineState() == EngineState::Running);
@@ -49,6 +50,7 @@ TEST_CASE("EngineState: Stopped after shutdown", "[EngineState]") {
     engine.onReply = [](const uint8_t*, uint32_t) {};
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 0;
     engine.init(cfg);
     REQUIRE(engine.engineState() == EngineState::Running);
@@ -350,6 +352,7 @@ TEST_CASE("SharedMemory: engine creates an anonymous segment on boot", "[EngineS
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 59100;   // non-zero is what creates the segment
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -374,6 +377,7 @@ TEST_CASE("SharedMemory: segment survives a cold swap",
     ClockworkEngine engine;
     ClockworkEngine::Config cfg;
     cfg.headless = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.udpPort  = 59101;
     engine.init(cfg);
     const auto handle = engine.shmNativeHandle();

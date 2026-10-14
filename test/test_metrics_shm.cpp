@@ -32,6 +32,7 @@ ClockworkEngine::Config metricsShmConfig(unsigned port) {
     cfg.bufferSize    = 128;
     cfg.udpPort       = port;  // non-zero enables the public shm segment
     cfg.headless      = true;
+    EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     return cfg;
 }
 }  // namespace
