@@ -1747,11 +1747,21 @@ void ClockworkEngine::sendOSC(const uint8_t* data, uint32_t size) {
 }
 
 void ClockworkEngine::pumpAudioBlock() {
-    pumpAudioCallback(static_cast<uint32_t>(get_audio_buffer_samples()));
+    // One block of the DSP's size: the size is read under the pump gate,
+    // where a swap cannot be changing it.
+    pumpAudioCallback(0);
 }
 
 void ClockworkEngine::pumpAudioCallback(uint32_t frames,
                                         const std::function<void()>& afterEachBlock) {
+    // A cold swap holds the gate while the DSP is down. A block that lands
+    // then is dropped, as a device callback is while its device is stopped.
+    std::unique_lock<std::mutex> gate(mPumpGate, std::try_to_lock);
+    if (!gate.owns_lock()) {
+        mPumpsDroppedBySwap.fetch_add(1, std::memory_order_acq_rel);
+        return;
+    }
+
     // One renderer at a time. With a source active — the device callback or
     // the headless driver on its own thread — a block rendered here would be
     // a second concurrent caller of process_audio, a data race across the
@@ -1822,6 +1832,15 @@ void ClockworkEngine::pumpDevice(const float* const* inputs, int numInputs,
         return;
     }
     if (frames <= 0) return;
+    // A cold swap holds the gate while the DSP is down: this callback is
+    // dropped and the device hears silence, as from a device that is stopped.
+    std::unique_lock<std::mutex> gate(mPumpGate, std::try_to_lock);
+    if (!gate.owns_lock()) {
+        mPumpsDroppedBySwap.fetch_add(1, std::memory_order_acq_rel);
+        for (int ch = 0; ch < numOutputs; ++ch)
+            if (outputs[ch]) std::fill_n(outputs[ch], frames, 0.0f);
+        return;
+    }
     if (!mPumpedDevice) {
         mPumpedBufferFrames = mCurrentConfig.bufferSize > 0 ? mCurrentConfig.bufferSize : frames;
         smoothie::DeviceInfo device;
@@ -3730,6 +3749,13 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
     // --- Stop audio ---
     stopAudioSource();
+    // A manual pump is not a source the engine can stop: it renders whenever
+    // its caller's thread arrives. From here until audio restarts it tries
+    // this gate and drops its block (pumpAudioCallback, pumpDevice), so no
+    // pumped block renders against a DSP being torn down or built. Taken
+    // blocking, after the source has stopped: a block already rendering
+    // finishes first. Every exit path below releases it.
+    std::unique_lock<std::mutex> pumpGate(mPumpGate);
 
     // What the engine has said so far reaches its clients before the rings
     // go down with the arena — the user's notice before a recovery, this
@@ -4013,6 +4039,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         controlPark.resumeNow();
         startAudioSource();
         mProcessor.resume();
+        pumpGate.unlock();
         result.error = errStr;
         if (isCold) {
             // The rollback rebuilt the guest too, and that can fail like any build.
@@ -4081,6 +4108,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     controlPark.resumeNow();
     const bool delivered = startAudioSource();
     mProcessor.resume();
+    pumpGate.unlock();
 
     // A device that opened and started but never delivered a block is a failed
     // swap, as one that refused to open is: nothing is playing on it, whatever

@@ -285,8 +285,12 @@ public:
     // Render one device callback of `frames` on the calling thread, as the
     // device path does: one clock step for the whole callback, then its blocks
     // back to back, `afterEachBlock` after each. For tests that need what a
-    // device buffer of that size does to timing, not only to audio.
+    // device buffer of that size does to timing, not only to audio. `frames`
+    // 0 renders one block, of the DSP's size.
     void pumpAudioCallback(uint32_t frames, const std::function<void()>& afterEachBlock = {});
+    // Pumped blocks and device callbacks that landed while a swap had the DSP
+    // down, and were dropped rather than rendered against it.
+    uint32_t pumpsDroppedBySwap() const { return mPumpsDroppedBySwap.load(std::memory_order_acquire); }
     // The next manual pump starts the audio-thread clock afresh, as a device
     // starting does.
     void restartManualPump() { mManualPumpStarted = false; }
@@ -952,6 +956,14 @@ private:
     bool   mManualPumpStarted  = false;
     bool   mPumpedDevice       = false;   // pumpDevice started a device
     int    mPumpedBufferFrames = 0;       // its buffer: no callback is larger
+    // A manual pump (pumpAudioCallback, pumpDevice) renders under this gate,
+    // and switchDevice holds it from stopping the audio source until audio
+    // restarts, across the DSP's teardown and rebuild. The pump only tries
+    // the gate: a block that lands mid-swap is dropped and counted, as a
+    // device callback is dropped while its device is stopped — never
+    // rendered against a DSP being freed.
+    std::mutex            mPumpGate;
+    std::atomic<uint32_t> mPumpsDroppedBySwap{0};
 
     // Audio-plane ingress: the default OscIngress route writes the IN ring
     // directly. The ring pointers moved off the transport so it stays a dumb

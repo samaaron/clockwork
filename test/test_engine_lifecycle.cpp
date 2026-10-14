@@ -12,6 +12,8 @@
 #include "lanes/lanes.h"   // post-shutdown ABI guard tests
 #include <stdexcept>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 
 // =============================================================================
@@ -267,4 +269,56 @@ TEST_CASE("Engine refuses a manual audio block while a driver is rendering", "[l
     });
     INFO("engine log:" << fix.debugMessagesDump());
     REQUIRE(refused);
+}
+
+TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pumping goes on after",
+          "[lifecycle][pump][swap]") {
+    // A cold swap tears the DSP down and builds it again. A manual pump is
+    // not a source the swap can stop: its caller's thread arrives when it
+    // likes, and a block rendered against the DSP being freed is a data race
+    // (TSan caught one: a pumped test's wait against destroy_dsp on the
+    // device lane). The engine drops such a block, as a device callback is
+    // dropped while its device is stopped, and renders again once audio has
+    // restarted.
+    EngineFixture fix;
+    auto& engine = fix.engine();
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool dspDown = false, pumped = false;
+    uint32_t renderedDuring = 0;
+    std::thread pumper([&] {
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait(lk, [&] { return dspDown; });
+        }
+        const uint32_t before = engine.processor().processCount.load(std::memory_order_acquire);
+        for (int i = 0; i < 8; ++i) engine.pumpAudioBlock();
+        renderedDuring = engine.processor().processCount.load(std::memory_order_acquire) - before;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            pumped = true;
+        }
+        cv.notify_all();
+    });
+    // Runs on the swapping thread after destroy_dsp and before rebuild_dsp:
+    // the window the pump must stay out of.
+    engine.testRebuildFailure = [&]() -> std::string {
+        std::unique_lock<std::mutex> lk(mu);
+        dspDown = true;
+        cv.notify_all();
+        cv.wait(lk, [&] { return pumped; });
+        return "";
+    };
+
+    const uint32_t droppedBefore = engine.pumpsDroppedBySwap();
+    const auto result = engine.switchDevice("", 44100);   // a rate change: a cold swap
+    pumper.join();
+    REQUIRE(result.success);
+    CHECK(renderedDuring == 0);
+    CHECK(engine.pumpsDroppedBySwap() - droppedBefore == 8);
+
+    const uint32_t before = engine.processor().processCount.load(std::memory_order_acquire);
+    engine.pumpAudioBlock();
+    CHECK(engine.processor().processCount.load(std::memory_order_acquire) == before + 1);
 }
