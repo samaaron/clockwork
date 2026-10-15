@@ -615,6 +615,28 @@ recommended, with one change at step 5, noted there.
     shows is nothing, and sizing it from what boot actually takes is a
     measurement Sam has deferred.
 
+19. **What the pool made visible, and the tool for the next one.** The
+    first push failed SuperSonic's macOS native jobs only: the one-process
+    shuffled run aborted in `World_Cleanup` with "mutex lock failed:
+    Invalid argument". A destroyed or zeroed pthread mutex still locks on
+    Linux and refuses on macOS, which is why Linux, Windows and ASan were
+    green on the same seed, and why ASan could not see it at all: the
+    corruption was inside the guest's pool, which ASan does not watch. The
+    World's locks now live in that pool, so a corruption of it surfaced at
+    the lock rather than passing silently, as it had under the old heap.
+    Hunting it: the pool refuses and counts a double free (none here);
+    then a walk of the whole pool after every engine-thread operation
+    (`CLOCKWORK_POOL_CHECK=1`, `clockwork_heap_pool_check`) stopped at the
+    first broken header and named the allocation before it — scsynth's
+    audio bus, 64 channels by the embedded test's option, under a host
+    handing it 80 in and 80 out (lanes a previous test had reserved, which
+    the fixture's 2-in 2-out could not know about), overrun by every block.
+    scsynth now widens its bus to the host's channels and says so, as the
+    contract asks ("size buffers against these in dsp_new"). Two guest
+    globals that outlived their instance were tidied on the way (the piano
+    table, the node tree's indices). The check stays, off by default, as
+    the way to find the next one at its source.
+
 **Still to measure:** how much of its pool a heavy Sonic Pi session uses;
 whether the boot-time memsets commit the tap pages; the cost of a 20 MB
 copy on the worklet in postMessage mode; the embedded profiles on a device.

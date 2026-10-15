@@ -35,6 +35,7 @@
 #include "platform.h"
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <thread>
 
 extern "C" {
@@ -46,8 +47,37 @@ void   clockwork_heap_pool_dealloc(void* pool, void* ptr);
 size_t clockwork_heap_pool_area_overhead(void);
 size_t clockwork_heap_pool_used_bytes(const void* pool);
 size_t clockwork_heap_pool_peak_bytes(const void* pool);
+uint32_t clockwork_heap_pool_double_frees(const void* pool);
+int32_t  clockwork_heap_pool_check(const void* pool);
+size_t   clockwork_heap_pool_check_bad(void);
+size_t   clockwork_heap_pool_check_prev_payload(void);
+size_t   clockwork_heap_pool_check_prev_size(void);
 int    clockwork_router_arm(void* base, size_t bytes);   // rust/clockwork-heap/src/router.rs
 void   clockwork_router_guest_hooks(void* (*take)(size_t), void (*give)(void*), int (*holds)(const void*));
+}
+
+static void* g_pool = nullptr;           // the Rust pool's handle; NULL = no pool
+
+// CLOCKWORK_POOL_CHECK=1 in the environment: walk the whole pool after every
+// allocation and free on the engine thread and stop at the first one that
+// leaves it broken, naming the operation. A hunt, never a build setting:
+// the walk is the whole pool, every time.
+static int g_pool_check = -1;
+static bool pool_check_wanted() {
+    if (g_pool_check < 0) { const char* v = std::getenv("CLOCKWORK_POOL_CHECK"); g_pool_check = (v && *v && *v != '0') ? 1 : 0; }
+    return g_pool_check == 1;
+}
+static void pool_check(const char* op, const void* ptr, size_t bytes) {
+    if (!pool_check_wanted() || !g_pool) return;
+    const int32_t code = clockwork_heap_pool_check(g_pool);
+    if (code != 0) {
+        const size_t bad = clockwork_heap_pool_check_bad(), prev = clockwork_heap_pool_check_prev_payload(), psz = clockwork_heap_pool_check_prev_size();
+        clockwork_log("clockwork_pool: BROKEN after %s(0x%08x, %zu): check %d at block 0x%08x; the block before it is payload 0x%08x + %zu",
+                      op, (unsigned)(uintptr_t)ptr, bytes, (int)code, (unsigned)bad, (unsigned)prev, psz);
+        fprintf(stderr, "clockwork_pool: BROKEN after %s(%p, %zu): check %d at block %p; the block before it is payload %p + %zu\n",   // stdio-ok: a hunt
+                op, ptr, bytes, (int)code, (void*)bad, (void*)prev, psz);
+        std::abort();
+    }
 }
 
 // ── Engine-thread ownership, no locks ───────────────────────────────────────
@@ -94,10 +124,12 @@ static void stack_push(std::atomic<void*>& head_slot, void* ptr) {
 
 // ── The pool ────────────────────────────────────────────────────────────────
 
-static void*  g_pool = nullptr;           // the Rust pool's handle; NULL = no pool
 static void*  g_span = nullptr;           // the guest's bulk span the pool runs over
 static size_t g_span_bytes = 0;
 static void*  g_pending_area = nullptr;   // the span, handed to the Rust pool's first area request
+// A guest's double free, refused by the pool: said once per occurrence, with
+// the pointer, since the pool's own count is the only trace of it.
+static uint32_t g_double_frees_seen = 0;
 
 // The span's address range, so a free routes without asking the pool.
 // Written on the engine thread at boot, read lock-free from anywhere.
@@ -177,6 +209,7 @@ static void  hook_give(void* p)        { clockwork_pool_free(p); }
 
 static void forget_pool() {
     g_pool = nullptr;
+    g_double_frees_seen = 0;
     g_span = nullptr; g_span_bytes = 0; g_pending_area = nullptr;
     g_area_end.store(0, std::memory_order_relaxed);
     g_area_base.store(0, std::memory_order_relaxed);
@@ -205,7 +238,9 @@ void* clockwork_pool_alloc(size_t bytes) {
     if (!g_pool || !bytes) return nullptr;
     if (on_engine_thread()) {
         drain_on_engine_thread();
-        return clockwork_heap_pool_alloc(g_pool, bytes);
+        void* p = clockwork_heap_pool_alloc(g_pool, bytes);
+        pool_check("alloc", p, bytes);
+        return p;
     }
     // Foreign thread: system memory on its own thread, routed back to the
     // right place on free by the range check.
@@ -225,6 +260,12 @@ void clockwork_pool_free(void* ptr) {
     if (on_engine_thread()) {
         drain_on_engine_thread();
         clockwork_heap_pool_dealloc(g_pool, ptr);
+        pool_check("free", ptr, 0);
+        const uint32_t d = clockwork_heap_pool_double_frees(g_pool);
+        if (d != g_double_frees_seen) {
+            g_double_frees_seen = d;
+            clockwork_log("clockwork_pool_free: the guest freed 0x%08x twice (refused; %u so far)", (unsigned)(uintptr_t)ptr, (unsigned)d);
+        }
     } else {
         stack_push(g_deferred_frees, ptr);
     }
