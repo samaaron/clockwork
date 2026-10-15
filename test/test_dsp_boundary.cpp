@@ -156,8 +156,8 @@ TEST_CASE("dsp boundary: dsp_describe answers before any instance exists",
     // against its memory profile before booting audio, and refuses rather
     // than spills (test_dsp_regions.cpp). The placeholder's are modest so
     // every host in this tree meets them.
-    CHECK(info->arena_bytes_wanted == 512u * 1024u);
-    CHECK(info->arena_bulk_bytes_wanted == 128u * 1024u);
+    CHECK(info->memory_bytes_wanted == 512u * 1024u);
+    CHECK(info->memory_bulk_bytes_wanted == 128u * 1024u);
     // Five fields, and that is the whole declaration. Before the wants it had
     // only ever shrunk: verbs naming a guest's definitions went when
     // DspConfig::persistent took over surviving a rebuild
@@ -501,7 +501,7 @@ TEST_CASE("dsp boundary: the table names the guest's window once the guest binds
     CHECK(info->window_magic == 0x44554D59u);
     CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_MAGIC]   == info->window_magic);
     CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_VERSION] == info->window_version);
-    // And it is a published region, in the guest's published run.
-    CHECK(clockwork_arena_published(h, CLOCKWORK_ARENA_GUEST_WINDOW));
-    CHECK(w->offset + w->bytes <= h->guest_published_end);
+    // And it is a public region, in the guest-public area.
+    CHECK(clockwork_arena_public(h, CLOCKWORK_ARENA_GUEST_WINDOW));
+    CHECK(clockwork_arena_area_of(h, w) == CLOCKWORK_AREA_GUEST_PUBLIC);
 }

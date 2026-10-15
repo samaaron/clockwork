@@ -98,14 +98,34 @@ typedef struct DspConfig {
     void*    persistent;
     uint32_t persistent_bytes;
 
-    /* ── The guest's three regions ────────────────────────────────────────
+    /* ── The guest's memory, and the two bulk lanes ──────────────────────
      *
-     * EACH HAS EXACTLY ONE WRITER: the guest writes `arena` and `outbox`, the
-     * client writes `inbox`. `inbox` is const here, so a GUEST that writes it
-     * does not compile; the client holds the same bytes writable, and its own
-     * view of `outbox` is const for the same reason.
+     * A GUEST'S MEMORY, IN FOUR SENTENCES. You get two spans, one per speed:
+     * `memory` is fast and `memory_bulk` is bulk. Say how much of each you
+     * need (DspInfo::memory_bytes_wanted and memory_bulk_bytes_wanted, plus
+     * dsp_memory_bytes and dsp_memory_bulk_bytes for what your configuration
+     * adds) and clockwork gives exactly that, or refuses the boot and says
+     * why. Lay out your hot per-block state in `memory` by hand; everything
+     * you allocate as you run comes from `memory_bulk`, through clockwork's
+     * allocator (DspHost::alloc_bytes, or in Rust simply Box and Vec). There
+     * is nothing else: a sample arrives read-only in `assets`, what you hand
+     * back goes in `returns`, and your window, config and persistent store
+     * are in the arena above.
      *
-     * Bulk moves by not being copied. A client writes into `inbox` from its own
+     * On a desktop or the web the two speeds are one RAM and the two spans
+     * are slices of one block; a guest is written once and only the sizes
+     * change per target. On a device with two kinds of RAM (the ESP32-S3:
+     * ~512 KiB of internal SRAM behind 8 MiB of slower PSRAM) `memory` is
+     * internal SRAM and `memory_bulk` PSRAM, and the placement is the host's
+     * memory profile's, never a guest crate's. The rule for a device: touched
+     * every block goes fast; touched less than that goes bulk.
+     *
+     * EACH REGION HAS EXACTLY ONE WRITER: the guest writes `memory` and
+     * `returns`, the client writes `assets`. `assets` is const here, so a GUEST
+     * that writes it does not compile; the client holds the same bytes
+     * writable, and its own view of `returns` is const for the same reason.
+     *
+     * Bulk moves by not being copied. A client writes into `assets` from its own
      * thread and sends a short message saying where; the guest receives an
      * offset rather than a payload. Nothing large crosses the audio thread in
      * either direction, which matters because every entry point in this header
@@ -122,53 +142,66 @@ typedef struct DspConfig {
      * shared segment still hands over all three; a client in its own process
      * reads them in place. */
 
-    /* The guest's own arena: working memory that needs no allocator to reach.
-     * Clockwork reserves it, zeroes it at every dsp_new and never touches a
-     * byte after that. NOTHING ELSE WRITES HERE.
+    /* THE FAST SPAN: what the guest lays out by hand at dsp_new and holds
+     * for the instance's life, reached with no allocator — its tables, its
+     * pools, its buses, anything sized by its configuration and touched
+     * every block. Clockwork reserves it from fast RAM, sized to what the
+     * guest asks, zeroes it at every dsp_new and never touches a byte after
+     * that. NOTHING ELSE WRITES HERE, and no client can reach it: it is not
+     * in the arena.
      *
-     * NULL only if the host provides none at all. That is not a licence to
-     * allocate in dsp_process, which may not allocate either way — a guest
-     * without an arena takes what it needs in dsp_new and holds it. */
-    void*    arena;
-    uint32_t arena_bytes;
+     * NULL/0 for a guest that asked for none (a guest whose state is all
+     * allocated, a Rust guest that keeps it in a Box, say), where the host
+     * profile gives no floor either.
+     *
+     * Nothing in clockwork can stop a guest keeping its state in globals or
+     * taking it with malloc, and such a guest runs; but memory taken those
+     * ways lives wherever the linker or the allocator put it, which
+     * clockwork can neither tier on a device nor name as the guest's on a
+     * map, and a malloc on the audio thread is the one thing the whole
+     * engine is built to avoid. So clockwork counts them (guest_malloc.h):
+     * where the link lets it stand between the program and its allocator,
+     * every malloc and new made inside a guest entry point is counted as the
+     * guest's, and the metrics say what it holds and how often it allocated
+     * while processing. */
+    void*    memory;
+    uint32_t memory_bytes;
 
-    /* THE ARENA IS THE FAST TIER, AND THIS IS THE BULK ONE.
+    /* THE BULK SPAN: where everything the guest allocates as it runs comes
+     * from. Clockwork runs its allocator over the whole of it (DspHost::
+     * alloc_bytes and free_bytes; a Rust guest's Box and Vec go there by
+     * themselves, through clockwork's global allocator, while a guest entry
+     * point is open), so A GUEST NEVER WRITES IT BY HAND: the base and the
+     * size are here so a guest can tell its own range from a client's
+     * (an asset in the assets area is never freed), and for nothing else. Zeroed
+     * and started over at every dsp_new. On a device with two kinds of RAM
+     * this is the slow, large one.
      *
-     * A device with two kinds of RAM (the ESP32-S3: ~512 KiB of internal SRAM
-     * behind 8 MiB of slower PSRAM) hands the guest two arenas: `arena` is
-     * placed in the fast tier and `arena_bulk` in the bulk tier, so a guest can
-     * carve its hot state — VM slots, kernel state, wires — from the one and its
-     * cold, large state — loop cells, sample data, tap rings — from the other,
-     * and the placement is decided by the host's memory profile rather than
-     * inside each guest crate.
+     * The allocator is lock-free on the audio thread and answers NULL when
+     * the span is full and its one spare growth is spent; it never blocks,
+     * never grows on the audio thread and never reaches malloc. Sized by the
+     * guest's bulk want, or the host profile's default when the guest
+     * declares none (a desktop's 64 MB; what the client sized on the web).
      *
-     * Same rules as `arena`: the guest's alone, zeroed at every dsp_new, never
-     * touched by clockwork after that.
-     *
-     * NULL/0 ON EVERY SINGLE-REGION HOST (desktop, web, the NIF): there is one
-     * kind of memory, so there is nothing to place differently. A guest that
-     * would have put something in bulk puts it in `arena` instead, and
-     * clockwork has already checked `arena` can hold both wants (see
-     * DspInfo::arena_bulk_bytes_wanted). Test `arena_bulk` for NULL, never the
-     * platform. */
-    void*    arena_bulk;
-    uint32_t arena_bulk_bytes;
+     * NULL/0 only on a host with no pool at all (a no-DSP core). */
+    void*    memory_bulk;
+    uint32_t memory_bulk_bytes;
 
     /* Bulk in. THE CLIENT WRITES, THE GUEST ONLY READS — hence const. A guest
-     * that needs to mutate what arrived copies it into `arena` first.
+     * that needs to mutate what arrived copies it into its own memory first.
      *
      * A published range belongs to the guest until it says otherwise, so a
      * guest that reads in place rather than copying must say when it is done.
      * NULL/0 when the host offers no inbound bulk. */
-    const void* inbox;
-    uint32_t    inbox_bytes;
+    const void* assets;
+    uint32_t    assets_bytes;
 
     /* Bulk out. THE GUEST WRITES, THE CLIENT ONLY READS. Write the payload
      * here and send a short message saying where it landed, rather than
      * pushing it through emit_osc, which would copy it in the audio callback.
      * NULL/0 when the host offers no outbound bulk. */
-    void*    outbox;
-    uint32_t outbox_bytes;
+    void*    returns;
+    uint32_t returns_bytes;
 
     /* The guest's own configuration, written by the host, opaque here — how
        many buses, how many nodes, how big a wire pool. Clockwork reserves the
@@ -234,7 +267,7 @@ typedef struct DspHost {
      *
      * BULK DOES NOT GO HERE: sending copies the payload into the egress ring,
      * so a large reply is a large memcpy in the audio callback. Write it into
-     * DspConfig::outbox and send a short message saying where.
+     * DspConfig::returns and send a short message saying where.
      *
      * Returns non-zero if accepted. A full ring DROPS and counts rather than
      * blocking, so a guest that sends bulk here gets a refusal it can see. */
@@ -295,15 +328,15 @@ typedef struct DspHost {
     int (*send_sink)(void* ctx, ClockworkSink sink, const uint8_t* bytes,
                      uint32_t len, int64_t when);
 
-    /* Give back bytes clockwork allocated. Clockwork owns the heap the guest's
-       larger allocations come from and has to be told when one is finished
-       with. Callable from any thread, the audio thread included: freeing
-       is lock-free and may defer internally. Passing NULL, or a pointer
-       clockwork did not allocate, is ignored. */
+    /* Give back bytes taken through alloc_bytes. Callable from any thread,
+       the audio thread included: freeing is lock-free and a foreign thread's
+       free is parked for the engine thread to drain. NULL is ignored; a
+       pointer the guest's pool does not hold (a foreign thread's allocation,
+       which came from the system) goes back to where it came from. */
     void (*free_bytes)(void* ctx, void* ptr);
 
     /* The guest is done with an asset it was handed through dsp_asset: the
-     * slot in the inbox may be reclaimed. Clockwork tells the client that
+     * slot in the assets area may be reclaimed. Clockwork tells the client that
      * committed it (/clockwork/asset/released <id>), and the client's pool
      * takes the slot back. Callable from dsp_process and dsp_osc — it emits
      * one short message and nothing else. Returns non-zero if the id was a
@@ -311,18 +344,21 @@ typedef struct DspHost {
      * host with no asset facility. */
     int (*asset_release)(void* ctx, uint32_t id);
 
-    /* Take bytes from the heap clockwork owns; free_bytes gives them back.
+    /* Take bytes from the guest's bulk memory (DspConfig::memory_bulk), the
+     * span clockwork runs its allocator over; free_bytes gives them back.
      *
-     * This is where a DSP's larger, longer-lived allocations come from — a
-     * definition, a buffer a client asked for empty, an area for the DSP's own
-     * real-time pool when the arena cannot hold it — so that no DSP has to
-     * know which heap a host built, or reach past this header for one.
+     * This is where everything a C guest allocates as it runs comes from —
+     * a definition, a buffer a client asked for empty, a table — so that no
+     * guest ships an allocator of its own or reaches past this header for
+     * one. A Rust guest does not call this: its Box and Vec land in the same
+     * span by themselves while one of its entry points is open.
      *
-     * Lock-free and callable from ANY THREAD, the audio thread included: the
-     * heap is a pre-claimed pool, and a request it cannot meet answers NULL
-     * rather than blocking or growing on that thread. A host with no heap
-     * leaves this NULL and a DSP falls back to whatever it has. NULL for 0
-     * bytes. */
+     * Lock-free and callable from ANY THREAD, the audio thread included: on
+     * the engine thread from the pool, and a request it cannot meet answers
+     * NULL rather than blocking or growing on that thread; on any other
+     * thread from the system allocator, on that thread. 16-byte aligned.
+     * A host with no pool leaves this NULL and a guest falls back to
+     * whatever it has. NULL for 0 bytes. */
     void* (*alloc_bytes)(void* ctx, size_t bytes);
 
     /* ── Taps ────────────────────────────────────────────────────────────
@@ -375,26 +411,27 @@ typedef struct DspInfo {
        timed messages and deliver them when due. */
     int32_t holds_schedule;
 
-    /* WHAT THE DSP NEEDS FROM ITS ARENAS, in bytes, per tier. Static, like the
-     * rest of this struct, because a guest that carves everything it will ever
-     * hold at dsp_new knows the figure before any instance exists — a loop
-     * cell of so many seconds, a voice pool of so many slots — and the host
-     * should learn it before booting audio, not from a failed carve halfway
-     * through dsp_new.
+    /* WHAT THE DSP NEEDS OF ITS MEMORY, in bytes, per speed: the fast span
+     * it lays out by hand (DspConfig::memory) and the bulk span it allocates
+     * from (DspConfig::memory_bulk). Static, like the rest of this struct,
+     * because a guest that carves everything it will ever hold at dsp_new
+     * knows the figure before any instance exists — a loop cell of so many
+     * seconds, a voice pool of so many slots — and the host should learn it
+     * before booting audio, not from a failed carve halfway through dsp_new.
+     * What the guest's configuration adds is asked separately
+     * (dsp_memory_bytes, dsp_memory_bulk_bytes), and the host profile's
+     * default is a floor under each.
      *
      * Clockwork compares these with what it can offer and REFUSES dsp_new,
-     * with a logged reason, when a non-zero want cannot be met in the tier it
-     * names. It NEVER spills: a hot pool that silently landed in PSRAM is a
-     * performance cliff with no error, which is worse than a boot that says
-     * why it stopped. On a single-region host `arena` must hold BOTH wants,
-     * and that is what is checked there; on a tiered host each want is checked
-     * against its own tier.
+     * with a logged reason, when a non-zero want cannot be met in the speed
+     * it names. It NEVER spills: a hot pool that silently landed in PSRAM is
+     * a performance cliff with no error, which is worse than a boot that
+     * says why it stopped.
      *
-     * 0 means "no claim": take whatever is offered, including nothing. A guest
-     * that allocates from the system in dsp_new (the historical native
-     * arrangement) declares 0 and 0 and is unaffected. */
-    uint32_t arena_bytes_wanted;
-    uint32_t arena_bulk_bytes_wanted;
+     * 0 means "no claim": take what the profile offers. A guest whose state
+     * is all allocated declares 0 for the fast span and gets none. */
+    uint32_t memory_bytes_wanted;
+    uint32_t memory_bulk_bytes_wanted;
 
     /* Non-zero if the DSP wants the host's INBOUND EVENTS — what a MIDI port
      * or a game controller sent, as "/clockwork/midi/in/…",
@@ -428,13 +465,22 @@ typedef struct DspInfo {
    is linked against without booting audio. */
 const DspInfo* dsp_describe(void);
 
-/* The heap an instance built from this guest config will take from
-   (DspHost::alloc_bytes), in bytes: what its configuration makes it ask for — a
-   server guest's real-time pool is one of its options, and only the guest can
-   read that. Asked before the heap is taken, every build, so the heap holds it
-   on every host. 0: no claim beyond the memory profile's heap. Static, like
-   dsp_describe: no instance exists yet. `guest_config` is DspConfig's. */
-uint64_t dsp_heap_bytes(const void* guest_config, uint32_t guest_config_bytes);
+/* The fast span an instance built from this guest config lays out at
+   dsp_new (DspConfig::memory), in bytes: what its configuration asks for
+   beyond DspInfo::memory_bytes_wanted — a server guest's real-time pool is
+   one of its options, and only the guest can read that. Clockwork reserves
+   the larger of the two from fast RAM before dsp_new, every build. 0: the
+   static want is the whole of it. Static, like dsp_describe: no instance
+   exists yet. `guest_config` is DspConfig's. */
+uint64_t dsp_memory_bytes(const void* guest_config, uint32_t guest_config_bytes);
+
+/* The same for the bulk span (DspConfig::memory_bulk): what this
+   configuration will make the instance allocate as it runs, beyond
+   DspInfo::memory_bulk_bytes_wanted — buffers a client may ask for empty,
+   definitions. Clockwork reserves the largest of the two and the host
+   profile's default before dsp_new, every build. 0: no claim beyond those.
+   Static, like dsp_describe. */
+uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_bytes);
 
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 
@@ -505,7 +551,7 @@ void dsp_process(struct Dsp* dsp,
  * the audio thread during the drain, and the guest copies it again when it
  * fires.
  *
- * SO DO NOT SEND BULK THROUGH HERE. Write it into DspConfig::outbox and
+ * SO DO NOT SEND BULK THROUGH HERE. Write it into DspConfig::returns and
  * send a short message saying where. What belongs here is commands, parameters,
  * notes, and references to bulk that lives elsewhere.
  */
@@ -517,18 +563,19 @@ void dsp_osc(struct Dsp* dsp,
              int64_t block_time);
 
 
-/* ── Assets: bulk that enters through the inbox lane ─────────────────────── */
+/* ── Assets: bulk that enters through the assets area lane ─────────────────────── */
 
 /*
  * A sample, a wavetable, a synthdef bundle, a model: a large blob the guest
  * needs in memory and must never receive through the message ring. It enters
- * through the inbox lane (DspConfig::inbox), and only the CLIENT puts it there:
+ * through the assets area lane (DspConfig::assets), and only the CLIENT puts it there:
  * the client owns the lane and a pool over it (clockwork_asset_pool.h), writes
  * the bytes into a slot — decoding a file first if that is what the bytes
  * need, with clockwork_audio_file.h, which is a client API — and sends one
  * message naming the slot:
  *
  *   /clockwork/asset/commit  ,iiiiiif  id kind offset bytes channels frames rate
+ *                            (rate may come as an int: a whole number of Hz)
  *
  * The audio thread checks the range against the lane and hands the guest a
  * pointer through dsp_asset. No copy: the guest reads the client's bytes where
@@ -558,7 +605,7 @@ typedef struct ClockworkAsset {
     uint32_t    id;
     uint32_t    kind;           /* CLOCKWORK_ASSET_* */
     uint32_t    origin;         /* who committed it; opaque to the guest */
-    const void* bytes;          /* into the inbox; valid until the guest releases */
+    const void* bytes;          /* into the assets area; valid until the guest releases */
     uint32_t    byte_count;
     uint32_t    channels;       /* AUDIO_F32 only, else 0 */
     uint32_t    frames;

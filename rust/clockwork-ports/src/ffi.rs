@@ -32,6 +32,7 @@ use crate::registry;
 pub unsafe extern "C" fn clockwork_port_open(
     name: *const c_char, dir: c_int, channels: c_uint, capacity_frames: c_uint,
 ) -> c_uint {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     let n = if name.is_null() {
         String::new()
     } else {
@@ -51,6 +52,7 @@ pub unsafe extern "C" fn clockwork_port_open_shared(
     name: *const c_char, dir: c_int, channels: c_uint, capacity_frames: c_uint,
     storage: *mut u8, storage_bytes: usize, reset: c_int,
 ) -> c_uint {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     let n = if name.is_null() {
         String::new()
     } else {
@@ -83,6 +85,7 @@ pub extern "C" fn clockwork_port_set_signal(
 
 #[no_mangle]
 pub extern "C" fn clockwork_port_close(port: c_uint) {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     registry::close(port);
 }
 
@@ -247,6 +250,7 @@ pub extern "C" fn clockwork_port_name(port: c_uint) -> *const c_char {
 /// one case cannot leak slots into the next.
 #[no_mangle]
 pub extern "C" fn clockwork_port_close_all() {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     registry::close_all();
 }
 

@@ -202,6 +202,7 @@ dependencies = [
 name = "clockwork-ports"
 version = "0.1.0"
 dependencies = [
+ "clockwork-heap",
  "clockwork-slots",
  "portable-atomic",
 ]
@@ -225,6 +226,7 @@ dependencies = [
 name = "clockwork-sinks"
 version = "0.1.0"
 dependencies = [
+ "clockwork-heap",
  "clockwork-log",
  "clockwork-midi",
  "clockwork-osc-net",

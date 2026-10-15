@@ -506,7 +506,7 @@ if(EMSCRIPTEN)
     set(CLOCKWORK_SCHEDULER_SLOT_COUNT 8192 CACHE STRING "Timed events the scheduler can hold")
     set(CLOCKWORK_SCHEDULER_DATA_POOL_SIZE 4194304 CACHE STRING "Bytes of queued OSC payload the scheduler can hold")
     set(CLOCKWORK_SCHEDULER_SHED_LATE_MS 1000 CACHE STRING "Drop an event this many ms late rather than play it; 0 never drops")
-    set(CLOCKWORK_IN_BUFFER_SIZE 1048576 CACHE STRING "The OSC IN ring, bytes")
+    set(CLOCKWORK_IN_RING_SIZE 1048576 CACHE STRING "The OSC IN ring, bytes")
 else()
     set(CLOCKWORK_SCHEDULER_SLOT_COUNT 512 CACHE STRING "Timed events the scheduler can hold")
     set(CLOCKWORK_SCHEDULER_DATA_POOL_SIZE 524288 CACHE STRING "Bytes of queued OSC payload the scheduler can hold")
@@ -543,11 +543,17 @@ if(EMSCRIPTEN)
     math(EXPR _mb_max     "${_mem_max} / 1048576")
     math(EXPR _mb_arena   "${_mem_arena} / 1048576")
     message(STATUS "web memory: ${_mb_initial}MB initial, ${_mb_max}MB ceiling, ${_mb_arena}MB arena")
+    # Stand between the program and its allocator (src/guest_malloc.h):
+    # wasm-ld routes every malloc, calloc, realloc and free through
+    # clockwork's wrappers, which count the ones made inside a guest entry
+    # point. Costs a compare per call; changes what no allocation does.
+    option(CLOCKWORK_WEB_COUNT_GUEST_MALLOC "Count the guest's mallocs (-Wl,--wrap=malloc)" ON)
     set(CLOCKWORK_WEB_COMPILE_DEFS
         CLOCKWORK_WORKLET_CLOCK=1
+        CLOCKWORK_COUNT_GUEST_MALLOC=$<IF:$<BOOL:${CLOCKWORK_WEB_COUNT_GUEST_MALLOC}>,1,0>
         CLOCKWORK_AUDIO_NO_STDIO=1
         SCHEDULER_SHED_LATE_MS=${CLOCKWORK_SCHEDULER_SHED_LATE_MS}
-        CLOCKWORK_IN_BUFFER_SIZE=${CLOCKWORK_IN_BUFFER_SIZE}
+        CLOCKWORK_IN_RING_SIZE=${CLOCKWORK_IN_RING_SIZE}
         CLOCKWORK_MEM_ARENA_SIZE=${CLOCKWORK_WEB_MEM_ARENA_SIZE}u)
     # Every translation unit of the module — clockwork's, the DSP's, the C
     # under both — shares one heap with JavaScript and one set of codegen
@@ -612,7 +618,7 @@ set(CLOCKWORK_COMPILE_DEFS
     # includes shm_audio_buffer.hpp must agree, hence a global rather than a
     # per-target definition; test builds carry more so capture assertions have
     # samples to work with.
-    CLOCKWORK_SHM_AUDIO_SECONDS=$<IF:$<BOOL:${BUILD_TESTS}>,10,1>
+    CLOCKWORK_SCOPE_SECONDS=$<IF:$<BOOL:${BUILD_TESTS}>,10,1>
     CACHE INTERNAL "Compile definitions a header-only consumer must match")
 
 # ─── Host sources ────────────────────────────────────────────────────────────
@@ -634,7 +640,12 @@ set(CLOCKWORK_CORE_SOURCES
     # here; the device boot is in the device layer below.
     ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp
     ${CLOCKWORK_SRC}/lanes/lanes.cpp
-    ${CLOCKWORK_SRC}/clockwork_heap.cpp
+    # The guest's pool (src/clockwork_pool.h): clockwork's allocator over the
+    # guest's bulk memory, and the RT router's block.
+    ${CLOCKWORK_SRC}/clockwork_pool.cpp
+    # What the guest takes from malloc, counted (src/guest_malloc.h). The
+    # wrappers inside it link only where the link can wrap (the web).
+    ${CLOCKWORK_SRC}/guest_malloc.cpp
     ${CLOCKWORK_SRC}/tap_streams.cpp
     ${CLOCKWORK_SRC}/mem_region.cpp
     ${CLOCKWORK_SRC}/engine_support.cpp
@@ -1264,6 +1275,10 @@ if(EMSCRIPTEN)
     set(CLOCKWORK_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist/wasm" CACHE PATH
         "Where the module is written")
     set(CLOCKWORK_WEB_STACK_SIZE 1048576 CACHE STRING "The wasm stack, bytes")
+    # The linker's map beside the module (<name>.map): where it placed every
+    # symbol. scripts/static-map.mjs reduces it to <name>.symbols.json, which
+    # the dev tools read to name static memory. Build metadata, not shipped.
+    option(CLOCKWORK_WEB_LINK_MAP "Write the linker's map beside the web module" ON)
     set(CLOCKWORK_WEB_ASSERTIONS 0 CACHE STRING "emscripten -sASSERTIONS")
     set(CLOCKWORK_WEB_SAFE_HEAP 0 CACHE STRING "emscripten -sSAFE_HEAP")
     option(CLOCKWORK_WEB_KEEP_NAMES "Keep function names in the module (--profiling-funcs)" OFF)
@@ -1279,13 +1294,14 @@ if(EMSCRIPTEN)
     # worklet fails at run time, not at build time — so this list has to be
     # right, and it is clockwork's to keep: the worklet is clockwork's.
     set(CLOCKWORK_WEB_EXPORTS
-        ___wasm_call_ctors _clockwork_init _get_ring_buffer_base _clockwork_product_version
+        ___wasm_call_ctors _clockwork_memory_claim _clockwork_init _clockwork_boot_error _clockwork_malloc_mark_boot _get_arena_base _clockwork_product_version
         _clockwork_tick _process_audio _get_audio_output_bus _get_audio_input_bus
         _get_audio_num_output_buses _get_audio_num_input_buses _get_audio_buffer_samples
         _clockwork_clock_wasm_init _set_time_offset _get_time_offset
         _clockwork_log _clockwork_log_va _clockwork_log_raw
         _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
-        _clear_scheduler _clockwork_host_forward _clockwork_host_forwards _malloc _free
+        _clear_scheduler _clockwork_host_forward _clockwork_host_forwards
+        _clockwork_worklet_alloc _clockwork_worklet_free
         _clockwork_client_abi_version _clockwork_client_status_text
         _clockwork_client_open_memory
         _clockwork_client_close _clockwork_client_info
@@ -1334,6 +1350,10 @@ if(EMSCRIPTEN)
         -sASSERTIONS=${CLOCKWORK_WEB_ASSERTIONS}
         -sSAFE_HEAP=${CLOCKWORK_WEB_SAFE_HEAP}
         $<$<BOOL:${CLOCKWORK_WEB_KEEP_NAMES}>:--profiling-funcs>
+        $<$<BOOL:${CLOCKWORK_WEB_LINK_MAP}>:-Wl,--Map=${CLOCKWORK_WEB_DIST_DIR}/${CLOCKWORK_WEB_MODULE_NAME}.map>
+        # src/guest_malloc.cpp: the program's allocator calls go through
+        # clockwork, which counts the guest's. Allocations are untouched.
+        $<$<BOOL:${CLOCKWORK_WEB_COUNT_GUEST_MALLOC}>:-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free>
         -sERROR_ON_UNDEFINED_SYMBOLS=1)
     message(STATUS "web module: ${CLOCKWORK_WEB_DIST_DIR}/${CLOCKWORK_WEB_MODULE_NAME}.wasm")
 endif()

@@ -5,12 +5,12 @@
 
     Defines the WASM memory regions. The initial committed memory is small
     (heap + ring buffers + the guest's initial region). The guest region
-    The inbox grows on demand up to maxInboxSize by extending WASM memory.
+    The assets area grows on demand up to maxAssetsSize by extending WASM memory.
 
-    Both inboxSize and maxInboxSize can be overridden at runtime
+    Both assetsSize and maxAssetsSize can be overridden at runtime
     via Clockwork constructor options:
       memory: { guestMemorySize: 64 * 1024 * 1024 }  // 64MB committed at boot
-      memory: { maxInboxSize: 512 * 1024 * 1024 }  // 512MB ceiling
+      memory: { maxAssetsSize: 512 * 1024 * 1024 }  // 512MB ceiling
 
     Memory Layout:
       0-14MB:   WASM Heap (emscripten malloc, static data, stack) — and the
@@ -31,9 +31,9 @@
     allocator arena, sample frames, anything else — is the guest's business
     and is decided by the guest's own client code.
 
-    THE RINGS ARE INSIDE THE HEAP, not above it. `ring_buffer_storage` is a
+    THE RINGS ARE INSIDE THE HEAP, not above it. `arena_storage` is a
     static array, so the linker places it in the data segment; measured
-    2026-08-22 the regions span 6.72MB from `ringBufferBase`, all of it inside
+    2026-08-22 the regions span 6.72MB from `arenaBase`, all of it inside
     what was then an 8MB heap — leaving about 1MB for malloc and the stack.
 
     The number that matters is guestMemoryOffset, because emscripten's malloc
@@ -52,8 +52,9 @@
     Nothing measures this margin from a booted engine any more; two specs that
     did (rt_pool_isolation, memory_headroom) were cited here long after they
     stopped existing. What catches it now is in C++: clockwork_init refuses to boot
-    when clockwork heap's end reaches the guest region base, with the two
-    addresses in the message (see clockwork_heap_backing_end).
+    when malloc's frontier reaches a guest region the host placed itself, with
+    the two addresses in the message; and the guest's spans now come out of
+    the engine's own memory below that frontier, so there is nothing to reach.
 */
 
 /**
@@ -117,7 +118,7 @@ export const MemoryLayout = {
      * region).
      *
      * DO NOT LIST THE FIGURES HERE OR RE-DERIVE THE TOTAL BY HAND — a written
-     * total drifts from the build it describes, and SHM_TAP, the largest
+     * total drifts from the build it describes, and TAPS, the largest
      * region of the lot, is the one most easily forgotten. The regions are
      * laid out by
      * src/shared_memory.h from the build's own -D flags, and the module
@@ -125,7 +126,7 @@ export const MemoryLayout = {
      * (`sonic.bufferConstants`) and measure.
      *
      * Measured on the web build, 2026-08-22: the regions span 6.474MB from
-     * `ringBufferBase`, of which SHM_TAP is 4.097MB, SHM_AUDIO 1.500MB and
+     * `arenaBase`, of which TAPS is 4.097MB, SCOPE 1.500MB and
      * the OSC rings 1.125MB (IN 1MB + OUT 128KB). They sit inside the WASM
      * heap below, not in the reservation named here.
      */
@@ -144,55 +145,73 @@ export const MemoryLayout = {
      * through a config-block slot; guestMemorySize was 36MB for that reason,
      * "32MB RT pool + 4MB buffers". The 32MB moved here and the guest region
      * kept the 4MB it was actually using, so the total is unchanged. The
-     * engine's pool now comes from clockwork's heap through DspHost::alloc_bytes,
-     * the same way on every target, and on this one the heap takes the arena
-     * less its spare growth area (CLOCKWORK_HEAP_SIZE, CLOCKWORK_FAST_RESERVE
-     * in src/memory_profile.h).
+     * guest's two spans now come out of it — its fast memory, sized to what
+     * it declares (dsp_memory_bytes: scsynth's tables and its pool), and its
+     * bulk memory, which takes what is left after the RT router's block and
+     * the spare (CLOCKWORK_GUEST_MEMORY_BULK_BYTES, CLOCKWORK_FAST_RESERVE in
+     * src/memory_profile.h) — the same shape as on every other target.
      *
-     * It bounds the engine: a real-time pool the heap cannot hold fails the
-     * boot with the size in the message, rather than being served from memory
-     * clockwork does not own.
+     * It bounds the engine: a span the guest declares that does not fit
+     * fails the boot with the two figures in the message, rather than being
+     * served from memory clockwork does not own. engineOverhead below is what
+     * a client adds to a guest's declared total to size this.
      */
     memArenaSize: 32 * 1024 * 1024,  // 32MB
+
+    /**
+     * What the engine takes of memArenaSize beside the guest's two spans, in
+     * bytes: the RT router's block (CLOCKWORK_ROUTER_BYTES, 1 MB), the spare
+     * the guest's pool may grow into (CLOCKWORK_GUEST_SPARE_BYTES, 4 MB) and
+     * the placement arena's own headers. A client that sizes memArenaSize
+     * for a guest's declared memory (SuperSonic does, from scsynth's
+     * options) adds this, or the guest's bulk want does not fit and the
+     * boot is refused with the two figures in the message. Mirrors
+     * src/memory_profile.h's web figures; a generous round number, since
+     * the headers are a few hundred bytes.
+     */
+    engineOverhead: 6 * 1024 * 1024,
 
     ringBufferReserved: 2 * 1024 * 1024,  // 2MB — see the header: the rings do
                                           // not live here, and this only sets
                                           // where the guest's region starts
 
     /**
-     * Guest memory, committed at boot, in bytes.
+     * A fixed slice for the guest's fast memory, in bytes. 0: none.
      *
-     * One opaque region handed to the guest, which subdivides it however its
-     * own design requires. This replaced `rtPoolSize` (32MB, sized from a
-     * real-time-memory field in one engine's own config) and `bufferPoolSize`
-     * (4MB, audio samples) on 2026-08-31; the default is their sum, so a
-     * guest that splits it the old way gets exactly what it had before.
+     * The guest's fast memory (DspConfig::memory) is reserved by clockwork
+     * itself, from the engine's memory (memArenaSize), sized to what the guest
+     * asks — DspInfo::memory_bytes_wanted, and what its configuration adds
+     * through dsp_memory_bytes (scsynth: its tables and its real-time pool) —
+     * and so is its bulk memory, the span its allocations come from. The same
+     * on every platform. A host that wants to place the fast slice itself may
+     * still give one here; it is handed to the guest as is, and clockwork
+     * reserves no fast span.
      *
      * Override at runtime: memory: { guestMemorySize: N }
      */
-    guestMemorySize: 4 * 1024 * 1024,  // 4MB — fixed at boot; see memArenaSize
+    guestMemorySize: 0,
 
     /**
      * Bulk staging, committed at boot. ONE WRITER EACH: the client writes the
-     * inbox and the guest only reads it; the guest writes the outbox and the
+     * assets and the guest only reads it; the guest writes the returns area and the
      * client only reads it. Neither is the guest's arena, and nothing is
      * written from both ends — which is what removes the need for the two
      * sides to agree at runtime about which bytes belong to whom.
      *
-     * The INBOX sits at the top of the memory and is the only region that
+     * The ASSETS sits at the top of the memory and is the only region that
      * grows, because bulk arriving from the client is the only thing whose
-     * size a session discovers as it runs. See inboxOffset.
+     * size a session discovers as it runs. See assetsOffset.
      *
-     * Override at runtime: memory: { inboxSize: N, outboxSize: N }
+     * Override at runtime: memory: { assetsSize: N, returnsSize: N }
      */
-    inboxSize:  4 * 1024 * 1024,   // client -> guest, grows to maxInboxSize
-    outboxSize: 4 * 1024 * 1024,   // guest -> client, fixed
+    assetsSize:  4 * 1024 * 1024,   // client -> guest, grows to maxAssetsSize
+    returnsSize: 4 * 1024 * 1024,   // guest -> client, fixed
 
     /**
-     * Maximum inbox size in bytes — the hard ceiling for growth.
+     * Maximum assets size in bytes — the hard ceiling for growth.
      *
-     * WASM address space is RESERVED up to inboxOffset +
-     * maxInboxSize at construction and can never be raised afterwards;
+     * WASM address space is RESERVED up to assetsOffset +
+     * maxAssetsSize at construction and can never be raised afterwards;
      * only the committed size grows into it. That is why this is a build-time
      * cap rather than something a caller can lift at runtime.
      *
@@ -203,7 +222,7 @@ export const MemoryLayout = {
      * on this, because it appends a new pool per growth and keeps the earlier
      * pools' buffer references alive.
      */
-    maxInboxSize: 768 * 1024 * 1024,  // 768MB — bulk in; see memArenaSize
+    maxAssetsSize: 768 * 1024 * 1024,  // 768MB — bulk in; see memArenaSize
 
     /**
      * Guest memory byte offset from the start of the SharedArrayBuffer.
@@ -213,16 +232,16 @@ export const MemoryLayout = {
      * same heap) and the placement arena. Everything at or above it is the
      * guest's and clockwork never interprets it.
      */
-    get outboxOffset() {
+    get returnsOffset() {
         return this.wasmHeapSize + this.ringBufferReserved + this.memArenaSize;
     },
 
     get guestMemoryOffset() {
-        return this.outboxOffset + this.outboxSize;
+        return this.returnsOffset + this.returnsSize;
     },
 
     /**
-     * THE INBOX IS LAST, because it is the one region that grows.
+     * THE ASSETS IS LAST, because it is the one region that grows.
      *
      * Only the region at the top of the memory can grow in place — everything
      * above it would have to move, and a published range that moved would be a
@@ -231,28 +250,28 @@ export const MemoryLayout = {
      * impulse responses, however many of them a session turns out to load. The
      * guest's arena is sized once at boot, as an arena is.
      */
-    get inboxOffset() {
+    get assetsOffset() {
         return this.guestMemoryOffset + this.guestMemorySize;
     },
 
     /**
      * Total committed memory (derived)
-     * inboxOffset + inboxSize
+     * assetsOffset + assetsSize
      */
     get totalMemory() {
-        return this.inboxOffset + this.inboxSize;
+        return this.assetsOffset + this.assetsSize;
     },
 
     /**
      * Maximum total WASM memory (derived, used by build.sh for -sMAXIMUM_MEMORY).
-     * Computed as: inboxOffset + maxInboxSize.
+     * Computed as: assetsOffset + maxAssetsSize.
      *
      * This is the RESERVATION. It fixes the address space at construction and
      * cannot be raised later, so it is the one number a build must get right
      * up front; everything else is committed on demand beneath it.
      */
     get maxTotalMemory() {
-        return this.inboxOffset + Math.max(this.maxInboxSize, this.inboxSize);
+        return this.assetsOffset + Math.max(this.maxAssetsSize, this.assetsSize);
     },
 
     /**

@@ -50,7 +50,7 @@ import {
     IN_HEAD, IN_TAIL, IN_SEQUENCE, IN_WRITE_LOCK,
     OUT_HEAD, OUT_TAIL, OUT_SEQUENCE, OUT_READ,
     NRT_OUT_HEAD, NRT_OUT_TAIL, NRT_OUT_SEQUENCE, NRT_OUT_READ,
-} from './control_offsets.js';
+} from './ring_cursor_offsets.js';
 
 // src/ring/ring.h
 export const MESSAGE_MAGIC = 0xDEADBEEF;
@@ -75,24 +75,24 @@ export function ringAt(buffer, offset, size, words, { head, tail, read, sequence
  * The table also states the frame format, and a format this file does not
  * write is refused here, rather than written over.
  */
-export function engineRings(buffer, ringBufferBase, constants) {
+export function engineRings(buffer, arenaBase, constants) {
     if (constants.MESSAGE_MAGIC !== MESSAGE_MAGIC
         || constants.PADDING_MAGIC !== PADDING_MAGIC
         || constants.MESSAGE_HEADER_SIZE !== HEADER_BYTES) {
         throw new Error('the engine\'s ring format is not the one js/lib/ring.js reads and writes');
     }
     const words = new Int32Array(buffer);
-    const control = ringBufferBase + constants.CONTROL_START;
+    const control = arenaBase + constants.RING_CURSORS_START;
     const at = (byteOffset) => (control + byteOffset) / 4;
-    const ring = (start, size, cursors) => ringAt(buffer, ringBufferBase + start, size, words, cursors);
+    const ring = (start, size, cursors) => ringAt(buffer, arenaBase + start, size, words, cursors);
     return {
-        ingress: ring(constants.IN_BUFFER_START, constants.IN_BUFFER_SIZE, {
+        ingress: ring(constants.IN_RING_START, constants.IN_RING_SIZE, {
             head: at(IN_HEAD), tail: at(IN_TAIL), sequence: at(IN_SEQUENCE), lock: at(IN_WRITE_LOCK),
         }),
-        egress: ring(constants.OUT_BUFFER_START, constants.OUT_BUFFER_SIZE, {
+        egress: ring(constants.RT_OUT_RING_START, constants.RT_OUT_RING_SIZE, {
             head: at(OUT_HEAD), tail: at(OUT_TAIL), read: at(OUT_READ), sequence: at(OUT_SEQUENCE),
         }),
-        nrtEgress: ring(constants.NRT_OUT_BUFFER_START, constants.NRT_OUT_BUFFER_SIZE, {
+        nrtEgress: ring(constants.NRT_OUT_RING_START, constants.NRT_OUT_RING_SIZE, {
             head: at(NRT_OUT_HEAD), tail: at(NRT_OUT_TAIL), read: at(NRT_OUT_READ), sequence: at(NRT_OUT_SEQUENCE),
         }),
     };

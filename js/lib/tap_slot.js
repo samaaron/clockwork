@@ -11,7 +11,7 @@
 export const SLOT = Object.freeze({ STATE: 0, CHANNELS: 1, CAPACITY: 2, ACTIVATIONS: 3 });
 
 // Frames a reader keeps clear of the ring's oldest edge: the writer appends
-// several blocks back-to-back per hardware callback. SHM_TAP_READ_MARGIN_FRAMES,
+// several blocks back-to-back per hardware callback. TAP_READ_MARGIN_FRAMES,
 // clamped to a quarter of a small ring as copy_window clamps it.
 const READ_MARGIN_FRAMES = 2048;
 

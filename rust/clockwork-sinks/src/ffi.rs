@@ -33,6 +33,7 @@ use crate::sink::Stats;
 pub unsafe extern "C" fn clockwork_sink_open(
     kind: c_int, target: *const c_char, capacity: c_uint,
 ) -> c_uint {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     let t = if target.is_null() {
         String::new()
     } else {
@@ -44,6 +45,7 @@ pub unsafe extern "C" fn clockwork_sink_open(
 
 #[no_mangle]
 pub extern "C" fn clockwork_sink_close(sink: c_uint) {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     registry::close(sink);
 }
 
@@ -70,6 +72,7 @@ pub extern "C" fn clockwork_sink_set_host_emit(emit: Option<crate::endpoint::Hos
 pub unsafe extern "C" fn clockwork_sink_profile(
     kind: c_int, n: c_uint, cell_bytes: *const c_uint, cells: *const c_uint,
 ) -> c_int {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     if n == 0 || cell_bytes.is_null() || cells.is_null() { return 0; }
     // SAFETY: both valid for `n` reads, per the contract; nulls were refused.
     let (widths, depths) = unsafe {
@@ -190,5 +193,6 @@ pub extern "C" fn clockwork_sink_flush_all() -> c_uint {
 
 #[no_mangle]
 pub extern "C" fn clockwork_sink_close_all() {
+    let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's
     registry::close_all();
 }

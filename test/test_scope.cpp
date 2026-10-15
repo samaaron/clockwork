@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_raw_scope.cpp — the raw scope is clockwork's, written at the
+ * test_raw_scope.cpp — the scope is clockwork's, written at the
  * device edge inside every tick, on every host.
  *
  * Through the lanes ABI alone, which is what the worklet, a plugin and an
@@ -22,15 +22,15 @@ namespace {
 shm_audio_buffer* tap(uint32_t slot) {
     lanes_test::boot();
     const auto* h = clockwork_arena_header();
-    const auto* e = clockwork_arena_find(h, CLOCKWORK_ARENA_RAW_SCOPE);
+    const auto* e = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_SCOPE);
     REQUIRE(e != nullptr);
-    REQUIRE(slot < e->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS]);
+    REQUIRE(slot < e->geom[CLOCKWORK_GEOM_SCOPE_SLOTS]);
     auto* base = static_cast<uint8_t*>(clockwork_lanes_base());
-    return reinterpret_cast<shm_audio_buffer*>(base + e->offset + slot * e->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOT_BYTES]);
+    return reinterpret_cast<shm_audio_buffer*>(base + e->offset + slot * e->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES]);
 }
 }
 
-TEST_CASE("raw scope: both are formatted at boot at the device's channel count, and flow from the first tick",
+TEST_CASE("scope: both are formatted at boot at the device's channel count, and flow from the first tick",
           "[lanes][tap]") {
     auto* out = tap(CLOCKWORK_TAP_OUT);
     auto* in  = tap(CLOCKWORK_TAP_IN);
@@ -39,7 +39,7 @@ TEST_CASE("raw scope: both are formatted at boot at the device's channel count, 
     CHECK(out->channels == lanes_test::kOutChannels);
     CHECK(in->channels == lanes_test::kInChannels);
     CHECK(out->sample_rate == static_cast<uint32_t>(lanes_test::kSampleRate));
-    CHECK(out->capacity_frames == SHM_AUDIO_FRAMES);
+    CHECK(out->capacity_frames == SCOPE_FRAMES);
 
     const uint64_t before = out->write_position.load();
     lanes_test::tick();
@@ -47,7 +47,7 @@ TEST_CASE("raw scope: both are formatted at boot at the device's channel count, 
     CHECK(in->write_position.load() >= clockwork_block_size());
 }
 
-TEST_CASE("raw scope: the IN slot carries what the host put on the input bus, channel for channel",
+TEST_CASE("scope: the IN slot carries what the host put on the input bus, channel for channel",
           "[lanes][tap]") {
     auto* in = tap(CLOCKWORK_TAP_IN);
     const uint32_t bl = clockwork_block_size();
@@ -74,7 +74,7 @@ TEST_CASE("raw scope: the IN slot carries what the host put on the input bus, ch
     for (uint32_t i = 0; i < bl * lanes_test::kInChannels; ++i) bus[i] = 0.0f;
 }
 
-TEST_CASE("raw scope: the OUT slot carries what the guest rendered for the device, block for block",
+TEST_CASE("scope: the OUT slot carries what the guest rendered for the device, block for block",
           "[lanes][tap]") {
     auto* out = tap(CLOCKWORK_TAP_OUT);
     const uint32_t bl = clockwork_block_size();

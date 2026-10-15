@@ -297,7 +297,7 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
 // audio_processor.cpp.
 bool clockwork_event_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len);
-// "/clockwork/asset/…": the hand-off of a committed inbox slot to the guest
+// "/clockwork/asset/…": the hand-off of a committed assets slot to the guest
 // (dsp_api.h, "Assets"). Registered on the audio thread of every host, since
 // the guest is only ever reached from there.
 bool clockwork_asset_route(void* routeCtx, const void* callCtx,

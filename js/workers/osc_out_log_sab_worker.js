@@ -16,7 +16,7 @@
  * written here, peeking at frame magic to guess whether it had been lapped.
  */
 
-import { calculateInControlIndices } from '../lib/control_offsets.js';
+import { calculateInControlIndices } from '../lib/ring_cursor_offsets.js';
 import { getCurrentNTPFromPerformance as getCurrentNTP } from '../lib/osc_classifier.js';
 import { runSabWorker } from '../lib/sab_worker_loop.js';
 import { RingTap } from '../lib/ring.js';

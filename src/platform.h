@@ -59,8 +59,12 @@
 #include "calc_type.inc"
 
 // Cold-BSS attribute: push large, rarely-touched static storage into bulk RAM
-// so the audio path keeps fast RAM. In this tree it carries the whole ring
-// arena (ring_buffer_storage) and the scheduler's data pool.
+// so the audio path keeps fast RAM. Nothing in this tree carries it today: the
+// arena is hot (its cursors, rings, scope and metrics are touched every block,
+// and the table says so per region, clockwork_arena.h) and the scheduler's
+// store is hot too, so both stay in fast RAM, and a tiered profile keeps the
+// arena's bulk-tier regions small instead (memory_profile.h). It is here for
+// a bulk static when one is written.
 // Empty (no-op) on single-tier targets.
 #if defined(CLOCKWORK_PROFILE_TARGET_ESP32)
 #    include "esp_attr.h"

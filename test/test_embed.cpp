@@ -45,7 +45,7 @@ struct Handle {
     ClockworkEmbedConfig cfg = config();
 };
 shm_audio_buffer* outTap() {
-    const auto* e = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_RAW_SCOPE);
+    const auto* e = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_CLOCKWORK_SCOPE);
     REQUIRE(e != nullptr);
     return reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(clockwork_lanes_base()) + e->offset) + CLOCKWORK_TAP_OUT;
 }
@@ -188,7 +188,7 @@ TEST_CASE("embed: host input reaches the guest, a block late at most", "[embed]"
     const uint32_t block = clockwork_embed_block_size(e.h);
     // Constant input on both channels; after a few blocks the IN slot's newest
     // block is that constant (the first block may be padded with silence).
-    const auto* te = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_RAW_SCOPE);
+    const auto* te = clockwork_arena_find(clockwork_arena_header(), CLOCKWORK_ARENA_CLOCKWORK_SCOPE);
     auto* inTap = reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(clockwork_lanes_base()) + te->offset) + CLOCKWORK_TAP_IN;
     shm_audio_buffer_reader reader(inTap);
     reader.seek_to_live();

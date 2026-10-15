@@ -44,7 +44,7 @@ struct ClientImpl {
     ShmReaderLayout L;
 
     // Sequence-gap tracking, which is per handle. The ring's read CURSOR is
-    // not here: it lives in the control block and is shared, because polling
+    // not here: it lives in the ring cursors and is shared, because polling
     // takes from the ring. A reader that wants its own cursor opens a tap.
     ClockworkDrainState drain{};      // the OUT ring: the audio thread's replies
     ClockworkDrainState nrtDrain{};   // the NRT-out ring: the gateway's replies and broadcasts
@@ -58,8 +58,8 @@ struct ClientImpl {
     std::unique_ptr<detail_shm_segment::shm_segment_client> mapping;   // the segment, when this handle mapped it
 #endif
 
-    ControlPointers* control() const {
-        return reinterpret_cast<ControlPointers*>(base + L.control_offset);
+    RingCursors* control() const {
+        return reinterpret_cast<RingCursors*>(base + L.control_offset);
     }
 };
 
@@ -214,7 +214,7 @@ ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientIn
                       | CLOCKWORK_FEATURE_SCHEDULER
 #endif
                       | CLOCKWORK_FEATURE_TAPS
-                      | CLOCKWORK_FEATURE_RAW_SCOPE;
+                      | CLOCKWORK_FEATURE_SCOPE;
     // The geometry, from the words the engine wrote once at init
     // (init_memory, audio_processor.cpp) — the same ones a metrics reader
     // finds at the schema's audioSampleRate..audioInputChannels, read here
@@ -341,9 +341,9 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     // — is brought up to the read cursor only here, at the next poll. A writer
     // that fills the ring in between is refused, as any full ring refuses it,
     // rather than let on to bytes the caller is still reading. Both cursors
-    // live in the ring's control block, so a rebuild resets them together and
+    // live in the ring's cursors, so a rebuild resets them together and
     // a client that comes back after a crash simply polls on.
-    ControlPointers* ctl = c->control();
+    RingCursors* ctl = c->control();
     clockwork_ring_give_back(&ctl->out_tail, &ctl->out_read);
     clockwork_ring_give_back(&ctl->nrt_out_tail, &ctl->nrt_out_read);
 
@@ -379,32 +379,32 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
             *out = { c->base + c->L.tap_offset,
                      c->L.tap_header_bytes + c->L.tap_max * c->L.tap_slot_bytes, 0 };
             return CLOCKWORK_OK;
-        case CLOCKWORK_REGION_RAW_SCOPE:
+        case CLOCKWORK_REGION_SCOPE:
             *out = { c->base + c->L.audio_offset,
                      c->L.audio_slot_count * c->L.audio_slot_bytes, 0 };
             return CLOCKWORK_OK;
 
         // The bulk lanes live outside the blob. A handle over the segment
         // sees them — the segment carries both, at offsets its header names —
-        // and the inbox is the one region a client WRITES: it is the client's
+        // and the assets area is the one region a client WRITES: it is the client's
         // lane, and clockwork_asset_pool.h is how a client carves it. An
         // in-process handle over bare memory cannot see where the engine put
         // them; that host reaches them through the engine it owns, and absent
         // is the honest answer here.
-        case CLOCKWORK_REGION_INBOX:
+        case CLOCKWORK_REGION_ASSETS:
 #if !defined(__EMSCRIPTEN__)
             if (c->mapping) {
-                *out = { c->mapping->get_inbox(),
-                         static_cast<uint32_t>(c->mapping->get_inbox_size()), 1 };
+                *out = { c->mapping->get_assets(),
+                         static_cast<uint32_t>(c->mapping->get_assets_size()), 1 };
                 return CLOCKWORK_OK;
             }
 #endif
             return CLOCKWORK_E_ABSENT;
-        case CLOCKWORK_REGION_OUTBOX:
+        case CLOCKWORK_REGION_RETURNS:
 #if !defined(__EMSCRIPTEN__)
             if (c->mapping) {
-                *out = { const_cast<uint8_t*>(c->mapping->get_outbox()),
-                         static_cast<uint32_t>(c->mapping->get_outbox_size()), 0 };
+                *out = { const_cast<uint8_t*>(c->mapping->get_returns()),
+                         static_cast<uint32_t>(c->mapping->get_returns_size()), 0 };
                 return CLOCKWORK_OK;
             }
 #endif

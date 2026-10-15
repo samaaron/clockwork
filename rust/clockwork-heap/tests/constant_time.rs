@@ -50,15 +50,15 @@ fn thread_cpu() -> u64 {
     cycles
 }
 
-unsafe extern "C" fn new_area(size: usize) -> *mut c_void {
+unsafe extern "C" fn new_area(_ctx: *mut c_void, size: usize) -> *mut c_void {
     let l = std::alloc::Layout::from_size_align(size, 16).unwrap();
     // SAFETY: the pool never asks for zero bytes.
     unsafe { std::alloc::alloc(l) }.cast::<c_void>()
 }
-unsafe extern "C" fn free_area(_p: *mut c_void) {}
+unsafe extern "C" fn free_area(_ctx: *mut c_void, _p: *mut c_void) {}
 
 fn pool() -> HeapPool {
-    HeapPool::new(Some(new_area), Some(free_area), 48 * 1024 * 1024, 0)
+    HeapPool::new(Some(new_area), Some(free_area), core::ptr::null_mut(), 48 * 1024 * 1024, 0)
 }
 
 /// The thread's CPU time per alloc/free, best of five passes: what is left

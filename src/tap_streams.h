@@ -16,11 +16,11 @@
 extern "C" {
 // Answers the Rust side asks the host for. Defined in tap_streams.cpp.
 void* clockwork_shm_base(void);
-// The guest's tap region, and the engine's track taps: the same slot
-// shape, numbered after the guest's (trackFirst == maxTaps).
+// The tap region: a header, then the guest's slots, then the engine's
+// track slots, every slot the same shape, one index space from 0.
 int   clockwork_tap_geometry(size_t* start, size_t* headerSize, size_t* slotSize,
-                        size_t* maxTaps, unsigned* ringFrames, unsigned* channels,
-                        size_t* trackStart, size_t* trackSlots);
+                        size_t* guestSlots, size_t* trackSlots,
+                        unsigned* ringFrames, unsigned* channels);
 }
 
 #endif /* CLOCKWORK_TAP_STREAMS_H */

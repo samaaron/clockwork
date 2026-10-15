@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_assets.cpp — assets: bulk that enters the guest through the inbox lane.
+ * test_assets.cpp — assets: bulk that enters the guest through the assets area lane.
  *
  * A sample, a wavetable, a synthdef bundle: a large blob the guest needs in
  * memory and must never receive through the message ring. The client owns
@@ -85,8 +85,8 @@ uint64_t grownSince(uint64_t before) {
 
 // The lane, as the client writes it. The engine's view is const (the guest
 // reads it); the client is the one writer, which is exactly this side.
-uint8_t* inboxOf(EngineFixture& fx) {
-    return const_cast<uint8_t*>(fx.engine().guestInbox());
+uint8_t* assetsOf(EngineFixture& fx) {
+    return const_cast<uint8_t*>(fx.engine().guestAssets());
 }
 
 uint32_t checksum(const uint8_t* p, uint32_t n) {
@@ -119,18 +119,18 @@ Last lastAsset(EngineFixture& fx) {
 
 } // namespace
 
-TEST_CASE("asset: a committed slot reaches the guest as a pointer into the inbox", "[asset]") {
+TEST_CASE("asset: a committed slot reaches the guest as a pointer into the assets area", "[asset]") {
     EngineFixture fx;
-    uint8_t* inbox = inboxOf(fx);
-    REQUIRE(inbox != nullptr);
-    REQUIRE(fx.engine().guestInboxBytes() >= 65536);
+    uint8_t* assets = assetsOf(fx);
+    REQUIRE(assets != nullptr);
+    REQUIRE(fx.engine().guestAssetsBytes() >= 65536);
 
     // The client's bytes, at an offset of its choosing. The engine copies
     // nothing: the guest reads these very bytes, so a pattern written here is
     // the pattern the guest checksums.
     const uint32_t off = 4096, n = 1000;
-    for (uint32_t i = 0; i < n; ++i) inbox[off + i] = static_cast<uint8_t>((i * 7) ^ 0x5A);
-    const uint32_t expect = checksum(inbox + off, n);
+    for (uint32_t i = 0; i < n; ++i) assets[off + i] = static_cast<uint8_t>((i * 7) ^ 0x5A);
+    const uint32_t expect = checksum(assets + off, n);
 
     fx.send(commit(7, CLOCKWORK_ASSET_RAW, static_cast<int32_t>(off), static_cast<int32_t>(n)));
     OscReply ok;
@@ -146,10 +146,10 @@ TEST_CASE("asset: a committed slot reaches the guest as a pointer into the inbox
 
 TEST_CASE("asset: the audio kind carries channels, frames and rate, and must add up", "[asset]") {
     EngineFixture fx;
-    uint8_t* inbox = inboxOf(fx);
+    uint8_t* assets = assetsOf(fx);
     const uint32_t off = 8192, channels = 2, frames = 250;
     const uint32_t bytes = frames * channels * sizeof(float);
-    std::memset(inbox + off, 0, bytes);
+    std::memset(assets + off, 0, bytes);
 
     fx.send(commit(3, CLOCKWORK_ASSET_AUDIO_F32, static_cast<int32_t>(off), static_cast<int32_t>(bytes),
                    channels, frames, 48000.f));
@@ -173,9 +173,9 @@ TEST_CASE("asset: the audio kind carries channels, frames and rate, and must add
     CHECK(lastAsset(fx).id == 3);
 }
 
-TEST_CASE("asset: a range outside the inbox is refused before the guest sees it", "[asset]") {
+TEST_CASE("asset: a range outside the assets area is refused before the guest sees it", "[asset]") {
     EngineFixture fx;
-    const uint32_t size = fx.engine().guestInboxBytes();
+    const uint32_t size = fx.engine().guestAssetsBytes();
     // Establish a known last asset first.
     fx.send(commit(1, CLOCKWORK_ASSET_RAW, 0, 16));
     OscReply ok;
@@ -272,11 +272,11 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
         ordinary = grownSince(before);
     }
 
-    cfg.inboxBytes = want;
+    cfg.assetsBytes = want;
     cfg.udpPort    = segment ? 57341 : 0;
     const uint64_t before = residentBytes();
     EngineFixture fx(cfg);
-    REQUIRE(fx.engine().guestInboxBytes() == want);
+    REQUIRE(fx.engine().guestAssetsBytes() == want);
     const uint64_t grew = grownSince(before);
     INFO("an ordinary boot grew the resident set by " << (ordinary >> 20)
          << " MB, this one by " << (grew >> 20) << " MB");
@@ -295,15 +295,15 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
 
     // The far end is addressable: an asset at the last page of the lane
     // reaches the guest, which checksums the very bytes written there.
-    uint8_t* inbox = inboxOf(fx);
+    uint8_t* assets = assetsOf(fx);
     const uint32_t off = want - 4096, n = 512;
-    for (uint32_t i = 0; i < n; ++i) inbox[off + i] = static_cast<uint8_t>(i * 3 + 1);
+    for (uint32_t i = 0; i < n; ++i) assets[off + i] = static_cast<uint8_t>(i * 3 + 1);
     fx.send(commit(11, CLOCKWORK_ASSET_RAW, static_cast<int32_t>(off), static_cast<int32_t>(n)));
     OscReply ok;
     REQUIRE(fx.waitForReply("/clockwork/asset/committed", ok));
     const Last l = lastAsset(fx);
     CHECK(l.id == 11);
-    CHECK(l.sum == checksum(inbox + off, n));
+    CHECK(l.sum == checksum(assets + off, n));
 
     // AND THE MEASUREMENT CAN SEE A LANE THAT IS WRITTEN. Half of it, touched
     // a page at a time, must show up in the resident set — otherwise "it did
@@ -311,7 +311,7 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     if (before != 0) {
         const uint64_t half = want / 2;
         const uint64_t untouched = residentBytes();
-        for (uint64_t at = 0; at < half; at += 4096) inbox[at] = 1;
+        for (uint64_t at = 0; at < half; at += 4096) assets[at] = 1;
         const uint64_t touched = grownSince(untouched);
         INFO("writing " << (half >> 20) << " MB of the lane grew the resident set by "
              << (touched >> 20) << " MB");
@@ -328,14 +328,14 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
                 detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle())), &st);
         REQUIRE(c != nullptr);
         ClockworkRegion region {};
-        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_INBOX, &region) == CLOCKWORK_OK);
+        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &region) == CLOCKWORK_OK);
         CHECK(region.bytes == want);
-        CHECK(static_cast<uint8_t*>(region.base)[off] == inbox[off]);
+        CHECK(static_cast<uint8_t*>(region.base)[off] == assets[off]);
         clockwork_client_close(c);
     }
 }
 
-TEST_CASE("asset: a client over the segment sees the same inbox", "[asset][shm]") {
+TEST_CASE("asset: a client over the segment sees the same assets", "[asset][shm]") {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
     cfg.udpPort = 57340;   // non-zero: the engine carves the lanes from a public segment
     EngineFixture fx(cfg);
@@ -346,14 +346,14 @@ TEST_CASE("asset: a client over the segment sees the same inbox", "[asset][shm]"
             detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle())), &st);
     REQUIRE(c != nullptr);
 
-    ClockworkRegion inbox {};
-    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_INBOX, &inbox) == CLOCKWORK_OK);
-    REQUIRE(inbox.base != nullptr);
-    CHECK(inbox.bytes == fx.engine().guestInboxBytes());
-    CHECK(inbox.writable == 1);
+    ClockworkRegion assets {};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &assets) == CLOCKWORK_OK);
+    REQUIRE(assets.base != nullptr);
+    CHECK(assets.bytes == fx.engine().guestAssetsBytes());
+    CHECK(assets.writable == 1);
 
     // Two mappings of one lane: what the client writes, the guest reads.
-    static_cast<uint8_t*>(inbox.base)[300] = 0xC3;
-    CHECK(fx.engine().guestInbox()[300] == 0xC3);
+    static_cast<uint8_t*>(assets.base)[300] = 0xC3;
+    CHECK(fx.engine().guestAssets()[300] == 0xC3);
     clockwork_client_close(c);
 }

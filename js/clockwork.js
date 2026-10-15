@@ -23,7 +23,7 @@ import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
 import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
 import { readArena, regionBytes, REGION, REGION_NAMES } from "./lib/arena.js";
-import { controlReader } from "./lib/control_reader.js";
+import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
 // Timeout waiting for the DSP profile's synced reply from the engine
@@ -236,19 +236,19 @@ export class Clockwork {
     // copy of the formula did not, so every guest write was checked against a
     // base 32MB below the real one and refused. ?? rather than ||, so a
     // deliberate 0 for any part is not silently replaced by the default.
-    // The INBOX IS LAST and everything else is fixed, because only the top
-    // region can grow in place — see MemoryLayout.inboxOffset, which says why
+    // The ASSETS IS LAST and everything else is fixed, because only the top
+    // region can grow in place — see MemoryLayout.assetsOffset, which says why
     // bulk in is the thing that grows and the arena is not.
-    mem.outboxOffset      = (mem.wasmHeapSize ?? MemoryLayout.wasmHeapSize)
+    mem.returnsOffset      = (mem.wasmHeapSize ?? MemoryLayout.wasmHeapSize)
                           + (mem.ringBufferReserved ?? MemoryLayout.ringBufferReserved)
                           + (mem.memArenaSize ?? MemoryLayout.memArenaSize);
-    mem.guestMemoryOffset = mem.outboxOffset
-                          + (mem.outboxSize ?? MemoryLayout.outboxSize);
-    mem.inboxOffset       = mem.guestMemoryOffset
+    mem.guestMemoryOffset = mem.returnsOffset
+                          + (mem.returnsSize ?? MemoryLayout.returnsSize);
+    mem.assetsOffset       = mem.guestMemoryOffset
                           + (mem.guestMemorySize ?? MemoryLayout.guestMemorySize);
-    mem.totalMemory    = mem.inboxOffset + mem.inboxSize;
-    mem.maxTotalMemory = mem.inboxOffset + Math.max(mem.maxInboxSize,
-                                                    mem.inboxSize);
+    mem.totalMemory    = mem.assetsOffset + mem.assetsSize;
+    mem.maxTotalMemory = mem.assetsOffset + Math.max(mem.maxAssetsSize,
+                                                    mem.assetsSize);
     return mem;
   }
 
@@ -360,11 +360,11 @@ export class Clockwork {
     };
 
     // The growth ceiling, resolved once: caller's option → layout default →
-    // the committed size, which means "do not grow". It belongs to the INBOX,
+    // the committed size, which means "do not grow". It belongs to the ASSETS,
     // which is the region that grows.
-    this.#config.effectiveMaxInbox = options.maxInbox
-        || this.#config.memory.maxInboxSize
-        || this.#config.memory.inboxSize;
+    this.#config.effectiveMaxAssets = options.maxAssets
+        || this.#config.memory.maxAssetsSize
+        || this.#config.memory.assetsSize;
 
 
     this.#fetchRetryConfig = {
@@ -419,7 +419,7 @@ export class Clockwork {
   get clock() { return this.#clock; }
   get mode() { return this.#config.mode; }
   get bufferConstants() { return this.#metricsReader.bufferConstants; }
-  get ringBufferBase() { return this.#metricsReader.ringBufferBase; }
+  get arenaBase() { return this.#metricsReader.arenaBase; }
   get sharedBuffer() { return this.#metricsReader.sharedBuffer; }
   /*
    * The guest's memory object, for a client that maps its own region.
@@ -428,7 +428,7 @@ export class Clockwork {
    * references valid but still sized to the OLD length, so a client holding
    * one cannot see memory it has just grown into. The Memory object always
    * yields the current buffer. Null in postMessage mode, where the client
-   * has no heap of its own and must go through writeInbox.
+   * has no heap of its own and must go through writeAssets.
    */
   get wasmMemory() { return this.#wasmMemory; }
   /*
@@ -918,9 +918,9 @@ export class Clockwork {
   #resetRingEpoch() {
     if (this.#config.mode !== 'sab' || !this.#wasmMemory) return;
     const bc = this.#metricsReader?.bufferConstants;
-    const ringBufferBase = this.#metricsReader?.ringBufferBase;
-    if (!bc || ringBufferBase == null || bc.CONTROL_START == null) return;
-    const view = new Int32Array(this.#wasmMemory.buffer, ringBufferBase + bc.CONTROL_START, 12);
+    const arenaBase = this.#metricsReader?.arenaBase;
+    if (!bc || arenaBase == null || bc.RING_CURSORS_START == null) return;
+    const view = new Int32Array(this.#wasmMemory.buffer, arenaBase + bc.RING_CURSORS_START, 12);
     // Heads, tails, sequences, the JS-side log tail — and the IN writer
     // lock. The engine's own epoch reset deliberately leaves that lock
     // alone, because on ITS path a live producer may be holding it. Here
@@ -1088,15 +1088,15 @@ export class Clockwork {
       // so the window starts where the metrics end.
       const snapshot = this.#metricsReader.getSnapshotBuffer();
       if (!snapshot) return null;
-      return { buffer: snapshot, offset: bc.METRICS_SIZE, size: bc.SHM_WINDOW_SIZE };
+      return { buffer: snapshot, offset: bc.METRICS_SIZE, size: bc.GUEST_WINDOW_SIZE };
     }
 
     const sab = this.#metricsReader.sharedBuffer;
     if (!sab) return null;
     return {
       buffer: sab,
-      offset: this.#metricsReader.ringBufferBase + bc.SHM_WINDOW_START,
-      size:   bc.SHM_WINDOW_SIZE,
+      offset: this.#metricsReader.arenaBase + bc.GUEST_WINDOW_START,
+      size:   bc.GUEST_WINDOW_SIZE,
     };
   }
 
@@ -1107,23 +1107,21 @@ export class Clockwork {
   /** @returns {object} Cached TypedArray views for a tap stream slot (lazily created) */
   #getTapSlotViews(tapNum) {
     if (!this.#tapViews) {
-      this.#tapViews = new Array(this.#metricsReader.bufferConstants.SHM_TAP_SLOT_COUNT);
+      this.#tapViews = new Array(this.#metricsReader.bufferConstants.TAP_SLOT_COUNT);
     }
     let views = this.#tapViews[tapNum];
     if (views) return views;
 
     const bc = this.#metricsReader.bufferConstants;
     const sab = this.#metricsReader.sharedBuffer;
-    const base = this.#metricsReader.ringBufferBase;
-    // One index space: the guest's slots in the tap region, then the
-    // engine's track taps in the clockwork block (docs/ARENA.md).
-    const slotOffset = tapNum < bc.SHM_TAP_MAX_TAPS
-      ? base + bc.SHM_TAP_START + bc.SHM_TAP_HEADER_SIZE + tapNum * bc.SHM_TAP_SLOT_SIZE
-      : base + bc.SHM_TRACK_TAPS_START + (tapNum - bc.SHM_TAP_MAX_TAPS) * bc.SHM_TAP_SLOT_SIZE;
+    const base = this.#metricsReader.arenaBase;
+    // One index space in one region: the guest's slots, then the engine's
+    // track taps, one stride apart (docs/ARENA.md).
+    const slotOffset = base + bc.TAPS_START + bc.TAPS_HEADER_SIZE + tapNum * bc.TAP_SLOT_SIZE;
     views = tapSlotViews(sab, slotOffset, {
-      headerBytes: bc.SHM_TAP_SLOT_HEADER_SIZE,
-      ringFrames: bc.SHM_TAP_RING_FRAMES,
-      channels: bc.SHM_TAP_CHANNELS,
+      headerBytes: bc.TAP_SLOT_HEADER_SIZE,
+      ringFrames: bc.TAP_RING_FRAMES,
+      channels: bc.TAP_CHANNELS,
     });
     this.#tapViews[tapNum] = views;
     return views;
@@ -1153,7 +1151,7 @@ export class Clockwork {
     const e = arena?.entries.get(id);
     if (!e) return null;
     return { id, name: REGION_NAMES[id] ?? `region ${id}`, offset: e.offset, byteLength: e.bytes, owner: e.owner, audience: e.audience, geom: e.geom,
-             bytes: regionBytes(this.sharedBuffer, this.ringBufferBase, e) };
+             bytes: regionBytes(this.sharedBuffer, this.arenaBase, e) };
   }
 
   /** Every region the arena carves, as region() gives them, in table order. */
@@ -1166,19 +1164,19 @@ export class Clockwork {
   arena() { return this.#arena(); }
 
   #arena() {
-    const buf = this.sharedBuffer, base = this.ringBufferBase;
+    const buf = this.sharedBuffer, base = this.arenaBase;
     if (!buf || base == null) return null;
     try { return readArena(buf, base); } catch { return null; }
   }
 
   /**
-   * The control plane's cursors (lib/control_reader.js): each ring's head and
+   * The control plane's cursors (lib/ring_cursors_reader.js): each ring's head and
    * tail, the last sequence number either way, the status flags. Null when not SAB.
    */
-  control(into = {}) {
-    const r = this.region(REGION.CONTROL);
+  ringCursors(into = {}) {
+    const r = this.region(REGION.CLOCKWORK_RING_CURSORS);
     if (!r) return null;
-    return controlReader(this.sharedBuffer, this.ringBufferBase + r.offset)(into);
+    return ringCursorsReader(this.sharedBuffer, this.arenaBase + r.offset)(into);
   }
 
   /**
@@ -1188,7 +1186,7 @@ export class Clockwork {
    * @returns {null|{ in: RingLevel, out: RingLevel, nrtOut: RingLevel }} where RingLevel is { used, peak, capacity, sequence }
    */
   ringLevels() {
-    const mx = this.getMetricsArray(), c = this.control();
+    const mx = this.getMetricsArray(), c = this.ringCursors();
     if (!mx || !c) return null;
     return {
       in: { used: mx[IN_BUFFER_USED_BYTES], peak: mx[IN_BUFFER_PEAK_BYTES], capacity: mx[CTX_IN_BUFFER_CAPACITY], sequence: c.inSequence },
@@ -1212,8 +1210,8 @@ export class Clockwork {
     if (!this.#initialized) return null;
 
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return null;
-    if (tapNum < 0 || tapNum >= bc.SHM_TAP_SLOT_COUNT) return null;
+    if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return null;
+    if (tapNum < 0 || tapNum >= bc.TAP_SLOT_COUNT) return null;
 
     // TODO: PM mode — read from latest heartbeat snapshot
     if (!this.#metricsReader.sharedBuffer) return null;
@@ -1233,8 +1231,8 @@ export class Clockwork {
   getTapActivations(tapNum) {
     if (!this.#initialized) return null;
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return null;
-    if (tapNum < 0 || tapNum >= bc.SHM_TAP_SLOT_COUNT) return null;
+    if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return null;
+    if (tapNum < 0 || tapNum >= bc.TAP_SLOT_COUNT) return null;
     if (!this.#metricsReader.sharedBuffer) return null;
     return tapSlotActivations(this.#getTapSlotViews(tapNum));
   }
@@ -1247,11 +1245,11 @@ export class Clockwork {
     if (!this.#initialized) return [];
 
     const bc = this.#metricsReader.bufferConstants;
-    if (!bc || bc.SHM_TAP_START == null || bc.SHM_TAP_SLOT_COUNT == null) return [];
+    if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return [];
     if (!this.#metricsReader.sharedBuffer) return [];
 
     const taps = [];
-    for (let i = 0; i < bc.SHM_TAP_SLOT_COUNT; i++) {
+    for (let i = 0; i < bc.TAP_SLOT_COUNT; i++) {
       const views = this.#getTapSlotViews(i);
       if (tapSlotLive(views)) {
         taps.push({ index: i, channels: views.meta[1] });
@@ -1277,7 +1275,7 @@ export class Clockwork {
   // ============================================================================
   // AUDIO CAPTURE API
   //
-  // The raw scope is clockwork's and flow from boot: the OUT slot is what
+  // The scope is clockwork's and flow from boot: the OUT slot is what
   // left for the device each block, written by the tick at the device edge
   // (audio_processor.cpp), the IN slot what arrived. A capture is a reader's
   // notion — startCapture notes the writer's cursor, stopCapture returns
@@ -1454,11 +1452,12 @@ export class Clockwork {
   // ============================================================================
 
   /**
-   * Where the guest's memory is, and how far it may grow.
+   * The fixed slice the layout gave the guest for its working memory, if any.
    *
-   * Clockwork reserves this region and never interprets a byte of it. What
-   * lives there — an allocator arena, sample frames, a wavetable, anything —
-   * is decided entirely by the guest and its client code.
+   * By default none (size 0): clockwork reserves the guest's working memory
+   * itself, inside the placement arena, sized to what the guest asks
+   * (js/memory_layout.js guestMemorySize). What lives there is the guest's
+   * alone; no client reads it.
    *
    * @returns {{offset: number, size: number, maxSize: number}} byte addresses
    *          in the guest's own address space
@@ -1468,7 +1467,7 @@ export class Clockwork {
     return {
       offset:  mem.guestMemoryOffset,
       size:    mem.guestMemorySize,
-      maxSize: mem.guestMemorySize,   // fixed at boot: the inbox is what grows
+      maxSize: mem.guestMemorySize,   // fixed at boot: the assets area is what grows
     };
   }
 
@@ -1483,20 +1482,20 @@ export class Clockwork {
    *
    * @returns {{offset: number, size: number}}
    */
-  inbox() {
+  assets() {
     const mem = this.#config.memory;
-    // SIZE IS MEASURED, NOT REMEMBERED. growInbox moves the end of the
+    // SIZE IS MEASURED, NOT REMEMBERED. growAssets moves the end of the
     // memory, so reading it back keeps a grown region from being reported at
     // its boot size — which would refuse every write past the initial commit,
     // since the range check is what a caller is held to. In postMessage mode
-    // there is no heap here to measure, so growInbox maintains the number.
+    // there is no heap here to measure, so growAssets maintains the number.
     const committed = this.#wasmMemory
-      ? Math.max(0, this.#wasmMemory.buffer.byteLength - mem.inboxOffset)
-      : mem.inboxSize;
+      ? Math.max(0, this.#wasmMemory.buffer.byteLength - mem.assetsOffset)
+      : mem.assetsSize;
     return {
-      offset:  mem.inboxOffset,
+      offset:  mem.assetsOffset,
       size:    committed,
-      maxSize: this.#config.effectiveMaxInbox ?? mem.maxInboxSize,
+      maxSize: this.#config.effectiveMaxAssets ?? mem.maxAssetsSize,
     };
   }
 
@@ -1505,24 +1504,24 @@ export class Clockwork {
    *
    * @returns {{offset: number, size: number}}
    */
-  outbox() {
+  returns() {
     const mem = this.#config.memory;
-    return { offset: mem.outboxOffset, size: mem.outboxSize };
+    return { offset: mem.returnsOffset, size: mem.returnsSize };
   }
 
   /**
-   * Commit more inbox, growing the WASM heap by whole pages.
+   * Commit more assets, growing the WASM heap by whole pages.
    *
    * The CEILING CANNOT MOVE. `maximum` is fixed when the memory is
    * constructed and reserves address space that growth then commits into, so
-   * this can only ever reach `inbox().maxSize`. A client that needs more
+   * this can only ever reach `assets().maxSize`. A client that needs more
    * than that must ask for it before boot, not here.
    *
    * @param {number} bytes  how much more is needed, rounded up to whole pages
    * @returns {Promise<boolean>} false if the ceiling refused it
    */
-  async growInbox(bytes) {
-    this.#ensureInitialized("grow inbox");
+  async growAssets(bytes) {
+    this.#ensureInitialized("grow assets");
     const pages = Math.ceil(bytes / 65536);
     if (pages <= 0) return true;
 
@@ -1533,16 +1532,16 @@ export class Clockwork {
     }
     // PM mode: the worklet owns the only heap there is, so it does the growing.
     // There is nothing here to measure afterwards, so the committed size is
-    // carried forward by hand — see inbox().
+    // carried forward by hand — see assets().
     const growId = ++this.#guestGrowSeq;
     return this.#workletReply(
       { type: "growMemory", growId, pages },
       "memoryGrown",
       (d) => d.growId === growId,
-      "grow inbox",
+      "grow assets",
     ).then((d) => {
       const ok = !!d.success;
-      if (ok) this.#config.memory.inboxSize += pages * 65536;
+      if (ok) this.#config.memory.assetsSize += pages * 65536;
       return ok;
     }).catch(() => false);
   }
@@ -1568,27 +1567,27 @@ export class Clockwork {
   }
 
   /**
-   * Put bytes into the INBOX at `offset`, for the guest to read.
+   * Put bytes into the ASSETS at `offset`, for the guest to read.
    *
    * SAB mode writes straight into the shared heap; postMessage mode ships the
    * bytes to the worklet to write. Bulk never rides OSC ingress either way.
    *
-   * OFFSET, NOT POINTER — measured from the base of the inbox. Native maps the
+   * OFFSET, NOT POINTER — measured from the base of the assets area. Native maps the
    * same region at a different address than the engine's, so an absolute
    * pointer names the wrong bytes there without faulting.
    *
-   * @param {number} offset  a byte offset into `inbox()`
+   * @param {number} offset  a byte offset into `assets()`
    * @param {ArrayBuffer|ArrayBufferView} bytes
    * @returns {Promise<{offset: number, bytes: number}>}
    */
-  async writeInbox(offset, bytes) {
-    this.#ensureInitialized("write inbox");
+  async writeAssets(offset, bytes) {
+    this.#ensureInitialized("write assets");
     const src = ArrayBuffer.isView(bytes)
       ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       : new Uint8Array(bytes);
 
-    const region = this.inbox();
-    this.#checkGuestRange(offset, src.byteLength, region, "write inbox");
+    const region = this.assets();
+    this.#checkGuestRange(offset, src.byteLength, region, "write assets");
     const ptr = region.offset + offset;
 
     if (this.#config.mode === "sab") {
@@ -1639,23 +1638,23 @@ export class Clockwork {
   }
 
   /**
-   * Read bytes out of the OUTBOX, which only the guest writes.
+   * Read bytes out of the RETURNS, which only the guest writes.
    *
-   * The mirror of writeInbox: a guest writes a blob into the outbox and sends a
+   * The mirror of writeAssets: a guest writes a blob into the returns area and sends a
    * short message saying where. `offset` is region-relative, as there.
    *
    * ASYNC ON BOTH TRANSPORTS, though SAB could answer synchronously — a
    * signature that changed shape with the transport would break any caller that
    * awaited only in postMessage mode.
    *
-   * @param {number} offset  a byte offset into `outbox()`
+   * @param {number} offset  a byte offset into `returns()`
    * @param {number} len
    * @returns {Promise<Uint8Array>} a COPY, so a later growth cannot invalidate it
    */
-  async readOutbox(offset, len) {
-    this.#ensureInitialized("read outbox");
-    const region = this.outbox();
-    this.#checkGuestRange(offset, len, region, "read outbox");
+  async readReturns(offset, len) {
+    this.#ensureInitialized("read returns");
+    const region = this.returns();
+    this.#checkGuestRange(offset, len, region, "read returns");
     const ptr = region.offset + offset;
 
     if (this.#config.mode === "sab") {
@@ -1999,12 +1998,12 @@ export class Clockwork {
       guestMemoryOffset: this.#config.memory.guestMemoryOffset,
       guestMemorySize: this.#config.memory.guestMemorySize,
       // The two one-way bulk lanes. Each has exactly one writer: the client
-      // writes the inbox and the guest only reads it; the guest writes the
-      // outbox and the client only reads it. Neither overlaps the arena.
-      inboxOffset: this.#config.memory.inboxOffset,
-      inboxSize: this.#config.memory.inboxSize,
-      outboxOffset: this.#config.memory.outboxOffset,
-      outboxSize: this.#config.memory.outboxSize,
+      // writes the assets area and the guest only reads it; the guest writes the
+      // returns and the client only reads it. Neither overlaps the arena.
+      assetsOffset: this.#config.memory.assetsOffset,
+      assetsSize: this.#config.memory.assetsSize,
+      returnsOffset: this.#config.memory.returnsOffset,
+      returnsSize: this.#config.memory.returnsSize,
       // And the span clockwork::mem allocates from, which sits below that region and
       // is where the guest's real-time pool comes from. A build-time constant
       // cannot size it: how big that pool is, is a runtime question.
@@ -2043,7 +2042,7 @@ export class Clockwork {
   async #initializeOSC() {
     const mode = this.#config.mode;
     const bc = this.#metricsReader.bufferConstants;
-    const ringBufferBase = this.#metricsReader.ringBufferBase;
+    const arenaBase = this.#metricsReader.arenaBase;
     const sharedBuffer = this.#metricsReader.sharedBuffer;
 
     const transportConfig = {
@@ -2058,14 +2057,14 @@ export class Clockwork {
       // endpoint speaks its protocol instead (lib/osc_in_pump.js runs the same reader wherever it is wanted).
       if (this.#config.oscInEndpoint) transportConfig.oscInEndpoint = this.#config.oscInEndpoint;
       transportConfig.sharedBuffer = sharedBuffer;
-      transportConfig.ringBufferBase = ringBufferBase;
+      transportConfig.arenaBase = arenaBase;
       transportConfig.bufferConstants = bc;
 
       // Initialize node ID counter in shared memory.
       // Starts at 1000: 0 is the root group and
       // 1–999 are left free for the client to assign by hand.
       if (bc?.NODE_ID_COUNTER_START !== undefined) {
-        const counterBase = ringBufferBase + bc.NODE_ID_COUNTER_START;
+        const counterBase = arenaBase + bc.NODE_ID_COUNTER_START;
         const counterView = new Int32Array(sharedBuffer, counterBase, 1);
         Atomics.store(counterView, 0, 1000);
       }
@@ -2296,7 +2295,7 @@ export class Clockwork {
         if (event.data.type === "error") {
           clearTimeout(timeout);
           this.#workletNode.port.removeEventListener("message", messageHandler);
-          reject(new Error(event.data.error || "AudioWorklet error"));
+          { const e = new Error(event.data.error || "AudioWorklet error"); if (event.data.stack) e.stack = event.data.stack; reject(e); }
           return;
         }
 
@@ -2306,12 +2305,12 @@ export class Clockwork {
 
           if (event.data.success) {
            try {
-            const ringBufferBase = event.data.ringBufferBase ?? 0;
+            const arenaBase = event.data.arenaBase ?? 0;
             const bufferConstants = event.data.bufferConstants;
             this.#version = event.data.version ?? null;
             const sharedBuffer = this.#config.mode === 'sab' ? this.#wasmMemory.buffer : null;
 
-            this.#metricsReader.initSharedViews(sharedBuffer, ringBufferBase, bufferConstants);
+            this.#metricsReader.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
 
             // How many mirror entries a guest will use is a number only the guest knows
             // the name of. Clockwork publishes the capacity; the guest decides whether it
@@ -2323,13 +2322,13 @@ export class Clockwork {
               audioContext: this.#audioContext,
               workletPort: this.#workletNode.port,
             });
-            this.#clock.initSharedViews(sharedBuffer, ringBufferBase, bufferConstants);
+            this.#clock.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
             await this.#clock.initialize();
             this.#clock.startDriftTimer();
 
             // Initialize audio capture (SAB mode only)
             if (this.#config.mode === 'sab') {
-              this.#audioCapture.update(sharedBuffer, ringBufferBase, bufferConstants);
+              this.#audioCapture.update(sharedBuffer, arenaBase, bufferConstants);
             }
 
             // PostMessage mode: set initial snapshot
@@ -2344,7 +2343,7 @@ export class Clockwork {
             reject(new Error(`the audio clock did not start (audio context ${this.#audioContext?.state ?? 'gone'}): ${error?.message ?? error}`));
            }
           } else {
-            reject(new Error(event.data.error || "AudioWorklet initialization failed"));
+            { const e = new Error(event.data.error || "AudioWorklet initialization failed"); if (event.data.stack) e.stack = event.data.stack; reject(e); }
           }
         }
       };
@@ -2362,7 +2361,9 @@ export class Clockwork {
       switch (data.type) {
         case "error":
           console.error("[Worklet] Error:", data.error);
-          this.#eventEmitter.emit('error', new Error(data.error));
+          // the worklet's stack travels with it: a trap inside the engine (a wasm "memory access out of bounds") is
+          // otherwise a message with no place
+          { const e = new Error(data.error); if (data.stack) e.stack = data.stack; this.#eventEmitter.emit('error', e); }
           break;
 
         case "snapshot":
@@ -2515,7 +2516,7 @@ export class Clockwork {
     // A message larger than the IN ring can never be delivered — fail loudly
     // rather than dropping it silently in the ring writer.
     const bc = this.#metricsReader?.bufferConstants;
-    const maxSize = bc?.IN_BUFFER_SIZE;
+    const maxSize = bc?.IN_RING_SIZE;
     if (maxSize && preparedData.length > maxSize - 16 /* Message header */) {
       throw new Error(
         `OSC message too large to send (${preparedData.length} > ${maxSize - 16} bytes)`

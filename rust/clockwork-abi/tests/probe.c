@@ -18,9 +18,9 @@ int main(void) {
     F(DspConfig, sample_rate); F(DspConfig, block_size); F(DspConfig, max_input_channels);
     F(DspConfig, max_output_channels); F(DspConfig, clock); F(DspConfig, channel_map);
     F(DspConfig, shm_window); F(DspConfig, shm_window_bytes); F(DspConfig, persistent);
-    F(DspConfig, persistent_bytes); F(DspConfig, arena); F(DspConfig, arena_bytes);
-    F(DspConfig, arena_bulk); F(DspConfig, arena_bulk_bytes); F(DspConfig, inbox);
-    F(DspConfig, inbox_bytes); F(DspConfig, outbox); F(DspConfig, outbox_bytes);
+    F(DspConfig, persistent_bytes); F(DspConfig, memory); F(DspConfig, memory_bytes);
+    F(DspConfig, memory_bulk); F(DspConfig, memory_bulk_bytes); F(DspConfig, assets);
+    F(DspConfig, assets_bytes); F(DspConfig, returns); F(DspConfig, returns_bytes);
     F(DspConfig, guest_config); F(DspConfig, guest_config_bytes);
     F(DspConfig, deterministic_seed); F(DspConfig, fp_env);
 
@@ -34,7 +34,7 @@ int main(void) {
 
     S(DspInfo);
     F(DspInfo, name); F(DspInfo, version); F(DspInfo, holds_schedule);
-    F(DspInfo, arena_bytes_wanted); F(DspInfo, arena_bulk_bytes_wanted); F(DspInfo, wants_events);
+    F(DspInfo, memory_bytes_wanted); F(DspInfo, memory_bulk_bytes_wanted); F(DspInfo, wants_events);
     F(DspInfo, window_magic); F(DspInfo, window_version);
 
     S(ClockworkAsset);
@@ -79,9 +79,8 @@ int main(void) {
 
     /* The enumerators, so a renumbering is caught as well as a reshaping. */
     printf("const CLOCKWORK_E_NOMEM %d\n", (int)CLOCKWORK_E_NOMEM);
-    printf("const CLOCKWORK_AUDIENCE_PUBLISHED %d\n", (int)CLOCKWORK_AUDIENCE_PUBLISHED);
+    printf("const CLOCKWORK_AUDIENCE_PUBLIC %d\n", (int)CLOCKWORK_AUDIENCE_PUBLIC);
     printf("const CLOCKWORK_AUDIENCE_TRANSPORT %d\n", (int)CLOCKWORK_AUDIENCE_TRANSPORT);
-    printf("const CLOCKWORK_GEOM_AUDIENCE %d\n", (int)CLOCKWORK_GEOM_AUDIENCE);
     printf("const CLOCKWORK_GEOM_WINDOW_VERSION %d\n", (int)CLOCKWORK_GEOM_WINDOW_VERSION);
     printf("const CLOCKWORK_REGION_EGRESS %d\n", (int)CLOCKWORK_REGION_EGRESS);
     printf("const CLOCKWORK_REGION_NATIVE_STATS %d\n", (int)CLOCKWORK_REGION_NATIVE_STATS);
@@ -97,7 +96,11 @@ int main(void) {
     printf("const CLOCKWORK_RESERVED_LANES_MAX %d\n", (int)CLOCKWORK_RESERVED_LANES_MAX);
     S(ClockworkArenaEntry);
     F(ClockworkArenaEntry, id); F(ClockworkArenaEntry, offset); F(ClockworkArenaEntry, bytes);
-    F(ClockworkArenaEntry, owner); F(ClockworkArenaEntry, geom);
+    F(ClockworkArenaEntry, owner); F(ClockworkArenaEntry, audience); F(ClockworkArenaEntry, cadence);
+    F(ClockworkArenaEntry, tier); F(ClockworkArenaEntry, lifetime); F(ClockworkArenaEntry, geom);
+    S(ClockworkArenaAreaEntry);
+    F(ClockworkArenaAreaEntry, area); F(ClockworkArenaAreaEntry, space); F(ClockworkArenaAreaEntry, base_lo);
+    F(ClockworkArenaAreaEntry, base_hi); F(ClockworkArenaAreaEntry, bytes_lo); F(ClockworkArenaAreaEntry, bytes_hi);
     S(ClockworkEmbedConfig);
     F(ClockworkEmbedConfig, struct_bytes); F(ClockworkEmbedConfig, sample_rate); F(ClockworkEmbedConfig, block_size);
     F(ClockworkEmbedConfig, input_channels); F(ClockworkEmbedConfig, output_channels);
@@ -110,19 +113,27 @@ int main(void) {
     F(ClockworkEmbedDevice, output_latency_frames); F(ClockworkEmbedDevice, input_latency_frames);
     S(ClockworkArenaHeader);
     F(ClockworkArenaHeader, magic); F(ClockworkArenaHeader, version); F(ClockworkArenaHeader, header_bytes);
-    F(ClockworkArenaHeader, instance_id); F(ClockworkArenaHeader, arena_bytes); F(ClockworkArenaHeader, block_bytes);
-    F(ClockworkArenaHeader, guest_offset); F(ClockworkArenaHeader, guest_bytes); F(ClockworkArenaHeader, entry_count);
-    F(ClockworkArenaHeader, entry_bytes); F(ClockworkArenaHeader, state);
-    F(ClockworkArenaHeader, block_published_end); F(ClockworkArenaHeader, guest_published_end); F(ClockworkArenaHeader, reserved);
+    F(ClockworkArenaHeader, instance_id); F(ClockworkArenaHeader, arena_bytes); F(ClockworkArenaHeader, clockwork_bytes);
+    F(ClockworkArenaHeader, guest_offset); F(ClockworkArenaHeader, guest_bytes); F(ClockworkArenaHeader, area_count);
+    F(ClockworkArenaHeader, area_bytes); F(ClockworkArenaHeader, entry_count); F(ClockworkArenaHeader, entry_bytes);
+    F(ClockworkArenaHeader, state); F(ClockworkArenaHeader, reserved); F(ClockworkArenaHeader, areas);
     F(ClockworkArenaHeader, entries);
     printf("const CLOCKWORK_ARENA_MAGIC %u\n", (unsigned)CLOCKWORK_ARENA_MAGIC);
     printf("const CLOCKWORK_ARENA_VERSION %d\n", (int)CLOCKWORK_ARENA_VERSION);
     printf("const CLOCKWORK_ARENA_HEADER_BYTES %d\n", (int)CLOCKWORK_ARENA_HEADER_BYTES);
     printf("const CLOCKWORK_ARENA_MAX_ENTRIES %d\n", (int)CLOCKWORK_ARENA_MAX_ENTRIES);
-    printf("const CLOCKWORK_ARENA_TAPS %d\n", (int)CLOCKWORK_ARENA_TAPS);
+    printf("const CLOCKWORK_ARENA_CLOCKWORK_TAPS %d\n", (int)CLOCKWORK_ARENA_CLOCKWORK_TAPS);
     printf("const CLOCKWORK_OWNER_HOST %d\n", (int)CLOCKWORK_OWNER_HOST);
-    printf("const CLOCKWORK_ARENA_TRACK_TAPS %d\n", (int)CLOCKWORK_ARENA_TRACK_TAPS);
-    printf("const CLOCKWORK_GEOM_TRACK_FIRST_INDEX %d\n", (int)CLOCKWORK_GEOM_TRACK_FIRST_INDEX);
+    printf("const CLOCKWORK_ARENA_GUEST_PERSIST %d\n", (int)CLOCKWORK_ARENA_GUEST_PERSIST);
+    printf("const CLOCKWORK_GEOM_TAP_TRACK_FIRST %d\n", (int)CLOCKWORK_GEOM_TAP_TRACK_FIRST);
+    printf("const CLOCKWORK_AREA_GUEST_PRIVATE %d\n", (int)CLOCKWORK_AREA_GUEST_PRIVATE);
+    printf("const CLOCKWORK_AREA_GUEST_MEMORY_BULK %d\n", (int)CLOCKWORK_AREA_GUEST_MEMORY_BULK);
+    printf("const CLOCKWORK_SPACE_PROCESS %d\n", (int)CLOCKWORK_SPACE_PROCESS);
+    printf("const CLOCKWORK_CADENCE_BOOT %d\n", (int)CLOCKWORK_CADENCE_BOOT);
+    printf("const CLOCKWORK_TIER_BULK %d\n", (int)CLOCKWORK_TIER_BULK);
+    printf("const CLOCKWORK_LIFETIME_REBUILD %d\n", (int)CLOCKWORK_LIFETIME_REBUILD);
+    printf("const CLOCKWORK_ARENA_MAX_AREAS %d\n", (int)CLOCKWORK_ARENA_MAX_AREAS);
+    printf("const CLOCKWORK_ARENA_GEOM_WORDS %d\n", (int)CLOCKWORK_ARENA_GEOM_WORDS);
     printf("const CLOCKWORK_TAP_IN %d\n", (int)CLOCKWORK_TAP_IN);
     return 0;
 }

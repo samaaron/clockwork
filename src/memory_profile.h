@@ -43,28 +43,38 @@
 // internal SRAM, 8 MiB octal PSRAM, 16 MiB flash) + Pimoroni Pico Audio Pack.
 //
 // Baseline values, not yet retuned against an on-device build — apart from
-// CLOCKWORK_HEAP_FAST_SIZE, which was (see its note below). Each is
+// CLOCKWORK_GUEST_MEMORY_FAST_BYTES, which was (see its note below). Each is
 // `#ifndef`-guarded so a build can still pin any individual knob with an
 // explicit -D.
 #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_ESP32S3
 
-  #ifndef CLOCKWORK_IN_BUFFER_SIZE
-  #define CLOCKWORK_IN_BUFFER_SIZE 32768          // 32 KB
+  #ifndef CLOCKWORK_IN_RING_SIZE
+  #define CLOCKWORK_IN_RING_SIZE 32768          // 32 KB
   #endif
-  #ifndef CLOCKWORK_OUT_BUFFER_SIZE
-  #define CLOCKWORK_OUT_BUFFER_SIZE 8192          // 8 KB
+  #ifndef CLOCKWORK_RT_OUT_RING_SIZE
+  #define CLOCKWORK_RT_OUT_RING_SIZE 8192          // 8 KB
   #endif
-  #ifndef CLOCKWORK_NRT_OUT_BUFFER_SIZE
-  #define CLOCKWORK_NRT_OUT_BUFFER_SIZE 4096        // 4 KB
+  #ifndef CLOCKWORK_NRT_OUT_RING_SIZE
+  #define CLOCKWORK_NRT_OUT_RING_SIZE 4096        // 4 KB
+  #endif
+  // The arena lives in internal SRAM (audio_processor.cpp: its hot regions
+  // are touched every block), so its bulk-tier regions are kept small here:
+  // no track-tap slots (no plugin tracks on a device), a 4 KB persistent
+  // store. Baselines, not yet measured on-device.
+  #ifndef TAP_TRACK_SLOTS
+  #define TAP_TRACK_SLOTS 0
+  #endif
+  #ifndef GUEST_PERSIST_BYTES
+  #define GUEST_PERSIST_BYTES (4u * 1024u)
   #endif
   #ifndef CLOCKWORK_WINDOW_BYTES
   #define CLOCKWORK_WINDOW_BYTES 12304
   #endif
-  #ifndef SHM_TAP_MAX_TAPS
-  #define SHM_TAP_MAX_TAPS 1
+  #ifndef TAPS_SLOTS
+  #define TAPS_SLOTS 1
   #endif
-  #ifndef SHM_TAP_RING_FRAMES
-  #define SHM_TAP_RING_FRAMES 512
+  #ifndef TAP_RING_FRAMES
+  #define TAP_RING_FRAMES 512
   #endif
   #ifndef CLOCKWORK_MAX_TIMELINES
   #define CLOCKWORK_MAX_TIMELINES 2
@@ -72,37 +82,31 @@
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
   #endif
-  #ifndef CLOCKWORK_HEAP_SIZE
-  #define CLOCKWORK_HEAP_SIZE 786432              // 768 KB nominal pool budget
+  #ifndef CLOCKWORK_GUEST_SPARE_BYTES
+  #define CLOCKWORK_GUEST_SPARE_BYTES 262144      // 256 KB: the one growth the guest's pool may take, from PSRAM
   #endif
-  #ifndef CLOCKWORK_HEAP_GROWTH_SIZE
-  #define CLOCKWORK_HEAP_GROWTH_SIZE 262144       // 256 KB growth (into Bulk/PSRAM)
+  #ifndef CLOCKWORK_ROUTER_BYTES
+  #define CLOCKWORK_ROUTER_BYTES 65536            // 64 KB, the least the router arms on: the sink and port queues
   #endif
-  #ifndef CLOCKWORK_HEAP_FAST_SIZE
-  #define CLOCKWORK_HEAP_FAST_SIZE 81920          // 80 KB internal-SRAM initial area. Sized to
-                                                    // hold the dsp_new hot working set (audio/
-                                                    // control buses, per-sample wire scratch,
-                                                    // sample buffers) so the render reads SRAM.
-                                                    // Measured on the ESP32-S3: 48 KB overflows
-                                                    // into PSRAM growth (heapGrow=1) and the
-                                                    // render distorts; 64 KB is the heapGrow=0
-                                                    // floor; 80 KB adds headroom for larger
-                                                    // scenes.
+  // The guest's fast working memory when the guest declares no fast want of
+  // its own: 80 KB of internal SRAM. Sized to hold a server guest's dsp_new
+  // hot working set (audio/control buses, per-sample wire scratch) so the
+  // render reads SRAM. Measured on the ESP32-S3 (as the heap's fast area,
+  // which this replaces): 48 KB overflows into PSRAM and the render distorts;
+  // 64 KB is the floor; 80 KB adds headroom for larger scenes. A guest's own
+  // figure (DspInfo::memory_bytes_wanted, dsp_memory_bytes) wins over this.
+  #ifndef CLOCKWORK_GUEST_MEMORY_FAST_BYTES
+  #define CLOCKWORK_GUEST_MEMORY_FAST_BYTES 81920
   #endif
   // Internal SRAM to leave free for allocations made after the engine boots: the
   // audio task's stack (32 KB, internal — it runs the DSP's deep render call chain),
-  // I2S DMA descriptors, display/touch drivers. The heap's initial area
-  // is bounded by largest_free(Fast) minus this reserve; without it it can claim
-  // the whole largest block, and the audio task's xTaskCreate then fails and the
-  // engine is never ticked.
+  // I2S DMA descriptors, display/touch drivers. The profile's default fast
+  // span above is bounded by largest_free(Fast) minus this reserve; without
+  // it it can claim the whole largest block, and the audio task's
+  // xTaskCreate then fails and the engine is never ticked. (A guest's own
+  // want is never clamped: it is met or the boot is refused.)
   #ifndef CLOCKWORK_FAST_RESERVE
   #define CLOCKWORK_FAST_RESERVE 45056            // 44 KB (32 KB audio task stack + I2S DMA + margin)
-  #endif
-  // RT heap growth-area size (Bulk/PSRAM) when the Fast initial is exhausted.
-  // Non-zero => the pool grows into PSRAM on overflow rather than refusing
-  // the allocation the DSP asked for.
-  #ifndef CLOCKWORK_RT_POOL_GROWTH_SIZE
-  #define CLOCKWORK_RT_POOL_GROWTH_SIZE 65536     // 64 KB
   #endif
   #ifndef CLOCKWORK_MAX_BLOCK_SIZE
   #define CLOCKWORK_MAX_BLOCK_SIZE 64
@@ -113,21 +117,18 @@
   #ifndef CLOCKWORK_MAX_CHANNELS
   #define CLOCKWORK_MAX_CHANNELS 2
   #endif
-  // The guest's two arenas, when the guest declares no wants of its own
-  // (DspInfo::arena_bytes_wanted / arena_bulk_bytes_wanted). Fast comes out of
-  // internal SRAM beside the heap's initial area and the audio task's stack, so
-  // it is small; bulk comes out of PSRAM. Baselines, not yet retuned on-device.
-  #ifndef CLOCKWORK_ARENA_BYTES
-  #define CLOCKWORK_ARENA_BYTES (64u * 1024u)             // 64 KB, internal SRAM
-  #endif
-  #ifndef CLOCKWORK_ARENA_BULK_BYTES
-  #define CLOCKWORK_ARENA_BULK_BYTES (2u * 1024u * 1024u) // 2 MB, PSRAM
+  // The guest's bulk memory — the span its pool runs over — when the guest
+  // declares no bulk want of its own (DspInfo::memory_bulk_bytes_wanted,
+  // dsp_memory_bulk_bytes): 2 MB of PSRAM. A baseline, not yet retuned
+  // on-device.
+  #ifndef CLOCKWORK_GUEST_MEMORY_BULK_BYTES
+  #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES (2u * 1024u * 1024u) // 2 MB, PSRAM
   #endif
   #ifndef CLOCKWORK_TAP_CHANNELS
   #define CLOCKWORK_TAP_CHANNELS 2
   #endif
-  #ifndef CLOCKWORK_SHM_AUDIO_FRAMES
-  #define CLOCKWORK_SHM_AUDIO_FRAMES 64
+  #ifndef CLOCKWORK_SCOPE_FRAMES
+  #define CLOCKWORK_SCOPE_FRAMES 64
   #endif
 
   // Sinks: no wide OSC classes on a small SRAM; sysex cells of 4 KB.
@@ -142,32 +143,40 @@
 // ── Teensy 4.1 profile ──────────────────────────────────────────────────────
 // PJRC Teensy 4.1 (NXP i.MX RT1062: 1 MiB RAM as 512 KiB ITCM/DTCM + 512 KiB
 // OCRAM, 8 MiB flash; PSRAM pads unpopulated, so single-tier RAM). The tiered
-// knobs (FAST_SIZE/FAST_RESERVE/RT_POOL_GROWTH) stay at their single-region
-// defaults. The RT heap is drawn from the OCRAM malloc heap, so
-// CLOCKWORK_HEAP_SIZE plus the host's own allocations must fit in ~512 KiB;
-// growth is 0 so exhaustion fails the OSC command loudly instead of creeping
-// into the audio-library heap. Block size is 128 to match the Teensy audio
-// library's per-update frame count (one engine tick per AudioStream update).
-// Values retuned against an on-device build.
+// knobs (FAST_RESERVE, the fast default) stay at their single-region
+// defaults. The guest's bulk memory is drawn from the OCRAM malloc heap, so
+// CLOCKWORK_GUEST_MEMORY_BULK_BYTES plus the host's own allocations must fit
+// in ~512 KiB; the spare is 0 so exhaustion fails the OSC command loudly
+// instead of creeping into the audio-library heap. Block size is 128 to
+// match the Teensy audio library's per-update frame count (one engine tick
+// per AudioStream update). Values retuned against an on-device build.
 #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_TEENSY41
 
-  #ifndef CLOCKWORK_IN_BUFFER_SIZE
-  #define CLOCKWORK_IN_BUFFER_SIZE 32768          // 32 KB
+  // As the ESP32-S3 profile: the arena is one span in fast RAM, so its
+  // bulk-tier regions are kept small.
+  #ifndef TAP_TRACK_SLOTS
+  #define TAP_TRACK_SLOTS 0
   #endif
-  #ifndef CLOCKWORK_OUT_BUFFER_SIZE
-  #define CLOCKWORK_OUT_BUFFER_SIZE 8192          // 8 KB
+  #ifndef GUEST_PERSIST_BYTES
+  #define GUEST_PERSIST_BYTES (4u * 1024u)
   #endif
-  #ifndef CLOCKWORK_NRT_OUT_BUFFER_SIZE
-  #define CLOCKWORK_NRT_OUT_BUFFER_SIZE 4096      // 4 KB
+  #ifndef CLOCKWORK_IN_RING_SIZE
+  #define CLOCKWORK_IN_RING_SIZE 32768          // 32 KB
+  #endif
+  #ifndef CLOCKWORK_RT_OUT_RING_SIZE
+  #define CLOCKWORK_RT_OUT_RING_SIZE 8192          // 8 KB
+  #endif
+  #ifndef CLOCKWORK_NRT_OUT_RING_SIZE
+  #define CLOCKWORK_NRT_OUT_RING_SIZE 4096      // 4 KB
   #endif
   #ifndef CLOCKWORK_WINDOW_BYTES
   #define CLOCKWORK_WINDOW_BYTES 12304
   #endif
-  #ifndef SHM_TAP_MAX_TAPS
-  #define SHM_TAP_MAX_TAPS 1
+  #ifndef TAPS_SLOTS
+  #define TAPS_SLOTS 1
   #endif
-  #ifndef SHM_TAP_RING_FRAMES
-  #define SHM_TAP_RING_FRAMES 512
+  #ifndef TAP_RING_FRAMES
+  #define TAP_RING_FRAMES 512
   #endif
   #ifndef CLOCKWORK_MAX_TIMELINES
   #define CLOCKWORK_MAX_TIMELINES 2
@@ -175,15 +184,18 @@
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
   #endif
-  #ifndef CLOCKWORK_HEAP_SIZE
-  #define CLOCKWORK_HEAP_SIZE 98304               // 96 KB engine buffer heap (the DSP's buses,
-                                                    // sample buffers, wire buffers). OCRAM (~338 KB
-                                                    // after the cold .bss) must also hold the
-                                                    // guest's memory region and the
-                                                    // library's registration mallocs.
+  #ifndef CLOCKWORK_GUEST_MEMORY_BULK_BYTES
+  #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES 98304 // 96 KB: the guest's bulk memory (sample buffers,
+                                                    // definitions). OCRAM (~338 KB after the cold
+                                                    // .bss) must also hold the guest's fast memory
+                                                    // and the library's registration mallocs.
   #endif
-  #ifndef CLOCKWORK_HEAP_GROWTH_SIZE
-  #define CLOCKWORK_HEAP_GROWTH_SIZE 0            // no growth: fail loud, keep OCRAM predictable
+  #ifndef CLOCKWORK_GUEST_SPARE_BYTES
+  #define CLOCKWORK_GUEST_SPARE_BYTES 0           // no growth: fail loud, keep OCRAM predictable
+  #endif
+  #ifndef CLOCKWORK_ROUTER_BYTES
+  #define CLOCKWORK_ROUTER_BYTES 0                // no router block: OCRAM has no 64 KB to spare, so the Rust
+                                                    // subsystems' queues stay with the library's malloc
   #endif
   #ifndef CLOCKWORK_MAX_BLOCK_SIZE
   #define CLOCKWORK_MAX_BLOCK_SIZE 128
@@ -197,8 +209,8 @@
   #ifndef CLOCKWORK_TAP_CHANNELS
   #define CLOCKWORK_TAP_CHANNELS 2
   #endif
-  #ifndef CLOCKWORK_SHM_AUDIO_FRAMES
-  #define CLOCKWORK_SHM_AUDIO_FRAMES 128
+  #ifndef CLOCKWORK_SCOPE_FRAMES
+  #define CLOCKWORK_SCOPE_FRAMES 128
   #endif
 
   // Sinks: no wide OSC classes on a small SRAM; sysex cells of 4 KB.
@@ -214,47 +226,52 @@
 // Anything left unset by an explicit -D or by the selected profile falls
 // through to here.
 
-// The guest's shared memory region, on a native host with a public segment.
+// THE GUEST'S MEMORY: two spans, one per speed (dsp_api.h, DspConfig::memory
+// and memory_bulk). Each is sized as the larger of what the guest declares
+// (DspInfo::memory_bytes_wanted / memory_bulk_bytes_wanted, plus what its
+// configuration adds through dsp_memory_bytes / dsp_memory_bulk_bytes) and
+// the profile's default here. A guest's own figure is met or the boot is
+// refused; the default is clamped to what the tier has. Neither span is in
+// the arena and no client can reach them.
 //
-// This is where a guest puts bulk it wants a client to see, and where a client
-// puts bulk it wants the guest to see. It is NOT in the
-// arena: the arena is `ring_buffer_storage`, a static array, and multi-megabyte
-// .bss would be paid by every target including the embedded ones. It sits after
-// the peer plane in the POSIX segment, which is mmap'd and already bigger than
-// the arena.
-//
-// Present only when there IS a public segment. Headless native has no client to
-// share with, so DspConfig::arena stays NULL there and a guest allocates from
-// the system as before.
-//
-// The web equivalent is guestMemorySize in js/memory_layout.js, which is a
-// slice of the wasm heap rather than of a segment.
-//
-// THREE REGIONS, ONE WRITER EACH. The arena is the guest's alone. Inbound bulk
-// is written by the client and only read by the guest; outbound bulk is the
-// reverse. Splitting them is what removes the need for the two ends to agree at
-// runtime about which bytes belong to whom.
-#ifndef CLOCKWORK_ARENA_BYTES
-#define CLOCKWORK_ARENA_BYTES  (32u * 1024u * 1024u)   // 32 MB, the guest's own
+// FAST: what the guest lays out by hand, its hot per-block state. The
+// default is 0 — a guest knows its own hot state and says so — and only a
+// tiered profile gives a floor (the ESP32's 80 KB, above).
+#ifndef CLOCKWORK_GUEST_MEMORY_FAST_BYTES
+#define CLOCKWORK_GUEST_MEMORY_FAST_BYTES 0u
 #endif
-
-// The guest's BULK arena — the second kind of RAM, when a device has one.
-// DspConfig::arena is the fast tier and DspConfig::arena_bulk this one; a
-// single-region platform has no second kind and hands the guest NULL/0 here,
-// so the default is 0 and only a tiered profile sets it. The guest's own
-// figure (DspInfo::arena_bulk_bytes_wanted) wins over this when it is
-// non-zero; this is what a guest that declares nothing gets.
-#ifndef CLOCKWORK_ARENA_BULK_BYTES
-#define CLOCKWORK_ARENA_BULK_BYTES 0u
+// BULK: the span the guest's pool runs over (clockwork_pool.h) — everything
+// it allocates as it runs. 64 MB on the desktop and the NIF, where it used
+// to be clockwork's own heap of the same size. On the web the figure is a
+// ceiling and the span takes what is left of the engine's memory after the
+// fast span, the RT router's block and the spare (CLOCKWORK_FAST_RESERVE),
+// which is what the client sized that memory for (memArenaSize in
+// js/memory_layout.js). The embedded profiles set their own, above.
+#ifndef CLOCKWORK_GUEST_MEMORY_BULK_BYTES
+  #if defined(__EMSCRIPTEN__)
+  #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES (2048u * 1024u * 1024u)   // a ceiling; the engine's memory bounds it
+  #else
+  #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES (64u * 1024u * 1024u)     // 64 MB
+  #endif
+#endif
+// THE SPARE: the one block the guest's pool may grow into without a malloc
+// on the audio thread, armed at boot from the bulk tier and re-armed by a
+// foreign thread natively. 0 means the pool never grows.
+#ifndef CLOCKWORK_GUEST_SPARE_BYTES
+  #if defined(__EMSCRIPTEN__)
+  #define CLOCKWORK_GUEST_SPARE_BYTES (4u * 1024u * 1024u)
+  #else
+  #define CLOCKWORK_GUEST_SPARE_BYTES (16u * 1024u * 1024u)
+  #endif
 #endif
 
 // Bulk staging. Lazily paged like the rest of the segment, so the cost of a
 // generous size is address space rather than memory.
-#ifndef CLOCKWORK_INBOX_BYTES
-#define CLOCKWORK_INBOX_BYTES  (8u * 1024u * 1024u)    // 8 MB, client -> guest
+#ifndef CLOCKWORK_ASSETS_BYTES
+#define CLOCKWORK_ASSETS_BYTES  (8u * 1024u * 1024u)    // 8 MB, client -> guest
 #endif
-#ifndef CLOCKWORK_OUTBOX_BYTES
-#define CLOCKWORK_OUTBOX_BYTES (8u * 1024u * 1024u)    // 8 MB, guest -> client
+#ifndef CLOCKWORK_RETURNS_BYTES
+#define CLOCKWORK_RETURNS_BYTES (8u * 1024u * 1024u)    // 8 MB, guest -> client
 #endif
 
 // Event-sink size classes, per kind: "<cell bytes>:<cells>,..." — the queues
@@ -272,14 +289,14 @@
 #endif
 
 // SAB / ring-buffer regions
-#ifndef CLOCKWORK_IN_BUFFER_SIZE
-#define CLOCKWORK_IN_BUFFER_SIZE 786432           // 768 KB
+#ifndef CLOCKWORK_IN_RING_SIZE
+#define CLOCKWORK_IN_RING_SIZE 786432           // 768 KB
 #endif
-#ifndef CLOCKWORK_OUT_BUFFER_SIZE
-#define CLOCKWORK_OUT_BUFFER_SIZE 131072          // 128 KB
+#ifndef CLOCKWORK_RT_OUT_RING_SIZE
+#define CLOCKWORK_RT_OUT_RING_SIZE 131072          // 128 KB
 #endif
-#ifndef CLOCKWORK_NRT_OUT_BUFFER_SIZE
-#define CLOCKWORK_NRT_OUT_BUFFER_SIZE 65536         // 64 KB
+#ifndef CLOCKWORK_NRT_OUT_RING_SIZE
+#define CLOCKWORK_NRT_OUT_RING_SIZE 65536         // 64 KB
 #endif
 // The window a guest publishes through (DspConfig::shm_window). Clockwork
 // reserves it and reads none of it, so the size is the only thing it has an
@@ -289,27 +306,27 @@
 #ifndef CLOCKWORK_WINDOW_BYTES
 #define CLOCKWORK_WINDOW_BYTES 98320
 #endif
-// The tap-stream slots. SHM_TAP_MAX_TAPS are the GUEST's, in the guest
+// The tap-stream slots. TAPS_SLOTS are the GUEST's, in the guest
 // region: a client numbers them as it likes and a ScopeOut2 claims one.
-// SHM_TAP_TRACK_SLOTS are the ENGINE's, in the clockwork block (the
-// TRACK_TAPS region, clockwork_arena.h): one per plugin track lane pair
+// TAP_TRACK_SLOTS are the ENGINE's, after the guest's slots in the one tap
+// region (clockwork_arena.h): one per plugin track lane pair
 // (plugin_bridge.h LANES / 2), written from the track's return lane
 // (src/native/TrackControl.cpp) so a panel can draw what a track is putting
 // out without a scope node in the graph. A client numbers the two as one
-// index space, the track slots after the guest's (SHM_TAP_TRACK_SLOT_BASE).
+// index space, the track slots after the guest's (TAP_TRACK_SLOT_BASE).
 // No track slots on the web, which hosts no plugins and whose arena is
 // budgeted to the byte (js/memory_layout.js), nor on the embedded profiles.
-#ifndef SHM_TAP_MAX_TAPS
-#define SHM_TAP_MAX_TAPS 32
+#ifndef TAPS_SLOTS
+#define TAPS_SLOTS 32
 #endif
-#ifndef SHM_TAP_TRACK_SLOTS
+#ifndef TAP_TRACK_SLOTS
   #if defined(__EMSCRIPTEN__)
-  #define SHM_TAP_TRACK_SLOTS 0
+  #define TAP_TRACK_SLOTS 0
   #else
-  #define SHM_TAP_TRACK_SLOTS 16
+  #define TAP_TRACK_SLOTS 16
   #endif
 #endif
-#define SHM_TAP_TRACK_SLOT_BASE SHM_TAP_MAX_TAPS
+#define TAP_TRACK_SLOT_BASE TAPS_SLOTS
 // Per-slot tap stream ring, in frames. A consumer draws the window being
 // HEARD, which sits the device's output latency behind the writer, so the
 // ring must hold that latency plus the longest display window (a client's
@@ -323,11 +340,11 @@
 // tens of ms of latency and budgets its arena to the byte
 // (js/memory_layout.js): 16384 ≈ 340ms @ 48k, 128KB per slot, 4 MB for the
 // guest's 32.
-#ifndef SHM_TAP_RING_FRAMES
+#ifndef TAP_RING_FRAMES
   #if defined(__EMSCRIPTEN__)
-  #define SHM_TAP_RING_FRAMES 16384
+  #define TAP_RING_FRAMES 16384
   #else
-  #define SHM_TAP_RING_FRAMES 131072
+  #define TAP_RING_FRAMES 131072
   #endif
 #endif
 
@@ -345,28 +362,13 @@
 #define SCHEDULER_SLOT_COUNT 512
 #endif
 
-// The heap on WASM: the placement arena, less one spare growth area.
-//
-// A DSP's real-time pool comes from this heap through DspHost::alloc_bytes
-// (dsp_api.h) — until 2026-09-29 scsynth took it from the arena directly —
-// and a heap that cannot hold it is a boot that fails, not a smaller pool. The
-// arena is what the host sized for that pool (memArenaSize in
-// js/memory_layout.js; the client grows it with realTimeMemorySize), so the
-// heap takes the arena: this figure is a ceiling, and clockwork_heap_init
-// clamps it to the arena's largest free block minus CLOCKWORK_FAST_RESERVE,
-// which keeps room for the spare growth area claimed right after. (Desktop
-// keeps the 64 MB default below; the ESP32 profile sets its own.)
+// What the guest's bulk span leaves of the engine's memory on the web: the
+// spare and the arena's own block headers. The RT router's block and the
+// guest's fast span are taken before the bulk span is sized, so they are
+// already out of what it sees.
 #if defined(__EMSCRIPTEN__)
-  #ifndef CLOCKWORK_HEAP_SIZE
-  #define CLOCKWORK_HEAP_SIZE (2048u * 1024 * 1024)  // 2 GB: a ceiling; the arena bounds it
-  #endif
-  #ifndef CLOCKWORK_HEAP_GROWTH_SIZE
-  #define CLOCKWORK_HEAP_GROWTH_SIZE (4 * 1024 * 1024)
-  #endif
-  // What the heap leaves of the arena: the spare growth area, and the arena's
-  // own block header on it.
   #ifndef CLOCKWORK_FAST_RESERVE
-  #define CLOCKWORK_FAST_RESERVE (CLOCKWORK_HEAP_GROWTH_SIZE + 64 * 1024)
+  #define CLOCKWORK_FAST_RESERVE (CLOCKWORK_GUEST_SPARE_BYTES + 64 * 1024)
   #endif
 #endif
 
@@ -396,33 +398,21 @@
 // measured then rather than inherited from this one, which was a census of one
 // particular guest.
 
-// RT heap (rust/clockwork-heap). Read by clockwork_heap_init via CLOCKWORK_HEAP_FAST_SIZE below,
-// which is what actually sizes the pool — on a profile that overrides
-// FAST_SIZE (the ESP32-S3 one does) this figure sizes nothing, so change the
-// two together or the one you changed will be the one that does not matter.
-#ifndef CLOCKWORK_HEAP_SIZE
-#define CLOCKWORK_HEAP_SIZE (64 * 1024 * 1024)    // 64 MB
+// The RT router's block (rust/clockwork-heap/src/router.rs): what clockwork's
+// Rust subsystems allocate inside an engine entry point — a sink's or a port's
+// queues, opened from the audio thread — comes from this one block, taken from
+// the Fast tier once at boot and kept for the life of the process. The
+// router arms on nothing under 64 KB; 0 leaves it unarmed, and those
+// allocations stay with the system allocator.
+#ifndef CLOCKWORK_ROUTER_BYTES
+#define CLOCKWORK_ROUTER_BYTES (1 * 1024 * 1024)      // 1 MB
 #endif
-#ifndef CLOCKWORK_HEAP_GROWTH_SIZE
-#define CLOCKWORK_HEAP_GROWTH_SIZE (16 * 1024 * 1024) // 16 MB growth area when exhausted
-#endif
-// The initial pool area drawn from the Fast tier (mem_region.h). On desktop/WASM
-// this equals CLOCKWORK_HEAP_SIZE, so the pool is one region and behaviour is
-// unchanged; an embedded profile shrinks it so only the boot-time hot set lands
-// in fast internal SRAM and later/large buffers grow into Bulk (PSRAM).
-#ifndef CLOCKWORK_HEAP_FAST_SIZE
-#define CLOCKWORK_HEAP_FAST_SIZE CLOCKWORK_HEAP_SIZE
-#endif
-// Fast-tier reserve + heap growth. Both 0 on desktop and the NIF: largest_free()
-// returns SIZE_MAX there so the boot-time bounding never clamps, and growth 0 keeps
-// the heap a fixed region with no allocation after boot. An embedded profile
-// sets both non-zero, and the web profile above sets the reserve so the heap
-// leaves its spare's worth of the arena.
+// Fast-tier reserve: what a profile's DEFAULT span leaves of the tier's
+// largest free block. 0 on desktop and the NIF: largest_free() returns
+// SIZE_MAX there so the bounding never clamps. The embedded profile and the
+// web set their own above.
 #ifndef CLOCKWORK_FAST_RESERVE
 #define CLOCKWORK_FAST_RESERVE 0
-#endif
-#ifndef CLOCKWORK_RT_POOL_GROWTH_SIZE
-#define CLOCKWORK_RT_POOL_GROWTH_SIZE 0
 #endif
 
 // Audio graph caps (non-WASM; the WASM render quantum is fixed at 128)
@@ -436,7 +426,7 @@
 #define CLOCKWORK_MAX_CHANNELS 128
 #endif
 
-// The raw scope (shm_audio_buffer.hpp): two slots, out and in, written by
+// The scope (shm_audio_buffer.hpp): two slots, out and in, written by
 // clockwork at the device edge. Each slot's ring is sized for this many
 // channels and carries the device's live count up to it: a stereo interface
 // fills two, an eight-out interface fills eight, anything wider is tapped to
@@ -449,18 +439,18 @@
   #define CLOCKWORK_TAP_CHANNELS 8
   #endif
 #endif
-#ifndef CLOCKWORK_SHM_AUDIO_SECONDS
-#define CLOCKWORK_SHM_AUDIO_SECONDS 1
+#ifndef CLOCKWORK_SCOPE_SECONDS
+#define CLOCKWORK_SCOPE_SECONDS 1
 #endif
-#ifndef CLOCKWORK_SHM_AUDIO_SAMPLE_RATE
-#define CLOCKWORK_SHM_AUDIO_SAMPLE_RATE 48000
+#ifndef CLOCKWORK_SCOPE_SAMPLE_RATE
+#define CLOCKWORK_SCOPE_SAMPLE_RATE 48000
 #endif
 // Per-slot frames default to seconds * sample-rate; a profile may override the
 // frame count directly (e.g. to shrink below one second, which the seconds knob
 // can't express because it is an integer).
-#ifndef CLOCKWORK_SHM_AUDIO_FRAMES
-#define CLOCKWORK_SHM_AUDIO_FRAMES \
-    (CLOCKWORK_SHM_AUDIO_SAMPLE_RATE * CLOCKWORK_SHM_AUDIO_SECONDS)
+#ifndef CLOCKWORK_SCOPE_FRAMES
+#define CLOCKWORK_SCOPE_FRAMES \
+    (CLOCKWORK_SCOPE_SAMPLE_RATE * CLOCKWORK_SCOPE_SECONDS)
 #endif
 
 #endif // CLOCKWORK_MEMORY_PROFILE_H

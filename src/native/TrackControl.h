@@ -19,7 +19,7 @@
  *
  *   THE SCOPES. The source's transfer signal fires once the return block is
  *   on the input bus, and that is where each track's output is tapped into
- *   a tap stream of its own (memory_profile.h SHM_TAP_TRACK_SLOT_BASE +
+ *   a tap stream of its own (memory_profile.h TAP_TRACK_SLOT_BASE +
  *   slot), so a panel can draw what a track is putting out without a scope
  *   node in the graph. Which lanes carry a track the bridge says each block
  *   (Header::slots_live); a slot that gains a track claims its stream on the

@@ -92,7 +92,7 @@ TEST_CASE("tap-stream: writer/reader round-trip with interleaved windows",
 
     REQUIRE(r.valid());
     CHECK(r.channels() == 2);
-    CHECK(r.capacity_frames() == SHM_TAP_RING_FRAMES);
+    CHECK(r.capacity_frames() == TAP_RING_FRAMES);
     CHECK(r.write_position() == 0);
 
     writeIndexedBlock(w, 5000, 128, 0);
@@ -138,7 +138,7 @@ TEST_CASE("tap-stream: ring wrap preserves window continuity",
     shm_tap_stream_reader r(slot.get());
 
     // Write ~1.5 rings in 512-frame blocks.
-    const uint32_t cap = SHM_TAP_RING_FRAMES;
+    const uint32_t cap = TAP_RING_FRAMES;
     const uint64_t total = cap + cap / 2;
     uint64_t engine = 0;
     for (uint64_t at = 0; at < total; at += 512) {
@@ -257,7 +257,7 @@ TEST_CASE("tap-stream: copy_triggered_window aligns to a rising zero-crossing",
     writeSineIndexedBlock(w, 0, 1000, 0);
 
     const uint32_t frames = 300, search = 150;
-    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS);
+    std::vector<float> out(frames * TAP_STREAM_CHANNELS);
     uint32_t ch = 0, trig = 0;
     const uint32_t real =
         r.copy_triggered_window(1000, frames, search, out.data(), &ch, &trig);
@@ -286,13 +286,13 @@ TEST_CASE("tap-stream: copy_triggered_window without a crossing matches the roll
         [](uint64_t idx) { return static_cast<float>(idx); });
 
     const uint32_t frames = 200, search = 100;
-    std::vector<float> triggered(frames * SHM_TAP_STREAM_CHANNELS);
-    std::vector<float> rolling(frames * SHM_TAP_STREAM_CHANNELS);
+    std::vector<float> triggered(frames * TAP_STREAM_CHANNELS);
+    std::vector<float> rolling(frames * TAP_STREAM_CHANNELS);
     uint32_t trig = 999;
     r.copy_triggered_window(800, frames, search, triggered.data(), nullptr, &trig);
     r.copy_window(800, frames, rolling.data());
 
-    CHECK(trig == SHM_TAP_TRIGGER_NONE);
+    CHECK(trig == TAP_TRIGGER_NONE);
     CHECK(std::memcmp(triggered.data(), rolling.data(),
                       frames * 2 * sizeof(float)) == 0);
 }
@@ -307,7 +307,7 @@ TEST_CASE("tap-stream: copy_triggered_window zero-fills like copy_window",
     writeSineIndexedBlock(w, 0, 100, 0);   // only 100 real frames
 
     const uint32_t frames = 300, search = 100;
-    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, 42.0f);
+    std::vector<float> out(frames * TAP_STREAM_CHANNELS, 42.0f);
     uint32_t trig = 0;
     const uint32_t real =
         r.copy_triggered_window(100, frames, search, out.data(), nullptr, &trig);
@@ -315,7 +315,7 @@ TEST_CASE("tap-stream: copy_triggered_window zero-fills like copy_window",
     // The whole search region is zero-fill, so no crossing can be found and
     // exactly the ring's 100 frames land in the emitted window.
     REQUIRE(real == 100);
-    CHECK(trig == SHM_TAP_TRIGGER_NONE);
+    CHECK(trig == TAP_TRIGGER_NONE);
     // The 200-frame lead-in must be zeroed, never left holding the caller's
     // prior buffer contents.
     CHECK(std::all_of(out.begin(), out.begin() + (frames - real) * 2,
@@ -337,7 +337,7 @@ TEST_CASE("tap-stream: the ring covers a two-second output latency",
     constexpr uint32_t kWindow  = kRate / 4;   // the 250 ms scrolling strip
 
     CHECK(shm_tap_ring_covers(kLatency, kRate));
-    CHECK_FALSE(shm_tap_ring_covers(SHM_TAP_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
+    CHECK_FALSE(shm_tap_ring_covers(TAP_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
 
     auto slot = makeSlot();
     shm_tap_stream_writer w(slot.get());

@@ -57,7 +57,7 @@ pub struct ClockworkClientInfo {
 }
 
 pub const CLOCKWORK_FEATURE_TAPS: u32 = 1 << 0;
-pub const CLOCKWORK_FEATURE_RAW_SCOPE: u32 = 1 << 1;
+pub const CLOCKWORK_FEATURE_SCOPE: u32 = 1 << 1;
 pub const CLOCKWORK_FEATURE_BULK: u32 = 1 << 2;
 pub const CLOCKWORK_FEATURE_WINDOW: u32 = 1 << 3;
 pub const CLOCKWORK_FEATURE_SCHEDULER: u32 = 1 << 4;
@@ -87,10 +87,10 @@ pub struct ClockworkRegionId(pub c_int);
 impl ClockworkRegionId {
     pub const METRICS: ClockworkRegionId = ClockworkRegionId(1);
     pub const WINDOW: ClockworkRegionId = ClockworkRegionId(2);
-    pub const INBOX: ClockworkRegionId = ClockworkRegionId(3);
-    pub const OUTBOX: ClockworkRegionId = ClockworkRegionId(4);
+    pub const ASSETS: ClockworkRegionId = ClockworkRegionId(3);
+    pub const RETURNS: ClockworkRegionId = ClockworkRegionId(4);
     pub const TAPS: ClockworkRegionId = ClockworkRegionId(5);
-    pub const RAW_SCOPE: ClockworkRegionId = ClockworkRegionId(6);
+    pub const SCOPE: ClockworkRegionId = ClockworkRegionId(6);
     pub const INGRESS: ClockworkRegionId = ClockworkRegionId(7);
     pub const EGRESS: ClockworkRegionId = ClockworkRegionId(8);
     pub const NATIVE_STATS: ClockworkRegionId = ClockworkRegionId(9);

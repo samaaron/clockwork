@@ -39,13 +39,10 @@ const CHANNELS: u32 = 2;
 const SLOT_HEADER: usize = 32;
 const SLOT_SIZE: usize = SLOT_HEADER + (RING_FRAMES as usize) * (CHANNELS as usize) * 4;
 const MAX_TAPS: usize = 4;
-// The engine's track taps: a second span of the same slot shape, numbered
-// after the guest's, in what would be the clockwork block. Here it simply
-// follows the tap region, with a gap so the two cannot be confused for
-// one contiguous array.
+// The engine's track taps: the same slot shape, after the guest's slots in
+// the same region, one index space.
 const TRACK_SLOTS: usize = 2;
-const TRACK_START: usize = START + HEADER_SIZE + SLOT_SIZE * MAX_TAPS + 256;
-const REGION: usize = TRACK_START + SLOT_SIZE * TRACK_SLOTS;
+const REGION: usize = START + HEADER_SIZE + SLOT_SIZE * (MAX_TAPS + TRACK_SLOTS);
 
 fn region() -> &'static Mutex<Vec<u8>> {
     static R: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
@@ -75,22 +72,20 @@ pub unsafe extern "C" fn clockwork_tap_geometry(
     start: *mut usize,
     header_size: *mut usize,
     slot_size: *mut usize,
-    max_taps: *mut usize,
+    guest_slots: *mut usize,
+    track_slots: *mut usize,
     ring_frames: *mut u32,
     channels: *mut u32,
-    track_start: *mut usize,
-    track_slots: *mut usize,
 ) -> c_int {
     // SAFETY: valid for one write each, per the contract above.
     unsafe {
         *start = START;
         *header_size = HEADER_SIZE;
         *slot_size = SLOT_SIZE;
-        *max_taps = MAX_TAPS;
+        *guest_slots = MAX_TAPS;
+        *track_slots = TRACK_SLOTS;
         *ring_frames = RING_FRAMES;
         *channels = CHANNELS;
-        *track_start = TRACK_START;
-        *track_slots = TRACK_SLOTS;
     }
     1
 }
@@ -111,22 +106,14 @@ fn region_u32(offset: usize) -> u32 {
 
 fn slot_state(index: usize) -> u32 {
     // `state` is the first u32 of the slot header (shm_tap_stream). One
-    // index space: the guest's slots, then the track taps.
-    if index < MAX_TAPS {
-        region_u32(START + HEADER_SIZE + SLOT_SIZE * index)
-    } else {
-        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_TAPS))
-    }
+    // index space: the guest's slots, then the track taps, one stride apart.
+    region_u32(START + HEADER_SIZE + SLOT_SIZE * index)
 }
 
 /// How many times slot `index` has gone live: the u32 after `capacity_frames`
 /// in the slot header.
 fn slot_activations(index: usize) -> u32 {
-    if index < MAX_TAPS {
-        region_u32(START + HEADER_SIZE + SLOT_SIZE * index + 12)
-    } else {
-        region_u32(TRACK_START + SLOT_SIZE * (index - MAX_TAPS) + 12)
-    }
+    region_u32(START + HEADER_SIZE + SLOT_SIZE * index + 12)
 }
 
 /// The global header's active-slot counter.
@@ -280,13 +267,13 @@ fn a_handle_whose_slot_is_outside_the_region_touches_nothing() {
 }
 
 #[test]
-fn a_track_tap_is_a_tap_slot_numbered_after_the_guests_in_its_own_span() {
+fn a_track_tap_is_a_tap_slot_numbered_after_the_guests() {
     let _g = lock();
-    // The first index past the guest's slots lands in the track span, at
-    // the track region's start, not one stride past the guest's last slot.
+    // The first index past the guest's slots is the next slot of the same
+    // region, one stride past the guest's last.
     let mut h = handle();
     assert!(claim(MAX_TAPS, &mut h), "the first track tap was refused");
-    assert_eq!(h.internalData as usize, base_ptr() as usize + TRACK_START);
+    assert_eq!(h.internalData as usize, base_ptr() as usize + START + HEADER_SIZE + SLOT_SIZE * MAX_TAPS);
     assert_eq!(slot_state(MAX_TAPS), 1);
     assert_eq!(slot_state(MAX_TAPS - 1), 0, "the guest's last slot was not touched");
 

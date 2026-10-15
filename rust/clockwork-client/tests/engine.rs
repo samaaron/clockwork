@@ -314,13 +314,13 @@ fn regions_are_named_and_absent_is_an_answer() {
     assert!(!e.region(RegionId::Egress).unwrap().is_writable());
     assert!(!e.region(RegionId::Window).unwrap().is_empty());
     assert!(!e.region(RegionId::Taps).unwrap().is_empty());
-    assert!(!e.region(RegionId::RawScope).unwrap().is_empty());
+    assert!(!e.region(RegionId::Scope).unwrap().is_empty());
     let stats = e.region(RegionId::NativeStats).unwrap();
     assert!(stats.len() >= 4 * clockwork_client::metrics_schema::NATIVE_STATS.len());
     assert!(!stats.is_writable());
     // An in-process handle over bare memory cannot see the bulk lanes.
-    assert_eq!(e.region(RegionId::Inbox).err(), Some(Error::Absent));
-    assert_eq!(e.region(RegionId::Outbox).err(), Some(Error::Absent));
+    assert_eq!(e.region(RegionId::Assets).err(), Some(Error::Absent));
+    assert_eq!(e.region(RegionId::Returns).err(), Some(Error::Absent));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
     // SAFETY: the engine is attached, so the arena header is mapped and
     // published; read only.
     let header = unsafe { &*clockwork_abi::lanes::clockwork_arena_header() };
-    let tap_entry = header.find(ClockworkArenaRegion::TAPS).expect("the arena has a tap region");
+    let tap_entry = header.find(ClockworkArenaRegion::CLOCKWORK_TAPS).expect("the arena has a tap region");
     assert_eq!(tap_entry.geom[geom::TAP_CHANNELS] as usize, AUDIO_TAP_MAX_CHANNELS);
 
     assert_eq!(e.audio_tap(1_000_000).err(), Some(Error::Absent));

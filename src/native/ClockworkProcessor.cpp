@@ -65,13 +65,13 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
                                      int numInputChannels,
                                      const void* guestConfig,
                                      uint32_t guestConfigBytes,
-                                     void* guestArena,
-                                     uint32_t guestArenaBytes,
+                                     void* guestMemory,
+                                     uint32_t guestMemoryBytes,
                                      int bufLen,
-                                     const void* inbox,
-                                     uint32_t inboxBytes,
-                                     void* outbox,
-                                     uint32_t outboxBytes)
+                                     const void* assets,
+                                     uint32_t assetsBytes,
+                                     void* returns,
+                                     uint32_t returnsBytes)
 {
     mRingBufferStorage = ringBufferStorage;
     mSampleRate        = sampleRate;
@@ -119,14 +119,14 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
              static_cast<uint32_t>(numInputChannels),
              static_cast<uint32_t>(numOutputChannels),
              /*verbosity*/ 0,
-             guestArena,
-             guestArenaBytes,
+             guestMemory,
+             guestMemoryBytes,
              guestConfig,
              guestConfigBytes,
              // No span: this host's allocator is safe to take the guest's
              // real-time pool from, so clockwork::mem stays on the system.
              /*arena_bytes*/ 0,
-             inbox, inboxBytes, outbox, outboxBytes);
+             assets, assetsBytes, returns, returnsBytes);
 }
 
 void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
@@ -570,7 +570,7 @@ void ClockworkProcessor::process(
         }
     }
 
-    // (No recording tap here: the master mix leaves through the raw scope
+    // (No recording tap here: the master mix leaves through the scope
     // a client reads — shm_audio_buffer slot 0 — and a client records it.)
 
     // ── 4. Timing stats (no I/O on audio thread — store atomically for external query) ──

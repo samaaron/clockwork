@@ -601,7 +601,7 @@ static ERL_NIF_TERM nif_send_osc(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     switch (g_engine->ingest(bin.data, size, kBeamToken)) {
         case CLOCKWORK_OK:        return enif_make_atom(env, "ok");
         case CLOCKWORK_E_FULL:    return error("full");       // no room this moment
-        case CLOCKWORK_E_TOO_BIG: return error("too_big");    // never room: bulk goes in the inbox
+        case CLOCKWORK_E_TOO_BIG: return error("too_big");    // never room: bulk goes in the assets area
         case CLOCKWORK_E_ARG:     return enif_make_badarg(env);  // an empty packet
         default:                  return error("not_running");
     }

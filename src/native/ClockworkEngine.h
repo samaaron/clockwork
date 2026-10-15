@@ -106,13 +106,13 @@ public:
         // Must fit the region with its terminating NUL (GUEST_CONFIG_SIZE),
         // or init refuses.
         std::string guestConfig;
-        // The guest's bulk lanes (shm_segment.hpp): the inbox a client writes
-        // samples and other assets into, the outbox the guest renders into.
+        // The guest's bulk lanes (shm_segment.hpp): the assets area a client writes
+        // samples and other assets into, the returns area the guest renders into.
         // Address space, not memory — pages are committed as they are
         // written — so a host sizes them for the largest set it expects,
         // not the smallest. A host exposes them as a launch option.
-        size_t inboxBytes               = static_cast<size_t>(CLOCKWORK_INBOX_BYTES);
-        size_t outboxBytes              = static_cast<size_t>(CLOCKWORK_OUTBOX_BYTES);
+        size_t assetsBytes               = static_cast<size_t>(CLOCKWORK_ASSETS_BYTES);
+        size_t returnsBytes              = static_cast<size_t>(CLOCKWORK_RETURNS_BYTES);
         bool   headless                 = false;   // skip audio device (for tests)
         bool   manualAudioPump          = false;   // skip the audio source entirely
                                                    // (no device, no headless driver):
@@ -348,16 +348,16 @@ public:
     // (false when the host drives control, and after shutdown).
     bool hasControlThread() const { return mNrtGateway.running(); }
 
-    // The guest's inbox as THIS engine placed it — the lane an in-process
+    // The guest's assets as THIS engine placed it — the lane an in-process
     // client writes and then names by OFFSET in /b_allocPtr and its kin. A
     // client in another process reaches the same bytes through the segment;
     // one sharing this address space asks here. Null and 0 before init.
-    const uint8_t* guestInbox()      const { return mGuestInbox; }
-    uint32_t       guestInboxBytes() const { return mGuestInboxBytes; }
-    // The guest's outbox likewise: the lane the guest writes and a client
+    const uint8_t* guestAssets()      const { return mGuestAssets; }
+    uint32_t       guestAssetsBytes() const { return mGuestAssetsBytes; }
+    // The guest's returns likewise: the lane the guest writes and a client
     // reads in place, when the guest says where.
-    const uint8_t* guestOutbox()      const { return mGuestOutbox; }
-    uint32_t       guestOutboxBytes() const { return mGuestOutboxBytes; }
+    const uint8_t* guestReturns()      const { return mGuestReturns; }
+    uint32_t       guestReturnsBytes() const { return mGuestReturnsBytes; }
 
     // Audio-thread control route (the fallback on mAudioRoutes: every claimed
     // address this thread does not answer itself):
@@ -557,7 +557,7 @@ public:
     void snapshotStateTo(uint32_t token);
 
     // No recording API: the engine opens no files. Its master mix leaves
-    // through the raw scope (shm_audio_buffer slot 0), and a client that
+    // through the scope (shm_audio_buffer slot 0), and a client that
     // wants a session recording reads that slot and writes the file itself
     // (SuperSonic's front does).
 
@@ -1013,7 +1013,7 @@ private:
 
     // The control pass: its registry of drains and tasks, and — unless the
     // host drives control — the gateway thread that runs it every audio block.
-    // The NRT_OUT_BUFFER SHM region carries ALL NRT-thread outgoing OSC —
+    // The NRT_OUT_RING SHM region carries ALL NRT-thread outgoing OSC —
     // command replies, Link/device notifications, off-thread debug — written
     // multi-producer through the lanes producer (clockwork_egress_nrt_write, which
     // owns the lock). The pass drains it (unless the host drains egress) and
@@ -1311,18 +1311,17 @@ private:
     // did — an engine embedded with no segment handed its guest no working
     // memory at all. Allocated once and reused across cold swaps;
     // audio_processor zeroes it at every dsp_new.
-    std::unique_ptr<uint8_t[]> mGuestArena;   // NOLINT(modernize-avoid-c-arrays): a raw block got with nothrow new and refused on failure (bringUp), not a container
 
-    // The inbox and outbox when there is no segment to carve them from — one
-    // block, inbox first. A plugin has no public segment and still has a
+    // The assets area and returns when there is no segment to carve them from — one
+    // block, assets first. A plugin has no public segment and still has a
     // client: the host process itself, reading in place.
-    std::unique_ptr<uint8_t[]> mGuestLanes;   // NOLINT(modernize-avoid-c-arrays): as mGuestArena
-    size_t mGuestLanesInboxBytes  = 0;   // how mGuestLanes is split
-    size_t mGuestLanesOutboxBytes = 0;
-    // Where the inbox ended up, whichever of the two above supplied it.
-    uint8_t* mGuestInbox      = nullptr;
-    uint32_t mGuestInboxBytes = 0;
-    uint8_t* mGuestOutbox      = nullptr;
-    uint32_t mGuestOutboxBytes = 0;
+    std::unique_ptr<uint8_t[]> mGuestLanes;   // NOLINT(modernize-avoid-c-arrays): a raw block got with nothrow new, not a container
+    size_t mGuestLanesAssetsBytes  = 0;   // how mGuestLanes is split
+    size_t mGuestLanesReturnsBytes = 0;
+    // Where the assets area ended up, whichever of the two above supplied it.
+    uint8_t* mGuestAssets      = nullptr;
+    uint32_t mGuestAssetsBytes = 0;
+    uint8_t* mGuestReturns      = nullptr;
+    uint32_t mGuestReturnsBytes = 0;
 
 };

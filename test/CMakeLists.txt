@@ -50,7 +50,7 @@ add_executable(clockwork_tests
     test_ring_concurrency.cpp
     test_lanes.cpp
     test_arena.cpp
-    test_raw_scope.cpp
+    test_scope.cpp
     test_embed.cpp
 
     # OSC: the codec, the ingress router, and the one prefix clockwork keeps.
@@ -88,7 +88,7 @@ add_executable(clockwork_tests
     # The shared-memory segment: layout guard and permissions.
     test_shm_segment.cpp
 
-    # The client's pool over the inbox lane.
+    # The client's pool over the assets area lane.
     test_asset_pool.cpp
     test_osc_front.cpp
     test_egress_router.cpp

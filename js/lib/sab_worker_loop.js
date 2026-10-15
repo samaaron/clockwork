@@ -13,8 +13,8 @@ export function runSabWorker(config) {
     const {
         name,
         calculateControlIndices,
-        headIndex,          // (CONTROL_INDICES) => int32 array index for head
-        tailIndex,          // (CONTROL_INDICES) => int32 array index for tail
+        headIndex,          // (RING_CURSOR_INDICES) => int32 array index for head
+        tailIndex,          // (RING_CURSOR_INDICES) => int32 array index for tail
         readMessages,       // (ctx) => array of results (empty if none)
         postResults,        // (results) => void — sends results to main thread
         initMetrics = true,
@@ -34,13 +34,13 @@ export function runSabWorker(config) {
     // Mutable shared state — updated by initRingBuffer, read by callbacks via ctx
     const ctx = {
         sharedBuffer: null,
-        ringBufferBase: null,
+        arenaBase: null,
         bufferConstants: null,
         atomicView: null,
         dataView: null,
         uint8View: null,
         metricsView: null,
-        CONTROL_INDICES: {},
+        RING_CURSOR_INDICES: {},
         // The engine's rings, for js/lib/ring.js to read. Nothing compiled
         // runs here (docs/THREADS.md).
         rings: null,
@@ -55,12 +55,12 @@ export function runSabWorker(config) {
 
     async function initRingBuffer(buffer, base, constants) {
         ctx.sharedBuffer = buffer;
-        ctx.ringBufferBase = base;
+        ctx.arenaBase = base;
         ctx.bufferConstants = constants;
         ctx.atomicView = new Int32Array(buffer);
         ctx.dataView = new DataView(buffer);
         ctx.uint8View = new Uint8Array(buffer);
-        ctx.CONTROL_INDICES = calculateControlIndices(base, constants.CONTROL_START);
+        ctx.RING_CURSOR_INDICES = calculateControlIndices(base, constants.RING_CURSORS_START);
         if (initMetrics) {
             const metricsBase = base + constants.METRICS_START;
             ctx.metricsView = new Uint32Array(buffer, metricsBase, constants.METRICS_SIZE / 4);
@@ -75,12 +75,12 @@ export function runSabWorker(config) {
     }
 
     function waitLoop(mine) {
-        const hIdx = headIndex(ctx.CONTROL_INDICES);
+        const hIdx = headIndex(ctx.RING_CURSOR_INDICES);
         // A reader that CONSUMES leaves its position in the ring's own tail, so
         // "nothing to do" is head === tail. A reader that only WATCHES keeps its
         // cursor to itself — the ring's tail belongs to whoever consumes — so it
         // idles on the head not having moved since it last looked.
-        const tIdx = tailIndex ? tailIndex(ctx.CONTROL_INDICES) : -1;
+        const tIdx = tailIndex ? tailIndex(ctx.RING_CURSOR_INDICES) : -1;
         let lastHead = -1;
 
         while (running && mine === generation) {
@@ -111,8 +111,8 @@ export function runSabWorker(config) {
     // parking the thread, so the host's own work — its messages, its timers — keeps running between frames.
     // Where it is missing, a short sleep stands in: slower to wake, but it still yields.
     async function waitLoopAsync(mine) {
-        const hIdx = headIndex(ctx.CONTROL_INDICES);
-        const tIdx = tailIndex ? tailIndex(ctx.CONTROL_INDICES) : -1;
+        const hIdx = headIndex(ctx.RING_CURSOR_INDICES);
+        const tIdx = tailIndex ? tailIndex(ctx.RING_CURSOR_INDICES) : -1;
         let lastHead = -1;
 
         while (running && mine === generation) {
@@ -176,7 +176,7 @@ export function runSabWorker(config) {
             switch (data.type) {
                 case 'init':
                     if (data.sharedBuffer) {
-                        await initRingBuffer(data.sharedBuffer, data.ringBufferBase,
+                        await initRingBuffer(data.sharedBuffer, data.arenaBase,
                                              data.bufferConstants);
                     }
                     endpoint.postMessage({ type: 'initialized' });

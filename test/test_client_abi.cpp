@@ -40,7 +40,7 @@ namespace {
 // A handle onto the engine this process is running, which is what a plugin's
 // GUI has and what a WebAssembly build has: same address space, no segment.
 ClockworkClient* openInProcess(ClockworkStatus* st) {
-    return clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, st);
+    return clockwork_client_open_memory(shared_memory, ARENA_SIZE, st);
 }
 
 } // namespace
@@ -149,7 +149,7 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
 
     const auto ping = osc_test::message("/dummy/ping");
     const uint32_t bound = 64 * 1024;
-    const uint32_t rounds = (IN_BUFFER_SIZE / bound) * 4;
+    const uint32_t rounds = (IN_RING_SIZE / bound) * 4;
     REQUIRE(rounds > 4);
 
     // NOTHING IS DRAINED WHILE THIS RUNS, which is what makes it an
@@ -235,7 +235,7 @@ TEST_CASE("client abi: a second reservation is refused rather than deadlocked",
     // without taking the lock — proven by the working send afterwards.
     CHECK(clockwork_client_send_begin(c, 0, &second) == nullptr);
     CHECK(second == CLOCKWORK_E_ARG);
-    CHECK(clockwork_client_send_begin(c, IN_BUFFER_SIZE + 1024, &second) == nullptr);
+    CHECK(clockwork_client_send_begin(c, IN_RING_SIZE + 1024, &second) == nullptr);
     CHECK(second == CLOCKWORK_E_TOO_BIG);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -260,7 +260,7 @@ TEST_CASE("client abi: refusals are told apart", "[client][abi]") {
     // Too big is a verdict, not a moment. A frame larger than the ring will
     // never fit however long a caller waits, so it is refused differently from
     // a ring that happens to be full.
-    std::vector<uint8_t> huge(IN_BUFFER_SIZE + 1024, 0);
+    std::vector<uint8_t> huge(IN_RING_SIZE + 1024, 0);
     CHECK(clockwork_client_send(c, huge.data(),
                                 static_cast<uint32_t>(huge.size()), 0) == CLOCKWORK_E_TOO_BIG);
 
@@ -281,7 +281,7 @@ TEST_CASE("client abi: regions are named, and absent is an answer",
     CHECK(reg.writable == 0);          // the engine's to write, not ours
 
     REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_WINDOW, &reg) == CLOCKWORK_OK);
-    CHECK(reg.bytes == SHM_WINDOW_SIZE);
+    CHECK(reg.bytes == GUEST_WINDOW_SIZE);
 
     // The device layer's account of its callback, beside the metrics: the
     // same flat-uint32 shape, the region the schema's nativeStats table
@@ -293,7 +293,7 @@ TEST_CASE("client abi: regions are named, and absent is an answer",
 
     // A region this engine does not expose here says so rather than handing
     // back a pointer into whatever is next along.
-    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_INBOX, &reg) == CLOCKWORK_E_ABSENT);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_E_ABSENT);
 
     clockwork_client_close(c);
 }
@@ -348,15 +348,15 @@ TEST_CASE("client abi: a tap slot reads as silence unless it is live", "[client]
     CHECK(clockwork_client_audio_tap_valid(&r) == 0);
 
     const uint32_t frames = 64;
-    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, 7.0f);
+    std::vector<float> out(frames * TAP_STREAM_CHANNELS, 7.0f);
     uint32_t channels = 0;
     CHECK(clockwork_client_audio_tap_read(c, &r, UINT64_MAX, frames, out.data(), &channels) == 0);
-    CHECK(channels == SHM_TAP_STREAM_CHANNELS);
+    CHECK(channels == TAP_STREAM_CHANNELS);
     for (float s : out) REQUIRE(s == 0.0f);
 
     // The slot's producer claims it and writes a ramp: the reader sees the
     // ramp, right-aligned to the write edge.
-    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + TAPS_START + TAPS_HEADER_SIZE);
     shm_tap_stream_writer w(slot);
     w.activate(2);
     std::vector<float> l(256), rr(256);
@@ -396,8 +396,8 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
     REQUIRE(clockwork_client_audio_tap_open(c, 1, &r) == CLOCKWORK_OK);
     const uint32_t before = clockwork_client_audio_tap_activations(&r);
 
-    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + SHM_TAP_START + SHM_TAP_HEADER_SIZE
-                                                      + SHM_TAP_SLOT_SIZE);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + TAPS_START + TAPS_HEADER_SIZE
+                                                      + TAP_SLOT_SIZE);
     shm_tap_stream_writer w(slot);
     w.activate(2);
     slot->state.store(0, std::memory_order_release);   // and gone again, unseen
@@ -516,7 +516,7 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
     CHECK(clockwork_client_open_memory(tiny, sizeof tiny, &st) == nullptr);
     CHECK(st == CLOCKWORK_E_ARG);
 
-    CHECK(clockwork_client_open_memory(nullptr, TOTAL_BUFFER_SIZE, &st) == nullptr);
+    CHECK(clockwork_client_open_memory(nullptr, ARENA_SIZE, &st) == nullptr);
     CHECK(st == CLOCKWORK_E_ARG);
 
     // And every status has words, because a binding raising an exception has
@@ -531,8 +531,8 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
 // built separately still finds the rings. The audio thread does not — its drain
 // addresses them with compile-time constants:
 //
-//     clockwork_drain_ring(shared_memory + IN_BUFFER_START, IN_BUFFER_SIZE,
-//                          &control->in_head, &control->in_tail, ...)
+//     clockwork_drain_ring(shared_memory + IN_RING_START, IN_RING_SIZE,
+//                          &cursors->in_head, &cursors->in_tail, ...)
 //
 // Two sources of truth for one address. They agree only while the table the
 // engine publishes matches the constants the engine compiled, and nothing
@@ -549,7 +549,7 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
 
     ShmReaderLayout table{};
     const char* why = nullptr;
-    REQUIRE(ShmReaderLayout::from_arena(shared_memory, TOTAL_BUFFER_SIZE, table, &why));
+    REQUIRE(ShmReaderLayout::from_arena(shared_memory, ARENA_SIZE, table, &why));
     INFO("from_arena refused: " << (why ? why : "-"));
 
     const ShmReaderLayout k = ShmReaderLayout::from_constants();

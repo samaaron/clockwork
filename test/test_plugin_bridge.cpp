@@ -95,7 +95,7 @@ struct Engine {
     ClockworkPort  ret  = CLOCKWORK_PORT_NONE;
     ClockworkProcess proc;
     ClockworkDrainState outDrain;
-    std::vector<Msg> inbox;
+    std::vector<Msg> assets;
     // Planar scratch for a block each way.
     std::vector<float> sendBuf, retBuf;
     std::vector<float*> sendPtrs, retPtrs;
@@ -185,10 +185,10 @@ struct Engine {
                                         static_cast<uint32_t>(sizeof(uint32_t) + s.Size()), 1));
     }
 
-    // Everything the bridge has put on the out ring, decoded into the inbox.
+    // Everything the bridge has put on the out ring, decoded into the assets area.
     void drain() {
         MsgRing& r = h->out;
-        clockwork_drain_ring(out_ring(seg.ptr), OUT_RING_SIZE, &r.head, &r.tail, outDrain, ClockworkDrainMetrics{}, 0,
+        clockwork_drain_ring(out_ring(seg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, outDrain, ClockworkDrainMetrics{}, 0,
             [&](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
                 if (len <= sizeof(uint32_t)) return ClockworkDrainVerdict::Consume;
                 Msg m;
@@ -206,7 +206,7 @@ struct Engine {
                         else if (it->IsFloat()) m.floats.push_back(it->AsFloatUnchecked());
                     }
                 } catch (...) {}
-                inbox.push_back(std::move(m));
+                assets.push_back(std::move(m));
                 return ClockworkDrainVerdict::Consume;
             });
     }
@@ -214,7 +214,7 @@ struct Engine {
     bool await(const char* addr, uint32_t token, Msg& out, int ms = 10000) {
         return waitFor([&] {
             drain();
-            for (auto& m : inbox)
+            for (auto& m : assets)
                 if (m.addr == addr && m.token == token) { out = m; return true; }
             return false;
         }, ms);
@@ -326,7 +326,7 @@ TEST_CASE("a track is bound to a timeline over the control ring", "[plugin][brid
 
     // A midi timeline, with the id the engine resolved (TrackControl puts it
     // there; this test stands where the engine stands).
-    e.inbox.clear();
+    e.assets.clear();
     e.control(22, [&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << "midi:iac-1" << 1 << osc::EndMessage;
     });
@@ -431,13 +431,13 @@ TEST_CASE("the bridge scans the folders it is given and says what it found", "[p
     REQUIRE(waitFor([&] {
         e.drain();
         int covered = 0;
-        for (auto& p : e.inbox)
+        for (auto& p : e.assets)
             if (p.addr == CLOCKWORK_SYS("track/plugins.reply") && p.token == 22 && p.ints.size() >= 3)
                 covered = std::max(covered, p.ints[1] + p.ints[2]);
         return covered >= total;
     }, 5000));
     bool found = false;
-    for (auto& p : e.inbox) {
+    for (auto& p : e.assets) {
         if (p.addr != CLOCKWORK_SYS("track/plugins.reply") || p.token != 22) continue;
         // Every page is one frame on the engine's NRT egress lane, which
         // refuses anything over 8 KB: a page that does not fit is a page
@@ -493,7 +493,7 @@ TEST_CASE("a bridge killed outright comes back with its tracks", "[plugin][bridg
 
     // As the engine does: fresh audio rings, the rig from the mirror.
     e.openPorts(true);
-    e.inbox.clear();
+    e.assets.clear();
     REQUIRE(e.spawn(true));
     REQUIRE(e.h->generation.load() == gen + 1);
     REQUIRE(e.h->restore.load() == 0);

@@ -51,18 +51,18 @@ pub struct DspConfig {
     pub shm_window_bytes: u32,
     pub persistent: *mut c_void,
     pub persistent_bytes: u32,
-    /// The fast tier.
-    pub arena: *mut c_void,
-    pub arena_bytes: u32,
+    /// The guest's working memory: the fast tier, sized to its want.
+    pub memory: *mut c_void,
+    pub memory_bytes: u32,
     /// The bulk tier; NULL/0 on a single-region host.
-    pub arena_bulk: *mut c_void,
-    pub arena_bulk_bytes: u32,
+    pub memory_bulk: *mut c_void,
+    pub memory_bulk_bytes: u32,
     /// Bulk in: the client writes, the guest only reads.
-    pub inbox: *const c_void,
-    pub inbox_bytes: u32,
+    pub assets: *const c_void,
+    pub assets_bytes: u32,
     /// Bulk out: the guest writes, the client reads.
-    pub outbox: *mut c_void,
-    pub outbox_bytes: u32,
+    pub returns: *mut c_void,
+    pub returns_bytes: u32,
     /// Opaque to clockwork; the host's and the guest's private matter.
     pub guest_config: *const c_void,
     pub guest_config_bytes: u32,
@@ -116,11 +116,14 @@ pub struct DspHost {
             when: i64,
         ) -> c_int,
     >,
+    /// Give back bytes taken through `alloc_bytes`. Any thread.
     pub free_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *mut c_void)>,
     /// The guest is done with an asset `dsp_asset` handed it.
     pub asset_release: Option<unsafe extern "C" fn(ctx: *mut c_void, id: u32) -> c_int>,
-    /// Memory from the heap clockwork owns, given back through `free_bytes`.
-    /// Audio thread callable; lock-free, and NULL rather than blocking.
+    /// Bytes from the guest's bulk memory (`DspConfig::memory_bulk`), the span clockwork runs its allocator
+    /// over; given back through `free_bytes`. Audio thread callable; lock-free, and NULL rather than blocking.
+    /// A Rust guest need not call it: its `Box` and `Vec` land in the same span by themselves while one of its
+    /// entry points is open (clockwork's global allocator routes them there).
     pub alloc_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, bytes: usize) -> *mut c_void>,
     /// Claim tap slot `index` to publish `channels` channels into. Non-zero on success.
     pub tap_open:
@@ -151,9 +154,9 @@ pub struct DspInfo {
     /// moment it arrives, carrying its timetag.
     pub holds_schedule: i32,
     /// Bytes wanted from the fast tier; 0 means no claim.
-    pub arena_bytes_wanted: u32,
+    pub memory_bytes_wanted: u32,
     /// Bytes wanted from the bulk tier; 0 means no claim.
-    pub arena_bulk_bytes_wanted: u32,
+    pub memory_bulk_bytes_wanted: u32,
     /// Non-zero: the host's inbound events (`/clockwork/midi/in/…`,
     /// `/clockwork/gamepad/in/…`, the ports and devices pushes) are handed
     /// to `dsp_osc` as they arrive, each with its arrival timetag as a
@@ -174,7 +177,7 @@ unsafe impl Sync for DspInfo {}
 pub const CLOCKWORK_ASSET_RAW: u32 = 0;
 pub const CLOCKWORK_ASSET_AUDIO_F32: u32 = 1;
 
-/// One asset the client staged in the inbox and committed, handed to
+/// One asset the client staged in the assets area and committed, handed to
 /// `dsp_asset` on the audio thread. The bytes stay valid until the guest
 /// calls `DspHost::asset_release(id)`.
 #[repr(C)]

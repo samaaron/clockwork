@@ -118,21 +118,36 @@ export const METRICS_SCHEMA = {
     driftOffsetMs:                { offset: 50, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
     audioContextState:            { offset: 52, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
-    inBufferCapacity:             { offset: 58, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
-    outBufferCapacity:            { offset: 59, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
-    nrtOutBufferCapacity:          { offset: 60, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
-    mode:                         { offset: 61, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
+    inBufferCapacity:             { offset: 62, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
+    outBufferCapacity:            { offset: 63, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
+    nrtOutBufferCapacity:          { offset: 64, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
+    mode:                         { offset: 65, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
 
-    // Audio diagnostics [62-68] (main thread, Chrome playbackStats + cross-browser health)
-    glitchCount:                  { offset: 62, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
-    glitchDurationMs:             { offset: 63, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
-    averageLatencyUs:             { offset: 64, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
-    maxLatencyUs:                 { offset: 65, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
-    audioHealthPct:               { offset: 66, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
-    totalFramesDurationMs:        { offset: 67, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
-    hasPlaybackStats:             { offset: 68, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
+    // Audio diagnostics [66-72] (main thread, Chrome playbackStats + cross-browser health)
+    glitchCount:                  { offset: 66, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
+    glitchDurationMs:             { offset: 67, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
+    averageLatencyUs:             { offset: 68, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
+    maxLatencyUs:                 { offset: 69, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
+    audioHealthPct:               { offset: 70, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
+    totalFramesDurationMs:        { offset: 71, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
+    hasPlaybackStats:             { offset: 72, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
 
-    // Buffer pool growth metrics [69-72] (main thread)
+    // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush; the slots the buffer
+    // pool's metrics once held)
+    guestPoolUsedBytes:           { offset: 53, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the guest\'s pool now: what it has allocated from its bulk memory (payloads as carved)' },
+    guestPoolPeakBytes:           { offset: 54, type: 'gauge',    unit: 'bytes', description: 'The most bytes ever in use in the guest\'s pool' },
+    guestPoolGrowths:             { offset: 55, type: 'counter',  unit: 'count', description: 'Times the guest\'s pool grew into the spare' },
+    rustHeapUsedBytes:            { offset: 56, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the rust heap now (the RT router\'s block)' },
+    rustHeapFallbacks:            { offset: 57, type: 'counter',  unit: 'count', description: 'Rust allocations inside the engine that fell back to the system allocator because the rust heap was full' },
+    // The guest's mallocs [58-59] (shared C++, written at the metrics flush; src/guest_malloc.h). Counted where the
+    // link lets clockwork wrap the allocator (the web); 0 everywhere else.
+    guestMallocBytes:             { offset: 58, type: 'gauge',    unit: 'bytes', description: 'Bytes the guest holds from malloc: taken inside its entry points with malloc or new and not freed' },
+    guestMallocsProcessing:       { offset: 59, type: 'counter',  unit: 'count', description: 'malloc, calloc or realloc calls the guest made while processing (inside dsp_process, dsp_osc or dsp_asset) since boot; 0 for a guest that allocates only through clockwork' },
+    // The whole program's mallocs after boot [60-61] (shared C++, written at the metrics flush; src/guest_malloc.h):
+    // what reaches the system allocator once the engine is up, any scope, which should be nothing. Counted on the
+    // web, 0 everywhere else.
+    mallocsAfterBoot:             { offset: 60, type: 'counter',  unit: 'count', description: 'malloc, calloc or realloc calls anywhere in the engine\'s program since the engine was ready; the memory model says 0' },
+    mallocBytesAfterBoot:         { offset: 61, type: 'gauge',    unit: 'bytes', description: 'Bytes taken from malloc since the engine was ready and still held' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in

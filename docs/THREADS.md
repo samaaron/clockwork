@@ -103,7 +103,8 @@ proportion.
 - the client slots region
 - `WasmClient`, and every second copy of the engine module
 - `clockwork_client_open_memory_in` and `clockwork_client_sizeof`, which only
-  the slots used. Region id 13 is retired, not reused.
+  the slots used. (Version 2 of the arena then renumbered its regions in memory
+  order, so there is no gap where they were.)
 - the engine's module and memory in a channel's transferable
 - the limit of eight, and the bookkeeping that gives slots back
 

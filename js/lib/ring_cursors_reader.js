@@ -3,13 +3,13 @@
 
 /**
  * The control plane, read where the engine and its clients keep the rings'
- * cursors (ControlPointers in src/shared_memory.h; the offsets are
- * control_offsets.js): each ring's head and tail, the sequence number of the
+ * cursors (RingCursors in src/shared_memory.h; the offsets are
+ * ring_cursor_offsets.js): each ring's head and tail, the sequence number of the
  * last message either way, and the status flags. What a client that watches
  * the transport reads, without an opinion about what the numbers mean.
  */
 
-import * as CTL from "./control_offsets.js";
+import * as CTL from "./ring_cursor_offsets.js";
 
 /**
  * A reader over the control region at `byteOffset` in `buffer`. Returns read(into = {}): `into`, filled
@@ -18,7 +18,7 @@ import * as CTL from "./control_offsets.js";
  * @param {ArrayBufferLike|(() => ArrayBufferLike)} buffer
  * @param {number} byteOffset
  */
-export function controlReader(buffer, byteOffset) {
+export function ringCursorsReader(buffer, byteOffset) {
   const source = typeof buffer === "function" ? buffer : () => buffer;
   let at = null, i32 = null;
   return function read(into = {}) {

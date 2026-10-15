@@ -25,7 +25,7 @@
  * there is no other thread it can be reached from. An off-thread ingress door
  * is not a thing that could be built. What that means for bulk is not "give up
  * and copy on the audio thread" — it is that bulk must not travel as a message
- * at all. A client writes the bytes into DspConfig::inbox from its own
+ * at all. A client writes the bytes into DspConfig::assets from its own
  * thread and sends a short message saying where they are; the guest gets an
  * OFFSET. js/clockwork.js says it outright: "bulk never rides OSC ingress in either
  * mode."
@@ -132,16 +132,16 @@ TEST_CASE("blobs: a blob far larger than the egress ring still arrives",
     // ARRIVES, which is not the same as arrives well. This is delivered on the
     // audio thread like every other message, and a guest that kept it would
     // memcpy 160 KB there. The case fixes what the path DOES rather than
-    // recommending it: a sample this size belongs in the inbox, written by
+    // recommending it: a sample this size belongs in the assets area, written by
     // the client, with a short message carrying the pointer.
     lanes_test::boot();
     lanes_test::drainRt();
 
-    // Bigger than OUT_BUFFER_SIZE, comfortably inside IN_BUFFER_SIZE. This is
+    // Bigger than RT_OUT_RING_SIZE, comfortably inside IN_RING_SIZE. This is
     // the asymmetry stated as a fact rather than as a header constant: the
     // inbound path carries payloads the outbound path cannot.
-    const uint32_t n = OUT_BUFFER_SIZE + 32 * 1024;
-    REQUIRE(n < IN_BUFFER_SIZE / 2);
+    const uint32_t n = RT_OUT_RING_SIZE + 32 * 1024;
+    REQUIRE(n < IN_RING_SIZE / 2);
     const auto payload = makeBlob(0x1234, n);
 
     const auto msg = osc_test::messageWithBlob("/dummy/blob", payload.data(), payload.size());
@@ -203,7 +203,7 @@ TEST_CASE("blobs: a blob too big for the egress ring is refused, and the guest i
 
     // Larger than the ring can ever hold, so this is not a full-ring race: it
     // cannot fit at any moment, with any cursor positions.
-    const uint32_t n = OUT_BUFFER_SIZE + 16 * 1024;
+    const uint32_t n = RT_OUT_RING_SIZE + 16 * 1024;
     REQUIRE(n < lanes_test::kGuestMemoryBytes);   // the guest can still build it
 
     const auto ask = osc_test::message("/dummy/blob/emit",
@@ -226,7 +226,7 @@ TEST_CASE("blobs: a blob too big for the egress ring is refused, and the guest i
     REQUIRE(findAddress(frames, "/dummy/blob-out") == nullptr);
 }
 
-// ── Bulk in, through the inbox ──────────────────────────────────────────────
+// ── Bulk in, through the assets area ──────────────────────────────────────────────
 
 TEST_CASE("blobs: a client stages a multi-megabyte payload and the guest reads it",
           "[boundary][blobs]") {
@@ -245,24 +245,24 @@ TEST_CASE("blobs: a client stages a multi-megabyte payload and the guest reads i
     const uint32_t seed = 0x3C;
     const uint32_t offset = 1024;   // NOT zero: an offset that is ignored
                                     // rather than resolved passes at base.
-    REQUIRE(n > IN_BUFFER_SIZE);
-    REQUIRE(offset + n <= lanes_test::kInboxBytes);
+    REQUIRE(n > IN_RING_SIZE);
+    REQUIRE(offset + n <= lanes_test::kAssetsBytes);
 
-    // The client is the region's only writer. lanes_test::inbox() hands back a
-    // mutable pointer and lanes_test::outbox() a const one, which is the same
+    // The client is the region's only writer. lanes_test::assets() hands back a
+    // mutable pointer and lanes_test::returns() a const one, which is the same
     // asymmetry DspConfig states from the other side.
-    uint8_t* base = lanes_test::inbox();
+    uint8_t* base = lanes_test::assets();
     REQUIRE(base != nullptr);
     const auto staged = makeBlob(seed, n);
     std::memcpy(base + offset, staged.data(), n);
 
-    const auto ask = osc_test::message("/dummy/inbox/hash",
+    const auto ask = osc_test::message("/dummy/assets/hash",
                                        static_cast<int32_t>(offset),
                                        static_cast<int32_t>(n));
     REQUIRE(lanes_test::ingress(ask.ptr(), ask.size(), kClient));
 
-    const auto frames = lanes_test::tickUntil(8, "/dummy/inbox/is");
-    const auto* is = findAddress(frames, "/dummy/inbox/is");
+    const auto frames = lanes_test::tickUntil(8, "/dummy/assets/is");
+    const auto* is = findAddress(frames, "/dummy/assets/is");
     REQUIRE(is != nullptr);
     const auto r = osc_test::parseReply(is->data.data(),
                                         static_cast<uint32_t>(is->data.size()));
@@ -290,7 +290,7 @@ TEST_CASE("blobs: the guest produces a multi-megabyte blob and a client takes it
 
     // THIS IS WHAT BULK-OUT IS. Not a large OSC reply — the previous case
     // shows those refused — but the exact mirror of loading a sample: bytes in
-    // DspConfig::outbox, and a short message saying where they are. The guest
+    // DspConfig::returns, and a short message saying where they are. The guest
     // is the only writer of that region; the client only ever reads it.
     //
     // 2 MB, which is sixteen times what the egress ring can carry and is not
@@ -299,8 +299,8 @@ TEST_CASE("blobs: the guest produces a multi-megabyte blob and a client takes it
     // just how it is checked.
     const uint32_t n = 2 * 1024 * 1024;
     const uint32_t seed = 0x5A;
-    REQUIRE(n > OUT_BUFFER_SIZE);
-    REQUIRE(n <= lanes_test::kOutboxBytes);
+    REQUIRE(n > RT_OUT_RING_SIZE);
+    REQUIRE(n <= lanes_test::kReturnsBytes);
 
     const auto ask = osc_test::message("/dummy/blob/produce",
                                        static_cast<int32_t>(n),
@@ -323,10 +323,10 @@ TEST_CASE("blobs: the guest produces a multi-megabyte blob and a client takes it
     // different processes, so a pointer would have read the wrong bytes
     // without faulting; here the fixture and the guest share an address space,
     // and the offset is still the only thing that crossed.
-    const uint8_t* base = lanes_test::outbox();
+    const uint8_t* base = lanes_test::returns();
     REQUIRE(base != nullptr);
-    REQUIRE(offset <= lanes_test::kOutboxBytes);
-    REQUIRE(length <= lanes_test::kOutboxBytes - offset);
+    REQUIRE(offset <= lanes_test::kReturnsBytes);
+    REQUIRE(length <= lanes_test::kReturnsBytes - offset);
 
     const auto expected = makeBlob(seed, n);
     REQUIRE(fnv1a(base + offset, length) == hash);

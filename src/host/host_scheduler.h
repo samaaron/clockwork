@@ -11,7 +11,7 @@
     scheduler core and fire loop (clockwork_fire_due) the engine runs, with the host's
     osc/midi backends in place of the DSP default. Decoupled from sockets so it
     is unit-testable: ingest() may be called from a recv thread (it only locks
-    the inbox), tick() is called from the single scheduler thread that owns the
+    the assets area), tick() is called from the single scheduler thread that owns the
     core.
 */
 
@@ -48,7 +48,7 @@ class HostScheduler {
 public:
     explicit HostScheduler(ClockworkSysRoutes& routes) : mRoutes(routes) {}
 
-    // Parse one control message and queue it. Thread-safe (locks the inbox only);
+    // Parse one control message and queue it. Thread-safe (locks the assets area only);
     // safe to call from the ingress recv thread. Unknown/malformed messages are
     // ignored.
     void ingest(const uint8_t* data, size_t len) {
@@ -78,7 +78,7 @@ public:
     // thread only (the core is not shared). No reply path → no call ctx.
     void tick(int64_t now) {
         std::vector<Command> batch;
-        { std::lock_guard<std::mutex> lk(mMx); batch.swap(mInbox); }
+        { std::lock_guard<std::mutex> lk(mMx); batch.swap(mAssets); }
         for (auto& c : batch) {
             if (c.kind == Command::Flush) {
                 mCore.flush(c.tag);
@@ -109,13 +109,13 @@ private:
 
     void push(Command&& c) {
         std::lock_guard<std::mutex> lk(mMx);
-        mInbox.push_back(std::move(c));
+        mAssets.push_back(std::move(c));
     }
 
     Core                 mCore;
     ClockworkSysRoutes&        mRoutes;
     std::mutex           mMx;
-    std::vector<Command> mInbox;
+    std::vector<Command> mAssets;
 };
 
 }  // namespace clockwork_host

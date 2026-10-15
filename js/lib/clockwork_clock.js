@@ -67,18 +67,18 @@ export class ClockworkClock {
   /**
    * Initialize SAB views for session state and time.
    * @param {SharedArrayBuffer} sharedBuffer
-   * @param {number} ringBufferBase
+   * @param {number} arenaBase
    * @param {Object} bufferConstants — must include CLOCK_STATE_START / _SIZE
    */
-  initSharedViews(sharedBuffer, ringBufferBase, bufferConstants) {
+  initSharedViews(sharedBuffer, arenaBase, bufferConstants) {
     if (this.#mode === 'sab') {
-      const base = ringBufferBase + bufferConstants.CLOCK_STATE_START;
+      const base = arenaBase + bufferConstants.CLOCK_STATE_START;
       const size = bufferConstants.CLOCK_STATE_SIZE;
       this.#sabBigInt = new BigInt64Array(sharedBuffer, base, size / 8);
       this.#sabInt32  = new Int32Array(sharedBuffer, base, size / 4);
       this.#sabViews  = { bigInt: this.#sabBigInt, int32: this.#sabInt32 };
     }
-    this.#ntp.initSharedViews(sharedBuffer, ringBufferBase, bufferConstants);
+    this.#ntp.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
   }
 
   /** @param {MessagePort} port */

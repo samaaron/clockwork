@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 //
-// AudioCapture.read({ frames }): the newest that many frames of a raw scope
+// AudioCapture.read({ frames }): the newest that many frames of a scope
 // slot, for a reader that draws a window. Over a synthetic slot: the header
 // shm_audio_buffer.hpp lays out, then the interleaved ring.
 import { test } from "node:test";
@@ -15,7 +15,7 @@ function slot({ capacity, channels, wpos }) {
   h[1] = 48000; h[2] = channels; h[3] = capacity; h[4] = wpos; h[5] = 0;
   const data = new Float32Array(sab, HEADER_BYTES, floats);
   for (let f = 0; f < capacity; f++) for (let c = 0; c < channels; c++) data[f * channels + c] = f * 10 + c;   // frame f, channel c, as written at absolute frame f (mod capacity)
-  const cap = new AudioCapture({ sharedBuffer: sab, ringBufferBase: 0, bufferConstants: { SHM_AUDIO_START: 0, SHM_AUDIO_HEADER_SIZE: HEADER_BYTES, SHM_AUDIO_SLOT_SIZE: HEADER_BYTES + floats * 4 } });
+  const cap = new AudioCapture({ sharedBuffer: sab, arenaBase: 0, bufferConstants: { SCOPE_START: 0, SCOPE_HEADER_SIZE: HEADER_BYTES, SCOPE_SLOT_SIZE: HEADER_BYTES + floats * 4 } });
   return cap;
 }
 

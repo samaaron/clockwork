@@ -9,7 +9,7 @@
  *
  * A registry of address-prefix -> handler. ingest() classifies a raw OSC packet
  * and routes it to the registered handler; the handler either copies the bytes
- * into a destination ring (clockwork-inbox, midi-out, …) or handles it inline
+ * into a destination ring (clockwork-assets, midi-out, …) or handles it inline
  * (control). Bundles and any message claiming no registered prefix go to the
  * default.
  *

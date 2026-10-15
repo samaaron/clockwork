@@ -48,7 +48,7 @@ fn main() {
     let msvc = target.contains("msvc");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
-    // Eight out-parameters, matching the declaration in src/lib.rs. C linkage
+    // Seven out-parameters, matching the declaration in src/lib.rs. C linkage
     // checks none of it, but a signature that drifts from the one the host
     // implements is a trap for whoever reads this next.
     let decl = if msvc { "" } else { "__attribute__((weak)) " };
@@ -56,11 +56,11 @@ fn main() {
         "#include <stddef.h>\n\
          {decl}void* clockwork_shm_base(void) {{ return 0; }}\n\
          {decl}int clockwork_tap_geometry(size_t* start, size_t* header_size,\n\
-         \x20                              size_t* slot_size, size_t* max_taps,\n\
-         \x20                              unsigned* ring_frames, unsigned* channels,\n\
-         \x20                              size_t* track_start, size_t* track_slots) {{\n\
-         \x20   (void)start; (void)header_size; (void)slot_size; (void)max_taps;\n\
-         \x20   (void)ring_frames; (void)channels; (void)track_start; (void)track_slots;\n\
+         \x20                              size_t* slot_size, size_t* guest_slots,\n\
+         \x20                              size_t* track_slots,\n\
+         \x20                              unsigned* ring_frames, unsigned* channels) {{\n\
+         \x20   (void)start; (void)header_size; (void)slot_size; (void)guest_slots;\n\
+         \x20   (void)track_slots; (void)ring_frames; (void)channels;\n\
          \x20   return 0;\n\
          }}\n"
     );

@@ -74,6 +74,10 @@ emcmake cmake -B "$BUILD_DIR" -S "$ROOT" \
     > "$BUILD_DIR.configure.log" 2>&1 || { cat "$BUILD_DIR.configure.log"; exit 1; }
 cmake --build "$BUILD_DIR" --parallel
 
+# The linker's map, reduced to the symbols that name static memory, for the
+# dev tools (scripts/static-map.mjs): clockwork.symbols.json beside the wasm.
+[ -f "$OUT/clockwork.map" ] && "$NODE" "$SCRIPT_DIR/static-map.mjs" "$OUT/clockwork.map"
+
 echo ""
 echo "built $OUT/clockwork.wasm ($(du -h "$OUT/clockwork.wasm" | cut -f1))"
 

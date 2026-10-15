@@ -82,9 +82,9 @@ const fn align_up(n: usize) -> usize {
 /// Asks the host for another area of at least `size` bytes. Returns null when
 /// it cannot, which the pool reports as a failed allocation rather than
 /// treating as fatal.
-pub type NewAreaFunc = Option<unsafe extern "C" fn(size: usize) -> *mut c_void>;
+pub type NewAreaFunc = Option<unsafe extern "C" fn(ctx: *mut c_void, size: usize) -> *mut c_void>;
 /// Hands an area back. Called only for areas that are completely free.
-pub type FreeAreaFunc = Option<unsafe extern "C" fn(area: *mut c_void)>;
+pub type FreeAreaFunc = Option<unsafe extern "C" fn(ctx: *mut c_void, area: *mut c_void)>;
 
 /// The header at the start of every block. Sized so the payload that follows
 /// it stays 16-byte aligned.
@@ -271,6 +271,9 @@ impl Block {
 pub struct HeapPool {
     new_area: NewAreaFunc,
     free_area: FreeAreaFunc,
+    /// Handed back to both callbacks untouched: the host's own, so one host
+    /// can run several pools and know which one is asking.
+    area_ctx: *mut c_void,
     growth_size: usize,
     total_area: usize,
     areas: *mut Area,
@@ -281,6 +284,10 @@ pub struct HeapPool {
     sl_bitmap: [u32; FL_COUNT],
     /// Head of the free list for each class.
     heads: [[*mut Block; SL_COUNT]; FL_COUNT],
+    /// Payload bytes handed out and not yet given back, and the most ever: the pool's own census, for the
+    /// metrics (block sizes as carved, so a request rounded up counts as what it took).
+    used: usize,
+    peak: usize,
 }
 
 impl HeapPool {
@@ -291,18 +298,22 @@ impl HeapPool {
     pub fn new(
         new_area: NewAreaFunc,
         free_area: FreeAreaFunc,
+        area_ctx: *mut c_void,
         initial_size: usize,
         growth_size: usize,
     ) -> HeapPool {
         let mut pool = HeapPool {
             new_area,
             free_area,
+            area_ctx,
             growth_size,
             total_area: 0,
             areas: core::ptr::null_mut(),
             fl_bitmap: 0,
             sl_bitmap: [0; FL_COUNT],
             heads: [[core::ptr::null_mut(); SL_COUNT]; FL_COUNT],
+            used: 0,
+            peak: 0,
         };
         pool.add_area(initial_size);
         pool
@@ -397,7 +408,7 @@ impl HeapPool {
         // block. That is not hypothetical — it corrupted the system heap the
         // first time.
         // SAFETY: the host's callback has no preconditions beyond a size.
-        let mem = unsafe { new_area(size) };
+        let mem = unsafe { new_area(self.area_ctx, size) };
         if mem.is_null() {
             return core::ptr::null_mut();
         }
@@ -470,6 +481,8 @@ impl HeapPool {
                         self.fl_push(rest);
                     }
                     (*b).free = false;
+                    self.used += (*b).size;
+                    if self.used > self.peak { self.peak = self.used; }
                     return Block::payload(b);
                 }
             }
@@ -505,6 +518,7 @@ impl HeapPool {
         unsafe {
             let mut b = ptr.sub(BLOCK_HDR).cast::<Block>();
             (*b).free = true;
+            self.used = self.used.saturating_sub((*b).size);
 
             // Coalesce with the physical neighbours, both in constant time:
             // the successor is one step forward, the predecessor is what
@@ -541,6 +555,7 @@ impl HeapPool {
     /// allocations. Used when the DSP is being rebuilt and nothing from the
     /// previous one survives.
     pub fn free_all_internal(&mut self) {
+        self.used = 0;
         self.fl_bitmap = 0;
         self.sl_bitmap = [0; FL_COUNT];
         self.heads = [[core::ptr::null_mut(); SL_COUNT]; FL_COUNT];
@@ -571,7 +586,7 @@ impl Drop for HeapPool {
             if let Some(free_area) = self.free_area {
                 // SAFETY: the area came from `new_area` and is handed back
                 // exactly once, here.
-                unsafe { free_area(a.cast::<c_void>()) };
+                unsafe { free_area(self.area_ctx, a.cast::<c_void>()) };
             }
             a = next;
         }
@@ -600,10 +615,11 @@ unsafe fn first_block(area: *mut Area) -> *mut Block {
 pub unsafe extern "C" fn clockwork_heap_pool_new(
     new_area: NewAreaFunc,
     free_area: FreeAreaFunc,
+    area_ctx: *mut c_void,
     initial_size: usize,
     growth_size: usize,
 ) -> *mut c_void {
-    let pool = Box::new(HeapPool::new(new_area, free_area, initial_size, growth_size));
+    let pool = Box::new(HeapPool::new(new_area, free_area, area_ctx, initial_size, growth_size));
     Box::into_raw(pool).cast::<c_void>()
 }
 
@@ -669,6 +685,25 @@ pub unsafe extern "C" fn clockwork_heap_pool_total_area(pool: *const c_void) -> 
 
 /// What a caller must add to the space it wants usable when sizing a backing
 /// block.
+/// Payload bytes in use now, and the most ever. Null is 0.
+///
+/// # Safety
+/// `pool` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_heap_pool_used_bytes(pool: *const c_void) -> usize {
+    if pool.is_null() { return 0; }
+    // SAFETY: a live handle, per the contract.
+    unsafe { (*pool.cast::<HeapPool>()).used }
+}
+/// # Safety
+/// `pool` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_heap_pool_peak_bytes(pool: *const c_void) -> usize {
+    if pool.is_null() { return 0; }
+    // SAFETY: a live handle, per the contract.
+    unsafe { (*pool.cast::<HeapPool>()).peak }
+}
+
 #[no_mangle]
 pub extern "C" fn clockwork_heap_pool_area_overhead() -> usize {
     AREA_OVERHEAD
@@ -684,7 +719,7 @@ mod tests {
     // a test can assert the pool asked for and returned the right areas.
     static AREAS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
 
-    unsafe extern "C" fn test_new_area(size: usize) -> *mut c_void {
+    unsafe extern "C" fn test_new_area(_ctx: *mut c_void, size: usize) -> *mut c_void {
         let layout = std::alloc::Layout::from_size_align(size, ALIGN).unwrap();
         // SAFETY: the pool never asks for zero bytes.
         let p = unsafe { std::alloc::alloc(layout) };
@@ -692,7 +727,7 @@ mod tests {
         p.cast::<c_void>()
     }
 
-    unsafe extern "C" fn test_free_area(area: *mut c_void) {
+    unsafe extern "C" fn test_free_area(_ctx: *mut c_void, area: *mut c_void) {
         let mut g = AREAS.lock().unwrap();
         let map = g.get_or_insert_with(HashMap::new);
         if let Some(size) = map.remove(&(area as usize)) {
@@ -704,7 +739,7 @@ mod tests {
     }
 
     fn pool(initial: usize, growth: usize) -> HeapPool {
-        HeapPool::new(Some(test_new_area), Some(test_free_area), initial, growth)
+        HeapPool::new(Some(test_new_area), Some(test_free_area), core::ptr::null_mut(), initial, growth)
     }
 
     // ── The structural oracle ──────────────────────────────────────────────
@@ -1035,10 +1070,10 @@ mod tests {
 
     #[test]
     fn failure_is_reported_rather_than_fatal() {
-        unsafe extern "C" fn no_area(_size: usize) -> *mut c_void {
+        unsafe extern "C" fn no_area(_ctx: *mut c_void, _size: usize) -> *mut c_void {
             core::ptr::null_mut()
         }
-        let mut p = HeapPool::new(Some(no_area), None, 64 * 1024, 64 * 1024);
+        let mut p = HeapPool::new(Some(no_area), None, core::ptr::null_mut(), 64 * 1024, 64 * 1024);
         assert!(p.alloc(16).is_null());
     }
 

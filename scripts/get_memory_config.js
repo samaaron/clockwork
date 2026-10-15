@@ -79,13 +79,13 @@ try {
         }
     }
 
-    // Validate inboxOffset + inboxSize == totalMemory. The INBOX is the top
-    // region, because it is the one that grows — see MemoryLayout.inboxOffset.
-    if (typeof memory.inboxOffset === 'number' && typeof memory.inboxSize === 'number') {
-        const expectedTotal = memory.inboxOffset + memory.inboxSize;
+    // Validate assetsOffset + assetsSize == totalMemory. The ASSETS is the top
+    // region, because it is the one that grows — see MemoryLayout.assetsOffset.
+    if (typeof memory.assetsOffset === 'number' && typeof memory.assetsSize === 'number') {
+        const expectedTotal = memory.assetsOffset + memory.assetsSize;
         if (totalMemory !== expectedTotal) {
             console.error(`Error: Memory layout inconsistency detected`);
-            console.error(`  inboxOffset + inboxSize = ${expectedTotal} bytes`);
+            console.error(`  assetsOffset + assetsSize = ${expectedTotal} bytes`);
             console.error(`  totalMemory = ${totalMemory} bytes`);
             console.error(`  These must match!`);
             process.exit(1);
@@ -130,23 +130,23 @@ try {
         // everything below it, so a region added below and forgotten here is
         // exactly the mistake this check exists to catch. Subtracting a fixed
         // list silently stops checking the moment the list grows — which is
-        // how it read when the inbox and the outbox were added.
-        // The inbox is TOP, so what sits below it is everything else. Checking
+        // how it read when the assets area and the returns area were added.
+        // The assets area is TOP, so what sits below it is everything else. Checking
         // the growable region's offset is the check that matters: if anything
         // below it changes size and this does not follow, every published
         // range moves under a guest that is already holding pointers into it.
-        if (typeof memory.inboxOffset === 'number' && typeof memory.ringBufferReserved === 'number') {
+        if (typeof memory.assetsOffset === 'number' && typeof memory.ringBufferReserved === 'number') {
             const below = [
                 ['wasmHeapSize',       wasmHeap],
                 ['ringBufferReserved', memory.ringBufferReserved],
                 ['memArenaSize',       memory.memArenaSize ?? 0],
-                ['outboxSize',         memory.outboxSize ?? 0],
+                ['returnsSize',         memory.returnsSize ?? 0],
                 ['guestMemorySize',    memory.guestMemorySize ?? 0],
             ];
             const expectedOffset = below.reduce((n, [, v]) => n + v, 0);
-            if (memory.inboxOffset !== expectedOffset) {
-                console.error(`Error: inboxOffset does not match the regions below it`);
-                console.error(`  inboxOffset getter returns:  ${memory.inboxOffset} bytes`);
+            if (memory.assetsOffset !== expectedOffset) {
+                console.error(`Error: assetsOffset does not match the regions below it`);
+                console.error(`  assetsOffset getter returns:  ${memory.assetsOffset} bytes`);
                 console.error(`  Sum of the regions below it:      ${expectedOffset} bytes`);
                 for (const [name, v] of below) console.error(`    ${name.padEnd(20)} ${v}`);
                 process.exit(1);
@@ -154,8 +154,10 @@ try {
         }
     }
 
-    // Validate guestMemorySize is reasonable
-    if (typeof memory.guestMemorySize === 'number') {
+    // Validate guestMemorySize is reasonable. 0 is the default: no fixed
+    // slice, clockwork reserves the guest's working memory itself, from the
+    // placement arena, sized to the guest's want (js/memory_layout.js).
+    if (typeof memory.guestMemorySize === 'number' && memory.guestMemorySize !== 0) {
         if (memory.guestMemorySize < 1 * 1024 * 1024) {
             console.error(`Error: guestMemorySize (${memory.guestMemorySize}) is too small (minimum 1MB)`);
             process.exit(1);
@@ -166,14 +168,14 @@ try {
         }
     }
 
-    // Validate maxInboxSize if present. The inbox is the region that grows,
-    // so it is the one carrying a ceiling — see MemoryLayout.inboxOffset.
-    if (typeof memory.maxInboxSize === 'number') {
-        if (memory.maxInboxSize < memory.inboxSize) {
-            console.error(`Error: maxInboxSize (${memory.maxInboxSize}) must be >= inboxSize (${memory.inboxSize})`);
+    // Validate maxAssetsSize if present. The assets area is the region that grows,
+    // so it is the one carrying a ceiling — see MemoryLayout.assetsOffset.
+    if (typeof memory.maxAssetsSize === 'number') {
+        if (memory.maxAssetsSize < memory.assetsSize) {
+            console.error(`Error: maxAssetsSize (${memory.maxAssetsSize}) must be >= assetsSize (${memory.assetsSize})`);
             process.exit(1);
         }
-        const maxTotalMemory = memory.maxTotalMemory || (memory.inboxOffset + memory.maxInboxSize);
+        const maxTotalMemory = memory.maxTotalMemory || (memory.assetsOffset + memory.maxAssetsSize);
         if (maxTotalMemory % 65536 !== 0) {
             console.error(`Error: maxTotalMemory (${maxTotalMemory}) must be a multiple of 65536 (WebAssembly page size)`);
             process.exit(1);

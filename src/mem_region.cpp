@@ -130,14 +130,14 @@ namespace {
  *
  * An implicit doubly-linked list of blocks covering the whole span, first fit,
  * splitting on allocation and coalescing both ways on free. That is more than
- * the traffic needs — the engine's RT pool and clockwork heap's initial area
- * are a handful of large, long-lived allocations made at boot — but a real
+ * the traffic needs — the guest's two spans, the RT router's block and the
+ * spare are a handful of large, long-lived allocations made at boot — but a real
  * allocator is what makes the arena a drop-in for malloc, and a drop-in is the
  * point: every caller keeps the code it already had.
  *
- * NOT for the audio thread. Nothing here allocates during render: the pool and
- * the heap take their areas at dsp_new and give them back at teardown, and the
- * growth path that could have run later is 0-sized off-device. The spin lock
+ * NOT for the audio thread. Nothing here allocates during render: the guest's
+ * spans and the spare are taken at boot and given back at teardown, and the
+ * pool's one growth adopts the spare without coming here. The spin lock
  * costs nothing uncontended and keeps two control threads from interleaving a
  * split with a coalesce.
  */

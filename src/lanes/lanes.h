@@ -165,7 +165,7 @@ int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   
 
 /* ── Init ──────────────────────────────────────────────────────────────────
  * Bring the engine up: lay out the arena (rings, control, metrics, node-tree,
- * scope), allocate the RT-safe heap, and create the DSP. Call once before the
+ * scope), reserve the guest's memory and run its pool, and create the DSP. Call once before the
  * first clockwork_tick. Every host boots through this one call.
  *
  * All of it is Clockwork geometry — what the host opened, and how loud to be
@@ -185,12 +185,12 @@ int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   
  *   verbosity        0 keeps boot quiet; above 0 logs the memory map and
  *                    the arrangement it proved.
  *
- * The guest's arena (guest_arena, guest_arena_bytes) is where the guest may
+ * The guest's arena (guest_memory, guest_memory_bytes) is where the guest may
  * allocate, and clockwork's promise about it is that nothing else will. Bulk
- * does not travel through it: `inbox` is written by the client and only read by
- * the guest, `outbox` the reverse, so no region has two writers. It is an ABSOLUTE address, not an offset from the arena — on web the
+ * does not travel through it: `assets` is written by the client and only read by
+ * the guest, `returns` the reverse, so no region has two writers. It is an ABSOLUTE address, not an offset from the arena — on web the
  * JS memory layout chooses it as a position in the wasm heap, and treating it
- * as arena-relative put it a whole ring_buffer_storage too high. (JavaScript
+ * as arena-relative put it a whole arena_storage too high. (JavaScript
  * passes it as a plain number: a wasm32 pointer IS a number, which is why this
  * is a pointer here rather than the uint32 it was first written as — that
  * could not hold a native address at all.) Pass NULL/0 for "no reserved
@@ -217,15 +217,15 @@ void clockwork_init(double   sample_rate,
               uint32_t input_channels,
               uint32_t output_channels,
               uint32_t verbosity,
-              void*    guest_arena,
-              uint32_t guest_arena_bytes,
+              void*    guest_memory,
+              uint32_t guest_memory_bytes,
               const void* guest_config,
               uint32_t    guest_config_bytes,
               uint32_t    arena_bytes,
-              const void* inbox        CLOCKWORK_ARG_DEFAULT(nullptr),
-              uint32_t    inbox_bytes  CLOCKWORK_ARG_DEFAULT(0),
-              void*       outbox       CLOCKWORK_ARG_DEFAULT(nullptr),
-              uint32_t    outbox_bytes CLOCKWORK_ARG_DEFAULT(0));
+              const void* assets        CLOCKWORK_ARG_DEFAULT(nullptr),
+              uint32_t    assets_bytes  CLOCKWORK_ARG_DEFAULT(0),
+              void*       returns       CLOCKWORK_ARG_DEFAULT(nullptr),
+              uint32_t    returns_bytes CLOCKWORK_ARG_DEFAULT(0));
 /* arena_bytes: the span clockwork::mem allocates from, or 0 for the build-time
  * default. A host whose system allocator is safe to use (native) passes 0 and
  * nothing is claimed; a host where it is not (wasm) passes the size it
@@ -277,15 +277,15 @@ int clockwork_attach(double   sample_rate,
                 uint32_t input_channels,
                 uint32_t output_channels,
                 uint32_t verbosity,
-                void*    guest_arena,
-                uint32_t guest_arena_bytes,
+                void*    guest_memory,
+                uint32_t guest_memory_bytes,
                 const void* guest_config,
                 uint32_t    guest_config_bytes,
                 uint32_t    arena_bytes,
-                const void* inbox        CLOCKWORK_ARG_DEFAULT(nullptr),
-                uint32_t    inbox_bytes  CLOCKWORK_ARG_DEFAULT(0),
-                void*       outbox       CLOCKWORK_ARG_DEFAULT(nullptr),
-                uint32_t    outbox_bytes CLOCKWORK_ARG_DEFAULT(0));
+                const void* assets        CLOCKWORK_ARG_DEFAULT(nullptr),
+                uint32_t    assets_bytes  CLOCKWORK_ARG_DEFAULT(0),
+                void*       returns       CLOCKWORK_ARG_DEFAULT(nullptr),
+                uint32_t    returns_bytes CLOCKWORK_ARG_DEFAULT(0));
 
 /* Release one attachment. Harmless when nobody is attached. Does NOT tear the
  * engine down: clockwork has no shutdown, and a host that attaches again gets
@@ -323,19 +323,20 @@ void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_cha
  * next dsp_new, like clockwork_set_channel_ceilings. */
 void clockwork_declare_fp_env(uint32_t env);
 
-/* Size the heap the guest's DspHost::alloc_bytes draws from, for the NEXT
- * build.
+/* A floor under the guest's bulk memory (DspConfig::memory_bulk, the span
+ * its allocations come from) for the NEXT build.
  *
- * The heap is taken once per build and never grown on the audio thread, so it
- * has to hold what the guest will take from it — and that is set by the
- * guest's own configuration (a server guest's real-time pool is an option),
- * which clockwork never reads. The host that wrote the configuration knows the
- * figure; this is where it says so. 0 restores the memory profile's
- * CLOCKWORK_HEAP_FAST_SIZE. A heap the system cannot provide fails the build
- * with that reason (clockwork_boot_error), rather than booting a guest that
- * cannot allocate. On a tiered or arena-bound host (web, embedded) the figure
- * is a ceiling: the heap is still clamped to the memory that tier has. */
-void clockwork_set_heap_bytes(size_t bytes);
+ * The span is sized before dsp_new as the largest of what the guest
+ * declares (DspInfo::memory_bulk_bytes_wanted, dsp_memory_bulk_bytes), the
+ * memory profile's default and this. A host that knows its session will
+ * allocate more than the guest can foresee says so here. 0 restores the
+ * profile's default (CLOCKWORK_GUEST_MEMORY_BULK_BYTES). A span the system
+ * cannot provide fails the build with that reason (clockwork_boot_error),
+ * rather than booting a guest that cannot allocate. On a tiered or
+ * arena-bound host (web, embedded) the figure is a ceiling: the span is
+ * still clamped to the memory that tier has, and only the guest's own want
+ * is refused rather than clamped. */
+void clockwork_set_guest_bulk_bytes(size_t bytes);
 
 /* Why the last build has no guest, or NULL when it has one: the first thing
  * that stopped the build, or the guest's own reason when dsp_new refused. Text

@@ -56,15 +56,15 @@ TEST_CASE("shm-security: tap reader clamps corrupt slot geometry",
     // slot must clamp to the compile-time ring geometry rather than push
     // reads out of bounds (or divide by a zero capacity).
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
+        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 0xFFFFu;
     slot->capacity_frames = 0;
     slot->write_position.store(1u << 20, std::memory_order_release);
 
-    CHECK(reader.channels() == SHM_TAP_STREAM_CHANNELS);
-    CHECK(reader.capacity_frames() == SHM_TAP_RING_FRAMES);
-    std::vector<float> scratch(1024 * SHM_TAP_STREAM_CHANNELS, 0.0f);
+    CHECK(reader.channels() == TAP_STREAM_CHANNELS);
+    CHECK(reader.capacity_frames() == TAP_RING_FRAMES);
+    std::vector<float> scratch(1024 * TAP_STREAM_CHANNELS, 0.0f);
     (void)reader.copy_window(reader.write_position(), 1024, scratch.data());
     SUCCEED("copy_window stayed inside the inline ring under corrupt geometry");
 

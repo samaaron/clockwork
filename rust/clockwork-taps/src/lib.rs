@@ -48,9 +48,8 @@ struct Geometry {
     ring_frames: u32,
     /// Channels a slot's ring interleaves.
     channels: u32,
-    /// The engine's track taps: the same slot shape, in the clockwork block,
-    /// numbered after the guest's. Zero slots on a build that carves none.
-    track_start: usize,
+    /// The engine's track taps: the same slot shape, after the guest's slots
+    /// in the same region. Zero on a build that carves none.
     track_slots: usize,
 }
 
@@ -72,24 +71,22 @@ extern "C" {
         start: *mut usize,
         header_size: *mut usize,
         slot_size: *mut usize,
-        max_taps: *mut usize,
+        guest_slots: *mut usize,
+        track_slots: *mut usize,
         ring_frames: *mut u32,
         channels: *mut u32,
-        track_start: *mut usize,
-        track_slots: *mut usize,
     ) -> c_int;
 }
 
 /// The geometry, fetched once. Zero means "not yet asked".
-static GEOMETRY_CACHE: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+static GEOMETRY_CACHE: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
 static GEOMETRY_KNOWN: AtomicU32 = AtomicU32::new(0);
 
 fn geometry() -> Option<Geometry> {
     if GEOMETRY_KNOWN.load(Ordering::Acquire) == 0 {
-        let (mut start, mut header_size, mut slot_size, mut max_taps) = (0usize, 0, 0, 0);
+        let (mut start, mut header_size, mut slot_size, mut max_taps, mut track_slots) = (0usize, 0, 0, 0, 0);
         let (mut ring_frames, mut channels) = (0u32, 0u32);
-        let (mut track_start, mut track_slots) = (0usize, 0usize);
-        // SAFETY: eight live out-pointers, which is all the host's function
+        // SAFETY: seven live out-pointers, which is all the host's function
         // asks for.
         let ok = unsafe {
             clockwork_tap_geometry(
@@ -97,10 +94,9 @@ fn geometry() -> Option<Geometry> {
                 &mut header_size,
                 &mut slot_size,
                 &mut max_taps,
+                &mut track_slots,
                 &mut ring_frames,
                 &mut channels,
-                &mut track_start,
-                &mut track_slots,
             )
         };
         if ok == 0 || slot_size == 0 || max_taps == 0 {
@@ -112,9 +108,8 @@ fn geometry() -> Option<Geometry> {
         GEOMETRY_CACHE[3].store(max_taps.min(MAX_SLOTS), Ordering::Relaxed);
         GEOMETRY_CACHE[4].store(ring_frames as usize, Ordering::Relaxed);
         GEOMETRY_CACHE[5].store(channels as usize, Ordering::Relaxed);
-        GEOMETRY_CACHE[6].store(track_start, Ordering::Relaxed);
-        // Both spans together must fit the owner table.
-        GEOMETRY_CACHE[7].store(track_slots.min(MAX_SLOTS - max_taps.min(MAX_SLOTS)), Ordering::Relaxed);
+        // Both kinds together must fit the owner table.
+        GEOMETRY_CACHE[6].store(track_slots.min(MAX_SLOTS - max_taps.min(MAX_SLOTS)), Ordering::Relaxed);
         GEOMETRY_KNOWN.store(1, Ordering::Release);
     }
     Some(Geometry {
@@ -124,8 +119,7 @@ fn geometry() -> Option<Geometry> {
         max_taps: GEOMETRY_CACHE[3].load(Ordering::Relaxed),
         ring_frames: GEOMETRY_CACHE[4].load(Ordering::Relaxed) as u32,
         channels: GEOMETRY_CACHE[5].load(Ordering::Relaxed) as u32,
-        track_start: GEOMETRY_CACHE[6].load(Ordering::Relaxed),
-        track_slots: GEOMETRY_CACHE[7].load(Ordering::Relaxed),
+        track_slots: GEOMETRY_CACHE[6].load(Ordering::Relaxed),
     })
 }
 
@@ -224,27 +218,19 @@ unsafe fn header_field(base: *mut u8, g: &Geometry, offset: usize) -> &'static A
 /// `index` less than `g.slots()`: the guest's slots first, then the track
 /// taps, as one index space.
 unsafe fn slot_ptr(base: *mut u8, g: &Geometry, index: usize) -> *mut SlotHeader {
-    let at = if index < g.max_taps {
-        g.start + g.header_size + index * g.slot_size
-    } else {
-        g.track_start + (index - g.max_taps) * g.slot_size
-    };
-    // SAFETY: the slot lies inside one of the two regions, per the contract.
+    // One region: the guest's slots, then the track taps, one stride apart.
+    let at = g.start + g.header_size + index * g.slot_size;
+    // SAFETY: the slot lies inside the region, per the contract.
     unsafe { base.add(at).cast::<SlotHeader>() }
 }
 
-/// Which slot a pointer is, when it lies in either span of the geometry.
+/// Which slot a pointer is, when it lies in the region.
 fn slot_index_of(base: *mut u8, g: &Geometry, slot: *const SlotHeader) -> Option<usize> {
     let p = slot as usize;
-    let guest = base as usize + g.start + g.header_size;
-    let off = p.wrapping_sub(guest);
-    if off < g.max_taps * g.slot_size && off % g.slot_size == 0 {
+    let first = base as usize + g.start + g.header_size;
+    let off = p.wrapping_sub(first);
+    if off < g.slots() * g.slot_size && off % g.slot_size == 0 {
         return Some(off / g.slot_size);
-    }
-    let track = base as usize + g.track_start;
-    let off = p.wrapping_sub(track);
-    if g.track_slots > 0 && off < g.track_slots * g.slot_size && off % g.slot_size == 0 {
-        return Some(g.max_taps + off / g.slot_size);
     }
     None
 }
@@ -516,11 +502,10 @@ mod hostless {
         _start: *mut usize,
         _header_size: *mut usize,
         _slot_size: *mut usize,
-        _max_taps: *mut usize,
+        _guest_slots: *mut usize,
+        _track_slots: *mut usize,
         _ring_frames: *mut u32,
         _channels: *mut u32,
-        _track_start: *mut usize,
-        _track_slots: *mut usize,
     ) -> c_int {
         0
     }

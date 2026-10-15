@@ -32,7 +32,7 @@
 #include <thread>
 #include <vector>
 
-#include "shared_memory.h"       // ControlPointers layout, EgressRoute, PerformanceMetrics
+#include "shared_memory.h"       // RingCursors layout, EgressRoute, PerformanceMetrics
 #include "ring/ring.h"           // Message, MESSAGE_MAGIC
 #include "RingBufferWriter.h"    // shared MPSC writer (ingress + NRT-egress)
 #include "lanes/ring_drain.h"    // clockwork_drain_ring consumer
@@ -43,7 +43,7 @@
 extern "C" int clockwork_log(const char* fmt, ...);
 extern "C" {
     extern uint8_t*            shared_memory;
-    extern ControlPointers*    control;
+    extern RingCursors*    cursors;
     extern PerformanceMetrics* metrics;
     extern bool                memory_initialized;
 }
@@ -165,17 +165,17 @@ TEST_CASE("off-audio-thread clockwork_log routes to NRT-out, not the RT-out ring
           "[RingConcurrency]") {
     // Self-contained arena + save/restore, so the test neither depends on
     // clockwork init nor disturbs global state for other tests.
-    static std::vector<uint8_t> arena(TOTAL_BUFFER_SIZE, 0);
+    static std::vector<uint8_t> arena(ARENA_SIZE, 0);
     uint8_t*            savedSM   = shared_memory;
-    ControlPointers*    savedC    = control;
+    RingCursors*    savedC    = cursors;
     PerformanceMetrics* savedM    = metrics;
     const bool          savedInit = memory_initialized;
     const bool          savedDrn  = g_nrt_egress_drained.load(std::memory_order_relaxed);
 
     shared_memory = arena.data();
-    control       = reinterpret_cast<ControlPointers*>(arena.data() + CONTROL_START);
+    cursors       = reinterpret_cast<RingCursors*>(arena.data() + RING_CURSORS_START);
     metrics       = nullptr;   // the debug emitter guards on this; keeps the arena minimal
-    ControlPointers* c = control;
+    RingCursors* c = cursors;
     c->out_head.store(0);      c->out_tail.store(0);      c->out_sequence.store(0);
     c->nrt_out_head.store(0);  c->nrt_out_tail.store(0);  c->nrt_out_sequence.store(0);
     memory_initialized = true;
@@ -192,7 +192,7 @@ TEST_CASE("off-audio-thread clockwork_log routes to NRT-out, not the RT-out ring
     clockwork_log("ring-route-test self-driven-fallback line");
     CHECK(c->out_head.load() != 0);       // RT-out advanced
 
-    shared_memory = savedSM; control = savedC; metrics = savedM;
+    shared_memory = savedSM; cursors = savedC; metrics = savedM;
     memory_initialized = savedInit;
     g_nrt_egress_drained.store(savedDrn, std::memory_order_relaxed);
 }

@@ -199,11 +199,11 @@ typedef struct ClockworkClientInfo {
 } ClockworkClientInfo;
 
 /* Feature bits. A client asks rather than assumes: an engine built for an
- * embedded target may have no taps, no raw scope and no bulk lanes, and a client
+ * embedded target may have no taps, no scope and no bulk lanes, and a client
  * that renders a scope should grey the control rather than read zeros. */
 #define CLOCKWORK_FEATURE_TAPS      (1u << 0u)
-#define CLOCKWORK_FEATURE_RAW_SCOPE (1u << 1u)
-#define CLOCKWORK_FEATURE_BULK       (1u << 2u)   /* inbox + outbox */
+#define CLOCKWORK_FEATURE_SCOPE (1u << 1u)
+#define CLOCKWORK_FEATURE_BULK       (1u << 2u)   /* assets + returns */
 #define CLOCKWORK_FEATURE_WINDOW     (1u << 3u)   /* the guest publishes one */
 #define CLOCKWORK_FEATURE_SCHEDULER  (1u << 4u)   /* timed messages are held */
 
@@ -221,7 +221,7 @@ ClockworkStatus clockwork_client_info(ClockworkClient* c, ClockworkClientInfo* o
  *
  * CLOCKWORK_E_FULL is a moment, not a verdict: the ring drains every block, so
  * a caller retries. CLOCKWORK_E_TOO_BIG is a verdict — the message is larger
- * than the ring can ever hold, and bulk belongs in the inbox instead.
+ * than the ring can ever hold, and bulk belongs in the assets area instead.
  */
 ClockworkStatus clockwork_client_send(ClockworkClient* c,
                                       const uint8_t* osc, uint32_t bytes,
@@ -305,7 +305,7 @@ typedef struct ClockworkClientMessage {
  * as any full ring refuses it, rather than let on to bytes still being read.
  *
  * SINGLE CONSUMER, AND THE RING HAS ONE. Polling TAKES: it advances the
- * egress ring's own read cursor, which lives in the engine's control block and
+ * egress ring's own read cursor, which lives in the engine's ring cursors and
  * is shared by every handle onto that engine. Two handles polling therefore
  * take from each other — whoever calls first gets the message and the other
  * never sees it, and a batch one handle still holds is given back by
@@ -396,10 +396,10 @@ typedef enum ClockworkRegionId {
                                    * it is talking to. The first uint32 is a
                                    * version stamp the guest bumps — that much
                                    * is contract, and it is all of it. */
-    CLOCKWORK_REGION_INBOX,       /* bulk in: the client writes, the guest reads */
-    CLOCKWORK_REGION_OUTBOX,      /* bulk out: the guest writes, the client reads */
+    CLOCKWORK_REGION_ASSETS,       /* bulk in: the client writes, the guest reads */
+    CLOCKWORK_REGION_RETURNS,      /* bulk out: the guest writes, the client reads */
     CLOCKWORK_REGION_TAPS,
-    CLOCKWORK_REGION_RAW_SCOPE,
+    CLOCKWORK_REGION_SCOPE,
     CLOCKWORK_REGION_INGRESS,     /* the ring clients write and the engine reads */
     CLOCKWORK_REGION_EGRESS,      /* the ring the engine writes and clients read */
     CLOCKWORK_REGION_NATIVE_STATS /* the device layer's own account of its callback:
@@ -413,7 +413,7 @@ typedef enum ClockworkRegionId {
 typedef struct ClockworkRegion {
     void*    base;
     uint32_t bytes;
-    int      writable;   /* 1 only for the inbox: everything else is the
+    int      writable;   /* 1 only for the assets area: everything else is the
                           * engine's or the guest's to write */
 } ClockworkRegion;
 

@@ -29,10 +29,11 @@ open_sink(ctx, kind,              open a MIDI or OSC destination
           target, capacity)
 send_sink(ctx, sink, bytes,       send to an opened sink, at a time
           len, when)
-free_bytes(ctx, ptr)              hand back memory clockwork allocated
+free_bytes(ctx, ptr)              hand back memory taken through alloc_bytes
 asset_release(ctx, id)            done with an asset taken through dsp_asset;
                                   the client's slot goes back
-alloc_bytes(ctx, bytes)           take memory from the heap clockwork owns
+alloc_bytes(ctx, bytes)           take memory from the DSP's bulk memory, through
+                                  clockwork's allocator
 tap_open(ctx, index,            claim a tap slot to publish audio into
            channels, hnd)
 tap_write(ctx, hnd, channels,   append a block to a claimed tap
@@ -59,16 +60,20 @@ Not all callbacks can be called from all threads:
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
 drops and counts rather than blocking, so a refusal is visible.
 
-A DSP's larger allocations come from `alloc_bytes` and go back through
-`free_bytes`: the heap is clockwork's, pre-claimed and lock-free, so a DSP
-never has to know which heap a host built, and never reaches past this header
-for one. `tap_open`, `tap_write` and `tap_close` are the same idea for
+Everything a DSP allocates as it runs comes from `alloc_bytes` and goes back
+through `free_bytes`: the memory is the DSP's own bulk span, and the
+allocator over it is clockwork's, lock-free, so a DSP never ships an
+allocator and never reaches past this header for one. A DSP written in Rust
+does not call them at all: its `Box` and `Vec` land in the same span by
+themselves while one of its entry points is open, because clockwork's Rust
+global allocator routes them there. `tap_open`, `tap_write` and `tap_close`
+are the same idea for
 taps: clockwork owns the slots and the ring a client reads, and a DSP that
 publishes one claims a slot and appends blocks without learning the layout.
 
 **Those are the only doors.** A DSP includes `dsp_api.h`, the sink header it
 pulls in, and `clockwork_clock_state.h` to read `DspConfig::clock`, and
-nothing else of clockwork's: not the arena layout, not the heap, not the
+nothing else of clockwork's: not the arena layout, not the pool, not the
 tap rings, not a global. SuperSonic's suite checks this against the scsynth
 guest's sources (`scripts/check-guest-boundary.sh`), because every reach past
 the header is a breakage waiting for the day the layout moves.
@@ -108,64 +113,78 @@ arrive identically. The distinction is a native, multi-client one.
 
 Bulk does not go through `emit_osc`: sending copies the payload into the egress
 ring, which is a large `memcpy` in the audio callback. Write it into
-`DspConfig::outbox` and send a short message saying where it landed.
+`DspConfig::returns` and send a short message saying where it landed.
 
-`DspConfig` hands the DSP three memory regions, and **each has exactly one
-writer**:
+`DspConfig` hands the DSP two spans of its own and two bulk lanes, and
+**each has exactly one writer**:
 
-| region   | written by | read by    |
-|----------|------------|------------|
-| `arena`  | the DSP    | the DSP    |
-| `inbox`  | the client | the DSP    |
-| `outbox` | the DSP    | the client |
+| region        | written by                          | read by    |
+|---------------|-------------------------------------|------------|
+| `memory`      | the DSP, by hand                    | the DSP    |
+| `memory_bulk` | the DSP, through clockwork's allocator | the DSP |
+| `assets`       | the client                          | the DSP    |
+| `returns`      | the DSP                             | the client |
 
-Each side gets the constness its role implies: `DspConfig::inbox` is a
+Each side gets the constness its role implies: `DspConfig::assets` is a
 `const void*`, so a DSP that writes to it does not compile, and the client's
-view of the outbox is const in the same way.
+view of the returns area is const in the same way.
 
-`arena` is the DSP's own memory: clockwork allocates it, zeroes it at every
-`dsp_new`, and never touches a byte after that. No client can reach it — it is
-not in the shared segment, so there is nothing for a client to map. It is there
-so a DSP can take working memory without calling an allocator, which matters
-because `dsp_process` may not allocate at all.
+A DSP's memory, in four sentences. It gets two spans, one per speed:
+`memory` is fast and `memory_bulk` is bulk. It says how much of each it
+needs (`DspInfo::memory_bytes_wanted` and `memory_bulk_bytes_wanted`, plus
+`dsp_memory_bytes` and `dsp_memory_bulk_bytes` for what its configuration
+adds) and clockwork gives exactly that, or refuses the boot and says why. It
+lays out its hot per-block state in `memory` by hand (scsynth: its tables
+and its real-time pool); everything it allocates as it runs comes from
+`memory_bulk`, through clockwork's allocator. There is nothing else.
+
+Both are reserved before `dsp_new`, zeroed at every `dsp_new`, and no
+client can reach them: they are not in the arena. `memory` is there so a
+DSP can hold working memory without calling an allocator, which matters
+because `dsp_process` may not allocate at all. `memory_bulk` is there so the
+allocations a session makes — buffers, definitions — have one place, sized
+by the DSP's own declaration or the host profile's default, whichever is
+larger, that may grow once into a spare clockwork keeps armed and never
+grows on the audio thread. The same on every platform.
 
 #### Two tiers, and what the DSP says it needs
 
 A device with two kinds of RAM — the ESP32-S3 has ~512 KiB of internal SRAM
-behind 8 MiB of slower PSRAM — hands the DSP two arenas. `arena` is placed in
-the **fast** tier and `DspConfig::arena_bulk` in the **bulk** tier, so a DSP
+behind 8 MiB of slower PSRAM — hands the DSP two spans. `memory` is placed in
+the **fast** tier and `DspConfig::memory_bulk` in the **bulk** tier, so a DSP
 carves its hot state (VM slots, kernel state, wires) from one and its cold,
 large state (loop cells, sample data, tap rings) from the other, and which
 RAM is which is the host's memory profile's decision rather than something
-each DSP crate works out for itself. Both follow `arena`'s rules: the DSP's
+each DSP crate works out for itself. Both follow `memory`'s rules: the DSP's
 alone, zeroed at every `dsp_new`.
 
-On a single-region host — desktop, web, the NIF — `arena_bulk` is NULL/0. There
+On a single-region host — desktop, web, the NIF — `memory_bulk` is NULL/0. There
 is one kind of memory, so there is nothing to place differently; whatever the
-DSP would have put in bulk goes in `arena`. Test `arena_bulk` for NULL, never
+DSP would have put in bulk goes in `memory`. Test `memory_bulk` for NULL, never
 the platform.
 
 The DSP declares what it needs of each tier **statically**, in `DspInfo`:
-`arena_bytes_wanted` and `arena_bulk_bytes_wanted`. A DSP that carves
+`memory_bytes_wanted` and `memory_bulk_bytes_wanted`. A DSP that carves
 everything at `dsp_new` knows the figure before any instance exists, and a host
 should learn it before booting audio rather than from a failed carve halfway
 through `dsp_new`. clockwork checks the wants against what it can offer — on a
 tiered host each want against its own tier, on a single-region host both
-against `arena` — and **refuses the boot with a logged reason when a want
+against `memory` — and **refuses the boot with a logged reason when a want
 cannot be met. It never spills.** A hot pool that silently landed in PSRAM is a
 performance cliff with no error, which is worse than a boot that says why it
 stopped. Zero means "no claim": take what is offered, including nothing.
 
-Where the bytes come from: the fast arena is the span the host reserved (the
-JS layout on web, `CLOCKWORK_ARENA_BYTES` on native), or, when the host passed
-none and the DSP wants some, a span clockwork takes from its own fast tier once
-and keeps across rebuilds. The bulk arena exists only on a tiered build, from
-clockwork's bulk tier, sized by the want or by `CLOCKWORK_ARENA_BULK_BYTES`.
+Where the bytes come from: clockwork takes the fast span from its own fast
+tier (the web's placement arena, a desktop's malloc, a device's internal SRAM),
+sized to the want, and keeps it across rebuilds while the want still fits. A
+host that wants to place the span itself may pass one to `clockwork_init`,
+and it is handed over as is. The bulk span exists only on a tiered build, from
+clockwork's bulk tier, sized by the want or by `CLOCKWORK_GUEST_MEMORY_BULK_BYTES`.
 
-`inbox` and `outbox` are the bulk channel for _binary blobs_ in and out. A client writes bytes straight into
-`inbox` from its own thread and sends a short message saying where they are, so
+`assets` and `returns` are the bulk channel for _binary blobs_ in and out. A client writes bytes straight into
+`assets` from its own thread and sends a short message saying where they are, so
 the DSP receives an offset rather than a payload, and the DSP does the same in
-reverse through `outbox`. Nothing large crosses the audio thread in either
+reverse through `returns`. Nothing large crosses the audio thread in either
 direction — which matters because every entry point in this header is called on
 the audio thread, and on web that is forced: the DSP exists only inside the
 AudioWorklet, so there is no off-thread door to use instead.
@@ -176,7 +195,7 @@ A reader maps the segment wherever the kernel puts it, which is not the address
 the engine sees, so a raw pointer names the wrong bytes on the other side — and
 does so without faulting.
 
-That leaves the DSP a choice about a range published in the inbox, and both
+That leaves the DSP a choice about a range published in the assets area, and both
 answers are permitted:
 
 - **Read it in place.** Nothing is copied. Right whenever the bytes are used as
@@ -184,13 +203,13 @@ answers are permitted:
   belongs to the DSP from the moment it is published and must be handed back
   explicitly: the client must not touch it until the DSP says it is done.
 - **Copy it into the arena.** Do this when you need to *mutate* the data —
-  resample it, normalise it, convert its format — because the inbox is
+  resample it, normalise it, convert its format — because the assets area is
   read-only to you. The range belongs to the client again as soon as `dsp_osc`
   returns, so nothing has to be tracked. The copy costs about 5% of a 128-frame
   block per megabyte, worst case, which is nothing for a sample and not nothing
   for a library.
 
-Native carves the inbox and the outbox out of a shared segment when there is
+Native carves the assets area and the returns area out of a shared segment when there is
 one, so the same routes work cross-process. **The segment publishes them; it
 does not create them.** An engine embedded without a UDP port builds no segment
 and allocates the lanes in-process, where its client — the host application —

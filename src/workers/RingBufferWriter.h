@@ -45,7 +45,7 @@ public:
     // Write one message into a ring buffer.
     // buffer_start: pointer to beginning of ring buffer region
     // buffer_size:  size of the ring buffer region (4-byte multiple)
-    // head/tail:    atomic head/tail pointers from ControlPointers
+    // head/tail:    atomic head/tail pointers from RingCursors
     // sequence:     atomic sequence counter
     // write_lock:   atomic spinlock (0=unlocked)
     // data/size:    message payload

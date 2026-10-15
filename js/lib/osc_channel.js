@@ -3,7 +3,7 @@
 
 import { engineRings, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
-import { calculateInControlIndices } from './control_offsets.js';
+import { calculateInControlIndices } from './ring_cursor_offsets.js';
 import { sampleClockReader } from './sample_clock.js';
 
 // postMessage mode: how far past the audio thread's last word on the time the channel will count by the wall clock.
@@ -34,7 +34,7 @@ const CLOCK_HEARD_FOR_SECS = 0.1;
 export class OscChannel {
     #mode;
     #directPort;         // postMessage mode: MessagePort to worklet
-    #sabConfig;          // SAB mode: { sharedBuffer, ringBufferBase, bufferConstants, controlIndices }
+    #sabConfig;          // SAB mode: { sharedBuffer, arenaBase, bufferConstants, controlIndices }
     #ingress;            // SAB mode: the engine's ingress ring (js/lib/ring.js)
     #metricsView;        // SAB mode: Int32Array view into metrics region
     #sourceId;           // Numeric source ID (0 = main thread, 1+ = workers)
@@ -82,19 +82,19 @@ export class OscChannel {
         } else {
             this.#sabConfig = {
                 sharedBuffer: config.sharedBuffer,
-                ringBufferBase: config.ringBufferBase,
+                arenaBase: config.arenaBase,
                 bufferConstants: config.bufferConstants,
                 controlIndices: config.controlIndices,
             };
             // The transport hands its own; a channel rebuilt in a worker finds
             // the ring from the table, as everything else here does.
             this.#ingress = config.ingress ?? (config.sharedBuffer && config.bufferConstants
-                ? engineRings(config.sharedBuffer, config.ringBufferBase, config.bufferConstants).ingress
+                ? engineRings(config.sharedBuffer, config.arenaBase, config.bufferConstants).ingress
                 : null);
 
             // Create metrics view at correct offset within SharedArrayBuffer
             if (config.sharedBuffer && config.bufferConstants) {
-                const metricsBase = config.ringBufferBase + config.bufferConstants.METRICS_START;
+                const metricsBase = config.arenaBase + config.bufferConstants.METRICS_START;
                 this.#metricsView = new Int32Array(
                     config.sharedBuffer,
                     metricsBase,
@@ -103,12 +103,12 @@ export class OscChannel {
             }
 
             if (config.sharedBuffer && config.bufferConstants?.SAMPLE_CLOCK_START !== undefined) {
-                this.#readClock = sampleClockReader(config.sharedBuffer, config.ringBufferBase + config.bufferConstants.SAMPLE_CLOCK_START);
+                this.#readClock = sampleClockReader(config.sharedBuffer, config.arenaBase + config.bufferConstants.SAMPLE_CLOCK_START);
             }
 
             // Create node ID counter view for atomic range allocation
             if (config.sharedBuffer && config.bufferConstants?.NODE_ID_COUNTER_START !== undefined) {
-                const counterBase = config.ringBufferBase + config.bufferConstants.NODE_ID_COUNTER_START;
+                const counterBase = config.arenaBase + config.bufferConstants.NODE_ID_COUNTER_START;
                 this.#nodeIdView = new Int32Array(config.sharedBuffer, counterBase, 1);
                 this.#claimNodeIdRange();
             }
@@ -377,7 +377,7 @@ export class OscChannel {
             return {
                 ...base,
                 sharedBuffer: this.#sabConfig.sharedBuffer,
-                ringBufferBase: this.#sabConfig.ringBufferBase,
+                arenaBase: this.#sabConfig.arenaBase,
                 bufferConstants: this.#sabConfig.bufferConstants,
                 controlIndices: this.#sabConfig.controlIndices,
             };
@@ -432,7 +432,7 @@ export class OscChannel {
      * @private
      * @param {Object} config
      * @param {SharedArrayBuffer} config.sharedBuffer
-     * @param {number} config.ringBufferBase
+     * @param {number} config.arenaBase
      * @param {Object} config.bufferConstants
      * @param {Object} [config.controlIndices] - If not provided, will be calculated
      * @param {number} [config.sourceId=0] - Source ID (0 = main, 1+ = workers)
@@ -443,14 +443,14 @@ export class OscChannel {
         let controlIndices = config.controlIndices;
         if (!controlIndices) {
             controlIndices = calculateInControlIndices(
-                config.ringBufferBase,
-                config.bufferConstants.CONTROL_START
+                config.arenaBase,
+                config.bufferConstants.RING_CURSORS_START
             );
         }
 
         return new OscChannel('sab', {
             sharedBuffer: config.sharedBuffer,
-            ringBufferBase: config.ringBufferBase,
+            arenaBase: config.arenaBase,
             bufferConstants: config.bufferConstants,
             controlIndices,
             ingress: config.ingress,
@@ -476,7 +476,7 @@ export class OscChannel {
         } else {
             return new OscChannel('sab', {
                 sharedBuffer: data.sharedBuffer,
-                ringBufferBase: data.ringBufferBase,
+                arenaBase: data.arenaBase,
                 bufferConstants: data.bufferConstants,
                 controlIndices: data.controlIndices,
                 sourceId: data.sourceId,

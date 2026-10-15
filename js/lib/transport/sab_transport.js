@@ -4,7 +4,7 @@
 import { Transport } from './transport.js';
 import { createWorker } from '../worker_loader.js';
 import { OscChannel } from '../osc_channel.js';
-import { calculateInControlIndices } from '../control_offsets.js';
+import { calculateInControlIndices } from '../ring_cursor_offsets.js';
 import { engineRings } from '../ring.js';
 
 /**
@@ -20,7 +20,7 @@ import { engineRings } from '../ring.js';
  */
 export class SABTransport extends Transport {
     #sharedBuffer;
-    #ringBufferBase;
+    #arenaBase;
     #bufferConstants;
 
     // The engine's ingress ring, which every channel on this thread writes
@@ -63,7 +63,7 @@ export class SABTransport extends Transport {
     /**
      * @param {Object} config
      * @param {SharedArrayBuffer} config.sharedBuffer
-     * @param {number} config.ringBufferBase
+     * @param {number} config.arenaBase
      * @param {Object} config.bufferConstants
      * @param {string} config.workerBaseURL
      * @param {Function} config.getAudioContextTime
@@ -73,7 +73,7 @@ export class SABTransport extends Transport {
         super({ ...config, mode: 'sab' });
 
         this.#sharedBuffer = config.sharedBuffer;
-        this.#ringBufferBase = config.ringBufferBase;
+        this.#arenaBase = config.arenaBase;
         this.#bufferConstants = config.bufferConstants;
         this.#workerBaseURL = config.workerBaseURL;
         // A host may drain the egress itself, in a worker where it can act on the frames. It speaks the same
@@ -175,7 +175,7 @@ export class SABTransport extends Transport {
 
         return OscChannel.createSAB({
             sharedBuffer: this.#sharedBuffer,
-            ringBufferBase: this.#ringBufferBase,
+            arenaBase: this.#arenaBase,
             bufferConstants: this.#bufferConstants,
             controlIndices: this.#controlIndices,
             ingress: this.#ingress,
@@ -251,10 +251,10 @@ export class SABTransport extends Transport {
         this.#uint8View = new Uint8Array(this.#sharedBuffer);
 
         this.#controlIndices = calculateInControlIndices(
-            this.#ringBufferBase,
-            this.#bufferConstants.CONTROL_START
+            this.#arenaBase,
+            this.#bufferConstants.RING_CURSORS_START
         );
-        this.#ingress = engineRings(this.#sharedBuffer, this.#ringBufferBase, this.#bufferConstants).ingress;
+        this.#ingress = engineRings(this.#sharedBuffer, this.#arenaBase, this.#bufferConstants).ingress;
     }
 
     #initWorker(worker, name, extraConfig = {}) {
@@ -280,7 +280,7 @@ export class SABTransport extends Transport {
             worker.postMessage({
                 type: 'init',
                 sharedBuffer: this.#sharedBuffer,
-                ringBufferBase: this.#ringBufferBase,
+                arenaBase: this.#arenaBase,
                 bufferConstants: this.#bufferConstants,
                 ...extraConfig,
             });

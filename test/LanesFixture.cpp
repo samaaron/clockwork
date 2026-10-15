@@ -48,12 +48,12 @@ void drainInto(std::vector<EgressFrame>& out,
 // region that outlived neither would be a use-after-free the tests would find
 // in the most confusing possible way.
 alignas(16) static uint8_t gGuestMemory[kGuestMemoryBytes];
-alignas(16) static uint8_t gInbox[kInboxBytes];
-alignas(16) static uint8_t gOutbox[kOutboxBytes];
+alignas(16) static uint8_t gAssets[kAssetsBytes];
+alignas(16) static uint8_t gReturns[kReturnsBytes];
 
 const uint8_t* guestMemory() { return gGuestMemory; }
-uint8_t*       inbox()       { return gInbox; }
-const uint8_t* outbox()      { return gOutbox; }
+uint8_t*       assets()       { return gAssets; }
+const uint8_t* returns()      { return gReturns; }
 
 uint32_t boot() {
     if (gBooted) return gBlockSize;
@@ -80,8 +80,8 @@ uint32_t boot() {
              // No placement span: this fixture's allocator is the system one,
              // which is what every native host passes.
              /*arena_bytes*/ 0,
-             gInbox,  kInboxBytes,
-             gOutbox, kOutboxBytes);
+             gAssets,  kAssetsBytes,
+             gReturns, kReturnsBytes);
     gBlockSize = clockwork_block_size();
     gBooted    = true;
     return gBlockSize;

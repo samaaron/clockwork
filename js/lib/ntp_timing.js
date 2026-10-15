@@ -61,7 +61,7 @@ export class NTPTiming {
   #workletPort;
   #audioStartTimeoutMs;
   #bufferConstants;
-  #ringBufferBase;
+  #arenaBase;
 
   // Cached SAB views (SAB mode only)
   #ntpStartView;
@@ -109,11 +109,11 @@ export class NTPTiming {
   /**
    * Initialize shared views for SAB mode
    * @param {SharedArrayBuffer} sharedBuffer
-   * @param {number} ringBufferBase
+   * @param {number} arenaBase
    * @param {Object} bufferConstants
    */
-  initSharedViews(sharedBuffer, ringBufferBase, bufferConstants) {
-    this.#ringBufferBase = ringBufferBase;
+  initSharedViews(sharedBuffer, arenaBase, bufferConstants) {
+    this.#arenaBase = arenaBase;
     this.#bufferConstants = bufferConstants;
 
     if (this.#mode === 'sab' && sharedBuffer && bufferConstants) {
@@ -122,17 +122,17 @@ export class NTPTiming {
       // After writing, we fence via Atomics.store on the adjacent drift Int32.
       this.#ntpStartView = new DataView(
         sharedBuffer,
-        ringBufferBase + bufferConstants.NTP_START_TIME_START,
+        arenaBase + bufferConstants.NTP_START_TIME_START,
         8
       );
       this.#driftView = new Int32Array(
         sharedBuffer,
-        ringBufferBase + bufferConstants.DRIFT_OFFSET_START,
+        arenaBase + bufferConstants.DRIFT_OFFSET_START,
         1
       );
       this.#clockOffsetView = new Int32Array(
         sharedBuffer,
-        ringBufferBase + bufferConstants.GLOBAL_OFFSET_START,
+        arenaBase + bufferConstants.GLOBAL_OFFSET_START,
         1
       );
     }

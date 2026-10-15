@@ -8,7 +8,7 @@
 #include "clockwork_product.h"
 #include "clockwork_sys.h"
 #include "clockwork_client.h"
-#include "../clockwork_heap.h"
+#include "../clockwork_pool.h"
 #include "clockwork_config.h"   // clockwork_log
 // MIDI clock out is ClockworkClock's, not the scheduler's: each tick carries its
 // own time to its sink, so it is present whatever this build decided about
@@ -54,8 +54,8 @@ extern "C" {
 
     // Unified-arena base. When non-null, init_memory() points the engine's
     // whole shared_memory.h blob (rings, control, metrics, node-tree, audio
-    // raw scope, taps) at this address — the public POSIX segment — instead of the
-    // process-local ring_buffer_storage. Everything is observable for free.
+    // scope, taps) at this address — the public POSIX segment — instead of the
+    // process-local arena_storage. Everything is observable for free.
     extern uint8_t* g_external_segment;
 
     // Real-pointer arena base (== init_memory's `shared_memory`). Use for any
@@ -1018,9 +1018,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // the host's attach endpoint (shm_attach.hpp) via shmNativeHandle().
     if (cfg.udpPort > 0) {
         try {
-            mShmemCreator = std::make_unique<shm_segment_creator>(cfg.inboxBytes, cfg.outboxBytes);
+            mShmemCreator = std::make_unique<shm_segment_creator>(cfg.assetsBytes, cfg.returnsBytes);
             // Point the engine's whole shared_memory.h arena at the public
-            // segment: rings, control, metrics, node-tree, raw scope and
+            // segment: rings, control, metrics, node-tree, scope and
             // scope all live there, observable cross-process for free.
             g_external_segment = mShmemCreator->get_base();
         } catch (const std::exception& e) {
@@ -1056,9 +1056,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
 
     // The arena is the public segment when one exists, so the whole
     // shared_memory.h blob lives cross-process; else the process-local
-    // ring_buffer_storage. init_memory() resolves the same base from
+    // arena_storage. init_memory() resolves the same base from
     // g_external_segment, so both agree.
-    uint8_t* arena = g_external_segment ? g_external_segment : ring_buffer_storage;
+    uint8_t* arena = g_external_segment ? g_external_segment : clockwork_local_arena();
 
     // The guest's config block: whatever the host put in Config::guestConfig,
     // carried as opaque bytes with its terminating NUL so a guest that reads
@@ -1070,62 +1070,53 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     const std::string& guestText  = cfg.guestConfig;
     const uint32_t     guestBytes = static_cast<uint32_t>(guestText.size() + 1);
 
-    // The guest's arena, allocated once and reused across cold swaps. It does
-    // not depend on the segment: a guest needs working memory whether or not
-    // anything is watching it, and dsp_process may not allocate either way.
-    if (!mGuestArena)
-        mGuestArena.reset(new (std::nothrow) uint8_t[static_cast<size_t>(CLOCKWORK_ARENA_BYTES)]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
-    uint8_t* guestArena      = mGuestArena.get();
-    uint32_t guestArenaBytes = mGuestArena ? CLOCKWORK_ARENA_BYTES : 0u;
+    // The guest's working memory: clockwork reserves it from its fast tier,
+    // sized to what the guest asks (DspInfo::memory_bytes_wanted and
+    // dsp_memory_bytes), and keeps it across cold swaps. Nothing to pass.
+    uint8_t* guestMemory      = nullptr;
+    uint32_t guestMemoryBytes = 0u;
 
-    // The bulk lanes. A client writes a sample into the inbox and sends a short
-    // message saying where; a guest writes a rendered blob into the outbox and
+    // The bulk lanes. A client writes a sample into the assets area and sends a short
+    // message saying where; a guest writes a rendered blob into the returns area and
     // does the same.
     //
     // THE SEGMENT PUBLISHES THESE, IT DOES NOT CREATE THEM, which is how the
     // rest of the layout works: shared_memory is the public segment when there
-    // is one and process-local ring_buffer_storage when there is not, so
+    // is one and process-local arena_storage when there is not, so
     // metrics, the taps and the node-tree window are there either way. An
     // engine embedded with no UDP port still has a client — the host
     // application, in this process, reading in place — and a plugin's GUI
-    // reads what the guest publishes through the outbox.
+    // reads what the guest publishes through the returns area.
     // Sized by the host's config, like the segment's lanes; untouched here,
     // so the pages cost nothing until a client writes them.
-    const auto laneGeom = detail_shm_segment::shm_lane_geometry::of(mCurrentConfig.inboxBytes, mCurrentConfig.outboxBytes);
+    const auto laneGeom = detail_shm_segment::shm_lane_geometry::of(mCurrentConfig.assetsBytes, mCurrentConfig.returnsBytes);
     if (!mShmemCreator
-        && (!mGuestLanes || mGuestLanesInboxBytes != laneGeom.inbox_size
-                         || mGuestLanesOutboxBytes != laneGeom.outbox_size)) {
-        mGuestLanes.reset(new (std::nothrow) uint8_t[laneGeom.inbox_size + laneGeom.outbox_size]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
-        mGuestLanesInboxBytes  = mGuestLanes ? laneGeom.inbox_size  : 0;
-        mGuestLanesOutboxBytes = mGuestLanes ? laneGeom.outbox_size : 0;
+        && (!mGuestLanes || mGuestLanesAssetsBytes != laneGeom.assets_size
+                         || mGuestLanesReturnsBytes != laneGeom.returns_size)) {
+        mGuestLanes.reset(new (std::nothrow) uint8_t[laneGeom.assets_size + laneGeom.returns_size]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
+        mGuestLanesAssetsBytes  = mGuestLanes ? laneGeom.assets_size  : 0;
+        mGuestLanesReturnsBytes = mGuestLanes ? laneGeom.returns_size : 0;
     }
-    uint8_t* guestInbox      = mShmemCreator ? mShmemCreator->get_inbox()
+    uint8_t* guestAssets      = mShmemCreator ? mShmemCreator->get_assets()
                                              : mGuestLanes.get();
-    uint32_t guestInboxBytes = mShmemCreator
-        ? static_cast<uint32_t>(mShmemCreator->get_inbox_size())
-        : static_cast<uint32_t>(mGuestLanesInboxBytes);
-    mGuestInbox      = guestInbox;
-    mGuestInboxBytes = guestInboxBytes;
-    uint8_t* guestOutbox      = mShmemCreator ? mShmemCreator->get_outbox()
-                                              : (mGuestLanes ? mGuestLanes.get() + mGuestLanesInboxBytes
+    uint32_t guestAssetsBytes = mShmemCreator
+        ? static_cast<uint32_t>(mShmemCreator->get_assets_size())
+        : static_cast<uint32_t>(mGuestLanesAssetsBytes);
+    mGuestAssets      = guestAssets;
+    mGuestAssetsBytes = guestAssetsBytes;
+    uint8_t* guestReturns      = mShmemCreator ? mShmemCreator->get_returns()
+                                              : (mGuestLanes ? mGuestLanes.get() + mGuestLanesAssetsBytes
                                                              : nullptr);
-    uint32_t guestOutboxBytes = mShmemCreator
-        ? static_cast<uint32_t>(mShmemCreator->get_outbox_size())
-        : static_cast<uint32_t>(mGuestLanesOutboxBytes);
-    mGuestOutbox      = guestOutbox;
-    mGuestOutboxBytes = guestOutboxBytes;
+    uint32_t guestReturnsBytes = mShmemCreator
+        ? static_cast<uint32_t>(mShmemCreator->get_returns_size())
+        : static_cast<uint32_t>(mGuestLanesReturnsBytes);
+    mGuestReturns      = guestReturns;
+    mGuestReturnsBytes = guestReturnsBytes;
 
-    // The heap the guest takes its larger allocations from, sized for what
-    // this configuration asks of it (dsp_heap_bytes): taken once per build and
-    // never grown on the audio thread. Every build, including 0 for the
-    // profile's, so an earlier engine's figure in this process is never the
-    // one used. One the system cannot provide stops the boot with the reason.
-    {
-        const uint64_t wanted = dsp_heap_bytes(guestText.c_str(), guestBytes);
-        const uint64_t capped = std::min<uint64_t>(wanted, std::numeric_limits<size_t>::max());
-        clockwork_set_heap_bytes(capped > static_cast<uint64_t>(CLOCKWORK_HEAP_SIZE)
-                                 ? static_cast<size_t>(capped) : 0);
-    }
+    // The guest's memory is sized by the engine itself, every build, from
+    // what the guest declares (dsp_memory_bytes, dsp_memory_bulk_bytes) and
+    // the profile's defaults; a host floor under the bulk span would go
+    // through clockwork_set_guest_bulk_bytes. Nothing to do here.
 
     mProcessor.initialiseDsp(
         arena,
@@ -1134,13 +1125,13 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         mCurrentConfig.numInputChannels,
         guestText.c_str(),
         guestBytes,
-        guestArena,
-        guestArenaBytes,
+        guestMemory,
+        guestMemoryBytes,
         chosenBufLen,
-        guestInbox,
-        guestInboxBytes,
-        guestOutbox,
-        guestOutboxBytes
+        guestAssets,
+        guestAssetsBytes,
+        guestReturns,
+        guestReturnsBytes
     );
     // Move the clock state into the shared arena's CLOCK_STATE region so
     // the native SHM has the same shape as web. Done before publish() below,
@@ -1187,7 +1178,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // control words and metrics all live in the arena (the public segment when
     // present), so external observers read the same structs with no redirect.
     uint8_t* base = arena;
-    ControlPointers*    ctrl = reinterpret_cast<ControlPointers*>(base + CONTROL_START);
+    RingCursors*    ctrl = reinterpret_cast<RingCursors*>(base + RING_CURSORS_START);
     mMetrics                 = reinterpret_cast<PerformanceMetrics*>(base + METRICS_START);
 
     // -- The control pass. Everything registered on mNrtGateway from here
@@ -1249,8 +1240,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // -- Audio-plane ingress (engine-owned) ---------------------------------
     // The engine owns the IN ring; the default OscIngress route writes it. The
     // transport is a dumb pipe.
-    mInBufferStart = base + IN_BUFFER_START;
-    mInBufferSize  = IN_BUFFER_SIZE;
+    mInBufferStart = base + IN_RING_START;
+    mInBufferSize  = IN_RING_SIZE;
     mInHead        = &ctrl->in_head;
     mInTail        = &ctrl->in_tail;
     mInSequence    = &ctrl->in_sequence;
@@ -1878,7 +1869,7 @@ void ClockworkEngine::noteInFlightCommand(const uint8_t* data, uint32_t size) {
 void ClockworkEngine::openClient() {
     if (mClientHandle || !shared_memory) return;
     ClockworkStatus st = CLOCKWORK_OK;
-    mClientHandle = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    mClientHandle = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
     if (!mClientHandle)
         clockwork_log("[engine] client boundary unavailable: %s",
                 clockwork_client_status_text(st));
@@ -2910,14 +2901,14 @@ void ClockworkEngine::sendDeviceReport() {
 
 bool ClockworkEngine::interceptBufferFreed(const uint8_t* /*data*/, uint32_t /*size*/) {
     /*
-     * Egress-thread heap maintenance, and nothing else.
+     * Egress-thread pool maintenance, and nothing else.
      *
      * A guest hands blocks back through DspHost::free_bytes, which carries a
      * pointer and no name — nothing here parses a message to find one. The hook
      * stays because this is a natural off-audio-thread moment for the
-     * deferred-free queue.
+     * deferred-free queue and the spare.
      */
-    clockwork_heap_foreign_maintenance();
+    clockwork_pool_foreign_maintenance();
     return false;
 }
 
@@ -4218,7 +4209,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                             "is more than the tap ring covers (%u frames): scopes "
                             "will show nothing on this device",
                             outLat, outLat * 1000.0 / result.sampleRate,
-                            static_cast<unsigned>(SHM_TAP_RING_FRAMES));
+                            static_cast<unsigned>(TAP_RING_FRAMES));
             }
 
             // Remember the rate of the last non-wireless settle so a

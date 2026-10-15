@@ -153,7 +153,7 @@ maybe("C writes ingress and JavaScript reads it, and a JavaScript writer leaves 
 });
 
 maybe("JavaScript writes both egress rings, and EgressReader reads them as clockwork_client_poll does", async () => {
-  const { x, memory, handle, rings, ringBufferBase, constants } = await bootEngine();
+  const { x, memory, handle, rings, arenaBase, constants } = await bootEngine();
   const max = 32;
   const messages = x.malloc(max * MESSAGE_BYTES);
 
@@ -164,7 +164,7 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
 
   // The engine's counters, which clockwork_client_poll adds to, and a set of
   // the reader's own, which must move by the same amounts.
-  const engineMetrics = new Uint32Array(memory.buffer, ringBufferBase + constants.METRICS_START,
+  const engineMetrics = new Uint32Array(memory.buffer, arenaBase + constants.METRICS_START,
                                         constants.METRICS_SIZE / 4);
   const counted = [M.OSC_IN_MESSAGES_RECEIVED, M.OSC_IN_BYTES_RECEIVED, M.OSC_IN_CORRUPTED, M.ENGINE_SEQUENCE_GAPS];
   const before = counted.map((i) => engineMetrics[i]);

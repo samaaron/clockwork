@@ -8,7 +8,7 @@
  * may want to stand between the two — to answer a verb its senders still use
  * that the engine no longer does, or to turn an engine reply into the words
  * a legacy client expects. SuperSonic answers /b_allocRead this way: the
- * engine reads no files, the front decodes into the inbox lane and commits,
+ * engine reads no files, the front decodes into the assets area lane and commits,
  * and the sender hears scsynth's /done. That is a client's job, and this is
  * the seam a client is given to do it — the engine is not told.
  *

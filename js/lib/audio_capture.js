@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
 /**
- * AudioCapture — a client's reader of a raw scope (shm_audio_buffer.hpp).
+ * AudioCapture — a client's reader of a scope (shm_audio_buffer.hpp).
  *
- * The raw scope is clockwork's and flow from boot: the OUT slot is what left for
+ * The scope is clockwork's and flow from boot: the OUT slot is what left for
  * the device each block, the IN slot what arrived. A capture is therefore a
  * READER'S notion: start() notes where the writer's cursor is, read()
  * returns the frames written since, and nothing is toggled in the engine.
- * The ring holds SHM_AUDIO_FRAMES (a second in production); a capture that
+ * The ring holds SCOPE_FRAMES (a second in production); a capture that
  * outlives it gets the newest ring's worth and says how much was lost.
  *
  * SAB mode only: the ring is read in place.
@@ -15,7 +15,7 @@
 export class AudioCapture {
   #sharedBuffer;
   #bufferConstants;
-  #ringBufferBase;
+  #arenaBase;
   #slot;
   /** The writer's cursor when the capture started, or null when none is running. */
   #startPosition = null;
@@ -27,13 +27,13 @@ export class AudioCapture {
   constructor(options = {}) {
     this.#sharedBuffer = options.sharedBuffer || null;
     this.#bufferConstants = options.bufferConstants || null;
-    this.#ringBufferBase = options.ringBufferBase || 0;
+    this.#arenaBase = options.arenaBase || 0;
     this.#slot = options.slot ?? 0;
   }
 
-  update(sharedBuffer, ringBufferBase, bufferConstants) {
+  update(sharedBuffer, arenaBase, bufferConstants) {
     this.#sharedBuffer = sharedBuffer;
-    this.#ringBufferBase = ringBufferBase;
+    this.#arenaBase = arenaBase;
     this.#bufferConstants = bufferConstants;
   }
 
@@ -52,7 +52,7 @@ export class AudioCapture {
 
   #slotOffset() {
     const bc = this.#bufferConstants;
-    return this.#ringBufferBase + bc.SHM_AUDIO_START + this.#slot * bc.SHM_AUDIO_SLOT_SIZE;
+    return this.#arenaBase + bc.SCOPE_START + this.#slot * bc.SCOPE_SLOT_SIZE;
   }
 
   #header() {
@@ -107,7 +107,7 @@ export class AudioCapture {
     // handed over before them is not lost, just not asked for.
     if (newest !== undefined && writer - start > newest) start = writer - Math.max(0, newest | 0);
     const frames = Math.max(0, writer - start);
-    const data = new Float32Array(this.#sharedBuffer, this.#slotOffset() + bc.SHM_AUDIO_HEADER_SIZE,
+    const data = new Float32Array(this.#sharedBuffer, this.#slotOffset() + bc.SCOPE_HEADER_SIZE,
                                   capacity * channels);
     const out = Array.from({ length: channels }, () => new Float32Array(frames));
     let at = start % capacity;
@@ -141,6 +141,6 @@ export class AudioCapture {
   getMaxDuration() {
     if (!this.#bufferConstants) return 0;
     const bc = this.#bufferConstants;
-    return bc.SHM_AUDIO_FRAMES / (bc.SHM_AUDIO_SAMPLE_RATE || 48000);
+    return bc.SCOPE_FRAMES / (bc.SCOPE_SAMPLE_RATE || 48000);
   }
 }

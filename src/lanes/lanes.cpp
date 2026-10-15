@@ -18,7 +18,7 @@
 
 #include "../audio_processor.h"          // arena globals + process_audio + accessors
 #include "../audio_config.h"             // block-size and channel caps
-#include "../shared_memory.h"            // layout, ControlPointers, EgressRoute
+#include "../shared_memory.h"            // layout, RingCursors, EgressRoute
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
 
 // ── internal state ──────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ static std::atomic<int32_t> g_nrt_egress_lock{0};
 // Windows machines — but never more than half the ring so a frame can
 // always drain (small-profile builds have a 4 KB NRT-out ring).
 static constexpr uint32_t kNrtEgressMax =
-    NRT_OUT_BUFFER_SIZE / 2 < 8192 ? NRT_OUT_BUFFER_SIZE / 2 : 8192;
+    NRT_OUT_RING_SIZE / 2 < 8192 ? NRT_OUT_RING_SIZE / 2 : 8192;
 
 // Per-lane consumer state (single consumer per lane, by contract). Process
 // lifetime; init_memory() resets it alongside the ring sequence counters via
@@ -58,7 +58,7 @@ void clockwork_lanes_reset_drains(void) {
 // the zeroing. The lock words are never zeroed: releasing the spinlock is
 // what returns them to 0, and a blind store would unlock under a holder.
 void clockwork_lanes_reset_rings(void) {
-    if (!shared_memory || !control) return;
+    if (!shared_memory || !cursors) return;
 
     const auto spin_acquire = [](std::atomic<int32_t>& lock) {
         int32_t expected = 0;
@@ -67,34 +67,34 @@ void clockwork_lanes_reset_rings(void) {
             expected = 0;
     };
 
-    spin_acquire(control->in_write_lock);
-    control->in_head.store(0, std::memory_order_relaxed);
-    control->in_tail.store(0, std::memory_order_relaxed);
-    control->in_sequence.store(0, std::memory_order_relaxed);
-    control->in_write_lock.store(0, std::memory_order_release);
+    spin_acquire(cursors->in_write_lock);
+    cursors->in_head.store(0, std::memory_order_relaxed);
+    cursors->in_tail.store(0, std::memory_order_relaxed);
+    cursors->in_sequence.store(0, std::memory_order_relaxed);
+    cursors->in_write_lock.store(0, std::memory_order_release);
 
     spin_acquire(g_nrt_egress_lock);
-    control->nrt_out_head.store(0, std::memory_order_relaxed);
-    control->nrt_out_tail.store(0, std::memory_order_relaxed);
-    control->nrt_out_read.store(0, std::memory_order_relaxed);
-    control->nrt_out_sequence.store(0, std::memory_order_relaxed);
+    cursors->nrt_out_head.store(0, std::memory_order_relaxed);
+    cursors->nrt_out_tail.store(0, std::memory_order_relaxed);
+    cursors->nrt_out_read.store(0, std::memory_order_relaxed);
+    cursors->nrt_out_sequence.store(0, std::memory_order_relaxed);
     g_nrt_egress_lock.store(0, std::memory_order_release);
 
-    control->out_head.store(0, std::memory_order_relaxed);
-    control->out_tail.store(0, std::memory_order_relaxed);
-    control->out_read.store(0, std::memory_order_relaxed);
-    control->out_sequence.store(0, std::memory_order_relaxed);
+    cursors->out_head.store(0, std::memory_order_relaxed);
+    cursors->out_tail.store(0, std::memory_order_relaxed);
+    cursors->out_read.store(0, std::memory_order_relaxed);
+    cursors->out_sequence.store(0, std::memory_order_relaxed);
 }
 
 // ── Ingress ─────────────────────────────────────────────────────────────────
 
 bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id) {
-    if (!memory_initialized || !shared_memory || !control || !osc || len == 0)
+    if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
         return false;
     return RingBufferWriter::write(
-        shared_memory + IN_BUFFER_START, IN_BUFFER_SIZE,
-        &control->in_head, &control->in_tail,
-        &control->in_sequence, &control->in_write_lock,
+        shared_memory + IN_RING_START, IN_RING_SIZE,
+        &cursors->in_head, &cursors->in_tail,
+        &cursors->in_sequence, &cursors->in_write_lock,
         osc, len, source_id);
 }
 
@@ -128,7 +128,7 @@ static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
 }
 
 uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
-    if (!memory_initialized || !shared_memory || !control || !fn) return 0;
+    if (!memory_initialized || !shared_memory || !cursors || !fn) return 0;
     // RT egress traffic counts into the segment-resident metrics so external
     // observers see reply/notification volume and ring health.
     ClockworkDrainMetrics m;
@@ -138,13 +138,13 @@ uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max
         m.corrupted = &metrics->osc_in_corrupted;
         m.seqGaps   = &metrics->messages_sequence_gaps;
     }
-    return drain_egress_ring(shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
-                             &control->out_head, &control->out_tail, &control->out_read,
+    return drain_egress_ring(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+                             &cursors->out_head, &cursors->out_tail, &cursors->out_read,
                              g_rt_drain_state, m, fn, ctx, max_frames);
 }
 
 uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
-    if (!memory_initialized || !shared_memory || !control || !fn) return 0;
+    if (!memory_initialized || !shared_memory || !cursors || !fn) return 0;
     // The same reply counters as the RT ring: which ring a reply rode is an
     // implementation detail (a guest's off-thread stage answers here, its
     // audio-thread stage there), and a client's "replies received" is the
@@ -155,8 +155,8 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
         m.bytes     = &metrics->osc_in_bytes_received;
         m.corrupted = &metrics->osc_in_corrupted;
     }
-    return drain_egress_ring(shared_memory + NRT_OUT_BUFFER_START, NRT_OUT_BUFFER_SIZE,
-                             &control->nrt_out_head, &control->nrt_out_tail, &control->nrt_out_read,
+    return drain_egress_ring(shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
+                             &cursors->nrt_out_head, &cursors->nrt_out_tail, &cursors->nrt_out_read,
                              g_nrt_drain_state, m, fn, ctx, max_frames);
 }
 
@@ -166,7 +166,7 @@ uint32_t clockwork_egress_nrt_max_frame(void) {
 
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len) {
-    if (!memory_initialized || !shared_memory || !control || !osc || len == 0)
+    if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
         return false;
     // Subtraction form: len + EGRESS_ROUTE_SIZE would wrap for len near
     // UINT32_MAX and slip past the bound into the stack memcpy below.
@@ -176,9 +176,9 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     std::memcpy(buf, &route, sizeof(route));
     std::memcpy(buf + sizeof(route), osc, len);
     return RingBufferWriter::write(
-        shared_memory + NRT_OUT_BUFFER_START, NRT_OUT_BUFFER_SIZE,
-        &control->nrt_out_head, &control->nrt_out_tail,
-        &control->nrt_out_sequence, &g_nrt_egress_lock,
+        shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
+        &cursors->nrt_out_head, &cursors->nrt_out_tail,
+        &cursors->nrt_out_sequence, &g_nrt_egress_lock,
         buf, len + EGRESS_ROUTE_SIZE, token);
 }
 
@@ -216,7 +216,7 @@ int64_t clockwork_block_time(void) {
 // The arena override init_memory() consults (set by the native backend when a
 // public POSIX segment exists; null otherwise). Declared here so clockwork_init
 // copies the guest's config block into the SAME arena init_memory will read:
-// reading from ring_buffer_storage while the host wrote to a segment would see
+// reading from arena_storage while the host wrote to a segment would see
 // zeros.
 extern uint8_t* g_external_segment;
 
@@ -245,20 +245,20 @@ int clockwork_attach(double   sample_rate,
                 uint32_t input_channels,
                 uint32_t output_channels,
                 uint32_t verbosity,
-                void*    guest_arena,
-                uint32_t guest_arena_bytes,
+                void*    guest_memory,
+                uint32_t guest_memory_bytes,
                 const void* guest_config,
                 uint32_t    guest_config_bytes,
                 uint32_t    arena_bytes,
-                const void* inbox,
-                uint32_t    inbox_bytes,
-                void*       outbox,
-                uint32_t    outbox_bytes) {
+                const void* assets,
+                uint32_t    assets_bytes,
+                void*       returns,
+                uint32_t    returns_bytes) {
     if (g_attached == 0) {
         clockwork_init(sample_rate, block_size, input_channels, output_channels,
-                  verbosity, guest_arena, guest_arena_bytes,
+                  verbosity, guest_memory, guest_memory_bytes,
                   guest_config, guest_config_bytes, arena_bytes,
-                  inbox, inbox_bytes, outbox, outbox_bytes);
+                  assets, assets_bytes, returns, returns_bytes);
         g_attached = 1;
         return CLOCKWORK_ATTACH_BOOTED;
     }
@@ -287,15 +287,15 @@ void clockwork_init(double   sample_rate,
               uint32_t input_channels,
               uint32_t output_channels,
               uint32_t verbosity,
-              void*    guest_arena,
-              uint32_t guest_arena_bytes,
+              void*    guest_memory,
+              uint32_t guest_memory_bytes,
               const void* guest_config,
               uint32_t    guest_config_bytes,
               uint32_t    arena_bytes,
-              const void* inbox,
-              uint32_t    inbox_bytes,
-              void*       outbox,
-              uint32_t    outbox_bytes) {
+              const void* assets,
+              uint32_t    assets_bytes,
+              void*       returns,
+              uint32_t    returns_bytes) {
     // THE SOLE-HOST CALL. Reconfiguring is routine — a device switch arrives
     // here — but once a second host has attached there is no longer any such
     // thing as "the" host's geometry, and applying one host's would silently
@@ -326,14 +326,14 @@ void clockwork_init(double   sample_rate,
                     guest_config_bytes, (uint32_t)GUEST_CONFIG_SIZE);
             return;
         }
-        uint8_t* arena = g_external_segment ? g_external_segment : ring_buffer_storage;
+        uint8_t* arena = g_external_segment ? g_external_segment : clockwork_local_arena();
         std::memcpy(arena + GUEST_CONFIG_START, guest_config, guest_config_bytes);
     }
 
     clockwork_set_engine_config(sample_rate, block_size, input_channels,
                            output_channels, verbosity,
-                           guest_arena, guest_arena_bytes, arena_bytes,
-                           inbox, inbox_bytes, outbox, outbox_bytes);
+                           guest_memory, guest_memory_bytes, arena_bytes,
+                           assets, assets_bytes, returns, returns_bytes);
     init_memory();
 }
 
@@ -346,8 +346,8 @@ void clockwork_declare_fp_env(uint32_t env) {
     g_clockwork_config.fp_env = env;
 }
 
-void clockwork_set_heap_bytes(size_t bytes) {
-    g_clockwork_config.heap_bytes = bytes;
+void clockwork_set_guest_bulk_bytes(size_t bytes) {
+    g_clockwork_config.guest_bulk_bytes = bytes;
 }
 
 const char* clockwork_boot_error(void) {

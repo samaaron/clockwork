@@ -7,7 +7,7 @@
  * @property {MessagePort} [workletPort] - Port for worklet communication (passed to initialize(), not constructor)
  * @property {SharedArrayBuffer} [sharedBuffer] - Shared memory (SAB mode only)
  * @property {WebAssembly.Memory} [wasmMemory] - WASM memory (SAB mode only)
- * @property {number} [ringBufferBase] - Ring buffer base offset (SAB mode only)
+ * @property {number} [arenaBase] - Ring buffer base offset (SAB mode only)
  * @property {Object} [bufferConstants] - Buffer layout constants (SAB mode only)
  * @property {Function} [getAudioContextTime] - Returns AudioContext.currentTime
  * @property {Function} [getNTPStartTime] - Returns NTP start time

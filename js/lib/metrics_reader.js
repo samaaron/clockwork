@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Sam Aaron
 
 import * as MetricsOffsets from './metrics_offsets.js';
-import { calculateAllControlIndices } from './control_offsets.js';
+import { calculateAllControlIndices } from './ring_cursor_offsets.js';
 
 const ADD_METRIC_OFFSETS = {
   oscOutMessagesSent: MetricsOffsets.OSC_OUT_MESSAGES_SENT,
@@ -15,7 +15,7 @@ const ADD_METRIC_OFFSETS = {
 export class MetricsReader {
   #guestMetrics = {};
   #sharedBuffer;
-  #ringBufferBase;
+  #arenaBase;
   #bufferConstants;
   #mode;
 
@@ -27,7 +27,8 @@ export class MetricsReader {
   // Cached snapshot buffer (postMessage mode)
   #cachedSnapshotBuffer = null;
 
-  // Merged array: slots 0-(SAB_METRICS_COUNT-1) from SAB/snapshot, SAB_METRICS_COUNT+ from context
+  // Merged array: the C++ struct's words from the SAB/snapshot (SAB_METRICS_WORDS), the context's own written over
+  // 50-52 and from 58, the guest's from GUEST_METRICS_BASE
   #mergedArray = new Uint32Array(MetricsOffsets.MERGED_ARRAY_SIZE);
   #mergedDV = new DataView(this.#mergedArray.buffer);
 
@@ -35,7 +36,7 @@ export class MetricsReader {
    * @param {Object} options
    * @param {string} options.mode - 'sab' or 'postMessage'
    * @param {SharedArrayBuffer} [options.sharedBuffer] - Required for SAB mode
-   * @param {number} [options.ringBufferBase] - Required for SAB mode
+   * @param {number} [options.arenaBase] - Required for SAB mode
    * @param {Object} [options.bufferConstants] - Buffer layout constants
    */
   /*
@@ -47,7 +48,7 @@ export class MetricsReader {
     this.#guestMetrics = options.guestMetrics || {};
     this.#mode = options.mode || 'sab';
     this.#sharedBuffer = options.sharedBuffer || null;
-    this.#ringBufferBase = options.ringBufferBase || 0;
+    this.#arenaBase = options.arenaBase || 0;
     this.#bufferConstants = options.bufferConstants || null;
   }
 
@@ -55,18 +56,18 @@ export class MetricsReader {
    * Initialize shared views (SAB mode only)
    * Call after receiving bufferConstants from worklet
    */
-  initSharedViews(sharedBuffer, ringBufferBase, bufferConstants) {
+  initSharedViews(sharedBuffer, arenaBase, bufferConstants) {
     this.#sharedBuffer = sharedBuffer;
-    this.#ringBufferBase = ringBufferBase;
+    this.#arenaBase = arenaBase;
     this.#bufferConstants = bufferConstants;
 
     if (this.#mode === 'sab' && sharedBuffer && bufferConstants) {
       // Atomic view for reading control pointers
       this.#atomicView = new Int32Array(sharedBuffer);
-      this.#controlIndices = calculateAllControlIndices(ringBufferBase, bufferConstants.CONTROL_START);
+      this.#controlIndices = calculateAllControlIndices(arenaBase, bufferConstants.RING_CURSORS_START);
 
       // Cache metrics view for efficient reads
-      const metricsBase = ringBufferBase + bufferConstants.METRICS_START;
+      const metricsBase = arenaBase + bufferConstants.METRICS_START;
       this.#metricsView = new Uint32Array(
         sharedBuffer,
         metricsBase,
@@ -141,6 +142,18 @@ export class MetricsReader {
       engineSchedulerLastLateTick: m[MetricsOffsets.ENGINE_SCHEDULER_LAST_LATE_TICK],
       engineSchedulerCapacity: m[MetricsOffsets.SCHEDULER_CAPACITY],
       engineSchedulerPoolBytes: m[MetricsOffsets.SCHEDULER_POOL_BYTES],
+      // the guest's pool and the rust heap (shared C++, at the metrics flush)
+      guestPoolUsedBytes: m[MetricsOffsets.GUEST_POOL_USED_BYTES],
+      guestPoolPeakBytes: m[MetricsOffsets.GUEST_POOL_PEAK_BYTES],
+      guestPoolGrowths: m[MetricsOffsets.GUEST_POOL_GROWTHS],
+      rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
+      rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
+      // the guest's mallocs (shared C++, at the metrics flush; counted on the web)
+      guestMallocBytes: m[MetricsOffsets.GUEST_MALLOC_BYTES],
+      guestMallocsProcessing: m[MetricsOffsets.GUEST_MALLOCS_PROCESSING],
+      // the whole program's mallocs after boot (shared C++, at the metrics flush; counted on the web)
+      mallocsAfterBoot: m[MetricsOffsets.MALLOCS_AFTER_BOOT],
+      mallocBytesAfterBoot: m[MetricsOffsets.MALLOC_BYTES_AFTER_BOOT],
 
       // OSC In/Out metrics
       oscInMessagesReceived: m[MetricsOffsets.OSC_IN_MESSAGES_RECEIVED],
@@ -194,24 +207,24 @@ export class MetricsReader {
     if (m[MetricsOffsets.IN_BUFFER_USED_BYTES] !== undefined && bc) {
       metrics.inBufferUsed = {
         bytes: m[MetricsOffsets.IN_BUFFER_USED_BYTES],
-        percentage: (m[MetricsOffsets.IN_BUFFER_USED_BYTES] / bc.IN_BUFFER_SIZE) * 100,
+        percentage: (m[MetricsOffsets.IN_BUFFER_USED_BYTES] / bc.IN_RING_SIZE) * 100,
         peakBytes: m[MetricsOffsets.IN_BUFFER_PEAK_BYTES],
-        peakPercentage: (m[MetricsOffsets.IN_BUFFER_PEAK_BYTES] / bc.IN_BUFFER_SIZE) * 100,
-        capacity: bc.IN_BUFFER_SIZE,
+        peakPercentage: (m[MetricsOffsets.IN_BUFFER_PEAK_BYTES] / bc.IN_RING_SIZE) * 100,
+        capacity: bc.IN_RING_SIZE,
       };
       metrics.outBufferUsed = {
         bytes: m[MetricsOffsets.OUT_BUFFER_USED_BYTES],
-        percentage: (m[MetricsOffsets.OUT_BUFFER_USED_BYTES] / bc.OUT_BUFFER_SIZE) * 100,
+        percentage: (m[MetricsOffsets.OUT_BUFFER_USED_BYTES] / bc.RT_OUT_RING_SIZE) * 100,
         peakBytes: m[MetricsOffsets.OUT_BUFFER_PEAK_BYTES],
-        peakPercentage: (m[MetricsOffsets.OUT_BUFFER_PEAK_BYTES] / bc.OUT_BUFFER_SIZE) * 100,
-        capacity: bc.OUT_BUFFER_SIZE,
+        peakPercentage: (m[MetricsOffsets.OUT_BUFFER_PEAK_BYTES] / bc.RT_OUT_RING_SIZE) * 100,
+        capacity: bc.RT_OUT_RING_SIZE,
       };
       metrics.nrtOutBufferUsed = {
         bytes: m[MetricsOffsets.NRT_OUT_BUFFER_USED_BYTES],
-        percentage: (m[MetricsOffsets.NRT_OUT_BUFFER_USED_BYTES] / bc.NRT_OUT_BUFFER_SIZE) * 100,
+        percentage: (m[MetricsOffsets.NRT_OUT_BUFFER_USED_BYTES] / bc.NRT_OUT_RING_SIZE) * 100,
         peakBytes: m[MetricsOffsets.NRT_OUT_BUFFER_PEAK_BYTES],
-        peakPercentage: (m[MetricsOffsets.NRT_OUT_BUFFER_PEAK_BYTES] / bc.NRT_OUT_BUFFER_SIZE) * 100,
-        capacity: bc.NRT_OUT_BUFFER_SIZE,
+        peakPercentage: (m[MetricsOffsets.NRT_OUT_BUFFER_PEAK_BYTES] / bc.NRT_OUT_RING_SIZE) * 100,
+        capacity: bc.NRT_OUT_RING_SIZE,
       };
     }
 
@@ -261,7 +274,9 @@ export class MetricsReader {
     // Copy slots 0-49 from SAB or snapshot
     if (this.#mode === 'postMessage') {
       if (this.#cachedSnapshotBuffer) {
-        const view = new Uint32Array(this.#cachedSnapshotBuffer, 0, MetricsOffsets.SAB_METRICS_COUNT);
+        // every word of the struct the snapshot carries, the heap's census at 53-57 included
+        const words = Math.min(MetricsOffsets.SAB_METRICS_WORDS, this.#cachedSnapshotBuffer.byteLength >> 2);
+        const view = new Uint32Array(this.#cachedSnapshotBuffer, 0, words);
         arr.set(view);
       }
       // PM mode: overlay transport metrics into the merged array
@@ -300,9 +315,9 @@ export class MetricsReader {
 
     // Static capacities from bufferConstants
     const bc = this.#bufferConstants;
-    arr[MetricsOffsets.CTX_IN_BUFFER_CAPACITY] = bc?.IN_BUFFER_SIZE ?? 0;
-    arr[MetricsOffsets.CTX_OUT_BUFFER_CAPACITY] = bc?.OUT_BUFFER_SIZE ?? 0;
-    arr[MetricsOffsets.CTX_NRT_OUT_BUFFER_CAPACITY] = bc?.NRT_OUT_BUFFER_SIZE ?? 0;
+    arr[MetricsOffsets.CTX_IN_BUFFER_CAPACITY] = bc?.IN_RING_SIZE ?? 0;
+    arr[MetricsOffsets.CTX_OUT_BUFFER_CAPACITY] = bc?.RT_OUT_RING_SIZE ?? 0;
+    arr[MetricsOffsets.CTX_NRT_OUT_BUFFER_CAPACITY] = bc?.NRT_OUT_RING_SIZE ?? 0;
 
     // Mode enum: 0=sab, 1=postMessage
     arr[MetricsOffsets.CTX_MODE] = this.#mode === 'sab' ? 0 : 1;
@@ -340,8 +355,8 @@ export class MetricsReader {
    * Get ring buffer base address
    * @returns {number}
    */
-  get ringBufferBase() {
-    return this.#ringBufferBase;
+  get arenaBase() {
+    return this.#arenaBase;
   }
 
   /**

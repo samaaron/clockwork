@@ -7,7 +7,7 @@
  * Verifies the redirect added in src/native/ClockworkEngine.cpp:
  *  - When the engine creates a public shm segment for its port, the
  *    metrics struct lives inside that segment instead of in the in-band
- *    slot inside ring_buffer_storage.
+ *    slot inside arena_storage.
  *  - An external observer can mmap the segment via shm_segment_client
  *    and read the same metrics struct that engine writers update.
  *
@@ -23,7 +23,7 @@
 #include "shm_segment.hpp"
 #include "shared_memory.h"
 
-extern "C" uint8_t ring_buffer_storage[];
+extern "C" uint8_t arena_storage[];
 
 namespace {
 ClockworkEngine::Config metricsShmConfig(unsigned port) {
@@ -44,11 +44,11 @@ TEST_CASE("metrics-shm: engine.getMetrics() points into the public segment when 
 
     const PerformanceMetrics* m = &fx.engine().getMetrics();
     auto* base = reinterpret_cast<const uint8_t*>(m);
-    auto* ring = ring_buffer_storage;
+    auto* ring = arena_storage;
 
-    // The metrics pointer must NOT be inside ring_buffer_storage now —
+    // The metrics pointer must NOT be inside arena_storage now —
     // it lives in the public shm segment.
-    bool insideRing = (base >= ring) && (base < ring + TOTAL_BUFFER_SIZE);
+    bool insideRing = (base >= ring) && (base < ring + ARENA_SIZE);
     CHECK_FALSE(insideRing);
 }
 

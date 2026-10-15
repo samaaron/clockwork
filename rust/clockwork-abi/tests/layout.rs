@@ -50,15 +50,15 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     let mut mine: Vec<(String, usize)> = Vec::new();
     expect!(mine, DspConfig {
         sample_rate, block_size, max_input_channels, max_output_channels, clock, channel_map,
-        shm_window, shm_window_bytes, persistent, persistent_bytes, arena, arena_bytes,
-        arena_bulk, arena_bulk_bytes, inbox, inbox_bytes, outbox, outbox_bytes,
+        shm_window, shm_window_bytes, persistent, persistent_bytes, memory, memory_bytes,
+        memory_bulk, memory_bulk_bytes, assets, assets_bytes, returns, returns_bytes,
         guest_config, guest_config_bytes, deterministic_seed, fp_env,
     });
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release,
         alloc_bytes, tap_open, tap_write, tap_close, flush_schedule });
     expect!(mine, DspTapHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
-        name, version, holds_schedule, arena_bytes_wanted, arena_bulk_bytes_wanted, wants_events,
+        name, version, holds_schedule, memory_bytes_wanted, memory_bulk_bytes_wanted, wants_events,
         window_magic, window_version,
     });
     expect!(mine, ClockworkAsset {
@@ -90,16 +90,23 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         struct_bytes, driver, device, sample_rate, buffer_frames, block_frames,
         input_channels, output_channels, output_latency_frames, input_latency_frames,
     });
-    expect!(mine, ClockworkArenaEntry { id, offset, bytes, owner, geom });
+    expect!(mine, ClockworkArenaAreaEntry { area, space, base_lo, base_hi, bytes_lo, bytes_hi });
+    expect!(mine, ClockworkArenaEntry { id, offset, bytes, owner, audience, cadence, tier, lifetime, geom });
     expect!(mine, ClockworkArenaHeader {
-        magic, version, header_bytes, instance_id, arena_bytes, block_bytes, guest_offset,
-        guest_bytes, entry_count, entry_bytes, state, block_published_end, guest_published_end,
-        reserved, entries,
+        magic, version, header_bytes, instance_id, arena_bytes, clockwork_bytes, guest_offset,
+        guest_bytes, area_count, area_bytes, entry_count, entry_bytes, state, reserved, areas, entries,
     });
-    let consts: [(&str, i64); 26] = [
-        ("CLOCKWORK_AUDIENCE_PUBLISHED", ClockworkArenaAudience::PUBLISHED.0 as i64),
+    let consts: [(&str, i64); 33] = [
+        ("CLOCKWORK_AUDIENCE_PUBLIC", ClockworkArenaAudience::PUBLIC.0 as i64),
         ("CLOCKWORK_AUDIENCE_TRANSPORT", ClockworkArenaAudience::TRANSPORT.0 as i64),
-        ("CLOCKWORK_GEOM_AUDIENCE", geom::AUDIENCE as i64),
+        ("CLOCKWORK_AREA_GUEST_PRIVATE", ClockworkArenaArea::GUEST_PRIVATE.0 as i64),
+        ("CLOCKWORK_AREA_GUEST_MEMORY_BULK", ClockworkArenaArea::GUEST_MEMORY_BULK.0 as i64),
+        ("CLOCKWORK_SPACE_PROCESS", ClockworkArenaSpace::PROCESS.0 as i64),
+        ("CLOCKWORK_CADENCE_BOOT", ClockworkArenaCadence::BOOT.0 as i64),
+        ("CLOCKWORK_TIER_BULK", ClockworkArenaTier::BULK.0 as i64),
+        ("CLOCKWORK_LIFETIME_REBUILD", ClockworkArenaLifetime::REBUILD.0 as i64),
+        ("CLOCKWORK_ARENA_MAX_AREAS", CLOCKWORK_ARENA_MAX_AREAS as i64),
+        ("CLOCKWORK_ARENA_GEOM_WORDS", CLOCKWORK_ARENA_GEOM_WORDS as i64),
         ("CLOCKWORK_GEOM_WINDOW_VERSION", geom::WINDOW_VERSION as i64),
         ("CLOCKWORK_E_NOMEM", ClockworkStatus::E_NOMEM.0 as i64),
         ("CLOCKWORK_REGION_EGRESS", ClockworkRegionId::EGRESS.0 as i64),
@@ -118,10 +125,10 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         ("CLOCKWORK_ARENA_VERSION", CLOCKWORK_ARENA_VERSION as i64),
         ("CLOCKWORK_ARENA_HEADER_BYTES", CLOCKWORK_ARENA_HEADER_BYTES as i64),
         ("CLOCKWORK_ARENA_MAX_ENTRIES", CLOCKWORK_ARENA_MAX_ENTRIES as i64),
-        ("CLOCKWORK_ARENA_TAPS", ClockworkArenaRegion::TAPS.0 as i64),
+        ("CLOCKWORK_ARENA_CLOCKWORK_TAPS", ClockworkArenaRegion::CLOCKWORK_TAPS.0 as i64),
         ("CLOCKWORK_OWNER_HOST", ClockworkArenaOwner::HOST.0 as i64),
-        ("CLOCKWORK_ARENA_TRACK_TAPS", ClockworkArenaRegion::TRACK_TAPS.0 as i64),
-        ("CLOCKWORK_GEOM_TRACK_FIRST_INDEX", geom::TRACK_FIRST_INDEX as i64),
+        ("CLOCKWORK_ARENA_GUEST_PERSIST", ClockworkArenaRegion::GUEST_PERSIST.0 as i64),
+        ("CLOCKWORK_GEOM_TAP_TRACK_FIRST", geom::TAP_TRACK_FIRST as i64),
         ("CLOCKWORK_TAP_IN", CLOCKWORK_TAP_IN as i64),
     ];
 

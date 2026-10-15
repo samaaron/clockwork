@@ -60,6 +60,29 @@ test("what the engine says as it boots reaches the 'debug' event", async ({ page
   expect(r.firstSequence, "the first frame seen was not the first frame sent").toBe(0);
 });
 
+test("a boot the engine refuses rejects init() with the engine's reason", async ({ page, clockworkConfig }) => {
+  // The engine's memory sized below what the guest declares: the engine
+  // refuses, records why, and keeps answering its own verbs with no guest.
+  // Until 2026-10-15 nothing carried that reason to the page — the log line
+  // went to the worklet's console and the client saw an engine that never
+  // ticked (Sonic Pi Web, with no sound and an empty log). Now init()
+  // rejects with the engine's own words, and the client is left as it was
+  // before init, ready to be asked again.
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const clockwork = new window.Clockwork({ ...config, memory: { memArenaSize: 256 * 1024 } });
+    let error = null;
+    try { await clockwork.init(); } catch (e) { error = String(e?.message ?? e); }
+    return { error, initialized: clockwork.initialized, state: clockwork.getEngineState() };
+  }, clockworkConfig);
+
+  expect(r.error, "init() resolved on a boot the engine refused").not.toBeNull();
+  expect(r.error).toContain("the engine refused to boot");
+  expect(r.error).toContain("FATAL");
+  expect(r.initialized).toBe(false);
+  expect(r.state).toBe("error");
+});
+
 test("a message reaches the guest and the reply comes back", async ({ page, clockworkConfig }) => {
   await boot(page);
   const r = await page.evaluate(async (config) => {
@@ -83,8 +106,8 @@ test("a message reaches the guest and the reply comes back", async ({ page, cloc
   expect(r.got, "no /dummy/pong came back — the round trip is broken").toBe(true);
 });
 
-test("the inbox grows, and what was already in it survives", async ({ page, clockworkConfig }) => {
-  // BULK IS WHAT GROWS. The inbox is the client's way to hand the guest a
+test("the assets area grows, and what was already in it survives", async ({ page, clockworkConfig }) => {
+  // BULK IS WHAT GROWS. The assets area is the client's way to hand the guest a
   // sample, a wavetable, an impulse response — and a client loading samples
   // does not know at boot how many it will load. The guest's arena does not
   // grow for anybody (nothing calls for it) while this does, so the growable
@@ -98,24 +121,24 @@ test("the inbox grows, and what was already in it survives", async ({ page, cloc
     const clockwork = new window.Clockwork(config);
     await clockwork.init();
 
-    const before = clockwork.inbox();
+    const before = clockwork.assets();
     const mark = new Uint8Array([0xC1, 0x0C, 0x6B, 0x21]);
 
     // Right at the old end, so growth cannot quietly relocate the region
     // without this moving too.
-    await clockwork.writeInbox(before.size - mark.length, mark);
+    await clockwork.writeAssets(before.size - mark.length, mark);
 
-    const grew = await clockwork.growInbox(1024 * 1024);
-    const after = clockwork.inbox();
+    const grew = await clockwork.growAssets(1024 * 1024);
+    const after = clockwork.assets();
 
     // A write PAST the old end, which the range check refused a moment ago.
     let wrotePastOldEnd = false;
     try {
-      await clockwork.writeInbox(before.size, mark);
+      await clockwork.writeAssets(before.size, mark);
       wrotePastOldEnd = true;
     } catch { /* reported below */ }
 
-    const read = await clockwork.readInboxForTest?.(before.size - mark.length, mark.length);
+    const read = await clockwork.readAssetsForTest?.(before.size - mark.length, mark.length);
     await clockwork.shutdown();
     return {
       grew, wrotePastOldEnd,
@@ -126,9 +149,9 @@ test("the inbox grows, and what was already in it survives", async ({ page, cloc
     };
   }, clockworkConfig);
 
-  expect(r.grew, "growInbox refused").toBe(true);
-  expect(r.afterSize, "the inbox did not get bigger").toBeGreaterThan(r.beforeSize);
-  expect(r.afterOffset, "the inbox moved, so every published range is now wrong")
+  expect(r.grew, "growAssets refused").toBe(true);
+  expect(r.afterSize, "the assets area did not get bigger").toBeGreaterThan(r.beforeSize);
+  expect(r.afterOffset, "the assets area moved, so every published range is now wrong")
     .toBe(r.beforeOffset);
   expect(r.wrotePastOldEnd, "a write past the old end was still refused").toBe(true);
 });
@@ -248,12 +271,12 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
     const clockwork = new window.Clockwork(config);
     await clockwork.init();
 
-    // Two regions, one writer each. The client writes the inbox and the guest
-    // only reads it; the guest writes the outbox and the client only reads it.
+    // Two regions, one writer each. The client writes the assets area and the guest
+    // only reads it; the guest writes the returns area and the client only reads it.
     // That is the whole reason there are two: with a single region both ends
     // wrote into the same bytes and nothing arbitrated between them.
-    const inbox  = clockwork.inbox();
-    const outbox = clockwork.outbox();
+    const assets  = clockwork.assets();
+    const returns = clockwork.returns();
     const arena  = clockwork.guestMemory();
 
     const overlaps = (a, b) =>
@@ -293,11 +316,11 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
     // cannot travel; both sides count from the region base.
     const staged = new Uint8Array(4096);
     for (let i = 0; i < staged.length; i++) staged[i] = byteAt(7, i);
-    await clockwork.writeInbox(1024, staged);
+    await clockwork.writeAssets(1024, staged);
 
-    const inboxIs = reply("/dummy/inbox/is");
-    clockwork.send("/dummy/inbox/hash", 1024, staged.length);
-    const sawInbox = await inboxIs;
+    const assetsIs = reply("/dummy/assets/is");
+    clockwork.send("/dummy/assets/hash", 1024, staged.length);
+    const sawAssets = await assetsIs;
 
     // ── Guest to client ─────────────────────────────────────────────────────
     const wants = 4096, seed = 99;
@@ -308,7 +331,7 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
     let readBack = null, readHash = null;
     if (produced) {
       const [offset, wrote] = produced;
-      readBack = Array.from(await clockwork.readOutbox(offset, wrote));
+      readBack = Array.from(await clockwork.readReturns(offset, wrote));
       readHash = fnv1a(readBack);
     }
 
@@ -318,16 +341,16 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
     // Out of range is refused rather than clamped, on both transports, and
     // before anything is written.
     let refused = null;
-    try { await clockwork.writeInbox(inbox.size - 2, new Uint8Array(8)); }
+    try { await clockwork.writeAssets(assets.size - 2, new Uint8Array(8)); }
     catch (e) { refused = String(e); }
 
     await clockwork.shutdown();
     return {
-      inbox, outbox,
-      inboxHitsArena:  overlaps(inbox, arena),
-      outboxHitsArena: overlaps(outbox, arena),
-      lanesOverlap:    overlaps(inbox, outbox),
-      sawInbox, stagedHash: fnv1a(staged), stagedLen: staged.length,
+      assets, returns,
+      assetsHitsArena:  overlaps(assets, arena),
+      returnsHitsArena: overlaps(returns, arena),
+      lanesOverlap:    overlaps(assets, returns),
+      sawAssets, stagedHash: fnv1a(staged), stagedLen: staged.length,
       produced, readHash, matches: readBack !== null
         && readBack.length === expected.length
         && readBack.every((b, i) => b === expected[i]),
@@ -335,30 +358,30 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
     };
   }, clockworkConfig);
 
-  expect(r.inbox.size, "no inbox reported").toBeGreaterThan(0);
-  expect(r.outbox.size, "no outbox reported").toBeGreaterThan(0);
+  expect(r.assets.size, "no assets reported").toBeGreaterThan(0);
+  expect(r.returns.size, "no returns reported").toBeGreaterThan(0);
 
-  // Disjointness is the invariant, not a layout detail: an inbox that overlaps
+  // Disjointness is the invariant, not a layout detail: an assets area that overlaps
   // the arena is a client with a pointer into the guest's allocator, which is
   // exactly the arrangement these two regions replaced.
-  expect(r.lanesOverlap, "the inbox and the outbox share bytes").toBe(false);
-  expect(r.inboxHitsArena, "the inbox overlaps the guest's arena").toBe(false);
-  expect(r.outboxHitsArena, "the outbox overlaps the guest's arena").toBe(false);
+  expect(r.lanesOverlap, "the assets area and the returns area share bytes").toBe(false);
+  expect(r.assetsHitsArena, "the assets area overlaps the guest's arena").toBe(false);
+  expect(r.returnsHitsArena, "the returns area overlaps the guest's arena").toBe(false);
 
   // The guest saw what the client staged, at the offset it was told.
-  expect(r.sawInbox, "the guest never answered /dummy/inbox/hash").not.toBe(null);
-  expect(r.sawInbox[0], "the guest read a different number of bytes").toBe(r.stagedLen);
-  expect(r.sawInbox[1], "the guest hashed different bytes than were staged").toBe(r.stagedHash);
+  expect(r.sawAssets, "the guest never answered /dummy/assets/hash").not.toBe(null);
+  expect(r.sawAssets[0], "the guest read a different number of bytes").toBe(r.stagedLen);
+  expect(r.sawAssets[1], "the guest hashed different bytes than were staged").toBe(r.stagedHash);
 
   // BOTH TRANSPORTS. Reading back used to throw in postMessage mode, on the
   // true observation that the client cannot see the worklet's heap — but the
   // worklet can, so it does the copy and transfers the result.
   expect(r.produced, "the guest never answered /dummy/blob/produce").not.toBe(null);
-  expect(r.produced[1], "the guest wrote nothing into the outbox").toBeGreaterThan(0);
+  expect(r.produced[1], "the guest wrote nothing into the returns area").toBeGreaterThan(0);
   expect(r.readHash, "the bytes read back hash differently than the guest's").toBe(r.produced[2]);
   expect(r.matches, "the bytes read back are not the blob the guest generated").toBe(true);
 
-  expect(r.refused, "a range past the end of the inbox was accepted").toContain("outside the region");
+  expect(r.refused, "a range past the end of the assets area was accepted").toContain("outside the region");
 });
 
 test("with no mode given, the transport is SAB where the page is isolated and postMessage elsewhere", async ({ page, clockworkConfig }) => {

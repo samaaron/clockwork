@@ -36,7 +36,7 @@ constexpr int kChannels = 2;
 
 ClockworkClientSampleClock sampleClock() {
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
     REQUIRE(st == CLOCKWORK_OK);
     ClockworkClientSampleClock sc{};
     sc.struct_bytes = sizeof(sc);

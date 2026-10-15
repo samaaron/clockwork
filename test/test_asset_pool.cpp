@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_asset_pool.cpp — the client's pool over the inbox lane
+ * test_asset_pool.cpp — the client's pool over the assets area lane
  * (src/clockwork_asset_pool.h).
  *
  * The lane is the client's to carve. This pool hands out offsets into it and

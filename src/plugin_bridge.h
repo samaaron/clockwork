@@ -146,7 +146,7 @@ inline constexpr uint32_t slack_for(uint32_t buffer_frames, uint32_t block, uint
 
 constexpr uint32_t CTL_RING_SIZE = 256 * 1024;
 constexpr uint32_t RT_RING_SIZE  =  64 * 1024;
-constexpr uint32_t OUT_RING_SIZE = 256 * 1024;
+constexpr uint32_t RT_OUT_RING_SIZE = 256 * 1024;
 constexpr uint32_t MIRROR_SIZE   = 4 * 1024 * 1024;
 constexpr uint32_t PATH_MAX_BYTES = 1024;
 
@@ -239,7 +239,7 @@ constexpr size_t RETURN_OFFSET = SEND_OFFSET   + page_up(AUDIO_RING_BYTES);
 constexpr size_t CTL_OFFSET    = RETURN_OFFSET + page_up(AUDIO_RING_BYTES);
 constexpr size_t RT_OFFSET     = CTL_OFFSET    + page_up(CTL_RING_SIZE);
 constexpr size_t OUT_OFFSET    = RT_OFFSET     + page_up(RT_RING_SIZE);
-constexpr size_t MIRROR_OFFSET = OUT_OFFSET    + page_up(OUT_RING_SIZE);
+constexpr size_t MIRROR_OFFSET = OUT_OFFSET    + page_up(RT_OUT_RING_SIZE);
 constexpr size_t SEGMENT_SIZE  = MIRROR_OFFSET + page_up(MIRROR_SIZE);
 
 static_assert(sizeof(Header) <= SEND_OFFSET, "header must fit its page(s)");
@@ -288,7 +288,7 @@ inline void init_header(Header* h, double sample_rate, uint32_t block_size,
     h->audio_ring_frames = AUDIO_RING_FRAMES;
     h->ctl_ring_size     = CTL_RING_SIZE;
     h->rt_ring_size      = RT_RING_SIZE;
-    h->out_ring_size     = OUT_RING_SIZE;
+    h->out_ring_size     = RT_OUT_RING_SIZE;
     h->mirror_size       = MIRROR_SIZE;
     h->sample_rate_bits.store(clockwork::doubleToBits(sample_rate), std::memory_order_relaxed);
     h->block_size.store(block_size, std::memory_order_relaxed);

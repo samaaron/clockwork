@@ -30,7 +30,7 @@
 // NOTE: These are RELATIVE OFFSETS from the ring buffer base address.
 // Actual addresses are calculated as: base_address + offset
 // On WASM the base is the linker's static buffer (data segment), retrieved via
-// get_ring_buffer_base() at runtime; every other runtime takes it from
+// get_arena_base() at runtime; every other runtime takes it from
 // get_shared_memory_base() — the local arena, or an external segment when one
 // was supplied.
 //
@@ -41,11 +41,11 @@
 // User-configurable buffer sizes.
 // Balanced to prevent message drops in the audioworklet; sized per device via
 // memory_profile.h (defaults: IN 768KB, OUT 128KB, NRT-out 64KB).
-constexpr uint32_t IN_BUFFER_SIZE     = CLOCKWORK_IN_BUFFER_SIZE;    // OSC messages from host to the engine (large for bulk payloads)
-constexpr uint32_t OUT_BUFFER_SIZE    = CLOCKWORK_OUT_BUFFER_SIZE;   // OSC replies from the engine to host (prevent drops)
-constexpr uint32_t NRT_OUT_BUFFER_SIZE  = CLOCKWORK_NRT_OUT_BUFFER_SIZE; // NRT-thread egress ring (replies, notifications, debug)
-constexpr uint32_t CONTROL_SIZE       = 56;    // Atomic control pointers & flags (13 fields × 4 bytes + 4 padding for 8-byte alignment)
-constexpr uint32_t METRICS_SIZE       = 208;   // Performance metrics: 52 fields * 4 bytes = 208 bytes (multiple of 8)
+constexpr uint32_t IN_RING_SIZE     = CLOCKWORK_IN_RING_SIZE;    // OSC messages from host to the engine (large for bulk payloads)
+constexpr uint32_t RT_OUT_RING_SIZE    = CLOCKWORK_RT_OUT_RING_SIZE;   // OSC replies from the engine to host (prevent drops)
+constexpr uint32_t NRT_OUT_RING_SIZE  = CLOCKWORK_NRT_OUT_RING_SIZE; // NRT-thread egress ring (replies, notifications, debug)
+constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers & flags (13 fields × 4 bytes + 4 padding for 8-byte alignment)
+constexpr uint32_t METRICS_SIZE       = 248;   // Performance metrics: 62 fields * 4 bytes = 248 bytes (multiple of 8)
 constexpr uint32_t NTP_START_TIME_SIZE = 8;    // NTP time when AudioContext started (double, 8-byte aligned, write-once)
 constexpr uint32_t DRIFT_OFFSET_SIZE = 4;      // Drift offset in microseconds (int32, atomic)
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
@@ -58,11 +58,11 @@ constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 ato
 //
 // Sized per device via memory_profile.h. A guest that publishes nothing simply
 // leaves it alone.
-constexpr uint32_t SHM_WINDOW_SIZE = CLOCKWORK_WINDOW_BYTES;
+constexpr uint32_t GUEST_WINDOW_SIZE = CLOCKWORK_WINDOW_BYTES;
 
-// The raw scope: two shm_audio_buffer slots, out and in, written by
+// The scope: two shm_audio_buffer slots, out and in, written by
 // clockwork at the device edge inside every tick on every host
-// (shm_audio_buffer.hpp). Per-slot ring duration is CLOCKWORK_SHM_AUDIO_SECONDS
+// (shm_audio_buffer.hpp). Per-slot ring duration is CLOCKWORK_SCOPE_SECONDS
 // (1s in production, larger in test builds so captures don't wrap).
 
 // Where each region sits is decided in one place — "The arena map" below —
@@ -87,24 +87,22 @@ constexpr uint32_t GUEST_CONFIG_SIZE  = 1024;  // bytes: room for a page of name
 // shm_tap_stream.hpp; rationale in docs/PORTS.md.
 // The stream's producer appends every block; readers combine a slot's cursor with the
 // sample-clock region (below) and their own wall clock to display exactly what
-// the listener is hearing. SHM_TAP_MAX_TAPS / SHM_TAP_RING_FRAMES sized
-// per device via memory_profile.h: 32 slots for the guest here, in the guest
-// region; the 16 track-tap slots the ENGINE writes natively (TrackControl.cpp)
-// are the TRACK_TAPS region in the clockwork block, numbered after these in
-// one index space (tapSlotAt below); 16384 frames per slot.
-constexpr uint32_t SHM_TAP_CHANNELS = SHM_TAP_STREAM_CHANNELS;
-constexpr uint32_t SHM_TAP_HEADER_SIZE = 32;  // Global header (16-aligned)
-constexpr uint32_t SHM_TAP_SLOT_HEADER_SIZE = SHM_TAP_STREAM_HEADER_SIZE;
-constexpr uint32_t SHM_TAP_SLOT_SIZE = SHM_TAP_STREAM_SLOT_SIZE;
-constexpr uint32_t SHM_TAP_TOTAL_SIZE = SHM_TAP_HEADER_SIZE + (SHM_TAP_MAX_TAPS * SHM_TAP_SLOT_SIZE);
+// the listener is hearing. TAPS_SLOTS / TAP_RING_FRAMES sized
+// per device via memory_profile.h: 32 slots for the guest, then the track-tap
+// slots the ENGINE writes natively (TrackControl.cpp), one region and one
+// index space (tapSlotAt below).
+constexpr uint32_t TAP_CHANNELS = TAP_STREAM_CHANNELS;
+constexpr uint32_t TAPS_HEADER_SIZE = 32;  // Global header (16-aligned)
+constexpr uint32_t TAP_SLOT_HEADER_SIZE = TAP_STREAM_HEADER_SIZE;
+constexpr uint32_t TAP_SLOT_SIZE = TAP_STREAM_SLOT_SIZE;
+// One tap region: the header, the guest's TAPS_SLOTS slots, then the engine's
+// TAP_TRACK_SLOTS track slots (memory_profile.h), every slot the same shape,
+// one index space numbered from 0 with the guest's first. The table carries
+// the geometry (CLOCKWORK_GEOM_TAP_*); no reader needs these constants.
+constexpr uint32_t TAPS_SIZE = TAPS_HEADER_SIZE + ((TAPS_SLOTS + TAP_TRACK_SLOTS) * TAP_SLOT_SIZE);
 
-// Track taps: the engine's tap-stream slots (memory_profile.h), the same
-// slot shape as the guest's, no global header — the arena table carries the
-// geometry. Slot index SHM_TAP_TRACK_SLOT_BASE + i lives here.
-constexpr uint32_t SHM_TRACK_TAPS_SLOTS = SHM_TAP_TRACK_SLOTS;
-constexpr uint32_t SHM_TRACK_TAPS_SIZE  = SHM_TRACK_TAPS_SLOTS * SHM_TAP_SLOT_SIZE;
 
-// Tap header layout (at SHM_TAP_START):
+// Tap header layout (at TAPS_START):
 //   [0..3]   u32  maxTaps
 //   [4..7]   u32  activeCount
 //   [8..11]  u32  ringFrames (per-slot capacity)
@@ -379,67 +377,74 @@ constexpr uint32_t CHANNEL_MAP_SIZE  = sizeof(ClockworkChannelMapState);
 // The order is chosen, not accumulated. Each half is two contiguous runs
 // (clockwork_arena.h, "Audiences"): first what is PUBLISHED — the data
 // contracts a client reads by hand — then what is not: the block's transport
-// (the control block, the rings, the counter), the guest's
+// (the ring cursors, the rings, the counter), the guest's
 // own (its config, its persistent bytes). Within a run, small state sits
 // together at the front and the large arrays last, each 16-aligned because
 // their slot structs are alignas(16). The header carries where each run ends.
 constexpr uint32_t alignArena16(uint32_t v) { return (v + 15u) & ~15u; }
 constexpr uint32_t alignArena8 (uint32_t v) { return (v + 7u)  & ~7u;  }
 
-// ── the clockwork block: the published run ──
-constexpr uint32_t ARENA_HEADER_START   = 0;
-constexpr uint32_t ARENA_HEADER_SIZE    = CLOCKWORK_ARENA_HEADER_BYTES;
-constexpr uint32_t METRICS_START        = ARENA_HEADER_START + ARENA_HEADER_SIZE;
-constexpr uint32_t NATIVE_STATS_START   = METRICS_START + METRICS_SIZE;
+// ── clockwork's half ──
+//   clockwork-state: public state any client reads
+constexpr uint32_t ARENA_HEADER_START    = 0;
+constexpr uint32_t ARENA_HEADER_SIZE     = CLOCKWORK_ARENA_HEADER_BYTES;
+constexpr uint32_t CLOCKWORK_STATE_START = ARENA_HEADER_START + ARENA_HEADER_SIZE;
+constexpr uint32_t METRICS_START         = CLOCKWORK_STATE_START;
+constexpr uint32_t NATIVE_STATS_START    = METRICS_START + METRICS_SIZE;
 // The host's clock anchors, as one region: the NTP start time (f64) then the
 // two offsets. The three names below are what the code has always used.
-constexpr uint32_t CLOCK_ANCHORS_START  = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
-constexpr uint32_t NTP_START_TIME_START = CLOCK_ANCHORS_START;
-constexpr uint32_t DRIFT_OFFSET_START   = NTP_START_TIME_START + NTP_START_TIME_SIZE;
-constexpr uint32_t GLOBAL_OFFSET_START  = DRIFT_OFFSET_START + DRIFT_OFFSET_SIZE;
-constexpr uint32_t CLOCK_ANCHORS_SIZE   = NTP_START_TIME_SIZE + DRIFT_OFFSET_SIZE + GLOBAL_OFFSET_SIZE;
-constexpr uint32_t CLOCK_STATE_START    = alignArena8(CLOCK_ANCHORS_START + CLOCK_ANCHORS_SIZE);
-constexpr uint32_t SAMPLE_CLOCK_START   = alignArena16(CLOCK_STATE_START + CLOCK_STATE_SIZE);
-constexpr uint32_t CHANNEL_MAP_START    = alignArena16(SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE);
-constexpr uint32_t SHM_AUDIO_START      = alignArena16(CHANNEL_MAP_START + CHANNEL_MAP_SIZE);
-constexpr uint32_t SHM_TRACK_TAPS_START = alignArena16(SHM_AUDIO_START + SHM_AUDIO_TOTAL_SIZE);
-constexpr uint32_t CLOCKWORK_BLOCK_PUBLISHED_END = alignArena16(SHM_TRACK_TAPS_START + SHM_TRACK_TAPS_SIZE);
+constexpr uint32_t CLOCK_ANCHORS_START   = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
+constexpr uint32_t NTP_START_TIME_START  = CLOCK_ANCHORS_START;
+constexpr uint32_t DRIFT_OFFSET_START    = NTP_START_TIME_START + NTP_START_TIME_SIZE;
+constexpr uint32_t GLOBAL_OFFSET_START   = DRIFT_OFFSET_START + DRIFT_OFFSET_SIZE;
+constexpr uint32_t CLOCK_ANCHORS_SIZE    = NTP_START_TIME_SIZE + DRIFT_OFFSET_SIZE + GLOBAL_OFFSET_SIZE;
+constexpr uint32_t CLOCK_STATE_START     = alignArena8(CLOCK_ANCHORS_START + CLOCK_ANCHORS_SIZE);
+constexpr uint32_t SAMPLE_CLOCK_START    = alignArena16(CLOCK_STATE_START + CLOCK_STATE_SIZE);
+constexpr uint32_t CHANNEL_MAP_START     = alignArena16(SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE);
+constexpr uint32_t CLOCKWORK_STATE_END   = alignArena16(CHANNEL_MAP_START + CHANNEL_MAP_SIZE);
+//   clockwork-audio: audio streams any client reads
+constexpr uint32_t CLOCKWORK_AUDIO_START = CLOCKWORK_STATE_END;
+constexpr uint32_t SCOPE_START           = CLOCKWORK_AUDIO_START;
+constexpr uint32_t TAPS_START            = alignArena16(SCOPE_START + SCOPE_SIZE);
+constexpr uint32_t CLOCKWORK_AUDIO_END   = alignArena16(TAPS_START + TAPS_SIZE);
+//   clockwork-transport: messages, through the client code only
+constexpr uint32_t CLOCKWORK_TRANSPORT_START = CLOCKWORK_AUDIO_END;
+constexpr uint32_t RING_CURSORS_START    = CLOCKWORK_TRANSPORT_START;
+constexpr uint32_t NODE_ID_COUNTER_START = RING_CURSORS_START + RING_CURSORS_SIZE;
+constexpr uint32_t IN_RING_START         = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
+constexpr uint32_t RT_OUT_RING_START     = IN_RING_START + IN_RING_SIZE;
+constexpr uint32_t NRT_OUT_RING_START    = RT_OUT_RING_START + RT_OUT_RING_SIZE;
+constexpr uint32_t CLOCKWORK_TRANSPORT_END = alignArena16(NRT_OUT_RING_START + NRT_OUT_RING_SIZE);
+constexpr uint32_t CLOCKWORK_HALF_SIZE   = CLOCKWORK_TRANSPORT_END;
 
-// ── the clockwork block: the transport run ──
-constexpr uint32_t CONTROL_START        = CLOCKWORK_BLOCK_PUBLISHED_END;
-constexpr uint32_t NODE_ID_COUNTER_START = CONTROL_START + CONTROL_SIZE;
-constexpr uint32_t IN_BUFFER_START      = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
-constexpr uint32_t OUT_BUFFER_START     = IN_BUFFER_START + IN_BUFFER_SIZE;
-constexpr uint32_t NRT_OUT_BUFFER_START = OUT_BUFFER_START + OUT_BUFFER_SIZE;
-constexpr uint32_t CLOCKWORK_BLOCK_SIZE = alignArena16(NRT_OUT_BUFFER_START + NRT_OUT_BUFFER_SIZE);
-
-// ── the guest region: the published run ──
-constexpr uint32_t GUEST_REGION_START   = CLOCKWORK_BLOCK_SIZE;
-constexpr uint32_t SHM_WINDOW_START     = GUEST_REGION_START;
-constexpr uint32_t SHM_TAP_START      = alignArena16(SHM_WINDOW_START + SHM_WINDOW_SIZE);
-constexpr uint32_t GUEST_PUBLISHED_END  = alignArena16(SHM_TAP_START + SHM_TAP_TOTAL_SIZE);
-
-// ── the guest region: the guest's own ──
-constexpr uint32_t GUEST_CONFIG_START   = GUEST_PUBLISHED_END;
-constexpr uint32_t GUEST_PERSIST_START  = alignArena16(GUEST_CONFIG_START + GUEST_CONFIG_SIZE);
-constexpr uint32_t TOTAL_BUFFER_SIZE    = GUEST_PERSIST_START + GUEST_PERSIST_SIZE;
-constexpr uint32_t GUEST_REGION_SIZE    = TOTAL_BUFFER_SIZE - GUEST_REGION_START;
+// ── the guest's half ──
+//   guest-public: the guest's window, in the guest's format
+constexpr uint32_t GUEST_HALF_START      = CLOCKWORK_HALF_SIZE;
+constexpr uint32_t GUEST_PUBLIC_START    = GUEST_HALF_START;
+constexpr uint32_t GUEST_WINDOW_START    = GUEST_PUBLIC_START;
+constexpr uint32_t GUEST_PUBLIC_END      = alignArena16(GUEST_WINDOW_START + GUEST_WINDOW_SIZE);
+//   guest-private: the guest's config and persistent store
+constexpr uint32_t GUEST_PRIVATE_START   = GUEST_PUBLIC_END;
+constexpr uint32_t GUEST_CONFIG_START    = GUEST_PRIVATE_START;
+constexpr uint32_t GUEST_PERSIST_START   = alignArena16(GUEST_CONFIG_START + GUEST_CONFIG_SIZE);
+constexpr uint32_t GUEST_PRIVATE_END     = alignArena16(GUEST_PERSIST_START + GUEST_PERSIST_SIZE);
+constexpr uint32_t ARENA_SIZE            = GUEST_PRIVATE_END;
+constexpr uint32_t GUEST_HALF_SIZE       = ARENA_SIZE - GUEST_HALF_START;
 
 static_assert(sizeof(ClockworkArenaHeader) <= ARENA_HEADER_SIZE, "the arena header outgrew its reservation");
-static_assert(CONTROL_START % 16 == 0,      "the control block must be 16-byte aligned");
+static_assert(RING_CURSORS_START % 16 == 0, "the ring cursors must be 16-byte aligned");
 static_assert(CLOCK_STATE_START % 8 == 0,   "ClockworkClockState holds 64-bit atomics");
 static_assert(SAMPLE_CLOCK_START % 16 == 0, "the sample clock is read as 64-bit words");
 static_assert(CHANNEL_MAP_START % 16 == 0,  "ClockworkChannelMapState is alignas(16)");
-static_assert(IN_BUFFER_START % 16 == 0,    "rings start 16-aligned");
-static_assert(SHM_AUDIO_START % 16 == 0,    "shm_audio_buffer is alignas(16)");
-static_assert(SHM_TRACK_TAPS_START % 16 == 0, "shm_tap_stream is alignas(16)");
-static_assert(GUEST_REGION_START % 16 == 0, "the guest region starts 16-aligned");
-static_assert(CLOCKWORK_BLOCK_PUBLISHED_END % 16 == 0 && CLOCKWORK_BLOCK_PUBLISHED_END <= CLOCKWORK_BLOCK_SIZE,
-              "the block's published run ends 16-aligned, inside the block");
-static_assert(GUEST_PUBLISHED_END % 16 == 0 && GUEST_PUBLISHED_END <= TOTAL_BUFFER_SIZE,
-              "the guest's published run ends 16-aligned, inside the arena");
-static_assert(SHM_WINDOW_START % 16 == 0,   "the guest window starts 16-aligned");
-static_assert((SHM_TAP_START + SHM_TAP_HEADER_SIZE) % 16 == 0,
+static_assert(IN_RING_START % 16 == 0,      "rings start 16-aligned");
+static_assert(SCOPE_START % 16 == 0,        "shm_audio_buffer is alignas(16)");
+static_assert(TAPS_START % 16 == 0,         "shm_tap_stream is alignas(16)");
+static_assert(GUEST_HALF_START % 16 == 0,   "the guest's half starts 16-aligned");
+static_assert(CLOCKWORK_STATE_END <= CLOCKWORK_AUDIO_START && CLOCKWORK_AUDIO_END <= CLOCKWORK_TRANSPORT_START
+              && CLOCKWORK_TRANSPORT_END == GUEST_PUBLIC_START && GUEST_PUBLIC_END <= GUEST_PRIVATE_START
+              && GUEST_PRIVATE_END == ARENA_SIZE, "the five areas lie end to end and cover the arena");
+static_assert(GUEST_WINDOW_START % 16 == 0,   "the guest window starts 16-aligned");
+static_assert((TAPS_START + TAPS_HEADER_SIZE) % 16 == 0,
               "tap slots must be 16-byte aligned for shm_tap_stream");
 static_assert(GUEST_PERSIST_START % 16 == 0, "the guest's persistent bytes start 16-aligned");
 
@@ -459,7 +464,7 @@ enum EgressRoute : uint32_t {
 constexpr uint32_t EGRESS_ROUTE_SIZE = sizeof(uint32_t);  // leading route word
 
 // Control pointers structure (4-byte aligned for atomics, padded to 56 bytes for 8-byte alignment)
-struct alignas(4) ControlPointers {
+struct alignas(4) RingCursors {
     std::atomic<int32_t> in_head;
     std::atomic<int32_t> in_tail;
     std::atomic<int32_t> out_head;
@@ -611,6 +616,27 @@ struct alignas(4) PerformanceMetrics {
     // _metrics_reserved at 50) padded to a multiple of 8.
     std::atomic<uint32_t> _metrics_reserved;        // 50: reserved (alignment)
     std::atomic<uint32_t> _metrics_reserved2;       // 51: reserved (alignment pad)
+    // 52 is the client's (js/lib/metrics_offsets.js: the AudioContext state,
+    // written into the merged array on the client side); the word is here so
+    // the slots after it are one address space, and stays 0.
+    std::atomic<uint32_t> _client_side;             // 52
+    // The guest's pool and the rust heap, written at the metrics flush
+    // (shared C++), in the slots 53-57 that once held the buffer pool's metrics.
+    std::atomic<uint32_t> guest_pool_used_bytes;    // 53: bytes in use in the guest's pool now (its bulk memory)
+    std::atomic<uint32_t> guest_pool_peak_bytes;    // 54: the most ever
+    std::atomic<uint32_t> guest_pool_growths;       // 55: times the pool grew into the spare
+    std::atomic<uint32_t> rust_heap_used_bytes;     // 56: bytes in use in the RT router's block
+    std::atomic<uint32_t> rust_heap_fallbacks;      // 57: Rust allocations that fell back to the system allocator
+    // What the guest takes from malloc (src/guest_malloc.h): counted where the
+    // link lets clockwork wrap the allocator (the web), 0 everywhere else.
+    std::atomic<uint32_t> guest_malloc_bytes;       // 58: bytes the guest holds from malloc, taken inside its entry points
+    std::atomic<uint32_t> guest_mallocs_processing; // 59: malloc/calloc/realloc calls inside dsp_process, dsp_osc or dsp_asset since boot
+    // The whole program's mallocs after boot, any scope (src/guest_malloc.h):
+    // what reaches the system allocator once the engine is up, which the
+    // memory model says should be nothing. Counted where the link lets
+    // clockwork wrap the allocator (the web), 0 everywhere else.
+    std::atomic<uint32_t> mallocs_after_boot;       // 60: malloc/calloc/realloc calls since the engine was ready
+    std::atomic<uint32_t> malloc_bytes_after_boot;  // 61: bytes taken since then and still held
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -630,8 +656,8 @@ enum StatusFlags : uint32_t {
 // Constants
 // MAX_MESSAGE_SIZE bounds what a frame header on the INGRESS ring may CLAIM.
 // It is not a bound for the egress rings and must not be used as one: it is
-// derived from IN_BUFFER_SIZE, which is six times OUT_BUFFER_SIZE and twelve
-// times NRT_OUT_BUFFER_SIZE by default, so a reader validating an egress frame
+// derived from IN_RING_SIZE, which is six times RT_OUT_RING_SIZE and twelve
+// times NRT_OUT_RING_SIZE by default, so a reader validating an egress frame
 // against this would accept a length several rings long. The C++ readers do
 // not — ring_drain.h bounds every frame by the size of the ring it was handed,
 // which is the only correct source — and this is exported in BufferLayout for
@@ -642,7 +668,7 @@ enum StatusFlags : uint32_t {
 // cursors sit — worst case roughly half the ring. Senders learn the real
 // answer per-write from the writer's fit check (canWriteMessage / the writers'
 // false return), and a guest learns it from DspHost::emit_osc's return.
-constexpr uint32_t MAX_MESSAGE_SIZE = IN_BUFFER_SIZE - sizeof(Message);
+constexpr uint32_t MAX_MESSAGE_SIZE = IN_RING_SIZE - sizeof(Message);
 // MESSAGE_MAGIC / PADDING_MAGIC are defined in ring/ring.h.
 constexpr uint8_t RING_PADDING_MARKER = 0xFF;  // Byte marking ring-buffer padding (skip to position 0 on wrap)
 
@@ -682,9 +708,9 @@ struct ShmReaderLayout {
     uint32_t audio_header_bytes = 0, audio_frames = 0, audio_channels = 0, audio_sample_rate = 0;
     uint32_t tap_offset = 0, tap_max = 0, tap_header_bytes = 0, tap_slot_bytes = 0;
     uint32_t tap_slot_header = 0, tap_ring_frames = 0, tap_channels = 0;
-    // The engine's track-tap slots: the same shape, numbered from track_first.
-    // Zero slots on a build that carves none.
-    uint32_t track_offset = 0, track_slots = 0, track_first = 0;
+    // The engine's track-tap slots: the same shape, after the guest's in the
+    // same region. Zero on a build that carves none.
+    uint32_t tap_track_slots = 0;
     uint32_t native_stats_offset = 0, native_stats_bytes = 0;
     uint32_t sample_clock_offset = 0, sample_clock_bytes = 0;
     uint32_t channel_map_offset = 0,  channel_map_bytes = 0;
@@ -692,31 +718,29 @@ struct ShmReaderLayout {
     // The engine's own table: what writeArenaHeader publishes.
     static ShmReaderLayout from_constants() {
         ShmReaderLayout L;
-        L.blob_size           = TOTAL_BUFFER_SIZE;
-        L.in_ring_offset      = IN_BUFFER_START;      L.in_ring_size      = IN_BUFFER_SIZE;
-        L.out_ring_offset     = OUT_BUFFER_START;     L.out_ring_size     = OUT_BUFFER_SIZE;
-        L.nrt_out_ring_offset = NRT_OUT_BUFFER_START; L.nrt_out_ring_size = NRT_OUT_BUFFER_SIZE;
-        L.control_offset      = CONTROL_START;        L.control_bytes     = CONTROL_SIZE;
+        L.blob_size           = ARENA_SIZE;
+        L.in_ring_offset      = IN_RING_START;      L.in_ring_size      = IN_RING_SIZE;
+        L.out_ring_offset     = RT_OUT_RING_START;     L.out_ring_size     = RT_OUT_RING_SIZE;
+        L.nrt_out_ring_offset = NRT_OUT_RING_START; L.nrt_out_ring_size = NRT_OUT_RING_SIZE;
+        L.control_offset      = RING_CURSORS_START;        L.control_bytes     = RING_CURSORS_SIZE;
         L.metrics_offset      = METRICS_START;        L.metrics_bytes     = METRICS_SIZE;
-        L.window_offset       = SHM_WINDOW_START;     L.window_bytes      = SHM_WINDOW_SIZE;
+        L.window_offset       = GUEST_WINDOW_START;     L.window_bytes      = GUEST_WINDOW_SIZE;
         L.clock_state_offset  = CLOCK_STATE_START;    L.clock_state_bytes = CLOCK_STATE_SIZE;
-        L.audio_offset        = SHM_AUDIO_START;
-        L.audio_slot_count    = SHM_AUDIO_SLOTS;
-        L.audio_slot_bytes    = SHM_AUDIO_SLOT_SIZE;
-        L.audio_header_bytes  = SHM_AUDIO_HEADER_SIZE;
-        L.audio_frames        = SHM_AUDIO_FRAMES;
-        L.audio_channels      = SHM_AUDIO_CHANNELS;
-        L.audio_sample_rate   = SHM_AUDIO_SAMPLE_RATE;
-        L.tap_offset        = SHM_TAP_START;
-        L.tap_max           = SHM_TAP_MAX_TAPS;
-        L.tap_header_bytes  = SHM_TAP_HEADER_SIZE;
-        L.tap_slot_bytes    = SHM_TAP_SLOT_SIZE;
-        L.tap_slot_header   = SHM_TAP_SLOT_HEADER_SIZE;
-        L.tap_ring_frames   = SHM_TAP_RING_FRAMES;
-        L.tap_channels      = SHM_TAP_CHANNELS;
-        L.track_offset        = SHM_TRACK_TAPS_START;
-        L.track_slots         = SHM_TRACK_TAPS_SLOTS;
-        L.track_first         = SHM_TAP_TRACK_SLOT_BASE;
+        L.audio_offset        = SCOPE_START;
+        L.audio_slot_count    = SCOPE_SLOTS;
+        L.audio_slot_bytes    = SCOPE_SLOT_SIZE;
+        L.audio_header_bytes  = SCOPE_HEADER_SIZE;
+        L.audio_frames        = SCOPE_FRAMES;
+        L.audio_channels      = SCOPE_CHANNELS;
+        L.audio_sample_rate   = SCOPE_SAMPLE_RATE;
+        L.tap_offset        = TAPS_START;
+        L.tap_max           = TAPS_SLOTS;
+        L.tap_header_bytes  = TAPS_HEADER_SIZE;
+        L.tap_slot_bytes    = TAP_SLOT_SIZE;
+        L.tap_slot_header   = TAP_SLOT_HEADER_SIZE;
+        L.tap_ring_frames   = TAP_RING_FRAMES;
+        L.tap_channels      = TAP_CHANNELS;
+        L.tap_track_slots   = TAP_TRACK_SLOTS;
         L.native_stats_offset = NATIVE_STATS_START;   L.native_stats_bytes = NATIVE_STATS_SIZE;
         L.sample_clock_offset = SAMPLE_CLOCK_START;   L.sample_clock_bytes = SAMPLE_CLOCK_SIZE;
         L.channel_map_offset  = CHANNEL_MAP_START;    L.channel_map_bytes  = CHANNEL_MAP_SIZE;
@@ -738,19 +762,19 @@ struct ShmReaderLayout {
             if (!e && why) *why = w;
             return e;
         };
-        const auto* in   = need(CLOCKWORK_ARENA_IN_RING,      "arena has no ingress ring");
-        const auto* out  = need(CLOCKWORK_ARENA_OUT_RING,     "arena has no egress ring");
-        const auto* nrt  = need(CLOCKWORK_ARENA_NRT_OUT_RING, "arena has no NRT egress ring");
-        const auto* ctl  = need(CLOCKWORK_ARENA_CONTROL,      "arena has no control block");
-        const auto* met  = need(CLOCKWORK_ARENA_METRICS,      "arena has no metrics");
+        const auto* in   = need(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,      "arena has no ingress ring");
+        const auto* out  = need(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     "arena has no egress ring");
+        const auto* nrt  = need(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING, "arena has no NRT egress ring");
+        const auto* ctl  = need(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,      "arena has no control block");
+        const auto* met  = need(CLOCKWORK_ARENA_CLOCKWORK_METRICS,      "arena has no metrics");
         const auto* win  = need(CLOCKWORK_ARENA_GUEST_WINDOW, "arena has no guest window");
-        const auto* clk  = need(CLOCKWORK_ARENA_CLOCK_STATE,  "arena has no clock state");
-        const auto* taps = need(CLOCKWORK_ARENA_RAW_SCOPE,   "arena has no raw scope");
-        const auto* sc   = need(CLOCKWORK_ARENA_TAPS,        "arena has no tap streams");
-        const auto* ns   = need(CLOCKWORK_ARENA_NATIVE_STATS, "arena has no native stats");
-        const auto* smp  = need(CLOCKWORK_ARENA_SAMPLE_CLOCK, "arena has no sample clock");
-        const auto* cm   = need(CLOCKWORK_ARENA_CHANNEL_MAP,  "arena has no channel map");
-        if (!in || !out || !nrt || !ctl || !met || !win || !clk || !taps || !sc || !ns || !smp || !cm)
+        const auto* clk  = need(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE,  "arena has no clock state");
+        const auto* scope = need(CLOCKWORK_ARENA_CLOCKWORK_SCOPE, "arena has no scope");
+        const auto* taps = need(CLOCKWORK_ARENA_CLOCKWORK_TAPS,  "arena has no tap streams");
+        const auto* ns   = need(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS, "arena has no native stats");
+        const auto* smp  = need(CLOCKWORK_ARENA_CLOCKWORK_SAMPLE_CLOCK, "arena has no sample clock");
+        const auto* cm   = need(CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,  "arena has no channel map");
+        if (!in || !out || !nrt || !ctl || !met || !win || !clk || !scope || !taps || !ns || !smp || !cm)
             return false;
         L.blob_size           = h->arena_bytes;
         L.in_ring_offset      = in->offset;   L.in_ring_size      = in->bytes;
@@ -760,26 +784,24 @@ struct ShmReaderLayout {
         L.metrics_offset      = met->offset;  L.metrics_bytes     = met->geom[CLOCKWORK_GEOM_METRICS_FIELDS] * 4u;
         L.window_offset       = win->offset;  L.window_bytes      = win->bytes;
         L.clock_state_offset  = clk->offset;  L.clock_state_bytes = clk->bytes;
-        L.audio_offset        = taps->offset;
-        L.audio_slot_count    = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS];
-        L.audio_slot_bytes    = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOT_BYTES];
-        L.audio_header_bytes  = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_HEADER_BYTES];
-        L.audio_frames        = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_FRAMES];
-        L.audio_channels      = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_CHANNELS];
-        L.audio_sample_rate   = taps->geom[CLOCKWORK_GEOM_RAW_SCOPE_SAMPLE_RATE];
-        L.tap_offset        = sc->offset;
-        L.tap_max           = sc->geom[CLOCKWORK_GEOM_TAP_SLOTS];
-        L.tap_header_bytes  = sc->geom[CLOCKWORK_GEOM_TAP_HEADER_BYTES];
-        L.tap_slot_bytes    = sc->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES];
-        L.tap_slot_header   = sc->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER];
-        L.tap_ring_frames   = sc->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES];
-        L.tap_channels      = sc->geom[CLOCKWORK_GEOM_TAP_CHANNELS];
-        // Optional: an arena with no track taps has no entry, and that is
-        // zero slots, not a refusal.
-        if (const auto* tr = clockwork_arena_find(h, CLOCKWORK_ARENA_TRACK_TAPS)) {
-            L.track_offset = tr->offset;
-            L.track_slots  = tr->geom[CLOCKWORK_GEOM_TRACK_SLOTS];
-            L.track_first  = tr->geom[CLOCKWORK_GEOM_TRACK_FIRST_INDEX];
+        L.audio_offset        = scope->offset;
+        L.audio_slot_count    = scope->geom[CLOCKWORK_GEOM_SCOPE_SLOTS];
+        L.audio_slot_bytes    = scope->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES];
+        L.audio_header_bytes  = scope->geom[CLOCKWORK_GEOM_SCOPE_HEADER_BYTES];
+        L.audio_frames        = scope->geom[CLOCKWORK_GEOM_SCOPE_FRAMES];
+        L.audio_channels      = scope->geom[CLOCKWORK_GEOM_SCOPE_CHANNELS];
+        L.audio_sample_rate   = scope->geom[CLOCKWORK_GEOM_SCOPE_SAMPLE_RATE];
+        L.tap_offset        = taps->offset;
+        L.tap_max           = taps->geom[CLOCKWORK_GEOM_TAP_SLOTS];
+        L.tap_header_bytes  = taps->geom[CLOCKWORK_GEOM_TAP_HEADER_BYTES];
+        L.tap_slot_bytes    = taps->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES];
+        L.tap_slot_header   = taps->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER];
+        L.tap_ring_frames   = taps->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES];
+        L.tap_channels      = taps->geom[CLOCKWORK_GEOM_TAP_CHANNELS];
+        L.tap_track_slots   = taps->geom[CLOCKWORK_GEOM_TAP_TRACK_SLOTS];
+        if (taps->geom[CLOCKWORK_GEOM_TAP_TRACK_FIRST] != L.tap_max) {
+            if (why) *why = "track taps are not numbered after the guest's tap slots";
+            return false;
         }
         L.native_stats_offset = ns->offset;   L.native_stats_bytes = ns->bytes;
         L.sample_clock_offset = smp->offset;  L.sample_clock_bytes = smp->bytes;
@@ -790,14 +812,11 @@ struct ShmReaderLayout {
     // Tap-stream slot `index` in ONE index space: the guest's slots first,
     // then the engine's track taps. nullptr past the end of both.
     uint8_t* tapSlotAt(uint8_t* base, uint32_t index) const {
-        if (index < tap_max)
+        if (index < tap_max + tap_track_slots)
             return base + tap_offset + tap_header_bytes + size_t(index) * tap_slot_bytes;
-        const uint32_t t = index - tap_max;
-        if (t < track_slots)
-            return base + track_offset + size_t(t) * tap_slot_bytes;
         return nullptr;
     }
-    uint32_t tapSlotCount() const { return tap_max + track_slots; }
+    uint32_t tapSlotCount() const { return tap_max + tap_track_slots; }
 
     // True when a reader built from THIS tree can address the segment the
     // table describes. `why` names the first failed check, for a log line.
@@ -811,22 +830,18 @@ struct ShmReaderLayout {
         if (in_ring_size == 0 || !inside(in_ring_offset, in_ring_size)) return fail("ingress ring outside the blob");
         if (out_ring_size == 0 || !inside(out_ring_offset, out_ring_size)) return fail("egress ring outside the blob");
         if (nrt_out_ring_size == 0 || !inside(nrt_out_ring_offset, nrt_out_ring_size)) return fail("NRT egress ring outside the blob");
-        if (control_bytes < sizeof(ControlPointers) || !inside(control_offset, control_bytes)) return fail("control block too small or outside the blob");
+        if (control_bytes < sizeof(RingCursors) || !inside(control_offset, control_bytes)) return fail("control block too small or outside the blob");
         if (metrics_bytes < sizeof(PerformanceMetrics) || !inside(metrics_offset, metrics_bytes)) return fail("metrics smaller than this reader's PerformanceMetrics, or outside the blob");
         if (!inside(window_offset, window_bytes)) return fail("window outside the blob");
         if (clock_state_bytes < sizeof(ClockworkClockState) || !inside(clock_state_offset, clock_state_bytes)) return fail("clock state too small or outside the blob");
-        if (audio_header_bytes != SHM_AUDIO_HEADER_SIZE) return fail("raw scope slot shape differs from this reader's");
-        if (audio_channels > SHM_AUDIO_CHANNELS) return fail("raw scope wider than this reader can interleave");
-        if (audio_slot_count < SHM_AUDIO_SLOTS) return fail("arena has fewer raw scope slots than out and in");
-        if (audio_slot_bytes < uint64_t(SHM_AUDIO_HEADER_SIZE) + uint64_t(audio_frames) * audio_channels * sizeof(float)) return fail("raw scope slot smaller than its declared ring");
-        if (!inside(audio_offset, uint64_t(audio_slot_count) * audio_slot_bytes)) return fail("raw scope outside the blob");
-        if (tap_slot_header != SHM_TAP_STREAM_HEADER_SIZE || tap_channels != SHM_TAP_STREAM_CHANNELS) return fail("tap slot shape differs from this reader's");
-        if (tap_slot_bytes < uint64_t(SHM_TAP_STREAM_HEADER_SIZE) + uint64_t(tap_ring_frames) * tap_channels * sizeof(float)) return fail("tap slot smaller than its declared ring");
-        if (!inside(tap_offset, uint64_t(tap_header_bytes) + uint64_t(tap_max) * tap_slot_bytes)) return fail("tap streams outside the blob");
-        if (track_slots != 0) {
-            if (!inside(track_offset, uint64_t(track_slots) * tap_slot_bytes)) return fail("track taps outside the blob");
-            if (track_first != tap_max) return fail("track taps are not numbered after the tap slots");
-        }
+        if (audio_header_bytes != SCOPE_HEADER_SIZE) return fail("scope slot shape differs from this reader's");
+        if (audio_channels > SCOPE_CHANNELS) return fail("scope wider than this reader can interleave");
+        if (audio_slot_count < SCOPE_SLOTS) return fail("arena has fewer scope slots than out and in");
+        if (audio_slot_bytes < uint64_t(SCOPE_HEADER_SIZE) + uint64_t(audio_frames) * audio_channels * sizeof(float)) return fail("scope slot smaller than its declared ring");
+        if (!inside(audio_offset, uint64_t(audio_slot_count) * audio_slot_bytes)) return fail("scope outside the blob");
+        if (tap_slot_header != TAP_STREAM_HEADER_SIZE || tap_channels != TAP_STREAM_CHANNELS) return fail("tap slot shape differs from this reader's");
+        if (tap_slot_bytes < uint64_t(TAP_STREAM_HEADER_SIZE) + uint64_t(tap_ring_frames) * tap_channels * sizeof(float)) return fail("tap slot smaller than its declared ring");
+        if (!inside(tap_offset, uint64_t(tap_header_bytes) + (uint64_t(tap_max) + tap_track_slots) * tap_slot_bytes)) return fail("tap streams outside the blob");
         if (native_stats_bytes < NATIVE_STATS_SIZE || !inside(native_stats_offset, native_stats_bytes)) return fail("native stats too small or outside the blob");
         if (sample_clock_bytes < SAMPLE_CLOCK_SIZE || !inside(sample_clock_offset, sample_clock_bytes)) return fail("sample clock too small or outside the blob");
         if (channel_map_bytes < sizeof(ClockworkChannelMapState) || !inside(channel_map_offset, channel_map_bytes)) return fail("channel map too small or outside the blob");
@@ -844,74 +859,127 @@ struct ShmReaderLayout {
 inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     auto* h = reinterpret_cast<ClockworkArenaHeader*>(base);
     std::memset(static_cast<void*>(h), 0, sizeof *h);
-    h->magic        = CLOCKWORK_ARENA_MAGIC;
-    h->version      = CLOCKWORK_ARENA_VERSION;
-    h->header_bytes = ARENA_HEADER_SIZE;
-    h->instance_id  = instance_id;
-    h->arena_bytes  = TOTAL_BUFFER_SIZE;
-    h->block_bytes  = CLOCKWORK_BLOCK_SIZE;
-    h->guest_offset = GUEST_REGION_START;
-    h->guest_bytes  = GUEST_REGION_SIZE;
-    h->entry_bytes  = sizeof(ClockworkArenaEntry);
-    h->block_published_end = CLOCKWORK_BLOCK_PUBLISHED_END;
-    h->guest_published_end = GUEST_PUBLISHED_END;
+    h->magic           = CLOCKWORK_ARENA_MAGIC;
+    h->version         = CLOCKWORK_ARENA_VERSION;
+    h->header_bytes    = ARENA_HEADER_SIZE;
+    h->instance_id     = instance_id;
+    h->arena_bytes     = ARENA_SIZE;
+    h->clockwork_bytes = CLOCKWORK_HALF_SIZE;
+    h->guest_offset    = GUEST_HALF_START;
+    h->guest_bytes     = GUEST_HALF_SIZE;
+    h->area_bytes      = sizeof(ClockworkArenaAreaEntry);
+    h->entry_bytes     = sizeof(ClockworkArenaEntry);
+    // The areas: the five in the arena by offset; the nine outside it with
+    // no place yet (arenaSetArea, when the engine knows where they are).
+    uint32_t na = 0;
+    const auto area = [&](uint32_t id, uint32_t space, uint64_t at, uint64_t bytes) {
+        ClockworkArenaAreaEntry& a = h->areas[na++];
+        a.area = id; a.space = space;
+        a.base_lo = uint32_t(at); a.base_hi = uint32_t(at >> 32);
+        a.bytes_lo = uint32_t(bytes); a.bytes_hi = uint32_t(bytes >> 32);
+    };
+    area(CLOCKWORK_AREA_CLOCKWORK_STATE,     CLOCKWORK_SPACE_ARENA, CLOCKWORK_STATE_START,     CLOCKWORK_STATE_END - CLOCKWORK_STATE_START);
+    area(CLOCKWORK_AREA_CLOCKWORK_AUDIO,     CLOCKWORK_SPACE_ARENA, CLOCKWORK_AUDIO_START,     CLOCKWORK_AUDIO_END - CLOCKWORK_AUDIO_START);
+    area(CLOCKWORK_AREA_CLOCKWORK_TRANSPORT, CLOCKWORK_SPACE_ARENA, CLOCKWORK_TRANSPORT_START, CLOCKWORK_TRANSPORT_END - CLOCKWORK_TRANSPORT_START);
+    area(CLOCKWORK_AREA_GUEST_PUBLIC,        CLOCKWORK_SPACE_ARENA, GUEST_PUBLIC_START,        GUEST_PUBLIC_END - GUEST_PUBLIC_START);
+    area(CLOCKWORK_AREA_GUEST_PRIVATE,       CLOCKWORK_SPACE_ARENA, GUEST_PRIVATE_START,       GUEST_PRIVATE_END - GUEST_PRIVATE_START);
+    area(CLOCKWORK_AREA_ASSETS,  CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_RETURNS, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_GUEST_MEMORY_BULK, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_GUEST_MEMORY_FAST, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_STATIC_DATA,  CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_STACK,        CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_MALLOC,       CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_RUST_HEAP,    CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_GUEST_SPARE,  CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    area(CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
+    h->area_count = na;
+    // The regions: id, where, the five facts, and the geometry a reader
+    // walks it by.
     uint32_t n = 0;
-    // id, where, who writes it, who it is for (the last geometry word), and
-    // the geometry a reader walks it by.
     const auto put = [&](uint32_t id, uint32_t offset, uint32_t bytes, uint32_t owner, uint32_t audience,
+                         uint32_t cadence, uint32_t tier, uint32_t lifetime,
                          std::initializer_list<uint32_t> geom = {}) {
         ClockworkArenaEntry& e = h->entries[n++];
-        e.id = id; e.offset = offset; e.bytes = bytes; e.owner = owner;
+        e.id = id; e.offset = offset; e.bytes = bytes; e.owner = owner; e.audience = audience;
+        e.cadence = cadence; e.tier = tier; e.lifetime = lifetime;
         uint32_t i = 0;
         for (uint32_t g : geom) e.geom[i++] = g;
-        e.geom[CLOCKWORK_GEOM_AUDIENCE] = audience;
     };
-    constexpr uint32_t kPublished = CLOCKWORK_AUDIENCE_PUBLISHED;
+    constexpr uint32_t kPublic    = CLOCKWORK_AUDIENCE_PUBLIC;
     constexpr uint32_t kTransport = CLOCKWORK_AUDIENCE_TRANSPORT;
-    // the block, the published run: the contracts
-    put(CLOCKWORK_ARENA_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublished,
-        { METRICS_SIZE / 4u });
-    put(CLOCKWORK_ARENA_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublished);
-    put(CLOCKWORK_ARENA_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublished,
+    constexpr uint32_t kBlock = CLOCKWORK_CADENCE_BLOCK, kChange = CLOCKWORK_CADENCE_CHANGE, kBoot = CLOCKWORK_CADENCE_BOOT;
+    constexpr uint32_t kFast = CLOCKWORK_TIER_FAST, kBulk = CLOCKWORK_TIER_BULK;
+    constexpr uint32_t kColdBoot = CLOCKWORK_LIFETIME_COLD_BOOT, kRebuild = CLOCKWORK_LIFETIME_REBUILD;
+    // clockwork-state
+    put(CLOCKWORK_ARENA_CLOCKWORK_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kFast, kRebuild, { METRICS_SIZE / 4u });
+    put(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kFast, kRebuild);
+    put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublic,
+        kBlock, kFast, kColdBoot,
         { NTP_START_TIME_START - CLOCK_ANCHORS_START, DRIFT_OFFSET_START - CLOCK_ANCHORS_START,
           GLOBAL_OFFSET_START - CLOCK_ANCHORS_START });
     // The two the guest is handed read-only pointers to (DspConfig::clock, channel_map).
-    put(CLOCKWORK_ARENA_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
-        kPublished | CLOCKWORK_AUDIENCE_GUEST);
-    put(CLOCKWORK_ARENA_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublished);
-    put(CLOCKWORK_ARENA_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
-        kPublished | CLOCKWORK_AUDIENCE_GUEST);
-    put(CLOCKWORK_ARENA_RAW_SCOPE,      SHM_AUDIO_START,       SHM_AUDIO_TOTAL_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kPublished,
-        { SHM_AUDIO_SLOTS, SHM_AUDIO_SLOT_SIZE, SHM_AUDIO_HEADER_SIZE, SHM_AUDIO_FRAMES,
-          SHM_AUDIO_CHANNELS, SHM_AUDIO_SAMPLE_RATE });
-    put(CLOCKWORK_ARENA_TRACK_TAPS,      SHM_TRACK_TAPS_START,  SHM_TRACK_TAPS_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kPublished,
-        { SHM_TRACK_TAPS_SLOTS, SHM_TAP_SLOT_SIZE, SHM_TAP_SLOT_HEADER_SIZE, SHM_TAP_RING_FRAMES,
-          SHM_TAP_CHANNELS, SHM_TAP_TRACK_SLOT_BASE });
-    // the block, the transport run: the command plane
-    put(CLOCKWORK_ARENA_CONTROL,         CONTROL_START,         CONTROL_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kTransport);
-    put(CLOCKWORK_ARENA_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kTransport);
-    put(CLOCKWORK_ARENA_IN_RING,         IN_BUFFER_START,       IN_BUFFER_SIZE,       CLOCKWORK_OWNER_CLIENT,    kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
+        kPublic | CLOCKWORK_AUDIENCE_GUEST, kBlock, kFast, kColdBoot);
+    put(CLOCKWORK_ARENA_CLOCKWORK_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kFast, kRebuild);
+    put(CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
+        kPublic | CLOCKWORK_AUDIENCE_GUEST, kChange, kFast, kRebuild);
+    // clockwork-audio
+    put(CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           SCOPE_SIZE,           CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kFast, kRebuild,
+        { SCOPE_SLOTS, SCOPE_SLOT_SIZE, SCOPE_HEADER_SIZE, SCOPE_FRAMES, SCOPE_CHANNELS, SCOPE_SAMPLE_RATE });
+    put(CLOCKWORK_ARENA_CLOCKWORK_TAPS,            TAPS_START,            TAPS_SIZE,            CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kBulk, kRebuild,
+        { TAPS_SLOTS, TAPS_HEADER_SIZE, TAP_SLOT_SIZE, TAP_SLOT_HEADER_SIZE, TAP_RING_FRAMES, TAP_CHANNELS,
+          TAP_TRACK_SLOTS, TAP_TRACK_SLOT_BASE });
+    // clockwork-transport
+    put(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    RING_CURSORS_START,    RING_CURSORS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        kBlock, kFast, kRebuild);
+    put(CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    kTransport,
+        kChange, kFast, kColdBoot);
+    put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    kTransport,
+        kBlock, kFast, kRebuild,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_OUT_RING,        OUT_BUFFER_START,      OUT_BUFFER_SIZE,      CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     RT_OUT_RING_START,     RT_OUT_RING_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        kBlock, kFast, kRebuild,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_NRT_OUT_RING,    NRT_OUT_BUFFER_START,  NRT_OUT_BUFFER_SIZE,  CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        kChange, kFast, kRebuild,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    // the guest region, the published run: what the guest shows its clients.
-    // The window's identity (magic, version) is the guest's to declare and is
-    // written when it binds — arenaSetGuestWindowIdentity — so it is 0 here.
-    put(CLOCKWORK_ARENA_GUEST_WINDOW,    SHM_WINDOW_START,      SHM_WINDOW_SIZE,      CLOCKWORK_OWNER_GUEST,     kPublished);
-    put(CLOCKWORK_ARENA_TAPS,           SHM_TAP_START,       SHM_TAP_TOTAL_SIZE, CLOCKWORK_OWNER_GUEST,     kPublished,
-        { SHM_TAP_MAX_TAPS, SHM_TAP_HEADER_SIZE, SHM_TAP_SLOT_SIZE, SHM_TAP_SLOT_HEADER_SIZE,
-          SHM_TAP_RING_FRAMES, SHM_TAP_CHANNELS });
-    // the guest region, the guest's own
-    put(CLOCKWORK_ARENA_GUEST_CONFIG,    GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
-        CLOCKWORK_AUDIENCE_GUEST | CLOCKWORK_AUDIENCE_HOST);
-    put(CLOCKWORK_ARENA_GUEST_PERSIST,   GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,
-        CLOCKWORK_AUDIENCE_GUEST);
+    // guest-public. The window's identity (magic, version) is the guest's to
+    // declare and is written when it binds — arenaSetGuestWindowIdentity — so
+    // it is 0 here.
+    put(CLOCKWORK_ARENA_GUEST_WINDOW,              GUEST_WINDOW_START,    GUEST_WINDOW_SIZE,    CLOCKWORK_OWNER_GUEST,     kPublic,
+        kChange, kBulk, kRebuild);
+    // guest-private
+    put(CLOCKWORK_ARENA_GUEST_CONFIG,              GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
+        CLOCKWORK_AUDIENCE_GUEST | CLOCKWORK_AUDIENCE_HOST, kBoot, kBulk, kColdBoot);
+    put(CLOCKWORK_ARENA_GUEST_PERSIST,             GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,
+        CLOCKWORK_AUDIENCE_GUEST, kChange, kBulk, kColdBoot);
     h->entry_count = n;
     std::atomic_thread_fence(std::memory_order_release);
     reinterpret_cast<std::atomic<uint32_t>*>(&h->state)->store(CLOCKWORK_ARENA_PUBLISHED,
                                                               std::memory_order_release);
+}
+
+// Where one of the three areas outside the arena is (assets, returns, the
+// heap), once the engine knows: the space its base is measured in, the base,
+// the size. Written after the table is published, each word a plain store
+// and the space last with a release, so a reader that took the table before
+// sees UNKNOWN, which means "not placed yet", and asks again. A build or a
+// host with no such area leaves it UNKNOWN for good.
+inline void arenaSetArea(uint8_t* base, uint32_t area, uint32_t space, uint64_t at, uint64_t bytes) {
+    auto* h = reinterpret_cast<ClockworkArenaHeader*>(base);
+    auto* a = const_cast<ClockworkArenaAreaEntry*>(clockwork_arena_area(h, area));
+    if (!a) return;
+    reinterpret_cast<std::atomic<uint32_t>*>(&a->bytes_lo)->store(uint32_t(bytes), std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint32_t>*>(&a->bytes_hi)->store(uint32_t(bytes >> 32), std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint32_t>*>(&a->base_lo)->store(uint32_t(at), std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint32_t>*>(&a->base_hi)->store(uint32_t(at >> 32), std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint32_t>*>(&a->space)->store(space, std::memory_order_release);
 }
 
 // The header at the front of an arena.
@@ -975,21 +1043,21 @@ CLOCKWORK_ASSERT_OFFSET(ClockworkClockState, meter,             32,
 CLOCKWORK_ASSERT_OFFSET(ClockworkClockState, generation,        36,
                  "js/lib/clockwork_clock_protocol.js SC_GENERATION_I32");
 
-// ControlPointers ↔ js/lib/control_offsets.js (JS exports byte offsets directly)
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_head,        0,  "js/lib/control_offsets.js IN_HEAD");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_tail,        4,  "js/lib/control_offsets.js IN_TAIL");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_head,       8,  "js/lib/control_offsets.js OUT_HEAD");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_tail,       12, "js/lib/control_offsets.js OUT_TAIL");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_head,     16, "js/lib/control_offsets.js NRT_OUT_HEAD");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_tail,     20, "js/lib/control_offsets.js NRT_OUT_TAIL");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_sequence,    24, "js/lib/control_offsets.js IN_SEQUENCE");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_sequence,   28, "js/lib/control_offsets.js OUT_SEQUENCE");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_sequence, 32, "js/lib/control_offsets.js NRT_OUT_SEQUENCE");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, status_flags,   36, "js/lib/control_offsets.js STATUS_FLAGS");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, in_write_lock,  40, "js/lib/control_offsets.js IN_WRITE_LOCK");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, out_read,       44, "js/lib/control_offsets.js OUT_READ");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, nrt_out_read,   48, "js/lib/control_offsets.js NRT_OUT_READ");
-CLOCKWORK_ASSERT_OFFSET(ControlPointers, _padding,       52, "js/lib/control_offsets.js padding");
+// RingCursors ↔ js/lib/ring_cursor_offsets.js (JS exports byte offsets directly)
+CLOCKWORK_ASSERT_OFFSET(RingCursors, in_head,        0,  "js/lib/ring_cursor_offsets.js IN_HEAD");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, in_tail,        4,  "js/lib/ring_cursor_offsets.js IN_TAIL");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, out_head,       8,  "js/lib/ring_cursor_offsets.js OUT_HEAD");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, out_tail,       12, "js/lib/ring_cursor_offsets.js OUT_TAIL");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, nrt_out_head,     16, "js/lib/ring_cursor_offsets.js NRT_OUT_HEAD");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, nrt_out_tail,     20, "js/lib/ring_cursor_offsets.js NRT_OUT_TAIL");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, in_sequence,    24, "js/lib/ring_cursor_offsets.js IN_SEQUENCE");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, out_sequence,   28, "js/lib/ring_cursor_offsets.js OUT_SEQUENCE");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, nrt_out_sequence, 32, "js/lib/ring_cursor_offsets.js NRT_OUT_SEQUENCE");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, status_flags,   36, "js/lib/ring_cursor_offsets.js STATUS_FLAGS");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, in_write_lock,  40, "js/lib/ring_cursor_offsets.js IN_WRITE_LOCK");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, out_read,       44, "js/lib/ring_cursor_offsets.js OUT_READ");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, nrt_out_read,   48, "js/lib/ring_cursor_offsets.js NRT_OUT_READ");
+CLOCKWORK_ASSERT_OFFSET(RingCursors, _padding,       52, "js/lib/ring_cursor_offsets.js padding");
 
 // PerformanceMetrics ↔ js/lib/metrics_offsets.js (all fields uint32; JS uses array index)
 CLOCKWORK_ASSERT_METRIC(process_count,                   0);
@@ -1034,6 +1102,15 @@ CLOCKWORK_ASSERT_METRIC(clock_tempo_mbpm,                46);
 CLOCKWORK_ASSERT_METRIC(clock_beat_centi,                47);
 CLOCKWORK_ASSERT_METRIC(clock_phase_centi,               48);
 CLOCKWORK_ASSERT_METRIC(clock_playing,                   49);
+CLOCKWORK_ASSERT_METRIC(guest_pool_used_bytes,           53);
+CLOCKWORK_ASSERT_METRIC(guest_pool_peak_bytes,           54);
+CLOCKWORK_ASSERT_METRIC(guest_pool_growths,              55);
+CLOCKWORK_ASSERT_METRIC(rust_heap_used_bytes,            56);
+CLOCKWORK_ASSERT_METRIC(rust_heap_fallbacks,             57);
+CLOCKWORK_ASSERT_METRIC(guest_malloc_bytes,              58);
+CLOCKWORK_ASSERT_METRIC(guest_mallocs_processing,        59);
+CLOCKWORK_ASSERT_METRIC(mallocs_after_boot,              60);
+CLOCKWORK_ASSERT_METRIC(malloc_bytes_after_boot,         61);
 CLOCKWORK_ASSERT_METRIC(_metrics_reserved,               50);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena

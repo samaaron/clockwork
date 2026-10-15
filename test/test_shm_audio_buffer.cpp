@@ -220,11 +220,11 @@ TEST_CASE("shm audio: an oversized capacity is refused, not clamped silently",
     // moment a caller can be told; clamping would give it a ring quietly
     // shorter than the one it asked for and a recording quietly shorter than
     // the one it expected.
-    REQUIRE_FALSE(w.activate(2, 48000, SHM_AUDIO_FRAMES + 1));
+    REQUIRE_FALSE(w.activate(2, 48000, SCOPE_FRAMES + 1));
     shm_audio_buffer_reader r(slot.get());
     REQUIRE_FALSE(r.is_active());
 
-    REQUIRE(w.activate(2, 48000, SHM_AUDIO_FRAMES));
+    REQUIRE(w.activate(2, 48000, SCOPE_FRAMES));
     REQUIRE(r.is_active());
 }
 

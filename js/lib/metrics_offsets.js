@@ -132,9 +132,14 @@ export const METRICS_RESERVED  = 50;
 // has one extra trailing pad word (index 51) purely for 8-byte alignment that
 // carries no value, so we stop the copy at the reserved slot.
 export const SAB_METRICS_COUNT = METRICS_RESERVED + 1;  // 51
+// Every word of the C++ struct, the heap's census at 53-57, the guest's
+// mallocs at 58-59 and the program's at 60-61 included: what the reader
+// copies from the SAB before the context writes its own slots over 50-52
+// (METRICS_SIZE / 4 in shared_memory.h).
+export const SAB_METRICS_WORDS = 62;   // MALLOC_BYTES_AFTER_BOOT + 1
 
 // =============================================================================
-// Context metrics [50-61] (written by main thread into merged array only)
+// Context metrics [50-63] (written by main thread into merged array only)
 // These are NOT in the C++ PerformanceMetrics struct or SAB — MetricsReader
 // writes them into the local merged Uint32Array. They start at index 50,
 // reusing the reserved padding slot (the last meaningful SAB metric is
@@ -143,38 +148,43 @@ export const SAB_METRICS_COUNT = METRICS_RESERVED + 1;  // 51
 export const CTX_DRIFT_OFFSET_MS = 50;             // Clock drift (int32, ms)
 export const CTX_CLOCK_OFFSET_MS = 51;             // Clock offset for multi-system sync (int32, ms)
 export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running,2=suspended,3=closed,4=interrupted
-// 53-55 RESERVED. They held bufferPoolUsedBytes/AvailableBytes/Allocations —
-// one engine's sample buffer pool, at fixed offsets in a guest-agnostic file.
-// Guest metrics are declared by the guest now and live in the range below.
-// Left as a hole rather than renumbered: these are read by offset.
-// 56 RESERVED. It held loadedSynthDefs, a count of the definitions the client
-// had cached so it could replay them after a reload. The count still exists —
-// a product tracks what it loaded and puts it back through
-// restoreClientState() — but it is one guest's noun, so it is declared by that
-// guest in the reserved guest range rather than sitting at a fixed offset in a
-// guest-agnostic file. Left as a hole for the same reason 53-55 are: these are
-// read by offset.
-// 57 RESERVED. It held the scheduler's capacity, read from a constant the
-// arena never carried; the engine publishes it now (SCHEDULER_CAPACITY, 40).
-// Left as a hole for the same reason as 53-56.
-export const CTX_IN_BUFFER_CAPACITY = 58;           // Static from bufferConstants
-export const CTX_OUT_BUFFER_CAPACITY = 59;          // Static from bufferConstants
-export const CTX_NRT_OUT_BUFFER_CAPACITY = 60;        // Static from bufferConstants
-export const CTX_MODE = 61;                         // Enum: 0=sab, 1=postMessage
+// 53-57 are the guest's pool's and the rust heap's census, in the C++ struct
+// and the SAB (written by the engine at its metrics flush): the slots that
+// once held the buffer pool's metrics, the loaded synthdef count and the
+// scheduler's capacity, holes until now. The reader copies them from the SAB
+// with the rest of the struct (SAB_METRICS_WORDS).
+export const GUEST_POOL_USED_BYTES = 53;  // bytes in use in the guest's pool now (its bulk memory)
+export const GUEST_POOL_PEAK_BYTES = 54;  // the most ever
+export const GUEST_POOL_GROWTHS    = 55;  // times the pool grew into the spare
+export const RUST_HEAP_USED_BYTES = 56;   // bytes in use in the RT router's block
+export const RUST_HEAP_FALLBACKS  = 57;   // Rust allocations inside the engine that fell back to the system allocator
+// 58-59 are the guest's mallocs (src/guest_malloc.h), in the C++ struct and
+// the SAB: counted where the link lets clockwork wrap the allocator (the
+// web), 0 everywhere else.
+export const GUEST_MALLOC_BYTES       = 58;   // bytes the guest holds from malloc, taken inside its entry points
+export const GUEST_MALLOCS_PROCESSING = 59;   // malloc/calloc/realloc calls inside dsp_process, dsp_osc or dsp_asset since boot
+// 60-61 are the whole program's mallocs after boot, any scope (src/guest_malloc.h): what reaches the system
+// allocator once the engine is up, which should be nothing. Counted on the web, 0 everywhere else.
+export const MALLOCS_AFTER_BOOT      = 60;   // malloc/calloc/realloc calls since the engine was ready
+export const MALLOC_BYTES_AFTER_BOOT = 61;   // bytes taken since then and still held
+export const CTX_IN_BUFFER_CAPACITY = 62;           // Static from bufferConstants
+export const CTX_OUT_BUFFER_CAPACITY = 63;          // Static from bufferConstants
+export const CTX_NRT_OUT_BUFFER_CAPACITY = 64;        // Static from bufferConstants
+export const CTX_MODE = 65;                         // Enum: 0=sab, 1=postMessage
 
 // =============================================================================
-// Audio diagnostics [62-68] (written by main thread into merged array only)
+// Audio diagnostics [66-72] (written by main thread into merged array only)
 // =============================================================================
-export const CTX_GLITCH_COUNT = 62;          // Chrome only: playbackStats.fallbackFramesEvents
-export const CTX_GLITCH_DURATION_MS = 63;    // Chrome only: playbackStats.fallbackFramesDuration * 1000 (ms int)
-export const CTX_AVERAGE_LATENCY_US = 64;    // Chrome only: playbackStats.averageLatency * 1_000_000 (us int)
-export const CTX_MAX_LATENCY_US = 65;        // Chrome only: playbackStats.maximumLatency * 1_000_000 (us int)
-export const CTX_AUDIO_HEALTH_PCT = 66;      // Cross-browser: audio health percentage 0-100
-export const CTX_TOTAL_FRAMES_DURATION_MS = 67; // Chrome only: playbackStats.totalFramesDuration * 1000 (ms int)
-export const CTX_HAS_PLAYBACK_STATS = 68;    // 1 if Chrome playbackStats available, 0 otherwise
+export const CTX_GLITCH_COUNT = 66;          // Chrome only: playbackStats.fallbackFramesEvents
+export const CTX_GLITCH_DURATION_MS = 67;    // Chrome only: playbackStats.fallbackFramesDuration * 1000 (ms int)
+export const CTX_AVERAGE_LATENCY_US = 68;    // Chrome only: playbackStats.averageLatency * 1_000_000 (us int)
+export const CTX_MAX_LATENCY_US = 69;        // Chrome only: playbackStats.maximumLatency * 1_000_000 (us int)
+export const CTX_AUDIO_HEALTH_PCT = 70;      // Cross-browser: audio health percentage 0-100
+export const CTX_TOTAL_FRAMES_DURATION_MS = 71; // Chrome only: playbackStats.totalFramesDuration * 1000 (ms int)
+export const CTX_HAS_PLAYBACK_STATS = 72;    // 1 if Chrome playbackStats available, 0 otherwise
 
 // =============================================================================
-// Buffer pool growth metrics [69-72] (written by main thread into merged array only)
+// The guest's metrics [71+] (written by main thread into merged array only)
 // =============================================================================
 /*
  * THE GUEST'S OWN METRICS.
@@ -191,8 +201,8 @@ export const CTX_HAS_PLAYBACK_STATS = 68;    // 1 if Chrome playbackStats availa
  * A guest that declares nothing simply has no metrics of its own, and the
  * range stays zero.
  */
-export const GUEST_METRICS_BASE = 69;
+export const GUEST_METRICS_BASE = 73;
 export const GUEST_METRICS_COUNT = 32;
 
-// Merged array size (slots 0-49 from SAB/snapshot, 50-61 context, 62-68 audio, 69-72 buffer growth)
-export const MERGED_ARRAY_SIZE = GUEST_METRICS_BASE + GUEST_METRICS_COUNT;  // 101
+// Merged array size (slots 0-59 from SAB/snapshot, 50-52 and 60-63 context, 64-70 audio, 71+ the guest's)
+export const MERGED_ARRAY_SIZE = GUEST_METRICS_BASE + GUEST_METRICS_COUNT;  // 105

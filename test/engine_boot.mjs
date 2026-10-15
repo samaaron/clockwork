@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MemoryLayout } from "../js/memory_layout.js";
-import { readArena, REGION } from "../js/lib/arena.js";
+import { readArena, REGION, AREA, SPACE } from "../js/lib/arena.js";
 import { engineRings } from "../js/lib/ring.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,7 +26,7 @@ let compiled = null;
  * Boot an engine and open the C client on its own instance, as the worklet
  * does.
  *
- * @returns {{ x: object, memory: WebAssembly.Memory, ringBufferBase: number,
+ * @returns {{ x: object, memory: WebAssembly.Memory, arenaBase: number,
  *             constants: object, rings: object, handle: number, status: number }}
  *   `x` the engine's exports; `rings` its three rings for js/lib/ring.js;
  *   `handle` its C client; `status` four bytes of its memory for out-params
@@ -70,33 +70,61 @@ export async function bootEngine() {
   x.clockwork_init(
     48000, 128, 0, 2, 0,
     L.guestMemoryOffset, L.guestMemorySize, 0, 0, L.memArenaSize,
-    L.inboxOffset, L.inboxSize, L.outboxOffset, L.outboxSize);
-  const ringBufferBase = x.get_ring_buffer_base();
+    L.assetsOffset, L.assetsSize, L.returnsOffset, L.returnsSize);
+  const arenaBase = x.get_arena_base();
 
   // The arena's own table, read from the front of the arena exactly as the
   // worklet reads it (js/lib/arena.js), and held to what ARENA.md says of it.
-  const arena = readArena(memory.buffer, ringBufferBase);
+  const arena = readArena(memory.buffer, arenaBase);
   const constants = arena.constants;
   assert.equal(constants.MESSAGE_MAGIC, 0xDEADBEEF, "the ring's frame magic is in the table");
-  assert.equal(arena.header.blockBytes, arena.header.guestOffset, "the guest region starts where the block ends");
-  assert.ok(arena.region(REGION.IN_RING).offset >= arena.header.headerBytes, "no region overlaps the header");
-  // Audiences: the contracts a client reads by hand are published and sit in
-  // each half's published run; the command plane is transport, after it.
-  assert.ok(arena.published(REGION.METRICS), "metrics are a published contract");
-  assert.ok(arena.published(REGION.CLOCK_STATE), "the clock state is a published contract");
-  assert.ok(arena.published(REGION.RAW_SCOPE), "the raw scope is a published contract");
-  assert.ok(arena.published(REGION.GUEST_WINDOW), "the guest window is a published contract");
-  assert.ok(!arena.published(REGION.IN_RING), "the ingress ring is transport");
-  assert.ok(!arena.published(REGION.CONTROL), "the control block is transport");
-  assert.ok(arena.header.blockPublishedEnd > arena.header.headerBytes, "the block's published run is stated");
-  assert.ok(arena.region(REGION.METRICS).offset + arena.region(REGION.METRICS).bytes <= arena.header.blockPublishedEnd);
-  assert.ok(arena.region(REGION.CONTROL).offset >= arena.header.blockPublishedEnd);
+  assert.equal(arena.header.clockworkBytes, arena.header.guestOffset, "the guest's half starts where clockwork's ends");
+  assert.ok(arena.region(REGION.CLOCKWORK_IN_RING).offset >= arena.header.headerBytes, "no region overlaps the header");
+  // The areas and the facts: what a client reads by hand is public and lies
+  // in a public area; the rings are transport, in the transport area.
+  assert.ok(arena.public(REGION.CLOCKWORK_METRICS), "metrics are public");
+  assert.ok(arena.public(REGION.CLOCKWORK_CLOCK_STATE), "the clock state is public");
+  assert.ok(arena.public(REGION.CLOCKWORK_SCOPE), "the scope is public");
+  assert.ok(arena.public(REGION.CLOCKWORK_TAPS), "the taps are public");
+  assert.ok(arena.public(REGION.GUEST_WINDOW), "the guest window is public");
+  assert.ok(!arena.public(REGION.CLOCKWORK_IN_RING), "the ingress ring is transport");
+  assert.ok(!arena.public(REGION.CLOCKWORK_RING_CURSORS), "the ring cursors are transport");
+  assert.equal(arena.region(REGION.CLOCKWORK_METRICS).area, AREA.CLOCKWORK_STATE);
+  assert.equal(arena.region(REGION.CLOCKWORK_TAPS).area, AREA.CLOCKWORK_AUDIO);
+  assert.equal(arena.region(REGION.CLOCKWORK_IN_RING).area, AREA.CLOCKWORK_TRANSPORT);
+  assert.equal(arena.region(REGION.GUEST_PERSIST).area, AREA.GUEST_PRIVATE);
+  // The three areas outside the arena are placed by the time the engine is
+  // up: on the web, as addresses in wasm memory.
+  for (const id of [AREA.ASSETS, AREA.RETURNS, AREA.GUEST_MEMORY_BULK, AREA.STATIC_DATA, AREA.STACK, AREA.MALLOC, AREA.ENGINE_MEMORY]) assert.equal(arena.area(id)?.space, SPACE.PROCESS, `area ${id} is placed`);
+  // The engine's memory: one block in what malloc took, with the arena at its start and the guest's bulk memory
+  // inside it. The static data holds the program's globals and not the arena.
+  const sd = arena.area(AREA.STATIC_DATA), ml = arena.area(AREA.MALLOC), gb = arena.area(AREA.GUEST_MEMORY_BULK), em = arena.area(AREA.ENGINE_MEMORY);
+  assert.equal(em.base, arenaBase, "the arena is the start of the engine's memory");
+  assert.ok(ml.base <= em.base && em.base + em.bytes <= ml.base + ml.bytes, "the engine's memory is in what malloc took");
+  assert.ok(em.base <= gb.base && gb.base + gb.bytes <= em.base + em.bytes, "the guest's bulk memory is in the engine's memory");
+  assert.ok(sd.base + sd.bytes <= arenaBase, "the arena is not in the static data");
+  assert.ok(ml.base <= gb.base && gb.base + gb.bytes <= ml.base + ml.bytes, "the guest's bulk memory is in what malloc took");
+  // The RT router's block: armed at boot, so placed, and in what malloc took.
+  const rh = arena.area(AREA.RUST_HEAP);
+  assert.equal(rh?.space, SPACE.PROCESS, "the rust heap is placed");
+  assert.ok(ml.base <= rh.base && rh.base + rh.bytes <= ml.base + ml.bytes, "the rust heap is in what malloc took");
+  // The spare the guest's pool may grow into: armed at boot (the web profile grows), so placed, in what malloc
+  // took, and the profile's size. Nothing the dummy's dsp_new mallocs is a span the engine measured as none.
+  const sp = arena.area(AREA.GUEST_SPARE);
+  assert.equal(sp?.space, SPACE.PROCESS, "the spare is placed");
+  assert.ok(ml.base <= sp.base && sp.base + sp.bytes <= ml.base + ml.bytes, "the spare is in what malloc took");
+  assert.ok(sp.bytes > 0, "the spare has a size");
+  // The guest's fast memory is placed when the guest asked for any (the dummy does; a guest built with none says so).
+  const gm = arena.area(AREA.GUEST_MEMORY_FAST);
+  assert.ok(gm && (gm.space === SPACE.PROCESS || (gm.space === SPACE.UNKNOWN && gm.bytes === 0)), "the guest's memory is placed, or none was asked for");
+  assert.equal(arena.area(AREA.ASSETS).base, L.assetsOffset);
+  assert.equal(arena.area(AREA.RETURNS).base, L.returnsOffset);
 
   const status = x.malloc(4);
-  const handle = x.clockwork_client_open_memory(ringBufferBase, constants.TOTAL_BUFFER_SIZE, status);
+  const handle = x.clockwork_client_open_memory(arenaBase, constants.ARENA_SIZE, status);
   assert.ok(handle, "the engine's own client opened");
 
-  return { x, memory, ringBufferBase, constants, rings: engineRings(memory.buffer, ringBufferBase, constants), handle, status };
+  return { x, memory, arenaBase, constants, rings: engineRings(memory.buffer, arenaBase, constants), handle, status };
 }
 
 /** Run one block of the engine: the tick, then the audio. */

@@ -62,9 +62,9 @@ TEST_CASE("shm-security: the segment is anonymous, owner-sized and close-on-exec
     // The lanes are sized by the creator's caller; the segment grows to fit,
     // and the header says where they are.
     shm_segment_creator big(64u << 20, 1u << 20);
-    CHECK(big.get_inbox_size()  == (64u << 20));
-    CHECK(big.get_outbox_size() == (1u << 20));
-    CHECK(big.segment_size() >= creator.segment_size() - detail_shm_segment::SHM_INBOX_SIZE - detail_shm_segment::SHM_OUTBOX_SIZE + (65u << 20));
+    CHECK(big.get_assets_size()  == (64u << 20));
+    CHECK(big.get_returns_size() == (1u << 20));
+    CHECK(big.segment_size() >= creator.segment_size() - detail_shm_segment::SHM_ASSETS_SIZE - detail_shm_segment::SHM_RETURNS_SIZE + (65u << 20));
     struct stat bst {};
     REQUIRE(::fstat(big.native_handle(), &bst) == 0);
     CHECK(static_cast<size_t>(bst.st_size) >= big.segment_size());
@@ -144,15 +144,15 @@ TEST_CASE("shm-security: stream reader clamps corrupt slot geometry",
     // slot must clamp to the compile-time ring geometry rather than push
     // reads out of bounds (or divide by a zero capacity).
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
+        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 0xFFFFu;
     slot->capacity_frames = 0;
     slot->write_position.store(1u << 20, std::memory_order_release);
 
-    CHECK(reader.channels() == SHM_TAP_STREAM_CHANNELS);
-    CHECK(reader.capacity_frames() == SHM_TAP_RING_FRAMES);
-    std::vector<float> scratch(1024 * SHM_TAP_STREAM_CHANNELS, 0.0f);
+    CHECK(reader.channels() == TAP_STREAM_CHANNELS);
+    CHECK(reader.capacity_frames() == TAP_RING_FRAMES);
+    std::vector<float> scratch(1024 * TAP_STREAM_CHANNELS, 0.0f);
     (void)reader.copy_window(reader.write_position(), 1024, scratch.data());
     SUCCEED("copy_window stayed inside the inline ring under corrupt geometry");
 
@@ -179,16 +179,16 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     // Native stats relocated into the (otherwise unused) window: the value
     // written there is what the client reports.
     const uint32_t movedStats = entry(CLOCKWORK_ARENA_GUEST_WINDOW)->offset;
-    entry(CLOCKWORK_ARENA_NATIVE_STATS)->offset = movedStats;
+    entry(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS)->offset = movedStats;
     auto* moved = reinterpret_cast<std::atomic<uint32_t>*>(creator.get_base() + movedStats);
     moved[NATIVE_STAT_CPU_AVG_CENTI / 4].store(4242, std::memory_order_relaxed);
 
     // The engine claims a smaller tap ring than this build's: the reader
     // clamps a slot's self-declared capacity to the ENGINE's, not to ours.
-    entry(CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES] = 64;
+    entry(CLOCKWORK_ARENA_CLOCKWORK_TAPS)->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES] = 64;
 
     // And more metrics fields than this build names: the count is the engine's.
-    entry(CLOCKWORK_ARENA_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = METRICS_SIZE / 4 + 8;
+    entry(CLOCKWORK_ARENA_CLOCKWORK_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = METRICS_SIZE / 4 + 8;
 
     shm_segment_client client(shm_dup_handle(creator.native_handle()));
     CHECK(client.get_native_stats().cpu_load_avg_centi == 4242);
@@ -196,10 +196,10 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     CHECK(client.layout().window_offset == movedStats);
 
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + SHM_TAP_START + SHM_TAP_HEADER_SIZE);
+        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 2;
-    slot->capacity_frames = SHM_TAP_RING_FRAMES;   // more than the engine says it has
+    slot->capacity_frames = TAP_RING_FRAMES;   // more than the engine says it has
     CHECK(client.get_tap_stream_reader(0).capacity_frames() == 64);
 }
 
@@ -228,12 +228,12 @@ TEST_CASE("shm-security: client refuses a layout that runs past the segment or s
     const auto entry = [](ClockworkArenaHeader* a, uint32_t id) {
         return const_cast<ClockworkArenaEntry*>(clockwork_arena_find(a, id));
     };
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_METRICS)->offset = a->arena_bytes; }));                       // past the blob
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOTS] = 0x00FFFFFFu; }));  // scope array overruns the blob
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_RAW_SCOPE)->geom[CLOCKWORK_GEOM_RAW_SCOPE_SLOTS] = 0xFFFFFFFFu; })); // count × stride overflow
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = 4; }));      // smaller than PerformanceMetrics
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCK_STATE)->bytes = 8; }));                                 // smaller than ClockworkClockState
-    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER] = 16; }));     // a slot shape we do not know
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_METRICS)->offset = a->arena_bytes; }));                       // past the blob
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOTS] = 0x00FFFFFFu; }));  // scope array overruns the blob
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_SCOPE)->geom[CLOCKWORK_GEOM_SCOPE_SLOTS] = 0xFFFFFFFFu; })); // count × stride overflow
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] = 4; }));      // smaller than PerformanceMetrics
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE)->bytes = 8; }));                                 // smaller than ClockworkClockState
+    CHECK(refused([&](H*, ClockworkArenaHeader* a) { entry(a, CLOCKWORK_ARENA_CLOCKWORK_TAPS)->geom[CLOCKWORK_GEOM_TAP_SLOT_HEADER] = 16; }));     // a slot shape we do not know
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { a->version = CLOCKWORK_ARENA_VERSION + 1; }));                                        // a table we were not written for
     CHECK(refused([&](H*, ClockworkArenaHeader* a) { a->magic = 0; }));                                                                     // not an arena at all
     CHECK(refused([&](H* h, ClockworkArenaHeader*) { h->blob_size = 0x7FFFFFFFu; }));                                                      // blob larger than the mapping
@@ -248,18 +248,18 @@ TEST_CASE("shm client exposes the observer views inside its own mapping",
     uint8_t* base = client.get_base();
 
     auto in = client.get_in_ring();
-    CHECK(in.base == base + IN_BUFFER_START);
-    CHECK(in.size == IN_BUFFER_SIZE);
+    CHECK(in.base == base + IN_RING_START);
+    CHECK(in.size == IN_RING_SIZE);
     REQUIRE(in.head != nullptr);
     REQUIRE(in.tail != nullptr);
 
     auto out = client.get_out_ring();
-    CHECK(out.base == base + OUT_BUFFER_START);
-    CHECK(out.size == OUT_BUFFER_SIZE);
+    CHECK(out.base == base + RT_OUT_RING_START);
+    CHECK(out.size == RT_OUT_RING_SIZE);
 
     auto nrt = client.get_nrt_out_ring();
-    CHECK(nrt.base == base + NRT_OUT_BUFFER_START);
-    CHECK(nrt.size == NRT_OUT_BUFFER_SIZE);
+    CHECK(nrt.base == base + NRT_OUT_RING_START);
+    CHECK(nrt.size == NRT_OUT_RING_SIZE);
 
     CHECK(client.get_metrics_flat()
           == reinterpret_cast<const std::atomic<uint32_t>*>(base + METRICS_START));
@@ -280,32 +280,32 @@ TEST_CASE("shm: the guest's region is shared, and addressed by offset",
     shm_segment_client client(shm_dup_handle(creator.native_handle()));
 
     // THE BULK CHANNELS, and the reason they are in the segment rather than in
-    // the arena: the arena is ring_buffer_storage, a static array, and multi-
+    // the arena: the arena is arena_storage, a static array, and multi-
     // megabyte .bss would be paid by every target including the embedded ones.
     // The segment is mmap'd, so this costs nothing where it is not mapped.
     //
-    // Two regions in the segment, one writer each: the client-written inbox and
-    // the guest-written outbox. They must not overlap, or "one writer" is a
+    // Two regions in the segment, one writer each: the client-written assets and
+    // the guest-written returns. They must not overlap, or "one writer" is a
     // claim the layout itself contradicts. The guest's arena is deliberately
     // NOT here — no client maps it, and while it was here it existed only when
     // a client did.
-    uint8_t*       engineSide = creator.get_outbox();
-    const uint8_t* clientSide = client.get_outbox();  // const: the guest writes this
+    uint8_t*       engineSide = creator.get_returns();
+    const uint8_t* clientSide = client.get_returns();  // const: the guest writes this
     REQUIRE(engineSide != nullptr);
     REQUIRE(clientSide != nullptr);
-    REQUIRE(creator.get_outbox_size() == client.get_outbox_size());
-    REQUIRE(client.get_outbox_size() >= 1024 * 1024);
+    REQUIRE(creator.get_returns_size() == client.get_returns_size());
+    REQUIRE(client.get_returns_size() >= 1024 * 1024);
 
     // Disjoint, and in both mappings.
     auto disjoint = [](const uint8_t* a, size_t an, const uint8_t* b, size_t bn) {
         return a + an <= b || b + bn <= a;
     };
-    REQUIRE(disjoint(creator.get_inbox(), creator.get_inbox_size(),
-                     creator.get_outbox(), creator.get_outbox_size()));
+    REQUIRE(disjoint(creator.get_assets(), creator.get_assets_size(),
+                     creator.get_returns(), creator.get_returns_size()));
     // The client sees the two staging regions and NOT the arena — there is no
     // client-side arena accessor to compare, which is the invariant, not an
     // omission.
-    REQUIRE(client.get_inbox_size()  == creator.get_inbox_size());
+    REQUIRE(client.get_assets_size()  == creator.get_assets_size());
 
     // TWO MAPPINGS OF THE SAME BYTES, AT DIFFERENT ADDRESSES. That is the whole
     // reason messages about this region carry offsets: this is one process, and
@@ -318,7 +318,7 @@ TEST_CASE("shm: the guest's region is shared, and addressed by offset",
     for (uint32_t i = 0; i < n; ++i)
         engineSide[offset + i] = static_cast<uint8_t>(i * 31u + 5u);
 
-    const uint8_t* view = client.outbox_at(offset, n);
+    const uint8_t* view = client.returns_at(offset, n);
     REQUIRE(view != nullptr);
     for (uint32_t i = 0; i < n; ++i)
         REQUIRE(view[i] == static_cast<uint8_t>(i * 31u + 5u));
@@ -327,19 +327,19 @@ TEST_CASE("shm: the guest's region is shared, and addressed by offset",
     // a message from another process, so both are attacker-influenced from the
     // reader's point of view, and a read outside the mapping is the failure
     // that must not be reachable.
-    const uint32_t size = static_cast<uint32_t>(client.get_outbox_size());
-    CHECK(client.outbox_at(size, 1) == nullptr);              // starts at the end
-    CHECK(client.outbox_at(size + 1, 0) == nullptr);          // starts past it
-    CHECK(client.outbox_at(0, size + 1) == nullptr);          // runs past it
-    CHECK(client.outbox_at(size - 4, 8) == nullptr);          // straddles the end
+    const uint32_t size = static_cast<uint32_t>(client.get_returns_size());
+    CHECK(client.returns_at(size, 1) == nullptr);              // starts at the end
+    CHECK(client.returns_at(size + 1, 0) == nullptr);          // starts past it
+    CHECK(client.returns_at(0, size + 1) == nullptr);          // runs past it
+    CHECK(client.returns_at(size - 4, 8) == nullptr);          // straddles the end
     // Overflow: offset + len wraps to something small, so a check written as
     // `offset + len > size` would pass this and hand back a view of the whole
     // region starting near its end.
-    CHECK(client.outbox_at(size - 4, 0xFFFFFFFCu) == nullptr);
+    CHECK(client.returns_at(size - 4, 0xFFFFFFFCu) == nullptr);
     // Exactly filling it is legal, and a zero-length view at the very end is
     // too — refusing those would be a different bug, quieter and just as wrong.
-    CHECK(client.outbox_at(0, size) != nullptr);
-    CHECK(client.outbox_at(size, 0) != nullptr);
+    CHECK(client.returns_at(0, size) != nullptr);
+    CHECK(client.returns_at(size, 0) != nullptr);
 }
 
 #endif  // !_WIN32

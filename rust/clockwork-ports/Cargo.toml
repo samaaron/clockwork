@@ -16,6 +16,9 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+# The RT router: a sink's or a port's queues are made inside an engine entry
+# point, so they come from the router's block, not the system allocator.
+clockwork-heap = { path = "../clockwork-heap" }
 # AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
 # (Xtensa): real atomics where the ISA has them, a critical section where it
 # does not — which is only ever the device, where these counters are idle.

@@ -19,7 +19,7 @@ use clockwork_abi::client::{
     clockwork_client_tap_poll, ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
     ClockworkClientSampleClock,
     ClockworkClientMessage, ClockworkClientTap, ClockworkRegion, ClockworkRegionId,
-    ClockworkStatus, CLOCKWORK_FEATURE_RAW_SCOPE, CLOCKWORK_FEATURE_BULK,
+    ClockworkStatus, CLOCKWORK_FEATURE_SCOPE, CLOCKWORK_FEATURE_BULK,
     CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_TAPS, CLOCKWORK_FEATURE_WINDOW,
     CLOCKWORK_ROUTE_NOTIFY, CLOCKWORK_ROUTE_REPLY,
 };
@@ -32,7 +32,7 @@ use crate::audio_tap::AudioTap;
 /// [`Client::set_poll_batch`] says otherwise.
 pub const POLL_BATCH: usize = 64;
 
-/// An unfilled inbox slot.
+/// An unfilled assets slot.
 const EMPTY_SLOT: ClockworkClientMessage = ClockworkClientMessage {
     bytes: core::ptr::null(),
     length: 0,
@@ -52,7 +52,7 @@ pub struct Client {
     /// Whether close is ours to call. An [`crate::Embed`]'s client is the
     /// handle's, closed with it.
     owned: bool,
-    inbox: Vec<ClockworkClientMessage>,
+    assets: Vec<ClockworkClientMessage>,
 }
 
 // SAFETY: nothing in a handle is pinned to the thread that opened it — the
@@ -128,7 +128,7 @@ impl Client {
 
     pub(crate) fn opened(raw: *mut ClockworkClient, st: ClockworkStatus, owned: bool) -> Result<Client> {
         match NonNull::new(raw) {
-            Some(raw) => Ok(Client { raw, owned, inbox: vec![EMPTY_SLOT; POLL_BATCH] }),
+            Some(raw) => Ok(Client { raw, owned, assets: vec![EMPTY_SLOT; POLL_BATCH] }),
             None => Err(refused(st)),
         }
     }
@@ -209,22 +209,22 @@ impl Client {
     /// as messages whose bytes are the ring's and live until the next poll
     /// on this handle. A `sequence` gap means the ring lapped this reader.
     pub fn poll(&mut self) -> Messages<'_> {
-        // SAFETY: a live handle, and `out` has `inbox.len()` slots, which is
+        // SAFETY: a live handle, and `out` has `assets.len()` slots, which is
         // the most the call is allowed to write.
         let n = unsafe {
-            clockwork_client_poll(self.raw.as_ptr(), self.inbox.as_mut_ptr(), self.inbox.len() as u32)
+            clockwork_client_poll(self.raw.as_ptr(), self.assets.as_mut_ptr(), self.assets.len() as u32)
         } as usize;
-        Messages::over(&self.inbox[..n.min(self.inbox.len())])
+        Messages::over(&self.assets[..n.min(self.assets.len())])
     }
 
     /// How many messages one poll takes at most.
     pub fn poll_batch(&self) -> usize {
-        self.inbox.len()
+        self.assets.len()
     }
 
     /// Set how many messages one poll takes at most (at least one).
     pub fn set_poll_batch(&mut self, messages: usize) {
-        self.inbox.resize(messages.max(1), EMPTY_SLOT);
+        self.assets.resize(messages.max(1), EMPTY_SLOT);
     }
 
     /// Take everything waiting and discard it. Returns how many were taken.
@@ -236,7 +236,7 @@ impl Client {
         loop {
             let n = self.poll().len();
             taken += n;
-            if n < self.inbox.len() {
+            if n < self.assets.len() {
                 return taken;
             }
         }
@@ -271,7 +271,7 @@ impl Client {
         // SAFETY: a live handle, a ring id the header names, a live out-pointer.
         let raw = unsafe { clockwork_client_tap_open(self.raw.as_ptr(), ring.region_id(), &mut st) };
         match NonNull::new(raw) {
-            Some(raw) => Ok(Tap { raw, ring, inbox: vec![EMPTY_SLOT; POLL_BATCH], _client: PhantomData }),
+            Some(raw) => Ok(Tap { raw, ring, assets: vec![EMPTY_SLOT; POLL_BATCH], _client: PhantomData }),
             None => Err(refused(st)),
         }
     }
@@ -363,7 +363,7 @@ impl Drop for Reservation<'_> {
 
 /// What an engine has: `CLOCKWORK_FEATURE_*` bits. A client asks rather
 /// than assumes — an engine built for an embedded target may have no
-/// taps, no raw scope and no bulk lanes.
+/// taps, no scope and no bulk lanes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Features(pub u32);
 
@@ -376,11 +376,11 @@ impl Features {
     pub const fn taps(self) -> bool {
         self.0 & CLOCKWORK_FEATURE_TAPS != 0
     }
-    /// The raw scope: what left for the device and what arrived from it.
+    /// The scope: what left for the device and what arrived from it.
     pub const fn raw_scope(self) -> bool {
-        self.0 & CLOCKWORK_FEATURE_RAW_SCOPE != 0
+        self.0 & CLOCKWORK_FEATURE_SCOPE != 0
     }
-    /// Inbox and outbox.
+    /// Assets and returns.
     pub const fn bulk(self) -> bool {
         self.0 & CLOCKWORK_FEATURE_BULK != 0
     }
@@ -538,7 +538,7 @@ impl Ring {
 pub struct Tap<'c> {
     raw: NonNull<ClockworkClientTap>,
     ring: Ring,
-    inbox: Vec<ClockworkClientMessage>,
+    assets: Vec<ClockworkClientMessage>,
     _client: PhantomData<&'c Client>,
 }
 
@@ -551,12 +551,12 @@ impl Tap<'_> {
     /// What was written since the last poll, as [`Client::poll`] delivers
     /// it. Bytes live until the next poll on this tap.
     pub fn poll(&mut self) -> Messages<'_> {
-        // SAFETY: a live tap, and `out` has `inbox.len()` slots, which is the
+        // SAFETY: a live tap, and `out` has `assets.len()` slots, which is the
         // most the call is allowed to write.
         let n = unsafe {
-            clockwork_client_tap_poll(self.raw.as_ptr(), self.inbox.as_mut_ptr(), self.inbox.len() as u32)
+            clockwork_client_tap_poll(self.raw.as_ptr(), self.assets.as_mut_ptr(), self.assets.len() as u32)
         } as usize;
-        Messages::over(&self.inbox[..n.min(self.inbox.len())])
+        Messages::over(&self.assets[..n.min(self.assets.len())])
     }
 
     /// Frames written past this tap before it could read them, since it
@@ -585,11 +585,11 @@ pub enum RegionId {
     /// the first `u32` is a version stamp the guest bumps.
     Window,
     /// Bulk in: the client writes, the guest reads.
-    Inbox,
+    Assets,
     /// Bulk out: the guest writes, the client reads.
-    Outbox,
+    Returns,
     Taps,
-    RawScope,
+    Scope,
     /// The ring clients write and the engine reads.
     Ingress,
     /// The ring the engine writes and clients read.
@@ -604,10 +604,10 @@ impl RegionId {
         match self {
             RegionId::Metrics => ClockworkRegionId::METRICS,
             RegionId::Window => ClockworkRegionId::WINDOW,
-            RegionId::Inbox => ClockworkRegionId::INBOX,
-            RegionId::Outbox => ClockworkRegionId::OUTBOX,
+            RegionId::Assets => ClockworkRegionId::ASSETS,
+            RegionId::Returns => ClockworkRegionId::RETURNS,
             RegionId::Taps => ClockworkRegionId::TAPS,
-            RegionId::RawScope => ClockworkRegionId::RAW_SCOPE,
+            RegionId::Scope => ClockworkRegionId::SCOPE,
             RegionId::Ingress => ClockworkRegionId::INGRESS,
             RegionId::Egress => ClockworkRegionId::EGRESS,
             RegionId::NativeStats => ClockworkRegionId::NATIVE_STATS,
@@ -637,7 +637,7 @@ impl Region<'_> {
         self.bytes == 0
     }
 
-    /// True only for the inbox: everything else is the engine's or the
+    /// True only for the assets area: everything else is the engine's or the
     /// guest's to write.
     pub fn is_writable(&self) -> bool {
         self.writable

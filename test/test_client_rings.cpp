@@ -34,7 +34,7 @@ using engine_test::Engine;
 namespace {
 
 ClockworkClient* openClient(ClockworkStatus* st) {
-    return clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, st);
+    return clockwork_client_open_memory(shared_memory, ARENA_SIZE, st);
 }
 
 // A message of a chosen payload size, so a test can fill a ring in a known
@@ -117,7 +117,7 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
     // reader rather than an idle one.
     const uint32_t payload = 8192;
     const auto msg = sized(payload);
-    const uint32_t rounds = (IN_BUFFER_SIZE / payload) * 3;
+    const uint32_t rounds = (IN_RING_SIZE / payload) * 3;
 
     uint32_t sent = 0;
     for (uint32_t i = 0; i < rounds; ++i) {
@@ -131,7 +131,7 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
     e.pump(0.5);
 
     CHECK(sent == rounds);
-    CHECK(sent * payload > IN_BUFFER_SIZE);   // it really did wrap
+    CHECK(sent * payload > IN_RING_SIZE);   // it really did wrap
 
     // The guest answers every blob with its length and a hash, so a frame that
     // was torn by a wrap, or spliced with its neighbour, is a reply that never
@@ -167,7 +167,7 @@ TEST_CASE("client rings: a second handle polling takes from the first",
     REQUIRE(clockwork_client_region(a, CLOCKWORK_REGION_EGRESS, &ra) == CLOCKWORK_OK);
     REQUIRE(clockwork_client_region(b, CLOCKWORK_REGION_EGRESS, &rb) == CLOCKWORK_OK);
     CHECK(ra.base == rb.base);
-    CHECK(ra.bytes == OUT_BUFFER_SIZE);
+    CHECK(ra.bytes == RT_OUT_RING_SIZE);
     CHECK(ra.writable == 0);          // the engine's to write
 
     clockwork_client_close(a);
@@ -312,7 +312,7 @@ TEST_CASE("client tap: being lapped is counted, not fatal",
     // keeps getting room and runs right over the tap.
     const uint32_t payload = 8192;
     const auto msg = sized(payload);
-    const uint32_t rounds = (IN_BUFFER_SIZE / payload) * 3;
+    const uint32_t rounds = (IN_RING_SIZE / payload) * 3;
     for (uint32_t i = 0; i < rounds; ++i) {
         while (clockwork_client_send(c, msg.data(),
                                      static_cast<uint32_t>(msg.size()), 1) == CLOCKWORK_E_FULL)

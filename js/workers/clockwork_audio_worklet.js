@@ -12,7 +12,7 @@ import * as MetricsOffsets from '../lib/metrics_offsets.js';
 // ClockworkClientMessage (bytes, length, origin, route, sequence).
 const REGION_INGRESS = 7;
 const CLIENT_MESSAGE_BYTES = 20;
-import { calculateAllControlIndices } from '../lib/control_offsets.js';
+import { calculateAllControlIndices } from '../lib/ring_cursor_offsets.js';
 import { readArena } from '../lib/arena.js';
 import { sampleClockReader } from '../lib/sample_clock.js';
 import {
@@ -36,7 +36,7 @@ const PM_POOL_CONFIG = {
     MAX_REPLY_MESSAGES: 64,
     MAX_LOG_ENTRIES: 100,
 
-    REPLY_BUFFER_SIZE: 128 * 1024,   // 128KB - matches OUT_BUFFER_SIZE
+    REPLY_BUFFER_SIZE: 128 * 1024,   // 128KB - matches RT_OUT_RING_SIZE
     LOG_BUFFER_SIZE: 256 * 1024,     // 256KB for log entries
 
     LOG_MAX_MESSAGE_SIZE: 16 * 1024, // 16KB - truncate larger messages
@@ -60,7 +60,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.fadeInLength = 0;
         this.lastStatusCheck = 0;
         this.lastInTail = 0;
-        this.ringBufferBase = null;
+        this.arenaBase = null;
         this.pendingClearSched = false;
 
         // Pre-allocated audio view to avoid per-frame allocations
@@ -83,7 +83,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.bufferConstants = null;
 
         // Control region indices (Int32Array indices) - will be calculated dynamically
-        this.CONTROL_INDICES = null;
+        this.RING_CURSOR_INDICES = null;
 
         this.metricsView = null;
 
@@ -170,16 +170,30 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.port.onmessage = this.handleMessage.bind(this);
     }
 
-    // The product's version as the build says it (clockwork_product_version),
-    // or null from a module that does not say. Read a byte at a time: the
-    // worklet scope has no TextDecoder, and the string is ASCII.
-    productVersion() {
-        const ptr = this.wasmInstance.exports.clockwork_product_version?.();
+    // A NUL-terminated string in the module's memory, or null for a null
+    // pointer. Read a byte at a time: the worklet scope has no TextDecoder,
+    // and the engine's strings are ASCII.
+    cString(ptr) {
         if (!ptr) return null;
         const bytes = new Uint8Array(this.wasmMemory.buffer);
-        let version = '';
-        for (let i = ptr; bytes[i] !== 0; i++) version += String.fromCharCode(bytes[i]);
-        return version;
+        let s = '';
+        for (let i = ptr; bytes[i] !== 0; i++) s += String.fromCharCode(bytes[i]);
+        return s;
+    }
+
+    // The product's version as the build says it (clockwork_product_version),
+    // or null from a module that does not say.
+    productVersion() {
+        return this.cString(this.wasmInstance.exports.clockwork_product_version?.());
+    }
+
+    // Why the build the engine just ran has no guest (clockwork_boot_error),
+    // or null when it has one. A module without the export is older than
+    // this worklet and cannot be trusted to say, so that is an error too.
+    bootError() {
+        const read = this.wasmInstance.exports.clockwork_boot_error;
+        if (!read) return 'the module does not export clockwork_boot_error: rebuild it with this worklet';
+        return this.cString(read());
     }
 
     // The arena's table of contents (js/lib/arena.js, src/clockwork_arena.h):
@@ -190,36 +204,36 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         if (!memory) {
             throw new Error('WASM memory not available');
         }
-        if (!this.wasmInstance || !this.wasmInstance.exports.get_ring_buffer_base) {
-            throw new Error('WASM instance does not export get_ring_buffer_base');
+        if (!this.wasmInstance || !this.wasmInstance.exports.get_arena_base) {
+            throw new Error('WASM instance does not export get_arena_base');
         }
-        const base = this.wasmInstance.exports.get_ring_buffer_base();
+        const base = this.wasmInstance.exports.get_arena_base();
         this.arena = readArena(memory.buffer, base);
         this.bufferConstants = this.arena.constants;
     }
 
     // Calculate buffer indices based on dynamic ring buffer base address
     // Uses constants loaded from WASM via loadBufferConstants()
-    calculateBufferIndices(ringBufferBase) {
+    calculateBufferIndices(arenaBase) {
         if (!this.bufferConstants) {
             throw new Error('Buffer constants not loaded. Call loadBufferConstants() first.');
         }
 
-        const CONTROL_START = this.bufferConstants.CONTROL_START;
+        const RING_CURSORS_START = this.bufferConstants.RING_CURSORS_START;
         const METRICS_START = this.bufferConstants.METRICS_START;
         const CLOCK_STATE_START = this.bufferConstants.CLOCK_STATE_START;
         const CLOCK_STATE_SIZE  = this.bufferConstants.CLOCK_STATE_SIZE;
 
         // Calculate Int32Array indices (divide byte offsets by 4)
-        this.CONTROL_INDICES = calculateAllControlIndices(ringBufferBase, CONTROL_START);
+        this.RING_CURSOR_INDICES = calculateAllControlIndices(arenaBase, RING_CURSORS_START);
 
         const clockworkClockBuf = (this.mode === 'sab') ? this.sharedBuffer : this.wasmMemory.buffer;
-        const clockworkClockBase = ringBufferBase + CLOCK_STATE_START;
+        const clockworkClockBase = arenaBase + CLOCK_STATE_START;
         this.clockworkClockStateBigInt = new BigInt64Array(clockworkClockBuf, clockworkClockBase, CLOCK_STATE_SIZE / 8);
         this.clockworkClockStateInt32  = new Int32Array(clockworkClockBuf, clockworkClockBase, CLOCK_STATE_SIZE / 4);
         if (this.mode === 'sab') {
             // SAB mode: views into SharedArrayBuffer
-            const metricsBase = ringBufferBase + METRICS_START;
+            const metricsBase = arenaBase + METRICS_START;
             this.metricsView = new Uint32Array(this.sharedBuffer, metricsBase, this.bufferConstants.METRICS_SIZE / 4);
         } else {
             // PostMessage mode: views into WASM memory
@@ -227,7 +241,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             this.atomicView = new Int32Array(this.wasmMemory.buffer);
             this.uint8View = new Uint8Array(this.wasmMemory.buffer);
             this.dataView = new DataView(this.wasmMemory.buffer);
-            const metricsBase = ringBufferBase + METRICS_START;
+            const metricsBase = arenaBase + METRICS_START;
             this.metricsView = new Uint32Array(this.wasmMemory.buffer, metricsBase, this.bufferConstants.METRICS_SIZE / 4);
 
         }
@@ -238,10 +252,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     // allocation values before process_audio() and read it back after.
     // In SAB mode, the counter is shared and managed atomically — no seeding needed.
     initNodeIdCounter() {
-        if (!this.wasmMemory || !this.bufferConstants || !this.ringBufferBase) return;
+        if (!this.wasmMemory || !this.bufferConstants || !this.arenaBase) return;
         if (this.mode !== 'postMessage') return;  // SAB mode uses shared atomic
 
-        const counterBase = this.ringBufferBase + this.bufferConstants.NODE_ID_COUNTER_START;
+        const counterBase = this.arenaBase + this.bufferConstants.NODE_ID_COUNTER_START;
         this.nodeIdCounterView = new Int32Array(this.wasmMemory.buffer, counterBase, 1);
 
         // If ranges were received before WASM loaded, seed counter with first range
@@ -304,7 +318,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                           + `region holds ${cap}: GUEST_CONFIG_SIZE and the `
                           + `encoder disagree`);
         }
-        new Uint8Array(this.wasmMemory.buffer, this.ringBufferBase + start, src.byteLength)
+        new Uint8Array(this.wasmMemory.buffer, this.arenaBase + start, src.byteLength)
             .set(src);
     }
 
@@ -382,7 +396,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
         if (this.bufferConstants && this.wasmMemory) {
             const bc = this.bufferConstants;
-            const size = bc.METRICS_SIZE + bc.SHM_WINDOW_SIZE;
+            const size = bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE;
             p.snapshot.buffer = new ArrayBuffer(size);
             p.snapshot.bufferView = new Uint8Array(p.snapshot.buffer);
             p.snapshot.size = size;
@@ -394,9 +408,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             // client reads back (readWindow: the window at METRICS_SIZE).
             // Valid as long as WASM memory does not grow.
             p.snapshot.metricsView = new Uint8Array(this.wasmMemory.buffer,
-                this.ringBufferBase + bc.METRICS_START, bc.METRICS_SIZE);
+                this.arenaBase + bc.METRICS_START, bc.METRICS_SIZE);
             p.snapshot.windowView = new Uint8Array(this.wasmMemory.buffer,
-                this.ringBufferBase + bc.SHM_WINDOW_START, bc.SHM_WINDOW_SIZE);
+                this.arenaBase + bc.GUEST_WINDOW_START, bc.GUEST_WINDOW_SIZE);
         }
     }
 
@@ -409,19 +423,22 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     openClientBoundary() {
         this.wasmExports = this.wasmInstance.exports;
 
-        const base  = this.wasmExports.get_ring_buffer_base();
-        const bytes = this.bufferConstants.TOTAL_BUFFER_SIZE;
+        const base  = this.wasmExports.get_arena_base();
+        const bytes = this.bufferConstants.ARENA_SIZE;
 
         // The status is written into scratch memory rather than returned,
         // because C reports through an out-parameter and wasm has no other way
         // to hand back two values.
-        const stPtr = this.wasmExports.malloc(4);
+        // Scratch comes from the module's own allocator through clockwork's
+        // exports (clockwork_worklet_alloc/free): the module may have its
+        // malloc wrapped to count the guest's, and the worklet does not care.
+        const stPtr = this.wasmExports.clockwork_worklet_alloc(4);
         this.clientHandle = this.wasmExports.clockwork_client_open_memory(base, bytes, stPtr);
 
         if (!this.clientHandle) {
             const status = new Int32Array(this.wasmMemory.buffer, stPtr, 1)[0];
             console.error('[AudioWorklet] client boundary unavailable, status', status);
-            this.wasmExports.free(stPtr);
+            this.wasmExports.clockwork_worklet_free(stPtr);
             return;
         }
 
@@ -430,20 +447,20 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         // audio thread.
         const C = PM_POOL_CONFIG;
         this.pollMax = Math.max(C.MAX_REPLY_MESSAGES, C.MAX_LOG_ENTRIES);
-        this.pollMessages = this.wasmExports.malloc(this.pollMax * CLIENT_MESSAGE_BYTES);
+        this.pollMessages = this.wasmExports.clockwork_worklet_alloc(this.pollMax * CLIENT_MESSAGE_BYTES);
 
         // The log shows what was SENT, which is the ingress ring — and the
         // engine is that ring's consumer, so this watches rather than drains.
         const tapBytes = this.wasmExports.clockwork_client_tap_sizeof();
         this.logTap = this.wasmExports.clockwork_client_tap_open_in(
-            this.wasmExports.malloc(tapBytes), tapBytes,
+            this.wasmExports.clockwork_worklet_alloc(tapBytes), tapBytes,
             this.clientHandle, REGION_INGRESS, stPtr);
         if (!this.logTap) {
             const status = new Int32Array(this.wasmMemory.buffer, stPtr, 1)[0];
             console.error('[AudioWorklet] could not watch the ingress ring, status', status);
         }
 
-        this.wasmExports.free(stPtr);
+        this.wasmExports.clockwork_worklet_free(stPtr);
     }
 
     // Read one ClockworkClientMessage out of the array a drain just filled.
@@ -477,9 +494,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         // One scratch buffer, grown when a message needs more. The alternative
         // is a malloc per message on the path a client sends every note down.
         if (!this.sendScratch || this.sendScratchBytes < len) {
-            if (this.sendScratch) this.wasmExports.free(this.sendScratch);
+            if (this.sendScratch) this.wasmExports.clockwork_worklet_free(this.sendScratch);
             this.sendScratchBytes = Math.max(len, 4096);
-            this.sendScratch = this.wasmExports.malloc(this.sendScratchBytes);
+            this.sendScratch = this.wasmExports.clockwork_worklet_alloc(this.sendScratchBytes);
         }
         new Uint8Array(this.wasmMemory.buffer, this.sendScratch, len)
             .set(new Uint8Array(oscData));
@@ -592,9 +609,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     // Returns true if a snapshot was sent, so log entries batch on the same tick.
     checkAndSendSnapshot(audioTime) {
         const bc = this.bufferConstants;
-        if (!bc || !this.wasmMemory || this.ringBufferBase === null || !this.pmPools) return false;
+        if (!bc || !this.wasmMemory || this.arenaBase === null || !this.pmPools) return false;
 
-        const windowBase = this.ringBufferBase + bc.SHM_WINDOW_START;
+        const windowBase = this.arenaBase + bc.GUEST_WINDOW_START;
         // Reuse existing atomicView to avoid creating new typed array
         const versionOffset = windowBase / 4;   // the guest's version stamp, word 0
         const currentVersion = this.atomicView[versionOffset];
@@ -629,14 +646,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     // client side reads it back. Returns a raw ArrayBuffer (transferable) or
     // null if not ready. Used only for the initial snapshot.
     readMetricsAndTreeBuffer() {
-        if (!this.bufferConstants || !this.wasmMemory || this.ringBufferBase === null) {
+        if (!this.bufferConstants || !this.wasmMemory || this.arenaBase === null) {
             return null;
         }
         const bc = this.bufferConstants;
-        const buffer = new ArrayBuffer(bc.METRICS_SIZE + bc.SHM_WINDOW_SIZE);
+        const buffer = new ArrayBuffer(bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE);
         const out = new Uint8Array(buffer);
-        out.set(new Uint8Array(this.wasmMemory.buffer, this.ringBufferBase + bc.METRICS_START, bc.METRICS_SIZE), 0);
-        out.set(new Uint8Array(this.wasmMemory.buffer, this.ringBufferBase + bc.SHM_WINDOW_START, bc.SHM_WINDOW_SIZE), bc.METRICS_SIZE);
+        out.set(new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.METRICS_START, bc.METRICS_SIZE), 0);
+        out.set(new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.GUEST_WINDOW_START, bc.GUEST_WINDOW_SIZE), bc.METRICS_SIZE);
         return buffer;
     }
 
@@ -752,9 +769,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 // so that new messages sent after purge() resolves are not affected.
                 // handleMessage and process() both run on the audio thread, so there
                 // is no race with the C++ ring buffer consumer.
-                if (this.CONTROL_INDICES) {
-                    const head = this.atomicLoad(this.CONTROL_INDICES.IN_HEAD);
-                    this.atomicStore(this.CONTROL_INDICES.IN_TAIL, head);
+                if (this.RING_CURSOR_INDICES) {
+                    const head = this.atomicLoad(this.RING_CURSOR_INDICES.IN_HEAD);
+                    this.atomicStore(this.RING_CURSOR_INDICES.IN_TAIL, head);
                 }
 
                 // Set flag to clear the WASM scheduler on next process() call.
@@ -842,23 +859,27 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     this.inputChannels = data.inputChannels ?? 0;
                     this.outputChannels = data.outputChannels ?? 2;
                     this.sampleRate = data.sampleRate || 48000;  // Fallback to 48000 if not provided
-                    // Where the guest's memory region sits in the wasm heap,
-                    // and how big it is. An ABSOLUTE address, measured from
-                    // zero — clockwork proves its own heap stops short of it
-                    // and then hands it to the guest as DspConfig::arena.
+                    // A fast span the host places for the guest itself
+                    // (guestMemorySize; 0 and none by default: clockwork
+                    // reserves the guest's spans inside its own memory). An
+                    // ABSOLUTE address, measured from zero — clockwork proves
+                    // malloc's frontier stops short of it and then hands it to
+                    // the guest as DspConfig::memory.
                     this.guestMemoryOffset = data.guestMemoryOffset ?? 0;
                     this.guestMemorySize = data.guestMemorySize ?? 0;
                     // Bulk staging, one writer each. Absolute offsets in the
                     // wasm heap, below the guest's arena because the arena
                     // grows upward into reserved space.
-                    this.inboxOffset  = data.inboxOffset ?? 0;
-                    this.inboxSize    = data.inboxSize ?? 0;
-                    this.outboxOffset = data.outboxOffset ?? 0;
-                    this.outboxSize   = data.outboxSize ?? 0;
-                    // The span clockwork::mem allocates from. The guest's real-time
-                    // pool comes out of it, so the host sizes it from what the
-                    // guest asked for; 0 leaves the module on its build-time
-                    // default.
+                    this.assetsOffset  = data.assetsOffset ?? 0;
+                    this.assetsSize    = data.assetsSize ?? 0;
+                    this.returnsOffset = data.returnsOffset ?? 0;
+                    this.returnsSize   = data.returnsSize ?? 0;
+                    // The engine's memory after the arena: the span
+                    // clockwork::mem allocates from. The guest's two spans,
+                    // the RT router's block and the spare come out of it, so
+                    // the host sizes it from what the guest declares plus the
+                    // engine's overhead; 0 leaves the module on its
+                    // build-time default.
                     this.memArenaSize = data.memArenaSize ?? 0;
 
                     // Import object for WASM
@@ -996,13 +1017,27 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     const module = await WebAssembly.compile(data.wasmBytes);
                     this.wasmInstance = await WebAssembly.instantiate(module, imports);
 
-                    if (this.wasmInstance.exports.get_ring_buffer_base) {
-                        this.ringBufferBase = this.wasmInstance.exports.get_ring_buffer_base();
+                    if (this.wasmInstance.exports.get_arena_base) {
+                        // The engine's memory first: one block holding the
+                        // arena and, after it, the placement arena the layout
+                        // sizes (memArenaSize, handed to clockwork_init below).
+                        // Claimed before anything else is allocated, so it is
+                        // the same block on every boot; a reload finds it.
+                        // A module without the export is older than this
+                        // worklet: said so, rather than booted on the default
+                        // size and left to fail where nothing shows it.
+                        if (!this.wasmInstance.exports.clockwork_memory_claim) {
+                            throw new Error('[clockwork] the module does not export clockwork_memory_claim: rebuild it with this worklet');
+                        }
+                        if (!this.wasmInstance.exports.clockwork_memory_claim(this.memArenaSize)) {
+                            throw new Error(`[clockwork] the engine's memory could not be claimed (memArenaSize ${this.memArenaSize})`);
+                        }
+                        this.arenaBase = this.wasmInstance.exports.get_arena_base();
 
                         // Load buffer constants from WASM (single source of truth)
                         this.loadBufferConstants();
 
-                        this.calculateBufferIndices(this.ringBufferBase);
+                        this.calculateBufferIndices(this.arenaBase);
 
                         this.initPMPools();
 
@@ -1029,11 +1064,35 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                 this.guestMemorySize,
                                 0, 0,
                                 this.memArenaSize,
-                                this.inboxOffset,  this.inboxSize,
-                                this.outboxOffset, this.outboxSize);
+                                this.assetsOffset,  this.assetsSize,
+                                this.returnsOffset, this.returnsSize);
+
+                            // A BUILD THAT REFUSED SAYS WHY, HERE. The engine
+                            // records the reason (clockwork_boot_fail, or the
+                            // guest's own from dsp_new) and goes on answering
+                            // its own verbs with no guest, so the arena is up
+                            // and nothing else would tell the page: its log
+                            // line went to the console of a thread the page
+                            // cannot see, and the metrics show an engine that
+                            // never ticks. Measured 2026-10-15: Sonic Pi Web
+                            // with no sound and nothing in its log, for a
+                            // pool that did not fit. So the reason goes to the
+                            // client as the init's error, and init() rejects
+                            // with it.
+                            const refused = this.bootError();
+                            if (refused) {
+                                console.error('[AudioWorklet] the engine refused to boot: ' + refused);
+                                this.port.postMessage({ type: 'error', error: 'the engine refused to boot: ' + refused });
+                                return;
+                            }
 
                             this.initNodeIdCounter();
                             this.openClientBoundary();
+                            // The host's boot is done too: its client handle
+                            // and scratch are taken. What the program mallocs
+                            // from here on is counted (mallocsAfterBoot), and
+                            // the memory model says it reads 0.
+                            this.wasmInstance.exports.clockwork_malloc_mark_boot?.();
 
                             this.isInitialized = true;
 
@@ -1042,7 +1101,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             const msg = {
                                 type: 'initialized',
                                 success: true,
-                                ringBufferBase: this.ringBufferBase,
+                                arenaBase: this.arenaBase,
                                 bufferConstants: this.bufferConstants,
                                 exports: Object.keys(this.wasmInstance.exports),
                                 version: this.productVersion(),
@@ -1101,8 +1160,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
             if (data.type === 'setNTPStartTime') {
                 // Write NTP start time to WASM memory (Float64)
-                if (this.wasmMemory && this.ringBufferBase !== null && this.bufferConstants) {
-                    const offset = this.ringBufferBase + this.bufferConstants.NTP_START_TIME_START;
+                if (this.wasmMemory && this.arenaBase !== null && this.bufferConstants) {
+                    const offset = this.arenaBase + this.bufferConstants.NTP_START_TIME_START;
                     const view = new Float64Array(this.wasmMemory.buffer, offset, 1);
                     view[0] = data.ntpStartTime;
                 }
@@ -1110,8 +1169,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
             if (data.type === 'setDriftOffset') {
                 // Write drift offset to WASM memory (Int32, microseconds)
-                if (this.wasmMemory && this.ringBufferBase !== null && this.bufferConstants) {
-                    const offset = this.ringBufferBase + this.bufferConstants.DRIFT_OFFSET_START;
+                if (this.wasmMemory && this.arenaBase !== null && this.bufferConstants) {
+                    const offset = this.arenaBase + this.bufferConstants.DRIFT_OFFSET_START;
                     const view = new Int32Array(this.wasmMemory.buffer, offset, 1);
                     view[0] = data.driftOffsetUs;
                 }
@@ -1119,8 +1178,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
             if (data.type === 'setClockOffset') {
                 // Write clock offset to WASM memory (Int32, milliseconds)
-                if (this.wasmMemory && this.ringBufferBase !== null && this.bufferConstants) {
-                    const offset = this.ringBufferBase + this.bufferConstants.GLOBAL_OFFSET_START;
+                if (this.wasmMemory && this.arenaBase !== null && this.bufferConstants) {
+                    const offset = this.arenaBase + this.bufferConstants.GLOBAL_OFFSET_START;
                     const view = new Int32Array(this.wasmMemory.buffer, offset, 1);
                     view[0] = data.clockOffsetMs;
                 }
@@ -1165,7 +1224,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
                     // Copy the payload to WASM memory at the given offset.
                     /*
-                     * BYTES, not samples. writeInbox promises OPAQUE bytes — a
+                     * BYTES, not samples. writeAssets promises OPAQUE bytes — a
                      * definition, a lookup table, six bytes of anything. Reading the payload
                      * as a Float32Array throws "byte length of Float32Array should be a
                      * multiple of 4" for any length that is not, and copies the right bytes
@@ -1199,7 +1258,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
              *
              * In postMessage mode the client has no view of the worklet's heap
              * at all, so a guest that produced a blob there had no way to hand
-             * it back — readOutbox simply threw, and the bulk channel was
+             * it back — readReturns simply threw, and the bulk channel was
              * one-directional on this transport alone. The worklet CAN see the
              * heap, so it copies the range out and transfers the buffer, which
              * is the same trick copyBufferData plays going the other way.
@@ -1365,8 +1424,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 );
 
                 // postMessage mode: the engine's time to each channel's port, for a worker that cannot read the arena
-                if (this.oscPorts.length && this.processCallCount % CLOCK_POST_BLOCKS === 0 && this.ringBufferBase != null && this.bufferConstants) {
-                    this.readSampleClock ??= sampleClockReader(() => this.wasmMemory?.buffer, this.ringBufferBase + this.bufferConstants.SAMPLE_CLOCK_START);
+                if (this.oscPorts.length && this.processCallCount % CLOCK_POST_BLOCKS === 0 && this.arenaBase != null && this.bufferConstants) {
+                    this.readSampleClock ??= sampleClockReader(() => this.wasmMemory?.buffer, this.arenaBase + this.bufferConstants.SAMPLE_CLOCK_START);
                     const clock = this.readSampleClock(this.clockReading);
                     if (clock) {
                         this.clockMessage.ntp = clock.renderNtp;
@@ -1483,16 +1542,16 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     // SAB mode: Notify waiting workers when there's data to read
                     // Atomics.notify() is cheap when no one is waiting, so notify every frame
                     if (this.atomicView) {
-                        const outHead = this.atomicLoad(this.CONTROL_INDICES.OUT_HEAD);
-                        const outTail = this.atomicLoad(this.CONTROL_INDICES.OUT_TAIL);
+                        const outHead = this.atomicLoad(this.RING_CURSOR_INDICES.OUT_HEAD);
+                        const outTail = this.atomicLoad(this.RING_CURSOR_INDICES.OUT_TAIL);
                         if (outHead !== outTail) {
-                            Atomics.notify(this.atomicView, this.CONTROL_INDICES.OUT_HEAD, 1);
+                            Atomics.notify(this.atomicView, this.RING_CURSOR_INDICES.OUT_HEAD, 1);
                         }
                         // Notify any IN-ring producer waiting on space when C++ consumes
                         // messages (tail moved = space freed)
-                        const inTail = this.atomicLoad(this.CONTROL_INDICES.IN_TAIL);
+                        const inTail = this.atomicLoad(this.RING_CURSOR_INDICES.IN_TAIL);
                         if (inTail !== this.lastInTail) {
-                            Atomics.notify(this.atomicView, this.CONTROL_INDICES.IN_TAIL, 1);
+                            Atomics.notify(this.atomicView, this.RING_CURSOR_INDICES.IN_TAIL, 1);
                             this.lastInTail = inTail;
                         }
                     }
@@ -1509,7 +1568,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             console.error('[AudioWorklet] process() error:', error);
             console.error('[AudioWorklet] Stack:', error.stack);
             if (this.atomicView && this.mode === 'sab') {
-                Atomics.or(this.atomicView, this.CONTROL_INDICES.STATUS_FLAGS, this.STATUS_FLAGS.WASM_ERROR);
+                Atomics.or(this.atomicView, this.RING_CURSOR_INDICES.STATUS_FLAGS, this.STATUS_FLAGS.WASM_ERROR);
             }
             if (this.metricsView) {
                 if (this.mode === 'sab') {
@@ -1526,7 +1585,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     checkStatus() {
         if (!this.atomicView) return;
 
-        const statusFlags = this.atomicLoad(this.CONTROL_INDICES.STATUS_FLAGS);
+        const statusFlags = this.atomicLoad(this.RING_CURSOR_INDICES.STATUS_FLAGS);
 
         if (statusFlags !== this.STATUS_FLAGS.OK) {
             // Update pre-allocated status object (avoids allocation on audio thread)
@@ -1549,7 +1608,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             this.port.postMessage(this._statusMessage);
 
             const persistentFlags = statusFlags & (this.STATUS_FLAGS.BUFFER_FULL);
-            this.atomicStore(this.CONTROL_INDICES.STATUS_FLAGS, persistentFlags);
+            this.atomicStore(this.RING_CURSOR_INDICES.STATUS_FLAGS, persistentFlags);
         }
     }
 }

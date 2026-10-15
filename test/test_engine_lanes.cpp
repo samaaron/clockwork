@@ -16,6 +16,11 @@
  */
 #include "EngineFixture.h"
 #include "memory_profile.h"
+#include "dsp_api.h"
+#include "lanes/lanes.h"       // clockwork_arena_header
+#include "clockwork_arena.h"
+
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -42,15 +47,15 @@ TEST_CASE("engine: the guest gets both bulk lanes with no shared segment",
     const auto r = askGuest(e, "/dummy/region/lanes", "/dummy/region/lanes-is");
 
     // NOT NULL, and the size the profile asks for. Reverting to
-    // `mShmemCreator ? get_inbox() : nullptr` fails here, which is the point
-    // of the case: the previous shape was silent, and a guest with no outbox
+    // `mShmemCreator ? get_assets() : nullptr` fails here, which is the point
+    // of the case: the previous shape was silent, and a guest with no returns
     // simply published nothing.
-    CHECK(r.argInt(0) == static_cast<int32_t>(CLOCKWORK_INBOX_BYTES));
-    CHECK(r.argInt(1) == static_cast<int32_t>(CLOCKWORK_OUTBOX_BYTES));
+    CHECK(r.argInt(0) == static_cast<int32_t>(CLOCKWORK_ASSETS_BYTES));
+    CHECK(r.argInt(1) == static_cast<int32_t>(CLOCKWORK_RETURNS_BYTES));
 
     // And real memory of that length: the guest read the first, middle and
-    // last byte of the inbox, and wrote then read back the same three of the
-    // outbox. A pointer that is merely non-NULL passes the checks above and
+    // last byte of the assets area, and wrote then read back the same three of the
+    // returns. A pointer that is merely non-NULL passes the checks above and
     // fails these.
     CHECK(r.argInt(2) == 1);
     CHECK(r.argInt(3) == 1);
@@ -60,13 +65,60 @@ TEST_CASE("engine: the arena is there with no shared segment too",
           "[boundary][regions][engine]") {
     Engine e;
 
-    // The same fix, made earlier and for the same reason — the arena used to
-    // be carved from the segment, so an embedded engine handed its guest no
-    // working memory at all. Asserted here rather than only in the lanes
-    // fixture because this is the boot path that had the bug.
+    // The guest's working memory used to be carved from the segment, so an
+    // embedded engine handed its guest none at all; now clockwork reserves it
+    // from its fast tier, sized to the guest's want (the dummy's static
+    // figure), on every boot path. Asserted here rather than only in the
+    // lanes fixture because this is the boot path that had the bug.
     const auto r = askGuest(e, "/dummy/region/memory", "/dummy/region/memory-is");
 
-    CHECK(r.argInt(0) == static_cast<int32_t>(CLOCKWORK_ARENA_BYTES));
+    // The fast span is the fast want (dsp_api.h); the bulk want is a span of
+    // its own on every host.
+    const DspInfo* info = dsp_describe();
+    CHECK(r.argInt(0) == static_cast<int32_t>(info->memory_bytes_wanted));
     CHECK(r.argInt(1) == 1);   // zeroed at dsp_new
     CHECK(r.argInt(2) == 1);   // and writable to its stated length
+}
+
+// ── The engine's memory is one block natively too ───────────────────────────
+//
+// On the web the guest's spans and the spare are carved from one block; a
+// desktop engine took four separate mallocs for them until 2026-10-15. Now
+// it claims one block too (ENGINE_MEMORY), sized to the build, and carves
+// the same things from it. The arena is not in it (static, or a segment
+// other processes map), nor the RT router's block (the process's, while the
+// block is a build's).
+TEST_CASE("engine: the guest's memory and the spare are carved from the engine's one block",
+          "[boundary][regions][engine]") {
+    Engine e;
+    const ClockworkArenaHeader* h = clockwork_arena_header();
+    REQUIRE(h != nullptr);
+    const auto span = [](const ClockworkArenaAreaEntry* a) {
+        const uint64_t base  = (uint64_t)a->base_lo  | ((uint64_t)a->base_hi  << 32);
+        const uint64_t bytes = (uint64_t)a->bytes_lo | ((uint64_t)a->bytes_hi << 32);
+        return std::pair<uint64_t, uint64_t>{ base, base + bytes };
+    };
+    const auto* em = clockwork_arena_area(h, CLOCKWORK_AREA_ENGINE_MEMORY);
+    REQUIRE(em != nullptr);
+    REQUIRE(em->space == CLOCKWORK_SPACE_PROCESS);
+    const auto block = span(em);
+    CHECK(block.second - block.first >= (uint64_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES + (uint64_t)CLOCKWORK_GUEST_SPARE_BYTES);
+    for (uint32_t id : { CLOCKWORK_AREA_GUEST_MEMORY_FAST, CLOCKWORK_AREA_GUEST_MEMORY_BULK, CLOCKWORK_AREA_GUEST_SPARE }) {
+        const auto* a = clockwork_arena_area(h, id);
+        REQUIRE(a != nullptr);
+        INFO("area " << id);
+        CHECK(a->space == CLOCKWORK_SPACE_PROCESS);
+        const auto s = span(a);
+        CHECK(s.second > s.first);
+        CHECK(block.first <= s.first);
+        CHECK(s.second <= block.second);
+    }
+    const auto* rh = clockwork_arena_area(h, CLOCKWORK_AREA_RUST_HEAP);
+    REQUIRE(rh != nullptr);
+    CHECK(rh->space == CLOCKWORK_SPACE_PROCESS);
+    const auto r = span(rh);
+    CHECK((r.second <= block.first || r.first >= block.second));
+    // The arena is not in the block either.
+    const uint64_t arena = (uint64_t)(uintptr_t)h;
+    CHECK((arena < block.first || arena >= block.second));
 }

@@ -273,13 +273,13 @@ void TrackControl::tapReturns() {
     const uint64_t at = g_engine_frames.load(std::memory_order_relaxed);
     // Only the slots this build carved: a profile with none has nothing to
     // claim, and its tracks simply have no tap.
-    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, SHM_TAP_TRACK_SLOTS);
+    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, TAP_TRACK_SLOTS);
     for (uint32_t slot = 0; slot < slots; ++slot) {
         TrackTap& tap = mTaps[slot];
         const bool want = (live >> slot) & 1u;
         if (want && !tap.writer.valid()) {
-            if (clockwork_tap_get(nullptr, static_cast<int>(SHM_TAP_TRACK_SLOT_BASE + slot),
-                                   static_cast<int>(SHM_TAP_STREAM_CHANNELS), 0, &tap.claim))
+            if (clockwork_tap_get(nullptr, static_cast<int>(TAP_TRACK_SLOT_BASE + slot),
+                                   static_cast<int>(TAP_STREAM_CHANNELS), 0, &tap.claim))
                 tap.writer = shm_tap_stream_writer(
                     static_cast<shm_tap_stream*>(tap.claim.internalData));
         } else if (!want && tap.writer.valid()) {
@@ -288,7 +288,7 @@ void TrackControl::tapReturns() {
         }
         if (!tap.writer.valid() || !bus || frames == 0) continue;
         // The return lanes are channel-major on the bus, a block apart.
-        const std::array<const float*, SHM_TAP_STREAM_CHANNELS> ch = {
+        const std::array<const float*, TAP_STREAM_CHANNELS> ch = {
             bus + static_cast<size_t>(mBoundBase + 2 * slot) * frames,
             bus + static_cast<size_t>(mBoundBase + 2 * slot + 1) * frames,
         };
@@ -526,7 +526,7 @@ void TrackControl::gatewayPass() {
 // rather than being lost, and the bridge feels the back-pressure.
 void TrackControl::relayOut() {
     MsgRing& r = mHeader->out;
-    clockwork_drain_ring(out_ring(mSeg.ptr), OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
+    clockwork_drain_ring(out_ring(mSeg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
         256,
         [](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
             if (len <= sizeof(Prefixed)) return ClockworkDrainVerdict::Consume;

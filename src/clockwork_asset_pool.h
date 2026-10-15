@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
  * Copyright (c) 2026 Sam Aaron
  *
- * clockwork_asset_pool.h — the client's pool over the inbox lane.
+ * clockwork_asset_pool.h — the client's pool over the assets area lane.
  *
- * The lane (DspConfig::inbox; CLOCKWORK_REGION_INBOX to a client) is the
+ * The lane (DspConfig::assets; CLOCKWORK_REGION_ASSETS to a client) is the
  * client's to carve. This pool hands out offsets into it and takes them back.
  * It holds no memory of its own and never touches the lane, so the same code
  * serves a client writing plain memory in its own process and one writing a

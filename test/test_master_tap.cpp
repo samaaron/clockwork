@@ -15,7 +15,7 @@
 #include <cmath>
 #include <vector>
 
-TEST_CASE("raw scope OUT slot: the OUT slot flows from boot on a device host and carries the guest's tone",
+TEST_CASE("scope OUT slot: the OUT slot flows from boot on a device host and carries the guest's tone",
           "[tap][engine]") {
     // The case renders every block itself: the tap is measured against what
     // was rendered, not against how much time a thread was given.
@@ -24,7 +24,7 @@ TEST_CASE("raw scope OUT slot: the OUT slot flows from boot on a device host and
     cfg.freewheelClock  = true;
     EngineFixture fx(cfg);
     ClockworkRegion taps {};
-    REQUIRE(clockwork_client_region(fx.engine().egressClient(), CLOCKWORK_REGION_RAW_SCOPE, &taps) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_region(fx.engine().egressClient(), CLOCKWORK_REGION_SCOPE, &taps) == CLOCKWORK_OK);
     auto* out = static_cast<shm_audio_buffer*>(taps.base) + CLOCKWORK_TAP_OUT;
     CHECK(out->enabled.load() == 1);
     CHECK(out->channels >= 1);
@@ -42,7 +42,7 @@ TEST_CASE("raw scope OUT slot: the OUT slot flows from boot on a device host and
     reader.seek_to_live();
     fx.send(osc_test::message("/dummy/tone"));
     fx.pumpBlock(48000 / 5 / block);                  // 0.2 s
-    std::vector<float> buf(4096 * SHM_AUDIO_CHANNELS);
+    std::vector<float> buf(4096 * SCOPE_CHANNELS);
     float peak = 0.f;
     for (int i = 0; i < 8; ++i) {
         const uint32_t n = reader.pull(buf.data(), 4096, nullptr);

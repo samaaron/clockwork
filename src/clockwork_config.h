@@ -33,9 +33,8 @@
 #define CLOCKWORK_COMMIT_WORD 0u
 #endif
 
-// Pre-allocated heap size for RT-safe allocations (used by clockwork_heap).
-// Default 64MB for native builds (unused in WASM where emscripten manages
-// memory); sized per device via memory_profile.h.
+// Every compile-time size — the guest's memory defaults, the spare, the
+// rings — sized per device.
 #include "memory_profile.h"
 
 #ifdef __cplusplus

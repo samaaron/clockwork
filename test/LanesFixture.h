@@ -75,20 +75,20 @@ inline constexpr uint32_t kGuestConfigSlots[4] = {
 // small enough that dsp_new can still scan the whole thing to prove it arrived
 // zeroed.
 //
-// It is also comfortably larger than the egress ring (OUT_BUFFER_SIZE, 128 KB),
+// It is also comfortably larger than the egress ring (RT_OUT_RING_SIZE, 128 KB),
 // which lets a test ask for a payload the ring cannot carry and watch it be
 // refused there while the region carries it without trouble.
 inline constexpr uint32_t kGuestMemoryBytes = 4 * 1024 * 1024;   // the arena
-// Bulk staging, one writer each: the client writes the inbox, the guest the
-// outbox. Separate regions so neither test can mask a two-writer bug.
-inline constexpr uint32_t kInboxBytes  = 4 * 1024 * 1024;
-inline constexpr uint32_t kOutboxBytes = 4 * 1024 * 1024;
+// Bulk staging, one writer each: the client writes the assets area, the guest the
+// returns. Separate regions so neither test can mask a two-writer bug.
+inline constexpr uint32_t kAssetsBytes  = 4 * 1024 * 1024;
+inline constexpr uint32_t kReturnsBytes = 4 * 1024 * 1024;
 
 // The region the fixture reserves for the guest, so a test can check
 // clockwork did not write into it.
 const uint8_t* guestMemory();   // the arena
-uint8_t*       inbox();         // client writes, guest reads
-const uint8_t* outbox();        // guest writes, client reads
+uint8_t*       assets();         // client writes, guest reads
+const uint8_t* returns();        // guest writes, client reads
 
 // The NTP instant the fixture calls frame 0. There is no real-time clock in
 // play: the fixture self-clocks from kBaseNtp + frames/rate exactly as a

@@ -95,15 +95,15 @@ public:
                          int numInputChannels,
                          const void* guestConfig,
                          uint32_t guestConfigBytes,
-                         void* guestArena,
-                         uint32_t guestArenaBytes,
+                         void* guestMemory,
+                         uint32_t guestMemoryBytes,
                          int bufLen = 0,   // 0 = use kDefaultBlockSize
                          // Bulk staging, one writer each. NULL when there is no
                          // segment to carve them from.
-                         const void* inbox = nullptr,
-                         uint32_t inboxBytes = 0,
-                         void* outbox = nullptr,
-                         uint32_t outboxBytes = 0);
+                         const void* assets = nullptr,
+                         uint32_t assetsBytes = 0,
+                         void* returns = nullptr,
+                         uint32_t returnsBytes = 0);
 
     // The DSP's audio block size — read at audio-thread frequency.
     int bufferLength() const { return mBufLen; }

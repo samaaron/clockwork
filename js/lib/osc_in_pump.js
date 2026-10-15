@@ -17,7 +17,7 @@
  * and is held to it by test/ring_cross.test.mjs.
  */
 import * as MetricsOffsets from './metrics_offsets.js';
-import { calculateOutControlIndices } from './control_offsets.js';
+import { calculateOutControlIndices } from './ring_cursor_offsets.js';
 import { getCurrentNTPFromPerformance as getCurrentNTP } from './osc_classifier.js';
 import { runSabWorker } from './sab_worker_loop.js';
 import { EgressReader } from './ring.js';

@@ -36,6 +36,20 @@
 //! * Unarmed, or outside engine scope, everything passes through to the
 //!   system allocator untouched — `cargo test` binaries and foreign threads
 //!   see the allocator they always had.
+//!
+//! **The guest's route.** A guest written in Rust allocates the Rust way,
+//! and its `Box`es and `Vec`s must land in the guest's own memory, not in
+//! malloc and not in this router's block (which is clockwork's). So the
+//! host installs three hooks at boot (`clockwork_router_guest_hooks`: take,
+//! give back, and "is this yours") over the pool it runs on the guest's
+//! bulk memory (src/clockwork_pool.cpp), and opens a *guest scope* around
+//! every guest entry point (`clockwork_router_guest_enter` / `_exit`). An
+//! allocation made inside a guest scope and outside an engine scope goes
+//! through the take hook; a free of anything the pool holds goes through
+//! the give-back hook, from any thread (the pool parks a foreign thread's
+//! free itself). Exhaustion falls back to the system allocator and counts
+//! it (`guest_fallback_allocs`), as the engine's own route does. The guest
+//! never learns any of this: it writes ordinary Rust.
 
 #[allow(unused_imports)]
 use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
@@ -83,9 +97,82 @@ struct Deferred {
     next: *mut Deferred,
 }
 
+/// The guest's route: the host's hooks over the guest's pool, and how many
+/// in-scope allocations the pool could not meet.
+type GuestTake = unsafe extern "C" fn(usize) -> *mut std::os::raw::c_void;
+type GuestGive = unsafe extern "C" fn(*mut std::os::raw::c_void);
+type GuestHolds = unsafe extern "C" fn(*const std::os::raw::c_void) -> std::os::raw::c_int;
+static GUEST_TAKE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static GUEST_GIVE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static GUEST_HOLDS: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static GUEST_FALLBACK_ALLOCS: AtomicU32 = AtomicU32::new(0);
+
 thread_local! {
     /// Depth of engine FFI entries on this thread's stack.
     static SCOPE: Cell<u32> = const { Cell::new(0) };
+    /// Depth of guest entry points on this thread's stack.
+    static GUEST_SCOPE: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Install the host's hooks over the guest's pool. NULL hooks remove the
+/// route (teardown). Called at boot and teardown, on the control thread,
+/// never while a guest scope is open.
+///
+/// # Safety
+/// The hooks must behave as described in the module doc, and `take` must
+/// return 16-aligned payloads of at least the bytes asked for.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_router_guest_hooks(
+    take: Option<GuestTake>,
+    give: Option<GuestGive>,
+    holds: Option<GuestHolds>,
+) {
+    GUEST_TAKE.store(take.map_or(ptr::null_mut(), |f| f as *mut ()), Ordering::Release);
+    GUEST_GIVE.store(give.map_or(ptr::null_mut(), |f| f as *mut ()), Ordering::Release);
+    GUEST_HOLDS.store(holds.map_or(ptr::null_mut(), |f| f as *mut ()), Ordering::Release);
+}
+
+/// A guest entry point is on this thread's stack: allocations go to the
+/// guest's pool until the matching exit.
+#[no_mangle]
+pub extern "C" fn clockwork_router_guest_enter() {
+    GUEST_SCOPE.with(|s| s.set(s.get() + 1));
+}
+
+#[no_mangle]
+pub extern "C" fn clockwork_router_guest_exit() {
+    GUEST_SCOPE.with(|s| s.set(s.get().saturating_sub(1)));
+}
+
+/// Allocations inside a guest scope the guest's pool could not meet, served
+/// by the system allocator instead: a sizing bug made visible.
+#[no_mangle]
+pub extern "C" fn clockwork_router_guest_fallback_allocs() -> u32 {
+    GUEST_FALLBACK_ALLOCS.load(Ordering::Relaxed)
+}
+
+#[inline]
+fn in_guest_scope() -> bool {
+    GUEST_SCOPE.with(|s| s.get() > 0)
+}
+
+#[inline]
+fn guest_hooks() -> Option<(GuestTake, GuestGive, GuestHolds)> {
+    let take = GUEST_TAKE.load(Ordering::Acquire);
+    let give = GUEST_GIVE.load(Ordering::Acquire);
+    let holds = GUEST_HOLDS.load(Ordering::Acquire);
+    if take.is_null() || give.is_null() || holds.is_null() {
+        return None;
+    }
+    // SAFETY: the pointers were made from these exact function types in
+    // `clockwork_router_guest_hooks` and are only ever read back as them.
+    unsafe {
+        Some((
+            core::mem::transmute::<*mut (), GuestTake>(take),
+            core::mem::transmute::<*mut (), GuestGive>(give),
+            core::mem::transmute::<*mut (), GuestHolds>(holds),
+        ))
+    }
 }
 
 /// RAII: the FFI layer holds one of these across every engine entry point.
@@ -147,11 +234,11 @@ fn drain_deferred() {
 /// One-shot region handoff to the pool's area callback.
 static PENDING_AREA: AtomicPtr<std::os::raw::c_void> = AtomicPtr::new(ptr::null_mut());
 
-unsafe extern "C" fn router_new_area(_size: usize) -> *mut std::os::raw::c_void {
+unsafe extern "C" fn router_new_area(_ctx: *mut std::os::raw::c_void, _size: usize) -> *mut std::os::raw::c_void {
     PENDING_AREA.swap(ptr::null_mut(), Ordering::Relaxed)
 }
 
-unsafe extern "C" fn router_free_area(_p: *mut std::os::raw::c_void) {
+unsafe extern "C" fn router_free_area(_ctx: *mut std::os::raw::c_void, _p: *mut std::os::raw::c_void) {
     // The region lives for the process; free_all keeps the initial area.
 }
 
@@ -190,6 +277,27 @@ pub unsafe fn arm_at(base: *mut u8, bytes: usize) {
         claim.done();
     }
 }
+
+/// `arm_at` for the C++ host: arm from `base..base+bytes`, a block the host
+/// took once for the life of the process (clockwork_heap.cpp, at heap init).
+/// Returns 1 once armed — by this call or an earlier one — and 0 when the
+/// router is still unarmed (a null base, or fewer than 64 KB).
+///
+/// # Safety
+/// `arm_at`'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_router_arm(base: *mut u8, bytes: usize) -> std::os::raw::c_int {
+    // SAFETY: the caller's contract is `arm_at`'s.
+    unsafe { arm_at(base, bytes) };
+    armed() as std::os::raw::c_int
+}
+
+/// How much of the armed region is in use, for the host's census: live
+/// payload bytes, and how many allocations fell back to the system.
+#[no_mangle]
+pub extern "C" fn clockwork_router_used_bytes() -> usize { used_bytes() }
+#[no_mangle]
+pub extern "C" fn clockwork_router_fallback_allocs() -> u32 { fallback_allocs() }
 
 /// The right to arm, held for the duration of one attempt.
 ///
@@ -255,6 +363,7 @@ unsafe fn arm_region(region: *mut u8, size: usize) {
     let pool = Box::into_raw(Box::new(HeapPool::new(
         Some(router_new_area),
         Some(router_free_area),
+        ptr::null_mut(),
         size,
         0, // growth 0: the pool may never ask the system for more mid-run
     )));
@@ -298,6 +407,37 @@ pub struct RtRouter;
 // lock-free stack rather than reaching it.
 unsafe impl GlobalAlloc for RtRouter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // The guest's route: inside a guest entry point and outside any
+        // engine entry point it opened (a sink's door, say, which is
+        // clockwork's and allocates from clockwork's block).
+        if !in_scope() && in_guest_scope() {
+            if let Some((take, _, _)) = guest_hooks() {
+                // SAFETY: the hook's contract is the module doc's; the
+                // over-aligned branch asked for slack as the engine route
+                // below does.
+                let p = unsafe {
+                    if layout.align() <= POOL_ALIGN {
+                        take(layout.size()).cast::<u8>()
+                    } else {
+                        let raw = take(layout.size() + layout.align() + POOL_ALIGN).cast::<u8>();
+                        if raw.is_null() {
+                            ptr::null_mut()
+                        } else {
+                            let aligned = ((raw as usize + POOL_ALIGN + layout.align() - 1)
+                                & !(layout.align() - 1)) as *mut u8;
+                            *aligned.cast::<usize>().sub(1) = raw as usize;
+                            aligned
+                        }
+                    }
+                };
+                if !p.is_null() {
+                    return p;
+                }
+                GUEST_FALLBACK_ALLOCS.fetch_add(1, Ordering::Relaxed);
+            }
+            // SAFETY: the caller's contract is `System`'s.
+            return unsafe { System.alloc(layout) };
+        }
         let pool = POOL.load(Ordering::Acquire);
         if pool.is_null() || !in_scope() {
             // SAFETY: the caller's contract is `System`'s.
@@ -336,6 +476,23 @@ unsafe impl GlobalAlloc for RtRouter {
     }
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+        // The guest's pool, from any thread and any scope: the pool routes a
+        // foreign thread's free itself.
+        if let Some((_, give, holds)) = guest_hooks() {
+            // SAFETY: the hook only reads the address.
+            if unsafe { holds(p.cast::<std::os::raw::c_void>()) } != 0 {
+                let block = if layout.align() <= POOL_ALIGN {
+                    p
+                } else {
+                    // SAFETY: `alloc` stashed the raw payload pointer in the
+                    // word below every over-aligned address it handed out.
+                    unsafe { (*p.cast::<usize>().sub(1)) as *mut u8 }
+                };
+                // SAFETY: a payload the pool holds, dead to its owner.
+                unsafe { give(block.cast::<std::os::raw::c_void>()) };
+                return;
+            }
+        }
         if !in_region(p) {
             if in_scope() && armed() {
                 // A pre-arm (or fallback) pointer dying inside engine scope:
@@ -404,6 +561,81 @@ mod tests {
     static ENGINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn engine() -> std::sync::MutexGuard<'static, ()> {
         ENGINE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // The guest's route: a host's hooks over a span, installed and removed.
+    static GUEST_SPAN: std::sync::Mutex<Option<(usize, usize, Vec<usize>)>> = std::sync::Mutex::new(None);
+    unsafe extern "C" fn guest_take(bytes: usize) -> *mut std::os::raw::c_void {
+        // A bump allocator over the span: enough to prove the route.
+        let mut g = GUEST_SPAN.lock().unwrap();
+        let (base, len, taken) = g.as_mut().unwrap();
+        let at = taken.iter().sum::<usize>();
+        let size = (bytes + 15) & !15;
+        if at + size > *len { return ptr::null_mut(); }
+        taken.push(size);
+        (*base + at) as *mut std::os::raw::c_void
+    }
+    unsafe extern "C" fn guest_give(_p: *mut std::os::raw::c_void) {}
+    unsafe extern "C" fn guest_holds(p: *const std::os::raw::c_void) -> std::os::raw::c_int {
+        let g = GUEST_SPAN.lock().unwrap();
+        let Some((base, len, _)) = g.as_ref() else { return 0 };
+        ((p as usize).wrapping_sub(*base) < *len) as std::os::raw::c_int
+    }
+
+    #[test]
+    fn guest_scope_allocs_land_in_the_guests_span_and_engine_scope_still_wins() {
+        let _engine = engine();
+        let r = armed_router();
+        let span = vec![0u8; 64 * 1024 + 16];
+        let base = (span.as_ptr() as usize + 15) & !15;
+        *GUEST_SPAN.lock().unwrap() = Some((base, 64 * 1024, Vec::new()));
+        // SAFETY: the hooks above behave as the module doc asks.
+        unsafe { clockwork_router_guest_hooks(Some(guest_take), Some(guest_give), Some(guest_holds)) };
+        // SAFETY: each pointer is freed once with the layout it was made with.
+        unsafe {
+            let l = Layout::from_size_align(200, 8).unwrap();
+            // Outside any scope: the system's, as before.
+            let p = r.alloc(l);
+            assert!(!in_region(p) && guest_holds(p.cast()) == 0);
+            r.dealloc(p, l);
+            // Inside a guest scope: the guest's span.
+            clockwork_router_guest_enter();
+            let g = r.alloc(l);
+            assert!(guest_holds(g.cast()) != 0, "a guest-scope alloc lands in the guest's span");
+            // Over-aligned too.
+            let la = Layout::from_size_align(100, 64).unwrap();
+            let a = r.alloc(la);
+            assert!(guest_holds(a.cast()) != 0 && (a as usize) % 64 == 0);
+            r.dealloc(a, la);
+            // An engine entry point opened inside the guest's (a sink's door)
+            // allocates from the engine's block, not the guest's.
+            {
+                let _e = EngineScope::enter();
+                let e = r.alloc(l);
+                assert!(in_region(e), "engine scope wins inside a guest scope");
+                r.dealloc(e, l);
+            }
+            // The span full: the system serves it, counted.
+            let before = clockwork_router_guest_fallback_allocs();
+            let big = Layout::from_size_align(128 * 1024, 8).unwrap();
+            let f = r.alloc(big);
+            assert!(!f.is_null() && guest_holds(f.cast()) == 0);
+            assert_eq!(clockwork_router_guest_fallback_allocs(), before + 1);
+            r.dealloc(f, big);
+            clockwork_router_guest_exit();
+            // Freed outside the scope: still routed to the guest's pool by
+            // address, never to the system allocator.
+            r.dealloc(g, l);
+            clockwork_router_guest_hooks(None, None, None);
+            // Hooks gone: the route is gone with them.
+            clockwork_router_guest_enter();
+            let s = r.alloc(l);
+            assert!(guest_holds(s.cast()) == 0);
+            r.dealloc(s, l);
+            clockwork_router_guest_exit();
+        }
+        *GUEST_SPAN.lock().unwrap() = None;
+        drop(span);
     }
 
     #[test]

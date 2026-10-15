@@ -67,7 +67,7 @@ maybe("many sends in a row all arrive, and an impossible one is refused", async 
 
   // A message larger than the ring can ever hold is refused, and the ring
   // still works afterwards: the refusal did not leave the lock held.
-  const tooBig = new Uint8Array(constants.IN_BUFFER_SIZE + 4096);
+  const tooBig = new Uint8Array(constants.IN_RING_SIZE + 4096);
   assert.equal(ringWrite(rings.ingress, tooBig, 0), false, "a message bigger than the ring is refused");
   assert.equal(Atomics.load(rings.ingress.words, rings.ingress.lock), 0, "the write lock is free");
   assert.equal(ringWrite(rings.ingress, msg, 1), true, "and the ring is still usable");

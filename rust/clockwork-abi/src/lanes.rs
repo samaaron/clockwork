@@ -57,15 +57,15 @@ unsafe extern "C" {
         input_channels: u32,
         output_channels: u32,
         verbosity: u32,
-        guest_arena: *mut c_void,
-        guest_arena_bytes: u32,
+        guest_memory: *mut c_void,
+        guest_memory_bytes: u32,
         guest_config: *const c_void,
         guest_config_bytes: u32,
         arena_bytes: u32,
-        inbox: *const c_void,
-        inbox_bytes: u32,
-        outbox: *mut c_void,
-        outbox_bytes: u32,
+        assets: *const c_void,
+        assets_bytes: u32,
+        returns: *mut c_void,
+        returns_bytes: u32,
     );
 
     // ── More than one host in a process ── BOOTED, JOINED (your arguments
@@ -76,23 +76,24 @@ unsafe extern "C" {
         input_channels: u32,
         output_channels: u32,
         verbosity: u32,
-        guest_arena: *mut c_void,
-        guest_arena_bytes: u32,
+        guest_memory: *mut c_void,
+        guest_memory_bytes: u32,
         guest_config: *const c_void,
         guest_config_bytes: u32,
         arena_bytes: u32,
-        inbox: *const c_void,
-        inbox_bytes: u32,
-        outbox: *mut c_void,
-        outbox_bytes: u32,
+        assets: *const c_void,
+        assets_bytes: u32,
+        returns: *mut c_void,
+        returns_bytes: u32,
     ) -> c_int;
     pub fn clockwork_detach();
     pub fn clockwork_attached() -> u32;
 
     pub fn clockwork_set_channel_ceilings(input_channels: u32, output_channels: u32);
     pub fn clockwork_declare_fp_env(env: u32);
-    /// The heap the guest's `alloc_bytes` draws from, for the next build; 0 = the profile's.
-    pub fn clockwork_set_heap_bytes(bytes: usize);
+    /// A floor under the guest's bulk memory (the span its allocations come from) for the next build; 0 = the
+    /// profile's default.
+    pub fn clockwork_set_guest_bulk_bytes(bytes: usize);
     /// Why the last build has no guest, or null when it has one. NUL-terminated.
     pub fn clockwork_boot_error() -> *const c_char;
 

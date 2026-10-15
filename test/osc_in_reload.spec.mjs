@@ -61,7 +61,7 @@ test("a reader the host runs on a port of its own has one loop reading, however 
       globalThis.__DEV__ = false;
       self.onmessage = async ({ data }) => {
         const { runSabWorker } = await import("${location.origin}/js/lib/sab_worker_loop.js");
-        const { calculateOutControlIndices } = await import("${location.origin}/js/lib/control_offsets.js");
+        const { calculateOutControlIndices } = await import("${location.origin}/js/lib/ring_cursor_offsets.js");
         const { EgressReader } = await import("${location.origin}/js/lib/ring.js");
         const port = data.port;
         let passes = 0;

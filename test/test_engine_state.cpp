@@ -94,8 +94,8 @@ TEST_CASE("EngineState: switchDevice in headless doesn't change state", "[Engine
 
 // ── A guest that does not come up ───────────────────────────────────────────
 //
-// A boot whose guest refuses (here: the dummy asks the host's heap for a
-// real-time pool larger than the heap) is an engine in error, not a running
+// A boot whose guest refuses (here: the dummy asks its bulk memory for a
+// real-time pool larger than it) is an engine in error, not a running
 // one, and every client can learn why: the engine still answers its own
 // verbs, and a late registrant's state replay carries the guest's reason.
 // Before this, the engine reported "running" with no guest inside, nothing
@@ -109,19 +109,19 @@ ClockworkEngine::Config askingForAPool(size_t bytes) {
     return cfg;
 }
 
-// The same, from a guest that does not declare the heap its pool needs
-// (dsp_heap_bytes says 0): the engine takes the profile's, and the pool does
-// not fit. The way to a guest that does not come up.
+// The same, from a guest that does not declare the bulk memory its pool
+// needs (dsp_memory_bulk_bytes says 0): the engine gives the profile's, and
+// the pool does not fit. The way to a guest that does not come up.
 ClockworkEngine::Config undeclaredPool(size_t bytes) {
     auto cfg = askingForAPool(bytes);
-    cfg.guestConfig += "declareHeap=0\n";
+    cfg.guestConfig += "declareBulk=0\n";
     return cfg;
 }
 }
 
 TEST_CASE("EngineState: a guest that does not come up leaves the engine in error, saying why",
           "[EngineState][guest-failed]") {
-    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u));
     CHECK(fix.engine().engineState() == EngineState::Error);
 
     fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
@@ -144,7 +144,7 @@ TEST_CASE("EngineState: a guest that does not come up leaves the engine in error
 TEST_CASE("EngineState: a guest that refuses at length: a client that registers is told the whole reason",
           "[EngineState][guest-failed]") {
     const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";
-    auto cfg = undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u);
+    auto cfg = undeclaredPool(size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u);
     cfg.guestConfig += "refusalReason=" + reason + "\n";
     EngineFixture fix(cfg);
     CHECK(fix.engine().engineState() == EngineState::Error);
@@ -162,7 +162,7 @@ TEST_CASE("EngineState: a guest that refuses at length: a client that registers 
 
 TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's own verbs still answer",
           "[EngineState][guest-failed]") {
-    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u));
+    EngineFixture fix(undeclaredPool(size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u));
     fix.send(osc_test::message("/dummy/ping"));
     fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 777));
     OscReply r;
@@ -171,16 +171,16 @@ TEST_CASE("EngineState: with no guest, its messages go nowhere and the engine's 
     CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 200));
 }
 
-// ── The heap is the guest's to declare ──────────────────────────────────────
+// ── The bulk memory is the guest's to declare ───────────────────────────────
 //
-// What a guest will take from the heap depends on its configuration — a
-// server guest's real-time pool is an option — and only the guest can read
-// that. So the engine asks it (dsp_heap_bytes) before taking the heap, every
-// host gets the same answer, and the boot either has it or says it could not.
+// What a guest will allocate depends on its configuration — a server guest's
+// real-time pool is an option — and only the guest can read that. So the
+// engine asks it (dsp_memory_bulk_bytes) before taking the span, every host
+// gets the same answer, and the boot either has it or says it could not.
 
-TEST_CASE("EngineState: a guest that declares its pool's heap boots, with no host sizing it",
+TEST_CASE("EngineState: a guest that declares its pool's bulk memory boots, with no host sizing it",
           "[EngineState][heap]") {
-    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+    const size_t pool = size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u;
     EngineFixture fix(askingForAPool(pool));
     CHECK(fix.engine().engineState() == EngineState::Running);
     fix.send(osc_test::message("/dummy/ping"));
@@ -188,7 +188,7 @@ TEST_CASE("EngineState: a guest that declares its pool's heap boots, with no hos
     REQUIRE(fix.waitForReply("/dummy/pong", r));
 }
 
-TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying why",
+TEST_CASE("EngineState: a bulk memory the system cannot provide stops the boot, saying why",
           "[EngineState][heap]") {
     // The sanitizers' allocators abort the process on a request this size
     // rather than answering NULL (allocation-size-too-big), so under them the
@@ -216,14 +216,14 @@ TEST_CASE("EngineState: a heap the system cannot provide stops the boot, saying 
     REQUIRE(s.argCount() >= 2);
     CHECK(s.argString(0) == "error");
     INFO("reason: " << s.argString(1));
-    CHECK(s.argString(1).find("heap") != std::string::npos);
+    CHECK(s.argString(1).find("bulk") != std::string::npos);
 }
 
-TEST_CASE("EngineState: the next engine takes the profile's heap again", "[EngineState][heap]") {
-    // The heap is one engine's, not the process's: a later boot whose guest
-    // declares nothing gets the default, and a pool that only the bigger heap
-    // held no longer fits.
-    const size_t pool = size_t(CLOCKWORK_HEAP_SIZE) + 1024u * 1024u;
+TEST_CASE("EngineState: the next engine takes the profile's bulk memory again", "[EngineState][heap]") {
+    // The span is one engine's, not the process's: a later boot whose guest
+    // declares nothing gets the default, and a pool that only the bigger
+    // span held no longer fits.
+    const size_t pool = size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u;
     {
         EngineFixture fix(askingForAPool(pool));
         REQUIRE(fix.engine().engineState() == EngineState::Running);
@@ -280,13 +280,13 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
     }
     fix.clearReplies();
 
-    const int32_t h0 = control->in_head.load(std::memory_order_acquire);
+    const int32_t h0 = cursors->in_head.load(std::memory_order_acquire);
     REQUIRE(h0 > 0);
-    REQUIRE(static_cast<uint32_t>(h0) + 64 < IN_BUFFER_SIZE);  // room for the frame below
+    REQUIRE(static_cast<uint32_t>(h0) + 64 < IN_RING_SIZE);  // room for the frame below
 
     // Producer stalls mid-write: lock held, head loaded, payload not yet copied.
     int32_t unlocked = 0;
-    REQUIRE(control->in_write_lock.compare_exchange_strong(unlocked, 1));
+    REQUIRE(cursors->in_write_lock.compare_exchange_strong(unlocked, 1));
 
     fix.engine().purge();
 
@@ -299,16 +299,16 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
         hdr.magic    = MESSAGE_MAGIC;
         hdr.length   = static_cast<uint32_t>(sizeof(Message)) + pkt.size();
         hdr.sequence = static_cast<uint32_t>(
-            control->in_sequence.fetch_add(1, std::memory_order_relaxed));
+            cursors->in_sequence.fetch_add(1, std::memory_order_relaxed));
         hdr.sourceId = 0;
-        uint8_t* slot = shared_memory + IN_BUFFER_START + h0;
+        uint8_t* slot = shared_memory + IN_RING_START + h0;
         std::memcpy(slot, &hdr, sizeof(Message));
         std::memcpy(slot + sizeof(Message), pkt.ptr(), pkt.size());
         const uint32_t aligned = (hdr.length + 3u) & ~3u;
-        control->in_head.store(
-            static_cast<int32_t>((static_cast<uint32_t>(h0) + aligned) % IN_BUFFER_SIZE),
+        cursors->in_head.store(
+            static_cast<int32_t>((static_cast<uint32_t>(h0) + aligned) % IN_RING_SIZE),
             std::memory_order_release);
-        control->in_write_lock.store(0, std::memory_order_release);
+        cursors->in_write_lock.store(0, std::memory_order_release);
     }
 
     // Drain. Frames performed before the purge must not run again.

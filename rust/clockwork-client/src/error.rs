@@ -26,7 +26,7 @@ pub enum Error {
     /// every block, so the caller retries ([`Error::is_retry`]).
     Full,
     /// The message cannot fit in the ring at any moment; bulk belongs in
-    /// the inbox instead.
+    /// the assets area instead.
     TooBig,
     /// The engine went away under us.
     Closed,

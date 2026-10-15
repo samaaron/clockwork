@@ -4,10 +4,10 @@
 /**
  * Control pointer offset constants for Clockwork.
  *
- * These byte offsets correspond to the ControlPointers struct in shared_memory.h.
+ * These byte offsets correspond to the RingCursors struct in shared_memory.h.
  * The struct layout is:
  *
- *   struct alignas(4) ControlPointers {
+ *   struct alignas(4) RingCursors {
  *       std::atomic<int32_t> in_head;        // offset 0
  *       std::atomic<int32_t> in_tail;        // offset 4
  *       std::atomic<int32_t> out_head;       // offset 8
@@ -26,7 +26,7 @@
  */
 
 // =============================================================================
-// Byte offsets within ControlPointers struct
+// Byte offsets within RingCursors struct
 // =============================================================================
 
 // IN buffer (OSC messages from JS to the engine)
@@ -63,12 +63,12 @@ export const NRT_OUT_READ = 48;
  * Calculate Int32Array indices for IN buffer control pointers.
  * Used by: OscChannel, SABTransport, osc_out_log_sab_worker
  *
- * @param {number} ringBufferBase - Base offset of ring buffer region
- * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @param {number} arenaBase - Base offset of ring buffer region
+ * @param {number} RING_CURSORS_START - Offset to control pointers within ring buffer
  * @returns {Object} Object with IN_HEAD, IN_TAIL, IN_SEQUENCE, IN_WRITE_LOCK indices
  */
-export function calculateInControlIndices(ringBufferBase, CONTROL_START) {
-    const base = ringBufferBase + CONTROL_START;
+export function calculateInControlIndices(arenaBase, RING_CURSORS_START) {
+    const base = arenaBase + RING_CURSORS_START;
     return {
         IN_HEAD: (base + IN_HEAD) / 4,
         IN_TAIL: (base + IN_TAIL) / 4,
@@ -81,12 +81,12 @@ export function calculateInControlIndices(ringBufferBase, CONTROL_START) {
  * Calculate Int32Array indices for OUT buffer control pointers.
  * Used by: osc_in_worker
  *
- * @param {number} ringBufferBase - Base offset of ring buffer region
- * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @param {number} arenaBase - Base offset of ring buffer region
+ * @param {number} RING_CURSORS_START - Offset to control pointers within ring buffer
  * @returns {Object} Object with OUT_HEAD, OUT_TAIL indices
  */
-export function calculateOutControlIndices(ringBufferBase, CONTROL_START) {
-    const base = ringBufferBase + CONTROL_START;
+export function calculateOutControlIndices(arenaBase, RING_CURSORS_START) {
+    const base = arenaBase + RING_CURSORS_START;
     return {
         OUT_HEAD: (base + OUT_HEAD) / 4,
         OUT_TAIL: (base + OUT_TAIL) / 4,
@@ -97,12 +97,12 @@ export function calculateOutControlIndices(ringBufferBase, CONTROL_START) {
  * Calculate Int32Array indices for all control pointers.
  * Used by: clockwork_audio_worklet
  *
- * @param {number} ringBufferBase - Base offset of ring buffer region
- * @param {number} CONTROL_START - Offset to control pointers within ring buffer
+ * @param {number} arenaBase - Base offset of ring buffer region
+ * @param {number} RING_CURSORS_START - Offset to control pointers within ring buffer
  * @returns {Object} Object with all control pointer indices
  */
-export function calculateAllControlIndices(ringBufferBase, CONTROL_START) {
-    const base = ringBufferBase + CONTROL_START;
+export function calculateAllControlIndices(arenaBase, RING_CURSORS_START) {
+    const base = arenaBase + RING_CURSORS_START;
     return {
         IN_HEAD: (base + IN_HEAD) / 4,
         IN_TAIL: (base + IN_TAIL) / 4,

@@ -75,12 +75,12 @@
  * rather than asking. Asking would prove only that the guest remembers what it
  * wrote.
  *
- * IT ALSO MOVES BULK, one way down each lane. The inbox verb only reads and
- * the outbox verb only writes, which is the whole invariant stated as two
+ * IT ALSO MOVES BULK, one way down each lane. The assets area verb only reads and
+ * the returns area verb only writes, which is the whole invariant stated as two
  * messages — a client can prove the guest saw what it staged, and read back
  * what the guest produced, without either side touching the other's region:
  *
- *   /dummy/inbox/hash ,ii <offset> <len> -> /dummy/inbox/is ,ii <read> <hash>
+ *   /dummy/assets/hash ,ii <offset> <len> -> /dummy/assets/is ,ii <read> <hash>
  *   /dummy/blob/produce ,ii <len> <seed>
  *                          -> /dummy/blob/at ,iii <offset> <wrote> <hash>
  *
@@ -124,18 +124,19 @@
  * actually emitted in. Sending from dsp_osc instead would prove nothing about
  * the audio thread, which is the thread the contract is really about.
  *
- * AND IT CAN TAKE A REAL-TIME POOL FROM THE HOST'S HEAP AT BIRTH, the way a
- * server guest does (scsynth sizes its pool by an option and takes it through
+ * AND IT CAN TAKE A REAL-TIME POOL FROM ITS BULK MEMORY AT BIRTH, the way a
+ * server guest allocates what its configuration asks for (through
  * DspHost::alloc_bytes in dsp_new). One line in the guest config asks for it:
  *
  *   rtPoolBytes=<bytes>
  *
- * It declares the heap that pool needs (dsp_heap_bytes), as a guest should, so
- * the engine takes a heap that holds it. Another line makes it declare nothing,
- * like a guest that does not say what it will take — the heap is the profile's,
- * the pool does not fit, and the boot is refused with this guest's reason:
+ * It declares the bulk memory that pool needs (dsp_memory_bulk_bytes), as a
+ * guest should, so the engine gives it a span that holds it. Another line
+ * makes it declare nothing, like a guest that does not say what it will take
+ * — the span is the profile's, the pool does not fit, and the boot is refused
+ * with this guest's reason:
  *
- *   declareHeap=0
+ *   declareBulk=0
  *
  * AND ITS REASON CAN BE ANY LENGTH. A guest's words are its own, and a host
  * carries them to every client however long they are. Another line replaces
@@ -194,17 +195,17 @@ struct RegionsAtBirth {
     uint32_t memory_was_zero = 0;    // 1 = every byte zero, as promised
     uint32_t memory_rw_ok    = 0;    // 1 = wrote a pattern and read it back
 
-    uint32_t bulk_bytes      = 0;    // DspConfig::arena_bulk — 0 on a single-region host
-    uint32_t bulk_was_zero   = 0;    // 1 = every byte zero (1 when there is no bulk tier)
-    uint32_t bulk_rw_ok      = 0;    // 1 = pattern read back   (1 when there is no bulk tier)
+    uint32_t bulk_bytes      = 0;    // DspConfig::memory_bulk
+    uint32_t bulk_was_zero   = 0;    // 1 = every byte zero (1 when there is none)
+    uint32_t bulk_rw_ok      = 0;    // 1 = the pool answered an allocation (1 when there is none)
     uint32_t fp_env          = 0;    // DspConfig::fp_env, verbatim
 
     uint32_t window_bytes    = 0;
 
-    uint32_t inbox_bytes     = 0;
-    uint32_t outbox_bytes    = 0;
-    uint32_t inbox_readable  = 0;    // 1 = first, middle and last byte read back
-    uint32_t outbox_rw_ok    = 0;    // 1 = wrote a pattern into it and read it back
+    uint32_t assets_bytes     = 0;
+    uint32_t returns_bytes    = 0;
+    uint32_t assets_readable  = 0;    // 1 = first, middle and last byte read back
+    uint32_t returns_rw_ok    = 0;    // 1 = wrote a pattern into it and read it back
 
     uint32_t persist_bytes   = 0;
     uint32_t persist_found   = 0;    // 1 = a valid record was already there
@@ -243,7 +244,7 @@ struct DummyDsp {
     DspConfig config{};
     DspHost   host{};
     RegionsAtBirth born{};
-    void*     rt_pool = nullptr;  // taken from the host's heap at birth (rtPoolBytes)
+    void*     rt_pool = nullptr;  // taken from the bulk memory at birth (rtPoolBytes)
     uint32_t  persist_gen = 0;    // generation of the record WE last wrote
     uint32_t  window_writes = 0;
     uint64_t  frame = 0;      // absolute frames rendered; the phase clock
@@ -264,7 +265,7 @@ struct DummyDsp {
 
     // ── Assets (dsp_api.h): what we were handed, and what we still hold ──
     // Recorded so a test can see, from the client's side, that the pointer
-    // landed on its bytes: the checksum is over the inbox as the guest reads
+    // landed on its bytes: the checksum is over the assets area as the guest reads
     // it. Held ids are released on /dummy/asset/release, which is the only
     // way a placeholder ever lets go.
     struct AssetRec { uint32_t id, kind, bytes, channels, frames, rate_milli, sum; };
@@ -310,36 +311,36 @@ struct DummyDsp {
         // whether the bytes are really there.
         // The bulk lanes, probed the same way and for the same reason: a
         // region that is shorter than it claims shows up here rather than as
-        // a corruption somewhere else. THE INBOX IS ONLY READ — it is const,
+        // a corruption somewhere else. THE ASSETS IS ONLY READ — it is const,
         // and a guest that writes it is the bug this arrangement removes.
-        born.inbox_bytes  = config.inbox_bytes;
-        born.outbox_bytes = config.outbox_bytes;
-        if (config.inbox && config.inbox_bytes >= 16) {
-            const auto* p = static_cast<const uint8_t*>(config.inbox);
-            const uint32_t n = config.inbox_bytes;
+        born.assets_bytes  = config.assets_bytes;
+        born.returns_bytes = config.returns_bytes;
+        if (config.assets && config.assets_bytes >= 16) {
+            const auto* p = static_cast<const uint8_t*>(config.assets);
+            const uint32_t n = config.assets_bytes;
             // All this can honestly claim is that the three reads happened
-            // without faulting — the inbox's CONTENT is the client's business
+            // without faulting — the assets area's CONTENT is the client's business
             // and may be anything. Accumulated through a volatile sink so the
             // reads survive the optimiser; a bad pointer of the stated length
             // dies here rather than somewhere unrelated later.
             volatile uint32_t sink = 0;
             sink += p[0]; sink += p[n / 2u]; sink += p[n - 1u];
-            born.inbox_readable = 1;
+            born.assets_readable = 1;
         }
-        if (config.outbox && config.outbox_bytes >= 16) {
-            auto* p = static_cast<uint8_t*>(config.outbox);
-            const uint32_t n = config.outbox_bytes;
+        if (config.returns && config.returns_bytes >= 16) {
+            auto* p = static_cast<uint8_t*>(config.returns);
+            const uint32_t n = config.returns_bytes;
             const uint32_t probes[3] = { 0u, n / 2u, n - 1u };
-            born.outbox_rw_ok = 1;
+            born.returns_rw_ok = 1;
             for (uint32_t i = 0; i < 3; ++i) p[probes[i]] = static_cast<uint8_t>(0x5A + i);
             for (uint32_t i = 0; i < 3; ++i)
-                if (p[probes[i]] != static_cast<uint8_t>(0x5A + i)) born.outbox_rw_ok = 0;
+                if (p[probes[i]] != static_cast<uint8_t>(0x5A + i)) born.returns_rw_ok = 0;
         }
 
-        born.memory_bytes = config.arena_bytes;
-        if (config.arena && config.arena_bytes >= 16) {
-            auto* p = static_cast<uint8_t*>(config.arena);
-            const uint32_t n = config.arena_bytes;
+        born.memory_bytes = config.memory_bytes;
+        if (config.memory && config.memory_bytes >= 16) {
+            auto* p = static_cast<uint8_t*>(config.memory);
+            const uint32_t n = config.memory_bytes;
             born.memory_was_zero = 1;
             for (uint32_t i = 0; i < n; ++i)
                 if (p[i] != 0) { born.memory_was_zero = 0; break; }
@@ -354,22 +355,27 @@ struct DummyDsp {
             for (uint32_t i = 0; i < 3; ++i) p[probes[i]] = 0;
         }
 
-        // The bulk tier, by the same probes. A single-region host hands NULL/0
-        // and that is a working state, reported as "nothing to check" rather
-        // than as a failure — test arena_bulk for NULL, never the platform.
-        born.bulk_bytes = config.arena_bulk_bytes;
-        if (config.arena_bulk && config.arena_bulk_bytes >= 16) {
-            auto* p = static_cast<uint8_t*>(config.arena_bulk);
-            const uint32_t n = config.arena_bulk_bytes;
-            born.bulk_was_zero = 1;
-            for (uint32_t i = 0; i < n; ++i)
-                if (p[i] != 0) { born.bulk_was_zero = 0; break; }
-            const uint32_t probes[3] = { 0u, n / 2u, n - 1u };
-            born.bulk_rw_ok = 1;
-            for (uint32_t i = 0; i < 3; ++i) p[probes[i]] = static_cast<uint8_t>(0xB5 + i);
-            for (uint32_t i = 0; i < 3; ++i)
-                if (p[probes[i]] != static_cast<uint8_t>(0xB5 + i)) born.bulk_rw_ok = 0;
-            for (uint32_t i = 0; i < 3; ++i) p[probes[i]] = 0;
+        // The bulk span is the pool's, never written by hand (dsp_api.h):
+        // what is checked is that an allocation from it lands inside it, is
+        // zero as handed out at birth, and reads back what was written. A
+        // host with no pool hands NULL/0 and that is reported as "nothing to
+        // check" rather than as a failure.
+        born.bulk_bytes = config.memory_bulk_bytes;
+        if (config.memory_bulk && config.memory_bulk_bytes >= 16 && host.alloc_bytes) {
+            auto* p = static_cast<uint8_t*>(host.alloc_bytes(host.ctx, 64));
+            const auto* base = static_cast<const uint8_t*>(config.memory_bulk);
+            born.bulk_was_zero = 0;
+            born.bulk_rw_ok    = 0;
+            if (p && p >= base && p + 64 <= base + config.memory_bulk_bytes) {
+                born.bulk_was_zero = 1;
+                for (uint32_t i = 0; i < 64; ++i)
+                    if (p[i] != 0) { born.bulk_was_zero = 0; break; }
+                born.bulk_rw_ok = 1;
+                for (uint32_t i = 0; i < 3; ++i) p[i * 31] = static_cast<uint8_t>(0xB5 + i);
+                for (uint32_t i = 0; i < 3; ++i)
+                    if (p[i * 31] != static_cast<uint8_t>(0xB5 + i)) born.bulk_rw_ok = 0;
+            }
+            if (p && host.free_bytes) host.free_bytes(host.ctx, p);
         } else {
             born.bulk_was_zero = 1;
             born.bulk_rw_ok    = 1;
@@ -713,8 +719,8 @@ const DspInfo* dsp_describe(void) {
         // that meets them runs on every boot rather than only in a guest that
         // is not here. On a single-region host the fast arena must hold both:
         // 640 KB of that 1 MB.
-        /* arena_bytes_wanted      */ 512u * 1024u,
-        /* arena_bulk_bytes_wanted */ 128u * 1024u,
+        /* memory_bytes_wanted      */ 512u * 1024u,
+        /* memory_bulk_bytes_wanted */ 128u * 1024u,
         // Hear the host's inbound events (a keyboard, a pad) as they arrive,
         // so the path a self-directed guest takes them by is exercised here.
         /* wants_events            */ 1,
@@ -759,16 +765,20 @@ static const char* refusal(const DspConfig* config, const char* own) {
     return reason.c_str();
 }
 
-// The pool asked for, and room for the heap's own headers around it.
-uint64_t dsp_heap_bytes(const void* guest_config, uint32_t guest_config_bytes) {
+// The pool asked for, and room for the allocator's own headers around it.
+uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_bytes) {
     DspConfig config{};
     config.guest_config       = guest_config;
     config.guest_config_bytes = guest_config_bytes;
-    if (configText(&config, "declareHeap") == "0") return 0;
+    if (configText(&config, "declareBulk") == "0") return 0;
     const uint64_t pool = configNumber(&config, "rtPoolBytes");
     constexpr uint64_t kHeadroom = 8u * 1024u * 1024u;
     return pool == 0 ? 0 : (pool > UINT64_MAX - kHeadroom ? UINT64_MAX : pool + kHeadroom);
 }
+
+// What the configuration adds to the static want: nothing. The dummy's
+// working memory is its static figure (kInfo.memory_bytes_wanted).
+uint64_t dsp_memory_bytes(const void*, uint32_t) { return 0; }
 
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err) {
     if (!config || config->block_size == 0 || !(config->sample_rate > 0.0)) {
@@ -786,7 +796,7 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
         if (d->host.alloc_bytes) d->rt_pool = d->host.alloc_bytes(d->host.ctx, want);
         if (!d->rt_pool) {
             delete d;
-            if (err) *err = refusal(config, "dummy dsp: the host's heap cannot hold the real-time pool rtPoolBytes asks for");
+            if (err) *err = refusal(config, "dummy dsp: the bulk memory cannot hold the real-time pool rtPoolBytes asks for");
             return nullptr;
         }
     }
@@ -802,7 +812,7 @@ void dsp_free(struct Dsp* dsp) {
 }
 
 // Take an asset: record its shape and a checksum of the bytes AS THE GUEST
-// READS THEM (through the pointer, in the inbox), and hold the id until asked
+// READS THEM (through the pointer, in the assets area), and hold the id until asked
 // to let go. A kind this placeholder does not know is refused, which is the
 // path a real guest takes for bytes it cannot bind.
 int dsp_asset(struct Dsp* dsp, const ClockworkAsset* asset) {
@@ -1073,8 +1083,8 @@ void dsp_osc(struct Dsp* dsp,
     }
     // ── Bulk in: read what the client staged ────────────────────────────────
     //
-    // The client wrote these bytes into DspConfig::inbox and sent a short
-    // message saying where they are. THE GUEST ONLY READS THIS REGION — inbox
+    // The client wrote these bytes into DspConfig::assets and sent a short
+    // message saying where they are. THE GUEST ONLY READS THIS REGION — assets
     // is a `const void*` precisely so that a guest which forgets fails to
     // compile rather than racing the client's next write.
     //
@@ -1085,32 +1095,32 @@ void dsp_osc(struct Dsp* dsp,
     // Reporting a size and a hash rather than echoing the bytes keeps the
     // reply small and still tells a truncated or shifted staging area from an
     // intact one.
-    if (addressIs(bytes, len, "/dummy/inbox/hash")) {
+    if (addressIs(bytes, len, "/dummy/assets/hash")) {
         uint32_t offset = 0, want = 0;
-        if (!readTwoInts(bytes, len, "/dummy/inbox/hash", &offset, &want)) return;
+        if (!readTwoInts(bytes, len, "/dummy/assets/hash", &offset, &want)) return;
         if (!d->host.emit_osc) return;
 
         // Subtraction form: offset + want would wrap and let a crafted pair
         // past a naive bound into a read outside the region.
         uint32_t read = 0, hash = 0;
-        if (d->config.inbox && offset <= d->config.inbox_bytes
-                            && want <= d->config.inbox_bytes - offset) {
-            const auto* p = static_cast<const uint8_t*>(d->config.inbox) + offset;
+        if (d->config.assets && offset <= d->config.assets_bytes
+                            && want <= d->config.assets_bytes - offset) {
+            const auto* p = static_cast<const uint8_t*>(d->config.assets) + offset;
             read = want;
             hash = blobHash(p, want);
         }
         const uint32_t v[2] = { read, hash };
         uint8_t reply[80];
-        const uint32_t m = writeReplyInts(reply, sizeof reply, "/dummy/inbox/is", v, 2);
+        const uint32_t m = writeReplyInts(reply, sizeof reply, "/dummy/assets/is", v, 2);
         if (m) d->host.emit_osc(d->host.ctx, origin, reply, m);
         return;
     }
 
     // ── Bulk out: the inverse, through the other region ─────────────────────
     //
-    // The guest writes bytes into DspConfig::outbox and sends a short message
+    // The guest writes bytes into DspConfig::returns and sends a short message
     // saying where they are; a client reads them out on its own thread. Same
-    // addressing as the inbox, opposite direction, and a different region.
+    // addressing as the assets area, opposite direction, and a different region.
     if (addressIs(bytes, len, "/dummy/blob/produce")) {
         uint32_t want = 0, seed = 0;
         if (!readTwoInts(bytes, len, "/dummy/blob/produce", &want, &seed)) return;
@@ -1120,8 +1130,8 @@ void dsp_osc(struct Dsp* dsp,
         // and would hand back wherever it placed the blob.
         const uint32_t offset = 0;
         uint32_t wrote = 0, hash = 0;
-        if (d->config.outbox && want <= d->config.outbox_bytes) {
-            auto* p = static_cast<uint8_t*>(d->config.outbox) + offset;
+        if (d->config.returns && want <= d->config.returns_bytes) {
+            auto* p = static_cast<uint8_t*>(d->config.returns) + offset;
             for (uint32_t i = 0; i < want; ++i) p[i] = blobByteAt(seed, i);
             wrote = want;
             hash  = blobHash(p, want);
@@ -1154,9 +1164,9 @@ void dsp_osc(struct Dsp* dsp,
         uint32_t accepted = 0;
         const uint32_t need = padded(static_cast<uint32_t>(std::strlen("/dummy/blob-out")))
                             + padded(2) + 4 + ((want + 3u) & ~3u);
-        if (d->config.arena && need <= d->config.arena_bytes) {
-            auto* buf = static_cast<uint8_t*>(d->config.arena);
-            const uint32_t m = writeReplyBlob(buf, d->config.arena_bytes,
+        if (d->config.memory && need <= d->config.memory_bytes) {
+            auto* buf = static_cast<uint8_t*>(d->config.memory);
+            const uint32_t m = writeReplyBlob(buf, d->config.memory_bytes,
                                               "/dummy/blob-out", seed, want);
             if (m) accepted = d->host.emit_osc(d->host.ctx, origin, buf, m) ? 1u : 0u;
         }
@@ -1185,7 +1195,7 @@ void dsp_osc(struct Dsp* dsp,
         return;
     }
 
-    // ── The regions (dsp_api.h: guest_config, arena, inbox, outbox,
+    // ── The regions (dsp_api.h: guest_config, arena, assets, returns,
     // shm_window, persistent, clock) ────────────────────────────────────────
     //
     // Every one of these reports rather than acts. A region is not observable
@@ -1221,8 +1231,8 @@ void dsp_osc(struct Dsp* dsp,
     // only the first is visible from a size alone.
     if (addressIs(bytes, len, "/dummy/region/lanes")) {
         if (d->host.emit_osc) {
-            const uint32_t v[4] = { d->born.inbox_bytes,    d->born.outbox_bytes,
-                                    d->born.inbox_readable, d->born.outbox_rw_ok };
+            const uint32_t v[4] = { d->born.assets_bytes,    d->born.returns_bytes,
+                                    d->born.assets_readable, d->born.returns_rw_ok };
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/lanes-is", v, 4);

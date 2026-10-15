@@ -17,7 +17,7 @@
  *   - counts the drop.
  *
  * Manual-pump + udpPort 0: this thread is the sole process_audio() caller and
- * the arena is the in-process ring_buffer_storage, so writing raw frames into
+ * the arena is the in-process arena_storage, so writing raw frames into
  * it races nothing.
  */
 #include <catch2/catch_test_macros.hpp>
@@ -27,7 +27,7 @@
 #include <cstdint>
 #include <cstring>
 
-extern "C" uint8_t ring_buffer_storage[];
+extern "C" uint8_t arena_storage[];
 extern "C" bool process_audio(double current_time, uint32_t active_output_channels,
                               uint32_t active_input_channels);
 
@@ -39,8 +39,8 @@ ClockworkEngine::Config drainConfig() {
     return cfg;
 }
 
-ControlPointers* control() {
-    return reinterpret_cast<ControlPointers*>(ring_buffer_storage + CONTROL_START);
+RingCursors* control() {
+    return reinterpret_cast<RingCursors*>(arena_storage + RING_CURSORS_START);
 }
 
 // One process_audio() block on the test thread (channel counts match the
@@ -62,7 +62,7 @@ void quiesceAndReset(EngineFixture& fx) {
 // it, so the drain sees exactly one frame available.
 void injectHeader(uint32_t magic, uint32_t length) {
     uint32_t hdr[4] = { magic, length, /*sequence*/ 0, /*sourceId*/ 0 };
-    std::memcpy(ring_buffer_storage + IN_BUFFER_START, hdr, sizeof(hdr));
+    std::memcpy(arena_storage + IN_RING_START, hdr, sizeof(hdr));
     control()->in_tail.store(0, std::memory_order_release);
     control()->in_head.store(static_cast<int32_t>(sizeof(Message)),
                              std::memory_order_release);
@@ -97,7 +97,7 @@ TEST_CASE("in-ring-drain: over-long frame is dropped and resynced",
     const uint32_t droppedBefore = fx.engine().getMetrics().messages_dropped.load();
 
     // length beyond the buffer: must be rejected, not used to index the ring.
-    injectHeader(MESSAGE_MAGIC, IN_BUFFER_SIZE + 64);
+    injectHeader(MESSAGE_MAGIC, IN_RING_SIZE + 64);
     pump();
 
     auto* ctrl = control();
@@ -116,7 +116,7 @@ TEST_CASE("in-ring-drain: bad magic resyncs to head instead of byte-walking",
     // the tail straight to head (the whole region after corruption is suspect),
     // not advance one byte per iteration scanning for the next magic.
     injectHeader(0xABADCAFE, 64);
-    control()->in_head.store(static_cast<int32_t>(IN_BUFFER_SIZE / 2),
+    control()->in_head.store(static_cast<int32_t>(IN_RING_SIZE / 2),
                              std::memory_order_release);
     pump();
 
@@ -130,11 +130,11 @@ TEST_CASE("in-ring-drain: out-of-range cursor is clamped, drain skipped safely",
     EngineFixture fx(drainConfig());
     quiesceAndReset(fx);
 
-    // A tail outside [0, IN_BUFFER_SIZE) would index outside the IN region.
+    // A tail outside [0, IN_RING_SIZE) would index outside the IN region.
     // The drain must repair it (resync tail to head) and not dereference it.
     control()->in_head.store(0, std::memory_order_release);
     control()->in_tail.store(0x7FFFFFFF, std::memory_order_release);
     pump();  // must return without an OOB read
 
-    CHECK(static_cast<uint32_t>(control()->in_tail.load()) < IN_BUFFER_SIZE);
+    CHECK(static_cast<uint32_t>(control()->in_tail.load()) < IN_RING_SIZE);
 }

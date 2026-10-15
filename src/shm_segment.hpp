@@ -74,7 +74,7 @@ using std::string;
 
 // The public segment is a small handshake header followed by the unified
 // shared_memory.h arena blob — the SAME layout the engine uses in
-// ring_buffer_storage (native) / the WASM SAB. One layout, one source of
+// arena_storage (native) / the WASM SAB. One layout, one source of
 // truth; no separate native layout to drift. The peer command plane
 // (shm_peer_plane.h) sits after the blob: it is native-segment-only (its
 // consumers are the native host and an external peer), so the arena layout —
@@ -87,42 +87,42 @@ using std::string;
 static constexpr size_t SHM_BLOB_OFFSET = 256;  // aligned, >= sizeof(shm_segment_header)
 // Rounded up to 8: the arena total is only guaranteed 4-aligned, and the peer
 // plane header is alignas(8).
-static constexpr size_t SHM_PEER_OFFSET = (SHM_BLOB_OFFSET + TOTAL_BUFFER_SIZE + 7u) & ~size_t{7};
+static constexpr size_t SHM_PEER_OFFSET = (SHM_BLOB_OFFSET + ARENA_SIZE + 7u) & ~size_t{7};
 // The guest's two bulk regions, last because they are by far the largest and
 // because nothing before them should move when a size changes. Each is
 // 16-aligned so a guest can place anything it likes at a base without
 // re-aligning first.
 //
-// ONE WRITER EACH: the inbox is written only by the client, the outbox only by
+// ONE WRITER EACH: the assets area is written only by the client, the returns area only by
 // the guest. Keeping them apart is what makes that enforceable rather than
 // merely agreed.
 //
 // The guest's arena is not among them: no client maps it, so it is the
 // engine's own allocation rather than a region of this segment.
-static constexpr size_t SHM_INBOX_OFFSET =
+static constexpr size_t SHM_ASSETS_OFFSET =
     (SHM_PEER_OFFSET + SHM_PEER_PLANE_TOTAL_SIZE + 15u) & ~size_t{15};
-static constexpr size_t SHM_INBOX_SIZE   = static_cast<size_t>(CLOCKWORK_INBOX_BYTES);
+static constexpr size_t SHM_ASSETS_SIZE   = static_cast<size_t>(CLOCKWORK_ASSETS_BYTES);
 
-static constexpr size_t SHM_OUTBOX_OFFSET =
-    (SHM_INBOX_OFFSET + SHM_INBOX_SIZE + 15u) & ~size_t{15};
-static constexpr size_t SHM_OUTBOX_SIZE   = static_cast<size_t>(CLOCKWORK_OUTBOX_BYTES);
+static constexpr size_t SHM_RETURNS_OFFSET =
+    (SHM_ASSETS_OFFSET + SHM_ASSETS_SIZE + 15u) & ~size_t{15};
+static constexpr size_t SHM_RETURNS_SIZE   = static_cast<size_t>(CLOCKWORK_RETURNS_BYTES);
 
-static constexpr size_t SEGMENT_SIZE = SHM_OUTBOX_OFFSET + SHM_OUTBOX_SIZE;
+static constexpr size_t SEGMENT_SIZE = SHM_RETURNS_OFFSET + SHM_RETURNS_SIZE;
 
 // The lanes are sized by the host at launch (ClockworkEngine::Config), the
 // constants above being the defaults; the segment grows to fit, and a reader
-// takes the geometry from the header. Everything before the inbox is fixed.
+// takes the geometry from the header. Everything before the assets area is fixed.
 struct shm_lane_geometry {
-    size_t inbox_offset, inbox_size, outbox_offset, outbox_size, segment_size;
+    size_t assets_offset, assets_size, returns_offset, returns_size, segment_size;
     static constexpr size_t align16(size_t v) { return (v + 15u) & ~size_t{15}; }
-    static constexpr shm_lane_geometry of(size_t inbox_bytes, size_t outbox_bytes) {
-        const size_t in  = align16(inbox_bytes);
-        const size_t out = align16(outbox_bytes);
-        const size_t out_off = align16(SHM_INBOX_OFFSET + in);
-        return { SHM_INBOX_OFFSET, in, out_off, out, out_off + out };
+    static constexpr shm_lane_geometry of(size_t assets_bytes, size_t returns_bytes) {
+        const size_t in  = align16(assets_bytes);
+        const size_t out = align16(returns_bytes);
+        const size_t out_off = align16(SHM_ASSETS_OFFSET + in);
+        return { SHM_ASSETS_OFFSET, in, out_off, out, out_off + out };
     }
 };
-static_assert(shm_lane_geometry::of(SHM_INBOX_SIZE, SHM_OUTBOX_SIZE).segment_size == SEGMENT_SIZE,
+static_assert(shm_lane_geometry::of(SHM_ASSETS_SIZE, SHM_RETURNS_SIZE).segment_size == SEGMENT_SIZE,
               "the default geometry is the constant one");
 
 // ──── Platform shared memory primitives ─────────────────────────────────
@@ -434,10 +434,10 @@ inline void shm_remove(const string& name) {
 //   shm_segment_header        (MAGIC + the self-describing geometry below;
 //                              184 B today, inside the 256 B reserved)
 //   <pad to SHM_BLOB_OFFSET>
-//   shared_memory.h arena blob (TOTAL_BUFFER_SIZE) — the *same* layout the
-//   engine uses in ring_buffer_storage / the WASM SAB. The engine points its
+//   shared_memory.h arena blob (ARENA_SIZE) — the *same* layout the
+//   engine uses in arena_storage / the WASM SAB. The engine points its
 //   `shared_memory` base at this blob, so rings, control pointers, metrics,
-//   node-tree, raw scope and tap streams are all addressed by their
+//   node-tree, scope and tap streams are all addressed by their
 //   shared_memory.h offsets and observable cross-process for free.
 //
 // MAGIC history:
@@ -452,10 +452,10 @@ inline void shm_remove(const string& name) {
 //   0x5C09E008  tap slots became lossless cursor-ring streams
 //               (shm_tap_stream.hpp) + ClockworkClock sample-clock region appended
 //               to the arena (engine-frames ↔ DAC-NTP mapping)
-//   0x5C09E009  guest memory regions (inbox/outbox) after the plane
+//   0x5C09E009  guest memory regions (assets/returns) after the plane
 //   0x5C09E00A  channel map region
 //   0x5C09E00B  self-describing for readers: control/clock-state/native-stats/
-//               sample-clock/channel-map sizes and the raw scope geometry
+//               sample-clock/channel-map sizes and the scope geometry
 //               appended, and readers (shm_segment_client, clockwork_client)
 //               address every region through the header (ShmReaderLayout)
 //               instead of their own build's constants. The segment is also
@@ -476,7 +476,7 @@ inline void shm_remove(const string& name) {
 
 // Self-describing handshake: the creator publishes every region's offset and
 // geometry, so a reader needs no compile-time knowledge of the
-// arena layout — it locates metrics, rings, node-tree, raw scope and taps
+// arena layout — it locates metrics, rings, node-tree, scope and taps
 // purely from these fields. This makes the consumer drift-proof: layout/size
 // changes propagate through the header rather than requiring a hand-synced copy.
 // All offsets are relative to the arena blob base (segment + blob_offset).
@@ -496,10 +496,10 @@ struct shm_segment_header {
     uint32_t peer_cmd_ring_bytes;  // SHM_PEER_CMD_RING_SIZE
     uint32_t peer_rep_ring_bytes;  // SHM_PEER_REP_RING_SIZE
     // The guest's two bulk regions, one direction each: a client writes a
-    // sample into the inbox and sends a short message saying where; a guest
-    // writes a rendered blob into the outbox and does the same. Nothing large
+    // sample into the assets area and sends a short message saying where; a guest
+    // writes a rendered blob into the returns area and does the same. Nothing large
     // goes through a ring, and nothing is written from both ends. The guest's
-    // arena is not in this segment — see SHM_INBOX_OFFSET.
+    // arena is not in this segment — see SHM_ASSETS_OFFSET.
     //
     // SEGMENT-relative, like peer_offset and for the same reason.
     //
@@ -508,10 +508,10 @@ struct shm_segment_header {
     // kernel gives it, which is not the address the engine sees, so a raw
     // pointer in a message would be meaningless across the boundary — and
     // meaningless in a way that reads as valid.
-    uint32_t inbox_offset;
-    uint32_t inbox_size;
-    uint32_t outbox_offset;
-    uint32_t outbox_size;
+    uint32_t assets_offset;
+    uint32_t assets_size;
+    uint32_t returns_offset;
+    uint32_t returns_size;
 };
 
 static_assert(sizeof(shm_segment_header) <= SHM_BLOB_OFFSET,
@@ -527,7 +527,7 @@ static_assert(SHM_PEER_OFFSET % 8 == 0,
 class shm_segment {
 public:
     shm_segment(void* segment_base, bool init,
-                shm_lane_geometry lanes = shm_lane_geometry::of(SHM_INBOX_SIZE, SHM_OUTBOX_SIZE)) {
+                shm_lane_geometry lanes = shm_lane_geometry::of(SHM_ASSETS_SIZE, SHM_RETURNS_SIZE)) {
         char* seg = static_cast<char*>(segment_base);
         auto* base8 = reinterpret_cast<uint8_t*>(seg);
         header_ = reinterpret_cast<shm_segment_header*>(seg);
@@ -538,18 +538,22 @@ public:
             L_    = ShmReaderLayout::from_constants();
             blob_ = base8 + SHM_BLOB_OFFSET;
             peer_ = reinterpret_cast<ShmPeerPlaneHeader*>(seg + SHM_PEER_OFFSET);
-            inbox_       = base8 + lanes.inbox_offset;
-            inbox_size_  = lanes.inbox_size;
-            outbox_      = base8 + lanes.outbox_offset;
-            outbox_size_ = lanes.outbox_size;
+            assets_       = base8 + lanes.assets_offset;
+            assets_size_  = lanes.assets_size;
+            returns_      = base8 + lanes.returns_offset;
+            returns_size_ = lanes.returns_size;
 
             header_->blob_offset = static_cast<uint32_t>(SHM_BLOB_OFFSET);
-            header_->blob_size   = static_cast<uint32_t>(TOTAL_BUFFER_SIZE);
+            header_->blob_size   = static_cast<uint32_t>(ARENA_SIZE);
             // The arena's own table, at the front of the blob. init_memory
             // writes the same bytes again when the engine takes the arena;
             // writing it here too means a segment is complete without one,
             // which is what a reader opened against a bare creator sees.
             writeArenaHeader(blob_);
+            // The assets and the returns, as offsets from the segment's base:
+            // what any process that maps the segment can resolve.
+            arenaSetArea(blob_, CLOCKWORK_AREA_ASSETS,  CLOCKWORK_SPACE_SEGMENT, lanes.assets_offset,  lanes.assets_size);
+            arenaSetArea(blob_, CLOCKWORK_AREA_RETURNS, CLOCKWORK_SPACE_SEGMENT, lanes.returns_offset, lanes.returns_size);
 
             header_->peer_offset         = static_cast<uint32_t>(SHM_PEER_OFFSET);
             header_->peer_header_bytes   = static_cast<uint32_t>(sizeof(ShmPeerPlaneHeader));
@@ -557,10 +561,10 @@ public:
             header_->peer_rep_ring_bytes = SHM_PEER_REP_RING_SIZE;
             shm_peer_plane_init(peer_);
 
-            header_->inbox_offset  = static_cast<uint32_t>(lanes.inbox_offset);
-            header_->inbox_size    = static_cast<uint32_t>(lanes.inbox_size);
-            header_->outbox_offset = static_cast<uint32_t>(lanes.outbox_offset);
-            header_->outbox_size   = static_cast<uint32_t>(lanes.outbox_size);
+            header_->assets_offset  = static_cast<uint32_t>(lanes.assets_offset);
+            header_->assets_size    = static_cast<uint32_t>(lanes.assets_size);
+            header_->returns_offset = static_cast<uint32_t>(lanes.returns_offset);
+            header_->returns_size   = static_cast<uint32_t>(lanes.returns_size);
 
             // NOTE: MAGIC is deliberately NOT stored here. The geometry fields
             // above are written now (before init_memory()), but the arena blob
@@ -581,10 +585,10 @@ public:
             if (!ShmReaderLayout::from_arena(blob_, header_->blob_size, L_, &why))
                 L_ = ShmReaderLayout{};
             peer_ = reinterpret_cast<ShmPeerPlaneHeader*>(seg + header_->peer_offset);
-            inbox_       = base8 + header_->inbox_offset;
-            inbox_size_  = header_->inbox_size;
-            outbox_      = base8 + header_->outbox_offset;
-            outbox_size_ = header_->outbox_size;
+            assets_       = base8 + header_->assets_offset;
+            assets_size_  = header_->assets_size;
+            returns_      = base8 + header_->returns_offset;
+            returns_size_ = header_->returns_size;
         }
     }
 
@@ -634,20 +638,20 @@ public:
     // The guest's three regions, one writer each. Callers address INTO them by
     // offset from a base — never by a pointer taken from a message, which would
     // belong to the engine's mapping and not to theirs.
-    uint8_t* get_inbox()       { return inbox_; }        // client writes
-    size_t   get_inbox_size()  { return inbox_size_; }
-    uint8_t* get_outbox()      { return outbox_; }       // guest writes
-    size_t   get_outbox_size() { return outbox_size_; }
+    uint8_t* get_assets()       { return assets_; }        // client writes
+    size_t   get_assets_size()  { return assets_size_; }
+    uint8_t* get_returns()      { return returns_; }       // guest writes
+    size_t   get_returns_size() { return returns_size_; }
 
 private:
     shm_segment_header* header_;
     ShmReaderLayout     L_;
     uint8_t*            blob_;
     ShmPeerPlaneHeader* peer_;
-    uint8_t*            inbox_       = nullptr;
-    size_t              inbox_size_  = 0;
-    uint8_t*            outbox_      = nullptr;
-    size_t              outbox_size_ = 0;
+    uint8_t*            assets_       = nullptr;
+    size_t              assets_size_  = 0;
+    uint8_t*            returns_      = nullptr;
+    size_t              returns_size_ = 0;
 };
 
 // ──── Sample-clock view ─────────────────────────────────────────────────
@@ -699,12 +703,12 @@ public:
     // segment is as large as they need. NOT cleared here: fresh anonymous
     // memory is zero on every platform, and clearing it would commit every
     // page of a lane whose whole point is to cost nothing until written.
-    explicit shm_segment_creator(size_t inbox_bytes = SHM_INBOX_SIZE,
-                                 size_t outbox_bytes = SHM_OUTBOX_SIZE):
-        lanes_(shm_lane_geometry::of(inbox_bytes, outbox_bytes)),
+    explicit shm_segment_creator(size_t assets_bytes = SHM_ASSETS_SIZE,
+                                 size_t returns_bytes = SHM_RETURNS_SIZE):
+        lanes_(shm_lane_geometry::of(assets_bytes, returns_bytes)),
         handle(shm_create_anonymous(lanes_.segment_size))
     {
-        if (lanes_.inbox_size > 0xFFFFFFFFull || lanes_.segment_size > 0xFFFFFFFFull) {
+        if (lanes_.assets_size > 0xFFFFFFFFull || lanes_.segment_size > 0xFFFFFFFFull) {
             shm_close(handle);
             throw std::runtime_error("shared memory lanes exceed what the header can address (4 GB)");
         }
@@ -740,13 +744,13 @@ public:
     // Arena blob base — the engine points `shared_memory` here.
     uint8_t* get_base() { return shm ? shm->get_base() : nullptr; }
 
-    // The guest's regions, handed to the DSP as DspConfig::arena / ::inbox /
-    // ::outbox. Bulk travels through the last two, one direction each, so
+    // The guest's regions, handed to the DSP as DspConfig::arena / ::assets /
+    // ::returns. Bulk travels through the last two, one direction each, so
     // nothing large has to travel as a message.
-    uint8_t* get_inbox()       { return shm ? shm->get_inbox() : nullptr; }
-    size_t   get_inbox_size()  { return shm ? shm->get_inbox_size() : 0; }
-    uint8_t* get_outbox()      { return shm ? shm->get_outbox() : nullptr; }
-    size_t   get_outbox_size() { return shm ? shm->get_outbox_size() : 0; }
+    uint8_t* get_assets()       { return shm ? shm->get_assets() : nullptr; }
+    size_t   get_assets_size()  { return shm ? shm->get_assets_size() : 0; }
+    uint8_t* get_returns()      { return shm ? shm->get_returns() : nullptr; }
+    size_t   get_returns_size() { return shm ? shm->get_returns_size() : 0; }
 
     // Store MAGIC, making the segment visible to readers. Call once the engine
     // has populated the arena (after init_memory()) so observers never see a
@@ -829,8 +833,8 @@ public:
                         + header->peer_rep_ring_bytes)
             || header->peer_header_bytes < sizeof(ShmPeerPlaneHeader))
             throw std::runtime_error("Shared memory peer plane outside the segment");
-        if (!within(header->inbox_offset, header->inbox_size)
-            || !within(header->outbox_offset, header->outbox_size))
+        if (!within(header->assets_offset, header->assets_size)
+            || !within(header->returns_offset, header->returns_size))
             throw std::runtime_error("Shared memory guest regions outside the segment");
         const char* why = "";
         ShmReaderLayout L;
@@ -868,10 +872,10 @@ public:
      * offset, and the bounds check below is why a corrupt or hostile one
      * yields nullptr rather than a read outside the mapping.
      */
-    uint8_t* get_inbox()       { return shm->get_inbox(); }
-    size_t   get_inbox_size()  { return shm->get_inbox_size(); }
-    const uint8_t* get_outbox()      { return shm->get_outbox(); }
-    size_t         get_outbox_size() { return shm->get_outbox_size(); }
+    uint8_t* get_assets()       { return shm->get_assets(); }
+    size_t   get_assets_size()  { return shm->get_assets_size(); }
+    const uint8_t* get_returns()      { return shm->get_returns(); }
+    size_t         get_returns_size() { return shm->get_returns_size(); }
 
     // Bounds-checked views of [offset, offset + len) inside a region. nullptr
     // when it does not lie wholly within — including on overflow, which is why
@@ -882,13 +886,13 @@ public:
         if (!base || offset > size || len > size - offset) return nullptr;
         return base + offset;
     }
-    uint8_t* inbox_at(uint32_t offset, uint32_t len) {
-        return region_at(shm->get_inbox(), shm->get_inbox_size(), offset, len);
+    uint8_t* assets_at(uint32_t offset, uint32_t len) {
+        return region_at(shm->get_assets(), shm->get_assets_size(), offset, len);
     }
-    // Const on this side: the guest writes the outbox, a client only reads it,
-    // which is the mirror of DspConfig::inbox being const to the guest.
-    const uint8_t* outbox_at(uint32_t offset, uint32_t len) {
-        return region_at(shm->get_outbox(), shm->get_outbox_size(), offset, len);
+    // Const on this side: the guest writes the returns area, a client only reads it,
+    // which is the mirror of DspConfig::assets being const to the guest.
+    const uint8_t* returns_at(uint32_t offset, uint32_t len) {
+        return region_at(shm->get_returns(), shm->get_returns_size(), offset, len);
     }
 
     // Flat atomic u32 view of PerformanceMetrics, for observers that render
@@ -977,8 +981,8 @@ private:
         shm_handle handle;
     };
 
-    ControlPointers* control() {
-        return reinterpret_cast<ControlPointers*>(shm->get_base() + layout().control_offset);
+    RingCursors* control() {
+        return reinterpret_cast<RingCursors*>(shm->get_base() + layout().control_offset);
     }
 
     std::shared_ptr<mapping>              map_;
@@ -993,4 +997,4 @@ using detail_shm_segment::ring_view;
 using detail_shm_segment::window_view;
 using detail_shm_segment::native_stats;
 using detail_shm_segment::sample_clock_view;
-// shm_audio_buffer + SHM_AUDIO_* names are exported by shm_audio_buffer.hpp.
+// shm_audio_buffer + SCOPE_* names are exported by shm_audio_buffer.hpp.

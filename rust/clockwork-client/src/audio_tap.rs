@@ -15,7 +15,7 @@ use clockwork_abi::client::{
 use crate::client::Client;
 use crate::error::{check, Result};
 
-/// The most channels a tap slot carries — `SHM_TAP_STREAM_CHANNELS` in
+/// The most channels a tap slot carries — `TAP_STREAM_CHANNELS` in
 /// `src/shm_tap_stream.hpp`, which the engine clamps every slot's channel
 /// count to. A read buffer is sized by this, because the count a slot
 /// actually has is re-read as the copy happens and may differ from one read

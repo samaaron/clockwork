@@ -39,7 +39,7 @@
 // not on this target's include path.
 extern "C" {
     extern uint8_t*            shared_memory;
-    extern ControlPointers*    control;
+    extern RingCursors* cursors;
     extern PerformanceMetrics* metrics;
     extern bool                memory_initialized;
 }
@@ -67,22 +67,22 @@ namespace {
 struct LanesArena {
     std::vector<uint8_t> buf;
     uint8_t*             savedMem;
-    ControlPointers*     savedCtrl;
+    RingCursors*     savedCtrl;
     PerformanceMetrics*  savedMetrics;
     bool                 savedInit;
 
-    LanesArena() : buf(TOTAL_BUFFER_SIZE, 0) {
-        savedMem  = shared_memory; savedCtrl = control;
+    LanesArena() : buf(ARENA_SIZE, 0) {
+        savedMem  = shared_memory; savedCtrl = cursors;
         savedMetrics = metrics;    savedInit = memory_initialized;
         shared_memory      = buf.data();
         writeArenaHeader(buf.data());   // an arena describes itself, even a test's
-        control            = reinterpret_cast<ControlPointers*>(buf.data() + CONTROL_START);
+        cursors            = reinterpret_cast<RingCursors*>(buf.data() + RING_CURSORS_START);
         metrics            = reinterpret_cast<PerformanceMetrics*>(buf.data() + METRICS_START);
         memory_initialized = true;
         clockwork_lanes_reset_drains();  // fresh arena → fresh sequence-gap tracking
     }
     ~LanesArena() {
-        shared_memory = savedMem; control = savedCtrl;
+        shared_memory = savedMem; cursors = savedCtrl;
         metrics = savedMetrics;   memory_initialized = savedInit;
     }
 };
@@ -112,8 +112,8 @@ bool writeRtFrame(uint32_t sourceId) {
     std::memcpy(framed, &route, sizeof(route));
     std::memcpy(framed + EGRESS_ROUTE_SIZE, kFiller, sizeof(kFiller));
     return RingBufferWriter::write(
-        shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
-        &control->out_head, &control->out_tail, &control->out_sequence, &lock,
+        shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+        &cursors->out_head, &cursors->out_tail, &cursors->out_sequence, &lock,
         framed, sizeof(framed), sourceId);
 }
 
@@ -434,8 +434,8 @@ TEST_CASE("lanes ABI: clockwork_ingress_write frames a message onto the IN ring"
     ClockworkDrainState st;
     int frames = 0; uint32_t gotSrc = 0; std::vector<uint8_t> gotPayload;
     uint32_t delivered = clockwork_drain_ring(
-        shared_memory + IN_BUFFER_START, IN_BUFFER_SIZE,
-        &control->in_head, &control->in_tail, st, ClockworkDrainMetrics{}, 0,
+        shared_memory + IN_RING_START, IN_RING_SIZE,
+        &cursors->in_head, &cursors->in_tail, st, ClockworkDrainMetrics{}, 0,
         [&](uint32_t src, const uint8_t* p, uint32_t n, uint32_t) {
             frames++; gotSrc = src; gotPayload.assign(p, p + n);
             return ClockworkDrainVerdict::Consume;
@@ -479,7 +479,7 @@ TEST_CASE("lanes ABI: RT egress drain delivers a framed OUT frame", "[lanes][abi
 TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing they took", "[lanes][abi]") {
     LanesArena arena;
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
@@ -504,7 +504,7 @@ TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing the
 TEST_CASE("lanes ABI: the egress drains after a client poll take nothing it took", "[lanes][abi]") {
     LanesArena arena;
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
@@ -549,22 +549,22 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     REQUIRE(h->magic == CLOCKWORK_ARENA_MAGIC);
     REQUIRE(h->version == CLOCKWORK_ARENA_VERSION);
     REQUIRE(h->state == CLOCKWORK_ARENA_PUBLISHED);
-    REQUIRE(h->arena_bytes == TOTAL_BUFFER_SIZE);
+    REQUIRE(h->arena_bytes == ARENA_SIZE);
 
     const auto region = [&](uint32_t id) {
         const ClockworkArenaEntry* e = clockwork_arena_find(h, id);
         REQUIRE(e != nullptr);
         return e;
     };
-    const auto* in  = region(CLOCKWORK_ARENA_IN_RING);
-    const auto* out = region(CLOCKWORK_ARENA_OUT_RING);
-    const auto* nrt = region(CLOCKWORK_ARENA_NRT_OUT_RING);
-    REQUIRE(in->offset  == IN_BUFFER_START);      REQUIRE(in->bytes  == IN_BUFFER_SIZE);
-    REQUIRE(out->offset == OUT_BUFFER_START);     REQUIRE(out->bytes == OUT_BUFFER_SIZE);
-    REQUIRE(nrt->offset == NRT_OUT_BUFFER_START); REQUIRE(nrt->bytes == NRT_OUT_BUFFER_SIZE);
-    REQUIRE(region(CLOCKWORK_ARENA_CONTROL)->offset == CONTROL_START);
-    REQUIRE(region(CLOCKWORK_ARENA_METRICS)->offset == METRICS_START);
-    REQUIRE(region(CLOCKWORK_ARENA_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] == METRICS_SIZE / 4u);
+    const auto* in  = region(CLOCKWORK_ARENA_CLOCKWORK_IN_RING);
+    const auto* out = region(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING);
+    const auto* nrt = region(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING);
+    REQUIRE(in->offset  == IN_RING_START);      REQUIRE(in->bytes  == IN_RING_SIZE);
+    REQUIRE(out->offset == RT_OUT_RING_START);     REQUIRE(out->bytes == RT_OUT_RING_SIZE);
+    REQUIRE(nrt->offset == NRT_OUT_RING_START); REQUIRE(nrt->bytes == NRT_OUT_RING_SIZE);
+    REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS)->offset == RING_CURSORS_START);
+    REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_METRICS)->offset == METRICS_START);
+    REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] == METRICS_SIZE / 4u);
 
     // The wire constants a foreign reader needs to parse a frame at all.
     REQUIRE(in->geom[CLOCKWORK_GEOM_RING_MESSAGE_MAGIC] == MESSAGE_MAGIC);

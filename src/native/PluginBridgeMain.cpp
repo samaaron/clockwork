@@ -138,7 +138,7 @@ private:
         std::memcpy(scratch.data(), &route, sizeof route);
         std::memcpy(scratch.data() + sizeof(uint32_t), osc, len);
         MsgRing& r = mHeader->out;
-        if (!RingBufferWriter::write(mRing, OUT_RING_SIZE, &r.head, &r.tail, &r.sequence,
+        if (!RingBufferWriter::write(mRing, clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, &r.sequence,
                                      &r.write_lock, scratch.data(),
                                      static_cast<uint32_t>(scratch.size()), token))
             r.dropped.fetch_add(1, std::memory_order_relaxed);

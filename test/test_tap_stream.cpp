@@ -7,7 +7,7 @@
  * blocks of audio into a shared ring at its own rate and a client copies
  * windows out of it whenever it likes, with no lock between them and no
  * message carrying a sample. It is how a waveform gets on screen, and it is
- * the largest region in the arena (4 MB) — SHM_TAP is bigger than the OSC
+ * the largest region in the arena (4 MB) — TAPS is bigger than the OSC
  * rings and the node-tree mirror put together.
  *
  * It went untested because it is header-only and its only in-tree writer lives
@@ -94,7 +94,7 @@ TEST_CASE("tap stream: a window comes back exactly as it was written",
     REQUIRE(r.write_position() == 512);
 
     uint32_t used = 0;
-    std::vector<float> out(256 * SHM_TAP_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(256 * TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(512, 256, out.data(), &used);
 
     REQUIRE(used == 2);
@@ -140,7 +140,7 @@ TEST_CASE("tap stream: a window straddling the ring wrap is still in order",
 
     const uint32_t frames = 1024;
     uint32_t used = 0;
-    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(frames * TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(pos, frames, out.data(), &used);
     REQUIRE(real == frames);
 
@@ -164,7 +164,7 @@ TEST_CASE("tap stream: history the ring no longer holds is zero-filled, not shor
 
     const uint32_t frames = 256;
     uint32_t used = 0;
-    std::vector<float> out(frames * SHM_TAP_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(frames * TAP_STREAM_CHANNELS, -1.0f);
     const uint32_t real = r.copy_window(64, frames, out.data(), &used);
 
     // Fewer real frames than asked for...
@@ -233,8 +233,8 @@ TEST_CASE("tap stream: corrupt geometry is clamped rather than believed",
     // to index the inline data array.
     slot.get()->channels        = 9999;
     slot.get()->capacity_frames = 0xFFFFFFFFu;
-    REQUIRE(r.channels() <= SHM_TAP_STREAM_CHANNELS);
-    REQUIRE(r.capacity_frames() <= SHM_TAP_RING_FRAMES);
+    REQUIRE(r.channels() <= TAP_STREAM_CHANNELS);
+    REQUIRE(r.capacity_frames() <= TAP_RING_FRAMES);
 
     slot.get()->channels        = 0;
     slot.get()->capacity_frames = 0;
@@ -244,9 +244,9 @@ TEST_CASE("tap stream: corrupt geometry is clamped rather than believed",
     // And a copy against the corrupt slot still writes the whole buffer
     // without reading outside the ring.
     uint32_t used = 0;
-    std::vector<float> out(64 * SHM_TAP_STREAM_CHANNELS, -1.0f);
+    std::vector<float> out(64 * TAP_STREAM_CHANNELS, -1.0f);
     r.copy_window(256, 64, out.data(), &used);
-    REQUIRE(used <= SHM_TAP_STREAM_CHANNELS);
+    REQUIRE(used <= TAP_STREAM_CHANNELS);
 }
 
 TEST_CASE("tap stream: an inactive or absent slot yields silence, not stale memory",
@@ -259,7 +259,7 @@ TEST_CASE("tap stream: an inactive or absent slot yields silence, not stale memo
     REQUIRE_FALSE(none.valid());
 
     uint32_t used = 0;
-    std::vector<float> out(32 * SHM_TAP_STREAM_CHANNELS, 7.0f);
+    std::vector<float> out(32 * TAP_STREAM_CHANNELS, 7.0f);
     const uint32_t real = none.copy_window(0, 32, out.data(), &used);
     REQUIRE(real == 0);
     for (float v : out) REQUIRE(v == 0.0f);

@@ -134,22 +134,22 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     // the window is microseconds wide, so the ring is filled by hand here.
     engine_test::Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrainsEgress = true; });
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, TOTAL_BUFFER_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
     REQUIRE(st == CLOCKWORK_OK);
     takeAll(c);   // boot's broadcasts
 
     // Put the reply half-way round the ring, where the writer will wrap on to
     // it: at the ring's start the front has no room for a frame and the
     // writer refuses before it ever reaches the held bytes.
-    auto* ctl = reinterpret_cast<ControlPointers*>(shared_memory + CONTROL_START);
+    auto* ctl = reinterpret_cast<RingCursors*>(shared_memory + RING_CURSORS_START);
     const auto fill = [&](const std::vector<uint8_t>& payload) {
-        return ring_buffer_write(shared_memory + OUT_BUFFER_START, OUT_BUFFER_SIZE,
+        return ring_buffer_write(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
                                  &ctl->out_head, &ctl->out_tail, &ctl->out_sequence,
                                  EGRESS_REPLY, 7, payload.data(), static_cast<uint32_t>(payload.size()),
                                  nullptr, nullptr);
     };
     const std::vector<uint8_t> coarse(200, 0xEE);
-    while (static_cast<uint32_t>(ctl->out_head.load()) < OUT_BUFFER_SIZE / 2) REQUIRE(fill(coarse));
+    while (static_cast<uint32_t>(ctl->out_head.load()) < RT_OUT_RING_SIZE / 2) REQUIRE(fill(coarse));
     takeAll(c);
 
     // One reply on the OUT ring, taken and held. Written by hand, and long,

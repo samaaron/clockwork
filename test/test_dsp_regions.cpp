@@ -203,24 +203,26 @@ TEST_CASE("regions: the guest's memory wants are declared, checked, and met",
     lanes_test::boot();
     lanes_test::drainRt();
 
-    // The placeholder declares wants (dsp_describe), and this fixture is a
-    // single-region host: no bulk tier, so the fast arena has to hold both.
-    // That the boot got this far IS the check passing; what is asserted here
-    // is that the arithmetic the boot used agrees with the declaration.
+    // The placeholder declares wants (dsp_describe); the fixture places the
+    // fast span itself and clockwork takes the bulk span from its bulk tier
+    // (one RAM here, so a second slice of it). That the boot got this far IS
+    // the check passing; what is asserted here is that the arithmetic the
+    // boot used agrees with the declaration.
     const DspInfo* info = dsp_describe();
     REQUIRE(info != nullptr);
-    REQUIRE(info->arena_bytes_wanted > 0);
-    REQUIRE(info->arena_bulk_bytes_wanted > 0);
-    REQUIRE(info->arena_bytes_wanted + info->arena_bulk_bytes_wanted
-            <= lanes_test::kGuestMemoryBytes);
+    REQUIRE(info->memory_bytes_wanted > 0);
+    REQUIRE(info->memory_bulk_bytes_wanted > 0);
+    REQUIRE(info->memory_bytes_wanted <= lanes_test::kGuestMemoryBytes);
     REQUIRE(g_dsp != nullptr);
 
-    // What the guest was handed. A single-region host: no bulk arena, and the
-    // guest reports "nothing to check" for it rather than a failure.
+    // What the guest was handed: a bulk span at least its want and the
+    // profile's default (dsp_api.h), with clockwork's allocator over it, which
+    // answered the guest's probe from inside the span, zeroed and writable.
     const auto r = ask("/dummy/region/tiers", "/dummy/region/tiers-is");
-    REQUIRE(r.argInt(0) == 0);   // arena_bulk_bytes
-    REQUIRE(r.argInt(1) == 1);   // bulk_was_zero: vacuously
-    REQUIRE(r.argInt(2) == 1);   // bulk_rw_ok:    vacuously
+    REQUIRE(r.argInt(0) >= static_cast<int32_t>(info->memory_bulk_bytes_wanted));   // memory_bulk_bytes
+    REQUIRE(r.argInt(0) >= static_cast<int32_t>(CLOCKWORK_GUEST_MEMORY_BULK_BYTES));
+    REQUIRE(r.argInt(1) == 1);   // bulk_was_zero: an allocation at birth is zero
+    REQUIRE(r.argInt(2) == 1);   // bulk_rw_ok:    and inside the span, writable
     // The floating-point environment the fixture declared reached the guest
     // verbatim — DENORMALS_HONOURED, because the fixture arms nothing on the
     // thread that ticks. A host that says nothing would show UNKNOWN here.
@@ -235,36 +237,36 @@ TEST_CASE("regions: a want the host cannot meet is refused, never spilled",
     uint32_t sf = 0, sb = 0;
 
     // Zero wants are met by any host, including one offering nothing.
-    CHECK(clockwork_arena_meets(0, 0, /*tiered*/ 0, 0, 0, &sf, &sb) != 0);
-    CHECK(clockwork_arena_meets(0, 0, /*tiered*/ 1, 0, 0, &sf, &sb) != 0);
+    CHECK(clockwork_memory_meets(0, 0, /*tiered*/ 0, 0, 0, &sf, &sb) != 0);
+    CHECK(clockwork_memory_meets(0, 0, /*tiered*/ 1, 0, 0, &sf, &sb) != 0);
 
     // Single-region: the fast arena carries both wants.
-    CHECK(clockwork_arena_meets(1000, 0, 0, 600, 400, &sf, &sb) != 0);
-    CHECK(clockwork_arena_meets(999,  0, 0, 600, 400, &sf, &sb) == 0);
+    CHECK(clockwork_memory_meets(1000, 0, 0, 600, 400, &sf, &sb) != 0);
+    CHECK(clockwork_memory_meets(999,  0, 0, 600, 400, &sf, &sb) == 0);
     CHECK(sf == 1);
     CHECK(sb == 0);
     // ...and a bulk arena that happens to be offered on a single-region host
     // does not rescue a fast shortfall, because the rule says there is no
     // bulk tier there.
-    CHECK(clockwork_arena_meets(999, 4096, 0, 600, 400, &sf, &sb) == 0);
+    CHECK(clockwork_memory_meets(999, 4096, 0, 600, 400, &sf, &sb) == 0);
 
     // Tiered: each want against its own tier, and NO SPILL in either
     // direction — a fast shortfall is not met from a roomy bulk, nor a bulk
     // shortfall from a roomy fast.
-    CHECK(clockwork_arena_meets(600, 400, 1, 600, 400, &sf, &sb) != 0);
-    CHECK(clockwork_arena_meets(599, 4096, 1, 600, 400, &sf, &sb) == 0);
+    CHECK(clockwork_memory_meets(600, 400, 1, 600, 400, &sf, &sb) != 0);
+    CHECK(clockwork_memory_meets(599, 4096, 1, 600, 400, &sf, &sb) == 0);
     CHECK(sf == 1);
     CHECK(sb == 0);
-    CHECK(clockwork_arena_meets(4096, 399, 1, 600, 400, &sf, &sb) == 0);
+    CHECK(clockwork_memory_meets(4096, 399, 1, 600, 400, &sf, &sb) == 0);
     CHECK(sf == 0);
     CHECK(sb == 1);
 
     // Two wants near the top of uint32 do not wrap into "met".
-    CHECK(clockwork_arena_meets(UINT32_MAX, 0, 0, UINT32_MAX, 16, &sf, &sb) == 0);
+    CHECK(clockwork_memory_meets(UINT32_MAX, 0, 0, UINT32_MAX, 16, &sf, &sb) == 0);
     CHECK(sf == 16);
 
     // The shortfall outputs are optional.
-    CHECK(clockwork_arena_meets(1, 0, 0, 2, 0, nullptr, nullptr) == 0);
+    CHECK(clockwork_memory_meets(1, 0, 0, 2, 0, nullptr, nullptr) == 0);
 }
 
 // ── shm_window: the guest publishes, a client polls ─────────────────────────
@@ -283,7 +285,7 @@ TEST_CASE("regions: what the guest publishes through the window is readable outs
 
     const auto* base = static_cast<const uint8_t*>(clockwork_lanes_base());
     REQUIRE(base != nullptr);
-    const auto* w = reinterpret_cast<const Window*>(base + SHM_WINDOW_START);
+    const auto* w = reinterpret_cast<const Window*>(base + GUEST_WINDOW_START);
 
     const uint32_t writesBefore = (w->magic == kWindowMagic) ? w->writes : 0u;
 
@@ -380,14 +382,14 @@ TEST_CASE("regions: the config block sits clear of every ring",
         return aStart + aSize <= bStart || bStart + bSize <= aStart;
     };
 
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, IN_BUFFER_START,      IN_BUFFER_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, OUT_BUFFER_START,     OUT_BUFFER_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, NRT_OUT_BUFFER_START, NRT_OUT_BUFFER_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, CONTROL_START,        CONTROL_SIZE));
+    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, IN_RING_START,      IN_RING_SIZE));
+    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, RT_OUT_RING_START,     RT_OUT_RING_SIZE));
+    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, NRT_OUT_RING_START, NRT_OUT_RING_SIZE));
+    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, RING_CURSORS_START,        RING_CURSORS_SIZE));
     CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, METRICS_START,        METRICS_SIZE));
 
     // And it is inside the arena it is addressed from.
-    CHECK(GUEST_CONFIG_START + GUEST_CONFIG_SIZE <= TOTAL_BUFFER_SIZE);
+    CHECK(GUEST_CONFIG_START + GUEST_CONFIG_SIZE <= ARENA_SIZE);
 }
 
 TEST_CASE("regions: the config block survives traffic and a rebuild",
