@@ -58,11 +58,10 @@ and `new` up to the frontier at boot; on the web the engine's memory lies
 inside it). Three more are the engine's: the **rust-heap**, the block the
 RT router serves, from which clockwork's Rust subsystems allocate whenever
 an engine entry point is on the stack (a sink's or a port's queues), taken
-once at boot for the life of the process; the **guest-spare**, the one
-block the guest's pool may grow into, armed at boot; and **engine-memory**,
-the one block the guest's spans and the spare are carved from (on the web
-it holds the arena at its start too; natively the arena is static or a
-segment, and the router's block is the process's, so neither is in it).
+once at boot for the life of the process; and **engine-memory**, the one
+block the guest's spans are carved from (on the web it holds the arena at
+its start too; natively the arena is static or a segment, and the router's
+block is the process's, so neither is in it).
 An area inside the arena is an offset from the arena base; one
 outside it is placed in a *space* — the segment, or the engine's process —
 and a reader that is not in that space cannot reach it and says so.
@@ -186,8 +185,8 @@ engine knows where they are (`arenaSetArea`). A segment's creator places
 the assets and the returns as segment offsets, which every process that
 maps the segment can resolve; an arena in plain memory, the web's
 included, gets their addresses in the engine's process at `init_memory`;
-the guest's spans, the rust heap and the spare are placed once they are
-carved, before `dsp_new`.
+the guest's spans and the rust heap are placed once they are carved,
+before `dsp_new`.
 
 ## Who reads it
 

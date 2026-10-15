@@ -348,7 +348,7 @@ extern "C" {
     // THE ENGINE'S MEMORY, on the web: one block for the life of the process
     // (CLOCKWORK_AREA_ENGINE_MEMORY). The arena is its first ARENA_SIZE
     // bytes; the placement arena — the RT router's block, the guest's
-    // working memory, the heap and its spare — is the rest. Claimed once,
+    // working memory, the heap — is the rest. Claimed once,
     // through clockwork_memory_claim, before anything else is allocated, so
     // it is the first thing after the linker's heap base and the same on
     // every boot. A reload instantiates a new module over the same memory:
@@ -362,25 +362,33 @@ extern "C" {
 #endif
 
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
-    // THE ENGINE'S MEMORY, NATIVELY: one block the guest's two spans and the
-    // spare are carved from, as on the web, so a desktop engine's memory is
+    // THE ENGINE'S MEMORY, NATIVELY: one block the guest's two spans are
+    // carved from, as on the web, so a desktop engine's memory is
     // one thing to see and one malloc to make. Unlike the web's block it
     // does not hold the arena: natively the arena is static storage, or a
     // shared-memory segment other processes map, and the guest's memory
     // must not be in a segment any process can reach. Nor the RT router's
-    // block, which is the process's for life while this block is a build's:
-    // a build whose guest wants more than the block holds takes a new one,
-    // and the router's block stays where it was. Everything carved from the
-    // block is given back before it is replaced (the pool, the spare and
-    // the spans are all per-build), so replacing it frees nothing live. A
-    // tiered device has real regions to place into and no block.
+    // block, which is the process's for life while this block is an
+    // engine's: a build whose guest wants more than the block holds takes a
+    // new one, and the router's block stays where it was. Everything carved
+    // from the block is given back before it is replaced (the pool and the
+    // spans are all per-build), so replacing it frees nothing live. THE
+    // BLOCK IS CUT IN TWO BY HAND — the fast span, then the bulk span — and
+    // clockwork::mem is not involved: natively it stays the system
+    // allocator, as it always was. (A first version installed the block as
+    // the placement arena; a test fixture that boots one engine for the
+    // whole process then had every later test's "system" allocation come
+    // out of the engine's block and freed as the system's, which CI's
+    // one-process shuffled run found, 2026-10-15.) The block goes with the
+    // engine (teardown_memory). A tiered device has real regions to place
+    // into and no block.
     uint8_t* g_engine_block       = nullptr;
     size_t   g_engine_block_bytes = 0;
 
     // Have a block that holds `bytes`: the one there is when it does, else a
     // new one with everything carved from the old one forgotten first.
-    // False when the system has no such block, with the arena left unset so
-    // every span fails and the boot refuses with the figures.
+    // False when the system has no such block, with no spans, so the boot
+    // refuses with the figures.
     static bool engine_block_holding(size_t bytes, uint32_t verbosity);
 #endif
 
@@ -1336,24 +1344,20 @@ extern "C" {
 
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
     static bool engine_block_holding(size_t bytes, uint32_t verbosity) {
-        if (g_engine_block && g_engine_block_bytes >= bytes) {
-            if (!clockwork::mem::arena_size()) clockwork::mem::set_arena(g_engine_block, g_engine_block_bytes);
-            return true;
-        }
+        if (g_engine_block && g_engine_block_bytes == bytes) return true;
         if (g_engine_block) {
-            // A build that wants more: everything carved from the block is a
-            // build's (the pool and its spare went with the last instance;
-            // the spans are retaken below), so forget it all and let it go.
+            // A build that wants another size: everything carved from the
+            // block is a build's (the pool went with the last instance; the
+            // spans are cut again below), so forget it all and let it go.
             clockwork_pool_abandon();
             g_owned_fast = nullptr; g_owned_fast_bytes = 0;
             g_owned_bulk = nullptr; g_owned_bulk_bytes = 0;
-            clockwork::mem::set_arena(nullptr, 0);
             std::free(g_engine_block);
             g_engine_block = nullptr; g_engine_block_bytes = 0;
         }
         void* block = nullptr;
-        if (bytes != SIZE_MAX) {
-            // 16-aligned, as the arena needs: what malloc gives on every
+        if (bytes != SIZE_MAX && bytes != 0) {
+            // 16-aligned, as the spans need: what malloc gives on every
             // desktop ABI, and checked rather than assumed.
             block = std::malloc(bytes);
             if (block && (reinterpret_cast<uintptr_t>(block) & 15u)) { std::free(block); block = nullptr; }
@@ -1361,7 +1365,6 @@ extern "C" {
         if (!block) return false;
         g_engine_block       = static_cast<uint8_t*>(block);
         g_engine_block_bytes = bytes;
-        clockwork::mem::set_arena(g_engine_block, g_engine_block_bytes);
         if (verbosity > 0)
             clockwork_log("ENGINE MEMORY: 0x%016llx + %u MB", (unsigned long long)(uintptr_t)g_engine_block,
                           (unsigned)(g_engine_block_bytes / (1024 * 1024)));
@@ -1864,38 +1867,43 @@ extern "C" {
         }
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
         // The engine's memory, natively (g_engine_block above): sized to
-        // what this build carves from it — the fast span, the bulk span at
-        // its figure, the spare, and the placement arena's own headers — and
-        // replaced by a build that wants more. The router's block is taken
-        // first, from the system, so it is not in the block (it outlives
-        // every block).
+        // exactly what this build cuts from it — the fast span, then the
+        // bulk span at its figure — and replaced by a build that wants
+        // another size. The router's block is taken first, from the system,
+        // so it is not in the block (it outlives every block). A host that
+        // placed the fast span itself keeps it; the block then holds the
+        // bulk span alone.
         {
             clockwork_router_reserve();
+            const bool host_fast = g_clockwork_config.guest_memory && g_clockwork_config.guest_memory_bytes;
             const size_t bulk_figure = g_clockwork_config.guest_bulk_bytes ? g_clockwork_config.guest_bulk_bytes
                                                                            : (size_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES;
-            size_t bulk_span = bulk_figure > bulk_wanted ? bulk_figure : (size_t)bulk_wanted;
-            size_t fast_span = (size_t)fast_wanted;
-            if (!(g_clockwork_config.guest_memory && g_clockwork_config.guest_memory_bytes)
-                && (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES > fast_span)
+            const size_t bulk_span = bulk_figure > bulk_wanted ? bulk_figure : (size_t)bulk_wanted;
+            size_t fast_span = host_fast ? 0 : (size_t)fast_wanted;
+            if (!host_fast && (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES > fast_span)
                 fast_span = (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES;
-            const size_t headers = 4u * 4096u;   // the placement arena's block headers, with room to spare
-            size_t need = headers + (size_t)CLOCKWORK_GUEST_SPARE_BYTES;
-            if (need > SIZE_MAX - fast_span || need + fast_span > SIZE_MAX - bulk_span) need = SIZE_MAX;
-            else need += fast_span + bulk_span;
+            const size_t fast_cut = (fast_span + 15u) & ~(size_t)15u;   // the bulk span starts 16-aligned
+            const size_t need = (fast_cut > SIZE_MAX - bulk_span) ? SIZE_MAX : fast_cut + bulk_span;
             if (!engine_block_holding(need, verbosity)) {
                 clockwork_boot_fail("FATAL: the system could not give the engine %zu bytes for the guest's memory "
-                                    "(%zu fast + %zu bulk + a %u spare) - lower the guest's wants or the profile's "
+                                    "(%zu fast + %zu bulk) - lower the guest's wants or the profile's "
                                     "CLOCKWORK_GUEST_MEMORY_BULK_BYTES",
-                                    need, fast_span, bulk_span, (unsigned)CLOCKWORK_GUEST_SPARE_BYTES);
+                                    need, fast_span, bulk_span);
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
             }
+            // The cut. The spans are the block's, never clockwork::mem's:
+            // nothing below frees them one by one, the block goes whole.
+            g_owned_fast       = fast_span ? g_engine_block : nullptr;
+            g_owned_fast_bytes = fast_span;
+            g_owned_bulk       = bulk_span ? g_engine_block + fast_cut : nullptr;
+            g_owned_bulk_bytes = bulk_span;
             arenaSetArea(shared_memory, CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_PROCESS,
                          (uintptr_t)g_engine_block, g_engine_block_bytes);
         }
 #endif
         // The profile's default for a tier, clamped to what the tier has
-        // less its reserve (a device's audio task stack; the web's spare).
+        // less its reserve (a device's audio task stack; the web's headers).
         // On a desktop with no block largest_free is SIZE_MAX and nothing
         // clamps; with the engine's block it is the block's largest free run.
         const auto tier_default = [](clockwork::mem::Tier tier, size_t figure) -> size_t {
@@ -1927,14 +1935,17 @@ extern "C" {
             g_guest_memory       = g_clockwork_config.guest_memory;
             g_guest_memory_bytes = g_clockwork_config.guest_memory_bytes;
         } else {
+#if defined(__EMSCRIPTEN__) || CLOCKWORK_HAS_TIERED_MEMORY
             size_t need = fast_wanted;
             const size_t floor = tier_default(clockwork::mem::Tier::Fast, (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES);
             if (floor > need) need = floor;
             take(clockwork::mem::Tier::Fast, g_owned_fast, g_owned_fast_bytes, need);
+#endif
             g_guest_memory       = g_owned_fast;
             g_guest_memory_bytes = g_owned_fast_bytes;
         }
 
+#if defined(__EMSCRIPTEN__) || CLOCKWORK_HAS_TIERED_MEMORY
         {
             size_t need = bulk_wanted;
             size_t figure = g_clockwork_config.guest_bulk_bytes ? g_clockwork_config.guest_bulk_bytes
@@ -1943,6 +1954,7 @@ extern "C" {
             if (floor > need) need = floor;
             take(clockwork::mem::Tier::Bulk, g_owned_bulk, g_owned_bulk_bytes, need);
         }
+#endif
         void*  bulk_arena       = g_owned_bulk;
         size_t bulk_arena_bytes = g_owned_bulk_bytes;
 
@@ -2027,8 +2039,8 @@ extern "C" {
 
 
         // The guest's pool: clockwork's allocator over the bulk span, started
-        // over every build; with it the RT router's block (once) and the
-        // spare. The same on every platform.
+        // over every build; with it the RT router's block (once). The same on
+        // every platform.
         clockwork_pool_boot(bulk_arena, bulk_arena_bytes);
 #ifdef __EMSCRIPTEN__
         /*
@@ -2080,10 +2092,6 @@ extern "C" {
         if (clockwork_router_bytes())
             arenaSetArea(shared_memory, CLOCKWORK_AREA_RUST_HEAP, CLOCKWORK_SPACE_PROCESS,
                          clockwork_router_begin(), clockwork_router_bytes());
-        // The spare the guest's pool may grow into, armed at boot: its own block.
-        if (clockwork_pool_spare_bytes())
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_GUEST_SPARE, CLOCKWORK_SPACE_PROCESS,
-                         clockwork_pool_spare_begin(), clockwork_pool_spare_bytes());
 #ifdef __EMSCRIPTEN__
         // The program's own three, which a wasm module can say exactly: its
         // static data (from the start of the memory to the linker's
@@ -2365,8 +2373,19 @@ extern "C" {
         // The arenas clockwork reserved for the guest go with the engine, not
         // with the instance: a rebuild keeps them (destroy_dsp above), a
         // teardown returns them.
+#if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
+        // The spans are cuts of the engine's block (g_engine_block), and the
+        // block goes whole: an engine's, not the process's. Nothing cut from
+        // it is live by now.
+        g_owned_fast = nullptr; g_owned_bulk = nullptr;
+        if (g_engine_block) {
+            std::free(g_engine_block);
+            g_engine_block = nullptr; g_engine_block_bytes = 0;
+        }
+#else
         if (g_owned_fast) { clockwork::mem::free(g_owned_fast); g_owned_fast = nullptr; }
         if (g_owned_bulk) { clockwork::mem::free(g_owned_bulk); g_owned_bulk = nullptr; }
+#endif
         g_owned_fast_bytes = g_owned_bulk_bytes = 0;
         memory_initialized = false;
         shared_memory = nullptr;
@@ -2535,7 +2554,6 @@ extern "C" {
                 metrics->malloc_bytes_after_boot.store((uint32_t)clockwork_malloc_bytes_after_boot(), std::memory_order_relaxed);
                 metrics->guest_pool_used_bytes.store((uint32_t)clockwork_pool_used_bytes(), std::memory_order_relaxed);
                 metrics->guest_pool_peak_bytes.store((uint32_t)clockwork_pool_peak_bytes(), std::memory_order_relaxed);
-                metrics->guest_pool_growths.store((uint32_t)clockwork_pool_growths(), std::memory_order_relaxed);
                 metrics->rust_heap_used_bytes.store((uint32_t)clockwork_router_used_bytes(), std::memory_order_relaxed);
                 metrics->rust_heap_fallbacks.store(clockwork_router_fallback_allocs(), std::memory_order_relaxed);
             }

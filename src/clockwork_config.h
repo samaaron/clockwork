@@ -33,8 +33,8 @@
 #define CLOCKWORK_COMMIT_WORD 0u
 #endif
 
-// Every compile-time size — the guest's memory defaults, the spare, the
-// rings — sized per device.
+// Every compile-time size — the guest's memory defaults, the rings — sized
+// per device.
 #include "memory_profile.h"
 
 #ifdef __cplusplus

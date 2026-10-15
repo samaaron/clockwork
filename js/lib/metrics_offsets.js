@@ -155,7 +155,7 @@ export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running
 // with the rest of the struct (SAB_METRICS_WORDS).
 export const GUEST_POOL_USED_BYTES = 53;  // bytes in use in the guest's pool now (its bulk memory)
 export const GUEST_POOL_PEAK_BYTES = 54;  // the most ever
-export const GUEST_POOL_GROWTHS    = 55;  // times the pool grew into the spare
+export const METRICS_RESERVED3     = 55;  // reserved: held the pool's growth count until the pool stopped growing (2026-10-15)
 export const RUST_HEAP_USED_BYTES = 56;   // bytes in use in the RT router's block
 export const RUST_HEAP_FALLBACKS  = 57;   // Rust allocations inside the engine that fell back to the system allocator
 // 58-59 are the guest's mallocs (src/guest_malloc.h), in the C++ struct and

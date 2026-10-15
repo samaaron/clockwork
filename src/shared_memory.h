@@ -624,7 +624,7 @@ struct alignas(4) PerformanceMetrics {
     // (shared C++), in the slots 53-57 that once held the buffer pool's metrics.
     std::atomic<uint32_t> guest_pool_used_bytes;    // 53: bytes in use in the guest's pool now (its bulk memory)
     std::atomic<uint32_t> guest_pool_peak_bytes;    // 54: the most ever
-    std::atomic<uint32_t> guest_pool_growths;       // 55: times the pool grew into the spare
+    std::atomic<uint32_t> _metrics_reserved3;       // 55: reserved (held the pool's growth count until the pool stopped growing, 2026-10-15)
     std::atomic<uint32_t> rust_heap_used_bytes;     // 56: bytes in use in the RT router's block
     std::atomic<uint32_t> rust_heap_fallbacks;      // 57: Rust allocations that fell back to the system allocator
     // What the guest takes from malloc (src/guest_malloc.h): counted where the
@@ -891,7 +891,6 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     area(CLOCKWORK_AREA_STACK,        CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     area(CLOCKWORK_AREA_MALLOC,       CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     area(CLOCKWORK_AREA_RUST_HEAP,    CLOCKWORK_SPACE_UNKNOWN, 0, 0);
-    area(CLOCKWORK_AREA_GUEST_SPARE,  CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     area(CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     h->area_count = na;
     // The regions: id, where, the five facts, and the geometry a reader
@@ -1104,7 +1103,7 @@ CLOCKWORK_ASSERT_METRIC(clock_phase_centi,               48);
 CLOCKWORK_ASSERT_METRIC(clock_playing,                   49);
 CLOCKWORK_ASSERT_METRIC(guest_pool_used_bytes,           53);
 CLOCKWORK_ASSERT_METRIC(guest_pool_peak_bytes,           54);
-CLOCKWORK_ASSERT_METRIC(guest_pool_growths,              55);
+CLOCKWORK_ASSERT_METRIC(_metrics_reserved3,              55);
 CLOCKWORK_ASSERT_METRIC(rust_heap_used_bytes,            56);
 CLOCKWORK_ASSERT_METRIC(rust_heap_fallbacks,             57);
 CLOCKWORK_ASSERT_METRIC(guest_malloc_bytes,              58);

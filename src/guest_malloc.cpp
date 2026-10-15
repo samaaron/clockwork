@@ -39,10 +39,13 @@ uint32_t g_mark_calls = 0;
 int64_t  g_mark_held  = 0;
 bool     g_host_scratch = false;   // engine thread only: inside clockwork_worklet_alloc/free
 
+#if CLOCKWORK_COUNT_GUEST_MALLOC
+// Only the wrappers below call this, and they exist only where the link wraps.
 inline void count_call() {
     if (g_open == GuestCall::Boot)            g_mallocs_boot.fetch_add(1, std::memory_order_relaxed);
     else if (g_open == GuestCall::Processing) g_mallocs_processing.fetch_add(1, std::memory_order_relaxed);
 }
+#endif
 }  // namespace
 
 void clockwork_guest_call_begin(GuestCall kind) { g_open = kind; clockwork_router_guest_enter(); }

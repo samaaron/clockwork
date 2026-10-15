@@ -147,8 +147,8 @@ export const MemoryLayout = {
      * kept the 4MB it was actually using, so the total is unchanged. The
      * guest's two spans now come out of it — its fast memory, sized to what
      * it declares (dsp_memory_bytes: scsynth's tables and its pool), and its
-     * bulk memory, which takes what is left after the RT router's block and
-     * the spare (CLOCKWORK_GUEST_MEMORY_BULK_BYTES, CLOCKWORK_FAST_RESERVE in
+     * bulk memory, which takes what is left after the RT router's block
+     * (CLOCKWORK_GUEST_MEMORY_BULK_BYTES, CLOCKWORK_FAST_RESERVE in
      * src/memory_profile.h) — the same shape as on every other target.
      *
      * It bounds the engine: a span the guest declares that does not fit
@@ -160,16 +160,15 @@ export const MemoryLayout = {
 
     /**
      * What the engine takes of memArenaSize beside the guest's two spans, in
-     * bytes: the RT router's block (CLOCKWORK_ROUTER_BYTES, 1 MB), the spare
-     * the guest's pool may grow into (CLOCKWORK_GUEST_SPARE_BYTES, 4 MB) and
-     * the placement arena's own headers. A client that sizes memArenaSize
+     * bytes: the RT router's block (CLOCKWORK_ROUTER_BYTES, 1 MB) and the
+     * placement arena's own headers. A client that sizes memArenaSize
      * for a guest's declared memory (SuperSonic does, from scsynth's
      * options) adds this, or the guest's bulk want does not fit and the
      * boot is refused with the two figures in the message. Mirrors
      * src/memory_profile.h's web figures; a generous round number, since
      * the headers are a few hundred bytes.
      */
-    engineOverhead: 6 * 1024 * 1024,
+    engineOverhead: 2 * 1024 * 1024,
 
     ringBufferReserved: 2 * 1024 * 1024,  // 2MB — see the header: the rings do
                                           // not live here, and this only sets

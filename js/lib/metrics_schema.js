@@ -136,7 +136,6 @@ export const METRICS_SCHEMA = {
     // pool's metrics once held)
     guestPoolUsedBytes:           { offset: 53, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the guest\'s pool now: what it has allocated from its bulk memory (payloads as carved)' },
     guestPoolPeakBytes:           { offset: 54, type: 'gauge',    unit: 'bytes', description: 'The most bytes ever in use in the guest\'s pool' },
-    guestPoolGrowths:             { offset: 55, type: 'counter',  unit: 'count', description: 'Times the guest\'s pool grew into the spare' },
     rustHeapUsedBytes:            { offset: 56, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the rust heap now (the RT router\'s block)' },
     rustHeapFallbacks:            { offset: 57, type: 'counter',  unit: 'count', description: 'Rust allocations inside the engine that fell back to the system allocator because the rust heap was full' },
     // The guest's mallocs [58-59] (shared C++, written at the metrics flush; src/guest_malloc.h). Counted where the

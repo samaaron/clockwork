@@ -22,11 +22,13 @@
  * any kind on the audio thread, and no malloc there beyond our own arena
  * management.
  *
- * Growth: the pool may grow ONCE, into the spare — one block of
- * CLOCKWORK_GUEST_SPARE_BYTES clockwork keeps armed off the audio thread
- * (bulk tier) — so a pool that fills does not fail the next allocation on
- * the audio thread. Natively a foreign thread re-arms it afterwards; on the
- * web and on a device with no such thread it is one growth per boot.
+ * THE POOL NEVER GROWS. The guest declares what it needs and gets exactly
+ * that (dsp_api.h); a pool that fills answers NULL, loudly, and the fix is
+ * the guest's declaration or the host's floor. Until 2026-10-15 a spare
+ * block was kept armed so the pool could grow once; it was a hedge against
+ * the declaration being wrong, sat oddly beside a model in which the
+ * declaration is the budget, and cost a block, an area, a knob and a
+ * growth path. Gone.
  *
  * Until 2026-10-15 this was clockwork's own heap, sized by clockwork and
  * named as clockwork's; the guest's memory was then in two places, one the
@@ -44,15 +46,15 @@
 
 /* Boot, on the control thread, with the guest's bulk span carved: run the
  * allocator over [bulk, bulk + bytes) (NULL/0: no pool, and every
- * allocation answers NULL), arm the RT router if it is not yet (its block
- * is taken once for the life of the process) and arm the spare. Every
- * build; a rebuild starts the pool over. */
+ * allocation answers NULL) and arm the RT router if it is not yet (its
+ * block is taken once for the life of the process). Every build; a rebuild
+ * starts the pool over. */
 void clockwork_pool_boot(void* bulk, size_t bytes);
 
 /* Take bytes from the pool. Any thread: on the engine thread straight from
  * the pool, lock-free; on any other thread from the system allocator, on
  * that thread, and routed back on free by address. NULL when the pool is
- * full and the spare is gone or too small, or for 0 bytes. */
+ * full, or for 0 bytes. */
 void* clockwork_pool_alloc(size_t bytes);
 
 /* Give bytes back. Any thread: a foreign thread's free is parked and the
@@ -61,34 +63,26 @@ void* clockwork_pool_alloc(size_t bytes);
  * above). NULL is ignored. */
 void clockwork_pool_free(void* ptr);
 
-/* Whether the pool holds this address: inside its span or the spare it
- * grew into. Lock-free, any thread. */
+/* Whether the pool holds this address: inside its span. Lock-free, any
+ * thread. */
 bool clockwork_pool_holds(const void* ptr);
 
-/* Forget the pool (the span is the guest's; a spare it grew into goes back
- * to clockwork) and give the armed spare back. destroy_dsp. */
+/* Forget the pool: the span is the guest's again. destroy_dsp. */
 void clockwork_pool_teardown();
 
-/* Forget the pool and the spare without freeing anything: they were a dead
- * engine's, placed in an arena about to be started over
- * (clockwork::mem::reset_arena), so their memory is the arena's to hand out
- * again. The web's reload. */
+/* Forget the pool without freeing anything: it was a dead engine's, placed
+ * in an arena about to be started over (clockwork::mem::reset_arena), so
+ * its memory is the arena's to hand out again. The web's reload. */
 void clockwork_pool_abandon();
 
-/* The census: payload bytes in use now, the most ever, and how many times
- * the pool grew into the spare. */
+/* The census: payload bytes in use now, and the most ever. */
 size_t clockwork_pool_used_bytes();
 size_t clockwork_pool_peak_bytes();
-size_t clockwork_pool_growths();
-
-/* The spare: begin is 0 and bytes 0 while none is armed. */
-uintptr_t clockwork_pool_spare_begin();
-size_t    clockwork_pool_spare_bytes();
 
 /* The engine thread claims pool ownership (called at boot and each block). */
 void clockwork_pool_register_engine_thread();
-/* Foreign-thread maintenance: releases engine-parked system pointers and
- * re-arms the spare. Called from loader/egress threads on native; on
+/* Foreign-thread maintenance: releases the system pointers the engine
+ * thread parked. Called from loader/egress threads on native; on
  * single-threaded targets it is safely callable from anywhere. */
 void clockwork_pool_foreign_maintenance();
 

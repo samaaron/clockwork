@@ -19,6 +19,7 @@
 #include "dsp_api.h"
 #include "lanes/lanes.h"       // clockwork_arena_header
 #include "clockwork_arena.h"
+#include "mem_region.h"
 
 #include <utility>
 
@@ -82,13 +83,13 @@ TEST_CASE("engine: the arena is there with no shared segment too",
 
 // ── The engine's memory is one block natively too ───────────────────────────
 //
-// On the web the guest's spans and the spare are carved from one block; a
-// desktop engine took four separate mallocs for them until 2026-10-15. Now
-// it claims one block too (ENGINE_MEMORY), sized to the build, and carves
-// the same things from it. The arena is not in it (static, or a segment
+// On the web the guest's spans are carved from one block; a desktop engine
+// took separate mallocs for them until 2026-10-15. Now it claims one block
+// too (ENGINE_MEMORY), sized to the build, and carves the same things from
+// it. The arena is not in it (static, or a segment
 // other processes map), nor the RT router's block (the process's, while the
 // block is a build's).
-TEST_CASE("engine: the guest's memory and the spare are carved from the engine's one block",
+TEST_CASE("engine: the guest's memory is carved from the engine's one block",
           "[boundary][regions][engine]") {
     Engine e;
     const ClockworkArenaHeader* h = clockwork_arena_header();
@@ -102,8 +103,8 @@ TEST_CASE("engine: the guest's memory and the spare are carved from the engine's
     REQUIRE(em != nullptr);
     REQUIRE(em->space == CLOCKWORK_SPACE_PROCESS);
     const auto block = span(em);
-    CHECK(block.second - block.first >= (uint64_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES + (uint64_t)CLOCKWORK_GUEST_SPARE_BYTES);
-    for (uint32_t id : { CLOCKWORK_AREA_GUEST_MEMORY_FAST, CLOCKWORK_AREA_GUEST_MEMORY_BULK, CLOCKWORK_AREA_GUEST_SPARE }) {
+    CHECK(block.second - block.first >= (uint64_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES);
+    for (uint32_t id : { CLOCKWORK_AREA_GUEST_MEMORY_FAST, CLOCKWORK_AREA_GUEST_MEMORY_BULK }) {
         const auto* a = clockwork_arena_area(h, id);
         REQUIRE(a != nullptr);
         INFO("area " << id);
@@ -121,4 +122,27 @@ TEST_CASE("engine: the guest's memory and the spare are carved from the engine's
     // The arena is not in the block either.
     const uint64_t arena = (uint64_t)(uintptr_t)h;
     CHECK((arena < block.first || arena >= block.second));
+}
+
+// The block is cut by hand and clockwork::mem is never pointed at it:
+// natively it stays the system allocator, while an engine runs and after it
+// goes. A first version installed the block as the placement arena, and a
+// fixture that boots one engine for the whole process then had every later
+// test's "system" memory come out of the engine's block and freed as the
+// system's — which is what CI's one-process shuffled run found (2026-10-15).
+TEST_CASE("engine: the engine's block is not the placement arena, while it runs or after",
+          "[boundary][regions][engine]") {
+    {
+        Engine e;
+        CHECK(clockwork::mem::arena_size() == 0);
+        void* p = clockwork::mem::alloc(clockwork::mem::Tier::Fast, 256);
+        REQUIRE(p != nullptr);
+        clockwork::mem::free(p);
+    }
+    CHECK(clockwork::mem::arena_size() == 0);
+    CHECK(clockwork::mem::largest_free(clockwork::mem::Tier::Fast) == SIZE_MAX);
+    // A system allocation now is the system's, and is freed as such.
+    void* p = clockwork::mem::alloc(clockwork::mem::Tier::Fast, 256);
+    REQUIRE(p != nullptr);
+    clockwork::mem::free(p);
 }

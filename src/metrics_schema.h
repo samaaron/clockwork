@@ -84,7 +84,6 @@ inline constexpr FieldInfo kFields[] = {
     { 52, "audioContextState", "", "AudioContext state" },
     { 53, "guestPoolUsedBytes", "bytes", "Bytes in use in the guest's pool now: what it has allocated from its bulk memory (payloads as carved)" },
     { 54, "guestPoolPeakBytes", "bytes", "The most bytes ever in use in the guest's pool" },
-    { 55, "guestPoolGrowths", "count", "Times the guest's pool grew into the spare" },
     { 56, "rustHeapUsedBytes", "bytes", "Bytes in use in the rust heap now (the RT router's block)" },
     { 57, "rustHeapFallbacks", "count", "Rust allocations inside the engine that fell back to the system allocator because the rust heap was full" },
     { 58, "guestMallocBytes", "bytes", "Bytes the guest holds from malloc: taken inside its entry points with malloc or new and not freed" },

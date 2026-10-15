@@ -82,9 +82,6 @@
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
   #endif
-  #ifndef CLOCKWORK_GUEST_SPARE_BYTES
-  #define CLOCKWORK_GUEST_SPARE_BYTES 262144      // 256 KB: the one growth the guest's pool may take, from PSRAM
-  #endif
   #ifndef CLOCKWORK_ROUTER_BYTES
   #define CLOCKWORK_ROUTER_BYTES 65536            // 64 KB, the least the router arms on: the sink and port queues
   #endif
@@ -146,8 +143,8 @@
 // knobs (FAST_RESERVE, the fast default) stay at their single-region
 // defaults. The guest's bulk memory is drawn from the OCRAM malloc heap, so
 // CLOCKWORK_GUEST_MEMORY_BULK_BYTES plus the host's own allocations must fit
-// in ~512 KiB; the spare is 0 so exhaustion fails the OSC command loudly
-// instead of creeping into the audio-library heap. Block size is 128 to
+// in ~512 KiB; the pool never grows, so exhaustion fails the OSC command
+// loudly instead of creeping into the audio-library heap. Block size is 128 to
 // match the Teensy audio library's per-update frame count (one engine tick
 // per AudioStream update). Values retuned against an on-device build.
 #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_TEENSY41
@@ -189,9 +186,6 @@
                                                     // definitions). OCRAM (~338 KB after the cold
                                                     // .bss) must also hold the guest's fast memory
                                                     // and the library's registration mallocs.
-  #endif
-  #ifndef CLOCKWORK_GUEST_SPARE_BYTES
-  #define CLOCKWORK_GUEST_SPARE_BYTES 0           // no growth: fail loud, keep OCRAM predictable
   #endif
   #ifndef CLOCKWORK_ROUTER_BYTES
   #define CLOCKWORK_ROUTER_BYTES 0                // no router block: OCRAM has no 64 KB to spare, so the Rust
@@ -244,24 +238,15 @@
 // it allocates as it runs. 64 MB on the desktop and the NIF, where it used
 // to be clockwork's own heap of the same size. On the web the figure is a
 // ceiling and the span takes what is left of the engine's memory after the
-// fast span, the RT router's block and the spare (CLOCKWORK_FAST_RESERVE),
-// which is what the client sized that memory for (memArenaSize in
-// js/memory_layout.js). The embedded profiles set their own, above.
+// fast span and the RT router's block (less CLOCKWORK_FAST_RESERVE, the
+// arena's own headers), which is what the client sized that memory for
+// (memArenaSize in js/memory_layout.js). The embedded profiles set their
+// own, above. The pool never grows: a guest that needs more declares more.
 #ifndef CLOCKWORK_GUEST_MEMORY_BULK_BYTES
   #if defined(__EMSCRIPTEN__)
   #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES (2048u * 1024u * 1024u)   // a ceiling; the engine's memory bounds it
   #else
   #define CLOCKWORK_GUEST_MEMORY_BULK_BYTES (64u * 1024u * 1024u)     // 64 MB
-  #endif
-#endif
-// THE SPARE: the one block the guest's pool may grow into without a malloc
-// on the audio thread, armed at boot from the bulk tier and re-armed by a
-// foreign thread natively. 0 means the pool never grows.
-#ifndef CLOCKWORK_GUEST_SPARE_BYTES
-  #if defined(__EMSCRIPTEN__)
-  #define CLOCKWORK_GUEST_SPARE_BYTES (4u * 1024u * 1024u)
-  #else
-  #define CLOCKWORK_GUEST_SPARE_BYTES (16u * 1024u * 1024u)
   #endif
 #endif
 
@@ -363,12 +348,12 @@
 #endif
 
 // What the guest's bulk span leaves of the engine's memory on the web: the
-// spare and the arena's own block headers. The RT router's block and the
-// guest's fast span are taken before the bulk span is sized, so they are
-// already out of what it sees.
+// arena's own block headers. The RT router's block and the guest's fast
+// span are taken before the bulk span is sized, so they are already out of
+// what it sees.
 #if defined(__EMSCRIPTEN__)
   #ifndef CLOCKWORK_FAST_RESERVE
-  #define CLOCKWORK_FAST_RESERVE (CLOCKWORK_GUEST_SPARE_BYTES + 64 * 1024)
+  #define CLOCKWORK_FAST_RESERVE (64 * 1024)
   #endif
 #endif
 

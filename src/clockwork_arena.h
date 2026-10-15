@@ -128,14 +128,12 @@ enum ClockworkArenaArea {
     CLOCKWORK_AREA_RUST_HEAP           = 13,  /* outside the arena: what clockwork's Rust code allocates inside an
                                                  engine entry point (a sink's or a port's queues); one block, for
                                                  the life of the process, that the RT router serves */
-    CLOCKWORK_AREA_GUEST_SPARE         = 14,  /* outside the arena: the spare the guest's pool may grow into once,
-                                                 kept armed so the growth allocates nothing on the audio thread */
-    CLOCKWORK_AREA_ENGINE_MEMORY       = 15,  /* the engine's memory: one block, taken once for the life of the
-                                                 process, that holds the arena at its start and, after it, the
-                                                 placement arena the rust heap, the guest's two spans and the
-                                                 spare are carved from. On the web, inside what malloc took. A
-                                                 start-over for a new engine carves it again in the same order
-                                                 from the same block; nothing has to be remembered */
+    CLOCKWORK_AREA_ENGINE_MEMORY       = 14,  /* the engine's memory: one block that the guest's two spans are
+                                                 carved from. On the web it holds the arena at its start and the
+                                                 rust heap too, and lies inside what malloc took; a start-over
+                                                 for a new engine carves it again in the same order from the same
+                                                 block, so nothing has to be remembered. Natively the arena and
+                                                 the rust heap are outside it */
 };
 
 /* Where an area's base is measured from. */

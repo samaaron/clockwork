@@ -52,13 +52,10 @@ impl ClockworkArenaArea {
     /// Outside the arena: what clockwork's Rust code allocates inside an engine entry point (a sink's or a port's
     /// queues); one block for the life of the process, which the RT router serves.
     pub const RUST_HEAP: Self = Self(13);
-    /// Outside the arena: the spare the guest's pool may grow into once, kept armed so the growth allocates
-    /// nothing on the audio thread.
-    pub const GUEST_SPARE: Self = Self(14);
-    /// The engine's memory: one block, taken once for the life of the process, holding the arena at its start and
-    /// after it the placement arena the rust heap, the guest's two spans and the spare are carved from. On the
-    /// web, inside what malloc took.
-    pub const ENGINE_MEMORY: Self = Self(15);
+    /// The engine's memory: one block the guest's two spans are carved from. On the web it holds the arena at its
+    /// start and the rust heap too, and lies inside what malloc took; natively the arena and the rust heap are
+    /// outside it.
+    pub const ENGINE_MEMORY: Self = Self(14);
 }
 
 /// Where an area's base is measured from.

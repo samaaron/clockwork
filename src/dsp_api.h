@@ -178,8 +178,8 @@ typedef struct DspConfig {
      * this is the slow, large one.
      *
      * The allocator is lock-free on the audio thread and answers NULL when
-     * the span is full and its one spare growth is spent; it never blocks,
-     * never grows on the audio thread and never reaches malloc. Sized by the
+     * the span is full; it never blocks, never grows and never reaches
+     * malloc. What you declared is what you have. Sized by the
      * guest's bulk want, or the host profile's default when the guest
      * declares none (a desktop's 64 MB; what the client sized on the web).
      *

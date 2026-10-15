@@ -97,7 +97,7 @@ const Expect kExpect[] = {
 TEST_CASE("arena: the five areas lie end to end, each in its half", "[arena]") {
     auto a = arena();
     const auto* h = arenaHeader(a.data());
-    CHECK(h->area_count == 15);
+    CHECK(h->area_count == 14);
     uint32_t next = h->header_bytes;
     for (const auto& x : kAreas) {
         INFO("area " << x.area);
@@ -116,7 +116,7 @@ TEST_CASE("arena: the five areas lie end to end, each in its half", "[arena]") {
     // The ten outside the arena are listed, with no place until the engine says.
     for (uint32_t id : { CLOCKWORK_AREA_ASSETS, CLOCKWORK_AREA_RETURNS, CLOCKWORK_AREA_GUEST_MEMORY_BULK, CLOCKWORK_AREA_GUEST_MEMORY_FAST,
                          CLOCKWORK_AREA_STATIC_DATA, CLOCKWORK_AREA_STACK, CLOCKWORK_AREA_MALLOC, CLOCKWORK_AREA_RUST_HEAP,
-                         CLOCKWORK_AREA_GUEST_SPARE, CLOCKWORK_AREA_ENGINE_MEMORY }) {
+                         CLOCKWORK_AREA_ENGINE_MEMORY }) {
         INFO("area " << id);
         const auto* e = clockwork_arena_area(h, id);
         REQUIRE(e != nullptr);

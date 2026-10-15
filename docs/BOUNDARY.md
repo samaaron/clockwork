@@ -144,8 +144,8 @@ DSP can hold working memory without calling an allocator, which matters
 because `dsp_process` may not allocate at all. `memory_bulk` is there so the
 allocations a session makes — buffers, definitions — have one place, sized
 by the DSP's own declaration or the host profile's default, whichever is
-larger, that may grow once into a spare clockwork keeps armed and never
-grows on the audio thread. The same on every platform.
+larger, and that never grows: what a DSP declared is what it has. The same
+on every platform.
 
 #### Two tiers, and what the DSP says it needs
 

@@ -145,7 +145,6 @@ export class MetricsReader {
       // the guest's pool and the rust heap (shared C++, at the metrics flush)
       guestPoolUsedBytes: m[MetricsOffsets.GUEST_POOL_USED_BYTES],
       guestPoolPeakBytes: m[MetricsOffsets.GUEST_POOL_PEAK_BYTES],
-      guestPoolGrowths: m[MetricsOffsets.GUEST_POOL_GROWTHS],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)

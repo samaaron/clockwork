@@ -108,12 +108,6 @@ export async function bootEngine() {
   const rh = arena.area(AREA.RUST_HEAP);
   assert.equal(rh?.space, SPACE.PROCESS, "the rust heap is placed");
   assert.ok(ml.base <= rh.base && rh.base + rh.bytes <= ml.base + ml.bytes, "the rust heap is in what malloc took");
-  // The spare the guest's pool may grow into: armed at boot (the web profile grows), so placed, in what malloc
-  // took, and the profile's size. Nothing the dummy's dsp_new mallocs is a span the engine measured as none.
-  const sp = arena.area(AREA.GUEST_SPARE);
-  assert.equal(sp?.space, SPACE.PROCESS, "the spare is placed");
-  assert.ok(ml.base <= sp.base && sp.base + sp.bytes <= ml.base + ml.bytes, "the spare is in what malloc took");
-  assert.ok(sp.bytes > 0, "the spare has a size");
   // The guest's fast memory is placed when the guest asked for any (the dummy does; a guest built with none says so).
   const gm = arena.area(AREA.GUEST_MEMORY_FAST);
   assert.ok(gm && (gm.space === SPACE.PROCESS || (gm.space === SPACE.UNKNOWN && gm.bytes === 0)), "the guest's memory is placed, or none was asked for");

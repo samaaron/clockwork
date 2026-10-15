@@ -212,7 +212,6 @@ memory map shows and the code uses; the old names are in brackets.
 | **guest-memory-bulk** [`DspConfig::memory_bulk`] | the guest's bulk memory: everything it allocates as it runs, through clockwork's allocator (a Rust guest's Box and Vec by themselves) | guest, through the pool → guest | bulk | once, by the spare |
 | **static-data**, **stack**, **malloc** | the program's own: its statics (natively the arena inside), its stack, what `malloc`/`new` took (on the web the engine's memory inside); placed by the web, unknown natively until taught | the program | — | malloc: by sbrk |
 | **rust-heap** | one block the RT router serves: what clockwork's Rust subsystems allocate inside an engine entry point (a sink's or a port's queues); taken once at boot, for the life of the process | clockwork | fast | no |
-| **guest-spare** | the one block the guest's pool may grow into, kept armed so the growth allocates nothing on the audio thread | clockwork | bulk | no |
 | **engine-memory** | on the web, the one block the arena and all of the above are carved from | clockwork | — | no |
 
 The first five are the arena today, and stay one span with one table.
@@ -510,12 +509,19 @@ recommended, with one change at step 5, noted there.
     else.
 
 13. **The engine's memory is one block natively too.** A desktop engine
-    took the guest's two spans, the spare and the RT router's block as
-    four separate mallocs; now it claims one block (`g_engine_block`, the
-    web's name) sized to the build — the fast span, the bulk span at its
-    figure, the spare and the placement arena's headers — and carves the
-    same things from it through `clockwork::mem::set_arena`, as the web
-    does. Two things stay out of it, each for a reason the model states:
+    took the guest's two spans and the RT router's block as separate
+    mallocs; now it claims one block (`g_engine_block`, the web's name)
+    sized to exactly the build's two spans — the fast span, then the bulk
+    span at its figure — and cuts it in two by hand. `clockwork::mem` is
+    not involved: natively it stays the system allocator, as it always was.
+    (A first version installed the block as the placement arena, as the
+    web does; a test fixture that boots one engine for the whole process
+    then had every later test's "system" allocation come out of the
+    engine's block and freed as the system's. CI's one-process shuffled
+    run and its TSan job found it on the first push, 2026-10-15, and a
+    test now holds the allocator to the system while an engine runs and
+    after it goes.) Two things stay out of the block, each for a reason
+    the model states:
     the arena, which natively is static storage or a shared-memory segment
     other processes map, and the guest's memory must not be in a segment
     any process can reach; and the router's block, which is the process's
@@ -593,6 +599,21 @@ recommended, with one change at step 5, noted there.
     reading that stays 0 and says so the day something changes, and the
     ground to size the web's `wasmHeapSize` from what boot actually takes
     rather than from a budget for run-time malloc.
+
+18. **The spare is gone.** Sam, on the map's "spare" and "unused": "just
+    feels wrong". It was: a block kept armed so the guest's pool could grow
+    once if the guest had declared too little, which is a hedge against the
+    declaration being wrong, sat beside a model in which the declaration is
+    the budget, and cost a block, an area, a knob, a growth path, a metric
+    and a line on the map. Removed: the pool never grows, a pool that fills
+    answers NULL loudly, and the fix is the guest's declaration or the
+    host's floor, both of which exist. Area 14 is now `ENGINE_MEMORY`;
+    metric 55 is a reserved pad; `CLOCKWORK_GUEST_SPARE_BYTES` is gone from
+    every profile; the web's `engineOverhead` is 2 MB (the router's block
+    and the headers). "Unused" stays for now: it is the web layout's
+    `wasmHeapSize` budget for run-time malloc, which the count in step 17
+    shows is nothing, and sizing it from what boot actually takes is a
+    measurement Sam has deferred.
 
 **Still to measure:** how much of its pool a heavy Sonic Pi session uses;
 whether the boot-time memsets commit the tap pages; the cost of a 20 MB
