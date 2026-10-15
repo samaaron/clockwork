@@ -32,7 +32,7 @@ use linux_ports::{Inputs, Outputs};
 /// stderr itself, which no flag of ours quiets. Asked first, there is nothing
 /// to print: no sequencer means no ports, said once (see `MidiIo::new`).
 #[cfg(target_os = "linux")]
-fn sequencer_present() -> bool {
+pub(crate) fn sequencer_present() -> bool {
     sequencer_at(std::path::Path::new("/dev/snd/seq"))
 }
 
@@ -42,7 +42,7 @@ fn sequencer_at(dev: &std::path::Path) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sequencer_present() -> bool {
+pub(crate) fn sequencer_present() -> bool {
     true
 }
 #[cfg(not(target_os = "linux"))]
@@ -398,6 +398,10 @@ mod linux_ports {
                 Some(s) => s,
                 None => return false,
             };
+            // No sequencer, no port — and no ALSA line on stderr for asking.
+            if !super::sequencer_present() {
+                return false;
+            }
             let midi_in = match MidiInput::new(client_name) {
                 Ok(m) => m,
                 Err(_) => return false,
@@ -451,6 +455,10 @@ mod linux_ports {
         }
 
         pub fn enable(&mut self, client_name: &str, norm: &str) -> bool {
+            // No sequencer, no port — and no ALSA line on stderr for asking.
+            if !super::sequencer_present() {
+                return false;
+            }
             let midi_out = match MidiOutput::new(client_name) {
                 Ok(m) => m,
                 Err(_) => return false,
@@ -548,6 +556,10 @@ mod per_port {
             if self.conns.contains_key(norm) {
                 return true;
             }
+            // No sequencer, no port — and no ALSA line on stderr for asking.
+            if !super::sequencer_present() {
+                return false;
+            }
             let mut midi_in = match MidiInput::new(client_name) {
                 Ok(m) => m,
                 Err(_) => return false,
@@ -609,6 +621,10 @@ mod per_port {
         pub fn enable(&mut self, client_name: &str, norm: &str) -> bool {
             if self.conns.contains_key(norm) {
                 return true;
+            }
+            // No sequencer, no port — and no ALSA line on stderr for asking.
+            if !super::sequencer_present() {
+                return false;
             }
             let midi_out = match MidiOutput::new(client_name) {
                 Ok(m) => m,
