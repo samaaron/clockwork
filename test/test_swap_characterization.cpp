@@ -121,10 +121,14 @@ TEST_CASE("Swap: a device that plays the session's rate is switched to without a
     CHECK(fix.waitForBlocks(20));
 }
 
-TEST_CASE("Swap: switching to a device with more outputs rebuilds the engine for all "
+TEST_CASE("Swap: switching to a device with more outputs gives the engine all "
           "of them", "[SwapChar]") {
-    // A switch that kept the DSP would keep it writing the two channels it was
-    // built with, and channels three to eight would stay silent.
+    // A switch that kept the DSP as it was would keep it writing the two
+    // channels it was built with, and channels three to eight would stay
+    // silent. The guest is either rebuilt at eight or, when it declared it
+    // survives a channel-count change as the dummy does, told eight
+    // (dsp_reconfigure, test_guest_reconfigure.cpp); either way it renders to
+    // all of them.
     auto sys = makeSimpleSystem();
     addOutput(*sys, "Fake 8out", 8);
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));   // two outputs
@@ -133,9 +137,11 @@ TEST_CASE("Swap: switching to a device with more outputs rebuilds the engine for
     const auto done = pick(fix, "Fake 8out");
     INFO(fix.debugMessagesDump());
     CHECK(done.argInt(0) == 1);
-    OscReply rebuilt;
-    CHECK(fix.waitForReply(CLOCKWORK_SYS("setup"), rebuilt, 10000));
     CHECK(fix.engine().currentDevice().activeOutputChannels == 8);
+    fix.send(osc_test::message("/dummy/reconfigured"));
+    OscReply told;
+    REQUIRE(fix.waitForReply("/dummy/reconfigured.reply", told, 10000));
+    CHECK(told.parsed().argInt(1) == 8);   // the guest's own output ceiling
     CHECK(fix.waitForBlocks(20));
 }
 

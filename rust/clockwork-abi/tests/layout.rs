@@ -59,7 +59,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, DspTapHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
         name, version, holds_schedule, memory_bytes_wanted, memory_bulk_bytes_wanted, wants_events,
-        window_magic, window_version,
+        window_magic, window_version, survives,
     });
     expect!(mine, ClockworkAsset {
         struct_bytes, id, kind, origin, bytes, byte_count, channels, frames, sample_rate,

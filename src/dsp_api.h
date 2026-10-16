@@ -458,8 +458,22 @@ typedef struct DspInfo {
        as it always was. */
     uint32_t window_magic;
     uint32_t window_version;
-
+    /* WHAT DEVICE CHANGE THE INSTANCE CAN TAKE LIVE (DSP_SURVIVES_*). A
+       device change clockwork would otherwise answer with a cold restart —
+       the instance destroyed and built again, everything it held gone,
+       every client told to rebuild (docs/RESTARTS.md) — is a HOT one when
+       the instance declares it survives that kind of change: the device is
+       reopened, the instance is told the new facts (dsp_reconfigure), and
+       it keeps everything it holds. 0: survives nothing; every such change
+       is cold, and dsp_reconfigure is never called. A guest built for one
+       rate and one channel count — a server whose world is laid out at
+       boot — declares 0 and is not wrong to. */
+    uint32_t survives;
 } DspInfo;
+
+/* DspInfo::survives: the kinds of device change an instance takes live. */
+#define DSP_SURVIVES_RATE_CHANGE     (1u << 0)   /* a different sample rate */
+#define DSP_SURVIVES_CHANNEL_CHANGE  (1u << 1)   /* different channel ceilings */
 
 /* Static: describable before any instance exists, so a host can report what it
    is linked against without booting audio. */
@@ -486,7 +500,27 @@ uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_b
 
 /* Build an instance, or NULL with `err` set to a message the DSP owns. */
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err);
+
+/* Destroy an instance. WHAT THE GUEST OWES HERE (docs/RESTARTS.md, "What the
+   guest owes"): before this returns, every ask the instance accepted and has
+   not yet answered is answered, in the guest's own words — a load it was
+   still doing, a read it was still waiting on — so no client is left holding
+   a question an instance that no longer exists would have answered. What the
+   guest holds is its business; clockwork's part is that those answers leave
+   on the rings before the rings reset. What it keeps across a rebuild is what
+   it wrote into DspConfig::persistent; everything else goes with it. */
 void        dsp_free(struct Dsp* dsp);
+
+/* A device change the instance declared it survives (DspInfo::survives):
+   the new rate and channel ceilings, in place, with audio stopped — no
+   block renders between the device going down and this returning — and
+   nothing else changed: the memory, the window, the clock, the channel map
+   are where they were. Return 0 to take it; non-zero to refuse, on which
+   clockwork does what it would have done had the instance declared no
+   survival: destroys it and builds it again, a cold restart. Never called
+   for a change the instance did not declare. */
+int         dsp_reconfigure(struct Dsp* dsp, double sample_rate,
+                            uint32_t max_input_channels, uint32_t max_output_channels);
 
 /* ── The tick ───────────────────────────────────────────────────────────── */
 

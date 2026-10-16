@@ -429,6 +429,22 @@ int clockwork_region_has_reset(uint32_t region_id);
 void clockwork_control_serve(int on);
 int  clockwork_control_served(void);
 
+/* ── What the guest instance survives (dsp_api.h, DspInfo::survives) ──────
+ * The kinds of device change the linked guest takes live, read once at boot
+ * from dsp_describe; 0 for a guest that survives nothing, and before a
+ * guest is described. The engine plans a swap by it (DevicePolicy). */
+uint32_t clockwork_guest_survives(void);
+
+/* Tell the instance a device change it declared it survives: the new rate
+ * and channel ceilings, with audio stopped. Clockwork's own regions that
+ * follow the device — the scope's format, the sample clock, the channel
+ * map's device words — are laid out again for it; nothing else moves, and
+ * the instance keeps everything it holds. 1 if the instance took it; 0 if
+ * it refused, or there is no instance, on which the caller does what it
+ * would have done otherwise: a cold restart. */
+int clockwork_guest_reconfigure(double sample_rate, uint32_t input_channels,
+                                uint32_t output_channels);
+
 /* Which channel is which (ClockworkChannelMapState, shared_memory.h), for a host
    or an in-process client. A guest reads the same bytes through
    DspConfig::channel_map. NULL before clockwork_init. */

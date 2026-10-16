@@ -11,6 +11,7 @@
 #pragma once
 
 #include "DeviceInfo.h"
+#include "dsp_api.h"   // DSP_SURVIVES_*: what the guest instance takes live
 
 #include <string>
 #include <vector>
@@ -409,6 +410,9 @@ struct SwapSnapshot {
     int probedInputChannels = -1;        // target input capacity (auto-enable clamp)
     int probedTargetOut = -1, probedTargetIn = -1;  // channel-cold probes
     int rememberedRate = 0;              // per-device rate memory for outputName
+    // What the guest instance survives live (DspInfo::survives, dsp_api.h):
+    // a change of that kind is planned hot, and the instance told.
+    uint32_t guestSurvives = 0;
 };
 
 struct SwapPlan {
@@ -424,6 +428,11 @@ struct SwapPlan {
     int  enableInputRequested = 0;       // pre-clamp width (logging)
     int  enableInputProbed = -1;         // probe answer (logging)
     bool coldForChannels = false;
+    // Hot, but the device's rate or channel count changes and the guest
+    // instance declared it survives that: it is told (dsp_reconfigure) once
+    // the device is open and before audio resumes. If it refuses, the swap
+    // becomes cold there.
+    bool reconfigureGuest = false;
     bool isCold = false;
 };
 

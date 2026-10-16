@@ -327,6 +327,64 @@ SwapSnapshot snapTwoDevices() {
 }
 } // namespace
 
+TEST_CASE("PlanSwap: a change the guest instance survives is planned hot, and the instance told",
+          "[PlanSwap][survives]") {
+    // DspInfo::survives (dsp_api.h): a guest that takes a channel-count or
+    // rate change live keeps its instance across one. The planner reads it
+    // from the snapshot; the executor tells the instance (reconfigureGuest).
+    SwapPlanRequest req;
+    req.outputName = "Interface";
+
+    // Four outputs at the target, two now: cold for a guest that survives
+    // nothing, hot and told for one that survives channel changes.
+    {
+        auto snap = snapTwoDevices();
+        snap.probedTargetOut = 4;
+        auto plan = planSwap(req, snap);
+        REQUIRE(plan.error.empty());
+        CHECK(plan.coldForChannels);
+        CHECK(plan.isCold);
+        CHECK_FALSE(plan.reconfigureGuest);
+    }
+    {
+        auto snap = snapTwoDevices();
+        snap.probedTargetOut = 4;
+        snap.guestSurvives = DSP_SURVIVES_CHANNEL_CHANGE;
+        auto plan = planSwap(req, snap);
+        REQUIRE(plan.error.empty());
+        CHECK_FALSE(plan.coldForChannels);
+        CHECK_FALSE(plan.isCold);
+        CHECK(plan.reconfigureGuest);
+    }
+    // A rate change, the same way.
+    {
+        auto snap = snapTwoDevices();
+        req.sampleRate = 44100;
+        auto plan = planSwap(req, snap);
+        CHECK(plan.isCold);
+        CHECK_FALSE(plan.reconfigureGuest);
+        snap.guestSurvives = DSP_SURVIVES_RATE_CHANGE;
+        plan = planSwap(req, snap);
+        CHECK_FALSE(plan.isCold);
+        CHECK(plan.reconfigureGuest);
+        // Surviving one kind is not surviving the other.
+        snap.probedTargetOut = 4;
+        plan = planSwap(req, snap);
+        CHECK(plan.isCold);
+        CHECK_FALSE(plan.reconfigureGuest);
+    }
+    // Nothing changing: hot, and nothing to tell.
+    {
+        auto snap = snapTwoDevices();
+        snap.guestSurvives = DSP_SURVIVES_CHANNEL_CHANGE | DSP_SURVIVES_RATE_CHANGE;
+        SwapPlanRequest same;
+        same.outputName = "Interface";
+        auto plan = planSwap(same, snap);
+        CHECK_FALSE(plan.isCold);
+        CHECK_FALSE(plan.reconfigureGuest);
+    }
+}
+
 TEST_CASE("PlanSwap: cross-driver pick forces cold and mirrors ASIO input",
           "[PlanSwap]") {
     SwapPlanRequest req;

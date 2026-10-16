@@ -5,6 +5,7 @@
  */
 #include "DevicePolicy.h"
 #include "FuzzyMatch.h"
+#include "dsp_api.h"   // DSP_SURVIVES_*: what the guest instance takes live
 
 #include <algorithm>
 #include <set>
@@ -128,21 +129,31 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
         plan.rateFromMemory = true;
     }
 
-    // A hot swap keeps the existing DSP instance, which only re-reads its
-    // channel counts when it is rebuilt — so a channel-count change at the
-    // target forces cold. Without it the DSP keeps writing into the channel
-    // range it booted with, and anything above that never reaches hardware.
+    // A hot swap keeps the guest instance, which learns its channel counts
+    // only when it is built or told (dsp_reconfigure) — so a channel-count
+    // change at the target is cold unless the instance declared it survives
+    // one (DspInfo::survives), in which case it is told. Without either the
+    // instance keeps writing into the channel range it booted with, and
+    // anything above that never reaches hardware.
+    bool channelsChange = false;
     if (snap.hasDeviceManager && !forceCold) {
         if (snap.probedTargetOut > 0
             && snap.probedTargetOut != snap.currentOutputChannels)
-            plan.coldForChannels = true;
+            channelsChange = true;
         if (snap.probedTargetIn > 0
             && snap.probedTargetIn != snap.currentInputChannels)
-            plan.coldForChannels = true;
+            channelsChange = true;
     }
+    const bool rateChanges = plan.sampleRate > 0 && plan.sampleRate != snap.currentRate;
+    const bool survivesChannels = (snap.guestSurvives & DSP_SURVIVES_CHANNEL_CHANGE) != 0;
+    const bool survivesRate     = (snap.guestSurvives & DSP_SURVIVES_RATE_CHANGE) != 0;
+    plan.coldForChannels = channelsChange && !survivesChannels;
 
     plan.isCold = forceCold || plan.coldForChannels || plan.scope.crossDriver
-               || (plan.sampleRate > 0 && plan.sampleRate != snap.currentRate);
+               || (rateChanges && !survivesRate);
+    // What stays hot only because the instance survives it is told so.
+    plan.reconfigureGuest = !plan.isCold
+                         && ((channelsChange && survivesChannels) || (rateChanges && survivesRate));
     return plan;
 }
 

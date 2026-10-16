@@ -617,6 +617,9 @@ extern "C" {
     // DspInfo::wants_events, read at the same moment: whether an inbound
     // event (clockwork_event_route) is also the guest's.
     bool g_dsp_wants_events = false;
+    // DspInfo::survives, read once at boot: the device changes this guest
+    // takes live (lanes.h clockwork_guest_survives).
+    uint32_t g_dsp_survives = 0;
 
     // True only while this thread is inside process_audio(). emit_debug_osc()
     // reads it to keep the RT-out ring single-writer: the audio thread logs to
@@ -1634,6 +1637,68 @@ extern "C" {
         return r && r->reset ? 1 : 0;
     }
 
+    // Reserved lanes, above the device (see the boundary at the top of this
+    // file). Widen both directions to hold them; the device backend copies
+    // only what the device has, so the extra channels never reach hardware.
+    // Recomputed on every build, and when a surviving instance is told a new
+    // channel count, so a wider device moves the base up rather than
+    // overlapping the lanes. The host's lanes start at the base and Link
+    // Audio's sit directly above.
+    static void widen_for_lanes(uint32_t& max_input_channels, uint32_t& max_output_channels) {
+        g_lane_base = 0;
+        g_link_audio_lane_base = 0;
+        const uint32_t lanes = g_reserved_lanes + g_link_audio_lanes;
+        if (lanes == 0) return;
+        const uint32_t first = lane_base_for(max_input_channels, max_output_channels);
+        const uint32_t top   = first + lanes;
+        if (top <= clockwork::kMaxChannels) {
+            g_lane_base = first;
+            if (g_link_audio_lanes > 0) g_link_audio_lane_base = first + g_reserved_lanes;
+            if (max_output_channels < top) max_output_channels = top;
+            if (max_input_channels  < top) max_input_channels  = top;
+        } else {
+            clockwork_log("WARNING: %u reserved lanes above channel %u do not fit "
+                    "kMaxChannels=%d; no lanes reserved",
+                    lanes, first, (int)clockwork::kMaxChannels);
+        }
+    }
+
+    // ── What the guest instance survives (lanes.h) ──────────────────────────
+    extern "C" uint32_t clockwork_guest_survives(void) {
+        return g_dsp_survives;
+    }
+
+    extern "C" int clockwork_guest_reconfigure(double sample_rate, uint32_t input_channels,
+                                               uint32_t output_channels) {
+        if (!g_dsp || !(sample_rate > 0.0)) return 0;
+        // The ceilings the instance is handed, as dsp_new hands them: the
+        // device's counts, clamped, widened for the lanes above the device.
+        uint32_t cin  = input_channels  > clockwork::kMaxChannels ? clockwork::kMaxChannels : input_channels;
+        uint32_t cout = output_channels > clockwork::kMaxChannels ? clockwork::kMaxChannels : output_channels;
+        widen_for_lanes(cin, cout);
+        {
+            GuestCallScope guest(GuestCall::Boot);
+            if (dsp_reconfigure(g_dsp, sample_rate, cin, cout) != 0) return 0;
+        }
+        // The instance took it: the device's facts are these from now on,
+        // and clockwork's own regions that follow the device are laid out
+        // again for it — the scope at the new channel count, the sample
+        // clock for the new rate, the channel map's device words. Nothing of
+        // the rings, the metrics or the guest's regions moves: the instance
+        // is the same one, and every client's picture of it still holds.
+        g_clockwork_config.sample_rate     = sample_rate;
+        g_clockwork_config.input_channels  = input_channels;
+        g_clockwork_config.output_channels = output_channels;
+        g_dsp_sample_rate = sample_rate;
+        g_in_channels     = cin;
+        g_out_channels    = cout;
+        metrics_flush_period.store(0, std::memory_order_relaxed);
+        reset_scope();
+        reset_sample_clock();
+        channel_map_set_device(g_in_channels, g_out_channels);
+        return 1;
+    }
+
     void init_memory() {
         const double sample_rate = g_clockwork_config.sample_rate;
         // A build starts with no reason not to have a guest; the first thing
@@ -1864,30 +1929,10 @@ extern "C" {
         if (config.max_input_channels > clockwork::kMaxChannels)
             config.max_input_channels = clockwork::kMaxChannels;
 
-        // Reserved lanes, above the device (see the boundary at the top of this
-        // file). Widen both directions to hold them; the device backend copies
-        // only what the device has, so the extra channels never reach hardware.
-        // Recomputed on every build so a cold swap onto a wider device moves
-        // the base up rather than letting the device overlap the lanes. The
-        // host's lanes start at the base and Link Audio's sit directly above.
-        g_lane_base = 0;
-        g_link_audio_lane_base = 0;
-        const uint32_t lanes = g_reserved_lanes + g_link_audio_lanes;
-        if (lanes > 0) {
-            const uint32_t first = lane_base_for(config.max_input_channels,
-                                                 config.max_output_channels);
-            const uint32_t top   = first + lanes;
-            if (top <= clockwork::kMaxChannels) {
-                g_lane_base = first;
-                if (g_link_audio_lanes > 0) g_link_audio_lane_base = first + g_reserved_lanes;
-                if (config.max_output_channels < top) config.max_output_channels = top;
-                if (config.max_input_channels  < top) config.max_input_channels  = top;
-            } else {
-                clockwork_log("WARNING: %u reserved lanes above channel %u do not fit "
-                        "kMaxChannels=%d; no lanes reserved",
-                        lanes, first, (int)clockwork::kMaxChannels);
-            }
-        }
+        // Reserved lanes, above the device: widened for on every build, and
+        // again when a surviving instance is told a new channel count
+        // (widen_for_lanes).
+        widen_for_lanes(config.max_input_channels, config.max_output_channels);
         // ── The guest's memory region ──────────────────────────────────────
         //
         // Reserved by the host, claimed by nothing else, and zeroed here so a
@@ -2315,6 +2360,7 @@ extern "C" {
         if (info) {
             g_dsp_holds_schedule = info->holds_schedule != 0;
             g_dsp_wants_events   = info->wants_events != 0;
+            g_dsp_survives       = info->survives;
             // Which guest, and which window layout: into the table, for the
             // readers of the window (shared_memory.h arenaSetGuestWindowIdentity).
             arenaSetGuestWindowIdentity(shared_memory, info->window_magic, info->window_version);

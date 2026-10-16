@@ -35,7 +35,7 @@ int main(void) {
     S(DspInfo);
     F(DspInfo, name); F(DspInfo, version); F(DspInfo, holds_schedule);
     F(DspInfo, memory_bytes_wanted); F(DspInfo, memory_bulk_bytes_wanted); F(DspInfo, wants_events);
-    F(DspInfo, window_magic); F(DspInfo, window_version);
+    F(DspInfo, window_magic); F(DspInfo, window_version); F(DspInfo, survives);
 
     S(ClockworkAsset);
     F(ClockworkAsset, struct_bytes); F(ClockworkAsset, id); F(ClockworkAsset, kind);

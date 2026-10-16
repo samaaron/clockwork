@@ -249,6 +249,10 @@ struct DummyDsp {
     uint32_t  window_writes = 0;
     uint64_t  frame = 0;      // absolute frames rendered; the phase clock
     uint32_t  messages = 0;   // how many OSC messages have arrived
+    // Times this instance was told new device facts (dsp_reconfigure) and
+    // took them — reported by /dummy/reconfigured, so a test can see the
+    // instance that answers is the one that was told, not a new one.
+    uint32_t  reconfigured = 0;
 
     Mode      mode = Mode::Pulse;
     uint64_t  pulse_width  = 0;   // frames, computed from ms at the sample rate
@@ -728,6 +732,11 @@ const DspInfo* dsp_describe(void) {
         // 'DUMY', layout 1. The arena table carries it once the guest binds.
         /* window_magic            */ 0x44554D59u,
         /* window_version          */ 1u,
+        // A channel-count change is taken live (dsp_reconfigure): what a
+        // guest that sizes nothing by the device can do, and what the engine
+        // tests drive a hot restart with. A rate change is NOT survived, so
+        // the tests that drive a cold restart with one keep their lever.
+        /* survives                */ DSP_SURVIVES_CHANNEL_CHANGE,
     };
     return &info;
 }
@@ -807,8 +816,28 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
 
 void dsp_free(struct Dsp* dsp) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
+    // What the guest owes here (dsp_api.h): every ask still held, answered.
+    // This placeholder holds none across a call — every verb it takes is
+    // answered inside dsp_osc — so there is nothing to say.
     if (d && d->rt_pool && d->host.free_bytes) d->host.free_bytes(d->host.ctx, d->rt_pool);
     delete d;
+}
+
+// A channel-count change, taken (DspInfo::survives): the ceilings this
+// instance renders to from now on. Above eight outputs it refuses, which is
+// the lever the engine tests use to see a refusal become a cold restart; a
+// rate change was never declared survived, so one is never offered.
+int dsp_reconfigure(struct Dsp* dsp, double sample_rate,
+                    uint32_t max_input_channels, uint32_t max_output_channels) {
+    auto* d = reinterpret_cast<DummyDsp*>(dsp);
+    if (!d || !(sample_rate > 0.0)) return 1;
+    if (max_output_channels > 8u) return 2;
+    d->config.sample_rate         = sample_rate;
+    d->config.max_input_channels  = max_input_channels;
+    d->config.max_output_channels = max_output_channels;
+    d->setPulse(kDefaultPulseWidthMs, kDefaultPulsePeriodMs);
+    d->reconfigured++;
+    return 0;
 }
 
 // Take an asset: record its shape and a checksum of the bytes AS THE GUEST
@@ -998,6 +1027,19 @@ void dsp_osc(struct Dsp* dsp,
         if (d->host.emit_osc) {
             uint8_t reply[32];
             const uint32_t n = writeReply(reply, sizeof reply, "/dummy/pong");
+            if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
+        }
+        return;
+    }
+    // How many times THIS instance took new device facts (dsp_reconfigure),
+    // and the output ceiling it renders to now: a test's proof that a hot
+    // restart kept the instance and told it, where a cold one would answer
+    // 0 from a new instance built at the new count.
+    if (addressIs(bytes, len, "/dummy/reconfigured")) {
+        if (d->host.emit_osc) {
+            uint8_t reply[64];
+            const uint32_t v[2] = { d->reconfigured, d->config.max_output_channels };
+            const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/reconfigured.reply", v, 2);
             if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
         }
         return;

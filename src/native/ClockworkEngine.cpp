@@ -3702,6 +3702,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     snap.currentInputChannels  = mCurrentConfig.numInputChannels;
     snap.bootInputChannels     = mBootInputChannels;
     snap.preWirelessRate       = mPreWirelessRate;
+    snap.guestSurvives         = clockwork_guest_survives();
     if (auto it = mDeviceRateMemory.find(deviceName);
         it != mDeviceRateMemory.end())
         snap.rememberedRate = it->second;
@@ -4136,6 +4137,26 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             }
         }
         return result;
+    }
+
+    // Hot only because the instance declared it survives the change the
+    // open device makes (DspInfo::survives): told now, with audio stopped,
+    // the device's real rate and channel counts. A refusal is a cold
+    // restart from here — what the swap would have been otherwise — and
+    // the instance is destroyed and built again below.
+    if (!isCold && plan.reconfigureGuest) {
+        const double openRate = takeOpenDeviceGeometry(
+            (sampleRate > 0) ? sampleRate : currentRate, inputWasDropped);
+        if (!clockwork_guest_reconfigure(openRate,
+                                         static_cast<uint32_t>(inputWasDropped ? 0 : mCurrentConfig.numInputChannels),
+                                         static_cast<uint32_t>(mCurrentConfig.numOutputChannels))) {
+            clockwork_log("[device-setup] the guest refused the new device facts "
+                          "(%.0f Hz, %d in, %d out): rebuilding it instead",
+                          openRate, mCurrentConfig.numInputChannels, mCurrentConfig.numOutputChannels);
+            restart.escalateToCold();
+            isCold = true;
+            result.type = SwapType::Cold;
+        }
     }
 
     if (isCold) {

@@ -21,14 +21,24 @@ inherits it by implementing the one hook in "What the guest owes".
 
 A hot restart is a device change the instance can take without being
 rebuilt: the device stops, is reopened or replaced at the same rate and
-channel count, and audio resumes. Nothing a client tracks has changed,
-so clockwork says statechange and nothing more.
+channel count — or at another, when the instance declared it survives
+that kind of change and is told — and audio resumes. Nothing a client
+tracks has changed, so clockwork says statechange and nothing more.
 
 A cold restart is `destroy_dsp` then `init_memory` on the same arena then
-`dsp_new` (src/audio_processor.cpp). Today every rate change, every
-channel count change and every driver change is cold, because the guest
-ABI gives a guest no way to say it can take one live. Offsets never move:
-a reader that resolved a region at open holds it across every restart.
+`dsp_new` (src/audio_processor.cpp). A driver change is always cold. A
+rate change or a channel-count change is cold unless the guest declared
+it survives that kind of change (`DspInfo::survives`, src/dsp_api.h): then
+the device is reopened, the instance is told the new facts with audio
+stopped (`dsp_reconfigure`), clockwork lays out again the regions of its
+own that follow the device — the scope's format, the sample clock, the
+channel map's device words — and nothing else moves: a hot restart, with
+the instance and every client's picture of it kept. An instance that
+refuses what it declared is destroyed and built again from there, the
+cold restart it would have been. A guest built for one rate and one
+channel count declares nothing and is not wrong to; scsynth is one.
+Offsets never move: a reader that resolved a region at open holds it
+across every restart.
 
 A cold boot is a new arena: the first boot, or `teardown_memory` followed by
 `init_memory`. The regions a rebuild keeps start over here.
@@ -222,11 +232,15 @@ moves, with the word up and down), and test_clockwork_sys.cpp (the rule).
 
 ## What the guest owes
 
-One hook, at teardown: **answer what you still hold**. Whatever the guest
-has accepted and not yet answered is answered, in its own words, before
-`dsp_free` returns. Clockwork's part is that those answers leave on the
-rings before the rings go (rule 3). What the guest holds is its business;
-the next guest implements the same hook and nothing else.
+At teardown: **answer what you still hold**. Whatever the guest has
+accepted and not yet answered is answered, in its own words, before
+`dsp_free` returns (src/dsp_api.h says so on `dsp_free`). Clockwork's part
+is that those answers leave on the rings before the rings go (rule 3).
+What the guest holds is its business; the next guest owes the same and
+nothing else.
+
+And, if it declares it survives a device change (`DspInfo::survives`):
+**take it** when told (`dsp_reconfigure`), or refuse and be rebuilt.
 
 A guest keeps across a rebuild only what it writes into `guest persist`.
 Everything else it holds is the instance's and goes with it.
@@ -252,6 +266,9 @@ Everything else it holds is the instance's and goes with it.
   the teardown, the drains and the rebuild is the engine's.
 - test/test_restart_sequence.cpp: one sequence whatever started it — the
   user's switch, the watchdog's recovery, the rate-skew recovery.
+- test/test_guest_reconfigure.cpp and the `[survives]` cases of
+  test/test_device_policy.cpp: a change the instance survives is hot and
+  told; one it refuses is the cold restart it would have been.
 - test/test_control_plane_liveness.cpp `[control-ring]`,
   test/test_client_abi.cpp and test/test_restarts.cpp `[control-ring]`:
   a control verb answered while no audio block renders, and which ring
@@ -268,5 +285,6 @@ Everything else it holds is the instance's and goes with it.
 
 ## Not yet
 
-The guest's teardown hook ("What the guest owes") is not yet in the ABI: a
-guest's own unanswered work still dies with it.
+Nothing of this document is unimplemented on clockwork's side. What a
+guest owes at teardown is the guest's to do: scsynth's unanswered asks
+still die with its world until SuperSonic answers them in `dsp_free`.

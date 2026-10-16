@@ -167,7 +167,17 @@ pub struct DspInfo {
     /// when the guest binds. 0 and 0: undeclared.
     pub window_magic: u32,
     pub window_version: u32,
+    /// What device change the instance takes live (`DSP_SURVIVES_*`): such a
+    /// change is a hot restart, the instance told through `dsp_reconfigure`
+    /// and keeping what it holds. 0: survives nothing; every such change is
+    /// cold (clockwork's docs/RESTARTS.md).
+    pub survives: u32,
 }
+
+/// `DspInfo::survives`: a different sample rate.
+pub const DSP_SURVIVES_RATE_CHANGE: u32 = 1 << 0;
+/// `DspInfo::survives`: different channel ceilings.
+pub const DSP_SURVIVES_CHANNEL_CHANGE: u32 = 1 << 1;
 
 // SAFETY: a DspInfo is immutable static data — string pointers into
 // statics — which is the only way a guest ever builds one.
