@@ -3449,6 +3449,90 @@ double ClockworkEngine::takeOpenDeviceGeometry(double fallbackRate, bool inputWa
     return rate;
 }
 
+// ── One restart, whatever started it (ClockworkEngine.h) ─────────────────────
+
+ClockworkEngine::Restart::Restart(ClockworkEngine& engine, bool cold)
+    : mEngine(engine), mCold(cold) {}
+
+ClockworkEngine::Restart::~Restart() {
+    // A way out that never resumed audio: the pass is let go here, and the
+    // gate goes with the lock. The processor stays paused, as it did: the
+    // swap that left early says what state the engine is in.
+    if (mCold && !mResumed) mEngine.resumeControlPass();
+}
+
+void ClockworkEngine::Restart::announce() {
+    if (mCold) mEngine.setEngineState(EngineState::Restarting, "rate-change");
+}
+
+void ClockworkEngine::Restart::teardown() {
+    // What is queued for the instance that is about to go is refused to its
+    // senders as such (docs/RESTARTS.md), and the schedule cleared.
+    if (mCold) mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
+    mEngine.mProcessor.pause();
+    // A cold restart re-inits the arena (destroy_dsp / rebuild_dsp →
+    // init_memory → clockwork_lanes_reset_drains) that the control pass
+    // drains — parked until the arena is back, whoever runs it.
+    if (mCold) {
+        mParked = mEngine.parkControlPass();
+        if (mEngine.testControlParked) mEngine.testControlParked();
+    }
+    mEngine.stopAudioSource();
+    // A manual pump is not a source the engine can stop: it renders whenever
+    // its caller's thread arrives. From here until audio resumes it tries
+    // this gate and drops its block (pumpAudioCallback, pumpDevice), so no
+    // pumped block renders against an instance being torn down or built.
+    // Taken blocking, after the source has stopped: a block already
+    // rendering finishes first.
+    mPumpGate = std::unique_lock<std::mutex>(mEngine.mPumpGate);
+    // The instance goes first: its teardown answers what was still in the
+    // in ring for it (destroy_dsp, docs/RESTARTS.md), and those answers
+    // have to be on the rings before the drain.
+    if (mCold) destroy_dsp();
+    // What the engine has said so far reaches its clients before the rings
+    // go down with the arena — the user's notice before a recovery, this
+    // swap's own account of itself, the teardown's refusals.
+    if (mCold) drain();
+}
+
+void ClockworkEngine::Restart::drain() {
+    // The pass is parked, so this thread is the rings' only reader. (A host
+    // that drains the egress itself is a reader the engine cannot park, and
+    // drains its own.)
+    if (mParked && !mEngine.mCurrentConfig.hostDrainsEgress) mEngine.drainEgressNow();
+}
+
+void ClockworkEngine::Restart::build(double rate) {
+    // Said since the last drain — a refusal at the door, a log line — leaves
+    // before the rings' epoch resets under it (docs/RESTARTS.md: the old
+    // generation's replies all leave before setup).
+    drain();
+    rebuild_dsp(rate);
+    mEngine.mDspRebuilt = true;
+}
+
+bool ClockworkEngine::Restart::resumeAudio() {
+    if (mCold) mEngine.resumeControlPass();
+    mResumed = true;
+    const bool delivered = mEngine.startAudioSource();
+    mEngine.mProcessor.resume();
+    mPumpGate.unlock();
+    return delivered;
+}
+
+void ClockworkEngine::Restart::escalateToCold() {
+    if (mCold) return;
+    mCold = true;
+    // Audio is stopped and the gate held (teardown); what a cold announce
+    // and teardown add, in their order.
+    mEngine.setEngineState(EngineState::Restarting, "rate-change");
+    mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
+    mParked = mEngine.parkControlPass();
+    if (mEngine.testControlParked) mEngine.testControlParked();
+    destroy_dsp();
+    drain();
+}
+
 SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                                            double sampleRate,
                                            int bufferSize,
@@ -3720,61 +3804,18 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
 
     bool inputWasDropped = false;
-    const bool   isCold      = plan.isCold;
+    // Not const: a hot swap whose guest refuses to be told the new device
+    // facts becomes cold where it refuses (Restart::escalateToCold).
+    bool         isCold      = plan.isCold;
     const double currentRate = snap.currentRate;
     result.type = isCold ? SwapType::Cold : SwapType::Hot;
 
-    if (isCold) setEngineState(EngineState::Restarting, "rate-change");
+    // The restart around the device work below: said first, then done, and
+    // its holds released by every way out of here (Restart, ClockworkEngine.h).
+    Restart restart(*this, isCold);
+    restart.announce();
     if (onSwapEvent) onSwapEvent("swap:start", result);
-
-    // --- Pause and optionally capture state ---
-    // What is queued for the instance that is about to go is refused to its
-    // senders as such (docs/RESTARTS.md), and the schedule cleared.
-    if (isCold) purge(CLOCKWORK_REFUSED_REBUILDING);
-    mProcessor.pause();
-
-    // Cold swaps tear down and re-init the shared-memory arena (destroy_dsp
-    // / rebuild_dsp → init_memory → clockwork_lanes_reset_drains) that the
-    // control pass drains — park it until the arena is back, whoever runs it.
-    // Tap guard so every exit path below resumes it; the happy paths
-    // resume explicitly just before audio restarts.
-    struct ControlPark {
-        ClockworkEngine* engine = nullptr;
-        bool parked = false;
-        void park(ClockworkEngine* e) { parked = e->parkControlPass(); engine = e; }
-        void resumeNow() { if (engine) engine->resumeControlPass(); engine = nullptr; }
-        ControlPark() = default;
-        ~ControlPark()   { resumeNow(); }
-        ControlPark(const ControlPark&) = delete;
-        ControlPark& operator=(const ControlPark&) = delete;
-    } controlPark;
-    if (isCold) {
-        controlPark.park(this);
-        if (testControlParked) testControlParked();
-    }
-
-    // --- Stop audio ---
-    stopAudioSource();
-    // A manual pump is not a source the engine can stop: it renders whenever
-    // its caller's thread arrives. From here until audio restarts it tries
-    // this gate and drops its block (pumpAudioCallback, pumpDevice), so no
-    // pumped block renders against a DSP being torn down or built. Taken
-    // blocking, after the source has stopped: a block already rendering
-    // finishes first. Every exit path below releases it.
-    std::unique_lock<std::mutex> pumpGate(mPumpGate);
-
-    // The instance goes first: its teardown answers what was still in the in
-    // ring for it (destroy_dsp, docs/RESTARTS.md), and those answers have to
-    // be on the rings before the drain below.
-    if (isCold) destroy_dsp();
-
-    // What the engine has said so far reaches its clients before the rings
-    // go down with the arena — the user's notice before a recovery, this
-    // swap's own account of itself, the teardown's refusals. The pass is
-    // parked, so this thread is the rings' only reader now. (A host that
-    // drains the egress itself is a reader the engine cannot park, and
-    // drains its own.)
-    if (isCold && controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
+    restart.teardown();
 
     // Snapshot for rollback: a failed setAudioDeviceSetup can leave JUCE's
     // AudioDeviceManager bound to NO device, and the rollback below would then
@@ -4042,17 +4083,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         // back, or the default when that has gone too, which can run at
         // another rate. Built at the old rate, a default at another played
         // everything at the wrong speed and pitch.
-        if (isCold) {
-            // As on the happy path: what was said since the teardown leaves
-            // before the rings reset.
-            if (controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
-            rebuild_dsp(takeOpenDeviceGeometry(currentRate, false));
-            mDspRebuilt = true;
-        }
-        controlPark.resumeNow();
-        startAudioSource();
-        mProcessor.resume();
-        pumpGate.unlock();
+        if (isCold) restart.build(takeOpenDeviceGeometry(currentRate, false));
+        restart.resumeAudio();
         result.error = errStr;
         if (isCold) {
             // The rollback rebuilt the guest too, and that can fail like any build.
@@ -4088,25 +4120,18 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 if (!failMsg.empty())
                     throw std::runtime_error(failMsg);
             }
-            // Said since the first drain — a refusal at the door, a log line
-            // — leaves before the rings' epoch resets under it
-            // (docs/RESTARTS.md: the old generation's replies all leave
-            // before setup).
-            if (controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
-            rebuild_dsp(newRate);
-            mDspRebuilt = true;
+            restart.build(newRate);
         } catch (const std::exception& e) {
             clockwork_log("[engine] rebuild_dsp failed: %s — recovering with safe defaults",
                     e.what());
 
             double safeRate = currentRate;
             int safeBuffer = 128;
-            mCurrentConfig.sampleRate = static_cast<int>(safeRate);
+            sessionRateOpened(safeRate);
             mCurrentConfig.bufferSize = safeBuffer;
 
             try {
-                rebuild_dsp(safeRate);
-                mDspRebuilt = true;
+                restart.build(safeRate);
                 recovered = true;
                 result.error = std::string("rebuild failed (") + e.what()
                              + "), recovered at safe defaults";
@@ -4123,10 +4148,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
 
     // --- Restart audio (success path) ---
-    controlPark.resumeNow();
-    const bool delivered = startAudioSource();
-    mProcessor.resume();
-    pumpGate.unlock();
+    const bool delivered = restart.resumeAudio();
 
     // A device that opened and started but never delivered a block is a failed
     // swap, as one that refused to open is: nothing is playing on it, whatever

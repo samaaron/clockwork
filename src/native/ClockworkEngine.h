@@ -1044,6 +1044,53 @@ private:
     // the pass is parked (the rings' only reader then).
     void drainEgressNow();
 
+    // ── One restart, whatever started it (docs/RESTARTS.md) ─────────────
+    // The sequence a swap runs around its device work, in its order, and
+    // the two holds every way out must release: the control pass parked and
+    // the pump gate taken. A hot swap stops and restarts the audio and
+    // nothing more; a cold one also says restarting, purges, tears the
+    // instance down and drains, and builds again before audio resumes. Used
+    // by switchDevice alone, which every cold path ends in — the user's
+    // switch, the watchdog's recovery, the rate-skew recovery — so a client
+    // hears one sequence and cannot tell which started it.
+    class Restart {
+    public:
+        Restart(ClockworkEngine& engine, bool cold);
+        ~Restart();   // every hold released, whichever way the swap left
+        Restart(const Restart&) = delete;
+        Restart& operator=(const Restart&) = delete;
+        // Say it: restarting, with the generation closing. First, so a
+        // client stops sending before the teardown refuses what it sent.
+        void announce();
+        // Do it: purge the schedule, pause the processor, park the control
+        // pass, stop the source and take the pump gate, tear the instance
+        // down (its refusals and carries happen there), drain what has
+        // been said to the clients before the rings go.
+        void teardown();
+        // Build the instance at `rate` on whatever device is open now, the
+        // egress drained first so the old generation's replies all leave
+        // before the rings reset under them. Throws as rebuild_dsp does.
+        void build(double rate);
+        // Audio again: the control pass resumed, the source started, the
+        // processor resumed, the gate released. Whether the source
+        // delivered a block.
+        bool resumeAudio();
+        // A hot restart that must become cold after all, with the device
+        // open and audio still stopped: the guest refused the device facts
+        // it had declared it survives. What a cold announce and teardown
+        // would have done, done now — restarting said, the schedule purged,
+        // the pass parked, the instance torn down, the egress drained — so
+        // build and resumeAudio run as for any cold restart.
+        void escalateToCold();
+    private:
+        void drain();
+        ClockworkEngine& mEngine;
+        bool             mCold;
+        bool             mParked  = false;   // the pass did park (it may not, in time)
+        bool             mResumed = false;
+        std::unique_lock<std::mutex> mPumpGate;
+    };
+
     // Peer command plane (SHM segment; shm_peer_plane.h). init() publishes the
     // segment's plane here when Config::shmCommands is set; shutdown() nulls it
     // before the segment unmaps. The gateway task drains its command ring into

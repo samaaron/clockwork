@@ -16,7 +16,7 @@ inherits it by implementing the one hook in "What the guest owes".
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
 | **hot restart** | survives | untouched, every region | statechange only |
-| **cold restart** (a rebuild) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting`, then `setup` with the new generation |
+| **cold restart** (a rebuild) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, then statechange `running` and `setup` with the one opened |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
 A hot restart is a device change the instance can take without being
@@ -207,6 +207,8 @@ Everything else it holds is the instance's and goes with it.
 - test/test_restart_refusals.cpp and the `[ColdSwap]` client ABI cases:
   the same rules through a whole engine's cold swap, where the order of
   the teardown, the drains and the rebuild is the engine's.
+- test/test_restart_sequence.cpp: one sequence whatever started it — the
+  user's switch, the watchdog's recovery, the rate-skew recovery.
 - test/osc_channel_no_instance.test.mjs and test/osc_channel.spec.mjs: the
   browser's boundary, in node over a real engine and in a page.
 - rust/clockwork-abi/tests/layout.rs: the status value, held to the C
