@@ -72,10 +72,14 @@ async function front({ midi = false, gamepad = false } = {}) {
     },
     deliver: (bytes) => delivered.push(decode(bytes)),
     ingest: (bytes) => ingested.push(decode(bytes)),
+    // The generation a refusal is stamped with (docs/RESTARTS.md): the
+    // page's to know, asked at the moment of refusing.
+    generation: () => kGeneration,
   });
   await f.init();
   return { f, delivered, ingested, kbd, synth, access, api, pad };
 }
+const kGeneration = 5;
 
 maybe("the front takes exactly the forwarded shape and nothing else", async () => {
   const { f, delivered } = await front();
@@ -95,7 +99,8 @@ maybe("the front takes exactly the forwarded shape and nothing else", async () =
 maybe("a verb nobody answers is refused by name", async () => {
   const { f, delivered } = await front();
   f.take(forwarded(encode(clockworkSys("no/such/verb"), [7])));
-  assert.deepEqual(delivered, [[clockworkSys("error"), clockworkSys("no/such/verb"), REASON_UNKNOWN]]);
+  // The one shape every refusal has: the address, the reason, the generation.
+  assert.deepEqual(delivered, [[clockworkSys("error"), clockworkSys("no/such/verb"), REASON_UNKNOWN, kGeneration]]);
   f.dispose();
 });
 
@@ -104,8 +109,8 @@ maybe("MIDI and gamepad verbs are refused with the option's name when not enable
   f.take(forwarded(encode(clockworkSys("midi/ports/list"), [])));
   f.take(forwarded(encode(clockworkSys("gamepad/devices/list"), [])));
   assert.deepEqual(delivered, [
-    [clockworkSys("error"), clockworkSys("midi/ports/list"), REASON_NO_MIDI],
-    [clockworkSys("error"), clockworkSys("gamepad/devices/list"), REASON_NO_GAMEPAD],
+    [clockworkSys("error"), clockworkSys("midi/ports/list"), REASON_NO_MIDI, kGeneration],
+    [clockworkSys("error"), clockworkSys("gamepad/devices/list"), REASON_NO_GAMEPAD, kGeneration],
   ]);
   f.dispose();
 });
@@ -158,7 +163,7 @@ maybe("MIDI: a guest's own send opens the port on demand and reaches it with its
   f.take(forwarded(encode(clockworkSys("midi/sink/send"), ["synth", Uint8Array.from([0xf8])])));
   assert.deepEqual(synth.sent[1], { bytes: [0xf8], timestamp: undefined });
   f.take(forwarded(encode(clockworkSys("midi/sink/send"), ["synth"])));
-  assert.deepEqual(delivered[delivered.length - 1], [clockworkSys("error"), clockworkSys("midi/sink/send"), "malformed"]);
+  assert.deepEqual(delivered[delivered.length - 1], [clockworkSys("error"), clockworkSys("midi/sink/send"), "malformed", kGeneration]);
   f.dispose();
 });
 
@@ -204,7 +209,7 @@ maybe("MIDI: an event goes INTO the engine, and comes back to the client only wh
 maybe("MIDI: the engine's clock-out verbs are refused as not on the web", async () => {
   const { f, delivered } = await front({ midi: true });
   f.take(forwarded(encode(clockworkSys("midi/clock/beat"), ["*", 500.0])));
-  assert.deepEqual(delivered, [[clockworkSys("error"), clockworkSys("midi/clock/beat"), REASON_NOT_ON_WEB]]);
+  assert.deepEqual(delivered, [[clockworkSys("error"), clockworkSys("midi/clock/beat"), REASON_NOT_ON_WEB, kGeneration]]);
   f.dispose();
 });
 

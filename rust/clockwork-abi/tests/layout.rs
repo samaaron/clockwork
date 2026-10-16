@@ -94,7 +94,8 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkArenaEntry { id, offset, bytes, owner, audience, cadence, tier, lifetime, geom });
     expect!(mine, ClockworkArenaHeader {
         magic, version, header_bytes, instance_id, arena_bytes, clockwork_bytes, guest_offset,
-        guest_bytes, area_count, area_bytes, entry_count, entry_bytes, state, reserved, areas, entries,
+        guest_bytes, area_count, area_bytes, entry_count, entry_bytes, state, generation, reserved,
+        areas, entries,
     });
     let consts: [(&str, i64); 34] = [
         ("CLOCKWORK_E_NO_INSTANCE", ClockworkStatus::E_NO_INSTANCE.0 as i64),

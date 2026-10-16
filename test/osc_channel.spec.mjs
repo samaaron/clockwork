@@ -100,7 +100,9 @@ test("while there is no instance the client's send is refused with the word, a w
       workerSent, workerReason, refused,
     };
   }, clockworkConfig);
-  expect(r.refusal, "the client heard the refusal with the address and the reason").toEqual(["/clockwork/error", "/dummy/ping", "no instance"]);
+  // ... and the generation it was refused in, read off the arena: the flag
+  // was raised by hand, so the word still names the first instance.
+  expect(r.refusal, "the client heard the refusal with the address, the reason and the generation").toEqual(["/clockwork/error", "/dummy/ping", "no instance", 1]);
   expect(r.pongs, "only the ping sent once there was an instance was answered").toBe(1);
   expect(r.synced, "clockwork's own went through while there was no instance").toBe(true);
   expect(r.workerSent).toBe(false);

@@ -261,7 +261,7 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
             : nullptr;
         const auto rt = handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
             [chan, token](const uint8_t* d, uint32_t n) { chan->reply(token, d, n); },
-            clockState);
+            clockState, arenaInstanceGeneration(shared_memory));
         if (rt == ClockworkSysRt::Answered) return true;
 
         // A /clock verb this build doesn't answer (native-only Link-session
@@ -1072,7 +1072,7 @@ extern "C" {
     // message, which buries the first one — the only one anybody reads.
     static inline void refuse_schedule_verb(const uint8_t* data, uint32_t len, uint32_t origin) {
         increment_scheduler_drop_metric();
-        clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT,
+        clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT, arenaInstanceGeneration(shared_memory),
             [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
         static std::atomic<uint32_t> refusals{0};
         const uint32_t n = refusals.fetch_add(1, std::memory_order_relaxed);
@@ -1263,7 +1263,7 @@ extern "C" {
             const SchedulePacket sp = clockwork_parse_schedule(data, len);
             if (!sp.ok) {                       // malformed: counted, and its sender told
                 increment_scheduler_drop_metric();
-                clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED,
+                clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, arenaInstanceGeneration(shared_memory),
                     [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
                 return;
             }
@@ -1431,6 +1431,7 @@ extern "C" {
                     clockwork_sys_refusals_dropped().fetch_add(1, std::memory_order_relaxed);
                 }
                 clockwork_sys_refuse(payload, payload_size, CLOCKWORK_REFUSED_REBUILDING,
+                    arenaInstanceGeneration(shared_memory),
                     [sourceId](const uint8_t* d, uint32_t n) {
                         clockwork_egress_nrt_write(EGRESS_REPLY, sourceId, d, n);
                     });
@@ -2267,7 +2268,10 @@ extern "C" {
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
             }
-            // There is an instance: the boundary takes messages for it again.
+            // There is an instance: a generation opens — the word goes even,
+            // one on from the last, which is the number setup will name —
+            // and the boundary takes messages for it again.
+            arenaInstanceUp(shared_memory);
             cursors->status_flags.fetch_and(~static_cast<uint32_t>(STATUS_NO_INSTANCE),
                                             std::memory_order_release);
         } catch (const std::exception& e) {
@@ -2420,6 +2424,10 @@ extern "C" {
         // goes, so a message written from now on meets the boundary's
         // refusal rather than a ring that will be reset under it.
         if (cursors) cursors->status_flags.fetch_or(STATUS_NO_INSTANCE, std::memory_order_release);
+        // And the generation word goes odd: the generation that is closing
+        // stays named, so a refusal from here says which instance refused
+        // and a reader of the arena knows "between instances" from the bytes.
+        if (shared_memory) arenaInstanceDown(shared_memory);
         // What was already in the ring: answered or carried, never dropped.
         g_carry_used = 0;
         restart_in_ring_refuse();
@@ -2743,6 +2751,7 @@ extern "C" {
                                 ingest_frame(payload, payload_size, sourceId, currentOscTime);
                             } else {
                                 clockwork_sys_refuse(payload, payload_size, g_in_discard_reason,
+                                    arenaInstanceGeneration(shared_memory),
                                     [sourceId](const uint8_t* d, uint32_t n) { emit_osc_out(sourceId, d, n); });
                             }
                             return ClockworkDrainVerdict::Consume;
@@ -3341,7 +3350,7 @@ bool clockwork_clockwork_sys_route(void* /*routeCtx*/, const void* callCtx,
         : nullptr;
     handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
         [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); },
-        clockState);
+        clockState, arenaInstanceGeneration(shared_memory));
     return true;   // the prefix is claimed whole, answered or refused
 }
 
@@ -3351,7 +3360,7 @@ bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     const uint32_t token = cc ? cc->sourceId : 0;
     const auto refuse = [&](const char* reason) {
-        clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason,
+        clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason, arenaInstanceGeneration(shared_memory),
             [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); });
     };
 #if CLOCKWORK_SCHEDULER
@@ -3408,7 +3417,7 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
         : nullptr;
     switch (handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
                 [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); },
-                clockState)) {
+                clockState, arenaInstanceGeneration(shared_memory))) {
         case ClockworkSysRt::NotClaimed:  return false;
         case ClockworkSysRt::Answered:    return true;
         case ClockworkSysRt::UnknownVerb: break;
@@ -3498,7 +3507,8 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
     if (std::strcmp(verb, "asset/commit") != 0) {
         // Claimed by prefix, not a verb of this layer: refuse as the sys route does.
         handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
-            [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
+            [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); },
+            nullptr, arenaInstanceGeneration(shared_memory));
         return true;
     }
     int32_t id = -1;

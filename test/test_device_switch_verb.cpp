@@ -41,14 +41,6 @@ std::vector<osc_test::ParsedReply> switchDones(EngineFixture& fix) {
     return out;
 }
 
-// Booted, and subscribed to the engine's broadcasts as a GUI is.
-void subscribe(EngineFixture& fix) {
-    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
-    OscReply ack;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
-    fix.clearReplies();
-}
-
 // Everything the engine has sent so far has arrived: this reply comes back
 // through the same ring, after it.
 void flushReplies(EngineFixture& fix) {

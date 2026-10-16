@@ -27,12 +27,16 @@
 
 namespace {
 
+// The generation the handler is told it answers in (an input, like the
+// clock): what a refusal carries back.
+constexpr uint32_t kGeneration = 3;
+
 // Collect whatever handle_clockwork_sys_osc emits for one packet.
 std::vector<osc_test::ParsedReply> answer(const osc_test::Packet& p) {
     std::vector<osc_test::ParsedReply> out;
     handle_clockwork_sys_osc(p.ptr(), p.size(), [&out](const uint8_t* d, uint32_t n) {
         out.push_back(osc_test::parseReply(d, n));
-    });
+    }, nullptr, kGeneration);
     return out;
 }
 
@@ -115,14 +119,20 @@ TEST_CASE("clockwork-sys: an unknown verb is refused, never forwarded", "[clockw
     auto r = answer(osc_test::message("/clockwork/no-such-verb"));
     REQUIRE(r.size() == 1);
     REQUIRE(r[0].address == "/clockwork/error");
+    REQUIRE(r[0].argCount() == 3);
     REQUIRE(r[0].argString(0) == "/clockwork/no-such-verb");
     REQUIRE_FALSE(r[0].argString(1).empty());
+    // ... and the generation it was refused in, the handler's input, so a
+    // client knows which instance's word this is (docs/RESTARTS.md).
+    REQUIRE(r[0].argInt(2) == static_cast<int32_t>(kGeneration));
 
     // echo with the wrong argument type is refused rather than answered with
     // something invented.
     auto wrong = answer(osc_test::message("/clockwork/echo", 1, 2));
     REQUIRE(wrong.size() == 1);
     REQUIRE(wrong[0].address == "/clockwork/error");
+    REQUIRE(wrong[0].argCount() == 3);
+    REQUIRE(wrong[0].argInt(2) == static_cast<int32_t>(kGeneration));
 }
 
 TEST_CASE("clockwork-sys: an address outside the prefix is left alone", "[clockwork_sys]") {
@@ -131,7 +141,7 @@ TEST_CASE("clockwork-sys: an address outside the prefix is left alone", "[clockw
     const auto p = osc_test::message("/dsp-probe/ping", 1);
     int emitted = 0;
     const bool claimed = handle_clockwork_sys_osc(p.ptr(), p.size(),
-        [&emitted](const uint8_t*, uint32_t) { ++emitted; });
+        [&emitted](const uint8_t*, uint32_t) { ++emitted; }, nullptr, kGeneration);
     REQUIRE_FALSE(claimed);
     REQUIRE(emitted == 0);
 }

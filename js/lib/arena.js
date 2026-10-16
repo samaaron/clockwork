@@ -102,7 +102,7 @@ export function readArena(buffer, base) {
   if (base % 4 !== 0) throw new Error(`arena base ${base} is not 4-byte aligned`);
   const words = new Uint32Array(buffer, base, HEADER_WORDS);
   const [magic, version, headerBytes, instanceId, arenaBytes, clockworkBytes, guestOffset, guestBytes,
-         areaCount, areaBytes, entryCount, entryBytes, state] = words;
+         areaCount, areaBytes, entryCount, entryBytes, state, generation] = words;
   if (magic !== ARENA_MAGIC) throw new Error(`not a clockwork arena (magic ${magic.toString(16)})`);
   if (version !== ARENA_VERSION) throw new Error(`arena version ${version}, this reader knows ${ARENA_VERSION}`);
   if (state !== ARENA_PUBLISHED) throw new Error('arena not yet published');
@@ -178,8 +178,10 @@ export function readArena(buffer, base) {
   };
 
   return {
+    // `generation` is the word as it was at this read; readGeneration below
+    // reads it live, since it moves while a page holds the table.
     header: { magic, version, headerBytes, instanceId, arenaBytes, clockworkBytes, guestOffset, guestBytes,
-              areaCount, entryCount },
+              areaCount, entryCount, generation },
     areas,
     area: (id) => areas.get(id) ?? null,
     entries,
@@ -194,6 +196,22 @@ export function readArena(buffer, base) {
     },
   };
 }
+
+/**
+ * The generation word (ClockworkArenaHeader::generation, docs/RESTARTS.md):
+ * odd while there is no guest instance, even while there is one; the rest is
+ * the generation the last build opened — the number /clockwork/setup named.
+ * The engine moves it at every teardown and build, so a page reads it live,
+ * with one load, rather than from a readArena snapshot.
+ */
+const GENERATION_WORD = 13;
+export function readGeneration(buffer, base) {
+  return Atomics.load(new Uint32Array(buffer, base + GENERATION_WORD * 4, 1), 0);
+}
+/** The generation the word names: the last one opened, 0 before any. */
+export function instanceGeneration(word) { return word >>> 1; }
+/** Whether a guest instance is up, from the word. */
+export function hasInstance(word) { return (word & 1) === 0; }
 
 /**
  * The flat constants object the JS runtime consumes, derived from the table.

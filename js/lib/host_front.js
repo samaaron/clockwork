@@ -75,14 +75,20 @@ export class HostFront {
    *   without it: a page that wants MIDI on a platform whose Web MIDI
    *   backend refuses (headless Linux says "Platform dependent
    *   initialization failed") still gets its audio.
+   * @param {() => number} [options.generation] the guest instance's
+   *   generation now, for a refusal to carry (docs/RESTARTS.md).
    */
-  constructor({ midi = false, gamepad = false, wasmBaseURL = null, deliver, ingest, onUnavailable } = {}) {
+  constructor({ midi = false, gamepad = false, wasmBaseURL = null, deliver, ingest, onUnavailable,
+                generation } = {}) {
     this._midiOptions = midi;
     this._gamepadOptions = gamepad;
     this._wasmBaseURL = wasmBaseURL;
     this._deliver = deliver;
     this._ingest = ingest ?? deliver;
     this._onUnavailable = onUnavailable ?? null;
+    // The guest instance's generation at the moment of refusing, which the
+    // owner knows where to read (docs/RESTARTS.md). 0 is "none opened".
+    this._generation = generation ?? (() => 0);
     this._midi = null;
     this._gamepad = null;
     this._midiError = null;
@@ -198,8 +204,11 @@ export class HostFront {
     this._refuse(address, REASON_UNKNOWN);
   }
 
+  // "/clockwork/error <address> <reason> <generation>": the one shape every
+  // refusal has, on every host (clockwork_sys.h).
   _refuse(address, reason) {
-    this._deliver(oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"), [address, reason])));
+    this._deliver(oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"),
+      [address, reason, { type: "int", value: this._generation() }])));
   }
 
   // The subscribe verbs ack with the trailing int32 the request carried, and

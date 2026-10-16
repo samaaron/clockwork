@@ -17,6 +17,7 @@
 #include "ClockworkEngine.h"
 #include "OscTestUtils.h"
 #include "clockwork_event_sink.h"
+#include "clockwork_prefix.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -184,6 +185,16 @@ SwapResult whenSwapGateFree(Attempt&& attempt) {
 template <typename Fix, typename... Args>
 SwapResult switchWhenFree(Fix& fix, Args&&... args) {
     return whenSwapGateFree([&] { return fix.engine().switchDevice(args...); });
+}
+
+// Booted, and subscribed to the engine's broadcasts as a GUI is: statechange,
+// setup, the device reports. A case that waits for any of those needs this.
+template <typename Fix>
+void subscribe(Fix& fix) {
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    fix.clearReplies();
 }
 
 // Everything the engine's device lane was given before this has run: it

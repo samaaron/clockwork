@@ -74,12 +74,16 @@ struct Answer {
     std::vector<Reply> replies;
 };
 
+// The generation the handler is told it is refusing in: an input, like the
+// clock, so the handler stays pure. A refusal carries it back (docs/RESTARTS.md).
+constexpr uint32_t kGeneration = 7;
+
 Answer answer(const uint8_t* data, uint32_t len) {
     Answer a;
     a.claimed = handle_clockwork_sys_osc(data, len, [&a](const uint8_t* b, uint32_t n) {
         a.replies.push_back(Reply{ osc_test::parseReply(b, n).address,
                                    std::vector<uint8_t>(b, b + n) });
-    });
+    }, nullptr, kGeneration);
     return a;
 }
 
@@ -123,7 +127,7 @@ bool sysRoute(void* ctx, const void* /*callCtx*/, const uint8_t* data, std::size
     return handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
                               [r](const uint8_t* b, uint32_t n) {
         r->replies.push_back(osc_test::parseReply(b, n).address);
-    });
+    }, nullptr, kGeneration);
 }
 
 } // namespace
@@ -353,10 +357,13 @@ TEST_CASE("ingress/clockwork-sys: an unknown verb is refused, never forwarded",
     auto parsed = osc_test::parseReply(a.replies[0].raw.data(),
                                        static_cast<uint32_t>(a.replies[0].raw.size()));
     CHECK(parsed.address == "/clockwork/error");
-    CHECK(typeTagOf(a.replies[0].raw) == "ss");
-    REQUIRE(parsed.argCount() == 2);
+    // One shape for every refusal clockwork makes (docs/RESTARTS.md): the
+    // address at fault, a reason, and the generation that refused.
+    CHECK(typeTagOf(a.replies[0].raw) == "ssi");
+    REQUIRE(parsed.argCount() == 3);
     CHECK(parsed.argString(0) == "/clockwork/no-such-verb");   // the address at fault
     CHECK_FALSE(parsed.argString(1).empty());                // and a reason
+    CHECK(parsed.argInt(2) == static_cast<int32_t>(kGeneration));
 }
 
 TEST_CASE("ingress/clockwork-sys: /clockwork/echo without a string or blob is refused",
@@ -375,7 +382,7 @@ TEST_CASE("ingress/clockwork-sys: /clockwork/echo without a string or blob is re
         auto parsed = osc_test::parseReply(a.replies[0].raw.data(),
                                            static_cast<uint32_t>(a.replies[0].raw.size()));
         CHECK(parsed.address == "/clockwork/error");
-        REQUIRE(parsed.argCount() == 2);
+        REQUIRE(parsed.argCount() == 3);
         CHECK(parsed.argString(0) == "/clockwork/echo");
     }
 }

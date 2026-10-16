@@ -443,9 +443,10 @@ matches the full `/clockwork/` including the trailing slash, never bare
 /clockwork/clock/tempo/get  clockwork — the session clock
 /clockwork/midi/ports       clockwork — MIDI devices
 /clockwork/record/start     clockwork — session recording
-/clockwork/no-such-verb     clockwork — REFUSED (/clockwork/error), never forwarded
+/clockwork/no-such-verb     clockwork — REFUSED (/clockwork/error <address> <reason> <generation>),
+                                        never forwarded
 /anything-for-the-DSP, with no DSP instance up
-                            clockwork — REFUSED at the boundary (/clockwork/error "no instance"),
+                            clockwork — REFUSED at the boundary (/clockwork/error ... "no instance" ...),
                                         never written; wait for /clockwork/setup (docs/RESTARTS.md)
 /clockwork-system-status        DSP — a near miss is not a match
 /clockwork/synth                DSP — forwarded untouched

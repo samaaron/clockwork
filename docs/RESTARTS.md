@@ -41,16 +41,32 @@ cold restart. It is the key to everything below: a region of lifetime
 refused, and a client rebuilds against the generation `setup` named, with
 nothing from an earlier one taken for the current one.
 
-Today the generation lives in one atomic in ClockworkEngine and is on the
-wire in `setup` alone. The contract is that it is also:
+It lives in the arena header, the one region a rebuild keeps
+(`ClockworkArenaHeader::generation`, src/clockwork_arena.h), as one word:
+`2g+1` while there is no guest instance, `2g` while there is one, `g` the
+generation the last build opened. A new arena holds 1: no instance, none
+opened. The lanes move it, one step each way, at the two moments that
+matter: even to odd at the start of `destroy_dsp`, before anything else of
+the teardown, and odd to even once `dsp_new` has succeeded. A reader in any
+process reads it with one load and knows "between instances" from the
+bytes, with no event to miss: `clockwork_arena_generation` and
+`clockwork_arena_has_instance` in C, `instance_generation` and
+`has_instance` on the Rust header, `readGeneration`, `instanceGeneration`
+and `hasInstance` in js/lib/arena.js. Clockwork keeps no other count:
+ClockworkEngine reads the same word, and the web's worklet reports it at
+the boot handshake for a page with no shared view of the arena.
 
-- published in `clockwork-state`, lifetime `arena`, odd while there is no
-  guest instance and even while there is one, as the channel map's
-  seqlock already does, so a reader knows "between instances" from the
-  bytes with no event to miss;
-- carried on `restarting` (the generation closing) as well as on `setup`
-  (the one opened);
-- stamped on every refusal clockwork makes on the guest's behalf.
+On the wire it is:
+
+- on `setup` (`,iii rate buffer generation`): the generation opened;
+- on `statechange` (`,ssi state reason generation`): on `restarting` the
+  generation closing, on `running` after a rebuild the one opened,
+  otherwise the one the instance has;
+- on every refusal clockwork makes (`/clockwork/error ,ssi address reason
+  generation`): the generation at the moment of refusing, whatever refused
+  and wherever. One shape, so a client parses one thing. A refusal made
+  between instances names the generation that closed, since none has
+  opened.
 
 The arena header's `instance_id` is a different axis: which engine, for a
 process that will one day hold more than one. It stays 0 and is not a
@@ -66,7 +82,7 @@ re-initialised by clockwork, not necessarily zero.
 
 | region | lifetime | hot restart | cold restart | told how |
 |---|---|---|---|---|
-| header and table | arena | kept | kept, offsets never move | n/a |
+| header and table | arena | kept | kept, offsets never move; the generation word moves on (odd at the teardown, even at the build) | the word itself |
 | clock anchors (NTP start, drift, global offset) | cold boot | kept | kept: the host's, not the instance's | n/a |
 | clock state (tempo, origin, transport, meter) | cold boot | kept | kept: a device change does not change the session | n/a |
 | node id counter | cold boot | kept | kept: ids are the clients' | n/a |
@@ -187,11 +203,13 @@ Everything else it holds is the instance's and goes with it.
   browser's boundary, in node over a real engine and in a page.
 - rust/clockwork-abi/tests/layout.rs: the status value, held to the C
   header by the compiled probe.
-- test/test_arena.cpp: the table every row's lifetime is read from.
+- test/test_arena.cpp: the table every row's lifetime is read from, and
+  the generation word's meaning; test/test_restarts.cpp `[generation]`
+  and the engine case in test/test_restart_refusals.cpp: how it moves, and
+  that `restarting`, `setup` and every refusal carry it; test/arena.test.mjs
+  and the Rust header's tests: the same word read on the other sides.
 
 ## Not yet
 
-The generation is not yet published in the arena, and `restarting` does
-not yet carry it; the refusal carries it once it exists. The guest's
-teardown hook ("What the guest owes") is not yet in the ABI: a guest's
-own unanswered work still dies with it.
+The guest's teardown hook ("What the guest owes") is not yet in the ABI: a
+guest's own unanswered work still dies with it.

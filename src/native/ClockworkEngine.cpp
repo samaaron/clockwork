@@ -375,14 +375,17 @@ void ClockworkEngine::setEngineState(EngineState state, const std::string& reaso
     // would make clients throw away state that is still live.
     if (state == EngineState::Running && mDspRebuilt) {
         mDspRebuilt = false;
-        // Bump before emit so the wire value is the post-rebuild
-        // generation (mSetupGeneration starts at 1; first cold swap = 2).
-        uint32_t gen = mSetupGeneration.fetch_add(1) + 1;
+        // The generation it names is the arena's: dsp_new moved the word on
+        // when the new instance came up, and the egress reads it there.
         auto* dev = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
         int sr  = dev ? static_cast<int>(dev->getCurrentSampleRate()) : mCurrentConfig.sampleRate;
         int buf = dev ? dev->getCurrentBufferSizeSamples() : mCurrentConfig.bufferSize;
-        mEgress.sendSetup(sr, buf, gen);
+        mEgress.sendSetup(sr, buf);
     }
+}
+
+uint32_t ClockworkEngine::generation() const {
+    return OscEgress::generationNow();
 }
 
 void ClockworkEngine::snapshotStateTo(uint32_t token) {

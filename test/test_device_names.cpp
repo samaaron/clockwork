@@ -34,14 +34,6 @@ std::shared_ptr<FakeDeviceSpec> output(const std::string& name, bool unplugged =
     return d;
 }
 
-// Booted, and subscribed to the engine's broadcasts as a GUI is.
-void subscribe(EngineFixture& fix) {
-    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
-    OscReply ack;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
-    fix.clearReplies();
-}
-
 // The user picks an output from the menu; what the engine says it did.
 osc_test::ParsedReply pick(EngineFixture& fix, const char* name) {
     osc_test::Builder b;

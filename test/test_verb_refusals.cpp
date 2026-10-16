@@ -5,8 +5,9 @@
  *
  * clockwork claims /clockwork/ whole, so nothing under it reaches the DSP, and
  * a client that sends a verb it got wrong must hear so: "/clockwork/error
- * <address> <reason>", with the reasons the web's host front gives
- * (js/lib/host_front.js), so a client reads the same refusal on every host.
+ * <address> <reason> <generation>", with the reasons the web's host front
+ * gives (js/lib/host_front.js), so a client reads the same refusal on every
+ * host, and the generation it was refused in (docs/RESTARTS.md).
  * A typo, or a verb from a newer client, is "unknown clockwork verb"; a verb
  * that exists but whose arguments it cannot read is "malformed".
  *
@@ -34,9 +35,10 @@ void requireRefused(EngineFixture& fx, const osc_test::Packet& pkt,
     INFO("refusal of " << address);
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("error"), err));
     const auto p = err.parsed();
-    REQUIRE(p.argCount() == 2);
+    REQUIRE(p.argCount() == 3);
     CHECK(p.argString(0) == address);
     CHECK(p.argString(1) == reason);
+    CHECK(p.argInt(2) == static_cast<int32_t>(fx.engine().generation()));
 }
 
 }  // namespace

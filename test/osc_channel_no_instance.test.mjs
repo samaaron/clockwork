@@ -12,10 +12,23 @@ import assert from "node:assert/strict";
 import { OscChannel, REASON_RING_FULL } from "../js/lib/osc_channel.js";
 import { STATUS_FLAGS, STATUS_NO_INSTANCE } from "../js/lib/ring_cursor_offsets.js";
 import { REASON_NO_INSTANCE, oscAddress, isClockworkSysBytes } from "../js/lib/clockwork_sys.js";
+import { readArena, readGeneration, instanceGeneration, hasInstance } from "../js/lib/arena.js";
 import * as oscFast from "../js/lib/osc_fast.js";
 import { EgressReader } from "../js/lib/ring.js";
 import { bootEngine, block, haveWasm } from "./engine_boot.mjs";
 const maybe = haveWasm ? test : test.skip;
+
+maybe("a booted engine's arena names its first instance: generation 1, and one is up", async () => {
+  // The word the C moves at every build (docs/RESTARTS.md), read by the
+  // page with one load, and the same number /clockwork/setup would name.
+  const { x, memory, arenaBase } = await bootEngine();
+  const word = readGeneration(memory.buffer, arenaBase);
+  assert.equal(word, 2, "writeArenaHeader put 1 (no instance); dsp_new made it even");
+  assert.equal(hasInstance(word), true);
+  assert.equal(instanceGeneration(word), 1);
+  assert.equal(readArena(memory.buffer, arenaBase).header.generation, 2, "the snapshot carries it too");
+  x.clockwork_client_close?.(0);
+});
 
 test("the sys rule in bytes agrees with the rule in strings, and a bundle is never claimed", () => {
   const enc = (a) => oscFast.copyEncoded(oscFast.encodeMessage(a, []));

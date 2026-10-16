@@ -117,8 +117,8 @@ int main(void) {
     F(ClockworkArenaHeader, instance_id); F(ClockworkArenaHeader, arena_bytes); F(ClockworkArenaHeader, clockwork_bytes);
     F(ClockworkArenaHeader, guest_offset); F(ClockworkArenaHeader, guest_bytes); F(ClockworkArenaHeader, area_count);
     F(ClockworkArenaHeader, area_bytes); F(ClockworkArenaHeader, entry_count); F(ClockworkArenaHeader, entry_bytes);
-    F(ClockworkArenaHeader, state); F(ClockworkArenaHeader, reserved); F(ClockworkArenaHeader, areas);
-    F(ClockworkArenaHeader, entries);
+    F(ClockworkArenaHeader, state); F(ClockworkArenaHeader, generation); F(ClockworkArenaHeader, reserved);
+    F(ClockworkArenaHeader, areas); F(ClockworkArenaHeader, entries);
     printf("const CLOCKWORK_ARENA_MAGIC %u\n", (unsigned)CLOCKWORK_ARENA_MAGIC);
     printf("const CLOCKWORK_ARENA_VERSION %d\n", (int)CLOCKWORK_ARENA_VERSION);
     printf("const CLOCKWORK_ARENA_HEADER_BYTES %d\n", (int)CLOCKWORK_ARENA_HEADER_BYTES);

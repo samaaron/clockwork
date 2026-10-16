@@ -47,9 +47,10 @@ pub use normalize::{assign_handle, normalize_ports, safe_osc_name, PortInfo};
 pub use osc::{decode, decode_packet, encode, encode_packet, OscArg, OscBundle, OscMessage, OscPacket};
 
 /// Why a subsystem refused one of its verbs. The engine answers it with
-/// `/clockwork/error <address> <reason>`, in the words the web's host front
-/// uses (`js/lib/host_front.js`), so a client reads the same refusal on every
-/// host.
+/// `/clockwork/error <address> <reason> <generation>`, in the words the
+/// web's host front uses (`js/lib/host_front.js`) and with the guest
+/// instance's generation at that moment (`docs/RESTARTS.md`), so a client
+/// reads the same refusal on every host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// Under the subsystem's namespace, but not one of its verbs: a typo, or

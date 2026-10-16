@@ -793,7 +793,7 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
     } catch (...) {
         mEmit->debug("a track verb could not be read, refused");
     }
-    clockwork_sys_refuse(data, size, "unknown track verb",
+    clockwork_sys_refuse(data, size, "unknown track verb", mEmit->generation(),
                    [this, token](const uint8_t* d, uint32_t n) { mEmit->reply(token, d, n); });
     return true;
 }

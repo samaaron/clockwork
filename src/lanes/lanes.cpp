@@ -100,6 +100,7 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
     if ((cursors->status_flags.load(std::memory_order_acquire) & STATUS_NO_INSTANCE)
         && !clockwork_sys_claims(osc, len)) {
         clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
+            arenaInstanceGeneration(shared_memory),
             [source_id](const uint8_t* d, uint32_t n) {
                 clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
             });

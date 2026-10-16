@@ -293,10 +293,26 @@ typedef struct ClockworkArenaHeader {
     uint32_t entry_count;
     uint32_t entry_bytes;       /* sizeof(ClockworkArenaEntry) */
     uint32_t state;             /* CLOCKWORK_ARENA_PUBLISHED once the table may be trusted */
-    uint32_t reserved[3];
+    uint32_t generation;        /* the guest instance's generation, as one word (docs/RESTARTS.md):
+                                 * 2g+1 while there is no instance, 2g while there is one, g the
+                                 * generation the last build opened — the number /clockwork/setup
+                                 * names. 1 in a new arena. Moved by the engine with atomic stores;
+                                 * read with one load, by every side */
+    uint32_t reserved[2];
     ClockworkArenaAreaEntry areas[CLOCKWORK_ARENA_MAX_AREAS];
     ClockworkArenaEntry entries[CLOCKWORK_ARENA_MAX_ENTRIES];
 } ClockworkArenaHeader;
+
+/* The generation word, read: which generation the last build opened, and
+ * whether its instance is up. A reader may hold the header across a rebuild
+ * (its offsets never move), so these are questions to ask again, not facts
+ * to cache. */
+static inline uint32_t clockwork_arena_generation(const ClockworkArenaHeader* h) {
+    return h ? (h->generation >> 1u) : 0u;
+}
+static inline int clockwork_arena_has_instance(const ClockworkArenaHeader* h) {
+    return h ? ((h->generation & 1u) == 0u) : 0;
+}
 
 /* NOLINTBEGIN(modernize-use-nullptr): a C header, compiled as C by the ABI probe (rust/clockwork-abi/tests/probe.c) */
 

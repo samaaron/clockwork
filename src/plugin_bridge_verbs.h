@@ -54,6 +54,10 @@ public:
         virtual void reply(uint32_t token, const uint8_t* osc, uint32_t len) = 0;
         virtual void broadcast(const uint8_t* osc, uint32_t len) = 0;
         virtual void debug(const std::string& line) = 0;
+        // The guest instance's generation, for a refusal to carry
+        // (docs/RESTARTS.md): the owner's to know, since these verbs may
+        // run in a process that holds no arena.
+        virtual uint32_t generation() = 0;
     };
 
     void init(Emit* emit, double sampleRate);

@@ -7,7 +7,8 @@
 // reader to a real engine's table.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readArena, regionBytes, AREA, SPACE, AUDIENCE, CADENCE, TIER, LIFETIME, REGION,
+import { readArena, regionBytes, readGeneration, instanceGeneration, hasInstance,
+         AREA, SPACE, AUDIENCE, CADENCE, TIER, LIFETIME, REGION,
          ARENA_MAGIC, ARENA_VERSION, ARENA_PUBLISHED, OWNER } from "../js/lib/arena.js";
 
 const HEADER_WORDS = 16, AREA_WORDS = 6, MAX_AREAS = 16, ENTRY_WORDS = 16, HEADER_BYTES = 4096;
@@ -32,8 +33,9 @@ function table({ areas, entries } = {}) {
     [REGION.GUEST_WINDOW,          8192,  2048, OWNER.GUEST,     AUDIENCE.PUBLIC,                 CADENCE.CHANGE, TIER.BULK, LIFETIME.REBUILD],
     [REGION.GUEST_PERSIST,         10240, 2048, OWNER.GUEST,     AUDIENCE.GUEST,                  CADENCE.CHANGE, TIER.BULK, LIFETIME.COLD_BOOT],
   ];
+  // ... state, then the generation word: 1, a new arena with no instance yet.
   w.set([ARENA_MAGIC, ARENA_VERSION, HEADER_BYTES, 0, 12288, 8192, 8192, 4096,
-         as.length, AREA_WORDS * 4, rows.length, ENTRY_WORDS * 4, ARENA_PUBLISHED]);
+         as.length, AREA_WORDS * 4, rows.length, ENTRY_WORDS * 4, ARENA_PUBLISHED, 1]);
   as.forEach(([area, space, base, bytes], i) => {
     const at = HEADER_WORDS + i * AREA_WORDS;
     w[at] = area; w[at + 1] = space; w[at + 2] = base; w[at + 4] = bytes;
@@ -99,6 +101,28 @@ test("the halves must meet and cover the arena", () => {
   const { buf, w } = table();
   w[6] = 8192 + 16;   // guestOffset
   assert.throws(() => readArena(buf, 0), /does not start where clockwork's ends/);
+});
+
+test("the generation word says whether there is an instance, and which one, live", () => {
+  // One word, one load (docs/RESTARTS.md): odd between instances, even with
+  // one; the rest is the generation the last build opened — the number
+  // /clockwork/setup named. readArena snapshots it; readGeneration reads it
+  // live, since it moves while a page holds the table.
+  const { buf, w } = table();
+  const a = readArena(buf, 0);
+  assert.equal(a.header.generation, 1, "a new arena: no instance yet, none opened");
+  assert.equal(hasInstance(a.header.generation), false);
+  assert.equal(instanceGeneration(a.header.generation), 0);
+  w[13] = 2;                                      // the first instance is up
+  assert.equal(readGeneration(buf, 0), 2);
+  assert.equal(hasInstance(2), true);
+  assert.equal(instanceGeneration(2), 1);
+  w[13] = 3;                                      // torn down; nothing built yet
+  assert.equal(hasInstance(readGeneration(buf, 0)), false);
+  assert.equal(instanceGeneration(readGeneration(buf, 0)), 1, "the one closing is still the one named");
+  w[13] = 4;
+  assert.equal(instanceGeneration(readGeneration(buf, 0)), 2);
+  assert.equal(a.header.generation, 1, "the snapshot is a snapshot");
 });
 
 test("regionBytes is the region's bytes as a view, and refuses one past the buffer", () => {

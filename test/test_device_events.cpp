@@ -43,14 +43,6 @@ using fake_audio::makeSimpleSystem;
 
 namespace {
 
-// Booted, and subscribed to the engine's broadcasts as a GUI is.
-void subscribe(EngineFixture& fix) {
-    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
-    OscReply ack;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
-    fix.clearReplies();
-}
-
 // Whether the engine has told its clients it is playing on `name`: the
 // device report a GUI fills its output menu from.
 bool reported(EngineFixture& fix, const std::string& name) {

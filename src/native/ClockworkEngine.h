@@ -544,10 +544,11 @@ public:
     bool isInputKnownBadFor(const std::string& outputName,
                             const std::string& inputName) const;
 
-    // Increments on every cold-swap rebuild of the DSP instance. Emitted on
-    // /clockwork/setup so clients can detect that a swap they
-    // were waiting on has completed and abort stale waits.
-    uint32_t                 setupGeneration() const { return mSetupGeneration.load(); }
+    // The guest instance's generation: the number the last /clockwork/setup
+    // named, moved on at every rebuild. Not the engine's to count: it is the
+    // arena's word (ClockworkArenaHeader::generation, docs/RESTARTS.md), read
+    // here as any client reads it.
+    uint32_t                 generation() const;
 
     // Send the current lifecycle state directly to one caller. Stream-
     // transport clients (TCP/UDS/pipe) can only connect after init, so they
@@ -1257,10 +1258,6 @@ private:
     // A rollback whose device is silent too stops there: it does not roll back.
     bool                     mNoAudioRollbackInFlight{false};
     std::map<std::string, int> mDeviceRateMemory; // per-device remembered sample rate
-
-    // Cold-swap generation. Cross-thread: write from setEngineState on
-    // the audio-management thread, read from the OSC server thread.
-    std::atomic<uint32_t>    mSetupGeneration{1};
 
     // Per-driver-type remembered device name. Written by
     // recordSwapPreferences after a successful open; read by

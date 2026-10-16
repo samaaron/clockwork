@@ -50,6 +50,33 @@ TEST_CASE("arena: the header is the front of the arena and says so", "[arena]") 
     CHECK(h->guest_offset + h->guest_bytes == h->arena_bytes);
     const char* why = "";
     CHECK(clockwork_arena_check(h, ARENA_SIZE, &why));
+
+    // A new arena holds no instance yet, and no generation has opened: the
+    // word is odd, and the generation it names is 0 (docs/RESTARTS.md).
+    CHECK(h->generation == 1);
+    CHECK_FALSE(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == 0);
+}
+
+TEST_CASE("arena: the generation word says whether there is an instance, and which one", "[arena]") {
+    // One word, read by every side with one load: the low bit is "between
+    // instances", the rest is the generation the last build opened — the
+    // number /clockwork/setup named. It moves on only at a build.
+    auto a = arena();
+    auto* h = const_cast<ClockworkArenaHeader*>(arenaHeader(a.data()));
+    h->generation = 2;                           // the first instance is up
+    CHECK(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == 1);
+    h->generation = 3;                           // torn down; nothing built yet
+    CHECK_FALSE(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == 1);   // the one closing is still the one named
+    h->generation = 4;                           // the second is up
+    CHECK(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == 2);
+    // The header is the one region that outlives a rebuild, and the word
+    // must not move an offset: it takes the first reserved slot.
+    CHECK(offsetof(ClockworkArenaHeader, generation) == offsetof(ClockworkArenaHeader, state) + 4);
+    CHECK(offsetof(ClockworkArenaHeader, areas) == offsetof(ClockworkArenaHeader, generation) + 4 + sizeof(h->reserved));
 }
 
 namespace {

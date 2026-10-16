@@ -159,6 +159,7 @@ its own cursor and catches up losslessly; the ring holds a second.
 | `area_count`, `area_bytes` | the area table |
 | `entry_count`, `entry_bytes` | the region table |
 | `state` | `PUBLISHED` once the table may be trusted |
+| `generation` | the guest instance's generation as one word: `2g+1` with no instance, `2g` with one; 1 in a new arena; moved by the engine at every teardown and build (docs/RESTARTS.md) |
 | `areas[16]` | `{area, space, base, bytes}`, base and bytes 64-bit |
 | `entries[48]` | `{id, offset, bytes, owner, audience, cadence, tier, lifetime, geom[8]}` |
 

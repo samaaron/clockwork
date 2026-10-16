@@ -24,6 +24,7 @@
 #include "clock/clock_math.h"
 #include "clockwork_clock_state.h"
 #include "clockwork_prefix.h"
+#include "clockwork_sys.h"
 #include "audio_processor.h"
 #include "dsp_api.h"
 
@@ -324,6 +325,86 @@ TEST_CASE("restarts: clockwork's own verbs are answered while there is no instan
     const auto* pong = findAddress(frames, CLOCKWORK_SYS("pong"));
     CHECK(pong != nullptr);
     CHECK(findAddress(frames, CLOCKWORK_SYS("error")) == nullptr);
+}
+
+// ── The generation ───────────────────────────────────────────────────────────
+
+namespace {
+const ClockworkArenaHeader* header() { return arenaHeader(arena()); }
+}
+
+TEST_CASE("restarts: the generation is in the arena header, even with an instance, odd between, and moves on at every build",
+          "[restarts][generation]") {
+    settle();
+    const auto* h = header();
+    REQUIRE(clockwork_arena_has_instance(h));
+    const uint32_t gen = clockwork_arena_generation(h);
+    CHECK(gen >= 1);
+
+    // Torn down: the word goes odd FIRST, before anything else of the
+    // teardown, and names the generation that is closing. A reader in
+    // another process knows "between instances" from the bytes alone.
+    destroy_dsp();
+    CHECK_FALSE(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == gen);
+    lanes_test::drainRt();
+    lanes_test::drainNrt();
+
+    // Built: even again, one on. The header is the region a rebuild keeps,
+    // so the count is continuous across every build on this arena.
+    rebuild_dsp(lanes_test::kSampleRate);
+    REQUIRE(g_dsp != nullptr);
+    CHECK(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == gen + 1);
+}
+
+TEST_CASE("restarts: a refusal names the generation that refused",
+          "[restarts][generation][transport]") {
+    settle();
+    const uint32_t gen = clockwork_arena_generation(header());
+
+    // In the ring at the teardown: refused by the generation that was
+    // closing, the one its sender had been talking to.
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    destroy_dsp();
+    auto said = lanes_test::drainRt();
+    for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
+    const auto* atTeardown = findAddress(said, CLOCKWORK_SYS("error"));
+    REQUIRE(atTeardown != nullptr);
+    auto r = osc_test::parseReply(atTeardown->data.data(),
+                                  static_cast<uint32_t>(atTeardown->data.size()));
+    REQUIRE(r.argCount() == 3);
+    CHECK(r.argString(1) == CLOCKWORK_REFUSED_REBUILDING);
+    CHECK(r.argInt(2) == static_cast<int32_t>(gen));
+
+    // Between instances: the same word, the generation still the closing one,
+    // since none has opened.
+    CHECK_FALSE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    said = lanes_test::drainRt();
+    for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
+    const auto* between = findAddress(said, CLOCKWORK_SYS("error"));
+    REQUIRE(between != nullptr);
+    r = osc_test::parseReply(between->data.data(),
+                             static_cast<uint32_t>(between->data.size()));
+    REQUIRE(r.argCount() == 3);
+    CHECK(r.argString(1) == CLOCKWORK_REFUSED_NO_INSTANCE);
+    CHECK(r.argInt(2) == static_cast<int32_t>(gen));
+
+    // Built again: every refusal clockwork makes from now on, of anything,
+    // carries the generation that opened. One shape for all of them.
+    rebuild_dsp(lanes_test::kSampleRate);
+    REQUIRE(g_dsp != nullptr);
+    const auto unknown = osc_test::message(CLOCKWORK_SYS("no-such-verb"));
+    REQUIRE(lanes_test::ingress(unknown.ptr(), unknown.size(), kClient));
+    const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
+    const auto* refused = findAddress(frames, CLOCKWORK_SYS("error"));
+    REQUIRE(refused != nullptr);
+    r = osc_test::parseReply(refused->data.data(),
+                             static_cast<uint32_t>(refused->data.size()));
+    REQUIRE(r.argCount() == 3);
+    CHECK(r.argString(0) == CLOCKWORK_SYS("no-such-verb"));
+    CHECK(r.argInt(2) == static_cast<int32_t>(gen + 1));
 }
 
 #if CLOCKWORK_SCHEDULER

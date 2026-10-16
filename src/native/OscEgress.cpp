@@ -12,7 +12,9 @@
 #include "IOscTransport.h"
 #include "comms/EgressRouter.h"
 #include "osc_debug.h"
+#include "lanes/lanes.h"           // clockwork_lanes_base: the arena, for the generation
 #include "lanes/lanes_internal.h"  // clockwork_egress_nrt_write (NRT egress producer)
+#include "shared_memory.h"         // arenaInstanceGeneration
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
 #include <array>
@@ -49,9 +51,18 @@ void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t 
                   static_cast<int>(addressLen), address, size, most);
     if (addressLen == size) return;   // no address to answer to
     clockwork_sys_refuse(osc, size, "the reply is too big for the engine's egress",
+        generationNow(),
         [&](const uint8_t* d, uint32_t n) {
             clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, d, n);
         });
+}
+
+// The guest instance's generation now, off the arena (docs/RESTARTS.md): what
+// every refusal, statechange and setup from here carries. The engine keeps no
+// count of its own; a reader of the arena in another process reads the same.
+uint32_t OscEgress::generationNow() {
+    void* base = clockwork_lanes_base();
+    return base ? arenaInstanceGeneration(base) : 0u;
 }
 
 void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
@@ -59,7 +70,7 @@ void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
 }
 
 void OscEgress::refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason) {
-    clockwork_sys_refuse(data, size, reason,
+    clockwork_sys_refuse(data, size, reason, generationNow(),
         [this, token](const uint8_t* d, uint32_t n) { reply(token, d, n); });
 }
 
@@ -170,30 +181,34 @@ void OscEgress::unsubscribeCallerFromOscNotify(uint32_t token) {
 
 // The reason is a guest's words, at any length it gave them (a boot error,
 // up to the 511 bytes the boot keeps): the packet takes them whole.
-static OscPacket stateChange(const char* state, const char* reason) {
+// ... and the guest instance's generation (docs/RESTARTS.md): on restarting
+// the one closing, on running after a rebuild the one opened, otherwise the
+// one the instance has.
+static OscPacket stateChange(const char* state, const char* reason, uint32_t generation) {
     return oscPacketOf(128 + std::strlen(state) + std::strlen(reason),
                        [&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("statechange"))
           << state
           << reason
+          << static_cast<osc::int32>(generation)
           << osc::EndMessage;
     });
 }
 
 void OscEgress::sendStateChange(const char* state, const char* reason) {
     if (!hasSubscribers()) return;
-    const OscPacket packet = stateChange(state, reason);
+    const OscPacket packet = stateChange(state, reason, generationNow());
     broadcastToTargets(packet.ptr(), packet.size());
 }
 
-void OscEgress::sendSetup(int sampleRate, int bufferSize, uint32_t generation) {
+void OscEgress::sendSetup(int sampleRate, int bufferSize) {
     if (!hasSubscribers()) return;
     std::array<char, 256> buf{};
     osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(CLOCKWORK_SYS("setup"))
       << static_cast<osc::int32>(sampleRate)
       << static_cast<osc::int32>(bufferSize)
-      << static_cast<osc::int32>(generation)
+      << static_cast<osc::int32>(generationNow())
       << osc::EndMessage;
     broadcastToTargets(reinterpret_cast<const uint8_t*>(s.Data()),
                        static_cast<uint32_t>(s.Size()));
@@ -207,7 +222,7 @@ void OscEgress::sendSetup(int sampleRate, int bufferSize, uint32_t generation) {
 // needed this. Deliberately state-only: /clockwork/setup is a rebuild
 // EVENT and must never be replayed to late joiners.
 void OscEgress::sendStateChangeTo(uint32_t token, const char* state, const char* reason) {
-    const OscPacket packet = stateChange(state, reason);
+    const OscPacket packet = stateChange(state, reason, generationNow());
     // reply routing: this is part of the direct response to the caller's
     // /clockwork/notify, and must also reach in-process (embedder) callers.
     reply(token, packet.ptr(), packet.size());

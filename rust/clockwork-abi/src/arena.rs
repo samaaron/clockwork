@@ -272,7 +272,13 @@ pub struct ClockworkArenaHeader {
     pub entry_count: u32,
     pub entry_bytes: u32,
     pub state: u32,
-    pub reserved: [u32; 3],
+    /// The guest instance's generation, as one word (docs/RESTARTS.md):
+    /// `2g+1` while there is no instance, `2g` while there is one, `g` the
+    /// generation the last build opened — the number `/clockwork/setup`
+    /// names. 1 in a new arena. Read it with one load, and ask again: it
+    /// moves while a reader holds the header.
+    pub generation: u32,
+    pub reserved: [u32; 2],
     pub areas: [ClockworkArenaAreaEntry; CLOCKWORK_ARENA_MAX_AREAS as usize],
     pub entries: [ClockworkArenaEntry; CLOCKWORK_ARENA_MAX_ENTRIES as usize],
 }
@@ -284,6 +290,12 @@ const PUBLIC_AREAS: [u32; 3] = [
 ];
 
 impl ClockworkArenaHeader {
+    /// The generation the word names: the last one opened, 0 before any.
+    pub fn instance_generation(&self) -> u32 { self.generation >> 1 }
+
+    /// Whether a guest instance is up, from the word.
+    pub fn has_instance(&self) -> bool { self.generation & 1 == 0 }
+
     /// The entry for a region, if the arena has one.
     pub fn find(&self, id: ClockworkArenaRegion) -> Option<&ClockworkArenaEntry> {
         let n = (self.entry_count as usize).min(CLOCKWORK_ARENA_MAX_ENTRIES as usize);
@@ -401,7 +413,7 @@ mod tests {
             arena_bytes: 12288, clockwork_bytes: 8192, guest_offset: 8192, guest_bytes: 4096,
             area_count: 4, area_bytes: core::mem::size_of::<ClockworkArenaAreaEntry>() as u32,
             entry_count: 5, entry_bytes: core::mem::size_of::<ClockworkArenaEntry>() as u32,
-            state: CLOCKWORK_ARENA_PUBLISHED, reserved: [0; 3],
+            state: CLOCKWORK_ARENA_PUBLISHED, generation: 1, reserved: [0; 2],
             areas: [NONE; CLOCKWORK_ARENA_MAX_AREAS as usize],
             entries: [entry(0, 0, 0, 0); CLOCKWORK_ARENA_MAX_ENTRIES as usize],
         };
@@ -468,5 +480,29 @@ mod tests {
         let mut h = header();
         h.entries[1].tier = 0;
         assert_eq!(h.check(12288), Err("a region with no tier"));
+    }
+
+    #[test]
+    fn the_generation_word_says_whether_there_is_an_instance_and_which_one() {
+        // One word, one load (docs/RESTARTS.md): odd between instances, even
+        // with one; the rest is the generation the last build opened, the
+        // number /clockwork/setup named. A new arena is at 1: none yet.
+        let mut h = header();
+        assert!(!h.has_instance());
+        assert_eq!(h.instance_generation(), 0);
+        h.generation = 2;
+        assert!(h.has_instance());
+        assert_eq!(h.instance_generation(), 1);
+        h.generation = 3;
+        assert!(!h.has_instance());
+        assert_eq!(h.instance_generation(), 1);   // the one closing is still the one named
+        h.generation = 4;
+        assert!(h.has_instance());
+        assert_eq!(h.instance_generation(), 2);
+        // The word took the first reserved slot: nothing after it moved.
+        assert_eq!(core::mem::offset_of!(ClockworkArenaHeader, generation),
+                   core::mem::offset_of!(ClockworkArenaHeader, state) + 4);
+        assert_eq!(core::mem::offset_of!(ClockworkArenaHeader, areas),
+                   core::mem::offset_of!(ClockworkArenaHeader, generation) + 12);
     }
 }

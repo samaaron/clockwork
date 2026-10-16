@@ -22,7 +22,7 @@ import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
 import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
-import { readArena, regionBytes, REGION, REGION_NAMES } from "./lib/arena.js";
+import { readArena, regionBytes, readGeneration, instanceGeneration, REGION, REGION_NAMES } from "./lib/arena.js";
 import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
@@ -168,6 +168,7 @@ export class Clockwork {
   #initPromise;
   #capabilities;
   #version;
+  #generation = 0;   // the guest instance's, as the worklet reported it (postMessage); SAB reads it live
   #guestMetrics = Object.freeze({});
   #guestMetricsPanels = Object.freeze([]);
   #config;
@@ -1169,6 +1170,18 @@ export class Clockwork {
     try { return readArena(buf, base); } catch { return null; }
   }
 
+  // The guest instance's generation (docs/RESTARTS.md): read live off the arena
+  // where the page shares it (SAB), else the worklet's word at 'initialized'.
+  // The web rebuilds nothing in place — reload() boots a new engine — so the
+  // two agree; the live read is for a page holding the arena across a build.
+  #instanceGeneration() {
+    const buf = this.sharedBuffer, base = this.arenaBase;
+    if (buf && base != null) {
+      try { return instanceGeneration(readGeneration(buf, base)); } catch { /* not yet mapped */ }
+    }
+    return this.#generation;
+  }
+
   /**
    * The control plane's cursors (lib/ring_cursors_reader.js): each ring's head and
    * tail, the last sequence number either way, the status flags. Null when not SAB.
@@ -1753,6 +1766,7 @@ export class Clockwork {
       bootTimeMs: this.bootStats.initDuration,
       capabilities: { ...this.#capabilities },
       version: this.#version,
+      generation: this.#instanceGeneration(),
     };
   }
 
@@ -2193,6 +2207,9 @@ export class Clockwork {
       gamepad: this.#config.gamepad,
       wasmBaseURL: this.#config.wasmBaseURL,
       deliver: (bytes) => this.#deliverInbound(bytes, -1, performance.now()),
+      // What a refusal is stamped with (docs/RESTARTS.md): the guest instance's
+      // generation at that moment, which only the page knows where to read.
+      generation: () => this.#instanceGeneration(),
       // An event goes INTO the engine, as a native subsystem's would: the
       // transport exists by now, and the client need not be 'initialized'
       // for a keyboard to be heard during boot.
@@ -2308,6 +2325,9 @@ export class Clockwork {
             const arenaBase = event.data.arenaBase ?? 0;
             const bufferConstants = event.data.bufferConstants;
             this.#version = event.data.version ?? null;
+            // The generation the worklet read off the arena once the instance was up: the
+            // page's word for it where it has no shared view of the arena (postMessage).
+            this.#generation = event.data.generation ?? 0;
             const sharedBuffer = this.#config.mode === 'sab' ? this.#wasmMemory.buffer : null;
 
             this.#metricsReader.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
@@ -2537,7 +2557,8 @@ export class Clockwork {
         && this.#oscChannel.lastRefusal === REASON_NO_INSTANCE) {
       this.#deliverInbound(
         oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"),
-                                                  [oscAddress(preparedData), REASON_NO_INSTANCE])),
+                                                  [oscAddress(preparedData), REASON_NO_INSTANCE,
+                                                   { type: "int", value: this.#instanceGeneration() }])),
         -1, performance.now());
     }
   }

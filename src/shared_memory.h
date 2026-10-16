@@ -869,6 +869,7 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     h->version         = CLOCKWORK_ARENA_VERSION;
     h->header_bytes    = ARENA_HEADER_SIZE;
     h->instance_id     = instance_id;
+    h->generation      = 1;   // no instance yet, and no generation opened (docs/RESTARTS.md)
     h->arena_bytes     = ARENA_SIZE;
     h->clockwork_bytes = CLOCKWORK_HALF_SIZE;
     h->guest_offset    = GUEST_HALF_START;
@@ -990,6 +991,33 @@ inline void arenaSetArea(uint8_t* base, uint32_t area, uint32_t space, uint64_t 
 // The header at the front of an arena.
 inline const ClockworkArenaHeader* arenaHeader(const void* base) {
     return reinterpret_cast<const ClockworkArenaHeader*>(base);
+}
+
+// The generation word (ClockworkArenaHeader::generation), as the engine moves
+// it and as a reader in this process loads it. Odd while there is no guest
+// instance, even while there is one; the rest is the generation the last build
+// opened (docs/RESTARTS.md). Two moves, each one step: the instance going
+// (even -> odd) at the start of a teardown, before anything else of it, and
+// the instance up (odd -> even) once dsp_new has succeeded. A move that is
+// not due — a teardown with no instance up — is not a move.
+inline std::atomic<uint32_t>& arenaGenerationWord(void* base) {
+    return *reinterpret_cast<std::atomic<uint32_t>*>(
+        &reinterpret_cast<ClockworkArenaHeader*>(base)->generation);
+}
+inline uint32_t arenaGenerationLoad(const void* base) {
+    return reinterpret_cast<const std::atomic<uint32_t>*>(
+        &arenaHeader(base)->generation)->load(std::memory_order_acquire);
+}
+inline uint32_t arenaInstanceGeneration(const void* base) { return arenaGenerationLoad(base) >> 1u; }
+inline void arenaInstanceDown(void* base) {
+    auto& w = arenaGenerationWord(base);
+    const uint32_t v = w.load(std::memory_order_acquire);
+    if ((v & 1u) == 0u) w.store(v + 1u, std::memory_order_release);
+}
+inline void arenaInstanceUp(void* base) {
+    auto& w = arenaGenerationWord(base);
+    const uint32_t v = w.load(std::memory_order_acquire);
+    if ((v & 1u) != 0u) w.store(v + 1u, std::memory_order_release);
 }
 
 // What the guest says its window is (DspInfo::window_magic, window_version),

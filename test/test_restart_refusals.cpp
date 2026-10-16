@@ -15,8 +15,10 @@
  * send and the swap unless a case pumps.
  */
 #include "EngineFixture.h"
+#include "clockwork_arena.h"
 #include "clockwork_prefix.h"
 #include "clockwork_sys.h"
+#include "lanes/lanes.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -111,4 +113,68 @@ TEST_CASE("restarts, engine: a message sent while there is no instance is refuse
     OscReply pong;
     CHECK(fix.waitForReply(CLOCKWORK_SYS("pong"), pong));
     CHECK_FALSE(replied(fix, "/dummy/pong"));
+}
+
+TEST_CASE("restarts, engine: restarting names the generation closing, setup the one opened, and the arena is where both are read",
+          "[restarts][engine][ColdSwap][generation]") {
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.manualAudioPump = true;
+    EngineFixture fix(cfg);
+    subscribe(fix);   // statechange and setup are broadcasts: heard as a GUI hears them
+
+    // The engine has no counter of its own: what it says is what the arena
+    // holds, and a reader of the arena in another process reads the same.
+    const auto* h = clockwork_arena_header();
+    REQUIRE(h != nullptr);
+    REQUIRE(clockwork_arena_has_instance(h));
+    const uint32_t gen = clockwork_arena_generation(h);
+    CHECK(fix.engine().generation() == gen);
+
+    // Something in the ring at the teardown, to hear the refusal's stamp.
+    fix.clearReplies();
+    fix.send(osc_test::message("/dummy/ping"));
+    const auto swap = switchWhenFree(fix, "", 44100);
+    REQUIRE(swap.success);
+    REQUIRE(swap.type == SwapType::Cold);
+
+    // waitForReply hands the matched reply over and drops it from the held
+    // list; the others stay held for the walk below.
+    OscReply setup;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("setup"), setup, 5000));
+    REQUIRE(setup.parsed().argCount() == 3);
+    const int32_t opened = setup.parsed().argInt(2);
+
+    // Restarting with the generation that was closing, the refusal stamped
+    // with it, setup with the one that opened.
+    int32_t restarting = -1, refused = -1;
+    for (const auto& r : fix.allReplies()) {
+        const auto p = r.parsed();
+        if (r.address == CLOCKWORK_SYS("statechange") && p.argString(0) == "restarting") {
+            REQUIRE(p.argCount() == 3);
+            restarting = p.argInt(2);
+        } else if (r.address == CLOCKWORK_SYS("error") && p.argString(0) == "/dummy/ping") {
+            REQUIRE(p.argCount() == 3);
+            refused = p.argInt(2);
+        }
+    }
+    CHECK(restarting == static_cast<int32_t>(gen));
+    CHECK(refused == static_cast<int32_t>(gen));
+    CHECK(opened == static_cast<int32_t>(gen + 1));
+
+    // And the arena agrees, as does the engine's own word for it.
+    CHECK(clockwork_arena_has_instance(h));
+    CHECK(clockwork_arena_generation(h) == gen + 1);
+    CHECK(fix.engine().generation() == gen + 1);
+
+    // A hot restart would not move it; a statechange that is not a rebuild
+    // still names the generation the instance has. The running statechange
+    // after this swap names the one that opened.
+    bool runningNamed = false;
+    for (const auto& r : fix.allReplies()) {
+        const auto p = r.parsed();
+        if (r.address == CLOCKWORK_SYS("statechange") && p.argString(0) == "running"
+            && p.argCount() == 3 && p.argInt(2) == static_cast<int32_t>(gen + 1))
+            runningNamed = true;
+    }
+    CHECK(runningNamed);
 }

@@ -52,5 +52,8 @@ export function isClockworkSysBytes(bytes) {
 
 /** The reason a message for the guest is refused with when there is no guest
  *  to take it (CLOCKWORK_REFUSED_NO_INSTANCE in clockwork_sys.h). A client
- *  reads it as "wait for /clockwork/setup", never as an error to show. */
+ *  reads it as "wait for /clockwork/setup", never as an error to show. Every
+ *  refusal has the one shape: /clockwork/error <address> <reason>
+ *  <generation>, the generation the guest instance's at that moment
+ *  (docs/RESTARTS.md). */
 export const REASON_NO_INSTANCE = "no instance";

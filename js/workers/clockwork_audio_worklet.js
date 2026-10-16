@@ -13,7 +13,7 @@ import * as MetricsOffsets from '../lib/metrics_offsets.js';
 const REGION_INGRESS = 7;
 const CLIENT_MESSAGE_BYTES = 20;
 import { calculateAllControlIndices } from '../lib/ring_cursor_offsets.js';
-import { readArena } from '../lib/arena.js';
+import { readArena, readGeneration, instanceGeneration } from '../lib/arena.js';
 import { sampleClockReader } from '../lib/sample_clock.js';
 import {
   ClockworkClockMessageType,
@@ -1105,6 +1105,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                 bufferConstants: this.bufferConstants,
                                 exports: Object.keys(this.wasmInstance.exports),
                                 version: this.productVersion(),
+                                // The guest instance's generation, off the arena now that
+                                // the instance is up (docs/RESTARTS.md): what a page with
+                                // no shared view of the arena stamps its refusals with.
+                                generation: instanceGeneration(readGeneration(this.wasmMemory.buffer, this.arenaBase)),
                                 initialSnapshot
                             };
                             this.port.postMessage(msg, initialSnapshot ? [initialSnapshot] : []);

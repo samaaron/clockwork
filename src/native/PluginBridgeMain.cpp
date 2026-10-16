@@ -122,6 +122,12 @@ public:
     void broadcast(const uint8_t* osc, uint32_t len) override {
         put(EGRESS_BROADCAST_NOTIFY, BRIDGE_ORIGIN_TOKEN, osc, len);
     }
+    // The bridge is its own process and holds no arena: it cannot read the
+    // guest instance's generation, so a refusal from here says 0, "none
+    // opened" (docs/RESTARTS.md). The bridge's world is not the guest's and
+    // is not rebuilt by a cold swap; when tracks return, the engine can hand
+    // the word across the bridge ring with the rest of its state.
+    uint32_t generation() override { return 0u; }
     // Over the ring only: the engine prints its debug channel to the same
     // stderr this process inherited, so a copy here would appear twice.
     void debug(const std::string& line) override {
