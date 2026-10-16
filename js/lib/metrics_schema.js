@@ -9,14 +9,19 @@
  *
  * Offsets [0-49] index the PerformanceMetrics struct in src/shared_memory.h;
  * [50+] are context metrics merged by MetricsReader on the JS main thread.
- * Fields marked `nativeOnly: true` have no web writer (always 0 on WASM).
+ * Fields marked `nativeOnly: true` have no web writer (always 0 on WASM);
+ * fields marked `webOnly: true` have no native writer (a browser's, or the
+ * JS client's own). One layout serves every panel: a row that reads a
+ * native-only field or a native stat is shown natively only, one that reads
+ * a web-only field on the web only (rowPlatform below).
  *
  * The `nativeStats` section describes the separate NATIVE_STATS shm segment
  * (see NATIVE_STAT_* in shared_memory.h); `index` is the u32 slot, not a
  * PerformanceMetrics offset.
  *
- * A C++ mirror is generated from this file for native GUIs:
- *   node scripts/gen-metrics-schema-header.mjs   →   src/metrics_schema.h
+ * A C++ mirror is generated from this file for native GUIs, the layout
+ * included, so a native panel renders the same rows from it:
+ *   npm run gen:metrics-header   →   src/metrics_schema.h
  * Regenerate (and commit the header) whenever this file changes.
  */
 
@@ -48,7 +53,7 @@ export const METRICS_SCHEMA = {
     engineSchedulerPeakDepth:    { offset: 4,  type: 'gauge',    unit: 'count', description: 'Peak scheduler queue depth (high water mark)' },
     engineSchedulerDropped:      { offset: 5,  type: 'counter',  unit: 'count', description: 'Events dropped because the scheduler queue overflowed' },
     engineSequenceGaps:          { offset: 6,  type: 'counter',  unit: 'count', description: 'Messages lost in transit from host to Clockwork' },
-    engineWasmErrors:            { offset: 7,  type: 'counter',  unit: 'count', description: 'WASM execution errors in audio worklet' },
+    engineWasmErrors:            { offset: 7, webOnly: true,  type: 'counter',  unit: 'count', description: 'WASM execution errors in audio worklet' },
     engineSchedulerLates:        { offset: 8,  type: 'counter',  unit: 'count', description: 'Bundles executed after their scheduled time' },
 
     // OSC Out metrics [9-10]
@@ -58,7 +63,7 @@ export const METRICS_SCHEMA = {
     // OSC In metrics [11-14]
     oscInMessagesReceived:        { offset: 11, type: 'counter',  unit: 'count', description: 'OSC replies received from Clockwork' },
     oscInBytesReceived:           { offset: 12, type: 'counter',  unit: 'bytes', description: 'Total bytes received from Clockwork' },
-    oscInMessagesDropped:         { offset: 13, type: 'counter',  unit: 'count', description: 'Replies lost in transit from Clockwork to host' },
+    oscInMessagesDropped:         { offset: 13, webOnly: true, type: 'counter',  unit: 'count', description: 'Replies lost in transit from Clockwork to host' },
     oscInCorrupted:               { offset: 14, type: 'counter',  unit: 'count', description: 'Corrupted messages detected in the ring buffer' },
 
     // Debug metrics [15-16]
@@ -79,7 +84,7 @@ export const METRICS_SCHEMA = {
     engineSchedulerLastLateTick: { offset: 25, type: 'gauge',    unit: 'count', description: 'Process count when the last scheduler late occurred' },
 
     // Ring buffer direct write failures [26]
-    ringBufferDirectWriteFails:   { offset: 26, type: 'counter',  unit: 'count', description: 'SAB mode only: direct IN-ring writes that lost the lock race or hit a full ring and were dropped (no fallback)' },
+    ringBufferDirectWriteFails:   { offset: 26, webOnly: true, type: 'counter',  unit: 'count', description: 'SAB mode only: direct IN-ring writes that lost the lock race or hit a full ring and were dropped (no fallback)' },
 
     // Link session [27-31] — native-only (no web writer; always 0 on WASM).
     // ClockworkClock session state lives in its own SAB region (ClockworkClockState),
@@ -115,22 +120,22 @@ export const METRICS_SCHEMA = {
     clockPlaying:                 { offset: 49, type: 'gauge',    unit: 'bool',     description: 'Transport playing (0/1)' },
 
     // Context metrics [50+] (main thread only)
-    driftOffsetMs:                { offset: 50, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
+    driftOffsetMs:                { offset: 50, webOnly: true, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
-    audioContextState:            { offset: 52, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
+    audioContextState:            { offset: 52, webOnly: true, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
     inBufferCapacity:             { offset: 62, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
     outBufferCapacity:            { offset: 63, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
     nrtOutBufferCapacity:          { offset: 64, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
-    mode:                         { offset: 65, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
+    mode:                         { offset: 65, webOnly: true, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
 
     // Audio diagnostics [66-72] (main thread, Chrome playbackStats + cross-browser health)
-    glitchCount:                  { offset: 66, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
-    glitchDurationMs:             { offset: 67, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
-    averageLatencyUs:             { offset: 68, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
-    maxLatencyUs:                 { offset: 69, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
-    audioHealthPct:               { offset: 70, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
-    totalFramesDurationMs:        { offset: 71, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
-    hasPlaybackStats:             { offset: 72, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
+    glitchCount:                  { offset: 66, webOnly: true, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
+    glitchDurationMs:             { offset: 67, webOnly: true, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
+    averageLatencyUs:             { offset: 68, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
+    maxLatencyUs:                 { offset: 69, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
+    audioHealthPct:               { offset: 70, webOnly: true, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
+    totalFramesDurationMs:        { offset: 71, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
+    hasPlaybackStats:             { offset: 72, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
 
     // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush; the slots the buffer
     // pool's metrics once held)
@@ -227,7 +232,7 @@ export const METRICS_SCHEMA = {
         ]
       },
       {
-        title: 'Engine',
+        title: 'Audio',
         rows: [
           { label: 'clockwork', cells: [{ key: 'clockworkCommit', format: 'commit' }] },
           { label: 'rate',     cells: [{ key: 'audioSampleRate' }, { text: ' Hz', kind: 'muted' }] },
@@ -242,8 +247,50 @@ export const METRICS_SCHEMA = {
           { label: 'beat',    cells: [{ key: 'clockBeatCenti', kind: 'dim', format: 'centi' }] },
           { label: 'phase',   cells: [{ key: 'clockPhaseCenti', kind: 'dim', format: 'centi' }] },
           { label: 'playing', cells: [{ key: 'clockPlaying', kind: 'muted' }] },
+          { label: 'peers',   cells: [{ key: 'linkPeers' }] },
+        ]
+      },
+      {
+        title: 'Performance',
+        rows: [
+          { label: 'load',     cells: [{ key: 'cpuAvgCenti', format: 'centi' }, { text: '%', kind: 'muted' }] },
+          { label: 'peak',     cells: [{ key: 'cpuPeakCenti', kind: 'dim', format: 'centi' }, { text: '%', kind: 'muted' }] },
+          { label: 'overruns', cells: [{ key: 'cbOverruns', kind: 'error' }] },
+          { label: 'blocked',  cells: [{ key: 'nrtInFlightUs', kind: 'error', format: 'latencyUs' }, { text: ' ms', kind: 'muted' }] },
+          { label: 'worst',    tooltip: COMPOSITES.nrtWorstRecentBoot.description, cells: [{ key: 'nrtRecentWorstUs', format: 'latencyUs' }, { sep: ' | ' }, { key: 'nrtMaxPassUs', kind: 'muted', format: 'latencyUs' }, { text: ' ms', kind: 'muted' }] },
+        ]
+      },
+      {
+        title: 'Link Audio',
+        rows: [
+          { label: 'in',        tooltip: COMPOSITES.linkAudioChannelsRate.description, cells: [{ key: 'linkAudioInChannels' }, { text: ' ch @ ', kind: 'muted' }, { key: 'linkAudioStreamRate', kind: 'muted' }, { text: ' Hz', kind: 'muted' }] },
+          { label: 'underruns', cells: [{ key: 'linkAudioUnderruns', kind: 'error' }] },
+          { label: 'buffered',  cells: [{ key: 'linkAudioBufferedMs', kind: 'dim' }, { text: ' ms', kind: 'muted' }] },
+          { label: 'drift',     cells: [{ key: 'linkAudioDriftPpm', kind: 'dim', format: 'signed' }, { text: ' ppm', kind: 'muted' }] },
+          { label: 'publish',   tooltip: COMPOSITES.linkAudioPublishSinks.description, cells: [{ key: 'linkAudioPublish' }, { sep: ' | ' }, { key: 'linkAudioSinks', kind: 'muted' }, { text: ' sinks', kind: 'muted' }] },
         ]
       },
     ]
   },
 };
+
+/**
+ * Which panels show a layout row: 'native' if it reads a native-only field
+ * or a native stat, 'web' if it reads a web-only field, else 'both'. The one
+ * rule every panel applies — the web component here, a native panel through
+ * the generated header (scripts/gen-metrics-schema-header.mjs) — so a row is
+ * never shown where nothing writes it. A row reading both kinds is an error.
+ */
+export function rowPlatform(row, schema = METRICS_SCHEMA) {
+  const keys = row.type === 'bar'
+    ? [row.usedKey, row.peakKey]
+    : (row.cells || []).filter((c) => c.key).map((c) => c.key);
+  let native = false, web = false;
+  for (const key of keys) {
+    const metric = schema.metrics[key];
+    if (schema.nativeStats[key] || metric?.nativeOnly) native = true;
+    if (metric?.webOnly) web = true;
+  }
+  if (native && web) throw new Error(`metrics layout row '${row.label}' reads native-only and web-only fields`);
+  return native ? 'native' : web ? 'web' : 'both';
+}

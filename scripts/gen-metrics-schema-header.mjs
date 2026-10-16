@@ -14,7 +14,7 @@
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { METRICS_SCHEMA } from '../js/lib/metrics_schema.js';
+import { METRICS_SCHEMA, rowPlatform } from '../js/lib/metrics_schema.js';
 
 const cEscape = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
@@ -40,6 +40,7 @@ export function renderHeader(schema = METRICS_SCHEMA) {
 
   const nativeLines = nativeStats.map((m) =>
     `    { ${m.index}, "${cEscape(m.key)}", "${cEscape(m.unit ?? '')}", "${cEscape(m.description)}" },`);
+  const layout = renderLayoutTables(schema);
 
   return `// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
@@ -47,8 +48,8 @@ export function renderHeader(schema = METRICS_SCHEMA) {
 // GENERATED FILE — DO NOT EDIT.
 // Source of truth: js/lib/metrics_schema.js
 // Regenerate with:  npm run gen:metrics-header
-// Nothing here checks it is in step with the schema; regenerate after any
-// change to metrics_schema.js.
+// test/metrics_schema.test.mjs fails when this file is out of step with the
+// schema; regenerate after any change to metrics_schema.js.
 //
 // Metric names, units and human-readable descriptions for the clockwork
 // performance metrics, for use by native GUIs. Offsets index the
@@ -122,9 +123,101 @@ inline const char* descriptionForNativeStat(uint32_t index)
     return nullptr;
 }
 
+// ── The panel layout ───────────────────────────────────────────────────────
+// The rows every metrics panel shows, as the <clockwork-metrics> web component
+// renders them (js/lib/metrics_schema.js, layout): one layout, so a native
+// panel and the web one cannot drift. A native panel shows the rows whose
+// platform is Both or Native; a row's platform comes from the fields it reads
+// (rowPlatform). Panels, rows and cells are flat tables, a panel naming its
+// rows and a row its cells by range.
+enum class Platform : uint8_t { Both, Web, Native };
+enum class CellType : uint8_t { Metric, NativeStat, Text, Separator };
+
+struct LayoutCell
+{
+    CellType type;
+    uint32_t index;          // Metric: the offset; NativeStat: the slot; else 0
+    const char* text;        // Text and Separator: what is shown; else ""
+    const char* kind;        // "", "muted", "dim", "error" or "green"
+    const char* format;      // "", "bytes", "signed", "milliBpm", "centi", "latencyUs", "commit", ...
+};
+
+struct LayoutRow
+{
+    const char* label;
+    const char* tooltip;     // the row's own, or its first field's description
+    Platform platform;
+    bool bar;                // a ring's level: used and peak against its capacity
+    uint32_t usedOffset;     // bar only
+    uint32_t peakOffset;     // bar only
+    const char* capacityKey; // bar only: the ring's capacity, by schema key
+    uint32_t firstCell;      // into kLayoutCells
+    uint32_t cellCount;
+};
+
+struct LayoutPanel
+{
+    const char* title;
+    uint32_t firstRow;       // into kLayoutRows
+    uint32_t rowCount;
+};
+
+inline constexpr LayoutCell kLayoutCells[] = {
+${layout.cells.join('\n')}
+};
+
+inline constexpr LayoutRow kLayoutRows[] = {
+${layout.rows.join('\n')}
+};
+
+inline constexpr LayoutPanel kLayoutPanels[] = {
+${layout.panels.join('\n')}
+};
+
 } // namespace metrics_schema
 } // namespace clockwork
 `;
+}
+
+// The layout as three flat tables (panels → rows → cells, by range), every
+// key resolved here: a key the schema does not declare stops the generation,
+// where a panel would only show a blank.
+function renderLayoutTables(schema) {
+  const cells = [], rows = [], panels = [];
+  const str = (v) => `"${cEscape(v ?? '')}"`;
+  const describe = (key) => schema.metrics[key]?.description ?? schema.nativeStats[key]?.description ?? '';
+  for (const panel of schema.layout.panels) {
+    const firstRow = rows.length;
+    for (const row of panel.rows) {
+      const platform = { both: 'Both', web: 'Web', native: 'Native' }[rowPlatform(row, schema)];
+      const firstCell = cells.length;
+      if (row.type === 'bar') {
+        for (const key of [row.usedKey, row.peakKey, row.capacityKey])
+          if (!schema.metrics[key]) throw new Error(`layout row '${row.label}': no metric '${key}'`);
+        rows.push(`    { ${str(row.label)}, ${str(row.tooltip ?? describe(row.usedKey))}, Platform::${platform}, true, `
+          + `${schema.metrics[row.usedKey].offset}, ${schema.metrics[row.peakKey].offset}, ${str(row.capacityKey)}, ${firstCell}, 0 },`);
+        continue;
+      }
+      for (const cell of row.cells) {
+        if (cell.sep !== undefined) {
+          cells.push(`    { CellType::Separator, 0, ${str(cell.sep)}, ${str(cell.kind)}, "" },`);
+        } else if (cell.text !== undefined) {
+          cells.push(`    { CellType::Text, 0, ${str(cell.text)}, ${str(cell.kind)}, "" },`);
+        } else if (schema.metrics[cell.key]) {
+          cells.push(`    { CellType::Metric, ${schema.metrics[cell.key].offset}, "", ${str(cell.kind)}, ${str(cell.format)} },`);
+        } else if (schema.nativeStats[cell.key]) {
+          cells.push(`    { CellType::NativeStat, ${schema.nativeStats[cell.key].index}, "", ${str(cell.kind)}, ${str(cell.format)} },`);
+        } else {
+          throw new Error(`layout row '${row.label}': no metric or native stat '${cell.key}'`);
+        }
+      }
+      const firstKey = row.cells.find((c) => c.key)?.key;
+      rows.push(`    { ${str(row.label)}, ${str(row.tooltip ?? describe(firstKey))}, Platform::${platform}, false, 0, 0, "", `
+        + `${firstCell}, ${cells.length - firstCell} },`);
+    }
+    panels.push(`    { ${str(panel.title)}, ${firstRow}, ${rows.length - firstRow} },`);
+  }
+  return { cells, rows, panels };
 }
 
 // The Rust twin: the same three tables for clockwork-client, plus one enum

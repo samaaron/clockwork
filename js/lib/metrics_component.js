@@ -18,6 +18,8 @@
 
 const HEADROOM_UNSET = 0xFFFFFFFF;
 
+import { rowPlatform } from './metrics_schema.js';
+
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -102,6 +104,10 @@ class ClockworkMetrics extends HTMLElement {
     this.#bars = [];
 
     for (const panel of layout.panels) {
+      // One layout serves every panel; this one shows what a browser has
+      // (rowPlatform: a native-only field or a native stat is not written here).
+      const rows = panel.rows.filter((row) => rowPlatform(row, schema) !== 'native');
+      if (rows.length === 0) continue;
       const panelEl = document.createElement('div');
       panelEl.className = 'ssm-panel' + (panel.class ? ` ssm-panel--${panel.class}` : '');
 
@@ -110,7 +116,7 @@ class ClockworkMetrics extends HTMLElement {
       titleEl.textContent = panel.title;
       panelEl.appendChild(titleEl);
 
-      for (const row of panel.rows) {
+      for (const row of rows) {
         if (row.type === 'bar') {
           this.#buildBarRow(panelEl, row, metrics);
         } else {

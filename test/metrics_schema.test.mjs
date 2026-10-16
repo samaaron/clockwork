@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { renderHeader, renderRust } from "../scripts/gen-metrics-schema-header.mjs";
-import { METRICS_SCHEMA } from "../js/lib/metrics_schema.js";
+import { METRICS_SCHEMA, rowPlatform } from "../js/lib/metrics_schema.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const headerPath = join(here, "..", "src", "metrics_schema.h");
@@ -105,5 +105,24 @@ test("every metric declares a description and a type, and every measurement a un
         assert.ok(def.unit, `${group}.${name} is a ${def.type} and has no unit`);
       }
     }
+  }
+});
+
+test("one layout for every panel: a row shows where something writes what it reads", () => {
+  // The web panel and a native one render the same layout (the native one
+  // through the generated header); rowPlatform decides where each row is
+  // shown, from the fields the row reads.
+  const row = (...keys) => ({ label: keys.join("+"), cells: keys.map((key) => ({ key })) });
+  assert.equal(rowPlatform(row("audioSampleRate")), "both");
+  assert.equal(rowPlatform(row("cpuAvgCenti")), "native", "a native stat is the device layer's");
+  assert.equal(rowPlatform(row("linkPeers")), "native", "a nativeOnly field has no web writer");
+  assert.equal(rowPlatform(row("glitchCount")), "web", "a webOnly field has no native writer");
+  assert.equal(rowPlatform({ label: "in", type: "bar", usedKey: "inBufferUsedBytes", peakKey: "inBufferPeakBytes" }), "both");
+  assert.throws(() => rowPlatform(row("linkPeers", "glitchCount")), /native-only and web-only/);
+
+  // Every row of the shipped layout resolves, and every panel shows somewhere.
+  for (const panel of METRICS_SCHEMA.layout.panels) {
+    const where = new Set(panel.rows.map((r) => rowPlatform(r)));
+    assert.ok(where.size > 0, `panel '${panel.title}' has no rows`);
   }
 });
