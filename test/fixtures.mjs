@@ -28,6 +28,12 @@ export const test = base.extend({
       workerBaseURL: "/dist/workers/",
       workletUrl: "/dist/workers/clockwork_audio_worklet.js",
       snapshotIntervalMs: 25,
+      // No output device: Chromium renders a context whose sink is "none"
+      // without opening the machine's hardware, which a test page has no
+      // business doing — one suite run opened a developer's sound card 198
+      // times and clicked it on every start (2026-10-16). The graph, the
+      // worklet and the engine run exactly as with a device.
+      audioContextOptions: { sinkId: { type: "none" } },
     });
   },
 

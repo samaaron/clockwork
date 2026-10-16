@@ -16,6 +16,14 @@ use clockwork_client::{Embed, EmbedConfig, Error, Metric, NativeStat};
 
 #[test]
 fn boot_ticks_itself_and_reports_the_device_it_opened() {
+    // This boots the engine on the machine's own audio device, which
+    // changes that device's rate and buffer under whatever else is playing
+    // on it. Run by asking for it, as the C++ suite's [.hardware] cases
+    // are (test/RealDeviceGuard.h); never by `cargo test` alone.
+    if std::env::var_os("CLOCKWORK_HARDWARE_TESTS").is_none() {
+        eprintln!("boot test opens the machine's audio device; set CLOCKWORK_HARDWARE_TESTS=1 to run it");
+        return;
+    }
     let cfg = EmbedConfig::new().app_name("clockwork-client test").no_input(true);
     let mut e = match Embed::boot(&cfg) {
         Ok(e) => e,
