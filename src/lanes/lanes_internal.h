@@ -40,6 +40,11 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
 /* The most OSC bytes one NRT egress frame carries. */
 uint32_t clockwork_egress_nrt_max_frame(void);
 
+/* Free bytes in the NRT egress ring now (0 before init): what a producer
+   that would rather wait than have a frame refused checks first — the
+   control pass, before it answers a verb. */
+uint32_t clockwork_egress_nrt_free(void);
+
 void clockwork_lanes_reset_drains(void);
 
 void clockwork_lanes_reset_rings(void);

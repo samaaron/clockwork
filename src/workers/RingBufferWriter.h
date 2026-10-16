@@ -110,8 +110,7 @@ public:
         uint32_t ut = static_cast<uint32_t>(t);
 
         // Total free space (head==tail ambiguity costs one byte).
-        uint32_t used  = (uh - ut + buffer_size) % buffer_size;
-        uint32_t avail = buffer_size - used - 1;
+        uint32_t avail = ring_free_bytes(uh, ut, buffer_size);
         if (aligned_size > avail) {
             write_lock->store(0, std::memory_order_release);
             return r;

@@ -19,6 +19,8 @@
 #include "PipeWireAudio.h"
 #include "audio_processor.h"
 #include "lanes/lanes.h"
+#include "lanes/lanes_internal.h"   // clockwork_egress_nrt_free: the control pass's room check
+#include "ring/ring.h"                // ring_free_bytes
 #include "audio_config.h"
 #include "shared_memory.h"
 #include "osc_debug.h"
@@ -1441,28 +1443,33 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     {
         auto* arena = static_cast<uint8_t*>(clockwork_lanes_base());
         auto* ctl   = reinterpret_cast<ControlRingCursors*>(arena + CONTROL_RING_START);
-        // A peer's replies go to a ring of its own (ShmTransport), which a
-        // peer that writes faster than it reads can fill; a reply with no
-        // room is dropped and counted there. The pass does not get that far:
-        // a control verb of a peer whose reply ring is nearly full waits in
-        // the control ring, consumed on a later pass once the peer has read
-        // (ring_drain.h, Retain). Before the control ring, a peer's verbs were
-        // paced by the audio thread's block, which hid this: the control pass
-        // answers as fast as it can, so the pacing is the peer's reading.
-        constexpr uint32_t kPeerReplyRoom = 16 * 1024;   // room a pass leaves for one verb's replies
+        // A verb's answers pass through two rings that refuse a frame with
+        // no room: the engine's egress ring (NRT_OUT_RING_SIZE), and, for a
+        // peer, that peer's reply ring (ShmTransport). The pass answers as
+        // fast as it can, so a ring of verbs whose answers are larger than
+        // they are overflowed the first (a peer lost 296 of 6000 on CI,
+        // 2026-10-16, and the line logging it rode the same full ring), and a
+        // peer that reads slowly filled the second. Before the control ring
+        // the audio thread's block paced the verbs, which hid both. Now a
+        // verb waits in the control ring while either ring lacks room for
+        // its answers, and is answered on a later pass, once the egress has
+        // been drained (that task runs first in every pass) and the peer has
+        // read (ring_drain.h, Retain).
+        constexpr uint32_t kAnswerRoom = 16 * 1024;   // room a pass leaves for one verb's answers
+        static_assert(kAnswerRoom < NRT_OUT_RING_SIZE && kAnswerRoom < SHM_PEER_REP_RING_SIZE,
+                      "a ring smaller than the room would hold every verb forever");
         mNrtGateway.addDrain(
             arena + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
             RingReader::OnMessageVerdict(
             [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
+                if (clockwork_egress_nrt_free() < kAnswerRoom) return ClockworkDrainVerdict::Retain;
                 if (token == SHM_PEER_ORIGIN_TOKEN)
-                    if (auto* plane = mPeerPlane.load(std::memory_order_acquire)) {
-                        const auto h = static_cast<uint32_t>(plane->rep_head.load(std::memory_order_relaxed));
-                        const auto t = static_cast<uint32_t>(plane->rep_tail.load(std::memory_order_acquire));
-                        const uint32_t used = (h - t + SHM_PEER_REP_RING_SIZE) % SHM_PEER_REP_RING_SIZE;
-                        if (SHM_PEER_REP_RING_SIZE - used - 1 < kPeerReplyRoom)
+                    if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
+                        if (ring_free_bytes(static_cast<uint32_t>(plane->rep_head.load(std::memory_order_relaxed)),
+                                            static_cast<uint32_t>(plane->rep_tail.load(std::memory_order_acquire)),
+                                            SHM_PEER_REP_RING_SIZE) < kAnswerRoom)
                             return ClockworkDrainVerdict::Retain;
-                    }
                 DrainCallCtx cc{ token, 0, 0 };
                 noteInFlightCommand(d, n);
                 mControlRoutes.ingest(d, n, &cc);

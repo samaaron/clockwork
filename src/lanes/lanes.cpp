@@ -191,6 +191,14 @@ uint32_t clockwork_egress_nrt_max_frame(void) {
     return kNrtEgressMax - EGRESS_ROUTE_SIZE;
 }
 
+uint32_t clockwork_egress_nrt_free(void) {
+    if (!memory_initialized || !shared_memory || !cursors) return 0;
+    return ring_free_bytes(
+        static_cast<uint32_t>(cursors->nrt_out_head.load(std::memory_order_acquire)),
+        static_cast<uint32_t>(cursors->nrt_out_tail.load(std::memory_order_acquire)),
+        NRT_OUT_RING_SIZE);
+}
+
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len) {
     if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)

@@ -20,8 +20,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
+#include "shared_memory.h"
+#include "ring/ring.h"
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 #ifndef _WIN32
 #include "StreamTestClient.h"
 #include <poll.h>
@@ -190,4 +194,57 @@ TEST_CASE("Registering clients does not park the control thread",
         fix.send(osc_test::message("/clockwork/notify"));
         REQUIRE(fix.waitForReply("/clockwork/notify.reply", r, 30000));
     }
+}
+
+TEST_CASE("control ring: a pass with more answers than the egress ring holds loses none — the rest wait for the next pass",
+          "[control][control-ring]") {
+    // The control pass answers every verb in the control ring in one pass,
+    // and a verb's replies go to the engine's egress ring, which is finite
+    // (NRT_OUT_RING_SIZE) and refuses a reply with no room. A ring of verbs
+    // whose replies are larger than the verbs themselves overflowed it: the
+    // surplus was refused, and the line logging the refusal rode the same
+    // full ring, so nothing said so (a peer lost 296 replies of 6000 on CI,
+    // 2026-10-16). The pass now leaves a verb in the control ring while the
+    // egress ring lacks room for its answer, and answers it on the next pass,
+    // once the egress has been drained.
+    ClockworkEngine engine;
+    std::mutex mu;
+    std::vector<std::vector<uint8_t>> replies;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [&](const uint8_t* d, uint32_t n) {
+        std::lock_guard<std::mutex> lock(mu);
+        replies.emplace_back(d, d + n);
+    };
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.manualAudioPump   = true;
+    cfg.hostDrivesControl = true;   // no pass runs until this case runs one
+    engine.init(cfg);
+    engine.pumpAudioBlock();
+
+    // The time verb's answer is larger than its question (an int64 and a
+    // longer address): a full control ring of them answers with more bytes
+    // than the egress ring holds.
+    const auto ask = osc_test::message(CLOCKWORK_SYS("clock/time/now/get"));
+    int sent = 0;
+    while (engine.ingest(ask.ptr(), ask.size(), 0) == CLOCKWORK_OK) ++sent;
+    REQUIRE(sent > 0);
+
+    auto answered = [&] {
+        std::lock_guard<std::mutex> lock(mu);
+        int n = 0;
+        for (const auto& r : replies)
+            if (osc_test::parseAddress(r.data(), static_cast<uint32_t>(r.size()))
+                == CLOCKWORK_SYS("clock/time/now.reply")) ++n;
+        return n;
+    };
+    for (int pass = 0; pass < 200 && answered() < sent; ++pass) REQUIRE(engine.controlPass());
+    CHECK(answered() == sent);
+
+    // The case bites only while the answers outgrow the egress ring: each
+    // takes its bytes, the route word and the ring's frame header (ring.h).
+    size_t answerBytes = 0;
+    { std::lock_guard<std::mutex> lock(mu); if (!replies.empty()) answerBytes = replies.front().size(); }
+    const uint64_t footprint = (sizeof(Message) + EGRESS_ROUTE_SIZE + answerBytes + 3u) & ~uint64_t{3};
+    CHECK(static_cast<uint64_t>(sent) * footprint > NRT_OUT_RING_SIZE);
+    engine.shutdown();
 }

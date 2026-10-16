@@ -29,5 +29,13 @@ struct alignas(4) Message {
     // payload follows (binary data — OSC on every ring here)
 };
 
+// Free bytes in a ring of `size` bytes whose writer is at `head` and whose
+// reader has given back up to `tail` (head == tail is empty, so a full ring
+// keeps one byte). The one formula every writer and every room check uses.
+inline uint32_t ring_free_bytes(uint32_t head, uint32_t tail, uint32_t size) {
+    const uint32_t used = (head - tail + size) % size;
+    return size - used - 1;
+}
+
 constexpr uint32_t MESSAGE_MAGIC = 0xDEADBEEF;
 constexpr uint32_t PADDING_MAGIC = 0xBADDCAFE;  // end-of-ring pad marker; frame restarts at offset 0
