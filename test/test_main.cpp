@@ -16,7 +16,9 @@
  */
 #include "rt_alloc.h"
 #include "DebugTail.h"
-#include "RealDeviceGuard.h"
+#if CLOCKWORK_DEVICE
+#include "RealDeviceGuard.h"   // no case opens a real device unless tagged [.hardware]
+#endif
 
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_case_info.hpp>
@@ -64,7 +66,9 @@ struct RTAllocListener : Catch::EventListenerBase {
 } // namespace
 
 CATCH_REGISTER_LISTENER(RTAllocListener)
-CATCH_REGISTER_LISTENER(real_device_guard::Listener)
+#if CLOCKWORK_DEVICE
+CATCH_REGISTER_LISTENER(real_device_guard::Listener)   // a build with no device layer has nothing to guard
+#endif
 
 // ─── The arguments as ctest hands them ────────────────────────────────────────
 // ctest runs each case on its own, giving the binary the case's name on the
