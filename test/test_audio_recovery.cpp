@@ -180,11 +180,18 @@ TEST_CASE("RateSkewPolicy: a device someone else runs at another rate is one fau
     CHECK(heldAt(1.09, 44100).adoptRate() == 44100.0);
     policy.acted(heldAt(1.09, 44100));
     CHECK(policy.adopted());
-    // A report at a different other rate, or none, is a new fault.
+    // The reopen before the report may have been a plain skew verdict — the
+    // other party's rate reported only after it (CoreAudio fires the listener
+    // when they re-assert): still the one chance, and the held verdict adopts.
+    RateSkewPolicy late(3, 0.05);
+    late.acted(at(0.92));
+    REQUIRE(late.next(heldAt(0.80, 44100)) == RateSkewAction::AdoptRate);
+    // A plain skew after a held verdict is a new fault.
     RateSkewPolicy fresh(3, 0.05);
     fresh.acted(heldAt(0.87, 44100));
-    REQUIRE(fresh.next(heldAt(0.87, 96000)) == RateSkewAction::Recover);
     REQUIRE(fresh.next(at(0.87)) == RateSkewAction::Recover);
+    fresh.acted(at(0.87));
+    CHECK(fresh.streak() == 1);
     // Measured, not reported, when the device reports the session rate.
     CHECK(at(0.919).adoptRate() == 0.919 * 48000);
 }

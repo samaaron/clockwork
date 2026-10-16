@@ -79,6 +79,19 @@ void RingReader::addDrain(uint8_t*              buffer,
     mDrains.push_back(std::move(d));
 }
 
+void RingReader::addDrain(uint8_t* buffer, uint32_t bufferSize,
+                          std::atomic<int32_t>* head, std::atomic<int32_t>* tail,
+                          OnMessageVerdict onMessage, Metrics metrics) {
+    Drain d;
+    d.buffer           = buffer;
+    d.size             = bufferSize;
+    d.head             = head;
+    d.tail             = tail;
+    d.onMessageVerdict = std::move(onMessage);
+    d.metrics          = metrics;
+    mDrains.push_back(std::move(d));
+}
+
 void RingReader::addTask(std::function<void()> task) {
     Drain d;
     d.task = std::move(task);
@@ -97,6 +110,8 @@ void RingReader::drainOne(Drain& d) {
                   0 /* drain everything available */,
                   [&d](uint32_t sourceId, const uint8_t* payload,
                        uint32_t payloadSize, uint32_t sequence) {
+                      if (d.onMessageVerdict)
+                          return d.onMessageVerdict(sourceId, payload, payloadSize, sequence);
                       if (d.onMessage)
                           d.onMessage(sourceId, payload, payloadSize, sequence);
                       return ClockworkDrainVerdict::Consume;

@@ -47,6 +47,9 @@ public:
     // (sourceId, payload, payloadSize, sequence). sourceId carries the origin
     // token on the control ring; a drain that has no use for it ignores it.
     using OnMessage = std::function<void(uint32_t, const uint8_t*, uint32_t, uint32_t)>;
+    // The same, with a say in whether the message is consumed: Retain leaves
+    // it, and everything behind it, for the next pass (ring_drain.h).
+    using OnMessageVerdict = std::function<ClockworkDrainVerdict(uint32_t, const uint8_t*, uint32_t, uint32_t)>;
 
     explicit RingReader(const char* threadName) : mName(threadName) {
         mDrains.reserve(4);  // fixed before start(); reserve so run() never reallocs
@@ -66,6 +69,12 @@ public:
                   std::atomic<int32_t>* head,
                   std::atomic<int32_t>* tail,
                   OnMessage             onMessage,
+                  Metrics               metrics);
+    void addDrain(uint8_t*              buffer,
+                  uint32_t              bufferSize,
+                  std::atomic<int32_t>* head,
+                  std::atomic<int32_t>* tail,
+                  OnMessageVerdict      onMessage,
                   Metrics               metrics);
 
     // Register a task to run on each wake, in registration order with the ring
@@ -146,6 +155,7 @@ private:
         std::atomic<int32_t>* head   = nullptr;
         std::atomic<int32_t>* tail   = nullptr;
         OnMessage             onMessage;
+        OnMessageVerdict      onMessageVerdict;   // when set, its verdict decides what the walk consumes
         Metrics               metrics;
         ClockworkDrainState          state;
         std::function<void()> task;  // when set, run instead of the ring walk

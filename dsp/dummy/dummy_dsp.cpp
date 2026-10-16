@@ -253,6 +253,7 @@ struct DummyDsp {
     // took them — reported by /dummy/reconfigured, so a test can see the
     // instance that answers is the one that was told, not a new one.
     uint32_t  reconfigured = 0;
+    uint32_t  built_output_channels = 0;   // dsp_new's ceiling: what dsp_reconfigure's headroom is measured from
 
     Mode      mode = Mode::Pulse;
     uint64_t  pulse_width  = 0;   // frames, computed from ms at the sample rate
@@ -800,6 +801,7 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
         return nullptr;
     }
     d->config = *config;
+    d->built_output_channels = config->max_output_channels;
     if (host) d->host = *host;
     if (const uint64_t want = configNumber(config, "rtPoolBytes")) {
         if (d->host.alloc_bytes) d->rt_pool = d->host.alloc_bytes(d->host.ctx, want);
@@ -831,7 +833,10 @@ int dsp_reconfigure(struct Dsp* dsp, double sample_rate,
                     uint32_t max_input_channels, uint32_t max_output_channels) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
     if (!d || !(sample_rate > 0.0)) return 1;
-    if (max_output_channels > 8u) return 2;
+    // A guest built for one width takes a little more, not a lot: eight
+    // outputs above what it was built with (lanes included, so a build with
+    // link audio or plugin lanes has the same headroom as one without).
+    if (max_output_channels > d->built_output_channels + 8u) return 2;
     d->config.sample_rate         = sample_rate;
     d->config.max_input_channels  = max_input_channels;
     d->config.max_output_channels = max_output_channels;

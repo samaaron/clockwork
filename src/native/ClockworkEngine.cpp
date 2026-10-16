@@ -1441,15 +1441,34 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     {
         auto* arena = static_cast<uint8_t*>(clockwork_lanes_base());
         auto* ctl   = reinterpret_cast<ControlRingCursors*>(arena + CONTROL_RING_START);
+        // A peer's replies go to a ring of its own (ShmTransport), which a
+        // peer that writes faster than it reads can fill; a reply with no
+        // room is dropped and counted there. The pass does not get that far:
+        // a control verb of a peer whose reply ring is nearly full waits in
+        // the control ring, consumed on a later pass once the peer has read
+        // (ring_drain.h, Retain). Before the control ring, a peer's verbs were
+        // paced by the audio thread's block, which hid this: the control pass
+        // answers as fast as it can, so the pacing is the peer's reading.
+        constexpr uint32_t kPeerReplyRoom = 16 * 1024;   // room a pass leaves for one verb's replies
         mNrtGateway.addDrain(
             arena + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
+            RingReader::OnMessageVerdict(
             [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
+                if (token == SHM_PEER_ORIGIN_TOKEN)
+                    if (auto* plane = mPeerPlane.load(std::memory_order_acquire)) {
+                        const auto h = static_cast<uint32_t>(plane->rep_head.load(std::memory_order_relaxed));
+                        const auto t = static_cast<uint32_t>(plane->rep_tail.load(std::memory_order_acquire));
+                        const uint32_t used = (h - t + SHM_PEER_REP_RING_SIZE) % SHM_PEER_REP_RING_SIZE;
+                        if (SHM_PEER_REP_RING_SIZE - used - 1 < kPeerReplyRoom)
+                            return ClockworkDrainVerdict::Retain;
+                    }
                 DrainCallCtx cc{ token, 0, 0 };
                 noteInFlightCommand(d, n);
                 mControlRoutes.ingest(d, n, &cc);
                 mInFlightCommand[0] = '\0';
-            },
+                return ClockworkDrainVerdict::Consume;
+            }),
             {});
     }
 
@@ -2546,6 +2565,18 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
             // the default the fresh manager opened, is audio restored — there.
             restored = err.empty() && (swap.success || swap.fellBack)
                     && mActiveSource.load() == AudioSource::RealCallback;
+            // What the device's driver says it runs at now, read here on the
+            // lane rather than waited for from a change report: a device
+            // someone else holds at their rate (reconcileOpenDevice logs it)
+            // is reported so the watchdog's next verdict carries it, whether
+            // or not the other party's re-assertion fires a report in time.
+            if (restored && mDeviceManager)
+                if (auto* dev = mDeviceManager->getCurrentAudioDevice()) {
+                    const auto live = dev->readLiveState();
+                    if (live.alive && live.sampleRate > 0)
+                        mReportedDeviceRate.store(static_cast<int>(live.sampleRate),
+                                                  std::memory_order_release);
+                }
         } catch (const std::exception& ex) {
             err = std::string("recovery exception: ") + ex.what();
         } catch (...) {

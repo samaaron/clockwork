@@ -170,9 +170,10 @@ public:
     // maxRecoveries: consecutive same-ratio verdicts acted on before the
     // fault is called persistent (the Nth is the adopt). sameRatioTolerance:
     // two ratios closer than this are the same fault. A device held at
-    // another rate is adopted on the second verdict, whatever its ratios.
+    // another rate is adopted on the first verdict after any recovery in
+    // the streak, whatever the ratios: one reopen was allowed to win the
+    // device back and did not.
     RateSkewPolicy(int maxRecoveries, double sameRatioTolerance);
-    static constexpr int kHeldRecoveries = 2;
 
     // What acting on a verdict would do. Pure: the caller asks, attempts the
     // action (a recovery can be refused — in flight, cooling down), and
@@ -192,8 +193,9 @@ public:
 
 private:
     enum class Phase { Recovering, Adopted, GaveUp };
-    // The same fault as the last verdict acted on: the same other rate
-    // reported, or a ratio within tolerance of the last.
+    // The same fault as the last verdict acted on: a device held at another
+    // rate (whatever either verdict's ratio), or a ratio within tolerance
+    // of the last.
     bool sameFault(const RateSkewVerdict& v) const;
     int  streakWith(const RateSkewVerdict& v) const;
 

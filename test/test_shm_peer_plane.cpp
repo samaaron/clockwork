@@ -219,6 +219,7 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
 
     REQUIRE(sent == N);
     REQUIRE(static_cast<int>(replies.size()) == N);
+    CHECK(plane->rep_dropped.load() == 0);
     // Completeness + strict order: tempo.reply ids 1..N, monotone, none missing or
     // duplicated. Verified in plain C++ so it's one assertion, not N.
     bool ordered = true;
@@ -233,5 +234,56 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
     CHECK(m.osc_in_corrupted.load(std::memory_order_relaxed) == 0);
     CHECK(plane->rep_dropped.load(std::memory_order_relaxed) == 0);  // peer kept up
 
+    engine.shutdown();
+}
+
+TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass waits for it",
+          "[shm][peer][load]") {
+    // Every control verb a peer writes is answered into its reply ring, which
+    // is finite; a peer that writes more than the ring holds before it reads
+    // used to lose the surplus (rep_dropped), silently to the asker. The
+    // control pass now leaves a verb in the control ring while the peer's
+    // reply ring is nearly full, and answers it once the peer has read.
+    // Pumped: the pass runs on the audio block, so the case controls when.
+    constexpr unsigned kPort = 57227;
+
+    ShmTransport     transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    engine.init(planeConfig(kPort));
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+
+    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    ShmPeerPlaneHeader* plane = client.get_peer_plane();
+    REQUIRE(plane != nullptr);
+    shm_peer_attach(plane, 1);
+
+    // More verbs than the reply ring can hold answers for, written before a
+    // single reply is read.
+    constexpr int N = 6000;
+    int sent = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (sent < N && std::chrono::steady_clock::now() < deadline) {
+        while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
+            ++sent;
+        for (int i = 0; i < 8; ++i) engine.pumpAudioBlock();   // the pass runs; the reply ring fills; the rest waits
+    }
+    REQUIRE(sent == N);
+    for (int i = 0; i < 50; ++i) engine.pumpAudioBlock();
+    CHECK(plane->rep_dropped.load() == 0);
+
+    // Read, and the rest is answered: every one, in order.
+    ClockworkDrainState repState;
+    std::vector<std::vector<uint8_t>> replies;
+    const auto readBy = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (static_cast<int>(replies.size()) < N && std::chrono::steady_clock::now() < readBy) {
+        drainReplies(plane, repState, replies);
+        engine.pumpAudioBlock();
+    }
+    REQUIRE(static_cast<int>(replies.size()) == N);
+    CHECK(plane->rep_dropped.load() == 0);
     engine.shutdown();
 }

@@ -59,7 +59,8 @@ TEST_CASE("guest reconfigure: a channel-count change the instance survives is a 
     subscribe(fix);
     REQUIRE(clockwork_guest_survives() == DSP_SURVIVES_CHANNEL_CHANGE);
     const uint32_t gen = fix.engine().generation();
-    REQUIRE(askTold(fix).times == 0);
+    const auto built = askTold(fix);   // the ceiling dsp_new was handed: the device's, widened for any lanes
+    REQUIRE(built.times == 0);
 
     fix.clearReplies();
     const auto swap = switchWhenFree(fix, "Fake Interface", 48000);
@@ -67,12 +68,13 @@ TEST_CASE("guest reconfigure: a channel-count change the instance survives is a 
     REQUIRE(swap.success);
     CHECK(swap.type == SwapType::Hot);
 
-    // The same instance, told once, rendering to four outputs; the
+    // The same instance, told once, rendering to two outputs more than it
+    // was built for (the device's four, the same lanes above); the
     // generation it opened is the one still open; nobody was told to
     // rebuild, and nothing was refused.
     const auto told = askTold(fix);
     CHECK(told.times == 1);
-    CHECK(told.outputs == 4);
+    CHECK(told.outputs == built.outputs + 2);
     CHECK(fix.engine().generation() == gen);
     CHECK_FALSE(heard(fix, CLOCKWORK_SYS("setup")));
     CHECK_FALSE(heard(fix, CLOCKWORK_SYS("error")));

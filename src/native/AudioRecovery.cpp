@@ -108,8 +108,11 @@ RateSkewPolicy::RateSkewPolicy(int maxRecoveries, double sameRatioTolerance)
 
 bool RateSkewPolicy::sameFault(const RateSkewVerdict& v) const {
     if (mStreak == 0) return false;
-    if (v.heldElsewhere() || mLast.heldElsewhere())
-        return v.heldElsewhere() && mLast.heldElsewhere() && v.reportedRate == mLast.reportedRate;
+    // Held at another rate: the report is the fault, and the reopen before
+    // it — held or merely skewed, read at whatever ratio — was the one
+    // chance to win the device back.
+    if (v.heldElsewhere()) return true;
+    if (mLast.heldElsewhere()) return false;
     const double d = v.ratio < mLast.ratio ? mLast.ratio - v.ratio : v.ratio - mLast.ratio;
     return d <= mTolerance;
 }
@@ -130,7 +133,7 @@ RateSkewAction RateSkewPolicy::next(const RateSkewVerdict& v) const {
     case Phase::Recovering:
         break;
     }
-    const int enough = v.heldElsewhere() ? kHeldRecoveries : mMaxRecoveries;
+    const int enough = v.heldElsewhere() ? 2 : mMaxRecoveries;
     return streakWith(v) >= enough ? RateSkewAction::AdoptRate
                                    : RateSkewAction::Recover;
 }
