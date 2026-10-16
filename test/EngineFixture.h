@@ -204,11 +204,26 @@ SwapResult switchWhenFree(Fix& fix, Args&&... args) {
 
 // Booted, and subscribed to the engine's broadcasts as a GUI is: statechange,
 // setup, the device reports. A case that waits for any of those needs this.
+//
+// The engine answers /clockwork/notify with notify.reply and THEN a snapshot
+// of its state (snapshotStateTo: reason "snapshot", or an error's own
+// reason). Both are the handshake, not anything the case heard happen, so
+// both are in before the slate is cleared. Cleared on the reply alone, the
+// snapshot landed after the clear on a slow runner, and a restart sequence
+// began with a "running" no restart had said (CI, 2026-10-16).
 template <typename Fix>
 void subscribe(Fix& fix) {
     fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
     OscReply ack;
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    REQUIRE(fix.pollUntil([&] {
+        for (const auto& r : fix.allReplies()) {
+            if (r.address != CLOCKWORK_SYS("statechange")) continue;
+            const auto p = r.parsed();
+            if (p.argString(1) == "snapshot" || p.argString(0) == "error") return true;
+        }
+        return false;
+    }, 2000));
     fix.clearReplies();
 }
 

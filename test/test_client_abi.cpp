@@ -147,7 +147,12 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     ClockworkClient* c = openInProcess(&st);
     REQUIRE(st == CLOCKWORK_OK);
 
-    const auto ping = osc_test::message("/dummy/ping");
+    // The ring is filled with an address the guest has no verb for: taken off
+    // the ring and not answered. A ping apiece had the guest answer thousands
+    // of pongs into an egress ring a sixth the size, with no client reading
+    // them, and most were refused (checkNoEgressRefused) — a flood of replies
+    // is not what this case is about. The same length as a ping.
+    const auto unanswered = osc_test::message("/dummy/none");
     const uint32_t bound = 64 * 1024;
     const uint32_t rounds = (IN_RING_SIZE / bound) * 4;
     REQUIRE(rounds > 4);
@@ -161,8 +166,8 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     while (true) {
         uint8_t* room = clockwork_client_send_begin(c, bound, &st);
         if (room == nullptr) break;
-        std::memcpy(room, ping.ptr(), ping.size());
-        REQUIRE(clockwork_client_send_commit(c, ping.size(), 1) == CLOCKWORK_OK);
+        std::memcpy(room, unanswered.ptr(), unanswered.size());
+        REQUIRE(clockwork_client_send_commit(c, unanswered.size(), 1) == CLOCKWORK_OK);
         ++sent;
         if (sent > 100000) break;   // a runaway is a failure, not a hang
     }
@@ -171,7 +176,10 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     // thousands. The gap is wide enough that no tuning sits between them.
     CHECK(sent > rounds * 20);
 
+    // Drained, the ring takes a message again, and the guest answers it.
     e.pump(0.5);
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), 1) == CLOCKWORK_OK);
     osc_test::ParsedReply r;
     REQUIRE(e.reply("/dummy/pong", r));
 
