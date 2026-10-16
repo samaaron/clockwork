@@ -86,6 +86,26 @@ bool heardRunning(EngineFixture& fix, int32_t above) {
     return false;
 }
 
+// The sequence once it has settled, read on the watchdog's clock: its last
+// word a setup naming the generation open now, and nothing more said for a
+// further stall window, so every restart in it is complete. A recovery
+// the engine asked for itself can start after the one a case waited for —
+// the stall watchdog firing before the restored device has ticked, on a
+// slow runner (2026-10-16) — and a sequence read mid-restart has a
+// restarting with no running and setup behind it yet.
+std::vector<Said> settledSequence(EngineFixture& fix, fake_audio::FakeSystem& sys) {
+    REQUIRE(runWatchdogUntil(fix.engine(), sys, 50, 20000, [&] {
+        const auto h = sequenceHeard(fix);
+        return !h.empty() && h.back().address == CLOCKWORK_SYS("setup")
+            && h.back().generation == static_cast<int32_t>(fix.engine().generation());
+    }));
+    const size_t settled = sequenceHeard(fix).size();
+    REQUIRE(runWatchdogFor(fix.engine(), sys, 50, 1500));
+    const auto heard = sequenceHeard(fix);
+    REQUIRE(heard.size() == settled);
+    return heard;
+}
+
 } // namespace
 
 TEST_CASE("restart sequence: a device switch the user asked for",
@@ -137,24 +157,9 @@ TEST_CASE("restart sequence: the watchdog's recovery of a device that stopped de
     REQUIRE(runWatchdogUntil(fix.engine(), *sys, 50, 20000, [&] {
         return fix.engine().watchdogRecoveryCount() >= 1 && heardRunning(fix, afterTheUsers);
     }));
-    // The failed reopen asked the watchdog for a recovery, and the stall
-    // watchdog may ask for one of its own before the restored device has
-    // ticked (a slow runner, 2026-10-16): a third restart can begin after
-    // the one waited for. The sequence is read once it has settled — its
-    // last word a setup naming the generation open now, and nothing said
-    // for a further stall window — so every restart in it is complete.
-    REQUIRE(runWatchdogUntil(fix.engine(), *sys, 50, 20000, [&] {
-        const auto h = sequenceHeard(fix);
-        return !h.empty() && h.back().address == CLOCKWORK_SYS("setup")
-            && h.back().generation == static_cast<int32_t>(fix.engine().generation());
-    }));
-    const size_t settled = sequenceHeard(fix).size();
-    REQUIRE(runWatchdogFor(fix.engine(), *sys, 50, 1500));
+    const auto heard = settledSequence(fix, *sys);
     sys->useWallTime();
     INFO(fix.debugMessagesDump());
-
-    const auto heard = sequenceHeard(fix);
-    REQUIRE(heard.size() == settled);
     CHECK(coldRestartsIn(heard, gen) >= 2);
     CHECK(heard.back().generation == static_cast<int32_t>(fix.engine().generation()));
 }
@@ -182,10 +187,9 @@ TEST_CASE("restart sequence: the watchdog's recovery from a device delivering at
     REQUIRE(runWatchdogUntil(fix.engine(), *sys, 50, 15000, [&] {
         return fix.engine().rateSkewRecoveryCount() >= 1 && heardRunning(fix, gen);
     }));
+    const auto heard = settledSequence(fix, *sys);
     sys->useWallTime();
     INFO(fix.debugMessagesDump());
-
-    const auto heard = sequenceHeard(fix);
     CHECK(coldRestartsIn(heard, gen) >= 1);
     CHECK(heard.back().generation == static_cast<int32_t>(fix.engine().generation()));
 }
