@@ -17,6 +17,7 @@
 #include "engine_state.h"
 #include "shm_segment.hpp"
 #include "audio_processor.h"   // control / shared_memory arena globals
+#include "lanes/lanes.h"       // clockwork_lanes_base
 #include "shared_memory.h"     // IN ring layout
 #include "ring/ring.h"         // Message wire header
 
@@ -230,6 +231,26 @@ TEST_CASE("EngineState: the next engine takes the profile's bulk memory again", 
     }
     EngineFixture again(undeclaredPool(pool));
     CHECK(again.engine().engineState() == EngineState::Error);
+}
+
+TEST_CASE("EngineState: a new arena starts empty, whatever the memory held before",
+          "[EngineState][regions][table]") {
+    // A cold boot resets every region of lifetime cold boot (docs/RESTARTS.md).
+    // The node id counter is one nothing writes at boot but the clients, so
+    // what the first engine left in it is exactly what a second must not
+    // inherit. On native the arena is the same static storage for both
+    // engines, so the first one's count is still there until the walk
+    // resets it.
+    {
+        EngineFixture first;
+        auto* counter = reinterpret_cast<std::atomic<int32_t>*>(
+            static_cast<uint8_t*>(clockwork_lanes_base()) + NODE_ID_COUNTER_START);
+        counter->store(0x5EED, std::memory_order_release);
+    }
+    EngineFixture second;
+    const auto* counter = reinterpret_cast<const std::atomic<int32_t>*>(
+        static_cast<const uint8_t*>(clockwork_lanes_base()) + NODE_ID_COUNTER_START);
+    CHECK(counter->load(std::memory_order_acquire) == 0);
 }
 
 // ── Recording survives pause/resume (hot swap) ──────────────────────────────

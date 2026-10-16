@@ -75,10 +75,18 @@ generation.
 ## Every region, at every event
 
 The lifetime fact in the arena table (docs/ARENA.md, `writeArenaHeader` in
-src/shared_memory.h) is the rule, and test_arena.cpp pins the table. This
-is what the rule means, region by region, with what a reader or client is
-told. "Kept" means the bytes are exactly what they were. "Reset" means
-re-initialised by clockwork, not necessarily zero.
+src/shared_memory.h) is the rule, and test_arena.cpp pins the table. It is
+also what runs: `init_memory` walks the table and resets each region at the
+event its lifetime names, from one list of resets (`kRegionResets` in
+src/audio_processor.cpp), so nothing else decides, and a region added to
+the table without a reset fails test_restarts.cpp by name. An arena is zero
+when it is made (static storage, a fresh mapping, the web's claim); a cold
+boot on one that was used before is the walk's to reset. This is what the
+rule means, region by region, with what a reader
+or client is told. "Kept" means the bytes are exactly what they were.
+"Reset" means re-initialised by clockwork, not necessarily zero — and for
+the transport area, a fresh epoch in the cursors rather than bytes, since a
+producer in another thread may be mid-write through a rebuild.
 
 | region | lifetime | hot restart | cold restart | told how |
 |---|---|---|---|---|
@@ -88,10 +96,10 @@ re-initialised by clockwork, not necessarily zero.
 | node id counter | cold boot | kept | kept: ids are the clients' | n/a |
 | guest config | cold boot | kept | kept, handed to the new instance as it was | n/a |
 | guest persist | cold boot | kept | kept, handed to the new instance as it was | n/a |
-| metrics | rebuild | kept | counters reset to 0 | n/a |
-| native stats | rebuild | kept | reset | n/a |
-| sample clock | rebuild | kept, continues | rebound to the new device, continues | n/a |
-| channel map | rebuild | kept | rewritten for the new device | its seqlock |
+| metrics | rebuild | kept | every counter and gauge to 0; the gauges are rewritten within a block | n/a |
+| native stats | rebuild | kept | to 0 | n/a |
+| sample clock | rebuild | kept, continues | emptied, then rewritten whole by the first block on the new device | its seqlock |
+| channel map | cold boot | kept | kept: the streams bound over channels outlive the instance; the device's own words are rewritten when the instance is built, as any attach rewrites an entry | its seqlock |
 | scope | rebuild | kept, continues | reformatted at the new device's channels; the write position restarts at 0 | a reader's cursor starts again |
 | taps | rebuild | kept | every slot free | the slot state |
 | ring cursors, status flags | rebuild | kept | fresh epoch, every ring empty | n/a |

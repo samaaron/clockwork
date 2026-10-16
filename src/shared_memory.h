@@ -931,8 +931,11 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         kPublic | CLOCKWORK_AUDIENCE_GUEST, kBlock, kFast, kColdBoot);
     put(CLOCKWORK_ARENA_CLOCKWORK_SAMPLE_CLOCK,    SAMPLE_CLOCK_START,    SAMPLE_CLOCK_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild);
+    // Cold boot, not rebuild: the streams bound over channels outlive the
+    // guest instance (docs/RESTARTS.md, "port routing"); a device change
+    // rewrites the device's own words, as any attach rewrites an entry.
     put(CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
-        kPublic | CLOCKWORK_AUDIENCE_GUEST, kChange, kFast, kRebuild);
+        kPublic | CLOCKWORK_AUDIENCE_GUEST, kChange, kFast, kColdBoot);
     // clockwork-audio
     put(CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           SCOPE_SIZE,           CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild,

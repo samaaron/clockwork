@@ -402,6 +402,14 @@ uint32_t clockwork_link_audio_lane_base(void);
 const ClockworkArenaHeader* clockwork_arena_header(void);
 void*                       clockwork_lanes_base(void);
 
+/* Whether the lanes have a reset for a region of the table: every region but
+ * the ones that live as long as the arena has one, run at the event its
+ * lifetime in the table names — a rebuild, or a cold boot (docs/RESTARTS.md,
+ * "Every region, at every event"). The table decides WHEN; this is only
+ * "is there a HOW", for a test that holds the two to each other. 0 for a
+ * region the table does not list. */
+int clockwork_region_has_reset(uint32_t region_id);
+
 /* Which channel is which (ClockworkChannelMapState, shared_memory.h), for a host
    or an in-process client. A guest reads the same bytes through
    DspConfig::channel_map. NULL before clockwork_init. */

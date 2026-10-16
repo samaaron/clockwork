@@ -246,6 +246,85 @@ TEST_CASE("restarts: the guest window is zeroed until the new instance lays it o
     CHECK(w->value == 0u);
 }
 
+// ── Every region, by the table ───────────────────────────────────────────────
+
+namespace {
+// The regions a cold restart is judged on by their bytes: everything in the
+// table but the transport area. The rings are a protocol between threads,
+// not bytes — a producer may be mid-write through a rebuild — so their
+// reset is their cursors (a fresh epoch), pinned by the rings case above,
+// and scribbling over them would not be dirtying but corrupting.
+std::vector<const ClockworkArenaEntry*> byteRegions() {
+    const auto* h = arenaHeader(arena());
+    std::vector<const ClockworkArenaEntry*> out;
+    for (uint32_t i = 0; i < h->entry_count; ++i) {
+        const auto* e = &h->entries[i];
+        if (e->audience & CLOCKWORK_AUDIENCE_TRANSPORT) continue;
+        if (e->lifetime == CLOCKWORK_LIFETIME_ARENA) continue;
+        out.push_back(e);
+    }
+    return out;
+}
+std::vector<uint8_t> bytesOf(const ClockworkArenaEntry* e) {
+    return std::vector<uint8_t>(arena() + e->offset, arena() + e->offset + e->bytes);
+}
+void scribble(const ClockworkArenaEntry* e, uint8_t pattern) {
+    std::memset(arena() + e->offset, pattern, e->bytes);
+}
+} // namespace
+
+TEST_CASE("restarts: every region is reset or kept across a cold restart as the table says, and nothing else decides",
+          "[restarts][regions][table]") {
+    settle();
+    // Two restarts, each from a different scribble. A region the table says
+    // is RESET comes out the same both times: what it held before has no say.
+    // One it says is KEPT comes out different: the scribble is still there.
+    // Judged from the table alone, so a region added without a reset, or
+    // labelled wrong, fails here by name rather than by someone noticing.
+    const auto regions = byteRegions();
+    REQUIRE(regions.size() >= 8);   // the table is not empty, and most of it is here
+    std::vector<std::vector<uint8_t>> original;
+    for (const auto* e : regions) original.push_back(bytesOf(e));
+
+    for (const auto* e : regions) scribble(e, 0xA5);
+    coldRestart();
+    std::vector<std::vector<uint8_t>> first;
+    for (const auto* e : regions) first.push_back(bytesOf(e));
+
+    for (const auto* e : regions) scribble(e, 0x5A);
+    coldRestart();
+    for (size_t i = 0; i < regions.size(); ++i) {
+        const auto* e = regions[i];
+        const auto second = bytesOf(e);
+        INFO("region id " << e->id << " (lifetime " << e->lifetime << ")");
+        if (e->lifetime == CLOCKWORK_LIFETIME_REBUILD)
+            CHECK(second == first[i]);            // reset: independent of what it held
+        else
+            CHECK(second != first[i]);            // kept: the scribble survived
+    }
+
+    // The suite shares this arena: what was there goes back, and one more
+    // build lays the reset regions out from it again.
+    for (size_t i = 0; i < regions.size(); ++i)
+        std::memcpy(arena() + regions[i]->offset, original[i].data(), original[i].size());
+    coldRestart();
+}
+
+TEST_CASE("restarts: every region in the table has a reset, and only the table says when it runs",
+          "[restarts][regions][table]") {
+    settle();
+    const auto* h = arenaHeader(arena());
+    for (uint32_t i = 0; i < h->entry_count; ++i) {
+        const auto* e = &h->entries[i];
+        INFO("region id " << e->id);
+        // A region that lives as long as the arena is never reset; every
+        // other one has its reset in the lanes, run at the event its
+        // lifetime names (docs/RESTARTS.md).
+        CHECK(clockwork_region_has_reset(e->id) == (e->lifetime != CLOCKWORK_LIFETIME_ARENA));
+    }
+    CHECK_FALSE(clockwork_region_has_reset(999u));   // not a region
+}
+
 // ── The transport area: nothing lost without a word ──────────────────────────
 
 TEST_CASE("restarts: a message in the in ring at a cold restart is refused to its sender, not dropped",

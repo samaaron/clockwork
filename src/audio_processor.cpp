@@ -1455,6 +1455,180 @@ extern "C" {
         g_carry_used = 0;
     }
 
+    // ── Every region, at every event (docs/RESTARTS.md) ─────────────────────
+    //
+    // The arena table says what each region's lifetime is; this is the HOW
+    // for each one, and the walk below runs it WHEN the table says: a region
+    // of lifetime rebuild at every build, one of lifetime cold boot when the
+    // arena is new, one that lives as long as the arena never. Nothing else
+    // decides, so a region added to the table without a reset is found by
+    // test_restarts.cpp and not by a user after a device change.
+    //
+    // "Reset" is bytes for all but one group. The transport area — the
+    // cursors and the three rings — is a protocol between threads, and a
+    // producer may be mid-write through a rebuild, so its reset is a fresh
+    // epoch in the cursors (clockwork_lanes_reset_rings) and the ring bytes
+    // are never touched: the cursors' reset carries the whole sequence, in
+    // its order, and the rings' entries name it as theirs.
+    static void reset_words(uint32_t start, uint32_t bytes) {
+        auto* w = reinterpret_cast<std::atomic<uint32_t>*>(shared_memory + start);
+        for (uint32_t i = 0; i < bytes / 4u; ++i) w[i].store(0, std::memory_order_relaxed);
+    }
+    static void reset_metrics()      { reset_words(METRICS_START, METRICS_SIZE); }
+    static void reset_native_stats() { reset_words(NATIVE_STATS_START, NATIVE_STATS_SIZE); }
+    // The host's: NTP start is write-once from the host once its audio runs,
+    // drift and the global offset are what it measured about this machine's
+    // clocks. A new arena, a new measurement.
+    static void reset_clock_anchors() { reset_words(CLOCK_ANCHORS_START, CLOCK_ANCHORS_SIZE); }
+    // Not zeros: a tempo of zero makes a guest asking for the beat divide by
+    // it (readClockworkClock answers a NULL with a sane default, an all-zero
+    // region with that). The defaults are the session's start.
+    static void reset_clock_state() {
+        ClockworkClockState::initDefaults(
+            *reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START));
+    }
+    // Rewritten whole every block by the tick (publishSampleClock), from the
+    // device it is rebound to; empty between the build and the first block.
+    static void reset_sample_clock() { reset_words(SAMPLE_CLOCK_START, SAMPLE_CLOCK_SIZE); }
+    // Empty: no device words, no streams, its seqlock even. The device's own
+    // words are written when the instance is built (channel_map_set_device),
+    // and a stream's when it attaches.
+    static void reset_channel_map()  { reset_words(CHANNEL_MAP_START, CHANNEL_MAP_SIZE); }
+    // The scope: out and in, formatted at the device's live channel count
+    // (up to the slot's ceiling) and written by the tick from then on. A tap
+    // for a direction the device has not got is formatted with no channels
+    // and left disabled, so a reader sees "nothing arrives" rather than a
+    // ring of zeros. A device switch is a new stream, and a reader's cursor
+    // starts again with it.
+    static void reset_scope() {
+        shm_audio_buffer* slots = reinterpret_cast<shm_audio_buffer*>(shared_memory + SCOPE_START);
+        memset(shared_memory + SCOPE_START, 0, SCOPE_SIZE);
+        const auto format_tap = [&](uint32_t slot, uint32_t device_channels) {
+            const uint32_t ch = device_channels < SCOPE_CHANNELS ? device_channels : SCOPE_CHANNELS;
+            if (ch > 0)
+                shm_audio_buffer_writer(&slots[slot]).activate(
+                    ch, static_cast<uint32_t>(g_clockwork_config.sample_rate), SCOPE_FRAMES);
+        };
+        format_tap(SCOPE_OUT_SLOT, g_clockwork_config.output_channels);
+        format_tap(SCOPE_IN_SLOT,  g_clockwork_config.input_channels);
+        g_shm_audio_buffers = slots;
+    }
+    // Tap streams: the global header (geometry for cross-process observers)
+    // then the slot array, every slot free; the producer claims and
+    // activates them on demand (rust/clockwork-taps).
+    static void reset_taps() {
+        uint8_t* tapBase = shared_memory + TAPS_START;
+        memset(tapBase, 0, TAPS_SIZE);
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 0)->store(TAPS_SLOTS, std::memory_order_relaxed);       // maxTaps
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 4)->store(0, std::memory_order_relaxed);               // activeCount
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(TAP_RING_FRAMES, std::memory_order_relaxed); // ringFrames
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(0, std::memory_order_relaxed);              // version
+    }
+    // The transport area, as one sequence on the cursors' entry. Serialised
+    // against the IN / NRT-out producers that keep running through a rebuild
+    // (details in clockwork_lanes_reset_rings). The IN writer lock is NOT
+    // re-zeroed: a producer may hold it right now, and its unlocked state is
+    // exactly the 0 its release store leaves behind. What reached the in
+    // ring since the teardown walked it is carried or refused before the
+    // epoch resets under it; then the flag says there is no instance yet, so
+    // a message for the guest written from now on is refused at the boundary
+    // rather than left for an instance it was not addressed to; the drains'
+    // gap tracking restarts with the sequences, and a flush requested
+    // against the old ring must not carry over; and clockwork's own
+    // messages that were waiting go first in the new epoch, in their order.
+    static void reset_transport() {
+        restart_in_ring_refuse();
+        clockwork_lanes_reset_rings();
+        cursors->status_flags.store(STATUS_NO_INSTANCE, std::memory_order_release);
+        clockwork_lanes_reset_drains();
+        g_in_drain.lastSeq = -1;
+        g_in_flush_below.store(-1, std::memory_order_relaxed);
+        g_in_discard_active = false;
+        restart_in_ring_carry();
+    }
+    static void reset_with_transport() { /* the cursors' entry resets this ring: a fresh epoch */ }
+    // The ids are the clients', shared between them: a new arena starts them.
+    static void reset_node_id_counter() { reset_words(NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE); }
+    // The guest's publish window: zeroed, and nothing more. What shape the
+    // bytes take is the guest's, so it lays the region out itself at
+    // dsp_new — clockwork cannot pre-fill a structure it does not know, and
+    // a wipe that assumed one would be a guess about its empty value.
+    static void reset_guest_window() { memset(shared_memory + GUEST_WINDOW_START, 0, GUEST_WINDOW_SIZE); }
+    // The host's, copied in by clockwork_init BEFORE the build (the build
+    // sizes the guest's pool from it), onto an arena that started empty. A
+    // host that hands a config over an old one on a segment it kept is
+    // making that copy itself. So the cold boot's reset here is the empty
+    // arena's, and this does nothing more.
+    static void reset_guest_config() {}
+    // Nobody but the guest can draw it, and the guest cannot tell "restored
+    // after a device switch" from "a previous engine in this process left
+    // its table behind": an engine that never asked for /notify once
+    // inherited a registration and started answering a client that had not
+    // spoken. Clockwork owns the arena's lifetime, so clockwork decides.
+    static void reset_guest_persist() { memset(shared_memory + GUEST_PERSIST_START, 0, GUEST_PERSIST_SIZE); }
+
+    struct RegionReset { uint32_t id; void (*reset)(); };
+    static constexpr RegionReset kRegionResets[] = {
+        { CLOCKWORK_ARENA_CLOCKWORK_METRICS,         &reset_metrics },
+        { CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    &reset_native_stats },
+        { CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   &reset_clock_anchors },
+        { CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE,     &reset_clock_state },
+        { CLOCKWORK_ARENA_CLOCKWORK_SAMPLE_CLOCK,    &reset_sample_clock },
+        { CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     &reset_channel_map },
+        { CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           &reset_scope },
+        { CLOCKWORK_ARENA_CLOCKWORK_TAPS,            &reset_taps },
+        { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    &reset_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, &reset_node_id_counter },
+        { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         &reset_with_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     &reset_with_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    &reset_with_transport },
+        { CLOCKWORK_ARENA_GUEST_WINDOW,              &reset_guest_window },
+        { CLOCKWORK_ARENA_GUEST_CONFIG,              &reset_guest_config },
+        { CLOCKWORK_ARENA_GUEST_PERSIST,             &reset_guest_persist },
+    };
+    // Every region the enum names, once. The ids are 1..N and contiguous
+    // (clockwork_arena.h: "stable numbers, in the order they lie"), so a
+    // region added to the enum without a reset here does not compile, and
+    // one listed twice does not either. The test holds the TABLE to this
+    // list; this holds the list to the enum.
+    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_GUEST_PERSIST;
+    static constexpr bool region_resets_cover_every_region() {
+        if (sizeof(kRegionResets) / sizeof(kRegionResets[0]) != kRegionLast) return false;
+        for (uint32_t id = 1; id <= kRegionLast; ++id) {
+            uint32_t n = 0;
+            for (const auto& r : kRegionResets) if (r.id == id) ++n;
+            if (n != 1) return false;
+        }
+        return true;
+    }
+    static_assert(region_resets_cover_every_region(),
+                  "every arena region has one reset in kRegionResets (docs/RESTARTS.md)");
+
+    static const RegionReset* region_reset(uint32_t id) {
+        for (const auto& r : kRegionResets) if (r.id == id) return &r;
+        return nullptr;
+    }
+    // The walk: every entry of the table, in the order it lies in memory,
+    // reset at the event its lifetime names.
+    static void reset_regions(bool cold_boot) {
+        const auto* h = arenaHeader(shared_memory);
+        for (uint32_t i = 0; i < h->entry_count; ++i) {
+            const auto& e = h->entries[i];
+            if (e.lifetime == CLOCKWORK_LIFETIME_ARENA) continue;
+            if (e.lifetime == CLOCKWORK_LIFETIME_COLD_BOOT && !cold_boot) continue;
+            const RegionReset* r = region_reset(e.id);
+            if (!r) {
+                clockwork_log("BUG: region %u is in the arena table with no reset — not reset", (unsigned)e.id);
+                continue;
+            }
+            r->reset();
+        }
+    }
+    // lanes.h: the test that holds the table and this list to each other.
+    extern "C" int clockwork_region_has_reset(uint32_t region_id) {
+        return region_reset(region_id) != nullptr ? 1 : 0;
+    }
+
     void init_memory() {
         const double sample_rate = g_clockwork_config.sample_rate;
         // A build starts with no reason not to have a guest; the first thing
@@ -1484,7 +1658,13 @@ extern "C" {
         // Every build of the engine, a cold swap included: the rate or the
         // block size may have changed, and the period is derived from both.
         metrics_flush_period.store(0, std::memory_order_relaxed);
-        if (shared_memory != base) {
+        // A new arena — the first boot, or one after teardown_memory — is a
+        // cold boot: every region is reset, the ones of lifetime cold boot
+        // included (reset_regions below). A rebuild on the arena that is up
+        // takes the skip path and resets only the regions of lifetime
+        // rebuild.
+        const bool cold_boot = shared_memory != base;
+        if (cold_boot) {
             shared_memory = base;
             // A new engine, not a rebuild of the one that was running.
             reset_engine_diagnostics();
@@ -1503,47 +1683,9 @@ extern "C" {
             drift_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + DRIFT_OFFSET_START);
             global_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + GLOBAL_OFFSET_START);
 
-            // A COLD BOOT CLEARS THE GUEST'S PERSISTENT REGION. A REBUILD DOES NOT.
-            //
-            // This branch is the difference: it runs on a first boot, and again
-            // after teardown_memory (which nulls the base), but a cold-swap
-            // rebuild takes the skip path above because the arena is unchanged.
-            // That is exactly the line DspConfig::persistent needs — survive a
-            // rebuild, start empty on a fresh engine.
-            //
-            // Nobody but the guest can draw it. The guest cannot tell "restored
-            // after a device switch" from "a previous engine in this process
-            // left its table behind", and guessing wrong is not harmless: an
-            // engine that never asked for /notify inherited a registration and
-            // started answering a client that had not spoken. Clockwork knows,
-            // because it owns the arena's lifetime, so clockwork decides.
-            std::memset(shared_memory + GUEST_PERSIST_START, 0, GUEST_PERSIST_SIZE);
-
-            // THE CLOCK REGION, ON EVERY BUILD, AND ONLY ON A COLD BOOT.
-            //
-            // NOT under the worklet-clock guard. A host that binds no
-            // ClockworkClock — anything driving lanes.h directly, which is the
-            // whole minimal-host contract — would then get DspConfig::clock
-            // pointing at zeros. That is WORSE than the NULL dsp_api.h allows
-            // for: readClockworkClock answers a null pointer with a sane
-            // default, and an all-zero region with a tempo of zero, so a guest
-            // asking for the beat divides by it.
-            //
-            // And it belongs in this branch rather than after it, because
-            // running it on a rebuild would reset the session tempo every time
-            // a device switched.
-            ClockworkClockState::initDefaults(
-                *reinterpret_cast<ClockworkClockState*>(
-                    shared_memory + CLOCK_STATE_START));
-
-            // THE CLOCK ANCHORS, THE SAME: a cold boot only. NTP start is
-            // write-once from the host once its audio context runs; drift
-            // and the global offset are what the host measured about this
-            // machine's clocks, not facts about the instance, and the
-            // region's lifetime in the table is cold boot. A rebuild keeps
-            // them (docs/RESTARTS.md).
-            drift_offset->store(0, std::memory_order_relaxed);
-            global_offset->store(0, std::memory_order_relaxed);
+            // What a cold boot resets beyond the pointers — the guest's
+            // persistent region, the clock's defaults, the host's anchors —
+            // is the table's say, in reset_regions below, not this branch's.
         }
 
 #if CLOCKWORK_WORKLET_CLOCK
@@ -1622,91 +1764,16 @@ extern "C" {
         }
 #endif
 
-        // Fresh ring epoch. Serialised against the IN / NRT-out producers that
-        // keep running through a cold-swap rebuild (details in
-        // clockwork_lanes_reset_rings). Note the IN writer lock is NOT re-zeroed: a
-        // producer may hold it right now, and its unlocked state is exactly
-        // the 0 its release store leaves behind.
-        // What reached the in ring since the teardown walked it: carried or
-        // refused now, before the epoch resets under it (restart_in_ring_refuse).
-        restart_in_ring_refuse();
-        clockwork_lanes_reset_rings();
-        // Status from the start, except that there is no instance yet: the
-        // flag stays up until dsp_new below succeeds, so a message for the
-        // guest written in the meantime is refused at the boundary rather
-        // than left for an instance it was not addressed to.
-        cursors->status_flags.store(STATUS_NO_INSTANCE, std::memory_order_release);
-
-        // Ring sequences restarted → restart the lanes drains' gap tracking,
-        // and the IN drain's alongside. A flush requested against the old
-        // ring must not carry over and refuse fresh writes.
-        clockwork_lanes_reset_drains();
-        g_in_drain.lastSeq = -1;
-        g_in_flush_below.store(-1, std::memory_order_relaxed);
-        g_in_discard_active = false;
-
-        // Clockwork's own messages that were waiting when the instance went:
-        // first in the new epoch, in their order (restart_in_ring_refuse).
-        restart_in_ring_carry();
-
-        metrics->process_count.store(0, std::memory_order_relaxed);
-        metrics->messages_processed.store(0, std::memory_order_relaxed);
-        metrics->messages_dropped.store(0, std::memory_order_relaxed);
-        metrics->scheduler_queue_depth.store(0, std::memory_order_relaxed);
-        metrics->scheduler_queue_max.store(0, std::memory_order_relaxed);
-        metrics->scheduler_queue_dropped.store(0, std::memory_order_relaxed);
-        metrics->messages_sequence_gaps.store(0, std::memory_order_relaxed);
-        metrics->scheduler_lates.store(0, std::memory_order_relaxed);
-
-        metrics->scheduler_max_late_ms.store(0, std::memory_order_relaxed);
-        metrics->scheduler_last_late_ms.store(0, std::memory_order_relaxed);
-        metrics->scheduler_last_late_tick.store(0, std::memory_order_relaxed);
-
-        // The guest's publish window: zeroed, and nothing more. What shape the
-        // bytes take is the guest's, so it lays the region out itself at
-        // dsp_new — clockwork cannot pre-fill a structure it does not know,
-        // and a wipe that assumed one would be a guess about its empty value.
-        memset(shared_memory + GUEST_WINDOW_START, 0, GUEST_WINDOW_SIZE);
-
-        // The scope: out and in, formatted here at the device's live
-        // channel count (up to the slot's ceiling) and written by the tick
-        // from then on. A tap for a direction the device has not got is
-        // formatted with no channels and left disabled, so a reader sees
-        // "nothing arrives" rather than a ring of zeros. Re-formatted on
-        // every boot: a device switch is a new stream, and a reader's
-        // cursor starts again with it.
-        shm_audio_buffer* slots = reinterpret_cast<shm_audio_buffer*>(
-            shared_memory + SCOPE_START);
-        memset(static_cast<void*>(slots), 0, SCOPE_SLOTS * sizeof(shm_audio_buffer));
-        const auto format_tap = [&](uint32_t slot, uint32_t device_channels) {
-            const uint32_t ch = device_channels < SCOPE_CHANNELS ? device_channels : SCOPE_CHANNELS;
-            if (ch > 0)
-                shm_audio_buffer_writer(&slots[slot]).activate(ch, static_cast<uint32_t>(sample_rate), SCOPE_FRAMES);
-        };
-        format_tap(SCOPE_OUT_SLOT, g_clockwork_config.output_channels);
-        format_tap(SCOPE_IN_SLOT,  g_clockwork_config.input_channels);
-        g_shm_audio_buffers = slots;
+        // Every region, at this event, as the table says (reset_regions):
+        // the transport area's fresh epoch, the metrics, the scope, the taps,
+        // the guest's window on every build; the clock's defaults, the
+        // host's anchors, the guest's persistent region on a cold boot.
+        reset_regions(cold_boot);
 
         // Event sinks: the size classes each kind is made of, from the memory
         // profile. Installed before any sink can be opened, so the DSP's own
         // opens get the shape too.
         install_sink_profiles();
-
-        // Tap streams: global header (geometry for cross-process observers)
-        // then the slot array. Slots start zeroed (state=free); the producer
-        // claims and activates them on demand (rust/clockwork-taps).
-        {
-            uint8_t* tapBase = shared_memory + TAPS_START;
-            memset(tapBase, 0, TAPS_SIZE);
-            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 0)->store(
-                TAPS_SLOTS, std::memory_order_relaxed);   // maxTaps
-            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 4)->store(
-                0, std::memory_order_relaxed);                      // activeCount
-            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(
-                TAP_RING_FRAMES, std::memory_order_relaxed);  // ringFrames
-            reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(
-                0, std::memory_order_relaxed);                      // version
-        }
 
         // Enable clockwork_log. Write-once per mapping (like the pointer family
         // above): on a rebuild this is already true and producers read it
