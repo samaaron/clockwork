@@ -32,6 +32,7 @@ memory, which lives outside this span. See BOUNDARY.md.)
   │  clockwork-transport         │  ── messages, through the client code only
   │   ring cursors · node id     │
   │   in ring · RT out · NRT out │
+  │   control ring               │     clockwork's own control verbs (docs/RESTARTS.md)
   ├──────────────────────────────┤ clockwork_bytes == guest_offset
   │ THE GUEST'S HALF             │  space clockwork reserves; the guest fills it
   │  guest-public                │  ── the guest's window, in the guest's format

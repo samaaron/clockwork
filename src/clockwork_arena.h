@@ -181,8 +181,9 @@ enum ClockworkArenaLifetime {
     CLOCKWORK_LIFETIME_REBUILD   = 3,   /* at every build of the engine: a device change too */
 };
 
-/* The regions. Stable numbers, in the order they lie in memory, each named
- * for its half. A reader looks these up, never a position. */
+/* The regions. Stable numbers — a region keeps its number for good, so one
+ * added later takes the next number whatever its place in memory — each
+ * named for its half. A reader looks these up, never a position. */
 enum ClockworkArenaRegion {
     /* ── clockwork-state ── */
     CLOCKWORK_ARENA_CLOCKWORK_METRICS         = 1,   /* PerformanceMetrics: u32 counters */
@@ -206,6 +207,9 @@ enum ClockworkArenaRegion {
     /* ── guest-private ── */
     CLOCKWORK_ARENA_GUEST_CONFIG              = 15,  /* host -> guest, copied at boot */
     CLOCKWORK_ARENA_GUEST_PERSIST             = 16,  /* DspConfig::persistent */
+    /* ── clockwork-transport, continued: a later addition keeps its number ── */
+    CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING    = 17,  /* clockwork's own control verbs: ControlRingCursors
+                                                        then the ring; lifetime arena (docs/RESTARTS.md) */
 };
 
 /* The two scope slots, as slot indices into the scope: what left for the

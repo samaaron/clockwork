@@ -486,6 +486,74 @@ TEST_CASE("restarts: a refusal names the generation that refused",
     CHECK(r.argInt(2) == static_cast<int32_t>(gen + 1));
 }
 
+// ── The control ring ─────────────────────────────────────────────────────────
+
+namespace {
+const ControlRingCursors* controlRing() { return region<const ControlRingCursors>(CONTROL_RING_START); }
+int32_t controlHead() { return controlRing()->head.load(std::memory_order_acquire); }
+int32_t inHead() { return region<RingCursors>(RING_CURSORS_START)->in_head.load(std::memory_order_acquire); }
+} // namespace
+
+TEST_CASE("restarts: with the control ring served, a control verb goes there and not through the audio thread; without, everything rides the in ring",
+          "[restarts][control-ring][transport]") {
+    settle();
+    const auto notify = osc_test::message(CLOCKWORK_SYS("notify"));
+    const auto ping   = osc_test::message(CLOCKWORK_SYS("ping"));
+    const auto guest  = osc_test::message("/dummy/ping");
+
+    // Nobody drains the control ring in this binary (the lanes have no
+    // control pass), so the word is off: a control verb rides the in ring as
+    // it always did, and the audio thread forwards it along its chain.
+    REQUIRE_FALSE(clockwork_control_served());
+    {
+        const int32_t in0 = inHead(), ctl0 = controlHead();
+        REQUIRE(lanes_test::ingress(notify.ptr(), notify.size(), kClient));
+        CHECK(inHead() != in0);
+        CHECK(controlHead() == ctl0);
+        lanes_test::tickUntil(2, nullptr);
+    }
+
+    // The engine says it serves the ring (ClockworkEngine does, once its
+    // control pass drains it): from then on a control verb is written there,
+    // where no audio block is between it and its answer, while a verb the
+    // audio thread performs and the guest's traffic ride the in ring.
+    clockwork_control_serve(1);
+    REQUIRE(clockwork_control_served());
+    {
+        const int32_t in0 = inHead(), ctl0 = controlHead();
+        REQUIRE(lanes_test::ingress(notify.ptr(), notify.size(), kClient));
+        CHECK(inHead() == in0);
+        CHECK(controlHead() != ctl0);
+        const int32_t ctl1 = controlHead();
+        REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+        REQUIRE(lanes_test::ingress(guest.ptr(), guest.size(), kClient));
+        CHECK(inHead() != in0);
+        CHECK(controlHead() == ctl1);
+        lanes_test::tickUntil(4, "/dummy/pong");
+    }
+
+    // Between instances the control ring takes a control verb as before: it
+    // is clockwork's, answered with or without a guest, and never refused.
+    destroy_dsp();
+    lanes_test::drainRt();
+    lanes_test::drainNrt();
+    {
+        const int32_t ctl0 = controlHead();
+        REQUIRE(lanes_test::ingress(notify.ptr(), notify.size(), kClient));
+        CHECK(controlHead() != ctl0);
+        auto said = lanes_test::drainRt();
+        for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
+        CHECK(findAddress(said, CLOCKWORK_SYS("error")) == nullptr);
+    }
+    rebuild_dsp(lanes_test::kSampleRate);
+    REQUIRE(g_dsp != nullptr);
+    // And a rebuild leaves the ring alone: lifetime arena.
+    CHECK(controlHead() != 0);
+    clockwork_control_serve(0);
+    // What this case queued is nobody's to drain here: the ring is left as a
+    // control pass would find it, and the next case does not read it.
+}
+
 #if CLOCKWORK_SCHEDULER
 TEST_CASE("restarts: what was scheduled for the old instance is cleared, not delivered to the new one",
           "[restarts][transport][scheduler]") {

@@ -97,14 +97,26 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
     // on the NRT egress for the source that sent it, as the client ABI's
     // status says the same to its caller (docs/RESTARTS.md). Clockwork's own
     // verbs go through and wait in the ring for the engine, instance or none.
-    if ((cursors->status_flags.load(std::memory_order_acquire) & STATUS_NO_INSTANCE)
-        && !clockwork_sys_claims(osc, len)) {
+    const uint32_t flags = cursors->status_flags.load(std::memory_order_acquire);
+    if ((flags & STATUS_NO_INSTANCE) && !clockwork_sys_claims(osc, len)) {
         clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
             arenaInstanceGeneration(shared_memory),
             [source_id](const uint8_t* d, uint32_t n) {
                 clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
             });
         return false;
+    }
+    // A control verb of clockwork's, while the engine serves the control
+    // ring (lanes.h, clockwork_control_serve): written there, where no audio
+    // block is between it and its answer. The same rule clockwork_client_send
+    // reads from the same bytes, so a client in any process does the same.
+    if ((flags & STATUS_CONTROL_SERVED) && clockwork_sys_control_takes(osc, len)) {
+        auto* ctl = reinterpret_cast<ControlRingCursors*>(shared_memory + CONTROL_RING_START);
+        return RingBufferWriter::write(
+            shared_memory + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
+            CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
+            &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
+            osc, len, source_id);
     }
     return RingBufferWriter::write(
         shared_memory + IN_RING_START, IN_RING_SIZE,
@@ -377,6 +389,19 @@ const ClockworkArenaHeader* clockwork_arena_header(void) {
 
 void* clockwork_lanes_base(void) {
     return get_shared_memory_base();
+}
+
+// ── The control ring (lanes.h) ──────────────────────────────────────────────
+
+void clockwork_control_serve(int on) {
+    if (!cursors) return;
+    if (on) cursors->status_flags.fetch_or(STATUS_CONTROL_SERVED, std::memory_order_release);
+    else    cursors->status_flags.fetch_and(~static_cast<uint32_t>(STATUS_CONTROL_SERVED),
+                                           std::memory_order_release);
+}
+
+int clockwork_control_served(void) {
+    return cursors && (cursors->status_flags.load(std::memory_order_acquire) & STATUS_CONTROL_SERVED) ? 1 : 0;
 }
 
 }  // extern "C"

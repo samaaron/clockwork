@@ -45,6 +45,13 @@ constexpr uint32_t IN_RING_SIZE     = CLOCKWORK_IN_RING_SIZE;    // OSC messages
 constexpr uint32_t RT_OUT_RING_SIZE    = CLOCKWORK_RT_OUT_RING_SIZE;   // OSC replies from the engine to host (prevent drops)
 constexpr uint32_t NRT_OUT_RING_SIZE  = CLOCKWORK_NRT_OUT_RING_SIZE; // NRT-thread egress ring (replies, notifications, debug)
 constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers & flags (13 fields × 4 bytes + 4 padding for 8-byte alignment)
+// Clockwork's own control verbs, written at the boundary and drained by the
+// control pass with no audio block in the loop (docs/RESTARTS.md, "The
+// control ring"): its cursors first (ControlRingCursors, one line), then
+// the ring. Small: a control verb is a few hundred bytes and answered at
+// once; a bulk payload is the guest's and rides the in ring.
+constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
+constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
 constexpr uint32_t METRICS_SIZE       = 248;   // Performance metrics: 62 fields * 4 bytes = 248 bytes (multiple of 8)
 constexpr uint32_t NTP_START_TIME_SIZE = 8;    // NTP time when AudioContext started (double, 8-byte aligned, write-once)
 constexpr uint32_t DRIFT_OFFSET_SIZE = 4;      // Drift offset in microseconds (int32, atomic)
@@ -414,7 +421,8 @@ constexpr uint32_t NODE_ID_COUNTER_START = RING_CURSORS_START + RING_CURSORS_SIZ
 constexpr uint32_t IN_RING_START         = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
 constexpr uint32_t RT_OUT_RING_START     = IN_RING_START + IN_RING_SIZE;
 constexpr uint32_t NRT_OUT_RING_START    = RT_OUT_RING_START + RT_OUT_RING_SIZE;
-constexpr uint32_t CLOCKWORK_TRANSPORT_END = alignArena16(NRT_OUT_RING_START + NRT_OUT_RING_SIZE);
+constexpr uint32_t CONTROL_RING_START    = alignArena16(NRT_OUT_RING_START + NRT_OUT_RING_SIZE);
+constexpr uint32_t CLOCKWORK_TRANSPORT_END = alignArena16(CONTROL_RING_START + CONTROL_RING_SIZE);
 constexpr uint32_t CLOCKWORK_HALF_SIZE   = CLOCKWORK_TRANSPORT_END;
 
 // ── the guest's half ──
@@ -656,8 +664,29 @@ enum StatusFlags : uint32_t {
     // region so that every writer of the in ring, in this process or another,
     // sees it where it writes: the client boundary refuses a message for the
     // guest while it is set and lets clockwork's own through (docs/RESTARTS.md).
-    STATUS_NO_INSTANCE = 1u << 4u
+    STATUS_NO_INSTANCE = 1u << 4u,
+    // The engine's control pass drains the control ring: a control verb of
+    // clockwork's is written there by every boundary, where no audio block
+    // is between it and its answer. Raised once the pass drains it, lowered
+    // at shutdown; off in a build with no control pass (the worklet, the
+    // lanes alone), where every verb rides the in ring as it always did.
+    STATUS_CONTROL_SERVED = 1u << 5u
 };
+
+// The control ring's own cursors, at the front of its region
+// (CONTROL_RING_START): the ring follows at CONTROL_RING_HEADER_SIZE. Its
+// own and not RingCursors', so the region is one piece of lifetime arena —
+// a rebuild resets the in ring's epoch and leaves this alone, which is why
+// nothing of clockwork's control needs carrying across one.
+struct alignas(16) ControlRingCursors {
+    std::atomic<int32_t> head;
+    std::atomic<int32_t> tail;
+    std::atomic<int32_t> sequence;
+    std::atomic<int32_t> write_lock;
+    uint8_t              reserved[CONTROL_RING_HEADER_SIZE - 4 * sizeof(std::atomic<int32_t>)];
+};
+static_assert(sizeof(ControlRingCursors) == CONTROL_RING_HEADER_SIZE,
+              "ControlRingCursors is the control ring's header line");
 
 // Constants
 // MAX_MESSAGE_SIZE bounds what a frame header on the INGRESS ring may CLAIM.
@@ -706,6 +735,7 @@ struct ShmReaderLayout {
     uint32_t in_ring_offset = 0,      in_ring_size = 0;
     uint32_t out_ring_offset = 0,     out_ring_size = 0;
     uint32_t nrt_out_ring_offset = 0, nrt_out_ring_size = 0;
+    uint32_t control_ring_offset = 0, control_ring_size = 0;   // 0: an arena with none
     uint32_t control_offset = 0,      control_bytes = 0;
     uint32_t metrics_offset = 0,      metrics_bytes = 0;
     uint32_t window_offset = 0,       window_bytes = 0;
@@ -728,6 +758,7 @@ struct ShmReaderLayout {
         L.in_ring_offset      = IN_RING_START;      L.in_ring_size      = IN_RING_SIZE;
         L.out_ring_offset     = RT_OUT_RING_START;     L.out_ring_size     = RT_OUT_RING_SIZE;
         L.nrt_out_ring_offset = NRT_OUT_RING_START; L.nrt_out_ring_size = NRT_OUT_RING_SIZE;
+        L.control_ring_offset = CONTROL_RING_START; L.control_ring_size = CONTROL_RING_SIZE;
         L.control_offset      = RING_CURSORS_START;        L.control_bytes     = RING_CURSORS_SIZE;
         L.metrics_offset      = METRICS_START;        L.metrics_bytes     = METRICS_SIZE;
         L.window_offset       = GUEST_WINDOW_START;     L.window_bytes      = GUEST_WINDOW_SIZE;
@@ -786,6 +817,11 @@ struct ShmReaderLayout {
         L.in_ring_offset      = in->offset;   L.in_ring_size      = in->bytes;
         L.out_ring_offset     = out->offset;  L.out_ring_size     = out->bytes;
         L.nrt_out_ring_offset = nrt->offset;  L.nrt_out_ring_size = nrt->bytes;
+        // An arena without one is a reader's to accept: every verb then rides
+        // the in ring, and the serve flag is never raised.
+        if (const auto* cr = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING)) {
+            L.control_ring_offset = cr->offset; L.control_ring_size = cr->bytes;
+        }
         L.control_offset      = ctl->offset;  L.control_bytes     = ctl->bytes;
         L.metrics_offset      = met->offset;  L.metrics_bytes     = met->geom[CLOCKWORK_GEOM_METRICS_FIELDS] * 4u;
         L.window_offset       = win->offset;  L.window_bytes      = win->bytes;
@@ -836,6 +872,9 @@ struct ShmReaderLayout {
         if (in_ring_size == 0 || !inside(in_ring_offset, in_ring_size)) return fail("ingress ring outside the blob");
         if (out_ring_size == 0 || !inside(out_ring_offset, out_ring_size)) return fail("egress ring outside the blob");
         if (nrt_out_ring_size == 0 || !inside(nrt_out_ring_offset, nrt_out_ring_size)) return fail("NRT egress ring outside the blob");
+        if (control_ring_size != 0 && (control_ring_size <= CONTROL_RING_HEADER_SIZE
+                                       || !inside(control_ring_offset, control_ring_size)))
+            return fail("control ring too small or outside the blob");
         if (control_bytes < sizeof(RingCursors) || !inside(control_offset, control_bytes)) return fail("control block too small or outside the blob");
         if (metrics_bytes < sizeof(PerformanceMetrics) || !inside(metrics_offset, metrics_bytes)) return fail("metrics smaller than this reader's PerformanceMetrics, or outside the blob");
         if (!inside(window_offset, window_bytes)) return fail("window outside the blob");
@@ -916,7 +955,8 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     constexpr uint32_t kTransport = CLOCKWORK_AUDIENCE_TRANSPORT;
     constexpr uint32_t kBlock = CLOCKWORK_CADENCE_BLOCK, kChange = CLOCKWORK_CADENCE_CHANGE, kBoot = CLOCKWORK_CADENCE_BOOT;
     constexpr uint32_t kFast = CLOCKWORK_TIER_FAST, kBulk = CLOCKWORK_TIER_BULK;
-    constexpr uint32_t kColdBoot = CLOCKWORK_LIFETIME_COLD_BOOT, kRebuild = CLOCKWORK_LIFETIME_REBUILD;
+    constexpr uint32_t kColdBoot = CLOCKWORK_LIFETIME_COLD_BOOT, kRebuild = CLOCKWORK_LIFETIME_REBUILD,
+                       kArena = CLOCKWORK_LIFETIME_ARENA;
     // clockwork-state
     put(CLOCKWORK_ARENA_CLOCKWORK_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild, { METRICS_SIZE / 4u });
@@ -958,6 +998,13 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     put(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
         kChange, kFast, kRebuild,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    // Clockwork's own control verbs (ControlRingCursors above): lifetime
+    // arena, so a rebuild neither resets it nor has anything to carry. The
+    // sixth geometry word is where the ring starts within the region.
+    put(CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    CONTROL_RING_START,    CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
+        kChange, kFast, kArena,
+        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)),
+          CONTROL_RING_HEADER_SIZE });
     // guest-public. The window's identity (magic, version) is the guest's to
     // declare and is written when it binds — arenaSetGuestWindowIdentity — so
     // it is 0 here.

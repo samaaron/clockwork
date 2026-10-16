@@ -109,7 +109,14 @@ void RingReader::run(const std::stop_token& stop) {
 
     while (!stop.stop_requested()) {
         if (mWake) {
-            mWake->wait(mLastWake);  // C++20 equivalent of Atomics.wait()
+            // Woken by the word — an audio block, a stop — or by the clock:
+            // the control ring (docs/RESTARTS.md) is written by boundaries
+            // in any process while no block renders, and a word that only
+            // the audio thread moves would leave it unread exactly when it
+            // matters. One millisecond is the bound; a block arriving sooner
+            // wakes the pass as before.
+            if (mWake->load(std::memory_order_acquire) == mLastWake)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             mLastWake = mWake->load(std::memory_order_acquire);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

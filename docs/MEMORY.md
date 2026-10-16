@@ -66,6 +66,7 @@ that fills up in a session (samples) lands in the assets area.
 | in ring | 1 MiB / 768 KB | clients | transport | **every block** |
 | out ring | 128 KB | clockwork | transport | **every block** |
 | NRT out ring | 64 KB | clockwork | transport | control rate |
+| control ring | 64 KB | clients | transport | per control verb; lifetime arena (docs/RESTARTS.md) |
 | guest window | 96 KB | guest | published | per node-tree change |
 | taps | 4 MiB / 32 MiB | guest (really clockwork, 1.4) | published | **every block** with scopes |
 | guest config | 1 KB | host | guest + host | boot |
@@ -203,7 +204,7 @@ memory map shows and the code uses; the old names are in brackets.
 |---|---|---|---|---|
 | **clockwork-state** | metrics, stats, clock anchors, clock state, sample clock, channel map | clockwork/host → public | fast | no |
 | **clockwork-audio** | scope (device out and in), taps (guest and track slots in one region) | clockwork → public | fast | no |
-| **clockwork-transport** | ring cursors, node id counter, in ring, RT out ring, NRT out ring | clients/clockwork → transport | fast | no |
+| **clockwork-transport** | ring cursors, node id counter, in ring, RT out ring, NRT out ring, control ring | clients/clockwork → transport | fast | no |
 | **guest-public** | the guest window | guest → public | bulk | no |
 | **guest-private** | config, persist, **and the guest's working memory** (today's `DspConfig::arena`) | guest (config: host) → guest | working memory: fast; persist: bulk | no |
 | **assets** | bulk the client hands the guest, read in place | client → guest, **read-only** | bulk | reserved, committed on commit |

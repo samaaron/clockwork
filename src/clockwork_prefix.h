@@ -66,3 +66,47 @@ inline bool clockwork_sys_claims(const uint8_t* osc, size_t len) noexcept {
     if (osc[0] != '/') return false;
     return std::memcmp(osc, CLOCKWORK_SYS_PREFIX, CLOCKWORK_SYS_PREFIX_LEN) == 0;
 }
+
+// ── Which of clockwork's verbs the AUDIO THREAD performs ────────────────────
+//
+// The audio thread answers a verb inside its block when the verb is about the
+// block: the liveness ping and echo; the ordering barrier (sync) and the
+// clock snapshot, which must be answered where the hand-off to the guest
+// happens; the schedule and its flush; an asset hand-off; an inbound event,
+// which reaches the guest from there; and what plays a hosted track. Every
+// other verb of clockwork's is CONTROL — notify, devices, the session tempo,
+// a port's subsystems, a track's edits — and is the control pass's, which
+// answers it with no audio block in the loop (docs/RESTARTS.md, "The control
+// ring"). One rule, read at every boundary and by the engine's routes alike.
+//
+// `address` is the whole address, NUL-terminated, "/clockwork/..." included.
+inline bool clockwork_sys_is_audio_verb(const char* address) noexcept {
+    if (address == nullptr
+        || std::strncmp(address, CLOCKWORK_SYS_PREFIX, CLOCKWORK_SYS_PREFIX_LEN) != 0)
+        return false;
+    const char* verb = address + CLOCKWORK_SYS_PREFIX_LEN;
+    const auto is = [verb](const char* v) { return std::strcmp(verb, v) == 0; };
+    const auto under = [verb](const char* p) { return std::strncmp(verb, p, std::strlen(p)) == 0; };
+    // "midi/in/enable" opens a port: control, under a prefix whose other
+    // verbs are the port's inbound events.
+    return is("ping") || is("echo") || is("sync") || is("schedule") || is("sched/flush")
+        || is("clock/state/get")
+        || under("asset/")
+        || (under("midi/in/") && !is("midi/in/enable")) || is("midi/ports")
+        || under("gamepad/in/") || is("gamepad/devices")
+        || is("track/note") || is("track/cc") || is("track/bend") || is("track/notes_off")
+        || is("track/param") || is("track/plugin/param");
+}
+
+// True iff this packet is a CONTROL verb of clockwork's: claimed by the prefix
+// (so never a bundle, never the guest's) and not the audio thread's. What the
+// control ring takes, when the engine serves one.
+inline bool clockwork_sys_control_takes(const uint8_t* osc, size_t len) noexcept {
+    if (!clockwork_sys_claims(osc, len)) return false;
+    // The address is NUL-terminated within the packet by OSC's framing; a
+    // packet cut short of its NUL is not clockwork's to classify.
+    size_t n = 0;
+    while (n < len && osc[n] != '\0') ++n;
+    if (n == len) return false;
+    return !clockwork_sys_is_audio_verb(reinterpret_cast<const char*>(osc));
+}

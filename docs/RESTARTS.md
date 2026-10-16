@@ -157,7 +157,10 @@ waiting on, so these are the rules a client may rely on:
    every refusal that cannot be made is.
 2. **Clockwork's own verbs keep working.** Device, state, notify and the
    rest of the `/clockwork/` namespace are answered throughout a restart;
-   a restart depends on some of them. One of clockwork's own found in the
+   a restart depends on some of them. A control verb never touches the in
+   ring on a host with a control pass: it has a ring of its own ("The
+   control ring" below), of lifetime `arena`, that a restart leaves alone.
+   One of clockwork's audio-thread verbs — a ping, a sync — found in the
    in ring at a teardown is carried into the new epoch, first and in its
    order, rather than refused. The carry is bounded (64 KB); one that does
    not fit is refused like the guest's, and counted. A bundle is never
@@ -176,6 +179,46 @@ waiting on, so these are the rules a client may rely on:
 A build with no guest at all (`CLOCKWORK_SYNTH` off) never lowers the flag:
 every message for a guest is refused with `no instance`, which is the
 truth, where before it was drained and dropped.
+
+## The control ring
+
+Clockwork's own verbs are of two kinds. The audio thread performs some
+inside its block, because they are about the block: the liveness ping and
+echo, the ordering barrier (`sync`) and the clock snapshot, the schedule and
+its flush, an asset hand-off, an inbound event, what plays a hosted track.
+Those ride the in ring with the guest's traffic, in order with it. Every
+other verb of clockwork's is CONTROL — `notify`, `devices/*`, the session
+tempo, a subsystem's verbs, a track's edits — and is answered by the
+control pass. The rule is one function, `clockwork_sys_is_audio_verb`
+(src/clockwork_prefix.h), read at every boundary and pinned in
+test_clockwork_sys.cpp.
+
+A control verb used to ride the in ring too, and be forwarded to the
+control pass by the audio thread, which meant it waited for an audio
+block: a device that stopped, a callback that stalled, a reopen blocked
+inside a driver all silenced the engine's own voice, the boot handshake
+with it (2026-10-15: Spider waited 30 s for `notify.reply` while the
+device was mid-reconfiguration). Now a control verb has a ring of its own
+in the arena (`CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING`, its cursors at
+its front), of lifetime `arena`: a restart neither resets it nor has
+anything to carry out of it. The control pass drains it directly, and its
+wait is bounded to a millisecond rather than tied to the audio thread's
+word, so a verb written while no block renders is answered within one.
+
+The engine SERVES the ring: once its control pass drains it, it says so in
+the cursors region (`STATUS_CONTROL_SERVED`), and every boundary — the
+lanes ABI, the client ABI in any process — writes a control verb there
+from then on. Until it is said, and in a build with no control pass (the
+worklet, the lanes alone), every verb rides the in ring as it always did,
+and the audio thread forwards control along its chain. Lowered at
+shutdown. A control verb fired by the scheduler is the other kind of
+arrival: it fires on the audio thread, inside its block, and the audio
+thread still hands it to the control pass with the block's time.
+
+Pinned in test_control_plane_liveness.cpp (`[control-ring]`: a control
+verb answered while no audio block renders, an audio-thread verb not),
+test_client_abi.cpp and test_restarts.cpp (which ring each kind of write
+moves, with the word up and down), and test_clockwork_sys.cpp (the rule).
 
 ## What the guest owes
 
@@ -209,6 +252,10 @@ Everything else it holds is the instance's and goes with it.
   the teardown, the drains and the rebuild is the engine's.
 - test/test_restart_sequence.cpp: one sequence whatever started it — the
   user's switch, the watchdog's recovery, the rate-skew recovery.
+- test/test_control_plane_liveness.cpp `[control-ring]`,
+  test/test_client_abi.cpp and test/test_restarts.cpp `[control-ring]`:
+  a control verb answered while no audio block renders, and which ring
+  each kind of write moves.
 - test/osc_channel_no_instance.test.mjs and test/osc_channel.spec.mjs: the
   browser's boundary, in node over a real engine and in a page.
 - rust/clockwork-abi/tests/layout.rs: the status value, held to the C

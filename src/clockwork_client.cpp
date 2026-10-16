@@ -246,9 +246,25 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     // addressed to. Clockwork's own verbs go through: the engine answers
     // those with or without a guest (docs/RESTARTS.md). The flag is in the
     // cursors region, so a client in another process reads the same word.
-    if ((c->control()->status_flags.load(std::memory_order_acquire) & STATUS_NO_INSTANCE)
-        && !clockwork_sys_claims(osc, bytes))
+    const uint32_t flags = c->control()->status_flags.load(std::memory_order_acquire);
+    if ((flags & STATUS_NO_INSTANCE) && !clockwork_sys_claims(osc, bytes))
         return CLOCKWORK_E_NO_INSTANCE;
+
+    // A control verb of clockwork's, while the engine serves the control
+    // ring: written there, where no audio block is between it and its
+    // answer (docs/RESTARTS.md, "The control ring"). The verbs the audio
+    // thread performs, and the guest's, ride the in ring. The same rule as
+    // clockwork_ingress_write's, read from the same bytes.
+    if ((flags & STATUS_CONTROL_SERVED) && c->L.control_ring_size > 0
+        && clockwork_sys_control_takes(osc, bytes)) {
+        auto* ctl = reinterpret_cast<ControlRingCursors*>(c->base + c->L.control_ring_offset);
+        const bool ok = RingBufferWriter::write(
+            c->base + c->L.control_ring_offset + CONTROL_RING_HEADER_SIZE,
+            c->L.control_ring_size - CONTROL_RING_HEADER_SIZE,
+            &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
+            osc, bytes, origin);
+        return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
+    }
 
     const bool ok = RingBufferWriter::write(
         c->base + c->L.in_ring_offset, c->L.in_ring_size,

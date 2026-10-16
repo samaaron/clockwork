@@ -95,7 +95,7 @@ constexpr uint32_t PUB = CLOCKWORK_AUDIENCE_PUBLIC, GUEST = CLOCKWORK_AUDIENCE_G
                    HOST = CLOCKWORK_AUDIENCE_HOST, TRANSPORT = CLOCKWORK_AUDIENCE_TRANSPORT;
 constexpr uint32_t BLOCK = CLOCKWORK_CADENCE_BLOCK, CHANGE = CLOCKWORK_CADENCE_CHANGE, BOOT = CLOCKWORK_CADENCE_BOOT;
 constexpr uint32_t FAST = CLOCKWORK_TIER_FAST, BULK = CLOCKWORK_TIER_BULK;
-constexpr uint32_t COLD = CLOCKWORK_LIFETIME_COLD_BOOT, REBUILD = CLOCKWORK_LIFETIME_REBUILD;
+constexpr uint32_t COLD = CLOCKWORK_LIFETIME_COLD_BOOT, REBUILD = CLOCKWORK_LIFETIME_REBUILD, ARENA = CLOCKWORK_LIFETIME_ARENA;
 const Expect kExpect[] = {
     // clockwork-state
     { CLOCKWORK_ARENA_CLOCKWORK_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, PUB,         BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_STATE },
@@ -116,6 +116,10 @@ const Expect kExpect[] = {
     { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
     { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     RT_OUT_RING_START,     RT_OUT_RING_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
     { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   CHANGE, FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    // Clockwork's own control verbs, written at the boundary and drained by
+    // the control pass with no audio block in the loop: lifetime arena, so a
+    // rebuild neither resets it nor has anything of clockwork's to carry.
+    { CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    CONTROL_RING_START,    CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   CHANGE, FAST, ARENA,   CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
     // guest-public
     { CLOCKWORK_ARENA_GUEST_WINDOW,              GUEST_WINDOW_START,    GUEST_WINDOW_SIZE,    CLOCKWORK_OWNER_GUEST,     PUB,         CHANGE, BULK, REBUILD, CLOCKWORK_AREA_GUEST_PUBLIC },
     // guest-private
@@ -174,16 +178,21 @@ TEST_CASE("arena: every region is where the constants put it, with its five fact
         CHECK(e->offset >= h->header_bytes);
         CHECK(e->offset + e->bytes <= h->arena_bytes);
     }
-    // The regions are a partition: sorted by offset, none overlaps the next,
-    // and version 2 numbers them in that order from 1 with no gaps.
+    // The regions are a partition: sorted by offset, none overlaps the next.
+    // The ids are the stable numbers 1..N, each once — a region added later
+    // keeps the next number whatever its place in memory (the control ring,
+    // 17, lies among the rings), so the set is pinned and not the order.
     std::vector<const ClockworkArenaEntry*> es;
     for (uint32_t i = 0; i < h->entry_count; ++i) es.push_back(&h->entries[i]);
     std::sort(es.begin(), es.end(), [](auto* p, auto* q) { return p->offset < q->offset; });
+    std::vector<uint32_t> ids;
     for (size_t i = 0; i < es.size(); ++i) {
         INFO("region " << es[i]->id);
-        CHECK(es[i]->id == i + 1);
+        ids.push_back(es[i]->id);
         if (i > 0) CHECK(es[i-1]->offset + es[i-1]->bytes <= es[i]->offset);
     }
+    std::sort(ids.begin(), ids.end());
+    for (size_t i = 0; i < ids.size(); ++i) CHECK(ids[i] == i + 1);
 }
 
 TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {

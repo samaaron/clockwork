@@ -410,6 +410,25 @@ void*                       clockwork_lanes_base(void);
  * region the table does not list. */
 int clockwork_region_has_reset(uint32_t region_id);
 
+/* ── The control ring ──────────────────────────────────────────────────────
+ * Clockwork's own CONTROL verbs — notify, devices, the session tempo, a
+ * subsystem's verbs: everything of clockwork's the audio thread does not
+ * perform inside its block (clockwork_sys_is_audio_verb) — have a ring of
+ * their own in the arena (CONTROL_RING_START, lifetime arena), so that the
+ * pass answering them has no audio block between it and the verb: a stopped
+ * device, a stalled callback or a reopen blocked inside a driver no longer
+ * silences the engine's own voice (docs/RESTARTS.md, "The control ring").
+ *
+ * The engine SERVES it: it says so here once its control pass drains the
+ * ring, and the word (STATUS_CONTROL_SERVED in the cursors region) is what
+ * every boundary reads — clockwork_ingress_write, clockwork_client_send in
+ * any process — to write a control verb there rather than on the in ring.
+ * Until it is said, and in a build with no control pass, every verb rides
+ * the in ring as it always did and the audio thread forwards control along
+ * its chain. Lowered at shutdown. */
+void clockwork_control_serve(int on);
+int  clockwork_control_served(void);
+
 /* Which channel is which (ClockworkChannelMapState, shared_memory.h), for a host
    or an in-process client. A guest reads the same bytes through
    DspConfig::channel_map. NULL before clockwork_init. */

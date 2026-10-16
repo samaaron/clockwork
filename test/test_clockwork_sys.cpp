@@ -146,6 +146,44 @@ TEST_CASE("clockwork-sys: an address outside the prefix is left alone", "[clockw
     REQUIRE(emitted == 0);
 }
 
+TEST_CASE("clockwork-sys: which of clockwork's verbs the audio thread answers, and which the control pass takes",
+          "[clockwork_sys][control-ring]") {
+    // The one rule every boundary classifies by (docs/RESTARTS.md, "The
+    // control ring"): a verb the audio thread performs inside its block —
+    // the liveness and ordering verbs, the schedule, an asset hand-off, an
+    // inbound event — rides the in ring with the guest's traffic; every
+    // other verb of clockwork's is control, and goes to the control pass
+    // directly. A bundle is never clockwork's, and the guest's is never
+    // control.
+    const auto audio = { "ping", "echo", "sync", "sched/flush", "schedule", "clock/state/get",
+                         "asset/commit", "asset/release", "midi/in/note_on", "midi/ports",
+                         "gamepad/in/button", "gamepad/devices",
+                         "track/note", "track/cc", "track/bend", "track/notes_off",
+                         "track/param", "track/plugin/param" };
+    for (const char* v : audio) {
+        const std::string addr = std::string(CLOCKWORK_SYS_PREFIX_LIT) + v;
+        INFO(addr);
+        CHECK(clockwork_sys_is_audio_verb(addr.c_str()));
+        const auto p = osc_test::message(addr.c_str());
+        CHECK_FALSE(clockwork_sys_control_takes(p.ptr(), p.size()));
+    }
+    const auto control = { "notify", "devices/list", "devices/switch", "devices/reopen",
+                           "clock/tempo/set", "clock/tempo/get", "midi/ports/list", "midi/in/enable",
+                           "midi/out/note_on", "gamepad/devices/list", "osc/send", "track/plugin/params",
+                           "state", "no-such-verb" };
+    for (const char* v : control) {
+        const std::string addr = std::string(CLOCKWORK_SYS_PREFIX_LIT) + v;
+        INFO(addr);
+        CHECK_FALSE(clockwork_sys_is_audio_verb(addr.c_str()));
+        const auto p = osc_test::message(addr.c_str());
+        CHECK(clockwork_sys_control_takes(p.ptr(), p.size()));
+    }
+    const auto guest = osc_test::message("/dummy/ping");
+    CHECK_FALSE(clockwork_sys_control_takes(guest.ptr(), guest.size()));
+    const auto bundle = osc_test::bundle(1, { osc_test::message(CLOCKWORK_SYS("notify")) });
+    CHECK_FALSE(clockwork_sys_control_takes(bundle.ptr(), bundle.size()));
+}
+
 // NOTE: the end-to-end cases that pushed these verbs through the IN ring and
 // read the replies off the RT egress ring are deliberately NOT here. They need
 // a DSP attached to boot clockwork, and the boundary that defines a DSP is being

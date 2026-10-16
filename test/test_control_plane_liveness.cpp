@@ -20,6 +20,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
+#include <chrono>
+#include <thread>
 #ifndef _WIN32
 #include "StreamTestClient.h"
 #include <poll.h>
@@ -51,6 +53,46 @@ TEST_CASE("Notify registration stays device-free for every new client",
         REQUIRE(fix.waitForReply("/clockwork/notify.reply", r));
         REQUIRE_FALSE(fix.waitForReply("/clockwork/devices", r, 100));
     }
+}
+
+namespace {
+// Whether `address` has been answered, waiting up to `ms` of wall clock and
+// rendering NO audio block meanwhile: what a client gets while the device is
+// stopped, stalled or still coming up.
+bool answeredWithoutAudio(EngineFixture& fix, const char* address, int ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& r : fix.allReplies())
+            if (r.address == address) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+}
+} // namespace
+
+TEST_CASE("Clockwork's own control verbs are answered while no audio block renders; the audio thread's wait for one",
+          "[control][notify][control-ring]") {
+    // The boot handshake is a control verb: Spider registers and waits. A
+    // device that stops right after boot, or a reopen that blocks inside the
+    // driver, used to leave it unanswered because the answer rode the audio
+    // thread (docs/RESTARTS.md, "The control ring"). Here no block renders
+    // at all — the pump is the case's, and the case never pumps.
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.manualAudioPump = true;
+    EngineFixture fix(cfg);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    CHECK(answeredWithoutAudio(fix, CLOCKWORK_SYS("notify.reply"), 2000));
+    fix.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1}));
+    CHECK(answeredWithoutAudio(fix, CLOCKWORK_SYS("clock/tempo.reply"), 2000));
+
+    // A verb the audio thread performs — the liveness ping, the ordering
+    // barrier — is the block's, as it should be: it says the audio thread is
+    // alive, and arrives once a block renders.
+    fix.send(osc_test::message(CLOCKWORK_SYS("ping")));
+    CHECK_FALSE(answeredWithoutAudio(fix, CLOCKWORK_SYS("pong"), 300));
+    fix.pumpBlock(2);
+    CHECK(answeredWithoutAudio(fix, CLOCKWORK_SYS("pong"), 2000));
 }
 
 // The device list must still be available on request — the fix removes the

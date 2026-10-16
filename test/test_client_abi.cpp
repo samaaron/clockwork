@@ -302,6 +302,44 @@ TEST_CASE("client abi: between instances a message for the guest is refused at t
     clockwork_client_close(c);
 }
 
+TEST_CASE("client abi: a control verb of clockwork's is written to the control ring, not the in ring",
+          "[client][abi][control-ring]") {
+    // The engine serves the control ring (its control pass drains it), and
+    // says so in the cursors region, so a client in any process writes a
+    // control verb where no audio block is between it and its answer. The
+    // verbs the audio thread performs, and the guest's, ride the in ring.
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(st == CLOCKWORK_OK);
+    REQUIRE(clockwork_control_served());
+
+    const auto* cursors = reinterpret_cast<const RingCursors*>(shared_memory + RING_CURSORS_START);
+    const auto* control = reinterpret_cast<const ControlRingCursors*>(shared_memory + CONTROL_RING_START);
+    const auto notify = osc_test::message(CLOCKWORK_SYS("notify"));
+    const auto ping   = osc_test::message(CLOCKWORK_SYS("ping"));
+    const auto guest  = osc_test::message("/dummy/ping");
+
+    // The control pass may drain the control ring at any moment, so what is
+    // pinned is which ring each write moved: the in ring's head, and the
+    // control ring's sequence, which only a write advances.
+    const int32_t in0 = cursors->in_head.load(std::memory_order_acquire);
+    const int32_t ctlSeq0 = control->sequence.load(std::memory_order_acquire);
+    CHECK(clockwork_client_send(c, notify.ptr(), notify.size(), 0xC11E) == CLOCKWORK_OK);
+    CHECK(cursors->in_head.load(std::memory_order_acquire) == in0);
+    CHECK(control->sequence.load(std::memory_order_acquire) != ctlSeq0);
+    const int32_t ctlSeq1 = control->sequence.load(std::memory_order_acquire);
+    CHECK(clockwork_client_send(c, ping.ptr(), ping.size(), 0xC11E) == CLOCKWORK_OK);
+    CHECK(clockwork_client_send(c, guest.ptr(), guest.size(), 0xC11E) == CLOCKWORK_OK);
+    CHECK(cursors->in_head.load(std::memory_order_acquire) != in0);
+    CHECK(control->sequence.load(std::memory_order_acquire) == ctlSeq1);
+
+    // And the engine answered the control verb: the registration's reply.
+    osc_test::ParsedReply ack;
+    CHECK(e.reply(CLOCKWORK_SYS("notify.reply"), ack));
+    clockwork_client_close(c);
+}
+
 TEST_CASE("client abi: regions are named, and absent is an answer",
           "[client][abi]") {
     Engine e;

@@ -1420,6 +1420,26 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             mInFlightCommand[0] = '\0';
         },
         {});
+    // The control ring (lanes.h, docs/RESTARTS.md): clockwork's own control
+    // verbs, written by every boundary — this engine's ingest, a client in
+    // another process — with no audio block between them and this pass. An
+    // immediate verb: its time is now, and the block it would have ridden
+    // is nobody's, so no envelope. What the hop above carries is the other
+    // kind: a control verb fired by the scheduler on the audio thread.
+    {
+        auto* arena = static_cast<uint8_t*>(clockwork_lanes_base());
+        auto* ctl   = reinterpret_cast<ControlRingCursors*>(arena + CONTROL_RING_START);
+        mNrtGateway.addDrain(
+            arena + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
+            CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
+            [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
+                DrainCallCtx cc{ token, 0, 0 };
+                noteInFlightCommand(d, n);
+                mControlRoutes.ingest(d, n, &cc);
+                mInFlightCommand[0] = '\0';
+            },
+            {});
+    }
 
     // MIDI clock out's periodic producer: every follower's pulses due within the
     // horizon, recorded once per pass. HERE rather than on ClockworkClock's session
@@ -1524,6 +1544,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // host's controlPass() is refused, so the two can never overlap.
     if (cfg.hostDrivesControl) mControlOpen.store(true, std::memory_order_release);
     else                       mNrtGateway.start();
+    // The pass drains the control ring from here: said in the arena, so every
+    // boundary — this engine's ingest, a client in another process — writes
+    // a control verb there from now on (lanes.h, clockwork_control_serve).
+    clockwork_control_serve(1);
     // The pass now drains NRT-out — off-audio-thread debug (clockwork_log) routes there
     // instead of the single-writer RT-out ring. Kept true through shutdown's thread
     // teardown so off-thread logging never falls back to racing RT-out; cleared
@@ -1599,6 +1623,10 @@ void ClockworkEngine::shutdown() {
     // is closed instead, and a pass already inside is waited for — the same
     // guarantee as the join, that no pass runs past this line. A host that
     // keeps calling after this gets false and nothing else.
+    // No pass drains the control ring from here: a boundary that writes a
+    // control verb now writes it to the in ring, as a build with no control
+    // pass always does, and the shutdown's own drain below is the last.
+    clockwork_control_serve(0);
     mControlOpen.store(false, std::memory_order_release);
     while (mControlPassesInFlight.load(std::memory_order_acquire) != 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

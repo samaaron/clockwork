@@ -1585,13 +1585,17 @@ extern "C" {
         { CLOCKWORK_ARENA_GUEST_WINDOW,              &reset_guest_window },
         { CLOCKWORK_ARENA_GUEST_CONFIG,              &reset_guest_config },
         { CLOCKWORK_ARENA_GUEST_PERSIST,             &reset_guest_persist },
+        // Lifetime arena: never reset, so no reset to name. The walk skips
+        // the lifetime before it looks; the list names every region anyway,
+        // so the enum and the list stay held to each other.
+        { CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    nullptr },
     };
     // Every region the enum names, once. The ids are 1..N and contiguous
     // (clockwork_arena.h: "stable numbers, in the order they lie"), so a
     // region added to the enum without a reset here does not compile, and
     // one listed twice does not either. The test holds the TABLE to this
     // list; this holds the list to the enum.
-    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_GUEST_PERSIST;
+    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING;
     static constexpr bool region_resets_cover_every_region() {
         if (sizeof(kRegionResets) / sizeof(kRegionResets[0]) != kRegionLast) return false;
         for (uint32_t id = 1; id <= kRegionLast; ++id) {
@@ -1617,7 +1621,7 @@ extern "C" {
             if (e.lifetime == CLOCKWORK_LIFETIME_ARENA) continue;
             if (e.lifetime == CLOCKWORK_LIFETIME_COLD_BOOT && !cold_boot) continue;
             const RegionReset* r = region_reset(e.id);
-            if (!r) {
+            if (!r || !r->reset) {
                 clockwork_log("BUG: region %u is in the arena table with no reset — not reset", (unsigned)e.id);
                 continue;
             }
@@ -1626,7 +1630,8 @@ extern "C" {
     }
     // lanes.h: the test that holds the table and this list to each other.
     extern "C" int clockwork_region_has_reset(uint32_t region_id) {
-        return region_reset(region_id) != nullptr ? 1 : 0;
+        const RegionReset* r = region_reset(region_id);
+        return r && r->reset ? 1 : 0;
     }
 
     void init_memory() {

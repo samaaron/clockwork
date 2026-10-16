@@ -53,6 +53,7 @@ export const REGION = Object.freeze({
   CLOCKWORK_SCOPE: 7, CLOCKWORK_TAPS: 8,
   CLOCKWORK_RING_CURSORS: 9, CLOCKWORK_NODE_ID_COUNTER: 10, CLOCKWORK_IN_RING: 11, CLOCKWORK_RT_OUT_RING: 12,
   CLOCKWORK_NRT_OUT_RING: 13,
+  CLOCKWORK_CONTROL_RING: 17,   // clockwork's own control verbs (docs/RESTARTS.md); a later addition, numbered after
   GUEST_WINDOW: 14,
   GUEST_CONFIG: 15, GUEST_PERSIST: 16,
 });
@@ -224,6 +225,8 @@ function constantsFrom(region, h) {
   const anchors = region(REGION.CLOCKWORK_CLOCK_ANCHORS), clock = region(REGION.CLOCKWORK_CLOCK_STATE), scope = region(REGION.CLOCKWORK_SCOPE);
   const nodeId = region(REGION.CLOCKWORK_NODE_ID_COUNTER), config = region(REGION.GUEST_CONFIG), taps = region(REGION.CLOCKWORK_TAPS);
   const sample = region(REGION.CLOCKWORK_SAMPLE_CLOCK), persist = region(REGION.GUEST_PERSIST), map = region(REGION.CLOCKWORK_CHANNEL_MAP);
+  let controlRing = null;
+  try { controlRing = region(REGION.CLOCKWORK_CONTROL_RING); } catch { /* an arena without one */ }
   return {
     ARENA_VERSION: h.version,
     ARENA_INSTANCE_ID: h.instanceId,
@@ -235,6 +238,12 @@ function constantsFrom(region, h) {
     IN_RING_START: inRing.offset, IN_RING_SIZE: inRing.bytes,
     RT_OUT_RING_START: outRing.offset, RT_OUT_RING_SIZE: outRing.bytes,
     NRT_OUT_RING_START: nrt.offset, NRT_OUT_RING_SIZE: nrt.bytes,
+    // Clockwork's own control verbs (docs/RESTARTS.md). The web writes
+    // nothing there — the worklet has no control pass, so the serve word is
+    // never raised and every verb rides the in ring — but a reader of the
+    // table sees the region as the engine lays it out. 0 in an arena
+    // without one (a test's table).
+    CONTROL_RING_START: controlRing ? controlRing.offset : 0, CONTROL_RING_SIZE: controlRing ? controlRing.bytes : 0,
     MAX_MESSAGE_SIZE: inRing.geom[GEOM.RING_MAX_MESSAGE],
     MESSAGE_MAGIC: inRing.geom[GEOM.RING_MESSAGE_MAGIC],
     PADDING_MAGIC: inRing.geom[GEOM.RING_PADDING_MAGIC],
