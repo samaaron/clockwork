@@ -5,14 +5,42 @@
  * that opens the device and ticks itself, and the client it hands back.
  */
 #include <catch2/catch_test_macros.hpp>
+#include "ClockworkEngine.h"
+#include "FakeAudioDevice.h"
 #include "OscTestUtils.h"
 #include "clockwork_embed.h"
 #include <cctype>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <thread>
 
+namespace {
+
+// The embed API names no device layer — a host hands it a config and gets a
+// handle — so these cases run it on the fake system through the process
+// default factory (ClockworkEngine::setDefaultDeviceManagerFactory): two
+// drivers, each with a device that ticks on a thread of its own, as the
+// platform's would. Until 2026-10-16 they booted on the machine's own
+// output, which changed its rate and buffer under whatever was playing
+// (test/RealDeviceGuard.h); the one case about the real device is hidden
+// below. The guard reinstalls its refusing factory when each case ends.
+struct OnFakeDevices {
+    std::shared_ptr<fake_audio::FakeSystem> sys = fake_audio::makeSimpleSystem();
+    OnFakeDevices() {
+        auto second = std::make_shared<fake_audio::FakeDeviceSpec>();
+        second->name = "Fake Other Speakers";
+        second->maxInputChannels = 0;
+        sys->types.push_back({ "FakeOtherDriver", { second }, 0 });
+        ClockworkEngine::setDefaultDeviceManagerFactory(std::make_shared<DeviceManagerFactory>(
+            DeviceManagerFactory{ fake_audio::makeFactory(sys) }));
+    }
+};
+
+} // namespace
+
 TEST_CASE("embed: boot opens the device, ticks itself, answers through its client, and closes", "[embed][engine]") {
+    OnFakeDevices devices;
     ClockworkEmbedConfig cfg {};
     cfg.struct_bytes = sizeof cfg;
     cfg.sample_rate  = 48000;
@@ -101,6 +129,7 @@ static ClockworkEmbed* bootOn(const char* driver, ClockworkStatus* st) {
 }
 
 TEST_CASE("embed: boot reports the device it opened, and opens the driver it is asked for", "[embed][engine]") {
+    OnFakeDevices devices;
     ClockworkStatus st = CLOCKWORK_OK;
 
     // The platform default, whatever it is here, and a full account of it.
@@ -155,14 +184,43 @@ TEST_CASE("embed: boot reports the device it opened, and opens the driver it is 
     CHECK(std::string(deviceOf(h).driver) == defaultDriver);
     clockwork_embed_close(h);
 
-#if defined(_WIN32)
-    // Windows always has DirectSound alongside WASAPI, so the field can be
-    // seen to CHOOSE, not merely to repeat the default.
-    h = bootOn("DirectSound", &st);
+    // A second driver beside the default, so the field can be seen to
+    // CHOOSE, not merely to repeat the default.
+    h = bootOn("FakeOtherDriver", &st);
     REQUIRE(h != nullptr);
-    CHECK(std::string(deviceOf(h).driver) == "DirectSound");
+    CHECK(std::string(deviceOf(h).driver) == "FakeOtherDriver");
+    CHECK(std::string(deviceOf(h).device) == "Fake Other Speakers");
     clockwork_embed_close(h);
-#endif
+}
+
+TEST_CASE("embed: boot opens the machine's own device and ticks", "[.hardware][embed]") {
+    // The one claim that needs the hardware: run by name, never by default
+    // (test/RealDeviceGuard.h). On a runner with no device it says so.
+    ClockworkEmbedConfig cfg {};
+    cfg.struct_bytes = sizeof cfg;
+    cfg.sample_rate  = 48000;
+    cfg.app_name     = "clockwork-embed-hardware-test";
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_boot(&cfg, &st);
+    REQUIRE(h != nullptr);
+    CHECK(st == CLOCKWORK_OK);
+    const ClockworkEmbedDevice opened = deviceOf(h);
+    if (opened.device[0] == 0 || opened.buffer_frames == 0) {
+        WARN("no audio device opened here; nothing to tick");
+    } else {
+        ClockworkClient* c = clockwork_embed_client(h);
+        REQUIRE(c != nullptr);
+        uint32_t m1[4] = {}, m2[4] = {};
+        REQUIRE(clockwork_client_metrics(c, m1, 4) >= 1);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            REQUIRE(clockwork_client_metrics(c, m2, 4) >= 1);
+            if (m2[0] > m1[0]) break;
+        }
+        CHECK(m2[0] > m1[0]);
+    }
+    clockwork_embed_close(h);
 }
 
 // ── The Rust boot test's path, in C++ where everything is reachable ──────────
@@ -188,6 +246,7 @@ TEST_CASE("embed: boot reports the device it opened, and opens the driver it is 
 // the Rust test fails, the difference is in the binding and that is where to
 // look. Either answer is worth one run.
 TEST_CASE("embed: a client send reaches the engine's ingress", "[embed][engine][ingress]") {
+    OnFakeDevices devices;
     ClockworkEmbedConfig cfg {};
     cfg.struct_bytes = sizeof cfg;
     cfg.sample_rate  = 48000;

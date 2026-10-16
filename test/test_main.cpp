@@ -16,6 +16,7 @@
  */
 #include "rt_alloc.h"
 #include "DebugTail.h"
+#include "RealDeviceGuard.h"
 
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_case_info.hpp>
@@ -63,6 +64,7 @@ struct RTAllocListener : Catch::EventListenerBase {
 } // namespace
 
 CATCH_REGISTER_LISTENER(RTAllocListener)
+CATCH_REGISTER_LISTENER(real_device_guard::Listener)
 
 // ─── The arguments as ctest hands them ────────────────────────────────────────
 // ctest runs each case on its own, giving the binary the case's name on the

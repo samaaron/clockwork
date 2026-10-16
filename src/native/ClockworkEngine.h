@@ -231,6 +231,14 @@ public:
         std::shared_ptr<const DeviceManagerFactory> deviceManagerFactory;
     };
 
+    // The factory every engine in this process builds its manager from when
+    // its Config names none: a test binary installs one that refuses, so a
+    // case that would reach a real device fails by name instead of opening
+    // it under whatever the machine is playing (test/RealDeviceGuard.h); an
+    // embedder may install one the same way. Null: a plain manager, the
+    // platform's devices. Read at every manager build, so set it before.
+    static void setDefaultDeviceManagerFactory(std::shared_ptr<const DeviceManagerFactory> factory);
+
     ClockworkEngine();
     ~ClockworkEngine();
 
@@ -486,6 +494,8 @@ public:
     // rescan=true triggers a full CoreAudio re-enumeration (may disrupt a
     // just-opened device on macOS). Pass false to reuse JUCE's cached list.
     std::vector<DeviceInfo>  listDevices(bool rescan = true) const;
+    // The Config's factory, else the process default (setDefaultDeviceManagerFactory).
+    std::shared_ptr<const DeviceManagerFactory> deviceManagerFactory() const;
     CurrentDeviceInfo        currentDevice() const;
     // True when `name` is the device table's synthetic default-follow row
     // ("System Default" under a driver that has no real device of that

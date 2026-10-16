@@ -214,12 +214,28 @@ void routeDeviceLayerLog() {
 }
 } // namespace
 
+namespace {
+std::mutex g_defaultFactoryMutex;
+std::shared_ptr<const DeviceManagerFactory> g_defaultFactory;
+} // namespace
+
+void ClockworkEngine::setDefaultDeviceManagerFactory(std::shared_ptr<const DeviceManagerFactory> factory) {
+    std::lock_guard<std::mutex> lock(g_defaultFactoryMutex);
+    g_defaultFactory = std::move(factory);
+}
+
+std::shared_ptr<const DeviceManagerFactory> ClockworkEngine::deviceManagerFactory() const {
+    if (mCurrentConfig.deviceManagerFactory) return mCurrentConfig.deviceManagerFactory;
+    std::lock_guard<std::mutex> lock(g_defaultFactoryMutex);
+    return g_defaultFactory;
+}
+
 std::unique_ptr<juce::AudioDeviceManager>
 ClockworkEngine::makeDeviceManager() {
     routeDeviceLayerLog();
-    auto manager = mCurrentConfig.deviceManagerFactory
-        ? mCurrentConfig.deviceManagerFactory->make()
-        : std::make_unique<juce::AudioDeviceManager>();
+    const auto factory = deviceManagerFactory();
+    auto manager = factory ? factory->make()
+                           : std::make_unique<juce::AudioDeviceManager>();
     // Device changes come to the engine, not to the manager: left to itself
     // the manager closes and reopens devices on whatever thread the OS
     // reports a change, under the device lane's feet.
@@ -521,7 +537,7 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     // deviceManagerFactory boundary — an injected (fake-device) manager
     // must not touch real PipeWire or DirectSound state. macOS has no such
     // step: CoreAudio needs nothing of the engine before a device opens.
-    const bool platformSetup = !cfg.deviceManagerFactory;
+    const bool platformSetup = !deviceManagerFactory();
 #endif
 
 #ifdef __linux__
@@ -4381,7 +4397,7 @@ void ClockworkEngine::teardownDeviceManager() {
 }
 
 void ClockworkEngine::restoreBootDriver() {
-    if (mCurrentConfig.deviceManagerFactory || !mDeviceManager) return;
+    if (deviceManagerFactory() || !mDeviceManager) return;
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
     // As at boot: PipeWire registered, and preferred unless boot honoured
     // another driver (--audio-driver). The scan must land before the
