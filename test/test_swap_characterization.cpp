@@ -141,7 +141,7 @@ TEST_CASE("Swap: switching to a device with more outputs gives the engine all "
     fix.send(osc_test::message("/dummy/reconfigured"));
     OscReply told;
     REQUIRE(fix.waitForReply("/dummy/reconfigured.reply", told, 10000));
-    CHECK(told.parsed().argInt(1) == 8);   // the guest's own output ceiling
+    CHECK(told.parsed().argInt(1) >= 8);   // the guest's own output ceiling: the device's eight, or the lane top above them
     CHECK(fix.waitForBlocks(20));
 }
 

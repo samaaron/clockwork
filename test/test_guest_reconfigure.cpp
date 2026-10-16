@@ -11,7 +11,7 @@
  * device are laid out again for it; no client is told to rebuild. If the
  * instance refuses, the swap is cold from there: what it would have been.
  *
- * The dummy guest survives a channel-count change and refuses above eight
+ * The dummy guest survives a channel-count change and refuses eight above what it was built with
  * outputs; it does not survive a rate change, which every cold-swap case in
  * this suite drives one with. The fake devices supply the channel counts.
  */
@@ -68,25 +68,31 @@ TEST_CASE("guest reconfigure: a channel-count change the instance survives is a 
     REQUIRE(swap.success);
     CHECK(swap.type == SwapType::Hot);
 
-    // The same instance, told once, rendering to two outputs more than it
-    // was built for (the device's four, the same lanes above); the
-    // generation it opened is the one still open; nobody was told to
-    // rebuild, and nothing was refused.
+    // The same instance, told once, rendering to at least the device's four
+    // outputs (a build with lanes above the device hands the guest the lane
+    // top, 48 with link audio's, for any device up to 32 wide: told again,
+    // the same ceiling); the generation it opened is the one still open;
+    // nobody was told to rebuild, and nothing was refused.
     const auto told = askTold(fix);
     CHECK(told.times == 1);
-    CHECK(told.outputs == built.outputs + 2);
+    CHECK(told.outputs >= 4);
+    CHECK(told.outputs >= built.outputs);
     CHECK(fix.engine().generation() == gen);
     CHECK_FALSE(heard(fix, CLOCKWORK_SYS("setup")));
     CHECK_FALSE(heard(fix, CLOCKWORK_SYS("error")));
     // Clockwork's own picture of the device followed it: the channel map's
     // device words, which a client and the guest both read.
-    CHECK(clockwork_channel_map()->device_out.load() == 4u);
+    CHECK(clockwork_channel_map()->device_out.load() == static_cast<uint32_t>(told.outputs));   // as at boot: the width rendered
 }
 
 TEST_CASE("guest reconfigure: a change the instance refuses becomes the cold restart it would have been",
           "[restarts][survives][ColdSwap]") {
     auto sys = makeSimpleSystem();
-    sys->at("Fake Interface").maxOutputChannels = 16;  // above what the dummy takes live
+    // Far above what the dummy takes live: eight more than it was built
+    // for, lanes included — a device wider than the lane base (32) moves
+    // the base itself, so the ceiling grows with the device whatever lanes
+    // a build adds above it.
+    sys->at("Fake Interface").maxOutputChannels = 64;
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
     const uint32_t gen = fix.engine().generation();
@@ -97,14 +103,14 @@ TEST_CASE("guest reconfigure: a change the instance refuses becomes the cold res
     REQUIRE(swap.success);
     CHECK(swap.type == SwapType::Cold);
 
-    // A new instance, built at sixteen, that was never told anything; the
-    // generation moved on; the clients heard restarting and setup, as for
-    // any cold restart.
+    // A new instance, built for the wider device (and any lanes above it),
+    // that was never told anything; the generation moved on; the clients
+    // heard restarting and setup, as for any cold restart.
     OscReply setup;
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("setup"), setup, 5000));
     const auto told = askTold(fix);
     CHECK(told.times == 0);
-    CHECK(told.outputs == 16);
+    CHECK(told.outputs >= 64);
     CHECK(fix.engine().generation() == gen + 1);
-    CHECK(clockwork_channel_map()->device_out.load() == 16u);
+    CHECK(clockwork_channel_map()->device_out.load() == static_cast<uint32_t>(told.outputs));
 }
