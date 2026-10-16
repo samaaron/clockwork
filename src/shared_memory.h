@@ -520,7 +520,7 @@ struct alignas(4) PerformanceMetrics {
     // (lanes.cpp / ring_drain.h).
     std::atomic<uint32_t> process_count;           // 0: Audio process() callbacks
     std::atomic<uint32_t> messages_processed;      // 1: OSC messages processed
-    std::atomic<uint32_t> messages_dropped;        // 2: Messages dropped
+    std::atomic<uint32_t> messages_dropped;        // 2: Messages refused on the way in (the IN ring full, or too big for it)
     std::atomic<uint32_t> scheduler_queue_depth;   // 3: Current scheduler depth
     std::atomic<uint32_t> scheduler_queue_max;     // 4: Peak scheduler depth
     std::atomic<uint32_t> scheduler_queue_dropped; // 5: Scheduler overflow drops
@@ -632,7 +632,13 @@ struct alignas(4) PerformanceMetrics {
     // (shared C++), in the slots 53-57 that once held the buffer pool's metrics.
     std::atomic<uint32_t> guest_pool_used_bytes;    // 53: bytes in use in the guest's pool now (its bulk memory)
     std::atomic<uint32_t> guest_pool_peak_bytes;    // 54: the most ever
-    std::atomic<uint32_t> _metrics_reserved3;       // 55: reserved (held the pool's growth count until the pool stopped growing, 2026-10-15)
+    // Frames an egress ring refused for want of room — the RT ring
+    // (ring_buffer_write) or the NRT ring (clockwork_egress_nrt_write): a
+    // reply, a broadcast or a log line the clients never get. Zero in a
+    // healthy engine; the line logging a refusal rides the same full ring, so
+    // this count is the only trace (2026-10-16). Held the pool's growth count
+    // until the pool stopped growing (2026-10-15).
+    std::atomic<uint32_t> egress_frames_refused;    // 55
     std::atomic<uint32_t> rust_heap_used_bytes;     // 56: bytes in use in the RT router's block
     std::atomic<uint32_t> rust_heap_fallbacks;      // 57: Rust allocations that fell back to the system allocator
     // What the guest takes from malloc (src/guest_malloc.h): counted where the
@@ -1187,7 +1193,7 @@ CLOCKWORK_ASSERT_METRIC(clock_phase_centi,               48);
 CLOCKWORK_ASSERT_METRIC(clock_playing,                   49);
 CLOCKWORK_ASSERT_METRIC(guest_pool_used_bytes,           53);
 CLOCKWORK_ASSERT_METRIC(guest_pool_peak_bytes,           54);
-CLOCKWORK_ASSERT_METRIC(_metrics_reserved3,              55);
+CLOCKWORK_ASSERT_METRIC(egress_frames_refused,           55);
 CLOCKWORK_ASSERT_METRIC(rust_heap_used_bytes,            56);
 CLOCKWORK_ASSERT_METRIC(rust_heap_fallbacks,             57);
 CLOCKWORK_ASSERT_METRIC(guest_malloc_bytes,              58);

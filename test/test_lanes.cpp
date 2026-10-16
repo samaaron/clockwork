@@ -581,3 +581,37 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     // boot-time decision and is pinned in test_audio_path.cpp.
     REQUIRE(clockwork_block_size() > 0u);
 }
+
+TEST_CASE("lanes ABI: a frame either egress ring refuses for want of room is counted as refused, and as nothing else",
+          "[lanes][abi][egress]") {
+    // A refused reply is one a client never gets, and the line logging it
+    // rides the same full ring, so the count is the only trace: a peer lost
+    // 296 replies of 6000 on CI with no counter moving (2026-10-16).
+    // messages_dropped is the way in's; the way out has its own.
+    LanesArena arena;
+    const uint8_t payload[60] = {'/', 'x', 0, 0};
+
+    // The NRT ring: written until it refuses, then three more.
+    int written = 0;
+    while (clockwork_egress_nrt_write(EGRESS_REPLY, 1, payload, sizeof(payload))) ++written;
+    REQUIRE(written > 0);
+    for (int i = 0; i < 3; ++i) REQUIRE_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, payload, sizeof(payload)));
+    CHECK(metrics->egress_frames_refused.load() == 4u);
+
+    // The RT ring, through the writer the audio thread uses.
+    std::atomic<uint32_t> status{0};
+    while (ring_buffer_write(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+                             &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
+                             EGRESS_REPLY, 1, payload, sizeof(payload), &status, metrics)) {}
+    CHECK(metrics->egress_frames_refused.load() == 5u);
+    CHECK((status.load() & STATUS_BUFFER_FULL) != 0u);
+
+    // A frame too big for the NRT ring ever to carry is not a refusal for
+    // want of room: its producer answers it with an error (OscEgress).
+    std::vector<uint8_t> huge(clockwork_egress_nrt_max_frame() + 1, 0);
+    CHECK_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, huge.data(), static_cast<uint32_t>(huge.size())));
+    CHECK(metrics->egress_frames_refused.load() == 5u);
+
+    // Nothing on the way in was refused.
+    CHECK(metrics->messages_dropped.load() == 0u);
+}

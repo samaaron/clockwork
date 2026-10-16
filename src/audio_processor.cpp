@@ -3069,7 +3069,7 @@ extern "C" {
                 shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
                 EGRESS_BROADCAST_NOTIFY, 0,  // route, source_id (debug broadcasts)
-                pkt.data(), p, &cursors->status_flags);
+                pkt.data(), p, &cursors->status_flags, metrics);   // a refused log line is counted too
         } else {
             clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 0,
                                 reinterpret_cast<const uint8_t*>(pkt.data()), p);
@@ -3351,7 +3351,7 @@ bool ring_buffer_write(
     uint32_t available = (buffer_size - 1 - current_head + current_tail) % buffer_size;
 
     if (available < footprint) {
-        if (pm) pm->messages_dropped.fetch_add(1, std::memory_order_relaxed);
+        if (pm) pm->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
         if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
         return false;
     }
@@ -3366,7 +3366,7 @@ bool ring_buffer_write(
         // Verify space at front after wrap (tail-1 to avoid head==tail ambiguity)
         uint32_t space_at_front = (current_tail > 0) ? (current_tail - 1) : 0;
         if (space_at_front < footprint) {
-            if (pm) pm->messages_dropped.fetch_add(1, std::memory_order_relaxed);
+            if (pm) pm->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
             if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
             return false;
         }

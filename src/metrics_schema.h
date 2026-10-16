@@ -31,7 +31,7 @@ struct FieldInfo
 inline constexpr FieldInfo kFields[] = {
     {  0, "engineProcessCount", "count", "Audio process() calls" },
     {  1, "engineMessagesProcessed", "count", "Messages drained from the IN ring and dispatched" },
-    {  2, "engineMessagesDropped", "count", "Messages dropped (ring buffer full)" },
+    {  2, "engineMessagesDropped", "count", "Messages refused on the way in: the IN ring full, or a message too big for it" },
     {  3, "engineSchedulerDepth", "count", "Current scheduler queue depth" },
     {  4, "engineSchedulerPeakDepth", "count", "Peak scheduler queue depth (high water mark)" },
     {  5, "engineSchedulerDropped", "count", "Events dropped because the scheduler queue overflowed" },
@@ -84,6 +84,7 @@ inline constexpr FieldInfo kFields[] = {
     { 52, "audioContextState", "", "AudioContext state" },
     { 53, "guestPoolUsedBytes", "bytes", "Bytes in use in the guest's pool now: what it has allocated from its bulk memory (payloads as carved)" },
     { 54, "guestPoolPeakBytes", "bytes", "The most bytes ever in use in the guest's pool" },
+    { 55, "egressFramesRefused", "count", "Replies, broadcasts and log lines an egress ring refused for want of room: what the clients never got. 0 in a healthy engine" },
     { 56, "rustHeapUsedBytes", "bytes", "Bytes in use in the rust heap now (the RT router's block)" },
     { 57, "rustHeapFallbacks", "count", "Rust allocations inside the engine that fell back to the system allocator because the rust heap was full" },
     { 58, "guestMallocBytes", "bytes", "Bytes the guest holds from malloc: taken inside its entry points with malloc or new and not freed" },

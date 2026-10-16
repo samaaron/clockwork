@@ -246,5 +246,6 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     { std::lock_guard<std::mutex> lock(mu); if (!replies.empty()) answerBytes = replies.front().size(); }
     const uint64_t footprint = (sizeof(Message) + EGRESS_ROUTE_SIZE + answerBytes + 3u) & ~uint64_t{3};
     CHECK(static_cast<uint64_t>(sent) * footprint > NRT_OUT_RING_SIZE);
+    checkNoEgressRefused(engine);   // the pass waited for room: nothing was refused
     engine.shutdown();
 }

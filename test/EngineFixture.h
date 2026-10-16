@@ -31,6 +31,20 @@
 #include <thread>
 #include <vector>
 
+// No case ends with frames an egress ring refused for want of room — a
+// reply, a broadcast or a log line a client never got — unless it says it
+// means to (EngineFixture::expectEgressRefusals). The line logging a refusal
+// rides the same full ring, so the count is the only trace: checked as every
+// fixture's engine goes down, so whichever case overflows says so by name
+// (a peer lost 296 replies of 6000 on CI, 2026-10-16, with no case noticing).
+inline void checkNoEgressRefused(const ClockworkEngine& engine) {
+    if (!engine.isRunning()) return;   // a case that shut it down, or a boot that failed
+    const uint32_t refused = engine.getMetrics().egress_frames_refused.load(std::memory_order_relaxed);
+    INFO(refused << " frame(s) refused by an egress ring: replies, broadcasts or log lines "
+         "no client got (PerformanceMetrics::egress_frames_refused)");
+    CHECK(refused == 0u);
+}
+
 namespace engine_test {
 
 constexpr int kSampleRate = 48000;
@@ -109,6 +123,7 @@ struct Engine {
         engine.pumpAudioBlock();         // anchors the audio-thread clock
     }
     ~Engine() {
+        checkNoEgressRefused(engine);
         hostControl.stop();              // a host stops its thread first
         engine.shutdown();
         clockwork_sink_close_all();
@@ -226,6 +241,10 @@ public:
     ~EngineFixture();
 
     // OSC in, in process — no socket.
+    // A case that overflows an egress ring on purpose says so, and is not
+    // failed for it at teardown (checkNoEgressRefused).
+    void expectEgressRefusals() { mExpectEgressRefusals = true; }
+
     void send(const osc_test::Packet& pkt);
     void send(const uint8_t* data, uint32_t size);
 
@@ -317,6 +336,7 @@ private:
     ClockworkEngine mEngine;
     engine_test::HostControlThread mHostControl;
     std::thread                    mLateHostStart;
+    bool                           mExpectEgressRefusals = false;
     bool            mManualPump = false;
     int             mSampleRate = 48000;
 

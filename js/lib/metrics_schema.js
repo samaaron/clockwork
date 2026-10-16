@@ -43,7 +43,7 @@ export const METRICS_SCHEMA = {
     // engine metrics [0-8]
     engineProcessCount:          { offset: 0,  type: 'counter',  unit: 'count', description: 'Audio process() calls' },
     engineMessagesProcessed:     { offset: 1,  type: 'counter',  unit: 'count', description: 'Messages drained from the IN ring and dispatched' },
-    engineMessagesDropped:       { offset: 2,  type: 'counter',  unit: 'count', description: 'Messages dropped (ring buffer full)' },
+    engineMessagesDropped:       { offset: 2,  type: 'counter',  unit: 'count', description: 'Messages refused on the way in: the IN ring full, or a message too big for it' },
     engineSchedulerDepth:        { offset: 3,  type: 'gauge',    unit: 'count', description: 'Current scheduler queue depth' },
     engineSchedulerPeakDepth:    { offset: 4,  type: 'gauge',    unit: 'count', description: 'Peak scheduler queue depth (high water mark)' },
     engineSchedulerDropped:      { offset: 5,  type: 'counter',  unit: 'count', description: 'Events dropped because the scheduler queue overflowed' },
@@ -136,6 +136,7 @@ export const METRICS_SCHEMA = {
     // pool's metrics once held)
     guestPoolUsedBytes:           { offset: 53, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the guest\'s pool now: what it has allocated from its bulk memory (payloads as carved)' },
     guestPoolPeakBytes:           { offset: 54, type: 'gauge',    unit: 'bytes', description: 'The most bytes ever in use in the guest\'s pool' },
+    egressFramesRefused:          { offset: 55, type: 'counter',  unit: 'count', description: 'Replies, broadcasts and log lines an egress ring refused for want of room: what the clients never got. 0 in a healthy engine' },
     rustHeapUsedBytes:            { offset: 56, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the rust heap now (the RT router\'s block)' },
     rustHeapFallbacks:            { offset: 57, type: 'counter',  unit: 'count', description: 'Rust allocations inside the engine that fell back to the system allocator because the rust heap was full' },
     // The guest's mallocs [58-59] (shared C++, written at the metrics flush; src/guest_malloc.h). Counted where the
@@ -195,7 +196,8 @@ export const METRICS_SCHEMA = {
         title: 'Engine',
         rows: [
           { label: 'ticks',       tooltip: 'Audio process() callback count and OSC messages processed', cells: [{ key: 'engineProcessCount', kind: 'dim' }, { sep: ' | ' }, { key: 'engineMessagesProcessed', kind: 'muted' }, { text: ' msgs', kind: 'muted' }] },
-          { label: 'dropped',     cells: [{ key: 'engineMessagesDropped', kind: 'error' }] },
+          { label: 'dropped',     tooltip: 'Messages refused on the way in', cells: [{ key: 'engineMessagesDropped', kind: 'error' }] },
+          { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused for want of room: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
           { label: 'drift',       cells: [{ key: 'driftOffsetMs', format: 'signed' }, { text: ' ms', kind: 'muted' }] },
           { label: 'debug',       tooltip: COMPOSITES.debugCountBytes.description, cells: [{ key: 'debugMessagesReceived', kind: 'muted' }, { text: ' (' }, { key: 'debugBytesReceived', kind: 'muted', format: 'bytes' }, { text: ')' }] },
         ]

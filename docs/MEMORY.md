@@ -495,8 +495,8 @@ recommended, with one change at step 5, noted there.
     cannot meet falls back to the system and is counted
     (`clockwork_router_guest_fallback_allocs`). Areas 8 and 14 are
     **`GUEST_MEMORY_BULK`** and **`GUEST_SPARE`**, 9 is
-    **`GUEST_MEMORY_FAST`**; metrics 53–55 are the guest's pool's census
-    (`guestPoolUsedBytes`, `guestPoolPeakBytes`, `guestPoolGrowths`). The
+    **`GUEST_MEMORY_FAST`**; metrics 53–54 are the guest's pool's census
+    (`guestPoolUsedBytes`, `guestPoolPeakBytes`). The
     web client sizes the engine's memory as the guest's two declared spans
     plus the engine's own overhead beside them (`MemoryLayout.engineOverhead`:
     the router's block, the spare, the headers), since a declared bulk want

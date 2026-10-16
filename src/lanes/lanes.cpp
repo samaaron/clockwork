@@ -210,11 +210,15 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     uint8_t buf[kNrtEgressMax];
     std::memcpy(buf, &route, sizeof(route));
     std::memcpy(buf + sizeof(route), osc, len);
-    return RingBufferWriter::write(
+    const bool written = RingBufferWriter::write(
         shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
         &cursors->nrt_out_head, &cursors->nrt_out_tail,
         &cursors->nrt_out_sequence, &g_nrt_egress_lock,
         buf, len + EGRESS_ROUTE_SIZE, token);
+    // Refused for want of room: counted, since the line logging it would
+    // ride this same full ring (PerformanceMetrics::egress_frames_refused).
+    if (!written && metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+    return written;
 }
 
 // ── Tick ────────────────────────────────────────────────────────────────────

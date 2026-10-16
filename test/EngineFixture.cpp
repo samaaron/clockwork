@@ -138,6 +138,7 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
 }
 
 EngineFixture::~EngineFixture() {
+    if (!mExpectEgressRefusals) checkNoEgressRefused(mEngine);
     if (mLateHostStart.joinable()) mLateHostStart.join();
     mHostControl.stop();   // a host stops its thread before the engine
     mEngine.shutdown();
