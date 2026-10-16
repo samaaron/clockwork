@@ -78,3 +78,28 @@ test("a worker's channel reads the engine's clock: with the page's, still while 
     expect(Math.abs(r.reloaded.page - r.reloaded.worker), "after a reload the worker's clock is not the new engine's").toBeLessThan(0.05);
   }
 });
+
+test("the transport stamp is a real time from boot, not the 1900 epoch", async ({ page, clockworkConfig }) => {
+  // The worklet clock anchors the transport stamp into the clock state as it
+  // binds, during init_memory; a region reset that ran after it wiped the
+  // stamp to 0 (NTP 1900) on the web, where native had re-anchored later
+  // (2026-10-16). The reply must carry the anchor, so a client's arithmetic
+  // across it is not 126 years out.
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const osc = window.Clockwork.osc;
+    const cw = new window.Clockwork({ ...config });
+    await cw.init();
+    const heard = [];
+    cw.on("in:osc", ({ oscData }) => { try { heard.push(osc.decode(oscData)); } catch { /* a bundle */ } });
+    cw.send("/clockwork/clock/transport/time/get");
+    const deadline = performance.now() + 5000;
+    const reply = () => heard.find((m) => m[0] === "/clockwork/clock/transport/time.reply");
+    while (!reply() && performance.now() < deadline) await new Promise((res) => setTimeout(res, 20));
+    const got = reply();
+    await cw.destroy();
+    return got ? Number(got[1]) : null;
+  }, clockworkConfig);
+  // NTP microseconds: anything after 2023 is above 3.9e15; 0 is the epoch.
+  expect(r, "the stamp is anchored to wall time as the clock enters service").toBeGreaterThan(3.9e15);
+});

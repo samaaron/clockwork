@@ -1121,6 +1121,24 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // the profile's defaults; a host floor under the bulk span would go
     // through clockwork_set_guest_bulk_bytes. Nothing to do here.
 
+    // The engine's clock is the process's: published before boot, so the
+    // processor binds it to the arena as the clock enters service
+    // (audio_processor.cpp, clock_enter_service), in the one order every
+    // target shares. Single-engine-per-process: g_active_clockwork_clock has
+    // no per-engine routing, so a second publisher would steer the
+    // /clockwork/clock queries to whichever was last initialised. CAS to
+    // detect; warn and overwrite.
+    {
+        ClockworkClock* expected = nullptr;
+        if (!g_active_clockwork_clock.compare_exchange_strong(
+                expected, &mClockworkClock, std::memory_order_release)) {
+            clockwork_log(
+                "[engine] WARNING: another ClockworkEngine has already "
+                "published a ClockworkClock; multi-engine native is not "
+                "supported. /clockwork/clock will reflect this engine.");
+            g_active_clockwork_clock.store(&mClockworkClock, std::memory_order_release);
+        }
+    }
     mProcessor.initialiseDsp(
         arena,
         mCurrentConfig.sampleRate,
@@ -1136,13 +1154,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         guestReturns,
         guestReturnsBytes
     );
-    // Move the clock state into the shared arena's CLOCK_STATE region so
-    // the native SHM has the same shape as web. Done before publish() below,
-    // so a cross-process reader sees it populated.
-    mClockworkClock.bindStateToShm(
-        reinterpret_cast<ClockworkClockState*>(arena + CLOCK_STATE_START));
-    mClockworkClock.bindSampleClockToShm(arena + SAMPLE_CLOCK_START);
-
     // Seed the session tempo before any consumer can read the clock and before the
     // tempo-changed callback is installed, so the engine opens at the embedder's
     // tempo with no notify and no transient.
@@ -1360,21 +1371,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // "/clockwork/schedule" is handled in the shared drain (audio_processor.cpp),
     // beside timestamped-bundle scheduling, so it works identically on every
     // target — it never reaches these dispatchers.
-
-    // Single-engine-per-process: g_active_clockwork_clock has no per-engine
-    // routing, so a second publisher would steer the /clockwork/clock queries
-    // to whichever was last initialised. CAS to detect; warn and overwrite.
-    {
-        ClockworkClock* expected = nullptr;
-        if (!g_active_clockwork_clock.compare_exchange_strong(
-                expected, &mClockworkClock, std::memory_order_release)) {
-            clockwork_log(
-                "[engine] WARNING: another ClockworkEngine has already "
-                "published a ClockworkClock; multi-engine native is not "
-                "supported. /clockwork/clock will reflect this engine.");
-            g_active_clockwork_clock.store(&mClockworkClock, std::memory_order_release);
-        }
-    }
 
     // Publish the boundary for the audio-thread drain to classify through (mirrors
     // g_active_clockwork_clock; single publisher per process).

@@ -15,8 +15,8 @@
  * Every target builds this same composition root: native (all four cells of
  * SYNTH×LINK), the freestanding guard, WASM, and ESP32. On the lean targets the
  * LinkSession header supplies the inline session-of-one, and the TimeSource
- * is the self-driven worklet clock. clockwork_clock_wasm_init (below, on
- * worklet builds) binds the SAB region + the worklet clock's offset pointers.
+ * is the self-driven worklet clock, bound to its SAB offset pointers as the
+ * clock enters service (audio_processor.cpp, clock_enter_service).
  *
  * State coherence: single-atomic-per-field, with two ordered write pairs —
  * beat_origin_ntp+bpm and is_playing_at_ntp+is_playing (shared_memory.h
@@ -35,12 +35,6 @@
 
 #include <cmath>
 
-#if CLOCKWORK_WORKLET_CLOCK
-// Resolves to the real emscripten header on WASM and to the NativeShim stub on
-// ESP32 (EMSCRIPTEN_KEEPALIVE → nothing there), so clockwork_clock_wasm_init keeps
-// the WASM export attribute without breaking the embedded build.
-#include <emscripten/emscripten.h>
-#endif
 
 #include <atomic>
 #include <cstdint>
@@ -161,27 +155,6 @@ void ClockworkClock::bindWorkletClock(const double* ntpStartTime,
                                   const std::atomic<int32_t>* globalOffset) {
     mImpl->timeSource.bindOffsets(ntpStartTime, driftOffset, globalOffset);
 }
-
-extern "C" {
-
-// The WASM host's boot hook. init_memory publishes the composition-root instance
-// to g_active_clockwork_clock, then calls this with the SAB CLOCK_STATE region
-// and the three SAB offset pointers. We bind both onto that instance: the state
-// (so ClockworkClock::state() reads/writes the SAB) and the worklet clock offsets
-// (so nowAt() evaluates the SAB time formula). Signature is fixed — kept stable
-// across the ClockworkClock decomposition so the WASM/JS side needs no change.
-EMSCRIPTEN_KEEPALIVE
-void clockwork_clock_wasm_init(ClockworkClockState* clockwork_clock_state,
-                          const double* ntp_start_time_ptr,
-                          const std::atomic<int32_t>* drift_offset_ptr,
-                          const std::atomic<int32_t>* global_offset_ptr) {
-    ClockworkClock* clock = g_active_clockwork_clock.load(std::memory_order_acquire);
-    if (!clock) return;
-    clock->bindStateToShm(clockwork_clock_state);
-    clock->bindWorkletClock(ntp_start_time_ptr, drift_offset_ptr, global_offset_ptr);
-}
-
-}  // extern "C"
 
 #endif  // CLOCKWORK_WORKLET_CLOCK
 

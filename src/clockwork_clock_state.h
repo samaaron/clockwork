@@ -72,8 +72,8 @@ constexpr double kDefaultBpm = 120.0;
 // state (the JS↔worklet transport on WASM depends on it), not observability
 // — separating it from PerformanceMetrics keeps that struct honest.
 //
-// Bound on EVERY build: WASM at clockwork_clock_wasm_init, native at engine init
-// (ClockworkEngine.cpp -> bindStateToShm).
+// Bound on EVERY build and every target as the clock enters service
+// (audio_processor.cpp, clock_enter_service -> bindStateToShm).
 //
 // Each field is a single 64-bit atomic (doubles stored as IEEE 754 bit-
 // pattern). There is no seqlock. Coherence between the fields that MUST agree

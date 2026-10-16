@@ -415,3 +415,19 @@ TEST_CASE("SharedMemory: segment survives a cold swap",
     engine.shutdown();
     CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmNativeHandle()));
 }
+
+TEST_CASE("EngineState: the transport stamp is a real time from boot, not the 1900 epoch",
+          "[EngineState][clock]") {
+    // The clock enters service in init_memory, after the layout and the
+    // reset, on every target (audio_processor.cpp, clock_enter_service):
+    // its transport stamp is anchored to wall time as it binds. The web half
+    // of this pin is test/channel_clock.spec.mjs; a reset that ran after the
+    // web's bind wiped the stamp to 0 there while native, which bound later,
+    // read a real time (2026-10-16). One order now, pinned on both.
+    EngineFixture fix;
+    fix.send(osc_test::message("/clockwork/clock/transport/time/get"));
+    OscReply r;
+    REQUIRE(fix.waitForReply("/clockwork/clock/transport/time.reply", r));
+    // NTP microseconds: anything after 2023 is above 3.9e15; 0 is the epoch.
+    CHECK(r.parsed().argInt64(0) > 3'900'000'000'000'000LL);
+}

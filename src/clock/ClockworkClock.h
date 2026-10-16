@@ -291,9 +291,9 @@ public:
     void publishClockMetrics(PerformanceMetrics* m, double ntpNow, double quantum = 4.0);
 
     // ─── Shared-memory state accessor (RT-safe reads) ────────────────────
-    // Underlying ClockworkClockState — the engine's shared arena region on BOTH
-    // WASM (bound at clockwork_clock_wasm_init) and native (bound at
-    // bindStateToShm), so the clock has one identical SHM shape on every build.
+    // Underlying ClockworkClockState — the engine's shared arena region on
+    // every target (bound at bindStateToShm as the clock enters service,
+    // audio_processor.cpp), so the clock has one identical SHM shape on every build.
     // Atomic loads through this pointer are RT-safe; getBpm()/isPlaying()
     // read the same atomics (ClockworkClock.cpp), so the audio thread can take
     // either.
@@ -301,10 +301,11 @@ public:
     const ClockworkClockState* state() const;
 
     // Point the clock state at a shared arena's CLOCK_STATE region (copying
-    // current state into it) so the SHM has one shape on every build. Native
-    // binds the cross-process arena at engine init; the worklet (WASM) binds its
-    // SAB region at boot via clockwork_clock_wasm_init. Called once before the audio
-    // thread runs — no concurrency.
+    // current state into it) so the SHM has one shape on every build. Bound as
+    // the clock enters service, in init_memory, on every target and every
+    // build (audio_processor.cpp, clock_enter_service); binding the region it
+    // is already bound to is a no-op. Called before the audio thread runs —
+    // no concurrency.
     void bindStateToShm(ClockworkClockState* region);
     // Copy the state back out of the arena and point at the private copy
     // again. Must be called before the arena is freed; safe to call twice.
@@ -337,7 +338,7 @@ public:
 #if CLOCKWORK_WORKLET_CLOCK
     // Worklet builds only: hand the worklet TimeSource its SAB offset pointers
     // (NTP start / drift µs / global ms) so nowAt() can evaluate the SAB time
-    // formula. Wired by clockwork_clock_wasm_init at boot.
+    // formula. Wired as the clock enters service (audio_processor.cpp).
     void bindWorkletClock(const double* ntpStartTime,
                           const std::atomic<int32_t>* driftOffset,
                           const std::atomic<int32_t>* globalOffset);

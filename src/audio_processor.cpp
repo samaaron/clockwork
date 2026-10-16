@@ -132,17 +132,13 @@ int clockwork_host_forwards(void) {
 std::atomic<bool> g_nrt_egress_drained{false};
 
 // The composition-root ClockworkClock for a worklet self-clock host (WASM + the
-// self-driven device). clockwork_clock_wasm_init binds the SAB region + the worklet
-// TimeSource onto g_active_clockwork_clock; clockworkClock() is the host-owned instance.
-// (External-clock hosts — native/JUCE — own their ClockworkClock elsewhere and never
-// reach this.) Capability-gated, not __EMSCRIPTEN__, so WASM and the device share
-// ONE codepath that every worklet target's tests exercise.
+// self-driven device), which has no host object above the processor to own one.
+// It stands in as the active clock when no host published one before boot
+// (clock_enter_service). A host that owns a clock — the engine — publishes its
+// own to g_active_clockwork_clock and never reaches this. Capability-gated, not
+// __EMSCRIPTEN__, so WASM and the device share ONE codepath that every worklet
+// target's tests exercise.
 #if CLOCKWORK_WORKLET_CLOCK
-extern "C" void clockwork_clock_wasm_init(ClockworkClockState* clockwork_clock_state,
-                                      const double* ntp_start_time_ptr,
-                                      const std::atomic<int32_t>* drift_offset_ptr,
-                                      const std::atomic<int32_t>* global_offset_ptr);
-
 static ClockworkClock& clockworkClock() {
     static ClockworkClock instance;
     return instance;
@@ -1699,6 +1695,35 @@ extern "C" {
         return 1;
     }
 
+    // ── The clock enters service ────────────────────────────────────────
+    // One order on every target, after the layout and the reset: whoever
+    // owns the clock published it to g_active_clockwork_clock before boot —
+    // the engine its member; a worklet host nothing, so the processor's own
+    // instance stands in — and it is bound here to the clock state (its
+    // transport stamp anchored to wall time as it binds, bindStateToShm),
+    // to the sample clock, and on the worklet to the time offsets its
+    // TimeSource reads. Every build: a rebuild binds the same instance to
+    // the same regions again, which is a no-op. Before this step was one
+    // step, native bound after boot and the worklet inside it, and a reset
+    // added between the two wiped the web's stamp to the 1900 epoch
+    // (2026-10-16).
+    static void clock_enter_service() {
+#if CLOCKWORK_WORKLET_CLOCK
+        ClockworkClock* none = nullptr;
+        g_active_clockwork_clock.compare_exchange_strong(none, &clockworkClock(), std::memory_order_acq_rel);
+#endif
+        ClockworkClock* clock = g_active_clockwork_clock.load(std::memory_order_acquire);
+        if (!clock) return;   // a host with no clock at all
+        clock->bindStateToShm(reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START));
+        // The sample clock, as native's driver publishes it (AudioBlockClock.h), here once a block: the one reading of
+        // the engine's time a thread without the audio context can take, a host's worker included (OscChannel#now).
+        clock->bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
+#if CLOCKWORK_WORKLET_CLOCK
+        clock->bindWorkletClock(ntp_start_time, drift_offset, global_offset);
+        ntp_start_at_init = *ntp_start_time;
+#endif
+    }
+
     void init_memory() {
         const double sample_rate = g_clockwork_config.sample_rate;
         // A build starts with no reason not to have a guest; the first thing
@@ -1755,25 +1780,16 @@ extern "C" {
 
             // What a cold boot resets beyond the pointers — the guest's
             // persistent region, the clock's defaults, the host's anchors —
-            // is the table's say, in reset_regions below, not this branch's.
+            // is the table's say, in reset_regions, not this branch's.
         }
 
-#if CLOCKWORK_WORKLET_CLOCK
-        // Hand SAB pointers to the composition-root ClockworkClock at boot — shared by
-        // every worklet self-clock host (WASM + the self-driven device). Publish the
-        // instance first: clockwork_clock_wasm_init binds the SAB region + the worklet
-        // clock onto whatever g_active_clockwork_clock points at. (External-clock hosts —
-        // native/JUCE — bind their own ClockworkClock elsewhere, never here.)
-        ClockworkClockState* clockwork_clock_state =
-            reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START);
-
-        g_active_clockwork_clock.store(&clockworkClock(), std::memory_order_release);
-        clockwork_clock_wasm_init(clockwork_clock_state, ntp_start_time, drift_offset, global_offset);
-        // The sample clock, as native's driver publishes it (AudioBlockClock.h), here once a block: the one reading of
-        // the engine's time a thread without the audio context can take, a host's worker included (OscChannel#now).
-        clockworkClock().bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
-        ntp_start_at_init = *ntp_start_time;
-#endif
+        // Every region, at this event, as the table says (reset_regions):
+        // the transport area's fresh epoch, the metrics, the scope, the taps,
+        // the guest's window on every build; the clock's defaults, the
+        // host's anchors, the guest's persistent region on a cold boot.
+        // Before anything below writes into a region.
+        reset_regions(cold_boot);
+        clock_enter_service();
 
 #if CLOCKWORK_SYNTH
         // ── Clockwork's own ingress root ──────────────────────────────────
@@ -1833,13 +1849,6 @@ extern "C" {
                 expected, &default_split, std::memory_order_release);
         }
 #endif
-
-        // Every region, at this event, as the table says (reset_regions):
-        // the transport area's fresh epoch, the metrics, the scope, the taps,
-        // the guest's window on every build; the clock's defaults, the
-        // host's anchors, the guest's persistent region on a cold boot.
-        reset_regions(cold_boot);
-
         // Event sinks: the size classes each kind is made of, from the memory
         // profile. Installed before any sink can be opened, so the DSP's own
         // opens get the shape too.
