@@ -75,15 +75,6 @@ void flushLog(EngineFixture& fix) {
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r, 30000));
 }
 
-// Subscribed to the engine's broadcasts as a GUI is: a recovery says so with
-// /clockwork/devices/reopen.done, a rebuild with /clockwork/setup.
-void subscribe(EngineFixture& fix) {
-    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
-    OscReply ack;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
-    fix.clearReplies();
-}
-
 std::vector<osc_test::ParsedReply> said(EngineFixture& fix, const std::string& address) {
     std::vector<osc_test::ParsedReply> out;
     for (auto& r : fix.allReplies())
@@ -143,6 +134,61 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
     // Still playing, still answering.
     CHECK(fix.engine().engineState() == EngineState::Running);
     CHECK(fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback);
+    OscReply r;
+    fix.send(osc_test::message("/dummy/ping"));
+    REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));
+}
+
+TEST_CASE("RateSkew: a device someone else holds at its own rate is adopted on the "
+          "second recovery, whatever the ratio",
+          "[RateSkew][Watchdog]") {
+    // 2026-10-15, 15:41 and 16:00: Loopback's pass-through held the headphone
+    // jack at 48 kHz while the engine ran at 44.1 kHz, and later held its own
+    // device at 48 kHz. The engine reopened at its rate, Loopback set the
+    // device's back, and the skew returned read at a different ratio each
+    // time (0.87x, then 1.09x — the flip lands inside a window): a different
+    // fault to the policy every time, so the adopt never came and the engine
+    // cold-swapped every ten seconds, each swap stopping the user's runs. The
+    // device's driver said what was happening all along ("reports 44100 Hz;
+    // the engine runs at 48000 Hz"): a report that disagrees with the session
+    // rate is the fault, whatever the ratio, and after one reopen has failed
+    // to win the device back, the reported rate is adopted.
+    auto sys = makeSimpleSystem();
+    auto& speakers = sys->at("Fake Speakers");
+    speakers.heldRate = 44100.0;   // held at 44.1k elsewhere; the engine opens it at 48k
+    EngineFixture fix(lyingDeviceConfig(sys));
+    REQUIRE(sessionRate(fix) == 48000);
+    REQUIRE(sys->reportOpenDeviceChanged());   // the rate change, as the driver reports it
+
+    // After each reopen at 48k the other party sets the device back, and
+    // its driver reports the rate again (CoreAudio's listener fires for the
+    // other party's request as for the engine's own). Once adopted, the
+    // device is honest at 44.1k. The varying ratios of the real fight are
+    // the policy's unit case; here the device keeps time at 44.1k throughout.
+    sys->useVirtualTime();
+    REQUIRE(runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
+        sys->reportOpenDeviceChanged();
+        return sessionRate(fix) == 44100;
+    }));
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 2500));
+    sys->useWallTime();
+    flushLog(fix);
+    INFO(fix.debugMessagesDump());
+
+    // One reopen at the session rate, then the reported rate adopted: two
+    // recoveries, not a storm — and none since.
+    CHECK(fix.engine().rateSkewRecoveryCount() == 2);
+    CHECK(sessionRate(fix) == 44100);
+    const auto lines = fix.debugMessages();
+    auto count = [&](const char* needle) {
+        int n = 0;
+        for (auto& l : lines) if (l.find(needle) != std::string::npos) ++n;
+        return n;
+    };
+    // Said once, naming the device and the rate it is held at.
+    CHECK(count("'Fake Speakers' is run at 44100 Hz") == 1);
+    CHECK(count("but is delivering ~") == 0);
+    CHECK(fix.engine().engineState() == EngineState::Running);
     OscReply r;
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));

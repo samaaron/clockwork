@@ -81,6 +81,13 @@ struct FakeDeviceSpec {
     // A stream opened at another rate cannot carry on — its driver says it
     // must be opened again — and this is the only rate it offers.
     std::atomic<double> systemRate { 0 };
+    // Held at another nominal rate by someone else (CoreAudio: one shared
+    // device, the last request wins — Loopback's pass-through, another app):
+    // its driver reports this rate, its callbacks keep time at it
+    // (deliveredRate aside), and the stream carries on as opened — nothing
+    // says it must be opened again. The engine's own reopen at another rate
+    // is overridden straight back. 0 = no one else.
+    std::atomic<double> heldRate { 0 };
 };
 
 class FakeAudioIODevice;
@@ -202,8 +209,10 @@ public:
         state.alive = !primary()->dead.load();
         if (state.alive) {
             const double systemRate = primary()->systemRate.load();
+            const double heldRate   = primary()->heldRate.load();
             state.mustReopen        = systemRate > 0 && systemRate != mRate;
-            state.sampleRate        = systemRate > 0 ? systemRate : mRate;
+            state.sampleRate        = systemRate > 0 ? systemRate
+                                    : heldRate   > 0 ? heldRate : mRate;
             state.numOutputChannels = liveOuts();
             state.numInputChannels  = liveIns();
         }
@@ -364,6 +373,7 @@ private:
         // to every period, and the watchdog's rate-skew check (5% tolerance
         // by default) would read an honest device as slow.
         const double tickRate = primary()->deliveredRate > 0 ? primary()->deliveredRate
+                              : primary()->heldRate > 0      ? primary()->heldRate.load()
                                                               : mRate;
         const double periodUs = 1e6 * mBufferSize / tickRate;
         const auto period = std::chrono::microseconds(static_cast<int64_t>(periodUs));

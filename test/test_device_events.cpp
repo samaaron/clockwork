@@ -40,6 +40,7 @@ using fake_audio::FakeSystem;
 using fake_audio::Says;
 using fake_audio::fakeEngineConfig;
 using fake_audio::makeSimpleSystem;
+using fake_audio::runWatchdogUntil;
 
 namespace {
 
@@ -270,6 +271,73 @@ TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from 
     CHECK(rebuilds == 0);
     CHECK(speakers->opens.load() == opened);
     checkCoherent(fix);
+}
+
+TEST_CASE("DeviceEvents: the user's microphone is recorded from again after the "
+          "watchdog's recovery of the output",
+          "[DeviceEvents][Watchdog][RateSkew]") {
+    // 2026-10-16: opened in and out on Loopback, a rate-skew recovery came
+    // back playing on Loopback and recording from the system default input
+    // (an aggregate built for the pair). The recovery rebuilds the device
+    // manager on the system defaults and reopens the pinned output from
+    // there — but passed no input name, so the fresh manager's default
+    // input stood. The pinned input is the user's choice as much as the
+    // output is: the same recovery keeps both.
+    auto sys = makeSimpleSystem();
+    // A virtual input ahead of every other in the driver's list — a webcam's
+    // microphone, NDI — is what a reopen that names no input ends up on:
+    // recovery's fresh manager stands on the system defaults, and the switch
+    // falls back to the first input the driver lists.
+    {
+        auto webcam = std::make_shared<fake_audio::FakeDeviceSpec>();
+        webcam->name = "Fake Webcam Microphone";
+        webcam->maxOutputChannels = 0;
+        webcam->maxInputChannels  = 1;
+        webcam->isVirtual = true;
+        auto& devices = sys->types[0].devices;
+        devices.insert(devices.begin(), webcam);
+        sys->types[0].defaultDeviceIndex = 1;   // the speakers out; the interface in
+    }
+    // A microphone paired with the speakers, and an interface played and
+    // recorded on as one device — as Loopback was.
+    const auto [output, input] = GENERATE(
+        std::pair<std::string, std::string>{ "Fake Speakers",  "Fake Microphone" },
+        std::pair<std::string, std::string>{ "Fake Interface", "Fake Interface" });
+    INFO("out " << output << ", in " << input);
+    // The output keeps time at 44.1k while reporting 48k: one recovery, the
+    // watchdog's, which reopens it at the measured rate.
+    sys->at(output).deliveredRate = 44100.0;
+    auto cfg = fakeEngineConfig(sys, output);
+    cfg.numInputChannels           = 2;
+    cfg.inputDevice                = input;
+    cfg.callbackWatchdog           = true;
+    cfg.watchdogPollMs             = 50;
+    cfg.watchdogStallMs            = 1000;
+    cfg.watchdogRateWindowMs       = 300;
+    cfg.watchdogRateTolerance      = 0.05;
+    cfg.watchdogRateBadWindows     = 2;
+    cfg.watchdogRateMaxRecoveries  = 1;
+    cfg.watchdogRecoveryCooldownMs = 200;
+    cfg.watchdogClockMs            = [sys] { return sys->nowMs(); };
+    cfg.hostDrivesControl          = true;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().currentDevice().name == output);
+    REQUIRE(fix.engine().currentDevice().inputDeviceName == input);
+
+    sys->useVirtualTime();
+    const bool recovered = runWatchdogUntil(fix.engine(), *sys, 50, 20000, [&] {
+        return fix.engine().rateSkewRecoveryCount() >= 1
+            && static_cast<int>(fix.engine().currentDevice().activeSampleRate) == 44100
+            && fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback;
+    });
+    sys->useWallTime();
+    INFO(fix.debugMessagesDump());
+    REQUIRE(recovered);
+
+    const auto cur = fix.engine().currentDevice();
+    CHECK(cur.name == output);
+    CHECK(cur.inputDeviceName == input);
+    CHECK(cur.activeInputChannels == 2);
 }
 
 TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "

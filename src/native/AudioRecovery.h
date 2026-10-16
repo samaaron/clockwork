@@ -126,27 +126,61 @@ private:
 // If it skews at that rate too, the device is lying in a way no rate request
 // corrects, and the policy gives up for the session: the engine keeps
 // playing, off-pitch, and says so once. Never another swap.
+//
+// A device RUN AT ANOTHER RATE by someone else is a different fault with a
+// different tell. CoreAudio shares one device between its clients and the
+// last rate request wins: Loopback's pass-through held the headphone jack at
+// 48 kHz under an engine at 44.1 kHz (2026-10-15, 15:41). Each reopen at the
+// session rate took the device back for a moment, the other party set its
+// rate again, and the skew returned read at a different ratio every time —
+// the flip lands inside a window — so to a ratio-only policy it was always a
+// new fault, the adopt never came, and the engine swapped every ten seconds.
+// The driver says what is happening all along: the device REPORTS a rate
+// other than the session's. A verdict carrying such a report is that fault
+// whatever its ratio, one reopen is allowed to win the device back, and the
+// next verdict still reporting the other rate adopts it.
 enum class RateSkewAction {
     Recover,            // reopen at the nominal rate, as for a transient skew
-    AdoptMeasuredRate,  // reopen asking for ratio x nominal
+    AdoptRate,          // reopen asking for the verdict's rate (adoptRate)
     GiveUp,             // stop recovering; say so once
     None,               // already given up: nothing to do
+};
+
+// One verdict of the monitor as the policy judges it: the ratio measured,
+// and what the device's driver reports it runs at, against the rate the
+// engine opened it at.
+struct RateSkewVerdict {
+    double ratio        = 0;
+    int    reportedRate = 0;   // the driver's word; 0 = none read
+    int    sessionRate  = 0;   // the engine's
+    // Run at another rate by someone else: the driver's report disagrees
+    // with the session.
+    bool heldElsewhere() const {
+        return reportedRate > 0 && sessionRate > 0 && reportedRate != sessionRate;
+    }
+    // The rate an adopt asks for: the one reported when the device is held
+    // elsewhere, else the one measured.
+    double adoptRate() const {
+        return heldElsewhere() ? static_cast<double>(reportedRate) : ratio * sessionRate;
+    }
 };
 
 class RateSkewPolicy {
 public:
     // maxRecoveries: consecutive same-ratio verdicts acted on before the
     // fault is called persistent (the Nth is the adopt). sameRatioTolerance:
-    // two ratios closer than this are the same fault.
+    // two ratios closer than this are the same fault. A device held at
+    // another rate is adopted on the second verdict, whatever its ratios.
     RateSkewPolicy(int maxRecoveries, double sameRatioTolerance);
+    static constexpr int kHeldRecoveries = 2;
 
-    // What acting on a verdict at `ratio` would do. Pure: the caller asks,
-    // attempts the action (a recovery can be refused — in flight, cooling
-    // down), and reports back with acted() only when it happened, so a
-    // refused attempt cannot advance the streak.
-    RateSkewAction next(double ratio) const;
-    // The action next(ratio) named was carried out.
-    void acted(double ratio);
+    // What acting on a verdict would do. Pure: the caller asks, attempts the
+    // action (a recovery can be refused — in flight, cooling down), and
+    // reports back with acted() only when it happened, so a refused attempt
+    // cannot advance the streak.
+    RateSkewAction next(const RateSkewVerdict& v) const;
+    // The action next(v) named was carried out.
+    void acted(const RateSkewVerdict& v);
     // A window came back within tolerance after a recovery: whatever the
     // fault was, it is gone, and the streak restarts from nothing. Not a
     // pardon for a policy that has given up — that is for the session.
@@ -158,13 +192,16 @@ public:
 
 private:
     enum class Phase { Recovering, Adopted, GaveUp };
-    bool sameRatio(double a, double b) const;
+    // The same fault as the last verdict acted on: the same other rate
+    // reported, or a ratio within tolerance of the last.
+    bool sameFault(const RateSkewVerdict& v) const;
+    int  streakWith(const RateSkewVerdict& v) const;
 
-    int    mMaxRecoveries;
-    double mTolerance;
-    Phase  mPhase     = Phase::Recovering;
-    int    mStreak    = 0;
-    double mLastRatio = 0.0;
+    int             mMaxRecoveries;
+    double          mTolerance;
+    Phase           mPhase  = Phase::Recovering;
+    int             mStreak = 0;
+    RateSkewVerdict mLast;
 };
 
 } // namespace clockwork::audio

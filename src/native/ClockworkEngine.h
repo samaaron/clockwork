@@ -419,11 +419,12 @@ public:
     // policy fills adoptRate when a skew has proved persistent: the cold swap
     // then REQUESTS that rate (snapped to what the device advertises) instead
     // of keeping the session rate that the device cannot deliver. The other
-    // two fields are for the one message the user gets about it.
+    // fields are for the one message the user gets about it.
     struct RecoveryIntent {
         double adoptRate    = 0;   // > 0: the rate the swap asks for
-        double nominalRate  = 0;   // what the device reports
+        double nominalRate  = 0;   // the session rate the device was opened at
         double measuredRate = 0;   // what it delivers
+        bool   heldElsewhere = false;   // adoptRate is the rate someone else runs it at
     };
     // Accept-or-reject an audio-recovery attempt (in-flight + cooldown gated).
     // On accept, posts recoverAudio() to the device task lane and returns true; on
@@ -1204,6 +1205,9 @@ private:
         // then 0.94x on a loaded machine (macOS CI, 2026-09-13) is still one
         // device — with the tolerance alone the streak restarted at every
         // wobble and the adopt came after five plain reopens instead of two.
+        // A verdict also carries the rate the device's driver reports
+        // (mReportedDeviceRate): one that disagrees with the session's is a
+        // device someone else runs at their rate, adopted on the second.
         clockwork::audio::RateSkewPolicy skewPolicy;
         uint64_t skewWindowsSeen  = 0;
         int      skewGoodWindows  = 0;   // consecutive, since the last bad one or recovery
@@ -1214,6 +1218,13 @@ private:
     std::jthread               mWatchdogThread;
     std::atomic<uint32_t>      mWatchdogRecoveries{0};
     std::atomic<uint32_t>      mRateSkewRecoveries{0};
+    // The rate the open device's driver last reported it running at, read on
+    // the device lane when the device reports a change (reconcileOpenDevice)
+    // and reset to the session rate whenever a device is opened; the
+    // watchdog's rate-skew verdicts carry it. 0 = none read.
+    std::atomic<int>           mReportedDeviceRate{0};
+    // A device was opened at `rate`: the session rate, and the report.
+    void sessionRateOpened(double rate);
     void watchdogLoop(const std::stop_token& stop);
     int64_t watchdogNowMs() const;   // Config::watchdogClockMs, else steady_clock
 

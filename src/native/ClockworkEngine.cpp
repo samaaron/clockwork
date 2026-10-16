@@ -2342,7 +2342,11 @@ void ClockworkEngine::watchdogPoll() {
             if (w.rateSkew.skewed()) {
                 const double ratio    = w.rateSkew.lastRatio();
                 const double measured = ratio * static_cast<double>(nominal);
-                const auto   action   = w.skewPolicy.next(ratio);
+                clockwork::audio::RateSkewVerdict verdict;
+                verdict.ratio        = ratio;
+                verdict.reportedRate = mReportedDeviceRate.load(std::memory_order_acquire);
+                verdict.sessionRate  = nominal;
+                const auto   action   = w.skewPolicy.next(verdict);
                 if (action == clockwork::audio::RateSkewAction::None) {
                     // Given up this session: keep playing, keep quiet.
                 } else if (action == clockwork::audio::RateSkewAction::GiveUp) {
@@ -2356,10 +2360,10 @@ void ClockworkEngine::watchdogPoll() {
                                "session; playback continues at this rate",
                                ratio, nominal);
                     }
-                    w.skewPolicy.acted(ratio);
+                    w.skewPolicy.acted(verdict);
                 } else {
                     const bool adopt =
-                        action == clockwork::audio::RateSkewAction::AdoptMeasuredRate;
+                        action == clockwork::audio::RateSkewAction::AdoptRate;
                     if (!w.rateSkewLogged) {
                         w.rateSkewLogged = true;
                         clockwork_log("[watchdog] rate skew detected: device delivering "
@@ -2370,15 +2374,21 @@ void ClockworkEngine::watchdogPoll() {
                                      : "recover with a cold swap");
                     }
                     RecoveryIntent intent;
-                    intent.nominalRate  = nominal;
-                    intent.measuredRate = measured;
-                    if (adopt) intent.adoptRate = measured;
+                    intent.nominalRate   = nominal;
+                    intent.measuredRate  = measured;
+                    intent.heldElsewhere = verdict.heldElsewhere();
+                    if (adopt) intent.adoptRate = verdict.adoptRate();
                     std::string reason;
                     if (requestAudioRecovery(reason, intent)) {
                         mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
                         mRateSkewRecoveries.fetch_add(1, std::memory_order_release);
-                        w.skewPolicy.acted(ratio);
-                        if (adopt)
+                        w.skewPolicy.acted(verdict);
+                        if (adopt && intent.heldElsewhere)
+                            clockwork_log("[watchdog] the device is still reported at %d Hz "
+                                   "after a reopen at %d Hz: cold swap requesting the "
+                                   "reported rate (%.2fx measured)",
+                                   verdict.reportedRate, nominal, ratio);
+                        else if (adopt)
                             clockwork_log("[watchdog] rate skew persisted through %d "
                                    "recoveries: cold swap requesting the measured "
                                    "rate, ~%.0f Hz (%.2fx of %d Hz)",
@@ -2503,12 +2513,19 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
                 if (mDeviceManager)
                     if (auto* dev = mDeviceManager->getCurrentAudioDevice())
                         name = dev->getName().toStdString();
-                clockwork_log("[watchdog] '%s' reports %.0f Hz but is delivering "
-                       "~%.0f Hz. Playback continues at the measured rate; pitch "
-                       "and timing may be slightly off. This is a fault in the "
-                       "device or its driver, not in the engine.",
-                       name.empty() ? "audio device" : name.c_str(),
-                       intent.nominalRate, intent.measuredRate);
+                if (intent.heldElsewhere)
+                    clockwork_log("[watchdog] '%s' is run at %.0f Hz by another app or "
+                           "the system, not the %.0f Hz the engine asked for. "
+                           "Playback continues at %.0f Hz.",
+                           name.empty() ? "audio device" : name.c_str(),
+                           intent.adoptRate, intent.nominalRate, intent.adoptRate);
+                else
+                    clockwork_log("[watchdog] '%s' reports %.0f Hz but is delivering "
+                           "~%.0f Hz. Playback continues at the measured rate; pitch "
+                           "and timing may be slightly off. This is a fault in the "
+                           "device or its driver, not in the engine.",
+                           name.empty() ? "audio device" : name.c_str(),
+                           intent.nominalRate, intent.measuredRate);
             }
             stopAudioSource();                      // detach the dead callback
             err = recreateDeviceManager();
@@ -2546,7 +2563,11 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     clockwork_log("[recover] %s (err='%s')",
            restored ? "restored real audio" : "device down — watchdog will retry",
            err.c_str());
-    if (restored && intent.adoptRate > 0)
+    if (restored && intent.adoptRate > 0 && intent.heldElsewhere)
+        clockwork_log("[recover] session rate is now %.0f Hz (the rate the device is "
+               "run at elsewhere; the engine had opened it at %.0f Hz)",
+               swap.sampleRate, intent.nominalRate);
+    else if (restored && intent.adoptRate > 0)
         clockwork_log("[recover] session rate is now %.0f Hz (asked for the measured "
                "~%.0f Hz; the device reported %.0f Hz)",
                swap.sampleRate, intent.adoptRate, intent.nominalRate);
@@ -3456,7 +3477,7 @@ std::string ClockworkEngine::reinitialiseWithDefaultsPreservingConfig() {
 double ClockworkEngine::takeOpenDeviceGeometry(double fallbackRate, bool inputWasDropped) {
     auto* dev = mDeviceManager ? mDeviceManager->getCurrentAudioDevice() : nullptr;
     const double rate = dev ? dev->getCurrentSampleRate() : fallbackRate;
-    mCurrentConfig.sampleRate = static_cast<int>(rate);
+    sessionRateOpened(rate);
 
     // Aim the DSP's channel ceilings at the device. The rebuild is built at
     // whatever these say; without the update it stays at the boot-time count,
@@ -4266,7 +4287,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         if (finalDev) {
             result.sampleRate = finalDev->getCurrentSampleRate();
             result.bufferSize = finalDev->getCurrentBufferSizeSamples();
-            mCurrentConfig.sampleRate = static_cast<int>(result.sampleRate);
+            sessionRateOpened(result.sampleRate);
             mCurrentConfig.bufferSize = result.bufferSize;
             mCurrentConfig.numOutputChannels = finalDev->getActiveOutputChannels().countNumberOfSetBits();
             // Preserve the user's desired input channel count when we had to
@@ -4389,6 +4410,11 @@ void ClockworkEngine::restoreBootDriver() {
 #endif
 }
 
+void ClockworkEngine::sessionRateOpened(double rate) {
+    mCurrentConfig.sampleRate = static_cast<int>(rate);
+    mReportedDeviceRate.store(static_cast<int>(rate), std::memory_order_release);
+}
+
 std::string ClockworkEngine::recreateDeviceManager() {
     // Release the stale, hibernate-killed CoreAudio/HAL client completely, then
     // build a fresh manager. A reopen keeps this same dead connection; only a
@@ -4479,10 +4505,24 @@ SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
                     sampleRate, advertised.empty() ? "nothing" : advertised.c_str());
         }
     }
-    clockwork_log("[reopen] forceCold switch out='%s' mode='%s' rate=%.0f",
-            outName.c_str(),
+    // The input as the output: recovery's fresh manager stands on the
+    // system defaults, and the input it opened is no more the user's than
+    // its output was (opened in and out on Loopback, a recovery came back
+    // recording from the default input, 2026-10-16). The pin while it is
+    // attached, else the input last played with, else whatever is open.
+    std::string inName;
+    if (mCurrentConfig.numInputChannels > 0) {
+        std::vector<std::string> inputNames;
+        for (auto& d : listDevices(false))
+            if (d.maxInputChannels > 0) inputNames.push_back(d.name);
+        inName = clockwork::device::selectRecoveryTarget(mPreferredInputDevice, inputNames);
+        if (inName.empty())
+            inName = clockwork::device::selectRecoveryTarget(mLastInputDeviceName, inputNames);
+    }
+    clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s' rate=%.0f",
+            outName.c_str(), inName.c_str(),
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str(), sampleRate);
-    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, {},
+    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, inName,
                         SwapOrigin::Internal);
 }
 
@@ -4905,6 +4945,7 @@ bool ClockworkEngine::reconcileOpenDevice() {
     // the device delivers (rate skew) and reopens at it. Said here, for the
     // log.
     const int liveRate = static_cast<int>(live.sampleRate);
+    if (liveRate > 0) mReportedDeviceRate.store(liveRate, std::memory_order_release);
     if (liveRate > 0 && liveRate != mCurrentConfig.sampleRate)
         clockwork_log("[devices] '%s' reports %d Hz; the engine runs at %d Hz",
                 name.c_str(), liveRate, mCurrentConfig.sampleRate);

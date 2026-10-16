@@ -113,22 +113,38 @@ TEST_CASE("RateSkewMonitor: a nominal rate change re-anchors",
 
 using clockwork::audio::RateSkewAction;
 using clockwork::audio::RateSkewPolicy;
+using clockwork::audio::RateSkewVerdict;
+
+namespace {
+// A verdict on a device that reports the session rate: the ratio alone.
+RateSkewVerdict at(double ratio) {
+    RateSkewVerdict v;
+    v.ratio = ratio; v.reportedRate = 48000; v.sessionRate = 48000;
+    return v;
+}
+// A verdict on a device someone else runs at `reported`.
+RateSkewVerdict heldAt(double ratio, int reported) {
+    RateSkewVerdict v = at(ratio);
+    v.reportedRate = reported;
+    return v;
+}
+} // namespace
 
 TEST_CASE("RateSkewPolicy: a transient skew recovers as before, and a healthy "
           "window restarts the count", "[AudioRecovery][RateSkew][Policy]") {
     RateSkewPolicy policy(3, 0.05);
     // Post-sleep free-run, one episode: recover, then the device runs clean.
-    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
-    policy.acted(0.3);
+    REQUIRE(policy.next(at(0.3)) == RateSkewAction::Recover);
+    policy.acted(at(0.3));
     policy.healthy();
     CHECK(policy.streak() == 0);
     // An hour later, the same again: still a plain recovery, not the second
     // step of a streak.
-    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
-    policy.acted(0.3);
+    REQUIRE(policy.next(at(0.3)) == RateSkewAction::Recover);
+    policy.acted(at(0.3));
     policy.healthy();
-    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
-    policy.acted(0.3);
+    REQUIRE(policy.next(at(0.3)) == RateSkewAction::Recover);
+    policy.acted(at(0.3));
     CHECK(policy.streak() == 1);
     CHECK_FALSE(policy.adopted());
 }
@@ -136,17 +152,40 @@ TEST_CASE("RateSkewPolicy: a transient skew recovers as before, and a healthy "
 TEST_CASE("RateSkewPolicy: a different ratio is a different fault",
           "[AudioRecovery][RateSkew][Policy]") {
     RateSkewPolicy policy(3, 0.05);
-    policy.acted(0.919);
-    policy.acted(0.919);
+    policy.acted(at(0.919));
+    policy.acted(at(0.919));
     CHECK(policy.streak() == 2);
     // Not the mixer's 0.919 any more: a 0.3x free-run restarts the count, so
     // two unrelated episodes cannot add up to "persistent".
-    REQUIRE(policy.next(0.3) == RateSkewAction::Recover);
-    policy.acted(0.3);
+    REQUIRE(policy.next(at(0.3)) == RateSkewAction::Recover);
+    policy.acted(at(0.3));
     CHECK(policy.streak() == 1);
     // Within tolerance of the last one IS the same fault.
-    REQUIRE(policy.next(0.32) == RateSkewAction::Recover);
-    policy.acted(0.32);
+    REQUIRE(policy.next(at(0.32)) == RateSkewAction::Recover);
+    policy.acted(at(0.32));
     CHECK(policy.streak() == 2);
+}
+
+TEST_CASE("RateSkewPolicy: a device someone else runs at another rate is one fault "
+          "whatever the ratio, adopted on the second verdict at that rate",
+          "[AudioRecovery][RateSkew][Policy]") {
+    RateSkewPolicy policy(3, 0.05);
+    // Loopback holds the device at 44.1k; the engine's reopen at 48k is set
+    // back and the next window reads a different ratio: still the same
+    // fault, and the second verdict adopts the reported rate rather than
+    // the measured one.
+    REQUIRE(policy.next(heldAt(0.87, 44100)) == RateSkewAction::Recover);
+    policy.acted(heldAt(0.87, 44100));
+    REQUIRE(policy.next(heldAt(1.09, 44100)) == RateSkewAction::AdoptRate);
+    CHECK(heldAt(1.09, 44100).adoptRate() == 44100.0);
+    policy.acted(heldAt(1.09, 44100));
+    CHECK(policy.adopted());
+    // A report at a different other rate, or none, is a new fault.
+    RateSkewPolicy fresh(3, 0.05);
+    fresh.acted(heldAt(0.87, 44100));
+    REQUIRE(fresh.next(heldAt(0.87, 96000)) == RateSkewAction::Recover);
+    REQUIRE(fresh.next(at(0.87)) == RateSkewAction::Recover);
+    // Measured, not reported, when the device reports the session rate.
+    CHECK(at(0.919).adoptRate() == 0.919 * 48000);
 }
 

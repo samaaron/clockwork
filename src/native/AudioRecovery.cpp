@@ -106,12 +106,20 @@ RateSkewPolicy::RateSkewPolicy(int maxRecoveries, double sameRatioTolerance)
     : mMaxRecoveries(maxRecoveries < 1 ? 1 : maxRecoveries),
       mTolerance(sameRatioTolerance) {}
 
-bool RateSkewPolicy::sameRatio(double a, double b) const {
-    const double d = a < b ? b - a : a - b;
+bool RateSkewPolicy::sameFault(const RateSkewVerdict& v) const {
+    if (mStreak == 0) return false;
+    if (v.heldElsewhere() || mLast.heldElsewhere())
+        return v.heldElsewhere() && mLast.heldElsewhere() && v.reportedRate == mLast.reportedRate;
+    const double d = v.ratio < mLast.ratio ? mLast.ratio - v.ratio : v.ratio - mLast.ratio;
     return d <= mTolerance;
 }
 
-RateSkewAction RateSkewPolicy::next(double ratio) const {
+// A different fault starts its streak at one.
+int RateSkewPolicy::streakWith(const RateSkewVerdict& v) const {
+    return sameFault(v) ? mStreak + 1 : 1;
+}
+
+RateSkewAction RateSkewPolicy::next(const RateSkewVerdict& v) const {
     switch (mPhase) {
     case Phase::GaveUp:
         return RateSkewAction::None;
@@ -122,27 +130,26 @@ RateSkewAction RateSkewPolicy::next(double ratio) const {
     case Phase::Recovering:
         break;
     }
-    // A different ratio is a different fault: its streak starts at one.
-    const int streak = (mStreak > 0 && sameRatio(ratio, mLastRatio)) ? mStreak + 1 : 1;
-    return streak >= mMaxRecoveries ? RateSkewAction::AdoptMeasuredRate
-                                    : RateSkewAction::Recover;
+    const int enough = v.heldElsewhere() ? kHeldRecoveries : mMaxRecoveries;
+    return streakWith(v) >= enough ? RateSkewAction::AdoptRate
+                                   : RateSkewAction::Recover;
 }
 
-void RateSkewPolicy::acted(double ratio) {
-    switch (next(ratio)) {
+void RateSkewPolicy::acted(const RateSkewVerdict& v) {
+    switch (next(v)) {
     case RateSkewAction::None:
         return;
     case RateSkewAction::GiveUp:
         mPhase = Phase::GaveUp;
         return;
-    case RateSkewAction::AdoptMeasuredRate:
+    case RateSkewAction::AdoptRate:
         mPhase = Phase::Adopted;
         break;
     case RateSkewAction::Recover:
         break;
     }
-    mStreak    = (mStreak > 0 && sameRatio(ratio, mLastRatio)) ? mStreak + 1 : 1;
-    mLastRatio = ratio;
+    mStreak = streakWith(v);
+    mLast   = v;
 }
 
 void RateSkewPolicy::healthy() {

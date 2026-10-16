@@ -82,13 +82,14 @@ bool shouldFollowDefaultOutputChange(const std::string& newDefault,
                                      bool newDefaultIsVirtual,
                                      const std::string& pinnedOutputDevice = {});
 
-// After the watchdog rebuilds the device manager, which output should the
-// reopen target? The pinned device when it's still attached (resolved
-// through resolveJuceDeviceName, so raw and "<name> (N)" forms both work) —
-// recovery must not convert a device wedge into a silent device switch.
-// Empty result = no pin, or pin gone = open the system default.
-std::string selectRecoveryTarget(const std::string& pinnedOutput,
-                                 const std::vector<std::string>& visibleOutputs);
+// After the watchdog rebuilds the device manager, which device should the
+// reopen target, for the output and for the input? The pinned device when
+// it's still attached (resolved through resolveJuceDeviceName, so raw and
+// "<name> (N)" forms both work) — recovery must not convert a device wedge
+// into a silent device switch. Empty result = no pin, or pin gone = open
+// the system default.
+std::string selectRecoveryTarget(const std::string& pinned,
+                                 const std::vector<std::string>& visible);
 
 // True if `name` (or its JUCE "<name> (N)" disambiguated form) currently
 // appears in `visibleNames`. Same "<base> (N)" tolerance as

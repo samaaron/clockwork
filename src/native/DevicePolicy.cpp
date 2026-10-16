@@ -299,11 +299,11 @@ bool deviceNameVisible(const std::string& name,
     return resolvedVisibleIndex(name, visibleNames) >= 0;
 }
 
-std::string selectRecoveryTarget(const std::string& pinnedOutput,
-                                 const std::vector<std::string>& visibleOutputs) {
-    if (pinnedOutput.empty()) return {};
-    const int idx = resolvedVisibleIndex(pinnedOutput, visibleOutputs);
-    if (idx >= 0) return visibleOutputs[idx];
+std::string selectRecoveryTarget(const std::string& pinned,
+                                 const std::vector<std::string>& visible) {
+    if (pinned.empty()) return {};
+    const int idx = resolvedVisibleIndex(pinned, visible);
+    if (idx >= 0) return visible[idx];
     return {};
 }
 
