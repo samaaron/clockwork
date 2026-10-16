@@ -131,6 +131,15 @@ inline constexpr const char* CLOCKWORK_CLIENT_VERBS_ABSENT =
 inline constexpr const char* CLOCKWORK_REFUSED_UNKNOWN   = "unknown clockwork verb";
 inline constexpr const char* CLOCKWORK_REFUSED_MALFORMED = "malformed";
 
+// The reasons a message for the guest is refused with when there is no guest
+// to take it (docs/RESTARTS.md). Three facts, three words: it arrived while
+// there was no instance; it was waiting when the instance was torn down; it
+// was waiting while the engine was stalled and is stale now. A client reads
+// each as "wait for /clockwork/setup", never as an error to show.
+inline constexpr const char* CLOCKWORK_REFUSED_NO_INSTANCE = "no instance";
+inline constexpr const char* CLOCKWORK_REFUSED_REBUILDING  = "rebuilding";
+inline constexpr const char* CLOCKWORK_REFUSED_STALLED     = "stalled";
+
 // The reason the timed store's verbs are refused with in a build that has none.
 inline constexpr const char* CLOCKWORK_SCHEDULER_ABSENT =
     "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)";

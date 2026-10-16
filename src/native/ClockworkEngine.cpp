@@ -1456,7 +1456,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mLinkAudio.setAudioFormat(
         static_cast<uint32_t>(mCurrentConfig.sampleRate),
         clockworkLinkInputWidth(mCurrentConfig.numInputChannels));
-    mProcessor.onWake = [this]() { purge(); };
+    // What queued while the audio thread was stalled is stale: refused to
+    // its senders as such, not performed late.
+    mProcessor.onWake = [this]() { purge(CLOCKWORK_REFUSED_STALLED); };
 
     // Wire ClockworkClock's Link-event callbacks → OSC notify push.
     // Callbacks fire on Link's network thread; the egress serialises socket
@@ -1909,11 +1911,18 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
             mMetrics->osc_out_messages_sent.fetch_add(1, std::memory_order_relaxed);
             mMetrics->osc_out_bytes_sent.fetch_add(size, std::memory_order_relaxed);
         } else {
-            // Backpressure / oversize frame: the message is gone — count it
-            // as a drop, never as sent.
+            // Backpressure / oversize frame / no instance: the message is
+            // gone — count it as a drop, never as sent.
             mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    // No guest instance to take it: the boundary said so to this door, and
+    // this door says so to the asker, in the words every refusal uses, so a
+    // transport's peer and an in-process caller hear the same thing as a
+    // sender on the lanes ABI does (docs/RESTARTS.md). The status goes back
+    // too, for a door that reads statuses.
+    if (status == CLOCKWORK_E_NO_INSTANCE)
+        mEgress.refuse(originToken, data, size, CLOCKWORK_REFUSED_NO_INSTANCE);
     return status;
 }
 
@@ -2914,13 +2923,14 @@ bool ClockworkEngine::interceptBufferFreed(const uint8_t* /*data*/, uint32_t /*s
 
 // --- Purge ---
 
-void ClockworkEngine::purge() {
-    // Discard pending IN-ring messages. Callers arrive on two threads — the
-    // wake hook pre-tick on the audio thread, cold swap on a control thread
-    // while audio is still live — so this only requests; the audio thread,
-    // the IN ring's single consumer, applies the flush at the top of its
-    // next drain.
-    clockwork_ingress_flush_request();
+void ClockworkEngine::purge(const char* reason) {
+    // Refuse pending IN-ring messages for the guest to their senders, with
+    // the reason (docs/RESTARTS.md: nothing dropped without a word). Callers
+    // arrive on two threads — the wake hook pre-tick on the audio thread,
+    // cold swap on a control thread while audio is still live — so this only
+    // requests; the audio thread, the IN ring's single consumer, applies the
+    // flush at the top of its next drain.
+    clockwork_ingress_flush_request(reason);
 
     clear_scheduler();
 }
@@ -3715,7 +3725,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     if (onSwapEvent) onSwapEvent("swap:start", result);
 
     // --- Pause and optionally capture state ---
-    if (isCold) purge();
+    // What is queued for the instance that is about to go is refused to its
+    // senders as such (docs/RESTARTS.md), and the schedule cleared.
+    if (isCold) purge(CLOCKWORK_REFUSED_REBUILDING);
     mProcessor.pause();
 
     // Cold swaps tear down and re-init the shared-memory arena (destroy_dsp
@@ -3748,14 +3760,18 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     // finishes first. Every exit path below releases it.
     std::unique_lock<std::mutex> pumpGate(mPumpGate);
 
+    // The instance goes first: its teardown answers what was still in the in
+    // ring for it (destroy_dsp, docs/RESTARTS.md), and those answers have to
+    // be on the rings before the drain below.
+    if (isCold) destroy_dsp();
+
     // What the engine has said so far reaches its clients before the rings
     // go down with the arena — the user's notice before a recovery, this
-    // swap's own account of itself. The pass is parked, so this thread is the
-    // rings' only reader now. (A host that drains the egress itself is a
-    // reader the engine cannot park, and drains its own.)
+    // swap's own account of itself, the teardown's refusals. The pass is
+    // parked, so this thread is the rings' only reader now. (A host that
+    // drains the egress itself is a reader the engine cannot park, and
+    // drains its own.)
     if (isCold && controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
-
-    if (isCold) destroy_dsp();
 
     // Snapshot for rollback: a failed setAudioDeviceSetup can leave JUCE's
     // AudioDeviceManager bound to NO device, and the rollback below would then
@@ -4024,6 +4040,9 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         // another rate. Built at the old rate, a default at another played
         // everything at the wrong speed and pitch.
         if (isCold) {
+            // As on the happy path: what was said since the teardown leaves
+            // before the rings reset.
+            if (controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
             rebuild_dsp(takeOpenDeviceGeometry(currentRate, false));
             mDspRebuilt = true;
         }
@@ -4066,6 +4085,11 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
                 if (!failMsg.empty())
                     throw std::runtime_error(failMsg);
             }
+            // Said since the first drain — a refusal at the door, a log line
+            // — leaves before the rings' epoch resets under it
+            // (docs/RESTARTS.md: the old generation's replies all leave
+            // before setup).
+            if (controlPark.parked && !mCurrentConfig.hostDrainsEgress) drainEgressNow();
             rebuild_dsp(newRate);
             mDspRebuilt = true;
         } catch (const std::exception& e) {

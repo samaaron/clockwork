@@ -133,7 +133,13 @@ typedef enum ClockworkStatus {
     CLOCKWORK_E_FULL,       /* the ingress ring had no room; try again later */
     CLOCKWORK_E_TOO_BIG,    /* the message cannot fit in the ring at any moment */
     CLOCKWORK_E_CLOSED,     /* the engine went away under us */
-    CLOCKWORK_E_NOMEM
+    CLOCKWORK_E_NOMEM,
+    CLOCKWORK_E_NO_INSTANCE /* the engine has no guest instance to take this:
+                             * it is between instances (a cold restart) or its
+                             * build failed. The message was not written. A
+                             * message under /clockwork/ is never refused for
+                             * this. Wait for /clockwork/setup, then send again
+                             * (docs/RESTARTS.md). */
 } ClockworkStatus;
 
 /* A phrase for a status, for logs and for bindings that want to raise. Static

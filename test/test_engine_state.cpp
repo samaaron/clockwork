@@ -249,7 +249,7 @@ TEST_CASE("EngineState: purge clears stale messages after cold swap",
     REQUIRE(fix.waitForReply("/dummy/pong", r));
 
     // Purge (simulates what happens during cold swap drain)
-    fix.engine().purge();
+    fix.engine().purge(CLOCKWORK_REFUSED_REBUILDING);
 
     // Verify the engine still works after purge — no leftover state
     fix.clearReplies();
@@ -288,7 +288,7 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
     int32_t unlocked = 0;
     REQUIRE(cursors->in_write_lock.compare_exchange_strong(unlocked, 1));
 
-    fix.engine().purge();
+    fix.engine().purge(CLOCKWORK_REFUSED_REBUILDING);
 
     // Producer resumes: completes the frame at its pre-loaded head and
     // publishes, following RingBufferWriter::write's sequence (header +

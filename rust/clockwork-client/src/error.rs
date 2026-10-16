@@ -32,6 +32,12 @@ pub enum Error {
     Closed,
     /// Out of memory.
     NoMem,
+    /// The engine has no guest instance to take the message: it is between
+    /// instances (a cold restart) or its build failed. Nothing was written.
+    /// A message under `/clockwork/` is never refused for this. Not a retry
+    /// now: wait for `/clockwork/setup`, then send again
+    /// ([`Error::is_wait_for_setup`]).
+    NoInstance,
     /// A status this build of the crate does not name. Receiving one is not
     /// undefined behaviour, which is why the ABI's status is a newtype and
     /// this variant exists.
@@ -55,6 +61,7 @@ impl Error {
             ClockworkStatus::E_TOO_BIG => Error::TooBig,
             ClockworkStatus::E_CLOSED => Error::Closed,
             ClockworkStatus::E_NOMEM => Error::NoMem,
+            ClockworkStatus::E_NO_INSTANCE => Error::NoInstance,
             other => Error::Unknown(other.0),
         })
     }
@@ -71,8 +78,16 @@ impl Error {
             Error::TooBig => ClockworkStatus::E_TOO_BIG,
             Error::Closed => ClockworkStatus::E_CLOSED,
             Error::NoMem => ClockworkStatus::E_NOMEM,
+            Error::NoInstance => ClockworkStatus::E_NO_INSTANCE,
             Error::Unknown(v) => ClockworkStatus(v),
         }
+    }
+
+    /// True for the refusal that ends with `/clockwork/setup`: the engine
+    /// has no guest instance now, and the message is sent again once the
+    /// setup event names the new one (docs/RESTARTS.md).
+    pub fn is_wait_for_setup(self) -> bool {
+        matches!(self, Error::NoInstance)
     }
 
     /// True for the one refusal that is about timing rather than the
@@ -132,6 +147,7 @@ mod tests {
             Error::TooBig,
             Error::Closed,
             Error::NoMem,
+            Error::NoInstance,
             Error::Unknown(99),
         ] {
             assert_eq!(Error::from_status(e.status()), Some(e));

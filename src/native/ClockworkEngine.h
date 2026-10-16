@@ -676,8 +676,9 @@ public:
 
     void printDeviceList();
 
-    // --- Purge stale messages ---
-    void purge();
+    // --- Purge stale messages: every one answered to its sender with
+    // `reason` (a CLOCKWORK_REFUSED_* phrase), none dropped silently ---
+    void purge(const char* reason);
 
 private:
     bool interceptBufferFreed(const uint8_t* data, uint32_t size);

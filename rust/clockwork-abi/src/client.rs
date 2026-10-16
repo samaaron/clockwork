@@ -26,6 +26,7 @@ impl ClockworkStatus {
     pub const E_TOO_BIG: ClockworkStatus = ClockworkStatus(7);
     pub const E_CLOSED: ClockworkStatus = ClockworkStatus(8);
     pub const E_NOMEM: ClockworkStatus = ClockworkStatus(9);
+    pub const E_NO_INSTANCE: ClockworkStatus = ClockworkStatus(10);
 
     pub fn is_ok(self) -> bool { self == Self::OK }
 }

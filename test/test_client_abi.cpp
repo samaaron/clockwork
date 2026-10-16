@@ -267,6 +267,41 @@ TEST_CASE("client abi: refusals are told apart", "[client][abi]") {
     clockwork_client_close(c);
 }
 
+TEST_CASE("client abi: between instances a message for the guest is refused at the boundary, and clockwork's own goes through",
+          "[client][abi][ColdSwap]") {
+    // The flag is in the cursors region, so this is what every writer sees —
+    // a client in this process, a peer on a segment, the browser's ring
+    // writer — and the boundary is where each of them is told
+    // (docs/RESTARTS.md).
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    const auto ping = osc_test::message("/dummy/ping");
+    const auto sys  = osc_test::message(CLOCKWORK_SYS("ping"));
+    ClockworkStatus guestStatus = CLOCKWORK_OK, sysStatus = CLOCKWORK_E_ARG;
+    e.engine.testRebuildFailure = [&]() -> std::string {
+        guestStatus = clockwork_client_send(c, ping.ptr(), ping.size(), 0xC11E);
+        sysStatus   = clockwork_client_send(c, sys.ptr(), sys.size(), 0xC11E);
+        return "";
+    };
+    const auto r = e.engine.switchDevice("", 44100);
+    e.engine.testRebuildFailure = nullptr;
+    REQUIRE(r.success);
+
+    CHECK(guestStatus == CLOCKWORK_E_NO_INSTANCE);
+    CHECK(sysStatus == CLOCKWORK_OK);
+    CHECK(std::string(clockwork_client_status_text(CLOCKWORK_E_NO_INSTANCE)).find("no instance") == 0);
+
+    // With an instance again, the same message goes through.
+    CHECK(clockwork_client_send(c, ping.ptr(), ping.size(), 0xC11E) == CLOCKWORK_OK);
+    osc_test::ParsedReply pong;
+    CHECK(e.reply("/dummy/pong", pong));
+
+    clockwork_client_close(c);
+}
+
 TEST_CASE("client abi: regions are named, and absent is an answer",
           "[client][abi]") {
     Engine e;

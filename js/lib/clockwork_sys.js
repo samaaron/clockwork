@@ -30,3 +30,27 @@ export function clockworkSys(suffix) {
 export function isClockworkSys(address) {
   return typeof address === "string" && address.startsWith(CLOCKWORK_SYS_PREFIX);
 }
+
+/** The address of an encoded OSC packet: its first string. A bundle begins
+ *  "#bundle" and that is what this returns for one, which no rule claims. */
+export function oscAddress(bytes) {
+  let end = 0;
+  while (end < bytes.length && bytes[end] !== 0) end++;
+  let s = "";
+  for (let i = 0; i < end; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+}
+
+/** isClockworkSys, for a packet still in bytes: clockwork_sys_claims in C.
+ *  A bundle is never claimed (clockwork_prefix.h says why). */
+export function isClockworkSysBytes(bytes) {
+  if (!bytes || bytes.length < CLOCKWORK_SYS_PREFIX.length || bytes[0] !== 0x2f) return false;
+  for (let i = 0; i < CLOCKWORK_SYS_PREFIX.length; i++)
+    if (bytes[i] !== CLOCKWORK_SYS_PREFIX.charCodeAt(i)) return false;
+  return true;
+}
+
+/** The reason a message for the guest is refused with when there is no guest
+ *  to take it (CLOCKWORK_REFUSED_NO_INSTANCE in clockwork_sys.h). A client
+ *  reads it as "wait for /clockwork/setup", never as an error to show. */
+export const REASON_NO_INSTANCE = "no instance";

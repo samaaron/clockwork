@@ -166,6 +166,7 @@ add_executable(clockwork_tests
     # survive that and another be cleared by it — which is the whole difference
     # between DspConfig::persistent and DspConfig::guest_memory.
     test_dsp_regions.cpp
+    test_restarts.cpp
 
     # Large payloads across the boundary, both ways — and the claim that there is
     # no separate door for them in either direction. Also fixes the capacity
@@ -411,6 +412,7 @@ add_executable(clockwork_engine_tests
     test_log_hold.cpp
     test_config_validation.cpp
     test_engine_state.cpp
+    test_restart_refusals.cpp
     test_control_plane_liveness.cpp
     test_ingest_overload.cpp
     test_callback_watchdog.cpp

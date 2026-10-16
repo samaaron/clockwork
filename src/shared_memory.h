@@ -650,7 +650,13 @@ enum StatusFlags : uint32_t {
     STATUS_BUFFER_FULL = 1u << 0u,
     STATUS_OVERRUN = 1u << 1u,
     STATUS_WASM_ERROR = 1u << 2u,
-    STATUS_FRAGMENTED_MSG = 1u << 3u
+    STATUS_FRAGMENTED_MSG = 1u << 3u,
+    // There is no guest instance: from the start of a teardown until the next
+    // dsp_new succeeds, and for good after a build that failed. In the cursors
+    // region so that every writer of the in ring, in this process or another,
+    // sees it where it writes: the client boundary refuses a message for the
+    // guest while it is set and lets clockwork's own through (docs/RESTARTS.md).
+    STATUS_NO_INSTANCE = 1u << 4u
 };
 
 // Constants

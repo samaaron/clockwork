@@ -50,6 +50,14 @@ export const NRT_OUT_SEQUENCE = 32;
 export const STATUS_FLAGS = 36;
 export const IN_WRITE_LOCK = 40;
 
+// The bits of status_flags (StatusFlags in shared_memory.h). The one a
+// writer of the in ring reads before it writes: there is no guest instance,
+// from the start of a teardown until the next one is up, so a message for
+// the guest is refused at the boundary rather than written to a ring whose
+// next reader is an instance it was not addressed to. Clockwork's own verbs
+// go through (docs/RESTARTS.md).
+export const STATUS_NO_INSTANCE = 1 << 4;
+
 // Where clockwork_client_poll has read each egress ring to; the tail follows
 // it one poll late, so a polled frame's bytes stay the caller's until then.
 export const OUT_READ = 44;

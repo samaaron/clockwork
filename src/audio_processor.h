@@ -140,10 +140,12 @@ extern "C" {
     // Scheduler control
     EMSCRIPTEN_KEEPALIVE void clear_scheduler();
 
-    // Ask the audio thread to discard everything pending in the IN ring at
-    // the top of its next drain. Callable from any thread — the consuming
-    // thread applies the flush, so it cannot race producers or the drain.
-    void clockwork_ingress_flush_request();
+    // Ask the audio thread to refuse everything pending in the IN ring for the
+    // guest at the top of its next drain, each to its sender with `reason`
+    // (a CLOCKWORK_REFUSED_* phrase, clockwork_sys.h); clockwork's own verbs
+    // are delivered. Callable from any thread — the consuming thread applies
+    // the flush, so it cannot race producers or the drain.
+    void clockwork_ingress_flush_request(const char* reason);
 
 #ifndef __EMSCRIPTEN__
     // Native-only: DSP teardown/rebuild for cold swap

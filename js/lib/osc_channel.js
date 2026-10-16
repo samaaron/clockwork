@@ -3,8 +3,13 @@
 
 import { engineRings, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
-import { calculateInControlIndices } from './ring_cursor_offsets.js';
+import { calculateInControlIndices, STATUS_FLAGS, STATUS_NO_INSTANCE } from './ring_cursor_offsets.js';
 import { sampleClockReader } from './sample_clock.js';
+import { isClockworkSysBytes, REASON_NO_INSTANCE } from './clockwork_sys.js';
+
+/** What a refused send says (`lastRefusal`): the ring had no room. A moment,
+ *  not a verdict: the ring drains every block, so the sender sends again. */
+export const REASON_RING_FULL = "ring full";
 
 // postMessage mode: how far past the audio thread's last word on the time the channel will count by the wall clock.
 // It says so every few blocks while it renders (the worklet's CLOCK_POST_BLOCKS); past this without a word, it has
@@ -37,7 +42,10 @@ export class OscChannel {
     #sabConfig;          // SAB mode: { sharedBuffer, arenaBase, bufferConstants, controlIndices }
     #ingress;            // SAB mode: the engine's ingress ring (js/lib/ring.js)
     #metricsView;        // SAB mode: Int32Array view into metrics region
+    #statusView;         // SAB mode: the cursors' status word, read before a write (STATUS_NO_INSTANCE)
     #sourceId;           // Numeric source ID (0 = main thread, 1+ = workers)
+    #lastRefusal = null; // why the last send was refused, or null when it was written
+    #onRefused = null;   // (bytes, reason) => void: the owner's ear for a refusal
 
     // Node ID allocation (range-based)
     #nodeIdView;         // SAB mode: Int32Array view for atomic counter
@@ -99,6 +107,13 @@ export class OscChannel {
                     config.sharedBuffer,
                     metricsBase,
                     config.bufferConstants.METRICS_SIZE / 4
+                );
+                // The boundary's word on whether there is a guest to write
+                // to, where every writer of the ring reads it.
+                this.#statusView = new Int32Array(
+                    config.sharedBuffer,
+                    config.arenaBase + config.bufferConstants.RING_CURSORS_START + STATUS_FLAGS,
+                    1
                 );
             }
 
@@ -192,10 +207,17 @@ export class OscChannel {
      * the worklet (PM). Classification and scheduling happen on the audio thread
      * (the engine's OscIngress + BundleScheduler) — the producer never classifies.
      *
-     * In SAB mode a send fails only when the ring is FULL. Producers take turns
-     * on the ring's write lock, waiting rather than giving up, so contention
-     * between a worker and the main thread costs a moment instead of a
-     * dropped message — the turn is a header and a copy.
+     * In SAB mode a send is refused for two reasons, and `lastRefusal` says
+     * which. The ring was FULL (REASON_RING_FULL): a moment, not a verdict —
+     * producers take turns on the ring's write lock, waiting rather than
+     * giving up, so contention between a worker and the main thread costs a
+     * moment instead of a dropped message, and a ring that is really full
+     * drains next block. Or there is NO INSTANCE (REASON_NO_INSTANCE): the
+     * engine is between guests, nothing was written, and the message is sent
+     * again after /clockwork/setup; a message under /clockwork/ is never
+     * refused for this (docs/RESTARTS.md). This is the boundary saying so to
+     * the one who sent it, as clockwork_client_send says it to its caller:
+     * the owner hears it through `onRefused` as well, with the bytes.
      *
      * @param {Uint8Array} oscData - OSC message bytes
      * @returns {boolean} true if sent
@@ -205,6 +227,7 @@ export class OscChannel {
             if (!this.#directPort) return false;
             this.#directPort.postMessage({ type: 'osc', oscData, sourceId: this.#sourceId });
             this.#recordSend(oscData.length);
+            this.#lastRefusal = null;
             return true;
         }
 
@@ -212,15 +235,37 @@ export class OscChannel {
 
         const bytes = oscData instanceof Uint8Array ? oscData : new Uint8Array(oscData);
         if (bytes.length === 0) return false;
+        if (this.#statusView
+            && (Atomics.load(this.#statusView, 0) & STATUS_NO_INSTANCE)
+            && !isClockworkSysBytes(bytes)) {
+            return this.#refuse(bytes, REASON_NO_INSTANCE);
+        }
         const success = ringWrite(this.#ingress, bytes, this.#sourceId);
         if (success) {
             this.#recordSend(oscData.length);
-        } else if (this.#metricsView) {
+            this.#lastRefusal = null;
+            return true;
+        }
+        if (this.#metricsView) {
             // The ring had no room. Counted so the loss isn't silent.
             Atomics.add(this.#metricsView, MetricsOffsets.RING_BUFFER_DIRECT_WRITE_FAILS, 1);
         }
-        return success;
+        return this.#refuse(bytes, REASON_RING_FULL);
     }
+
+    #refuse(bytes, reason) {
+        this.#lastRefusal = reason;
+        if (this.#onRefused) this.#onRefused(bytes, reason);
+        return false;
+    }
+
+    /** Why the last send was refused (REASON_NO_INSTANCE, REASON_RING_FULL), or null when it was written. */
+    get lastRefusal() { return this.#lastRefusal; }
+
+    /** The owner's ear for a refusal: called with the bytes that were not
+     *  written and the reason, in the call to send() that refused them. */
+    set onRefused(fn) { this.#onRefused = typeof fn === 'function' ? fn : null; }
+    get onRefused() { return this.#onRefused; }
 
     // =========================================================================
     // The engine's clock

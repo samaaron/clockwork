@@ -12,6 +12,7 @@
  * checking a public boundary owes its callers.
  */
 #include "clockwork_client.h"
+#include "clockwork_prefix.h"   // clockwork_sys_claims: whose message this is
 #include "owner.h"
 
 #include "shared_memory.h"
@@ -99,6 +100,7 @@ const char* clockwork_client_status_text(ClockworkStatus s) {
         case CLOCKWORK_E_TOO_BIG:    return "message larger than the ring can hold";
         case CLOCKWORK_E_CLOSED:     return "engine closed";
         case CLOCKWORK_E_NOMEM:      return "out of memory";
+        case CLOCKWORK_E_NO_INSTANCE: return "no instance: the engine is between guests; wait for setup";
     }
     return "unknown status";
 }
@@ -238,6 +240,15 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     // A frame that cannot fit an empty ring will never fit: say so once rather
     // than let a caller retry forever.
     if (bytes + sizeof(Message) > c->L.in_ring_size) return CLOCKWORK_E_TOO_BIG;
+
+    // No guest instance to take it: refused here, at the boundary, rather
+    // than written to a ring whose next reader is an instance it was not
+    // addressed to. Clockwork's own verbs go through: the engine answers
+    // those with or without a guest (docs/RESTARTS.md). The flag is in the
+    // cursors region, so a client in another process reads the same word.
+    if ((c->control()->status_flags.load(std::memory_order_acquire) & STATUS_NO_INSTANCE)
+        && !clockwork_sys_claims(osc, bytes))
+        return CLOCKWORK_E_NO_INSTANCE;
 
     const bool ok = RingBufferWriter::write(
         c->base + c->L.in_ring_offset, c->L.in_ring_size,

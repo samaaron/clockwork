@@ -18,6 +18,8 @@
 
 #include "../audio_processor.h"          // arena globals + process_audio + accessors
 #include "../audio_config.h"             // block-size and channel caps
+#include "../clockwork_prefix.h"         // clockwork_sys_claims: whose message this is
+#include "../clockwork_sys.h"            // clockwork_sys_refuse, the refusal reasons
 #include "../shared_memory.h"            // layout, RingCursors, EgressRoute
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
 
@@ -91,6 +93,18 @@ void clockwork_lanes_reset_rings(void) {
 bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id) {
     if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
         return false;
+    // No guest instance to take it: refused at the boundary, with the word
+    // on the NRT egress for the source that sent it, as the client ABI's
+    // status says the same to its caller (docs/RESTARTS.md). Clockwork's own
+    // verbs go through and wait in the ring for the engine, instance or none.
+    if ((cursors->status_flags.load(std::memory_order_acquire) & STATUS_NO_INSTANCE)
+        && !clockwork_sys_claims(osc, len)) {
+        clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
+            [source_id](const uint8_t* d, uint32_t n) {
+                clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
+            });
+        return false;
+    }
     return RingBufferWriter::write(
         shared_memory + IN_RING_START, IN_RING_SIZE,
         &cursors->in_head, &cursors->in_tail,

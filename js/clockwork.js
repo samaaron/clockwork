@@ -8,7 +8,7 @@
 
 import { createTransport, OscChannel } from "./lib/transport/index.js";
 import { readTimetag, getCurrentNTPFromPerformance } from "./lib/osc_classifier.js";
-import { clockworkSys } from "./lib/clockwork_sys.js";
+import { clockworkSys, oscAddress, REASON_NO_INSTANCE } from "./lib/clockwork_sys.js";
 import { HostFront } from "./lib/host_front.js";
 
 export { OscChannel };
@@ -2527,7 +2527,19 @@ export class Clockwork {
     // The audio thread classifies + schedules (OscIngress + Scheduler).
     // A SAB write that loses the lock race / hits a full ring is dropped and
     // counted as ringBufferDirectWriteFails (no fallback) — not silent.
-    this.#oscChannel.send(preparedData);
+    //
+    // A message for the guest while there is no guest is refused at the
+    // boundary, and the client hears the refusal the way it hears every
+    // other: /clockwork/error with the address and the reason, on the same
+    // path as the engine's replies (docs/RESTARTS.md). The word is
+    // "wait for /clockwork/setup", so a listener re-sends then.
+    if (!this.#oscChannel.send(preparedData)
+        && this.#oscChannel.lastRefusal === REASON_NO_INSTANCE) {
+      this.#deliverInbound(
+        oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"),
+                                                  [oscAddress(preparedData), REASON_NO_INSTANCE])),
+        -1, performance.now());
+    }
   }
 
       }
