@@ -11,11 +11,11 @@
  * why in its message. A surprise failure here means the refactor changed
  * behaviour it didn't mean to.
  *
- * Everything runs against a real juce::AudioDeviceManager whose only
- * device types are fakes — manager logic (name validation, setup
- * resolution, type switching) is JUCE's own. First suite in the repo to
- * exercise these paths off-hardware; before the deviceManagerFactory
- * seam every engine device test ran with a null manager.
+ * Everything runs against a real device session (smoothie_devices.h)
+ * whose only drivers are fakes — the session's logic (name validation,
+ * the rate and buffer it chooses, driver changes) is its own. First suite
+ * in the repo to exercise these paths off-hardware; before the fake
+ * drivers every engine device test ran with no devices at all.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "DeviceInvariants.h"

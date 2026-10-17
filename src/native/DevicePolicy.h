@@ -91,7 +91,7 @@ bool shouldFollowDefaultOutputChange(const std::string& newDefault,
 std::string selectRecoveryTarget(const std::string& pinned,
                                  const std::vector<std::string>& visible);
 
-// True if `name` (or its JUCE "<name> (N)" disambiguated form) currently
+// True if `name` (or its driver's "<name> (N)" disambiguated form) currently
 // appears in `visibleNames`. Same "<base> (N)" tolerance as
 // resolveJuceDeviceName.
 bool deviceNameVisible(const std::string& name,
@@ -116,16 +116,16 @@ HotplugDecision decideHotplugAction(
     int  currentActiveInputChannels,
     const std::vector<std::string>& visibleDevices);
 
-// Translate a CoreAudio-raw device name into JUCE's disambiguated form.
+// Translate a CoreAudio-raw device name into the driver's disambiguated form.
 //
-// JUCE appends " (N)" to device names when CoreAudio has duplicate base
-// names (e.g. two identical USB interfaces, two AirPlay endpoints with
-// the same base name). CoreAudio APIs return the raw base name; JUCE
-// APIs (setAudioDeviceSetup) require the suffixed form or error with
+// The CoreAudio driver appends " (N)" to device names when CoreAudio has
+// duplicate base names (e.g. two identical USB interfaces, two AirPlay
+// endpoints with the same base name). CoreAudio APIs return the raw base
+// name; the device session opens only the suffixed form, or errors with
 // "No such device". Call this whenever a name sourced from CoreAudio
-// needs to be handed to JUCE.
+// needs to be opened.
 //
-// An unmatched name is returned unchanged, so JUCE errors normally rather than
+// An unmatched name is returned unchanged, so the open errors normally rather than
 // being silently rewritten. The match is strict on "<raw> (digits)": a
 // prefix+space check would match "USB Audio Pro" against "USB Audio".
 // The stricter "<raw> (digits)" check avoids matching "USB Audio Pro"
@@ -173,7 +173,7 @@ std::vector<std::string> scopeInputsToDriver(
 // `visibleInputs` are the inputs that can pair with that output (the caller
 // leaves out any its driver won't pair — #3555: a Bluetooth HFP mic in an
 // aggregate made a 16 kHz engine and corrupted the heap).
-//   - requestedInput visible (exact or JUCE "<name> (N)" form,
+//   - requestedInput visible (exact or the driver's "<name> (N)" form,
 //     resolveJuceDeviceName) → the resolved name
 //   - otherwise (no request / "__none__" / unplugged / can't pair) →
 //     systemDefaultInput (the caller passes the input already open, so
@@ -182,7 +182,7 @@ std::string chooseBootInputDevice(const std::string& requestedInput,
                                   const std::string& systemDefaultInput,
                                   const std::vector<std::string>& visibleInputs);
 
-// Resolve the driver (JUCE device type) the engine opens at boot. `requested` is
+// Resolve the driver the engine opens at boot. `requested` is
 // the embedder's --audio-driver value, so boot lands on the saved preference
 // instead of opening the platform default and being cold-swapped after the
 // handshake. `hasDeviceRequest` is whether a -H output device came with it.
@@ -233,9 +233,9 @@ std::string validateSwapDeviceNames(
     const std::string& inputDeviceName,
     const std::vector<std::string>& visibleDevices);
 
-// A device's location: which AudioIODeviceType owns it, and the
-// canonical (driver-disambiguated) device name. Pure data — no JUCE
-// dependency so it can be returned from a unit-testable helper.
+// A device's location: which driver lists it, and the canonical
+// (driver-disambiguated) device name. Pure data, so it can be returned
+// from a unit-testable helper.
 struct DeviceLocation {
     std::string driverName;
     std::string deviceName;
@@ -246,7 +246,7 @@ struct DeviceLocation {
 // flat list of (driverName, deviceName) pairs across every available
 // type (callers build this by iterating getAvailableDeviceTypes() +
 // scanForDevices() + getDeviceNames(false)). Match is case-sensitive
-// exact, plus the JUCE "<base> (N)" disambiguation suffix tolerated
+// exact, plus the driver's "<base> (N)" disambiguation suffix tolerated
 // (matches resolveJuceDeviceName's rules).
 //
 // Returns {found=false} if the name resolves to no known device. The
@@ -311,7 +311,7 @@ SwapScopeDecision resolveSwapScope(
     const std::vector<std::pair<std::string, std::string>>& deviceTable);
 
 // The list-shaping half of sendDeviceReport: which devices the GUI is
-// offered, given everything JUCE enumerated. Filter order is contractual:
+// offered, given everything the drivers listed. Filter order is contractual:
 //   1. platform clutter hidden (isPlatformClutter, with PipeWire-active
 //      detection folded in — direct-hw ALSA PCMs are unopenable while
 //      PipeWire owns the card);
@@ -326,7 +326,7 @@ SwapScopeDecision resolveSwapScope(
 //   6. flat lists dedupe by name, active driver's entry winning
 //      (Windows enumerates one endpoint under four driver types);
 //   7. an empty input list against a non-empty current input marks the
-//      snapshot transient (JUCE mid-churn) — suppress the whole report,
+//      snapshot transient (the driver mid-churn) — suppress the whole report,
 //      or the GUI silently deselects the user's mic.
 struct DeviceListSelection {
     bool pipewireActive = false;
@@ -344,7 +344,7 @@ DeviceListSelection selectReportedDevices(
 
 // Where a swap will land, driver-wise. Accumulated across the output and input
 // names of one swap request by resolveSwapTarget; crossDriver latches first-wins
-// — the first name resolving under a driver other than JUCE's actual type decides
+// — the first name resolving under a driver other than the one open decides
 // the transition, and the second never overwrites it.
 struct SwapScope {
     bool        crossDriver = false;
@@ -357,13 +357,13 @@ struct SwapScope {
 // `scope`. Returns an error string when the name doesn't resolve under
 // the scoped driver — exact wording is a GUI-facing contract — or empty
 // on success / sentinel / empty name. The cross-driver comparison runs
-// against `juceCurrentType` (JUCE's actual open type), NOT the scope:
-// that's what setCurrentAudioDeviceType has to be called for, regardless
-// of the pending-intent scope used for the lookup.
+// against `currentDriver` (the driver actually open), NOT the scope:
+// that's the driver the device is opened away from, whatever the
+// pending-intent scope used for the lookup.
 std::string resolveSwapTarget(
     const std::string& name,
     const std::string& scopedDriver,
-    const std::string& juceCurrentType,
+    const std::string& currentDriver,
     const std::vector<std::pair<std::string, std::string>>& deviceTable,
     SwapScope& scope);
 
@@ -395,8 +395,8 @@ struct SwapPlanRequest {
 };
 
 struct SwapSnapshot {
-    bool hasDeviceManager = false;       // headless: only rate/cold basics apply
-    std::string juceCurrentType;         // JUCE's actually-open type
+    bool hasDevices = false;             // headless: only rate/cold basics apply
+    std::string currentDriver;           // the driver actually open
     std::string intendedDriver;          // pending switchDriver intent
     std::string deviceMode;              // pinned output ("" = system mode)
     std::vector<std::pair<std::string, std::string>> deviceTable;
@@ -447,7 +447,7 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap);
 double resolveTargetRate(const std::vector<double>& deviceRates,
                          double currentRate);
 
-// THE device-name identity predicate: equal, or equal modulo JUCE's " (N)"
+// THE device-name identity predicate: equal, or equal modulo the driver's " (N)"
 // duplicate-disambiguation suffix (digits only), in either direction. NOT a
 // "base + space" prefix rule — that matches "USB Audio Pro" against "USB Audio",
 // letting the hotplug auto-switch treat a different physical device as the

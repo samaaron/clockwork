@@ -21,6 +21,7 @@
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
 
 #include "PipeWireAudio.h"
+#include "smoothie_juce_drivers.h"
 #include "owner.h"
 
 #include <dlfcn.h>
@@ -214,8 +215,8 @@ struct PwNodeInfo {
 
 //==============================================================================
 // Process-lifetime daemon connection + registry mirror. Never torn down: the
-// loop thread and dlopen'd library outlive every AudioDeviceManager the engine
-// creates (it rebuilds managers on cold recovery), and skipping shutdown
+// loop thread and dlopen'd library outlive every device session the engine
+// makes (it makes a fresh one on cold recovery), and skipping shutdown
 // avoids exit-order races against PipeWire's own threads — the same reason
 // JUCE never dlcloses libjack.
 class PipeWireSystem {
@@ -341,7 +342,7 @@ public:
 
     // Device-change fan-out to live subscribers: the device type, and an
     // open patchbay device that needs to revisit its auto-links (the engine
-    // rebuilds its AudioDeviceManager — and therefore our type — on cold
+    // makes a fresh device session — and therefore our type — on cold
     // recovery, so sinks register and unregister dynamically).
     void addChangeSink(void* owner, std::function<void()> fn) {
         std::lock_guard<std::mutex> g(mSinkMutex);
@@ -1586,12 +1587,18 @@ private:
 
 } // namespace
 
-std::unique_ptr<juce::AudioIODeviceType> createPipeWireAudioIODeviceType() {
-    // Library presence alone decides registration; daemon connection is
-    // retried on every scan so a daemon started after boot still shows up.
-    if (!PipeWireSystem::instance().libLoaded())
-        return nullptr;
-    return std::make_unique<PipeWireAudioIODeviceType>();
+std::shared_ptr<const smoothie::DriverFactory> platformDriversWithPipeWire() {
+    auto factory = std::make_shared<smoothie::DriverFactory>();
+    factory->make = [] {
+        smoothie::Drivers drivers = smoothie::platformDrivers();
+        // Library presence alone decides whether the driver is there; the
+        // daemon connection is retried on every scan so a daemon started
+        // after boot still shows up.
+        if (PipeWireSystem::instance().libLoaded())
+            drivers.push_back(std::make_unique<PipeWireAudioIODeviceType>());
+        return drivers;
+    };
+    return factory;
 }
 
 const char* pipeWirePatchbayDeviceName() { return kPatchbayDeviceName; }

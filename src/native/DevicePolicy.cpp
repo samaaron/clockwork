@@ -13,8 +13,8 @@
 namespace clockwork::device {
 
 namespace {
-// full == base + " (digits)" — JUCE's duplicate-name suffix, exactly.
-bool hasJuceDupSuffix(const std::string& full, const std::string& base) {
+// full == base + " (digits)" — the CoreAudio driver's duplicate-name suffix, exactly.
+bool hasDuplicateSuffix(const std::string& full, const std::string& base) {
     if (full.size() < base.size() + 4) return false;   // need " (1)"
     if (full.compare(0, base.size(), base) != 0) return false;
     size_t i = base.size();
@@ -30,7 +30,7 @@ bool hasJuceDupSuffix(const std::string& full, const std::string& base) {
 } // anonymous namespace
 
 bool sameDeviceName(const std::string& a, const std::string& b) {
-    return a == b || hasJuceDupSuffix(a, b) || hasJuceDupSuffix(b, a);
+    return a == b || hasDuplicateSuffix(a, b) || hasDuplicateSuffix(b, a);
 }
 
 
@@ -40,15 +40,15 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
     plan.sampleRate = req.sampleRate;
     bool forceCold  = req.forceCold;
 
-    if (snap.hasDeviceManager) {
+    if (snap.hasDevices) {
         auto scopeDecision = resolveSwapScope(
-            req.userInitiated, snap.intendedDriver, snap.juceCurrentType,
+            req.userInitiated, snap.intendedDriver, snap.currentDriver,
             req.outputName, req.inputName, snap.deviceTable);
         plan.abandonDriverIntent = scopeDecision.abandonIntent;
 
         if (auto err = resolveSwapTarget(req.outputName,
                                          scopeDecision.scopedDriver,
-                                         snap.juceCurrentType,
+                                         snap.currentDriver,
                                          snap.deviceTable, plan.scope);
             !err.empty()) {
             plan.error = err;
@@ -56,7 +56,7 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
         }
         if (auto err = resolveSwapTarget(req.inputName,
                                          scopeDecision.scopedDriver,
-                                         snap.juceCurrentType,
+                                         snap.currentDriver,
                                          snap.deviceTable, plan.scope);
             !err.empty()) {
             plan.error = err;
@@ -84,7 +84,7 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
     // pre-wireless rate (the wireless receiver's negotiated rate must not
     // carry onto hardware).
     if (plan.sampleRate <= 0 && snap.preWirelessRate > 0
-        && snap.hasDeviceManager) {
+        && snap.hasDevices) {
         const std::string targetName =
             req.outputName.empty() ? snap.deviceMode : req.outputName;
         const double resolved = resolveWirelessExitRate(
@@ -136,7 +136,7 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
     // instance keeps writing into the channel range it booted with, and
     // anything above that never reaches hardware.
     bool channelsChange = false;
-    if (snap.hasDeviceManager && !forceCold) {
+    if (snap.hasDevices && !forceCold) {
         if (snap.probedTargetOut > 0
             && snap.probedTargetOut != snap.currentOutputChannels)
             channelsChange = true;
@@ -400,9 +400,9 @@ std::string resolveJuceDeviceName(const std::string& rawName,
     for (auto& v : visibleDevices)
         if (v == rawName) return v;
 
-    // Looking for "<rawName> (<digits>)" — JUCE's disambiguation pattern.
+    // Looking for "<rawName> (<digits>)" — the driver's disambiguation pattern.
     for (auto& v : visibleDevices)
-        if (hasJuceDupSuffix(v, rawName)) return v;
+        if (hasDuplicateSuffix(v, rawName)) return v;
 
     return rawName;
 }
@@ -416,7 +416,7 @@ std::string selectBootOutputDevice(const std::string& defaultName,
 
     // Prefer a built-in or similarly obvious non-wireless candidate.
     // If several exist, the first non-wireless device in enumeration
-    // order wins — JUCE's order matches System Settings top-to-bottom
+    // order wins — CoreAudio's order matches System Settings top-to-bottom
     // so this is predictable to the user.
     for (size_t i = 0; i < visibleDevices.size(); ++i) {
         if (!visibleIsWireless[i] && !visibleDevices[i].empty()
@@ -430,7 +430,7 @@ std::string selectBootOutputDevice(const std::string& defaultName,
 std::string resolveSwapTarget(
         const std::string& name,
         const std::string& scopedDriver,
-        const std::string& juceCurrentType,
+        const std::string& currentDriver,
         const std::vector<std::pair<std::string, std::string>>& deviceTable,
         SwapScope& scope) {
     if (name.empty() || name == "__system__" || name == "__none__")
@@ -440,7 +440,7 @@ std::string resolveSwapTarget(
         return "device '" + name + "' not available on driver '"
              + (scopedDriver.empty() ? "(none)" : scopedDriver) + "'";
     }
-    if (plan.targetDriver != juceCurrentType && !scope.crossDriver) {
+    if (plan.targetDriver != currentDriver && !scope.crossDriver) {
         scope.crossDriver  = true;
         scope.targetDriver = plan.targetDriver;
         scope.targetDevice = plan.targetDevice;
@@ -505,7 +505,7 @@ namespace {
 bool deviceNameAcceptable(const std::string& name,
                           const std::vector<std::string>& visible) {
     for (auto& v : visible)
-        if (v == name || hasJuceDupSuffix(v, name)) return true;
+        if (v == name || hasDuplicateSuffix(v, name)) return true;
     return false;
 }
 } // anonymous namespace
@@ -525,7 +525,7 @@ DeviceLocation locateDevice(
             return result;
         }
     }
-    // Tolerate JUCE's "<base> (N)" disambiguation suffix on either side.
+    // Tolerate the driver's "<base> (N)" disambiguation suffix on either side.
     for (auto& [drv, dev] : deviceTable) {
         if (dev.size() < deviceName.size() + 4) continue;
         if (dev.compare(0, deviceName.size(), deviceName) != 0) continue;

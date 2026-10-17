@@ -13,14 +13,14 @@
  * hardware carry the hidden [.hardware] tag and run only when named.
  *
  * The listener installs, for every case not tagged [.hardware], a process
- * default device-manager factory that REFUSES: the engine builds its manager
- * from it (ClockworkEngine::setDefaultDeviceManagerFactory), so a case that
+ * default driver factory that REFUSES: the engine makes its device session's
+ * drivers from it (ClockworkEngine::setDefaultDrivers), so a case that
  * reaches a real device fails on the throw, by name, before any device is
  * touched. Registered from test_main.cpp.
  */
 #pragma once
 #include "ClockworkEngine.h"
-#include "DeviceManagerFactory.h"
+#include "smoothie_juce_drivers.h"
 #include <catch2/catch_test_case_info.hpp>
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <memory>
@@ -29,9 +29,9 @@
 
 namespace real_device_guard {
 
-inline std::shared_ptr<const DeviceManagerFactory> refusing(const std::string& caseName) {
-    auto f = std::make_shared<DeviceManagerFactory>();
-    f->make = [caseName]() -> std::unique_ptr<juce::AudioDeviceManager> {
+inline std::shared_ptr<const smoothie::DriverFactory> refusing(const std::string& caseName) {
+    auto f = std::make_shared<smoothie::DriverFactory>();
+    f->make = [caseName]() -> smoothie::Drivers {
         throw std::runtime_error(
             "\"" + caseName + "\" would open a real audio device. Run headless "
             "(EngineFixture::defaultConfig()), on the fake system "
@@ -46,10 +46,10 @@ struct Listener : Catch::EventListenerBase {
     void testCaseStarting(Catch::TestCaseInfo const& info) override {
         // Catch renders the hidden tag [.hardware] as [.] and [hardware].
         const bool hardware = info.tagsAsString().find("[hardware]") != std::string::npos;
-        ClockworkEngine::setDefaultDeviceManagerFactory(hardware ? nullptr : refusing(info.name));
+        ClockworkEngine::setDefaultDrivers(hardware ? nullptr : refusing(info.name));
     }
     void testCaseEnded(Catch::TestCaseStats const&) override {
-        ClockworkEngine::setDefaultDeviceManagerFactory(refusing("(between cases)"));
+        ClockworkEngine::setDefaultDrivers(refusing("(between cases)"));
     }
 };
 

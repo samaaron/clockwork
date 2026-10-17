@@ -3,14 +3,14 @@
 /*
  * FakeAudioDevice.h — scriptable JUCE audio devices for hermetic engine tests.
  *
- * The seam is Config::deviceManagerFactory: the engine constructs its
- * juce::AudioDeviceManager through it (boot AND recovery recreate), so a
- * test can hand the engine a REAL manager whose only device types are
- * fakes. Every line of manager logic — name validation, setup resolution,
- * type switching, change broadcasts — is JUCE's own; only the device edge
- * (open/start/callback) is simulated. That is deliberately the opposite
- * of mocking the manager: the manager's behaviour is part of what the
- * engine tests must exercise.
+ * The seam is Config::drivers: the engine makes its device session's
+ * drivers through it (boot AND recovery's fresh session), so a test hands
+ * the engine a REAL session (smoothie_devices.h) whose only drivers are
+ * fakes. Every line of the session — name validation, the rate and buffer
+ * it chooses, driver changes, change reports — is its own; only the device
+ * edge (open/start/callback) is simulated. That is deliberately the
+ * opposite of mocking the session: its behaviour is part of what the engine
+ * tests must exercise.
  *
  * A FakeAudioIODevice delivers real callbacks from its own thread at
  * roughly hardware cadence, so waitForBlocks / the watchdog / first-tick
@@ -25,7 +25,6 @@
 #pragma once
 
 #include "ClockworkEngine.h"
-#include "DeviceManagerFactory.h"
 #include "smoothie_juce_drivers.h"
 #include <atomic>
 #include <chrono>
@@ -102,8 +101,8 @@ enum class Says {
 };
 
 // The simulated machine: device types and their devices, shared between
-// the test (which scripts it) and every manager the factory builds —
-// including managers built later by recovery's recreateDeviceManager.
+// the test (which scripts it) and every session the factory makes drivers
+// for — including the fresh one a recovery makes.
 struct FakeSystem {
     struct TypeSpec {
         std::string typeName;
@@ -135,8 +134,8 @@ struct FakeSystem {
         return *d;
     }
 
-    // The device types alive right now. Each manager owns its own, and
-    // recovery replaces the manager, so a case delivers an OS notification
+    // The device types alive right now. Each session owns its own, and
+    // recovery replaces the session, so a case delivers an OS notification
     // through whichever exists.
     std::mutex liveTypesMutex;
     std::vector<FakeAudioIODeviceType*> liveTypes;
@@ -144,7 +143,7 @@ struct FakeSystem {
     // The OS reporting "the device list changed": on the calling thread, at
     // the caller's moment, through whichever device type is alive. Fenced
     // against that type being destroyed mid-call, as CoreAudio's listener is
-    // (LiveInternalRegistry). False when no manager exists, or when the
+    // (LiveInternalRegistry). False when no session exists, or when the
     // driver hears nothing of it (TypeSpec::listChanges): the case then has
     // the engine look for itself (its watchdog) as it would on that driver.
     bool reportListChanged();
@@ -591,21 +590,6 @@ inline bool FakeSystem::reportDefaultChanged() {
     return !liveTypes.empty() && liveTypes.back()->reportDefaultChanged();
 }
 
-class FakeDeviceManager : public juce::AudioDeviceManager {
-public:
-    explicit FakeDeviceManager(std::shared_ptr<FakeSystem> system)
-        : mSystem(std::move(system)) {}
-
-    void createAudioDeviceTypes(
-        juce::OwnedArray<juce::AudioIODeviceType>& types) override {
-        for (size_t i = 0; i < mSystem->types.size(); ++i)
-            types.add(new FakeAudioIODeviceType(mSystem, i));
-    }
-
-private:
-    std::shared_ptr<FakeSystem> mSystem;
-};
-
 // The engine's watchdog on the case's clock (FakeSystem::useVirtualTime,
 // Config::watchdogClockMs = the system's nowMs): polled every `pollMs` of it,
 // while every playing device delivers what falls due, until `done` or `forMs`
@@ -738,13 +722,6 @@ std::vector<Driver> onePerWay(Keep keep, Way way) {
     return out;
 }
 
-inline std::function<std::unique_ptr<juce::AudioDeviceManager>()>
-makeFactory(std::shared_ptr<FakeSystem> system) {
-    return [system] {
-        return std::make_unique<FakeDeviceManager>(system);
-    };
-}
-
 // The system's drivers, made afresh for each session that asks.
 inline std::shared_ptr<const smoothie::DriverFactory>
 makeDrivers(std::shared_ptr<FakeSystem> system) {
@@ -771,8 +748,7 @@ inline ClockworkEngine::Config fakeEngineConfig(
     cfg.numOutputChannels    = 2;
     cfg.numInputChannels     = 0;   // skip mac aggregate-promotion CoreAudio reads
     cfg.hardwareDevice       = bootOutput;  // skip mac default-output CoreAudio reads
-    cfg.deviceManagerFactory = std::make_shared<DeviceManagerFactory>(
-        DeviceManagerFactory{ makeFactory(std::move(system)) });
+    cfg.drivers              = makeDrivers(std::move(system));
     return cfg;
 }
 

@@ -15,9 +15,9 @@ the platform owns the hardware and calls a processor with buffers.
 `worklet/smoothie_worklet.h` is that whole interface — a `Processor` handed
 plain facts about the device and plain buffers, and `startPlatform()` — and it
 contains no JUCE. JUCE is used here and nowhere above: the engine, its hosts
-and their tests reach the hardware through the worklet alone, and a JUCE type,
-include or initialiser outside this tree is a bug to move into it.
-`worklet/smoothie_juce_device_callback.h` is the worklet's JUCE side.
+and their tests reach the hardware through the worklet and the devices below,
+and a JUCE type, include or initialiser outside this tree is a bug to move
+into it.
 
 ## The devices
 

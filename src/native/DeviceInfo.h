@@ -24,7 +24,7 @@ struct DeviceInfo {
     bool outChannelsProbed = false;
     bool inChannelsProbed  = false;
 
-    // What its driver says it is (juce::AudioIODeviceType::DeviceTraits):
+    // What its driver says it is (smoothie::DeviceTraits):
     // a wireless link negotiates its own rate and buffer (Bluetooth, AirPlay
     // — codecs unsuited to low-latency work: HFP's 16 kHz mono, AirPlay's
     // buffering); a virtual device is made in software (Loopback,
@@ -43,7 +43,7 @@ struct DeviceInfo {
 
     // Hide platform-specific clutter from the GUI dropdown list. On macOS
     // the wireless / virtual predicates above cover everything. On Linux
-    // JUCE's ALSA backend exposes a raft of redundant PCM nodes (surround
+    // the ALSA driver exposes a raft of redundant PCM nodes (surround
     // 2.1/4.0/5.1/7.1, Direct sample mixing / snooping) that users don't
     // want to scroll through. Additionally, when PipeWire is active
     // (pipewireActive=true), direct-hardware ALSA PCMs cannot be opened
@@ -112,8 +112,8 @@ struct SwapResult {
     // Set by switchDriver when the driver was selected but no device
     // was opened — the caller (GUI) must follow up with switchDevice
     // naming a specific device. Used on ASIO and on any driver with
-    // no remembered preferred device, where letting JUCE auto-pick
-    // the alphabetical-first device of the new type is unsafe.
+    // no remembered preferred device, where opening the new driver's
+    // alphabetical-first device is unsafe.
     bool        requiresDeviceSelection = false;
     // Set when the target opened but delivered no audio and the engine went
     // back to the device it was playing on, which does: deviceName, rate and

@@ -57,12 +57,13 @@
 #include "shm_segment.hpp"
 #include <memory>
 
-// Held, not seen. Their headers bring JUCE, and a host that includes this one
-// must not need it: the engine uses JUCE inside, and none of it is a host's.
-namespace juce { class AudioDeviceManager; }
-namespace smoothie { class JuceDeviceCallback; }
+// Held, not seen: a host that includes this header needs neither.
+namespace smoothie {
+class DeviceSession;     // smoothie_devices.h
+struct DeviceRequest;    // smoothie_devices.h
+struct DriverFactory;    // smoothie_juce_drivers.h: it brings JUCE, which no host needs
+}
 class HeadlessDriver;
-struct DeviceManagerFactory;   // DeviceManagerFactory.h
 
 class ClockworkEngine {
     friend class EngineFixture;
@@ -73,7 +74,7 @@ public:
     ClockworkEngine(ClockworkEngine&&) = delete;
     ClockworkEngine& operator=(ClockworkEngine&&) = delete;
     // Channel-count sentinel: negative means "open the device with all its
-    // channels active (let JUCE/CoreAudio clamp to the hardware max)".
+    // channels active (the driver clamps to the hardware max)".
     // 0 still means "disabled" for inputs; positive N means "exactly N".
     static constexpr int kAutoChannelCount   = -1;
     // Upper bound on channels we'll ever request when the true capacity is
@@ -201,7 +202,7 @@ public:
         std::string inputDevice;                   // -H input name (first of two, or the
                                                    // single shared name); empty = pair with
                                                    // the system default input
-        std::string audioDriver;                   // --audio-driver: JUCE device type name
+        std::string audioDriver;                   // --audio-driver: the driver's name
                                                    // to boot on (e.g. "Windows Audio",
                                                    // "DirectSound", "ASIO", "PipeWire").
                                                    // Resolved by resolveBootDriver; an
@@ -220,24 +221,24 @@ public:
         // cannot know.
         std::string pluginBridgePath;
 
-        // Test boundary: what builds the device manager. When set, the engine
-        // builds its manager from this instead of a plain one — both at boot
-        // and in recovery's recreateDeviceManager — and skips every
-        // platform-specific piece of device bring-up (PipeWire registration,
-        // the Windows driver preference): the factory's manager owns its own
-        // device types, typically fakes (test/FakeAudioDevice.h). Opaque here,
-        // as the manager is JUCE's (DeviceManagerFactory.h). Production
-        // leaves it null.
-        std::shared_ptr<const DeviceManagerFactory> deviceManagerFactory;
+        // Test boundary: what makes the device session's drivers. When set,
+        // the engine's session is made of these drivers instead of the
+        // platform's — at boot and in recovery's fresh session alike — and
+        // every platform-specific piece of device bring-up (PipeWire, the
+        // Windows driver preference) is skipped: the drivers are the
+        // factory's, typically fakes (test/FakeAudioDevice.h). Opaque here,
+        // as drivers are JUCE's (smoothie_juce_drivers.h). Production leaves
+        // it null.
+        std::shared_ptr<const smoothie::DriverFactory> drivers;
     };
 
-    // The factory every engine in this process builds its manager from when
-    // its Config names none: a test binary installs one that refuses, so a
+    // The drivers every engine in this process makes its session of when its
+    // Config names none: a test binary installs a factory that refuses, so a
     // case that would reach a real device fails by name instead of opening
     // it under whatever the machine is playing (test/RealDeviceGuard.h); an
-    // embedder may install one the same way. Null: a plain manager, the
-    // platform's devices. Read at every manager build, so set it before.
-    static void setDefaultDeviceManagerFactory(std::shared_ptr<const DeviceManagerFactory> factory);
+    // embedder may install one the same way. Null: the platform's devices.
+    // Read whenever a session is made, so set it before.
+    static void setDefaultDrivers(std::shared_ptr<const smoothie::DriverFactory> drivers);
 
     ClockworkEngine();
     ~ClockworkEngine();
@@ -491,11 +492,11 @@ public:
     //                   preferred input sub-device.
     // Any other non-empty value is treated as a literal device name.
     //
-    // rescan=true triggers a full CoreAudio re-enumeration (may disrupt a
-    // just-opened device on macOS). Pass false to reuse JUCE's cached list.
+    // rescan=true has every driver list its devices again (on macOS that
+    // may disrupt a just-opened device). False reuses the last list.
     std::vector<DeviceInfo>  listDevices(bool rescan = true) const;
-    // The Config's factory, else the process default (setDefaultDeviceManagerFactory).
-    std::shared_ptr<const DeviceManagerFactory> deviceManagerFactory() const;
+    // The Config's drivers, else the process default (setDefaultDrivers).
+    std::shared_ptr<const smoothie::DriverFactory> driverFactory() const;
     CurrentDeviceInfo        currentDevice() const;
     // True when `name` is the device table's synthetic default-follow row
     // ("System Default" under a driver that has no real device of that
@@ -536,9 +537,9 @@ public:
 
     // --- Audio driver management ---
     std::vector<std::string> listDrivers() const;
-    // The driver type of whichever device JUCE actually has open (or
-    // the active type if no device is open). Does NOT reflect the
-    // user's pending choice — see intendedDriver().
+    // The driver of whichever device is actually open (or the
+    // session's driver if none is). Does NOT reflect the user's
+    // pending choice — see intendedDriver().
     std::string              currentDriver() const;
     // The user's last switchDriver() pick when it wasn't followed by
     // an immediate device transition (no saved preference + ASIO, or
@@ -548,7 +549,7 @@ public:
     std::string              intendedDriver() const;
     SwapResult               switchDriver(const std::string& driverName);
 
-    // True iff JUCE rejected the (outputName, inputName) pair on a
+    // True iff the driver refused the (outputName, inputName) pair on a
     // previous swap. The pair is remembered in mUngatableInputPairs
     // and filtered out of subsequent device-list pushes — "don't show
     // options we can't honour." Cleared by hotplug rescans.
@@ -630,9 +631,10 @@ public:
     // Bounded acquisition of the swap gate: up to `attempts` try_locks,
     // `sleepMs` apart, mirroring executePendingSwitch's retry discipline.
     // Used by setDeviceMode's system-default reinit so it cannot interleave
-    // with an in-flight switchDevice — two threads driving JUCE's
-    // AudioDeviceManager concurrently can wedge the device's callback
-    // thread. Public so tests can exercise the gate without a device.
+    // with an in-flight switchDevice — two threads driving the device
+    // session concurrently can wedge the device's callback thread
+    // (DirectSound's, in a cursor-poll spin). Public so tests can exercise
+    // the gate without a device.
     bool tryAcquireSwapGate(std::unique_lock<std::recursive_mutex>& lk,
                             int attempts, int sleepMs);
 
@@ -711,12 +713,21 @@ private:
     void initAudioDevice(const Config& cfg);
     void initEngine(const Config& cfg);
 
-    // The one place a juce::AudioDeviceManager is constructed: the
-    // Config::deviceManagerFactory boundary when set (tests), else a plain
-    // manager. Both boot (init) and recovery (recreateDeviceManager) go
-    // through this so a recovered engine keeps its injected fakes, and
-    // every manager hands its device changes to devicesChanged().
-    std::unique_ptr<juce::AudioDeviceManager> makeDeviceManager();
+    // The one place a device session is made: of the Config's drivers when
+    // set (tests), else the platform's. Boot (init) and recovery
+    // (recreateDeviceSession) both come here, so a recovered engine keeps
+    // its injected fakes, and every session hands its device changes to
+    // devicesChanged().
+    std::unique_ptr<smoothie::DeviceSession> makeDeviceSession();
+    // What a driver's own default device is, as JUCE's manager took it: its
+    // default by name, else the first it lists; "" when it lists none.
+    std::string defaultOrFirst(const std::string& driver, bool input) const;
+    // A driver's default devices, as JUCE's manager took them: its default
+    // output, and its default input when `ins` is not 0 — `driver`'s (the
+    // session's when empty), or the first driver's that lists any device
+    // when it lists none. Opened by openDefaults: "" when open.
+    smoothie::DeviceRequest defaultsRequest(int ins, int outs, std::string driver = {}) const;
+    std::string openDefaults(int ins, int outs, std::string driver = {});
 
     // What changed about the devices, as a pass of reconcileDevices is told.
     enum DeviceChanges : unsigned {
@@ -759,18 +770,18 @@ private:
     // was opened with, it is opened again. True if it acted.
     bool reconcileOpenDevice();
 
-    // Destroy and recreate mDeviceManager, then re-open the default device and
-    // re-attach the audio callback. Unlike a reopen (which reuses the existing
-    // CoreAudio/HAL client), this forces a brand-new connection — the recovery
-    // for a hibernate-killed device where the IO thread is no longer driven by
-    // coreaudiod. Called only from recoverAudio() on the device task lane under the swap
-    // gate — leaves the fresh manager initialised to the default device for the
-    // cold swap that follows. Empty return on success.
-    std::string recreateDeviceManager();
+    // Close the session and make a fresh one, then re-open the default device.
+    // Unlike a reopen (which reuses the existing CoreAudio/HAL client), this
+    // forces a brand-new connection — the recovery for a hibernate-killed
+    // device where the IO thread is no longer driven by coreaudiod. Called
+    // only from recoverAudio() on the device task lane under the swap gate —
+    // leaves the fresh session on the default device for the cold swap that
+    // follows. Empty return on success.
+    std::string recreateDeviceSession();
 
-    // Detach listeners/callback, close the device, and release mDeviceManager.
-    // Shared by shutdown() and recreateDeviceManager().
-    void teardownDeviceManager();
+    // Let the processor go, close the device, and release mDevices. Shared
+    // by shutdown() and recreateDeviceSession().
+    void closeDevices();
 
     // What a swap rebuilds the DSP for: the device open now, however it came
     // to be open (the swap, its way back, or the default when that failed
@@ -779,17 +790,17 @@ private:
     // rate.
     double takeOpenDeviceGeometry(double fallbackRate, bool inputWasDropped);
 
-    // On a fresh device manager, the driver boot settled on: recovery must
-    // not change the driver the user chose (a fresh manager starts on JUCE's
-    // first type). Not under the factory boundary — an injected manager owns
-    // its types.
+    // On a fresh session, the driver boot settled on: recovery must not
+    // change the driver the user chose (a fresh session starts on the first
+    // driver with devices). Not under the factory boundary — injected
+    // drivers are the factory's.
     void restoreBootDriver();
 
     // ── Audio source state machine ──────────────────────────────────────────
     //
     // process_audio() runs from exactly one of two drivers:
-    //   RealCallback: JUCE's AudioDeviceManager fires Smoothie's device callback, which runs our ClockworkProcessor
-    //                 when a device is open.
+    //   RealCallback: the device session's open device runs our
+    //                 ClockworkProcessor.
     //   Headless:     a high-priority timer thread (HeadlessDriver) fakes
     //                 the same contract when no device is available. Used
     //                 for explicit cfg.headless==true, for boot-time
@@ -800,9 +811,8 @@ private:
     // mActiveSource is the source of truth. Every device-swap path goes
     // through stopAudioSource() then startAudioSource() so the "exactly
     // one source active while running" invariant holds. Without it, a
-    // partially-failed init can leave mDeviceManager non-null with no
-    // current device, neither driver firing, and process_audio silently
-    // never called.
+    // partially-failed init can leave a session with no open device,
+    // neither driver firing, and process_audio silently never called.
 public:
     enum class AudioSource { None, RealCallback, Headless };
     AudioSource audioSource() const { return mActiveSource.load(std::memory_order_acquire); }
@@ -859,13 +869,13 @@ private:
     // Refuses a swap whose output or input name doesn't resolve to any
     // visible device (and isn't a known sentinel like "__system__" /
     // "__none__"). Without this, switchDevice mutates state (mCurrentConfig,
-    // the channel ceilings, destroy_dsp) before the doomed setAudioDeviceSetup —
-    // leaving the engine half-broken when JUCE returns "No such device".
+    // the channel ceilings, destroy_dsp) before the doomed open — leaving
+    // the engine half-broken when the session says "No such device".
     // Returns non-empty error string on refusal; empty = OK.
     std::string refuseUnknownDeviceName(const std::string& deviceName,
                                         const std::string& inputDeviceName);
 
-    // Probes a named device (input or output) via JUCE and returns the
+    // Probes a named device (input or output) and returns the
     // number of channels it advertises, or -1 if the name doesn't
     // match / device can't be opened. Handles the "__none__" sentinel
     // by returning -1 without probing.
@@ -920,8 +930,6 @@ private:
     std::string openSystemDefault();
 
     ClockworkProcessor mProcessor;
-    // What the device manager calls: the processor behind Smoothie's worklet.
-    std::unique_ptr<smoothie::JuceDeviceCallback> mDeviceCallback;
     // The default egress transport: in-process, replies via onReply. An embedder
     // injects a real transport via setTransport (a host that owns sockets
     // injects one from the comms client library). The engine owns no socket.
@@ -1149,12 +1157,12 @@ private:
     // the recovery worker, read by the watchdog / control threads.
     static constexpr int64_t   kNeverMs = INT64_MIN;
     std::atomic<int64_t>       mLastReopenFinishedAtMs{kNeverMs};
-    // Recreate the device manager, rebuild the real device, and promote back to
-    // it — or, if none opens, settle into the idle "waiting for audio device"
-    // state. Runs on the device task lane (posted by requestAudioRecovery) so
-    // it works on every platform: the Linux standalone loop never pumps the
-    // JUCE message queue, and this keeps the multi-second swap off the
-    // message thread everywhere. The intent says whether the reopen requests
+    // Make a fresh device session, open what the user chose on it (else the
+    // default), and play there — or, if none opens, settle into the idle
+    // "waiting for audio device" state. Runs on the device task lane (posted
+    // by requestAudioRecovery) so it works on every platform: the Linux
+    // standalone loop never pumps a message queue, and this keeps the
+    // multi-second swap off every other thread. The intent says whether the reopen requests
     // a rate (see RecoveryIntent).
     void recoverAudio(RecoveryIntent intent);
 
@@ -1239,7 +1247,9 @@ private:
     int64_t watchdogNowMs() const;   // Config::watchdogClockMs, else steady_clock
 
     std::unique_ptr<HeadlessDriver> mHeadlessDriver;
-    std::unique_ptr<juce::AudioDeviceManager> mDeviceManager;
+    // The devices: what there is, and the one open (smoothie_devices.h).
+    // Null headless, and between a recovery's old session and its new one.
+    std::unique_ptr<smoothie::DeviceSession> mDevices;
     PerformanceMetrics*          mMetrics = nullptr;  // points into the shared arena; null before init()
     std::atomic<bool>        mRunning{false};
     std::atomic<EngineState> mEngineState{EngineState::Stopped};
@@ -1296,8 +1306,8 @@ private:
     mutable std::mutex                           mListDriversMutex;
     mutable std::vector<std::string>             mCachedDrivers;
     mutable std::chrono::steady_clock::time_point mCachedDriversAt{};
-    // Cache for listDevices(false). Building this list calls JUCE's
-    // type->createDevice() + initialise() per device — on Windows that's a
+    // Cache for listDevices(false). Building this list creates each device
+    // it cannot describe unopened, to ask it — on Windows that's a
     // full WASAPI IAudioClient activation each time, ~50–100 ms per device.
     // With ~150 device/type combinations on a typical machine the call takes
     // ~10 s, which during boot starves the OSC thread and causes the client's
@@ -1341,16 +1351,16 @@ private:
     // recordSwapPreferences on the next successful open.
     std::string              mIntendedDriver;
 
-    // Driver (JUCE device type) selected at boot: the --audio-driver
-    // request when it resolved, else the platform default ("DirectSound"
-    // on Windows, empty elsewhere). Recovery paths that rebuild the
-    // device manager restore this instead of re-deriving the platform
-    // default, so a recovered engine doesn't silently change driver.
+    // The driver boot settled on: -H's device's, else the --audio-driver
+    // request when it resolved, else the platform's preference ("Windows
+    // Audio" on Windows, "PipeWire" where it has devices, empty elsewhere).
+    // A recovery's fresh session restores this instead of re-deriving the
+    // platform default, so a recovered engine doesn't silently change driver.
     std::string              mBootDriver;
 
-    // (output, input) pairs that JUCE rejected. Populated from
-    // switchDevice's input-fallback branch when setAudioDeviceSetup
-    // returns "Couldn't open the input device!" — typically WASAPI
+    // (output, input) pairs the driver refused. Populated from
+    // switchDevice's input-fallback branch when an open with the input
+    // fails and one without it succeeds — typically WASAPI
     // Shared / DirectSound combiner refusing a full-duplex hardware
     // combination. Queried by sendDeviceReport to hide known-bad
     // inputs from the dropdown while the matching output is active.

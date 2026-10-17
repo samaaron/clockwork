@@ -314,8 +314,8 @@ using clockwork::device::SwapSnapshot;
 namespace {
 SwapSnapshot snapTwoDevices() {
     SwapSnapshot s;
-    s.hasDeviceManager = true;
-    s.juceCurrentType = "CoreAudio";
+    s.hasDevices = true;
+    s.currentDriver = "CoreAudio";
     s.deviceTable = { {"CoreAudio", "Speakers"},
                       {"CoreAudio", "Interface"},
                       {"ASIO", "MOTU"} };

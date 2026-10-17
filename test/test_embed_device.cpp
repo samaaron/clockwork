@@ -19,7 +19,7 @@ namespace {
 
 // The embed API names no device layer — a host hands it a config and gets a
 // handle — so these cases run it on the fake system through the process
-// default factory (ClockworkEngine::setDefaultDeviceManagerFactory): two
+// default drivers (ClockworkEngine::setDefaultDrivers): two
 // drivers, each with a device that ticks on a thread of its own, as the
 // platform's would. Until 2026-10-16 they booted on the machine's own
 // output, which changed its rate and buffer under whatever was playing
@@ -32,8 +32,7 @@ struct OnFakeDevices {
         second->name = "Fake Other Speakers";
         second->maxInputChannels = 0;
         sys->types.push_back({ "FakeOtherDriver", { second }, 0 });
-        ClockworkEngine::setDefaultDeviceManagerFactory(std::make_shared<DeviceManagerFactory>(
-            DeviceManagerFactory{ fake_audio::makeFactory(sys) }));
+        ClockworkEngine::setDefaultDrivers(fake_audio::makeDrivers(sys));
     }
 };
 
