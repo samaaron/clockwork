@@ -21,7 +21,6 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 #include "DevicePolicy.h"
-#include <juce_core/juce_core.h>
 #include <array>
 #include <optional>
 #include <algorithm>

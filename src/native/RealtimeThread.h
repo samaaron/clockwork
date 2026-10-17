@@ -2,8 +2,8 @@
 // Copyright (c) 2025 Sam Aaron
 #pragma once
 
-// Audio-thread realtime promotion. JUCE's Linux ALSA backend
-// runs its audio thread at SCHED_OTHER (startThread(Priority::high) maps to no
+// Audio-thread realtime promotion. The ALSA driver (Smoothie's, from JUCE)
+// runs its audio thread at SCHED_OTHER (its "high" priority maps to no
 // realtime guarantee on Linux), so under CPU contention the callback fires late
 // and the scheduler accrues "lates". This helper lifts the *calling* thread to
 // SCHED_RR — call it from the audio callback so the audio thread itself is

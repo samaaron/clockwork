@@ -17,17 +17,26 @@
  */
 #pragma once
 
-#include <juce_core/juce_core.h>
 #include <cstdint>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 
 class ClockworkProcessor;
 class ClockworkClock;
 class LinkAudioHost;
 struct PerformanceMetrics;
 
-class HeadlessDriver : public juce::Thread {
+// Starting, stopping and setting it up are serialised: the engine's watchdog
+// restarts a driver that another thread may have just stopped.
+class HeadlessDriver {
 public:
-    HeadlessDriver();
+    HeadlessDriver() = default;
+    ~HeadlessDriver() { stop(); }
+    HeadlessDriver(const HeadlessDriver&) = delete;
+    HeadlessDriver& operator=(const HeadlessDriver&) = delete;
+    HeadlessDriver(HeadlessDriver&&) = delete;
+    HeadlessDriver& operator=(HeadlessDriver&&) = delete;
 
     void configure(ClockworkProcessor* callback,
                    int sampleRate,
@@ -35,13 +44,18 @@ public:
                    int numOutputChannels,
                    int numInputChannels);
 
-    // Must be set before run() is called.
-    void setClockworkClock(ClockworkClock* sc) { mClockworkClock = sc; }
-    void setLinkAudio(LinkAudioHost* la) { mLinkAudio = la; }
+    // Set before start(), as configure is.
+    void setClockworkClock(ClockworkClock* sc);
+    void setLinkAudio(LinkAudioHost* la);
     // The engine's dashboard block, mirrored into per block; null skips it.
-    void setMetrics(PerformanceMetrics* m) { mMetrics = m; }
+    void setMetrics(PerformanceMetrics* m);
 
-    void run() override;
+    // Tick on a thread of its own, scheduled as an audio thread is at its
+    // block period, until stop(). Idempotent.
+    void start();
+    // Stop ticking: the block in hand finishes, then the thread is joined.
+    // Idempotent.
+    void stop();
 
     // Bound on how far the timer loop replays missed blocks after a scheduling
     // gap (thread starvation, sleep/wake). Beyond this the loop re-anchors to
@@ -62,6 +76,9 @@ public:
                                   int64_t blockTicks);
 
 private:
+    // The platform's high-resolution timer loop, until `stop` is requested.
+    void run(const std::stop_token& stop);
+
     // Shared loop body: derive NTP via ClockworkClock,
     // process audio, wake workers. Called once per block.
     void processBlock(double& samplePos);
@@ -79,4 +96,9 @@ private:
     int                mSampleRate        = 48000;
     int                mNumOutputChannels = 2;
     int                mNumInputChannels  = 0;
+
+    // Held by configure, the setters, start and stop: what one thread set up
+    // and stopped, another starts, and sees all of it.
+    std::mutex         mLifecycle;
+    std::jthread       mThread;
 };

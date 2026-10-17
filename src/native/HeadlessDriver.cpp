@@ -4,8 +4,8 @@
  * HeadlessDriver.cpp — Platform-specific high-resolution timer implementations.
  */
 #include "HeadlessDriver.h"
-#include "clockwork_product.h"
 #include "ClockworkProcessor.h"
+#include "RealtimeThread.h"
 #include "clock/ClockworkClock.h"
 #include "native/AudioBlockClock.h"
 #include "native/LinkAudioHost.h"
@@ -24,19 +24,51 @@
 
 // wallClockNTP() comes from clock_math.h (included via ClockworkProcessor.h).
 
-HeadlessDriver::HeadlessDriver()
-    : juce::Thread(CLOCKWORK_PRODUCT_NAME "-Headless") {}
-
 void HeadlessDriver::configure(ClockworkProcessor* callback,
                                 int sampleRate,
                                 int blockSize,
                                 int numOutputChannels,
                                 int numInputChannels) {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
     mCallback          = callback;
     mSampleRate        = (sampleRate > 0) ? sampleRate : 48000;
     mBlockSize         = (blockSize  > 0) ? blockSize  : 128;
     mNumOutputChannels = numOutputChannels;
     mNumInputChannels  = numInputChannels;
+}
+
+void HeadlessDriver::setClockworkClock(ClockworkClock* sc) {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    mClockworkClock = sc;
+}
+
+void HeadlessDriver::setLinkAudio(LinkAudioHost* la) {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    mLinkAudio = la;
+}
+
+void HeadlessDriver::setMetrics(PerformanceMetrics* m) {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    mMetrics = m;
+}
+
+void HeadlessDriver::start() {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    if (mThread.joinable()) return;
+    mThread = std::jthread([this](const std::stop_token& stop) {
+        // Scheduled as a device's callback thread is: the headless driver is
+        // the engine's audio clock, and late blocks are late audio.
+        clockwork::elevateCurrentThreadToRealtime(
+            static_cast<double>(mBlockSize) / static_cast<double>(mSampleRate));
+        run(stop);
+    });
+}
+
+void HeadlessDriver::stop() {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    if (!mThread.joinable()) return;
+    mThread.request_stop();
+    mThread.join();
 }
 
 // Shared per-block loop body — derives NTP via ClockworkClock, ticks the engine
@@ -90,14 +122,14 @@ static struct timespec nsToTimespec(int64_t ns) {
     return ts;
 }
 
-void HeadlessDriver::run() {
+void HeadlessDriver::run(const std::stop_token& stop) {
     const int64_t blockNs = 1'000'000'000LL * mBlockSize / mSampleRate;
     struct timespec next{};
     clock_gettime(CLOCK_MONOTONIC, &next);
     double samplePos = 0.0;
     clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate);
 
-    while (!threadShouldExit()) {
+    while (!stop.stop_requested()) {
         processBlock(samplePos);
         struct timespec nowTs{};
         clock_gettime(CLOCK_MONOTONIC, &nowTs);
@@ -109,7 +141,7 @@ void HeadlessDriver::run() {
 
 #elif defined(__APPLE__)
 
-void HeadlessDriver::run() {
+void HeadlessDriver::run(const std::stop_token& stop) {
     mach_timebase_info_data_t tbi;
     mach_timebase_info(&tbi);
     const uint64_t blockNs    = 1'000'000'000ULL * mBlockSize / mSampleRate;
@@ -118,7 +150,7 @@ void HeadlessDriver::run() {
     double samplePos = 0.0;
     clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate);
 
-    while (!threadShouldExit()) {
+    while (!stop.stop_requested()) {
         processBlock(samplePos);
         nextWake = static_cast<uint64_t>(cappedNextWake(
             static_cast<int64_t>(nextWake + blockTicks),
@@ -130,7 +162,7 @@ void HeadlessDriver::run() {
 
 #elif defined(_WIN32)
 
-void HeadlessDriver::run() {
+void HeadlessDriver::run(const std::stop_token& stop) {
     HANDLE timer = CreateWaitableTimerExW(
         nullptr, nullptr,
         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
@@ -146,7 +178,7 @@ void HeadlessDriver::run() {
     double samplePos = 0.0;
     clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate);
 
-    while (!threadShouldExit()) {
+    while (!stop.stop_requested()) {
         processBlock(samplePos);
         QueryPerformanceCounter(&now);
         nextWake = cappedNextWake(nextWake + blockTicks, now.QuadPart, blockTicks);

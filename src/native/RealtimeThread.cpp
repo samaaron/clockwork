@@ -55,8 +55,9 @@ RealtimeResult elevateCurrentThreadToRealtime() {
 #elif defined(_WIN32)
 
 RealtimeResult elevateCurrentThreadToRealtime() {
-    // Windows audio threads are NOT protected by default: JUCE's DirectSound
-    // backend polls from an ordinary Priority::highest juce::Thread, and even
+    // Windows audio threads are NOT protected by default: the DirectSound
+    // driver (Smoothie's, from JUCE) polls from an ordinary high-priority
+    // thread, and even
     // ASIO driver threads aren't necessarily MMCSS-registered. Under CPU load
     // (a compile, a browser) the callback gets preempted for multi-ms bursts
     // → DSP overruns → audible stutter with no callback gap.

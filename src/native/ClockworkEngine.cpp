@@ -1536,14 +1536,12 @@ void ClockworkEngine::shutdown() {
     mDeviceTaskThread.request_stop();   // the lane wakes through the loop's stop_callback
     if (mDeviceTaskThread.joinable()) mDeviceTaskThread.join();
 
-    mHeadlessDriver->signalThreadShouldExit();
+    mHeadlessDriver->stop();
 
     // Wake the readers so they can exit. Both wait on processCount; bump it so
     // wait() sees a change and returns.
     mProcessor.processCount.fetch_add(1, std::memory_order_release);
     mProcessor.processCount.notify_all();
-
-    mHeadlessDriver->stopThread(2000);
 
     // Unpublish from the /clockwork/clock queries only if we're the current
     // publisher — never stomp another engine's pointer.
@@ -3128,7 +3126,7 @@ bool ClockworkEngine::startAudioSource() {
         mHeadlessDriver->setClockworkClock(&mClockworkClock);
         mHeadlessDriver->setLinkAudio(&mLinkAudio);
         mHeadlessDriver->setMetrics(mMetrics);
-        mHeadlessDriver->startThread(juce::Thread::Priority::highest);
+        mHeadlessDriver->start();
         mActiveSource.store(AudioSource::Headless, std::memory_order_release);
     } else {
         // No audio device open: stay sourceless and surface it. The watchdog
@@ -3155,8 +3153,7 @@ void ClockworkEngine::stopAudioSource() {
         if (mDevices) mDevices->detach();
         break;
     case AudioSource::Headless:
-        mHeadlessDriver->signalThreadShouldExit();
-        mHeadlessDriver->stopThread(2000);
+        mHeadlessDriver->stop();
         break;
     }
     mActiveSource.store(AudioSource::None, std::memory_order_release);

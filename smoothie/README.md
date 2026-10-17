@@ -59,7 +59,8 @@ PipeWire driver), or a test's fakes.
 ## Build
 
 `smoothie/CMakeLists.txt` builds one static library target `smoothie`
-that compiles each module's unity source with the module-format defines and
-the worklet, and exports `worklet/` and `modules/` as include roots. Code
-above Smoothie still includes JUCE in places while it moves behind the
-worklet; when none does, `modules/` stops being exported.
+that compiles each module's unity source with the module-format defines,
+the worklet and the device session, and exports `worklet/` and `modules/` as
+include roots. Above Smoothie, JUCE is left only where code is a driver or
+talks to one — Clockwork's PipeWire driver, the plugin tracks, and the tests'
+fake drivers and sockets; when none does, `modules/` stops being exported.
