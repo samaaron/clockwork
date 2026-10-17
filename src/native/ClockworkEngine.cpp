@@ -2316,7 +2316,6 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
         mReopenInProgress.store(false);
         return;
     }
-    PhaseGuard phase(mDevicePhase, DevicePhase::Recovering);
 
     // Recovery is a full cold swap on a FRESH connection:
     //   1. recreateDeviceSession — a reopen reuses the hibernate-dead CoreAudio
@@ -2335,7 +2334,10 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     SwapResult swap;   // device name/rate/buffer from the cold swap — reused below
     {
         std::unique_lock<std::recursive_mutex> lk;
-        if (!tryAcquireSwapGate(lk, 20, 50)) {
+        const bool gateFree = tryAcquireSwapGate(lk, 1, 0);
+        if (!gateFree)
+            clockwork_log("[recover] a device change is in flight — waiting for it");
+        if (!gateFree && !tryAcquireSwapGate(lk, 20, 50)) {
             // Another thread genuinely holds the gate (a swap in flight) — it will
             // re-establish audio. Tell any /reopen caller it didn't run (so it
             // isn't left waiting), but DON'T stamp the cooldown: no recovery
@@ -2346,6 +2348,7 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
             mReopenInProgress.store(false);
             return;
         }
+        PhaseGuard phase(mDevicePhase, DevicePhase::Recovering);
         try {
             // The one message a user gets about a device that keeps time at a
             // rate other than the one it reports. Said here, under the gate,

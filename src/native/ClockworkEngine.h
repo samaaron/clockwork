@@ -619,9 +619,9 @@ public:
 
     // The one authoritative answer to "is a device mutation in flight".
     // Set via PhaseGuard by switchDevice (Swapping) and recoverAudio
-    // (Recovering). Replaces probing the swap gate with try_lock/unlock
-    // (a TOCTOU, and a false positive whenever a mere reader held the
-    // gate).
+    // (Recovering), each once it holds the swap gate. Replaces probing the
+    // swap gate with try_lock/unlock (a TOCTOU, and a false positive
+    // whenever a mere reader held the gate).
     enum class DevicePhase : uint8_t { Idle, Swapping, Recovering };
     DevicePhase devicePhase() const { return mDevicePhase.load(); }
     // A recovery accepted and not yet finished — including one queued on the
@@ -1185,6 +1185,10 @@ private:
 
     // ── Explicit device-mutation phase (enum declared public, above) ────
     std::atomic<DevicePhase>   mDevicePhase { DevicePhase::Idle };
+    // Made only by a holder of the swap gate, so the phases put back nest as
+    // the gate's holders do. One made while waiting for the gate saved the
+    // holder's phase and put it back after the holder had finished, leaving
+    // the engine Swapping for good (CI, 2026-10-17).
     struct PhaseGuard {
         std::atomic<DevicePhase>& phase;
         DevicePhase prev;

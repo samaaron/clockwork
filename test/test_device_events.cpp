@@ -388,6 +388,49 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     REQUIRE(answered);
 }
 
+TEST_CASE("DeviceEvents: a recovery that waits for a device change leaves the "
+          "device phase idle once both are done", "[DeviceEvents]") {
+    // CI, 2026-10-17, the case above: a recovery marked the phase Recovering
+    // before it held the swap gate, so one queued behind a switch saved the
+    // switch's Swapping as the phase to put back, and put it back after the
+    // switch had finished. With the phase stuck at Swapping the watchdog,
+    // which opens no device while a change is in flight, never opened one
+    // again: the engine stopped answering.
+    auto cfg = fakeEngineConfig(makeSimpleSystem(), "Fake Speakers");
+    cfg.watchdogRecoveryCooldownMs = 0;
+    EngineFixture fix(cfg);
+    subscribe(fix);
+
+    const auto waits = [&] {
+        int n = 0;
+        for (const auto& line : fix.debugMessages())
+            if (line.find("[recover] a device change is in flight") != std::string::npos) ++n;
+        return n;
+    };
+
+    // A recovery waits a second for the gate, then gives up and says it did
+    // not run, so a test thread held up longer than that between seeing it
+    // wait and letting the gate go sees one that never ran. Ask again until
+    // one waits and runs. Its log lines arrive here after it has finished;
+    // its reopen.done is what says whether it ran.
+    bool ranAfterWaiting = false;
+    for (int attempt = 0; attempt < 5 && !ranAfterWaiting; ++attempt) {
+        const int waitedBefore = waits();
+        auto hold = fix.engine().testHoldSwapGate();   // a switch, mid-change
+        std::string reason;
+        REQUIRE(fix.engine().requestAudioRecovery(reason));
+        REQUIRE(fix.pollUntil([&] { return waits() > waitedBefore; }, 10000));
+        hold.unlock();                                 // the switch finishes
+        OscReply done;                                 // and so does the recovery
+        REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.done"), done, 10000));
+        deviceLaneDone(fix.engine());
+        CHECK(fix.engine().devicePhase() == ClockworkEngine::DevicePhase::Idle);
+        ranAfterWaiting = done.parsed().argInt(0) == 1;
+    }
+    INFO(fix.debugMessagesDump());
+    REQUIRE(ranAfterWaiting);
+}
+
 // ── The device played on, changing where it stands ──────────────────────────
 // It can die while still listed, or its driver can change its channels (an
 // interface's control panel turning outputs on or off). The OS says so on a
