@@ -39,6 +39,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -46,6 +47,22 @@
 #include <vector>
 
 using namespace std::chrono;
+
+namespace {
+
+// A clock the case moves (RingReader::setClock): a pass takes exactly the
+// time the case gives it, however the machine schedules the reader, and an
+// idle pass takes none. It starts far from 0, which the reader keeps for "no
+// pass in flight".
+struct CaseClock {
+    std::atomic<uint64_t> us{1'000'000'000};
+    void advance(uint64_t by) { us.fetch_add(by, std::memory_order_acq_rel); }
+    std::function<uint64_t()> reading() {
+        return [this] { return us.load(std::memory_order_acquire); };
+    }
+};
+
+}  // namespace
 
 TEST_CASE("RingReader stops promptly when its wake word is never bumped",
           "[RingReader]") {
@@ -297,10 +314,13 @@ TEST_CASE("RingReader reports how long a blocking handler held the thread",
             gotCount.fetch_add(1, std::memory_order_release);
         },
         RingReader::Metrics{});
-    reader.start();
 
-    // Nothing has run yet, so nothing has blocked.
+    // Nothing has run, so nothing has blocked. Read before the thread starts:
+    // once it runs, its idle passes are timed too, and on the real clock of a
+    // slow machine they take a microsecond or two. (The cases below hold idle
+    // passes to exactly nothing, on a clock of their own.)
     REQUIRE(reader.maxPassUs() == 0);
+    reader.start();
 
     const std::string payload = "slow";
     REQUIRE(RingBufferWriter::write(
@@ -338,12 +358,17 @@ TEST_CASE("RingReader tracks the worst pass in the recent window",
     std::atomic<uint32_t> wake{0};
     std::atomic<int> gotCount{0};
 
+    CaseClock clock;
+
     RingReader reader("test-ringreader-recent");
     reader.setWake(&wake);
+    // On the case's clock: the handler holds the thread for exactly 120 ms of
+    // it, and the passes around it take nothing.
+    reader.setClock(clock.reading());
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
         [&](uint32_t, const uint8_t*, uint32_t, uint32_t) {
-            std::this_thread::sleep_for(milliseconds(120));
+            clock.advance(120'000);
             gotCount.fetch_add(1, std::memory_order_release);
         },
         RingReader::Metrics{});
@@ -367,14 +392,62 @@ TEST_CASE("RingReader tracks the worst pass in the recent window",
     reader.stop();   // the pass's record is written after its handler returns
 
     // The slow pass just ended, so it is inside the rolling window and the
-    // two measures agree; only the windowed copy will decay back to quiet
-    // once ~60 s slide past (not wall-clock testable here).
-    REQUIRE(reader.recentMaxPassUs() >= 100'000);
-    REQUIRE(reader.recentMaxPassUs() <= reader.maxPassUs());
+    // two measures agree; only the windowed copy lets it go once the window
+    // slides past (the next case).
+    REQUIRE(reader.recentMaxPassUs() == 120'000);
+    REQUIRE(reader.maxPassUs() == 120'000);
 
     // Reset clears the window along with the high-water mark.
     reader.resetMaxPassUs();
     REQUIRE(reader.recentMaxPassUs() == 0);
+}
+
+TEST_CASE("RingReader lets a slow pass go from the recent window once the window has slid past it",
+          "[RingReader][blocking]") {
+    constexpr uint32_t kSize = 4096;
+    std::vector<uint8_t> buffer(kSize, 0);
+    std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
+    std::atomic<uint32_t> wake{0};
+    std::atomic<int> gotCount{0};
+    CaseClock clock;
+
+    RingReader reader("test-ringreader-window");
+    reader.setWake(&wake);
+    reader.setClock(clock.reading());
+    reader.addDrain(
+        buffer.data(), kSize, &head, &tail,
+        [&](uint32_t, const uint8_t*, uint32_t, uint32_t) {
+            clock.advance(120'000);
+            gotCount.fetch_add(1, std::memory_order_release);
+        },
+        RingReader::Metrics{});
+    reader.start();
+
+    const std::string payload = "window";
+    REQUIRE(RingBufferWriter::write(
+        buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
+        payload.data(), static_cast<uint32_t>(payload.size()), 0));
+
+    const auto deadline = steady_clock::now() + seconds(5);
+    while (gotCount.load(std::memory_order_acquire) == 0
+           && steady_clock::now() < deadline) {
+        wake.fetch_add(1, std::memory_order_release);
+        wake.notify_all();
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
+    reader.stop();   // the pass's record is written after its handler returns
+    REQUIRE(reader.recentMaxPassUs() == 120'000);
+
+    // The window is 12 buckets of 5 s (RingReader.h), and a pass belongs to
+    // the bucket it ended in: 55 s on, it is still in the window, wherever in
+    // its bucket it ended; 60 s on, it has slid out, and only the high-water
+    // mark keeps it.
+    clock.advance(55'000'000);
+    REQUIRE(reader.recentMaxPassUs() == 120'000);
+    clock.advance(5'000'000);
+    REQUIRE(reader.recentMaxPassUs() == 0);
+    REQUIRE(reader.maxPassUs() == 120'000);
 }
 
 TEST_CASE("RingReader exposes a stall while it is still stuck",
@@ -386,8 +459,19 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
     std::atomic<bool> release{false};
     std::atomic<bool> inHandler{false};
 
+    CaseClock clock;
+
     RingReader reader("test-ringreader-inflight");
+    // However the case leaves, the handler is let go before the reader is
+    // joined: a check that fails is a failure, not a hang.
+    struct LetGo {
+        std::atomic<bool>& release;
+        ~LetGo() { release.store(true, std::memory_order_release); }
+    } letGo{release};
     reader.setWake(&wake);
+    // On the case's clock: the stall lasts exactly as long as the case moves
+    // the clock on while the handler is held, and idle passes take nothing.
+    reader.setClock(clock.reading());
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
         [&](uint32_t, const uint8_t*, uint32_t, uint32_t) {
@@ -417,8 +501,8 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
 
     // Wedged right now: this is what a watchdog or the metrics panel reads to
     // distinguish "busy" from "can never answer you".
-    std::this_thread::sleep_for(milliseconds(60));
-    REQUIRE(reader.inFlightUs() >= 50'000);
+    clock.advance(60'000);
+    REQUIRE(reader.inFlightUs() == 60'000);
     REQUIRE(reader.maxPassUs() == 0);   // the pass has not ended yet
 
     release.store(true, std::memory_order_release);
@@ -427,8 +511,8 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
     // in-flight of 0 does not yet mean the record is there. Joining the
     // reader does: the released pass has finished, and all of it is visible.
     reader.stop();
-    REQUIRE(reader.inFlightUs() == 0);       // released
-    REQUIRE(reader.maxPassUs() >= 50'000);   // and recorded on the way out
+    REQUIRE(reader.inFlightUs() == 0);        // released
+    REQUIRE(reader.maxPassUs() == 60'000);    // and recorded on the way out
 }
 
 TEST_CASE("RingReader reports a slow pass to its observer",
