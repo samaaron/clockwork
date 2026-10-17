@@ -131,6 +131,10 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
 
 void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     mSampleRate     = static_cast<int>(device.sampleRate);
+    // The restart fades at this device's rate. Starting is not one: no
+    // fade-in is due until a restart resumes the processor.
+    mFadeLength = std::max(1, static_cast<int>(std::lround(mSampleRate * kRestartFadeSeconds)));
+    mFadeInDone = mFadeLength;
     mNominalRate.store(mSampleRate, std::memory_order_relaxed);
     mDeviceBufferSize.store(device.bufferFrames, std::memory_order_relaxed);
     mSamplePosition = 0.0;
@@ -265,6 +269,10 @@ void ClockworkProcessor::deviceStopped() {
 
 // --- Pause/resume ---
 
+void ClockworkProcessor::fadeOut() {
+    mFadeOutRequested.store(true, std::memory_order_release);
+}
+
 void ClockworkProcessor::pause() {
     mPaused.store(true, std::memory_order_release);
 }
@@ -294,7 +302,38 @@ void ClockworkProcessor::resume() {
         mDspInputChannels  = get_audio_num_input_buses();
     }
 
+    // What follows fades in from silence, and no fade-out is under way.
+    mFadeInDone  = 0;
+    mFadeOutDone = 0;
+    mFadeOutRequested.store(false, std::memory_order_relaxed);
+
     mPaused.store(false, std::memory_order_release);
+}
+
+void ClockworkProcessor::applyFades(float* const* outputs, int numOutputs, int frames) {
+    const bool fadingIn  = mFadeInDone < mFadeLength;
+    const bool fadingOut = mFadeOutRequested.load(std::memory_order_acquire);
+    if (!fadingIn && !fadingOut) return;
+    // Raised cosines, as the web's: from silence up, from full down.
+    constexpr float kPi = 3.14159265358979f;
+    const float length = static_cast<float>(mFadeLength);
+    for (int i = 0; i < frames; ++i) {
+        float gain = 1.0f;
+        if (const int k = mFadeInDone + i; k < mFadeLength)
+            gain *= 0.5f - 0.5f * std::cos(kPi * static_cast<float>(k) / length);
+        if (fadingOut) {
+            const int k = mFadeOutDone + i;
+            gain *= k < mFadeLength ? 0.5f + 0.5f * std::cos(kPi * static_cast<float>(k) / length) : 0.0f;
+        }
+        for (int ch = 0; ch < numOutputs; ++ch)
+            if (outputs[ch]) outputs[ch][i] *= gain;
+    }
+    if (fadingIn) mFadeInDone = std::min(mFadeLength, mFadeInDone + frames);
+    if (fadingOut) {
+        mFadeOutDone += frames;
+        // At silence: paused, so nothing is rendered while the restart goes on.
+        if (mFadeOutDone >= mFadeLength) mPaused.store(true, std::memory_order_release);
+    }
 }
 
 bool ClockworkProcessor::isPaused() const {
@@ -371,6 +410,9 @@ void ClockworkProcessor::process(
             if (outputChannelData[ch])
                 std::memset(outputChannelData[ch], 0,
                             static_cast<size_t>(numSamples) * sizeof(float));
+        // Silent already: a fade-out asked for now has nothing to fade.
+        if (mFadeOutRequested.load(std::memory_order_acquire))
+            mPaused.store(true, std::memory_order_release);
         mCallbackCount++;
         processCount.fetch_add(1, std::memory_order_release);
         processCount.notify_all();
@@ -572,6 +614,10 @@ void ClockworkProcessor::process(
 
     // (No recording tap here: the master mix leaves through the scope
     // a client reads — shm_audio_buffer slot 0 — and a client records it.)
+
+    // The restart fades, on what the device plays only: the scope and taps,
+    // written as each block renders, carry the engine's output unfaded.
+    applyFades(outputChannelData, nOut, numSamples);
 
     // ── 4. Timing stats (no I/O on audio thread — store atomically for external query) ──
     auto cbEnd = std::chrono::high_resolution_clock::now();

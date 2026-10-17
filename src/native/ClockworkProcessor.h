@@ -149,8 +149,17 @@ public:
     void leaveThreadPriority() { mRealtimeElevated.store(true, std::memory_order_relaxed); }
 
     // --- Pause/resume for device swap ---
+    // A restart is heard as a dip, not as a click: the output fades to
+    // silence over kRestartFadeSeconds before the device stops, and back from
+    // silence over the same once the restart resumes it — the web's resume
+    // fade (clockwork_audio_worklet.js), natively. A device's first start,
+    // before any restart, is not faded.
+    static constexpr double kRestartFadeSeconds = 0.02;
+    // From the next block, fade the output to silence, and pause there
+    // (isPaused). Control thread.
+    void fadeOut();
     void pause();
-    void resume();
+    void resume();   // fades in what follows
     bool isPaused() const;
 
     // --- Cached channel widths ---
@@ -232,6 +241,18 @@ private:
     int   mAccumPerChanCap = 0;
 
     std::atomic<bool> mPaused{false};
+
+    // The restart fades (kRestartFadeSeconds), in samples at the device's
+    // rate. The counts are the audio thread's, reset only while the callback
+    // is gated or not yet running (deviceStarting, resume); the request
+    // crosses from the control thread, and the arrival at silence is mPaused.
+    int mFadeLength  = 0;
+    int mFadeInDone  = 0;   // samples of the fade-in rendered; mFadeLength: none due
+    int mFadeOutDone = 0;   // samples of the fade-out rendered
+    std::atomic<bool> mFadeOutRequested{false};
+    // The fades on this callback's output, as far as they have got.
+    void applyFades(float* const* outputs, int numOutputs, int frames);
+
     std::atomic<int>  mNominalRate{0};        // see nominalSampleRate()
     std::atomic<int>  mDeviceBufferSize{0};   // see deviceBufferSize()
 

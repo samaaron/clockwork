@@ -92,6 +92,14 @@ whatever else plays through the device. On CoreAudio an aggregate is also
 made and pulled down. `test/test_device_intent.cpp` pins the boot and
 recovery opens to one each.
 
+The engine's own sound dips rather than clicks. A restart fades what the
+device plays down to silence over 20 ms before the device stops, and up
+from silence over 20 ms once audio resumes: the web's resume fade
+(`js/workers/clockwork_audio_worklet.js`), natively. The restart waits for
+the fade-out while the device goes on calling; a device that has stopped
+calling has nothing left to fade. The scope and the taps carry the output
+unfaded. `test/test_restart_fade.cpp` listens across hot and cold restarts.
+
 ## What the engine remembers
 
 The user's choices outlive the device they were made on: a pinned output is

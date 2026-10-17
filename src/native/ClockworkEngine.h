@@ -862,6 +862,12 @@ private:
     // hot-plug events survive swaps.
     void stopAudioSource();
 
+    // The processor paused for a restart, a device the session runs faded
+    // to silence first (ClockworkProcessor::fadeOut) and waited for while it
+    // goes on calling: a device that has stopped calling has nothing left
+    // to fade.
+    void fadeOutAndPause();
+
     // True once process_audio has ticked past `before`; false after 5 s.
     bool waitForFirstAudioTick(uint32_t before);
 
@@ -1092,10 +1098,10 @@ private:
         // Say it: restarting, with the generation closing. First, so a
         // client stops sending before the teardown refuses what it sent.
         void announce();
-        // Do it: purge the schedule, pause the processor, park the control
-        // pass, stop the source and take the pump gate, tear the instance
-        // down (its refusals and carries happen there), drain what has
-        // been said to the clients before the rings go.
+        // Do it: purge the schedule, fade the processor out and pause it,
+        // park the control pass, stop the source and take the pump gate,
+        // tear the instance down (its refusals and carries happen there),
+        // drain what has been said to the clients before the rings go.
         void teardown();
         // Build the instance at `rate` on whatever device is open now, the
         // egress drained first so the old generation's replies all leave

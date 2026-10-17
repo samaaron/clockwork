@@ -88,6 +88,16 @@ struct FakeDeviceSpec {
     // says it must be opened again. The engine's own reopen at another rate
     // is overridden straight back. 0 = no one else.
     std::atomic<double> heldRate { 0 };
+
+    // What the device played on its first output, when a case listens: every
+    // block in the order played, and the sample count at each stop — where a
+    // run of blocks ended. Null: nothing is kept.
+    struct Played {
+        std::mutex          m;
+        std::vector<float>  samples;
+        std::vector<size_t> stops;
+    };
+    std::shared_ptr<Played> played;
 };
 
 class FakeAudioIODevice;
@@ -292,6 +302,10 @@ public:
         }
         mSystem->clockCv.notify_all();
         if (mThread.joinable()) mThread.join();
+        if (const auto& played = primary()->played) {
+            std::lock_guard<std::mutex> pl(played->m);
+            played->stops.push_back(played->samples.size());
+        }
         {
             std::lock_guard<std::mutex> clk(mSystem->clockMutex);
             auto& v = mSystem->playing;
@@ -408,6 +422,10 @@ private:
                 mCallback->audioDeviceIOCallbackWithContext(
                     nIn > 0 ? inPtrs.data() : nullptr, nIn,
                     outPtrs.data(), nOut, mBufferSize, {});
+            if (const auto& played = primary()->played; played && nOut > 0) {
+                std::lock_guard<std::mutex> pl(played->m);
+                played->samples.insert(played->samples.end(), outBufs[0].begin(), outBufs[0].end());
+            }
             if (onCaseClock) {
                 {
                     std::lock_guard<std::mutex> clk(sys.clockMutex);

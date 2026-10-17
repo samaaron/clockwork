@@ -439,6 +439,7 @@ add_executable(clockwork_engine_tests
     test_device_report.cpp
     test_device_session.cpp
     test_device_intent.cpp
+    test_restart_fade.cpp
     test_gateway_swap_gate.cpp
     test_engine_fixture.cpp
     test_guest_config_layout.cpp

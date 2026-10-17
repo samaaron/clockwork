@@ -3159,6 +3159,40 @@ void ClockworkEngine::stopAudioSource() {
     mActiveSource.store(AudioSource::None, std::memory_order_release);
 }
 
+void ClockworkEngine::fadeOutAndPause() {
+    // Only a device the session runs is waited for. The headless driver is
+    // heard by no one, and an embedder's pump may not call while a restart
+    // waits: its blocks are dropped from the teardown on, silent.
+    if (mActiveSource.load(std::memory_order_acquire) == AudioSource::RealCallback) {
+        mProcessor.fadeOut();
+        // Patience: three of the device's buffers without a block, and never
+        // less than 250 ms, well past any stall a busy machine gives a thread;
+        // a second in all, for a device that calls on but slowly. Only a
+        // device that has stopped calling waits it out.
+        using namespace std::chrono;
+        const int rate   = std::max(1, mProcessor.nominalSampleRate());
+        const int buffer = std::max(1, mProcessor.deviceBufferSize());
+        const auto patience = std::max<microseconds>(milliseconds(250),
+                                                     microseconds(3'000'000LL * buffer / rate));
+        const auto start = steady_clock::now();
+        auto lastBlock = start;
+        uint32_t count = mProcessor.processCount.load(std::memory_order_acquire);
+        while (!mProcessor.isPaused()) {
+            const auto now = steady_clock::now();
+            if (now - lastBlock > patience || now - start > seconds(1)) {
+                clockwork_log("[engine] restart: the device stopped calling before its fade-out ended");
+                break;
+            }
+            std::this_thread::sleep_for(milliseconds(1));
+            if (const uint32_t c = mProcessor.processCount.load(std::memory_order_acquire); c != count) {
+                count     = c;
+                lastBlock = steady_clock::now();
+            }
+        }
+    }
+    mProcessor.pause();
+}
+
 bool ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     constexpr int kTimeoutMs = 5000;
     auto start = std::chrono::steady_clock::now();
@@ -3317,7 +3351,7 @@ void ClockworkEngine::Restart::teardown() {
     // What is queued for the instance that is about to go is refused to its
     // senders as such (docs/RESTARTS.md), and the schedule cleared.
     if (mCold) mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
-    mEngine.mProcessor.pause();
+    mEngine.fadeOutAndPause();
     // A cold restart re-inits the arena (destroy_dsp / rebuild_dsp →
     // init_memory → clockwork_lanes_reset_drains) that the control pass
     // drains — parked until the arena is back, whoever runs it.
