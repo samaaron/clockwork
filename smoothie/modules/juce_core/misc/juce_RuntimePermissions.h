@@ -68,8 +68,8 @@ public:
     enum PermissionID
     {
         /** Permission to access the microphone (required on Android).
-            You need to request this, for example, to initialise an AudioDeviceManager with
-            a non-zero number of input channels, and to open the default audio input device.
+            You need to request this, for example, to open an audio device with a
+            non-zero number of input channels, and to open the default audio input device.
         */
         recordAudio = 1,
 

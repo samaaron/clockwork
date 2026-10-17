@@ -32,7 +32,8 @@ whatever it has open, and it holds no JUCE either.
 Its drivers are JUCE's device types: `worklet/smoothie_juce_drivers.h` is
 the session's JUCE side, where the platform's drivers are made, and where a
 caller hands it others — a driver Smoothie does not carry (Clockwork's
-PipeWire driver), or a test's fakes.
+PipeWire driver), or a test's fakes. JUCE's `AudioDeviceManager`, which the
+session replaces, is not carried.
 
 ## Provenance
 
@@ -42,10 +43,12 @@ PipeWire driver), or a test's fakes.
 - Modules: `juce_core`, `juce_events`, `juce_audio_basics`, `juce_audio_devices`
   — all ISC. `juce_audio_formats` (GPL-dual) was deliberately NOT vendored; the
   recorder uses `src/clockwork_audio_file.h` instead.
-- Pruned relative to upstream: Android glue (`native/java*`, oboe) — Smoothie
-  targets macOS / Windows / Linux only; and `AudioSourcePlayer` and
-  `AudioTransportSource` (`juce_audio_devices/sources`), which Clockwork never
-  uses: it drives the device through its own callback.
+- Pruned relative to upstream: Android glue (`native/java*`, oboe) — the
+  builds are macOS / Windows / Linux today, while the iOS, Android and Bela
+  drivers themselves are kept; `AudioSourcePlayer` and `AudioTransportSource`
+  (`juce_audio_devices/sources`), which Clockwork never uses: it drives the
+  device through its own callback; and `AudioDeviceManager`, which the device
+  session replaces.
 - The `juce` namespace and per-file copyright headers are retained, as the ISC
   licence requires. Smoothie is the subproject/target name, not a rename.
 

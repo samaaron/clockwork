@@ -27,12 +27,12 @@ namespace juce
 /**
     Represents a type of audio driver, such as DirectSound, ASIO, CoreAudio, etc.
 
-    To get a list of available audio driver types, use the AudioDeviceManager::createAudioDeviceTypes()
-    method. Each of the objects returned can then be used to list the available
-    devices of that type. E.g.
+    The platform's driver types come from the createAudioIODeviceType_ methods below
+    (Smoothie's smoothie::platformDrivers() makes them all). Each can then be used
+    to list the available devices of that type. E.g.
     @code
     OwnedArray<AudioIODeviceType> types;
-    myAudioDeviceManager.createAudioDeviceTypes (types);
+    types.add (AudioIODeviceType::createAudioIODeviceType_CoreAudio());
 
     for (int i = 0; i < types.size(); ++i)
     {
@@ -51,10 +51,10 @@ namespace juce
     }
     @endcode
 
-    For an easier way of managing audio devices and their settings, have a look at the
-    AudioDeviceManager class.
+    Smoothie's smoothie::DeviceSession (smoothie_devices.h) opens devices of these
+    types on behalf of the code above it.
 
-    @see AudioIODevice, AudioDeviceManager
+    @see AudioIODevice
 
     @tags{Audio}
 */

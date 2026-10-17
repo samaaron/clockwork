@@ -47,7 +47,7 @@ struct AudioIODeviceCallbackContext
     method on its own high-priority audio thread, when it needs to send or receive
     the next block of data.
 
-    @see AudioIODevice, AudioDeviceManager
+    @see AudioIODevice
 
     @tags{Audio}
 */
@@ -140,10 +140,10 @@ public:
     To create one of these, you'll need to use the AudioIODeviceType class - see the
     documentation for that class for more info.
 
-    For an easier way of managing audio devices and their settings, have a look at the
-    AudioDeviceManager class.
+    Smoothie's smoothie::DeviceSession (smoothie_devices.h) opens and runs these on
+    behalf of the code above it.
 
-    @see AudioIODeviceType, AudioDeviceManager
+    @see AudioIODeviceType
 
     @tags{Audio}
 */

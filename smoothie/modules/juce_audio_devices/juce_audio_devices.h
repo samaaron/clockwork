@@ -181,7 +181,6 @@ namespace juce
 #include "audio_io/juce_AudioIODevice.h"
 #include "audio_io/juce_AudioIODeviceType.h"
 #include "audio_io/juce_SystemAudioVolume.h"
-#include "audio_io/juce_AudioDeviceManager.h"
 
 #if JUCE_IOS
  #include "native/juce_Audio_ios.h"
