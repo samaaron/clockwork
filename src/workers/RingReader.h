@@ -86,8 +86,9 @@ public:
     void start();
     // Signal exit, wake the loop (and release any park), join. Idempotent.
     void stop();
-    // Whether start() spawned a thread that has not been stopped.
-    bool running() const { return mThread.joinable(); }
+    // Whether start() spawned a thread that has not been stopped. Safe from a
+    // handler on that thread, even on its first pass (see RingReader.cpp).
+    bool running() const;
 
     // ONE pass, on the calling thread: every registered drain and task, in
     // order, timed like the thread's own passes (maxPassUs & co. below record

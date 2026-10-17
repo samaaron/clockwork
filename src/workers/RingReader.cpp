@@ -6,9 +6,19 @@
 #include "RingReader.h"
 #include "clockwork_config.h"   // clockwork_log
 
+// The reader whose thread this is, set by run() before its first pass, so
+// running() and pause() can answer a call from its own handler without
+// reading mThread — which start() is still assigning when a first pass's
+// handler can already be running (TSan, CI, 2026-10-16).
+static thread_local const RingReader* tReaderOfThisThread = nullptr;
+
 void RingReader::start() {
     if (mThread.joinable()) return;
     mThread = std::jthread([this](const std::stop_token& stop) { run(stop); });
+}
+
+bool RingReader::running() const {
+    return tReaderOfThisThread == this || mThread.joinable();
 }
 
 // request_stop() runs wakeForStop through the loop's stop_callback, so the
@@ -32,12 +42,12 @@ void RingReader::wakeForStop() {
 }
 
 bool RingReader::pause() {
-    if (!mThread.joinable()) return true;
     // Self-pause would deadlock waiting for our own park acknowledgement. It is
     // also unnecessary: a drain handler that triggers the caller's critical
     // section (e.g. a cold swap run from an OSC command on the NRT gateway
     // thread) is by definition not draining concurrently with it.
-    if (std::this_thread::get_id() == mThread.get_id()) return true;
+    if (tReaderOfThisThread == this) return true;
+    if (!mThread.joinable()) return true;
     mPauseRequest.store(1, std::memory_order_release);
     // Kick the wake word so a reader blocked on it re-checks the request.
     if (mWake) {
@@ -119,6 +129,7 @@ void RingReader::drainOne(Drain& d) {
 }
 
 void RingReader::run(const std::stop_token& stop) {
+    tReaderOfThisThread = this;
     const std::stop_callback wake(stop, [this] { wakeForStop(); });
     if (mWake) mLastWake = mWake->load(std::memory_order_relaxed);
 

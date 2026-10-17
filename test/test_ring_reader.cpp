@@ -178,30 +178,35 @@ TEST_CASE("RingReader pause parks draining until resume", "[RingReader]") {
 
 TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
           "[RingReader]") {
-    std::atomic<uint32_t> wake{0};
     std::atomic<bool> selfPaused{false};
+    std::atomic<bool> sawRunning{false};
     std::atomic<int> passes{0};
 
+    // No wake word: the reader passes on its own clock, so nothing this thread
+    // does after start() is ordered before the handler — only the thread's
+    // creation is. A wake bumped here straight after start() ordered it on a
+    // quick machine and hid that pause() read mThread while start() was still
+    // assigning it (TSan, a slow CI runner, 2026-10-16).
     RingReader reader("test-ringreader-selfpause");
-    reader.setWake(&wake);
     // Mirrors a drain handler that triggers a device swap: the swap parks the
-    // readers, including the one whose handler is running.
+    // readers, including the one whose handler is running — asking whether the
+    // reader runs and then pausing it, as ClockworkEngine::parkControlPass does.
     reader.addTask([&]() {
-        if (!selfPaused.exchange(true)) reader.pause();
+        if (!selfPaused.exchange(true)) {
+            sawRunning.store(reader.running());
+            reader.pause();
+        }
         passes.fetch_add(1, std::memory_order_release);
     });
     reader.start();
 
-    // If self-pause deadlocked, the task would never complete a pass and the
-    // reader would stop servicing wakes.
+    // If self-pause deadlocked, the task would never complete a second pass.
     const auto deadline = steady_clock::now() + seconds(2);
     while (passes.load(std::memory_order_acquire) < 2
-           && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+           && steady_clock::now() < deadline)
         std::this_thread::sleep_for(milliseconds(2));
-    }
     REQUIRE(selfPaused.load());
+    CHECK(sawRunning.load());
     REQUIRE(passes.load(std::memory_order_acquire) >= 2);
 }
 
