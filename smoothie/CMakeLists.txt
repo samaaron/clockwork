@@ -22,10 +22,12 @@ endforeach()
 
 target_include_directories(smoothie PUBLIC modules)
 
-# The worklet: what Smoothie offers the code above it (worklet/smoothie_worklet.h,
-# with no JUCE in it). A processor is handed plain buffers and plain facts about
-# the device; JUCE stays on this side.
-target_sources(smoothie PRIVATE worklet/smoothie_worklet.cpp)
+# What Smoothie offers the code above it, with no JUCE in either header: the
+# worklet (worklet/smoothie_worklet.h), where a processor is handed plain
+# buffers and plain facts about the device, and the device session
+# (worklet/smoothie_devices.h), which opens a device as asked and runs the
+# processor on it. JUCE stays on this side.
+target_sources(smoothie PRIVATE worklet/smoothie_worklet.cpp worklet/smoothie_devices.cpp)
 target_include_directories(smoothie PUBLIC worklet)
 target_compile_features(smoothie PUBLIC cxx_std_17)
 

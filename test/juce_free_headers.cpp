@@ -10,6 +10,7 @@
  * this build, rather than quietly handing JUCE to every host.
  */
 #include "smoothie_worklet.h"
+#include "smoothie_devices.h"
 #include "ClockworkEngine.h"
 #include "ClockworkProcessor.h"
 #include "TrackControl.h"

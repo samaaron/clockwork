@@ -19,6 +19,21 @@ and their tests reach the hardware through the worklet alone, and a JUCE type,
 include or initialiser outside this tree is a bug to move into it.
 `worklet/smoothie_juce_device_callback.h` is the worklet's JUCE side.
 
+## The devices
+
+`worklet/smoothie_devices.h` is how a device comes to run: a `DeviceSession`
+lists the drivers there are and the devices each has, says what a driver
+knows of a device without opening it, and opens exactly the device, rate,
+buffer and channels a request names — nothing filled in from a default the
+caller did not name, and nothing left open when an open fails. Choosing what
+to open is the caller's. It runs the worklet `Processor` it is given on
+whatever it has open, and it holds no JUCE either.
+
+Its drivers are JUCE's device types: `worklet/smoothie_juce_drivers.h` is
+the session's JUCE side, where the platform's drivers are made, and where a
+caller hands it others — a driver Smoothie does not carry (Clockwork's
+PipeWire driver), or a test's fakes.
+
 ## Provenance
 
 - Source: JUCE tag **7.0.12** — the last JUCE whose core/audio modules are ISC.

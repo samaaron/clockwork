@@ -26,6 +26,7 @@
 
 #include "ClockworkEngine.h"
 #include "DeviceManagerFactory.h"
+#include "smoothie_juce_drivers.h"
 #include <atomic>
 #include <chrono>
 #include <algorithm>
@@ -742,6 +743,19 @@ makeFactory(std::shared_ptr<FakeSystem> system) {
     return [system] {
         return std::make_unique<FakeDeviceManager>(system);
     };
+}
+
+// The system's drivers, made afresh for each session that asks.
+inline std::shared_ptr<const smoothie::DriverFactory>
+makeDrivers(std::shared_ptr<FakeSystem> system) {
+    auto factory = std::make_shared<smoothie::DriverFactory>();
+    factory->make = [system] {
+        smoothie::Drivers types;
+        for (size_t i = 0; i < system->types.size(); ++i)
+            types.push_back(std::make_unique<FakeAudioIODeviceType>(system, i));
+        return types;
+    };
+    return factory;
 }
 
 // The hermetic boot recipe (see header comment): a named -H open of a
