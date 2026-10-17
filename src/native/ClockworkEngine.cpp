@@ -548,6 +548,67 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
     }
 
+    // What boot opens is decided before anything is opened, and opened once:
+    // every open is heard — a click, a moment of silence on whatever else
+    // plays through the device, on CoreAudio an aggregate made and pulled
+    // down. The output is -H's device, else the default (a wired one in
+    // place of a wireless default); the input is the user's when it can
+    // play with that output, else the default input when inputs are wanted
+    // and -H named none; the rate and buffer are the session's. What won't
+    // open gives way a part at a time: the input, then -H's device, then
+    // the default's input, then the driver.
+
+    // The session's rate and buffer, on whatever request boot makes. Auto
+    // buffer: the smallest the device offers from 128 up — asked for as 128,
+    // which is that whenever offered (the rare device without it is put
+    // right once open, below). The block size follows the hardware buffer on
+    // native (chooseBlockSize), so any size works; below 128 mostly adds
+    // callback overhead without a latency win. DirectSound keeps its own.
+    constexpr int kAutoBufferFloor = 128;
+    auto atSessionRate = [&](smoothie::DeviceRequest request) {
+        const std::string driver = request.driver.empty() ? mDevices->driver() : request.driver;
+        if (cfg.sampleRate > 0) request.sampleRate = cfg.sampleRate;
+        if (cfg.bufferSize > 0)             request.bufferFrames = cfg.bufferSize;
+        else if (driver != "DirectSound")   request.bufferFrames = kAutoBufferFloor;
+        return request;
+    };
+
+    // The input the user chose, when its driver can play it with `output`:
+    // the output itself (one duplex device: no aggregate, and no transient
+    // default input for the GUI to correct with a cold swap), or another
+    // that pairs with it (not one its driver won't — a wireless one on
+    // CoreAudio: tried, it is refused with the output already closed).
+    // Scoped to `driver`: Windows lists the same hardware under each driver
+    // with a different name, so a choice saved under another driver is not
+    // tried here (scopeInputsToDriver). Resolution is exact-or-"(N)": with
+    // "USB Audio Device" and "USB Audio Device (2)" both attached, opening
+    // box 2 never swallows box 1's input. "" when it can't be.
+    auto chosenInputFor = [&](const std::string& driver, const std::string& output) -> std::string {
+        if (cfg.numInputChannels == 0 || mPreferredInputDevice.empty()) return {};
+        const bool outputPairs = mDevices->traits(driver, output).pairs;
+        std::vector<std::string> inputs;
+        for (const auto& name : mDevices->deviceNames(driver, true))
+            if (sameDeviceName(name, output)
+                || (outputPairs && mDevices->traits(driver, name).pairs))
+                inputs.push_back(name);
+        return clockwork::device::chooseBootInputDevice(mPreferredInputDevice, {}, inputs);
+    };
+
+    // Open `request`, and when its input won't open, its output alone: a
+    // bad input never costs the output.
+    auto openGivingWayOnInput = [&](smoothie::DeviceRequest request) {
+        std::string err = mDevices->open(request);
+        if (!err.empty() && !request.input.empty()) {
+            clockwork_log("[device-setup] '%s' with input '%s' failed (%s) — "
+                    "opening the output alone",
+                    request.output.c_str(), request.input.c_str(), err.c_str());
+            request.input.clear();
+            request.inputChannels = 0;
+            err = mDevices->open(request);
+        }
+        return err;
+    };
+
     // -H "__system__" is the GUI sentinel for "follow macOS default".
     // Skip fuzzy-match and go straight to the default devices.
     std::string initError;
@@ -616,42 +677,11 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 request.driver = e.typeName;   // the driver from here on, opened or not
                 request.output = e.devName;
                 request.outputChannels = reqOut;
-                // Requested input is this same device (full-duplex, e.g. a virtual
-                // loopback): open both directions at once — no aggregate, and no
-                // transient default-input state for the GUI to correct with a cold swap.
-                // Resolution is exact-or-"(N)": with "USB Audio Device" and "USB Audio
-                // Device (2)" both attached, opening box 2 never swallows box 1's input.
-                // Otherwise no input here: the input-pairing below attaches a
-                // preferred one.
-                request.inputChannels = 0;
-                if (cfg.numInputChannels != 0
-                    && !mPreferredInputDevice.empty()) {
-                    std::vector<std::string> devNames;
-                    for (auto& cand : entries)
-                        devNames.push_back(cand.devName);
-                    if (clockwork::device::resolveJuceDeviceName(
-                            mPreferredInputDevice, devNames) == e.devName) {
-                        request.input = e.devName;
-                        request.inputChannels = reqIn;
-                    }
-                }
-                if (cfg.sampleRate > 0) request.sampleRate = cfg.sampleRate;
-                if (cfg.bufferSize > 0) request.bufferFrames = cfg.bufferSize;
-
-                initError = mDevices->open(request);
-
-                // A failed full-duplex attempt may be the input half alone (mic-privacy
-                // denial, exclusive-mode contention, input-side rate limits). Retry
-                // output-only so a bad input never costs the user their chosen output;
-                // boot's input pairing below pairs an input normally.
-                if (!initError.empty() && !request.input.empty()) {
-                    clockwork_log("[device-setup] -H full-duplex open of "
-                            "'%s' failed (%s) — retrying output-only",
-                            e.devName.c_str(), initError.c_str());
-                    request.input.clear();
-                    request.inputChannels = 0;
-                    initError = mDevices->open(request);
-                }
+                // No input but the user's: an output with inputs enabled
+                // activates none of its own accord.
+                request.input = chosenInputFor(e.typeName, e.devName);
+                request.inputChannels = request.input.empty() ? 0 : reqIn;
+                initError = openGivingWayOnInput(atSessionRate(request));
 
                 if (!initError.empty()) {
                     clockwork_log("[device-setup] -H '%s' matched '%s' but failed: %s",
@@ -670,8 +700,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     }
 
     if (!openedByHardwareFlag) {
-        // The default output, with the default input when inputs are wanted:
-        // the driver pairs the two (CoreAudio on an aggregate device of them).
+        // The default output, with the user's input or else the default one
+        // when inputs are wanted: the driver pairs the two (CoreAudio on an
+        // aggregate device of them).
         //
         // NEVER OPEN A WIRELESS DEFAULT (AirPlay, Bluetooth) at boot on
         // macOS: opening wireless and then moving to a wired device for the
@@ -703,32 +734,19 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
 
 #endif
-        auto openDefault = [&](int ins) -> std::string {
-            if (bootFallback.empty())
-                return openDefaults(ins, reqOut);
-            smoothie::DeviceRequest request;
-            request.output = bootFallback;
-            request.outputChannels = reqOut;
-            if (ins != 0) {
-                request.input = defaultOrFirst(mDevices->driver(), true);
-                request.inputChannels = ins;
-            }
-            return mDevices->open(request);
-        };
-        initError = openDefault(reqIn);
-        // An input the driver won't pair with the output (CoreAudio refuses a
-        // wireless one, whose codec would drop the pair to 16 kHz — #3555)
-        // costs the input, never the output.
-        if (!initError.empty() && reqIn != 0) {
-            clockwork_log("[device-setup] init with %d in / %d out failed: %s "
-                    "— opening the output alone", reqIn, reqOut, initError.c_str());
-            initError = openDefault(0);
+        smoothie::DeviceRequest request = defaultsRequest(reqIn, reqOut);
+        if (!bootFallback.empty()) request.output = bootFallback;
+        if (!request.output.empty() && reqIn != 0) {
+            if (const std::string chosen = chosenInputFor(request.driver, request.output);
+                !chosen.empty())
+                request.input = chosen;
         }
+        initError = openGivingWayOnInput(atSessionRate(request));
         if (initError.empty() && !bootFallback.empty()) mDeviceMode = bootFallback;
         if (!initError.empty()) {
             clockwork_log("[device-setup] init with 0 in / %d out failed: %s",
                     reqOut, initError.c_str());
-            initError = openDefaults(0, 2);
+            initError = mDevices->open(atSessionRate(defaultsRequest(0, 2)));
         }
         if (!initError.empty()) {
             clockwork_log("[device-setup] all init attempts failed: %s",
@@ -749,9 +767,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
                 "— falling back to '%s'",
                 mBootDriver.c_str(), platformDefaultDriver.c_str());
         mDevices->selectDriver(platformDefaultDriver);
-        std::string fbErr = openDefaults(reqIn, reqOut);
+        std::string fbErr = openGivingWayOnInput(atSessionRate(defaultsRequest(reqIn, reqOut)));
         if (!fbErr.empty())
-            fbErr = openDefaults(0, 2);
+            fbErr = mDevices->open(atSessionRate(defaultsRequest(0, 2)));
         if (fbErr.empty()) {
             mBootDriver = platformDefaultDriver;
             initError.clear();
@@ -765,127 +783,33 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
     }
 
-    // Pair the requested input with the output (the driver opens the two as
-    // one: CoreAudio on an aggregate device, others side by side). Without it
-    // the GUI reconciler sees intent != actual on every boot and corrects with
-    // the redundant cold swap this exists to remove.
-    if (const auto settled = mDevices->settled();
-        settled && initError.empty() && cfg.numInputChannels != 0
-        && !mPreferredInputDevice.empty()) {
-        const smoothie::DeviceRequest previous = *settled;
-        const std::string currentIn = previous.input;
-        // Candidates must be SCOPED to the driver actually open. Windows lists the same
-        // hardware under each driver with a different name, so an unscoped list makes a
-        // stale pref from another driver look pairable — it then fails at the open,
-        // with the output already up. See scopeInputsToDriver. Nor one its driver won't
-        // pair with the output (a wireless one, on CoreAudio): tried, it is refused with
-        // the output already closed, and the output opened again.
-        const auto devices = listDevices(false);
-        const std::string currentOut = previous.output;
-        bool outputPairs = true;
-        for (auto& d : devices)
-            if (sameDeviceName(d.name, currentOut)) outputPairs = d.pairs;
-        std::vector<std::pair<std::string, std::string>> inputTable;
-        for (auto& d : devices)
-            if (d.maxInputChannels > 0
-                && (sameDeviceName(d.name, currentOut) || (outputPairs && d.pairs)))
-                inputTable.emplace_back(d.typeName, d.name);
-        const std::vector<std::string> inputNames =
-            clockwork::device::scopeInputsToDriver(inputTable, mDevices->driver());
-        const std::string chosen = clockwork::device::chooseBootInputDevice(
-            mPreferredInputDevice, currentIn, inputNames);
-        if (!chosen.empty() && chosen != currentIn) {
-            clockwork_log("[device-setup] boot: pairing requested input "
-                    "'%s' (default was '%s')",
-                    chosen.c_str(), currentIn.c_str());
-            smoothie::DeviceRequest paired = previous;
-            paired.input = chosen;
-            // Clamp to the device's real capacity — WASAPI rejects a request
-            // for more inputs than exist, and the auto-max sentinel asks for
-            // kRequestMaxChannels.
-            int wantIn = reqIn;
-            const int probedIn = probeDeviceChannelCount(
-                chosen, true, probeDriverTypeName());
-            if (probedIn > 0 && probedIn < wantIn) wantIn = probedIn;
-            paired.inputChannels = wantIn;
-            // A rejected open leaves nothing open, so without going back to
-            // what was there a bad input name costs the whole boot, output
-            // included. Pairing is an optimisation and must never take the
-            // output down with it.
-            const std::string pairErr = mDevices->open(paired);
-            if (!pairErr.empty()) {
-                clockwork_log("[device-setup] boot input pairing failed: "
-                        "%s — keeping '%s'",
-                        pairErr.c_str(), currentIn.c_str());
-                const std::string restoreErr = mDevices->open(previous);
-                clockwork_log("[device-setup] boot: restored output-only "
-                        "device after failed pairing%s%s",
-                        restoreErr.empty() ? "" : " — FAILED: ",
-                        restoreErr.c_str());
-            } else {
-                mLastInputDeviceName = chosen;
-            }
-        }
-    }
-
-    // Negotiate rate and buffer. A hardware buffer that is a whole multiple of
-    // the DSP's fixed block avoids prefetch overhead and NTP discontinuities at
-    // callback boundaries.
     if (const auto settled = mDevices->settled()) {
-        const smoothie::OpenDevice dev = mDevices->current().value_or(smoothie::OpenDevice{});
-        smoothie::DeviceRequest request = *settled;
-        bool changed = false;
-
-        // The configured rate, when the device offers it (a paired device
+        if (!settled->input.empty() && settled->inputChannels > 0
+            && sameDeviceName(settled->input, mPreferredInputDevice))
+            mLastInputDeviceName = settled->input;
+        // The session's rate, when the device offers it (a paired device
         // offers the rates both its devices share).
-        if (static_cast<int>(request.sampleRate) != cfg.sampleRate) {
-            bool supported = false;
-            for (auto r : dev.sampleRates) {
-                if (static_cast<int>(r) == cfg.sampleRate) {
-                    supported = true;
-                    break;
-                }
-            }
-            if (supported) {
-                request.sampleRate = cfg.sampleRate;
-                changed = true;
-            } else {
-                clockwork_log("[device-setup] requested sr %d not supported, "
-                        "keeping %.0f", cfg.sampleRate, request.sampleRate);
-            }
-        }
-
-        if (cfg.bufferSize > 0) {
-            // The user's -z / -Z / TOML buffer size (a drift-compensated
-            // pair raises one too small for it itself).
-            request.bufferFrames = cfg.bufferSize;
-            changed = true;
-        } else if (dev.driver != "DirectSound") {
-            // Auto: pick the smallest available buffer that is at least
-            // 128 samples. The block size follows the HW buffer on native
-            // (see chooseBlockSize below), so any size works. Buffers below
-            // 128 mostly add callback overhead without a latency win.
-            constexpr int kMinBuf = 128;
+        if (cfg.sampleRate > 0 && static_cast<int>(settled->sampleRate) != cfg.sampleRate)
+            clockwork_log("[device-setup] requested sr %d not supported, "
+                    "keeping %.0f", cfg.sampleRate, settled->sampleRate);
+        // The rare device that has no 128-frame buffer opened at its
+        // default: the smallest it offers from 128 up, once.
+        const auto open = mDevices->current();
+        if (open && cfg.bufferSize <= 0 && settled->driver != "DirectSound") {
             int best = 0;
-            for (auto size : dev.bufferSizes) {
-                if (size >= kMinBuf && size <= clockwork::kMaxBlockSize) {
+            for (int size : open->bufferSizes)
+                if (size >= kAutoBufferFloor && size <= clockwork::kMaxBlockSize) {
                     best = size;
-                    break;  // sizes are sorted ascending
+                    break;   // sizes are sorted ascending
                 }
-            }
-            if (best > 0 && best != dev.bufferFrames) {
+            if (best > 0 && best != settled->bufferFrames) {
+                smoothie::DeviceRequest request = *settled;
                 request.bufferFrames = best;
-                changed = true;
-            }
-        }
-
-        if (changed) {
-            const std::string setupErr = mDevices->open(request);
-            if (!setupErr.empty()) {
-                clockwork_log("[device-setup] reopening at the negotiated rate and buffer failed: %s",
-                        setupErr.c_str());
-                clockwork_log("[device-setup] recovering with device defaults");
-                openDefaults(reqIn, reqOut);
+                if (const auto err = mDevices->open(request); !err.empty()) {
+                    clockwork_log("[device-setup] reopening at a %d-frame buffer failed: %s "
+                            "— back to its default", best, err.c_str());
+                    mDevices->open(*settled);
+                }
             }
         }
     }
@@ -2400,13 +2324,14 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     //   1. recreateDeviceSession — a reopen reuses the hibernate-dead CoreAudio
     //      connection; only a brand-new session gets a live, coreaudiod-driven
     //      IO thread.
-    //   2. reopenCurrentDevice — the cold swap on that fresh session, rebuilding the
-    //      DSP and emitting /clockwork/setup so a client drops the now-dead
-    //      pre-outage timeline and re-establishes what it was tracking.
+    //   2. openChosenDevices — the cold swap onto what the user chose (or the
+    //      default) on that fresh session, rebuilding the DSP and emitting
+    //      /clockwork/setup so a client drops the now-dead pre-outage
+    //      timeline and re-establishes what it was tracking.
     //
-    // Hold the swap gate across the whole swap. It is recursive, so reopenCurrentDevice
-    // re-taking it is fine — but it MUST be released before the reopen.done broadcast,
-    // which re-takes it. Hence the inner scope.
+    // Hold the swap gate across the whole swap. It is recursive, so the switches
+    // under it re-taking it is fine — but it MUST be released before the
+    // reopen.done broadcast, which re-takes it. Hence the inner scope.
     std::string err;
     bool restored = false;
     SwapResult swap;   // device name/rate/buffer from the cold swap — reused below
@@ -2448,11 +2373,11 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
                            intent.nominalRate, intent.measuredRate);
             }
             stopAudioSource();                      // detach the dead callback
-            err = recreateDeviceSession();
-            if (err.empty()) swap = reopenCurrentDevice(intent.adoptRate);
-            // A pinned device that delivered nothing, with the engine back on
-            // the default the fresh session opened, is audio restored — there.
-            restored = err.empty() && (swap.success || swap.fellBack)
+            recreateDeviceSession();
+            swap = openChosenDevices(intent.adoptRate);
+            // A chosen device that would not play, with the engine on the
+            // default instead, is audio restored — there.
+            restored = swap.success
                     && mActiveSource.load() == AudioSource::RealCallback;
             // What the device's driver says it runs at now, read here on the
             // lane rather than waited for from a change report: a device
@@ -4213,69 +4138,20 @@ void ClockworkEngine::sessionRateOpened(double rate) {
     mReportedDeviceRate.store(static_cast<int>(rate), std::memory_order_release);
 }
 
-std::string ClockworkEngine::recreateDeviceSession() {
+void ClockworkEngine::recreateDeviceSession() {
     // Release the stale, hibernate-killed CoreAudio/HAL client completely, then
     // make a fresh session. A reopen keeps this same dead connection; only a
     // new session's drivers get a new IsolatedCoreAudioClient + AudioObjectIDs
     // that coreaudiod will actually drive with a live IO thread. Runs on the
     // device task lane (the recovery worker — see requestAudioRecovery),
     // holding the swap gate: the thread that made the old one, on every
-    // platform.
+    // platform. Opens nothing: what to open is the recovery's to say.
     closeDevices();
     mDevices = makeDeviceSession();
     restoreBootDriver();
-
-    // Open the device via the shared system-default reinit: it preserves the
-    // session sample rate.
-    const std::string err = reinitialiseWithDefaultsPreservingConfig();
-    if (!err.empty()) return err;
-    if (!mDevices->isOpen())
-        return "recreate: opened no device";
-
-    // Device is open but no callback/listener is attached yet — the caller
-    // (recoverAudio) promotes to it via startAudioSource() once it's confirmed
-    // this fresh connection actually ticks. Recovery falls back to the default
-    // output with no inputs (a pinned device / mic is not restored), but the
-    // cache cleared above keeps the rest of the engine consistent with that.
-    return {};
 }
 
-SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
-    SwapResult result;
-
-    if (!mDevices) {
-        result.error = "no audio devices (headless)";
-        return result;
-    }
-
-    // Always delegate to switchDevice with forceCold=true, so the device opens
-    // afresh and picks up any channel-count change; an open input carries
-    // over from the setup. Aim at the pinned device, then the current one.
-    std::string outName;
-    // After recovery's recreate the "current" device is whatever the
-    // system-default reinit opened — NOT necessarily the user's pinned
-    // choice (#3555 follow-on: Testy wedged, recovery reopened the
-    // wireless default and stayed there). Aim at the pin while it's
-    // still attached; a pin that's genuinely gone falls through to
-    // the current device.
-    if (!mPreferredOutputDevice.empty()) {
-        std::vector<std::string> outputNames;
-        for (auto& d : listDevices(false))
-            if (d.maxOutputChannels > 0) outputNames.push_back(d.name);
-        outName = clockwork::device::selectRecoveryTarget(
-            mPreferredOutputDevice, outputNames);
-        if (const auto dev = mDevices->current(); !outName.empty() && dev && outName != dev->name)
-            clockwork_log("[reopen] retargeting pinned device '%s' "
-                    "(current is '%s')", outName.c_str(), dev->name.c_str());
-    }
-    if (outName.empty()) {
-        if (const auto dev = mDevices->current())
-            outName = dev->name;
-    }
-    if (outName.empty()) {
-        result.error = "no current output device to reopen";
-        return result;
-    }
+double ClockworkEngine::snapToAdvertisedRate(const std::string& output, double sampleRate) {
     // An explicit rate sits at the top of planSwap's precedence, above
     // "keep the session rate when the target advertises it" — which is what
     // a rate-skew recovery must get past: the device advertises the rate it
@@ -4283,40 +4159,93 @@ SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
     // raw measurement (44,03x Hz), and log the list, because a driver can
     // back-fill the nominal rate into it whether or not the device claimed
     // it (Smoothie's CoreAudio does).
-    if (sampleRate > 0) {
-        const auto rates = probeDeviceSampleRates(outName, false);
-        std::string advertised;
-        for (double r : rates) advertised += (advertised.empty() ? "" : ", ")
-                                          + std::to_string(static_cast<int>(r));
-        const double snapped = clockwork::device::resolveTargetRate(rates, sampleRate);
-        if (snapped != 0 && snapped != sampleRate) {
-            clockwork_log("[reopen] requested %.0f Hz snaps to %.0f Hz (device advertises: %s)",
-                    sampleRate, snapped, advertised.empty() ? "nothing" : advertised.c_str());
-            sampleRate = snapped;
-        } else {
-            clockwork_log("[reopen] requesting %.0f Hz (device advertises: %s)",
-                    sampleRate, advertised.empty() ? "nothing" : advertised.c_str());
-        }
+    if (sampleRate <= 0) return sampleRate;
+    const auto rates = probeDeviceSampleRates(output, false);
+    std::string advertised;
+    for (double r : rates) advertised += (advertised.empty() ? "" : ", ")
+                                      + std::to_string(static_cast<int>(r));
+    const double snapped = clockwork::device::resolveTargetRate(rates, sampleRate);
+    if (snapped != 0 && snapped != sampleRate) {
+        clockwork_log("[reopen] requested %.0f Hz snaps to %.0f Hz (device advertises: %s)",
+                sampleRate, snapped, advertised.empty() ? "nothing" : advertised.c_str());
+        return snapped;
     }
-    // The input as the output: recovery's fresh session stands on the
-    // system defaults, and the input it opened is no more the user's than
-    // its output was (opened in and out on Loopback, a recovery came back
-    // recording from the default input, 2026-10-16). The pin while it is
-    // attached, else the input last played with, else whatever is open.
-    std::string inName;
-    if (mCurrentConfig.numInputChannels > 0) {
-        std::vector<std::string> inputNames;
-        for (auto& d : listDevices(false))
-            if (d.maxInputChannels > 0) inputNames.push_back(d.name);
-        inName = clockwork::device::selectRecoveryTarget(mPreferredInputDevice, inputNames);
-        if (inName.empty())
-            inName = clockwork::device::selectRecoveryTarget(mLastInputDeviceName, inputNames);
-    }
+    clockwork_log("[reopen] requesting %.0f Hz (device advertises: %s)",
+            sampleRate, advertised.empty() ? "nothing" : advertised.c_str());
+    return sampleRate;
+}
+
+std::string ClockworkEngine::inputToReopenWith() const {
+    // The user's input while it is attached, else the input last played
+    // with — whatever was open is not taken on trust: opened in and out on
+    // Loopback, a recovery once came back recording from the default input
+    // (2026-10-16). None when no inputs are open.
+    if (mCurrentConfig.numInputChannels <= 0) return {};
+    std::vector<std::string> inputNames;
+    for (auto& d : listDevices(false))
+        if (d.maxInputChannels > 0) inputNames.push_back(d.name);
+    std::string in = clockwork::device::selectRecoveryTarget(mPreferredInputDevice, inputNames);
+    if (in.empty())
+        in = clockwork::device::selectRecoveryTarget(mLastInputDeviceName, inputNames);
+    return in;
+}
+
+SwapResult ClockworkEngine::reopenCold(const std::string& output, double sampleRate) {
+    // Always a cold switch, so the device opens afresh and picks up any
+    // channel-count change, and the DSP is built again on it.
+    sampleRate = snapToAdvertisedRate(output, sampleRate);
+    const std::string input = inputToReopenWith();
     clockwork_log("[reopen] forceCold switch out='%s' in='%s' mode='%s' rate=%.0f",
-            outName.c_str(), inName.c_str(),
+            output.c_str(), input.c_str(),
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str(), sampleRate);
-    return switchDevice(outName, sampleRate, 0, /*forceCold=*/true, inName,
-                        SwapOrigin::Internal);
+    return switchDevice(output, sampleRate, 0, /*forceCold=*/true, input, SwapOrigin::Internal);
+}
+
+SwapResult ClockworkEngine::reopenCurrentDevice(double sampleRate) {
+    SwapResult result;
+    if (!mDevices) {
+        result.error = "no audio devices (headless)";
+        return result;
+    }
+    const auto dev = mDevices->current();
+    if (!dev) {
+        result.error = "no current output device to reopen";
+        return result;
+    }
+    return reopenCold(dev->name, sampleRate);
+}
+
+SwapResult ClockworkEngine::openChosenDevices(double sampleRate) {
+    // The output the user chose, when it is there: opened directly, never
+    // the system default first (every open is heard).
+    const std::string chosen = [this] {
+        if (mPreferredOutputDevice.empty()) return std::string();
+        std::vector<std::string> outputNames;
+        for (auto& d : listDevices(false))
+            if (d.maxOutputChannels > 0) outputNames.push_back(d.name);
+        return clockwork::device::selectRecoveryTarget(mPreferredOutputDevice, outputNames);
+    }();
+    SwapResult result;
+    if (!chosen.empty()) {
+        result = reopenCold(chosen, sampleRate);
+        if (result.success) return result;
+        clockwork_log("[recover] '%s' did not come back (%s) — the system default instead",
+                chosen.c_str(), result.error.c_str());
+    }
+
+    // None chosen, or it will not play: the system default. A wired one by
+    // name, as any device; the driver opens a wireless one itself (opening
+    // AirPlay by name never did reliably), and the default of a driver that
+    // has one when this one has none (ASIO).
+    const SystemDefaultOutput def = systemDefaultOutput();
+    if (!def.name.empty() && !def.wireless && def.name != chosen)
+        return reopenCold(def.name, sampleRate);
+    if (const std::string err = reinitialiseWithDefaultsPreservingConfig(); !err.empty()) {
+        result = {};
+        result.error = err;
+        return result;
+    }
+    return reopenCurrentDevice(sampleRate);
 }
 
 // --- Input channel management ---

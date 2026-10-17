@@ -514,13 +514,13 @@ public:
                                           const std::string& inputDeviceName = "",
                                           SwapOrigin origin = SwapOrigin::User);
 
-    // Re-open the current device (tear down and recreate without changing
-    // selection). Use when an external config change — e.g. a MOTU Pro
-    // Audio Control "Computer" channel-count bump — needs to flow through
-    // without a full engine restart. Preserves the input pairing and
-    // system-default / manual mode semantics. sampleRate > 0 makes the reopen an
-    // explicit rate request (snapped to the device's advertised rates); 0
-    // keeps the session rate, as a reopen always did.
+    // Re-open the device playing now, cold (tear down and recreate without
+    // changing selection). Use when an external config change — e.g. a MOTU
+    // Pro Audio Control "Computer" channel-count bump — needs to flow
+    // through without a full engine restart. The input is the user's
+    // (inputToReopenWith). sampleRate > 0 makes the reopen an explicit rate
+    // request (snapped to the device's advertised rates); 0 keeps the
+    // session rate, as a reopen always did.
     SwapResult               reopenCurrentDevice(double sampleRate = 0);
 
     // --- Input channel management ---
@@ -770,14 +770,25 @@ private:
     // was opened with, it is opened again. True if it acted.
     bool reconcileOpenDevice();
 
-    // Close the session and make a fresh one, then re-open the default device.
-    // Unlike a reopen (which reuses the existing CoreAudio/HAL client), this
-    // forces a brand-new connection — the recovery for a hibernate-killed
-    // device where the IO thread is no longer driven by coreaudiod. Called
-    // only from recoverAudio() on the device task lane under the swap gate —
-    // leaves the fresh session on the default device for the cold swap that
-    // follows. Empty return on success.
-    std::string recreateDeviceSession();
+    // Close the session and make a fresh one, with nothing open. Unlike a
+    // reopen (which reuses the existing CoreAudio/HAL client), this forces a
+    // brand-new connection — the recovery for a hibernate-killed device where
+    // the IO thread is no longer driven by coreaudiod. Called only from
+    // recoverAudio() on the device task lane under the swap gate.
+    void recreateDeviceSession();
+    // Recovery's open on a fresh session, cold: the output the user chose
+    // when it is there, else the system default — directly, never the
+    // default first — with the input to reopen with (inputToReopenWith).
+    // `sampleRate` > 0 asks for that rate (snapped to what the device
+    // advertises); 0 keeps the session's.
+    SwapResult openChosenDevices(double sampleRate);
+    // `output` opened afresh, cold, with the input to reopen with.
+    SwapResult reopenCold(const std::string& output, double sampleRate);
+    // The input a reopen opens: the user's while it is attached, else the
+    // one last played with; none with no inputs open.
+    std::string inputToReopenWith() const;
+    // `sampleRate` snapped to the rates `output` advertises (0 stays 0).
+    double snapToAdvertisedRate(const std::string& output, double sampleRate);
 
     // Let the processor go, close the device, and release mDevices. Shared
     // by shutdown() and recreateDeviceSession().
