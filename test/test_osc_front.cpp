@@ -137,11 +137,12 @@ TEST_CASE("fronted transport: a push to the notify targets is heard by the front
 
 TEST_CASE("fronted transport: an attached front is a notify target, so the engine builds the pushes it hears",
           "[front]") {
-    // The engine builds a push only for an audience (OscEgress::sendSetup
-    // asks hasNotifySubscribers first). A host whose clients never subscribe
-    // — an application with the engine linked in — still has a front that
-    // must hear a rebuild, so the front counts, whatever the inner transport
-    // says; without a front the answer is the inner transport's.
+    // The engine builds a push only for an audience (OscEgress::sendStateChange
+    // asks hasNotifySubscribers first; a rebuild's setup is the one written
+    // whoever listens). A host whose clients never subscribe — an application
+    // with the engine linked in — still has a front that hears what the engine
+    // pushes, so the front counts, whatever the inner transport says; without
+    // a front the answer is the inner transport's.
     Inner inner;
     inner.subscribers = false;
     Front front;

@@ -72,7 +72,7 @@ public:
     void broadcastLink(const uint8_t* d, uint32_t n) override   { if (mInner) mInner->broadcastLink(d, n); }
     // A front is a notify target: the engine builds a push only for an
     // audience, and a host whose clients never subscribe still has a front
-    // that must hear a rebuild.
+    // that hears what the engine pushes.
     bool hasNotifySubscribers() const override { return mFront || (mInner && mInner->hasNotifySubscribers()); }
     bool subscribeNotify(uint32_t t) override   { return mInner && mInner->subscribeNotify(t); }
     bool subscribeNotifyPort(int port) override { return mInner && mInner->subscribeNotifyPort(port); }
