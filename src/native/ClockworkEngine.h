@@ -1101,11 +1101,12 @@ private:
         // Do it: purge the schedule, fade the processor out and pause it,
         // park the control pass, stop the source and take the pump gate,
         // tear the instance down (its refusals and carries happen there),
-        // drain what has been said to the clients before the rings go.
+        // and deliver what has been said so far, so clients hear it while the
+        // device work goes on.
         void teardown();
-        // Build the instance at `rate` on whatever device is open now, the
-        // egress drained first so the old generation's replies all leave
-        // before the rings reset under them. Throws as rebuild_dsp does.
+        // Build the instance at `rate` on whatever device is open now; its
+        // setup, naming that device's callback, is its first word on its
+        // ring (rebuild_dsp). Throws as rebuild_dsp does.
         void build(double rate);
         // Audio again: the control pass resumed, the source started, the
         // processor resumed, the gate released. Whether the source
@@ -1351,7 +1352,6 @@ private:
     // Read by the host's CFRunLoop pump at every tick (isRunLoopSuppressed).
     std::atomic<bool>        mSuppressRunLoop{false};
     std::string              mDeviceMode;   // empty = system/auto, non-empty = manual device name
-    bool                     mDspRebuilt{false};
     // Set while switchDevice is taking the engine back to the device it was
     // playing on, after the new one delivered no audio. Under the swap gate.
     // A rollback whose device is silent too stops there: it does not roll back.

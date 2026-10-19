@@ -617,17 +617,20 @@ extern "C" {
     // takes live (lanes.h clockwork_guest_survives).
     uint32_t g_dsp_survives = 0;
 
-    // True only while this thread is inside process_audio(). emit_debug_osc()
-    // reads it to keep the RT-out ring single-writer: the audio thread logs to
-    // the lock-free RT-out ring; any other thread (watchdog, recovery, boot on
-    // native) routes to the locked NRT-out ring, so RT-out never gets a second
-    // concurrent writer. Set via AudioThreadScope at the top of process_audio.
-    thread_local bool t_on_audio_thread = false;
-    struct AudioThreadScope {
-        AudioThreadScope()  { t_on_audio_thread = true;  }
-        ~AudioThreadScope() { t_on_audio_thread = false; }
-        AudioThreadScope(const AudioThreadScope&) = delete;
-        AudioThreadScope& operator=(const AudioThreadScope&) = delete;
+    // True while this thread is the one writer of the instance's ring
+    // (RT-out): the audio thread inside process_audio(), and the restart
+    // thread inside destroy_dsp() and rebuild_dsp(), which run with the audio
+    // thread stopped. What an instance says goes out on that ring, in order
+    // (emit_osc_route), and so do this thread's log lines (emit_debug_osc);
+    // any other thread (watchdog, recovery, boot on native) writes the locked
+    // NRT-out ring, so the instance's ring never has a second concurrent writer.
+    thread_local bool t_writes_instance_ring = false;
+    struct InstanceRingScope {
+        InstanceRingScope()  : prev(t_writes_instance_ring) { t_writes_instance_ring = true; }
+        ~InstanceRingScope() { t_writes_instance_ring = prev; }
+        InstanceRingScope(const InstanceRingScope&) = delete;
+        InstanceRingScope& operator=(const InstanceRingScope&) = delete;
+        const bool prev;
     };
 
     // File-scope state shared across threads: written by clear_scheduler()
@@ -789,7 +792,7 @@ extern "C" {
         if (!memory_initialized || !cursors || !shared_memory || !osc || len == 0)
             return false;
         const bool useRtOut =
-            t_on_audio_thread ||
+            t_writes_instance_ring ||
             !g_nrt_egress_drained.load(std::memory_order_relaxed);
         if (useRtOut) {
             return ::ring_buffer_write(
@@ -971,6 +974,32 @@ extern "C" {
         ps << osc::EndMessage;
         emit_osc_out(origin, reinterpret_cast<const uint8_t*>(ps.Data()),
                      static_cast<uint32_t>(ps.Size()));
+    }
+
+    // A rebuilt instance's first word on its ring is its /clockwork/setup
+    // (docs/RESTARTS.md): rebuild_dsp says it, as the restart thread writes the
+    // ring with the audio thread stopped. A ring with no room for it then — a
+    // reader far behind — leaves it owed, and the instance does not run until
+    // it has been said (process_audio), so nothing of the instance's goes
+    // ahead of it.
+    static std::atomic<bool>     g_setup_owed{false};
+    static std::atomic<uint32_t> g_setup_buffer_frames{0};   // the device's callback, as setup names it
+
+    // "/clockwork/setup ,iii <rate> <device buffer> <generation>", on the
+    // instance's ring. True once said.
+    static bool say_setup() {
+        char buf[96];
+        osc::OutboundPacketStream ps(buf, sizeof buf);
+        ps << osc::BeginMessage(CLOCKWORK_SYS("setup"))
+           << static_cast<int32_t>(g_dsp_sample_rate)
+           << static_cast<int32_t>(g_setup_buffer_frames.load(std::memory_order_relaxed))
+           << static_cast<int32_t>(arenaInstanceGeneration(shared_memory))
+           << osc::EndMessage;
+        if (!emit_osc_route(EGRESS_BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
+                            static_cast<uint32_t>(ps.Size())))
+            return false;
+        g_setup_owed.store(false, std::memory_order_relaxed);
+        return true;
     }
 
     // DspHost::asset_release — the guest is done; the committing client hears.
@@ -1465,10 +1494,11 @@ extern "C" {
     //
     // "Reset" is bytes for all but one group. The transport area — the
     // cursors and the three rings — is a protocol between threads, and a
-    // producer may be mid-write through a rebuild, so its reset is a fresh
-    // epoch in the cursors (clockwork_lanes_reset_rings) and the ring bytes
-    // are never touched: the cursors' reset carries the whole sequence, in
-    // its order, and the rings' entries name it as theirs.
+    // producer may be mid-write through a rebuild, so a ring's reset is a
+    // fresh epoch in its cursors (clockwork_lanes_reset_*_ring) and the ring
+    // bytes are never touched. The in ring's goes with the cursors' entry,
+    // which carries its whole sequence in order; the reply rings' are their
+    // own entries', at a new arena only.
     static void reset_words(uint32_t start, uint32_t bytes) {
         auto* w = reinterpret_cast<std::atomic<uint32_t>*>(shared_memory + start);
         for (uint32_t i = 0; i < bytes / 4u; ++i) w[i].store(0, std::memory_order_relaxed);
@@ -1523,29 +1553,33 @@ extern "C" {
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(TAP_RING_FRAMES, std::memory_order_relaxed); // ringFrames
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(0, std::memory_order_relaxed);              // version
     }
-    // The transport area, as one sequence on the cursors' entry. Serialised
-    // against the IN / NRT-out producers that keep running through a rebuild
-    // (details in clockwork_lanes_reset_rings). The IN writer lock is NOT
-    // re-zeroed: a producer may hold it right now, and its unlocked state is
-    // exactly the 0 its release store leaves behind. What reached the in
-    // ring since the teardown walked it is carried or refused before the
-    // epoch resets under it; then the flag says there is no instance yet, so
-    // a message for the guest written from now on is refused at the boundary
-    // rather than left for an instance it was not addressed to; the drains'
-    // gap tracking restarts with the sequences, and a flush requested
-    // against the old ring must not carry over; and clockwork's own
-    // messages that were waiting go first in the new epoch, in their order.
+    // The in ring and the status flags, as one sequence on the cursors'
+    // entry. Serialised against the IN producers that keep running through a
+    // rebuild (details in clockwork_lanes_reset_in_ring). The IN writer lock
+    // is NOT re-zeroed: a producer may hold it right now, and its unlocked
+    // state is exactly the 0 its release store leaves behind. What reached
+    // the in ring since the teardown walked it is carried or refused before
+    // the epoch resets under it; then the flag says there is no instance yet,
+    // so a message for the guest written from now on is refused at the
+    // boundary rather than left for an instance it was not addressed to; the
+    // drain's gap tracking restarts with the sequence, and a flush requested
+    // against the old ring must not carry over; and clockwork's own messages
+    // that were waiting go first in the new epoch, in their order.
     static void reset_transport() {
         restart_in_ring_refuse();
-        clockwork_lanes_reset_rings();
+        clockwork_lanes_reset_in_ring();
         cursors->status_flags.store(STATUS_NO_INSTANCE, std::memory_order_release);
-        clockwork_lanes_reset_drains();
         g_in_drain.lastSeq = -1;
         g_in_flush_below.store(-1, std::memory_order_relaxed);
         g_in_discard_active = false;
         restart_in_ring_carry();
     }
     static void reset_with_transport() { /* the cursors' entry resets this ring: a fresh epoch */ }
+    // The reply rings outlive an instance: what one said stays for its
+    // readers, and the next one's setup follows it (docs/RESTARTS.md). A new
+    // arena begins them afresh.
+    static void reset_rt_out_ring()  { clockwork_lanes_reset_rt_out_ring(); }
+    static void reset_nrt_out_ring() { clockwork_lanes_reset_nrt_out_ring(); }
     // The ids are the clients', shared between them: a new arena starts them.
     static void reset_node_id_counter() { reset_words(NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE); }
     // The guest's publish window: zeroed, and nothing more. What shape the
@@ -1579,8 +1613,8 @@ extern "C" {
         { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    &reset_transport },
         { CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, &reset_node_id_counter },
         { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         &reset_with_transport },
-        { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     &reset_with_transport },
-        { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    &reset_with_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     &reset_rt_out_ring },
+        { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    &reset_nrt_out_ring },
         { CLOCKWORK_ARENA_GUEST_WINDOW,              &reset_guest_window },
         { CLOCKWORK_ARENA_GUEST_CONFIG,              &reset_guest_config },
         { CLOCKWORK_ARENA_GUEST_PERSIST,             &reset_guest_persist },
@@ -2546,6 +2580,10 @@ extern "C" {
     // must re-subscribe. A registry that outlives an instance is state clockwork
     // cannot ask for and the DSP cannot hand over.
     void destroy_dsp() {
+        // The audio thread is stopped (the caller's contract): what the instance
+        // says as it goes, and what clockwork says for it, go on its ring after
+        // everything it said before.
+        InstanceRingScope instance_ring;
         // From here until the next dsp_new succeeds there is no instance: said
         // where every writer of the in ring reads it, before anything else
         // goes, so a message written from now on meets the boundary's
@@ -2555,6 +2593,9 @@ extern "C" {
         // stays named, so a refusal from here says which instance refused
         // and a reader of the arena knows "between instances" from the bytes.
         if (shared_memory) arenaInstanceDown(shared_memory);
+        // An instance whose setup is still owed goes unannounced: it said
+        // nothing, and the next one up announces itself.
+        g_setup_owed.store(false, std::memory_order_relaxed);
         // What was already in the ring: answered or carried, never dropped.
         g_carry_used = 0;
         restart_in_ring_refuse();
@@ -2583,13 +2624,23 @@ extern "C" {
         g_in_seq_reset.store(true, std::memory_order_relaxed);
     }
 
-    void rebuild_dsp(double sample_rate) {
+    void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames) {
+        // The audio thread is stopped (the caller's contract), so this thread
+        // writes the instance's ring: what the instance says as it is built,
+        // and then its setup.
+        InstanceRingScope instance_ring;
         // The new rate, plus whatever channel ceilings the caller aimed at
         // with clockwork_set_channel_ceilings since the last build. Everything else
         // — the guest's config block, the arena, the regions — is where it
         // was; a rebuild is init_memory again, not a different function.
         g_clockwork_config.sample_rate = sample_rate;
         init_memory();
+        // Not up: there is no instance to announce, and the failed build is
+        // the host's to report.
+        if (!g_dsp) return;
+        g_setup_buffer_frames.store(device_buffer_frames, std::memory_order_relaxed);
+        g_setup_owed.store(true, std::memory_order_release);
+        say_setup();
     }
 
     // Mirror of init_memory for engine shutdown: tear down the DSP instance and drop
@@ -2679,7 +2730,7 @@ extern "C" {
     // active_output_channels / active_input_channels: live channel counts
     EMSCRIPTEN_KEEPALIVE
     bool process_audio(double current_time, uint32_t active_output_channels, uint32_t active_input_channels) {
-        AudioThreadScope _audio_thread_scope;   // this thread owns RT-out for clockwork_log routing
+        InstanceRingScope instance_ring;   // the audio thread writes the instance's ring
         clockwork_pool_register_engine_thread();  // pool ownership follows the audio thread
 #if CLOCKWORK_SYNTH
         if (!memory_initialized) {
@@ -2703,6 +2754,11 @@ extern "C" {
         if (!metrics) {
             return false;
         }
+
+        // A new instance says nothing before its setup: one the ring had no
+        // room for at the rebuild says it now, or waits, silent, for a block
+        // when it can.
+        if (g_setup_owed.load(std::memory_order_acquire) && !say_setup()) return true;
 
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().drainPendingClear();
@@ -3062,7 +3118,7 @@ extern "C" {
         // the always-safe RT-out. Capability signal, not an __EMSCRIPTEN__ branch,
         // so every target shares one codepath.
         const bool useRtOut =
-            t_on_audio_thread ||
+            t_writes_instance_ring ||
             !g_nrt_egress_drained.load(std::memory_order_relaxed);
         if (useRtOut) {
             ::ring_buffer_write(

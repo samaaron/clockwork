@@ -49,16 +49,10 @@
 #include <thread>
 #include <vector>
 
-// Clockwork's own, as test_stream_identity.cpp reaches them: a device switch
-// is what frees a DSP, and freeing a DSP is the only way to see clockwork
-// close the sinks that DSP opened. Declared here rather than via
-// audio_processor.h, which pulls in the <emscripten/...> shim that is not on a
-// native include path. All three have C linkage (src/audio_processor.cpp).
-extern "C" {
-extern struct Dsp* g_dsp;
-void destroy_dsp();
-void rebuild_dsp(double sample_rate);
-}
+// Clockwork's own (destroy_dsp, rebuild_dsp, g_dsp): a device switch is what
+// frees a DSP, and freeing a DSP is the only way to see clockwork close the
+// sinks that DSP opened.
+#include "audio_processor.h"
 
 namespace {
 
@@ -445,7 +439,7 @@ TEST_CASE("sinks: freeing the DSP closes the sinks it opened",
     ClockworkSink list[8] = {};
     REQUIRE(clockwork_sink_list(list, 8) == 0);
 
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     // A fresh instance holds no sinks, and the old handle cannot reach one.
     const uint8_t body[1] = { 0x00 };

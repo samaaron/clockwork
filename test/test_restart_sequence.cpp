@@ -4,8 +4,8 @@
  * test_restart_sequence.cpp — one cold restart, whatever started it.
  *
  * docs/RESTARTS.md names a cold restart as one sequence: restarting, with
- * the generation closing; the teardown's refusals; running and setup, with
- * the generation opened. Three things start one — a device switch the user
+ * the generation closing; the teardown's refusals; setup, the new instance's
+ * first word, and running as the swap ends, with the generation opened. Three things start one — a device switch the user
  * asked for, the watchdog's recovery of a device that stopped delivering,
  * and the watchdog's recovery from a device that delivers at a rate other
  * than the one it reports — and a client cannot tell which, nor should it:
@@ -53,8 +53,8 @@ std::vector<Said> sequenceHeard(EngineFixture& fix) {
     return out;
 }
 
-// The cold restarts in what was heard, each restarting(g), running(h),
-// setup(h) with h above g, each closing the generation the last opened,
+// The cold restarts in what was heard, each restarting(g), setup(h),
+// running(h) with h above g, each closing the generation the last opened,
 // starting from `from`. How many there were.
 int coldRestartsIn(const std::vector<Said>& heard, int32_t from) {
     std::vector<Said> cold;
@@ -71,9 +71,9 @@ int coldRestartsIn(const std::vector<Said>& heard, int32_t from) {
         INFO("cold restart " << i << ", closing generation " << g);
         CHECK(a.state == "restarting");
         CHECK(a.generation == g);
-        CHECK(b.state == "running");
+        CHECK(b.address == CLOCKWORK_SYS("setup"));
         CHECK(b.generation > g);
-        CHECK(c.address == CLOCKWORK_SYS("setup"));
+        CHECK(c.state == "running");
         CHECK(c.generation == b.generation);
         g = b.generation;
     }
@@ -87,16 +87,16 @@ bool heardRunning(EngineFixture& fix, int32_t above) {
 }
 
 // The sequence once it has settled, read on the watchdog's clock: its last
-// word a setup naming the generation open now, and nothing more said for a
+// word a running naming the generation open now, and nothing more said for a
 // further stall window, so every restart in it is complete. A recovery
 // the engine asked for itself can start after the one a case waited for —
 // the stall watchdog firing before the restored device has ticked, on a
 // slow runner (2026-10-16) — and a sequence read mid-restart has a
-// restarting with no running and setup behind it yet.
+// restarting with no setup and running behind it yet.
 std::vector<Said> settledSequence(EngineFixture& fix, fake_audio::FakeSystem& sys) {
     REQUIRE(runWatchdogUntil(fix.engine(), sys, 50, 20000, [&] {
         const auto h = sequenceHeard(fix);
-        return !h.empty() && h.back().address == CLOCKWORK_SYS("setup")
+        return !h.empty() && h.back().state == "running"
             && h.back().generation == static_cast<int32_t>(fix.engine().generation());
     }));
     const size_t settled = sequenceHeard(fix).size();

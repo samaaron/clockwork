@@ -48,15 +48,14 @@ public:
     // "/clockwork/statechange ,ssi <state> <reason> <generation>": restarting
     // names the generation closing, running after a rebuild the one opened.
     void sendStateChange(const char* state, const char* reason);
-    // "/clockwork/setup ,iii <rate> <buffer> <generation>": the one opened.
-    void sendSetup(int sampleRate, int bufferSize);
     // Caller-targeted statechange for post-init registrants (stream
     // transports connect only after boot and miss the boot broadcast).
     // Note: no setup variant — /clockwork/setup is a rebuild EVENT, never
     // replayed to late joiners (it would trigger spurious client reinits).
     void sendStateChangeTo(uint32_t token, const char* state, const char* reason);
     // The guest instance's generation now, off the arena: the number every
-    // refusal, statechange and setup above carries (docs/RESTARTS.md).
+    // refusal and statechange above carries, and a rebuilt instance's setup
+    // (docs/RESTARTS.md).
     static uint32_t generationNow();
 
     // ── Gateway side: deliver (only the NRT gateway calls these) ──────────────

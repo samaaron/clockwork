@@ -6,18 +6,11 @@
 #include "LanesFixture.h"
 
 #include "lanes/lanes.h"
+#include "audio_processor.h"   // destroy_dsp, rebuild_dsp
 #include "dsp_api.h"      // DspFpEnv
 #include "OscTestUtils.h"
 
 #include <cstring>
-
-// Declared here rather than via audio_processor.h, which pulls in the
-// <emscripten/...> shim that is not on a native include path. Both have C
-// linkage (src/audio_processor.cpp).
-extern "C" {
-void destroy_dsp();
-void rebuild_dsp(double sample_rate);
-}
 
 namespace lanes_test {
 namespace {
@@ -94,7 +87,7 @@ uint64_t position() { return gSamplePos; }
 uint64_t freshDsp() {
     boot();
     destroy_dsp();
-    rebuild_dsp(kSampleRate);
+    rebuild_dsp(kSampleRate, kBufLength);
     gDspOrigin = gSamplePos;
     return gSamplePos;
 }

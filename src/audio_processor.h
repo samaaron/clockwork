@@ -150,7 +150,10 @@ extern "C" {
 #ifndef __EMSCRIPTEN__
     // Native-only: DSP teardown/rebuild for cold swap
     void destroy_dsp();
-    void rebuild_dsp(double sample_rate);
+    // A new instance at `sample_rate`, on a device whose callback is
+    // `device_buffer_frames`: what its /clockwork/setup names, said by its
+    // first block.
+    void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
     // Native-only: full arena teardown for engine shutdown — destroys the
     // DSP instance and clears memory_initialized/shared_memory/control/metrics so
     // the lanes entry points reject before the host unmaps the segment.

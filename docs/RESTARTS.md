@@ -16,7 +16,7 @@ inherits it by implementing the one hook in "What the guest owes".
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
 | **hot restart** | survives | untouched, every region | statechange only |
-| **cold restart** (a rebuild) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, then statechange `running` and `setup` with the one opened |
+| **cold restart** (a rebuild) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
 A hot restart is a device change the instance can take without being
@@ -112,9 +112,9 @@ producer in another thread may be mid-write through a rebuild.
 | channel map | cold boot | kept | kept: the streams bound over channels outlive the instance; the device's own words are rewritten when the instance is built, as any attach rewrites an entry | its seqlock |
 | scope | rebuild | kept, continues | reformatted at the new device's channels; the write position restarts at 0 | a reader's cursor starts again |
 | taps | rebuild | kept | every slot free | the slot state |
-| ring cursors, status flags | rebuild | kept | fresh epoch, every ring empty | n/a |
+| ring cursors, status flags | rebuild | kept | the in ring's cursors and the status flags: a fresh epoch; the reply rings' cursors go with their rings | n/a |
 | in ring | rebuild | kept, drained as usual | every unread message for the guest refused to its sender, clockwork's own carried, then the ring is fresh | `/clockwork/error` to the token |
-| RT out ring, NRT out ring | rebuild | kept | drained to every client first, then fresh | the replies themselves |
+| RT out ring, NRT out ring | cold boot | kept | kept: what the old instance said stays for its readers, and the new instance's `setup` follows it | the replies themselves |
 | guest window | rebuild | kept | zeroed; the new instance lays it out again | the window's identity reads 0 until it does |
 
 And the areas outside the arena, and the engine's own stores:
@@ -175,13 +175,34 @@ waiting on, so these are the rules a client may rely on:
    order, rather than refused. The carry is bounded (64 KB); one that does
    not fit is refused like the guest's, and counted. A bundle is never
    clockwork's (clockwork_prefix.h), so a bundle is refused.
-3. **The old generation's replies all leave before `setup`.** The egress
-   rings are drained to every client after the teardown and again just
-   before the rings reset (`drainEgressNow` in the cold path), so the
-   teardown's refusals, and anything said in the window between, reach
-   their clients, and a client never hears a reply from a dead generation
-   after it has been told about the new one.
-4. **The schedule is empty from `restarting`.** Timed messages held for
+3. **Everything an instance says goes out on its ring, in order, and
+   `setup` cuts it.** A reply carries no generation of its own, so a client
+   tells which instance made it by where it falls against `setup`. The RT
+   out ring is the instance's: the audio thread writes it, and while a
+   restart has the audio thread stopped, the restart thread does
+   (`destroy_dsp`, `rebuild_dsp` in src/audio_processor.cpp) — so what the
+   old instance says as it goes (its last answers, its assets released)
+   follows everything it said before, and `setup` is the last thing
+   `rebuild_dsp` writes, naming the generation opened, before the new
+   instance can say anything. Every reader of the ring — the engine's
+   gateway, a host reading the rings itself, a tap — hears the old
+   instance, then `setup`, then the new instance, because that is their
+   order in the ring. A ring with no room for `setup` then (a reader far
+   behind) holds the new instance silent until it has room: nothing of the
+   instance's goes ahead of it.
+4. **The NRT out ring carries nothing whose meaning depends on the cut.**
+   Clockwork's own replies, device reports, inputs (MIDI, Link, gamepad,
+   OSC), log lines and hosted tracks belong to no instance; statechanges
+   and refusals name their generation. So `restarting` and `running` need
+   no place against `setup`: `running`, said as the swap ends, comes after
+   it for the engine's own reader, which reads nothing until audio resumes,
+   and may come either side of the new instance's first replies.
+5. **Nothing is lost at the cut.** The reply rings outlive an instance
+   (lifetime cold boot): what a reader had not read when the rebuild came
+   is still there, ahead of `setup`. The engine's own reader, parked for
+   the swap, is handed what has been said at the teardown, so clients hear
+   `restarting` while a device opens.
+6. **The schedule is empty from `restarting`.** Timed messages held for
    the old instance are cleared, not refused one by one: the store can
    hold thousands, and a client that halts on `restarting` re-sends its
    future after `setup`.
@@ -235,7 +256,7 @@ moves, with the word up and down), and test_clockwork_sys.cpp (the rule).
 At teardown: **answer what you still hold**. Whatever the guest has
 accepted and not yet answered is answered, in its own words, before
 `dsp_free` returns (src/dsp_api.h says so on `dsp_free`). Clockwork's part
-is that those answers leave on the rings before the rings go (rule 3).
+is that those answers go out on the instance's ring, ahead of `setup` (rule 3).
 What the guest holds is its business; the next guest owes the same and
 nothing else.
 
@@ -263,7 +284,11 @@ Everything else it holds is the instance's and goes with it.
   `rebuild_dsp`).
 - test/test_restart_refusals.cpp and the `[ColdSwap]` client ABI cases:
   the same rules through a whole engine's cold swap, where the order of
-  the teardown, the drains and the rebuild is the engine's.
+  the teardown, the drains and the rebuild is the engine's; there too,
+  that a client hears `setup` before anything the new instance says, and
+  that a host reading the rings itself gets, before `setup`, what the old
+  instance said that it had not read — its answers and its assets
+  released.
 - test/test_restart_sequence.cpp: one sequence whatever started it — the
   user's switch, the watchdog's recovery, the rate-skew recovery.
 - test/test_guest_reconfigure.cpp and the `[survives]` cases of

@@ -16,13 +16,19 @@
  */
 #include "EngineFixture.h"
 #include "clockwork_arena.h"
+#include "clockwork_client.h"
 #include "clockwork_prefix.h"
 #include "clockwork_sys.h"
+#include "dsp_api.h"
 #include "lanes/lanes.h"
+#include "shared_memory.h"   // RingCursors: where the instance's ring stands
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
+#include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -42,6 +48,35 @@ bool replied(EngineFixture& fix, const std::string& addr) {
     for (const auto& r : fix.allReplies())
         if (r.address == addr) return true;
     return false;
+}
+
+// Everything on the reply rings, as a host that reads them itself takes it
+// (Config::hostDrainsEgress, clockwork_client_poll): the addresses, in the
+// order given.
+std::vector<std::string> pollAll(ClockworkClient* rings) {
+    std::vector<std::string> out;
+    std::array<ClockworkClientMessage, 64> batch{};
+    for (;;) {
+        const uint32_t n = clockwork_client_poll(rings, batch.data(), static_cast<uint32_t>(batch.size()));
+        for (uint32_t i = 0; i < n; ++i)
+            out.push_back(osc_test::parseAddress(batch[i].bytes, batch[i].length));
+        if (n < batch.size()) return out;
+    }
+}
+
+long indexOf(const std::vector<std::string>& heard, const std::string& addr) {
+    for (size_t i = 0; i < heard.size(); ++i)
+        if (heard[i] == addr) return static_cast<long>(i);
+    return -1;
+}
+
+// An engine whose reply rings a host reads itself, as SuperSonic's server
+// does: a reader the engine can neither park nor drain for.
+ClockworkEngine::Config hostReadsTheRings() {
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.manualAudioPump  = true;
+    cfg.hostDrainsEgress = true;
+    return cfg;
 }
 
 } // namespace
@@ -177,4 +212,134 @@ TEST_CASE("restarts, engine: restarting names the generation closing, setup the 
             runningNamed = true;
     }
     CHECK(runningNamed);
+}
+
+TEST_CASE("restarts, engine: a client hears setup before anything the new instance says",
+          "[restarts][engine][ColdSwap][generation]") {
+    // On setup a client drops everything it held of the old instance's
+    // (docs/RESTARTS.md, "What a client does"). A reply from the new instance
+    // heard before setup is dropped with it: an asset the new instance took
+    // goes back to the client's pool while the new instance still reads it.
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.manualAudioPump   = true;
+    cfg.hostDrivesControl = true;
+    EngineFixture fix(cfg);
+    subscribe(fix);
+    // The case is the host from here: a reply pass runs when it says.
+    fix.stopHostControl();
+
+    const auto swap = switchWhenFree(fix, "", 44100);
+    REQUIRE(swap.success);
+    REQUIRE(swap.type == SwapType::Cold);
+
+    // The client has not heard yet, and sends: the new instance takes it.
+    fix.send(osc_test::message("/dummy/ping"));
+    for (int i = 0; i < 8 && !replied(fix, "/dummy/pong"); ++i) {
+        fix.pumpBlock();
+        fix.engine().controlPass();
+    }
+
+    const auto replies = fix.allReplies();
+    INFO(fix.repliesDump());
+    const auto at = [&](const std::string& addr) {
+        for (size_t i = 0; i < replies.size(); ++i)
+            if (replies[i].address == addr) return static_cast<long>(i);
+        return -1L;
+    };
+    const long setup = at(CLOCKWORK_SYS("setup")), pong = at("/dummy/pong");
+    REQUIRE(setup >= 0);
+    REQUIRE(pong >= 0);
+    CHECK(setup < pong);
+}
+
+TEST_CASE("restarts, engine: what the old instance said that a host had not read reaches it, before setup",
+          "[restarts][engine][ColdSwap]") {
+    EngineFixture fix(hostReadsTheRings());
+    ClockworkClient* rings = fix.engine().egressClient();
+    REQUIRE(rings != nullptr);
+    pollAll(rings);   // the boot's
+
+    // The old instance answers, and the host has not read it when the rebuild comes.
+    fix.send(osc_test::message("/dummy/ping"));
+    fix.pumpBlock();
+    const auto swap = switchWhenFree(fix, "", 44100);
+    REQUIRE(swap.success);
+    REQUIRE(swap.type == SwapType::Cold);
+
+    const auto heard = pollAll(rings);
+    INFO([&] { std::string s; for (const auto& a : heard) s += "\n  | " + a; return s; }());
+    const long pong = indexOf(heard, "/dummy/pong"), setup = indexOf(heard, CLOCKWORK_SYS("setup"));
+    REQUIRE(pong >= 0);
+    REQUIRE(setup >= 0);
+    CHECK(pong < setup);
+}
+
+TEST_CASE("restarts, engine: the old instance's asset releases reach a host that had not read them, before setup",
+          "[restarts][engine][ColdSwap]") {
+    EngineFixture fix(hostReadsTheRings());
+    ClockworkClient* rings = fix.engine().egressClient();
+    REQUIRE(rings != nullptr);
+
+    // An asset the old instance holds: its bytes in the lane, committed, and the commit answered.
+    std::memset(const_cast<uint8_t*>(fix.engine().guestAssets()), 0x5A, 64);
+    osc_test::Builder b;
+    b.begin("/clockwork/asset/commit") << int32_t{5} << int32_t{CLOCKWORK_ASSET_RAW} << int32_t{0}
+                                       << int32_t{64} << int32_t{0} << int32_t{0} << 0.f;
+    fix.send(b.end());
+    fix.pumpBlock();
+    REQUIRE(indexOf(pollAll(rings), CLOCKWORK_SYS("asset/committed")) >= 0);
+
+    // The rebuild releases it; the host reads nothing until the rebuild is done.
+    const auto swap = switchWhenFree(fix, "", 44100);
+    REQUIRE(swap.success);
+    REQUIRE(swap.type == SwapType::Cold);
+
+    const auto heard = pollAll(rings);
+    INFO([&] { std::string s; for (const auto& a : heard) s += "\n  | " + a; return s; }());
+    const long released = indexOf(heard, CLOCKWORK_SYS("asset/released")), setup = indexOf(heard, CLOCKWORK_SYS("setup"));
+    REQUIRE(released >= 0);
+    REQUIRE(setup >= 0);
+    CHECK(released < setup);
+}
+
+TEST_CASE("restarts, engine: a new instance whose ring has no room for its setup says nothing until it has, then setup first",
+          "[restarts][engine][ColdSwap]") {
+    EngineFixture fix(hostReadsTheRings());
+    fix.expectEgressRefusals();   // the instance's ring is filled on purpose
+    ClockworkClient* rings = fix.engine().egressClient();
+    REQUIRE(rings != nullptr);
+    pollAll(rings);
+
+    // The host stops reading, and the old instance answers until its ring takes nothing more.
+    const auto* cursors = reinterpret_cast<const RingCursors*>(
+        static_cast<uint8_t*>(clockwork_lanes_base()) + RING_CURSORS_START);
+    const auto ping = osc_test::message("/dummy/ping");
+    bool full = false;
+    for (int i = 0; i < 100000 && !full; ++i) {
+        const int32_t before = cursors->out_head.load(std::memory_order_acquire);
+        fix.send(ping);
+        fix.pumpBlock();
+        full = cursors->out_head.load(std::memory_order_acquire) == before;
+    }
+    REQUIRE(full);
+
+    // The rebuild finds no room for the new instance's setup. Asked something, the new
+    // instance renders its blocks and answers nothing while setup waits.
+    const auto swap = switchWhenFree(fix, "", 44100);
+    REQUIRE(swap.success);
+    REQUIRE(swap.type == SwapType::Cold);
+    fix.send(osc_test::message("/dummy/asset/last"));
+    fix.pumpBlock(8);
+    auto heard = pollAll(rings);   // the host reads again: the old instance's answers, and room
+    CHECK(indexOf(heard, CLOCKWORK_SYS("setup")) < 0);
+    CHECK(indexOf(heard, "/dummy/asset/last.reply") < 0);
+
+    // With room, the next block says setup, and then the new instance answers.
+    fix.pumpBlock(4);
+    heard = pollAll(rings);
+    INFO([&] { std::string s; for (const auto& a : heard) s += "\n  | " + a; return s; }());
+    const long setup = indexOf(heard, CLOCKWORK_SYS("setup")), answer = indexOf(heard, "/dummy/asset/last.reply");
+    REQUIRE(setup >= 0);
+    REQUIRE(answer >= 0);
+    CHECK(setup < answer);
 }

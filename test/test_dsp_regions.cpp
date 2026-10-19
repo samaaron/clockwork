@@ -55,15 +55,6 @@
 #include <string>
 #include <vector>
 
-// Declared here rather than via audio_processor.h, which pulls in the
-// <emscripten/...> shim that is not on a native include path. Both have C
-// linkage (src/audio_processor.cpp). test_stream_identity.cpp does the same.
-extern "C" {
-extern struct Dsp* g_dsp;
-void destroy_dsp();
-void rebuild_dsp(double sample_rate);
-}
-
 namespace {
 
 constexpr uint32_t kClient = 0x9e61;
@@ -425,7 +416,7 @@ TEST_CASE("regions: the config block survives traffic and a rebuild",
     // so the new instance is handed the same bytes rather than whatever the
     // previous one left behind.
     destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     lanes_test::drainRt();
     CHECK(slots() == before);
 }
@@ -464,7 +455,7 @@ TEST_CASE("regions: persistent survives a rebuild and the guest's memory does no
     // The device switch. destroy_dsp + rebuild_dsp is exactly what ClockworkEngine
     // does for a cold swap, and it is the moment both promises are tested.
     destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
 
     // PERSISTENT SURVIVED. The new instance found the old one's record, and it
@@ -535,7 +526,7 @@ TEST_CASE("regions: a blob clockwork has no verb for survives a rebuild",
     lanes_test::tickUntil(4, "/dummy/region/persist-gen");
 
     destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
 
     const auto r = ask("/dummy/region/persist-at-birth", "/dummy/region/persist-was");

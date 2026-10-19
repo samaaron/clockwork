@@ -58,9 +58,6 @@ extern "C" {
     // Real-pointer arena base (== init_memory's `shared_memory`). Use for any
     // engine region so native glue stays consistent with the unified arena.
     void* get_shared_memory_base();
-
-    void destroy_dsp();
-    void rebuild_dsp(double sample_rate);
 }
 
 namespace {
@@ -326,22 +323,10 @@ void ClockworkEngine::setEngineState(EngineState state, const std::string& reaso
                    engineStateToString(prev), stateStr,
                    reason.empty() ? "-" : reason.c_str());
 
+    // /clockwork/setup is not a state's: the rebuild says it, as the new
+    // instance's first word on its ring (rebuild_dsp), ahead of anything the
+    // instance answers whenever this transition is said.
     mEgress.sendStateChange(stateStr, reason.c_str());
-
-    // /clockwork/setup fires ONLY when the DSP instance was actually rebuilt
-    // (cold swap). It tells a client that everything the DSP was holding is
-    // gone and whatever it tracked must be re-established. Sending it on a
-    // swap-failed rollback or a hot swap — where the instance survives —
-    // would make clients throw away state that is still live.
-    if (state == EngineState::Running && mDspRebuilt) {
-        mDspRebuilt = false;
-        // The generation it names is the arena's: dsp_new moved the word on
-        // when the new instance came up, and the egress reads it there.
-        const auto dev = mDevices ? mDevices->current() : std::nullopt;
-        const int sr  = dev ? static_cast<int>(dev->sampleRate) : mCurrentConfig.sampleRate;
-        const int buf = dev ? dev->bufferFrames : mCurrentConfig.bufferSize;
-        mEgress.sendSetup(sr, buf);
-    }
 }
 
 uint32_t ClockworkEngine::generation() const {
@@ -3356,8 +3341,8 @@ void ClockworkEngine::Restart::teardown() {
     if (mCold) mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
     mEngine.fadeOutAndPause();
     // A cold restart re-inits the arena (destroy_dsp / rebuild_dsp →
-    // init_memory → clockwork_lanes_reset_drains) that the control pass
-    // drains — parked until the arena is back, whoever runs it.
+    // init_memory) that the control pass works over — parked until the
+    // arena is back, whoever runs it.
     if (mCold) {
         mParked = mEngine.parkControlPass();
         if (mEngine.testControlParked) mEngine.testControlParked();
@@ -3374,9 +3359,12 @@ void ClockworkEngine::Restart::teardown() {
     // in ring for it (destroy_dsp, docs/RESTARTS.md), and those answers
     // have to be on the rings before the drain.
     if (mCold) destroy_dsp();
-    // What the engine has said so far reaches its clients before the rings
-    // go down with the arena — the user's notice before a recovery, this
-    // swap's own account of itself, the teardown's refusals.
+    // What the engine has said so far reaches its clients now, not when audio
+    // resumes: the pass is parked for the whole swap, and a device can take
+    // seconds to open — the user's notice before a recovery, this swap's own
+    // account of itself, the old instance's last words and the teardown's
+    // refusals. Nothing is lost by waiting (the reply rings outlive the
+    // instance); it is only late.
     if (mCold) drain();
 }
 
@@ -3388,12 +3376,10 @@ void ClockworkEngine::Restart::drain() {
 }
 
 void ClockworkEngine::Restart::build(double rate) {
-    // Said since the last drain — a refusal at the door, a log line — leaves
-    // before the rings' epoch resets under it (docs/RESTARTS.md: the old
-    // generation's replies all leave before setup).
-    drain();
-    rebuild_dsp(rate);
-    mEngine.mDspRebuilt = true;
+    // The device's callback, which the new instance's setup names.
+    const auto dev = mEngine.mDevices ? mEngine.mDevices->current() : std::nullopt;
+    const int buffer = dev ? dev->bufferFrames : mEngine.mCurrentConfig.bufferSize;
+    rebuild_dsp(rate, static_cast<uint32_t>(buffer));
 }
 
 bool ClockworkEngine::Restart::resumeAudio() {
@@ -4038,8 +4024,7 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
             }
         }
         // A cold swap left Restarting; the way back, when it was cold too, has
-        // already said Running (this is then no transition, and no second
-        // /clockwork/setup).
+        // already said Running (this is then no transition).
         if (isCold) {
             if (const char* why = clockwork_boot_error())
                 setEngineState(EngineState::Error, why);

@@ -38,54 +38,58 @@ static constexpr uint32_t kNrtEgressMax =
     NRT_OUT_RING_SIZE / 2 < 8192 ? NRT_OUT_RING_SIZE / 2 : 8192;
 
 // Per-lane consumer state (single consumer per lane, by contract). Process
-// lifetime; init_memory() resets it alongside the ring sequence counters via
-// clockwork_lanes_reset_drains.
+// lifetime; reset with its ring's sequence counter when the ring begins a
+// fresh epoch (clockwork_lanes_reset_rt_out_ring / _nrt_out_ring).
 static ClockworkDrainState g_rt_drain_state;
 static ClockworkDrainState g_nrt_drain_state;
 
 extern "C" {
 
-void clockwork_lanes_reset_drains(void) {
-    g_rt_drain_state.lastSeq  = -1;
-    g_nrt_drain_state.lastSeq = -1;
+// Fresh ring epochs. The IN and NRT-out producers run through a cold-swap
+// rebuild: transport ingress threads, and clockwork_log / clockwork_egress_nrt_write
+// from any engine worker. Each serialises its whole read-head→publish
+// sequence on its ring's writer spinlock (RingBufferWriter::write), so owning
+// that lock across the reset linearises it — an in-flight write lands wholly
+// in the old epoch (discarded here) or wholly in the fresh one, never
+// interleaved with the zeroing. The lock words are never zeroed: releasing
+// the spinlock is what returns them to 0, and a blind store would unlock
+// under a holder.
+static void spin_acquire(std::atomic<int32_t>& lock) {
+    int32_t expected = 0;
+    while (!lock.compare_exchange_weak(expected, 1,
+            std::memory_order_acquire, std::memory_order_relaxed))
+        expected = 0;
 }
 
-// Fresh ring epoch. The RT-out ring's single producer (the audio thread) is
-// stopped by the caller, but IN and NRT-out producers run through a cold-swap
-// rebuild: transport ingress threads, and clockwork_log / clockwork_egress_nrt_write from
-// any engine worker. Each serialises its whole read-head→publish sequence on
-// its ring's writer spinlock (RingBufferWriter::write), so owning that lock
-// across the reset linearises it — an in-flight write lands wholly in the old
-// epoch (discarded here) or wholly in the fresh one, never interleaved with
-// the zeroing. The lock words are never zeroed: releasing the spinlock is
-// what returns them to 0, and a blind store would unlock under a holder.
-void clockwork_lanes_reset_rings(void) {
+void clockwork_lanes_reset_in_ring(void) {
     if (!shared_memory || !cursors) return;
-
-    const auto spin_acquire = [](std::atomic<int32_t>& lock) {
-        int32_t expected = 0;
-        while (!lock.compare_exchange_weak(expected, 1,
-                std::memory_order_acquire, std::memory_order_relaxed))
-            expected = 0;
-    };
-
     spin_acquire(cursors->in_write_lock);
     cursors->in_head.store(0, std::memory_order_relaxed);
     cursors->in_tail.store(0, std::memory_order_relaxed);
     cursors->in_sequence.store(0, std::memory_order_relaxed);
     cursors->in_write_lock.store(0, std::memory_order_release);
+}
 
+// The RT-out ring's one writer is stopped by the caller: a new arena has no
+// audio thread yet.
+void clockwork_lanes_reset_rt_out_ring(void) {
+    if (!shared_memory || !cursors) return;
+    cursors->out_head.store(0, std::memory_order_relaxed);
+    cursors->out_tail.store(0, std::memory_order_relaxed);
+    cursors->out_read.store(0, std::memory_order_relaxed);
+    cursors->out_sequence.store(0, std::memory_order_relaxed);
+    g_rt_drain_state.lastSeq = -1;
+}
+
+void clockwork_lanes_reset_nrt_out_ring(void) {
+    if (!shared_memory || !cursors) return;
     spin_acquire(g_nrt_egress_lock);
     cursors->nrt_out_head.store(0, std::memory_order_relaxed);
     cursors->nrt_out_tail.store(0, std::memory_order_relaxed);
     cursors->nrt_out_read.store(0, std::memory_order_relaxed);
     cursors->nrt_out_sequence.store(0, std::memory_order_relaxed);
     g_nrt_egress_lock.store(0, std::memory_order_release);
-
-    cursors->out_head.store(0, std::memory_order_relaxed);
-    cursors->out_tail.store(0, std::memory_order_relaxed);
-    cursors->out_read.store(0, std::memory_order_relaxed);
-    cursors->out_sequence.store(0, std::memory_order_relaxed);
+    g_nrt_drain_state.lastSeq = -1;
 }
 
 // ── Ingress ─────────────────────────────────────────────────────────────────

@@ -201,19 +201,6 @@ void OscEgress::sendStateChange(const char* state, const char* reason) {
     broadcastToTargets(packet.ptr(), packet.size());
 }
 
-void OscEgress::sendSetup(int sampleRate, int bufferSize) {
-    if (!hasSubscribers()) return;
-    std::array<char, 256> buf{};
-    osc::OutboundPacketStream s(buf.data(), buf.size());
-    s << osc::BeginMessage(CLOCKWORK_SYS("setup"))
-      << static_cast<osc::int32>(sampleRate)
-      << static_cast<osc::int32>(bufferSize)
-      << static_cast<osc::int32>(generationNow())
-      << osc::EndMessage;
-    broadcastToTargets(reinterpret_cast<const uint8_t*>(s.Data()),
-                       static_cast<uint32_t>(s.Size()));
-}
-
 // Caller-targeted statechange. Connection-oriented clients (TCP/UDS/pipe)
 // can only register AFTER engine init — the boot-time statechange broadcast
 // fired into an audience they hadn't joined yet, so a new registrant is

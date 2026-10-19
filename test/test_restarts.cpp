@@ -36,12 +36,6 @@
 #include <string>
 #include <vector>
 
-extern "C" {
-extern struct Dsp* g_dsp;
-void destroy_dsp();
-void rebuild_dsp(double sample_rate);
-}
-
 namespace {
 
 constexpr uint32_t kClient = 0x4e57;   // this file's asker; no other case uses it
@@ -90,7 +84,7 @@ std::vector<lanes_test::EgressFrame> coldRestart() {
     destroy_dsp();
     auto said = lanes_test::drainRt();
     for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     return said;
 }
@@ -200,28 +194,36 @@ TEST_CASE("restarts: the metrics counters start from zero",
     CHECK(metrics->messages_dropped.load(std::memory_order_acquire) == 0u);
 }
 
-TEST_CASE("restarts: the rings begin a fresh epoch, every one of them empty",
+TEST_CASE("restarts: the in ring begins a fresh epoch; the instance's ring keeps what is on it, and setup follows",
           "[restarts][regions]") {
     settle();
-    coldRestart();
+    // The old instance answers, and nobody reads it before the rebuild.
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    lanes_test::tick();
+    destroy_dsp();
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(g_dsp != nullptr);
+
     const auto* cursors = region<RingCursors>(RING_CURSORS_START);
     // The in ring: empty, its sequence from the start.
     CHECK(cursors->in_head.load() == cursors->in_tail.load());
     CHECK(cursors->in_sequence.load() == 0);
     CHECK(cursors->status_flags.load() == STATUS_OK);
-    // The out rings: whatever is on them was said in the new epoch (the
-    // rebuild's own account of itself), numbered from the start again, and
-    // nothing of the old instance's is among it.
-    auto fresh = lanes_test::drainRt();
-    for (auto& f : lanes_test::drainNrt()) fresh.push_back(std::move(f));
-    for (const auto& f : fresh) {
-        const auto addr = osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size()));
-        INFO("on the rings after the rebuild: " << addr << " seq " << f.seq);
-        CHECK(f.seq < 16u);
-        CHECK(addr != "/dummy/pong");
-    }
-    // And the new instance answers through them.
-    const auto ping = osc_test::message("/dummy/ping");
+    // The instance's ring: the old instance's answer, then the new instance's
+    // setup, naming the rate, the device's callback and the generation opened.
+    const auto said = lanes_test::drainRt();
+    const auto* pong  = findAddress(said, "/dummy/pong");
+    const auto* setup = findAddress(said, CLOCKWORK_SYS("setup"));
+    REQUIRE(pong != nullptr);
+    REQUIRE(setup != nullptr);
+    CHECK(pong < setup);
+    const auto p = osc_test::parseReply(setup->data.data(), static_cast<uint32_t>(setup->data.size()));
+    REQUIRE(p.argCount() == 3);
+    CHECK(p.argInt(0) == static_cast<int32_t>(lanes_test::kSampleRate));
+    CHECK(p.argInt(1) == static_cast<int32_t>(lanes_test::kBufLength));
+    CHECK(p.argInt(2) == static_cast<int32_t>(clockwork_arena_generation(arenaHeader(arena()))));
+    // And the new instance answers through it, after.
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
     const auto frames = lanes_test::tickUntil(4, "/dummy/pong");
     CHECK(findAddress(frames, "/dummy/pong") != nullptr);
@@ -381,7 +383,7 @@ TEST_CASE("restarts: a message sent while there is no instance is refused at onc
         CHECK(r.argString(1) == "no instance");
     }
 
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     const auto after = lanes_test::tickUntil(4, "/dummy/pong");
     CHECK(findAddress(after, "/dummy/pong") == nullptr);
@@ -399,7 +401,7 @@ TEST_CASE("restarts: clockwork's own verbs are answered while there is no instan
     // build answers.
     const auto ping = osc_test::message(CLOCKWORK_SYS("ping"));
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("pong"));
     const auto* pong = findAddress(frames, CLOCKWORK_SYS("pong"));
     CHECK(pong != nullptr);
@@ -431,7 +433,7 @@ TEST_CASE("restarts: the generation is in the arena header, even with an instanc
 
     // Built: even again, one on. The header is the region a rebuild keeps,
     // so the count is continuous across every build on this arena.
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     CHECK(clockwork_arena_has_instance(h));
     CHECK(clockwork_arena_generation(h) == gen + 1);
@@ -472,7 +474,7 @@ TEST_CASE("restarts: a refusal names the generation that refused",
 
     // Built again: every refusal clockwork makes from now on, of anything,
     // carries the generation that opened. One shape for all of them.
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     const auto unknown = osc_test::message(CLOCKWORK_SYS("no-such-verb"));
     REQUIRE(lanes_test::ingress(unknown.ptr(), unknown.size(), kClient));
@@ -545,7 +547,7 @@ TEST_CASE("restarts: with the control ring served, a control verb goes there and
         for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
         CHECK(findAddress(said, CLOCKWORK_SYS("error")) == nullptr);
     }
-    rebuild_dsp(lanes_test::kSampleRate);
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
     // And a rebuild leaves the ring alone: lifetime arena.
     CHECK(controlHead() != 0);

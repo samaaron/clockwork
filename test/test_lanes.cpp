@@ -79,7 +79,9 @@ struct LanesArena {
         cursors            = reinterpret_cast<RingCursors*>(buf.data() + RING_CURSORS_START);
         metrics            = reinterpret_cast<PerformanceMetrics*>(buf.data() + METRICS_START);
         memory_initialized = true;
-        clockwork_lanes_reset_drains();  // fresh arena → fresh sequence-gap tracking
+        // A fresh arena: fresh reply rings, and with them fresh sequence-gap tracking.
+        clockwork_lanes_reset_rt_out_ring();
+        clockwork_lanes_reset_nrt_out_ring();
     }
     ~LanesArena() {
         shared_memory = savedMem; cursors = savedCtrl;

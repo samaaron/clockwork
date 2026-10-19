@@ -11,15 +11,14 @@
  * in lanes.h, so the public boundary stays strictly write-ingress /
  * read-egress / tick.
  *
- * clockwork_lanes_reset_drains: called by init_memory() when the arena (and the ring
- * sequence counters) are reset, so the egress drains' process-lifetime
- * consumer state (sequence-gap tracking) restarts with them — otherwise a
- * second engine boot in the same process counts a spurious sequence gap.
- *
- * clockwork_lanes_reset_rings: zero every ring's head/tail/sequence for a fresh
- * epoch (boot and cold-swap rebuild), serialising against IN / NRT-out
- * producers via their writer spinlocks — those producers keep running
- * through a rebuild, so a bare store would race an in-flight write.
+ * clockwork_lanes_reset_in_ring / _rt_out_ring / _nrt_out_ring: a fresh epoch
+ * for one ring — its head, tail and sequence zeroed — serialising against its
+ * producers via their writer spinlocks, since IN and NRT-out producers keep
+ * running through a rebuild and a bare store would race an in-flight write.
+ * The in ring's at every build; the reply rings' at a new arena only
+ * (docs/RESTARTS.md). An egress ring's drain state (sequence-gap tracking)
+ * restarts with it — otherwise a second engine boot in the same process
+ * counts a spurious sequence gap.
  */
 #pragma once
 
@@ -45,9 +44,9 @@ uint32_t clockwork_egress_nrt_max_frame(void);
    control pass, before it answers a verb. */
 uint32_t clockwork_egress_nrt_free(void);
 
-void clockwork_lanes_reset_drains(void);
-
-void clockwork_lanes_reset_rings(void);
+void clockwork_lanes_reset_in_ring(void);
+void clockwork_lanes_reset_rt_out_ring(void);
+void clockwork_lanes_reset_nrt_out_ring(void);
 
 #ifdef __cplusplus
 }

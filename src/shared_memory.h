@@ -998,11 +998,15 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    kTransport,
         kBlock, kFast, kRebuild,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    // Cold boot, not rebuild: what an instance said stays for its readers
+    // across the rebuild, and the next instance's setup follows it
+    // (docs/RESTARTS.md). Their cursors live in the ring cursors' region and
+    // are reset with them.
     put(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     RT_OUT_RING_START,     RT_OUT_RING_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, kTransport,
-        kBlock, kFast, kRebuild,
+        kBlock, kFast, kColdBoot,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     put(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
-        kChange, kFast, kRebuild,
+        kChange, kFast, kColdBoot,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     // Clockwork's own control verbs (ControlRingCursors above): lifetime
     // arena, so a rebuild neither resets it nor has anything to carry. The

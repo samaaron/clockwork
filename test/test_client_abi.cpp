@@ -655,8 +655,8 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
 // ── A client's base, across a cold device swap ───────────────────────────────
 //
 // A client caches the arena base it was opened over (ClientImpl::base, from
-// clockwork_lanes_base()). A cold device switch runs rebuild_dsp -> init_memory
-// -> clockwork_lanes_reset_drains, and init_memory is what resolves that base.
+// clockwork_lanes_base()). A cold device switch runs rebuild_dsp -> init_memory,
+// and init_memory is what resolves that base.
 // So if a swap ever re-points the arena, every client opened before it is
 // writing into memory the audio thread has stopped reading — silently, because
 // the write still succeeds and the layouts are identical.
