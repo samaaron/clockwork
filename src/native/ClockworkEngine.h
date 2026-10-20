@@ -31,6 +31,7 @@
 #include "clockwork_sys.h"
 #include "IngressCallCtx.h"
 #include "shm_peer_plane.h"
+#include "lanes/ring_marks.h"
 #include "EngineControl.h"
 #ifdef CLOCKWORK_MIDI
 #include "MidiControl.h"
@@ -1090,15 +1091,17 @@ private:
         // Say it: restarting, with the generation closing. First, so a
         // client stops sending before the teardown refuses what it sent.
         void announce();
-        // Do it: purge the schedule, fade the processor out and pause it,
+        // Do it: clear the schedule, fade the processor out and pause it,
         // park the control pass, stop the source and take the pump gate,
-        // tear the instance down (its refusals and carries happen there),
-        // and deliver what has been said so far, so clients hear it while the
-        // device work goes on.
+        // mark where the old generation's messages end — in the in ring and
+        // in a peer's plane — and tear the instance down, and deliver what
+        // has been said so far, so clients hear it while the device work
+        // goes on.
         void teardown();
         // Build the instance at `rate` on whatever device is open now; its
         // setup, naming that device's callback, is its first word on its
-        // ring (rebuild_dsp). Throws as rebuild_dsp does.
+        // ring (rebuild_dsp), and what a peer wrote between instances is
+        // marked as such. Throws as rebuild_dsp does.
         void build(double rate);
         // Audio again: the control pass resumed, the source started, the
         // processor resumed, the gate released. Whether the source
@@ -1127,6 +1130,13 @@ private:
     // produces its reply ring. Null ⇒ the plane is inert.
     std::atomic<ShmPeerPlaneHeader*> mPeerPlane{nullptr};
     ClockworkDrainState                     mPeerDrainState;
+    // Where in the peer's command ring the messages written for a generation
+    // end (lanes/ring_marks.h): set by a cold restart while the control pass
+    // is parked — the generation closing at the teardown, "no instance" at
+    // the build — and read by the pass when it takes the plane again.
+    RingMarks                               mPeerMarks;
+    uint32_t                                mPeerClosing = 0;   // the generation the last teardown closed
+    void markPeerPlane(const char* reason);
 
     // Debounced device switch — rapid clicks settle into one final switch.
     struct PendingSwitch {

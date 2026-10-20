@@ -185,6 +185,7 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 // IN-ring drain below runs on.
 #include "lanes/lanes_internal.h"
 #include "lanes/ring_drain.h"
+#include "lanes/ring_marks.h"       // where a generation's messages end in the in ring
 #include "workers/RingBufferWriter.h"   // the in ring's writer lock, which a teardown's mark takes
 
 // Pre-allocated heap for RT-safe allocations
@@ -422,34 +423,18 @@ extern "C" {
         if (generation > g_carried_generation) g_carried_generation = generation;
     }
 
-    // THE MARKS: where in the in ring the messages written for a generation
-    // end (docs/RESTARTS.md, rule 1). A teardown sets one for the generation
-    // closing (destroy_dsp); a purge of what went stale while the audio
-    // thread was stalled sets one for the generation it has
-    // (clockwork_ingress_mark). Each holds the in_sequence snapshot taken
-    // then, with the reason and the generation its refusals name. The drain
-    // refuses each frame for the guest sequenced below the earliest mark to
-    // its sender, as the ring it answers on has room (refuse_when_room), and
-    // takes everything of clockwork's own as it comes — so whatever replaced
-    // the instance in between, what was written for the old one is answered
-    // once, in order, and nothing is dropped without a word.
-    //
-    // Several can wait for one drain: an instance built and torn down again
-    // before a block ran (a device that never called back) leaves the mark of
-    // the generation before it and its own, and a message written while it
-    // was up is refused as its. Set only where the drain is not running — on
-    // the audio thread itself, or with it stopped — so they are the consuming
-    // thread's state, handed over by the audio thread's stop and start; and
-    // the ring cursors keep their fixed owners (producers advance head under
-    // in_write_lock, the drain owns tail), so nothing here writes one.
-    struct InRingMark {
-        uint32_t    below;        // the first sequence written after it
-        uint32_t    generation;   // the generation its refusals name
-        const char* reason;       // a CLOCKWORK_REFUSED_* phrase: static storage
-    };
-    constexpr uint32_t kInRingMarks = 8;
-    InRingMark g_in_marks[kInRingMarks];
-    uint32_t   g_in_mark_count = 0;
+    // THE IN RING'S MARKS (lanes/ring_marks.h): a teardown sets one for the
+    // generation closing (destroy_dsp); a purge of what went stale while the
+    // audio thread was stalled sets one for the generation it has
+    // (clockwork_ingress_mark). The drain refuses each frame for the guest
+    // below one to its sender, as the ring it answers on has room
+    // (refuse_when_room), and takes everything of clockwork's own as it comes
+    // — so whatever replaced the instance in between, what was written for the
+    // old one is answered once, in order, and nothing is dropped without a
+    // word. Set only where the drain is not running — on the audio thread
+    // itself, or with it stopped — so they are the consuming thread's state,
+    // handed over by the audio thread's stop and start.
+    RingMarks g_in_marks;
 
     void*  g_guest_memory       = nullptr;
     size_t g_guest_memory_bytes = 0;
@@ -1162,20 +1147,9 @@ extern "C" {
     // lock round it (mark_closing_generation).
     void clockwork_ingress_mark(const char* reason) {
         if (!memory_initialized || !cursors) return;
-        const InRingMark mark { static_cast<uint32_t>(cursors->in_sequence.load(std::memory_order_acquire)),
-                                arenaInstanceGeneration(shared_memory),
-                                reason ? reason : CLOCKWORK_REFUSED_REBUILDING };
-        // Nothing written since the last: it would mark no message.
-        if (g_in_mark_count > 0 && g_in_marks[g_in_mark_count - 1].below == mark.below) return;
-        // Full — eight replacements without a block between them: the two
-        // oldest become one, and what was written for the oldest generation
-        // is refused naming the one after it. Answered still, which is what
-        // a client waits on.
-        if (g_in_mark_count == kInRingMarks) {
-            for (uint32_t i = 1; i < kInRingMarks; ++i) g_in_marks[i - 1] = g_in_marks[i];
-            --g_in_mark_count;
-        }
-        g_in_marks[g_in_mark_count++] = mark;
+        g_in_marks.set(static_cast<uint32_t>(cursors->in_sequence.load(std::memory_order_acquire)),
+                       arenaInstanceGeneration(shared_memory),
+                       reason ? reason : CLOCKWORK_REFUSED_REBUILDING);
     }
 
     // What is pending as of now went stale — a stall, a page's context
@@ -1557,7 +1531,7 @@ extern "C" {
     static void reset_in_ring() {
         clockwork_lanes_reset_in_ring();
         g_in_drain.lastSeq = -1;
-        g_in_mark_count = 0;
+        g_in_marks.clear();
     }
     // The reply rings outlive an instance: what one said stays for its
     // readers, and the next one's setup follows it (docs/RESTARTS.md). A new
@@ -2687,23 +2661,6 @@ extern "C" {
     }
 #endif
 
-    // The mark a frame falls below, if any: the earliest one, every mark it
-    // has passed done with. Frames come in sequence order, so a mark once
-    // passed is passed for good. The signed delta stays correct across
-    // uint32 seq rollover (pending frames are always far fewer than 2^31
-    // apart).
-    static const InRingMark* in_ring_mark_of(uint32_t seq) {
-        uint32_t passed = 0;
-        while (passed < g_in_mark_count
-               && static_cast<int32_t>(seq - g_in_marks[passed].below) >= 0)
-            ++passed;
-        if (passed > 0) {
-            for (uint32_t i = passed; i < g_in_mark_count; ++i) g_in_marks[i - passed] = g_in_marks[i];
-            g_in_mark_count -= passed;
-        }
-        return g_in_mark_count > 0 ? &g_in_marks[0] : nullptr;
-    }
-
     // A refusal on the instance's ring, made only when the ring has room for
     // it (docs/RESTARTS.md, rule 1): false when it has not, and the frame
     // waits for a later block, with everything behind it, rather than be
@@ -2749,7 +2706,7 @@ extern "C" {
             MAX_MESSAGES_PER_FRAME,
             [blockTime](uint32_t sourceId, const uint8_t* payload,
                         uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
-                const InRingMark* mark = in_ring_mark_of(seq);
+                const RingMark* mark = g_in_marks.of(seq);
                 if (clockwork_sys_answers_without_guest(payload, payload_size)) {
                     dispatch(payload, payload_size, sourceId, 1, blockTime);
                     return ClockworkDrainVerdict::Consume;
@@ -2972,7 +2929,7 @@ extern "C" {
                     // and consumed undispatched. Clockwork's own go through
                     // unless they hand the guest something: the engine
                     // answers those whatever the guest is doing.
-                    if (const InRingMark* mark = in_ring_mark_of(seq);
+                    if (const RingMark* mark = g_in_marks.of(seq);
                         mark && !clockwork_sys_answers_without_guest(payload, payload_size))
                         return refuse_when_room(sourceId, payload, payload_size,
                                                 mark->reason, mark->generation)

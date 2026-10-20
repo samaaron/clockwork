@@ -50,4 +50,13 @@ void clockwork_lanes_reset_nrt_out_ring(void);
 
 #ifdef __cplusplus
 }
+
+#include "../in_ring_door.h"
+
+// clockwork_ingress_write, saying which of its two refusals it made: full (a
+// moment: try again) or no instance (answered: the refusal is on the NRT
+// egress for the source, and the message is done with). For a door of the
+// engine's own that holds a message while the ring is full and must not hold
+// one that has been answered — a shm peer's plane.
+InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uint32_t source_id);
 #endif

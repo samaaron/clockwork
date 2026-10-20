@@ -1046,9 +1046,28 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                             mMetrics ? &mMetrics->osc_in_corrupted : nullptr,
                             nullptr },
             kPeerDrainMaxFrames,
-            [this](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t) {
-                if (!clockwork_ingress_write(d, n, SHM_PEER_ORIGIN_TOKEN))
-                    return ClockworkDrainVerdict::Retain;   // IN ring full — retry next wake
+            [this](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t seq) {
+                // Written for an instance that has gone, or between instances
+                // (mPeerMarks): refused to the peer, naming the generation that
+                // closed, and done with. Clockwork's own verbs go to the door
+                // as ever: the engine answers those with or without a guest.
+                if (const RingMark* mark = mPeerMarks.of(seq);
+                    mark && !clockwork_sys_answers_without_guest(d, n)) {
+                    if (clockwork_egress_nrt_free() < 1024) return ClockworkDrainVerdict::Retain;   // its refusal waits for room
+                    clockwork_sys_refuse(d, n, mark->reason, mark->generation,
+                        [](const uint8_t* r, uint32_t rn) {
+                            clockwork_egress_nrt_write(EGRESS_REPLY, SHM_PEER_ORIGIN_TOKEN, r, rn);
+                        });
+                    return ClockworkDrainVerdict::Consume;
+                }
+                switch (clockwork_ingress_write_status(d, n, SHM_PEER_ORIGIN_TOKEN)) {
+                    case InRingWrite::Full:
+                        return ClockworkDrainVerdict::Retain;   // IN ring full — retry next wake
+                    case InRingWrite::NoInstance:
+                        return ClockworkDrainVerdict::Consume;  // refused at the door, once: done with
+                    case InRingWrite::Written:
+                        break;
+                }
                 if (mMetrics) {
                     mMetrics->osc_out_messages_sent.fetch_add(1, std::memory_order_relaxed);
                     mMetrics->osc_out_bytes_sent.fetch_add(n, std::memory_order_relaxed);
@@ -3323,6 +3342,17 @@ void ClockworkEngine::Restart::announce() {
     if (mCold) mEngine.setEngineState(EngineState::Restarting, "rate-change");
 }
 
+// Where the peer's messages for a generation end in its command ring: the
+// plane's sequence now (mPeerMarks). With the control pass parked, so its
+// drain is not running; without the peer's writer lock, which a peer that
+// died writing would hold for good — a frame mid-write lands either side,
+// and is answered either way.
+void ClockworkEngine::markPeerPlane(const char* reason) {
+    if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
+        mPeerMarks.set(static_cast<uint32_t>(plane->cmd_sequence.load(std::memory_order_acquire)),
+                       mPeerClosing, reason);
+}
+
 void ClockworkEngine::Restart::teardown() {
     // The schedule is the instance's, and empty from restarting
     // (docs/RESTARTS.md, rule 6). What waits in the in ring for it is
@@ -3348,7 +3378,13 @@ void ClockworkEngine::Restart::teardown() {
     // The instance goes first: its teardown answers what was still in the
     // in ring for it (destroy_dsp, docs/RESTARTS.md), and those answers
     // have to be on the rings before the drain.
-    if (mCold) destroy_dsp();
+    // And what a peer wrote for it in its own ring, which the parked pass
+    // takes only once the swap is over: marked as the closing generation's.
+    if (mCold) {
+        mEngine.mPeerClosing = mEngine.generation();
+        mEngine.markPeerPlane(CLOCKWORK_REFUSED_REBUILDING);
+        destroy_dsp();
+    }
     // What the engine has said so far reaches its clients now, not when audio
     // resumes: the pass is parked for the whole swap, and a device can take
     // seconds to open — the user's notice before a recovery, this swap's own
@@ -3366,6 +3402,9 @@ void ClockworkEngine::Restart::drain() {
 }
 
 void ClockworkEngine::Restart::build(double rate) {
+    // What a peer wrote while there was no instance: marked as such, for the
+    // pass to refuse when it takes the plane again.
+    mEngine.markPeerPlane(CLOCKWORK_REFUSED_NO_INSTANCE);
     // The device's callback, which the new instance's setup names.
     const auto dev = mEngine.mDevices ? mEngine.mDevices->current() : std::nullopt;
     const int buffer = dev ? dev->bufferFrames : mEngine.mCurrentConfig.bufferSize;
@@ -3390,6 +3429,8 @@ void ClockworkEngine::Restart::escalateToCold() {
     clear_scheduler();
     mParked = mEngine.parkControlPass();
     if (mEngine.testControlParked) mEngine.testControlParked();
+    mEngine.mPeerClosing = mEngine.generation();
+    mEngine.markPeerPlane(CLOCKWORK_REFUSED_REBUILDING);
     destroy_dsp();
     drain();
 }

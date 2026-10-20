@@ -91,8 +91,14 @@ void clockwork_lanes_reset_nrt_out_ring(void) {
 // ── Ingress ─────────────────────────────────────────────────────────────────
 
 bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id) {
+    return clockwork_ingress_write_status(osc, len, source_id) == InRingWrite::Written;
+}
+
+} // extern "C"
+
+InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uint32_t source_id) {
     if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
-        return false;
+        return InRingWrite::Full;
     // A control verb of clockwork's, while the engine serves the control ring
     // (lanes.h, clockwork_control_serve): written there, where no audio
     // block is between it and its answer. The same rule clockwork_client_send
@@ -104,29 +110,25 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
             shared_memory + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
             &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
-            osc, len, source_id);
+            osc, len, source_id) ? InRingWrite::Written : InRingWrite::Full;
     }
     // No guest instance to take it: refused at the boundary (in_ring_door.h),
     // with the word on the NRT egress for the source that sent it, as the
     // client ABI's status says the same to its caller (docs/RESTARTS.md).
     // Clockwork's own verbs go through and wait in the ring for the engine,
     // instance or none.
-    switch (in_ring_write(shared_memory, shared_memory + IN_RING_START, IN_RING_SIZE,
-                          cursors, osc, len, source_id)) {
-        case InRingWrite::Written:
-            return true;
-        case InRingWrite::NoInstance:
-            clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
-                arenaInstanceGeneration(shared_memory),
-                [source_id](const uint8_t* d, uint32_t n) {
-                    clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
-                });
-            return false;
-        case InRingWrite::Full:
-            break;
-    }
-    return false;
+    const InRingWrite wrote = in_ring_write(shared_memory, shared_memory + IN_RING_START, IN_RING_SIZE,
+                                            cursors, osc, len, source_id);
+    if (wrote == InRingWrite::NoInstance)
+        clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
+            arenaInstanceGeneration(shared_memory),
+            [source_id](const uint8_t* d, uint32_t n) {
+                clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
+            });
+    return wrote;
 }
+
+extern "C" {
 
 // ── Egress ──────────────────────────────────────────────────────────────────
 

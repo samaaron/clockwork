@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -114,7 +115,8 @@ private:
 // A cell: an engine on fake devices, the reader, and what the reader heard.
 class Cell {
 public:
-    Cell(Reader reader, Event event, unsigned port = 0)
+    Cell(Reader reader, Event event, unsigned port = 0,
+         const std::function<void(ClockworkEngine::Config&)>& tweak = {})
         : mReader(reader), mEvent(event), mSys(makeSimpleSystem()) {
         if (event == Event::DriverChange) {
             auto other = std::make_shared<fake_audio::FakeDeviceSpec>();
@@ -125,6 +127,7 @@ public:
         auto cfg = fakeEngineConfig(mSys, "Fake Speakers");
         cfg.hostDrivesControl = true;
         cfg.hostDrainsEgress  = reader == Reader::HostRings;
+        if (tweak) tweak(cfg);
         if (reader == Reader::ShmPeer) {
             REQUIRE(port != 0);
             cfg.udpPort     = port;   // the public segment, and its plane
@@ -407,7 +410,6 @@ void checkCell(Reader reader, Event event, When when, unsigned port) {
 // the day it passes, so the tag goes with the fix that turns it green.
 #define GRID_CELL(reader, event, when, port, title, pending)                                     \
     TEST_CASE("restart grid: " title, "[restarts][grid]" pending) { checkCell(reader, event, when, port); }
-#define NOT_YET_8  "[not-yet-8][!shouldfail]"    // the peer plane's door
 #define NOT_YET_13 "[not-yet-13][!shouldfail]"   // a fact a hot restart changed, told
 
 GRID_CELL(Reader::Engine,    Event::RateChange,   When::Before, 0, "the engine's own reader at a rate change",                    "")
@@ -435,7 +437,7 @@ GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::Before,           57250, 
 GRID_CELL(Reader::ShmPeer,   Event::OtherDevice, When::Before,           57251, "a peer on the plane at a device the instance survives",  "")
 GRID_CELL(Reader::Engine,    Event::RateChange,  When::BetweenInstances, 0,     "the engine's own reader sending between instances",      "")
 GRID_CELL(Reader::HostRings, Event::RateChange,  When::BetweenInstances, 0,     "a host reading the rings sending between instances",     "")
-GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::BetweenInstances, 57252, "a peer on the plane sending between instances",          NOT_YET_8)
+GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::BetweenInstances, 57252, "a peer on the plane sending between instances",          "")
 
 // A peer that is behind: its reply ring all but full of the old instance's
 // answers when the rebuild comes. It loses none of them, and hears setup
@@ -488,6 +490,40 @@ TEST_CASE("restart grid: a peer whose reply ring is nearly full when the rebuild
     CHECK(restart_model::where(heard, "/dummy/pong").back() < setups[0]);
 }
 
+
+// A peer that writes while no instance comes up — a rebuild whose guest would
+// not start, so the engine waits in error: each message for the guest is
+// refused once, and the plane moves on past it to what clockwork answers.
+TEST_CASE("restart grid: a peer writing while no instance comes up is refused once a message, and the plane moves on",
+          "[restarts][grid]") {
+    // A guest that builds now and not after the rebuild: its pool asks for
+    // more than the bulk memory the rebuild hands it (test_cold_swap_recovery.cpp).
+    const size_t pool = size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u;
+    clockwork_set_guest_bulk_bytes(pool + (8u << 20));
+    Cell cell(Reader::ShmPeer, Event::RateChange, 57254, [pool](ClockworkEngine::Config& cfg) {
+        cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\ndeclareBulk=0\n";
+    });
+    clockwork_set_guest_bulk_bytes(0);
+    cell.happen();
+    REQUIRE(cell.engine().engineState() == EngineState::Error);
+    REQUIRE_FALSE(clockwork_arena_has_instance(clockwork_arena_header()));
+    cell.read();   // what the failed rebuild said
+
+    constexpr int kAsks = 3;
+    for (int i = 0; i < kAsks; ++i) cell.send(restart_model::oldAsk());
+    cell.send(osc_test::message(CLOCKWORK_SYS("sync"), restart_model::kSyncId));
+    for (int i = 0; i < 8; ++i) cell.advance(5);
+    cell.read();
+
+    const auto& heard = cell.heard();
+    INFO("the peer heard:" << restart_model::dump(heard));
+    const auto refused = restart_model::refusalsOf(heard, "/dummy/ping");
+    CHECK(refused.size() == static_cast<size_t>(kAsks));
+    for (const auto& r : refused) CHECK(r.argString(1) == CLOCKWORK_REFUSED_NO_INSTANCE);
+    CHECK(restart_model::where(heard, restart_model::kSynced).size() == 1);
+    ShmPeerPlaneHeader* plane = cell.plane();
+    CHECK(plane->cmd_head.load() == plane->cmd_tail.load());
+}
 
 // More waiting at the teardown than the refusals of it fill on clockwork's
 // ring: every one is still refused, once.

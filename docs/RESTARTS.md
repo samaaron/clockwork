@@ -225,6 +225,16 @@ waiting on, so these are the rules a client may rely on:
    it — and several may wait for one drain: an instance built and torn
    down before a block ran leaves its own as well as the one before it.
 
+   A shm peer writes a ring of its own (shm_peer_plane.h), which the
+   control pass takes to the in ring's door — a pass a cold restart parks,
+   so the plane is taken only once the swap is over. The restart marks the
+   plane as well (src/lanes/ring_marks.h, one design for both rings): where
+   the teardown found it, as the closing generation's (`rebuilding`), and
+   where the build found it, as written between instances (`no instance`).
+   The pass refuses what it finds below either mark, naming the generation
+   that closed, and takes the rest to the door, which refuses a message once
+   if there is still no instance.
+
    Where a door can reach the asker's egress it writes the refusal there
    and also says so to its caller; where it cannot, the caller speaks:
 
@@ -382,12 +392,13 @@ fails the day it passes, so the mark goes with the fix.
 | the engine's own | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | ✓ |
 | a host reading the rings | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | ✓ |
 | a tap on the instance's ring | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | |
-| a peer on the segment's plane | ✓ | | ✓ | | | | 8 |
+| a peer on the segment's plane | ✓ | | ✓ | | | | ✓ |
 
 And the cells that are not one event among others: thousands of messages
 waiting at a rebuild, for the engine's own reader and a host reading the
 rings (✓); a peer whose reply ring is nearly full when a rebuild comes (✓);
-an embedded host attaching again, at its rate and at another (✓); a client
+a peer writing while no instance comes up (✓); an embedded host attaching
+again, at its rate and at another (✓); a client
 writing its message in place between instances (✓, in
 test/test_restarts.cpp); an engine booted again in the same process (✓, in
 test/test_engine_lifecycle.cpp); and the page, in
@@ -442,7 +453,7 @@ grid above shows say so; the fix follows the test.
 | # | where | against the model |
 |---|---|---|
 | 4 | the worklet's `checkStatus` | stores the status word whole, wiping the no-instance flag |
-| 8 | the shm peer plane | its door is the control pass, parked for a swap, so what a peer writes between instances reaches the new instance; with no instance for a while, its drain takes the boundary's refusal for a full ring and holds the message, refused again every pass; its reply ring drops what does not fit. **Shown**: a message written between instances is answered by the new instance; with the smallest rings, what a peer wrote before a rebuild that was still in the plane, behind a full in ring, is answered by the new instance |
+| 8 | the shm peer plane | its reply ring drops what does not fit when its peer is behind, at a rebuild or not; holding the engine's replies for one slow peer would hold every other client's, so it is left for a round of its own |
 | 9 | the client ABI | a client in another process has no sanctioned read of the generation |
 | 10 | the plugin bridge (parked with tracks) | refusals carry generation 0; a track's errors are another shape, broadcast; timed track events vanish with the schedule; track tap slots go dark when the taps region resets |
 | 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read, not yet tested) |
