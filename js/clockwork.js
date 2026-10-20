@@ -24,6 +24,7 @@ import { AudioCapture } from "./lib/audio_capture.js";
 import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
 import { readArena, regionBytes, readGeneration, instanceGeneration, REGION, REGION_NAMES } from "./lib/arena.js";
 import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
+import { IN_WRITE_LOCK } from "./lib/ring_cursor_offsets.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
 // Timeout waiting for the DSP profile's synced reply from the engine
@@ -169,6 +170,7 @@ export class Clockwork {
   #capabilities;
   #version;
   #generation = 0;   // the guest instance's, as the worklet reported it (postMessage); SAB reads it live
+  #closedGeneration = 0;   // the generation a reload closed, carried into the next memory
   #guestMetrics = Object.freeze({});
   #guestMetricsPanels = Object.freeze([]);
   #config;
@@ -855,6 +857,7 @@ export class Clockwork {
   }
 
   async #reloadSteps() {
+    await this.#closeInstance();
     await this.#partialShutdown();
     await this.#partialInit();
 
@@ -906,34 +909,28 @@ export class Clockwork {
   }
 
   /**
-   * Zero the ring control words in a reused SAB, in the one window where it
-   * is safe: after partialShutdown (workers terminated, worklet gone) and
-   * before anything new attaches.
+   * Let go of the in ring's writer lock in a reused SAB, in the one window
+   * where it is safe: after partialShutdown (workers terminated, worklet gone)
+   * and before anything new attaches.
    *
-   * A first boot gets this free (a fresh SAB is zeros); reload keeps the SAB,
-   * so the old session's cursors survive. The engine's own epoch reset runs on
-   * the audio thread's first process(), but the new OSC workers attach before
-   * that — they would drink the stale ring and starve at a read index the
-   * reborn writer won't reach for several messages.
+   * Nothing else of the rings is touched. A reload over the same memory is a
+   * rebuild (docs/RESTARTS.md, "One event, every route"): the engine keeps
+   * every ring and the cursors with them, what waited in the in ring is
+   * refused by the new instance, and the page's readers read on from where
+   * they were, past the old instance's words to the new one's setup. The
+   * writer lock is the exception because its holder is gone: partialShutdown
+   * has terminated every worker and the worklet, so a surviving 1 is stale by
+   * construction — left in place, every write after reload spins the lock's
+   * 10-second deadlock path and the restore-phase traffic dies in exactly the
+   * /clockwork/synced-timeout shape.
    */
-  #resetRingEpoch() {
+  #releaseStaleWriterLock() {
     if (this.#config.mode !== 'sab' || !this.#wasmMemory) return;
     const bc = this.#metricsReader?.bufferConstants;
     const arenaBase = this.#metricsReader?.arenaBase;
     if (!bc || arenaBase == null || bc.RING_CURSORS_START == null) return;
-    const view = new Int32Array(this.#wasmMemory.buffer, arenaBase + bc.RING_CURSORS_START, 12);
-    // Heads, tails, sequences, the JS-side log tail — and the IN writer
-    // lock. The engine's own epoch reset deliberately leaves that lock
-    // alone, because on ITS path a live producer may be holding it. Here
-    // the opposite invariant holds: partialShutdown has terminated every
-    // worker and the worklet, so anything that held the lock is gone and a
-    // surviving 1 is stale by construction — left in place, every write
-    // after reload spins the lock's 10-second deadlock path and the
-    // restore-phase traffic dies in exactly the /clockwork/synced-timeout shape.
-    // NOT status_flags: the engine owns its lifecycle word.
-    for (const idx of [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]) {
-      Atomics.store(view, idx, 0);
-    }
+    const cursors = new Int32Array(this.#wasmMemory.buffer, arenaBase + bc.RING_CURSORS_START, IN_WRITE_LOCK / 4 + 1);
+    Atomics.store(cursors, IN_WRITE_LOCK / 4, 0);
   }
 
   async #awaitEngineProcessing(timeoutMs = 5000) {
@@ -961,12 +958,36 @@ export class Clockwork {
     return false;
   }
 
+  // The instance closes before the memory it ran in goes (docs/RESTARTS.md, "One event, every route"). In postMessage
+  // mode the worklet's memory is its own: what waits there for the instance is refused there, and relayed while the
+  // worklet can still say so. The generation it closed is carried into the next memory either way. SAB mode keeps
+  // its memory, and the next engine's build there does the rest itself.
+  async #closeInstance() {
+    this.#closedGeneration = Math.max(this.#closedGeneration, this.#instanceGeneration());
+    if (this.#config.mode === 'sab' || !this.#workletNode) return;
+    const port = this.#workletNode.port;
+    const closed = await new Promise((resolve) => {
+      const onMessage = (event) => {
+        if (event.data?.type !== 'closed') return;
+        clearTimeout(timer);
+        port.removeEventListener('message', onMessage);
+        resolve(event.data);
+      };
+      // A worklet that is gone (the tab's scope reclaimed) answers nothing: what waited went with it.
+      const timer = setTimeout(() => { port.removeEventListener('message', onMessage); resolve(null); },
+                               PURGE_ACK_TIMEOUT_MS);
+      port.addEventListener('message', onMessage);
+      port.postMessage({ type: 'close' });
+    });
+    if (closed) this.#closedGeneration = Math.max(this.#closedGeneration, closed.generation ?? 0);
+  }
+
   async #partialShutdown() {
     this.#clock?.stopDriftTimer();
     this.#abandonSyncs("the engine shut down");
 
     if (this.#osc) {
-      this.#osc.dispose();
+      await this.#osc.dispose();
       this.#osc = null;
     }
     // Stop forwarding worklet debug batches — the transport is gone. A live
@@ -995,22 +1016,15 @@ export class Clockwork {
     this.bootStats.initStartTime = performance.now();
 
     try {
-      this.#resetRingEpoch();
+      this.#releaseStaleWriterLock();
       this.#initializeAudioContext();
       const wasmBytes = await this.#loadWasm();
       await this.#initializeAudioWorklet(wasmBytes);
       await this.#initializeOSC();
       await this.#initializeFront();
-      // The reborn engine runs its ring-epoch reset on the audio thread's
-      // first process(), and anything already sitting in the IN ring at that
-      // moment is discarded as belonging to the old epoch. First boot never
-      // races this — the SAB is fresh and init's callers only send after
-      // 'ready'. A reload reuses the SAB, and the definition/buffer restores
-      // below would otherwise be sent straight into the discard window —
-      // nondeterministically, which is the worst kind of sometimes.
-      // process_count is zeroed by that same init block and then counts
-      // every block, so two increasing reads prove the reset has run and
-      // the engine is pumping.
+      // The definition/buffer restores below go to the new instance once it
+      // is processing: two increasing reads of process_count prove the
+      // engine is pumping.
       await this.#awaitEngineProcessing();
       await this.#finishInitialization({ announce: false });
     } catch (error) {
@@ -1791,7 +1805,7 @@ export class Clockwork {
     this.#abandonSyncs("the engine shut down");
 
     if (this.#osc) {
-      this.#osc.dispose();
+      await this.#osc.dispose();
       this.#osc = null;
     }
     // Stop forwarding worklet debug batches — the transport is gone. A live
@@ -2003,6 +2017,8 @@ export class Clockwork {
     const loadWasmMsg = {
       type: "loadWasm",
       wasmBytes: wasmBytes,
+      // The generation a reload closed, which this memory carries on (#closeInstance).
+      carriedGeneration: this.#closedGeneration,
       // The guest's config block, already encoded by whoever knows its shape.
       guestConfigBytes: this.encodeGuestConfig({
         mode,

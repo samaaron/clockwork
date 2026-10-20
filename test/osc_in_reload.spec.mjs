@@ -116,3 +116,47 @@ test("a reader the host runs on a port of its own has one loop reading, however 
   expect(r.afterReloads, "more passes per reply after reloads: a loop from before a reload is still reading").toBe(r.first);
   expect(r.later, "more passes per reply after a stop and start: the loop from before is still reading").toBe(r.first);
 });
+
+test("after a reload over the same memory the reply rings keep their place, and the page reads on from it", async ({ page, clockworkConfig, clockworkMode }) => {
+  // A reload over the same memory replaces the instance as a device change does (docs/RESTARTS.md, "One event,
+  // every route"): the reply rings outlive it, so what the page had not read is still there for it, and its readers
+  // read on from where they were, past the old instance's words to the new one's setup. Nothing begins again at 0
+  // under a reader, and nothing it reads is taken for damage.
+  test.skip(clockworkMode !== "sab", "a reload keeps the memory only in SAB mode");
+  await boot(page);
+  const r = await page.evaluate(async ([config, withinSrc]) => {
+    const within = eval(withinSrc);
+    const offs = await import(`${location.origin}/js/lib/ring_cursor_offsets.js`);
+    const cw = new window.Clockwork({ ...config });
+    const init = await within(cw.init(), 10000);
+    if (init.error || !init.settled) return { init };
+    const { transferable } = cw.createOscChannel();
+    const cursors = new Int32Array(transferable.sharedBuffer,
+      transferable.arenaBase + transferable.bufferConstants.RING_CURSORS_START, 16);
+    const word = (byte) => byte / 4;
+    const ring = (head, tail, read) => ({ head: Atomics.load(cursors, word(head)), tail: Atomics.load(cursors, word(tail)),
+                                          read: Atomics.load(cursors, word(read)) });
+    let setups = 0;
+    cw.on("in:osc", ({ oscData }) => { if (window.Clockwork.osc.decode(oscData)[0] === "/clockwork/setup") setups++; });
+    // The instance's ring well along before the reload: a hundred answers, read.
+    for (let i = 0; i < 100; i++) cw.send("/dummy/ping");
+    await within(cw.sync(), 5000);
+    const before = ring(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ);
+    const reload = await within(cw.reload(), 15000);
+    await within(cw.sync(), 5000);
+    const after = { out: ring(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ),
+                    nrt: ring(offs.NRT_OUT_HEAD, offs.NRT_OUT_TAIL, offs.NRT_OUT_READ) };
+    const corrupted = cw.getMetrics()?.oscInCorrupted;
+    await cw.shutdown();
+    return { init, reload, before, after, corrupted, setups };
+  }, [clockworkConfig, within]);
+  expect(r.init.error ?? null).toBeNull();
+  expect(r.reload).toEqual({ settled: true, value: true });
+  expect(r.corrupted, "the reader found its own cursor damaged after the reload").toBe(0);
+  expect(r.after.out.head, "the instance's ring began again under its reader").toBeGreaterThanOrEqual(r.before.head);
+  expect(r.setups, "the new instance's setup, heard once").toBe(1);
+  for (const [name, c] of Object.entries(r.after)) {
+    expect(c.read, `the ${name} ring's reader is not where its writer is`).toBe(c.head);
+    expect(c.tail, `the ${name} ring's writer has had space handed back from somewhere else`).toBe(c.head);
+  }
+});
