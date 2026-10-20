@@ -23,6 +23,7 @@
 #include "shared_memory.h"
 #include "clock/clock_math.h"
 #include "clockwork_clock_state.h"
+#include "clockwork_client.h"
 #include "clockwork_prefix.h"
 #include "clockwork_sys.h"
 #include "audio_processor.h"
@@ -69,6 +70,12 @@ uint8_t* arena() {
 
 template <typename T>
 T* region(uint32_t offset) { return reinterpret_cast<T*>(arena() + offset); }
+
+// Frames an egress ring has refused for want of room, since the arena was
+// built (PerformanceMetrics::egress_frames_refused).
+uint32_t metrics_refused() {
+    return region<PerformanceMetrics>(METRICS_START)->egress_frames_refused.load();
+}
 
 // Nothing left on either egress ring from whatever ran before.
 void settle() {
@@ -180,35 +187,45 @@ TEST_CASE("restarts: the taps start with every slot free",
     CHECK(zero);
 }
 
-TEST_CASE("restarts: the metrics counters start from zero",
+TEST_CASE("restarts: the metrics count on across a cold restart, so what a teardown lost is still counted after it",
           "[restarts][regions]") {
     settle();
     auto* metrics = region<PerformanceMetrics>(METRICS_START);
-    lanes_test::tickUntil(4, nullptr);
-    REQUIRE(metrics->process_count.load(std::memory_order_acquire) > 0u);
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    lanes_test::tickUntil(4, "/dummy/pong");
+    const uint32_t blocks    = metrics->process_count.load(std::memory_order_acquire);
+    const uint32_t processed = metrics->messages_processed.load(std::memory_order_acquire);
+    REQUIRE(blocks > 0u);
+    REQUIRE(processed > 0u);
+    metrics->egress_frames_refused.fetch_add(1);   // a loss at the teardown, as a full ring counts one
 
     coldRestart();
 
-    CHECK(metrics->process_count.load(std::memory_order_acquire) == 0u);
-    CHECK(metrics->messages_processed.load(std::memory_order_acquire) == 0u);
-    CHECK(metrics->messages_dropped.load(std::memory_order_acquire) == 0u);
+    CHECK(metrics->process_count.load(std::memory_order_acquire) >= blocks);
+    CHECK(metrics->messages_processed.load(std::memory_order_acquire) >= processed);
+    CHECK(metrics->egress_frames_refused.load(std::memory_order_acquire) >= 1u);
+    metrics->egress_frames_refused.fetch_sub(1);
 }
 
-TEST_CASE("restarts: the in ring begins a fresh epoch; the instance's ring keeps what is on it, and setup follows",
+TEST_CASE("restarts: the in ring and the instance's ring keep their place across a cold restart, and setup follows the old instance's words",
           "[restarts][regions]") {
     settle();
+    const auto* cursors = region<RingCursors>(RING_CURSORS_START);
     // The old instance answers, and nobody reads it before the rebuild.
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
     lanes_test::tick();
+    const int32_t inHead = cursors->in_head.load(), inSequence = cursors->in_sequence.load();
     destroy_dsp();
     rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
 
-    const auto* cursors = region<RingCursors>(RING_CURSORS_START);
-    // The in ring: empty, its sequence from the start.
-    CHECK(cursors->in_head.load() == cursors->in_tail.load());
-    CHECK(cursors->in_sequence.load() == 0);
+    // The in ring: where it was, its sequence going on — nothing in it was
+    // the rebuild's to throw away.
+    CHECK(cursors->in_head.load() == inHead);
+    CHECK(cursors->in_tail.load() == inHead);
+    CHECK(cursors->in_sequence.load() == inSequence);
     CHECK(cursors->status_flags.load() == STATUS_OK);
     // The instance's ring: the old instance's answer, then the new instance's
     // setup, naming the rate, the device's callback and the generation opened.
@@ -329,7 +346,7 @@ TEST_CASE("restarts: every region in the table has a reset, and only the table s
 
 // ── The transport area: nothing lost without a word ──────────────────────────
 
-TEST_CASE("restarts: a message in the in ring at a cold restart is refused to its sender, not dropped",
+TEST_CASE("restarts: a message in the in ring at a cold restart is refused to its sender, naming the generation that closed",
           "[restarts][transport]") {
     settle();
     // In the ring, not yet drained: what a client had sent in the moment the
@@ -337,25 +354,59 @@ TEST_CASE("restarts: a message in the in ring at a cold restart is refused to it
     // stopping and the rebuild.
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    const uint32_t closing = clockwork_arena_generation(arenaHeader(arena()));
+    coldRestart();
 
-    const auto said = coldRestart();
-
-    // Refused to the one who sent it, naming the message and why: there is
-    // no instance to answer it, and clockwork has the address and the token,
-    // which is all a refusal needs.
-    const auto* refusal = findAddress(said, CLOCKWORK_SYS("error"));
+    // Refused to the one who sent it by the next drain, naming the message,
+    // why, and the generation it was written for: clockwork has the address
+    // and the token, which is all a refusal needs.
+    const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
+    const auto* refusal = findAddress(frames, CLOCKWORK_SYS("error"));
     REQUIRE(refusal != nullptr);
     CHECK(refusal->sourceId == kClient);
     const auto r = osc_test::parseReply(refusal->data.data(),
                                         static_cast<uint32_t>(refusal->data.size()));
-    REQUIRE(r.argCount() >= 2);
+    REQUIRE(r.argCount() == 3);
     CHECK(r.argString(0) == "/dummy/ping");
-    CHECK(r.argString(1).find("rebuild") != std::string::npos);
+    CHECK(r.argString(1) == CLOCKWORK_REFUSED_REBUILDING);
+    CHECK(static_cast<uint32_t>(r.argInt(2)) == closing);
 
     // And the new instance never saw it: a message addressed to the old one
     // is not the new one's to answer.
+    CHECK(findAddress(frames, "/dummy/pong") == nullptr);
     const auto after = lanes_test::tickUntil(4, "/dummy/pong");
     CHECK(findAddress(after, "/dummy/pong") == nullptr);
+}
+
+TEST_CASE("restarts: more waiting at a cold restart than the instance's ring can hold refusals for are all refused, as it makes room",
+          "[restarts][transport]") {
+    settle();
+    // Far more refusals than the instance's ring holds at once.
+    constexpr int kWaiting = 4000;
+    const auto ping = osc_test::message("/dummy/ping");
+    for (int i = 0; i < kWaiting; ++i)
+        REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    coldRestart();
+    const uint32_t refusedBefore = metrics_refused();
+
+    // Nobody reads for a while: the refusals stop when the ring is full, and
+    // none is lost to it.
+    for (int i = 0; i < 400; ++i) lanes_test::tick();
+    CHECK(metrics_refused() == refusedBefore);
+
+    // Read, and the rest follow: every one, once.
+    int refused = 0, answered = 0;
+    for (int i = 0; i < 4000 && refused + answered < kWaiting; ++i) {
+        lanes_test::tick();
+        for (const auto& f : lanes_test::drainRt()) {
+            const auto addr = osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size()));
+            if (addr == CLOCKWORK_SYS("error")) ++refused;
+            if (addr == "/dummy/pong") ++answered;
+        }
+    }
+    CHECK(refused == kWaiting);
+    CHECK(answered == 0);
+    CHECK(metrics_refused() == refusedBefore);
 }
 
 TEST_CASE("restarts: a message sent while there is no instance is refused at once",
@@ -382,6 +433,35 @@ TEST_CASE("restarts: a message sent while there is no instance is refused at onc
         CHECK(r.argString(0) == "/dummy/ping");
         CHECK(r.argString(1) == "no instance");
     }
+
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(g_dsp != nullptr);
+    const auto after = lanes_test::tickUntil(4, "/dummy/pong");
+    CHECK(findAddress(after, "/dummy/pong") == nullptr);
+}
+
+TEST_CASE("restarts: a message written in place while there is no instance is refused, as one sent is",
+          "[restarts][transport]") {
+    settle();
+    destroy_dsp();
+    lanes_test::drainRt();
+    lanes_test::drainNrt();
+
+    // A client building its message in the ring, where it will live
+    // (clockwork_client_send_begin / _commit): the same door as a send, and
+    // the same refusal, whether at the reservation or at the commit.
+    ClockworkStatus st = CLOCKWORK_OK;
+    uint8_t* base = static_cast<uint8_t*>(clockwork_lanes_base());
+    ClockworkClient* c = clockwork_client_open_memory(base, arenaHeader(base)->arena_bytes, &st);
+    REQUIRE(c != nullptr);
+    const auto ping = osc_test::message("/dummy/ping");
+    uint8_t* at = clockwork_client_send_begin(c, ping.size(), &st);
+    if (at) {
+        std::memcpy(at, ping.ptr(), ping.size());
+        st = clockwork_client_send_commit(c, ping.size(), kClient);
+    }
+    CHECK(st == CLOCKWORK_E_NO_INSTANCE);
+    clockwork_client_close(c);
 
     rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
@@ -444,38 +524,42 @@ TEST_CASE("restarts: a refusal names the generation that refused",
     settle();
     const uint32_t gen = clockwork_arena_generation(header());
 
-    // In the ring at the teardown: refused by the generation that was
-    // closing, the one its sender had been talking to.
+    // In the ring at the teardown.
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
     destroy_dsp();
-    auto said = lanes_test::drainRt();
-    for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
-    const auto* atTeardown = findAddress(said, CLOCKWORK_SYS("error"));
-    REQUIRE(atTeardown != nullptr);
-    auto r = osc_test::parseReply(atTeardown->data.data(),
-                                  static_cast<uint32_t>(atTeardown->data.size()));
-    REQUIRE(r.argCount() == 3);
-    CHECK(r.argString(1) == CLOCKWORK_REFUSED_REBUILDING);
-    CHECK(r.argInt(2) == static_cast<int32_t>(gen));
+    lanes_test::drainRt();
+    lanes_test::drainNrt();
 
-    // Between instances: the same word, the generation still the closing one,
-    // since none has opened.
+    // Between instances: refused at the door, the generation still the
+    // closing one, since none has opened.
     CHECK_FALSE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
-    said = lanes_test::drainRt();
+    auto said = lanes_test::drainRt();
     for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
     const auto* between = findAddress(said, CLOCKWORK_SYS("error"));
     REQUIRE(between != nullptr);
-    r = osc_test::parseReply(between->data.data(),
-                             static_cast<uint32_t>(between->data.size()));
+    auto r = osc_test::parseReply(between->data.data(),
+                                  static_cast<uint32_t>(between->data.size()));
     REQUIRE(r.argCount() == 3);
     CHECK(r.argString(1) == CLOCKWORK_REFUSED_NO_INSTANCE);
     CHECK(r.argInt(2) == static_cast<int32_t>(gen));
 
-    // Built again: every refusal clockwork makes from now on, of anything,
-    // carries the generation that opened. One shape for all of them.
+    // Built again. What waited at the teardown is refused by the next drain,
+    // naming the generation that was closing, the one its sender had been
+    // talking to.
     rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
     REQUIRE(g_dsp != nullptr);
+    const auto waited = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
+    const auto* atTeardown = findAddress(waited, CLOCKWORK_SYS("error"));
+    REQUIRE(atTeardown != nullptr);
+    r = osc_test::parseReply(atTeardown->data.data(),
+                             static_cast<uint32_t>(atTeardown->data.size()));
+    REQUIRE(r.argCount() == 3);
+    CHECK(r.argString(1) == CLOCKWORK_REFUSED_REBUILDING);
+    CHECK(r.argInt(2) == static_cast<int32_t>(gen));
+
+    // And every refusal clockwork makes from now on, of anything, carries
+    // the generation that opened. One shape for all of them.
     const auto unknown = osc_test::message(CLOCKWORK_SYS("no-such-verb"));
     REQUIRE(lanes_test::ingress(unknown.ptr(), unknown.size(), kClient));
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));

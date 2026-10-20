@@ -17,6 +17,7 @@
 
 #include "shared_memory.h"
 #include "clockwork_config.h"
+#include "in_ring_door.h"        // the in ring's boundary
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
 #include "shm_tap_stream.hpp"
@@ -241,20 +242,12 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     // than let a caller retry forever.
     if (bytes + sizeof(Message) > c->L.in_ring_size) return CLOCKWORK_E_TOO_BIG;
 
-    // No guest instance to take it: refused here, at the boundary, rather
-    // than written to a ring whose next reader is an instance it was not
-    // addressed to. Clockwork's own verbs go through: the engine answers
-    // those with or without a guest (docs/RESTARTS.md). The flag is in the
-    // cursors region, so a client in another process reads the same word.
-    const uint32_t flags = c->control()->status_flags.load(std::memory_order_acquire);
-    if ((flags & STATUS_NO_INSTANCE) && !clockwork_sys_claims(osc, bytes))
-        return CLOCKWORK_E_NO_INSTANCE;
-
     // A control verb of clockwork's, while the engine serves the control
     // ring: written there, where no audio block is between it and its
     // answer (docs/RESTARTS.md, "The control ring"). The verbs the audio
     // thread performs, and the guest's, ride the in ring. The same rule as
     // clockwork_ingress_write's, read from the same bytes.
+    const uint32_t flags = c->control()->status_flags.load(std::memory_order_acquire);
     if ((flags & STATUS_CONTROL_SERVED) && c->L.control_ring_size > 0
         && clockwork_sys_control_takes(osc, bytes)) {
         auto* ctl = reinterpret_cast<ControlRingCursors*>(c->base + c->L.control_ring_offset);
@@ -266,12 +259,17 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
         return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
     }
 
-    const bool ok = RingBufferWriter::write(
-        c->base + c->L.in_ring_offset, c->L.in_ring_size,
-        &c->control()->in_head, &c->control()->in_tail,
-        &c->control()->in_sequence, &c->control()->in_write_lock,
-        osc, bytes, origin);
-    return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
+    // No guest instance to take it: refused at the boundary (in_ring_door.h),
+    // rather than written to a ring whose next reader is an instance it was
+    // not addressed to. The generation word is in the arena's header, so a
+    // client in another process reads the same word.
+    switch (in_ring_write(c->base, c->base + c->L.in_ring_offset, c->L.in_ring_size,
+                          c->control(), osc, bytes, origin)) {
+        case InRingWrite::Written:    return CLOCKWORK_OK;
+        case InRingWrite::NoInstance: return CLOCKWORK_E_NO_INSTANCE;
+        case InRingWrite::Full:       break;
+    }
+    return CLOCKWORK_E_FULL;
 }
 
 uint8_t* clockwork_client_send_begin(ClockworkClient* handle, uint32_t max_bytes,
@@ -313,6 +311,14 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
         RingBufferWriter::abort(&c->control()->in_write_lock);
         c->pending = {};
         return CLOCKWORK_E_ARG;
+    }
+    // The boundary's question, asked now the message is there to read, under
+    // the lock the reservation holds (in_ring_door.h): a send by the other
+    // road is refused the same way.
+    if (!in_ring_takes(c->base, c->pending.payload, bytes)) {
+        RingBufferWriter::abort(&c->control()->in_write_lock);
+        c->pending = {};
+        return CLOCKWORK_E_NO_INSTANCE;
     }
 
     RingBufferWriter::commit(

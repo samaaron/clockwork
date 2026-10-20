@@ -76,6 +76,7 @@ struct LanesArena {
         savedMetrics = metrics;    savedInit = memory_initialized;
         shared_memory      = buf.data();
         writeArenaHeader(buf.data());   // an arena describes itself, even a test's
+        arenaInstanceUp(buf.data());    // and has an instance up, for the in ring's door to take its messages
         cursors            = reinterpret_cast<RingCursors*>(buf.data() + RING_CURSORS_START);
         metrics            = reinterpret_cast<PerformanceMetrics*>(buf.data() + METRICS_START);
         memory_initialized = true;

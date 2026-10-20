@@ -338,7 +338,9 @@ clockwork_discover_tests(clockwork_tests)
 # process-wide attach count from zero, which no other binary can still be at.
 add_executable(clockwork_attach_tests
     test_main.cpp
+    OscTestUtils.cpp
     test_attach.cpp
+    test_restart_grid_embed.cpp
 )
 target_include_directories(clockwork_attach_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(clockwork_attach_tests ${CLOCKWORK_DSP})
@@ -414,6 +416,7 @@ add_executable(clockwork_engine_tests
     test_engine_state.cpp
     test_restart_refusals.cpp
     test_restart_sequence.cpp
+    test_restart_grid.cpp
     test_guest_reconfigure.cpp
     test_control_plane_liveness.cpp
     test_ingest_overload.cpp

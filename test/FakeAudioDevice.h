@@ -66,6 +66,10 @@ struct FakeDeviceSpec {
     std::atomic<bool> hidden { false };
     // Times the engine has tried to open it, failed or not.
     std::atomic<int> opens { 0 };
+    // Called as the engine opens it, on the thread opening it, before the
+    // open succeeds or fails: a moment inside a swap a case can act in,
+    // between the old device's teardown and anything built for this one.
+    std::function<void()> onOpen;
     // Gone where it stands: still listed, but its driver says it is no
     // longer alive, and it cannot be opened.
     std::atomic<bool> dead { false };
@@ -245,6 +249,7 @@ public:
                       double sampleRate, int bufferSizeSamples) override {
         std::lock_guard<std::recursive_mutex> lk(mLifecycle);
         primary()->opens.fetch_add(1);
+        if (primary()->onOpen) primary()->onOpen();
         // Error strings mimic real JUCE drivers, which name the device.
         // Nothing reads the wording: the engine attributes input-side
         // failures by retrying output-only, not by parsing these.

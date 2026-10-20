@@ -964,8 +964,10 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     constexpr uint32_t kColdBoot = CLOCKWORK_LIFETIME_COLD_BOOT, kRebuild = CLOCKWORK_LIFETIME_REBUILD,
                        kArena = CLOCKWORK_LIFETIME_ARENA;
     // clockwork-state
+    // Cold boot, not rebuild: a count of what a teardown lost is still there
+    // after it (docs/RESTARTS.md); the gauges are rewritten within a block.
     put(CLOCKWORK_ARENA_CLOCKWORK_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublic,
-        kBlock, kFast, kRebuild, { METRICS_SIZE / 4u });
+        kBlock, kFast, kColdBoot, { METRICS_SIZE / 4u });
     put(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublic,
@@ -995,8 +997,10 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    kTransport,
         kChange, kFast, kColdBoot);
+    // Cold boot, not rebuild: what waited for an instance that went is the
+    // next drain's to refuse, below the teardown's mark (docs/RESTARTS.md).
     put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    kTransport,
-        kBlock, kFast, kRebuild,
+        kBlock, kFast, kColdBoot,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     // Cold boot, not rebuild: what an instance said stays for its readers
     // across the rebuild, and the next instance's setup follows it
@@ -1069,6 +1073,7 @@ inline uint32_t arenaGenerationLoad(const void* base) {
         &arenaHeader(base)->generation)->load(std::memory_order_acquire);
 }
 inline uint32_t arenaInstanceGeneration(const void* base) { return arenaGenerationLoad(base) >> 1u; }
+inline bool     arenaHasInstance(const void* base)        { return (arenaGenerationLoad(base) & 1u) == 0u; }
 inline void arenaInstanceDown(void* base) {
     auto& w = arenaGenerationWord(base);
     const uint32_t v = w.load(std::memory_order_acquire);

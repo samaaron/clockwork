@@ -21,6 +21,7 @@
 #include "../clockwork_prefix.h"         // clockwork_sys_claims: whose message this is
 #include "../clockwork_sys.h"            // clockwork_sys_refuse, the refusal reasons
 #include "../shared_memory.h"            // layout, RingCursors, EgressRoute
+#include "../in_ring_door.h"              // the in ring's boundary
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
 
 // ── internal state ──────────────────────────────────────────────────────────
@@ -54,12 +55,7 @@ extern "C" {
 // interleaved with the zeroing. The lock words are never zeroed: releasing
 // the spinlock is what returns them to 0, and a blind store would unlock
 // under a holder.
-static void spin_acquire(std::atomic<int32_t>& lock) {
-    int32_t expected = 0;
-    while (!lock.compare_exchange_weak(expected, 1,
-            std::memory_order_acquire, std::memory_order_relaxed))
-        expected = 0;
-}
+static void spin_acquire(std::atomic<int32_t>& lock) { RingBufferWriter::lock(&lock); }
 
 void clockwork_lanes_reset_in_ring(void) {
     if (!shared_memory || !cursors) return;
@@ -97,23 +93,11 @@ void clockwork_lanes_reset_nrt_out_ring(void) {
 bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id) {
     if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
         return false;
-    // No guest instance to take it: refused at the boundary, with the word
-    // on the NRT egress for the source that sent it, as the client ABI's
-    // status says the same to its caller (docs/RESTARTS.md). Clockwork's own
-    // verbs go through and wait in the ring for the engine, instance or none.
-    const uint32_t flags = cursors->status_flags.load(std::memory_order_acquire);
-    if ((flags & STATUS_NO_INSTANCE) && !clockwork_sys_claims(osc, len)) {
-        clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
-            arenaInstanceGeneration(shared_memory),
-            [source_id](const uint8_t* d, uint32_t n) {
-                clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
-            });
-        return false;
-    }
-    // A control verb of clockwork's, while the engine serves the control
-    // ring (lanes.h, clockwork_control_serve): written there, where no audio
+    // A control verb of clockwork's, while the engine serves the control ring
+    // (lanes.h, clockwork_control_serve): written there, where no audio
     // block is between it and its answer. The same rule clockwork_client_send
     // reads from the same bytes, so a client in any process does the same.
+    const uint32_t flags = cursors->status_flags.load(std::memory_order_acquire);
     if ((flags & STATUS_CONTROL_SERVED) && clockwork_sys_control_takes(osc, len)) {
         auto* ctl = reinterpret_cast<ControlRingCursors*>(shared_memory + CONTROL_RING_START);
         return RingBufferWriter::write(
@@ -122,11 +106,26 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
             &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
             osc, len, source_id);
     }
-    return RingBufferWriter::write(
-        shared_memory + IN_RING_START, IN_RING_SIZE,
-        &cursors->in_head, &cursors->in_tail,
-        &cursors->in_sequence, &cursors->in_write_lock,
-        osc, len, source_id);
+    // No guest instance to take it: refused at the boundary (in_ring_door.h),
+    // with the word on the NRT egress for the source that sent it, as the
+    // client ABI's status says the same to its caller (docs/RESTARTS.md).
+    // Clockwork's own verbs go through and wait in the ring for the engine,
+    // instance or none.
+    switch (in_ring_write(shared_memory, shared_memory + IN_RING_START, IN_RING_SIZE,
+                          cursors, osc, len, source_id)) {
+        case InRingWrite::Written:
+            return true;
+        case InRingWrite::NoInstance:
+            clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
+                arenaInstanceGeneration(shared_memory),
+                [source_id](const uint8_t* d, uint32_t n) {
+                    clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
+                });
+            return false;
+        case InRingWrite::Full:
+            break;
+    }
+    return false;
 }
 
 // ── Egress ──────────────────────────────────────────────────────────────────

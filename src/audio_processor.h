@@ -140,19 +140,20 @@ extern "C" {
     // Scheduler control
     EMSCRIPTEN_KEEPALIVE void clear_scheduler();
 
-    // Ask the audio thread to refuse everything pending in the IN ring for the
-    // guest at the top of its next drain, each to its sender with `reason`
-    // (a CLOCKWORK_REFUSED_* phrase, clockwork_sys.h); clockwork's own verbs
-    // are delivered. Callable from any thread — the consuming thread applies
-    // the flush, so it cannot race producers or the drain.
-    void clockwork_ingress_flush_request(const char* reason);
+    // Mark everything pending in the IN ring for the guest: the drain refuses
+    // each to its sender with `reason` (a CLOCKWORK_REFUSED_* phrase,
+    // clockwork_sys.h), naming the generation as it reads now; clockwork's
+    // own verbs are delivered. On the audio thread, or with it stopped: the
+    // marks are the drain's state (docs/RESTARTS.md, rule 1).
+    void clockwork_ingress_mark(const char* reason);
 
 #ifndef __EMSCRIPTEN__
     // Native-only: DSP teardown/rebuild for cold swap
     void destroy_dsp();
     // A new instance at `sample_rate`, on a device whose callback is
-    // `device_buffer_frames`: what its /clockwork/setup names, said by its
-    // first block.
+    // `device_buffer_frames`: what its /clockwork/setup names, the last thing
+    // this writes (or its first block's, when the instance's ring has no room
+    // for it yet).
     void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
     // Native-only: full arena teardown for engine shutdown — destroys the
     // DSP instance and clears memory_initialized/shared_memory/control/metrics so

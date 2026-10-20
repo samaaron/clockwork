@@ -11,19 +11,54 @@ regions, and what its messages mean, is the guest's business and is not
 described here. SuperSonic works to this contract today; the next guest
 inherits it by implementing the one hook in "What the guest owes".
 
+## One event, every route
+
+A guest instance is one conversation, and its generation is its name.
+Replacing it ends one conversation and starts the next. However it is
+replaced — a device change on a native engine, a reload in the browser, an
+embedded host attaching again — it is the same event, told the same way:
+
+1. **The old generation closes.** The generation word goes odd, and
+   everything still waiting for the old instance is answered once, then:
+   refused to its sender, naming the generation that closed, or, for a
+   message about clockwork itself (a ping, a sync), carried to the next.
+2. **The old instance's last words follow everything it said before,** on
+   its ring.
+3. **The new generation opens, and its first word on that ring is
+   `setup`.** Every reader of the ring hears the old instance, then
+   `setup`, then the new instance, because that is the order they sit in.
+4. **Nothing a reader has not read is lost.** The reply rings outlive
+   instances, and no reader is reset under a writer, nor a writer under a
+   reader.
+
+Two kinds of message go out, and only two. The instance's words go on the
+instance's ring, and a reader places them by where they fall against
+`setup`. Clockwork's own notices go on its ring, and each either belongs to
+no instance (device reports, inputs, log lines, hosted tracks) or names its
+generation (statechanges, refusals); none needs a place against `setup`.
+
+"Between instances" is one fact with one representation: the generation
+word's parity. A client needs no timer for any of it. It stops sending to
+the guest on `restarting` or on its first refusal, rebuilds once on
+`setup`, and a refusal tells it what to send again.
+
+Where the code is still behind this, it is listed under "Not yet", with
+the test that shows it.
+
 ## Three events
 
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
-| **hot restart** | survives | untouched, every region | statechange only |
-| **cold restart** (a rebuild) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
+| **hot restart** | survives | untouched, every region | statechange; and when a fact clients compute with has changed (the rate), a notice of it naming the same generation |
+| **cold restart** (a rebuild: a native device change, a browser reload over the same memory, an embedded host attaching again) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
 A hot restart is a device change the instance can take without being
 rebuilt: the device stops, is reopened or replaced at the same rate and
 channel count — or at another, when the instance declared it survives
-that kind of change and is told — and audio resumes. Nothing a client
-tracks has changed, so clockwork says statechange and nothing more.
+that kind of change and is told — and audio resumes. The instance and the
+generation are the same; a client is told the facts that changed, and
+nothing to rebuild.
 
 A cold restart is `destroy_dsp` then `init_memory` on the same arena then
 `dsp_new` (src/audio_processor.cpp). A driver change is always cold. A
@@ -41,12 +76,16 @@ Offsets never move: a reader that resolved a region at open holds it
 across every restart.
 
 A cold boot is a new arena: the first boot, or `teardown_memory` followed by
-`init_memory`. The regions a rebuild keeps start over here.
+`init_memory`. The regions a rebuild keeps start over here. A cold boot
+that replaces a running engine — the browser's reload into new memory — is
+still the one event above for its clients: the old generation closes, and
+the new arena carries the generation on from the one it replaces.
 
 ## The generation
 
 Every guest instance has a generation. It starts at 1 and moves on at every
-cold restart. It is the key to everything below: a region of lifetime
+cold restart, and never goes back: a new arena that replaces a running
+engine carries it on. It is the key to everything below: a region of lifetime
 `rebuild` belongs to one generation, a refusal names the generation that
 refused, and a client rebuilds against the generation `setup` named, with
 nothing from an earlier one taken for the current one.
@@ -62,9 +101,10 @@ process reads it with one load and knows "between instances" from the
 bytes, with no event to miss: `clockwork_arena_generation` and
 `clockwork_arena_has_instance` in C, `instance_generation` and
 `has_instance` on the Rust header, `readGeneration`, `instanceGeneration`
-and `hasInstance` in js/lib/arena.js. Clockwork keeps no other count:
-ClockworkEngine reads the same word, and the web's worklet reports it at
-the boot handshake for a page with no shared view of the arena.
+and `hasInstance` in js/lib/arena.js. Clockwork keeps no other count and no
+other flag: ClockworkEngine reads the same word, every boundary reads its
+parity to know whether there is an instance, and the web's worklet reports
+it at the boot handshake for a page with no shared view of the arena.
 
 On the wire it is:
 
@@ -106,14 +146,14 @@ producer in another thread may be mid-write through a rebuild.
 | node id counter | cold boot | kept | kept: ids are the clients' | n/a |
 | guest config | cold boot | kept | kept, handed to the new instance as it was | n/a |
 | guest persist | cold boot | kept | kept, handed to the new instance as it was | n/a |
-| metrics | rebuild | kept | every counter and gauge to 0; the gauges are rewritten within a block | n/a |
+| metrics | cold boot | kept | kept: a count of what a teardown lost is still there after it; the gauges are rewritten within a block | n/a |
 | native stats | rebuild | kept | to 0 | n/a |
 | sample clock | rebuild | kept, continues | emptied, then rewritten whole by the first block on the new device | its seqlock |
 | channel map | cold boot | kept | kept: the streams bound over channels outlive the instance; the device's own words are rewritten when the instance is built, as any attach rewrites an entry | its seqlock |
 | scope | rebuild | kept, continues | reformatted at the new device's channels; the write position restarts at 0 | a reader's cursor starts again |
 | taps | rebuild | kept | every slot free | the slot state |
-| ring cursors, status flags | rebuild | kept | the in ring's cursors and the status flags: a fresh epoch; the reply rings' cursors go with their rings | n/a |
-| in ring | rebuild | kept, drained as usual | every unread message for the guest refused to its sender, clockwork's own carried, then the ring is fresh | `/clockwork/error` to the token |
+| ring cursors, status flags | rebuild | kept | the status flags: a fresh word; every ring's cursors go with their ring | n/a |
+| in ring | cold boot | kept, drained as usual | kept: what waited for the old instance is refused by the next drain, below the teardown's mark, naming the generation that closed; clockwork's own is answered | `/clockwork/error` to the token |
 | RT out ring, NRT out ring | cold boot | kept | kept: what the old instance said stays for its readers, and the new instance's `setup` follows it | the replies themselves |
 | guest window | rebuild | kept | zeroed; the new instance lays it out again | the window's identity reads 0 until it does |
 
@@ -141,40 +181,58 @@ waiting on, so these are the rules a client may rely on:
    | reason | the fact | where it is said |
    |---|---|---|
    | `no instance` | it arrived while there was no instance: between a teardown and the next build, or after a build that failed | at the boundary, as it is written |
-   | `rebuilding` | it was waiting in the in ring when the instance was torn down, or a cold swap's purge found it there | the teardown's walk of the ring; the purge's drain |
-   | `stalled` | it was waiting while the audio thread was stalled, and is stale now | the wake's purge, in the drain |
+   | `rebuilding` | it was waiting in the in ring when the instance was torn down | the next drain, of everything below the mark the teardown set |
+   | `stalled` | it was waiting while the audio thread was stalled, and is stale now | the next drain, of everything below the mark the wake's purge set |
 
    Clockwork has the address and the token, which is all a refusal needs;
    it never needs to know what the message meant. A client reads every one
    as "wait for `/clockwork/setup`", never as an error to show.
 
-   The boundary is the same function for every writer, and the flag it
-   reads is in the arena (`STATUS_NO_INSTANCE` in the ring cursors, raised
-   at the start of `destroy_dsp`, lowered when `dsp_new` succeeds), so a
-   client in another process reads the same word. Where a door can reach
-   the asker's egress it writes the refusal there and also says so to its
-   caller; where it cannot, the caller speaks:
+   The boundary is the same function for every writer
+   (src/in_ring_door.h), and what it reads is the generation word's
+   parity, under the ring's writer lock: odd from the start of
+   `destroy_dsp` until `dsp_new` succeeds. A client in another process
+   reads the same word. The teardown marks the in ring under the same
+   lock once the word is odd: a writer that took the lock before wrote
+   below the mark, and the next drain refuses its message as the closing
+   generation's; one that takes it after reads the word odd and is
+   refused at the door. The in ring is kept across a rebuild, so nothing
+   is reset under a writer, and the drain refuses what is below a mark as
+   the instance's ring has room for the refusals, holding everything after
+   them until it has: thousands waiting are all answered, a block's worth
+   at a time. Marks are set only where the drain is not running — by a
+   teardown, with the audio thread stopped, and by the wake's purge, on
+   it — and several may wait for one drain: an instance built and torn
+   down before a block ran leaves its own as well as the one before it.
+
+   Where a door can reach the asker's egress it writes the refusal there
+   and also says so to its caller; where it cannot, the caller speaks:
 
    | door | to the asker | to the caller |
    |---|---|---|
-   | `clockwork_client_send` (C, Rust, the shm peers) | the status is the word | `CLOCKWORK_E_NO_INSTANCE` / `Error::NoInstance` |
+   | `clockwork_client_send`, and `clockwork_client_send_begin`/`_commit` at the commit (C, Rust, the shm peers) | the status is the word | `CLOCKWORK_E_NO_INSTANCE` / `Error::NoInstance` |
    | `ClockworkEngine::ingest` (every socket transport, `sendOSC`, the NIF) | `/clockwork/error` to the token | the status |
    | `clockwork_ingress_write` (the lanes ABI) | `/clockwork/error` on the NRT egress for the source | `false` |
    | `OscChannel.send` (the browser) | `/clockwork/error` through the client's inbound path, from the main thread's channel; `onRefused` and `lastRefusal` on any channel | `false` |
 
-   A refusal that cannot be made — no room on the egress, or an address
-   too long to encode — is counted (`clockwork_sys_refusals_dropped`), as
-   every refusal that cannot be made is.
+   A refusal at a door that finds no room on clockwork's ring is lost, and
+   counted as an egress frame refused; one too long to encode is counted
+   (`clockwork_sys_refusals_dropped`). The metrics live as long as the
+   arena, so a count made at a teardown is still there after the rebuild.
 2. **Clockwork's own verbs keep working.** Device, state, notify and the
    rest of the `/clockwork/` namespace are answered throughout a restart;
    a restart depends on some of them. A control verb never touches the in
    ring on a host with a control pass: it has a ring of its own ("The
    control ring" below), of lifetime `arena`, that a restart leaves alone.
-   One of clockwork's audio-thread verbs — a ping, a sync — found in the
-   in ring at a teardown is carried into the new epoch, first and in its
-   order, rather than refused. The carry is bounded (64 KB); one that does
-   not fit is refused like the guest's, and counted. A bundle is never
-   clockwork's (clockwork_prefix.h), so a bundle is refused.
+   One of clockwork's audio-thread verbs that is not the guest's business —
+   a ping, an echo, a sync, the clock snapshot, a port listing, what plays
+   a hosted track — found in the in ring below a teardown's mark is
+   answered by the next drain, in its order, rather than refused. A verb
+   that hands something to the guest — an asset, an inbound event, a
+   scheduled message or the schedule's flush — was written for the old
+   instance as much as the guest's own messages beside it, and is refused
+   with them. A bundle is never clockwork's (clockwork_prefix.h), so a
+   bundle is refused.
 3. **Everything an instance says goes out on its ring, in order, and
    `setup` cuts it.** A reply carries no generation of its own, so a client
    tells which instance made it by where it falls against `setup`. The RT
@@ -192,8 +250,9 @@ waiting on, so these are the rules a client may rely on:
    instance's goes ahead of it.
 4. **The NRT out ring carries nothing whose meaning depends on the cut.**
    Clockwork's own replies, device reports, inputs (MIDI, Link, gamepad,
-   OSC), log lines and hosted tracks belong to no instance; statechanges
-   and refusals name their generation. So `restarting` and `running` need
+   OSC), log lines and hosted tracks belong to no instance; statechanges,
+   refusals and the notice of a fact a hot restart changed name their
+   generation. So `restarting` and `running` need
    no place against `setup`: `running`, said as the swap ends, comes after
    it for the engine's own reader, which reads nothing until audio resumes,
    and may come either side of the new instance's first replies.
@@ -270,6 +329,8 @@ Everything else it holds is the instance's and goes with it.
 
 - On `restarting`, stop sending to the guest. Read every `rebuilding`
   refusal as "wait for `setup`", never as an error to show.
+- On a notice of a fact a hot restart changed, take the new fact. Nothing
+  is rebuilt: the instance is the one it was.
 - On `setup`, rebuild in one pass against the generation it names. A retry
   budget is counted against that generation alone: a pass that could not
   reach the engine at all, because the machine slept or the device was
@@ -278,6 +339,34 @@ Everything else it holds is the instance's and goes with it.
   lost, so a client needs no timers to guess with.
 
 ## Where it is pinned
+
+The model is pinned as a grid: every reader against every way an instance
+is replaced or survives, one deterministic case per cell, each checked by
+the same function (test/RestartModel.h). Around its event a cell has the old
+instance answer something its reader has not yet read, has three messages
+waiting — the guest's, a sync, an asset's commit — and asks the new instance
+one more thing after. The native cells are test/test_restart_grid.cpp, on
+fake devices that keep the case's clock; the embedded host's are
+test/test_restart_grid_embed.cpp. A cell marked with a number is red until
+that row of "Not yet" is done, and its test says so ([not-yet-N] and
+[!shouldfail], `test.fail` in the page's): it passes while it fails, and
+fails the day it passes, so the mark goes with the fix.
+
+| reader | rate change | driver change | another device, survived | bigger buffer, survived | device that will not open | device that never calls back | sent between instances |
+|---|---|---|---|---|---|---|---|
+| the engine's own | 7 | 7 | ✓ | 13 | 7 | 7 | 7 |
+| a host reading the rings | 7 | 7 | ✓ | 13 | 7 | 7 | 7 |
+| a tap on the instance's ring | 7 | 7 | ✓ | 13 | 7 | 7 | |
+| a peer on the segment's plane | 7 | | ✓ | | | | 8 |
+
+And the cells that are not one event among others: thousands of messages
+waiting at a rebuild, for the engine's own reader and a host reading the
+rings (✓); a peer whose reply ring is nearly full when a rebuild comes (✓);
+an embedded host attaching again, at its rate and at another (5); a client
+writing its message in place between instances (✓, in
+test/test_restarts.cpp); and the page, in test/restart_grid.spec.mjs, at a
+reload over the same memory (1) and into new memory (2), and purging what
+waited while it was suspended (3). The NIF's cell comes with its fix (11).
 
 - test/test_restarts.cpp: every region's row and the transport rules, at
   the lanes level, against the mechanism itself (`destroy_dsp` +
@@ -310,6 +399,29 @@ Everything else it holds is the instance's and goes with it.
 
 ## Not yet
 
-Nothing of this document is unimplemented on clockwork's side. What a
-guest owes at teardown is the guest's to do: scsynth's unanswered asks
-still die with its world until SuperSonic answers them in `dsp_free`.
+What a guest owes at teardown is the guest's to do: scsynth's unanswered
+asks still die with its world until SuperSonic answers them in `dsp_free`.
+
+On clockwork's side, today's code is behind the model at these places.
+Each is a suspect until a deterministic test shows it, and the ones the
+grid above shows say so; the fix follows the test.
+
+| # | where | against the model |
+|---|---|---|
+| 1 | browser reload over the same memory | takes the rebuild path with no teardown: the generation never moves, the instance is never freed, its assets are never released, and no `setup` goes on the ring; the page empties the reply rings and the in ring without a word. **Shown**: the generation stays at 1, no `setup`, and a message and a sync waiting at the reload are neither answered nor refused |
+| 2 | browser reload into new memory | the generation starts again at 1, so a refusal cannot name the one that closed; a worker's port to the old engine goes quiet. **Shown**: as row 1 |
+| 3 | the browser's `purge()` and `resume()` | waiting messages are dropped by moving the tail, with no refusal (native refuses them `stalled`). **Shown**: a message and a sync waiting at a purge are neither answered nor refused |
+| 4 | the worklet's `checkStatus` | stores the status word whole, wiping the no-instance flag |
+| 5 | an embedded host attaching again | `clockwork_init` on a live arena abandons the old instance: no teardown, the generation unmoved, no `setup`; an attach that joins can tick through a swap. **Shown**: the generation stays at 1 and no `setup` is said |
+| 7 | the native carry | the verbs that hand something to the guest (an asset's commit, an inbound event, a scheduled message and the schedule's flush) are carried into the new instance, while the guest's own messages beside them are refused. **Shown**: an asset's commit waiting at the teardown, or sent between instances, is committed by the new instance, for every reader and every rebuild |
+| 8 | the shm peer plane | its door is the control pass, parked for a swap, so what a peer writes between instances reaches the new instance; with no instance for a while, its drain takes the boundary's refusal for a full ring and holds the message, refused again every pass; its reply ring drops what does not fit. **Shown**: a message written between instances is answered by the new instance; a peer behind at a rebuild loses 844 replies |
+| 9 | the client ABI | a client in another process has no sanctioned read of the generation |
+| 10 | the plugin bridge (parked with tracks) | refusals carry generation 0; a track's errors are another shape, broadcast; timed track events vanish with the schedule; track tap slots go dark when the taps region resets |
+| 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read, not yet tested) |
+| 12 | the page's boundary | the page's channel and the worklet read `STATUS_NO_INSTANCE`, a second record of what the generation word's parity already says; every C door reads the word |
+| 13 | a hot restart that changes a fact | told only as a statechange; an embedded host's cached rate goes stale. **Shown**: a switch to a bigger buffer, survived, says nothing of the buffer (the notice the grid expects is `/clockwork/setup/changed ,iii rate buffer generation`) |
+| 14 | clients | Spider's one-second quiet period, its retries and timeouts; the GUI's fifteen-second re-enable; the browser's one-second settle; the page's sync sent six times because "the first message after a reload can go missing": each covers a loss the engine should not have, and goes once the engine has none |
+
+"Generation" also names, elsewhere in clockwork, the bridge's spawn count,
+the peer plane's attach count, the clock grid's version and the channel
+map's seqlock. Each is renamed on the way past, so the word means one thing.

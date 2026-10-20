@@ -691,7 +691,9 @@ public:
     void printDeviceList();
 
     // --- Purge stale messages: every one answered to its sender with
-    // `reason` (a CLOCKWORK_REFUSED_* phrase), none dropped silently ---
+    // `reason` (a CLOCKWORK_REFUSED_* phrase), none dropped silently. On the
+    // audio thread (the wake after a stall), where the in ring's marks are
+    // set (docs/RESTARTS.md, rule 1) ---
     void purge(const char* reason);
 
 private:
@@ -1002,16 +1004,6 @@ private:
     // rendered against a DSP being freed.
     std::mutex            mPumpGate;
     std::atomic<uint32_t> mPumpsDroppedBySwap{0};
-
-    // Audio-plane ingress: the default OscIngress route writes the IN ring
-    // directly. The ring pointers moved off the transport so it stays a dumb
-    // pipe; the engine owns the audio plane.
-    uint8_t*              mInBufferStart = nullptr;
-    uint32_t              mInBufferSize  = 0;
-    std::atomic<int32_t>* mInHead        = nullptr;
-    std::atomic<int32_t>* mInTail        = nullptr;
-    std::atomic<int32_t>* mInSequence    = nullptr;
-    std::atomic<int32_t>* mInWriteLock   = nullptr;
 
     // NRT control plane: the audio-thread ingress forwards clockwork verbs it
     // does not answer itself onto this process-local, Message-framed ring. The

@@ -92,40 +92,20 @@ public:
         const uint32_t total_size   = static_cast<uint32_t>(sizeof(Message)) + max_payload;
         const uint32_t aligned_size = (total_size + 3u) & ~3u;
 
-        // Acquire spinlock
-        int32_t expected = 0;
-        while (!write_lock->compare_exchange_weak(expected, 1,
-                std::memory_order_acquire, std::memory_order_relaxed)) {
-            expected = 0;
-            #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-                _mm_pause();
-            #elif defined(__aarch64__) || defined(__arm__)
-                __asm__ volatile("yield");
-            #endif
-        }
+        lock(write_lock);
 
-        int32_t h = head->load(std::memory_order_relaxed);
-        int32_t t = tail->load(std::memory_order_acquire);
-        uint32_t uh = static_cast<uint32_t>(h);
-        uint32_t ut = static_cast<uint32_t>(t);
-
-        // Total free space (head==tail ambiguity costs one byte).
-        uint32_t avail = ring_free_bytes(uh, ut, buffer_size);
-        if (aligned_size > avail) {
-            write_lock->store(0, std::memory_order_release);
+        uint32_t uh = static_cast<uint32_t>(head->load(std::memory_order_relaxed));
+        const uint32_t ut = static_cast<uint32_t>(tail->load(std::memory_order_acquire));
+        if (!ring_fits(uh, ut, buffer_size, aligned_size)) {
+            unlock(write_lock);
             return r;
         }
 
-        // Frames never wrap: if the frame doesn't fit before the end, mark the
-        // remainder as padding and restart at offset 0 — which needs that much
-        // contiguous room before the tail.
-        uint32_t space_to_end = buffer_size - uh;
+        // Frames never wrap: one that does not fit before the end restarts at
+        // offset 0 (ring_fits said there is room there), and the remainder is
+        // marked as padding.
+        const uint32_t space_to_end = buffer_size - uh;
         if (aligned_size > space_to_end) {
-            uint32_t space_at_front = (ut > 0) ? (ut - 1) : 0;
-            if (aligned_size > space_at_front) {
-                write_lock->store(0, std::memory_order_release);
-                return r;
-            }
             // Padding marker: magic word, zeros to the end of the ring. When
             // >= 16 bytes remain this doubles as a full zeroed pad header;
             // 4-byte alignment guarantees at least the magic always fits.
@@ -201,12 +181,31 @@ public:
             reinterpret_cast<int32_t*>(head), 0x7FFFFFFFu);
 #endif
 
-        write_lock->store(0, std::memory_order_release);
+        unlock(write_lock);
     }
 
     // Give the reservation back without publishing. The head has not moved, so
     // nothing a reader can see was changed.
     static void abort(std::atomic<int32_t>* write_lock) {
+        unlock(write_lock);
+    }
+
+    // The ring's writer lock, as every write takes it, for one who must stand
+    // between two writes without writing: what is published before it is
+    // taken is all there is until it is let go.
+    static void lock(std::atomic<int32_t>* write_lock) {
+        int32_t expected = 0;
+        while (!write_lock->compare_exchange_weak(expected, 1,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
+            expected = 0;
+            #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+                _mm_pause();
+            #elif defined(__aarch64__) || defined(__arm__)
+                __asm__ volatile("yield");
+            #endif
+        }
+    }
+    static void unlock(std::atomic<int32_t>* write_lock) {
         write_lock->store(0, std::memory_order_release);
     }
 

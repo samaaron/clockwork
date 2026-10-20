@@ -37,5 +37,17 @@ inline uint32_t ring_free_bytes(uint32_t head, uint32_t tail, uint32_t size) {
     return size - used - 1;
 }
 
+// Whether a frame of `footprint` bytes (its 4-aligned size) fits a ring of
+// `size` bytes now: in its free space, and in one piece — before the end of
+// the ring, or, when it would cross the end, at the front, before the tail
+// (frames never wrap). The one fit test every writer and every room check
+// uses.
+inline bool ring_fits(uint32_t head, uint32_t tail, uint32_t size, uint32_t footprint) {
+    if (footprint > ring_free_bytes(head, tail, size)) return false;
+    if (footprint <= size - head) return true;
+    const uint32_t front = tail > 0 ? tail - 1 : 0;
+    return footprint <= front;
+}
+
 constexpr uint32_t MESSAGE_MAGIC = 0xDEADBEEF;
 constexpr uint32_t PADDING_MAGIC = 0xBADDCAFE;  // end-of-ring pad marker; frame restarts at offset 0

@@ -185,6 +185,7 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 // IN-ring drain below runs on.
 #include "lanes/lanes_internal.h"
 #include "lanes/ring_drain.h"
+#include "workers/RingBufferWriter.h"   // the in ring's writer lock, which a teardown's mark takes
 
 // Pre-allocated heap for RT-safe allocations
 #include "clockwork_pool.h"
@@ -410,35 +411,34 @@ extern "C" {
     // its next drain so g_in_drain stays single-threaded.
     std::atomic<bool> g_in_seq_reset{false};
 
-    // IN-ring flush request (native purge: sleep/wake recovery, cold swap;
-    // callable from any thread). Holds the in_sequence snapshot taken at
-    // request time, -1 = no request. The drain refuses pending frames for the
-    // guest whose seq predates the snapshot, each to its sender with the
-    // reason given, and dispatches everything newer and everything of
-    // clockwork's own, so the flush answers exactly what was queued at
-    // request time (docs/RESTARTS.md: nothing is dropped without a word). The
-    // ring cursors have fixed owners — producers advance head under
-    // in_write_lock, the drain owns tail — so the refusal runs on the
-    // consuming thread via the normal consume path; no cursor is written from
-    // the requesting thread.
-    std::atomic<int64_t>     g_in_flush_below{-1};
-    std::atomic<const char*> g_in_flush_reason{CLOCKWORK_REFUSED_REBUILDING};
-
-    // Audio-thread-only discard state armed from g_in_flush_below: while
-    // active, frames for the guest with seq before the threshold are refused
-    // and consumed undispatched.
-    bool        g_in_discard_active = false;
-    uint32_t    g_in_discard_below  = 0;
-    const char* g_in_discard_reason = CLOCKWORK_REFUSED_REBUILDING;
-
-    // What the in ring held of clockwork's own when the instance was torn
-    // down, carried into the new epoch (restart_in_ring, below): the engine
-    // answers those with or without a guest, so a teardown must not lose
-    // them. Bounded, and the bound is honest: a sys message that does not
-    // fit is refused with the rest, and counted (clockwork_sys_refusals_dropped).
-    constexpr uint32_t kCarryBytes = 64 * 1024;
-    alignas(16) uint8_t g_carry[kCarryBytes];
-    uint32_t            g_carry_used = 0;
+    // THE MARKS: where in the in ring the messages written for a generation
+    // end (docs/RESTARTS.md, rule 1). A teardown sets one for the generation
+    // closing (destroy_dsp); a purge of what went stale while the audio
+    // thread was stalled sets one for the generation it has
+    // (clockwork_ingress_mark). Each holds the in_sequence snapshot taken
+    // then, with the reason and the generation its refusals name. The drain
+    // refuses each frame for the guest sequenced below the earliest mark to
+    // its sender, as the ring it answers on has room (refuse_when_room), and
+    // takes everything of clockwork's own as it comes — so whatever replaced
+    // the instance in between, what was written for the old one is answered
+    // once, in order, and nothing is dropped without a word.
+    //
+    // Several can wait for one drain: an instance built and torn down again
+    // before a block ran (a device that never called back) leaves the mark of
+    // the generation before it and its own, and a message written while it
+    // was up is refused as its. Set only where the drain is not running — on
+    // the audio thread itself, or with it stopped — so they are the consuming
+    // thread's state, handed over by the audio thread's stop and start; and
+    // the ring cursors keep their fixed owners (producers advance head under
+    // in_write_lock, the drain owns tail), so nothing here writes one.
+    struct InRingMark {
+        uint32_t    below;        // the first sequence written after it
+        uint32_t    generation;   // the generation its refusals name
+        const char* reason;       // a CLOCKWORK_REFUSED_* phrase: static storage
+    };
+    constexpr uint32_t kInRingMarks = 8;
+    InRingMark g_in_marks[kInRingMarks];
+    uint32_t   g_in_mark_count = 0;
 
     void*  g_guest_memory       = nullptr;
     size_t g_guest_memory_bytes = 0;
@@ -1124,23 +1124,47 @@ extern "C" {
             clockwork_log("SHED: %.0fms late, dropped (overload)", late_ms);
     }
 
-    // Request that the audio thread refuse everything pending in the IN ring
-    // as of NOW: frames for the guest sequenced before this snapshot are
-    // answered to their sender with `reason` and not delivered, later ones
-    // dispatch normally, and clockwork's own are delivered whatever their
-    // sequence. Callable from any thread — the caller only requests, the
-    // consuming thread applies (g_in_flush_below). `reason` is one of the
-    // CLOCKWORK_REFUSED_* phrases: static storage, read on the audio thread.
+    // Mark everything pending in the IN ring as of NOW (the marks, above):
+    // frames for the guest sequenced before it are answered to their sender
+    // with `reason`, naming the generation as it reads now, and not
+    // delivered; later ones dispatch normally, and clockwork's own are
+    // delivered whatever their sequence. On the audio thread, or with it
+    // stopped (the marks, above). `reason` is one of the CLOCKWORK_REFUSED_*
+    // phrases.
     //
-    // The IN ring is drained separately by the JS worklet in its message handler,
-    // eagerly, so stale messages are refused before the ack is sent.
-    void clockwork_ingress_flush_request(const char* reason) {
+    // Taken without the ring's writer lock, so the audio thread may call it
+    // (the wake's purge): a writer mid-write lands on either side, and is
+    // answered either way. A teardown wants the mark exact, and takes the
+    // lock round it (mark_closing_generation).
+    void clockwork_ingress_mark(const char* reason) {
         if (!memory_initialized || !cursors) return;
-        g_in_flush_reason.store(reason ? reason : CLOCKWORK_REFUSED_REBUILDING,
-                                std::memory_order_relaxed);
-        g_in_flush_below.store(
-            cursors->in_sequence.load(std::memory_order_acquire),
-            std::memory_order_release);
+        const InRingMark mark { static_cast<uint32_t>(cursors->in_sequence.load(std::memory_order_acquire)),
+                                arenaInstanceGeneration(shared_memory),
+                                reason ? reason : CLOCKWORK_REFUSED_REBUILDING };
+        // Nothing written since the last: it would mark no message.
+        if (g_in_mark_count > 0 && g_in_marks[g_in_mark_count - 1].below == mark.below) return;
+        // Full — eight replacements without a block between them: the two
+        // oldest become one, and what was written for the oldest generation
+        // is refused naming the one after it. Answered still, which is what
+        // a client waits on.
+        if (g_in_mark_count == kInRingMarks) {
+            for (uint32_t i = 1; i < kInRingMarks; ++i) g_in_marks[i - 1] = g_in_marks[i];
+            --g_in_mark_count;
+        }
+        g_in_marks[g_in_mark_count++] = mark;
+    }
+
+    // The teardown's mark, exact: taken under the in ring's writer lock once
+    // the generation word has gone odd. Every door asks its question under
+    // the same lock (in_ring_door.h), so a message whose writer saw the
+    // instance up is below the mark, and refused as the closing generation's
+    // by the next drain; one written after reads the word odd and is refused
+    // at the door. Called with the audio thread stopped.
+    static void mark_closing_generation() {
+        if (!memory_initialized || !cursors) return;
+        RingBufferWriter::lock(&cursors->in_write_lock);
+        clockwork_ingress_mark(CLOCKWORK_REFUSED_REBUILDING);
+        RingBufferWriter::unlock(&cursors->in_write_lock);
     }
 
     EMSCRIPTEN_KEEPALIVE
@@ -1419,70 +1443,6 @@ extern "C" {
     }
 #endif
 
-    // THE IN RING AT A TEARDOWN: nothing in it is dropped without a word
-    // (docs/RESTARTS.md). Walked here, once, by the thread tearing down —
-    // audio is stopped, so the ring's one consumer is idle and this thread
-    // may take its place for the walk. A frame for the guest is refused to
-    // its sender, on the NRT egress (this thread's ring), naming the message
-    // and why: the instance it was written for is going. A frame of
-    // clockwork's own is carried to the new epoch (restart_in_ring_carry,
-    // after init_memory has reset the ring), because the engine answers
-    // those with or without a guest. Drained with a state of its own, so the
-    // audio thread's gap tracking (g_in_drain) stays the audio thread's.
-    //
-    // Walked twice per restart: at the teardown, and again just before the
-    // ring's epoch resets in init_memory, for what arrived in between — a
-    // verb of clockwork's own the boundary let through, or a guest message
-    // from a writer that does not read the flag. The carry appends across
-    // both walks and is emptied by restart_in_ring_carry.
-    void restart_in_ring_refuse() {
-        if (!memory_initialized || !shared_memory || !cursors) return;
-        ClockworkDrainState walk;
-        clockwork_drain_ring(
-            shared_memory + IN_RING_START, IN_RING_SIZE,
-            &cursors->in_head, &cursors->in_tail, walk,
-            ClockworkDrainMetrics{}, /*maxFrames=*/0,
-            [](uint32_t sourceId, const uint8_t* payload, uint32_t payload_size,
-               uint32_t /*seq*/) -> ClockworkDrainVerdict {
-                if (clockwork_sys_claims(payload, payload_size)) {
-                    // A carried frame: source id, length, bytes, 4-aligned.
-                    const uint32_t need = 8u + ((payload_size + 3u) & ~3u);
-                    if (g_carry_used + need <= kCarryBytes) {
-                        std::memcpy(g_carry + g_carry_used, &sourceId, 4);
-                        std::memcpy(g_carry + g_carry_used + 4, &payload_size, 4);
-                        std::memcpy(g_carry + g_carry_used + 8, payload, payload_size);
-                        g_carry_used += need;
-                        return ClockworkDrainVerdict::Consume;
-                    }
-                    // No room to carry it: refused like the guest's, and
-                    // counted as a refusal that could not be made in full.
-                    clockwork_sys_refusals_dropped().fetch_add(1, std::memory_order_relaxed);
-                }
-                clockwork_sys_refuse(payload, payload_size, CLOCKWORK_REFUSED_REBUILDING,
-                    arenaInstanceGeneration(shared_memory),
-                    [sourceId](const uint8_t* d, uint32_t n) {
-                        clockwork_egress_nrt_write(EGRESS_REPLY, sourceId, d, n);
-                    });
-                return ClockworkDrainVerdict::Consume;
-            });
-    }
-
-    // The other half: what the walk above carried, written into the fresh
-    // ring in the order it was found, numbered in the new epoch. Through the
-    // boundary (clockwork_ingress_write), which lets clockwork's own through
-    // whatever the instance flag says. Nothing to do on a first boot.
-    void restart_in_ring_carry() {
-        uint32_t at = 0;
-        while (at + 8u <= g_carry_used) {
-            uint32_t sourceId = 0, len = 0;
-            std::memcpy(&sourceId, g_carry + at, 4);
-            std::memcpy(&len, g_carry + at + 4, 4);
-            clockwork_ingress_write(g_carry + at + 8, len, sourceId);
-            at += 8u + ((len + 3u) & ~3u);
-        }
-        g_carry_used = 0;
-    }
-
     // ── Every region, at every event (docs/RESTARTS.md) ─────────────────────
     //
     // The arena table says what each region's lifetime is; this is the HOW
@@ -1493,12 +1453,12 @@ extern "C" {
     // test_restarts.cpp and not by a user after a device change.
     //
     // "Reset" is bytes for all but one group. The transport area — the
-    // cursors and the three rings — is a protocol between threads, and a
-    // producer may be mid-write through a rebuild, so a ring's reset is a
-    // fresh epoch in its cursors (clockwork_lanes_reset_*_ring) and the ring
-    // bytes are never touched. The in ring's goes with the cursors' entry,
-    // which carries its whole sequence in order; the reply rings' are their
-    // own entries', at a new arena only.
+    // cursors and the three rings — is a protocol between threads, so a
+    // ring's reset is a fresh epoch in its cursors (clockwork_lanes_reset_*_ring)
+    // and the ring bytes are never touched. Each ring's is its own entry's,
+    // at a new arena only: a rebuild keeps all three, what is in them
+    // answered across it (the marks, for the in ring); the cursors' entry
+    // resets the status flags alone.
     static void reset_words(uint32_t start, uint32_t bytes) {
         auto* w = reinterpret_cast<std::atomic<uint32_t>*>(shared_memory + start);
         for (uint32_t i = 0; i < bytes / 4u; ++i) w[i].store(0, std::memory_order_relaxed);
@@ -1553,28 +1513,21 @@ extern "C" {
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(TAP_RING_FRAMES, std::memory_order_relaxed); // ringFrames
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(0, std::memory_order_relaxed);              // version
     }
-    // The in ring and the status flags, as one sequence on the cursors'
-    // entry. Serialised against the IN producers that keep running through a
-    // rebuild (details in clockwork_lanes_reset_in_ring). The IN writer lock
-    // is NOT re-zeroed: a producer may hold it right now, and its unlocked
-    // state is exactly the 0 its release store leaves behind. What reached
-    // the in ring since the teardown walked it is carried or refused before
-    // the epoch resets under it; then the flag says there is no instance yet,
-    // so a message for the guest written from now on is refused at the
-    // boundary rather than left for an instance it was not addressed to; the
-    // drain's gap tracking restarts with the sequence, and a flush requested
-    // against the old ring must not carry over; and clockwork's own messages
-    // that were waiting go first in the new epoch, in their order.
-    static void reset_transport() {
-        restart_in_ring_refuse();
-        clockwork_lanes_reset_in_ring();
+    // The status flags: a fresh word with every build, saying there is no
+    // instance until dsp_new says there is.
+    static void reset_status_flags() {
         cursors->status_flags.store(STATUS_NO_INSTANCE, std::memory_order_release);
-        g_in_drain.lastSeq = -1;
-        g_in_flush_below.store(-1, std::memory_order_relaxed);
-        g_in_discard_active = false;
-        restart_in_ring_carry();
     }
-    static void reset_with_transport() { /* the cursors' entry resets this ring: a fresh epoch */ }
+    // The in ring: a fresh epoch at a new arena only, serialised against its
+    // producers (clockwork_lanes_reset_in_ring). A rebuild keeps it: what
+    // waited for the old instance is the next drain's to refuse, below the
+    // mark the teardown set (destroy_dsp), so its cursors, its sequence, the
+    // drain's place in it and the mark go on.
+    static void reset_in_ring() {
+        clockwork_lanes_reset_in_ring();
+        g_in_drain.lastSeq = -1;
+        g_in_mark_count = 0;
+    }
     // The reply rings outlive an instance: what one said stays for its
     // readers, and the next one's setup follows it (docs/RESTARTS.md). A new
     // arena begins them afresh.
@@ -1610,9 +1563,9 @@ extern "C" {
         { CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     &reset_channel_map },
         { CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           &reset_scope },
         { CLOCKWORK_ARENA_CLOCKWORK_TAPS,            &reset_taps },
-        { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    &reset_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    &reset_status_flags },
         { CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, &reset_node_id_counter },
-        { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         &reset_with_transport },
+        { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         &reset_in_ring },
         { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     &reset_rt_out_ring },
         { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    &reset_nrt_out_ring },
         { CLOCKWORK_ARENA_GUEST_WINDOW,              &reset_guest_window },
@@ -2584,21 +2537,21 @@ extern "C" {
         // says as it goes, and what clockwork says for it, go on its ring after
         // everything it said before.
         InstanceRingScope instance_ring;
-        // From here until the next dsp_new succeeds there is no instance: said
-        // where every writer of the in ring reads it, before anything else
-        // goes, so a message written from now on meets the boundary's
-        // refusal rather than a ring that will be reset under it.
-        if (cursors) cursors->status_flags.fetch_or(STATUS_NO_INSTANCE, std::memory_order_release);
-        // And the generation word goes odd: the generation that is closing
-        // stays named, so a refusal from here says which instance refused
-        // and a reader of the arena knows "between instances" from the bytes.
+        // From here until the next dsp_new succeeds there is no instance: the
+        // generation word goes odd, before anything else goes, so a message
+        // written from now on meets the boundary's refusal (in_ring_door.h).
+        // The generation that is closing stays named, so a refusal from here
+        // says which instance refused and a reader of the arena knows
+        // "between instances" from the bytes. The status flag says the same
+        // for the page's channel, which reads it still.
         if (shared_memory) arenaInstanceDown(shared_memory);
+        if (cursors) cursors->status_flags.fetch_or(STATUS_NO_INSTANCE, std::memory_order_release);
         // An instance whose setup is still owed goes unannounced: it said
         // nothing, and the next one up announces itself.
         g_setup_owed.store(false, std::memory_order_relaxed);
-        // What was already in the ring: answered or carried, never dropped.
-        g_carry_used = 0;
-        restart_in_ring_refuse();
+        // What was already in the in ring was written for this generation:
+        // marked, for the next drain to answer (the marks).
+        mark_closing_generation();
         if (g_dsp) {
             assets_release_all();   // the instance's assets go with it; committers hear
             { GuestCallScope guest(GuestCall::Boot); dsp_free(g_dsp); }
@@ -2689,16 +2642,55 @@ extern "C" {
     }
 #endif
 
+    // The mark a frame falls below, if any: the earliest one, every mark it
+    // has passed done with. Frames come in sequence order, so a mark once
+    // passed is passed for good. The signed delta stays correct across
+    // uint32 seq rollover (pending frames are always far fewer than 2^31
+    // apart).
+    static const InRingMark* in_ring_mark_of(uint32_t seq) {
+        uint32_t passed = 0;
+        while (passed < g_in_mark_count
+               && static_cast<int32_t>(seq - g_in_marks[passed].below) >= 0)
+            ++passed;
+        if (passed > 0) {
+            for (uint32_t i = passed; i < g_in_mark_count; ++i) g_in_marks[i - passed] = g_in_marks[i];
+            g_in_mark_count -= passed;
+        }
+        return g_in_mark_count > 0 ? &g_in_marks[0] : nullptr;
+    }
+
+    // A refusal on the instance's ring, made only when the ring has room for
+    // it (docs/RESTARTS.md, rule 1): false when it has not, and the frame
+    // waits for a later block, with everything behind it, rather than be
+    // refused into a full ring and lost. A refusal that cannot be encoded at
+    // all is counted and the frame consumed: there is nothing truthful left
+    // to say (clockwork_sys_refuse).
+    static bool refuse_when_room(uint32_t sourceId, const uint8_t* payload, uint32_t size,
+                                 const char* reason, uint32_t generation) {
+        bool made = true;
+        clockwork_sys_refuse(payload, size, reason, generation,
+            [&made, sourceId](const uint8_t* d, uint32_t n) {
+                const uint32_t footprint =
+                    (static_cast<uint32_t>(sizeof(Message)) + EGRESS_ROUTE_SIZE + n + 3u) & ~3u;
+                made = ring_fits(static_cast<uint32_t>(cursors->out_head.load(std::memory_order_relaxed)),
+                                 static_cast<uint32_t>(cursors->out_tail.load(std::memory_order_acquire)),
+                                 RT_OUT_RING_SIZE, footprint)
+                    && emit_osc_out(sourceId, d, n);
+            });
+        return made;
+    }
+
 #if CLOCKWORK_SYNTH
     // A BUILD WITH NO GUEST STILL ANSWERS FOR CLOCKWORK. When the build failed
     // (clockwork_boot_error) no instance is coming, but a client still has to
     // be able to register, ask what state the engine is in and hear why — and
     // every one of those is a /clockwork/ verb, which clockwork answers. So the
     // ingress ring is walked as on any block and those are dispatched. What was
-    // for the guest is consumed and dropped: there is no instance to hand it
-    // to, and holding it would replay it into whatever build comes next.
-    // Nothing is parked — /clockwork/schedule carries the guest's work too —
-    // and nothing is rendered.
+    // for the guest is refused: below the mark, as the generation it was
+    // written for; above it — a writer that reads no generation word — for
+    // want of an instance. Holding it would replay it into whatever build
+    // comes next. Nothing is parked — /clockwork/schedule carries the guest's
+    // work too — and nothing is rendered.
     static void drain_without_guest() {
         constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
         const int64_t blockTime = g_block_osc_time.load(std::memory_order_relaxed);
@@ -2711,14 +2703,21 @@ extern "C" {
                             &metrics->messages_sequence_gaps },
             MAX_MESSAGES_PER_FRAME,
             [blockTime](uint32_t sourceId, const uint8_t* payload,
-                        uint32_t payload_size, uint32_t) -> ClockworkDrainVerdict {
+                        uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
+                const InRingMark* mark = in_ring_mark_of(seq);
                 const bool schedule =
                     payload_size >= CLOCKWORK_SYS_PADDED("schedule") &&
                     std::memcmp(payload, CLOCKWORK_SYS("schedule"), CLOCKWORK_SYS_LEN("schedule")) == 0 &&
                     payload[CLOCKWORK_SYS_LEN("schedule")] == '\0';
-                if (!schedule && clockwork_sys_claims(payload, payload_size))
+                if (!schedule && clockwork_sys_claims(payload, payload_size)) {
                     dispatch(payload, payload_size, sourceId, 1, blockTime);
-                return ClockworkDrainVerdict::Consume;
+                    return ClockworkDrainVerdict::Consume;
+                }
+                const bool refused = mark
+                    ? refuse_when_room(sourceId, payload, payload_size, mark->reason, mark->generation)
+                    : refuse_when_room(sourceId, payload, payload_size,
+                                       CLOCKWORK_REFUSED_NO_INSTANCE, arenaInstanceGeneration(shared_memory));
+                return refused ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
             },
             &stop);
     }
@@ -2870,18 +2869,6 @@ extern "C" {
         if (g_dsp)
 #endif
         {
-            // Flush request (purge): arm the discard threshold here so
-            // g_in_discard_* stays audio-thread-only, like g_in_drain below.
-            {
-                const int64_t below =
-                    g_in_flush_below.exchange(-1, std::memory_order_acquire);
-                if (below >= 0) {
-                    g_in_discard_active = true;
-                    g_in_discard_below  = static_cast<uint32_t>(below);
-                    g_in_discard_reason = g_in_flush_reason.load(std::memory_order_relaxed);
-                }
-            }
-
             // Off-thread reset request (purge → clear_scheduler): apply it
             // here so g_in_drain stays audio-thread-only. Read before the
             // exchange, and take the exchange only when a request is actually
@@ -2921,26 +2908,16 @@ extern "C" {
                 MAX_MESSAGES_PER_FRAME,
                 [currentOscTime](uint32_t sourceId, const uint8_t* payload,
                                  uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
-                    // Purge in progress: frames for the guest sequenced
-                    // before the flush snapshot are stale — refused to their
-                    // sender with the purge's reason, and consumed
-                    // undispatched. Clockwork's own go through: the engine
-                    // answers those whatever the guest is doing. The signed
-                    // delta stays correct across uint32 seq rollover (pending
-                    // frames are always far fewer than 2^31 apart).
-                    if (g_in_discard_active) {
-                        if (static_cast<int32_t>(seq - g_in_discard_below) < 0) {
-                            if (clockwork_sys_claims(payload, payload_size)) {
-                                ingest_frame(payload, payload_size, sourceId, currentOscTime);
-                            } else {
-                                clockwork_sys_refuse(payload, payload_size, g_in_discard_reason,
-                                    arenaInstanceGeneration(shared_memory),
-                                    [sourceId](const uint8_t* d, uint32_t n) { emit_osc_out(sourceId, d, n); });
-                            }
-                            return ClockworkDrainVerdict::Consume;
-                        }
-                        g_in_discard_active = false;
-                    }
+                    // Below the mark: written for a generation that has
+                    // closed, or before a stall — refused to its sender with
+                    // the mark's reason and generation as the ring has room,
+                    // and consumed undispatched. Clockwork's own go through:
+                    // the engine answers those whatever the guest is doing.
+                    if (const InRingMark* mark = in_ring_mark_of(seq);
+                        mark && !clockwork_sys_claims(payload, payload_size))
+                        return refuse_when_room(sourceId, payload, payload_size,
+                                                mark->reason, mark->generation)
+                            ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
 
                     // In-place delivery: the payload points into the IN ring
                     // (the consumer owns the region until we return Consume).
@@ -3404,29 +3381,17 @@ bool ring_buffer_write(
     // writer (readers advance the tail by this footprint).
     const uint32_t footprint = (header.length + 3u) & ~3u;
 
-    uint32_t available = (buffer_size - 1 - current_head + current_tail) % buffer_size;
-
-    if (available < footprint) {
+    if (!ring_fits(static_cast<uint32_t>(current_head), static_cast<uint32_t>(current_tail),
+                   buffer_size, footprint)) {
         if (pm) pm->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
         if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
         return false;
     }
 
-    // Check if message fits contiguously, otherwise write padding and wrap to 0.
-    //
-    // After wrapping, we must re-check that there's enough space between position 0
-    // and tail — the initial available-space check included bytes that will be wasted
-    // as padding, so it can overestimate the usable space at the front.
+    // A frame that does not fit before the end restarts at offset 0
+    // (ring_fits said there is room there), the remainder marked as padding.
     uint32_t space_to_end = buffer_size - current_head;
     if (footprint > space_to_end) {
-        // Verify space at front after wrap (tail-1 to avoid head==tail ambiguity)
-        uint32_t space_at_front = (current_tail > 0) ? (current_tail - 1) : 0;
-        if (space_at_front < footprint) {
-            if (pm) pm->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
-            if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
-            return false;
-        }
-
         // Padding marker: magic word, zeros to the end of the ring (matching
         // the other writers — when >= 16 bytes remain this doubles as a full
         // zeroed pad header; 4-byte alignment guarantees the magic fits).

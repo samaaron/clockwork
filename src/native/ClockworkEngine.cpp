@@ -997,12 +997,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         }
     }
 
-    // Derive worker pointers from the arena. With the unified layout the rings,
-    // control words and metrics all live in the arena (the public segment when
-    // present), so external observers read the same structs with no redirect.
-    uint8_t* base = arena;
-    RingCursors*    ctrl = reinterpret_cast<RingCursors*>(base + RING_CURSORS_START);
-    mMetrics                 = reinterpret_cast<PerformanceMetrics*>(base + METRICS_START);
+    // The metrics live in the arena (the public segment when present), so
+    // external observers read the same struct with no redirect.
+    mMetrics = reinterpret_cast<PerformanceMetrics*>(arena + METRICS_START);
 
     // -- The control pass. Everything registered on mNrtGateway from here
     //    down is ONE pass, run in order by one thread: the engine's gateway
@@ -1059,16 +1056,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 return ClockworkDrainVerdict::Consume;
             });
     });
-
-    // -- Audio-plane ingress (engine-owned) ---------------------------------
-    // The engine owns the IN ring; the default OscIngress route writes it. The
-    // transport is a dumb pipe.
-    mInBufferStart = base + IN_RING_START;
-    mInBufferSize  = IN_RING_SIZE;
-    mInHead        = &ctrl->in_head;
-    mInTail        = &ctrl->in_tail;
-    mInSequence    = &ctrl->in_sequence;
-    mInWriteLock   = &ctrl->in_write_lock;
 
     // The engine owns no socket. By default egress is in-process (CallbackTransport
     // → onReply); an embedder injects a real transport via setTransport before
@@ -2819,13 +2806,11 @@ bool ClockworkEngine::interceptBufferFreed(const uint8_t* /*data*/, uint32_t /*s
 
 void ClockworkEngine::purge(const char* reason) {
     // Refuse pending IN-ring messages for the guest to their senders, with
-    // the reason (docs/RESTARTS.md: nothing dropped without a word). Callers
-    // arrive on two threads — the wake hook pre-tick on the audio thread,
-    // cold swap on a control thread while audio is still live — so this only
-    // requests; the audio thread, the IN ring's single consumer, applies the
-    // flush at the top of its next drain.
-    clockwork_ingress_flush_request(reason);
-
+    // the reason (docs/RESTARTS.md: nothing dropped without a word): marked,
+    // here on the audio thread, before the block that follows the stall, and
+    // refused by its drain. The schedule held for the moment that has gone
+    // goes with them.
+    clockwork_ingress_mark(reason);
     clear_scheduler();
 }
 
@@ -3336,9 +3321,11 @@ void ClockworkEngine::Restart::announce() {
 }
 
 void ClockworkEngine::Restart::teardown() {
-    // What is queued for the instance that is about to go is refused to its
-    // senders as such (docs/RESTARTS.md), and the schedule cleared.
-    if (mCold) mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
+    // The schedule is the instance's, and empty from restarting
+    // (docs/RESTARTS.md, rule 6). What waits in the in ring for it is
+    // answered by the teardown's mark (destroy_dsp): until then, a block of
+    // the fade takes it as any block would.
+    if (mCold) clear_scheduler();
     mEngine.fadeOutAndPause();
     // A cold restart re-inits the arena (destroy_dsp / rebuild_dsp →
     // init_memory) that the control pass works over — parked until the
@@ -3397,7 +3384,7 @@ void ClockworkEngine::Restart::escalateToCold() {
     // Audio is stopped and the gate held (teardown); what a cold announce
     // and teardown add, in their order.
     mEngine.setEngineState(EngineState::Restarting, "rate-change");
-    mEngine.purge(CLOCKWORK_REFUSED_REBUILDING);
+    clear_scheduler();
     mParked = mEngine.parkControlPass();
     if (mEngine.testControlParked) mEngine.testControlParked();
     destroy_dsp();
