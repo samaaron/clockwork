@@ -356,13 +356,14 @@ void clockwork_init(double   sample_rate,
 
     uint8_t* const arena = g_external_segment ? g_external_segment : clockwork_local_arena();
 #if CLOCKWORK_SYNTH
-    // AN ARENA ALREADY UP IS A REBUILD, as a device change is (docs/RESTARTS.md,
-    // "One event, every route"): a host attaching again, a page reloaded
-    // over the same memory, a host's own device change. The instance goes,
-    // what waited for it is marked, and the next is built and says setup.
-    // With no block rendering, which is this call's contract anyway.
-    const bool rebuild = memory_initialized && get_shared_memory_base() == arena;
-    if (rebuild) destroy_dsp();
+    // AN ARENA ALREADY UP IS AUDIO COMING BACK to the instance in it, as a
+    // device returning is (docs/RESTARTS.md, "One event, every route"): a
+    // page whose worklet the browser took away, reloaded over the same
+    // memory; a host attaching again; a host's own device change. It does the
+    // least that gets the engine back where it was (come_back, below, once
+    // the host's bytes are in place). With no block rendering, which is this
+    // call's contract anyway.
+    const bool coming_back = memory_initialized && get_shared_memory_base() == arena;
 #endif
 
     // Copy the guest's bytes into the region reserved for them, without
@@ -389,8 +390,8 @@ void clockwork_init(double   sample_rate,
                            guest_memory, guest_memory_bytes, arena_bytes,
                            assets, assets_bytes, returns, returns_bytes);
 #if CLOCKWORK_SYNTH
-    if (rebuild) {
-        rebuild_dsp(sample_rate, 0);   // no device: setup names the block
+    if (coming_back) {
+        come_back();
         return;
     }
 #endif

@@ -19,6 +19,14 @@ struct Dsp;
 // (WASM / self-driven device), which have no NRT-out drainer, so they use RT-out.
 extern std::atomic<bool> g_nrt_egress_drained;
 
+// True from the start of a block (process_audio) to its end. Found true when
+// audio comes back (come_back), it says the audio thread was stopped partway
+// through one — a worklet thread the browser ended, say — and whatever that
+// block was changing is half changed: the instance is built again rather
+// than carried on. Atomic because the thread that comes back is not the one
+// that left.
+extern std::atomic<bool> g_block_open;
+
 extern "C" {
     // Static ring buffer (allocated in WASM data segment)
     // This is separate from the engine heap, preventing memory conflicts
@@ -164,8 +172,16 @@ extern "C" {
     void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
     // A device change the instance survived changed a fact its setup named:
     // told as /clockwork/setup/changed on its ring, with the audio thread
-    // stopped (docs/RESTARTS.md, "Three events").
+    // stopped (docs/RESTARTS.md, "Three events"). A buffer of 0, for a host
+    // with no device, names the block.
     void clockwork_announce_facts(double sample_rate, uint32_t buffer_frames);
+    // Audio coming back to the instance in the arena that is up, at the
+    // configuration a host's clockwork_init on it has just applied (a page
+    // reloaded over its memory, a host whose device returned), with the
+    // audio thread stopped: the least that gets the engine back where it was
+    // (restart_plan.h). The instance carries on if nothing it was built for
+    // changed, is told a change it survives, and is built again otherwise.
+    void come_back();
 
 #ifndef __EMSCRIPTEN__
     // Native-only: full arena teardown for engine shutdown — destroys the

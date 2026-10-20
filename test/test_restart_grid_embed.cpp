@@ -6,9 +6,11 @@
  * A host that renders (clockwork_embed_attach) and reads the rings through
  * the handle's client closes its handle and attaches again: a plugin
  * reloaded, a host that changed its rate. With no other host holding the
- * engine, the attach lays the engine out again on the arena that is up, and
- * that replaces the instance (docs/RESTARTS.md, "One event, every route"):
- * RestartModel.h says what the host must hear.
+ * engine, the attach is audio coming back to the arena that is up
+ * (docs/RESTARTS.md, "One event, every route"), and it does the least that
+ * gets the engine back where it was: at the rate it had, the instance
+ * carries on; at another, which the placeholder cannot take, it is replaced.
+ * RestartModel.h says what the host must hear either way.
  *
  * Here, in clockwork_attach_tests, because the event needs an attach count
  * that is back at zero, which only this binary walks. Each case leaves it
@@ -104,7 +106,10 @@ void attachingAgain(double rate) {
 
     host.send(restart_model::newAsk());
     host.render(8);
-    restart_model::checkReplaced(host.read(), "an embedded host", /*seesRefusals*/ true, before, after);
+    if (rate == 48000.0)
+        restart_model::checkSurvived(host.read(), "an embedded host", before, after, 48000, /*changedBuffer*/ 0);
+    else
+        restart_model::checkReplaced(host.read(), "an embedded host", /*seesRefusals*/ true, before, after);
 }
 
 } // namespace

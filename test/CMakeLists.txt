@@ -167,6 +167,9 @@ add_executable(clockwork_tests
     # between DspConfig::persistent and DspConfig::guest_memory.
     test_dsp_regions.cpp
     test_restarts.cpp
+    # The least a restart does, as a rule alone; the hosts that ask it are
+    # pinned in test_restarts.cpp and test_device_policy.cpp.
+    test_restart_plan.cpp
 
     # Large payloads across the boundary, both ways — and the claim that there is
     # no separate door for them in either direction. Also fixes the capacity

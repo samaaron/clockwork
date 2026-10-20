@@ -147,9 +147,11 @@ inline void checkReplaced(const Heard& heard, const char* reader, bool seesRefus
 }
 
 // The instance survived: nothing refused, no setup, the generation unmoved,
-// and everything asked of it answered by it, on its ring. When a fact
-// clients compute with changed, a notice names the new facts (rate, buffer)
-// and the same generation; `changedBuffer` 0 says none did.
+// and everything asked of it answered by it, on its ring — the asset's
+// commit taken, or, by a host with no assets region to take it from,
+// refused as any commit there is. When a fact clients compute with changed,
+// a notice names the new facts (rate, buffer) and the same generation;
+// `changedBuffer` 0 says none did.
 inline void checkSurvived(const Heard& heard, const char* reader,
                           uint32_t before, uint32_t after, int rate, int changedBuffer) {
     INFO(reader << " heard:" << dump(heard));
@@ -157,10 +159,12 @@ inline void checkSurvived(const Heard& heard, const char* reader,
     CHECK(where(heard, kSetup).empty());
     CHECK(where(heard, kError).empty());
     for (const char* answer : { "/dummy/pong", "/dummy/events", "/dummy/reconfigured.reply",
-                                CLOCKWORK_SYS("synced"), CLOCKWORK_SYS("asset/committed") }) {
+                                CLOCKWORK_SYS("synced") }) {
         INFO("answers heard at " << answer);
         CHECK(where(heard, answer).size() == 1);
     }
+    CHECK(where(heard, CLOCKWORK_SYS("asset/committed")).size()
+          + where(heard, CLOCKWORK_SYS("asset/refused")).size() == 1);
 
     const auto changed = where(heard, kChanged);
     if (changedBuffer == 0) {

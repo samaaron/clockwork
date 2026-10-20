@@ -3,10 +3,13 @@
 /*
  * The restart grid's browser cells (docs/RESTARTS.md, "Where it is pinned").
  *
- * A reload is the browser's way of replacing the instance — over the same memory on the SAB transport, into new
- * memory on postMessage — and the model is the native one: what was waiting for the old instance is refused once,
- * naming the generation that closed; the new instance's first word on its ring is setup, naming the one opened; the
- * generation never goes back. The page is the reader, hearing the engine's words as they arrive (in:osc).
+ * A reload is audio coming back, and the model is the native one: the least that gets the engine back where it was.
+ * Over the same memory (the SAB transport), with nothing changed that the instance was built for, it carries on as
+ * native's does across a device restart — its generation, everything it holds, and what waited for it delivered to
+ * it. Into new memory (postMessage, whose worklet took its memory with it) the instance is replaced: what was waiting
+ * for the old one is refused once, naming the generation that closed; the new instance's first word on its ring is
+ * setup, naming the one opened; the generation never goes back. The page is the reader, hearing the engine's words as
+ * they arrive (in:osc).
  *
  * A message waits when the audio thread is not running: the context is suspended before it is sent. What waits
  * through a stall and is thrown away as stale (purge(), resume()) is refused as such, as native's wake refuses it.
@@ -34,7 +37,11 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
     await cw.init();
     const heard = eval(listenSrc)(cw);
     const before = cw.getInfo().generation;
+    let resumed = null, setupSaid = 0;
+    cw.on("reload:complete", (d) => { resumed = d?.resumed ?? null; });
+    cw.on("setup", () => { setupSaid += 1; });
 
+    cw.send("/clockwork/asset/commit", 11, 0, 0, 64, 0, 0, 0);   // something the instance holds
     cw.send("/dummy/ping");                 // answered by the old instance
     await cw.sync();
     await cw.suspend();                      // nothing taken from here
@@ -43,16 +50,39 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
     const reloaded = await cw.reload();
     const after = cw.getInfo().generation;
 
-    cw.send("/dummy/reconfigured");          // the new instance's
+    cw.send("/dummy/reconfigured");          // the instance's after
+    cw.send("/dummy/asset/last");            // what it holds after
     await cw.sync();
     await new Promise((res) => setTimeout(res, 200));
+    cw.send("/dummy/asset/release", 11);
+    await cw.sync();
     await cw.shutdown();
-    return { reloaded, before, after, heard };
+    return { reloaded, before, after, heard, resumed, setupSaid, mode: config.mode };
   }, [clockworkConfig, listen]);
 
   const { heard, before, after } = r;
   const info = `the page heard:\n  | ${shown(heard)}`;
   expect(r.reloaded, info).toBe(true);
+  expect(where(heard, "/clockwork/asset/committed").length, info).toBe(1);
+
+  if (r.mode === "sab") {
+    // Over the same memory: the same instance, carrying on. Its generation, no setup said by the engine or the page,
+    // everything that waited delivered to it and nothing refused, and the asset it was handed still its own.
+    expect(r.resumed, info).toBe(true);
+    expect(after, `the generation carried on (${info})`).toBe(before);
+    expect(where(heard, "/clockwork/setup").length, `no setup (${info})`).toBe(0);
+    expect(r.setupSaid, info).toBe(0);
+    expect(where(heard, "/clockwork/error").length, `nothing refused (${info})`).toBe(0);
+    for (const answer of ["/dummy/pong", "/dummy/events", "/dummy/reconfigured.reply"])
+      expect(where(heard, answer).length, `${answer} heard once (${info})`).toBe(1);
+    expect(heard.filter((m) => m[0] === "/clockwork/synced" && m[1] === 7).length, info).toBe(1);
+    const last = heard.find((m) => m[0] === "/dummy/asset/last.reply");
+    expect(last?.[1], `the asset still held (${info})`).toBe(11);
+    return;
+  }
+
+  expect(r.resumed, info).toBe(false);
+  expect(r.setupSaid, info).toBe(1);
   expect(after, `the generation the reload opened (${info})`).toBe(before + 1);
 
   const setups = where(heard, "/clockwork/setup");

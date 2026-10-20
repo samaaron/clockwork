@@ -5,7 +5,7 @@
  */
 #include "DevicePolicy.h"
 #include "FuzzyMatch.h"
-#include "dsp_api.h"   // DSP_SURVIVES_*: what the guest instance takes live
+#include "restart_plan.h"   // the guest's half of a swap: carry on, tell it, or rebuild
 
 #include <algorithm>
 #include <set>
@@ -129,31 +129,30 @@ SwapPlan planSwap(const SwapPlanRequest& req, const SwapSnapshot& snap) {
         plan.rateFromMemory = true;
     }
 
-    // A hot swap keeps the guest instance, which learns its channel counts
-    // only when it is built or told (dsp_reconfigure) — so a channel-count
-    // change at the target is cold unless the instance declared it survives
-    // one (DspInfo::survives), in which case it is told. Without either the
-    // instance keeps writing into the channel range it booted with, and
-    // anything above that never reaches hardware.
-    bool channelsChange = false;
+    // The guest's half, as every host asks it (restart_plan.h): the instance
+    // carries on, is told (dsp_reconfigure), or is built again, by what the
+    // target changes of the rate and channel counts it was built for and what
+    // it declared it survives (DspInfo::survives). Without the telling, an
+    // instance kept across a channel-count change keeps writing into the
+    // range it booted with, and anything above that never reaches hardware.
+    // The target's channel counts are probed only with devices to probe, and
+    // weigh nothing in a swap already cold. Driving the device's own block
+    // is the processor's (mBufLen, fixed at boot), so it is the same on both
+    // sides here.
+    const RestartFacts builtFor { snap.currentRate, 0,
+                                  static_cast<uint32_t>(std::max(0, snap.currentInputChannels)),
+                                  static_cast<uint32_t>(std::max(0, snap.currentOutputChannels)) };
+    RestartFacts target = builtFor;
+    if (plan.sampleRate > 0) target.rate = plan.sampleRate;
     if (snap.hasDevices && !forceCold) {
-        if (snap.probedTargetOut > 0
-            && snap.probedTargetOut != snap.currentOutputChannels)
-            channelsChange = true;
-        if (snap.probedTargetIn > 0
-            && snap.probedTargetIn != snap.currentInputChannels)
-            channelsChange = true;
+        if (snap.probedTargetOut > 0) target.outputs = static_cast<uint32_t>(snap.probedTargetOut);
+        if (snap.probedTargetIn  > 0) target.inputs  = static_cast<uint32_t>(snap.probedTargetIn);
     }
-    const bool rateChanges = plan.sampleRate > 0 && plan.sampleRate != snap.currentRate;
-    const bool survivesChannels = (snap.guestSurvives & DSP_SURVIVES_CHANNEL_CHANGE) != 0;
-    const bool survivesRate     = (snap.guestSurvives & DSP_SURVIVES_RATE_CHANGE) != 0;
-    plan.coldForChannels = channelsChange && !survivesChannels;
-
-    plan.isCold = forceCold || plan.coldForChannels || plan.scope.crossDriver
-               || (rateChanges && !survivesRate);
+    const RestartPlan guest = planRestart(builtFor, target, snap.guestSurvives);
+    plan.coldForChannels = guest.rebuildForChannels;
+    plan.isCold = forceCold || plan.scope.crossDriver || guest.step == RestartStep::Rebuild;
     // What stays hot only because the instance survives it is told so.
-    plan.reconfigureGuest = !plan.isCold
-                         && ((channelsChange && survivesChannels) || (rateChanges && survivesRate));
+    plan.reconfigureGuest = !plan.isCold && guest.step == RestartStep::Reconfigure;
     return plan;
 }
 

@@ -821,9 +821,12 @@ export class Clockwork {
   }
 
   /**
-   * Full reload - destroys and recreates worklet/WASM, then calls
-   * restoreClientState() to put back whatever the product was holding.
-   * Emits 'setup' event so you can rebuild groups, FX chains, bus routing.
+   * Full reload - recreates the worklet and its module, and brings the engine
+   * back as it was. Over the memory it ran in (SAB) the instance carries on
+   * when nothing it was built for changed: nothing is lost, no 'setup' is
+   * said, and 'reload:complete' says `resumed`. Otherwise a new instance is
+   * built, restoreClientState() puts back whatever the product was holding,
+   * and 'setup' is said so you can rebuild groups, FX chains, bus routing.
    * Use when the worklet was killed (e.g., long background, browser reclaimed memory).
    * @param {{ audioContext?: AudioContext }} [options] audioContext: a context to reload onto in place of the one there
    *   is (recover()'s spare): the engine's own from then on, and closed with it
@@ -857,12 +860,18 @@ export class Clockwork {
   }
 
   async #reloadSteps() {
+    // A reload is audio coming back, and the engine does the least that gets it back where it was (docs/RESTARTS.md):
+    // over the memory it ran in (SAB), with nothing changed that the instance was built for, the instance carries on
+    // as it was, its generation with it, and nothing it held was lost. A new instance — another rate it cannot take,
+    // or new memory (postMessage, whose worklet took its memory with it) — has a generation of its own.
+    const before = this.#instanceGeneration();
     await this.#closeInstance();
     await this.#partialShutdown();
     await this.#partialInit();
+    const resumed = this.#instanceGeneration() === before;
 
-    // Everything the engine was holding, put back by the only party that
-    // knows what it was.
+    // Everything a new instance was not given, put back by the only party
+    // that knows what it was.
     //
     // Clockwork used to restore one category itself — definitions — by
     // watching for the verb that carried them, reading a name out of each blob
@@ -873,10 +882,12 @@ export class Clockwork {
     // rather than clockwork replaying.
     //
     // BEFORE the sync below, so one barrier covers all of it.
-    try {
-      await this.restoreClientState();
-    } catch (e) {
-      console.error("[Clockwork] client state did not survive the reload:", e);
+    if (!resumed) {
+      try {
+        await this.restoreClientState();
+      } catch (e) {
+        console.error("[Clockwork] client state did not survive the reload:", e);
+      }
     }
 
     // Verified, not assumed: the first message or two after a reload can
@@ -886,12 +897,13 @@ export class Clockwork {
     // short timeouts instead of betting ten seconds on the first attempt.
     await this.#syncWithRetry();
 
-    // Only now 'setup' and 'ready': a host rebuilds on the engine there (its groups, its FX), and what it builds
-    // refers to the definitions and buffers just put back. Said any earlier, it refers to what is not there yet.
+    // Only now 'setup' and 'ready': a host rebuilds on a new instance (its groups, its FX), and what it builds
+    // refers to the definitions and buffers just put back. Said any earlier, it refers to what is not there yet. An
+    // instance that carried on still has everything a host built on it, and 'setup' would build it all twice.
     this.#setEngineState('running', 'reload');
-    await this.#announceReady();
+    await this.#announceReady({ setup: !resumed });
 
-    this.#eventEmitter.emit('reload:complete', { success: true });
+    this.#eventEmitter.emit('reload:complete', { success: true, resumed });
     return true;
   }
 
@@ -1069,11 +1081,11 @@ export class Clockwork {
     for (const handler of pending?.values() ?? []) handler.abandon?.(why);
   }
 
-  // 'setup', where a host builds on the engine, then 'ready'
-  async #announceReady() {
+  // 'setup', where a host builds on a new instance, then 'ready'
+  async #announceReady({ setup = true } = {}) {
     // a listener that failed to build on the engine: the engine is up, but the host's world on it is not, and it
     // says so on 'error' rather than the boot looking as if it went fine
-    for (const error of await this.#eventEmitter.emitAsync('setup')) {
+    for (const error of setup ? await this.#eventEmitter.emitAsync('setup') : []) {
       this.#eventEmitter.emit('error', new Error(`a 'setup' listener failed: ${error?.message ?? error}`, { cause: error }));
     }
     this.#eventEmitter.emit('ready', { capabilities: this.#capabilities, bootStats: this.bootStats });
@@ -1186,8 +1198,8 @@ export class Clockwork {
 
   // The guest instance's generation (docs/RESTARTS.md): read live off the arena
   // where the page shares it (SAB), else the worklet's word at 'initialized'.
-  // The web rebuilds nothing in place — reload() boots a new engine — so the
-  // two agree; the live read is for a page holding the arena across a build.
+  // Between builds the two agree; the live read is for a page holding the
+  // arena across a reload, which carries the instance on or builds another.
   #instanceGeneration() {
     const buf = this.sharedBuffer, base = this.arenaBase;
     if (buf && base != null) {

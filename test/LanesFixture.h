@@ -124,6 +124,16 @@ uint64_t position();
 // one that booted is assuming the order the suite ran in.
 uint64_t freshDsp();
 
+// The host coming back over the memory it ran in: clockwork_init again, on
+// the arena that is up, with the fixture's own regions — what a page whose
+// worklet the browser took away does, reloaded over the same memory, and a
+// host whose device came back. `config` stands in for the guest's config
+// block. A case that comes back with other facts comes back with the
+// fixture's own before it ends.
+void comeBack(double rate = kSampleRate, uint32_t block = kBufLength,
+              uint32_t inputs = kInChannels, uint32_t outputs = kOutChannels,
+              const uint32_t (&config)[4] = kGuestConfigSlots);
+
 // The DSP's own index for a frame this fixture rendered at `streamFrame`:
 // frames since the last freshDsp(). What the placeholder's pulse is a
 // function of, and so what a case checking that pulse counts in.

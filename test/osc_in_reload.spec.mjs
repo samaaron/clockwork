@@ -118,10 +118,10 @@ test("a reader the host runs on a port of its own has one loop reading, however 
 });
 
 test("after a reload over the same memory the reply rings keep their place, and the page reads on from it", async ({ page, clockworkConfig, clockworkMode }) => {
-  // A reload over the same memory replaces the instance as a device change does (docs/RESTARTS.md, "One event,
-  // every route"): the reply rings outlive it, so what the page had not read is still there for it, and its readers
-  // read on from where they were, past the old instance's words to the new one's setup. Nothing begins again at 0
-  // under a reader, and nothing it reads is taken for damage.
+  // A reload over the same memory onto a rate the instance cannot take replaces it, as a device change does
+  // (docs/RESTARTS.md, "One event, every route"): the reply rings outlive it, so what the page had not read is still
+  // there for it, and its readers read on from where they were, past the old instance's words to the new one's setup.
+  // Nothing begins again at 0 under a reader, and nothing it reads is taken for damage.
   test.skip(clockworkMode !== "sab", "a reload keeps the memory only in SAB mode");
   await boot(page);
   const r = await page.evaluate(async ([config, withinSrc]) => {
@@ -142,7 +142,8 @@ test("after a reload over the same memory the reply rings keep their place, and 
     for (let i = 0; i < 100; i++) cw.send("/dummy/ping");
     await within(cw.sync(), 5000);
     const before = ring(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ);
-    const reload = await within(cw.reload(), 15000);
+    const other = cw.audioContext.sampleRate === 44100 ? 48000 : 44100;
+    const reload = await within(cw.reload({ audioContext: new AudioContext({ sampleRate: other }) }), 15000);
     await within(cw.sync(), 5000);
     const after = { out: ring(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ),
                     nrt: ring(offs.NRT_OUT_HEAD, offs.NRT_OUT_TAIL, offs.NRT_OUT_READ) };

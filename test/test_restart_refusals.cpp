@@ -274,8 +274,8 @@ TEST_CASE("restarts, engine: what the old instance said that a host had not read
     CHECK(pong < setup);
 }
 
-TEST_CASE("restarts, engine: the old instance's asset releases reach a host that had not read them, before setup",
-          "[restarts][engine][ColdSwap]") {
+TEST_CASE("restarts, engine: an asset the old instance held is the new instance's after a cold swap, and nothing is released",
+          "[restarts][engine][ColdSwap][assets]") {
     EngineFixture fix(hostReadsTheRings());
     ClockworkClient* rings = fix.engine().egressClient();
     REQUIRE(rings != nullptr);
@@ -289,17 +289,29 @@ TEST_CASE("restarts, engine: the old instance's asset releases reach a host that
     fix.pumpBlock();
     REQUIRE(indexOf(pollAll(rings), CLOCKWORK_SYS("asset/committed")) >= 0);
 
-    // The rebuild releases it; the host reads nothing until the rebuild is done.
+    // The rebuild hands it to the new instance; the host reads nothing until the rebuild is done.
     const auto swap = switchWhenFree(fix, "", 44100);
     REQUIRE(swap.success);
     REQUIRE(swap.type == SwapType::Cold);
 
     const auto heard = pollAll(rings);
     INFO([&] { std::string s; for (const auto& a : heard) s += "\n  | " + a; return s; }());
-    const long released = indexOf(heard, CLOCKWORK_SYS("asset/released")), setup = indexOf(heard, CLOCKWORK_SYS("setup"));
-    REQUIRE(released >= 0);
-    REQUIRE(setup >= 0);
-    CHECK(released < setup);
+    CHECK(indexOf(heard, CLOCKWORK_SYS("setup")) >= 0);
+    CHECK(indexOf(heard, CLOCKWORK_SYS("asset/released")) < 0);
+
+    // And the new instance holds it, the host having sent nothing again.
+    fix.send(osc_test::message("/dummy/asset/last"));
+    int32_t held = -1;
+    std::array<ClockworkClientMessage, 64> batch{};
+    for (int block = 0; block < 4 && held < 0; ++block) {
+        fix.pumpBlock();
+        for (uint32_t n; (n = clockwork_client_poll(rings, batch.data(), static_cast<uint32_t>(batch.size()))) > 0;)
+            for (uint32_t i = 0; i < n; ++i) {
+                const auto r = osc_test::parseReply(batch[i].bytes, batch[i].length);
+                if (r.address == "/dummy/asset/last.reply") held = r.argInt(0);
+            }
+    }
+    CHECK(held == 5);
 }
 
 TEST_CASE("restarts, engine: a new instance whose ring has no room for its setup says nothing until it has, then setup first",

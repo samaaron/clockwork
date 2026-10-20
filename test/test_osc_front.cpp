@@ -44,17 +44,13 @@ struct Inner final : IOscTransport {
     void unsubscribeOsc(uint32_t) override { log.push_back("unsubOsc"); }
 };
 
-// Takes every reply whose bytes start with "/mine"; counts the pushes it hears.
+// Takes every reply whose bytes start with "/mine".
 struct Front final : OscFront {
     int seen = 0;
-    std::vector<std::string> noticed;
     bool ingress(const uint8_t*, uint32_t, uint32_t) override { return false; }
     bool egress(uint32_t, const uint8_t* d, uint32_t n) override {
         ++seen;
         return n >= 5 && std::memcmp(d, "/mine", 5) == 0;
-    }
-    void notice(const uint8_t* d, uint32_t n) override {
-        noticed.emplace_back(reinterpret_cast<const char*>(d), n);
     }
     const char* describe() const override { return "test front"; }
 };
@@ -107,50 +103,4 @@ TEST_CASE("fronted transport: every other method is the inner transport's", "[fr
     CHECK_FALSE(bare.send(1, d, 4, false));
     CHECK_FALSE(bare.hasNotifySubscribers());
     CHECK_FALSE(bare.subscribeNotify(1));
-}
-
-TEST_CASE("fronted transport: a push to the notify targets is heard by the front and still goes to them",
-          "[front]") {
-    // A front that stages state in the engine (samples in a lane) has to
-    // learn when a rebuild dropped it all: /clockwork/setup goes to every
-    // notify target, and the front hears it on the way. Heard, never taken:
-    // the targets get it whether or not a front is attached, and a front
-    // hears only the notify pushes, not Link's, MIDI's or the gamepads'.
-    Inner inner;
-    Front front;
-    FrontedTransport t;
-    t.attach(&inner, &front);
-    const char setup[] = "/clockwork/setup";
-    t.broadcastNotify(reinterpret_cast<const uint8_t*>(setup), sizeof setup);
-    CHECK(front.noticed == std::vector<std::string>{std::string(setup, sizeof setup)});
-    CHECK(inner.log == std::vector<std::string>{"notify"});
-
-    const uint8_t d[4] = {};
-    t.broadcastLink(d, 4); t.broadcastMidi(d, 4); t.broadcastGamepad(d, 4); t.broadcastOsc(d, 4);
-    CHECK(front.noticed.size() == 1);
-
-    t.detachFront();
-    t.broadcastNotify(d, 4);
-    CHECK(front.noticed.size() == 1);
-    CHECK(inner.log.back() == "notify");
-}
-
-TEST_CASE("fronted transport: an attached front is a notify target, so the engine builds the pushes it hears",
-          "[front]") {
-    // The engine builds a push only for an audience (OscEgress::sendStateChange
-    // asks hasNotifySubscribers first; a rebuild's setup is the one written
-    // whoever listens). A host whose clients never subscribe — an application
-    // with the engine linked in — still has a front that hears what the engine
-    // pushes, so the front counts, whatever the inner transport says; without
-    // a front the answer is the inner transport's.
-    Inner inner;
-    inner.subscribers = false;
-    Front front;
-    FrontedTransport t;
-    t.attach(&inner, &front);
-    CHECK(t.hasNotifySubscribers());
-    t.detachFront();
-    CHECK_FALSE(t.hasNotifySubscribers());
-    inner.subscribers = true;
-    CHECK(t.hasNotifySubscribers());
 }

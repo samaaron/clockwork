@@ -707,3 +707,225 @@ TEST_CASE("restarts: what was scheduled for the old instance is cleared, not del
     CHECK(findAddress(frames, "/dummy/when-was") == nullptr);
 }
 #endif
+
+// ── Audio coming back over the same memory ───────────────────────────────────
+//
+// A host calls clockwork_init again on the arena that is up when its audio
+// comes back: a page whose worklet the browser took away, reloaded over the
+// memory it ran in, or a host whose device returned. That is a restart, and
+// a restart does the least that gets the engine back where it was
+// (restart_plan.h): with nothing changed the instance carries on as it was,
+// pause and play; a change it takes live it is told; only one it cannot take
+// builds it again.
+
+namespace {
+
+// Commit `bytes` of the assets area, from its start, as asset `id`.
+void commitAsset(int32_t id, int32_t bytes, uint8_t fill) {
+    std::memset(lanes_test::assets(), fill, static_cast<size_t>(bytes));
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("asset/commit")) << id << int32_t{CLOCKWORK_ASSET_RAW} << int32_t{0}
+                                           << bytes << int32_t{0} << int32_t{0} << 0.f;
+    const auto commit = b.end();
+    REQUIRE(lanes_test::ingress(commit.ptr(), commit.size(), kClient));
+    const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("asset/committed"));
+    REQUIRE(findAddress(frames, CLOCKWORK_SYS("asset/committed")) != nullptr);
+}
+
+void releaseAsset(int32_t id) {
+    const auto release = osc_test::message("/dummy/asset/release", id);
+    REQUIRE(lanes_test::ingress(release.ptr(), release.size(), kClient));
+    lanes_test::tickUntil(2, nullptr);
+    lanes_test::drainNrt();
+}
+
+std::vector<lanes_test::EgressFrame> drainBoth() {
+    auto said = lanes_test::drainRt();
+    for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
+    return said;
+}
+
+uint32_t generationNow() { return clockwork_arena_generation(arenaHeader(arena())); }
+
+} // namespace
+
+TEST_CASE("restarts: audio coming back with nothing changed carries the instance on, holding all it held",
+          "[restarts][resume]") {
+    settle();
+    const uint32_t gen = generationNow();
+    commitAsset(9, 64, 0x3C);
+    // Waiting for the instance as its audio goes.
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+
+    lanes_test::comeBack();
+
+    // The same instance: its generation, no setup, nothing let go.
+    CHECK(clockwork_arena_has_instance(arenaHeader(arena())));
+    CHECK(generationNow() == gen);
+    const auto said = drainBoth();
+    CHECK(findAddress(said, CLOCKWORK_SYS("setup")) == nullptr);
+    CHECK(findAddress(said, CLOCKWORK_SYS("asset/released")) == nullptr);
+    // What waited is its, delivered and not refused; and it still has the
+    // asset a new instance would never have been handed.
+    const auto frames = lanes_test::tickUntil(4, "/dummy/pong");
+    CHECK(findAddress(frames, "/dummy/pong") != nullptr);
+    CHECK(findAddress(frames, CLOCKWORK_SYS("error")) == nullptr);
+    CHECK(ask("/dummy/asset/last", "/dummy/asset/last.reply").argInt(0) == 9);
+
+    releaseAsset(9);
+}
+
+#if CLOCKWORK_SCHEDULER
+TEST_CASE("restarts: audio coming back with nothing changed keeps what was scheduled, and plays it when it is due",
+          "[restarts][resume][scheduler]") {
+    settle();
+    const uint64_t dueFrame = lanes_test::position() + 40ull * lanes_test::kBufLength;
+    const int64_t  due = clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(dueFrame));
+    const auto pkt = osc_test::bundle(static_cast<uint64_t>(due), { osc_test::message("/dummy/when") });
+    REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
+    lanes_test::tickUntil(2, nullptr);   // into the store
+
+    lanes_test::comeBack();
+
+    const auto frames = lanes_test::tickUntil(60, "/dummy/when-was");
+    CHECK(findAddress(frames, "/dummy/when-was") != nullptr);
+}
+#endif
+
+TEST_CASE("restarts: audio coming back with channels the instance takes live tells it, and it carries on",
+          "[restarts][resume][survives]") {
+    settle();
+    REQUIRE((clockwork_guest_survives() & DSP_SURVIVES_CHANNEL_CHANGE) != 0);
+    const uint32_t gen = generationNow();
+    const int32_t told = ask("/dummy/reconfigured", "/dummy/reconfigured.reply").argInt(0);
+
+    lanes_test::comeBack(lanes_test::kSampleRate, lanes_test::kBufLength,
+                         lanes_test::kInChannels, lanes_test::kOutChannels + 2);
+
+    CHECK(generationNow() == gen);
+    const auto said = drainBoth();
+    CHECK(findAddress(said, CLOCKWORK_SYS("setup")) == nullptr);
+    const auto r = ask("/dummy/reconfigured", "/dummy/reconfigured.reply");
+    CHECK(r.argInt(0) == told + 1);
+    CHECK(r.argInt(1) == static_cast<int32_t>(lanes_test::kOutChannels + 2));
+
+    lanes_test::comeBack();
+    drainBoth();
+}
+
+TEST_CASE("restarts: audio coming back at a rate the instance cannot take builds it again, and says setup",
+          "[restarts][resume][rebuild]") {
+    settle();
+    REQUIRE((clockwork_guest_survives() & DSP_SURVIVES_RATE_CHANGE) == 0);
+    const uint32_t gen = generationNow();
+
+    lanes_test::comeBack(44100.0);
+
+    CHECK(generationNow() == gen + 1);
+    const auto said = drainBoth();
+    const auto* setup = findAddress(said, CLOCKWORK_SYS("setup"));
+    REQUIRE(setup != nullptr);
+    CHECK(osc_test::parseReply(setup->data.data(), static_cast<uint32_t>(setup->data.size())).argInt(0) == 44100);
+
+    lanes_test::comeBack();
+    CHECK(generationNow() == gen + 2);
+    drainBoth();
+}
+
+TEST_CASE("restarts: audio coming back with another guest config builds the instance again, which reads the new one",
+          "[restarts][resume][rebuild]") {
+    settle();
+    const uint32_t gen = generationNow();
+    constexpr uint32_t other[4] = { 0xC0FFEE01u, 0xC0FFEE02u, 0xC0FFEE03u, 0xBEEF0004u };
+
+    lanes_test::comeBack(lanes_test::kSampleRate, lanes_test::kBufLength,
+                         lanes_test::kInChannels, lanes_test::kOutChannels, other);
+
+    CHECK(generationNow() == gen + 1);
+    CHECK(static_cast<uint32_t>(ask("/dummy/region/config", "/dummy/region/config-is").argInt(4)) == 0xBEEF0004u);
+
+    lanes_test::comeBack();
+    drainBoth();
+}
+
+TEST_CASE("restarts: an instance whose audio went in the middle of a block is built again when it comes back",
+          "[restarts][resume][rebuild]") {
+    settle();
+    const uint32_t gen = generationNow();
+    // As the audio thread leaves it if it is stopped partway through a block:
+    // whatever the block was changing is half changed.
+    g_block_open = true;
+
+    lanes_test::comeBack();
+
+    CHECK(generationNow() == gen + 1);
+    CHECK_FALSE(g_block_open);
+    drainBoth();
+}
+
+// ── Assets outlive the instance ──────────────────────────────────────────────
+//
+// An asset is the client's bytes, lent to the guest: they are in the assets
+// area, which a rebuild keeps, and clockwork keeps the commit with them. A new
+// instance is handed every asset the last one held as it is built, before its
+// setup, so a client loses nothing it lent and has nothing to send again.
+
+TEST_CASE("restarts: an asset the instance held is handed to the new one at a cold restart, and nothing is released",
+          "[restarts][assets]") {
+    settle();
+    commitAsset(9, 64, 0x3C);
+    const auto held = ask("/dummy/asset/last", "/dummy/asset/last.reply");
+    REQUIRE(held.argInt(0) == 9);
+
+    const auto said = coldRestart();
+    auto after = said;
+    for (auto& f : drainBoth()) after.push_back(std::move(f));
+
+    CHECK(findAddress(after, CLOCKWORK_SYS("asset/released")) == nullptr);
+    // The new instance has it, over the same bytes: the guest's checksum of
+    // them is the old instance's.
+    const auto handed = ask("/dummy/asset/last", "/dummy/asset/last.reply");
+    CHECK(handed.argInt(0) == 9);
+    CHECK(handed.argInt(2) == 64);
+    CHECK(handed.argInt(6) == held.argInt(6));
+
+    releaseAsset(9);
+}
+
+TEST_CASE("restarts: an asset a new instance will not take is released to the client that committed it, before setup",
+          "[restarts][assets]") {
+    settle();
+    commitAsset(9, 64, 0x3C);
+    // Built again from a config that takes no assets: the asset has nowhere to go.
+    constexpr uint32_t takesNone[4] = { 0xC0FFEE01u, 0xC0FFEE02u, 0xC0FFEE03u, 0xA55E7000u };
+
+    lanes_test::comeBack(lanes_test::kSampleRate, lanes_test::kBufLength,
+                         lanes_test::kInChannels, lanes_test::kOutChannels, takesNone);
+
+    const auto said = drainBoth();
+    const auto* released = findAddress(said, CLOCKWORK_SYS("asset/released"));
+    const auto* setup    = findAddress(said, CLOCKWORK_SYS("setup"));
+    REQUIRE(released != nullptr);
+    REQUIRE(setup != nullptr);
+    CHECK(released < setup);
+    CHECK(released->sourceId == kClient);
+    CHECK(osc_test::parseReply(released->data.data(), static_cast<uint32_t>(released->data.size())).argInt(0) == 9);
+    // And the id is the client's to commit again.
+    lanes_test::comeBack();
+    drainBoth();
+    commitAsset(9, 64, 0x3C);
+    releaseAsset(9);
+}
+
+TEST_CASE("restarts: the asset table takes ids again after many more commits and releases than it has room for",
+          "[restarts][assets]") {
+    settle();
+    // Each commit and release leaves its slot as a marker the probe chains
+    // run through; a table that never takes those back is full after as many
+    // commits as it has slots, however few are held.
+    for (int32_t i = 0; i < 5000; ++i) {
+        commitAsset(100 + (i % 7), 64, static_cast<uint8_t>(i));
+        releaseAsset(100 + (i % 7));
+    }
+}

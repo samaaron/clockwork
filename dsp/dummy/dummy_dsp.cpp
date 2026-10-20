@@ -279,6 +279,11 @@ struct DummyDsp {
     static constexpr uint32_t kMaxHeld = 64;
     uint32_t  held[kMaxHeld] = {};
     uint32_t  n_held = 0;
+    // How many it takes: kMaxHeld, or fewer for an instance built from a
+    // config whose fourth word is kTakesAtMost + n — the lever a test uses to
+    // build an instance that turns away an asset the last one held.
+    static constexpr uint32_t kTakesAtMost = 0xA55E7000u;
+    uint32_t  max_held = kMaxHeld;
 
     // Returns whether it was taken. A refusal leaves n_pending where it was,
     // which /dummy/sink/pending reports, so a caller that asked for more than
@@ -308,6 +313,7 @@ struct DummyDsp {
         if (config.guest_config && config.guest_config_bytes >= 16) {
             const auto* w = static_cast<const uint32_t*>(config.guest_config);
             for (int i = 0; i < 4; ++i) born.config_slots[i] = w[i];
+            if ((w[3] & ~0xFFu) == kTakesAtMost && (w[3] & 0xFFu) <= kMaxHeld) max_held = w[3] & 0xFFu;
         }
 
         // arena: clockwork promises it is ours alone and that it arrives
@@ -853,7 +859,7 @@ int dsp_asset(struct Dsp* dsp, const ClockworkAsset* asset) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
     if (!d || !asset || asset->struct_bytes < sizeof(ClockworkAsset)) return 1;
     if (asset->kind != CLOCKWORK_ASSET_RAW && asset->kind != CLOCKWORK_ASSET_AUDIO_F32) return 2;
-    if (d->n_held >= DummyDsp::kMaxHeld) return 3;
+    if (d->n_held >= d->max_held) return 3;
     const auto* p = static_cast<const uint8_t*>(asset->bytes);
     uint32_t h = 2166136261u;
     for (uint32_t i = 0; i < asset->byte_count; ++i) { h ^= p[i]; h *= 16777619u; }

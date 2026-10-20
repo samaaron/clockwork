@@ -234,10 +234,12 @@ void clockwork_init(double   sample_rate,
 
 /* ── More than one host in a process ─────────────────────────────────────────
  *
- * clockwork_init() is the SOLE-HOST call. It boots the engine, or reconfigures
- * the running one — and reconfiguring is routine, not exceptional: a native
- * host calls it again on every device start and cold swap, because the device
- * is what decides the rate and the block.
+ * clockwork_init() is the SOLE-HOST call. It boots the engine, or brings back
+ * the one running in the arena that is up — and that is routine, not
+ * exceptional: a page reloaded over its memory, a host attaching again, a
+ * device that decides another rate or block. It does the least that gets the
+ * engine back where it was (docs/RESTARTS.md): the instance carries on, is
+ * told what changed, or is built again.
  *
  * Which is exactly why a SECOND host must not use it. The engine is a process
  * singleton, and a plugin instantiated twice in one DAW, or two embedders in

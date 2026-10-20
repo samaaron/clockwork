@@ -92,6 +92,20 @@ uint64_t freshDsp() {
     return gSamplePos;
 }
 
+void comeBack(double rate, uint32_t block, uint32_t inputs, uint32_t outputs, const uint32_t (&config)[4]) {
+    boot();
+    const uint32_t before = clockwork_arena_generation(clockwork_arena_header());
+    clockwork_init(rate, block, inputs, outputs, /*verbosity*/ 0,
+                   gGuestMemory, kGuestMemoryBytes,
+                   config, static_cast<uint32_t>(sizeof config),
+                   /*arena_bytes*/ 0,
+                   gAssets,  kAssetsBytes,
+                   gReturns, kReturnsBytes);
+    gBlockSize = clockwork_block_size();
+    // A new instance counts its frames from here, as freshDsp's does.
+    if (clockwork_arena_generation(clockwork_arena_header()) != before) gDspOrigin = gSamplePos;
+}
+
 uint64_t dspFrame(uint64_t streamFrame) { return streamFrame - gDspOrigin; }
 
 uint64_t tick() {

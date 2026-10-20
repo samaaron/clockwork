@@ -129,22 +129,58 @@ test("resume() on an engine that is already running changes nothing, and drops n
   expect(r.purged, "resume() purged a running engine's schedule").toBe(0);
 });
 
-test("reload() puts the host's state back before it says the engine is ready", async ({ page, clockworkConfig }) => {
-  // 'setup' and 'ready' are where a host rebuilds on the engine (its groups, its FX). Said before the client's own
+test("a reload into a new instance puts the host's state back before it says the engine is ready", async ({ page, clockworkConfig }) => {
+  // 'setup' and 'ready' are where a host rebuilds on a new instance (its groups, its FX). Said before the client's own
   // state is back — a subclass's synthdefs and buffers — whatever the host builds refers to what is not there yet.
+  // Onto a context at another rate, which the placeholder cannot take: a new instance whatever the transport.
   await boot(page);
   const r = await page.evaluate(async (config) => {
     const order = [];
     class Host extends window.Clockwork { async restoreClientState() { order.push("restore"); } }
     const cw = new Host(config);
     await cw.init();
+    const before = cw.getInfo().generation;
     cw.on("setup", () => order.push("setup"));
     cw.on("ready", () => order.push("ready"));
-    await cw.reload();
+    let resumed = null;
+    cw.on("reload:complete", (d) => { resumed = d?.resumed ?? null; });
+    const other = cw.audioContext.sampleRate === 44100 ? 48000 : 44100;
+    await cw.reload({ audioContext: new AudioContext({ sampleRate: other }) });
+    const out = { order, resumed, rate: cw.audioContext.sampleRate, other, opened: cw.getInfo().generation - before };
     await cw.shutdown();
-    return order;
+    return out;
   }, clockworkConfig);
-  expect(r).toEqual(["restore", "setup", "ready"]);
+  expect(r.rate).toBe(r.other);
+  expect(r.resumed).toBe(false);
+  expect(r.opened, "the generation a new instance opened").toBe(1);
+  expect(r.order).toEqual(["restore", "setup", "ready"]);
+});
+
+test("a reload over the same memory with nothing changed carries the instance on: nothing put back, no setup", async ({ page, clockworkConfig, clockworkMode }) => {
+  // Audio coming back does the least that gets the engine back where it was (docs/RESTARTS.md). The instance a host
+  // built on is still there, with everything it held: putting it back would load it all twice, and 'setup' would
+  // build the host's world on it twice.
+  test.skip(clockworkMode !== "sab", "a reload keeps the memory only in SAB mode");
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const order = [];
+    class Host extends window.Clockwork { async restoreClientState() { order.push("restore"); } }
+    const cw = new Host(config);
+    await cw.init();
+    const before = cw.getInfo().generation;
+    cw.on("setup", () => order.push("setup"));
+    cw.on("ready", () => order.push("ready"));
+    let resumed = null;
+    cw.on("reload:complete", (d) => { resumed = d?.resumed ?? null; });
+    const reloaded = await cw.reload();
+    const out = { order, resumed, reloaded, same: cw.getInfo().generation === before };
+    await cw.shutdown();
+    return out;
+  }, clockworkConfig);
+  expect(r.reloaded).toBe(true);
+  expect(r.resumed).toBe(true);
+  expect(r.same, "the generation carried on").toBe(true);
+  expect(r.order).toEqual(["ready"]);
 });
 
 test("reloads asked for at once are one reload, and each caller hears how it went", async ({ page, clockworkConfig }) => {

@@ -23,10 +23,23 @@ an ESP32-S3), one thread for the audio and everything else, a browser with
 no shared memory, an audio thread that never waits on a lock. A mechanism
 that needs more than that is not one of these rules.
 
+A restart does the least that gets the engine back where it was. Audio
+stops and comes back — a device switched, or lost and found; a laptop's
+lid; a page whose worklet the browser took away, reloaded over the memory
+it ran in; an embedded host attaching again — and what comes back is the
+same instance, holding everything it held, unless what it was built for
+has changed in a way it cannot take. One rule decides, for every host
+(src/restart_plan.h, which the native engine's device switch and a host
+coming back over its memory both ask): with nothing changed it carries on;
+a new rate or channel count it declared it takes, it is told; anything
+else it cannot take — another rate or channel count, another block — and
+it is replaced. Only then is there a new instance.
+
 A guest instance is one conversation, and its generation is its name.
 Replacing it ends one conversation and starts the next. However it is
-replaced — a device change on a native engine, a reload in the browser, an
-embedded host attaching again — it is the same event, told the same way:
+replaced — a device change the instance cannot take, a reload into new
+memory or at a rate it cannot take, an embedded host attaching again at
+one — it is the same event, told the same way:
 
 1. **The old generation closes.** The generation word goes odd, and
    everything still waiting for the old instance is answered once, then:
@@ -59,8 +72,8 @@ the test that shows it.
 
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
-| **hot restart** | survives | untouched, every region | statechange; and when a fact `setup` named has changed (the rate, the device's callback), `/clockwork/setup/changed ,iii rate buffer generation` naming the same generation, on the instance's ring as audio resumes |
-| **cold restart** (a rebuild: a native device change, a browser reload over the same memory, an embedded host attaching again) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
+| **hot restart** (a device change the instance takes; a browser reload over the same memory, or an embedded host attaching again, with nothing changed it cannot take) | survives | untouched, every region | statechange; and when a fact `setup` named has changed (the rate, the device's callback), `/clockwork/setup/changed ,iii rate buffer generation` naming the same generation, on the instance's ring as audio resumes |
+| **cold restart** (a rebuild: a device change the instance cannot take, and the same at a browser reload over the same memory or an embedded host attaching again) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
 A hot restart is a device change the instance can take without being
@@ -93,11 +106,19 @@ its clients: the old generation closes (in the browser, the old worklet
 refuses what waited for it before its memory goes, `clockwork_close`), the
 new arena carries the generation on, and its instance says `setup`.
 
-`clockwork_init` on an arena that is already up is a rebuild, whoever calls
-it: an embedded host attaching again, a page reloaded over the same memory
-(whose new module finds the old one's state where it left it), a host's own
-device change. The instance goes, what waited for it is marked, and the next
-is built and says `setup`.
+`clockwork_init` on an arena that is already up is audio coming back,
+whoever calls it: an embedded host attaching again, a page reloaded over
+the same memory (whose new module finds the old one's state where it left
+it, the instance included), a host's own device change. It does the least
+that gets the engine back where it was (`come_back` in
+src/audio_processor.cpp). With nothing changed the instance carries on, as
+at any hot restart: the same generation, nothing refused, what waited for
+it delivered, what was scheduled for it still due. A change it declared it
+takes, it is told, and `/clockwork/setup/changed` is said. Otherwise it is
+rebuilt and says `setup`; and it is rebuilt too, whatever it survives, when
+its guest config block is not the one it was built from, when the memory it
+was built in has moved, and when the audio thread left it partway through a
+block (`g_block_open`), with whatever that block was changing half changed.
 
 ## The generation
 
@@ -181,7 +202,7 @@ And the areas outside the arena, and the engine's own stores:
 
 | area or store | hot restart | cold restart | told how |
 |---|---|---|---|
-| assets | kept | every slot released | `/clockwork/asset/released` per slot |
+| assets | kept | kept: every asset the old instance held is handed to the new one as it is built, before its `setup` (`hand_over_assets`); one the new instance will not take is released | `/clockwork/asset/released` for one not taken, before `setup` |
 | returns | kept | what the instance published is gone | n/a |
 | guest fast and bulk memory | kept | the pool is torn down; the new instance carves again from zero | n/a |
 | scheduler store | kept | cleared | `restarting` means the schedule is empty from that generation |
@@ -269,8 +290,8 @@ waiting on, so these are the rules a client may rely on:
    out ring is the instance's: the audio thread writes it, and while a
    restart has the audio thread stopped, the restart thread does
    (`destroy_dsp`, `rebuild_dsp` in src/audio_processor.cpp) — so what the
-   old instance says as it goes (its last answers, its assets released)
-   follows everything it said before, and `setup` is the last thing
+   old instance says as it goes (its last answers) follows everything it
+   said before, and `setup` is the last thing
    `rebuild_dsp` writes, naming the generation opened, before the new
    instance can say anything. Every reader of the ring — the engine's
    gateway, a host reading the rings itself, a tap — hears the old
@@ -361,7 +382,10 @@ nothing else.
 And, if it declares it survives a device change (`DspInfo::survives`):
 **take it** when told (`dsp_reconfigure`), or refuse and be rebuilt.
 
-A guest keeps across a rebuild only what it writes into `guest persist`.
+A new instance is handed, as it is built, every asset the last one held,
+through `dsp_asset` as any commit is: it takes them, or refuses one, which
+is then released to the client that committed it. Of its own state, a
+guest keeps across a rebuild only what it writes into `guest persist`.
 Everything else it holds is the instance's and goes with it.
 
 ## What a client does
@@ -374,7 +398,9 @@ Everything else it holds is the instance's and goes with it.
 - On `setup`, rebuild in one pass against the generation it names. A retry
   budget is counted against that generation alone: a pass that could not
   reach the engine at all, because the machine slept or the device was
-  down, is not a failed pass of this generation.
+  down, is not a failed pass of this generation. The assets it committed
+  are still committed: nothing to send again, and one the new instance
+  would not take is released to it, as any release is.
 - Nothing is restored for a client, and nothing in flight is silently
   lost, so a client needs no timers to guess with.
 
@@ -400,7 +426,12 @@ And the cells that are not one event among others: thousands of messages
 waiting at a rebuild, for the engine's own reader and a host reading the
 rings (✓); a peer whose reply ring is nearly full when a rebuild comes (✓);
 a peer writing while no instance comes up (✓); an embedded host attaching
-again, at its rate and at another (✓); a client
+again, at its rate and at another (✓); audio coming back over the same
+memory with nothing changed, with a change the instance takes, at a rate
+it cannot take, with another guest config, and after a block left open (✓,
+test/test_restarts.cpp `[resume]`); assets handed to a new instance, one it
+will not take released, and the table taking ids again after a session's
+worth of commits (✓, `[assets]`); a client
 writing its message in place between instances (✓, in
 test/test_restarts.cpp); an engine booted again in the same process (✓, in
 test/test_engine_lifecycle.cpp); and the page, in
@@ -422,8 +453,8 @@ by what the ring holds, not by a desktop's.
   the teardown, the drains and the rebuild is the engine's; there too,
   that a client hears `setup` before anything the new instance says, and
   that a host reading the rings itself gets, before `setup`, what the old
-  instance said that it had not read — its answers and its assets
-  released.
+  instance said that it had not read, and that an asset the old instance
+  held is the new instance's.
 - test/test_restart_sequence.cpp: one sequence whatever started it — the
   user's switch, the watchdog's recovery, the rate-skew recovery.
 - test/test_guest_reconfigure.cpp and the `[survives]` cases of

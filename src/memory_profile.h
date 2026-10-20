@@ -127,6 +127,11 @@
   #ifndef CLOCKWORK_SCOPE_FRAMES
   #define CLOCKWORK_SCOPE_FRAMES 64
   #endif
+  // Committed assets the guest may hold at once (the asset table): a
+  // sample buffer count on the scale of an embedded guest's.
+  #ifndef CLOCKWORK_ASSET_SLOTS
+  #define CLOCKWORK_ASSET_SLOTS 1024
+  #endif
 
   // Sinks: no wide OSC classes on a small SRAM; sysex cells of 4 KB.
   #ifndef CLOCKWORK_OSC_SINK_CLASSES
@@ -206,6 +211,11 @@
   #ifndef CLOCKWORK_SCOPE_FRAMES
   #define CLOCKWORK_SCOPE_FRAMES 128
   #endif
+  // Committed assets the guest may hold at once (the asset table): a
+  // sample buffer count on the scale of an embedded guest's.
+  #ifndef CLOCKWORK_ASSET_SLOTS
+  #define CLOCKWORK_ASSET_SLOTS 1024
+  #endif
 
   // Sinks: no wide OSC classes on a small SRAM; sysex cells of 4 KB.
   #ifndef CLOCKWORK_OSC_SINK_CLASSES
@@ -257,6 +267,14 @@
 #endif
 #ifndef CLOCKWORK_RETURNS_BYTES
 #define CLOCKWORK_RETURNS_BYTES (8u * 1024u * 1024u)    // 8 MB, guest -> client
+#endif
+
+// Committed assets the guest may hold at once: the asset table, one entry
+// per asset, kept across a rebuild so a new instance is handed
+// every one (docs/RESTARTS.md). A power of two; a commit past what the
+// table holds is refused.
+#ifndef CLOCKWORK_ASSET_SLOTS
+#define CLOCKWORK_ASSET_SLOTS 4096
 #endif
 
 // Event-sink size classes, per kind: "<cell bytes>:<cells>,..." — the queues

@@ -70,6 +70,7 @@ uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 // places the ring arena + scheduler pool in bulk RAM on tiered targets.
 #include "platform.h"
 #include "dsp_api.h"  // the contract with the DSP
+#include "restart_plan.h"   // the least audio coming back does (come_back)
 #include "guest_malloc.h"       // every call into the DSP is marked, so its mallocs are counted as its own
 #include "shm_tap_stream.hpp"   // the tap slots DspHost::scope_* hand a DSP
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
@@ -130,6 +131,17 @@ int clockwork_host_forwards(void) {
 // self-driven device), which have no NRT-out drainer and no second RT-out writer,
 // so those always use RT-out. A capability signal, not an __EMSCRIPTEN__ branch.
 std::atomic<bool> g_nrt_egress_drained{false};
+
+// See audio_processor.h. Set and cleared by process_audio (BlockOpenScope).
+std::atomic<bool> g_block_open{false};
+namespace {
+struct BlockOpenScope {
+    BlockOpenScope()  { g_block_open.store(true,  std::memory_order_relaxed); }
+    ~BlockOpenScope() { g_block_open.store(false, std::memory_order_release); }
+    BlockOpenScope(const BlockOpenScope&) = delete;
+    BlockOpenScope& operator=(const BlockOpenScope&) = delete;
+};
+} // namespace
 
 // The composition-root ClockworkClock for a worklet self-clock host (WASM + the
 // self-driven device), which has no host object above the processor to own one.
@@ -512,6 +524,21 @@ extern "C" {
     uint32_t g_out_channels = 0;
     uint32_t g_in_channels  = 0;
     double   g_dsp_sample_rate = 0.0;
+
+    // The block a build is laid out in, for the block a host asked for. The
+    // staging buffers are fixed-size, so the configuration cannot ask for more
+    // than they hold, and a bad block size falls back to the default rather
+    // than rendering past the end of the arena.
+    static uint32_t build_block(uint32_t asked) {
+        return (asked == 0 || asked > clockwork::kMaxBlockSize) ? clockwork::kDefaultBlockSize : asked;
+    }
+
+    // What the instance in the arena was built from: clockwork's configuration
+    // as it stood, and the guest's config block. Audio coming back carries the
+    // instance on only in the same (come_back); a change it was told of
+    // (clockwork_guest_reconfigure) is what it is built for from then on.
+    static ClockworkConfig g_built_config{};
+    static std::array<uint8_t, GUEST_CONFIG_SIZE> g_built_guest_config{};
 
     // Channel pointer arrays handed to dsp_process, built once at init so the
     // audio thread does no arithmetic beyond passing two pointers.
@@ -934,12 +961,30 @@ extern "C" {
     // ── Assets (dsp_api.h, "Assets") ───────────────────────────────────────
     //
     // The audio thread's half of the facility: check a committed range against
-    // the lane, hand the guest a pointer, remember who committed each id so a
-    // release can be told to the right client. A fixed table, probed by id —
-    // no allocation on this thread, and a full table is a refusal.
-    struct AssetSlot { uint32_t id; uint32_t origin; bool used; };
-    constexpr uint32_t kAssetSlots = 4096;   // power of two
+    // the lane, hand the guest a pointer, and keep the committed asset — who
+    // committed it, and what it is — so a release is told to the right client
+    // and an instance built again is handed every asset the last one held
+    // (hand_over_assets). A fixed table, probed by id — no allocation on this
+    // thread, and a full table is a refusal.
+    struct AssetSlot {
+        uint32_t id;
+        uint32_t origin;
+        uint32_t offset;        // into the assets area
+        uint32_t byte_count;
+        uint32_t channels;
+        uint32_t frames;
+        float    sample_rate;
+        uint8_t  kind;
+        bool     used;
+    };
+    constexpr uint32_t kAssetSlots = CLOCKWORK_ASSET_SLOTS;
+    static_assert(kAssetSlots > 0 && (kAssetSlots & (kAssetSlots - 1)) == 0,
+                  "CLOCKWORK_ASSET_SLOTS is a power of two");
     AssetSlot g_assets[kAssetSlots] = {};
+    // An asset released leaves its slot `used`, under an id no client can
+    // commit, so the probe chains through it stay intact; the next insert on
+    // its chain takes it.
+    constexpr uint32_t kAssetTombstone = 0xFFFFFFFFu;
 
     AssetSlot* asset_lookup(uint32_t id) {
         for (uint32_t i = 0, h = id * 2654435761u; i < kAssetSlots; ++i, ++h) {
@@ -949,17 +994,19 @@ extern "C" {
         }
         return nullptr;
     }
+    // A slot for an id asset_lookup did not find: the first on its chain that
+    // is free, or a released asset's.
     AssetSlot* asset_insert(uint32_t id, uint32_t origin) {
         for (uint32_t i = 0, h = id * 2654435761u; i < kAssetSlots; ++i, ++h) {
             AssetSlot& s = g_assets[h & (kAssetSlots - 1)];
-            if (!s.used) { s = AssetSlot{ id, origin, true }; return &s; }
+            if (!s.used || s.id == kAssetTombstone) {
+                s = AssetSlot{};
+                s.id = id; s.origin = origin; s.used = true;
+                return &s;
+            }
         }
         return nullptr;
     }
-    // Removal keeps the probe chains intact: the slot is marked as a tombstone
-    // by leaving `used` true with an id no client can commit (the table is
-    // rebuilt whenever the guest is destroyed, which also clears tombstones).
-    constexpr uint32_t kAssetTombstone = 0xFFFFFFFFu;
     void asset_remove(AssetSlot* s) { s->id = kAssetTombstone; s->origin = 0; }
 
     void asset_emit(uint32_t origin, const char* address, uint32_t id, const char* reason) {
@@ -1008,15 +1055,18 @@ extern "C" {
         return true;
     }
 
+    // The device's callback as setup names it: for a host with no device, the block.
+    static uint32_t setup_buffer_frames(uint32_t buffer_frames) {
+        return buffer_frames ? buffer_frames : static_cast<uint32_t>(get_audio_buffer_samples());
+    }
+
     // The new instance announces itself: its setup, naming the device's
     // callback (or, for a host with no device yet, the block), written on its
     // ring as the build's last word, or owed until the ring has room.
     static void announce_instance(uint32_t buffer_frames) {
         InstanceRingScope instance_ring;
         g_setup_rate.store(static_cast<int32_t>(g_dsp_sample_rate), std::memory_order_relaxed);
-        g_setup_buffer_frames.store(buffer_frames ? buffer_frames
-                                                  : static_cast<uint32_t>(get_audio_buffer_samples()),
-                                    std::memory_order_relaxed);
+        g_setup_buffer_frames.store(setup_buffer_frames(buffer_frames), std::memory_order_relaxed);
         g_owed.store(Owed::Setup, std::memory_order_release);
         say_owed();
     }
@@ -1025,7 +1075,7 @@ extern "C" {
         if (!memory_initialized || !g_dsp) return;
         InstanceRingScope instance_ring;
         g_setup_rate.store(static_cast<int32_t>(sample_rate), std::memory_order_relaxed);
-        g_setup_buffer_frames.store(buffer_frames, std::memory_order_relaxed);
+        g_setup_buffer_frames.store(setup_buffer_frames(buffer_frames), std::memory_order_relaxed);
         // A setup still owed says the new facts itself.
         Owed nothing = Owed::Nothing;
         g_owed.compare_exchange_strong(nothing, Owed::Changed, std::memory_order_acq_rel);
@@ -1042,13 +1092,44 @@ extern "C" {
         return 1;
     }
 
-    // Every asset dies with the instance that held it: tell each committer,
-    // then forget the table. Called before the guest is freed.
+    // Every asset released: each committer told, and the table forgotten.
+    // When the engine goes (teardown_memory), and when audio comes back to an
+    // assets area that has moved, where no committed asset points at
+    // anything any more.
     void assets_release_all() {
         for (AssetSlot& s : g_assets) {
             if (s.used && s.id != kAssetTombstone)
                 asset_emit(s.origin, CLOCKWORK_SYS("asset/released"), s.id, nullptr);
             s = AssetSlot{};
+        }
+    }
+
+    // A new instance is handed every asset the last one held, as it is built
+    // and before it says setup (docs/RESTARTS.md): the bytes are the client's,
+    // in the assets area a rebuild keeps, so nothing a client lent is lost to
+    // a rebuild and nothing has to be sent again. An asset the new instance
+    // will not take is released there, and its committer hears so, as from a
+    // guest that let go.
+    static void hand_over_assets() {
+        const auto* assets = static_cast<const uint8_t*>(g_clockwork_config.assets);
+        for (AssetSlot& s : g_assets) {
+            if (!s.used || s.id == kAssetTombstone) continue;
+            ClockworkAsset asset {};
+            asset.struct_bytes = sizeof asset;
+            asset.id           = s.id;
+            asset.kind         = s.kind;
+            asset.origin       = s.origin;
+            asset.bytes        = assets ? assets + s.offset : nullptr;
+            asset.byte_count   = s.byte_count;
+            asset.channels     = s.channels;
+            asset.frames       = s.frames;
+            asset.sample_rate  = s.sample_rate;
+            int rc = 1;
+            if (assets) { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(g_dsp, &asset); }
+            if (rc == 0) continue;
+            const uint32_t origin = s.origin, id = s.id;
+            asset_remove(&s);
+            asset_emit(origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
         }
     }
 
@@ -1697,6 +1778,9 @@ extern "C" {
         g_clockwork_config.sample_rate     = sample_rate;
         g_clockwork_config.input_channels  = input_channels;
         g_clockwork_config.output_channels = output_channels;
+        g_built_config.sample_rate     = sample_rate;
+        g_built_config.input_channels  = input_channels;
+        g_built_config.output_channels = output_channels;
         g_dsp_sample_rate = sample_rate;
         g_in_channels     = cin;
         g_out_channels    = cout;
@@ -1935,6 +2019,10 @@ extern "C" {
         // over without a glance. See DspConfig::guest_config.
         config.guest_config       = shared_memory + GUEST_CONFIG_START;
         config.guest_config_bytes = GUEST_CONFIG_SIZE;
+        // What this instance is built from, for audio coming back to it
+        // (come_back): it is carried on only in the same.
+        g_built_config = g_clockwork_config;
+        std::memcpy(g_built_guest_config.data(), shared_memory + GUEST_CONFIG_START, GUEST_CONFIG_SIZE);
 
         // The window the DSP may publish through: the node-tree mirror region.
         // Clockwork zeroes it at boot, hands it over, and thereafter only
@@ -1950,11 +2038,7 @@ extern "C" {
 
         config.deterministic_seed = clockwork_deterministic_seed;
 
-        // The staging buffers are fixed-size, so the configuration cannot ask
-        // for more than they hold. A bad block size falls back to the default
-        // rather than rendering past the end of the arena.
-        if (config.block_size == 0 || config.block_size > clockwork::kMaxBlockSize)
-            config.block_size = clockwork::kDefaultBlockSize;
+        config.block_size = build_block(config.block_size);
         if (config.max_output_channels > clockwork::kMaxChannels)
             config.max_output_channels = clockwork::kMaxChannels;
         if (config.max_input_channels > clockwork::kMaxChannels)
@@ -2541,6 +2625,9 @@ extern "C" {
         // No banner off the web, so the guest's identity is a line of its own.
         clockwork_log("DSP: %s %s", dsp_name, dsp_version);
 #endif
+        // Every asset the last instance held, the new one's before it says
+        // anything of its own (hand_over_assets). None on a new arena.
+        if (g_dsp) hand_over_assets();
         if (replacing && g_dsp) announce_instance(0);
 #else  // !CLOCKWORK_SYNTH
         // No-DSP core: no instance, no audio render. The scheduler/router still
@@ -2561,10 +2648,10 @@ extern "C" {
 
 #if CLOCKWORK_SYNTH
     // destroy_dsp / rebuild_dsp — a cold restart, however it came: a device
-    // change, a host attaching again, a page reloaded over the same memory
-    // (docs/RESTARTS.md, "One event, every route"). Frees the DSP instance
-    // outright and builds a new one; nothing of the old instance survives but
-    // DspConfig::persistent.
+    // change the instance cannot take, or audio coming back that it cannot be
+    // carried across (come_back; docs/RESTARTS.md, "One event, every route").
+    // Frees the DSP instance outright and builds a new one; nothing of the
+    // old instance survives but DspConfig::persistent.
     //
     // A COLD SWAP EMPTIES WHATEVER SUBSCRIPTION SET THE DSP WAS KEEPING, and a client
     // must re-subscribe. A registry that outlives an instance is state clockwork
@@ -2587,8 +2674,9 @@ extern "C" {
         // What was already in the in ring was written for this generation:
         // marked, for the next drain to answer (the marks).
         mark_closing_generation();
+        // The assets it held stay committed, for the next instance (hand_over_assets):
+        // the bytes are the client's, and still where they were.
         if (g_dsp) {
-            assets_release_all();   // the instance's assets go with it; committers hear
             { GuestCallScope guest(GuestCall::Boot); dsp_free(g_dsp); }
             g_dsp = nullptr;
         }
@@ -2628,6 +2716,57 @@ extern "C" {
         if (g_dsp) announce_instance(device_buffer_frames);
     }
 
+    void come_back() {
+        const ClockworkConfig& now = g_clockwork_config;
+        // What no instance is carried across, whatever it survives: there is
+        // none to carry (its build failed), it is not in the memory it was
+        // built in, its config block is not the one it read, or the audio
+        // thread left it partway through a block.
+        const bool same_memory = now.guest_memory == g_built_config.guest_memory
+                              && now.guest_memory_bytes == g_built_config.guest_memory_bytes
+                              && now.assets == g_built_config.assets
+                              && now.assets_bytes == g_built_config.assets_bytes
+                              && now.returns == g_built_config.returns
+                              && now.returns_bytes == g_built_config.returns_bytes
+                              && now.arena_bytes == g_built_config.arena_bytes
+                              && now.guest_bulk_bytes == g_built_config.guest_bulk_bytes
+                              && now.fp_env == g_built_config.fp_env;
+        const bool same_config = std::memcmp(shared_memory + GUEST_CONFIG_START, g_built_guest_config.data(),
+                                             GUEST_CONFIG_SIZE) == 0;
+        const bool torn = g_block_open.load(std::memory_order_acquire);
+        clockwork::RestartStep step = clockwork::RestartStep::Rebuild;
+        if (g_dsp && same_memory && same_config && !torn) {
+            const clockwork::RestartFacts built_for { g_dsp_sample_rate, g_block_size,
+                                                      g_built_config.input_channels, g_built_config.output_channels };
+            const clockwork::RestartFacts back { now.sample_rate, build_block(now.block_size),
+                                                 now.input_channels, now.output_channels };
+            step = clockwork::planRestart(built_for, back, g_dsp_survives).step;
+        }
+        if (step == clockwork::RestartStep::Reconfigure
+            && !clockwork_guest_reconfigure(now.sample_rate, now.input_channels, now.output_channels))
+            step = clockwork::RestartStep::Rebuild;
+
+        if (step == clockwork::RestartStep::Rebuild) {
+            // The new instance's blocks are its own.
+            g_block_open.store(false, std::memory_order_relaxed);
+            // A committed asset points into the assets area it was committed
+            // in: one that has moved leaves nothing for the next instance.
+            if (now.assets != g_built_config.assets || now.assets_bytes != g_built_config.assets_bytes) {
+                InstanceRingScope instance_ring;
+                assets_release_all();
+            }
+            destroy_dsp();
+            rebuild_dsp(now.sample_rate, 0);   // no device: setup names the block
+            return;
+        }
+        // The same instance, back, every region as it was, as at any hot
+        // restart. Its clock comes into service again: on a worklet whose
+        // new context starts its time over, nothing is published as the
+        // engine's time until the host has written the new context's start.
+        clock_enter_service();
+        if (step == clockwork::RestartStep::Reconfigure) clockwork_announce_facts(now.sample_rate, 0);
+    }
+
 #endif
 
 #if !defined(__EMSCRIPTEN__) && CLOCKWORK_SYNTH
@@ -2652,6 +2791,12 @@ extern "C" {
          */
         clockwork_port_bus_detach_all();
 
+        // And the committed assets: a rebuild hands them on, the engine going
+        // releases them, and each committer hears so.
+        {
+            InstanceRingScope instance_ring;
+            assets_release_all();
+        }
         destroy_dsp();
         // The arenas clockwork reserved for the guest go with the engine, not
         // with the instance: a rebuild keeps them (destroy_dsp above), a
@@ -2761,6 +2906,7 @@ extern "C" {
     EMSCRIPTEN_KEEPALIVE
     bool process_audio(double current_time, uint32_t active_output_channels, uint32_t active_input_channels) {
         InstanceRingScope instance_ring;   // the audio thread writes the instance's ring
+        BlockOpenScope block_open;         // until the block is done (g_block_open)
         clockwork_pool_register_engine_thread();  // pool ownership follows the audio thread
 #if CLOCKWORK_SYNTH
         if (!memory_initialized) {
@@ -3759,6 +3905,13 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
     if (asset_lookup(asset.id)) return refuse("id is still held; release it first");
     AssetSlot* slot = asset_insert(asset.id, origin);
     if (!slot) return refuse("too many assets held");
+    // All of it, for an instance built after this one (hand_over_assets).
+    slot->offset      = static_cast<uint32_t>(offset);
+    slot->byte_count  = asset.byte_count;
+    slot->channels    = asset.channels;
+    slot->frames      = asset.frames;
+    slot->sample_rate = asset.sample_rate;
+    slot->kind        = static_cast<uint8_t>(asset.kind);
     int rc;
     { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(g_dsp, &asset); }
     if (rc != 0) {
