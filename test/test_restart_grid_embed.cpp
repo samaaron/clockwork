@@ -109,12 +109,10 @@ void attachingAgain(double rate) {
 
 } // namespace
 
-// Red until docs/RESTARTS.md's "Not yet" row 5 is done: [!shouldfail] passes
-// while it fails, and fails the day it passes, so the tag goes with the fix.
-TEST_CASE("restart grid: an embedded host attaching again", "[restarts][grid][embed][not-yet-5][!shouldfail]") {
+TEST_CASE("restart grid: an embedded host attaching again", "[restarts][grid][embed]") {
     attachingAgain(48000.0);
 }
 
-TEST_CASE("restart grid: an embedded host attaching again at another rate", "[restarts][grid][embed][not-yet-5][!shouldfail]") {
+TEST_CASE("restart grid: an embedded host attaching again at another rate", "[restarts][grid][embed]") {
     attachingAgain(44100.0);
 }

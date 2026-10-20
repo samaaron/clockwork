@@ -763,16 +763,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             }
 
             if (data.type === 'clearSched') {
-                // Drain the IN ring buffer immediately — discard all stale messages
-                // that accumulated while the AudioContext was suspended (e.g. mobile
-                // tab switch). This must happen eagerly (not deferred to process())
-                // so that new messages sent after purge() resolves are not affected.
-                // handleMessage and process() both run on the audio thread, so there
-                // is no race with the C++ ring buffer consumer.
-                if (this.RING_CURSOR_INDICES) {
-                    const head = this.atomicLoad(this.RING_CURSOR_INDICES.IN_HEAD);
-                    this.atomicStore(this.RING_CURSOR_INDICES.IN_TAIL, head);
-                }
+                // What accumulated while the AudioContext was suspended (a
+                // mobile tab switched away) is stale: marked now, eagerly, so
+                // a message sent after purge() resolves is not, and refused to
+                // its sender ("stalled") by the next block's drain — never
+                // dropped without a word (docs/RESTARTS.md, rule 1).
+                // handleMessage and process() both run on the audio thread,
+                // where the marks are set.
+                if (this.wasmExports) this.wasmExports.clockwork_ingress_mark_stale();
 
                 // Set flag to clear the WASM scheduler on next process() call.
                 // The scheduler may contain bundles already dequeued from the ring
@@ -782,6 +780,26 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 if (data.ack) {
                     this.port.postMessage({ type: 'clearSchedAck' });
                 }
+                return;
+            }
+
+            if (data.type === 'close') {
+                // The instance closes before this worklet and the memory it
+                // runs in go (the page's reload in postMessage mode,
+                // docs/RESTARTS.md "One event, every route"): torn down, and
+                // what waits for it refused a block's worth at a time
+                // (clockwork_close), each batch relayed to the page before the
+                // next. Then the generation that closed, which the next memory
+                // carries on.
+                const ex = this.wasmExports;
+                if (ex) {
+                    for (let i = 0; i < 4096 && ex.clockwork_close() > 0; i++) this.readOscReplies();
+                    this.readOscReplies();
+                }
+                this.port.postMessage({
+                    type: 'closed',
+                    generation: ex ? instanceGeneration(readGeneration(this.wasmMemory.buffer, this.arenaBase)) : 0,
+                });
                 return;
             }
 
@@ -1054,6 +1072,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                         // anything else.
                         if (this.wasmInstance.exports.clockwork_init) {
                             console.log(`[clockwork] transport: ${this.mode === 'sab' ? 'SAB' : 'PM'}`);
+                            // The generation the engine this memory replaces
+                            // closed: carried on, never named twice.
+                            if (data.carriedGeneration)
+                                this.wasmInstance.exports.clockwork_carry_generation(data.carriedGeneration);
                             this.wasmInstance.exports.clockwork_init(
                                 this.sampleRate,
                                 0,

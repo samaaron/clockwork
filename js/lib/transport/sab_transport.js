@@ -4,7 +4,7 @@
 import { Transport } from './transport.js';
 import { createWorker } from '../worker_loader.js';
 import { OscChannel } from '../osc_channel.js';
-import { calculateInControlIndices } from '../ring_cursor_offsets.js';
+import { calculateInControlIndices, IN_HEAD, OUT_HEAD } from '../ring_cursor_offsets.js';
 import { engineRings } from '../ring.js';
 
 /**
@@ -39,6 +39,10 @@ export class SABTransport extends Transport {
     #oscOutLogWorker;
     #workerBaseURL;
     #oscInEndpoint;
+
+    // The readers' stop, in memory they read every time they wake (sab_worker_loop.js): 1 = stop.
+    #stop = new Int32Array(new SharedArrayBuffer(4));
+    #disposing = null;
 
     // Lazily-created main-thread channel for the transport's own send()
     #mainChannel = null;
@@ -222,20 +226,35 @@ export class SABTransport extends Transport {
         return this.#initialized && !this._disposed;
     }
 
+    // The readers stopped, and heard to have stopped, before they are let go: a reader that read on — parked in
+    // Atomics.wait, where neither a message nor terminate() reaches it at once — would take what the next engine
+    // says first (sab_worker_loop.js, the stop a parked thread sees). Told in memory and by message, its ring's
+    // waiters woken, and waited for, within a bound a reader that is already gone reaches.
     dispose() {
-        if (this._disposed) return;
+        if (this._disposed) return Promise.resolve();
+        this.#disposing ??= this.#stopReaders();
+        return this.#disposing;
+    }
 
-        // Stop and terminate workers
-        if (this.#oscInWorker) {
-            this.#oscInWorker.postMessage({ type: 'stop' });
-            if (this.#oscInIsOurs) this.#oscInWorker.terminate();
-            this.#oscInWorker = null;
-        }
-        if (this.#oscOutLogWorker) {
-            this.#oscOutLogWorker.postMessage({ type: 'stop' });
-            this.#oscOutLogWorker.terminate();
-            this.#oscOutLogWorker = null;
-        }
+    async #stopReaders() {
+        const readers = [this.#oscInWorker, this.#oscOutLogWorker].filter(Boolean);
+        const heard = readers.map((reader) => new Promise((resolve) => {
+            const done = () => { clearTimeout(timer); reader.removeEventListener('message', onMessage); resolve(); };
+            const onMessage = (event) => { if (event.data?.type === 'stopped') done(); };
+            const timer = setTimeout(done, 500);
+            reader.addEventListener('message', onMessage);
+        }));
+        Atomics.store(this.#stop, 0, 1);
+        const cursors = this.#arenaBase + this.#bufferConstants.RING_CURSORS_START;
+        Atomics.notify(this.#atomicView, (cursors + OUT_HEAD) / 4);
+        Atomics.notify(this.#atomicView, (cursors + IN_HEAD) / 4);
+        for (const reader of readers) reader.postMessage({ type: 'stop' });
+        await Promise.all(heard);
+
+        if (this.#oscInWorker && this.#oscInIsOurs) this.#oscInWorker.terminate();
+        this.#oscInWorker = null;
+        this.#oscOutLogWorker?.terminate();
+        this.#oscOutLogWorker = null;
 
         this.#initialized = false;
         super.dispose();
@@ -279,6 +298,7 @@ export class SABTransport extends Transport {
             worker.addEventListener('message', handler);
             worker.postMessage({
                 type: 'init',
+                stopBuffer: this.#stop.buffer,
                 sharedBuffer: this.#sharedBuffer,
                 arenaBase: this.#arenaBase,
                 bufferConstants: this.#bufferConstants,

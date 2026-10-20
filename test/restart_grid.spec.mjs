@@ -27,10 +27,7 @@ const where = (heard, address) => heard.flatMap((m, i) => (m[0] === address ? [i
 const refusalsOf = (heard, address) => heard.filter((m) => m[0] === "/clockwork/error" && m[1] === address);
 const shown = (heard) => heard.map((m) => m.join(" ")).join("\n  | ");
 
-// A cell still red until a row of docs/RESTARTS.md's "Not yet" is done is marked so: it passes while it fails, and
-// fails the day it passes, so the mark goes with the fix that turns it green.
 test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => {
-  test.fail(true, "Not yet 1 and 2: a reload is not a rebuild");
   await boot(page);
   const r = await page.evaluate(async ([config, listenSrc]) => {
     const cw = new window.Clockwork(config);
@@ -66,22 +63,23 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
   const reply = where(heard, "/dummy/reconfigured.reply");
   expect(reply.length, info).toBe(1);
   expect(reply[0], info).toBeGreaterThan(setup);
-  const synced = heard.flatMap((m, i) => (m[0] === "/clockwork/synced" && m[1] === 7 ? [i] : []));
-  expect(synced.length, `the waiting sync answered once (${info})`).toBe(1);
-  expect(synced[0], info).toBeGreaterThan(setup);
-
   expect(where(heard, "/dummy/events").length, `the waiting message reached an instance (${info})`).toBe(0);
   const refused = refusalsOf(heard, "/dummy/events/get");
   expect(refused.length, `the waiting message refused once (${info})`).toBe(1);
   expect(refused[0][2], info).toBe("rebuilding");
   expect(refused[0][3], info).toBe(before);
+
+  // Clockwork's own is answered once, whichever engine answers it — its answers belong to no instance — and a sync
+  // after everything sent before it.
+  const synced = heard.flatMap((m, i) => (m[0] === "/clockwork/synced" && m[1] === 7 ? [i] : []));
+  expect(synced.length, `the waiting sync answered once (${info})`).toBe(1);
+  expect(synced[0], info).toBeGreaterThan(heard.indexOf(refused[0]));
 });
 
 test("restart grid: the page purging what waited while it was suspended", async ({ page, clockworkConfig }) => {
   // What resume() does after a stall (purge(), then the context started), with the purge made while the audio
   // thread is still stopped: resume() starts the context first, and whether a block takes what waited before the
   // purge arrives is then the browser's timing.
-  test.fail(true, "Not yet 3: the page's purge drops what waited");
   await boot(page);
   const r = await page.evaluate(async ([config, listenSrc]) => {
     const cw = new window.Clockwork(config);

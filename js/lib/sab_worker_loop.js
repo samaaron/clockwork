@@ -47,6 +47,14 @@ export function runSabWorker(config) {
     };
 
     let running = false;
+    // THE STOP A PARKED THREAD SEES. A worker blocked in Atomics.wait runs no message until it wakes, and a
+    // terminate() does not stop it at once either: Chromium runs a terminated worker on for about two seconds, and
+    // one parked on a ring wakes with every frame written and reads it — the next engine's setup, its first
+    // replies, gone to a thread no one listens to. So the transport says stop in shared memory as well, wakes the
+    // ring's waiters, and waits to hear 'stopped': the loop reads this word every time it wakes, before it reads
+    // the ring.
+    let stopWord = null;
+    const toldToStop = () => stopWord !== null && Atomics.load(stopWord, 0) !== 0;
     // Counted up by every start() and stop(). A yielding loop parked in Atomics.waitAsync when the reader is stopped
     // and started again, with nothing written in between, wakes to a running reader — and without this read on beside
     // the loop that replaced it: one more loop for each time, every one woken by every frame (and a watcher, which
@@ -74,6 +82,13 @@ export function runSabWorker(config) {
         await onInit?.(ctx);
     }
 
+    // Out of the loop for good, said once to whoever waits on it.
+    function stopped() {
+        running = false;
+        generation++;
+        endpoint.postMessage({ type: 'stopped' });
+    }
+
     function waitLoop(mine) {
         const hIdx = headIndex(ctx.RING_CURSOR_INDICES);
         // A reader that CONSUMES leaves its position in the ring's own tail, so
@@ -85,6 +100,7 @@ export function runSabWorker(config) {
 
         while (running && mine === generation) {
             try {
+                if (toldToStop()) { stopped(); return; }
                 const currentHead = Atomics.load(ctx.atomicView, hIdx);
                 const idle = tIdx >= 0
                     ? currentHead === Atomics.load(ctx.atomicView, tIdx)
@@ -92,6 +108,7 @@ export function runSabWorker(config) {
 
                 if (idle) {
                     Atomics.wait(ctx.atomicView, hIdx, currentHead);
+                    if (toldToStop()) { stopped(); return; }
                 }
                 lastHead = Atomics.load(ctx.atomicView, hIdx);
 
@@ -117,6 +134,7 @@ export function runSabWorker(config) {
 
         while (running && mine === generation) {
             try {
+                if (toldToStop()) { stopped(); return; }
                 const currentHead = Atomics.load(ctx.atomicView, hIdx);
                 const idle = tIdx >= 0
                     ? currentHead === Atomics.load(ctx.atomicView, tIdx)
@@ -129,6 +147,7 @@ export function runSabWorker(config) {
                     } else {
                         await new Promise((r) => setTimeout(r, 1));
                     }
+                    if (toldToStop()) { stopped(); return; }
                     if (!running || mine !== generation) return;   // stopped, or replaced, while it waited
                 }
                 lastHead = Atomics.load(ctx.atomicView, hIdx);
@@ -175,6 +194,7 @@ export function runSabWorker(config) {
             }
             switch (data.type) {
                 case 'init':
+                    stopWord = data.stopBuffer ? new Int32Array(data.stopBuffer) : null;
                     if (data.sharedBuffer) {
                         await initRingBuffer(data.sharedBuffer, data.arenaBase,
                                              data.bufferConstants);
@@ -185,7 +205,10 @@ export function runSabWorker(config) {
                     if (ctx.sharedBuffer) start();
                     break;
                 case 'stop':
+                    // Not while a read is under way: this handler runs between the loop's awaits, or not at all
+                    // while it is blocked (the stop word is for that one).
                     stop();
+                    endpoint.postMessage({ type: 'stopped' });
                     break;
                 default:
                     console.warn(`[${name}] Unknown message type:`, data.type);   // a mismatch between versions: said in every build

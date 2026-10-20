@@ -1301,6 +1301,7 @@ if(EMSCRIPTEN)
         _clockwork_log _clockwork_log_va _clockwork_log_raw
         _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
         _clear_scheduler _clockwork_host_forward _clockwork_host_forwards
+        _clockwork_ingress_mark_stale _clockwork_carry_generation _clockwork_close
         _clockwork_worklet_alloc _clockwork_worklet_free
         _clockwork_client_abi_version _clockwork_client_status_text
         _clockwork_client_open_memory

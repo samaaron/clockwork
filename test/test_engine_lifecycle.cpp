@@ -322,3 +322,19 @@ TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pum
     engine.pumpAudioBlock();
     CHECK(engine.processor().processCount.load(std::memory_order_acquire) == before + 1);
 }
+
+TEST_CASE("An engine booted again in the same process carries the generation on from the last",
+          "[lifecycle][restarts][generation]") {
+    // A client of the first engine may still hold a refusal or a setup that
+    // named its generation; the next engine in the process must never name
+    // one already used (docs/RESTARTS.md, "The generation"). The NIF's stop
+    // and start, and a host's shutdown and init, are this.
+    uint32_t first = 0;
+    {
+        EngineFixture fix;
+        first = fix.engine().generation();
+        REQUIRE(first > 0);
+    }
+    EngineFixture fix;
+    CHECK(fix.engine().generation() > first);
+}

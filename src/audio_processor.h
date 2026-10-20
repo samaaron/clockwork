@@ -146,15 +146,24 @@ extern "C" {
     // own verbs are delivered. On the audio thread, or with it stopped: the
     // marks are the drain's state (docs/RESTARTS.md, rule 1).
     void clockwork_ingress_mark(const char* reason);
+    EMSCRIPTEN_KEEPALIVE void clockwork_ingress_mark_stale();
+    // The generation a new arena carries on from (the last this process
+    // opened, or one a host hands over from memory now gone).
+    EMSCRIPTEN_KEEPALIVE void clockwork_carry_generation(uint32_t generation);
+    // The instance closed with the memory it ran in: torn down, and what
+    // waits for it refused a block's worth a call. Bytes still waiting.
+    EMSCRIPTEN_KEEPALIVE uint32_t clockwork_close();
+
+    // A cold restart (docs/RESTARTS.md): the instance torn down, with the
+    // audio thread stopped...
+    void destroy_dsp();
+    // ...and a new one at `sample_rate`, on a device whose callback is
+    // `device_buffer_frames` (0 for a host with no device: its block): what
+    // its /clockwork/setup names, the last thing this writes (or its first
+    // block's, when the instance's ring has no room for it yet).
+    void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
 
 #ifndef __EMSCRIPTEN__
-    // Native-only: DSP teardown/rebuild for cold swap
-    void destroy_dsp();
-    // A new instance at `sample_rate`, on a device whose callback is
-    // `device_buffer_frames`: what its /clockwork/setup names, the last thing
-    // this writes (or its first block's, when the instance's ring has no room
-    // for it yet).
-    void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
     // Native-only: full arena teardown for engine shutdown — destroys the
     // DSP instance and clears memory_initialized/shared_memory/control/metrics so
     // the lanes entry points reject before the host unmaps the segment.

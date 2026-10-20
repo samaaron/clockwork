@@ -411,6 +411,17 @@ extern "C" {
     // its next drain so g_in_drain stays single-threaded.
     std::atomic<bool> g_in_seq_reset{false};
 
+    // The last generation opened in this process, or handed over by a host
+    // whose engine ran in memory now gone (clockwork_carry_generation): a new
+    // arena carries it on, so no generation is named twice to a client that
+    // outlived the engine before (docs/RESTARTS.md, "The generation").
+    // Outlives teardown_memory, as the process does.
+    uint32_t g_carried_generation = 0;
+
+    void clockwork_carry_generation(uint32_t generation) {
+        if (generation > g_carried_generation) g_carried_generation = generation;
+    }
+
     // THE MARKS: where in the in ring the messages written for a generation
     // end (docs/RESTARTS.md, rule 1). A teardown sets one for the generation
     // closing (destroy_dsp); a purge of what went stale while the audio
@@ -976,9 +987,10 @@ extern "C" {
                      static_cast<uint32_t>(ps.Size()));
     }
 
-    // A rebuilt instance's first word on its ring is its /clockwork/setup
-    // (docs/RESTARTS.md): rebuild_dsp says it, as the restart thread writes the
-    // ring with the audio thread stopped. A ring with no room for it then — a
+    // A new instance's first word on its ring is its /clockwork/setup
+    // (docs/RESTARTS.md) whenever it replaces one: a rebuild's, or a new
+    // arena's that carries a generation on. Said by the build, with the audio
+    // thread stopped (announce_instance). A ring with no room for it then — a
     // reader far behind — leaves it owed, and the instance does not run until
     // it has been said (process_audio), so nothing of the instance's goes
     // ahead of it.
@@ -1000,6 +1012,18 @@ extern "C" {
             return false;
         g_setup_owed.store(false, std::memory_order_relaxed);
         return true;
+    }
+
+    // The new instance announces itself: its setup, naming the device's
+    // callback (or, for a host with no device yet, the block), written on its
+    // ring as the build's last word, or owed until the ring has room.
+    static void announce_instance(uint32_t buffer_frames) {
+        InstanceRingScope instance_ring;
+        g_setup_buffer_frames.store(buffer_frames ? buffer_frames
+                                                  : static_cast<uint32_t>(get_audio_buffer_samples()),
+                                    std::memory_order_relaxed);
+        g_setup_owed.store(true, std::memory_order_release);
+        say_setup();
     }
 
     // DspHost::asset_release — the guest is done; the committing client hears.
@@ -1152,6 +1176,13 @@ extern "C" {
             --g_in_mark_count;
         }
         g_in_marks[g_in_mark_count++] = mark;
+    }
+
+    // What is pending as of now went stale — a stall, a page's context
+    // suspended — and is refused, each to its sender ("stalled"), by the next
+    // drain (the marks, above). On the audio thread, or with it stopped.
+    void clockwork_ingress_mark_stale() {
+        clockwork_ingress_mark(CLOCKWORK_REFUSED_STALLED);
     }
 
     // The teardown's mark, exact: taken under the in ring's writer lock once
@@ -1746,6 +1777,11 @@ extern "C" {
         // takes the skip path and resets only the regions of lifetime
         // rebuild.
         const bool cold_boot = shared_memory != base;
+#if CLOCKWORK_SYNTH
+        // A new arena that carries a generation on replaces a running engine
+        // (docs/RESTARTS.md, "Three events"): its instance announces itself.
+        const bool replacing = cold_boot && g_carried_generation > 0;
+#endif
         if (cold_boot) {
             shared_memory = base;
             // A new engine, not a rebuild of the one that was running.
@@ -1755,6 +1791,11 @@ extern "C" {
             // segment's creator wrote the same bytes already; the wasm arena
             // and an embedder's memory get theirs here.
             writeArenaHeader(shared_memory);
+            // The generation goes on from the last this process opened: the
+            // word as the last arena's stood between instances.
+            if (g_carried_generation > 0)
+                arenaGenerationWord(shared_memory).store(2u * g_carried_generation + 1u,
+                                                         std::memory_order_release);
             cursors = reinterpret_cast<RingCursors*>(shared_memory + RING_CURSORS_START);
             // Metrics live in the arena at their fixed offset — which is the
             // public segment when one was supplied, so external observers read
@@ -2386,6 +2427,7 @@ extern "C" {
             // one on from the last, which is the number setup will name —
             // and the boundary takes messages for it again.
             arenaInstanceUp(shared_memory);
+            clockwork_carry_generation(arenaInstanceGeneration(shared_memory));
             cursors->status_flags.fetch_and(~static_cast<uint32_t>(STATUS_NO_INSTANCE),
                                             std::memory_order_release);
         } catch (const std::exception& e) {
@@ -2507,6 +2549,7 @@ extern "C" {
         // No banner off the web, so the guest's identity is a line of its own.
         clockwork_log("DSP: %s %s", dsp_name, dsp_version);
 #endif
+        if (replacing && g_dsp) announce_instance(0);
 #else  // !CLOCKWORK_SYNTH
         // No-DSP core: no instance, no audio render. The scheduler/router still
         // runs — derive the block-time constants from the AudioContext rate and a
@@ -2524,10 +2567,12 @@ extern "C" {
 #endif // CLOCKWORK_SYNTH
     }
 
-#if !defined(__EMSCRIPTEN__) && CLOCKWORK_SYNTH
-    // destroy_dsp / rebuild_dsp — for native cold swap (device sample rate change).
-    // Frees the DSP instance outright and builds a new one at the new rate; nothing
-    // of the old instance survives but DspConfig::persistent.
+#if CLOCKWORK_SYNTH
+    // destroy_dsp / rebuild_dsp — a cold restart, however it came: a device
+    // change, a host attaching again, a page reloaded over the same memory
+    // (docs/RESTARTS.md, "One event, every route"). Frees the DSP instance
+    // outright and builds a new one; nothing of the old instance survives but
+    // DspConfig::persistent.
     //
     // A COLD SWAP EMPTIES WHATEVER SUBSCRIPTION SET THE DSP WAS KEEPING, and a client
     // must re-subscribe. A registry that outlives an instance is state clockwork
@@ -2590,12 +2635,12 @@ extern "C" {
         init_memory();
         // Not up: there is no instance to announce, and the failed build is
         // the host's to report.
-        if (!g_dsp) return;
-        g_setup_buffer_frames.store(device_buffer_frames, std::memory_order_relaxed);
-        g_setup_owed.store(true, std::memory_order_release);
-        say_setup();
+        if (g_dsp) announce_instance(device_buffer_frames);
     }
 
+#endif
+
+#if !defined(__EMSCRIPTEN__) && CLOCKWORK_SYNTH
     // Mirror of init_memory for engine shutdown: tear down the DSP instance and drop
     // the engine's global view of the arena while it is still mapped, so the
     // lanes guards (memory_initialized / control) reject post-shutdown calls
@@ -2716,6 +2761,23 @@ extern "C" {
                 return refused ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
             },
             &stop);
+    }
+
+    // A host that replaces the engine's memory rather than rebuild in it —
+    // the page reloading over postMessage, its worklet going with the memory
+    // it ran in — closes the instance first, so what waits for it is
+    // answered before the memory goes: the instance is torn down, and each
+    // call refuses a block's worth of what waits, as its ring has room, for
+    // the host to relay between calls. How much still waits, in bytes: 0
+    // once everything has been answered.
+    uint32_t clockwork_close() {
+        if (!memory_initialized || !cursors) return 0;
+        if (g_dsp) destroy_dsp();
+        InstanceRingScope instance_ring;
+        drain_without_guest();
+        const auto head = static_cast<uint32_t>(cursors->in_head.load(std::memory_order_acquire));
+        const auto tail = static_cast<uint32_t>(cursors->in_tail.load(std::memory_order_acquire));
+        return (head - tail + IN_RING_SIZE) % IN_RING_SIZE;
     }
 #endif
 

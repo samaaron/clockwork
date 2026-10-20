@@ -87,15 +87,25 @@ across every restart.
 
 A cold boot is a new arena: the first boot, or `teardown_memory` followed by
 `init_memory`. The regions a rebuild keeps start over here. A cold boot
-that replaces a running engine — the browser's reload into new memory — is
-still the one event above for its clients: the old generation closes, and
-the new arena carries the generation on from the one it replaces.
+that replaces a running engine — the browser's reload into new memory, an
+engine booted again in the same process — is still the one event above for
+its clients: the old generation closes (in the browser, the old worklet
+refuses what waited for it before its memory goes, `clockwork_close`), the
+new arena carries the generation on, and its instance says `setup`.
+
+`clockwork_init` on an arena that is already up is a rebuild, whoever calls
+it: an embedded host attaching again, a page reloaded over the same memory
+(whose new module finds the old one's state where it left it), a host's own
+device change. The instance goes, what waited for it is marked, and the next
+is built and says `setup`.
 
 ## The generation
 
 Every guest instance has a generation. It starts at 1 and moves on at every
-cold restart, and never goes back: a new arena that replaces a running
-engine carries it on. It is the key to everything below: a region of lifetime
+cold restart, and never goes back: a new arena carries it on from the last
+generation its process opened, or from one its host hands over from memory
+that has gone (`clockwork_carry_generation`: the page's reload into new
+memory). It is the key to everything below: a region of lifetime
 `rebuild` belongs to one generation, a refusal names the generation that
 refused, and a client rebuilds against the generation `setup` named, with
 nothing from an earlier one taken for the current one.
@@ -270,7 +280,12 @@ waiting on, so these are the rules a client may rely on:
    (lifetime cold boot): what a reader had not read when the rebuild came
    is still there, ahead of `setup`. The engine's own reader, parked for
    the swap, is handed what has been said at the teardown, so clients hear
-   `restarting` while a device opens.
+   `restarting` while a device opens. A reader that is let go stops before
+   anything new is written for it to take: the page's readers are told
+   to stop in memory they read every time they wake, and are heard to
+   have stopped before the page lets them go (js/lib/sab_worker_loop.js),
+   since one parked in `Atomics.wait` hears neither a message nor its own
+   termination at once.
 6. **The schedule is empty from `restarting`.** Timed messages held for
    the old instance are cleared, not refused one by one: the store can
    hold thousands, and a client that halts on `restarting` re-sends its
@@ -372,11 +387,13 @@ fails the day it passes, so the mark goes with the fix.
 And the cells that are not one event among others: thousands of messages
 waiting at a rebuild, for the engine's own reader and a host reading the
 rings (✓); a peer whose reply ring is nearly full when a rebuild comes (✓);
-an embedded host attaching again, at its rate and at another (5); a client
+an embedded host attaching again, at its rate and at another (✓); a client
 writing its message in place between instances (✓, in
-test/test_restarts.cpp); and the page, in test/restart_grid.spec.mjs, at a
-reload over the same memory (1) and into new memory (2), and purging what
-waited while it was suspended (3). The NIF's cell comes with its fix (11).
+test/test_restarts.cpp); an engine booted again in the same process (✓, in
+test/test_engine_lifecycle.cpp); and the page, in
+test/restart_grid.spec.mjs and test/osc_in_reload.spec.mjs, at a reload over
+the same memory and into new memory, and purging what waited while it was
+suspended (✓). The NIF's cell comes with its fix (11).
 
 The same tests run against the smallest rings a profile builds — a native
 tree configured with the ESP32-S3's sizes (`-DCLOCKWORK_IN_RING_SIZE=32768
@@ -424,18 +441,14 @@ grid above shows say so; the fix follows the test.
 
 | # | where | against the model |
 |---|---|---|
-| 1 | browser reload over the same memory | takes the rebuild path with no teardown: the generation never moves, the instance is never freed, its assets are never released, and no `setup` goes on the ring; the page empties the reply rings and the in ring without a word. **Shown**: the generation stays at 1, no `setup`, and a message and a sync waiting at the reload are neither answered nor refused |
-| 2 | browser reload into new memory | the generation starts again at 1, so a refusal cannot name the one that closed; a worker's port to the old engine goes quiet. **Shown**: as row 1 |
-| 3 | the browser's `purge()` and `resume()` | waiting messages are dropped by moving the tail, with no refusal (native refuses them `stalled`). **Shown**: a message and a sync waiting at a purge are neither answered nor refused |
 | 4 | the worklet's `checkStatus` | stores the status word whole, wiping the no-instance flag |
-| 5 | an embedded host attaching again | `clockwork_init` on a live arena abandons the old instance: no teardown, the generation unmoved, no `setup`; an attach that joins can tick through a swap. **Shown**: the generation stays at 1 and no `setup` is said |
 | 8 | the shm peer plane | its door is the control pass, parked for a swap, so what a peer writes between instances reaches the new instance; with no instance for a while, its drain takes the boundary's refusal for a full ring and holds the message, refused again every pass; its reply ring drops what does not fit. **Shown**: a message written between instances is answered by the new instance; with the smallest rings, what a peer wrote before a rebuild that was still in the plane, behind a full in ring, is answered by the new instance |
 | 9 | the client ABI | a client in another process has no sanctioned read of the generation |
 | 10 | the plugin bridge (parked with tracks) | refusals carry generation 0; a track's errors are another shape, broadcast; timed track events vanish with the schedule; track tap slots go dark when the taps region resets |
 | 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read, not yet tested) |
 | 12 | the page's boundary | the page's channel and the worklet read `STATUS_NO_INSTANCE`, a second record of what the generation word's parity already says; every C door reads the word |
 | 13 | a hot restart that changes a fact | told only as a statechange; an embedded host's cached rate goes stale. **Shown**: a switch to a bigger buffer, survived, says nothing of the buffer (the notice the grid expects is `/clockwork/setup/changed ,iii rate buffer generation`) |
-| 14 | clients | Spider's one-second quiet period, its retries and timeouts; the GUI's fifteen-second re-enable; the browser's one-second settle; the page's sync sent six times because "the first message after a reload can go missing": each covers a loss the engine should not have, and goes once the engine has none |
+| 14 | clients | Spider's one-second quiet period, its retries and timeouts; the GUI's fifteen-second re-enable; the browser's one-second settle; the page's sync sent six times because "the first message after a reload can go missing" (it could: the page's own reader, terminated and still running, took it — now stopped before it is let go): each covers a loss the engine should not have, and goes once the engine has none |
 | 16 | Clockwork's ring through a long swap | the engine's own reader is parked for the whole swap, and the swap's own words (its log lines, the device reports) wait on Clockwork's ring until audio resumes; a desktop's 64 KB holds a long swap's, the smallest profile's 4 KB does not, and a few are lost. **Shown**, with the smallest rings: a device that never calls back, and a change the instance refuses |
 
 "Generation" also names, elsewhere in clockwork, the bridge's spawn count,

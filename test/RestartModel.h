@@ -90,7 +90,8 @@ inline Heard refusalsOf(const Heard& heard, const std::string& address) {
 // open now; the old instance's answer comes before the first, everything
 // the new one says after the last; what was waiting for the guest is
 // refused once, for `reason`, naming the generation that closed; clockwork's
-// own is carried and answered once, by the new instance. `reason` is
+// own is answered once, and a sync after everything sent before it — when
+// is clockwork's, since its answers belong to no instance. `reason` is
 // CLOCKWORK_REFUSED_REBUILDING for what was in the in ring at the teardown,
 // CLOCKWORK_REFUSED_NO_INSTANCE for what was sent between instances.
 inline void checkReplaced(const Heard& heard, const char* reader, bool seesRefusals,
@@ -121,7 +122,6 @@ inline void checkReplaced(const Heard& heard, const char* reader, bool seesRefus
     const auto synced = where(heard, kSynced);
     REQUIRE(synced.size() == 1);
     CHECK(heard[static_cast<size_t>(synced[0])].argInt(0) == kSyncId);
-    CHECK(synced[0] > last);
 
     // The guest's answer to a message refused is never heard, and neither is
     // the commit of an asset the old instance never took.
@@ -136,6 +136,14 @@ inline void checkReplaced(const Heard& heard, const char* reader, bool seesRefus
         CHECK(refused[0].argString(1) == reason);
         CHECK(static_cast<uint32_t>(refused[0].argInt(2)) == before);
     }
+    // The sync was in the in ring after the guest's message: its answer
+    // comes after that message's refusal, both said by the drain on the
+    // instance's ring. (A message refused at the door was never in the ring,
+    // and its refusal rides clockwork's, which has no place against it.)
+    if (std::string(reason) == CLOCKWORK_REFUSED_REBUILDING)
+        for (size_t i = 0; i < heard.size(); ++i)
+            if (heard[i].address == kError && heard[i].argString(0) == "/dummy/events/get")
+                CHECK(static_cast<long>(i) < synced[0]);
 }
 
 // The instance survived: nothing refused, no setup, the generation unmoved,

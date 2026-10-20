@@ -352,6 +352,17 @@ void clockwork_init(double   sample_rate,
     // However this host arrived, it is now the one attached.
     if (g_attached == 0) g_attached = 1;
 
+    uint8_t* const arena = g_external_segment ? g_external_segment : clockwork_local_arena();
+#if CLOCKWORK_SYNTH
+    // AN ARENA ALREADY UP IS A REBUILD, as a device change is (docs/RESTARTS.md,
+    // "One event, every route"): a host attaching again, a page reloaded
+    // over the same memory, a host's own device change. The instance goes,
+    // what waited for it is marked, and the next is built and says setup.
+    // With no block rendering, which is this call's contract anyway.
+    const bool rebuild = memory_initialized && get_shared_memory_base() == arena;
+    if (rebuild) destroy_dsp();
+#endif
+
     // Copy the guest's bytes into the region reserved for them, without
     // looking at any of them. NULL means the host has already put them there
     // (the web one has no C pointer to pass) or that there are none.
@@ -368,7 +379,6 @@ void clockwork_init(double   sample_rate,
                     guest_config_bytes, (uint32_t)GUEST_CONFIG_SIZE);
             return;
         }
-        uint8_t* arena = g_external_segment ? g_external_segment : clockwork_local_arena();
         std::memcpy(arena + GUEST_CONFIG_START, guest_config, guest_config_bytes);
     }
 
@@ -376,6 +386,12 @@ void clockwork_init(double   sample_rate,
                            output_channels, verbosity,
                            guest_memory, guest_memory_bytes, arena_bytes,
                            assets, assets_bytes, returns, returns_bytes);
+#if CLOCKWORK_SYNTH
+    if (rebuild) {
+        rebuild_dsp(sample_rate, 0);   // no device: setup names the block
+        return;
+    }
+#endif
     init_memory();
 }
 
