@@ -1103,9 +1103,9 @@ private:
         // ring (rebuild_dsp), and what a peer wrote between instances is
         // marked as such. Throws as rebuild_dsp does.
         void build(double rate);
-        // Audio again: the control pass resumed, the source started, the
-        // processor resumed, the gate released. Whether the source
-        // delivered a block.
+        // Audio again: a fact a hot restart changed told, the control pass
+        // resumed, the source started, the processor resumed, the gate
+        // released. Whether the source delivered a block.
         bool resumeAudio();
         // A hot restart that must become cold after all, with the device
         // open and audio still stopped: the guest refused the device facts
@@ -1116,10 +1116,16 @@ private:
         void escalateToCold();
     private:
         void drain();
+        // The facts the instance's setup named, as the device stood: what a
+        // hot restart that changes them tells (clockwork_announce_facts).
+        struct Facts { int rate = 0; int buffer = 0; bool operator!=(const Facts& o) const { return rate != o.rate || buffer != o.buffer; } };
+        Facts deviceFacts() const;
+
         ClockworkEngine& mEngine;
         bool             mCold;
         bool             mParked  = false;   // the pass did park (it may not, in time)
         bool             mResumed = false;
+        Facts            mFactsBefore;
         std::unique_lock<std::mutex> mPumpGate;
     };
 

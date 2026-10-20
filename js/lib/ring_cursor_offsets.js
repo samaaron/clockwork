@@ -50,13 +50,9 @@ export const NRT_OUT_SEQUENCE = 32;
 export const STATUS_FLAGS = 36;
 export const IN_WRITE_LOCK = 40;
 
-// The bits of status_flags (StatusFlags in shared_memory.h). The one a
-// writer of the in ring reads before it writes: there is no guest instance,
-// from the start of a teardown until the next one is up, so a message for
-// the guest is refused at the boundary rather than written to a ring whose
-// next reader is an instance it was not addressed to. Clockwork's own verbs
-// go through (docs/RESTARTS.md).
-export const STATUS_NO_INSTANCE = 1 << 4;
+// A bit of status_flags (StatusFlags in shared_memory.h). Whether there is a
+// guest instance is not one: the arena's generation word says that, and
+// every door reads it (js/lib/arena.js, docs/RESTARTS.md).
 // The engine's control pass drains the control ring, so a boundary writes a
 // control verb of clockwork's there (docs/RESTARTS.md, "The control ring").
 // Never raised by the worklet, which has no control pass: the web's writer

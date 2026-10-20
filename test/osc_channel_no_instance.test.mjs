@@ -4,15 +4,14 @@
 // The browser's writer of the in ring at the boundary docs/RESTARTS.md draws:
 // while the engine has no guest instance, a message for the guest is refused
 // where it is written, with the word every boundary uses, and clockwork's own
-// goes through. The flag is the engine's (STATUS_NO_INSTANCE in the cursors
-// region, set by the C at a teardown); here it is raised by hand over a real
-// engine booted in node, since the web build has no device to swap.
+// goes through. The word is the engine's (the arena's generation word, odd
+// from a teardown until the next build); here it is turned odd by hand over a
+// real engine booted in node, since the web build has no device to swap.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OscChannel, REASON_RING_FULL } from "../js/lib/osc_channel.js";
-import { STATUS_FLAGS, STATUS_NO_INSTANCE } from "../js/lib/ring_cursor_offsets.js";
 import { REASON_NO_INSTANCE, oscAddress, isClockworkSysBytes } from "../js/lib/clockwork_sys.js";
-import { readArena, readGeneration, instanceGeneration, hasInstance } from "../js/lib/arena.js";
+import { readArena, readGeneration, generationView, instanceGeneration, hasInstance } from "../js/lib/arena.js";
 import * as oscFast from "../js/lib/osc_fast.js";
 import { EgressReader } from "../js/lib/ring.js";
 import { bootEngine, block, haveWasm } from "./engine_boot.mjs";
@@ -43,8 +42,8 @@ test("the sys rule in bytes agrees with the rule in strings, and a bundle is nev
 
 maybe("while there is no instance a message for the guest is refused at the boundary, and clockwork's own goes through", async () => {
   const { x, memory, arenaBase, constants, rings } = await bootEngine();
-  const status = new Int32Array(memory.buffer, arenaBase + constants.RING_CURSORS_START + STATUS_FLAGS, 1);
-  assert.equal(Atomics.load(status, 0) & STATUS_NO_INSTANCE, 0, "booted: there is an instance");
+  const word = generationView(memory.buffer, arenaBase);
+  assert.equal(hasInstance(Atomics.load(word, 0)), true, "booted: there is an instance");
 
   const channel = OscChannel.createSAB({ sharedBuffer: memory.buffer, arenaBase, bufferConstants: constants, sourceId: 7 });
   const refused = [];
@@ -52,16 +51,16 @@ maybe("while there is no instance a message for the guest is refused at the boun
   const guest = oscFast.copyEncoded(oscFast.encodeMessage("/dummy/ping", []));
   const sys = oscFast.copyEncoded(oscFast.encodeMessage("/clockwork/ping", []));
 
-  // The flag up, as the C raises it at a teardown.
-  Atomics.or(status, 0, STATUS_NO_INSTANCE);
+  // The word odd, as the C turns it at a teardown.
+  Atomics.or(word, 0, 1);
   assert.equal(channel.send(guest), false, "not written");
   assert.equal(channel.lastRefusal, REASON_NO_INSTANCE);
   assert.deepEqual(refused, [["/dummy/ping", REASON_NO_INSTANCE]], "the owner heard the word, with the bytes");
   assert.equal(channel.send(sys), true, "clockwork's own goes through");
   assert.equal(channel.lastRefusal, null);
-  Atomics.and(status, 0, ~STATUS_NO_INSTANCE);
+  Atomics.and(word, 0, ~1);
 
-  // The flag down: the same message is written, and the engine answers both.
+  // The word even again: the same message is written, and the engine answers both.
   assert.equal(channel.send(guest), true);
   assert.equal(channel.lastRefusal, null);
   const heard = [];

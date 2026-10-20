@@ -59,7 +59,7 @@ the test that shows it.
 
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
-| **hot restart** | survives | untouched, every region | statechange; and when a fact clients compute with has changed (the rate), a notice of it naming the same generation |
+| **hot restart** | survives | untouched, every region | statechange; and when a fact `setup` named has changed (the rate, the device's callback), `/clockwork/setup/changed ,iii rate buffer generation` naming the same generation, on the instance's ring as audio resumes |
 | **cold restart** (a rebuild: a native device change, a browser reload over the same memory, an embedded host attaching again) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
@@ -277,12 +277,16 @@ waiting on, so these are the rules a client may rely on:
    instance, then `setup`, then the new instance, because that is their
    order in the ring. A ring with no room for `setup` then (a reader far
    behind) holds the new instance silent until it has room: nothing of the
-   instance's goes ahead of it.
+   instance's goes ahead of it. A change the instance survives of a fact
+   `setup` named is told on the same ring, as `/clockwork/setup/changed`,
+   before it says anything more, and held the same way; so are the
+   refusals the drain makes of what waited below a mark, which name the
+   generation they were written for wherever they fall.
 4. **The NRT out ring carries nothing whose meaning depends on the cut.**
    Clockwork's own replies, device reports, inputs (MIDI, Link, gamepad,
-   OSC), log lines and hosted tracks belong to no instance; statechanges,
-   refusals and the notice of a fact a hot restart changed name their
-   generation. So `restarting` and `running` need
+   OSC), log lines and hosted tracks belong to no instance; statechanges
+   and the door's refusals name their generation. So `restarting` and
+   `running` need
    no place against `setup`: `running`, said as the swap ends, comes after
    it for the engine's own reader, which reads nothing until audio resumes,
    and may come either side of the new instance's first replies.
@@ -364,8 +368,9 @@ Everything else it holds is the instance's and goes with it.
 
 - On `restarting`, stop sending to the guest. Read every `rebuilding`
   refusal as "wait for `setup`", never as an error to show.
-- On a notice of a fact a hot restart changed, take the new fact. Nothing
-  is rebuilt: the instance is the one it was.
+- On `/clockwork/setup/changed`, take the new facts. Nothing is rebuilt:
+  the instance is the one it was, and the generation it names is the one
+  the client has.
 - On `setup`, rebuild in one pass against the generation it names. A retry
   budget is counted against that generation alone: a pass that could not
   reach the engine at all, because the machine slept or the device was
@@ -382,16 +387,13 @@ instance answer something its reader has not yet read, has three messages
 waiting — the guest's, a sync, an asset's commit — and asks the new instance
 one more thing after. The native cells are test/test_restart_grid.cpp, on
 fake devices that keep the case's clock; the embedded host's are
-test/test_restart_grid_embed.cpp. A cell marked with a number is red until
-that row of "Not yet" is done, and its test says so ([not-yet-N] and
-[!shouldfail], `test.fail` in the page's): it passes while it fails, and
-fails the day it passes, so the mark goes with the fix.
+test/test_restart_grid_embed.cpp.
 
 | reader | rate change | driver change | another device, survived | bigger buffer, survived | device that will not open | device that never calls back | sent between instances |
 |---|---|---|---|---|---|---|---|
-| the engine's own | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | ✓ |
-| a host reading the rings | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | ✓ |
-| a tap on the instance's ring | ✓ | ✓ | ✓ | 13 | ✓ | ✓ | |
+| the engine's own | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| a host reading the rings | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| a tap on the instance's ring | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | a peer on the segment's plane | ✓ | | ✓ | | | | ✓ |
 
 And the cells that are not one event among others: thousands of messages
@@ -452,13 +454,10 @@ grid above shows say so; the fix follows the test.
 
 | # | where | against the model |
 |---|---|---|
-| 4 | the worklet's `checkStatus` | stores the status word whole, wiping the no-instance flag |
 | 8 | the shm peer plane | its reply ring drops what does not fit when its peer is behind, at a rebuild or not; holding the engine's replies for one slow peer would hold every other client's, so it is left for a round of its own |
 | 9 | the client ABI | a client in another process has no sanctioned read of the generation |
 | 10 | the plugin bridge (parked with tracks) | refusals carry generation 0; a track's errors are another shape, broadcast; timed track events vanish with the schedule; track tap slots go dark when the taps region resets |
-| 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read, not yet tested) |
-| 12 | the page's boundary | the page's channel and the worklet read `STATUS_NO_INSTANCE`, a second record of what the generation word's parity already says; every C door reads the word |
-| 13 | a hot restart that changes a fact | told only as a statechange; an embedded host's cached rate goes stale. **Shown**: a switch to a bigger buffer, survived, says nothing of the buffer (the notice the grid expects is `/clockwork/setup/changed ,iii rate buffer generation`) |
+| 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read; a test needs a way to hold an instance down from Erlang, which a boot the guest refuses does not give — the NIF shuts that engine down) |
 | 14 | clients | Spider's one-second quiet period, its retries and timeouts; the GUI's fifteen-second re-enable; the browser's one-second settle; the page's sync sent six times because "the first message after a reload can go missing" (it could: the page's own reader, terminated and still running, took it — now stopped before it is let go): each covers a loss the engine should not have, and goes once the engine has none |
 | 16 | Clockwork's ring through a long swap | the engine's own reader is parked for the whole swap, and the swap's own words (its log lines, the device reports) wait on Clockwork's ring until audio resumes; a desktop's 64 KB holds a long swap's, the smallest profile's 4 KB does not, and a few are lost. **Shown**, with the smallest rings: a device that never calls back, and a change the instance refuses |
 

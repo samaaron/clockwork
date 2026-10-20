@@ -57,15 +57,16 @@ test("channels opened from their transferable each reach the engine, however man
  * instance, a message for the guest is refused where it is written, and the
  * client hears it as it hears every refusal — /clockwork/error on the same
  * path as the engine's replies — while clockwork's own goes through. The
- * flag is the engine's (raised by the C at a teardown); the web build has no
- * device to swap, so here it is raised by hand in the cursors region.
+ * word is the engine's (the arena's generation word, odd from a teardown
+ * until the next build); the web build has no device to swap, so here it is
+ * turned odd by hand.
  */
 test("while there is no instance the client's send is refused with the word, a worker's channel says why, and clockwork's own goes through", async ({ page, clockworkConfig, clockworkMode }) => {
   test.skip(clockworkMode === "postMessage", "the boundary is the ring writer, which only SAB mode has");
   await boot(page);
   const r = await page.evaluate(async (config) => {
     const { OscChannel } = await import(`${location.origin}/js/lib/osc_channel.js`);
-    const { STATUS_FLAGS, STATUS_NO_INSTANCE } = await import(`${location.origin}/js/lib/ring_cursor_offsets.js`);
+    const { generationView } = await import(`${location.origin}/js/lib/arena.js`);
     const osc = window.Clockwork.osc;
     const cw = new window.Clockwork({ ...config });
     await cw.init();
@@ -73,18 +74,17 @@ test("while there is no instance the client's send is refused with the word, a w
     const heard = [];
     cw.on("in:osc", ({ oscData }) => { try { heard.push(osc.decode(oscData)); } catch { /* a bundle */ } });
     const { transferable } = cw.createOscChannel();
-    const status = new Int32Array(transferable.sharedBuffer,
-      transferable.arenaBase + transferable.bufferConstants.RING_CURSORS_START + STATUS_FLAGS, 1);
+    const word = generationView(transferable.sharedBuffer, transferable.arenaBase);
     const worker = await OscChannel.fromTransferable(transferable);
     const refused = [];
     worker.onRefused = (bytes, reason) => refused.push(reason);
 
-    Atomics.or(status, 0, STATUS_NO_INSTANCE);
+    Atomics.or(word, 0, 1);                      // odd: no instance, as at a teardown
     cw.send("/dummy/ping");                      // the client's own door
     const workerSent = worker.send(osc.encodeMessage("/dummy/ping", []));
     const workerReason = worker.lastRefusal;
     cw.send("/clockwork/sync", 4242);            // clockwork's own: written, answered once it renders
-    Atomics.and(status, 0, ~STATUS_NO_INSTANCE);
+    Atomics.and(word, 0, ~1);
     cw.send("/dummy/ping");                      // an instance again: delivered
 
     const deadline = performance.now() + 5000;

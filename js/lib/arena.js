@@ -206,8 +206,12 @@ export function readArena(buffer, base) {
  * with one load, rather than from a readArena snapshot.
  */
 const GENERATION_WORD = 13;
+/** The word itself, to read again and again without making a view each time (a door asks it on every send). */
+export function generationView(buffer, base) {
+  return new Uint32Array(buffer, base + GENERATION_WORD * 4, 1);
+}
 export function readGeneration(buffer, base) {
-  return Atomics.load(new Uint32Array(buffer, base + GENERATION_WORD * 4, 1), 0);
+  return Atomics.load(generationView(buffer, base), 0);
 }
 /** The generation the word names: the last one opened, 0 before any. */
 export function instanceGeneration(word) { return word >>> 1; }

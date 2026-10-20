@@ -162,6 +162,10 @@ extern "C" {
     // its /clockwork/setup names, the last thing this writes (or its first
     // block's, when the instance's ring has no room for it yet).
     void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames);
+    // A device change the instance survived changed a fact its setup named:
+    // told as /clockwork/setup/changed on its ring, with the audio thread
+    // stopped (docs/RESTARTS.md, "Three events").
+    void clockwork_announce_facts(double sample_rate, uint32_t buffer_frames);
 
 #ifndef __EMSCRIPTEN__
     // Native-only: full arena teardown for engine shutdown — destroys the

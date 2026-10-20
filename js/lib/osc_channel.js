@@ -3,7 +3,8 @@
 
 import { engineRings, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
-import { calculateInControlIndices, STATUS_FLAGS, STATUS_NO_INSTANCE } from './ring_cursor_offsets.js';
+import { calculateInControlIndices } from './ring_cursor_offsets.js';
+import { generationView, hasInstance } from './arena.js';
 import { sampleClockReader } from './sample_clock.js';
 import { answersWithoutGuest, REASON_NO_INSTANCE } from './clockwork_sys.js';
 
@@ -42,7 +43,7 @@ export class OscChannel {
     #sabConfig;          // SAB mode: { sharedBuffer, arenaBase, bufferConstants, controlIndices }
     #ingress;            // SAB mode: the engine's ingress ring (js/lib/ring.js)
     #metricsView;        // SAB mode: Int32Array view into metrics region
-    #statusView;         // SAB mode: the cursors' status word, read before a write (STATUS_NO_INSTANCE)
+    #generationView;     // SAB mode: the arena's generation word, read before a write (odd: no instance)
     #sourceId;           // Numeric source ID (0 = main thread, 1+ = workers)
     #lastRefusal = null; // why the last send was refused, or null when it was written
     #onRefused = null;   // (bytes, reason) => void: the owner's ear for a refusal
@@ -109,12 +110,9 @@ export class OscChannel {
                     config.bufferConstants.METRICS_SIZE / 4
                 );
                 // The boundary's word on whether there is a guest to write
-                // to, where every writer of the ring reads it.
-                this.#statusView = new Int32Array(
-                    config.sharedBuffer,
-                    config.arenaBase + config.bufferConstants.RING_CURSORS_START + STATUS_FLAGS,
-                    1
-                );
+                // to: the generation word, which every door reads
+                // (docs/RESTARTS.md, rule 1).
+                this.#generationView = generationView(config.sharedBuffer, config.arenaBase);
             }
 
             if (config.sharedBuffer && config.bufferConstants?.SAMPLE_CLOCK_START !== undefined) {
@@ -235,8 +233,8 @@ export class OscChannel {
 
         const bytes = oscData instanceof Uint8Array ? oscData : new Uint8Array(oscData);
         if (bytes.length === 0) return false;
-        if (this.#statusView
-            && (Atomics.load(this.#statusView, 0) & STATUS_NO_INSTANCE)
+        if (this.#generationView
+            && !hasInstance(Atomics.load(this.#generationView, 0))
             && !answersWithoutGuest(bytes)) {
             return this.#refuse(bytes, REASON_NO_INSTANCE);
         }

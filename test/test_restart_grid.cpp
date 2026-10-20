@@ -405,39 +405,35 @@ void checkCell(Reader reader, Event event, When when, unsigned port) {
 
 } // namespace
 
-// A cell still red until a row of docs/RESTARTS.md's "Not yet" is done is
-// tagged with the row and [!shouldfail]: it passes while it fails, and fails
-// the day it passes, so the tag goes with the fix that turns it green.
-#define GRID_CELL(reader, event, when, port, title, pending)                                     \
-    TEST_CASE("restart grid: " title, "[restarts][grid]" pending) { checkCell(reader, event, when, port); }
-#define NOT_YET_13 "[not-yet-13][!shouldfail]"   // a fact a hot restart changed, told
+#define GRID_CELL(reader, event, when, port, title)                                              \
+    TEST_CASE("restart grid: " title, "[restarts][grid]") { checkCell(reader, event, when, port); }
 
-GRID_CELL(Reader::Engine,    Event::RateChange,   When::Before, 0, "the engine's own reader at a rate change",                    "")
-GRID_CELL(Reader::HostRings, Event::RateChange,   When::Before, 0, "a host reading the rings at a rate change",                   "")
-GRID_CELL(Reader::Tap,       Event::RateChange,   When::Before, 0, "a tap at a rate change",                                      "")
-GRID_CELL(Reader::Engine,    Event::DriverChange, When::Before, 0, "the engine's own reader at a driver change",                  "")
-GRID_CELL(Reader::HostRings, Event::DriverChange, When::Before, 0, "a host reading the rings at a driver change",                 "")
-GRID_CELL(Reader::Tap,       Event::DriverChange, When::Before, 0, "a tap at a driver change",                                    "")
-GRID_CELL(Reader::Engine,    Event::OtherDevice,  When::Before, 0, "the engine's own reader at a device the instance survives",   "")
-GRID_CELL(Reader::HostRings, Event::OtherDevice,  When::Before, 0, "a host reading the rings at a device the instance survives",  "")
-GRID_CELL(Reader::Tap,       Event::OtherDevice,  When::Before, 0, "a tap at a device the instance survives",                     "")
-GRID_CELL(Reader::Engine,    Event::BufferChange, When::Before, 0, "the engine's own reader at a bigger buffer",                  NOT_YET_13)
-GRID_CELL(Reader::HostRings, Event::BufferChange, When::Before, 0, "a host reading the rings at a bigger buffer",                 NOT_YET_13)
-GRID_CELL(Reader::Tap,       Event::BufferChange, When::Before, 0, "a tap at a bigger buffer",                                    NOT_YET_13)
-GRID_CELL(Reader::Engine,    Event::RolledBack,   When::Before, 0, "the engine's own reader at a device that will not open",      "")
-GRID_CELL(Reader::HostRings, Event::RolledBack,   When::Before, 0, "a host reading the rings at a device that will not open",     "")
-GRID_CELL(Reader::Tap,       Event::RolledBack,   When::Before, 0, "a tap at a device that will not open",                        "")
-GRID_CELL(Reader::Engine,    Event::SilentDevice, When::Before, 0, "the engine's own reader at a device that never calls back",   "")
-GRID_CELL(Reader::HostRings, Event::SilentDevice, When::Before, 0, "a host reading the rings at a device that never calls back",  "")
-GRID_CELL(Reader::Tap,       Event::SilentDevice, When::Before, 0, "a tap at a device that never calls back",                     "")
+GRID_CELL(Reader::Engine,    Event::RateChange,   When::Before, 0, "the engine's own reader at a rate change")
+GRID_CELL(Reader::HostRings, Event::RateChange,   When::Before, 0, "a host reading the rings at a rate change")
+GRID_CELL(Reader::Tap,       Event::RateChange,   When::Before, 0, "a tap at a rate change")
+GRID_CELL(Reader::Engine,    Event::DriverChange, When::Before, 0, "the engine's own reader at a driver change")
+GRID_CELL(Reader::HostRings, Event::DriverChange, When::Before, 0, "a host reading the rings at a driver change")
+GRID_CELL(Reader::Tap,       Event::DriverChange, When::Before, 0, "a tap at a driver change")
+GRID_CELL(Reader::Engine,    Event::OtherDevice,  When::Before, 0, "the engine's own reader at a device the instance survives")
+GRID_CELL(Reader::HostRings, Event::OtherDevice,  When::Before, 0, "a host reading the rings at a device the instance survives")
+GRID_CELL(Reader::Tap,       Event::OtherDevice,  When::Before, 0, "a tap at a device the instance survives")
+GRID_CELL(Reader::Engine,    Event::BufferChange, When::Before, 0, "the engine's own reader at a bigger buffer")
+GRID_CELL(Reader::HostRings, Event::BufferChange, When::Before, 0, "a host reading the rings at a bigger buffer")
+GRID_CELL(Reader::Tap,       Event::BufferChange, When::Before, 0, "a tap at a bigger buffer")
+GRID_CELL(Reader::Engine,    Event::RolledBack,   When::Before, 0, "the engine's own reader at a device that will not open")
+GRID_CELL(Reader::HostRings, Event::RolledBack,   When::Before, 0, "a host reading the rings at a device that will not open")
+GRID_CELL(Reader::Tap,       Event::RolledBack,   When::Before, 0, "a tap at a device that will not open")
+GRID_CELL(Reader::Engine,    Event::SilentDevice, When::Before, 0, "the engine's own reader at a device that never calls back")
+GRID_CELL(Reader::HostRings, Event::SilentDevice, When::Before, 0, "a host reading the rings at a device that never calls back")
+GRID_CELL(Reader::Tap,       Event::SilentDevice, When::Before, 0, "a tap at a device that never calls back")
 
 // The segment's peer, and what was sent between instances (a rebuild only:
 // the instance is down between its teardown and the next build).
-GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::Before,           57250, "a peer on the plane at a rate change",                   "")
-GRID_CELL(Reader::ShmPeer,   Event::OtherDevice, When::Before,           57251, "a peer on the plane at a device the instance survives",  "")
-GRID_CELL(Reader::Engine,    Event::RateChange,  When::BetweenInstances, 0,     "the engine's own reader sending between instances",      "")
-GRID_CELL(Reader::HostRings, Event::RateChange,  When::BetweenInstances, 0,     "a host reading the rings sending between instances",     "")
-GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::BetweenInstances, 57252, "a peer on the plane sending between instances",          "")
+GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::Before,           57250, "a peer on the plane at a rate change")
+GRID_CELL(Reader::ShmPeer,   Event::OtherDevice, When::Before,           57251, "a peer on the plane at a device the instance survives")
+GRID_CELL(Reader::Engine,    Event::RateChange,  When::BetweenInstances, 0,     "the engine's own reader sending between instances")
+GRID_CELL(Reader::HostRings, Event::RateChange,  When::BetweenInstances, 0,     "a host reading the rings sending between instances")
+GRID_CELL(Reader::ShmPeer,   Event::RateChange,  When::BetweenInstances, 57252, "a peer on the plane sending between instances")
 
 // A peer that is behind: its reply ring all but full of the old instance's
 // answers when the rebuild comes. It loses none of them, and hears setup

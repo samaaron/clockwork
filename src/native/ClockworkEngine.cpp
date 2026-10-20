@@ -3353,7 +3353,14 @@ void ClockworkEngine::markPeerPlane(const char* reason) {
                        mPeerClosing, reason);
 }
 
+ClockworkEngine::Restart::Facts ClockworkEngine::Restart::deviceFacts() const {
+    const auto dev = mEngine.mDevices ? mEngine.mDevices->current() : std::nullopt;
+    if (dev) return { static_cast<int>(dev->sampleRate), dev->bufferFrames };
+    return { mEngine.mCurrentConfig.sampleRate, mEngine.mCurrentConfig.bufferSize };
+}
+
 void ClockworkEngine::Restart::teardown() {
+    mFactsBefore = deviceFacts();
     // The schedule is the instance's, and empty from restarting
     // (docs/RESTARTS.md, rule 6). What waits in the in ring for it is
     // answered by the teardown's mark (destroy_dsp): until then, a block of
@@ -3412,6 +3419,12 @@ void ClockworkEngine::Restart::build(double rate) {
 }
 
 bool ClockworkEngine::Restart::resumeAudio() {
+    // The instance survived; a fact its setup named may not have (a bigger
+    // buffer, a rate it takes live): told on its ring before it runs again.
+    if (!mCold) {
+        const Facts now = deviceFacts();
+        if (now != mFactsBefore) clockwork_announce_facts(now.rate, static_cast<uint32_t>(now.buffer));
+    }
     if (mCold) mEngine.resumeControlPass();
     mResumed = true;
     const bool delivered = mEngine.startAudioSource();

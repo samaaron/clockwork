@@ -975,27 +975,36 @@ extern "C" {
     // A new instance's first word on its ring is its /clockwork/setup
     // (docs/RESTARTS.md) whenever it replaces one: a rebuild's, or a new
     // arena's that carries a generation on. Said by the build, with the audio
-    // thread stopped (announce_instance). A ring with no room for it then — a
-    // reader far behind — leaves it owed, and the instance does not run until
+    // thread stopped (announce_instance). A change the instance survives, of
+    // a fact its setup named — the rate, the device's callback — is said as
+    // /clockwork/setup/changed, naming the generation it has, as audio
+    // resumes (clockwork_announce_facts). Either on its ring, so a reader
+    // places it among the instance's words; and either, with no room on the
+    // ring then — a reader far behind — owed, the instance not running until
     // it has been said (process_audio), so nothing of the instance's goes
     // ahead of it.
-    static std::atomic<bool>     g_setup_owed{false};
+    enum class Owed : uint8_t { Nothing, Setup, Changed };
+    static std::atomic<Owed>     g_owed{Owed::Nothing};
+    static std::atomic<int32_t>  g_setup_rate{0};            // the rate, as setup names it
     static std::atomic<uint32_t> g_setup_buffer_frames{0};   // the device's callback, as setup names it
 
-    // "/clockwork/setup ,iii <rate> <device buffer> <generation>", on the
-    // instance's ring. True once said.
-    static bool say_setup() {
+    // "/clockwork/setup ,iii <rate> <device buffer> <generation>", or the same
+    // as /clockwork/setup/changed, on the instance's ring: whichever is owed.
+    // True once said, or when nothing is.
+    static bool say_owed() {
+        const Owed owed = g_owed.load(std::memory_order_acquire);
+        if (owed == Owed::Nothing) return true;
         char buf[96];
         osc::OutboundPacketStream ps(buf, sizeof buf);
-        ps << osc::BeginMessage(CLOCKWORK_SYS("setup"))
-           << static_cast<int32_t>(g_dsp_sample_rate)
+        ps << osc::BeginMessage(owed == Owed::Setup ? CLOCKWORK_SYS("setup") : CLOCKWORK_SYS("setup/changed"))
+           << g_setup_rate.load(std::memory_order_relaxed)
            << static_cast<int32_t>(g_setup_buffer_frames.load(std::memory_order_relaxed))
            << static_cast<int32_t>(arenaInstanceGeneration(shared_memory))
            << osc::EndMessage;
         if (!emit_osc_route(EGRESS_BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
                             static_cast<uint32_t>(ps.Size())))
             return false;
-        g_setup_owed.store(false, std::memory_order_relaxed);
+        g_owed.store(Owed::Nothing, std::memory_order_relaxed);
         return true;
     }
 
@@ -1004,11 +1013,23 @@ extern "C" {
     // ring as the build's last word, or owed until the ring has room.
     static void announce_instance(uint32_t buffer_frames) {
         InstanceRingScope instance_ring;
+        g_setup_rate.store(static_cast<int32_t>(g_dsp_sample_rate), std::memory_order_relaxed);
         g_setup_buffer_frames.store(buffer_frames ? buffer_frames
                                                   : static_cast<uint32_t>(get_audio_buffer_samples()),
                                     std::memory_order_relaxed);
-        g_setup_owed.store(true, std::memory_order_release);
-        say_setup();
+        g_owed.store(Owed::Setup, std::memory_order_release);
+        say_owed();
+    }
+
+    void clockwork_announce_facts(double sample_rate, uint32_t buffer_frames) {
+        if (!memory_initialized || !g_dsp) return;
+        InstanceRingScope instance_ring;
+        g_setup_rate.store(static_cast<int32_t>(sample_rate), std::memory_order_relaxed);
+        g_setup_buffer_frames.store(buffer_frames, std::memory_order_relaxed);
+        // A setup still owed says the new facts itself.
+        Owed nothing = Owed::Nothing;
+        g_owed.compare_exchange_strong(nothing, Owed::Changed, std::memory_order_acq_rel);
+        say_owed();
     }
 
     // DspHost::asset_release — the guest is done; the committing client hears.
@@ -1518,10 +1539,9 @@ extern "C" {
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(TAP_RING_FRAMES, std::memory_order_relaxed); // ringFrames
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(0, std::memory_order_relaxed);              // version
     }
-    // The status flags: a fresh word with every build, saying there is no
-    // instance until dsp_new says there is.
+    // The status flags: a fresh word with every build.
     static void reset_status_flags() {
-        cursors->status_flags.store(STATUS_NO_INSTANCE, std::memory_order_release);
+        cursors->status_flags.store(STATUS_OK, std::memory_order_release);
     }
     // The in ring: a fresh epoch at a new arena only, serialised against its
     // producers (clockwork_lanes_reset_in_ring). A rebuild keeps it: what
@@ -2393,7 +2413,7 @@ extern "C" {
             if (!g_dsp) {
                 clockwork_log("ERROR: engine bring-up failed: %s", err ? err : "unknown");
                 record_boot_error("%s did not start: %s", dsp_name, err ? err : "it gave no reason");
-                // STATUS_NO_INSTANCE stays up: there is none, and none coming.
+                // The generation word stays odd: there is none, and none coming.
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
             }
@@ -2402,8 +2422,6 @@ extern "C" {
             // and the boundary takes messages for it again.
             arenaInstanceUp(shared_memory);
             clockwork_carry_generation(arenaInstanceGeneration(shared_memory));
-            cursors->status_flags.fetch_and(~static_cast<uint32_t>(STATUS_NO_INSTANCE),
-                                            std::memory_order_release);
         } catch (const std::exception& e) {
             clockwork_log("ERROR: engine bring-up threw exception: %s", e.what());
             record_boot_error("%s did not start: %s", dsp_name, e.what());
@@ -2561,13 +2579,11 @@ extern "C" {
         // written from now on meets the boundary's refusal (in_ring_door.h).
         // The generation that is closing stays named, so a refusal from here
         // says which instance refused and a reader of the arena knows
-        // "between instances" from the bytes. The status flag says the same
-        // for the page's channel, which reads it still.
+        // "between instances" from the bytes.
         if (shared_memory) arenaInstanceDown(shared_memory);
-        if (cursors) cursors->status_flags.fetch_or(STATUS_NO_INSTANCE, std::memory_order_release);
         // An instance whose setup is still owed goes unannounced: it said
         // nothing, and the next one up announces itself.
-        g_setup_owed.store(false, std::memory_order_relaxed);
+        g_owed.store(Owed::Nothing, std::memory_order_relaxed);
         // What was already in the in ring was written for this generation:
         // marked, for the next drain to answer (the marks).
         mark_closing_generation();
@@ -2769,10 +2785,10 @@ extern "C" {
             return false;
         }
 
-        // A new instance says nothing before its setup: one the ring had no
-        // room for at the rebuild says it now, or waits, silent, for a block
-        // when it can.
-        if (g_setup_owed.load(std::memory_order_acquire) && !say_setup()) return true;
+        // A new instance says nothing before its setup, nor a survived change
+        // before its notice: one the ring had no room for says it now, or
+        // waits, silent, for a block when it can.
+        if (!say_owed()) return true;
 
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().drainPendingClear();
