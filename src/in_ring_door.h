@@ -8,9 +8,9 @@
  * clockwork_ingress_write in the engine's. The page's channel restates it
  * (js/lib/osc_channel.js).
  *
- * The one question — is there an instance, or is the message clockwork's own,
- * which the engine answers either way? — is asked of the generation word,
- * and under the ring's writer lock. Asked
+ * The one question — is there an instance, or is the message clockwork's own
+ * and none of the guest's business, which the engine answers either way? —
+ * is asked of the generation word, and under the ring's writer lock. Asked
  * there, the mark a teardown sets (destroy_dsp) falls exactly between a
  * generation's messages and the ones after it: a writer that took the lock
  * before the mark wrote below it, and the next drain refuses its message as
@@ -19,7 +19,7 @@
  */
 #pragma once
 
-#include "clockwork_prefix.h"           // clockwork_sys_claims: whose message this is
+#include "clockwork_prefix.h"           // clockwork_sys_answers_without_guest: whose message this is
 #include "shared_memory.h"              // RingCursors, the generation word
 #include "workers/RingBufferWriter.h"   // the writer, and its lock
 
@@ -28,7 +28,7 @@
 
 // Whether the in ring takes this message now.
 inline bool in_ring_takes(const void* arena, const uint8_t* osc, uint32_t len) {
-    return arenaHasInstance(arena) || clockwork_sys_claims(osc, len);
+    return arenaHasInstance(arena) || clockwork_sys_answers_without_guest(osc, len);
 }
 
 enum class InRingWrite { Written, Full, NoInstance };

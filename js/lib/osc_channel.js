@@ -5,7 +5,7 @@ import { engineRings, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateInControlIndices, STATUS_FLAGS, STATUS_NO_INSTANCE } from './ring_cursor_offsets.js';
 import { sampleClockReader } from './sample_clock.js';
-import { isClockworkSysBytes, REASON_NO_INSTANCE } from './clockwork_sys.js';
+import { answersWithoutGuest, REASON_NO_INSTANCE } from './clockwork_sys.js';
 
 /** What a refused send says (`lastRefusal`): the ring had no room. A moment,
  *  not a verdict: the ring drains every block, so the sender sends again. */
@@ -237,7 +237,7 @@ export class OscChannel {
         if (bytes.length === 0) return false;
         if (this.#statusView
             && (Atomics.load(this.#statusView, 0) & STATUS_NO_INSTANCE)
-            && !isClockworkSysBytes(bytes)) {
+            && !answersWithoutGuest(bytes)) {
             return this.#refuse(bytes, REASON_NO_INSTANCE);
         }
         const success = ringWrite(this.#ingress, bytes, this.#sourceId);

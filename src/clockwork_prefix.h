@@ -98,6 +98,39 @@ inline bool clockwork_sys_is_audio_verb(const char* address) noexcept {
         || is("track/param") || is("track/plugin/param");
 }
 
+// ── Which of clockwork's audio-thread verbs hand the GUEST something ───────
+//
+// An asset, an inbound event, a scheduled message, the schedule's flush: each
+// is written for the instance that is up, as much as the guest's own
+// messages beside it, and is refused with them when that instance goes
+// (docs/RESTARTS.md, rule 2) — at the door between instances, and below a
+// teardown's mark. Clockwork's other verbs are answered with or without a
+// guest. `address` is the whole address, NUL-terminated.
+inline bool clockwork_sys_hands_to_guest(const char* address) noexcept {
+    if (address == nullptr
+        || std::strncmp(address, CLOCKWORK_SYS_PREFIX, CLOCKWORK_SYS_PREFIX_LEN) != 0)
+        return false;
+    const char* verb = address + CLOCKWORK_SYS_PREFIX_LEN;
+    const auto is = [verb](const char* v) { return std::strcmp(verb, v) == 0; };
+    const auto under = [verb](const char* p) { return std::strncmp(verb, p, std::strlen(p)) == 0; };
+    return under("asset/")
+        || (under("midi/in/") && !is("midi/in/enable"))
+        || under("gamepad/in/")
+        || is("schedule") || is("sched/flush");
+}
+
+// True iff this packet is clockwork's and answered with or without a guest:
+// claimed by the prefix, its address whole within the packet, and handing
+// the guest nothing. What the in ring takes between instances, and what the
+// drain answers below a teardown's mark rather than refuse.
+inline bool clockwork_sys_answers_without_guest(const uint8_t* osc, size_t len) noexcept {
+    if (!clockwork_sys_claims(osc, len)) return false;
+    size_t n = 0;
+    while (n < len && osc[n] != '\0') ++n;
+    if (n == len) return false;
+    return !clockwork_sys_hands_to_guest(reinterpret_cast<const char*>(osc));
+}
+
 // True iff this packet is a CONTROL verb of clockwork's: claimed by the prefix
 // (so never a bundle, never the guest's) and not the audio thread's. What the
 // control ring takes, when the engine serves one.

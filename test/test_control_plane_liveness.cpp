@@ -237,7 +237,15 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
                 == CLOCKWORK_SYS("clock/time/now.reply")) ++n;
         return n;
     };
-    for (int pass = 0; pass < 200 && answered() < sent; ++pass) REQUIRE(engine.controlPass());
+    // As many passes as it takes — a desktop's ring takes hundreds of answers
+    // a pass, the smallest profile's a few — while each pass answers more:
+    // a pass that answered nothing, fifty times running, is a verb held for
+    // good.
+    for (int idle = 0; answered() < sent && idle < 50;) {
+        const int before = answered();
+        REQUIRE(engine.controlPass());
+        idle = answered() > before ? 0 : idle + 1;
+    }
     CHECK(answered() == sent);
 
     // The case bites only while the answers outgrow the egress ring: each

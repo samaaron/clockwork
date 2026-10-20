@@ -50,6 +50,26 @@ export function isClockworkSysBytes(bytes) {
   return true;
 }
 
+/** clockwork_sys_hands_to_guest in C (clockwork_prefix.h): whether one of
+ *  clockwork's verbs hands the guest something — an asset, an inbound event,
+ *  a scheduled message, the schedule's flush — and so was written for the
+ *  instance that is up, as much as the guest's own messages beside it. */
+export function handsToGuest(address) {
+  if (!isClockworkSys(address)) return false;
+  const verb = address.slice(CLOCKWORK_SYS_PREFIX.length);
+  return verb.startsWith("asset/")
+    || (verb.startsWith("midi/in/") && verb !== "midi/in/enable")
+    || verb.startsWith("gamepad/in/")
+    || verb === "schedule" || verb === "sched/flush";
+}
+
+/** clockwork_sys_answers_without_guest in C, for a packet still in bytes:
+ *  clockwork's, and none of the guest's business, so answered with or
+ *  without a guest. What the in ring takes between instances. */
+export function answersWithoutGuest(bytes) {
+  return isClockworkSysBytes(bytes) && !handsToGuest(oscAddress(bytes));
+}
+
 /** The reason a message for the guest is refused with when there is no guest
  *  to take it (CLOCKWORK_REFUSED_NO_INSTANCE in clockwork_sys.h). A client
  *  reads it as "wait for /clockwork/setup", never as an error to show. Every

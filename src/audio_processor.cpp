@@ -2686,11 +2686,11 @@ extern "C" {
     // be able to register, ask what state the engine is in and hear why — and
     // every one of those is a /clockwork/ verb, which clockwork answers. So the
     // ingress ring is walked as on any block and those are dispatched. What was
-    // for the guest is refused: below the mark, as the generation it was
-    // written for; above it — a writer that reads no generation word — for
-    // want of an instance. Holding it would replay it into whatever build
-    // comes next. Nothing is parked — /clockwork/schedule carries the guest's
-    // work too — and nothing is rendered.
+    // for the guest — its own, and clockwork's that hand it something
+    // (clockwork_sys_hands_to_guest) — is refused: below the mark, as the
+    // generation it was written for; above it, from a writer that reads no
+    // generation word, for want of an instance. Holding it would replay it
+    // into whatever build comes next. Nothing is rendered.
     static void drain_without_guest() {
         constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
         const int64_t blockTime = g_block_osc_time.load(std::memory_order_relaxed);
@@ -2705,11 +2705,7 @@ extern "C" {
             [blockTime](uint32_t sourceId, const uint8_t* payload,
                         uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                 const InRingMark* mark = in_ring_mark_of(seq);
-                const bool schedule =
-                    payload_size >= CLOCKWORK_SYS_PADDED("schedule") &&
-                    std::memcmp(payload, CLOCKWORK_SYS("schedule"), CLOCKWORK_SYS_LEN("schedule")) == 0 &&
-                    payload[CLOCKWORK_SYS_LEN("schedule")] == '\0';
-                if (!schedule && clockwork_sys_claims(payload, payload_size)) {
+                if (clockwork_sys_answers_without_guest(payload, payload_size)) {
                     dispatch(payload, payload_size, sourceId, 1, blockTime);
                     return ClockworkDrainVerdict::Consume;
                 }
@@ -2911,10 +2907,11 @@ extern "C" {
                     // Below the mark: written for a generation that has
                     // closed, or before a stall — refused to its sender with
                     // the mark's reason and generation as the ring has room,
-                    // and consumed undispatched. Clockwork's own go through:
-                    // the engine answers those whatever the guest is doing.
+                    // and consumed undispatched. Clockwork's own go through
+                    // unless they hand the guest something: the engine
+                    // answers those whatever the guest is doing.
                     if (const InRingMark* mark = in_ring_mark_of(seq);
-                        mark && !clockwork_sys_claims(payload, payload_size))
+                        mark && !clockwork_sys_answers_without_guest(payload, payload_size))
                         return refuse_when_room(sourceId, payload, payload_size,
                                                 mark->reason, mark->generation)
                             ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;

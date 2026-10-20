@@ -381,11 +381,13 @@ TEST_CASE("restarts: a message in the in ring at a cold restart is refused to it
 TEST_CASE("restarts: more waiting at a cold restart than the instance's ring can hold refusals for are all refused, as it makes room",
           "[restarts][transport]") {
     settle();
-    // Far more refusals than the instance's ring holds at once.
-    constexpr int kWaiting = 4000;
+    // Far more refusals than the instance's ring holds at once: four
+    // thousand, or as many as the in ring holds (the smallest profile's
+    // holds about a thousand).
+    int waiting = 0;
     const auto ping = osc_test::message("/dummy/ping");
-    for (int i = 0; i < kWaiting; ++i)
-        REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
+    while (waiting < 4000 && lanes_test::ingress(ping.ptr(), ping.size(), kClient)) ++waiting;
+    REQUIRE(waiting > 500);
     coldRestart();
     const uint32_t refusedBefore = metrics_refused();
 
@@ -396,7 +398,7 @@ TEST_CASE("restarts: more waiting at a cold restart than the instance's ring can
 
     // Read, and the rest follow: every one, once.
     int refused = 0, answered = 0;
-    for (int i = 0; i < 4000 && refused + answered < kWaiting; ++i) {
+    for (int i = 0; i < 4000 && refused + answered < waiting; ++i) {
         lanes_test::tick();
         for (const auto& f : lanes_test::drainRt()) {
             const auto addr = osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size()));
@@ -404,7 +406,7 @@ TEST_CASE("restarts: more waiting at a cold restart than the instance's ring can
             if (addr == "/dummy/pong") ++answered;
         }
     }
-    CHECK(refused == kWaiting);
+    CHECK(refused == waiting);
     CHECK(answered == 0);
     CHECK(metrics_refused() == refusedBefore);
 }
@@ -486,6 +488,51 @@ TEST_CASE("restarts: clockwork's own verbs are answered while there is no instan
     const auto* pong = findAddress(frames, CLOCKWORK_SYS("pong"));
     CHECK(pong != nullptr);
     CHECK(findAddress(frames, CLOCKWORK_SYS("error")) == nullptr);
+}
+
+TEST_CASE("restarts: what hands the guest something was written for its instance, refused with the guest's own at a cold restart and at the door between instances",
+          "[restarts][transport]") {
+    settle();
+    const uint32_t closing = clockwork_arena_generation(arenaHeader(arena()));
+    // An asset's commit, of 64 bytes at the start of the assets area, and a
+    // sync: one hands the guest something, the other is clockwork's alone.
+    std::memset(lanes_test::assets(), 0x5A, 64);
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("asset/commit")) << int32_t{5} << int32_t{CLOCKWORK_ASSET_RAW} << int32_t{0}
+                                           << int32_t{64} << int32_t{0} << int32_t{0} << 0.f;
+    const auto commit = b.end();
+    const auto sync = osc_test::message(CLOCKWORK_SYS("sync"), int32_t{7});
+    const auto refusalOf = [](const std::vector<lanes_test::EgressFrame>& frames, const char* reason) {
+        for (const auto& f : frames) {
+            const auto r = osc_test::parseReply(f.data.data(), static_cast<uint32_t>(f.data.size()));
+            if (r.address == CLOCKWORK_SYS("error") && r.argString(0) == CLOCKWORK_SYS("asset/commit")
+                && r.argString(1) == reason)
+                return r.argInt(2);
+        }
+        return -1;
+    };
+
+    // Waiting when the instance goes.
+    REQUIRE(lanes_test::ingress(commit.ptr(), commit.size(), kClient));
+    REQUIRE(lanes_test::ingress(sync.ptr(), sync.size(), kClient));
+    destroy_dsp();
+    lanes_test::drainRt();
+    lanes_test::drainNrt();
+
+    // Sent between instances: refused at the door.
+    CHECK_FALSE(lanes_test::ingress(commit.ptr(), commit.size(), kClient));
+    auto said = lanes_test::drainRt();
+    for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
+    CHECK(refusalOf(said, CLOCKWORK_REFUSED_NO_INSTANCE) == static_cast<int32_t>(closing));
+
+    // The next instance: the waiting commit refused as the closing
+    // generation's, the sync beside it answered, and nothing committed.
+    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(g_dsp != nullptr);
+    const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("synced"));
+    CHECK(refusalOf(frames, CLOCKWORK_REFUSED_REBUILDING) == static_cast<int32_t>(closing));
+    CHECK(findAddress(frames, CLOCKWORK_SYS("synced")) != nullptr);
+    CHECK(findAddress(frames, CLOCKWORK_SYS("asset/committed")) == nullptr);
 }
 
 // ── The generation ───────────────────────────────────────────────────────────

@@ -1232,9 +1232,12 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         // verb waits in the control ring while either ring lacks room for
         // its answers, and is answered on a later pass, once the egress has
         // been drained (that task runs first in every pass) and the peer has
-        // read (ring_drain.h, Retain).
-        constexpr uint32_t kAnswerRoom = 16 * 1024;   // room a pass leaves for one verb's answers
-        static_assert(kAnswerRoom < NRT_OUT_RING_SIZE && kAnswerRoom < SHM_PEER_REP_RING_SIZE,
+        // read (ring_drain.h, Retain). The room a pass leaves for one verb's
+        // answers is 16 KB where the ring has it; a smaller ring (a small
+        // profile, src/memory_profile.h) offers all it has, once drained —
+        // a verb then waits for an empty ring, which every pass drains to.
+        constexpr uint32_t kAnswerRoom = std::min<uint32_t>(16 * 1024, NRT_OUT_RING_SIZE - 1);
+        static_assert(kAnswerRoom < SHM_PEER_REP_RING_SIZE,
                       "a ring smaller than the room would hold every verb forever");
         mNrtGateway.addDrain(
             arena + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,

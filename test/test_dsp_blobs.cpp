@@ -60,6 +60,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -108,7 +110,9 @@ TEST_CASE("blobs: a blob arrives at the guest whole, as an ordinary argument",
     lanes_test::boot();
     lanes_test::drainRt();
 
-    const uint32_t n = 64 * 1024;
+    // 64 KB, or as much as half the in ring holds where that is less (the
+    // smallest profile's is 32 KB).
+    const uint32_t n = std::min<uint32_t>(64 * 1024, IN_RING_SIZE / 2 - 64);
     const auto payload = makeBlob(0xABCD, n);
 
     const auto msg = osc_test::messageWithBlob("/dummy/blob", payload.data(), payload.size());
@@ -139,8 +143,11 @@ TEST_CASE("blobs: a blob far larger than the egress ring still arrives",
 
     // Bigger than RT_OUT_RING_SIZE, comfortably inside IN_RING_SIZE. This is
     // the asymmetry stated as a fact rather than as a header constant: the
-    // inbound path carries payloads the outbound path cannot.
-    const uint32_t n = RT_OUT_RING_SIZE + 32 * 1024;
+    // inbound path carries payloads the outbound path cannot. 32 KB past the
+    // egress ring, or half way to half the in ring where that is less (the
+    // smallest profile's rings are 8 KB and 32 KB).
+    static_assert(RT_OUT_RING_SIZE < IN_RING_SIZE / 2, "the inbound path is the wider");
+    const uint32_t n = RT_OUT_RING_SIZE + std::min<uint32_t>(32 * 1024, (IN_RING_SIZE / 2 - RT_OUT_RING_SIZE) / 2);
     REQUIRE(n < IN_RING_SIZE / 2);
     const auto payload = makeBlob(0x1234, n);
 
