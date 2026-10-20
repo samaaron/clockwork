@@ -31,33 +31,37 @@ void StreamOscTransport::initialisePipe(const std::string& name) {
 }
 
 bool StreamOscTransport::start() {
-    if (mServer) return true;
+    if (mServer.load(std::memory_order_acquire)) return true;
     const auto* ep = reinterpret_cast<const uint8_t*>(mEndpoint.data());
     const auto epLen = static_cast<uint32_t>(mEndpoint.size());
+    ClockworkOscStream* server = nullptr;
     switch (mKind) {
     case Kind::Tcp:
-        mServer = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mPort,
-                                   reinterpret_cast<const uint8_t*>(mBindAddress.data()),
-                                   static_cast<uint32_t>(mBindAddress.size()), mMaxConns);
+        server = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mPort,
+                                         reinterpret_cast<const uint8_t*>(mBindAddress.data()),
+                                         static_cast<uint32_t>(mBindAddress.size()), mMaxConns);
         break;
     case Kind::Uds:
-        mServer = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
+        server = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
         break;
     case Kind::Pipe:
-        mServer = clockwork_osc_pipe_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
+        server = clockwork_osc_pipe_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
         break;
     case Kind::None:
         break;
     }
-    return mServer != nullptr;
+    mServer.store(server, std::memory_order_release);
+    return server != nullptr;
 }
 
 void StreamOscTransport::stop() {
-    if (mServer) { clockwork_osc_stream_stop(mServer); mServer = nullptr; }
+    if (auto* server = mServer.exchange(nullptr, std::memory_order_acq_rel))
+        clockwork_osc_stream_stop(server);
 }
 
 int StreamOscTransport::boundPort() const {
-    return mServer ? clockwork_osc_stream_port(mServer) : 0;
+    auto* server = mServer.load(std::memory_order_acquire);
+    return server ? clockwork_osc_stream_port(server) : 0;
 }
 
 // Rust reader thread → ingest carrying the connection id as the origin token.
@@ -83,13 +87,15 @@ void StreamOscTransport::onClosed(void* ctx, uint32_t conn) {
 bool StreamOscTransport::send(uint32_t token, const uint8_t* data, uint32_t size,
                               bool /*networkOnly*/) {
     // networkOnly is moot — there is no in-process observer to skip.
-    if (!mServer || token == 0) return false;
-    return clockwork_osc_stream_send(mServer, token, data, size) != 0;
+    auto* server = mServer.load(std::memory_order_acquire);
+    if (!server || token == 0) return false;
+    return clockwork_osc_stream_send(server, token, data, size) != 0;
 }
 
 void StreamOscTransport::broadcast(const std::vector<uint32_t>& list,
                                    const uint8_t* data, uint32_t size) {
-    if (!mServer) return;
+    auto* server = mServer.load(std::memory_order_acquire);
+    if (!server) return;
     // Copy the audience out so a send never runs under the audience lock (a
     // reader thread pruning via onClosed must not wait on a slow write).
     std::vector<uint32_t> targets;
@@ -97,7 +103,7 @@ void StreamOscTransport::broadcast(const std::vector<uint32_t>& list,
         std::lock_guard<std::mutex> lk(mMutex);
         targets = list;
     }
-    for (uint32_t conn : targets) clockwork_osc_stream_send(mServer, conn, data, size);
+    for (uint32_t conn : targets) clockwork_osc_stream_send(server, conn, data, size);
 }
 
 void StreamOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {

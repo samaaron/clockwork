@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -93,7 +94,11 @@ private:
     std::string  mBindAddress;          // Tcp
     std::string  mEndpoint;             // Uds path / pipe name
     uint32_t     mMaxConns = 4;
-    ClockworkOscStream* mServer = nullptr;
+    // Published once it is listening: start() may come after the engine is
+    // up, its gateway already broadcasting through this transport (a boot
+    // that says setup), so the gateway reads it with one load. stop() frees
+    // it, and so comes once the engine has stopped sending.
+    std::atomic<ClockworkOscStream*> mServer{nullptr};
     IngestFn     mIngest;
 
     // Audience lists hold conn ids. Guarded by mMutex: the gateway thread

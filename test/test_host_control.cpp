@@ -78,8 +78,11 @@ TEST_CASE("host control: the engine starts no thread, and nothing is answered un
           "[host][control]") {
     Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrivesControl = true; });
     // The fixture's own host thread is what a host would run; here the TEST
-    // is the host, so it is stopped and the passes are made by hand.
+    // is the host, so it is stopped and the passes are made by hand. What its
+    // passes delivered during the boot is the boot's (a setup, where an engine
+    // ran before in this process), and set aside.
     e.hostControl.stop();
+    { std::lock_guard<std::mutex> lock(e.mu); e.replies.clear(); }
 
     CHECK_FALSE(e.engine.hasControlThread());
 
