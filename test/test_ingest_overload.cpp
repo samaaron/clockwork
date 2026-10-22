@@ -170,8 +170,10 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     const uint32_t dropped = now.dropped - before.dropped;
     const uint32_t processed = now.processed - before.processed;
     const uint32_t refused = now.refused - before.refused;
+    const uint32_t undelivered = now.undelivered - before.undelivered;
     INFO(sent.load() << " sent: " << taken << " taken, " << processed << " processed, "
-         << answered.load() << " answered, " << refused << " answers refused, " << dropped << " dropped");
+         << answered.load() << " answered, " << refused << " answers refused, "
+         << undelivered << " undelivered, " << dropped << " dropped");
     CHECK(sent.load() == kCommands);
     // Overloaded, and the client can see it: n sent, m dropped and counted,
     // n - m taken and processed, each answered or its answer refused and
@@ -181,6 +183,13 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     CHECK(processed == uint32_t(kCommands) - dropped);
     CHECK(answered.load() + int(refused) == kCommands - int(dropped));
     CHECK(outOfOrder.load() == 0);
+    // The client reads all the while, so the transport never has cause to
+    // drop it (StreamOscTransport: a write it does not take within 2 s). Had
+    // it, the answers after would be counted undelivered, and those the
+    // socket had already taken lost uncounted: said here by name, rather than
+    // as answers that do not add up.
+    INFO("the transport cut the client off: answers went to a connection it had dropped");
+    CHECK(undelivered == 0u);
 }
 
 // A client that closes its connection before its answers come back gets none

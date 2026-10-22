@@ -150,7 +150,7 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     // The ring is filled with an address the guest has no verb for: taken off
     // the ring and not answered. A ping apiece had the guest answer thousands
     // of pongs into an egress ring a sixth the size, with no client reading
-    // them, and most were refused (checkNoEgressRefused) — a flood of replies
+    // them, and most were refused (checkNoEgressLost) — a flood of replies
     // is not what this case is about. The same length as a ping.
     const auto unanswered = osc_test::message("/dummy/none");
     const uint32_t bound = 64 * 1024;

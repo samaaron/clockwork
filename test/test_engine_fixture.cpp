@@ -11,7 +11,11 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include "clockwork_client.h"
 #include "clockwork_prefix.h"
+#include "lanes/lanes_internal.h"
+
+#include <vector>
 
 namespace {
 
@@ -41,4 +45,40 @@ TEST_CASE("Fixture: the boot barrier waits for its own pong, however late it com
     for (const auto& r : fix.allReplies())
         if (r.address == "/dummy/pong") ++pongs;
     CHECK(pongs == 0);   // the barrier took its own
+}
+
+// THE TEARDOWN CHECK LOOKS (checkNoEgressLost). Every case passes with
+// nothing lost, which is also what a check that stopped looking would say;
+// these lose a frame each way and pass only by failing ([!shouldfail]), so a
+// check that went blind turns them red. Their twins say they mean to.
+namespace {
+void loseOneUndelivered(EngineFixture& fix) {
+    clockwork_client_count_undelivered(fix.engine().egressClient(), 1);   // as a host whose peer had gone
+}
+void loseOneRefused() {
+    std::vector<uint8_t> tooBig(clockwork_egress_nrt_max_frame() + 1, 0);
+    tooBig[0] = '/';
+    REQUIRE_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, tooBig.data(), static_cast<uint32_t>(tooBig.size())));
+}
+}  // namespace
+
+TEST_CASE("Fixture: a case that ends with a frame no transport could deliver fails",
+          "[Fixture][egress][!shouldfail]") {
+    EngineFixture fix;
+    loseOneUndelivered(fix);
+}
+
+TEST_CASE("Fixture: a case that ends with a frame an egress ring refused fails",
+          "[Fixture][egress][!shouldfail]") {
+    EngineFixture fix;
+    loseOneRefused();
+}
+
+TEST_CASE("Fixture: a case that says it loses frames is not failed for them",
+          "[Fixture][egress]") {
+    EngineFixture fix;
+    fix.expectEgressUndelivered();
+    fix.expectEgressRefusals();
+    loseOneUndelivered(fix);
+    loseOneRefused();
 }
