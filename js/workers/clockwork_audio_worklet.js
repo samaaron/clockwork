@@ -54,6 +54,11 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.wasmModule = null;
         this.wasmInstance = null;
         this.isInitialized = false;
+        // Let go by the page (a reload, a shutdown: Clockwork's #retireWorklet): no block rendered and no message
+        // taken from then on. Said by a message, and in SAB mode by a word in shared memory too, read before every
+        // block, so a worklet the message reaches late still never renders again.
+        this.retired = false;
+        this.stopWord = null;
         this.processCallCount = 0;
         this.lastRenderWall = 0;       // Date.now() at the last render (RESUME_GAP_MS)
         this.fadeInDone = 0;           // samples of the fade-in rendered, while one is under way (RESUME_FADE_SECONDS)
@@ -710,7 +715,12 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
     async handleMessage(event) {
         const { data } = event;
-
+        if (this.retired) return;
+        if (data.type === 'retire') {
+            this.retire();
+            this.port.postMessage({ type: 'retired' });
+            return;
+        }
 
         try {
             if (data.type === 'listening') {
@@ -824,6 +834,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
             if (data.type === 'init') {
                 this.mode = data.mode || 'sab';
+                this.stopWord = data.stopBuffer ? new Int32Array(data.stopBuffer) : null;
 
                 // Set snapshot interval (postMessage mode) - convert ms to seconds for AudioContext time
                 if (data.snapshotIntervalMs) {
@@ -1370,7 +1381,22 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         }
     }
 
+    // Out of the engine for good. process() says false from here, so the browser stops calling it and can let it
+    // go: a host's context outlives the engine it was given to, and a processor that says true is called for as long
+    // as its context runs, connected or not — over the memory the next worklet renders (a reload in SAB mode), or over
+    // nothing at all. The ports workers wrote through close with it.
+    retire() {
+        this.retired = true;
+        for (const port of this.oscPorts) port.close();
+        this.oscPorts = [];
+    }
+
     process(inputs, outputs, parameters) {
+        if (this.retired) return false;
+        if (this.stopWord && Atomics.load(this.stopWord, 0) !== 0) {
+            this.retire();
+            return false;
+        }
         this.processCallCount++;
 
         if (!this.isInitialized) {

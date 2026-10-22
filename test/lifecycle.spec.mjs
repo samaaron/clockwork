@@ -418,3 +418,61 @@ test("a 'setup' listener that fails is said on 'error', not swallowed", async ({
   expect(r.errors.some((m) => m.includes("setup") && m.includes("no such group")), JSON.stringify(r.errors)).toBe(true);
   expect(r.state, "the engine itself is up").toBe("running");
 });
+
+test("after a reload onto the context the host supplied, one audio thread renders the engine, not two", async ({ page, clockworkConfig, clockworkMode }) => {
+  // A reload makes a new worklet. The old one's node is let go, but on a context that stays open (the host's, kept
+  // across the reload) its processor is still called while it asks to be, and one still rendering is a second audio
+  // thread in the engine: a SAB reload's carried-on instance driven twice a block — scsynth reads a bus written in
+  // the other thread's block as silence — and the in ring with two readers. The engine renders a block per render
+  // quantum of the context, and no more. Counted where the page reads the count live (SAB); postMessage's snapshots
+  // carry it late, and there the old worklet renders memory of its own.
+  test.skip(clockworkMode !== "sab", "the engine's block count is read live in SAB mode");
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const ctx = new AudioContext();
+    const cw = new window.Clockwork({ ...config, audioContext: ctx });
+    await cw.init();
+    const rate = async () => {
+      const n = () => cw.getMetrics().engineProcessCount, a = n(), t = performance.now();
+      await new Promise((res) => setTimeout(res, 1500));
+      return (n() - a) / ((performance.now() - t) / 1000);
+    };
+    const before = await rate();
+    const reloaded = await cw.reload();
+    const after = await rate();
+    const quanta = ctx.sampleRate / 128;
+    await cw.shutdown();
+    await ctx.close();
+    return { reloaded, before, after, quanta };
+  }, clockworkConfig);
+  expect(r.reloaded).toBe(true);
+  expect(r.before / r.quanta, `before the reload: ${r.before.toFixed(0)} blocks a second at ${r.quanta} quanta`).toBeLessThan(1.2);
+  expect(r.after / r.quanta, `after the reload: ${r.after.toFixed(0)} blocks a second at ${r.quanta} quanta`).toBeLessThan(1.2);
+});
+
+test("after a shutdown on the context the host supplied, the engine's audio thread renders no more", async ({ page, clockworkConfig, clockworkMode }) => {
+  // The host's context outlives the engine it was given to, and a worklet still rendering on it once the engine has
+  // shut down is an audio thread spent on nothing, for as long as the page lives. Counted where the page reads the
+  // count live (SAB): the old memory's block count stands still once the engine is down.
+  test.skip(clockworkMode !== "sab", "the engine's block count is read live in SAB mode");
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const ctx = new AudioContext();
+    const cw = new window.Clockwork({ ...config, audioContext: ctx });
+    await cw.init();
+    const count = () => cw.getMetrics().engineProcessCount;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const a = count();
+    await sleep(500);
+    const running = count() - a;
+    await cw.shutdown();
+    await sleep(100);   // a block already under way finishes
+    const b = count();
+    await sleep(1000);
+    const after = count() - b;
+    await ctx.close();
+    return { running, after };
+  }, clockworkConfig);
+  expect(r.running, "the engine rendered before the shutdown").toBeGreaterThan(50);
+  expect(r.after, "blocks rendered in the second after the shutdown").toBe(0);
+});

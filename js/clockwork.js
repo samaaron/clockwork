@@ -36,6 +36,9 @@ const WORKLET_INIT_TIMEOUT_MS = 5000;
 // worklet is gone — at which point purge() resolves best-effort so recover()
 // can fall back to reload() instead of hanging.
 const PURGE_ACK_TIMEOUT_MS = 1000;
+// How long a worklet being let go has to say it rendered its last block (#retireWorklet). A live one answers within a
+// render quantum; one that does not is gone, or stalled, and in SAB mode the stop word keeps it from rendering again.
+const RETIRE_ACK_TIMEOUT_MS = 250;
 // Interval for metrics/tree snapshots in postMessage mode (ms)
 const SNAPSHOT_INTERVAL_MS = 150;
 import { MemoryLayout } from "./memory_layout.js";
@@ -154,6 +157,7 @@ export class Clockwork {
 
   #audioContext;
   #workletNode;
+  #workletStop = null;   // SAB mode: the word the worklet reads before every block, set when it is let go
   #node = null;
   #osc;
   #wasmMemory;
@@ -998,22 +1002,7 @@ export class Clockwork {
     this.#clock?.stopDriftTimer();
     this.#abandonSyncs("the engine shut down");
 
-    if (this.#osc) {
-      await this.#osc.dispose();
-      this.#osc = null;
-    }
-    // Stop forwarding worklet debug batches — the transport is gone. A live
-    // handler here would deref the null #osc when a late batch arrives.
-    this.#debugRawHandler = null;
-    this.#front?.dispose();
-    this.#front = null;
-
-    if (this.#workletNode) {
-      this.#workletNode.disconnect();
-      this.#workletNode = null;
-    }
-
-    await this.#releaseAudioContext();
+    await this.#releaseEngine();
 
     this.#initialized = false;
     this.#tapViews = null;
@@ -1816,24 +1805,7 @@ export class Clockwork {
     this.#audioHealthMonitor = null;
     this.#abandonSyncs("the engine shut down");
 
-    if (this.#osc) {
-      await this.#osc.dispose();
-      this.#osc = null;
-    }
-    // Stop forwarding worklet debug batches — the transport is gone. A live
-    // handler here would deref the null #osc when a late batch arrives.
-    this.#debugRawHandler = null;
-    // The front's devices close with the transport that fed them.
-    this.#front?.dispose();
-    this.#front = null;
-
-    if (this.#workletNode) {
-      this.#workletNode.disconnect();
-      this.#workletNode = null;
-    }
-
-    await this.#releaseAudioContext();
-
+    await this.#releaseEngine();
 
     this.#oscChannel = null;
     this.#initialized = false;
@@ -1964,6 +1936,48 @@ export class Clockwork {
 
   // The context let go of: its listener taken off (a reload would otherwise leave one on every context the engine has
   // ever had), and closed only if the engine made it — a host's context stays open, for the host.
+  // What shutdown() and a reload both let go, in this order: the transport and the front it fed, the worklet, then
+  // the context. One path, so neither can miss a step the other takes.
+  async #releaseEngine() {
+    if (this.#osc) {
+      await this.#osc.dispose();
+      this.#osc = null;
+    }
+    // Stop forwarding worklet debug batches — the transport is gone. A live
+    // handler here would deref the null #osc when a late batch arrives.
+    this.#debugRawHandler = null;
+    // The front's devices close with the transport that fed them.
+    this.#front?.dispose();
+    this.#front = null;
+    await this.#retireWorklet();
+    await this.#releaseAudioContext();
+  }
+
+  // THE OLD WORKLET STOPS BEFORE IT IS LET GO. A processor that says true is called for as long as its context runs,
+  // connected or not, and a host's context outlives the engine it gave Clockwork: a worklet let go without a word
+  // rendered on, over the memory the next one renders (a reload in SAB mode: the engine driven twice a block) or over
+  // nothing, an audio thread spent for the life of the page. So it is told, in the word it reads before every block
+  // (SAB) and in a message it answers once it is out ('retire', 'retired'). One that does not answer in time is gone,
+  // or stalled, and the word keeps it from rendering again.
+  async #retireWorklet() {
+    const node = this.#workletNode;
+    const stop = this.#workletStop;
+    this.#workletNode = null;
+    this.#workletStop = null;
+    if (!node) return;
+    if (stop) Atomics.store(stop, 0, 1);
+    await new Promise((resolve) => {
+      let timer = 0;
+      const done = () => { clearTimeout(timer); node.port.removeEventListener('message', onMessage); resolve(); };
+      const onMessage = (event) => { if (event.data?.type === 'retired') done(); };
+      timer = setTimeout(done, RETIRE_ACK_TIMEOUT_MS);
+      node.port.addEventListener('message', onMessage);
+      node.port.postMessage({ type: 'retire' });
+    });
+    node.disconnect();
+    node.port.close();
+  }
+
   async #releaseAudioContext() {
     const ctx = this.#audioContext;
     if (!ctx) return;
@@ -2018,11 +2032,13 @@ export class Clockwork {
 
     const mode = this.#config.mode;
     const sharedBuffer = mode === 'sab' ? this.#wasmMemory.buffer : null;
+    this.#workletStop = mode === 'sab' ? new Int32Array(new SharedArrayBuffer(4)) : null;
 
     this.#workletNode.port.postMessage({
       type: "init",
       mode: mode,
       sharedBuffer: sharedBuffer,
+      stopBuffer: this.#workletStop?.buffer ?? null,
       snapshotIntervalMs: this.#config.snapshotIntervalMs,
     });
 
