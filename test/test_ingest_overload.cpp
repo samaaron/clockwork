@@ -8,8 +8,11 @@
  * a time. A client that outruns it has the commands that do not fit dropped:
  * the client's error, not a fault, but never a silent one. Every command a
  * client sends is either taken or counted dropped in the metrics it reads
- * (clockwork_client_metrics), and every command taken is answered, so a client
- * can see that it overloaded the engine and by how much. SuperSonic 0.90.1's
+ * (clockwork_client_metrics), and every command taken is answered or its
+ * answer counted refused, so a client can see that it overloaded the engine
+ * and by how much. An answer the egress ring has no room for is dropped, as
+ * a command the command ring has no room for is: the audio thread never waits
+ * for a client to read. SuperSonic 0.90.1's
  * publish was stopped by a transport test that did just that: its TCP load
  * sent 5,000 commands at once, a loaded Windows runner's engine fell behind,
  * and the probe waited for replies to commands that had been dropped.
@@ -69,15 +72,16 @@ std::vector<uint8_t> framed(const std::vector<uint8_t>& pkt) {
 // The counters a client reads to know what became of its commands, read as a
 // block, as the metrics' contract asks: the commands the engine took
 // (osc_out_messages_sent, the client's view of the host→engine direction),
-// those it dropped (messages_dropped), and those it processed off the ring
-// (messages_processed).
-struct Taken {
-    uint32_t taken = 0, dropped = 0, processed = 0;
+// those it dropped (messages_dropped), those it processed off the ring
+// (messages_processed), and the answers an egress ring refused for want of
+// room (egress_frames_refused).
+struct Counts {
+    uint32_t taken = 0, dropped = 0, processed = 0, refused = 0;
 };
-Taken readTaken(ClockworkEngine& engine) {
-    std::array<uint32_t, 16> m{};
-    REQUIRE(clockwork_client_metrics(engine.egressClient(), m.data(), uint32_t(m.size())) >= 10);
-    return {m[9], m[2], m[1]};
+Counts readCounts(ClockworkEngine& engine) {
+    std::array<uint32_t, 64> m{};
+    REQUIRE(clockwork_client_metrics(engine.egressClient(), m.data(), uint32_t(m.size())) >= 56);
+    return {m[9], m[2], m[1], m[55]};
 }
 
 }  // namespace
@@ -85,7 +89,8 @@ Taken readTaken(ClockworkEngine& engine) {
 // Far more commands than the engine can take, sent over TCP as fast as
 // loopback carries them: the engine drops what does not fit, and the client
 // sees it did, in the metrics; and between them, what was taken (every one
-// answered) and what was dropped account for every command sent.
+// answered, or its answer refused) and what was dropped account for every
+// command sent.
 TEST_CASE("A client that overloads the engine sees it in the metrics and no command goes unaccounted",
           "[transport][tcp][overload][rt]") {
     constexpr int kCommands = 200000;
@@ -102,7 +107,7 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     cfg.hostDrivesControl = false;   // the engine runs its own control pass
     engine.init(cfg);
     REQUIRE(tcp.start());
-    const Taken before = readTaken(engine);
+    const Counts before = readCounts(engine);
 
     const int fd = connectTcp(tcp.boundPort());
 #ifdef SO_NOSIGPIPE
@@ -132,16 +137,16 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     });
 
     // Every command has been taken or dropped, and every one taken processed
-    // and answered.
+    // and answered or its answer refused.
     writer.join();
-    Taken now{};
+    Counts now{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     do {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        now = readTaken(engine);
+        now = readCounts(engine);
     } while ((now.taken - before.taken + now.dropped - before.dropped < uint32_t(kCommands)
               || now.processed - before.processed < now.taken - before.taken
-              || answered.load() < int(now.taken - before.taken))
+              || answered.load() + int(now.refused - before.refused) < int(now.taken - before.taken))
              && std::chrono::steady_clock::now() < deadline);
     finished.store(true);
     shutdown(fd, SHUT_RDWR);
@@ -153,15 +158,17 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     const uint32_t taken = now.taken - before.taken;
     const uint32_t dropped = now.dropped - before.dropped;
     const uint32_t processed = now.processed - before.processed;
+    const uint32_t refused = now.refused - before.refused;
     INFO(sent.load() << " sent: " << taken << " taken, " << processed << " processed, "
-         << answered.load() << " answered, " << dropped << " dropped");
+         << answered.load() << " answered, " << refused << " answers refused, " << dropped << " dropped");
     CHECK(sent.load() == kCommands);
     // Overloaded, and the client can see it: n sent, m dropped and counted,
-    // n - m taken, processed and answered.
+    // n - m taken and processed, each answered or its answer refused and
+    // counted.
     CHECK(dropped > 0);
     CHECK(taken + dropped == uint32_t(kCommands));
     CHECK(processed == uint32_t(kCommands) - dropped);
-    CHECK(answered.load() == kCommands - int(dropped));
+    CHECK(answered.load() + int(refused) == kCommands - int(dropped));
     CHECK(outOfOrder.load() == 0);
 }
 
