@@ -52,7 +52,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 248;   // Performance metrics: 62 fields * 4 bytes = 248 bytes (multiple of 8)
+constexpr uint32_t METRICS_SIZE       = 256;   // Performance metrics: 64 fields * 4 bytes = 256 bytes (multiple of 8)
 constexpr uint32_t NTP_START_TIME_SIZE = 8;    // NTP time when AudioContext started (double, 8-byte aligned, write-once)
 constexpr uint32_t DRIFT_OFFSET_SIZE = 4;      // Drift offset in microseconds (int32, atomic)
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
@@ -632,9 +632,10 @@ struct alignas(4) PerformanceMetrics {
     // (shared C++), in the slots 53-57 that once held the buffer pool's metrics.
     std::atomic<uint32_t> guest_pool_used_bytes;    // 53: bytes in use in the guest's pool now (its bulk memory)
     std::atomic<uint32_t> guest_pool_peak_bytes;    // 54: the most ever
-    // Frames an egress ring refused for want of room — the RT ring
-    // (ring_buffer_write) or the NRT ring (clockwork_egress_nrt_write): a
-    // reply, a broadcast or a log line the clients never get. Zero in a
+    // Frames an egress ring refused, for want of room or for their size —
+    // the RT ring (ring_buffer_write) or the NRT ring
+    // (clockwork_egress_nrt_write): a reply, a broadcast or a log line the
+    // clients never get. Zero in a
     // healthy engine; the line logging a refusal rides the same full ring, so
     // this count is the only trace (2026-10-16). Held the pool's growth count
     // until the pool stopped growing (2026-10-15).
@@ -651,6 +652,15 @@ struct alignas(4) PerformanceMetrics {
     // clockwork wrap the allocator (the web), 0 everywhere else.
     std::atomic<uint32_t> mallocs_after_boot;       // 60: malloc/calloc/realloc calls since the engine was ready
     std::atomic<uint32_t> malloc_bytes_after_boot;  // 61: bytes taken since then and still held
+    // Deliveries the transport could not make: a reply to a client that has
+    // gone (a stream connection closed, or dropped for not reading), a
+    // datagram the socket refused, a peer whose reply ring was full, or one
+    // subscriber of a broadcast that any of these befell. The frame left its
+    // egress ring and reached no one: the other half of what the clients
+    // never got, beside egress_frames_refused. Counted by the gateway, one per
+    // destination missed (OscEgress::dispatchEgress).
+    std::atomic<uint32_t> egress_frames_undelivered; // 62
+    std::atomic<uint32_t> _metrics_pad;              // 63: keeps METRICS_SIZE a multiple of 8
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -1206,6 +1216,7 @@ CLOCKWORK_ASSERT_METRIC(guest_malloc_bytes,              58);
 CLOCKWORK_ASSERT_METRIC(guest_mallocs_processing,        59);
 CLOCKWORK_ASSERT_METRIC(mallocs_after_boot,              60);
 CLOCKWORK_ASSERT_METRIC(malloc_bytes_after_boot,         61);
+CLOCKWORK_ASSERT_METRIC(egress_frames_undelivered,       62);
 CLOCKWORK_ASSERT_METRIC(_metrics_reserved,               50);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena

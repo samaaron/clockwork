@@ -34,21 +34,16 @@ bool ShmTransport::send(uint32_t token, const uint8_t* data, uint32_t size,
     return writeReply(data, size);
 }
 
-void ShmTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
-    if (mNotify.load(std::memory_order_relaxed)) writeReply(data, size);
+// The audience is the one peer, if it subscribed.
+uint32_t ShmTransport::broadcastTo(const std::atomic<bool>& subscribed,
+                                   const uint8_t* data, uint32_t size) {
+    return subscribed.load(std::memory_order_relaxed) && !writeReply(data, size) ? 1u : 0u;
 }
-void ShmTransport::broadcastLink(const uint8_t* data, uint32_t size) {
-    if (mLink.load(std::memory_order_relaxed)) writeReply(data, size);
-}
-void ShmTransport::broadcastMidi(const uint8_t* data, uint32_t size) {
-    if (mMidi.load(std::memory_order_relaxed)) writeReply(data, size);
-}
-void ShmTransport::broadcastGamepad(const uint8_t* data, uint32_t size) {
-    if (mGamepad.load(std::memory_order_relaxed)) writeReply(data, size);
-}
-void ShmTransport::broadcastOsc(const uint8_t* data, uint32_t size) {
-    if (mOsc.load(std::memory_order_relaxed)) writeReply(data, size);
-}
+uint32_t ShmTransport::broadcastNotify(const uint8_t* data, uint32_t size) { return broadcastTo(mNotify, data, size); }
+uint32_t ShmTransport::broadcastLink(const uint8_t* data, uint32_t size) { return broadcastTo(mLink, data, size); }
+uint32_t ShmTransport::broadcastMidi(const uint8_t* data, uint32_t size) { return broadcastTo(mMidi, data, size); }
+uint32_t ShmTransport::broadcastGamepad(const uint8_t* data, uint32_t size) { return broadcastTo(mGamepad, data, size); }
+uint32_t ShmTransport::broadcastOsc(const uint8_t* data, uint32_t size) { return broadcastTo(mOsc, data, size); }
 
 // Caller-relative subscription with one possible caller: accept only the
 // peer's token (an in-process caller — token 0 — is unaddressable here, the

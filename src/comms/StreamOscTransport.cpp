@@ -92,10 +92,8 @@ bool StreamOscTransport::send(uint32_t token, const uint8_t* data, uint32_t size
     return clockwork_osc_stream_send(server, token, data, size) != 0;
 }
 
-void StreamOscTransport::broadcast(const std::vector<uint32_t>& list,
-                                   const uint8_t* data, uint32_t size) {
-    auto* server = mServer.load(std::memory_order_acquire);
-    if (!server) return;
+uint32_t StreamOscTransport::broadcast(const std::vector<uint32_t>& list,
+                                       const uint8_t* data, uint32_t size) {
     // Copy the audience out so a send never runs under the audience lock (a
     // reader thread pruning via onClosed must not wait on a slow write).
     std::vector<uint32_t> targets;
@@ -103,14 +101,19 @@ void StreamOscTransport::broadcast(const std::vector<uint32_t>& list,
         std::lock_guard<std::mutex> lk(mMutex);
         targets = list;
     }
-    for (uint32_t conn : targets) clockwork_osc_stream_send(server, conn, data, size);
+    auto* server = mServer.load(std::memory_order_acquire);
+    if (!server) return static_cast<uint32_t>(targets.size());
+    uint32_t missed = 0;
+    for (uint32_t conn : targets)
+        if (clockwork_osc_stream_send(server, conn, data, size) == 0) ++missed;
+    return missed;
 }
 
-void StreamOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
-    broadcast(mNotifyTargets, data, size);
+uint32_t StreamOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
+    return broadcast(mNotifyTargets, data, size);
 }
-void StreamOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
-    broadcast(mLinkNotifyTargets, data, size);
+uint32_t StreamOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
+    return broadcast(mLinkNotifyTargets, data, size);
 }
 
 bool StreamOscTransport::hasNotifySubscribers() const {
@@ -142,8 +145,8 @@ void StreamOscTransport::unsubscribeLink(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
     removeConn(mLinkNotifyTargets, token);
 }
-void StreamOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) {
-    broadcast(mMidiNotifyTargets, data, size);
+uint32_t StreamOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) {
+    return broadcast(mMidiNotifyTargets, data, size);
 }
 bool StreamOscTransport::subscribeMidi(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
@@ -153,8 +156,8 @@ void StreamOscTransport::unsubscribeMidi(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
     removeConn(mMidiNotifyTargets, token);
 }
-void StreamOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) {
-    broadcast(mGamepadNotifyTargets, data, size);
+uint32_t StreamOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) {
+    return broadcast(mGamepadNotifyTargets, data, size);
 }
 bool StreamOscTransport::subscribeGamepad(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
@@ -164,8 +167,8 @@ void StreamOscTransport::unsubscribeGamepad(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
     removeConn(mGamepadNotifyTargets, token);
 }
-void StreamOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) {
-    broadcast(mOscNotifyTargets, data, size);
+uint32_t StreamOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) {
+    return broadcast(mOscNotifyTargets, data, size);
 }
 bool StreamOscTransport::subscribeOsc(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);

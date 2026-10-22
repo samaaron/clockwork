@@ -71,8 +71,8 @@ struct MockTransport : IOscTransport {
     bool send(uint32_t token, const uint8_t*, uint32_t, bool networkOnly) override {
         lastSendToken = token; lastNetworkOnly = networkOnly; ++sendCount; return true;
     }
-    void broadcastNotify(const uint8_t*, uint32_t) override {}
-    void broadcastLink(const uint8_t*, uint32_t) override {}
+    uint32_t broadcastNotify(const uint8_t*, uint32_t) override { return 0; }
+    uint32_t broadcastLink(const uint8_t*, uint32_t) override { return 0; }
     bool hasNotifySubscribers() const override { return false; }
     bool subscribeNotify(uint32_t t) override { lastSubToken = t; return true; }
     bool subscribeNotifyPort(int) override { return false; }
@@ -80,13 +80,13 @@ struct MockTransport : IOscTransport {
     void clearNotify() override {}
     bool subscribeLink(uint32_t t) override { lastSubToken = t; return true; }
     void unsubscribeLink(uint32_t t) override { lastSubToken = t; }
-    void broadcastMidi(const uint8_t*, uint32_t) override {}
+    uint32_t broadcastMidi(const uint8_t*, uint32_t) override { return 0; }
     bool subscribeMidi(uint32_t t) override { lastSubToken = t; return true; }
     void unsubscribeMidi(uint32_t t) override { lastSubToken = t; }
-    void broadcastGamepad(const uint8_t*, uint32_t) override {}
+    uint32_t broadcastGamepad(const uint8_t*, uint32_t) override { return 0; }
     bool subscribeGamepad(uint32_t t) override { lastSubToken = t; return true; }
     void unsubscribeGamepad(uint32_t t) override { lastSubToken = t; }
-    void broadcastOsc(const uint8_t*, uint32_t) override {}
+    uint32_t broadcastOsc(const uint8_t*, uint32_t) override { return 0; }
     bool subscribeOsc(uint32_t t) override { lastSubToken = t; return true; }
     void unsubscribeOsc(uint32_t t) override { lastSubToken = t; }
 };

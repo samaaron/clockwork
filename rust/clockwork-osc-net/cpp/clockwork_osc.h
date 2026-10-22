@@ -51,9 +51,11 @@ void clockwork_osc_destroy(ClockworkOsc* handle);
 void clockwork_osc_configure(ClockworkOsc* handle, int32_t port, int32_t loopback, int32_t cues_on);
 
 /* Send one OSC packet `data`/`len` to `host`:`port`. `host` is a byte string
- * (ptr + len, not NUL-terminated). Off the audio thread. */
-void clockwork_osc_send(ClockworkOsc* handle, const uint8_t* host, uint32_t host_len,
-                 int32_t port, const uint8_t* data, uint32_t len);
+ * (ptr + len, not NUL-terminated). Off the audio thread. Non-zero when the
+ * socket took the datagram; 0 when it could not be sent (no such host, a
+ * socket that refused it, a bad argument). */
+int32_t clockwork_osc_send(ClockworkOsc* handle, const uint8_t* host, uint32_t host_len,
+                           int32_t port, const uint8_t* data, uint32_t len);
 
 /* Raw OSC ingress (separate from the cue server): receive datagrams on `port`
  * and hand the raw OSC bytes to `emit` (kind = broadcast) without re-framing.

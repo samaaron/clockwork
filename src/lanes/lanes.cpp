@@ -209,8 +209,13 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
         return false;
     // Subtraction form: len + EGRESS_ROUTE_SIZE would wrap for len near
-    // UINT32_MAX and slip past the bound into the stack memcpy below.
-    if (len > kNrtEgressMax - EGRESS_ROUTE_SIZE) return false;
+    // UINT32_MAX and slip past the bound into the stack memcpy below. Too big
+    // ever to carry is refused and counted, as a full ring's refusal is: the
+    // frame reaches no one either way.
+    if (len > kNrtEgressMax - EGRESS_ROUTE_SIZE) {
+        if (metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
     uint8_t buf[kNrtEgressMax];
     std::memcpy(buf, &route, sizeof(route));
@@ -224,6 +229,10 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     // ride this same full ring (PerformanceMetrics::egress_frames_refused).
     if (!written && metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
     return written;
+}
+
+void clockwork_egress_count_undelivered(uint32_t n) {
+    if (n && metrics) metrics->egress_frames_undelivered.fetch_add(n, std::memory_order_relaxed);
 }
 
 // ── Tick ────────────────────────────────────────────────────────────────────

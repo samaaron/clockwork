@@ -7,8 +7,9 @@
  * every GUI that renders engine metrics (the <clockwork-metrics> web
  * component, a Qt metrics panel, clockwork-state, ...).
  *
- * Offsets [0-49] index the PerformanceMetrics struct in src/shared_memory.h;
- * [50+] are context metrics merged by MetricsReader on the JS main thread.
+ * Offsets [0-49] and [53-62] index the PerformanceMetrics struct in
+ * src/shared_memory.h; [50-52] and [64+] are context metrics merged by
+ * MetricsReader on the JS main thread.
  * Fields marked `nativeOnly: true` have no web writer (always 0 on WASM);
  * fields marked `webOnly: true` have no native writer (a browser's, or the
  * JS client's own). One layout serves every panel: a row that reads a
@@ -123,25 +124,25 @@ export const METRICS_SCHEMA = {
     driftOffsetMs:                { offset: 50, webOnly: true, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
     audioContextState:            { offset: 52, webOnly: true, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
-    inBufferCapacity:             { offset: 62, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
-    outBufferCapacity:            { offset: 63, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
-    nrtOutBufferCapacity:          { offset: 64, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
-    mode:                         { offset: 65, webOnly: true, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
+    inBufferCapacity:             { offset: 64, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
+    outBufferCapacity:            { offset: 65, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
+    nrtOutBufferCapacity:          { offset: 66, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
+    mode:                         { offset: 67, webOnly: true, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
 
     // Audio diagnostics [66-72] (main thread, Chrome playbackStats + cross-browser health)
-    glitchCount:                  { offset: 66, webOnly: true, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
-    glitchDurationMs:             { offset: 67, webOnly: true, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
-    averageLatencyUs:             { offset: 68, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
-    maxLatencyUs:                 { offset: 69, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
-    audioHealthPct:               { offset: 70, webOnly: true, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
-    totalFramesDurationMs:        { offset: 71, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
-    hasPlaybackStats:             { offset: 72, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
+    glitchCount:                  { offset: 68, webOnly: true, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
+    glitchDurationMs:             { offset: 69, webOnly: true, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
+    averageLatencyUs:             { offset: 70, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
+    maxLatencyUs:                 { offset: 71, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
+    audioHealthPct:               { offset: 72, webOnly: true, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
+    totalFramesDurationMs:        { offset: 73, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
+    hasPlaybackStats:             { offset: 74, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
 
     // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush; the slots the buffer
     // pool's metrics once held)
     guestPoolUsedBytes:           { offset: 53, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the guest\'s pool now: what it has allocated from its bulk memory (payloads as carved)' },
     guestPoolPeakBytes:           { offset: 54, type: 'gauge',    unit: 'bytes', description: 'The most bytes ever in use in the guest\'s pool' },
-    egressFramesRefused:          { offset: 55, type: 'counter',  unit: 'count', description: 'Replies, broadcasts and log lines an egress ring refused for want of room: what the clients never got. 0 in a healthy engine' },
+    egressFramesRefused:          { offset: 55, type: 'counter',  unit: 'count', description: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got. 0 in a healthy engine' },
     rustHeapUsedBytes:            { offset: 56, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the rust heap now (the RT router\'s block)' },
     rustHeapFallbacks:            { offset: 57, type: 'counter',  unit: 'count', description: 'Rust allocations inside the engine that fell back to the system allocator because the rust heap was full' },
     // The guest's mallocs [58-59] (shared C++, written at the metrics flush; src/guest_malloc.h). Counted where the
@@ -153,6 +154,9 @@ export const METRICS_SCHEMA = {
     // web, 0 everywhere else.
     mallocsAfterBoot:             { offset: 60, type: 'counter',  unit: 'count', description: 'malloc, calloc or realloc calls anywhere in the engine\'s program since the engine was ready; the memory model says 0' },
     mallocBytesAfterBoot:         { offset: 61, type: 'gauge',    unit: 'bytes', description: 'Bytes taken from malloc since the engine was ready and still held' },
+    // What left an egress ring and reached no one (shared_memory.h): counted by the native gateway; the web
+    // page delivers its replies itself, and counts its own losses (oscInMessagesDropped).
+    egressFramesUndelivered:      { offset: 62, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full. 0 in a healthy engine' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -202,7 +206,8 @@ export const METRICS_SCHEMA = {
         rows: [
           { label: 'ticks',       tooltip: 'Audio process() callback count and OSC messages processed', cells: [{ key: 'engineProcessCount', kind: 'dim' }, { sep: ' | ' }, { key: 'engineMessagesProcessed', kind: 'muted' }, { text: ' msgs', kind: 'muted' }] },
           { label: 'dropped',     tooltip: 'Messages refused on the way in', cells: [{ key: 'engineMessagesDropped', kind: 'error' }] },
-          { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused for want of room: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
+          { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
+          { label: 'undelivered', tooltip: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full', cells: [{ key: 'egressFramesUndelivered', kind: 'error' }] },
           { label: 'drift',       cells: [{ key: 'driftOffsetMs', format: 'signed' }, { text: ' ms', kind: 'muted' }] },
           { label: 'debug',       tooltip: COMPOSITES.debugCountBytes.description, cells: [{ key: 'debugMessagesReceived', kind: 'muted' }, { text: ' (' }, { key: 'debugBytesReceived', kind: 'muted', format: 'bytes' }, { text: ')' }] },
         ]

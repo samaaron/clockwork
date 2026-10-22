@@ -133,13 +133,14 @@ export const METRICS_RESERVED  = 50;
 // carries no value, so we stop the copy at the reserved slot.
 export const SAB_METRICS_COUNT = METRICS_RESERVED + 1;  // 51
 // Every word of the C++ struct, the heap's census at 53-57, the guest's
-// mallocs at 58-59 and the program's at 60-61 included: what the reader
-// copies from the SAB before the context writes its own slots over 50-52
-// (METRICS_SIZE / 4 in shared_memory.h).
-export const SAB_METRICS_WORDS = 62;   // MALLOC_BYTES_AFTER_BOOT + 1
+// mallocs at 58-59, the program's at 60-61 and the undelivered count at 62
+// included: what the reader copies from the SAB before the context writes
+// its own slots over 50-52 (METRICS_SIZE / 4 in shared_memory.h, less its
+// trailing pad word).
+export const SAB_METRICS_WORDS = 63;   // EGRESS_FRAMES_UNDELIVERED + 1
 
 // =============================================================================
-// Context metrics [50-63] (written by main thread into merged array only)
+// Context metrics [50-52, 64-67] (written by main thread into merged array only)
 // These are NOT in the C++ PerformanceMetrics struct or SAB — MetricsReader
 // writes them into the local merged Uint32Array. They start at index 50,
 // reusing the reserved padding slot (the last meaningful SAB metric is
@@ -155,7 +156,7 @@ export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running
 // with the rest of the struct (SAB_METRICS_WORDS).
 export const GUEST_POOL_USED_BYTES = 53;  // bytes in use in the guest's pool now (its bulk memory)
 export const GUEST_POOL_PEAK_BYTES = 54;  // the most ever
-export const EGRESS_FRAMES_REFUSED = 55;  // frames an egress ring refused for want of room (0 in a healthy engine)
+export const EGRESS_FRAMES_REFUSED = 55;  // frames an egress ring refused, for want of room or for their size (0 in a healthy engine)
 export const RUST_HEAP_USED_BYTES = 56;   // bytes in use in the RT router's block
 export const RUST_HEAP_FALLBACKS  = 57;   // Rust allocations inside the engine that fell back to the system allocator
 // 58-59 are the guest's mallocs (src/guest_malloc.h), in the C++ struct and
@@ -167,24 +168,27 @@ export const GUEST_MALLOCS_PROCESSING = 59;   // malloc/calloc/realloc calls ins
 // allocator once the engine is up, which should be nothing. Counted on the web, 0 everywhere else.
 export const MALLOCS_AFTER_BOOT      = 60;   // malloc/calloc/realloc calls since the engine was ready
 export const MALLOC_BYTES_AFTER_BOOT = 61;   // bytes taken since then and still held
-export const CTX_IN_BUFFER_CAPACITY = 62;           // Static from bufferConstants
-export const CTX_OUT_BUFFER_CAPACITY = 63;          // Static from bufferConstants
-export const CTX_NRT_OUT_BUFFER_CAPACITY = 64;        // Static from bufferConstants
-export const CTX_MODE = 65;                         // Enum: 0=sab, 1=postMessage
+// 62 is the deliveries the transport could not make (a client gone, a full peer ring), in the C++ struct
+// and the SAB; 63 is the struct's pad word, and holds nothing.
+export const EGRESS_FRAMES_UNDELIVERED = 62;
+export const CTX_IN_BUFFER_CAPACITY = 64;           // Static from bufferConstants
+export const CTX_OUT_BUFFER_CAPACITY = 65;          // Static from bufferConstants
+export const CTX_NRT_OUT_BUFFER_CAPACITY = 66;        // Static from bufferConstants
+export const CTX_MODE = 67;                         // Enum: 0=sab, 1=postMessage
 
 // =============================================================================
-// Audio diagnostics [66-72] (written by main thread into merged array only)
+// Audio diagnostics [68-74] (written by main thread into merged array only)
 // =============================================================================
-export const CTX_GLITCH_COUNT = 66;          // Chrome only: playbackStats.fallbackFramesEvents
-export const CTX_GLITCH_DURATION_MS = 67;    // Chrome only: playbackStats.fallbackFramesDuration * 1000 (ms int)
-export const CTX_AVERAGE_LATENCY_US = 68;    // Chrome only: playbackStats.averageLatency * 1_000_000 (us int)
-export const CTX_MAX_LATENCY_US = 69;        // Chrome only: playbackStats.maximumLatency * 1_000_000 (us int)
-export const CTX_AUDIO_HEALTH_PCT = 70;      // Cross-browser: audio health percentage 0-100
-export const CTX_TOTAL_FRAMES_DURATION_MS = 71; // Chrome only: playbackStats.totalFramesDuration * 1000 (ms int)
-export const CTX_HAS_PLAYBACK_STATS = 72;    // 1 if Chrome playbackStats available, 0 otherwise
+export const CTX_GLITCH_COUNT = 68;          // Chrome only: playbackStats.fallbackFramesEvents
+export const CTX_GLITCH_DURATION_MS = 69;    // Chrome only: playbackStats.fallbackFramesDuration * 1000 (ms int)
+export const CTX_AVERAGE_LATENCY_US = 70;    // Chrome only: playbackStats.averageLatency * 1_000_000 (us int)
+export const CTX_MAX_LATENCY_US = 71;        // Chrome only: playbackStats.maximumLatency * 1_000_000 (us int)
+export const CTX_AUDIO_HEALTH_PCT = 72;      // Cross-browser: audio health percentage 0-100
+export const CTX_TOTAL_FRAMES_DURATION_MS = 73; // Chrome only: playbackStats.totalFramesDuration * 1000 (ms int)
+export const CTX_HAS_PLAYBACK_STATS = 74;    // 1 if Chrome playbackStats available, 0 otherwise
 
 // =============================================================================
-// The guest's metrics [71+] (written by main thread into merged array only)
+// The guest's metrics [75+] (written by main thread into merged array only)
 // =============================================================================
 /*
  * THE GUEST'S OWN METRICS.
@@ -201,8 +205,8 @@ export const CTX_HAS_PLAYBACK_STATS = 72;    // 1 if Chrome playbackStats availa
  * A guest that declares nothing simply has no metrics of its own, and the
  * range stays zero.
  */
-export const GUEST_METRICS_BASE = 73;
+export const GUEST_METRICS_BASE = 75;
 export const GUEST_METRICS_COUNT = 32;
 
-// Merged array size (slots 0-59 from SAB/snapshot, 50-52 and 60-63 context, 64-70 audio, 71+ the guest's)
-export const MERGED_ARRAY_SIZE = GUEST_METRICS_BASE + GUEST_METRICS_COUNT;  // 105
+// Merged array size (slots 0-62 from SAB/snapshot, 50-52 and 64-67 context, 68-74 audio, 75+ the guest's)
+export const MERGED_ARRAY_SIZE = GUEST_METRICS_BASE + GUEST_METRICS_COUNT;  // 107

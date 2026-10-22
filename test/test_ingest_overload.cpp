@@ -36,6 +36,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <thread>
 #include <vector>
 
@@ -73,15 +74,25 @@ std::vector<uint8_t> framed(const std::vector<uint8_t>& pkt) {
 // block, as the metrics' contract asks: the commands the engine took
 // (osc_out_messages_sent, the client's view of the host→engine direction),
 // those it dropped (messages_dropped), those it processed off the ring
-// (messages_processed), and the answers an egress ring refused for want of
-// room (egress_frames_refused).
+// (messages_processed), the answers an egress ring refused
+// (egress_frames_refused), and those the transport could not deliver
+// (egress_frames_undelivered).
 struct Counts {
-    uint32_t taken = 0, dropped = 0, processed = 0, refused = 0;
+    uint32_t taken = 0, dropped = 0, processed = 0, refused = 0, undelivered = 0;
 };
 Counts readCounts(ClockworkEngine& engine) {
     std::array<uint32_t, 64> m{};
-    REQUIRE(clockwork_client_metrics(engine.egressClient(), m.data(), uint32_t(m.size())) >= 56);
-    return {m[9], m[2], m[1], m[55]};
+    REQUIRE(clockwork_client_metrics(engine.egressClient(), m.data(), uint32_t(m.size())) >= 63);
+    return {m[9], m[2], m[1], m[55], m[62]};
+}
+
+bool waitFor(const std::function<bool()>& f) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!f()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
 }
 
 }  // namespace
@@ -170,6 +181,50 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     CHECK(processed == uint32_t(kCommands) - dropped);
     CHECK(answered.load() + int(refused) == kCommands - int(dropped));
     CHECK(outOfOrder.load() == 0);
+}
+
+// A client that closes its connection before its answers come back gets none
+// of them: the transport has nowhere to send them. They left the egress ring
+// and reached no one, and the metrics say so, one per answer.
+TEST_CASE("Answers to a client that has gone are counted undelivered",
+          "[transport][tcp][egress]") {
+    StreamOscTransport tcp;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    tcp.setIngest([&engine](const uint8_t* d, uint32_t n, uint32_t token) {
+        engine.ingest(d, n, token);
+    });
+    tcp.initialiseTcp(0, "127.0.0.1");
+    engine.setTransport(&tcp);
+    auto cfg = EngineFixture::defaultConfig();   // pumped: no block but this case's
+    cfg.hostDrivesControl = true;                 // and no pass but this case's
+    engine.init(cfg);
+    REQUIRE(tcp.start());
+
+    // Subscribed, so the transport's audience says when it has seen the
+    // connection close.
+    const int fd = connectTcp(tcp.boundPort());
+    REQUIRE(sendAll(fd, framed(osc_test::message(CLOCKWORK_SYS("notify")).data)));
+    REQUIRE(waitFor([&] { engine.controlPass(); return tcp.hasNotifySubscribers(); }));
+    REQUIRE(engine.controlPass());   // the subscription's answer, delivered
+
+    const Counts before = readCounts(engine);
+    constexpr uint32_t kAsked = 5;
+    for (uint32_t id = 1; id <= kAsked; ++id)
+        REQUIRE(sendAll(fd, framed(osc_test::message(CLOCKWORK_SYS("sync"), int(id)).data)));
+    REQUIRE(waitFor([&] { return readCounts(engine).taken - before.taken == kAsked; }));
+    close(fd);
+    REQUIRE(waitFor([&] { return !tcp.hasNotifySubscribers(); }));
+
+    engine.pumpAudioBlock();          // answered, into the egress ring
+    REQUIRE(engine.controlPass());    // and handed to a transport with no one to give them to
+    const Counts after = readCounts(engine);
+    INFO((after.processed - before.processed) << " answered by the engine, "
+         << (after.undelivered - before.undelivered) << " counted undelivered");
+    CHECK(after.processed - before.processed == kAsked);
+    CHECK(after.undelivered - before.undelivered == kAsked);
+    engine.shutdown();
+    tcp.stop();
 }
 
 #endif  // _WIN32

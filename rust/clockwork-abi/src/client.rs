@@ -170,6 +170,7 @@ extern "C" {
     pub fn clockwork_client_send_commit(c: *mut ClockworkClient, bytes: u32, origin: u32) -> ClockworkStatus;
     pub fn clockwork_client_send_abort(c: *mut ClockworkClient);
     pub fn clockwork_client_poll(c: *mut ClockworkClient, out: *mut ClockworkClientMessage, max: u32) -> u32;
+    pub fn clockwork_client_count_undelivered(c: *mut ClockworkClient, n: u32);
 
     pub fn clockwork_client_tap_sizeof() -> usize;
     pub fn clockwork_client_tap_open(c: *mut ClockworkClient, ring: u32, out_status: *mut ClockworkStatus) -> *mut ClockworkClientTap;

@@ -13,7 +13,7 @@
 #include "comms/EgressRouter.h"
 #include "osc_debug.h"
 #include "lanes/lanes.h"           // clockwork_lanes_base: the arena, for the generation
-#include "lanes/lanes_internal.h"  // clockwork_egress_nrt_write (NRT egress producer)
+#include "lanes/lanes_internal.h"  // clockwork_egress_nrt_write (NRT egress producer), the undelivered count
 #include "shared_memory.h"         // arenaInstanceGeneration
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
@@ -112,10 +112,12 @@ void OscEgress::dispatchEgress(uint32_t originToken, uint32_t route,
     // true; the engine's current hook inspects nothing and never does.
     if (mInterceptor && mInterceptor(osc, oscLen)) return;
     if (!mTransport) return;
-    // The one routing table, shared with a host that drains egress itself.
+    // The one routing table, shared with a host that drains egress itself,
+    // and what the transport could not deliver counted, as such a host counts it.
     const std::function<void(const std::string&)> onDebug =
         [this](const std::string& s) { deliverDebug(s.data(), static_cast<uint32_t>(s.size())); };
-    clockwork_route_egress(*mTransport, originToken, route, osc, oscLen, onDebug);
+    clockwork_egress_count_undelivered(
+        clockwork_route_egress(*mTransport, originToken, route, osc, oscLen, onDebug));
 }
 
 

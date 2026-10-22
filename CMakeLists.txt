@@ -1308,7 +1308,7 @@ if(EMSCRIPTEN)
         _clockwork_client_close _clockwork_client_info
         _clockwork_client_send _clockwork_client_send_begin
         _clockwork_client_send_commit _clockwork_client_send_abort
-        _clockwork_client_poll _clockwork_client_region
+        _clockwork_client_poll _clockwork_client_count_undelivered _clockwork_client_region
         _clockwork_client_metrics _clockwork_client_clock _clockwork_client_beat_at
         _clockwork_client_tap_sizeof _clockwork_client_tap_open
         _clockwork_client_tap_open_in _clockwork_client_tap_close

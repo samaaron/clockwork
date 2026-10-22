@@ -213,10 +213,9 @@ impl ClockworkOsc {
         cs.loopback = loopback;
     }
 
-    fn send(&self, host: &str, port: u16, data: &[u8]) {
-        if let Some(out) = &self.out {
-            out.send(host, port, data);
-        }
+    // Whether the socket took it: false with no sender to take it.
+    fn send(&self, host: &str, port: u16, data: &[u8]) -> bool {
+        self.out.as_ref().is_some_and(|out| out.send(host, port, data))
     }
 }
 
@@ -426,7 +425,8 @@ pub unsafe extern "C" fn clockwork_osc_configure(handle: *mut ClockworkOsc, port
 
 /// Send one OSC packet (`data`/`len`) to `host`:`port`. `host` is a byte string
 /// (ptr+len, not NUL-terminated; an IPv4/IPv6 literal or a hostname, no brackets).
-/// Off the audio thread (the deferred-event dispatch thread).
+/// Off the audio thread (the deferred-event dispatch thread). 1 when the socket
+/// took the datagram, 0 when it could not be sent.
 ///
 /// # Safety
 /// `handle` is null or a live handle; `host` and `data` are null or readable
@@ -439,9 +439,9 @@ pub unsafe extern "C" fn clockwork_osc_send(
     port: i32,
     data: *const u8,
     len: u32,
-) {
+) -> i32 {
     if handle.is_null() || host.is_null() || data.is_null() || port <= 0 || port > 65535 {
-        return;
+        return 0;
     }
     // SAFETY: a live handle and two (pointer, length) byte strings, per the
     // contract; nulls were refused above.
@@ -452,11 +452,10 @@ pub unsafe extern "C" fn clockwork_osc_send(
             slice::from_raw_parts(data, len as usize),
         )
     };
-    no_unwind((), || {
-        if let Ok(h) = std::str::from_utf8(host_bytes) {
-            me.send(h, port as u16, data);
-        }
-    });
+    no_unwind(0, || match std::str::from_utf8(host_bytes) {
+        Ok(h) => me.send(h, port as u16, data) as i32,
+        Err(_) => 0,
+    })
 }
 
 /// Start a raw OSC ingress server on `port`: `loopback` != 0 binds 127.0.0.1 +

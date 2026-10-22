@@ -26,16 +26,25 @@ class IOscTransport {
 public:
     virtual ~IOscTransport() = default;
 
+    // WHAT DID NOT ARRIVE IS SAID. A send returns false, and a broadcast the
+    // number of its audience it did not reach, when the frame was meant for a
+    // destination and could not be handed to it: a token no peer answers to
+    // any more, a connection that refused the write, a datagram the socket
+    // refused, a full reply ring. Whoever routes egress counts every one —
+    // the engine's gateway, or a host draining egress itself
+    // (PerformanceMetrics::egress_frames_undelivered, EgressRouter.h). A
+    // broadcast to an empty audience missed no one.
+
     // Reply to the peer an origin token resolves to. `networkOnly` means "do not
     // deliver to an in-process observer" (Link snapshots): a real transport
-    // (UDP/NIF) sends regardless; a callback sink drops it. Returns true if it
-    // reached a destination.
+    // (UDP/NIF) sends regardless; a callback sink has no one it is meant for,
+    // and drops it having missed no one.
     virtual bool send(uint32_t token, const uint8_t* data, uint32_t size,
                       bool networkOnly) = 0;
 
     // Fan out to the device-notify / Link-notify subscriber audiences.
-    virtual void broadcastNotify(const uint8_t* data, uint32_t size) = 0;
-    virtual void broadcastLink(const uint8_t* data, uint32_t size) = 0;
+    virtual uint32_t broadcastNotify(const uint8_t* data, uint32_t size) = 0;
+    virtual uint32_t broadcastLink(const uint8_t* data, uint32_t size) = 0;
 
     // Notify-audience registry. subscribeNotify is caller-relative (resolve the
     // token); subscribeNotifyPort targets an explicit local port (the GUI's
@@ -56,20 +65,20 @@ public:
 
     // MIDI-notify audience: receives /clockwork/midi/in/* events and
     // /clockwork/midi/ports change pushes. Caller-relative, like the Link audience.
-    virtual void broadcastMidi(const uint8_t* data, uint32_t size) = 0;
+    virtual uint32_t broadcastMidi(const uint8_t* data, uint32_t size) = 0;
     virtual bool subscribeMidi(uint32_t token) = 0;
     virtual void unsubscribeMidi(uint32_t token) = 0;
 
     // Gamepad-notify audience: receives /clockwork/gamepad/in/* events and
     // /clockwork/gamepad/devices change pushes. Caller-relative, like the MIDI audience.
-    virtual void broadcastGamepad(const uint8_t* data, uint32_t size) = 0;
+    virtual uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) = 0;
     virtual bool subscribeGamepad(uint32_t token) = 0;
     virtual void unsubscribeGamepad(uint32_t token) = 0;
 
     // OSC-cue audience: receives /external-osc-cue pushes (external OSC arriving
     // on the cue server). Caller-relative, like the MIDI audience. Default
     // no-ops; every transport here overrides them except the NIF bridge.
-    virtual void broadcastOsc(const uint8_t*, uint32_t) {}
+    virtual uint32_t broadcastOsc(const uint8_t*, uint32_t) { return 0; }
     virtual bool subscribeOsc(uint32_t) { return false; }
     virtual void unsubscribeOsc(uint32_t) {}
 };

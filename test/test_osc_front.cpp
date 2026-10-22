@@ -23,8 +23,8 @@ struct Inner final : IOscTransport {
         sent.emplace_back(token, std::string(reinterpret_cast<const char*>(d), n));
         return true;
     }
-    void broadcastNotify(const uint8_t*, uint32_t) override { log.push_back("notify"); }
-    void broadcastLink(const uint8_t*, uint32_t) override { log.push_back("link"); }
+    uint32_t broadcastNotify(const uint8_t*, uint32_t) override { log.push_back("notify"); return 0; }
+    uint32_t broadcastLink(const uint8_t*, uint32_t) override { log.push_back("link"); return 0; }
     bool subscribers = true;
     bool hasNotifySubscribers() const override { return subscribers; }
     bool subscribeNotify(uint32_t) override { log.push_back("subNotify"); return true; }
@@ -33,13 +33,13 @@ struct Inner final : IOscTransport {
     void clearNotify() override { log.push_back("clearNotify"); }
     bool subscribeLink(uint32_t) override { log.push_back("subLink"); return true; }
     void unsubscribeLink(uint32_t) override { log.push_back("unsubLink"); }
-    void broadcastMidi(const uint8_t*, uint32_t) override { log.push_back("midi"); }
+    uint32_t broadcastMidi(const uint8_t*, uint32_t) override { log.push_back("midi"); return 0; }
     bool subscribeMidi(uint32_t) override { log.push_back("subMidi"); return true; }
     void unsubscribeMidi(uint32_t) override { log.push_back("unsubMidi"); }
-    void broadcastGamepad(const uint8_t*, uint32_t) override { log.push_back("gamepad"); }
+    uint32_t broadcastGamepad(const uint8_t*, uint32_t) override { log.push_back("gamepad"); return 0; }
     bool subscribeGamepad(uint32_t) override { log.push_back("subGamepad"); return true; }
     void unsubscribeGamepad(uint32_t) override { log.push_back("unsubGamepad"); }
-    void broadcastOsc(const uint8_t*, uint32_t) override { log.push_back("osc"); }
+    uint32_t broadcastOsc(const uint8_t*, uint32_t) override { log.push_back("osc"); return 0; }
     bool subscribeOsc(uint32_t) override { log.push_back("subOsc"); return true; }
     void unsubscribeOsc(uint32_t) override { log.push_back("unsubOsc"); }
 };

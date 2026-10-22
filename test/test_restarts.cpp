@@ -71,7 +71,7 @@ uint8_t* arena() {
 template <typename T>
 T* region(uint32_t offset) { return reinterpret_cast<T*>(arena() + offset); }
 
-// Frames an egress ring has refused for want of room, since the arena was
+// Frames an egress ring has refused, since the arena was
 // built (PerformanceMetrics::egress_frames_refused).
 uint32_t metrics_refused() {
     return region<PerformanceMetrics>(METRICS_START)->egress_frames_refused.load();

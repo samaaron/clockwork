@@ -287,3 +287,52 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     CHECK(plane->rep_dropped.load() == 0);
     engine.shutdown();
 }
+
+TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, in the engine's metrics as well as the plane",
+          "[shm][peer][egress]") {
+    // The audio thread answers a peer's /clockwork/sync in its block, and the
+    // gateway hands each answer to the peer's reply ring, which is finite. A
+    // peer that asks more than the ring holds answers for before it reads
+    // loses the rest: counted in its plane (rep_dropped), for the peer, and in
+    // the engine's metrics (egress_frames_undelivered), for whoever reads
+    // them. Pumped, and no pass but the case's own: a block, then a pass that
+    // takes the peer's commands and hands the answers to its ring.
+    constexpr unsigned kPort = 57229;
+
+    ShmTransport     transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    auto cfg = planeConfig(kPort);
+    cfg.hostDrivesControl = true;
+    engine.init(cfg);
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+
+    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    ShmPeerPlaneHeader* plane = client.get_peer_plane();
+    REQUIRE(plane != nullptr);
+    shm_peer_attach(plane, 1);
+
+    auto block = [&] { engine.pumpAudioBlock(); REQUIRE(engine.controlPass()); };
+    constexpr int N = 6000;
+    int sent = 0;
+    for (int round = 0; sent < N && round < 1000; ++round) {
+        while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("sync"), sent + 1)))
+            ++sent;
+        for (int i = 0; i < 8; ++i) block();
+    }
+    REQUIRE(sent == N);
+    for (int i = 0; i < N / 32 + 50; ++i) block();
+
+    const uint32_t lost = plane->rep_dropped.load();
+    const auto& m = engine.getMetrics();
+    INFO("cmd ring head " << plane->cmd_head.load() << " tail " << plane->cmd_tail.load()
+         << "; taken " << m.osc_out_messages_sent.load() << ", dropped " << m.messages_dropped.load());
+    INFO(m.messages_processed.load() << " processed, " << m.egress_frames_refused.load() << " refused, "
+         << lost << " lost at the reply ring, " << m.egress_frames_undelivered.load() << " counted undelivered");
+    REQUIRE(lost > 0);
+    CHECK(m.egress_frames_undelivered.load() == lost);
+    engine.shutdown();
+}

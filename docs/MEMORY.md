@@ -53,7 +53,7 @@ that fills up in a session (samples) lands in the assets area.
 | region | bytes web / native | owner | audience today | touched |
 |---|---|---|---|---|
 | header + table | 4 KB | creator | all | boot |
-| metrics | 208 | clockwork | published | **every block** |
+| metrics | 256 | clockwork | published | **every block** |
 | native stats | 24 | clockwork | published | per callback (never on the web) |
 | clock anchors | 16 | host | published | read every block |
 | clock state | 40 | clockwork | published + guest | every change |

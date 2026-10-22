@@ -27,25 +27,32 @@
 #include <functional>
 #include <string>
 
-// True when the frame went somewhere: a transport door, or the debug log.
-inline bool clockwork_route_egress(IOscTransport& transport, uint32_t origin, uint32_t route,
-                                   const uint8_t* osc, uint32_t len,
-                                   const std::function<void(const std::string&)>& onDebug) {
+// How many destinations the frame was meant for and did not reach (0 when it
+// reached every one): a reply whose origin no peer answers to any more, or the
+// members of a notify audience the transport could not hand it to
+// (IOscTransport). The caller counts them — the engine's gateway through
+// clockwork_egress_count_undelivered, a host draining egress itself through
+// clockwork_client_count_undelivered — so nothing that left an egress ring
+// goes missing unsaid. A debug line goes to the host's log, or nowhere when
+// the host keeps none, and misses no one either way.
+inline uint32_t clockwork_route_egress(IOscTransport& transport, uint32_t origin, uint32_t route,
+                                       const uint8_t* osc, uint32_t len,
+                                       const std::function<void(const std::string&)>& onDebug) {
     if (len >= clockwork::kDebugArgOffset
         && std::memcmp(osc, CLOCKWORK_SYS("debug"), CLOCKWORK_SYS_LEN("debug")) == 0) {
-        if (!onDebug) return false;
+        if (!onDebug) return 0;
         const char* s = reinterpret_cast<const char*>(osc) + clockwork::kDebugArgOffset;
         onDebug(std::string(s, strnlen(s, len - clockwork::kDebugArgOffset)));
-        return true;
+        return 0;
     }
     switch (route) {
-        case EGRESS_REPLY:            return transport.send(origin, osc, len, /*networkOnly*/ false);
-        case EGRESS_SEND_TO_CALLER:   return transport.send(origin, osc, len, /*networkOnly*/ true);
-        case EGRESS_BROADCAST_LINK:    transport.broadcastLink(osc, len);    return true;
-        case EGRESS_BROADCAST_MIDI:    transport.broadcastMidi(osc, len);    return true;
-        case EGRESS_BROADCAST_GAMEPAD: transport.broadcastGamepad(osc, len); return true;
-        case EGRESS_BROADCAST_OSC:     transport.broadcastOsc(osc, len);     return true;
+        case EGRESS_REPLY:             return transport.send(origin, osc, len, /*networkOnly*/ false) ? 0 : 1;
+        case EGRESS_SEND_TO_CALLER:    return transport.send(origin, osc, len, /*networkOnly*/ true) ? 0 : 1;
+        case EGRESS_BROADCAST_LINK:    return transport.broadcastLink(osc, len);
+        case EGRESS_BROADCAST_MIDI:    return transport.broadcastMidi(osc, len);
+        case EGRESS_BROADCAST_GAMEPAD: return transport.broadcastGamepad(osc, len);
+        case EGRESS_BROADCAST_OSC:     return transport.broadcastOsc(osc, len);
         case EGRESS_BROADCAST_NOTIFY:
-        default:                       transport.broadcastNotify(osc, len);  return true;
+        default:                       return transport.broadcastNotify(osc, len);
     }
 }

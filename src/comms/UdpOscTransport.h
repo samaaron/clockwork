@@ -48,8 +48,8 @@ public:
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
     bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
-    void broadcastNotify(const uint8_t* data, uint32_t size) override;
-    void broadcastLink(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override { return !mNotifyTargets.empty(); }
     bool subscribeNotify(uint32_t token) override;
     bool subscribeNotifyPort(int port) override;
@@ -57,13 +57,13 @@ public:
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;
     void unsubscribeLink(uint32_t token) override;
-    void broadcastMidi(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override;
     bool subscribeMidi(uint32_t token) override;
     void unsubscribeMidi(uint32_t token) override;
-    void broadcastGamepad(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override;
     bool subscribeGamepad(uint32_t token) override;
     void unsubscribeGamepad(uint32_t token) override;
-    void broadcastOsc(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override;
     bool subscribeOsc(uint32_t token) override;
     void unsubscribeOsc(uint32_t token) override;
 
@@ -73,8 +73,8 @@ private:
     static void onDatagram(void* ctx, const uint8_t* ip, uint32_t ip_len,
                            int32_t port, const uint8_t* osc, uint32_t len);
 
-    void sendTo(const std::string& ip, int port, const uint8_t* data, uint32_t size);
-    void broadcast(const std::vector<Target>& list, const uint8_t* data, uint32_t size);
+    bool sendTo(const std::string& ip, int port, const uint8_t* data, uint32_t size);
+    uint32_t broadcast(const std::vector<Target>& list, const uint8_t* data, uint32_t size);
     bool subscribeCallerTo(std::vector<Target>& list, uint32_t token);
     void unsubscribeCallerFrom(std::vector<Target>& list, uint32_t token);
     static bool addTarget(std::vector<Target>& list, const std::string& ip, int port);

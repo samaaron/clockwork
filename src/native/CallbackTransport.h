@@ -31,19 +31,25 @@ public:
         const std::function<void(uint32_t, uint32_t, const uint8_t*, uint32_t)>* onRouted = nullptr)
         : mOnReply(onReply), mOnRouted(onRouted) {}
 
+    // Missed only when the host is watching neither way: a reply is meant for
+    // the caller, and here the caller is whoever set onReply or onReplyRouted.
+    // A frame for a wire alone (a Link snapshot) is meant for no one here.
     bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override {
-        routed(token, EGRESS_REPLY, data, size);
-        if (networkOnly) return false;            // no in-process observer for snapshots
+        const bool watched = routed(token, EGRESS_REPLY, data, size);
+        if (networkOnly) return true;
         if (mOnReply && *mOnReply) { (*mOnReply)(data, size); return true; }
-        return false;
+        return watched;
     }
 
-    void broadcastNotify(const uint8_t* data, uint32_t size) override {
+    // The audience is the one observer, and a host that set none asked for
+    // nothing: a broadcast here misses no one.
+    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override {
         routed(0, EGRESS_BROADCAST_NOTIFY, data, size);
         if (mOnReply && *mOnReply) (*mOnReply)(data, size);
+        return 0;
     }
 
-    void broadcastLink(const uint8_t*, uint32_t) override {}  // no in-process Link audience
+    uint32_t broadcastLink(const uint8_t*, uint32_t) override { return 0; }  // no in-process Link audience
 
     bool hasNotifySubscribers() const override {
         return !mNotify.empty();
@@ -60,31 +66,37 @@ public:
 
     // MIDI notify: deliver to the single in-process observer so an
     // embedder/test can see /clockwork/midi/in/* events through onReply.
-    void broadcastMidi(const uint8_t* data, uint32_t size) override {
+    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override {
         if (mOnReply && *mOnReply) (*mOnReply)(data, size);
+        return 0;
     }
     bool subscribeMidi(uint32_t token) override { return mMidi.insert(token).second; }
     void unsubscribeMidi(uint32_t token) override { mMidi.erase(token); }
 
     // Gamepad notify: deliver to the single in-process observer so an
     // embedder/test can see /clockwork/gamepad/in/* events through onReply.
-    void broadcastGamepad(const uint8_t* data, uint32_t size) override {
+    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override {
         if (mOnReply && *mOnReply) (*mOnReply)(data, size);
+        return 0;
     }
     bool subscribeGamepad(uint32_t token) override { return mGamepad.insert(token).second; }
     void unsubscribeGamepad(uint32_t token) override { mGamepad.erase(token); }
 
     // OSC-cue notify: deliver to the single in-process observer so an
     // embedder/test can see /external-osc-cue events through onReply.
-    void broadcastOsc(const uint8_t* data, uint32_t size) override {
+    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override {
         if (mOnReply && *mOnReply) (*mOnReply)(data, size);
+        return 0;
     }
     bool subscribeOsc(uint32_t token) override { return mOsc.insert(token).second; }
     void unsubscribeOsc(uint32_t token) override { mOsc.erase(token); }
 
 private:
-    void routed(uint32_t origin, uint32_t route, const uint8_t* d, uint32_t n) const {
-        if (mOnRouted && *mOnRouted) (*mOnRouted)(origin, route, d, n);
+    // Whether a routed observer saw it.
+    bool routed(uint32_t origin, uint32_t route, const uint8_t* d, uint32_t n) const {
+        if (!mOnRouted || !*mOnRouted) return false;
+        (*mOnRouted)(origin, route, d, n);
+        return true;
     }
 
     const std::function<void(const uint8_t*, uint32_t)>* mOnReply;

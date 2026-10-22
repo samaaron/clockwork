@@ -28,7 +28,7 @@ export class MetricsReader {
   #cachedSnapshotBuffer = null;
 
   // Merged array: the C++ struct's words from the SAB/snapshot (SAB_METRICS_WORDS), the context's own written over
-  // 50-52 and from 58, the guest's from GUEST_METRICS_BASE
+  // 50-52 and from 64, the guest's from GUEST_METRICS_BASE
   #mergedArray = new Uint32Array(MetricsOffsets.MERGED_ARRAY_SIZE);
   #mergedDV = new DataView(this.#mergedArray.buffer);
 
@@ -145,8 +145,10 @@ export class MetricsReader {
       // the guest's pool and the rust heap (shared C++, at the metrics flush)
       guestPoolUsedBytes: m[MetricsOffsets.GUEST_POOL_USED_BYTES],
       guestPoolPeakBytes: m[MetricsOffsets.GUEST_POOL_PEAK_BYTES],
-      // frames an egress ring refused for want of room (0 in a healthy engine)
+      // frames an egress ring refused, for want of room or for their size (0 in a healthy engine)
       egressFramesRefused: m[MetricsOffsets.EGRESS_FRAMES_REFUSED],
+      // deliveries the native gateway's transport could not make (0 on the web, and in a healthy engine)
+      egressFramesUndelivered: m[MetricsOffsets.EGRESS_FRAMES_UNDELIVERED],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)
@@ -323,7 +325,7 @@ export class MetricsReader {
     // Mode enum: 0=sab, 1=postMessage
     arr[MetricsOffsets.CTX_MODE] = this.#mode === 'sab' ? 0 : 1;
 
-    // Audio diagnostics [59-66]
+    // Audio diagnostics [68-74]
     arr[MetricsOffsets.CTX_HAS_PLAYBACK_STATS] = context.playbackStats ? 1 : 0;
     if (context.playbackStats) {
       arr[MetricsOffsets.CTX_GLITCH_COUNT] = context.playbackStats.fallbackFramesEvents ?? 0;

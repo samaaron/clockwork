@@ -91,8 +91,8 @@ public:
     bool send(uint32_t t, const uint8_t* d, uint32_t n, bool net) override {
         return t == SHM_PEER_ORIGIN_TOKEN ? peer.send(t, d, n, net) : mOwn.send(t, d, n, net);
     }
-    void broadcastNotify(const uint8_t* d, uint32_t n) override { peer.broadcastNotify(d, n); mOwn.broadcastNotify(d, n); }
-    void broadcastLink(const uint8_t* d, uint32_t n) override { peer.broadcastLink(d, n); }
+    uint32_t broadcastNotify(const uint8_t* d, uint32_t n) override { return peer.broadcastNotify(d, n) + mOwn.broadcastNotify(d, n); }
+    uint32_t broadcastLink(const uint8_t* d, uint32_t n) override { return peer.broadcastLink(d, n); }
     bool hasNotifySubscribers() const override { return peer.hasNotifySubscribers() || mOwn.hasNotifySubscribers(); }
     bool subscribeNotify(uint32_t t) override { return of(t).subscribeNotify(t); }
     bool subscribeNotifyPort(int) override { return false; }
@@ -100,10 +100,10 @@ public:
     void clearNotify() override { peer.clearNotify(); mOwn.clearNotify(); }
     bool subscribeLink(uint32_t t) override { return of(t).subscribeLink(t); }
     void unsubscribeLink(uint32_t t) override { of(t).unsubscribeLink(t); }
-    void broadcastMidi(const uint8_t* d, uint32_t n) override { peer.broadcastMidi(d, n); mOwn.broadcastMidi(d, n); }
+    uint32_t broadcastMidi(const uint8_t* d, uint32_t n) override { return peer.broadcastMidi(d, n) + mOwn.broadcastMidi(d, n); }
     bool subscribeMidi(uint32_t t) override { return of(t).subscribeMidi(t); }
     void unsubscribeMidi(uint32_t t) override { of(t).unsubscribeMidi(t); }
-    void broadcastGamepad(const uint8_t* d, uint32_t n) override { peer.broadcastGamepad(d, n); mOwn.broadcastGamepad(d, n); }
+    uint32_t broadcastGamepad(const uint8_t* d, uint32_t n) override { return peer.broadcastGamepad(d, n) + mOwn.broadcastGamepad(d, n); }
     bool subscribeGamepad(uint32_t t) override { return of(t).subscribeGamepad(t); }
     void unsubscribeGamepad(uint32_t t) override { of(t).unsubscribeGamepad(t); }
 

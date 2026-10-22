@@ -59,8 +59,8 @@ public:
         if (mFront && mFront->egress(token, data, size)) return true;
         return mInner && mInner->send(token, data, size, networkOnly);
     }
-    void broadcastNotify(const uint8_t* d, uint32_t n) override { if (mInner) mInner->broadcastNotify(d, n); }
-    void broadcastLink(const uint8_t* d, uint32_t n) override   { if (mInner) mInner->broadcastLink(d, n); }
+    uint32_t broadcastNotify(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastNotify(d, n) : 0; }
+    uint32_t broadcastLink(const uint8_t* d, uint32_t n) override   { return mInner ? mInner->broadcastLink(d, n) : 0; }
     bool hasNotifySubscribers() const override { return mInner && mInner->hasNotifySubscribers(); }
     bool subscribeNotify(uint32_t t) override   { return mInner && mInner->subscribeNotify(t); }
     bool subscribeNotifyPort(int port) override { return mInner && mInner->subscribeNotifyPort(port); }
@@ -68,13 +68,13 @@ public:
     void clearNotify() override                 { if (mInner) mInner->clearNotify(); }
     bool subscribeLink(uint32_t t) override     { return mInner && mInner->subscribeLink(t); }
     void unsubscribeLink(uint32_t t) override   { if (mInner) mInner->unsubscribeLink(t); }
-    void broadcastMidi(const uint8_t* d, uint32_t n) override { if (mInner) mInner->broadcastMidi(d, n); }
+    uint32_t broadcastMidi(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastMidi(d, n) : 0; }
     bool subscribeMidi(uint32_t t) override     { return mInner && mInner->subscribeMidi(t); }
     void unsubscribeMidi(uint32_t t) override   { if (mInner) mInner->unsubscribeMidi(t); }
-    void broadcastGamepad(const uint8_t* d, uint32_t n) override { if (mInner) mInner->broadcastGamepad(d, n); }
+    uint32_t broadcastGamepad(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastGamepad(d, n) : 0; }
     bool subscribeGamepad(uint32_t t) override  { return mInner && mInner->subscribeGamepad(t); }
     void unsubscribeGamepad(uint32_t t) override { if (mInner) mInner->unsubscribeGamepad(t); }
-    void broadcastOsc(const uint8_t* d, uint32_t n) override { if (mInner) mInner->broadcastOsc(d, n); }
+    uint32_t broadcastOsc(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastOsc(d, n) : 0; }
     bool subscribeOsc(uint32_t t) override      { return mInner && mInner->subscribeOsc(t); }
     void unsubscribeOsc(uint32_t t) override    { if (mInner) mInner->unsubscribeOsc(t); }
 

@@ -585,7 +585,7 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     REQUIRE(clockwork_block_size() > 0u);
 }
 
-TEST_CASE("lanes ABI: a frame either egress ring refuses for want of room is counted as refused, and as nothing else",
+TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or for its size, is counted as refused, and as nothing else",
           "[lanes][abi][egress]") {
     // A refused reply is one a client never gets, and the line logging it
     // rides the same full ring, so the count is the only trace: a peer lost
@@ -609,11 +609,13 @@ TEST_CASE("lanes ABI: a frame either egress ring refuses for want of room is cou
     CHECK(metrics->egress_frames_refused.load() == 5u);
     CHECK((status.load() & STATUS_BUFFER_FULL) != 0u);
 
-    // A frame too big for the NRT ring ever to carry is not a refusal for
-    // want of room: its producer answers it with an error (OscEgress).
+    // A frame too big for the NRT ring ever to carry is refused and counted
+    // too, as the RT ring counts one: a guest's answer sent from a thread of
+    // its own goes no further, and the client gets nothing. (Clockwork's own
+    // producer also answers one with an error, OscEgress.)
     std::vector<uint8_t> huge(clockwork_egress_nrt_max_frame() + 1, 0);
     CHECK_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, huge.data(), static_cast<uint32_t>(huge.size())));
-    CHECK(metrics->egress_frames_refused.load() == 5u);
+    CHECK(metrics->egress_frames_refused.load() == 6u);
 
     // Nothing on the way in was refused.
     CHECK(metrics->messages_dropped.load() == 0u);

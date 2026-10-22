@@ -396,6 +396,13 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     return taken();
 }
 
+void clockwork_client_count_undelivered(ClockworkClient* handle, uint32_t n) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || n == 0) return;
+    auto* pm = reinterpret_cast<PerformanceMetrics*>(c->base + c->L.metrics_offset);
+    pm->egress_frames_undelivered.fetch_add(n, std::memory_order_relaxed);
+}
+
 ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegionId id,
                                         ClockworkRegion* out) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);

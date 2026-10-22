@@ -330,6 +330,15 @@ typedef struct ClockworkClientMessage {
 uint32_t clockwork_client_poll(ClockworkClient* c,
                                ClockworkClientMessage* out, uint32_t max);
 
+/* A client that delivers what it polls says what it could not deliver: `n`
+ * destinations a message was meant for and did not reach — a peer gone, a
+ * write refused, a full queue. Counted in the engine's metrics
+ * (egressFramesUndelivered), as the engine's own gateway counts its own, so
+ * whoever reads them sees every message that left the engine and reached no
+ * one, whichever of the two delivered it. clockwork_route_egress (EgressRouter.h)
+ * returns the number for a message it routes. */
+void clockwork_client_count_undelivered(ClockworkClient* c, uint32_t n);
+
 /* ── Watching a ring ─────────────────────────────────────────────────────────
  *
  * A TAP reads a ring without taking from it. It carries its own cursor, so

@@ -52,8 +52,8 @@ public:
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
     bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
-    void broadcastNotify(const uint8_t* data, uint32_t size) override;
-    void broadcastLink(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override { return mNotify.load(std::memory_order_relaxed); }
     bool subscribeNotify(uint32_t token) override;
     bool subscribeNotifyPort(int port) override;  // UDP-specific — false here
@@ -61,13 +61,13 @@ public:
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;
     void unsubscribeLink(uint32_t token) override;
-    void broadcastMidi(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override;
     bool subscribeMidi(uint32_t token) override;
     void unsubscribeMidi(uint32_t token) override;
-    void broadcastGamepad(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override;
     bool subscribeGamepad(uint32_t token) override;
     void unsubscribeGamepad(uint32_t token) override;
-    void broadcastOsc(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override;
     bool subscribeOsc(uint32_t token) override;
     void unsubscribeOsc(uint32_t token) override;
 
@@ -75,6 +75,7 @@ private:
     // Write one packet into the reply ring; drop when unbound, drop + count
     // (rep_dropped) when full.
     bool writeReply(const uint8_t* data, uint32_t size);
+    uint32_t broadcastTo(const std::atomic<bool>& subscribed, const uint8_t* data, uint32_t size);
     bool subscribeFlag(std::atomic<bool>& flag, uint32_t token);
 
     // Points at the engine's plane slot; bound (main thread) after the egress

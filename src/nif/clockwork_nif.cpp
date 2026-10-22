@@ -69,6 +69,12 @@ static constexpr uint32_t kBeamToken = 1;
 // engine produces the optional broadcasts. Touched from BEAM scheduler threads
 // (register/clear), the lifecycle worker (clear on stop) and the NRT gateway
 // thread (deliver), so all access is locked.
+// What a fan-out did: the pids it reached, and the ones it did not.
+struct Fanout {
+    uint32_t reached = 0;
+    uint32_t missed = 0;
+};
+
 struct Subscribers {
     mutable std::mutex   mutex;
     std::vector<ErlNifPid> pids;
@@ -99,7 +105,7 @@ struct Subscribers {
     }
 
     // Frame {osc_reply, <<bytes>>} and fan out to every registered pid.
-    bool deliverOscReply(const uint8_t* data, uint32_t size) {
+    Fanout deliverOscReply(const uint8_t* data, uint32_t size) {
         return deliverAll([&](ErlNifEnv* env) {
             ERL_NIF_TERM bin;
             uint8_t* buf = enif_make_new_binary(env, size, &bin);
@@ -124,22 +130,24 @@ private:
     }
 
     // Build a fresh message env per pid (enif_send invalidates it), send, and
-    // evict pids whose process has gone. Returns true if any pid was registered.
+    // evict pids whose process has gone. Says how many pids it reached and how
+    // many it did not: a process gone, or no env to build the message in.
     template <typename MakeMsg>
-    bool deliverAll(MakeMsg makeMsg) {
+    Fanout deliverAll(MakeMsg makeMsg) {
         std::lock_guard<std::mutex> lk(mutex);
-        if (pids.empty()) return false;
+        Fanout f;
         std::vector<ErlNifPid> dead;
         for (const auto& p : pids) {
             ErlNifEnv* env = enif_alloc_env();
-            if (!env) continue;
+            if (!env) { ++f.missed; continue; }
             ERL_NIF_TERM msg = makeMsg(env);
             int ok = enif_send(nullptr, const_cast<ErlNifPid*>(&p), env, msg);
             enif_free_env(env);
-            if (ok == 0) dead.push_back(p);
+            if (ok == 0) { dead.push_back(p); ++f.missed; }
+            else ++f.reached;
         }
         for (const auto& d : dead) erasePid(d);
-        return true;
+        return f;
     }
 };
 static Subscribers g_subs;
@@ -158,16 +166,16 @@ public:
 
     // The token is always kBeamToken; the audience is the registered pids.
     // networkOnly is ignored: the NIF is a real peer, so Link snapshots ship.
+    // A reply reached its caller if it reached any pid: every one of them is
+    // the caller. A broadcast missed each pid it did not reach.
     bool send(uint32_t, const uint8_t* data, uint32_t size, bool /*networkOnly*/) override {
-        return mSubs->deliverOscReply(data, size);
+        return mSubs->deliverOscReply(data, size).reached > 0;
     }
-    void broadcastNotify(const uint8_t* data, uint32_t size) override {
-        mSubs->deliverOscReply(data, size);
+    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override {
+        return mSubs->deliverOscReply(data, size).missed;
     }
-    void broadcastLink(const uint8_t* data, uint32_t size) override {
-        bool wanted;
-        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = mSubs->linkSubscribed; }
-        if (wanted) mSubs->deliverOscReply(data, size);
+    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override {
+        return broadcastIf(mSubs->linkSubscribed, data, size);
     }
 
     bool hasNotifySubscribers() const override {
@@ -203,10 +211,8 @@ public:
 
     // MIDI notify: a BEAM caller is addressable; delivery is gated
     // on midiSubscribed.
-    void broadcastMidi(const uint8_t* data, uint32_t size) override {
-        bool wanted;
-        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = mSubs->midiSubscribed; }
-        if (wanted) mSubs->deliverOscReply(data, size);
+    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override {
+        return broadcastIf(mSubs->midiSubscribed, data, size);
     }
     bool subscribeMidi(uint32_t) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
@@ -219,10 +225,8 @@ public:
     }
 
     // Gamepad notify: same shape as the MIDI audience.
-    void broadcastGamepad(const uint8_t* data, uint32_t size) override {
-        bool wanted;
-        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = mSubs->gamepadSubscribed; }
-        if (wanted) mSubs->deliverOscReply(data, size);
+    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override {
+        return broadcastIf(mSubs->gamepadSubscribed, data, size);
     }
     bool subscribeGamepad(uint32_t) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
@@ -236,10 +240,8 @@ public:
 
     // OSC cues heard by the cue server (/external-osc-cue), once a process
     // has subscribed (/clockwork/osc/notify/subscribe).
-    void broadcastOsc(const uint8_t* data, uint32_t size) override {
-        bool wanted;
-        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = mSubs->oscSubscribed; }
-        if (wanted) mSubs->deliverOscReply(data, size);
+    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override {
+        return broadcastIf(mSubs->oscSubscribed, data, size);
     }
     bool subscribeOsc(uint32_t) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
@@ -252,6 +254,13 @@ public:
     }
 
 private:
+    // An audience gated on its flag: missed only by the pids it was meant for.
+    uint32_t broadcastIf(const bool& subscribed, const uint8_t* data, uint32_t size) {
+        bool wanted;
+        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = subscribed; }
+        return wanted ? mSubs->deliverOscReply(data, size).missed : 0;
+    }
+
     Subscribers* mSubs;
 };
 static NifTransport g_transport(&g_subs);

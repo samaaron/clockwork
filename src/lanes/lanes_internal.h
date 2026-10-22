@@ -32,7 +32,8 @@ extern "C" {
 /* token is the origin sourceId the frame replies to (broadcasts ignore it).
    False when the ring is full, or when len is more than a frame can carry
    (clockwork_egress_nrt_max_frame): the ring is a fixed size, and a frame
-   has to be able to drain. */
+   has to be able to drain. Either refusal is counted
+   (PerformanceMetrics::egress_frames_refused). */
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len);
 
@@ -43,6 +44,11 @@ uint32_t clockwork_egress_nrt_max_frame(void);
    that would rather wait than have a frame refused checks first — the
    control pass, before it answers a verb. */
 uint32_t clockwork_egress_nrt_free(void);
+
+/* Count `n` deliveries the transport could not make for a frame that left an
+   egress ring (PerformanceMetrics::egress_frames_undelivered): whoever hands
+   egress to a transport, after each frame. */
+void clockwork_egress_count_undelivered(uint32_t n);
 
 void clockwork_lanes_reset_in_ring(void);
 void clockwork_lanes_reset_rt_out_ring(void);

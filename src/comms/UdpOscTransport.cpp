@@ -46,11 +46,11 @@ void UdpOscTransport::onDatagram(void* ctx, const uint8_t* ip, uint32_t ip_len,
     if (self->mIngest) self->mIngest(osc, len, token);
 }
 
-void UdpOscTransport::sendTo(const std::string& ip, int port,
+bool UdpOscTransport::sendTo(const std::string& ip, int port,
                              const uint8_t* data, uint32_t size) {
-    if (!mOsc || ip.empty() || port <= 0) return;
-    clockwork_osc_send(mOsc, reinterpret_cast<const uint8_t*>(ip.data()),
-                static_cast<uint32_t>(ip.size()), port, data, size);
+    if (!mOsc || ip.empty() || port <= 0) return false;
+    return clockwork_osc_send(mOsc, reinterpret_cast<const uint8_t*>(ip.data()),
+                              static_cast<uint32_t>(ip.size()), port, data, size) != 0;
 }
 
 // ── IOscTransport: resolve a token / audience → (ip,port) → clockwork_osc_send ───────
@@ -61,20 +61,22 @@ bool UdpOscTransport::send(uint32_t token, const uint8_t* data, uint32_t size,
     std::string ip;
     int port = 0;
     if (!mOrigins.resolve(token, ip, port)) return false;
-    sendTo(ip, port, data, size);
-    return true;
+    return sendTo(ip, port, data, size);
 }
 
-void UdpOscTransport::broadcast(const std::vector<Target>& list,
-                                const uint8_t* data, uint32_t size) {
-    for (const auto& t : list) sendTo(t.ip, t.port, data, size);
+uint32_t UdpOscTransport::broadcast(const std::vector<Target>& list,
+                                    const uint8_t* data, uint32_t size) {
+    uint32_t missed = 0;
+    for (const auto& t : list)
+        if (!sendTo(t.ip, t.port, data, size)) ++missed;
+    return missed;
 }
 
-void UdpOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
-    broadcast(mNotifyTargets, data, size);
+uint32_t UdpOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
+    return broadcast(mNotifyTargets, data, size);
 }
-void UdpOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
-    broadcast(mLinkNotifyTargets, data, size);
+uint32_t UdpOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
+    return broadcast(mLinkNotifyTargets, data, size);
 }
 
 bool UdpOscTransport::subscribeNotify(uint32_t token) {
@@ -116,13 +118,13 @@ void UdpOscTransport::unsubscribeCallerFrom(std::vector<Target>& list, uint32_t 
 
 bool UdpOscTransport::subscribeLink(uint32_t token) { return subscribeCallerTo(mLinkNotifyTargets, token); }
 void UdpOscTransport::unsubscribeLink(uint32_t token) { unsubscribeCallerFrom(mLinkNotifyTargets, token); }
-void UdpOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) { broadcast(mMidiNotifyTargets, data, size); }
+uint32_t UdpOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) { return broadcast(mMidiNotifyTargets, data, size); }
 bool UdpOscTransport::subscribeMidi(uint32_t token) { return subscribeCallerTo(mMidiNotifyTargets, token); }
 void UdpOscTransport::unsubscribeMidi(uint32_t token) { unsubscribeCallerFrom(mMidiNotifyTargets, token); }
-void UdpOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) { broadcast(mGamepadNotifyTargets, data, size); }
+uint32_t UdpOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) { return broadcast(mGamepadNotifyTargets, data, size); }
 bool UdpOscTransport::subscribeGamepad(uint32_t token) { return subscribeCallerTo(mGamepadNotifyTargets, token); }
 void UdpOscTransport::unsubscribeGamepad(uint32_t token) { unsubscribeCallerFrom(mGamepadNotifyTargets, token); }
-void UdpOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) { broadcast(mOscNotifyTargets, data, size); }
+uint32_t UdpOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) { return broadcast(mOscNotifyTargets, data, size); }
 bool UdpOscTransport::subscribeOsc(uint32_t token) { return subscribeCallerTo(mOscNotifyTargets, token); }
 void UdpOscTransport::unsubscribeOsc(uint32_t token) { unsubscribeCallerFrom(mOscNotifyTargets, token); }
 

@@ -59,16 +59,19 @@ bool UdsDgramOscTransport::send(uint32_t token, const uint8_t* data, uint32_t si
     return sendTo(path, data, size);
 }
 
-void UdsDgramOscTransport::broadcast(const std::vector<std::string>& list,
-                                     const uint8_t* data, uint32_t size) {
-    for (const auto& p : list) sendTo(p, data, size);
+uint32_t UdsDgramOscTransport::broadcast(const std::vector<std::string>& list,
+                                         const uint8_t* data, uint32_t size) {
+    uint32_t missed = 0;
+    for (const auto& p : list)
+        if (!sendTo(p, data, size)) ++missed;
+    return missed;
 }
 
-void UdsDgramOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
-    broadcast(mNotifyTargets, data, size);
+uint32_t UdsDgramOscTransport::broadcastNotify(const uint8_t* data, uint32_t size) {
+    return broadcast(mNotifyTargets, data, size);
 }
-void UdsDgramOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
-    broadcast(mLinkNotifyTargets, data, size);
+uint32_t UdsDgramOscTransport::broadcastLink(const uint8_t* data, uint32_t size) {
+    return broadcast(mLinkNotifyTargets, data, size);
 }
 
 bool UdsDgramOscTransport::subscribeNotify(uint32_t token) {
@@ -100,13 +103,13 @@ void UdsDgramOscTransport::unsubscribeCallerFrom(std::vector<std::string>& list,
 
 bool UdsDgramOscTransport::subscribeLink(uint32_t token) { return subscribeCallerTo(mLinkNotifyTargets, token); }
 void UdsDgramOscTransport::unsubscribeLink(uint32_t token) { unsubscribeCallerFrom(mLinkNotifyTargets, token); }
-void UdsDgramOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) { broadcast(mMidiNotifyTargets, data, size); }
+uint32_t UdsDgramOscTransport::broadcastMidi(const uint8_t* data, uint32_t size) { return broadcast(mMidiNotifyTargets, data, size); }
 bool UdsDgramOscTransport::subscribeMidi(uint32_t token) { return subscribeCallerTo(mMidiNotifyTargets, token); }
 void UdsDgramOscTransport::unsubscribeMidi(uint32_t token) { unsubscribeCallerFrom(mMidiNotifyTargets, token); }
-void UdsDgramOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) { broadcast(mGamepadNotifyTargets, data, size); }
+uint32_t UdsDgramOscTransport::broadcastGamepad(const uint8_t* data, uint32_t size) { return broadcast(mGamepadNotifyTargets, data, size); }
 bool UdsDgramOscTransport::subscribeGamepad(uint32_t token) { return subscribeCallerTo(mGamepadNotifyTargets, token); }
 void UdsDgramOscTransport::unsubscribeGamepad(uint32_t token) { unsubscribeCallerFrom(mGamepadNotifyTargets, token); }
-void UdsDgramOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) { broadcast(mOscNotifyTargets, data, size); }
+uint32_t UdsDgramOscTransport::broadcastOsc(const uint8_t* data, uint32_t size) { return broadcast(mOscNotifyTargets, data, size); }
 bool UdsDgramOscTransport::subscribeOsc(uint32_t token) { return subscribeCallerTo(mOscNotifyTargets, token); }
 void UdsDgramOscTransport::unsubscribeOsc(uint32_t token) { unsubscribeCallerFrom(mOscNotifyTargets, token); }
 

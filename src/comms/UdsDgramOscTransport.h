@@ -51,8 +51,8 @@ public:
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
     bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
-    void broadcastNotify(const uint8_t* data, uint32_t size) override;
-    void broadcastLink(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override { return !mNotifyTargets.empty(); }
     bool subscribeNotify(uint32_t token) override;
     bool subscribeNotifyPort(int port) override;  // UDP-specific — false here
@@ -60,13 +60,13 @@ public:
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;
     void unsubscribeLink(uint32_t token) override;
-    void broadcastMidi(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override;
     bool subscribeMidi(uint32_t token) override;
     void unsubscribeMidi(uint32_t token) override;
-    void broadcastGamepad(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override;
     bool subscribeGamepad(uint32_t token) override;
     void unsubscribeGamepad(uint32_t token) override;
-    void broadcastOsc(const uint8_t* data, uint32_t size) override;
+    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override;
     bool subscribeOsc(uint32_t token) override;
     void unsubscribeOsc(uint32_t token) override;
 
@@ -75,7 +75,7 @@ private:
                            const uint8_t* osc, uint32_t len);
 
     bool sendTo(const std::string& path, const uint8_t* data, uint32_t size);
-    void broadcast(const std::vector<std::string>& list, const uint8_t* data, uint32_t size);
+    uint32_t broadcast(const std::vector<std::string>& list, const uint8_t* data, uint32_t size);
     bool subscribeCallerTo(std::vector<std::string>& list, uint32_t token);
     void unsubscribeCallerFrom(std::vector<std::string>& list, uint32_t token);
     static bool addTarget(std::vector<std::string>& list, const std::string& path);
