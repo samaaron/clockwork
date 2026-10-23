@@ -172,8 +172,23 @@ public:
         for (int t = 0; t < ms; t += 5) {
             mSys->advanceBy(5000);
             engine().controlPass();
+            noteClock();
         }
     }
+
+    // The engine's clock as a client reads it (clockwork_client_sample_clock),
+    // at every step of the case's clock: the most it was ever seen to go back
+    // from one reading to the next. A client paces its schedule by it, and
+    // time going back holds everything scheduled for as long again: never,
+    // whatever the event, on any target (restart_grid.spec.mjs reads it there).
+    void noteClock() {
+        ClockworkClientSampleClock sc{};
+        sc.struct_bytes = sizeof(sc);
+        if (clockwork_client_sample_clock(engine().egressClient(), &sc) != CLOCKWORK_OK || sc.dac_ntp <= 0) return;
+        if (mLastClock > 0 && sc.dac_ntp < mLastClock) mClockBack = std::max(mClockBack, mLastClock - sc.dac_ntp);
+        mLastClock = sc.dac_ntp;
+    }
+    double clockWentBack() const { return mClockBack; }
 
     // A message from the reader's client: through the engine's door, or
     // written into the plane's command ring, as a peer writes one.
@@ -285,9 +300,12 @@ private:
             return opens() > before
                 || done.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
         };
-        while (!opening()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        while (done.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
+        while (!opening()) { noteClock(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        while (done.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
             mSys->advanceBy(1000);
+            noteClock();
+        }
+        noteClock();
         return done.get();
     }
 
@@ -326,6 +344,7 @@ private:
     ClockworkDrainState                 mRepState;
     ClockworkClientTap*                 mTap = nullptr;
     std::vector<osc_test::ParsedReply>  mHeard;
+    double                              mLastClock = 0, mClockBack = 0;   // noteClock()
 };
 
 // ── The cell's run ──────────────────────────────────────────────────────────
@@ -339,6 +358,7 @@ Run runCell(Cell& cell, When when) {
     cell.send(restart_model::oldAsk());
     cell.delivered();
     cell.sys().advanceBy(20000);   // answered by the old instance, and not read
+    cell.noteClock();
 
     std::memset(const_cast<uint8_t*>(cell.engine().guestAssets()), 0x5A, 64);
     const auto sendWaiting = [&cell] {
@@ -401,6 +421,8 @@ void checkCell(Reader reader, Event event, When when, unsigned port) {
     }
     // A tap is never lapped here: nothing a reader had not read is lost.
     CHECK(cell.tapMissed() == 0u);
+    INFO("the engine's clock, as a client reads it, went back by " << cell.clockWentBack() << " s");
+    CHECK(cell.clockWentBack() == 0.0);
 }
 
 } // namespace

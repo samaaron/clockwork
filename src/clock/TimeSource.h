@@ -1,34 +1,51 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 /*
- * TimeSource.h — audio-thread time-source. Two shapes, one guard.
+ * TimeSource.h — the audio thread's time, one shape on every target.
  *
- * CLOCKWORK_WORKLET_CLOCK selects the variant:
+ * The monotonic sample counter, anchored to a wall clock: each block runs one
+ * IIR step (updateAudioThreadNTP) toward the wall time the HOST hands over
+ * with the block — native's callback reads its own wall clock, the worklet
+ * passes Date.now(), an embedded host its own — and now() returns the latest
+ * value. The clock is the ruler everything is scheduled on, so the IIR's pull
+ * is bounded (kClockSlewPerBlock, a few µs a block: more than crystals drift
+ * by) and what is on the ruler stays where its sender put it. An anchor is
+ * one reading, out by up to a render burst where the host reads Date.now(),
+ * so it settles: the clock holds the reading for kAnchorSettleBlocks, then
+ * moves once to the median of the readings meanwhile, and the bound holds it
+ * from there. The clock never steps on a wall reading: a wall set forward is
+ * followed at the bound, as one set back is. A gap — no block rendered while
+ * time passed: a stall, a context suspended, a sleep, a reload — is the
+ * host's to see, against the audio it rendered (clockwork_audio_back), and it
+ * anchors the clock afresh at the block back (resetAudioThreadTime), since a
+ * clock that converges from seconds behind runs fast until it has caught up
+ * and everything scheduled against it plays compressed. The audio thread
+ * anchors itself on its first block, and a host at its audio start and after
+ * a gap; nothing else writes its time, so
+ * no block ever reads an anchor someone else is half-way through rewriting
+ * (the page used to write an NTP start and a drift into the arena, in steps,
+ * and a new worklet over the same memory published whatever mix was there:
+ * the clock stepped back 0.7 s in Clockwork's own test and 13.7 s under Sonic
+ * Pi, 2026-10-23). Time never goes back: a reset has a floor, the clock the
+ * arena already carries (ClockworkClock::floorRenderNtp), and the bound is far
+ * under a block.
  *
- *   undefined (native) — the WallClock + IIR clock. An IIR-smoothed wall clock
- *     anchored to the monotonic sample counter; each callback runs one IIR step
- *     (updateAudioThreadNTP) and now() returns the latest cached value. Freewheel
- *     mode bypasses the drift IIR and derives NTP purely from sample position
- *     (deterministic for offline / accuracy tests).
+ * Freewheel mode bypasses the drift IIR and derives NTP purely from sample
+ * position (deterministic for offline / accuracy tests).
  *
- *   defined (WASM / ESP32) — the self-driven worklet clock. now()/nowAt() evaluate
- *     the SAB time formula (audioCurrentTime + ntp_start + drift + global) from
- *     offset pointers bound by the host at boot (bindOffsets). There is no headless
- *     driver thread or wall clock here, so freewheel is a no-op and wallNow()
- *     returns the cached now() (0 only before the first nowAt()).
+ * The host's global offset (the arena's clock-anchors region, a deliberate
+ * shift for multi-system sync) is added to every answer, on every target.
  *
- * Both shapes depend only on the centralised double↔uint64 bit-cast — no JUCE,
- * no Ableton, no guest DSP. The native shape additionally reads the wall clock
- * (wallClockNTP, clock_math.h). The Link-clock-domain block stamp
+ * Depends only on the centralised double↔uint64 bit-cast — no JUCE, no
+ * Ableton, no guest DSP. The Link-clock-domain block stamp
  * (LinkAudioHost::blockHostMicros) is the Link Audio host's own anchor, not
- * here.
- *
- * Dispatch is link-time-concrete (no vtable) so the audio-thread reads
- * (now / nowAt / updateAudioThreadNTP) stay inlinable and branch-free.
+ * here. Dispatch is link-time-concrete (no vtable) so the audio-thread reads
+ * stay inlinable and branch-free.
  */
 #pragma once
 
 #include "shared_memory.h"
+#include "clock/clock_math.h"
 
 #include <atomic>
 #include <cstdint>
@@ -39,145 +56,103 @@ namespace clockwork {
 // and Windows shared-mode WASAPI hovers right at the threshold, so a
 // per-second limit still logs forever (thousands of lines per session);
 // ASIO-grade callbacks stay below it and log nothing. A genuine step is
-// reported immediately; a persisting condition summarises at most once
-// per minute, the line carrying the window's peak and hit count so one
-// line tells the minute's story. Audio-thread only — plain fields.
+// reported immediately; a persisting condition at most once per minute.
+// Audio-thread only — plain fields.
 struct DriftLogGate {
     static constexpr double kThresholdSec   = 0.005;
     static constexpr double kMinIntervalSec = 60.0;
 
-    struct Line {
-        double   driftSec = 0.0;   // this callback's signed drift
-        double   peakSec = 0.0;    // window peak magnitude
-        uint32_t hits = 0;         // over-threshold callbacks this window
-        uint32_t total = 0;        // over-threshold callbacks since boot
-    };
-
-    // Returns true when a line should be emitted, filling `out`.
-    bool offer(double driftSec, double wallNow, Line& out) {
+    // Returns true when a line should be emitted.
+    bool offer(double driftSec, double wallNow) {
         const double mag = driftSec < 0.0 ? -driftSec : driftSec;
-        if (mag <= kThresholdSec)
+        if (mag <= kThresholdSec || wallNow - mLastLogNTP < kMinIntervalSec)
             return false;
-        ++mTotal;
-        ++mWindowHits;
-        if (mag > mWindowPeakSec)
-            mWindowPeakSec = mag;
-        if (wallNow - mLastLogNTP < kMinIntervalSec)
-            return false;
-        out = { driftSec, mWindowPeakSec, mWindowHits, mTotal };
         mLastLogNTP = wallNow;
-        mWindowHits = 0;
-        mWindowPeakSec = 0.0;
+        ++mReports;
         return true;
     }
+    // Lines emitted so far.
+    uint32_t reports() const { return mReports; }
 
 private:
     double   mLastLogNTP{0.0};
-    double   mWindowPeakSec{0.0};
-    uint32_t mWindowHits{0};
-    uint32_t mTotal{0};
+    uint32_t mReports{0};
 };
 
 } // namespace clockwork
 
-#if CLOCKWORK_WORKLET_CLOCK
-
-// ─── Worklet time-source (self-driven; WASM / ESP32) ─────────────────────────
-// now()/nowAt() evaluate the SAB time formula (audioCurrentTime + ntp_start +
-// drift + global) from offset pointers bound at boot. The host (WASM init_memory)
-// binds the SAB offset pointers via bindOffsets; an unbound source returns the
-// last cached value (0 before the first nowAt).
 class TimeSource {
 public:
     TimeSource() = default;
-
     TimeSource(const TimeSource&) = delete;
     TimeSource& operator=(const TimeSource&) = delete;
     ~TimeSource() = default;
 
-    // Bind the host's SAB offset pointers (NTP start / drift µs / global ms).
-    // Called once at boot before the audio thread runs — no concurrency.
-    void bindOffsets(const double* ntpStartTime,
-                     const std::atomic<int32_t>* driftOffset,
-                     const std::atomic<int32_t>* globalOffset) {
-        mNtpStartTime = ntpStartTime;
-        mDriftOffset  = driftOffset;
-        mGlobalOffset = globalOffset;
-    }
+    // The host's global offset word in the arena (milliseconds), added to
+    // every answer. Bound as the clock enters service, before the audio
+    // thread runs; null is 0.
+    void bindGlobalOffset(const std::atomic<int32_t>* globalOffset) { mGlobalOffset = globalOffset; }
 
+    // App-thread read: the latest audio-thread NTP. Before the first block,
+    // the wall clock where there is one (native); 0 on the worklet.
     double now() const;
-    double nowAt(double audioCurrentTime) const;
+    // App-thread wall-clock NTP. The worklet has no wall clock of its own
+    // and answers the last audio-thread NTP (0 before the first block).
     double wallNow() const;
 
-    double updateAudioThreadNTP(double samplePosition,
-                                double sampleRate,
-                                double audioCurrentTime);
-    void   resetAudioThreadTime(double samplePosition, double sampleRate,
-                                double renderedFrames = 0.0);
+    // Audio-thread time-base: one IIR step per block toward `wallNtp`, the
+    // host's wall clock as it hands the block over, returning the NTP for
+    // this block, never below the last block's (or the pure sample-derived
+    // NTP in freewheel mode).
+    double updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp);
+    // Anchor afresh at `wallNtp`, and never below `floorNtp` (0: no floor):
+    // the clock the arena already carries, so a new host over memory that is
+    // up goes on from it. `renderedFrames`: the frames rendered so far on the
+    // count being left, where a freewheel clock from an origin goes on from.
+    void   resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
+                                double renderedFrames = 0.0, double floorNtp = 0.0);
+    // Whether a reset has anchored this clock yet.
+    bool   anchored() const { return mBaseNTPBits.load(std::memory_order_relaxed) != 0; }
+    // For the metrics (publishClockMetrics): the clock against the host's
+    // wall clock at the last block, microseconds, signed; and how many times
+    // it has been anchored afresh since boot.
+    int32_t  lastDriftUs() const { return mLastDriftUs.load(std::memory_order_relaxed); }
+    uint32_t anchors() const { return mAnchors.load(std::memory_order_relaxed); }
+    // Lines the drift diagnostic has logged (audio-thread read; tests).
+    uint32_t driftReports() const { return mDriftLogGate.reports(); }
 
     void   setFreewheelClock(bool enabled, double originNtp = 0.0);
     bool   freewheelClock() const;
 
-private:
-    const double*               mNtpStartTime{nullptr};
-    const std::atomic<int32_t>* mDriftOffset{nullptr};
-    const std::atomic<int32_t>* mGlobalOffset{nullptr};
-
-    // Cache published by nowAt(), read by now(). Bit-pattern in uint64 because
-    // std::atomic<double> isn't lock-free everywhere.
-    mutable std::atomic<uint64_t> mLastAudioThreadNTPBits{0};
-};
-
-#else  // !CLOCKWORK_WORKLET_CLOCK
-
-#include "clock/clock_math.h"
-
-// ─── Native time-source (WallClock + IIR) ────────────────────────────────────
-class TimeSource {
-public:
-    TimeSource() = default;
-
-    TimeSource(const TimeSource&) = delete;
-    TimeSource& operator=(const TimeSource&) = delete;
-    ~TimeSource() = default;
-
-    // App-thread read: the latest audio-thread NTP cached by the most recent
-    // update call. Falls back to a fresh wall-clock read before the first update.
-    double now() const;
-    // Native uses its own time source — the supplied AudioContext currentTime
-    // (the WASM worklet's input) is ignored.
-    double nowAt(double audioCurrentTime) const;
-    // App-thread wall-clock NTP entry point.
-    double wallNow() const;
-
-    // Audio-thread time-base: one IIR step per callback, returning the
-    // drift-corrected NTP for this block (or the pure sample-derived NTP in
-    // freewheel mode).
-    double updateAudioThreadNTP(double samplePosition,
-                                double sampleRate,
-                                double audioCurrentTime);
-    void   resetAudioThreadTime(double samplePosition, double sampleRate,
-                                double renderedFrames = 0.0);
-
-    void   setFreewheelClock(bool enabled, double originNtp = 0.0);
-    bool   freewheelClock() const;
-
-    // Test boundary: when non-zero, the IIR reads this instead of wallClockNTP(),
-    // so scenario tests (test_time_source.cpp) can drive exact stall /
-    // rate-mismatch shapes against exact expected answers. Costs one relaxed
-    // atomic load on the audio path; zero (the default) = real clock.
+    // Test boundary: when non-zero, the IIR reads this instead of the wall
+    // time the host passes, so scenario tests (test_time_source.cpp) can
+    // drive exact stall / rate-mismatch shapes against exact expected
+    // answers. Costs one relaxed atomic load on the audio path; zero (the
+    // default) = the host's.
     void setTestWallClock(double ntpSeconds) {
-        mTestWallBits.store(clockwork::doubleToBits(ntpSeconds),
-                            std::memory_order_relaxed);
+        mTestWallBits.store(clockwork::doubleToBits(ntpSeconds), std::memory_order_relaxed);
     }
 
 private:
-    double readWallClock() const {
+    double settledResidual() const;   // the median of an anchor's settling window
+    double wall(double hostWallNtp) const {
         const uint64_t bits = mTestWallBits.load(std::memory_order_relaxed);
-        return bits ? clockwork::bitsToDouble(bits) : wallClockNTP();
+        return bits ? clockwork::bitsToDouble(bits) : hostWallNtp;
+    }
+    double globalOffsetSeconds() const {
+        const int32_t ms = mGlobalOffset ? mGlobalOffset->load(std::memory_order_relaxed) : 0;
+        return ms ? (ms / 1000.0) : 0.0;   // exactly 0 without arithmetic, the common case
     }
 
+    const std::atomic<int32_t>* mGlobalOffset{nullptr};
     std::atomic<uint64_t> mTestWallBits{0};
+    std::atomic<int32_t>  mLastDriftUs{0};
+    std::atomic<uint32_t> mAnchors{0};
+    double                mDriftSmoothedSec{0.0};   // audio thread only
+    // An anchor settling (kAnchorSettleBlocks): the residual at each block
+    // since it, and how many so far. Audio thread only.
+    double                mSettleResidual[clockwork::kAnchorSettleBlocks]{};
+    uint32_t              mSettleCount{clockwork::kAnchorSettleBlocks};
     // IIR-smoothed audio-thread NTP. Bit-pattern in uint64 because
     // std::atomic<double> isn't lock-free everywhere.
     std::atomic<uint64_t> mBaseNTPBits{0};
@@ -193,5 +168,3 @@ private:
     // Drift-step logging state (audio-thread only).
     clockwork::DriftLogGate mDriftLogGate;
 };
-
-#endif  // CLOCKWORK_WORKLET_CLOCK

@@ -240,8 +240,9 @@ void clockwork_egress_count_undelivered(uint32_t n) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-bool clockwork_tick(double ntp_now, uint32_t out_channels, uint32_t in_channels) {
-    return process_audio(ntp_now, out_channels, in_channels);
+bool clockwork_tick(const ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels) {
+    if (!time || time->struct_bytes < sizeof(ClockworkBlockTime)) return false;
+    return process_audio(time->audio_time, time->wall_ntp, time->monotonic_secs, out_channels, in_channels);
 }
 
 const float* clockwork_audio_out(void) {

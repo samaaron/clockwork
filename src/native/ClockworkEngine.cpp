@@ -1317,10 +1317,6 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mLinkAudio.setAudioFormat(
         static_cast<uint32_t>(mCurrentConfig.sampleRate),
         clockworkLinkInputWidth(mCurrentConfig.numInputChannels));
-    // What queued while the audio thread was stalled is stale: refused to
-    // its senders as such, not performed late.
-    mProcessor.onWake = [this]() { purge(CLOCKWORK_REFUSED_STALLED); };
-
     // Wire ClockworkClock's Link-event callbacks → OSC notify push.
     // Callbacks fire on Link's network thread; the egress serialises socket
     // writes via the transport's send().
@@ -1644,16 +1640,21 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
     // HeadlessDriver — picks up rendering from a clean time base.
     if (!mManualPumpStarted) {
         mManualSamplePos = 0.0;
+        mManualWall      = wallClockNTP();
         clockwork::resetAudioBlockClock(mClockworkClock, mLinkAudio, mManualSamplePos,
-                                  mCurrentConfig.sampleRate);
+                                  mCurrentConfig.sampleRate, mManualWall);
+        clockwork_audio_starts(mManualWall, 0.0);   // the pump's audio starts now
         mManualPumpStarted = true;
     }
 
     // The manual pump renders with no live device (idle / device-loss), so
     // "audible" == render time (latency 0).
+    // A pump keeps no wall clock: its own time stands in — the wall as it
+    // started, advanced with the audio it renders — so no gap is ever seen
+    // (a test on a virtual clock, a debugger's pause).
     const clockwork::BlockTime bt = clockwork::beginAudioBlock(
         mClockworkClock, mLinkAudio, mManualSamplePos,
-        static_cast<double>(mCurrentConfig.sampleRate), 0, mMetrics);
+        static_cast<double>(mCurrentConfig.sampleRate), 0, mMetrics, mManualWall, 0.0);
 
     // The DSP's actual block size is authoritative here; the configured buffer
     // size can differ from the render quantum.
@@ -1671,8 +1672,9 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
     uint64_t host = bt.hostMicros;
     for (uint32_t rendered = 0; rendered < std::max(frames, blockSize); rendered += blockSize) {
         renderAudioBlock(mLinkAudio, blockSize, nOut, nIn,
-                         static_cast<uint32_t>(mCurrentConfig.sampleRate), ntp, host);
+                         static_cast<uint32_t>(mCurrentConfig.sampleRate), ntp, ntp, 0.0, host);
         mManualSamplePos += blockSize;
+        mManualWall      += blockSeconds;
         // Rendered to here, as the device path keeps it (tap streams anchor
         // on it, and a restart goes on from it).
         mClockworkClock.advanceEngineFrames(mManualSamplePos);

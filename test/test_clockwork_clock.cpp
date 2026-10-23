@@ -370,8 +370,8 @@ TEST_CASE("ClockworkClock: wallNow tracks wallClockNTP within tight bound",
 TEST_CASE("ClockworkClock: updateAudioThreadNTP publishes the returned value",
           "[ClockworkClock]") {
     ClockworkClock sc;
-    sc.resetAudioThreadTime(0.0, 48000.0);
-    const double returned = sc.updateAudioThreadNTP(128.0, 48000.0);
+    sc.resetAudioThreadTime(0.0, 48000.0, wallClockNTP());
+    const double returned = sc.updateAudioThreadNTP(128.0, 48000.0, wallClockNTP());
     CHECK(sc.now() == returned);
 }
 
@@ -379,7 +379,7 @@ TEST_CASE("ClockworkClock: resetAudioThreadTime publishes a usable NTP immediate
           "[ClockworkClock]") {
     ClockworkClock sc;
     const double before = wallClockNTP();
-    sc.resetAudioThreadTime(0.0, 48000.0);
+    sc.resetAudioThreadTime(0.0, 48000.0, wallClockNTP());
     const double after  = wallClockNTP();
     CHECK(sc.now() >= before - 1e-6);
     CHECK(sc.now() <= after + 1e-6);

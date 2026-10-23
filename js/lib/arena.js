@@ -62,7 +62,7 @@ export const REGION = Object.freeze({
 export const GEOM = Object.freeze({
   RING_MAX_MESSAGE: 0, RING_MESSAGE_MAGIC: 1, RING_PADDING_MAGIC: 2, RING_PADDING_MARKER: 3, RING_HEADER_BYTES: 4,
   METRICS_FIELDS: 0,
-  ANCHOR_NTP_START: 0, ANCHOR_DRIFT: 1, ANCHOR_GLOBAL: 2,
+  ANCHOR_GLOBAL: 0,
   SCOPE_SLOTS: 0, SCOPE_SLOT_BYTES: 1, SCOPE_HEADER_BYTES: 2, SCOPE_FRAMES: 3, SCOPE_CHANNELS: 4, SCOPE_SAMPLE_RATE: 5,
   // taps: a header, the guest's TAP_SLOTS slots, then TAP_TRACK_SLOTS track slots, one index space
   TAP_SLOTS: 0, TAP_HEADER_BYTES: 1, TAP_SLOT_BYTES: 2, TAP_SLOT_HEADER: 3, TAP_RING_FRAMES: 4, TAP_CHANNELS: 5,
@@ -257,8 +257,6 @@ function constantsFrom(region, h) {
     RING_CURSORS_START: cursors.offset, RING_CURSORS_SIZE: cursors.bytes,
     METRICS_START: metrics.offset, METRICS_SIZE: metrics.geom[GEOM.METRICS_FIELDS] * 4,
     GUEST_WINDOW_START: window.offset, GUEST_WINDOW_SIZE: window.bytes,
-    NTP_START_TIME_START: anchors.offset + anchors.geom[GEOM.ANCHOR_NTP_START], NTP_START_TIME_SIZE: 8,
-    DRIFT_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_DRIFT], DRIFT_OFFSET_SIZE: 4,
     GLOBAL_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_GLOBAL], GLOBAL_OFFSET_SIZE: 4,
     CLOCK_STATE_START: clock.offset, CLOCK_STATE_SIZE: clock.bytes,
     SCOPE_START: scope.offset, SCOPE_SIZE: scope.bytes,

@@ -24,10 +24,10 @@ TEST_CASE("audio block clock: begin steps the NTP and stamps the block",
     LinkAudioHost host(clock);
     const double sr = 48000.0;
     clock.setFreewheelClock(true);        // NTP is the sample count, exactly
-    clockwork::resetAudioBlockClock(clock, host, 0.0, sr);
+    clockwork::resetAudioBlockClock(clock, host, 0.0, sr, wallClockNTP());
 
-    const clockwork::BlockTime b0 = clockwork::beginAudioBlock(clock, host, 0.0,    sr, 0, nullptr);
-    const clockwork::BlockTime b1 = clockwork::beginAudioBlock(clock, host, 4800.0, sr, 0, nullptr);
+    const clockwork::BlockTime b0 = clockwork::beginAudioBlock(clock, host, 0.0, sr, 0, nullptr, wallClockNTP(), 0.0);
+    const clockwork::BlockTime b1 = clockwork::beginAudioBlock(clock, host, 4800.0, sr, 0, nullptr, wallClockNTP(), 0.0);
 
     CHECK(b0.ntp > 0.0);                                  // anchored to the wall clock
     // 4800 samples; the margin is double resolution at NTP magnitude (~1e-6).
@@ -48,11 +48,11 @@ TEST_CASE("audio block clock: begin mirrors the clock into the dashboard, whoeve
     LinkAudioHost host(clock);
     const double sr = 48000.0;
     clock.setFreewheelClock(true);
-    clockwork::resetAudioBlockClock(clock, host, 0.0, sr);
+    clockwork::resetAudioBlockClock(clock, host, 0.0, sr, wallClockNTP());
     clock.setBpm(120.0);
 
     PerformanceMetrics m{};
-    clockwork::beginAudioBlock(clock, host, 0.0, sr, 0, &m);
+    clockwork::beginAudioBlock(clock, host, 0.0, sr, 0, &m, wallClockNTP(), 0.0);
     CHECK(m.clock_tempo_mbpm.load() == 120000u);
     CHECK(m.clock_playing.load() == 0u);
     // The origin is 0 here, so the beat count is every beat since 1900 — far
@@ -62,7 +62,7 @@ TEST_CASE("audio block clock: begin mirrors the clock into the dashboard, whoeve
     CHECK(m.clock_phase_centi.load() < 400u);
 
     // A driver with no dashboard (unit contexts, no segment) passes null.
-    clockwork::beginAudioBlock(clock, host, 128.0, sr, 0, nullptr);
+    clockwork::beginAudioBlock(clock, host, 128.0, sr, 0, nullptr, wallClockNTP(), 0.0);
 }
 
 #if CLOCKWORK_LINK
@@ -86,12 +86,12 @@ TEST_CASE("audio block clock: the block after a reset is stamped when Link's clo
     ClockworkClock clock;
     LinkAudioHost host(clock);
     clock.setFreewheelClock(true);
-    clockwork::resetAudioBlockClock(clock, host, 0.0, kSr);
-    clockwork::beginAudioBlock(clock, host, 0.0, kSr, 0, nullptr);
-    clockwork::beginAudioBlock(clock, host, 10 * kSr, kSr, 0, nullptr);   // 10 s of samples on, at once
-    clockwork::resetAudioBlockClock(clock, host, 10 * kSr, kSr);
+    clockwork::resetAudioBlockClock(clock, host, 0.0, kSr, wallClockNTP());
+    clockwork::beginAudioBlock(clock, host, 0.0, kSr, 0, nullptr, wallClockNTP(), 0.0);
+    clockwork::beginAudioBlock(clock, host, 10 * kSr, kSr, 0, nullptr, wallClockNTP(), 0.0);   // 10 s of samples on, at once
+    clockwork::resetAudioBlockClock(clock, host, 10 * kSr, kSr, wallClockNTP());
     const int64_t before = clock.linkSession().linkClockMicrosRaw();
-    const auto    block  = clockwork::beginAudioBlock(clock, host, 10 * kSr, kSr, 0, nullptr);
+    const auto    block  = clockwork::beginAudioBlock(clock, host, 10 * kSr, kSr, 0, nullptr, wallClockNTP(), 0.0);
     const int64_t after  = clock.linkSession().linkClockMicrosRaw();
     CHECK(int64_t(block.hostMicros) >= before);
     CHECK(int64_t(block.hostMicros) <= after);
@@ -105,11 +105,11 @@ TEST_CASE("audio block clock: with a freewheel clock a block's stamp is its samp
     ClockworkClock clock;
     LinkAudioHost host(clock);
     clock.setFreewheelClock(true);
-    clockwork::resetAudioBlockClock(clock, host, 0.0, kSr);
-    const auto b0 = clockwork::beginAudioBlock(clock, host, 0.0, kSr, 0, nullptr);
+    clockwork::resetAudioBlockClock(clock, host, 0.0, kSr, wallClockNTP());
+    const auto b0 = clockwork::beginAudioBlock(clock, host, 0.0, kSr, 0, nullptr, wallClockNTP(), 0.0);
     std::this_thread::sleep_for(std::chrono::milliseconds(120));   // late
-    const auto b1 = clockwork::beginAudioBlock(clock, host, 128.0, kSr, 0, nullptr);
-    const auto b2 = clockwork::beginAudioBlock(clock, host, 128.0 + 48000.0, kSr, 0, nullptr);   // early
+    const auto b1 = clockwork::beginAudioBlock(clock, host, 128.0, kSr, 0, nullptr, wallClockNTP(), 0.0);
+    const auto b2 = clockwork::beginAudioBlock(clock, host, 128.0 + 48000.0, kSr, 0, nullptr, wallClockNTP(), 0.0);   // early
     CHECK(std::llabs(int64_t(b1.hostMicros) - int64_t(b0.hostMicros) - std::llround(kBlockMicros)) <= 1);
     CHECK(std::llabs(int64_t(b2.hostMicros) - int64_t(b1.hostMicros) - 1000000) <= 1);
 }

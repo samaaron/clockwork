@@ -185,9 +185,7 @@ pub mod geom {
     pub const RING_PADDING_MARKER: usize = 3;
     pub const RING_HEADER_BYTES: usize = 4;
     pub const METRICS_FIELDS: usize = 0;
-    pub const ANCHOR_NTP_START: usize = 0;
-    pub const ANCHOR_DRIFT: usize = 1;
-    pub const ANCHOR_GLOBAL: usize = 2;
+    pub const ANCHOR_GLOBAL: usize = 0;
     pub const SCOPE_SLOTS: usize = 0;
     pub const SCOPE_SLOT_BYTES: usize = 1;
     pub const SCOPE_HEADER_BYTES: usize = 2;

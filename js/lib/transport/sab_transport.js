@@ -71,7 +71,6 @@ export class SABTransport extends Transport {
      * @param {Object} config.bufferConstants
      * @param {string} config.workerBaseURL
      * @param {Function} config.getAudioContextTime
-     * @param {Function} config.getNTPStartTime
      */
     constructor(config) {
         super({ ...config, mode: 'sab' });

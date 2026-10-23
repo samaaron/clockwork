@@ -475,13 +475,6 @@ extern "C" {
     uint8_t* shared_memory = nullptr;
     RingCursors* cursors = nullptr;
     PerformanceMetrics* metrics = nullptr;
-    double* ntp_start_time = nullptr;
-#if CLOCKWORK_WORKLET_CLOCK
-    // The NTP start time in the arena when this engine began (first boot: 0; a reload: the engine before's). Until
-    // the host writes this engine's, the clock is not this engine's, and the sample clock is not published from it.
-    double ntp_start_at_init = 0.0;
-#endif
-    std::atomic<int32_t>* drift_offset = nullptr;
     std::atomic<int32_t>* global_offset = nullptr;
     bool memory_initialized = false;
 
@@ -1247,18 +1240,99 @@ extern "C" {
     // (the wake's purge): a writer mid-write lands on either side, and is
     // answered either way. A teardown wants the mark exact, and takes the
     // lock round it (mark_closing_generation).
-    void clockwork_ingress_mark(const char* reason) {
+    static void mark_ingress(const char* reason, bool onlyDue) {
         if (!memory_initialized || !cursors) return;
         g_in_marks.set(static_cast<uint32_t>(cursors->in_sequence.load(std::memory_order_acquire)),
-                       arenaInstanceGeneration(shared_memory),
-                       reason ? reason : CLOCKWORK_REFUSED_REBUILDING);
+                       arenaInstanceGeneration(shared_memory), reason, onlyDue);
+    }
+    void clockwork_ingress_mark(const char* reason) {
+        mark_ingress(reason ? reason : CLOCKWORK_REFUSED_REBUILDING, false);
     }
 
-    // What is pending as of now went stale — a stall, a page's context
-    // suspended — and is refused, each to its sender ("stalled"), by the next
-    // drain (the marks, above). On the audio thread, or with it stopped.
+    // What is pending as of now waited while the audio was away — a stall, a
+    // page's context suspended — and what is due of it is stale: refused,
+    // each to its sender ("stalled"), by the next drain (the marks, above). A
+    // bundle for later is not, and goes through to play at its time. On the
+    // audio thread, or with it stopped.
     void clockwork_ingress_mark_stale() {
-        clockwork_ingress_mark(CLOCKWORK_REFUSED_STALLED);
+        mark_ingress(CLOCKWORK_REFUSED_STALLED, true);
+    }
+
+    // A bundle whose time is not yet come at `blockTime`, this block's start
+    // in OSC time: it plays on time whatever it waited through. Timetags are
+    // compared unsigned (ingest_frame: a present-day one has its top bit set).
+    static bool bundle_for_later(const uint8_t* payload, uint32_t payload_size, int64_t blockTime) {
+        if (!clockwork_is_bundle(payload, payload_size)) return false;
+        const uint64_t tt = clockwork_bundle_timetag(payload);
+        return tt > 1u && tt >= static_cast<uint64_t>(blockTime);
+    }
+
+    // THE AUDIO WAS AWAY: the one rule, on every target. The gap is the time
+    // that passed since the last block less the audio rendered in it — by the
+    // host's monotonic clock where this host and the last both had one (a
+    // system clock set by hand is not a gap), by its wall clock otherwise —
+    // against the record of the last block rendered in the arena, whichever
+    // host rendered it (a worklet made again over the same memory, an
+    // embedded host attaching again, the device thread back from a stall).
+    // Measured against the audio rendered, a huge device buffer rendering a
+    // block every 170 ms is not a gap. Over kClockStepSeconds the clock
+    // steps at this block: the host is told so and anchors it afresh (a
+    // clock converged from seconds behind runs fast until it has caught up,
+    // and everything scheduled against it plays compressed). Over
+    // kAudioAwaySeconds what waited for the engine and is due is stale too:
+    // refused to its senders as such (the mark; docs/RESTARTS.md, rule 1) and
+    // the schedule cleared, before anything more is taken. One line says it,
+    // either way. Every host asks once a block as it hands its time over,
+    // before its clock moves (AudioBlockClock.h, the worklet's block below,
+    // an embedded host's render), and as its audio starts
+    // (clockwork_audio_starts): judged by time alone then, as nothing was
+    // rendered, and its first block after is never a gap — the host's count
+    // of the audio rendered starts over with it.
+    static double g_last_audio_secs = -1.0;   // the host's count at the last block; < 0: its audio just started
+
+    static bool audio_gap(double wall_ntp, double monotonic_secs, double audio_secs) {
+        if (!memory_initialized || !shared_memory) return false;
+        uint8_t* const sample_clock = shared_memory + SAMPLE_CLOCK_START;
+        const double last_wall = read_last_block_wall(sample_clock);
+        const double last_mono = read_last_block_mono(sample_clock);
+        const double last_audio = g_last_audio_secs;
+        write_last_block_time(sample_clock, wall_ntp, monotonic_secs);
+        g_last_audio_secs = audio_secs;
+        const bool byMono = monotonic_secs > 0.0 && last_mono > 0.0;
+        const double passed = byMono ? monotonic_secs - last_mono : (last_wall > 0.0 ? wall_ntp - last_wall : 0.0);
+        if (audio_secs >= 0.0 && last_audio < 0.0) return false;   // the first block after a start
+        const double rendered = (audio_secs >= 0.0 && audio_secs > last_audio) ? audio_secs - last_audio : 0.0;
+        const double gap = passed - rendered;
+        if (gap <= clockwork::kClockStepSeconds) return false;
+        if (gap > clockwork::kAudioAwaySeconds) {
+            clockwork_log("[clock] audio resumed and message buffer cleared after %.3fs", gap);
+            clockwork_ingress_mark_stale();
+#if CLOCKWORK_SCHEDULER
+            clockwork_engine_schedule().requestClear();
+#endif
+        } else {
+            clockwork_log("[clock] audio resumed after %.3fs", gap);
+        }
+        return true;
+    }
+
+    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_back(double wall_ntp, double monotonic_secs, double audio_secs) {
+        return audio_gap(wall_ntp, monotonic_secs, audio_secs);
+    }
+#if CLOCKWORK_WORKLET_CLOCK
+    // The worklet's block clock is kept in process_audio, so its start is
+    // recorded here: a worklet made again over the same memory finds the last
+    // one's clock there, anchored, and its context's sample counter may have
+    // started over — so, as a native host anchors at its device start, its
+    // clock anchors afresh at its first block (never below the clock the
+    // arena carries).
+    static bool g_anchor_at_first_block = false;
+#endif
+    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_starts(double wall_ntp, double monotonic_secs) {
+#if CLOCKWORK_WORKLET_CLOCK
+        g_anchor_at_first_block = true;
+#endif
+        return audio_gap(wall_ntp, monotonic_secs, -1.0);
     }
 
     // The teardown's mark, exact: taken under the in ring's writer lock once
@@ -1797,8 +1871,7 @@ extern "C" {
     // the engine its member; a worklet host nothing, so the processor's own
     // instance stands in — and it is bound here to the clock state (its
     // transport stamp anchored to wall time as it binds, bindStateToShm),
-    // to the sample clock, and on the worklet to the time offsets its
-    // TimeSource reads. Every build: a rebuild binds the same instance to
+    // to the sample clock, and to the host's global offset. Every build: a rebuild binds the same instance to
     // the same regions again, which is a no-op. Before this step was one
     // step, native bound after boot and the worklet inside it, and a reset
     // added between the two wiped the web's stamp to the 1900 epoch
@@ -1814,10 +1887,7 @@ extern "C" {
         // The sample clock, as native's driver publishes it (AudioBlockClock.h), here once a block: the one reading of
         // the engine's time a thread without the audio context can take, a host's worker included (OscChannel#now).
         clock->bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
-#if CLOCKWORK_WORKLET_CLOCK
-        clock->bindWorkletClock(ntp_start_time, drift_offset, global_offset);
-        ntp_start_at_init = *ntp_start_time;
-#endif
+        clock->bindGlobalOffset(global_offset);
     }
 
     void init_memory() {
@@ -1880,8 +1950,6 @@ extern "C" {
             // them with no redirect.
             metrics = reinterpret_cast<PerformanceMetrics*>(shared_memory + METRICS_START);
 
-            ntp_start_time = reinterpret_cast<double*>(shared_memory + NTP_START_TIME_START);
-            drift_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + DRIFT_OFFSET_START);
             global_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + GLOBAL_OFFSET_START);
 
             // What a cold boot resets beyond the pointers — the guest's
@@ -2904,7 +2972,7 @@ extern "C" {
     // current_time: AudioContext.currentTime (WASM) or wall-clock NTP (native)
     // active_output_channels / active_input_channels: live channel counts
     EMSCRIPTEN_KEEPALIVE
-    bool process_audio(double current_time, uint32_t active_output_channels, uint32_t active_input_channels) {
+    bool process_audio(double current_time, double wall_ntp, double monotonic_secs, uint32_t active_output_channels, uint32_t active_input_channels) {
         InstanceRingScope instance_ring;   // the audio thread writes the instance's ring
         BlockOpenScope block_open;         // until the block is done (g_block_open)
         clockwork_pool_register_engine_thread();  // pool ownership follows the audio thread
@@ -2936,31 +3004,46 @@ extern "C" {
         // waits, silent, for a block when it can.
         if (!say_owed()) return true;
 
+#if CLOCKWORK_WORKLET_CLOCK
+        // The audio was away? (clockwork_audio_back: the one rule, every
+        // target.) The worklet's block clock is kept here, so it asks here,
+        // before the clock moves: a gap anchors it afresh at this block.
+        const bool gap = clockwork_audio_back(wall_ntp, monotonic_secs, current_time);
+#endif
+
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().drainPendingClear();
 #endif
 
-        // WASM derives NTP via ClockworkClock, reading ntp_start_time from shared memory
-        // every frame rather than caching, so a timing resync after resume takes effect
-        // at once. On native, current_time is already the ClockworkClock-derived NTP.
 #if CLOCKWORK_WORKLET_CLOCK
-        // Worklet self-clock host (WASM + the self-driven device): derive NTP from
-        // the sample clock via the bound ClockworkClock, and mirror the readout into the
-        // cross-platform clock metrics (slots 46-49). External-clock hosts (native/
-        // JUCE) take the #else: current_time is already the ClockworkClock-derived NTP
-        // from the callback.
-        const double current_ntp = clockworkClock().nowAt(current_time);
-        // Where the audio thread has got to, for readers on other threads: this block's first frame and its NTP time.
-        // The worklet knows no device latency, so the frame is stamped as rendered. A block that is not rendered (the
-        // context suspended) publishes nothing: the clock stands still, as the audio does. Nor does one before the host
-        // has written this engine's NTP start: until then its time is the context's alone (a first boot), or the new
-        // context's on the old one's start (a reload) — the past, and a reader would take the jump back for real.
-        {
-            const uint32_t rate = metrics->audio_sample_rate.load(std::memory_order_relaxed);
-            if (rate && *ntp_start_time != ntp_start_at_init)
-                clockworkClock().publishSampleClock(current_time * rate, rate, current_ntp, 0);
+        // The worklet's clock is the audio thread's own, the same clock as
+        // native's (clock/TimeSource.h): the context's time is its sample
+        // counter, the host's wall time what it follows — converging on it,
+        // or anchored afresh where no block was rendered meanwhile (the
+        // context suspended, a reload, which onto a new context starts the
+        // sample counter over). Anchored at its first block, never below what
+        // the arena's sample clock already says, so a new worklet over the
+        // same memory goes on from the old one's time. Published every block:
+        // this block's first frame and its NTP time, for readers on other
+        // threads (OscChannel#now). The worklet knows no device latency, so
+        // the frame is stamped as rendered. A block that is not rendered (the
+        // context suspended) publishes nothing: the clock stands still, as
+        // the audio does.
+        const double rate = static_cast<double>(metrics->audio_sample_rate.load(std::memory_order_relaxed));
+        double current_ntp = clockworkClock().now();
+        if (rate > 0.0) {
+            const double sample_pos = current_time * rate;
+            ClockworkClock& clk = clockworkClock();
+            if (!clk.audioThreadAnchored() || gap || g_anchor_at_first_block) {
+                g_anchor_at_first_block = false;
+                clk.resetAudioThreadTime(sample_pos, rate, wall_ntp, clk.floorRenderNtp(0));
+            }
+            current_ntp = clk.updateAudioThreadNTP(sample_pos, rate, wall_ntp);
+            clk.publishSampleClock(sample_pos, rate, current_ntp, 0);
         }
 #else
+        // Native hosts keep the same clock themselves, a callback at a time
+        // (AudioBlockClock.h): current_time is the block's NTP already.
         const double current_ntp = current_time;
 #endif
 
@@ -3086,13 +3169,17 @@ extern "C" {
                 [currentOscTime](uint32_t sourceId, const uint8_t* payload,
                                  uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                     // Below the mark: written for a generation that has
-                    // closed, or before a stall — refused to its sender with
-                    // the mark's reason and generation as the ring has room,
-                    // and consumed undispatched. Clockwork's own go through
-                    // unless they hand the guest something: the engine
-                    // answers those whatever the guest is doing.
+                    // closed, or while the audio was away — refused to its
+                    // sender with the mark's reason and generation as the
+                    // ring has room, and consumed undispatched. Clockwork's
+                    // own go through unless they hand the guest something:
+                    // the engine answers those whatever the guest is doing.
+                    // And below a mark of what is due (the audio away), a
+                    // bundle for later goes through to play at its time: what
+                    // a client sends as the audio comes back is not stale.
                     if (const RingMark* mark = g_in_marks.of(seq);
-                        mark && !clockwork_sys_answers_without_guest(payload, payload_size))
+                        mark && !clockwork_sys_answers_without_guest(payload, payload_size)
+                        && !(mark->onlyDue && bundle_for_later(payload, payload_size, currentOscTime)))
                         return refuse_when_room(sourceId, payload, payload_size,
                                                 mark->reason, mark->generation)
                             ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;

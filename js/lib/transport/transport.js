@@ -10,7 +10,6 @@
  * @property {number} [arenaBase] - Ring buffer base offset (SAB mode only)
  * @property {Object} [bufferConstants] - Buffer layout constants (SAB mode only)
  * @property {Function} [getAudioContextTime] - Returns AudioContext.currentTime
- * @property {Function} [getNTPStartTime] - Returns NTP start time
  */
 
 /**

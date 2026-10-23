@@ -243,25 +243,27 @@ public:
     // `now()` is the app-thread read: returns the latest audio-thread NTP,
     // cached by the most recent update call. Both builds.
     //
-    // `nowAt(audioCurrentTime)` is the WASM worklet's audio-thread entry
-    // point: computes NTP from the supplied AudioContext currentTime and
-    // publishes it to the cache. On native, audio-thread NTP comes from
-    // the IIR — `nowAt` ignores its argument and returns `now()`.
-
     double now() const;
-    double nowAt(double audioCurrentTime) const;
 
-    // App-thread wall-clock NTP entry point. Native returns wallClockNTP()
-    // directly; WASM has no wall clock and returns the last audio-thread NTP
-    // (0 only before the first nowAt()).
+    // App-thread wall-clock NTP entry point. Native returns the wall clock;
+    // the worklet has none and returns the last audio-thread NTP (0 only
+    // before the first block).
     double wallNow() const;
 
-    // Audio-thread time-base. Native runs one IIR step per callback;
-    // WASM evaluates the SAB formula.
-    double updateAudioThreadNTP(double samplePosition,
-                                double sampleRate,
-                                double audioCurrentTime = 0.0);
-    void   resetAudioThreadTime(double samplePosition, double sampleRate);
+    // Audio-thread time-base, one shape on every target (TimeSource.h): one
+    // IIR step per block toward `wallNtp`, the host's wall clock as it hands
+    // the block over. A reset anchors afresh at `wallNtp`, never below
+    // `floorNtp` (floorRenderNtp: the clock the arena already carries).
+    double updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp);
+    void   resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
+                                double floorNtp = 0.0);
+    bool   audioThreadAnchored() const;
+    int32_t  clockDriftUs() const;    // the clock against the host's wall at the last block (TimeSource::lastDriftUs)
+    uint32_t clockAnchors() const;    // anchored afresh since boot (TimeSource::anchors)
+    // The render NTP a reset must not go below, for a host whose blocks are
+    // heard `outputLatencyFrames` after they are rendered: what the arena's
+    // sample clock last published, as a reader took it. 0 with none published.
+    double floorRenderNtp(uint32_t outputLatencyFrames) const;
 
     // Freewheel clock mode: derive the audio-thread NTP purely from sample
     // position, skipping the wall-clock drift IIR in updateAudioThreadNTP.
@@ -335,14 +337,9 @@ public:
     // tick at the wrong rate.
     uint64_t engineFrames() const;
 
-#if CLOCKWORK_WORKLET_CLOCK
-    // Worklet builds only: hand the worklet TimeSource its SAB offset pointers
-    // (NTP start / drift µs / global ms) so nowAt() can evaluate the SAB time
-    // formula. Wired as the clock enters service (audio_processor.cpp).
-    void bindWorkletClock(const double* ntpStartTime,
-                          const std::atomic<int32_t>* driftOffset,
-                          const std::atomic<int32_t>* globalOffset);
-#endif
+    // The host's global clock offset word in the arena (milliseconds), added
+    // to every answer. Wired as the clock enters service (audio_processor.cpp).
+    void bindGlobalOffset(const std::atomic<int32_t>* globalOffset);
 
     // The Link session itself, for the one borrower that needs more than the
     // NTP surface: LinkAudioHost, whose sinks share the session's Link

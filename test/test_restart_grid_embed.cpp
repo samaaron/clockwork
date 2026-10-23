@@ -24,7 +24,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cstring>
 #include <vector>
 
@@ -52,14 +55,28 @@ public:
         REQUIRE(mH != nullptr);
         mC = clockwork_embed_client(mH);
         REQUIRE(mC != nullptr);
+        noteClock();
     }
     void close() { clockwork_embed_close(mH); mH = nullptr; mC = nullptr; }
 
     void render(uint32_t blocks) {
         float* outs[2] = { mL.data(), mR.data() };
-        for (uint32_t i = 0; i < blocks; ++i)
+        for (uint32_t i = 0; i < blocks; ++i) {
             REQUIRE(clockwork_embed_render(mH, outs, 2, nullptr, 0, kBlock) == kBlock);
+            noteClock();
+        }
     }
+    // The engine's clock as the host's client reads it, after every block and
+    // across the attach: the most it went back from one reading to the next.
+    // Never, as on native and the web (test_restart_grid.cpp, restart_grid.spec.mjs).
+    void noteClock() {
+        ClockworkClientSampleClock sc {};
+        sc.struct_bytes = sizeof sc;
+        if (clockwork_client_sample_clock(mC, &sc) != CLOCKWORK_OK || sc.dac_ntp <= 0) return;
+        if (mLastClock > 0 && sc.dac_ntp < mLastClock) mClockBack = std::max(mClockBack, mLastClock - sc.dac_ntp);
+        mLastClock = sc.dac_ntp;
+    }
+    double clockWentBack() const { return mClockBack; }
     void send(const osc_test::Packet& p) {
         REQUIRE(clockwork_client_send(mC, p.ptr(), p.size(), kOrigin) == CLOCKWORK_OK);
     }
@@ -83,6 +100,7 @@ private:
     ClockworkEmbed*    mH = nullptr;
     ClockworkClient*   mC = nullptr;
     std::vector<float> mL = std::vector<float>(kBlock), mR = std::vector<float>(kBlock);
+    double             mLastClock = 0, mClockBack = 0;   // noteClock()
 };
 
 uint32_t generation() { return clockwork_arena_generation(clockwork_arena_header()); }
@@ -110,6 +128,8 @@ void attachingAgain(double rate) {
         restart_model::checkSurvived(host.read(), "an embedded host", before, after, 48000, /*changedBuffer*/ 0);
     else
         restart_model::checkReplaced(host.read(), "an embedded host", /*seesRefusals*/ true, before, after);
+    INFO("the engine's clock, as the host's client reads it, went back by " << host.clockWentBack() << " s");
+    CHECK(host.clockWentBack() == 0.0);
 }
 
 } // namespace
@@ -120,4 +140,47 @@ TEST_CASE("restart grid: an embedded host attaching again", "[restarts][grid][em
 
 TEST_CASE("restart grid: an embedded host attaching again at another rate", "[restarts][grid][embed]") {
     attachingAgain(44100.0);
+}
+
+TEST_CASE("restart grid: an embedded host attaching again after the audio was away hears what waited refused as stale",
+          "[restarts][grid][embed]") {
+    // The same attach, with the audio away longer than kAudioAwaySeconds
+    // between the close and the attach: the instance carries on, and what
+    // waited for it through the gap is stale — refused once as such, never
+    // performed late, by the one rule every target keeps (process_audio); what
+    // is sent after is answered. And the clock never went back.
+    REQUIRE(clockwork_attached() == 0);
+    Host host(48000.0);
+    host.render(8);
+    host.read();
+
+    for (const auto& ask : restart_model::waitingAsks()) host.send(ask);
+    const uint32_t before = generation();
+    host.close();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    host.attach(48000.0);
+    CHECK(generation() == before);
+
+    // A block first: what is in the ring as the first block back begins is
+    // what waited, and is refused; what a host sends once it is rendering
+    // again is taken.
+    host.render(1);
+    host.send(restart_model::newAsk());
+    host.render(8);
+    const restart_model::Heard heard = host.read();
+    INFO(restart_model::dump(heard));
+    int stale = 0, delivered = 0, answered = 0;
+    for (const auto& m : heard) {
+        if (m.address == restart_model::kError && m.argString(0) == "/dummy/events/get") {
+            ++stale;
+            CHECK(m.argString(1) == CLOCKWORK_REFUSED_STALLED);
+        }
+        if (m.address == "/dummy/events") ++delivered;
+        if (m.address == "/dummy/reconfigured.reply") ++answered;
+    }
+    CHECK(stale == 1);
+    CHECK(delivered == 0);
+    CHECK(answered == 1);
+    INFO("the engine's clock, as the host's client reads it, went back by " << host.clockWentBack() << " s");
+    CHECK(host.clockWentBack() == 0.0);
 }

@@ -53,8 +53,6 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
 constexpr uint32_t METRICS_SIZE       = 256;   // Performance metrics: 64 fields * 4 bytes = 256 bytes (multiple of 8)
-constexpr uint32_t NTP_START_TIME_SIZE = 8;    // NTP time when AudioContext started (double, 8-byte aligned, write-once)
-constexpr uint32_t DRIFT_OFFSET_SIZE = 4;      // Drift offset in microseconds (int32, atomic)
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -151,13 +149,25 @@ constexpr uint32_t NATIVE_STAT_NRT_RECENT_WORST_US = 20;
 // (seqlock: odd SEQ, fields, even SEQ with release ordering). Consumers:
 // tap streams, plus anything needing audible-time alignment (recording
 // markers, visual sync). See docs/PORTS.md.
-constexpr uint32_t SAMPLE_CLOCK_SIZE  = 32;
+//
+// Beside it, outside the seqlock: when the last block was rendered, by the
+// host's clocks as it handed the block over — its wall clock (LAST_WALL), and
+// its monotonic clock where it has one (LAST_MONO: native, an embedded host;
+// a worklet has none) — the one record that the audio was away: a stall, a
+// page's context suspended, a worklet gone. It survives a new worklet over
+// the same memory or an embedded host attaching again, so the first block
+// back on any target sees how long it was (clockwork_audio_back,
+// kAudioAwaySeconds): by the monotonic clock where there is one, which a
+// system clock set by hand cannot fool, else by the wall.
+constexpr uint32_t SAMPLE_CLOCK_SIZE  = 48;
 // Field byte offsets within the sample-clock region.
 constexpr uint32_t SAMPLE_CLOCK_SEQ            = 0;   // u32 seqlock (odd = mid-update)
 constexpr uint32_t SAMPLE_CLOCK_SAMPLE_RATE    = 4;   // u32
 constexpr uint32_t SAMPLE_CLOCK_ENGINE_FRAMES  = 8;   // u64 engine frames at block start
 constexpr uint32_t SAMPLE_CLOCK_DAC_NTP        = 16;  // f64 NTP seconds when that frame hits the DAC
 constexpr uint32_t SAMPLE_CLOCK_OUT_LATENCY    = 24;  // u32 device output latency, frames
+constexpr uint32_t SAMPLE_CLOCK_LAST_WALL      = 32;  // f64 wall NTP of the last block rendered (0: none yet)
+constexpr uint32_t SAMPLE_CLOCK_LAST_MONO      = 40;  // f64 the host's monotonic clock at it, seconds (0: the host has none)
                                                   // [28..31] reserved
 
 // ─── Guest persistence ──────────────────────────────────────────────────────
@@ -277,6 +287,27 @@ inline sample_clock_view read_sample_clock(const uint8_t* tl) {
         }
     }
     return v;
+}
+
+// The last block's wall time (SAMPLE_CLOCK_LAST_WALL): written by the audio
+// thread as it renders, read by the first block back on whichever host
+// renders next. Outside the seqlock: one word, one writer at a time.
+inline double read_last_block_wall(const uint8_t* tl) {
+    if (!tl) return 0.0;
+    return clockwork::bitsToDouble(
+        reinterpret_cast<const std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_LAST_WALL)->load(std::memory_order_relaxed));
+}
+inline double read_last_block_mono(const uint8_t* tl) {
+    if (!tl) return 0.0;
+    return clockwork::bitsToDouble(
+        reinterpret_cast<const std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_LAST_MONO)->load(std::memory_order_relaxed));
+}
+inline void write_last_block_time(uint8_t* tl, double wall_ntp, double monotonic_secs) {
+    if (!tl) return;
+    reinterpret_cast<std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_LAST_WALL)
+        ->store(clockwork::doubleToBits(wall_ntp), std::memory_order_relaxed);
+    reinterpret_cast<std::atomic<uint64_t>*>(tl + SAMPLE_CLOCK_LAST_MONO)
+        ->store(clockwork::doubleToBits(monotonic_secs), std::memory_order_relaxed);
 }
 
 // The writer, once for every host that renders: odd seq, release fence
@@ -401,10 +432,8 @@ constexpr uint32_t NATIVE_STATS_START    = METRICS_START + METRICS_SIZE;
 // The host's clock anchors, as one region: the NTP start time (f64) then the
 // two offsets. The three names below are what the code has always used.
 constexpr uint32_t CLOCK_ANCHORS_START   = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
-constexpr uint32_t NTP_START_TIME_START  = CLOCK_ANCHORS_START;
-constexpr uint32_t DRIFT_OFFSET_START    = NTP_START_TIME_START + NTP_START_TIME_SIZE;
-constexpr uint32_t GLOBAL_OFFSET_START   = DRIFT_OFFSET_START + DRIFT_OFFSET_SIZE;
-constexpr uint32_t CLOCK_ANCHORS_SIZE    = NTP_START_TIME_SIZE + DRIFT_OFFSET_SIZE + GLOBAL_OFFSET_SIZE;
+constexpr uint32_t GLOBAL_OFFSET_START   = CLOCK_ANCHORS_START;
+constexpr uint32_t CLOCK_ANCHORS_SIZE    = GLOBAL_OFFSET_SIZE;   // the host's global offset, and nothing else: the clock anchors itself
 constexpr uint32_t CLOCK_STATE_START     = alignArena8(CLOCK_ANCHORS_START + CLOCK_ANCHORS_SIZE);
 constexpr uint32_t SAMPLE_CLOCK_START    = alignArena16(CLOCK_STATE_START + CLOCK_STATE_SIZE);
 constexpr uint32_t CHANNEL_MAP_START     = alignArena16(SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE);
@@ -617,13 +646,13 @@ struct alignas(4) PerformanceMetrics {
     std::atomic<uint32_t> clock_phase_centi;        // 48: phase within quantum * 100
     std::atomic<uint32_t> clock_playing;            // 49: transport 0/1
 
-    // Reserved padding so METRICS_SIZE stays a multiple of 8 bytes — the
-    // regions that follow in the arena (NTP time, ClockworkClockState) are
-    // 8-byte-aligned and read via Float64/BigInt64 views, which require it.
-    // Two words are needed to keep the 51-meaningful-field struct (0-49 plus
-    // _metrics_reserved at 50) padded to a multiple of 8.
-    std::atomic<uint32_t> _metrics_reserved;        // 50: reserved (alignment)
-    std::atomic<uint32_t> _metrics_reserved2;       // 51: reserved (alignment pad)
+    // The engine's clock against the host's wall clock, smoothed as the clock
+    // is, in microseconds, signed (as uint32 bits): what the clock nudges by
+    // (clock/TimeSource.h). Near 0 and steady is locked; a wander is the
+    // smoothing not keeping up; a jump is a clock step or an anchor. Written
+    // by publishClockMetrics on every target.
+    std::atomic<uint32_t> clock_drift_us;           // 50: int32 bits
+    std::atomic<uint32_t> _metrics_reserved2;       // 51: reserved (the page's clock offset in the merged array)
     // 52 is the client's (js/lib/metrics_offsets.js: the AudioContext state,
     // written into the merged array on the client side); the word is here so
     // the slots after it are one address space, and stays 0.
@@ -660,7 +689,10 @@ struct alignas(4) PerformanceMetrics {
     // never got, beside egress_frames_refused. Counted by the gateway, one per
     // destination missed (OscEgress::dispatchEgress).
     std::atomic<uint32_t> egress_frames_undelivered; // 62
-    std::atomic<uint32_t> _metrics_pad;              // 63: keeps METRICS_SIZE a multiple of 8
+    // Times the engine's clock was anchored afresh since boot: its first
+    // block, the audio back after being away, a new context — each a step
+    // in the clock a reader would want to know about (clock/TimeSource.h).
+    std::atomic<uint32_t> clock_anchors;             // 63
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -979,8 +1011,7 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublic,
         kBlock, kFast, kColdBoot,
-        { NTP_START_TIME_START - CLOCK_ANCHORS_START, DRIFT_OFFSET_START - CLOCK_ANCHORS_START,
-          GLOBAL_OFFSET_START - CLOCK_ANCHORS_START });
+        { GLOBAL_OFFSET_START - CLOCK_ANCHORS_START });
     // The two the guest is handed read-only pointers to (DspConfig::clock, channel_map).
     put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE,     CLOCK_STATE_START,     CLOCK_STATE_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
         kPublic | CLOCKWORK_AUDIENCE_GUEST, kBlock, kFast, kColdBoot);
@@ -1217,12 +1248,12 @@ CLOCKWORK_ASSERT_METRIC(guest_mallocs_processing,        59);
 CLOCKWORK_ASSERT_METRIC(mallocs_after_boot,              60);
 CLOCKWORK_ASSERT_METRIC(malloc_bytes_after_boot,         61);
 CLOCKWORK_ASSERT_METRIC(egress_frames_undelivered,       62);
-CLOCKWORK_ASSERT_METRIC(_metrics_reserved,               50);
+CLOCKWORK_ASSERT_METRIC(clock_drift_us,                  50);
+CLOCKWORK_ASSERT_METRIC(clock_anchors,                   63);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
-// regions that follow (NTP time, ClockworkClockState) are 8-byte aligned and read
-// via Float64/BigInt64 views. _metrics_reserved exists solely to satisfy this;
-// these asserts make removing it (or any odd field count) a build error.
+// regions that follow (ClockworkClockState) are 8-byte aligned and read via
+// Float64/BigInt64 views; these asserts make an odd field count a build error.
 static_assert(sizeof(PerformanceMetrics) == METRICS_SIZE,
               "METRICS_SIZE must equal sizeof(PerformanceMetrics)");
 static_assert(METRICS_SIZE % 8 == 0,

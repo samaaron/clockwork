@@ -12,9 +12,7 @@ import { ClockworkClock } from "../js/lib/clockwork_clock.js";
 
 // The arena constants a headless clock needs, laid out back to back.
 const CONSTS = {
-  NTP_START_TIME_START: 0,
-  DRIFT_OFFSET_START: 8,
-  GLOBAL_OFFSET_START: 12,
+  GLOBAL_OFFSET_START: 8,
   CLOCK_STATE_START: 16,
   CLOCK_STATE_SIZE: 40,
 };

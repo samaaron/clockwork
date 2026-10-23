@@ -48,7 +48,7 @@ TEST_CASE("link audio host: block stamp is sample-locked in Link's domain, 0 wit
     ClockworkClock clock;
     LinkAudioHost host(clock);
     const double sr = 48000.0;
-    clock.resetAudioThreadTime(0.0, sr);
+    clock.resetAudioThreadTime(0.0, sr, wallClockNTP());
     host.resetBlockClock();
 
     const int64_t a = host.blockHostMicros(0.0, sr);

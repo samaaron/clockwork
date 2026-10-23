@@ -14,7 +14,6 @@
 #include "smoothie_worklet.h"
 #include "clock/clock_math.h"
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -24,7 +23,7 @@ class LinkAudioHost;
 struct PerformanceMetrics;
 
 extern "C" {
-    bool process_audio(double current_time, uint32_t active_output_channels, uint32_t active_input_channels);
+    bool process_audio(double current_time, double wall_ntp, double monotonic_secs, uint32_t active_output_channels, uint32_t active_input_channels);
     void set_time_offset(double offset);
     uintptr_t get_audio_output_bus();
     uintptr_t get_audio_input_bus();
@@ -77,6 +76,8 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
                       double   ntp,
+                      double   wallNtp,
+                      double   monotonicSecs,
                       uint64_t hostMicros,
                       uint32_t publishChannels = 0);
 
@@ -168,13 +169,6 @@ public:
     int dspOutputChannels() const { return mDspOutputChannels; }
     int dspInputChannels() const  { return mDspInputChannels; }
 
-    // --- Gap detector state (for testing) ---
-    // Returns true if the inter-callback gap detector has a baseline timestamp,
-    // meaning the next callback will measure the gap since that timestamp.
-    bool gapDetectorArmed() const { return mLastCbTime.time_since_epoch().count() != 0; }
-    // Arm the gap detector by recording the current time as baseline.
-    void armGapDetector() { mLastCbTime = std::chrono::high_resolution_clock::now(); }
-
     // Read wall clock as NTP seconds (sub-millisecond precision).
     // Public + static so HeadlessDriver can reuse the same implementation.
     static double wallClockNTP() { return ::wallClockNTP(); }
@@ -185,10 +179,6 @@ public:
     // wallMs: wall clock time in milliseconds
     std::function<void(double samplePosition, double wallMs)> preTick;
 
-    // --- Wake hook ---
-    // Called when a sleep/wake cycle is detected (callback gap > 2 seconds).
-    // Used to purge stale messages from the ring buffer and scheduler.
-    std::function<void()> onWake;
 
 
 private:
@@ -279,8 +269,5 @@ private:
     // peak of per-callback load (callback time / time budget), in percent.
     double   mLoadAvgPct    = 0.0;
     double   mLoadPeakPct   = 0.0;
-
-    // Inter-callback gap detector baseline (used by sleep/wake recovery)
-    std::chrono::high_resolution_clock::time_point mLastCbTime{};
 
 };

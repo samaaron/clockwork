@@ -131,24 +131,18 @@ TEST_CASE("restarts: the node id counter keeps its count across a cold restart",
     counter->store(saved, std::memory_order_release);
 }
 
-TEST_CASE("restarts: the clock anchors are the host's and keep across a cold restart",
+TEST_CASE("restarts: the clock anchor is the host's and keeps across a cold restart",
           "[restarts][regions]") {
     settle();
-    auto* drift  = region<std::atomic<int32_t>>(DRIFT_OFFSET_START);
     auto* global = region<std::atomic<int32_t>>(GLOBAL_OFFSET_START);
-    const int32_t savedDrift = drift->load(std::memory_order_acquire);
     const int32_t savedGlobal = global->load(std::memory_order_acquire);
-    drift->store(777, std::memory_order_release);
     global->store(-42, std::memory_order_release);
 
     coldRestart();
 
-    // The region's lifetime is cold boot: what the host measured about this
-    // machine's clocks is not a fact about the instance, and a device change
-    // must not throw it away.
-    CHECK(drift->load(std::memory_order_acquire) == 777);
+    // The region's lifetime is cold boot: the shift the host chose is not a
+    // fact about the instance, and a device change must not throw it away.
     CHECK(global->load(std::memory_order_acquire) == -42);
-    drift->store(savedDrift, std::memory_order_release);
     global->store(savedGlobal, std::memory_order_release);
 }
 

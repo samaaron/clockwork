@@ -670,12 +670,6 @@ export class Clockwork {
         message: `${pbStats.fallbackFramesEvents} audio glitch events (${(pbStats.fallbackFramesDuration * 1000).toFixed(1)}ms total silence)`,
       });
     }
-    if (metrics.driftOffsetMs !== undefined && Math.abs(metrics.driftOffsetMs) > 10) {
-      issues.push({
-        severity: 'warning',
-        message: `Clock drift: ${metrics.driftOffsetMs}ms between AudioContext and wall clock`,
-      });
-    }
 
     const summary = issues.length === 0
       ? `Audio health: ${healthPct}% — no issues detected`
@@ -779,17 +773,13 @@ export class Clockwork {
     // one. Everything awaited before this point is time the press has already run out of.
     const starting = ctx.resume().catch(() => {});
 
-    // What queued while the engine slept (a fade-out, the next beat) belongs to a moment that has gone: dropped,
-    // rather than all played at once the instant the audio comes back
-    await this.purge();
+    // What queued while the engine slept is the engine's to judge, by the same rule on every target: more than
+    // kAudioAwaySeconds since its last block, and it is refused as stale at the first block back; less, and it
+    // plays, late by the gap (docs/RESTARTS.md). purge() is there for a host that wants it gone regardless.
     await starting;
 
-    this.#clock?.startDriftTimer();
     const alive = await this.#audioThreadAlive();
-    if (alive) {
-      this.#clock?.resync();
-      this.#eventEmitter.emit('resumed');
-    }
+    if (alive) this.#eventEmitter.emit('resumed');
     return alive;
   }
 
@@ -797,16 +787,32 @@ export class Clockwork {
   // either transport — postMessage's count arrives in snapshots every snapshotIntervalMs, and a fixed 200 ms could see
   // none of them and call a live engine dead (and send recover() into a reload it did not need).
   async #audioThreadAlive() {
+    // postMessage mode: the count comes in snapshots the worklet posts as it renders, and one posted just before the
+    // context suspended can land after this starts and read as a rise. The baseline is taken once any in flight
+    // has landed.
+    if (this.#config.mode === 'postMessage')
+      await new Promise((r) => setTimeout(r, this.#config.snapshotIntervalMs ?? SNAPSHOT_INTERVAL_MS));
     const first = this.#readProcessCount();
     if (first === null) return this.#audioContext?.state === 'running';   // no metrics yet: the context is all there is to go on
     const limit = Math.max(250, 3 * (this.#config.snapshotIntervalMs ?? 150));
     const t0 = performance.now();
+    let moved = false;
     while (performance.now() - t0 < limit) {
       await new Promise((r) => setTimeout(r, 25));
       const n = this.#readProcessCount();
-      if (n !== null && n > first) return true;
+      if (n !== null && n > first) { moved = true; break; }
     }
-    return false;
+    if (!moved) return false;
+    await this.#clockReadable(limit - (performance.now() - t0));   // ...and its clock readable
+    return true;
+  }
+
+  // The engine's clock readable by the page, or `limitMs` passed: the sample clock it publishes (SAB), or its word on
+  // the time down the main channel's port (postMessage, every few blocks). A page that reads clock.now() the moment
+  // init() or resume() returns gets the engine's time, not 0.
+  async #clockReadable(limitMs) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < limitMs && !(this.#oscChannel?.now() > 0)) await new Promise((r) => setTimeout(r, 10));
   }
 
   /**
@@ -816,7 +822,6 @@ export class Clockwork {
    */
   async suspend() {
     if (!this.#initialized) return;
-    this.#clock?.stopDriftTimer();
     try {
       await this.#audioContext?.suspend();
     } catch (e) {
@@ -999,7 +1004,6 @@ export class Clockwork {
   }
 
   async #partialShutdown() {
-    this.#clock?.stopDriftTimer();
     this.#abandonSyncs("the engine shut down");
 
     await this.#releaseEngine();
@@ -1008,7 +1012,6 @@ export class Clockwork {
     this.#tapViews = null;
     this.#initPromise = null;
     this.#oscChannel = null;
-    this.#clock?.reset();
     this.#audioHealthMonitor?.reset();
   }
 
@@ -1800,7 +1803,6 @@ export class Clockwork {
     this.#setEngineState('stopped', 'shutdown');
 
     this.#eventEmitter.emit("shutdown");
-    this.#clock?.stopDriftTimer();
     this.#audioHealthMonitor?.reset();
     this.#audioHealthMonitor = null;
     this.#abandonSyncs("the engine shut down");
@@ -1812,7 +1814,6 @@ export class Clockwork {
     this.#tapViews = null;
     this.#initPromise = null;
     this.#wasmMemory = null;
-    this.#clock?.reset();
     this.bootStats = { initStartTime: null, initDuration: null };
   }
 
@@ -1912,10 +1913,6 @@ export class Clockwork {
       const state = ctx.state;
       const previousState = this.#previousAudioContextState;
       this.#previousAudioContextState = state;
-
-      if (state === 'running' && (previousState === 'suspended' || previousState === 'interrupted')) {
-        this.#clock?.resync();
-      }
 
       this.#eventEmitter.emit('audiocontext:statechange', { state });
       if (state === 'suspended') {
@@ -2107,7 +2104,6 @@ export class Clockwork {
       workerBaseURL: this.#config.workerBaseURL,
       snapshotIntervalMs: this.#config.snapshotIntervalMs,
       getAudioContextTime: () => this.#audioContext?.currentTime ?? 0,
-      getNTPStartTime: () => this.#clock?.getNTPStartTime() ?? 0,
     };
 
     if (mode === 'sab') {
@@ -2195,7 +2191,7 @@ export class Clockwork {
             }
 
             if (this.#eventEmitter.hasListeners('out:html')) {
-              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.#clock?.getNTPStartTime() ?? 0, entry.sourceId);
+              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.#clock?.now() ?? 0, entry.sourceId);
               this.#eventEmitter.emit('out:html', { html, sequence: entry.sequence, timestamp: entry.timestamp });
             }
           } catch (e) { /* skip decoded events on decode failure */ }
@@ -2309,7 +2305,7 @@ export class Clockwork {
       }
 
       if (this.#eventEmitter.hasListeners('in:html')) {
-        const html = formatOscLineHtml(msg, sequence, timestamp, this.#clock?.getNTPStartTime() ?? 0);
+        const html = formatOscLineHtml(msg, sequence, timestamp, this.#clock?.now() ?? 0);
         this.#eventEmitter.emit('in:html', { html, sequence, timestamp });
       }
     } catch (e) {
@@ -2323,6 +2319,10 @@ export class Clockwork {
     this.bootStats.initDuration = performance.now() - this.bootStats.initStartTime;
 
     if (announce) {
+      // Up means its clock can be read too: a page that reads clock.now() the moment init() returns gets the
+      // engine's time, not 0 (postMessage mode hears it down the main channel's port a few blocks in). A context
+      // not yet running (autoplay) has no blocks to wait for.
+      if (this.#audioContext?.state === 'running') await this.#clockReadable(250);
       this.#setEngineState('running', 'boot');
       await this.#announceReady();
     }
@@ -2387,8 +2387,8 @@ export class Clockwork {
               workletPort: this.#workletNode.port,
             });
             this.#clock.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
-            await this.#clock.initialize();
-            this.#clock.startDriftTimer();
+            // The engine's time is read where the engine publishes it (its sample clock), never computed here
+            this.#clock.setNowSource(() => this.#oscChannel?.now() ?? 0);
 
             // Initialize audio capture (SAB mode only)
             if (this.#config.mode === 'sab') {
@@ -2532,8 +2532,6 @@ export class Clockwork {
       // Only what the guest declared gets through; the rest has no slot.
       guestMetrics: this.clientMetrics(),
       transportMetrics: this.#osc?.getMetrics(),
-      driftOffsetMs: this.#clock?.getDriftOffset() ?? 0,
-      ntpStartTime: this.#clock?.getNTPStartTime() ?? 0,
       clockOffsetMs: this.#clock?.getClockOffset() ?? 0,
       audioContextState: this.#audioContext?.state || "unknown",
       audioHealthPct: this.#audioHealthMonitor?.update() ?? 100,

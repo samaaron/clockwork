@@ -11,8 +11,10 @@
  * setup, naming the one opened; the generation never goes back. The page is the reader, hearing the engine's words as
  * they arrive (in:osc).
  *
- * A message waits when the audio thread is not running: the context is suspended before it is sent. What waits
- * through a stall and is thrown away as stale (purge(), resume()) is refused as such, as native's wake refuses it.
+ * A message waits when the audio thread is not running: the context is suspended before it is sent. What waited
+ * while the audio was away is stale, however the audio comes back: refused as such once (purge(), resume(), or a
+ * reload over the same memory), as native's watchdog refuses what waited through a stall — nothing plays late. And
+ * the engine's clock, as a client reads it, never goes back (test_restart_grid.cpp reads it on native).
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -29,13 +31,40 @@ const listen = `(cw) => {
 const where = (heard, address) => heard.flatMap((m, i) => (m[0] === address ? [i] : []));
 const refusalsOf = (heard, address) => heard.filter((m) => m[0] === "/clockwork/error" && m[1] === address);
 const shown = (heard) => heard.map((m) => m.join(" ")).join("\n  | ");
+// The engine's clock as a channel made before the event reads it, every millisecond until stop(): the most it went
+// back from one reading to the next, and the most it was from the page's wall clock from a moment on (\`from\`, page ms).
+const clockWatch = `(cw) => {
+  const ch = cw.createOscChannel();
+  const seen = [];   // [page ms, engine ntp] every reading
+  let last = 0, back = 0, readings = 0, backAt = -1;
+  const timer = setInterval(() => {
+    const t = ch.now();
+    seen.push([Math.round(performance.now()), t]);
+    if (!t) return;
+    readings += 1;
+    if (last && t < last && last - t > back) { back = last - t; backAt = seen.length - 1; }
+    last = t;
+  }, 1);
+  const wall = (ms) => (performance.timeOrigin + ms) / 1000 + 2208988800;
+  return { stop: (from) => {
+    clearInterval(timer);
+    let offWall = 0;
+    for (const [ms, t] of seen) if (ms >= from && t && Math.abs(t - wall(ms)) > Math.abs(offWall)) offWall = t - wall(ms);
+    return { back, readings, offWall, around: backAt < 0 ? [] : seen.slice(Math.max(0, backAt - 4), backAt + 4) };
+  } };
+}`;
 
-test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => {
+// Twice: on a context of Clockwork's own, closed and made again by the reload, and on one the host gave it, which
+// stays open across the reload (Sonic Pi's), its time going on.
+for (const hostContext of [false, true])
+test(`restart grid: the page at a reload${hostContext ? " onto the context it was given" : ""}`, async ({ page, clockworkConfig }) => {
   await boot(page);
-  const r = await page.evaluate(async ([config, listenSrc]) => {
-    const cw = new window.Clockwork(config);
+  const r = await page.evaluate(async ([config, listenSrc, clockWatchSrc, hostContext]) => {
+    const ctx = hostContext ? new AudioContext() : null;
+    const cw = new window.Clockwork({ ...config, ...(ctx ? { audioContext: ctx } : {}) });
     await cw.init();
     const heard = eval(listenSrc)(cw);
+    const clock = eval(clockWatchSrc)(cw);
     const before = cw.getInfo().generation;
     let resumed = null, setupSaid = 0;
     cw.on("reload:complete", (d) => { resumed = d?.resumed ?? null; });
@@ -47,7 +76,12 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
     await cw.suspend();                      // nothing taken from here
     cw.send("/dummy/events/get");            // the guest's, waiting
     cw.send("/clockwork/sync", 7);           // clockwork's own, waiting
+    await new Promise((res) => setTimeout(res, 2500));   // the audio away longer than kAudioAwaySeconds, as a tab's long in the background
     const reloaded = await cw.reload();
+    const reloadedAt = performance.now();
+    // A channel made after the reload: it hears the new worklet (one made before it keeps, in postMessage mode, a
+    // port to the old one, and hears nothing more).
+    const clockAfter = eval(clockWatchSrc)(cw);
     const after = cw.getInfo().generation;
 
     cw.send("/dummy/reconfigured");          // the instance's after
@@ -56,25 +90,39 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
     await new Promise((res) => setTimeout(res, 200));
     cw.send("/dummy/asset/release", 11);
     await cw.sync();
+    const clockSeen = { ...clock.stop(reloadedAt + 200), offWall: clockAfter.stop(reloadedAt + 200).offWall };
     await cw.shutdown();
-    return { reloaded, before, after, heard, resumed, setupSaid, mode: config.mode };
-  }, [clockworkConfig, listen]);
+    if (ctx) await ctx.close();
+    return { reloaded, before, after, heard, resumed, setupSaid, clockSeen, mode: config.mode };
+  }, [clockworkConfig, listen, clockWatch, hostContext]);
 
   const { heard, before, after } = r;
   const info = `the page heard:\n  | ${shown(heard)}`;
   expect(r.reloaded, info).toBe(true);
   expect(where(heard, "/clockwork/asset/committed").length, info).toBe(1);
+  expect(r.clockSeen.readings, "the clock was read through the reload").toBeGreaterThan(100);
+  expect(r.clockSeen.back, `the engine's clock went back ${r.clockSeen.back} s across the reload; the readings around it (page ms, ntp): ${JSON.stringify(r.clockSeen.around)}`).toBe(0);
+  // The worklet's audio starts at the reload, and its clock is anchored to the wall afresh, as native's is at a device
+  // start — not converged towards it from where it stood when the audio went away (a clock that lags by seconds and
+  // then runs fast plays everything scheduled against it late).
+  expect(Math.abs(r.clockSeen.offWall), `the engine's clock was ${(r.clockSeen.offWall * 1000).toFixed(0)} ms from the wall clock after the reload`).toBeLessThan(0.1);
 
   if (r.mode === "sab") {
     // Over the same memory: the same instance, carrying on. Its generation, no setup said by the engine or the page,
-    // everything that waited delivered to it and nothing refused, and the asset it was handed still its own.
+    // and the asset it was handed still its own. The audio was away (the context suspended, then the worklet made
+    // again): what waited for the guest is stale, refused once as such, and nothing of it plays late. Clockwork's
+    // own is answered whatever the guest is doing.
     expect(r.resumed, info).toBe(true);
     expect(after, `the generation carried on (${info})`).toBe(before);
     expect(where(heard, "/clockwork/setup").length, `no setup (${info})`).toBe(0);
     expect(r.setupSaid, info).toBe(0);
-    expect(where(heard, "/clockwork/error").length, `nothing refused (${info})`).toBe(0);
-    for (const answer of ["/dummy/pong", "/dummy/events", "/dummy/reconfigured.reply"])
+    for (const answer of ["/dummy/pong", "/dummy/reconfigured.reply"])
       expect(where(heard, answer).length, `${answer} heard once (${info})`).toBe(1);
+    expect(where(heard, "/dummy/events").length, `what waited did not reach the instance (${info})`).toBe(0);
+    const stale = refusalsOf(heard, "/dummy/events/get");
+    expect(stale.length, `what waited refused once (${info})`).toBe(1);
+    expect(stale[0][2], info).toBe("stalled");
+    expect(stale[0][3], info).toBe(before);
     expect(heard.filter((m) => m[0] === "/clockwork/synced" && m[1] === 7).length, info).toBe(1);
     const last = heard.find((m) => m[0] === "/dummy/asset/last.reply");
     expect(last?.[1], `the asset still held (${info})`).toBe(11);
@@ -104,6 +152,45 @@ test("restart grid: the page at a reload", async ({ page, clockworkConfig }) => 
   const synced = heard.flatMap((m, i) => (m[0] === "/clockwork/synced" && m[1] === 7 ? [i] : []));
   expect(synced.length, `the waiting sync answered once (${info})`).toBe(1);
   expect(synced[0], info).toBeGreaterThan(heard.indexOf(refused[0]));
+});
+
+test("restart grid: what waited while the audio was away is refused if it is due, and plays if it is for later", async ({ page, clockworkConfig }) => {
+  // A context suspended for longer than kAudioAwaySeconds, then resumed with nothing purged (a demo page waking from
+  // idle, a tab coming back): an immediate message that waited, and a bundle whose time passed meanwhile, are stale
+  // and refused at the first block back; a bundle that waited but is for after it plays at its time — what the page
+  // sends as it wakes the audio is not stale, however the browser times the first block against the page's sends.
+  // And the engine's clock steps to the wall at that block, never going back, rather than catching up over seconds.
+  await boot(page);
+  const r = await page.evaluate(async ([config, listenSrc, clockWatchSrc]) => {
+    const cw = new window.Clockwork(config);
+    await cw.init();
+    const heard = eval(listenSrc)(cw);
+    const clock = eval(clockWatchSrc)(cw);
+    const wall = () => (performance.timeOrigin + performance.now()) / 1000 + 2208988800;
+    const bundleAt = (t) => cw.sendOSC(window.Clockwork.osc.encodeBundle(t, [["/dummy/events/get"]]));
+
+    await cw.suspend();
+    cw.send("/dummy/events/get");                      // immediate: waits, and is due
+    bundleAt(wall() + 0.5);                            // due during the gap
+    await new Promise((res) => setTimeout(res, 2500));
+    bundleAt(wall() + 0.5);                            // for after the audio is back
+    const resumedAt = performance.now();
+    const resumed = await cw.resume();
+    await new Promise((res) => setTimeout(res, 1200));   // the bundle for later fires, and its reply arrives
+    const clockSeen = clock.stop(resumedAt + 200);
+    await cw.shutdown();
+    return { resumed, heard, clockSeen };
+  }, [clockworkConfig, listen, clockWatch]);
+
+  const { heard } = r;
+  const info = `the page heard:\n  | ${shown(heard)}`;
+  expect(r.resumed, info).toBe(true);
+  expect(refusalsOf(heard, "/dummy/events/get").length, `the immediate refused (${info})`).toBe(1);
+  expect(refusalsOf(heard, "#bundle").length, `the bundle that fell due refused (${info})`).toBe(1);
+  for (const m of heard.filter((m) => m[0] === "/clockwork/error")) expect(m[2], info).toBe("stalled");
+  expect(where(heard, "/dummy/events").length, `the bundle for later played, once (${info})`).toBe(1);
+  expect(r.clockSeen.back, `the engine's clock went back ${r.clockSeen.back} s; around it (page ms, ntp): ${JSON.stringify(r.clockSeen.around)}`).toBe(0);
+  expect(Math.abs(r.clockSeen.offWall), `the engine's clock was ${(r.clockSeen.offWall * 1000).toFixed(0)} ms from the wall clock after the resume`).toBeLessThan(0.1);
 });
 
 test("restart grid: the page purging what waited while it was suspended", async ({ page, clockworkConfig }) => {

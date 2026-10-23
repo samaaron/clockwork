@@ -17,6 +17,7 @@
 #pragma once
 
 #include "clock/ClockworkClock.h"
+#include "lanes/lanes.h"
 #include "native/LinkAudioHost.h"
 #include "shared_memory.h"
 
@@ -33,10 +34,14 @@ struct BlockTime {
 };
 
 // Re-anchor both audio-thread clocks after a discontinuity: device start,
-// resume after a swap, a sleep/wake gap, the first manual block.
+// resume after a swap, the first manual block, a gap (beginAudioBlock).
+// `wallNtp` is the host's wall clock now; `outputLatencyFrames` what its
+// blocks are heard after they are rendered, which says where the clock the
+// arena already carries puts the floor (ClockworkClock::floorRenderNtp).
 inline void resetAudioBlockClock(ClockworkClock& clock, LinkAudioHost& linkAudio,
-                                 double samplePos, double sampleRate) {
-    clock.resetAudioThreadTime(samplePos, sampleRate);
+                                 double samplePos, double sampleRate, double wallNtp,
+                                 uint32_t outputLatencyFrames = 0) {
+    clock.resetAudioThreadTime(samplePos, sampleRate, wallNtp, clock.floorRenderNtp(outputLatencyFrames));
     linkAudio.resetBlockClock();
 }
 
@@ -44,11 +49,19 @@ inline void resetAudioBlockClock(ClockworkClock& clock, LinkAudioHost& linkAudio
 // the device reports between render and audible (0 when there is no device:
 // headless and the manual pump render straight into the segment); `metrics`
 // is the segment-resident dashboard block, null where there is no segment.
+// `wallNtp` and `monoSecs` are the driver's clocks now (the monotonic one 0
+// where it has none): first the audio was away? (clockwork_audio_back, the
+// one rule on every target), asked before the clock moves with this driver's
+// count of the audio rendered, so a gap anchors both clocks afresh at this
+// block.
 inline BlockTime beginAudioBlock(ClockworkClock& clock, LinkAudioHost& linkAudio,
                                  double samplePos, double sampleRate,
                                  uint32_t outputLatencyFrames,
-                                 PerformanceMetrics* metrics, double quantum = 4.0) {
-    const double ntp = clock.updateAudioThreadNTP(samplePos, sampleRate);
+                                 PerformanceMetrics* metrics, double wallNtp, double monoSecs,
+                                 double quantum = 4.0) {
+    if (clockwork_audio_back(wallNtp, monoSecs, samplePos / sampleRate))
+        resetAudioBlockClock(clock, linkAudio, samplePos, sampleRate, wallNtp, outputLatencyFrames);
+    const double ntp = clock.updateAudioThreadNTP(samplePos, sampleRate, wallNtp);
     clock.publishSampleClock(samplePos, sampleRate, ntp, outputLatencyFrames);
     const uint64_t hostMicros = static_cast<uint64_t>(
         std::max<int64_t>(0, linkAudio.blockHostMicros(samplePos, sampleRate)));

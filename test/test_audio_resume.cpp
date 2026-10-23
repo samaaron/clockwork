@@ -91,16 +91,3 @@ TEST_CASE("audio resume: paused, the callback writes silence over a sounding gue
     CHECK(d.peak() > before * 0.5f);
     CHECK(d.peak() < before * 2.0f);
 }
-
-TEST_CASE("audio resume: a resume clears the gap detector, so the pause is not read as a stall",
-          "[resume][engine]") {
-    EngineFixture fx(manualPump());
-    auto& cb = fx.engine().processor();
-    cb.armGapDetector();
-    REQUIRE(cb.gapDetectorArmed());
-    cb.pause();
-    cb.resume();
-    // Armed across the resume, the first callback after it would measure the
-    // whole pause as one gap between callbacks and log a stall that never was.
-    CHECK_FALSE(cb.gapDetectorArmed());
-}

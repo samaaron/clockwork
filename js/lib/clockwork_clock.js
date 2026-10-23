@@ -9,11 +9,13 @@
  *   - Session state: BPM, transport, beat origin, meter. SAB-mode writes the
  *     ClockworkClockState region directly via BigInt64 atomics; PM-mode
  *     posts to the worklet which writes the same region.
- *   - Time: ntp_start_time / drift / clock-offset via a composed
- *     private NTPTiming helper.
+ *   - Time: read from the engine, which keeps its own clock on every target
+ *     (clock/TimeSource.h) and publishes it in the arena's sample clock
+ *     (setNowSource); and the host's global clock offset, written to the
+ *     arena's anchor word for the engine to add.
  */
 
-import { NTPTiming, NTP_EPOCH_OFFSET } from './ntp_timing.js';
+import { NTP_EPOCH_OFFSET } from './timetag.js';
 import {
   SC_BPM_I64,
   SC_BEAT_ORIGIN_NTP_I64,
@@ -45,7 +47,9 @@ export class ClockworkClock {
   #localMeter = { num: 4, den: 4 };
   #localGeneration = 0;
 
-  #ntp;
+  #nowSource = () => 0;        // the engine's time, as a channel reads it (setNowSource)
+  #globalOffsetView = null;    // SAB mode: the host's global offset word in the arena (ms)
+  #localClockOffsetMs = 0;
 
   /**
    * @param {Object} options
@@ -57,11 +61,6 @@ export class ClockworkClock {
     this.#mode = options.mode || 'sab';
     this.#workletPort = options.workletPort || null;
     this.#audioContext = options.audioContext || null;
-    this.#ntp = new NTPTiming({
-      mode: this.#mode,
-      audioContext: options.audioContext,
-      workletPort: this.#workletPort,
-    });
   }
 
   /**
@@ -78,7 +77,8 @@ export class ClockworkClock {
       this.#sabInt32  = new Int32Array(sharedBuffer, base, size / 4);
       this.#sabViews  = { bigInt: this.#sabBigInt, int32: this.#sabInt32 };
     }
-    this.#ntp.initSharedViews(sharedBuffer, arenaBase, bufferConstants);
+    if (this.#mode === 'sab' && bufferConstants.GLOBAL_OFFSET_START !== undefined)
+      this.#globalOffsetView = new Int32Array(sharedBuffer, arenaBase + bufferConstants.GLOBAL_OFFSET_START, 1);
   }
 
   /** @param {MessagePort} port */
@@ -86,21 +86,24 @@ export class ClockworkClock {
 
   updateAudioContext(audioContext) {
     this.#audioContext = audioContext;
-    this.#ntp.updateAudioContext(audioContext);
   }
 
-  // ── Time / drift surface (delegates to private NTPTiming) ──────────────
+  // ── Time ───────────────────────────────────────────────────────────────
 
-  async initialize() { await this.#ntp.initialize(); }
-  resync()           { this.#ntp.resync(); }
-  startDriftTimer()  { this.#ntp.startDriftTimer(); }
-  stopDriftTimer()   { this.#ntp.stopDriftTimer(); }
-  updateDriftOffset(){ this.#ntp.updateDriftOffset(); }
-  getDriftOffset()   { return this.#ntp.getDriftOffset(); }
-  getNTPStartTime()  { return this.#ntp.getNTPStartTime(); }
-  getClockOffset()   { return this.#ntp.getClockOffset(); }
-  setClockOffset(s)  { this.#ntp.setClockOffset(s); }
-  reset()            { this.#ntp.reset(); }
+  /** Where now() reads the engine's time: a channel's now() (OscChannel), which reads what the audio thread published. */
+  setNowSource(fn) { this.#nowSource = fn; }
+  /** The host's global clock offset (multi-system sync), in milliseconds, as last set here. */
+  getClockOffset() { return this.#localClockOffsetMs; }
+  /**
+   * Shift the engine's clock by `offsetS` seconds, on every target (the arena's anchor word, which the engine's
+   * clock adds to every answer): a deliberate shift for multi-system sync.
+   */
+  setClockOffset(offsetS) {
+    const ms = Math.round(offsetS * 1000);
+    this.#localClockOffsetMs = ms;
+    if (this.#globalOffsetView) Atomics.store(this.#globalOffsetView, 0, ms);
+    else if (this.#workletPort) this.#workletPort.postMessage({ type: 'setClockOffset', clockOffsetMs: ms });
+  }
 
   // ── Session mutators ───────────────────────────────────────────────────
 
@@ -265,37 +268,19 @@ export class ClockworkClock {
   numPeers()      { return 0; }
 
   /**
-   * Current NTP time as seen by the audio thread — `AudioContext.currentTime`
-   * + the engine's NTP-start anchor + drift + global offset.
+   * The engine's clock, in NTP seconds: the time its audio thread has reached, as it publishes it once a block
+   * (the arena's sample clock; the same reading an OscChannel's now() takes on any thread). It stands still while
+   * the audio does, and after a reload it is the engine's from its first block. 0 until the engine has rendered one.
    *
    * Use this to schedule events relative to "now in audio time":
    *
    *   sonic.sendOSC(osc.encodeBundle(sonic.clock.now() + 0.05, packets));
    *
-   * That bundle fires 50 ms of *audio time* from now. The audio thread is
-   * reading the same clock, so the two sides always agree — no skew if
-   * AudioContext is throttled, no need to know the NTP-start formula.
+   * That bundle fires 50 ms of *audio time* from now. The audio thread is reading the same clock, so the two sides
+   * always agree — no skew if the AudioContext is throttled.
    */
   now() {
-    if (!this.#audioContext) return 0;
-    return this.nowAt(this.#audioContext.currentTime);
-  }
-
-  /**
-   * Compute audio-thread NTP for a specific `AudioContext.currentTime`.
-   * `now()` calls this with the live `currentTime`; advanced callers can
-   * pass a specific value (e.g. from `audioContext.getOutputTimestamp()`
-   * for tight sample-aligned scheduling).
-   */
-  nowAt(audioCurrentTime) {
-    // getDriftOffset / getClockOffset both return milliseconds; divide
-    // by 1000 to get seconds. (C++ reads raw microseconds from the SAB
-    // and divides by 1e6, getting the same seconds value with µs
-    // precision — JS-side precision is ms because NTPTiming rounds.)
-    return audioCurrentTime
-         + this.getNTPStartTime()
-         + this.getDriftOffset() / 1000
-         + this.getClockOffset() / 1000;
+    return this.#nowSource();
   }
 
   /**

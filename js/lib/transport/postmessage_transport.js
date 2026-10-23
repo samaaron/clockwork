@@ -52,13 +52,11 @@ export class PostMessageTransport extends Transport {
 
     // Timing functions
     #getAudioContextTime;
-    #getNTPStartTime;
 
     /**
      * @param {Object} config
      * @param {string} config.workerBaseURL - Base URL for worker scripts
      * @param {Function} config.getAudioContextTime - Returns AudioContext.currentTime
-     * @param {Function} config.getNTPStartTime - Returns NTP start time
      * @param {number} [config.snapshotIntervalMs] - Interval for metrics/tree snapshots
      */
     constructor(config) {
@@ -67,7 +65,6 @@ export class PostMessageTransport extends Transport {
         this.#workerBaseURL = config.workerBaseURL;
         this.#snapshotIntervalMs = config.snapshotIntervalMs;
         this.#getAudioContextTime = config.getAudioContextTime;
-        this.#getNTPStartTime = config.getNTPStartTime;
     }
 
     /**

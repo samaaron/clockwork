@@ -146,17 +146,9 @@ void ClockworkClock::unbindStateFromShm() {
     mImpl->boundState = owned;
 }
 
-#if CLOCKWORK_WORKLET_CLOCK
-
-// ─── Worklet (WASM/ESP32) boot binding ──────────────────────────────────────
-// The worklet clock evaluates the SAB time formula from these offset pointers.
-void ClockworkClock::bindWorkletClock(const double* ntpStartTime,
-                                  const std::atomic<int32_t>* driftOffset,
-                                  const std::atomic<int32_t>* globalOffset) {
-    mImpl->timeSource.bindOffsets(ntpStartTime, driftOffset, globalOffset);
+void ClockworkClock::bindGlobalOffset(const std::atomic<int32_t>* globalOffset) {
+    mImpl->timeSource.bindGlobalOffset(globalOffset);
 }
-
-#endif  // CLOCKWORK_WORKLET_CLOCK
 
 // ─── MIDI follower timelines (native) ──────────────────────────────────────
 // The registry lives in MidiTimelines (constructed with this ClockworkClock as its
@@ -389,26 +381,36 @@ double ClockworkClock::now() const {
     return mImpl->timeSource.now();
 }
 
-double ClockworkClock::nowAt(double audioCurrentTime) const {
-    return mImpl->timeSource.nowAt(audioCurrentTime);
-}
-
 double ClockworkClock::wallNow() const {
     return mImpl->timeSource.wallNow();
 }
 
-double ClockworkClock::updateAudioThreadNTP(double samplePosition,
-                                         double sampleRate,
-                                         double audioCurrentTime) {
-    return mImpl->timeSource.updateAudioThreadNTP(samplePosition, sampleRate,
-                                                  audioCurrentTime);
+double ClockworkClock::updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp) {
+    return mImpl->timeSource.updateAudioThreadNTP(samplePosition, sampleRate, wallNtp);
 }
 
-void ClockworkClock::resetAudioThreadTime(double samplePosition, double sampleRate) {
+void ClockworkClock::resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
+                                          double floorNtp) {
     // The frames rendered so far, on the count being left: where a freewheel
     // clock from an origin goes on from.
-    mImpl->timeSource.resetAudioThreadTime(samplePosition, sampleRate,
-                                           static_cast<double>(engineFrames()));
+    mImpl->timeSource.resetAudioThreadTime(samplePosition, sampleRate, wallNtp,
+                                           static_cast<double>(engineFrames()), floorNtp);
+}
+
+bool ClockworkClock::audioThreadAnchored() const {
+    return mImpl->timeSource.anchored();
+}
+
+int32_t  ClockworkClock::clockDriftUs() const { return mImpl->timeSource.lastDriftUs(); }
+uint32_t ClockworkClock::clockAnchors() const { return mImpl->timeSource.anchors(); }
+
+double ClockworkClock::floorRenderNtp(uint32_t outputLatencyFrames) const {
+    const sample_clock_view v = read_sample_clock(mSampleClockRegion);
+    if (!v.valid || v.dac_ntp <= 0.0) return 0.0;
+    // The anchor published is speaker-time: render NTP plus the latency the
+    // publisher had, so the render NTP this host may start at is that less
+    // its own latency, and its next publish is never below the last.
+    return v.dac_ntp - static_cast<double>(outputLatencyFrames) / static_cast<double>(v.sample_rate);
 }
 
 void ClockworkClock::setFreewheelClock(bool enabled, double originNtp) {

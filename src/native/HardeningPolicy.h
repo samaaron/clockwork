@@ -22,19 +22,6 @@
 
 namespace hardening {
 
-// Gap size beyond which an audio-callback pause is a stall worth logging.
-// Floored at 150ms (the point where scheduled client threads overshoot
-// their sched-ahead window), but scaled to 2.5 healthy callback periods so
-// a graph running us at a huge-but-regular quantum — which delivers one
-// callback per period by design — is not misread as stalling.
-inline double stallThresholdUs(int numSamples, double sampleRate) {
-    constexpr double kFloorUs = 150'000.0;
-    if (numSamples <= 0 || sampleRate <= 0.0)
-        return kFloorUs;
-    const double periodUs = (double) numSamples / sampleRate * 1'000'000.0;
-    return std::max(kFloorUs, 2.5 * periodUs);
-}
-
 // True when the session manager's *configured* default device names a node
 // that is absent from the graph while other candidates exist — the stale
 // state left behind by unplugging or swapping a sound card. An empty graph

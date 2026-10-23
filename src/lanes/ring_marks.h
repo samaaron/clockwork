@@ -27,13 +27,14 @@ struct RingMark {
     uint32_t    below;        // the first sequence written after it
     uint32_t    generation;   // the generation its refusals name
     const char* reason;       // a CLOCKWORK_REFUSED_* phrase: static storage
+    bool        onlyDue;      // only what is due by the block draining it: a bundle for later is delivered
 };
 
 class RingMarks {
 public:
     // Everything written so far, below `below`, is refused for `reason`,
-    // naming `generation`.
-    void set(uint32_t below, uint32_t generation, const char* reason) {
+    // naming `generation` — or, `onlyDue`, everything of it that is due.
+    void set(uint32_t below, uint32_t generation, const char* reason, bool onlyDue = false) {
         // Nothing written since the last: it would mark no message.
         if (mCount > 0 && mMarks[mCount - 1].below == below) return;
         // Full — eight replacements without a drain between them: the two
@@ -44,7 +45,7 @@ public:
             for (uint32_t i = 1; i < kMarks; ++i) mMarks[i - 1] = mMarks[i];
             --mCount;
         }
-        mMarks[mCount++] = RingMark { below, generation, reason };
+        mMarks[mCount++] = RingMark { below, generation, reason, onlyDue };
     }
 
     // The mark a frame falls below, if any: the earliest, every mark it has

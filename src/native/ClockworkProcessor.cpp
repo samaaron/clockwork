@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 #include "ClockworkProcessor.h"
-#include "HardeningPolicy.h"
 #include "RealtimeThread.h"
 #include "clock/clock_math.h"
 #include "clock/ClockworkClock.h"
@@ -12,6 +11,7 @@
 #include "clockwork_config.h"   // clockwork_log
 #include "lanes/lanes.h"
 #include "dsp_api.h"            // DspFpEnv: what this host declares about its audio thread
+#include <chrono>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -29,10 +29,17 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
                       double   ntp,
+                      double   wallNtp,
+                      double   monotonicSecs,
                       uint64_t hostMicros,
                       uint32_t publishChannels) {
     if (publishChannels == 0) publishChannels = numOutputChannels;
-    clockwork_tick(ntp, numOutputChannels, numInputChannels);
+    ClockworkBlockTime time {};
+    time.struct_bytes   = sizeof time;
+    time.audio_time     = ntp;
+    time.wall_ntp       = wallNtp;
+    time.monotonic_secs = monotonicSecs;
+    clockwork_tick(&time, numOutputChannels, numInputChannels);
 
     // This block has read its ports (pull_port_sources, in the tick): what
     // each is at now is read when the next block begins, a block on. Dated
@@ -140,7 +147,10 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate);
+    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate, wallClockNTP());
+    // The device's audio starts now: what waited through a gap before it is
+    // stale, what a client sends from here is not (clockwork_audio_starts).
+    clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
     // A device restart can change the rate under a running engine, so the
     // endpoint is told again here as well as at initialiseDsp.
     mLinkAudio->setAudioFormat(static_cast<uint32_t>(mSampleRate),
@@ -246,19 +256,6 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
 
     mOutputLatencySamples = device.outputLatencyFrames;
 
-    // Native timing: set ntp_start and drift to 0. NTP is derived from sample
-    // position with slow drift correction (see ClockworkClock::updateAudioThreadNTP),
-    // so these offsets are unused.
-    if (mRingBufferStorage) {
-        double* ntpStartPtr = reinterpret_cast<double*>(
-            mRingBufferStorage + NTP_START_TIME_START);
-        *ntpStartPtr = 0.0;
-
-        auto* driftPtr = reinterpret_cast<std::atomic<int32_t>*>(
-            mRingBufferStorage + DRIFT_OFFSET_START);
-        driftPtr->store(0, std::memory_order_relaxed);
-    }
-
 }
 
 void ClockworkProcessor::deviceStopped() {
@@ -281,9 +278,11 @@ void ClockworkProcessor::resume() {
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;      // discard stale mic samples from before pause
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate);
+    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate, wallClockNTP());
+    // The device's audio starts again now, its count from 0: what waited
+    // through the pause is judged by its length (clockwork_audio_starts).
+    clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
     mCallbackCount  = 0;       // re-arm warmup for new device
-    mLastCbTime     = {};      // clear gap detector baseline
     mOverrunCount   = 0;
     mTotalUs        = 0.0;
     mMaxUs          = 0.0;
@@ -369,7 +368,7 @@ void ClockworkProcessor::process(
     }
 
     // ── If paused, output silence and touch nothing else ──────────────────────
-    // Placed before the warmup counter, mSamplePosition and mLastCbTime reads
+    // Placed before the warmup counter and mSamplePosition reads
     // below: during a device swap/recovery the control thread runs resume(),
     // which resets exactly those fields, and a freshly-opened device can already
     // be delivering callbacks on its own IO thread before resume() clears
@@ -421,28 +420,11 @@ void ClockworkProcessor::process(
 
     // ── Timing measurement ────────────────────────────────────────────────────
     auto cbStart = std::chrono::high_resolution_clock::now();
+    const double cbWall = wallClockNTP();   // this callback's wall time: the clock's target, and the engine's record of it
+    const double cbMono = clockwork::monotonicSeconds();   // and its monotonic time: the record a set clock cannot fool
 
-    // Sleep/wake recovery: if gap > 2 seconds, re-anchor NTP timing
-    // and purge stale messages so the engine doesn't try to catch up
-    if (mLastCbTime.time_since_epoch().count() != 0) {
-        double gapUs = std::chrono::duration<double, std::micro>(cbStart - mLastCbTime).count();
-        if (gapUs > 2'000'000.0) {
-            clockwork_log("  [wake] gap=%.0fs — re-anchoring NTP, purging stale messages",
-                    gapUs / 1e6);
-            clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate);
-            if (onWake) onWake();
-        } else if (gapUs > hardening::stallThresholdUs(numSamples, mSampleRate)) {
-            // Sub-wake stall: long enough to snap the timeline and push
-            // scheduled client threads past their sched-ahead window (a client
-            // raises TimingError on the affected live loops), too short for
-            // the wake path above. Log its size — without this, such a stall
-            // surfaces only as unexplained LATEs downstream. The threshold
-            // scales with the callback period so a graph running us at a
-            // huge quantum isn't misread as one stall per cycle.
-            clockwork_log("  [gap] audio callback stalled %.0fms", gapUs / 1000.0);
-        }
-    }
-    mLastCbTime = cbStart;
+    // The audio was away? That is asked with the block clock below
+    // (beginAudioBlock: the one rule on every target), from these clocks.
 
     int outputFilled  = 0;
     float* prefBase   = mPrefetchBuf.data();
@@ -510,7 +492,7 @@ void ClockworkProcessor::process(
     // drivers clamp to 0 — a raw cast would push the anchor ~a day ahead.
     const clockwork::BlockTime bt = clockwork::beginAudioBlock(
         *mClockworkClock, *mLinkAudio, mSamplePosition, static_cast<double>(mSampleRate),
-        static_cast<uint32_t>(std::max(0, mOutputLatencySamples)), mMetrics);
+        static_cast<uint32_t>(std::max(0, mOutputLatencySamples)), mMetrics, cbWall, cbMono);
     double wallNTP = bt.ntp;         // advanced per sub-block below
 
     // hostTimeNs is the driver's "this buffer plays at T" timestamp (only the
@@ -570,7 +552,7 @@ void ClockworkProcessor::process(
                          static_cast<uint32_t>(mNumOutputChannels),
                          static_cast<uint32_t>(mNumInputChannels),
                          static_cast<uint32_t>(mSampleRate),
-                         wallNTP, linkAudioBlockHostMicros,
+                         wallNTP, cbWall, cbMono, linkAudioBlockHostMicros,
                          static_cast<uint32_t>(nOut));
         wallNTP += static_cast<double>(mBufLen) / mSampleRate;
         linkAudioBlockHostMicros += engineBlockMicros;

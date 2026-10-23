@@ -188,7 +188,7 @@ enum ClockworkArenaRegion {
     /* ── clockwork-state ── */
     CLOCKWORK_ARENA_CLOCKWORK_METRICS         = 1,   /* PerformanceMetrics: u32 counters */
     CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS    = 2,   /* NATIVE_STAT_*: DSP load, overruns, NRT timings */
-    CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS   = 3,   /* the host's anchors: NTP start (f64), drift, global offset */
+    CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS   = 3,   /* the host's anchor: the global clock offset */
     CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE     = 4,   /* ClockworkClockState */
     CLOCKWORK_ARENA_CLOCKWORK_SAMPLE_CLOCK    = 5,   /* sample position <-> DAC time, seqlocked */
     CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP     = 6,   /* ClockworkChannelMapState */
@@ -235,9 +235,7 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_WINDOW_MAGIC        = 0,
     CLOCKWORK_GEOM_WINDOW_VERSION      = 1,
     /* clock anchors: byte offsets within the region */
-    CLOCKWORK_GEOM_ANCHOR_NTP_START    = 0,   /* f64 */
-    CLOCKWORK_GEOM_ANCHOR_DRIFT        = 1,   /* i32, microseconds */
-    CLOCKWORK_GEOM_ANCHOR_GLOBAL       = 2,   /* i32, milliseconds */
+    CLOCKWORK_GEOM_ANCHOR_GLOBAL       = 0,   /* i32, milliseconds */
     /* scope */
     CLOCKWORK_GEOM_SCOPE_SLOTS         = 0,
     CLOCKWORK_GEOM_SCOPE_SLOT_BYTES    = 1,

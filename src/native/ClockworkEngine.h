@@ -994,6 +994,7 @@ private:
     // caller's thread, and a one-shot flag to anchor the audio-thread clock on
     // the first pump.
     double mManualSamplePos    = 0.0;
+    double mManualWall         = 0.0;   // the pump's own time: the wall as it started, advanced with its audio
     bool   mManualPumpStarted  = false;
     bool   mPumpedDevice       = false;   // pumpDevice started a device
     int    mPumpedBufferFrames = 0;       // its buffer: no callback is larger

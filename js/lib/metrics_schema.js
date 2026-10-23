@@ -121,7 +121,7 @@ export const METRICS_SCHEMA = {
     clockPlaying:                 { offset: 49, type: 'gauge',    unit: 'bool',     description: 'Transport playing (0/1)' },
 
     // Context metrics [50+] (main thread only)
-    driftOffsetMs:                { offset: 50, webOnly: true, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock drift between AudioContext and wall clock' },
+    clockDriftUs:                 { offset: 50, type: 'gauge',    unit: 'us',    signed: true, description: 'The difference between the audio clock and the wall clock (µs, signed), smoothed; a jump means the audio clock was re-anchored' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
     audioContextState:            { offset: 52, webOnly: true, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
     inBufferCapacity:             { offset: 64, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
@@ -157,6 +157,7 @@ export const METRICS_SCHEMA = {
     // What left an egress ring and reached no one (shared_memory.h): counted by the native gateway; the web
     // page delivers its replies itself, and counts its own losses (oscInMessagesDropped).
     egressFramesUndelivered:      { offset: 62, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full. 0 in a healthy engine' },
+    clockAnchors:                 { offset: 63, type: 'counter',  unit: 'count', description: 'Times the audio clock was re-anchored since boot' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -208,7 +209,7 @@ export const METRICS_SCHEMA = {
           { label: 'dropped',     tooltip: 'Messages refused on the way in', cells: [{ key: 'engineMessagesDropped', kind: 'error' }] },
           { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
           { label: 'undelivered', tooltip: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full', cells: [{ key: 'egressFramesUndelivered', kind: 'error' }] },
-          { label: 'drift',       cells: [{ key: 'driftOffsetMs', format: 'signed' }, { text: ' ms', kind: 'muted' }] },
+          { label: 'clock',       tooltip: 'The difference between the audio clock and the wall clock (µs, signed) and number of times it was re-anchored since boot', cells: [{ key: 'clockDriftUs', format: 'signed' }, { text: ' µs', kind: 'muted' }, { sep: ' | ' }, { key: 'clockAnchors', kind: 'muted' }, { text: ' anchors', kind: 'muted' }] },
           { label: 'debug',       tooltip: COMPOSITES.debugCountBytes.description, cells: [{ key: 'debugMessagesReceived', kind: 'muted' }, { text: ' (' }, { key: 'debugBytesReceived', kind: 'muted', format: 'bytes' }, { text: ')' }] },
         ]
       },

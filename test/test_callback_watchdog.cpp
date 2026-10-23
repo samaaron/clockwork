@@ -17,6 +17,8 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include "clockwork_client.h"
+#include "clockwork_prefix.h"
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -67,6 +69,14 @@ bool runUntil(EngineFixture& fix, CaseClock& clock, int forMs, const std::functi
     return done();
 }
 
+// The engine's clock as a client reads it (clockwork_client_sample_clock).
+double dacNtp(EngineFixture& fix) {
+    ClockworkClientSampleClock sc{};
+    sc.struct_bytes = sizeof(sc);
+    REQUIRE(clockwork_client_sample_clock(fix.engine().egressClient(), &sc) == CLOCKWORK_OK);
+    return sc.dac_ntp;
+}
+
 } // namespace
 
 TEST_CASE("Watchdog: silent during normal operation", "[Watchdog][rt]") {
@@ -82,11 +92,26 @@ TEST_CASE("Watchdog: silent during normal operation", "[Watchdog][rt]") {
     REQUIRE(fix.waitForReply("/dummy/pong", r));
 }
 
-TEST_CASE("Watchdog: restarts a stalled audio source and the engine answers again",
+TEST_CASE("Watchdog: restarts a stalled audio source; what waited through the stall is refused as stale, nothing of it plays late, and the engine answers again",
           "[Watchdog][rt]") {
+    // The audio was away, and what waited for the engine through it is stale:
+    // refused once as such (docs/RESTARTS.md, `stalled`), and a bundle that
+    // fell due meanwhile does not play late — as a web page's purge and its
+    // reload after a gap refuse it (restart_grid.spec.mjs). A bundle that
+    // waited but is for later still plays, at its time: what a client sends
+    // as the audio comes back is not stale. The engine then answers what is
+    // sent after, and its clock never went back.
     CaseClock clock;
     EngineFixture fix(watchdogConfig(clock));
     runHealthy(fix, clock, 500);   // the watchdog has seen the source live
+    const double clockAtStall = dacNtp(fix);
+
+    // Due 300 ms from now, which the stall will cover: in the schedule before it starts.
+    OscReply r;
+    fix.send(osc_test::bundle(static_cast<uint64_t>((clockAtStall + 0.3) * 4294967296.0),
+                              { osc_test::message("/dummy/events/get") }));
+    fix.send(osc_test::message(CLOCKWORK_SYS("sync"), 1));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("synced"), r, 30000));
 
     // Kill the driver thread behind the engine's back: mActiveSource stays
     // Headless — exactly the wedge state (source believed live, no ticks).
@@ -94,20 +119,45 @@ TEST_CASE("Watchdog: restarts a stalled audio source and the engine answers agai
 
     // Deaf: the command lands in the IN ring with nothing draining it, and no
     // time has passed for the watchdog, so nothing can have recovered it.
-    OscReply r;
     fix.send(osc_test::message("/dummy/ping"));
     CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 200));
     CHECK(fix.engine().watchdogRecoveryCount() == 0);
+    // For well after the stall: it waits through it, and is not stale.
+    fix.send(osc_test::bundle(static_cast<uint64_t>((clockAtStall + 6.0) * 4294967296.0),
+                              { osc_test::message("/dummy/events/get") }));
+    // The first bundle's time passes, and the audio is away for longer than
+    // kAudioAwaySeconds: what waited and is due is stale.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    const double clockInStall = dacNtp(fix);
 
     // The watchdog must notice the frozen processCount and restart the source…
     REQUIRE(runUntil(fix, clock, 5000, [&] {
         return fix.engine().watchdogRecoveryCount() >= 1;
     }));
 
-    // …after which the queued command drains and the engine answers.
+    // …after which what waited is refused as stale, and never answered…
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("error"), r, 30000));
+    CHECK(r.parsed().argString(0) == "/dummy/ping");
+    CHECK(r.parsed().argString(1) == "stalled");
+    CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 300));
+    CHECK_FALSE(fix.waitForReply("/dummy/events", r, 300));
+
+    // …and what is sent now is answered.
+    fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForReply("/dummy/pong", r, 30000));
     REQUIRE(fix.engine().audioSource()
             == ClockworkEngine::AudioSource::Headless);
+
+    // The clock stepped to the wall as the audio came back, never going
+    // back, so the bundle for later is still ahead of it — and plays at its
+    // time, as the one message that waited and was not stale.
+    const double clockAfter = dacNtp(fix);
+    INFO("the clock: " << clockAtStall << " at the stall, " << clockInStall << " in it, " << clockAfter << " after");
+    CHECK(clockInStall >= clockAtStall);
+    CHECK(clockAfter >= clockInStall);
+    CHECK(clockAfter > clockAtStall + 2.0);
+    CHECK(clockAfter < clockAtStall + 6.0);
+    REQUIRE(fix.waitForReply("/dummy/events", r, 10000));
 }
 
 TEST_CASE("Watchdog: holds fire while a device swap is in flight", "[Watchdog][rt]") {

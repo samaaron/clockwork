@@ -112,7 +112,11 @@ uint64_t tick() {
     boot();
     const uint64_t at  = gSamplePos;
     const double   ntp = ntpAtFrame(gSamplePos);
-    clockwork_tick(ntp, kOutChannels, kInChannels);
+    ClockworkBlockTime time {};
+    time.struct_bytes = sizeof time;
+    time.audio_time   = ntp;
+    time.wall_ntp     = ntp;   // its own time for a wall, and no monotonic clock: a fixture sees no gap
+    clockwork_tick(&time, kOutChannels, kInChannels);
     gSamplePos += gBlockSize;
     return at;
 }

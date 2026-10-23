@@ -118,11 +118,17 @@ export async function bootEngine() {
   const handle = x.clockwork_client_open_memory(arenaBase, constants.ARENA_SIZE, status);
   assert.ok(handle, "the engine's own client opened");
 
+  bootedMemory = memory; blockTime = 0;
   return { x, memory, arenaBase, constants, rings: engineRings(memory.buffer, arenaBase, constants), handle, status };
 }
 
-/** Run one block of the engine: the tick, then the audio. */
+/** Run one block of the engine: the tick, its own time standing in for a wall clock, so no gap is ever seen. */
+let blockTime = 0, bootedMemory = null;
 export function block(x) {
-  x.clockwork_tick(0);
-  x.process_audio(128);
+  // ClockworkBlockTime (lanes.h): struct_bytes, then audio_time, wall_ntp, monotonic_secs as doubles, in the engine's
+  // memory (the last booted: a test boots one engine)
+  blockTime ||= x.clockwork_worklet_alloc(32);
+  new Uint32Array(bootedMemory.buffer, blockTime, 1)[0] = 32;
+  new Float64Array(bootedMemory.buffer, blockTime + 8, 3).fill(0);
+  x.clockwork_tick(blockTime, 2, 0);
 }

@@ -1,158 +1,119 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 /*
- * TimeSource.cpp — audio-thread time-source. Two shapes, one guard
- * (CLOCKWORK_WORKLET_CLOCK), matching TimeSource.h.
- *
- * native (WallClock + IIR): now() / nowAt() / updateAudioThreadNTP() are
- * audio-thread reads: concrete (no vtable), atomics only. updateAudioThreadNTP
- * runs one low-pass step per callback, converging the sample-derived clock
- * toward the wall clock at ~1% per call; freewheel mode bypasses that and
- * returns a pure sample-derived NTP.
- *
- * worklet (self-driven): nowAt() evaluates the SAB time formula from the bound
- * offset pointers and publishes it to the now()-cache — no wall clock, no IIR,
- * no freewheel.
+ * TimeSource.cpp — the audio thread's time, one shape on every target
+ * (TimeSource.h). The one difference between targets is where an app thread
+ * reads a wall clock: native has one; the worklet has only what the audio
+ * thread last said.
  */
 #include "clock/TimeSource.h"
 #include "clock/clock_math.h"
+#include "clockwork_config.h"   // clockwork_log
 
-using clockwork::doubleToBits;
+#include <algorithm>
+#include <cstdint>
+
 using clockwork::bitsToDouble;
+using clockwork::doubleToBits;
 
-extern "C" int clockwork_log(const char* fmt, ...);
-
+double TimeSource::now() const {
+    const uint64_t bits = mCurrentAudioThreadNTPBits.load(std::memory_order_acquire);
 #if CLOCKWORK_WORKLET_CLOCK
-
-double TimeSource::now() const {
-    return bitsToDouble(mLastAudioThreadNTPBits.load(std::memory_order_acquire));
-}
-
-double TimeSource::nowAt(double audioCurrentTime) const {
-    // The two offsets are integers and are almost always zero: the drift
-    // offset moves only when the host resyncs after a suspend, the global
-    // offset only when an embedder shifts the whole clock. Both conversions
-    // to seconds cost an int→double widening and a soft-float divide on a
-    // target with no double FPU (the ESP32-S3 runs both through ROM
-    // __floatsidf/__divdf3, ~500 cycles a block for two answers that are
-    // both zero), so the zero case is answered without arithmetic.
-    // Exactly equal, not an approximation: 0 / 1000000.0 IS 0.0. The loads
-    // themselves are unchanged — the acquire on the drift offset still
-    // orders this block's read of it.
-    const int32_t drift_us =
-        mDriftOffset ? mDriftOffset->load(std::memory_order_acquire) : 0;
-    const double drift_seconds = drift_us ? (drift_us / 1000000.0) : 0.0;
-    const double ntp_start =
-        (mNtpStartTime && *mNtpStartTime != 0.0) ? *mNtpStartTime : 0.0;
-    const int32_t global_ms =
-        mGlobalOffset ? mGlobalOffset->load(std::memory_order_relaxed) : 0;
-    const double global_seconds = global_ms ? (global_ms / 1000.0) : 0.0;
-    const double result = audioCurrentTime + ntp_start + drift_seconds + global_seconds;
-    mLastAudioThreadNTPBits.store(doubleToBits(result), std::memory_order_release);
-    return result;
+    return bits ? bitsToDouble(bits) : 0.0;
+#else
+    return bits ? bitsToDouble(bits) : wall(wallClockNTP()) + globalOffsetSeconds();
+#endif
 }
 
 double TimeSource::wallNow() const {
-    // No wall clock on the worklet; the last audio-thread NTP is the best
-    // available "right now" (0.0 only before the first nowAt()). Callers that
-    // stamp events with wallNow() (e.g. /clockwork/clock/transport/set) would otherwise
-    // record NTP epoch 1900.
+#if CLOCKWORK_WORKLET_CLOCK
     return now();
+#else
+    return wall(wallClockNTP()) + globalOffsetSeconds();
+#endif
 }
 
-double TimeSource::updateAudioThreadNTP(double samplePosition,
-                                        double sampleRate,
-                                        double audioCurrentTime) {
-    (void)samplePosition;
-    (void)sampleRate;
-    return nowAt(audioCurrentTime);
+// The median of the residuals an anchor's settling window gathered: a copy
+// on the stack, partially sorted — bounded work, no allocation, on the audio
+// thread once an anchor.
+double TimeSource::settledResidual() const {
+    double sorted[clockwork::kAnchorSettleBlocks];
+    std::copy(std::begin(mSettleResidual), std::end(mSettleResidual), std::begin(sorted));
+    double* const mid = std::begin(sorted) + clockwork::kAnchorSettleBlocks / 2;
+    std::nth_element(std::begin(sorted), mid, std::end(sorted));
+    return *mid;
 }
 
-void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate,
-                                      double renderedFrames) {
-    (void)samplePosition;
-    (void)sampleRate;
-    (void)renderedFrames;
-}
-
-void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
-    // No-op: the worklet evaluates the SAB time formula in nowAt() and has no
-    // headless driver / drift IIR to bypass; its host sets the NTP start time.
-    (void)enabled;
-    (void)originNtp;
-}
-
-bool TimeSource::freewheelClock() const { return false; }
-
-#else  // !CLOCKWORK_WORKLET_CLOCK
-
-double TimeSource::now() const {
-    const uint64_t bits =
-        mCurrentAudioThreadNTPBits.load(std::memory_order_acquire);
-    if (bits == 0) return readWallClock();
-    return bitsToDouble(bits);
-}
-
-double TimeSource::nowAt(double audioCurrentTime) const {
-    (void)audioCurrentTime;  // Native uses its own time source.
-    return now();
-}
-
-double TimeSource::wallNow() const {
-    return readWallClock();
-}
-
-double TimeSource::updateAudioThreadNTP(double samplePosition,
-                                        double sampleRate,
-                                        double audioCurrentTime) {
-    (void)audioCurrentTime;
+double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp) {
     const double sampleOffsetSec = samplePosition / sampleRate;
+    const double global = globalOffsetSeconds();
 
     // Freewheel: pure sample-derived NTP, no wall-clock drift IIR. The headless
     // driver thread can be preempted on a busy machine; chasing that as "drift"
     // injects scheduling jitter a real device callback never sees. Deterministic
     // for offline/accuracy tests.
     if (mFreewheelClock.load(std::memory_order_relaxed)) {
-        const double wallNTP =
-            bitsToDouble(mBaseNTPBits.load(std::memory_order_relaxed))
-            + sampleOffsetSec;
-        mCurrentAudioThreadNTPBits.store(doubleToBits(wallNTP),
-                                         std::memory_order_release);
-        return wallNTP;
+        const double ntp = bitsToDouble(mBaseNTPBits.load(std::memory_order_relaxed)) + sampleOffsetSec + global;
+        mCurrentAudioThreadNTPBits.store(doubleToBits(ntp), std::memory_order_release);
+        return ntp;
     }
 
     //   sampleNTP = mBaseNTP + samplePosition / sampleRate
     //   drift     = wallNow - sampleNTP
     //   mBaseNTP += drift * 0.01   (low-pass converge ~1% per call)
     //   result    = mBaseNTP + samplePosition / sampleRate
-    const double wallNow = readWallClock();
-    const double baseNTP = bitsToDouble(
-        mBaseNTPBits.load(std::memory_order_relaxed));
+    const double wallNow = wall(wallNtp);
+    const double baseNTP = bitsToDouble(mBaseNTPBits.load(std::memory_order_relaxed));
     const double drift = wallNow - (baseNTP + sampleOffsetSec);
 
     // Surface timebase disturbances (wall-clock step/slew, callback stall):
-    // a genuine step is reported immediately; jitter that *hovers* at the
-    // threshold (VMs, Windows shared-mode) summarises at most once per
-    // minute instead of becoming per-second wallpaper — see DriftLogGate.
-    // clockwork_log is a lock-free egress-ring write.
-    clockwork::DriftLogGate::Line line;
-    if (mDriftLogGate.offer(drift, wallNow, line)) {
-        clockwork_log("DRIFT: wall clock %+.1fms from audio timebase, re-converging "
-               "(peak %.1fms, %u hits since last report, %u total)",
-               line.driftSec * 1000.0, line.peakSec * 1000.0,
-               line.hits, line.total);
-    }
+    // a step is said at once; a persisting condition at most once a minute
+    // (DriftLogGate). Not while an anchor settles: its first reading is
+    // expected to be off, and the median takes that up. clockwork_log is a
+    // lock-free egress-ring write.
+    const bool settled = mSettleCount >= clockwork::kAnchorSettleBlocks;
+    if (settled && mDriftLogGate.offer(drift, wallNow))
+        clockwork_log("[clock] wall clock and audio clock have diverged by %+.1f ms", drift * 1000.0);
 
-    const double newBaseNTP = baseNTP + drift * clockwork::kDriftIirGain;
-    const double wallNTP = newBaseNTP + sampleOffsetSec;
+    // What this block moves the clock against its samples by. An anchor
+    // settling (kAnchorSettleBlocks): nothing, until the last block of the
+    // window moves it once to the median of the window's readings — one
+    // reading is out by up to a render burst where the host reads Date.now(),
+    // the median of sixty-four within a millisecond, and a callback that
+    // woke late is one vote. On, only: an anchor that read late (the clock
+    // ahead of the wall; a new worklet going on from the floor the arena
+    // carries) is taken up at the bound like any residual, as time never goes
+    // back. Settled: the IIR's pull, bounded (kClockSlewPerBlock) — the clock
+    // is the ruler everything is scheduled on, and a ruler that flexes under
+    // what is already on it misplaces it. Real drift is well under the bound
+    // and followed in full; a wall clock set back is followed the same way;
+    // and as the bound is far under a block a reader never sees time go
+    // back, whatever the wall did.
+    double pull = 0.0;
+    if (!settled) {
+        mSettleResidual[mSettleCount++] = drift;
+        if (mSettleCount == clockwork::kAnchorSettleBlocks) pull = std::max(0.0, settledResidual());
+    } else {
+        pull = std::clamp(drift * clockwork::kDriftIirGain,
+                          -clockwork::kClockSlewPerBlock, clockwork::kClockSlewPerBlock);
+    }
+    const double newBaseNTP = baseNTP + pull;
+    const double ntp = newBaseNTP + sampleOffsetSec + global;
+    // The clock against the wall, as the metrics show it: smoothed as the
+    // clock itself is (one block's reading swings by a buffer where a browser
+    // renders its quanta in bursts; the mean is what the clock follows), and
+    // saturated into an int32 of microseconds.
+    mDriftSmoothedSec += (-drift - mDriftSmoothedSec) * clockwork::kDriftIirGain;
+    const double driftUs = mDriftSmoothedSec * 1e6;
+    mLastDriftUs.store(driftUs > 2147483647.0 ? INT32_MAX : driftUs < -2147483648.0 ? INT32_MIN : static_cast<int32_t>(driftUs),
+                       std::memory_order_relaxed);
     mBaseNTPBits.store(doubleToBits(newBaseNTP), std::memory_order_relaxed);
-    mCurrentAudioThreadNTPBits.store(doubleToBits(wallNTP),
-                                     std::memory_order_release);
-    return wallNTP;
+    mCurrentAudioThreadNTPBits.store(doubleToBits(ntp), std::memory_order_release);
+    return ntp;
 }
 
-void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate,
-                                      double renderedFrames) {
+void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
+                                      double renderedFrames, double floorNtp) {
     const double sampleOffsetSec = samplePosition / sampleRate;
     // A freewheel clock from an origin is the frames rendered since it, with
     // no wall clock in it at all: the first start puts frame 0 at the origin,
@@ -167,12 +128,21 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate,
                   + renderedFrames / sampleRate - sampleOffsetSec
             : bitsToDouble(originBits);
     } else {
-        newBaseNTP = readWallClock() - sampleOffsetSec;
+        newBaseNTP = wall(wallNtp) - sampleOffsetSec;
+        // Never behind the clock the arena already carries: a host whose wall
+        // clock lags what the last host published (a worklet made again over
+        // the same memory, an embedded host attaching again, a wall clock
+        // stepped back) goes on from it, and a reader never sees time go back.
+        if (floorNtp > 0.0 && newBaseNTP + sampleOffsetSec < floorNtp)
+            newBaseNTP = floorNtp - sampleOffsetSec;
     }
     mBaseNTPBits.store(doubleToBits(newBaseNTP), std::memory_order_relaxed);
-    mCurrentAudioThreadNTPBits.store(
-        doubleToBits(newBaseNTP + sampleOffsetSec),
-        std::memory_order_release);
+    mCurrentAudioThreadNTPBits.store(doubleToBits(newBaseNTP + sampleOffsetSec + globalOffsetSeconds()),
+                                     std::memory_order_release);
+    mDriftSmoothedSec = 0.0;
+    mSettleCount = 0;   // the anchor settles over the blocks to come (updateAudioThreadNTP)
+    mLastDriftUs.store(0, std::memory_order_relaxed);
+    mAnchors.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
@@ -184,5 +154,3 @@ void TimeSource::setFreewheelClock(bool enabled, double originNtp) {
 bool TimeSource::freewheelClock() const {
     return mFreewheelClock.load(std::memory_order_relaxed);
 }
-
-#endif  // CLOCKWORK_WORKLET_CLOCK

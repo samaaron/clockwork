@@ -149,6 +149,9 @@ export class MetricsReader {
       egressFramesRefused: m[MetricsOffsets.EGRESS_FRAMES_REFUSED],
       // deliveries the native gateway's transport could not make (0 on the web, and in a healthy engine)
       egressFramesUndelivered: m[MetricsOffsets.EGRESS_FRAMES_UNDELIVERED],
+      // the engine's clock: against the host's wall (µs, signed) and how often anchored afresh
+      clockDriftUs: m[MetricsOffsets.CLOCK_DRIFT_US] | 0,
+      clockAnchors: m[MetricsOffsets.CLOCK_ANCHORS],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)
@@ -232,8 +235,6 @@ export class MetricsReader {
     }
 
     // Context-provided metrics
-    if (context.driftOffsetMs !== undefined) metrics.driftOffsetMs = context.driftOffsetMs;
-    if (context.ntpStartTime !== undefined) metrics.ntpStartTime = context.ntpStartTime;
     if (context.clockOffsetMs !== undefined) metrics.clockOffsetMs = context.clockOffsetMs;
     if (context.audioContextState) metrics.audioContextState = context.audioContextState;
     // Whatever the guest declared, read back out of the range it declared it
@@ -296,9 +297,8 @@ export class MetricsReader {
     }
 
     // Context slots 46+
-    // driftOffsetMs and clockOffsetMs are signed — store as int32 via DataView
+    // clockOffsetMs is signed — stored as int32 via DataView
     const dv = this.#mergedDV;
-    dv.setInt32(MetricsOffsets.CTX_DRIFT_OFFSET_MS * 4, context.driftOffsetMs ?? 0, true);
     dv.setInt32(MetricsOffsets.CTX_CLOCK_OFFSET_MS * 4, context.clockOffsetMs ?? 0, true);
 
     // audioContextState enum: unknown=0, running=1, suspended=2, closed=3, interrupted=4

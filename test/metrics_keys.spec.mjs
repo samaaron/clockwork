@@ -27,7 +27,7 @@ test("getMetrics() has a key for every metric the schema declares, and none it d
       "inBufferPeakBytes", "outBufferPeakBytes", "nrtOutBufferPeakBytes",
       "inBufferCapacity", "outBufferCapacity", "nrtOutBufferCapacity",
     ]);
-    const ringObjects = new Set(["inBufferUsed", "outBufferUsed", "nrtOutBufferUsed", "ntpStartTime"]);
+    const ringObjects = new Set(["inBufferUsed", "outBufferUsed", "nrtOutBufferUsed"]);
     const declared = Object.keys(schema.metrics).filter((k) => !inRingObjects.has(k));
     const reported = Object.keys(metrics).filter((k) => !ringObjects.has(k));
     return {

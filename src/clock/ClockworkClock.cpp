@@ -138,4 +138,7 @@ void ClockworkClock::publishClockMetrics(PerformanceMetrics* m, double ntpNow, d
     m->clock_beat_centi.store(u32(beat * 100.0), std::memory_order_relaxed);
     m->clock_phase_centi.store(u32(phase * 100.0), std::memory_order_relaxed);
     m->clock_playing.store(playing ? 1u : 0u, std::memory_order_relaxed);
+    // The clock itself: how far from the host's wall clock, and how often anchored afresh (TimeSource.h).
+    m->clock_drift_us.store(static_cast<uint32_t>(clockDriftUs()), std::memory_order_relaxed);
+    m->clock_anchors.store(clockAnchors(), std::memory_order_relaxed);
 }

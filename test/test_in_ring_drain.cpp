@@ -28,8 +28,8 @@
 #include <cstring>
 
 extern "C" uint8_t arena_storage[];
-extern "C" bool process_audio(double current_time, uint32_t active_output_channels,
-                              uint32_t active_input_channels);
+extern "C" bool process_audio(double current_time, double wall_ntp, double monotonic_secs,
+                              uint32_t active_output_channels, uint32_t active_input_channels);
 
 namespace {
 
@@ -46,7 +46,7 @@ RingCursors* control() {
 // One process_audio() block on the test thread (channel counts match the
 // fixture's 2-in/2-out world). Returning at all is itself the liveness check.
 void pump() {
-    process_audio(4'000'000'000.0 /*arbitrary NTP*/, 2, 2);
+    process_audio(4'000'000'000.0 /*arbitrary NTP*/, 4'000'000'000.0, 0.0, 2, 2);
 }
 
 // Drain whatever boot traffic is queued, then park both cursors at 0 so the

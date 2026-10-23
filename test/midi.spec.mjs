@@ -112,12 +112,15 @@ test("a note sent now reaches the port now", async ({ page, clockworkConfig }) =
   expect(r.sent[0].timestamp).toBeUndefined();
 });
 
-test("a scheduled note reaches the port early, stamped with its moment", async ({ page, clockworkConfig }) => {
+test("a scheduled note reaches the port at its moment, stamped with it", async ({ page, clockworkConfig }) => {
   // The contract the whole hop exists for. The scheduler fires the note on
   // the audio thread at the block that holds its time; the forward carries
   // that time to the front; the front hands the browser the bytes AND the
-  // time. So the port sees the send BEFORE the moment, with the moment as its
-  // timestamp — and the browser, not clockwork, holds it to that moment.
+  // time. So the port sees the send within a few milliseconds of the moment
+  // — the block it falls in, and the hop to the page — with the moment as
+  // its timestamp, which the browser holds it to where it is still ahead.
+  // The engine's clock is render time, as native's is (clock/TimeSource.h):
+  // not the time the audio is heard, which only some devices report.
   const r = await run(page, clockworkConfig, async ({ clockwork, until }) => {
     clockwork.send("/clockwork/midi/out/enable", "*", 1);
     const leadS = 0.4;
@@ -134,8 +137,8 @@ test("a scheduled note reaches the port early, stamped with its moment", async (
   expect(timestamp, "the send carried no timestamp: the time was lost on the hop").toBeDefined();
   // Within a few ms of the moment asked for...
   expect(Math.abs(timestamp - r.duePerfMs), `stamped ${timestamp - r.duePerfMs} ms off`).toBeLessThan(30);
-  // ...and handed over before it, for the browser to hold.
-  expect(r.sentAt[0], "the send was made after its moment, not held to it").toBeLessThan(timestamp);
+  // ...and handed over at it: the block it falls in, the hop, nothing held back.
+  expect(Math.abs(r.sentAt[0] - timestamp), `the send was made ${r.sentAt[0] - timestamp} ms from its moment`).toBeLessThan(10);
 });
 
 test("a scheduled note that names its own moment is sent at that moment", async ({ page, clockworkConfig }) => {

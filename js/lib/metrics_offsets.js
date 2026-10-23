@@ -121,32 +121,25 @@ export const CLOCK_BEAT_CENTI  = 47;  // beat position * 100
 export const CLOCK_PHASE_CENTI = 48;  // phase within quantum * 100
 export const CLOCK_PLAYING     = 49;  // transport 0/1
 
-// Slot 50 is reserved padding in the C++ struct so METRICS_SIZE stays a
-// multiple of 8 (the following arena regions are 8-byte aligned). The merged
-// array reuses index 50 for the first context metric (CTX_DRIFT_OFFSET_MS),
-// which is written after the SAB copy, mirroring how context reuses the
-// native-only Link slots.
-export const METRICS_RESERVED  = 50;
+// The engine's clock against the host's wall clock, smoothed as the clock is, microseconds, signed (int32 bits): what
+// the clock nudges by (clock/TimeSource.h), on every target. Near 0 and steady is locked. It once held the page's
+// own drift estimate; the engine keeps its clock itself now.
+export const CLOCK_DRIFT_US = 50;
 
-// Number of metric slots copied from the SAB/snapshot buffer. The C++ struct
-// has one extra trailing pad word (index 51) purely for 8-byte alignment that
-// carries no value, so we stop the copy at the reserved slot.
-export const SAB_METRICS_COUNT = METRICS_RESERVED + 1;  // 51
 // Every word of the C++ struct, the heap's census at 53-57, the guest's
-// mallocs at 58-59, the program's at 60-61 and the undelivered count at 62
-// included: what the reader copies from the SAB before the context writes
-// its own slots over 50-52 (METRICS_SIZE / 4 in shared_memory.h, less its
-// trailing pad word).
-export const SAB_METRICS_WORDS = 63;   // EGRESS_FRAMES_UNDELIVERED + 1
+// mallocs at 58-59, the program's at 60-61, the undelivered count at 62 and
+// the clock's anchors at 63 included: what the reader copies from the SAB
+// before the context writes its own slots over 51-52 (METRICS_SIZE / 4 in
+// shared_memory.h).
+export const SAB_METRICS_WORDS = 64;   // CLOCK_ANCHORS + 1
 
 // =============================================================================
-// Context metrics [50-52, 64-67] (written by main thread into merged array only)
+// Context metrics [51-52, 64-67] (written by main thread into merged array only)
 // These are NOT in the C++ PerformanceMetrics struct or SAB — MetricsReader
-// writes them into the local merged Uint32Array. They start at index 50,
-// reusing the reserved padding slot (the last meaningful SAB metric is
-// CLOCK_PLAYING at 49); context is written after the SAB copy so it wins.
+// writes them into the local merged Uint32Array. They start at index 51
+// (the last meaningful SAB metric is CLOCK_PLAYING at 49, and 50 is the
+// struct's pad); context is written after the SAB copy so it wins.
 // =============================================================================
-export const CTX_DRIFT_OFFSET_MS = 50;             // Clock drift (int32, ms)
 export const CTX_CLOCK_OFFSET_MS = 51;             // Clock offset for multi-system sync (int32, ms)
 export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running,2=suspended,3=closed,4=interrupted
 // 53-57 are the guest's pool's and the rust heap's census, in the C++ struct
@@ -168,9 +161,10 @@ export const GUEST_MALLOCS_PROCESSING = 59;   // malloc/calloc/realloc calls ins
 // allocator once the engine is up, which should be nothing. Counted on the web, 0 everywhere else.
 export const MALLOCS_AFTER_BOOT      = 60;   // malloc/calloc/realloc calls since the engine was ready
 export const MALLOC_BYTES_AFTER_BOOT = 61;   // bytes taken since then and still held
-// 62 is the deliveries the transport could not make (a client gone, a full peer ring), in the C++ struct
-// and the SAB; 63 is the struct's pad word, and holds nothing.
+// 62 is the deliveries the transport could not make (a client gone, a full peer ring), 63 the clock's anchors:
+// both in the C++ struct and the SAB.
 export const EGRESS_FRAMES_UNDELIVERED = 62;
+export const CLOCK_ANCHORS = 63;   // times the engine's clock was anchored afresh since boot: its first block, back after being away, a new context
 export const CTX_IN_BUFFER_CAPACITY = 64;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 65;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 66;        // Static from bufferConstants

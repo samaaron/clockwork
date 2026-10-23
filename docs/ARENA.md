@@ -105,9 +105,9 @@ The regions:
 |---|---|---|---|---|---|---|
 | `clockwork-metrics` | state | clockwork | public | block | fast | the counters the HUD shows |
 | `clockwork-native-stats` | state | clockwork | public | block | fast | DSP load, overruns, control-thread timings (zeros on the web) |
-| `clockwork-clock-anchors` | state | host | public | block | fast | NTP start time, drift, global offset |
+| `clockwork-clock-anchors` | state | host | public | block | fast | the host's global clock offset (the clock anchors itself: TimeSource.h) |
 | `clockwork-clock-state` | state | clockwork | public + guest | block | fast | the Link timeline: tempo, beat origin, transport, meter |
-| `clockwork-sample-clock` | state | clockwork | public | block | fast | sample position to DAC time, seqlocked |
+| `clockwork-sample-clock` | state | clockwork | public | block | fast | sample position to DAC time, seqlocked; beside it the wall time of the last block rendered |
 | `clockwork-channel-map` | state | clockwork | public + guest | change | fast | live channel widths |
 | `clockwork-scope` | audio | clockwork | public | block | fast | what left for the device and what arrived, every tick |
 | `clockwork-taps` | audio | clockwork | public | block | bulk | tap streams: the guest's slots, then the track slots |

@@ -35,6 +35,44 @@ inline constexpr double kMicrobeatsPerBeat = 1.0e6;
 // step, since audio placed by it hears every one.
 inline constexpr double kDriftIirGain = 0.01;
 
+// The most the audio thread's clock moves against its sample counter in one
+// block, either way (TimeSource): the clock is the ruler everything is
+// scheduled on, and a ruler that flexes under what is already on it misplaces
+// it — a bundle placed 50 ms ahead lands within 40 µs of where its sender
+// worked it out. Two microseconds a block is 1500 ppm at 128 frames and
+// 48 kHz: more than any two crystals disagree by, so real drift is followed in
+// full, and the residual an anchor leaves (one wall reading can be off by a
+// render burst, ~7 ms) is taken up over seconds rather than at once. Far under
+// a block, so a reading never goes back.
+inline constexpr double kClockSlewPerBlock = 2.0e-6;
+
+// An anchor is one wall reading, and one reading can be out by a render burst
+// on a host that reads Date.now() (~7 ms): more than the bound takes up in
+// seconds. So an anchor settles: the clock holds its first reading for this
+// many blocks (~170 ms at 128 frames and 48 kHz), then moves once to the
+// median of the readings meanwhile — within a millisecond of the truth, and
+// deaf to a callback that woke late — and the bound holds it from there. On a
+// host whose readings are exact the median is the reading, and nothing moves.
+inline constexpr uint32_t kAnchorSettleBlocks = 64;
+
+// The audio was away (clockwork_audio_back): the gap is the time that passed
+// since the last block less the audio rendered in it, measured by the host as
+// it hands each block over. Over this the host anchors the clock afresh at the
+// block back, rather than letting it converge (TimeSource): a clock that
+// converges from behind runs fast until it has caught up, and everything
+// scheduled against it plays compressed. Under this the IIR takes it up, a
+// bounded share a block (kClockSlewPerBlock), as it takes up a browser
+// rendering its quanta in bursts (a reading swings by a device buffer, ~20 ms).
+inline constexpr double kClockStepSeconds = 0.1;
+
+// The same gap, over which what waited for the engine is stale as well: what
+// is due by the block back is refused as such and the schedule cleared there;
+// what waited but is for later still plays, at its time. One number on every
+// target: a stall, a page's context suspended, a worklet gone and made again,
+// an embedded host attaching again. Shorter gaps deliver what waited, late by
+// the gap.
+inline constexpr double kAudioAwaySeconds = 2.0;
+
 inline double beatAt(double t, double origin, double bpm) {
     return (t - origin) * bpm / 60.0;
 }
@@ -75,6 +113,14 @@ inline double wallClockNTP() {
                std::chrono::system_clock::now().time_since_epoch()).count()
          + clockwork::kNtpEpochOffset;
 }
+
+namespace clockwork {
+// The host's monotonic clock, seconds from an origin of its own: what tells a
+// gap in the audio from a system clock set by hand (ClockworkBlockTime).
+inline double monotonicSeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace clockwork
 
 namespace clockwork {
 

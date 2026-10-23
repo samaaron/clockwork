@@ -218,8 +218,6 @@ TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     CHECK(taps->geom[CLOCKWORK_GEOM_TAP_TRACK_FIRST]  == TAPS_SLOTS);
     CHECK(taps->bytes == TAPS_HEADER_SIZE + (TAPS_SLOTS + TAP_TRACK_SLOTS) * TAP_SLOT_SIZE);
     const auto* anchors = entry(a, CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS);
-    CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_NTP_START] == NTP_START_TIME_START);
-    CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_DRIFT]     == DRIFT_OFFSET_START);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_GLOBAL]    == GLOBAL_OFFSET_START);
 }
 

@@ -15,6 +15,7 @@ const CLIENT_MESSAGE_BYTES = 20;
 import { calculateAllControlIndices } from '../lib/ring_cursor_offsets.js';
 import { readArena, readGeneration, instanceGeneration } from '../lib/arena.js';
 import { sampleClockReader } from '../lib/sample_clock.js';
+import { NTP_EPOCH_OFFSET } from '../lib/timetag.js';
 import {
   ClockworkClockMessageType,
   retempoClock, writeClockOrigin, writeClockTransport, writeClockMeter, isValidMeter,
@@ -1099,6 +1100,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                 this.memArenaSize,
                                 this.assetsOffset,  this.assetsSize,
                                 this.returnsOffset, this.returnsSize);
+                            // This worklet's audio starts now: what waited through a gap before it (the context
+                            // suspended, the old worklet gone) and is due is stale; what is for later, and what
+                            // the page sends from here, plays. Its clock steps on to the wall at its first block.
+                            this.wasmInstance.exports.clockwork_audio_starts((Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
+                            // The block's time, handed to every tick (ClockworkBlockTime, lanes.h): struct_bytes,
+                            // then audio_time, wall_ntp, monotonic_secs as doubles — a worklet has no monotonic clock
+                            this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(32);
+                            new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr, 1)[0] = 32;
 
                             // A BUILD THAT REFUSED SAYS WHY, HERE. The engine
                             // records the reason (clockwork_boot_fail, or the
@@ -1192,24 +1201,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                         type: 'error',
                         error: 'get_time_offset function not available in WASM exports'
                     });
-                }
-            }
-
-            if (data.type === 'setNTPStartTime') {
-                // Write NTP start time to WASM memory (Float64)
-                if (this.wasmMemory && this.arenaBase !== null && this.bufferConstants) {
-                    const offset = this.arenaBase + this.bufferConstants.NTP_START_TIME_START;
-                    const view = new Float64Array(this.wasmMemory.buffer, offset, 1);
-                    view[0] = data.ntpStartTime;
-                }
-            }
-
-            if (data.type === 'setDriftOffset') {
-                // Write drift offset to WASM memory (Int32, microseconds)
-                if (this.wasmMemory && this.arenaBase !== null && this.bufferConstants) {
-                    const offset = this.arenaBase + this.bufferConstants.DRIFT_OFFSET_START;
-                    const view = new Int32Array(this.wasmMemory.buffer, offset, 1);
-                    view[0] = data.driftOffsetUs;
                 }
             }
 
@@ -1462,18 +1453,16 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     }
                 }
 
-                // clockwork_tick (the lanes tick, src/lanes/lanes.h) calculates NTP
-                // time internally from:
-                // - NTP_START_TIME (write-once, set during initialization)
-                // - DRIFT_OFFSET (microseconds, updated every 1s by main thread)
-                // - GLOBAL_OFFSET (milliseconds, written by the setClockOffset
-                //   handler above; for multi-system sync)
 
-                const keepAlive = this.wasmInstance.exports.clockwork_tick(
-                    audioContextTime,
-                    outputChannels,
-                    inputChannels
-                );
+                // The engine keeps its own clock from the context's time and this thread's wall clock (one IIR
+                // clock on every target, clock/TimeSource.h), and reads from the wall time how long the audio was away.
+                // Date.now() is whole milliseconds (a worklet has no finer clock): given as the middle of its
+                // millisecond, so the clock the engine converges on is not half a millisecond behind the wall.
+                const blockTime = new Float64Array(this.wasmMemory.buffer, this.blockTimePtr + 8, 3);
+                blockTime[0] = audioContextTime;
+                blockTime[1] = (wall + 0.5) / 1000 + NTP_EPOCH_OFFSET;
+                blockTime[2] = 0;
+                const keepAlive = this.wasmInstance.exports.clockwork_tick(this.blockTimePtr, outputChannels, inputChannels);
 
                 // postMessage mode: the engine's time to each channel's port, for a worker that cannot read the arena
                 if (this.oscPorts.length && this.processCallCount % CLOCK_POST_BLOCKS === 0 && this.arenaBase != null && this.bufferConstants) {
