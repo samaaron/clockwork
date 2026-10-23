@@ -27,11 +27,18 @@ bool engine_test::hostDrivesControlByDefault() {
 }
 
 // Caller holds mReplyMutex.
+// The last few held, and how many there are: a case that polls for a reply
+// dumps this on every attempt, and a recovery loop can hold a thousand (the
+// engine's own log, dumped once by the case, was buried under fifty copies
+// of them in CI, 2026-10-23).
 static std::string dumpReplies(const std::vector<OscReply>& replies) {
     if (replies.empty()) return "(none)";
+    constexpr size_t kShown = 12;
     std::string out;
-    for (auto& r : replies)
-        out += "\n  | " + r.address + " (" + std::to_string(r.raw.size()) + " bytes)";
+    if (replies.size() > kShown)
+        out += "\n  | (" + std::to_string(replies.size() - kShown) + " more before these)";
+    for (size_t i = replies.size() > kShown ? replies.size() - kShown : 0; i < replies.size(); ++i)
+        out += "\n  | " + replies[i].address + " (" + std::to_string(replies[i].raw.size()) + " bytes)";
     return out;
 }
 
@@ -173,8 +180,7 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
             if (owed) { pumpBlock(); --owed; }
             if (take()) return true;
             if (!owed && std::chrono::steady_clock::now() >= deadline) {
-                UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after "
-                              << timeoutMs << "ms; replies held:" << repliesDump());
+                sayTimedOut(addr, timeoutMs, repliesDump());
                 return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
@@ -191,8 +197,7 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
             }
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after "
-                          << timeoutMs << "ms; replies held:" << dumpReplies(mReplies));
+            sayTimedOut(addr, timeoutMs, dumpReplies(mReplies));
             return false;
         }
         mReplyCv.wait_until(lk, deadline);
@@ -246,6 +251,16 @@ std::string EngineFixture::debugMessagesDump() const {
     std::string out;
     for (auto& m : mDebugMessages) out += "\n  | " + m;
     return out;
+}
+
+// A case that polls for a reply times out on every attempt: the held list
+// is said the first time for an address, and a line each time after.
+void EngineFixture::sayTimedOut(const std::string& addr, int timeoutMs, const std::string& held) {
+    const int n = ++mTimeouts[addr];
+    if (n == 1)
+        UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after " << timeoutMs << "ms; replies held:" << held);
+    else
+        UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out again (" << n << " times)");
 }
 
 std::string EngineFixture::repliesDump() const {

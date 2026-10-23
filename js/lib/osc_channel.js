@@ -63,6 +63,7 @@ export class OscChannel {
     #readClock = null;   // SAB mode: the sample clock in the arena
     #clockReading = {};  // SAB mode: what #readClock fills, each time
     #heardClock = null;  // PM mode: { ntp, at } — the audio thread's last word on the time, and when it came (ms)
+    #lastNow = 0;        // the last reading given: a reading never goes back
 
     // Local metrics counters
     // SAB mode: used for tracking, then written atomically to shared memory
@@ -283,10 +284,18 @@ export class OscChannel {
      * @returns {number} NTP seconds, or 0
      */
     now() {
-        if (this.#readClock) return this.#readClock(this.#clockReading)?.renderNtp ?? 0;
-        const heard = this.#heardClock;
-        if (!heard) return 0;
-        return heard.ntp + Math.min(CLOCK_HEARD_FOR_SECS, Math.max(0, (performance.now() - heard.at) / 1000));
+        let t;
+        if (this.#readClock) t = this.#readClock(this.#clockReading)?.renderNtp ?? 0;
+        else {
+            const heard = this.#heardClock;
+            if (!heard) return 0;
+            // Carried on by the page's clock from the last word, which the
+            // next word can land behind: the reading holds, never back.
+            t = heard.ntp + Math.min(CLOCK_HEARD_FOR_SECS, Math.max(0, (performance.now() - heard.at) / 1000));
+        }
+        if (t < this.#lastNow) return this.#lastNow;
+        this.#lastNow = t;
+        return t;
     }
 
     // =========================================================================

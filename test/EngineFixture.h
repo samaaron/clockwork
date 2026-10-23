@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -320,6 +321,8 @@ public:
 
     std::vector<OscReply> allReplies() const;
     void clearReplies();
+    // waitForReply's account of a timeout: the held list once per address, a line each time after.
+    void sayTimedOut(const std::string& addr, int timeoutMs, const std::string& held);
 
     std::vector<std::string> debugMessages() const;
     void clearDebugMessages();
@@ -374,6 +377,7 @@ private:
     mutable std::mutex       mReplyMutex;
     std::condition_variable  mReplyCv;
     std::vector<OscReply>    mReplies;
+    std::map<std::string, int> mTimeouts;   // waitForReply timeouts so far, by address
 
     mutable std::mutex       mDebugMutex;
     std::vector<std::string> mDebugMessages;

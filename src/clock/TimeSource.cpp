@@ -80,19 +80,32 @@ double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate
     // window moves it once to the median of the window's readings — one
     // reading is out by up to a render burst where the host reads Date.now(),
     // the median of sixty-four within a millisecond, and a callback that
-    // woke late is one vote. On, only: an anchor that read late (the clock
-    // ahead of the wall; a new worklet going on from the floor the arena
-    // carries) is taken up at the bound like any residual, as time never goes
-    // back. Settled: the IIR's pull, bounded (kClockSlewPerBlock) — the clock
-    // is the ruler everything is scheduled on, and a ruler that flexes under
-    // what is already on it misplaces it. Real drift is well under the bound
-    // and followed in full; a wall clock set back is followed the same way;
-    // and as the bound is far under a block a reader never sees time go
-    // back, whatever the wall did.
+    // woke late is one vote. On, at once; back, never: an anchor that read
+    // late (the clock ahead of the wall by a render burst — a context
+    // filling its output buffer at start; a new worklet going on from the
+    // floor the arena carries) is taken up by slowing, kAnchorTakeUpShare of
+    // a block a block, so a reader never sees time go back and the clock is
+    // on the wall within a few dozen blocks. Settled: the IIR's pull,
+    // bounded (kClockSlewPerBlock) — the clock is the ruler everything is
+    // scheduled on, and a ruler that flexes under what is already on it
+    // misplaces it. Real drift is well under the bound and followed in full;
+    // a wall clock set back is followed the same way; and as the bound is
+    // far under a block a reader never sees time go back, whatever the wall
+    // did.
+    const double blockSec = std::max(0.0, samplePosition - mLastSamplePos) / sampleRate;
+    mLastSamplePos = samplePosition;
     double pull = 0.0;
     if (!settled) {
         mSettleResidual[mSettleCount++] = drift;
-        if (mSettleCount == clockwork::kAnchorSettleBlocks) pull = std::max(0.0, settledResidual());
+        if (mSettleCount == clockwork::kAnchorSettleBlocks) {
+            const double residual = settledResidual();
+            if (residual >= 0.0) pull = residual;
+            else mTakeUpSec = -residual;
+        }
+    } else if (mTakeUpSec > 0.0) {
+        const double step = std::min(mTakeUpSec, clockwork::kAnchorTakeUpShare * blockSec);
+        mTakeUpSec -= step;
+        pull = -step;
     } else {
         pull = std::clamp(drift * clockwork::kDriftIirGain,
                           -clockwork::kClockSlewPerBlock, clockwork::kClockSlewPerBlock);
@@ -141,6 +154,8 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate, 
                                      std::memory_order_release);
     mDriftSmoothedSec = 0.0;
     mSettleCount = 0;   // the anchor settles over the blocks to come (updateAudioThreadNTP)
+    mTakeUpSec = 0.0;
+    mLastSamplePos = samplePosition;
     mLastDriftUs.store(0, std::memory_order_relaxed);
     mAnchors.fetch_add(1, std::memory_order_relaxed);
 }

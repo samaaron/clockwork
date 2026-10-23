@@ -54,6 +54,13 @@ inline constexpr double kClockSlewPerBlock = 2.0e-6;
 // deaf to a callback that woke late — and the bound holds it from there. On a
 // host whose readings are exact the median is the reading, and nothing moves.
 inline constexpr uint32_t kAnchorSettleBlocks = 64;
+// A settle that would move the clock BACK (the anchor read late: the clock
+// ahead of the wall by a render burst, as a context filling its output buffer
+// at start renders one) is taken up by slowing instead — this share of each
+// block's length a block — so a reader never sees time go back and the clock
+// is on the wall again within a few dozen blocks; what is scheduled meanwhile
+// lands late by at most what is still to take up.
+inline constexpr double kAnchorTakeUpShare = 0.125;
 
 // The audio was away (clockwork_audio_back): the gap is the time that passed
 // since the last block less the audio rendered in it, measured by the host as

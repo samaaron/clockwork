@@ -53,13 +53,15 @@ inline void resetAudioBlockClock(ClockworkClock& clock, LinkAudioHost& linkAudio
 // where it has none): first the audio was away? (clockwork_audio_back, the
 // one rule on every target), asked before the clock moves with this driver's
 // count of the audio rendered, so a gap anchors both clocks afresh at this
-// block.
+// block. Not for a freewheeling clock, which has no wall clock: a driver
+// preempted on a busy machine, or a host pumping blocks whenever it likes,
+// must not move the timeline a stream is placed on.
 inline BlockTime beginAudioBlock(ClockworkClock& clock, LinkAudioHost& linkAudio,
                                  double samplePos, double sampleRate,
                                  uint32_t outputLatencyFrames,
                                  PerformanceMetrics* metrics, double wallNtp, double monoSecs,
                                  double quantum = 4.0) {
-    if (clockwork_audio_back(wallNtp, monoSecs, samplePos / sampleRate))
+    if (!clock.freewheelClock() && clockwork_audio_back(wallNtp, monoSecs, samplePos / sampleRate))
         resetAudioBlockClock(clock, linkAudio, samplePos, sampleRate, wallNtp, outputLatencyFrames);
     const double ntp = clock.updateAudioThreadNTP(samplePos, sampleRate, wallNtp);
     clock.publishSampleClock(samplePos, sampleRate, ntp, outputLatencyFrames);

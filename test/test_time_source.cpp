@@ -212,26 +212,43 @@ TEST_CASE("TimeSource: an anchor settles on the median of its first readings", "
     }
 }
 
-TEST_CASE("TimeSource: an anchor that read late is not moved back by the settle; the bound takes it up",
-          "[TimeSource]") {
+TEST_CASE("TimeSource: an anchor that read late is not moved back by the settle; it is taken up by "
+          "slowing, and the clock is on the wall within a few dozen blocks", "[TimeSource]") {
     // The clock anchored ahead of the wall (a reading late in a render
-    // burst; a new worklet going on from the floor the arena carries, above
-    // the wall): the readings that follow say so, and the median would move
-    // the clock back. Time never goes back: the settle moves it on only, and
-    // a late anchor is taken up at the bound like any residual.
+    // burst; a context filling its output buffer at start): the readings
+    // that follow say so, and the median would move the clock back. Time
+    // never goes back: the settle takes the correction up by slowing,
+    // kAnchorTakeUpShare of a block a block, until it is on the wall.
     ClockRig rig;
     rig.anchorOn(rig.trueWall() + 0.0055);
+    const uint32_t anchors = rig.ts.anchors();
     const double anchored = rig.ts.now();
     double prev = anchored;
-    for (uint32_t i = 0; i < clockwork::kAnchorSettleBlocks + 10; ++i) {
+    for (uint32_t i = 0; i < clockwork::kAnchorSettleBlocks; ++i) {
         const double ntp = rig.step();
-        REQUIRE(ntp - prev >= kDt - clockwork::kClockSlewPerBlock - kUlp);   // never back, through the settle
+        REQUIRE(ntp - prev >= kDt - kUlp);   // held on the reading through the settle
         prev = ntp;
     }
-    REQUIRE(prev - anchored >= (clockwork::kAnchorSettleBlocks + 10) * kDt - (clockwork::kAnchorSettleBlocks + 10) * clockwork::kClockSlewPerBlock - kUlp);
-    // Still ahead of the wall by nearly the anchor's error: the bound is taking it up.
-    REQUIRE(prev - rig.wall > 0.0055 - (clockwork::kAnchorSettleBlocks + 10) * clockwork::kClockSlewPerBlock - kUlp);
-    REQUIRE(prev - rig.wall < 0.0055);
+    REQUIRE(prev - rig.wall == Approx(0.0055).margin(kUlp));
+    // Taken up: never back, no slower than the share says, and done in the
+    // blocks the share says (5.5 ms at an eighth of 2.67 ms a block: 17).
+    const uint32_t blocks = static_cast<uint32_t>(std::ceil(0.0055 / (clockwork::kAnchorTakeUpShare * kDt)));
+    for (uint32_t i = 0; i < blocks; ++i) {
+        const double ntp = rig.step();
+        REQUIRE(ntp - prev >= kDt * (1.0 - clockwork::kAnchorTakeUpShare) - kUlp);
+        REQUIRE(ntp - prev <= kDt + kUlp);
+        prev = ntp;
+    }
+    REQUIRE(prev - rig.wall == Approx(0.0).margin(2 * kUlp));
+    // And on the wall from here, at the bound.
+    for (int i = 0; i < 100; ++i) {
+        const double ntp = rig.step();
+        REQUIRE(ntp - prev >= kDt - clockwork::kClockSlewPerBlock - kUlp);
+        REQUIRE(ntp - prev <= kDt + clockwork::kClockSlewPerBlock + kUlp);
+        prev = ntp;
+    }
+    REQUIRE(prev - rig.wall == Approx(0.0).margin(kAlignmentFloor + kUlp));
+    REQUIRE(rig.ts.anchors() == anchors);
 }
 
 TEST_CASE("TimeSource: a wall clock that went forward is followed no faster than the bound; "

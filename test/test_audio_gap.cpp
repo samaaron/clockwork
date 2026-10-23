@@ -163,3 +163,26 @@ TEST_CASE("audio block clock: a block after a gap steps the clock there", "[gap]
     CHECK(b.ntp == Catch::Approx(wall0 + 0.8).margin(1e-5));
     CHECK(linesSaying(fix, "audio resumed") == 1);
 }
+
+TEST_CASE("audio block clock: a freewheeling clock sees no gap, having no wall clock", "[gap][clock][block]") {
+    // Deterministic rendering (ClockworkClock::setFreewheelClock): a driver
+    // preempted on a busy machine, or a host pumping blocks whenever it likes,
+    // must not move the clock, and the gap rule is a wall-clock rule.
+    EngineFixture fix(pumped());
+    const double wall0 = wallClockNTP();
+    const double mono0 = clockwork::monotonicSeconds();
+    ClockworkClock clock;
+    LinkAudioHost host(clock);
+    const double sr = 48000.0;
+    clock.setFreewheelClock(true);
+    clockwork_audio_starts(wall0, mono0);
+    clockwork::resetAudioBlockClock(clock, host, 0.0, sr, wall0);
+    const uint32_t anchors = clock.clockAnchors();
+    clockwork::beginAudioBlock(clock, host, 0.0, sr, 0, nullptr, wall0, mono0);
+    // 0.7 s late with one block rendered: a driver preempted. No wall clock, no gap.
+    const clockwork::BlockTime b = clockwork::beginAudioBlock(clock, host, 128.0, sr, 0, nullptr, wall0 + 0.7, mono0 + 0.7);
+    CHECK(clock.clockAnchors() == anchors);
+    CHECK(b.ntp == Catch::Approx(wall0 + 128.0 / sr).margin(1e-5));
+    CHECK(linesSaying(fix, "audio resumed") == 0);
+}
+

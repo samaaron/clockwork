@@ -150,9 +150,14 @@ private:
     std::atomic<uint32_t> mAnchors{0};
     double                mDriftSmoothedSec{0.0};   // audio thread only
     // An anchor settling (kAnchorSettleBlocks): the residual at each block
-    // since it, and how many so far. Audio thread only.
+    // since it, and how many so far; what a settle that would have moved the
+    // clock back has still to take up by slowing (kAnchorTakeUpShare), and
+    // the sample position at the last block, for the block's length. Audio
+    // thread only.
     double                mSettleResidual[clockwork::kAnchorSettleBlocks]{};
     uint32_t              mSettleCount{clockwork::kAnchorSettleBlocks};
+    double                mTakeUpSec{0.0};
+    double                mLastSamplePos{0.0};
     // IIR-smoothed audio-thread NTP. Bit-pattern in uint64 because
     // std::atomic<double> isn't lock-free everywhere.
     std::atomic<uint64_t> mBaseNTPBits{0};
