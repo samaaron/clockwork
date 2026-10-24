@@ -52,7 +52,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 256;   // Performance metrics: 64 fields * 4 bytes = 256 bytes (multiple of 8)
+constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 65 in use
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -693,6 +693,12 @@ struct alignas(4) PerformanceMetrics {
     // block, the audio back after being away, a new context — each a step
     // in the clock a reader would want to know about (clock/TimeSource.h).
     std::atomic<uint32_t> clock_anchors;             // 63
+    // Timed events the scheduler dropped for coming due later than the host
+    // allows (clockwork_set_timed_event_late_limit_ms; 0, the default, allows
+    // any lateness and nothing is ever dropped for it). Not a want-of-room
+    // drop: those are scheduler_queue_dropped.
+    std::atomic<uint32_t> scheduler_late_dropped;    // 64
+    std::atomic<uint32_t> reserved[15];              // 65-79: room for what comes next, 0
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -1250,6 +1256,7 @@ CLOCKWORK_ASSERT_METRIC(malloc_bytes_after_boot,         61);
 CLOCKWORK_ASSERT_METRIC(egress_frames_undelivered,       62);
 CLOCKWORK_ASSERT_METRIC(clock_drift_us,                  50);
 CLOCKWORK_ASSERT_METRIC(clock_anchors,                   63);
+CLOCKWORK_ASSERT_METRIC(scheduler_late_dropped,          64);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
 // regions that follow (ClockworkClockState) are 8-byte aligned and read via

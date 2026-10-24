@@ -124,19 +124,19 @@ export const METRICS_SCHEMA = {
     clockDriftUs:                 { offset: 50, type: 'gauge',    unit: 'us',    signed: true, description: 'The difference between the audio clock and the wall clock (µs, signed), smoothed; a jump means the audio clock was re-anchored' },
     clockOffsetMs:                { offset: 51, type: 'gauge',    unit: 'ms',    signed: true, description: 'Clock offset for multi-system sync' },
     audioContextState:            { offset: 52, webOnly: true, type: 'enum',     values: ['unknown', 'running', 'suspended', 'closed', 'interrupted'], description: 'AudioContext state' },
-    inBufferCapacity:             { offset: 64, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
-    outBufferCapacity:            { offset: 65, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
-    nrtOutBufferCapacity:          { offset: 66, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
-    mode:                         { offset: 67, webOnly: true, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
+    inBufferCapacity:             { offset: 80, type: 'constant', unit: 'bytes', description: 'IN ring buffer capacity' },
+    outBufferCapacity:            { offset: 81, type: 'constant', unit: 'bytes', description: 'OUT ring buffer capacity' },
+    nrtOutBufferCapacity:          { offset: 82, type: 'constant', unit: 'bytes', description: 'NRT-out ring buffer capacity' },
+    mode:                         { offset: 83, webOnly: true, type: 'enum',     values: ['sab', 'postMessage'], description: 'Transport mode' },
 
     // Audio diagnostics [66-72] (main thread, Chrome playbackStats + cross-browser health)
-    glitchCount:                  { offset: 68, webOnly: true, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
-    glitchDurationMs:             { offset: 69, webOnly: true, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
-    averageLatencyUs:             { offset: 70, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
-    maxLatencyUs:                 { offset: 71, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
-    audioHealthPct:               { offset: 72, webOnly: true, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
-    totalFramesDurationMs:        { offset: 73, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
-    hasPlaybackStats:             { offset: 74, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
+    glitchCount:                  { offset: 84, webOnly: true, type: 'counter',  unit: 'count', description: 'Chrome only: audio underrun/glitch events' },
+    glitchDurationMs:             { offset: 85, webOnly: true, type: 'gauge',    unit: 'ms',    description: 'Chrome only: total silence from audio underruns' },
+    averageLatencyUs:             { offset: 86, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: average audio output latency' },
+    maxLatencyUs:                 { offset: 87, webOnly: true, type: 'gauge',    unit: 'us',    description: 'Chrome only: maximum audio output latency' },
+    audioHealthPct:               { offset: 88, webOnly: true, type: 'gauge',    unit: '%',     description: 'Cross-browser: fraction of expected audio frames delivered (100% = no issues)' },
+    totalFramesDurationMs:        { offset: 89, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
+    hasPlaybackStats:             { offset: 90, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
 
     // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush; the slots the buffer
     // pool's metrics once held)
@@ -158,6 +158,7 @@ export const METRICS_SCHEMA = {
     // page delivers its replies itself, and counts its own losses (oscInMessagesDropped).
     egressFramesUndelivered:      { offset: 62, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full. 0 in a healthy engine' },
     clockAnchors:                 { offset: 63, type: 'counter',  unit: 'count', description: 'Times the audio clock was re-anchored since boot' },
+    engineSchedulerLateDropped:   { offset: 64, type: 'counter',  unit: 'count', description: 'Timed events dropped for coming due later than the host allows (schedulerLateLimitMs); 0 unless a host set a limit' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -199,6 +200,7 @@ export const METRICS_SCHEMA = {
           { label: 'queue',   tooltip: COMPOSITES.schedulerQueueCurrentPeak.description, cells: [{ key: 'engineSchedulerDepth' }, { sep: ' | ' }, { key: 'engineSchedulerPeakDepth', kind: 'muted' }] },
           { label: 'dropped', cells: [{ key: 'engineSchedulerDropped', kind: 'error' }] },
           { label: 'lates',   cells: [{ key: 'engineSchedulerLates', kind: 'error' }] },
+          { label: 'late, dropped', tooltip: 'Timed events dropped for coming due later than the host allows; 0 unless a host set a limit', cells: [{ key: 'engineSchedulerLateDropped', kind: 'error' }] },
           { label: 'max | last', tooltip: COMPOSITES.schedulerLateWorstLast.description, cells: [{ key: 'engineSchedulerMaxLateMs', kind: 'error' }, { sep: ' | ' }, { key: 'engineSchedulerLastLateMs', kind: 'dim' }, { text: ' ms', kind: 'muted' }] },
         ]
       },

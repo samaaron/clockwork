@@ -28,7 +28,7 @@ export class MetricsReader {
   #cachedSnapshotBuffer = null;
 
   // Merged array: the C++ struct's words from the SAB/snapshot (SAB_METRICS_WORDS), the context's own written over
-  // 50-52 and from 64, the guest's from GUEST_METRICS_BASE
+  // 50-52 and from 80, the guest's from GUEST_METRICS_BASE
   #mergedArray = new Uint32Array(MetricsOffsets.MERGED_ARRAY_SIZE);
   #mergedDV = new DataView(this.#mergedArray.buffer);
 
@@ -152,6 +152,8 @@ export class MetricsReader {
       // the engine's clock: against the host's wall (µs, signed) and how often anchored afresh
       clockDriftUs: m[MetricsOffsets.CLOCK_DRIFT_US] | 0,
       clockAnchors: m[MetricsOffsets.CLOCK_ANCHORS],
+      // timed events dropped as later than the host allows (0 unless a host set a limit)
+      engineSchedulerLateDropped: m[MetricsOffsets.SCHEDULER_LATE_DROPPED],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)
