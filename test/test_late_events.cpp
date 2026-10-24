@@ -12,13 +12,21 @@
 #include "EngineFixture.h"
 #include "clockwork_client.h"
 #include "lanes/lanes.h"
-#include "shared_memory.h"
+#include "metrics_schema.h"
 
 #include <string>
-
-extern PerformanceMetrics* metrics;   // the engine's block, as the engine sees it (audio_processor.cpp)
+#include <vector>
 
 namespace {
+
+// The engine's metrics block, as a client reads it (clockwork_client_metrics).
+struct Counts { uint32_t lates, dropped, lateDropped; };
+Counts counts(EngineFixture& fix) {
+    std::vector<uint32_t> words(clockwork::metrics_schema::kMetricWords, 0);
+    const uint32_t n = clockwork_client_metrics(fix.engine().egressClient(), words.data(), static_cast<uint32_t>(words.size()));
+    REQUIRE(n > 64);
+    return { words[8], words[5], words[64] };   // scheduler_lates, scheduler_queue_dropped, scheduler_late_dropped
+}
 
 ClockworkEngine::Config pumped() {
     auto cfg = EngineFixture::defaultConfig();
@@ -55,28 +63,24 @@ TEST_CASE("late events: a timed event that comes due late plays, late, and is co
     LimitGuard guard;
     clockwork_set_timed_event_late_limit_ms(0);
     EngineFixture fix(pumped());
-    REQUIRE(metrics != nullptr);
-    const uint32_t lates0   = metrics->scheduler_lates.load();
-    const uint32_t dropped0 = metrics->scheduler_queue_dropped.load();
-    const uint32_t late0    = metrics->scheduler_late_dropped.load();
+    const Counts before = counts(fix);
 
     // Two seconds late already as it is sent.
     fix.send(osc_test::bundle(timetag(clockNtp(fix) - 2.0), { osc_test::message("/dummy/events/get") }));
     OscReply r;
     REQUIRE(fix.waitForReply("/dummy/events", r));
-    CHECK(metrics->scheduler_lates.load() == lates0 + 1);
-    CHECK(metrics->scheduler_queue_dropped.load() == dropped0);
-    CHECK(metrics->scheduler_late_dropped.load() == late0);
+    const Counts after = counts(fix);
+    CHECK(after.lates == before.lates + 1);
+    CHECK(after.dropped == before.dropped);
+    CHECK(after.lateDropped == before.lateDropped);
 }
 
 TEST_CASE("late events: with the latest a timed event may play set by the host, a later one is dropped, counted "
           "as such, and said", "[scheduler][late][engine]") {
     LimitGuard guard;
     EngineFixture fix(pumped());
-    REQUIRE(metrics != nullptr);
     clockwork_set_timed_event_late_limit_ms(500);
-    const uint32_t dropped0 = metrics->scheduler_queue_dropped.load();
-    const uint32_t late0    = metrics->scheduler_late_dropped.load();
+    const Counts before = counts(fix);
     OscReply r;
 
     // Within the limit: plays, late.
@@ -86,8 +90,9 @@ TEST_CASE("late events: with the latest a timed event may play set by the host, 
     // Beyond it: dropped, counted as late and dropped (not as want of room), said once.
     fix.send(osc_test::bundle(timetag(clockNtp(fix) - 2.0), { osc_test::message("/dummy/events/get") }));
     CHECK_FALSE(fix.waitForReply("/dummy/events", r, 300));
-    CHECK(metrics->scheduler_late_dropped.load() == late0 + 1);
-    CHECK(metrics->scheduler_queue_dropped.load() == dropped0);
+    const Counts after = counts(fix);
+    CHECK(after.lateDropped == before.lateDropped + 1);
+    CHECK(after.dropped == before.dropped);
     CHECK(linesSaying(fix, "was dropped: the host allows 500 ms") == 1);
 
     // Back to any lateness: plays again.
