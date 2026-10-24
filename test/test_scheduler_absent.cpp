@@ -56,7 +56,6 @@
 // than via audio_processor.h, which pulls in the <emscripten/...> shim that is
 // not on this target's include path — the same reason test_lanes.cpp does it.
 extern "C" {
-    extern PerformanceMetrics* metrics;
 }
 
 namespace {
@@ -187,9 +186,8 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
-    REQUIRE(metrics != nullptr);
     const uint32_t before =
-        metrics->scheduler_queue_dropped.load(std::memory_order_relaxed);
+        lanes_test::metricWord(5);
 
     // A well-formed "/clockwork/schedule <timetag> <blob>" — well-formed on
     // purpose, so what is being tested is the missing store and not a parse
@@ -208,7 +206,7 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
 
     // Counted where a client can see it: refused is not the same as lost, and
     // the metric is the difference.
-    CHECK(metrics->scheduler_queue_dropped.load(std::memory_order_relaxed) == before + 1u);
+    CHECK(lanes_test::metricWord(5) == before + 1u);
 
     // The inner message must NOT have been delivered. Refusing the verb and
     // then quietly performing it immediately would be the worst answer of all
@@ -217,7 +215,7 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
     CHECK(findAddress(frames, "/dummy/pong") == nullptr);
 
     // And the queue depth stays 0, because there is no queue.
-    CHECK(metrics->scheduler_queue_depth.load(std::memory_order_relaxed) == 0u);
+    CHECK(lanes_test::metricWord(3) == 0u);
 
     // The client that sent it is told, naming the switch: the metric says
     // something was refused, this says what and why.

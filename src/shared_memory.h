@@ -22,6 +22,7 @@
 // live in clockwork_clock_state.h: the one header a DSP includes to read
 // DspConfig::clock, so it must not depend on the layout below.
 #include "clockwork_clock_state.h"
+#include "metrics_history.h"      // the history region's size (kRegionBytes)
 
 // ============================================================================
 // BUFFER LAYOUT CONFIGURATION
@@ -428,7 +429,10 @@ constexpr uint32_t ARENA_HEADER_START    = 0;
 constexpr uint32_t ARENA_HEADER_SIZE     = CLOCKWORK_ARENA_HEADER_BYTES;
 constexpr uint32_t CLOCKWORK_STATE_START = ARENA_HEADER_START + ARENA_HEADER_SIZE;
 constexpr uint32_t METRICS_START         = CLOCKWORK_STATE_START;
-constexpr uint32_t NATIVE_STATS_START    = METRICS_START + METRICS_SIZE;
+// What every counter and gauge did over the last hour (metrics_history.h).
+constexpr uint32_t METRICS_HISTORY_START = alignArena16(METRICS_START + METRICS_SIZE);
+constexpr uint32_t METRICS_HISTORY_SIZE  = clockwork::metrics_history::kRegionBytes;
+constexpr uint32_t NATIVE_STATS_START    = alignArena16(METRICS_HISTORY_START + METRICS_HISTORY_SIZE);
 // The host's clock anchors, as one region: the NTP start time (f64) then the
 // two offsets. The three names below are what the code has always used.
 constexpr uint32_t CLOCK_ANCHORS_START   = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
@@ -789,6 +793,7 @@ struct ShmReaderLayout {
     uint32_t control_ring_offset = 0, control_ring_size = 0;   // 0: an arena with none
     uint32_t control_offset = 0,      control_bytes = 0;
     uint32_t metrics_offset = 0,      metrics_bytes = 0;
+    uint32_t metrics_history_offset = 0, metrics_history_bytes = 0;   // 0: an arena with none
     uint32_t window_offset = 0,       window_bytes = 0;
     uint32_t clock_state_offset = 0,  clock_state_bytes = 0;
     uint32_t audio_offset = 0, audio_slot_count = 0, audio_slot_bytes = 0;
@@ -812,6 +817,7 @@ struct ShmReaderLayout {
         L.control_ring_offset = CONTROL_RING_START; L.control_ring_size = CONTROL_RING_SIZE;
         L.control_offset      = RING_CURSORS_START;        L.control_bytes     = RING_CURSORS_SIZE;
         L.metrics_offset      = METRICS_START;        L.metrics_bytes     = METRICS_SIZE;
+        L.metrics_history_offset = METRICS_HISTORY_START; L.metrics_history_bytes = METRICS_HISTORY_SIZE;
         L.window_offset       = GUEST_WINDOW_START;     L.window_bytes      = GUEST_WINDOW_SIZE;
         L.clock_state_offset  = CLOCK_STATE_START;    L.clock_state_bytes = CLOCK_STATE_SIZE;
         L.audio_offset        = SCOPE_START;
@@ -875,6 +881,9 @@ struct ShmReaderLayout {
         }
         L.control_offset      = ctl->offset;  L.control_bytes     = ctl->bytes;
         L.metrics_offset      = met->offset;  L.metrics_bytes     = met->geom[CLOCKWORK_GEOM_METRICS_FIELDS] * 4u;
+        if (const auto* hist = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY)) {
+            L.metrics_history_offset = hist->offset; L.metrics_history_bytes = hist->bytes;
+        }
         L.window_offset       = win->offset;  L.window_bytes      = win->bytes;
         L.clock_state_offset  = clk->offset;  L.clock_state_bytes = clk->bytes;
         L.audio_offset        = scope->offset;
@@ -1013,6 +1022,11 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     // after it (docs/RESTARTS.md); the gauges are rewritten within a block.
     put(CLOCKWORK_ARENA_CLOCKWORK_METRICS,         METRICS_START,         METRICS_SIZE,         CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kColdBoot, { METRICS_SIZE / 4u });
+    // Cold boot only: a rebuild, or a new worklet over the same memory, carries the hour on.
+    put(CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY, METRICS_HISTORY_START, METRICS_HISTORY_SIZE, CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kBlock, kFast, kColdBoot, { clockwork::metrics_history::kLevels, clockwork::metrics_history::kBuckets,
+                                     clockwork::metrics_history::kMetrics, clockwork::metrics_history::kWords,
+                                     clockwork::metrics_history::kHeaderBytes });
     put(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublic,

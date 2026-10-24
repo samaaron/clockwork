@@ -89,6 +89,10 @@ inline constexpr uint32_t kReturnsBytes = 4 * 1024 * 1024;
 const uint8_t* guestMemory();   // the arena
 uint8_t*       assets();         // client writes, guest reads
 const uint8_t* returns();        // guest writes, client reads
+// One word of the engine's metrics block, by its offset (metrics_schema.h),
+// as a client reads it (clockwork_client_metrics) — never the engine's own
+// pointer to it.
+uint32_t metricWord(uint32_t offset);
 
 // The NTP instant the fixture calls frame 0. There is no real-time clock in
 // play: the fixture self-clocks from kBaseNtp + frames/rate exactly as a

@@ -490,6 +490,26 @@ typedef struct ClockworkClientSampleClock {
 
 ClockworkStatus clockwork_client_sample_clock(ClockworkClient* c, ClockworkClientSampleClock* out);
 
+/* What a metric did over a window of the last `buckets` buckets of `level` of
+ * the metrics history (metrics_history.h): level 0 is a second a bucket, 1
+ * ten seconds, 2 a minute; `metric_offset` is the metric's word in the
+ * metrics block (metrics_schema.h). The lowest and highest value seen in the
+ * window, the last, the change across it (a counter's count in that time),
+ * and how many buckets it found recorded — 0 for a constant, which has no
+ * history, or before the engine has rendered a block. CLOCKWORK_E_ABSENT on
+ * an arena with no history region. */
+typedef struct ClockworkClientMetricWindow {
+    uint32_t struct_bytes;
+    uint32_t covered;
+    int64_t  low;
+    int64_t  high;
+    int64_t  last;
+    int64_t  delta;
+} ClockworkClientMetricWindow;
+
+ClockworkStatus clockwork_client_metrics_history(ClockworkClient* c, uint32_t level, uint32_t buckets,
+                                                 uint32_t metric_offset, ClockworkClientMetricWindow* out);
+
 /* The NTP instant `frame` is heard at, under a snapshot the caller already
  * has: the formula above, here so that every binding agrees to the bit. */
 double clockwork_client_ntp_at_frame(const ClockworkClientSampleClock* clock, uint64_t frame);

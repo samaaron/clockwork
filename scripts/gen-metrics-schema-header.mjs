@@ -42,6 +42,24 @@ export function renderHeader(schema = METRICS_SCHEMA) {
     `    { ${m.index}, "${cEscape(m.key)}", "${cEscape(m.unit ?? '')}", "${cEscape(m.description)}" },`);
   const layout = renderLayoutTables(schema);
 
+  // The engine's block as words (PerformanceMetrics, METRICS_SIZE / 4): which
+  // are signed, and which keep a history (metrics_history.h) — every counter
+  // and gauge; a constant, and a word not in use, have none.
+  const kMetricWords = 80;
+  const engineWords = metrics.filter((m) => m.offset < kMetricWords && !m.webOnly);
+  const signedWords = new Array(kMetricWords).fill(false);
+  const historySlot = new Array(kMetricWords).fill(-1);
+  let historyCount = 0;
+  for (const m of engineWords) {
+    signedWords[m.offset] = Boolean(m.signed);
+    if (m.type !== 'constant') historySlot[m.offset] = historyCount++;
+  }
+  const wordTable = (arr, per = 16) => {
+    const rows = [];
+    for (let i = 0; i < arr.length; i += per) rows.push('    ' + arr.slice(i, i + per).join(', ') + ',');
+    return rows.join('\n');
+  };
+
   return `// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 //
@@ -98,6 +116,17 @@ struct CompositeInfo
 inline constexpr CompositeInfo kComposites[] = {
 ${compositeLines.join('\n')}
 };
+
+// The engine's block as words: whether each is signed, and its slot in the
+// metrics history (metrics_history.h), -1 for a constant or a word not in use.
+inline constexpr uint32_t kMetricWords = ${kMetricWords};
+inline constexpr bool kMetricSigned[kMetricWords] = {
+${wordTable(signedWords.map((b) => (b ? 'true' : 'false')))}
+};
+inline constexpr int8_t kMetricHistorySlot[kMetricWords] = {
+${wordTable(historySlot)}
+};
+inline constexpr uint32_t kMetricHistoryCount = ${historyCount};
 
 inline const char* descriptionForComposite(const char* key)
 {

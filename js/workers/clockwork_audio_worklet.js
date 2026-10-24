@@ -402,7 +402,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
         if (this.bufferConstants && this.wasmMemory) {
             const bc = this.bufferConstants;
-            const size = bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE;
+            const size = bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE + (bc.METRICS_HISTORY_SIZE || 0);
             p.snapshot.buffer = new ArrayBuffer(size);
             p.snapshot.bufferView = new Uint8Array(p.snapshot.buffer);
             p.snapshot.size = size;
@@ -417,6 +417,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 this.arenaBase + bc.METRICS_START, bc.METRICS_SIZE);
             p.snapshot.windowView = new Uint8Array(this.wasmMemory.buffer,
                 this.arenaBase + bc.GUEST_WINDOW_START, bc.GUEST_WINDOW_SIZE);
+            // and the metrics history after the window (metrics_history.js)
+            p.snapshot.historyView = bc.METRICS_HISTORY_SIZE
+                ? new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.METRICS_HISTORY_START, bc.METRICS_HISTORY_SIZE)
+                : null;
         }
     }
 
@@ -636,9 +640,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         const pool = this.pmPools.snapshot;
         if (!pool.buffer || !pool.metricsView) return false;
 
-        // Metrics, then the window — pre-allocated views, no allocation.
+        // Metrics, then the window, then the metrics history — pre-allocated views, no allocation.
         pool.bufferView.set(pool.metricsView, 0);
         pool.bufferView.set(pool.windowView, pool.metricsView.length);
+        if (pool.historyView) pool.bufferView.set(pool.historyView, pool.metricsView.length + pool.windowView.length);
 
         // Send via postMessage (structured clone - pool remains valid for reuse)
         this.treeSnapshotsSent++;

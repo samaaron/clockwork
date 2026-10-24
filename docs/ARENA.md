@@ -22,7 +22,8 @@ memory, which lives outside this span. See BOUNDARY.md.)
   ├──────────────────────────────┤
   │ CLOCKWORK'S HALF             │  formats clockwork defines; the same under every guest
   │  clockwork-state             │  ── public state any client reads
-  │   metrics · native stats     │
+  │   metrics · metrics history  │
+  │   native stats               │
   │   clock anchors · clock state│
   │   sample clock · channel map │
   ├ · · · · · · · · · · · · · · ·┤
@@ -104,6 +105,7 @@ The regions:
 | region | area | owner | audience | cadence | tier | holds |
 |---|---|---|---|---|---|---|
 | `clockwork-metrics` | state | clockwork | public | block | fast | the counters the HUD shows |
+| `clockwork-metrics-history` | state | clockwork | public | block | fast | what every counter and gauge did over the last hour: three rings of sixty buckets, a second, ten seconds and a minute each, holding the lowest, highest and last value seen (`metrics_history.h`); reset at a cold boot only |
 | `clockwork-native-stats` | state | clockwork | public | block | fast | DSP load, overruns, control-thread timings (zeros on the web) |
 | `clockwork-clock-anchors` | state | host | public | block | fast | the host's global clock offset (the clock anchors itself: TimeSource.h) |
 | `clockwork-clock-state` | state | clockwork | public + guest | block | fast | the Link timeline: tempo, beat origin, transport, meter |

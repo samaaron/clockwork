@@ -198,6 +198,7 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 #include "lanes/lanes_internal.h"
 #include "lanes/ring_drain.h"
 #include "lanes/ring_marks.h"       // where a generation's messages end in the in ring
+#include "metrics_history.h"        // what every counter and gauge did over the last hour
 #include "workers/RingBufferWriter.h"   // the in ring's writer lock, which a teardown's mark takes
 
 // Pre-allocated heap for RT-safe allocations
@@ -475,6 +476,7 @@ extern "C" {
     uint8_t* shared_memory = nullptr;
     RingCursors* cursors = nullptr;
     PerformanceMetrics* metrics = nullptr;
+    static clockwork::metrics_history::Writer g_metrics_history;   // the hour's history of the metrics, the audio thread's to write
     std::atomic<int32_t>* global_offset = nullptr;
     bool memory_initialized = false;
 
@@ -1647,6 +1649,7 @@ extern "C" {
         for (uint32_t i = 0; i < bytes / 4u; ++i) w[i].store(0, std::memory_order_relaxed);
     }
     static void reset_metrics()      { reset_words(METRICS_START, METRICS_SIZE); }
+    static void reset_metrics_history() { reset_words(METRICS_HISTORY_START, METRICS_HISTORY_SIZE); }
     static void reset_native_stats() { reset_words(NATIVE_STATS_START, NATIVE_STATS_SIZE); }
     // The host's: NTP start is write-once from the host once its audio runs,
     // drift and the global offset are what it measured about this machine's
@@ -1738,6 +1741,7 @@ extern "C" {
     struct RegionReset { uint32_t id; void (*reset)(); };
     static constexpr RegionReset kRegionResets[] = {
         { CLOCKWORK_ARENA_CLOCKWORK_METRICS,         &reset_metrics },
+        { CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY, &reset_metrics_history },
         { CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    &reset_native_stats },
         { CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   &reset_clock_anchors },
         { CLOCKWORK_ARENA_CLOCKWORK_CLOCK_STATE,     &reset_clock_state },
@@ -1763,7 +1767,7 @@ extern "C" {
     // region added to the enum without a reset here does not compile, and
     // one listed twice does not either. The test holds the TABLE to this
     // list; this holds the list to the enum.
-    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING;
+    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY;
     static constexpr bool region_resets_cover_every_region() {
         if (sizeof(kRegionResets) / sizeof(kRegionResets[0]) != kRegionLast) return false;
         for (uint32_t id = 1; id <= kRegionLast; ++id) {
@@ -1951,6 +1955,7 @@ extern "C" {
             // public segment when one was supplied, so external observers read
             // them with no redirect.
             metrics = reinterpret_cast<PerformanceMetrics*>(shared_memory + METRICS_START);
+            g_metrics_history.bind(shared_memory + METRICS_HISTORY_START);
 
             global_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + GLOBAL_OFFSET_START);
 
@@ -3057,6 +3062,9 @@ extern "C" {
         // block, for an increment nobody was racing.
         const uint32_t pc = metrics->process_count.load(std::memory_order_relaxed) + 1;
         metrics->process_count.store(pc, std::memory_order_relaxed);
+        // The hour's history of every counter and gauge, a bucket at a time
+        // on the engine's clock (metrics_history.h).
+        g_metrics_history.record(reinterpret_cast<const uint32_t*>(metrics), current_ntp);
 
         // Host telemetry. Sample the ring fill every block so peaks stay a true
         // high-water mark (a burst can fill and drain within a few blocks); this is cheap

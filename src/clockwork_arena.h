@@ -210,6 +210,9 @@ enum ClockworkArenaRegion {
     /* ── clockwork-transport, continued: a later addition keeps its number ── */
     CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING    = 17,  /* clockwork's own control verbs: ControlRingCursors
                                                         then the ring; lifetime arena (docs/RESTARTS.md) */
+    /* ── clockwork-state, continued: a later addition keeps its number ── */
+    CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY = 18,  /* what every counter and gauge did over the last hour:
+                                                        three rings of buckets (metrics_history.h) */
 };
 
 /* The two scope slots, as slot indices into the scope: what left for the
@@ -254,6 +257,13 @@ enum ClockworkArenaGeom {
     CLOCKWORK_GEOM_TAP_CHANNELS        = 5,
     CLOCKWORK_GEOM_TAP_TRACK_SLOTS     = 6,
     CLOCKWORK_GEOM_TAP_TRACK_FIRST     = 7,   /* the index of the first track slot (== TAP_SLOTS) */
+    /* the metrics history: levels (rings), buckets a ring, metrics with a
+     * history, words a bucket (low, high, last), and the header's bytes */
+    CLOCKWORK_GEOM_HISTORY_LEVELS      = 0,
+    CLOCKWORK_GEOM_HISTORY_BUCKETS     = 1,
+    CLOCKWORK_GEOM_HISTORY_METRICS     = 2,
+    CLOCKWORK_GEOM_HISTORY_WORDS       = 3,
+    CLOCKWORK_GEOM_HISTORY_HEADER_BYTES = 4,
 };
 
 /* One area. 24 bytes. `base` and `bytes` are 64-bit so an address in a

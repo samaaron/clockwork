@@ -54,6 +54,7 @@ export const REGION = Object.freeze({
   CLOCKWORK_RING_CURSORS: 9, CLOCKWORK_NODE_ID_COUNTER: 10, CLOCKWORK_IN_RING: 11, CLOCKWORK_RT_OUT_RING: 12,
   CLOCKWORK_NRT_OUT_RING: 13,
   CLOCKWORK_CONTROL_RING: 17,   // clockwork's own control verbs (docs/RESTARTS.md); a later addition, numbered after
+  CLOCKWORK_METRICS_HISTORY: 18,   // what every counter and gauge did over the last hour (metrics_history.js); a later addition
   GUEST_WINDOW: 14,
   GUEST_CONFIG: 15, GUEST_PERSIST: 16,
 });
@@ -67,6 +68,8 @@ export const GEOM = Object.freeze({
   // taps: a header, the guest's TAP_SLOTS slots, then TAP_TRACK_SLOTS track slots, one index space
   TAP_SLOTS: 0, TAP_HEADER_BYTES: 1, TAP_SLOT_BYTES: 2, TAP_SLOT_HEADER: 3, TAP_RING_FRAMES: 4, TAP_CHANNELS: 5,
   TAP_TRACK_SLOTS: 6, TAP_TRACK_FIRST: 7,
+  // the metrics history: levels (rings), buckets a ring, metrics with a history, words a bucket, the header's bytes
+  HISTORY_LEVELS: 0, HISTORY_BUCKETS: 1, HISTORY_METRICS: 2, HISTORY_WORDS: 3, HISTORY_HEADER_BYTES: 4,
   // the guest window: what the guest declared its window to be, 0 until it binds
   WINDOW_MAGIC: 0, WINDOW_VERSION: 1,
 });
@@ -231,6 +234,8 @@ function constantsFrom(region, h) {
   const sample = region(REGION.CLOCKWORK_SAMPLE_CLOCK), persist = region(REGION.GUEST_PERSIST), map = region(REGION.CLOCKWORK_CHANNEL_MAP);
   let controlRing = null;
   try { controlRing = region(REGION.CLOCKWORK_CONTROL_RING); } catch { /* an arena without one */ }
+  let history = null;
+  try { history = region(REGION.CLOCKWORK_METRICS_HISTORY); } catch { /* an arena without one */ }
   return {
     ARENA_VERSION: h.version,
     ARENA_INSTANCE_ID: h.instanceId,
@@ -256,6 +261,13 @@ function constantsFrom(region, h) {
 
     RING_CURSORS_START: cursors.offset, RING_CURSORS_SIZE: cursors.bytes,
     METRICS_START: metrics.offset, METRICS_SIZE: metrics.geom[GEOM.METRICS_FIELDS] * 4,
+    // The metrics history (metrics_history.js); 0 in an arena without one.
+    METRICS_HISTORY_START: history ? history.offset : 0, METRICS_HISTORY_SIZE: history ? history.bytes : 0,
+    METRICS_HISTORY_LEVELS: history ? history.geom[GEOM.HISTORY_LEVELS] : 0,
+    METRICS_HISTORY_BUCKETS: history ? history.geom[GEOM.HISTORY_BUCKETS] : 0,
+    METRICS_HISTORY_METRICS: history ? history.geom[GEOM.HISTORY_METRICS] : 0,
+    METRICS_HISTORY_WORDS: history ? history.geom[GEOM.HISTORY_WORDS] : 0,
+    METRICS_HISTORY_HEADER_BYTES: history ? history.geom[GEOM.HISTORY_HEADER_BYTES] : 0,
     GUEST_WINDOW_START: window.offset, GUEST_WINDOW_SIZE: window.bytes,
     GLOBAL_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_GLOBAL], GLOBAL_OFFSET_SIZE: 4,
     CLOCK_STATE_START: clock.offset, CLOCK_STATE_SIZE: clock.bytes,

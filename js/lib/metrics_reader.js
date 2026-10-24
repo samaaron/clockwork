@@ -77,6 +77,25 @@ export class MetricsReader {
   }
 
   /**
+   * The metrics history's words (metrics_history.js): the arena's region in
+   * SAB mode; in postMessage mode the copy the worklet's snapshot carries
+   * after the metrics and the guest's window. Null before either is there.
+   * @returns {Uint32Array|null}
+   */
+  historyWords() {
+    const bc = this.#bufferConstants;
+    if (!bc || !bc.METRICS_HISTORY_SIZE) return null;
+    if (this.#mode === 'sab') {
+      if (!this.#sharedBuffer) return null;
+      return new Uint32Array(this.#sharedBuffer, this.#arenaBase + bc.METRICS_HISTORY_START, bc.METRICS_HISTORY_SIZE >> 2);
+    }
+    const snap = this.#cachedSnapshotBuffer;
+    const at = bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE;
+    if (!snap || snap.byteLength < at + bc.METRICS_HISTORY_SIZE) return null;
+    return new Uint32Array(snap, at, bc.METRICS_HISTORY_SIZE >> 2);
+  }
+
+  /**
    * Update cached snapshot buffer (postMessage mode)
    * @param {ArrayBuffer} buffer - Snapshot from worklet
    */

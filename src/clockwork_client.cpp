@@ -16,6 +16,7 @@
 #include "owner.h"
 
 #include "shared_memory.h"
+#include "metrics_history.h"
 #include "clockwork_config.h"
 #include "in_ring_door.h"        // the in ring's boundary
 #include "lanes/ring_drain.h"
@@ -514,6 +515,25 @@ ClockworkStatus clockwork_client_sample_clock(ClockworkClient* handle,
     v.engine_frames         = snap.engine_frames;
     v.dac_ntp               = snap.dac_ntp;
     v.output_latency_frames = snap.output_latency_frames;
+    const size_t n = out->struct_bytes < sizeof(v) ? out->struct_bytes : sizeof(v);
+    std::memcpy(out, &v, n);
+    return CLOCKWORK_OK;
+}
+
+ClockworkStatus clockwork_client_metrics_history(ClockworkClient* handle, uint32_t level, uint32_t buckets,
+                                                 uint32_t metric_offset, ClockworkClientMetricWindow* out) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || out->struct_bytes < sizeof(uint32_t)) return CLOCKWORK_E_ARG;
+    if (c->L.metrics_history_bytes < clockwork::metrics_history::kRegionBytes) return CLOCKWORK_E_ABSENT;
+
+    const auto w = clockwork::metrics_history::window(c->base + c->L.metrics_history_offset, level, buckets, metric_offset);
+    ClockworkClientMetricWindow v{};
+    v.struct_bytes = out->struct_bytes;
+    v.covered      = w.covered;
+    v.low          = w.low;
+    v.high         = w.high;
+    v.last         = w.last;
+    v.delta        = w.delta;
     const size_t n = out->struct_bytes < sizeof(v) ? out->struct_bytes : sizeof(v);
     std::memcpy(out, &v, n);
     return CLOCKWORK_OK;

@@ -17,6 +17,7 @@ import { guestMetrics } from "./lib/guest_metrics.js";
 import { ENGINE_PROCESS_COUNT, GUEST_METRICS_BASE } from "./lib/metrics_offsets.js";
 import { EventEmitter } from "./lib/event_emitter.js";
 import { MetricsReader } from "./lib/metrics_reader.js";
+import { readHistoryWindows } from "./lib/metrics_history.js";
 import { METRICS_SCHEMA } from "./lib/metrics_schema.js";
 import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
@@ -553,6 +554,18 @@ export class Clockwork {
 
   getMetrics() {
     return this.#gatherMetrics();
+  }
+
+  /**
+   * What every counter and gauge did over the last hour (metrics_history.js): for each metric with a history, the
+   * windows `s1`, `s10`, `m1` (the last second, ten seconds and minute), `m10` and `h1` — each the lowest and highest
+   * value seen, the last, the change across the window (a counter's count in that time) and how many buckets it
+   * covered. Kept by the engine, so it survives a reload of the page's engine; {} before the engine is up.
+   * @returns {Object}
+   */
+  getMetricsHistory() {
+    const bc = this.#metricsReader?.bufferConstants;
+    return readHistoryWindows(this.#metricsReader?.historyWords(), bc);
   }
 
   /**

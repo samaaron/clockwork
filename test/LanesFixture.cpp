@@ -4,6 +4,9 @@
  * LanesFixture.cpp — see LanesFixture.h.
  */
 #include "LanesFixture.h"
+#include <catch2/catch_test_macros.hpp>
+#include "clockwork_client.h"
+#include "metrics_schema.h"
 
 #include "lanes/lanes.h"
 #include "audio_processor.h"   // destroy_dsp, rebuild_dsp
@@ -45,6 +48,16 @@ alignas(16) static uint8_t gAssets[kAssetsBytes];
 alignas(16) static uint8_t gReturns[kReturnsBytes];
 
 const uint8_t* guestMemory() { return gGuestMemory; }
+uint32_t metricWord(uint32_t offset) {
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkClient* c = clockwork_client_open_memory(gGuestMemory, kGuestMemoryBytes, &st);
+    REQUIRE(c != nullptr);
+    uint32_t words[clockwork::metrics_schema::kMetricWords] = {};
+    const uint32_t n = clockwork_client_metrics(c, words, clockwork::metrics_schema::kMetricWords);
+    clockwork_client_close(c);
+    REQUIRE(offset < n);
+    return words[offset];
+}
 uint8_t*       assets()       { return gAssets; }
 const uint8_t* returns()      { return gReturns; }
 

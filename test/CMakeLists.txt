@@ -84,6 +84,7 @@ add_executable(clockwork_tests
     test_audio_block_clock.cpp
     test_block_stamp.cpp
     test_time_source.cpp
+    test_metrics_history.cpp
 
     # The shared-memory segment: layout guard and permissions.
     test_shm_segment.cpp

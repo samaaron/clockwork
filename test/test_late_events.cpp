@@ -100,3 +100,23 @@ TEST_CASE("late events: with the latest a timed event may play set by the host, 
     fix.send(osc_test::bundle(timetag(clockNtp(fix) - 2.0), { osc_test::message("/dummy/events/get") }));
     REQUIRE(fix.waitForReply("/dummy/events", r));
 }
+
+TEST_CASE("metrics history: a client reads what a counter did over the last second, through the API",
+          "[metrics][history][engine]") {
+    EngineFixture fix(pumped());
+    fix.pumpBlock(fix.blocksOfAudio(1500));   // a second and a half of blocks, on the engine's own clock
+    ClockworkClientMetricWindow w{};
+    w.struct_bytes = sizeof w;
+    // Blocks rendered (process_count, word 0): the last ten seconds hold the full second rendered.
+    REQUIRE(clockwork_client_metrics_history(fix.engine().egressClient(), 0, 10, 0, &w) == CLOCKWORK_OK);
+    CHECK(w.covered >= 2);
+    CHECK(w.delta > 300);
+    CHECK(w.last >= w.high);
+    // A constant has no history.
+    REQUIRE(clockwork_client_metrics_history(fix.engine().egressClient(), 0, 1, 42, &w) == CLOCKWORK_OK);
+    CHECK(w.covered == 0);
+    // Out of range asks are refused.
+    CHECK(clockwork_client_metrics_history(fix.engine().egressClient(), 3, 1, 0, &w) == CLOCKWORK_OK);   // a level past the last: an empty window
+    CHECK(w.covered == 0);
+}
+
