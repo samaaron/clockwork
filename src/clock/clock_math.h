@@ -72,14 +72,6 @@ inline constexpr double kAnchorTakeUpShare = 0.125;
 // rendering its quanta in bursts (a reading swings by a device buffer, ~20 ms).
 inline constexpr double kClockStepSeconds = 0.1;
 
-// The same gap, over which what waited for the engine is stale as well: what
-// is due by the block back is refused as such and the schedule cleared there;
-// what waited but is for later still plays, at its time. One number on every
-// target: a stall, a page's context suspended, a worklet gone and made again,
-// an embedded host attaching again. Shorter gaps deliver what waited, late by
-// the gap.
-inline constexpr double kAudioAwaySeconds = 2.0;
-
 inline double beatAt(double t, double origin, double bpm) {
     return (t - origin) * bpm / 60.0;
 }

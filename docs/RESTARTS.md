@@ -223,7 +223,7 @@ waiting on, so these are the rules a client may rely on:
    |---|---|---|
    | `no instance` | it arrived while there was no instance: between a teardown and the next build, or after a build that failed | at the boundary, as it is written |
    | `rebuilding` | it was waiting in the in ring when the instance was torn down | the next drain, of everything below the mark the teardown set |
-   | `stalled` | it was waiting while the audio was away — the time passed less the audio rendered over `kAudioAwaySeconds`, by the host's monotonic clock where it has one and its wall clock otherwise: a stall, a page's context suspended, a worklet gone — and is due, so stale now. A bundle that waited but is for later is not: it plays at its time, as what a client sends as it brings the audio back is not stale | the first block back, on any target, of everything due that is waiting as it begins (the mark it sets; the schedule is cleared with it, and the clock steps on to the wall) |
+   | `stalled` | it was waiting when the host said what waited was to go (the page's `purge()`, `clockwork_ingress_mark_stale`) and is due. The engine never says this of its own accord: after a gap what waited plays, late by the gap, and a bundle for later plays at its time | the next drain, of everything due below the mark the host set (the schedule is cleared with it) |
 
    Clockwork has the address and the token, which is all a refusal needs;
    it never needs to know what the message meant. A client reads every one
@@ -242,9 +242,8 @@ waiting on, so these are the rules a client may rely on:
    the instance's ring has room for the refusals, holding everything after
    them until it has: thousands waiting are all answered, a block's worth
    at a time. Marks are set only where the drain is not running — by a
-   teardown, with the audio thread stopped, and by the first block back
-   after the audio was away, on it, before that block takes anything — and
-   several may wait for one drain: an instance built and torn
+   teardown, with the audio thread stopped, and by a host's purge, on it —
+   and several may wait for one drain: an instance built and torn
    down before a block ran leaves its own as well as the one before it.
 
    A shm peer writes a ring of its own (shm_peer_plane.h), which the

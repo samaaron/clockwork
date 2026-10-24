@@ -142,13 +142,13 @@ TEST_CASE("restart grid: an embedded host attaching again at another rate", "[re
     attachingAgain(44100.0);
 }
 
-TEST_CASE("restart grid: an embedded host attaching again after the audio was away hears what waited refused as stale",
+TEST_CASE("restart grid: an embedded host attaching again after the audio was away hears what waited answered, late",
           "[restarts][grid][embed]") {
-    // The same attach, with the audio away longer than kAudioAwaySeconds
-    // between the close and the attach: the instance carries on, and what
-    // waited for it through the gap is stale — refused once as such, never
-    // performed late, by the one rule every target keeps (process_audio); what
-    // is sent after is answered. And the clock never went back.
+    // The same attach, with the audio away for over two seconds between the
+    // close and the attach: the instance carries on, and what waited for it
+    // through the gap is delivered when it is back — the engine drops nothing
+    // for a gap, on any target; what is sent after is answered. And the clock
+    // never went back.
     REQUIRE(clockwork_attached() == 0);
     Host host(48000.0);
     host.render(8);
@@ -162,8 +162,8 @@ TEST_CASE("restart grid: an embedded host attaching again after the audio was aw
     CHECK(generation() == before);
 
     // A block first: what is in the ring as the first block back begins is
-    // what waited, and is refused; what a host sends once it is rendering
-    // again is taken.
+    // what waited, and is taken; so is what a host sends once it is
+    // rendering again.
     host.render(1);
     host.send(restart_model::newAsk());
     host.render(8);
@@ -178,8 +178,8 @@ TEST_CASE("restart grid: an embedded host attaching again after the audio was aw
         if (m.address == "/dummy/events") ++delivered;
         if (m.address == "/dummy/reconfigured.reply") ++answered;
     }
-    CHECK(stale == 1);
-    CHECK(delivered == 0);
+    CHECK(stale == 0);
+    CHECK(delivered == 1);
     CHECK(answered == 1);
     INFO("the engine's clock, as the host's client reads it, went back by " << host.clockWentBack() << " s");
     CHECK(host.clockWentBack() == 0.0);

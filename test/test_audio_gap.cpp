@@ -8,9 +8,9 @@
  * rendered in it, measured once a block where the host hands its time over,
  * by its monotonic clock where it has one (a system clock set by hand is not
  * a gap) and by its wall clock otherwise. Over kClockStepSeconds the clock
- * steps at that block; over kAudioAwaySeconds what waited and is due is
- * dropped too, and the schedule cleared. One line says it either way, and
- * nothing else does. A huge device buffer renders a block every 170 ms by
+ * steps at that block. Nothing that waited is dropped for a gap: it plays,
+ * late by the gap. One line says the gap, and nothing else does. A huge
+ * device buffer renders a block every 170 ms by
  * design and is not a gap: measuring against the audio rendered is what
  * keeps it from being one.
  */
@@ -78,7 +78,6 @@ TEST_CASE("audio gap: time passed with no audio rendered, over kClockStepSeconds
     // And set back: no more a gap.
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.8, mono0 + 0.8, 0.3));
     CHECK(linesSaying(fix, "audio resumed") == 1);
-    CHECK(linesSaying(fix, "message buffer cleared") == 0);
 }
 
 TEST_CASE("audio gap: a host with no monotonic clock is judged by its wall clock", "[gap][engine]") {
@@ -103,15 +102,18 @@ TEST_CASE("audio gap: a host whose audio starts is judged by time alone, as noth
     clockwork_audio_starts(wall0, mono0);
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.05, mono0 + 0.05, 100.0));   // a count from any origin
     // Its audio starts again 3 s on (a device opened again): the gap is the 3 s, whatever its count says.
-    clockwork_audio_starts(wall0 + 3.05, mono0 + 3.05);
+    REQUIRE(clockwork_audio_starts(wall0 + 3.05, mono0 + 3.05));
     // And on from there: its first block, then one on time.
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 3.1, mono0 + 3.1, 0.0));
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 3.15, mono0 + 3.15, 0.05));
-    CHECK(linesSaying(fix, "message buffer cleared") == 1);
+    CHECK(linesSaying(fix, "audio resumed") == 1);
 }
 
-TEST_CASE("audio gap: over kClockStepSeconds what waited still plays; over kAudioAwaySeconds what "
-          "waited and is due is dropped; one line says which, and nothing else speaks", "[gap][engine]") {
+TEST_CASE("audio gap: what waited through a gap plays when the audio is back, late by the gap, whatever "
+          "the gap; one line says the gap and nothing else speaks", "[gap][engine]") {
+    // The engine drops a message only for want of room, and counts it: a gap
+    // of any length delivers what queued and fires what was scheduled, late.
+    // A host that wants what waited gone says so itself (purge).
     EngineFixture fix(pumped());
     // The pump keeps the record too, a block at a time, from the wall it
     // started on: the gaps here are measured from that, not a made-up instant.
@@ -126,18 +128,14 @@ TEST_CASE("audio gap: over kClockStepSeconds what waited still plays; over kAudi
     REQUIRE(clockwork_audio_back(wall0 + 0.5, mono0 + 0.5, 0.0));
     REQUIRE(fix.waitForReply("/dummy/pong", r));
     CHECK(linesSaying(fix, "audio resumed") == 1);
-    CHECK(linesSaying(fix, "message buffer cleared") == 0);
 
-    // A long gap: what was sent before it and is due is dropped; what is
-    // sent after is answered.
+    // A long gap: the same.
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(clockwork_audio_back(wall0 + 5.0, mono0 + 5.0, 0.0));
-    CHECK_FALSE(fix.waitForReply("/dummy/pong", r, 300));
-    fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForReply("/dummy/pong", r));
     CHECK(linesSaying(fix, "audio resumed") == 2);
-    CHECK(linesSaying(fix, "message buffer cleared") == 1);
     CHECK(linesSaying(fix, "[wake]") == 0);
+    CHECK(linesSaying(fix, "stalled") == 0);
 }
 
 TEST_CASE("audio block clock: a block after a gap steps the clock there", "[gap][clock][block]") {

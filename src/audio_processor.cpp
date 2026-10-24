@@ -1284,11 +1284,13 @@ extern "C" {
     // block every 170 ms is not a gap. Over kClockStepSeconds the clock
     // steps at this block: the host is told so and anchors it afresh (a
     // clock converged from seconds behind runs fast until it has caught up,
-    // and everything scheduled against it plays compressed). Over
-    // kAudioAwaySeconds what waited for the engine and is due is stale too:
-    // refused to its senders as such (the mark; docs/RESTARTS.md, rule 1) and
-    // the schedule cleared, before anything more is taken. One line says it,
-    // either way. Every host asks once a block as it hands its time over,
+    // and everything scheduled against it plays compressed). Nothing that
+    // waited is dropped for it: what queued is delivered and what was
+    // scheduled fires, late by the gap, as scsynth has always done after a
+    // sleep — Clockwork drops a message only for want of room, and counts
+    // it (PerformanceMetrics); a host that wants what waited gone says so
+    // itself (clockwork_ingress_mark_stale, the page's purge()). One line
+    // says the gap. Every host asks once a block as it hands its time over,
     // before its clock moves (AudioBlockClock.h, the worklet's block below,
     // an embedded host's render), and as its audio starts
     // (clockwork_audio_starts): judged by time alone then, as nothing was
@@ -1310,15 +1312,7 @@ extern "C" {
         const double rendered = (audio_secs >= 0.0 && audio_secs > last_audio) ? audio_secs - last_audio : 0.0;
         const double gap = passed - rendered;
         if (gap <= clockwork::kClockStepSeconds) return false;
-        if (gap > clockwork::kAudioAwaySeconds) {
-            clockwork_log("[clock] audio resumed and message buffer cleared after %.3fs", gap);
-            clockwork_ingress_mark_stale();
-#if CLOCKWORK_SCHEDULER
-            clockwork_engine_schedule().requestClear();
-#endif
-        } else {
-            clockwork_log("[clock] audio resumed after %.3fs", gap);
-        }
+        clockwork_log("[clock] audio resumed after %.3fs", gap);
         return true;
     }
 

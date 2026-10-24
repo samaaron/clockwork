@@ -156,9 +156,9 @@ constexpr uint32_t NATIVE_STAT_NRT_RECENT_WORST_US = 20;
 // a worklet has none) — the one record that the audio was away: a stall, a
 // page's context suspended, a worklet gone. It survives a new worklet over
 // the same memory or an embedded host attaching again, so the first block
-// back on any target sees how long it was (clockwork_audio_back,
-// kAudioAwaySeconds): by the monotonic clock where there is one, which a
-// system clock set by hand cannot fool, else by the wall.
+// back on any target sees how long it was (clockwork_audio_back): by the
+// monotonic clock where there is one, which a system clock set by hand
+// cannot fool, else by the wall.
 constexpr uint32_t SAMPLE_CLOCK_SIZE  = 48;
 // Field byte offsets within the sample-clock region.
 constexpr uint32_t SAMPLE_CLOCK_SEQ            = 0;   // u32 seqlock (odd = mid-update)

@@ -776,9 +776,8 @@ export class Clockwork {
     // one. Everything awaited before this point is time the press has already run out of.
     const starting = ctx.resume().catch(() => {});
 
-    // What queued while the engine slept is the engine's to judge, by the same rule on every target: more than
-    // kAudioAwaySeconds since its last block, and it is refused as stale at the first block back; less, and it
-    // plays, late by the gap (docs/RESTARTS.md). purge() is there for a host that wants it gone regardless.
+    // What queued while the engine slept plays when it is back, late by the gap, on every target: the engine drops
+    // nothing for a gap (docs/RESTARTS.md). purge() is there for a host that wants it gone.
     await starting;
 
     const alive = await this.#audioThreadAlive();
