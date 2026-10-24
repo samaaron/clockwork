@@ -408,6 +408,7 @@ void ClockworkEngine::init(const Config& cfg) {
 
     mHeadless = cfg.headless;
     mClockworkClock.setFreewheelClock(cfg.freewheelClock, cfg.freewheelOriginNtp);
+    clockwork_set_timed_event_late_limit_ms(static_cast<uint32_t>(std::max(0, cfg.schedulerLateLimitMs)));
     mCurrentConfig = cfg;
     // mBootInputChannels may be kAutoChannelCount (-1) here — resolved to a
     // concrete count when enableInputChannels() is eventually called.

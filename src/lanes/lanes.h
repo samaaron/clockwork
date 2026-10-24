@@ -173,15 +173,24 @@ bool clockwork_tick(const ClockworkBlockTime* time, uint32_t out_channels, uint3
  * time over, BEFORE its clock moves, with its own count of the audio rendered
  * (audio_secs, seconds from any origin): true when the gap is over
  * kClockStepSeconds, and the host anchors its clock afresh at this block
- * (resetAudioThreadTime; AudioBlockClock.h for native drivers). Over
- * kAudioAwaySeconds what waited for the engine and is due is refused as stale
- * and the schedule cleared as well (docs/RESTARTS.md) — a bundle for later
- * plays at its time. A host asks clockwork_audio_starts as its audio starts —
+ * (resetAudioThreadTime; AudioBlockClock.h for native drivers). Nothing that
+ * waited is dropped for a gap: it is delivered, late by the gap; a host that
+ * wants it gone says so (clockwork_ingress_mark_stale). A host asks
+ * clockwork_audio_starts as its audio starts —
  * a device opened, an embedded host attached, a worklet made — judged by time
  * alone, as nothing was rendered meanwhile; its first block after is never a
  * gap, as its count of the audio starts over with it. */
 bool clockwork_audio_back(double wall_ntp, double monotonic_secs, double audio_secs);
 bool clockwork_audio_starts(double wall_ntp, double monotonic_secs);
+
+/* The latest a timed event held by clockwork's scheduler may play: one that
+ * comes due more than `ms` after its time is dropped instead, counted
+ * (scheduler_late_dropped) and said once in a while. 0, the default, allows
+ * any lateness: nothing is ever dropped for it, and an event plays late
+ * (scheduler_lates). A host's policy for an engine that can be flooded
+ * (an interactive page) — never clockwork's own. Set as the engine comes
+ * up; read on the audio thread. */
+void clockwork_set_timed_event_late_limit_ms(uint32_t ms);
 
 /* Sample-clock publication (sample position ↔ DAC time, consumed by scope
  * streams and any audible-time reader) lives on the clock subsystem:

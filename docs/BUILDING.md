@@ -42,8 +42,8 @@ cmake --build build/web --parallel 3      # → dist/wasm/clockwork.wasm
 `scripts/build-web.sh` wraps that and bundles the JavaScript client and workers
 around the module. A product names its own module (`CLOCKWORK_WEB_MODULE_NAME`)
 and where it lands (`CLOCKWORK_WEB_DIST_DIR`), sizes the scheduler for its
-worklet (`CLOCKWORK_SCHEDULER_SLOT_COUNT`, `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE`,
-`CLOCKWORK_SCHEDULER_SHED_LATE_MS`) and may export more of its own
+worklet (`CLOCKWORK_SCHEDULER_SLOT_COUNT`, `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE`)
+and may export more of its own
 (`CLOCKWORK_WEB_EXTRA_EXPORTS`); the exports the worklet calls are clockwork's
 list in `CMakeLists.txt`.
 

@@ -323,6 +323,9 @@ export class Clockwork {
     this.#config = {
       mode: mode,
       snapshotIntervalMs: options.snapshotIntervalMs ?? SNAPSHOT_INTERVAL_MS,
+      // The latest a timed event may play, ms: one later is dropped and counted (engineSchedulerLateDropped).
+      // 0, the default, plays everything, however late. A page that can be flooded sets a limit.
+      schedulerLateLimitMs: options.schedulerLateLimitMs ?? 0,
       // What the page going away, or out of sight, does to the engine. pagehide: 'shutdown' (the default: an engine
       // left running after its page is what a phone keeps playing with no page at all) or 'none'. hidden: 'keep'
       // (the default: a performer's tab behind another plays on) or 'suspend' (and resume when shown again).
@@ -2037,6 +2040,7 @@ export class Clockwork {
       sharedBuffer: sharedBuffer,
       stopBuffer: this.#workletStop?.buffer ?? null,
       snapshotIntervalMs: this.#config.snapshotIntervalMs,
+      schedulerLateLimitMs: this.#config.schedulerLateLimitMs,
     });
 
     const loadWasmMsg = {

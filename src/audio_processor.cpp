@@ -1218,14 +1218,20 @@ extern "C" {
     }
 #endif
 
-    // The overload law: an event more than SCHEDULER_SHED_LATE_MS late is dropped
-    // rather than played, because a backlog played late is worse than a backlog not
-    // played. 0 (the default) never sheds.
-    static inline void note_shed(double late_ms) {
-        increment_scheduler_drop_metric();
-        static std::atomic<uint32_t> shedLog{0};
-        if (shedLog.fetch_add(1, std::memory_order_relaxed) % 64 == 0)
-            clockwork_log("SHED: %.0fms late, dropped (overload)", late_ms);
+    // The latest a timed event may play, set by the host (lanes.h): 0 allows
+    // any lateness. A host whose engine can be flooded sets one, because a
+    // backlog played minutes late is worse than a backlog not played (a
+    // mashed bench once snowballed to 4.5 s behind); clockwork itself never
+    // drops for lateness.
+    static std::atomic<uint32_t> g_timed_event_late_limit_ms{0};
+    EMSCRIPTEN_KEEPALIVE void clockwork_set_timed_event_late_limit_ms(uint32_t ms) {
+        g_timed_event_late_limit_ms.store(ms, std::memory_order_relaxed);
+    }
+    static inline void note_late_dropped(double late_ms, uint32_t limit_ms) {
+        if (metrics) metrics->scheduler_late_dropped.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> saidLog{0};
+        if (saidLog.fetch_add(1, std::memory_order_relaxed) % 64 == 0)
+            clockwork_log("[schedule] a timed event %.0f ms late was dropped: the host allows %u ms", late_ms, limit_ms);
     }
 
     // Mark everything pending in the IN ring as of NOW (the marks, above):
@@ -1395,7 +1401,7 @@ extern "C" {
     // it has the block's start time and each message's own (dsp_api.h). How late
     // the event was is clockwork's, and goes into the metrics.
     //
-    // Returns true when the event was shed and must not be delivered.
+    // Returns true when the event is dropped as later than the host allows, and must not be delivered.
     //
     // The immediacy check is `== 0 || == 1`, NOT `<= 1`: a present-day OSC
     // timetag is huge and, taken as int64, has its sign bit set — i.e. it is
@@ -1407,9 +1413,11 @@ extern "C" {
         const double time_diff_ms =
             (static_cast<double>(when - blockTime) / 4294967296.0) * 1000.0;
 
-        if (SCHEDULER_SHED_LATE_MS > 0 &&
-            time_diff_ms < -static_cast<double>(SCHEDULER_SHED_LATE_MS)) {
-            note_shed(-time_diff_ms);
+        // Later than the host allows (clockwork_set_timed_event_late_limit_ms):
+        // dropped, as the host asked; 0 allows any lateness.
+        const uint32_t limit_ms = g_timed_event_late_limit_ms.load(std::memory_order_relaxed);
+        if (limit_ms > 0 && time_diff_ms < -static_cast<double>(limit_ms)) {
+            note_late_dropped(-time_diff_ms, limit_ms);
             return true;
         }
 

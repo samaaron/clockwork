@@ -501,11 +501,11 @@ endif()
 # Pending events and the payload pool they carry. The native defaults are the
 # process's; a worklet's live in a static arena inside the wasm module's own
 # gap before the guest region, so a web build sizes them for that. A product
-# sets its own (SuperSonic: 2048 slots, 512 KB, and late events play).
+# sets its own (SuperSonic: 2048 slots, 512 KB). Whether a late event plays
+# is the host's to say at run time (clockwork_set_timed_event_late_limit_ms).
 if(EMSCRIPTEN)
     set(CLOCKWORK_SCHEDULER_SLOT_COUNT 8192 CACHE STRING "Timed events the scheduler can hold")
     set(CLOCKWORK_SCHEDULER_DATA_POOL_SIZE 4194304 CACHE STRING "Bytes of queued OSC payload the scheduler can hold")
-    set(CLOCKWORK_SCHEDULER_SHED_LATE_MS 1000 CACHE STRING "Drop an event this many ms late rather than play it; 0 never drops")
     set(CLOCKWORK_IN_RING_SIZE 1048576 CACHE STRING "The OSC IN ring, bytes")
 else()
     set(CLOCKWORK_SCHEDULER_SLOT_COUNT 512 CACHE STRING "Timed events the scheduler can hold")
@@ -552,7 +552,6 @@ if(EMSCRIPTEN)
         CLOCKWORK_WORKLET_CLOCK=1
         CLOCKWORK_COUNT_GUEST_MALLOC=$<IF:$<BOOL:${CLOCKWORK_WEB_COUNT_GUEST_MALLOC}>,1,0>
         CLOCKWORK_AUDIO_NO_STDIO=1
-        SCHEDULER_SHED_LATE_MS=${CLOCKWORK_SCHEDULER_SHED_LATE_MS}
         CLOCKWORK_IN_RING_SIZE=${CLOCKWORK_IN_RING_SIZE}
         CLOCKWORK_MEM_ARENA_SIZE=${CLOCKWORK_WEB_MEM_ARENA_SIZE}u)
     # Every translation unit of the module — clockwork's, the DSP's, the C
@@ -1301,7 +1300,7 @@ if(EMSCRIPTEN)
         _clockwork_log _clockwork_log_va _clockwork_log_raw
         _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
         _clear_scheduler _clockwork_host_forward _clockwork_host_forwards
-        _clockwork_ingress_mark_stale _clockwork_audio_back _clockwork_audio_starts _clockwork_carry_generation _clockwork_close
+        _clockwork_ingress_mark_stale _clockwork_audio_back _clockwork_audio_starts _clockwork_set_timed_event_late_limit_ms _clockwork_carry_generation _clockwork_close
         _clockwork_worklet_alloc _clockwork_worklet_free
         _clockwork_client_abi_version _clockwork_client_status_text
         _clockwork_client_open_memory

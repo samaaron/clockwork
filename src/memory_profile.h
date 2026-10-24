@@ -375,17 +375,6 @@
   #endif
 #endif
 
-// Fire-time load shedding: a scheduled event already more than this many ms
-// past its timetag when it comes due is dropped (counted in the dropped
-// metric, logged rate-limited) instead of played. 0 = never shed — classic
-// semantics, and the default everywhere compat is measured (native,
-// NRT). The web build sets a threshold: an interactive engine that falls
-// behind should shed the unplayable backlog, not perform it minutes late —
-// capacity without shedding converts overload from drops into unbounded
-// lateness (measured: a mashed bench snowballed to 4.5 s).
-#ifndef SCHEDULER_SHED_LATE_MS
-#define SCHEDULER_SHED_LATE_MS 0
-#endif
 
 // A RUST-SIDE ENGINE ARENA WAS DECLARED HERE and never wired up.
 //

@@ -841,6 +841,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 if (data.snapshotIntervalMs) {
                     this.treeSnapshotMinInterval = data.snapshotIntervalMs / 1000;
                 }
+                // The latest a timed event may play (lanes.h): told to the engine once it is up
+                this.schedulerLateLimitMs = data.schedulerLateLimitMs | 0;
 
                 if (this.mode === 'sab' && data.sharedBuffer) {
                     this.sharedBuffer = data.sharedBuffer;
@@ -1100,10 +1102,11 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                 this.memArenaSize,
                                 this.assetsOffset,  this.assetsSize,
                                 this.returnsOffset, this.returnsSize);
-                            // This worklet's audio starts now: what waited through a gap before it (the context
-                            // suspended, the old worklet gone) and is due is stale; what is for later, and what
-                            // the page sends from here, plays. Its clock steps on to the wall at its first block.
+                            // This worklet's audio starts now: its clock is anchored afresh at its first block,
+                            // and what waited through a gap before it plays, late by the gap (the page's purge()
+                            // is for a host that wants it gone).
                             this.wasmInstance.exports.clockwork_audio_starts((Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
+                            this.wasmInstance.exports.clockwork_set_timed_event_late_limit_ms(this.schedulerLateLimitMs || 0);
                             // The block's time, handed to every tick (ClockworkBlockTime, lanes.h): struct_bytes,
                             // then audio_time, wall_ntp, monotonic_secs as doubles — a worklet has no monotonic clock
                             this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(32);

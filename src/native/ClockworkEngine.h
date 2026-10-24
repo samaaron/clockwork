@@ -167,6 +167,10 @@ public:
                                                    // A device clocked at 44.1k
                                                    // that reports 48k otherwise
                                                    // cold-swaps every window.
+        // The latest a timed event held by clockwork's scheduler may play, ms;
+        // one later is dropped and counted (scheduler_late_dropped). 0, the
+        // default: any lateness, nothing is ever dropped for it.
+        int    schedulerLateLimitMs      = 0;
         int    watchdogRecoveryCooldownMs = 3000;  // between recoveries: covers
                                                    // the client's re-init after
                                                    // a promotion (seconds), so a
