@@ -372,7 +372,13 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     }
     stop = true;
     os.join();
+    // The device is back, and the OS says so, as it always does: its last
+    // report before this may have said "gone" and still be on its way, and a
+    // reopen on it finds no device and goes idle — where, with no watchdog
+    // in this config, only the OS's next word brings the engine back (the
+    // x86 runner, 2026-10-23, where that word never came).
     speakers->hidden = false;
+    sys->reportListChanged();
 
     INFO("reports=" << reports.load() << " recoveries=" << recoveries);
     CHECK(reports.load() > 0);
@@ -386,6 +392,39 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     }, 10000);
     INFO(fix.debugMessagesDump());
     REQUIRE(answered);
+}
+
+TEST_CASE("DeviceEvents: a device that goes while a recovery runs and comes back is reopened "
+          "from idle when the OS says so, with no watchdog", "[DeviceEvents]") {
+    // The engine with no device is idle: it renders nothing and the guest's
+    // messages wait. Without the callback watchdog (off in this config, on in
+    // Sonic Pi's) the one way out is the OS reporting a change — which it
+    // does for every device that comes back.
+    auto sys = makeSimpleSystem();
+    auto cfg = fakeEngineConfig(sys, "Fake Speakers");
+    cfg.watchdogRecoveryCooldownMs = 0;
+    EngineFixture fix(cfg);
+    auto speakers = sys->device("Fake Speakers");
+    REQUIRE(fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback);
+
+    // Gone, and the OS says so: the reopen finds no device, and the engine is idle.
+    speakers->hidden = true;
+    REQUIRE(sys->reportListChanged());
+    REQUIRE(fix.pollUntil([&] { return fix.engine().audioSource() == ClockworkEngine::AudioSource::None; }, 5000));
+    INFO(fix.debugMessagesDump());
+
+    // Back, and the OS says so: reopened, and answering again.
+    speakers->hidden = false;
+    REQUIRE(sys->reportListChanged());
+    REQUIRE(fix.pollUntil([&] { return fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback; }, 5000));
+    OscReply reply;
+    const bool answered = fix.pollUntil([&] {
+        fix.send(osc_test::message("/dummy/ping"));
+        return fix.waitForReply("/dummy/pong", reply, 200);
+    }, 5000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(answered);
+    CHECK(fix.engine().currentDevice().name == "Fake Speakers");
 }
 
 TEST_CASE("DeviceEvents: a recovery that waits for a device change leaves the "
