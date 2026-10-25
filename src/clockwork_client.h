@@ -510,6 +510,20 @@ typedef struct ClockworkClientMetricWindow {
 ClockworkStatus clockwork_client_metrics_history(ClockworkClient* c, uint32_t level, uint32_t buckets,
                                                  uint32_t metric_offset, ClockworkClientMetricWindow* out);
 
+/* One bucket of the history, `back` buckets before the current one (0: the
+ * current, part-way through): the lowest, highest and last value seen in it.
+ * `recorded` is 0 past what the level holds, or for a constant. */
+typedef struct ClockworkClientMetricBucket {
+    uint32_t struct_bytes;
+    uint32_t recorded;
+    int64_t  low;
+    int64_t  high;
+    int64_t  last;
+} ClockworkClientMetricBucket;
+
+ClockworkStatus clockwork_client_metrics_history_bucket(ClockworkClient* c, uint32_t level, uint32_t back,
+                                                        uint32_t metric_offset, ClockworkClientMetricBucket* out);
+
 /* The NTP instant `frame` is heard at, under a snapshot the caller already
  * has: the formula above, here so that every binding agrees to the bit. */
 double clockwork_client_ntp_at_frame(const ClockworkClientSampleClock* clock, uint64_t frame);

@@ -92,6 +92,7 @@ EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg,
 void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs,
                          const std::function<void(ClockworkEngine&)>& beforeInit) {
     mManualPump = cfg.manualAudioPump;
+    mAudioCanary = !cfg.manualAudioPump && cfg.headless;   // the headless driver, on wall time
     mSampleRate = cfg.sampleRate;
 
     mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
@@ -146,6 +147,7 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
 
 EngineFixture::~EngineFixture() {
     checkNoEgressLost(mEngine, mExpectedLoss);
+    if (mAudioCanary) checkAudioKeptUp(mEngine, mEngine.egressClient(), mExpectedLoss);
     if (mLateHostStart.joinable()) mLateHostStart.join();
     mHostControl.stop();   // a host stops its thread before the engine
     mEngine.shutdown();
@@ -266,6 +268,11 @@ void EngineFixture::sayTimedOut(const std::string& addr, int timeoutMs, const st
 std::string EngineFixture::repliesDump() const {
     std::lock_guard<std::mutex> lk(mReplyMutex);
     return dumpReplies(mReplies);
+}
+
+void EngineFixture::startHeadlessDriver() {
+    if (mManualPump) return;
+    mEngine.mHeadlessDriver->start();
 }
 
 void EngineFixture::stopHeadlessDriver() {

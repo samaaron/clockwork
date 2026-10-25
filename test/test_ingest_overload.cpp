@@ -163,6 +163,18 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     shutdown(fd, SHUT_RDWR);
     reader.join();
     close(fd);
+    // The flood as the metrics history saw it, which no read during it could:
+    // the IN ring filled this minute — its high over the window above nothing
+    // and no more than the ring holds — and every drop counted fell in it.
+    ClockworkClientMetricWindow ring{}, drops{};
+    ring.struct_bytes = drops.struct_bytes = sizeof ring;
+    REQUIRE(clockwork_client_metrics_history(engine.egressClient(), 0, 60, 17, &ring) == CLOCKWORK_OK);   // in_buffer_used_bytes
+    REQUIRE(clockwork_client_metrics_history(engine.egressClient(), 0, 60, 2, &drops) == CLOCKWORK_OK);   // messages_dropped
+    CHECK(ring.covered >= 1);
+    CHECK(ring.high > 0);
+    CHECK(ring.high <= static_cast<int64_t>(IN_RING_SIZE));
+    CHECK(drops.delta == static_cast<int64_t>(now.dropped - before.dropped));
+
     engine.shutdown();
     tcp.stop();
 

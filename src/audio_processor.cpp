@@ -3064,7 +3064,7 @@ extern "C" {
         metrics->process_count.store(pc, std::memory_order_relaxed);
         // The hour's history of every counter and gauge, a bucket at a time
         // on the engine's clock (metrics_history.h).
-        g_metrics_history.record(reinterpret_cast<const uint32_t*>(metrics), current_ntp);
+        g_metrics_history.record(reinterpret_cast<const std::atomic<uint32_t>*>(metrics), current_ntp);
 
         // Host telemetry. Sample the ring fill every block so peaks stay a true
         // high-water mark (a burst can fill and drain within a few blocks); this is cheap

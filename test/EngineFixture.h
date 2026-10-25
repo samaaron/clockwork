@@ -15,6 +15,8 @@
 #pragma once
 
 #include "ClockworkEngine.h"
+#include "clockwork_client.h"
+#include "metrics_history.h"
 #include "OscTestUtils.h"
 #include "clockwork_event_sink.h"
 #include "clockwork_prefix.h"
@@ -42,7 +44,38 @@
 struct EgressLossExpected {
     bool refused = false;
     bool undelivered = false;
+    bool audioAway = false;   // the case stalls the audio on purpose (checkAudioKeptUp)
 };
+// THE AUDIO KEPT UP, every second of the run. The metrics history keeps, a
+// second at a time, how many blocks the audio thread rendered
+// (metrics_history.h, process_count): a second that rendered under half of
+// what the rate and block size say is a stall — the machine starving the
+// audio thread, or the engine's — and a case that did not say it meant one
+// (expectAudioAway) is failed naming the second, rather than passing on a
+// run that was not real time, or flaking on an answer that came late with
+// nothing to say why. Checked for a driver on wall time only: a pumped case
+// renders on the engine's own clock, and a second of that is exactly its
+// blocks by construction.
+inline void checkAudioKeptUp(const ClockworkEngine& engine, ClockworkClient* client, EgressLossExpected expected = {}) {
+    if (!engine.isRunning() || !client || expected.audioAway) return;
+    const auto& m = engine.getMetrics();
+    const uint32_t rate  = m.audio_sample_rate.load(std::memory_order_relaxed);
+    const uint32_t block = m.audio_block_size.load(std::memory_order_relaxed);
+    if (!rate || !block) return;
+    const int64_t expectedBlocks = static_cast<int64_t>(rate / block);
+    // Each completed second between the first and the current (both part-way).
+    for (uint32_t back = 1; back < clockwork::metrics_history::kBuckets; ++back) {
+        ClockworkClientMetricBucket now{}, before{};
+        now.struct_bytes = before.struct_bytes = sizeof now;
+        if (clockwork_client_metrics_history_bucket(client, 0, back, 0, &now) != CLOCKWORK_OK || !now.recorded) break;
+        if (clockwork_client_metrics_history_bucket(client, 0, back + 1, 0, &before) != CLOCKWORK_OK || !before.recorded) break;
+        const int64_t rendered = now.last - before.last;
+        INFO("second " << back << " before the end: " << rendered << " block(s) rendered of the " << expectedBlocks
+             << " a second of audio is; the audio was away, and the case did not say it meant it (expectAudioAway)");
+        CHECK(rendered * 2 >= expectedBlocks);
+    }
+}
+
 inline void checkNoEgressLost(const ClockworkEngine& engine, EgressLossExpected expected = {}) {
     if (!engine.isRunning()) return;   // a case that shut it down, or a boot that failed
     const auto& m = engine.getMetrics();
@@ -276,6 +309,8 @@ public:
     // (checkNoEgressLost).
     void expectEgressRefusals() { mExpectedLoss.refused = true; }
     void expectEgressUndelivered() { mExpectedLoss.undelivered = true; }
+    // The case stalls the audio on purpose: a second with few blocks is not failed (checkAudioKeptUp).
+    void expectAudioAway() { mExpectedLoss.audioAway = true; }
 
     void send(const osc_test::Packet& pkt);
     void send(const uint8_t* data, uint32_t size);
@@ -358,6 +393,8 @@ public:
 
     // Stop the headless driver so the caller owns process_audio exclusively.
     void stopHeadlessDriver();
+    // Start it again after stopHeadlessDriver: the audio back after a stall.
+    void startHeadlessDriver();
 
     // Render `n` blocks on the calling thread via pumpAudioBlock().
     void pumpBlock(uint32_t n = 1);
@@ -371,6 +408,7 @@ private:
     engine_test::HostControlThread mHostControl;
     std::thread                    mLateHostStart;
     EgressLossExpected             mExpectedLoss;
+    bool            mAudioCanary = false;   // a driver on wall time: checkAudioKeptUp at teardown
     bool            mManualPump = false;
     int             mSampleRate = 48000;
 

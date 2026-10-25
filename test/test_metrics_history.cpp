@@ -14,6 +14,7 @@
 #include "metrics_schema.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -30,7 +31,7 @@ constexpr double   kT0 = 3900000000.0;   // an NTP instant, on a minute
 
 struct Rig {
     std::vector<uint8_t> region = std::vector<uint8_t>(kRegionBytes, 0);
-    std::array<uint32_t, schema::kMetricWords> words{};
+    std::array<std::atomic<uint32_t>, schema::kMetricWords> words{};
     Writer writer;
     Rig() { writer.bind(region.data()); }
     void block(double ntp) { writer.record(words.data(), ntp); }

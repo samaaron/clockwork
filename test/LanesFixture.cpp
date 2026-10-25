@@ -50,7 +50,9 @@ alignas(16) static uint8_t gReturns[kReturnsBytes];
 const uint8_t* guestMemory() { return gGuestMemory; }
 uint32_t metricWord(uint32_t offset) {
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = clockwork_client_open_memory(gGuestMemory, kGuestMemoryBytes, &st);
+    uint8_t* const arena = static_cast<uint8_t*>(get_shared_memory_base());   // the engine's arena, not the guest's reservation
+    REQUIRE(arena != nullptr);
+    ClockworkClient* c = clockwork_client_open_memory(arena, reinterpret_cast<const ClockworkArenaHeader*>(arena)->arena_bytes, &st);
     REQUIRE(c != nullptr);
     uint32_t words[clockwork::metrics_schema::kMetricWords] = {};
     const uint32_t n = clockwork_client_metrics(c, words, clockwork::metrics_schema::kMetricWords);

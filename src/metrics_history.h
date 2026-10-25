@@ -9,7 +9,8 @@
  * (metrics_schema.h: kMetricHistorySlot), three rings of kBuckets buckets —
  * a second, ten seconds and a minute each (kSpanSeconds) — and in each
  * bucket three words: the lowest value seen in it, the highest, and the
- * last. The audio thread records once a block (Writer::record): for each
+ * last. The audio thread records once a block (Writer::record, reading the
+ * block's words as the atomics they are: other threads count into them): for each
  * level, the block's values into the current bucket, a compare and a store
  * each; when the engine's clock crosses a bucket's span the level steps on,
  * and buckets no block fell in hold the last value (a gap is a hold, not a
@@ -93,7 +94,7 @@ class Writer {
 public:
     void bind(uint8_t* region) { mRegion = region; }
 
-    void record(const uint32_t* metricWords, double ntp) {
+    void record(const std::atomic<uint32_t>* metricWords, double ntp) {
         if (!mRegion) return;
         std::atomic<uint32_t>* w = words(mRegion);
         const uint64_t originBits = (static_cast<uint64_t>(w[kHdrOriginHi].load(std::memory_order_relaxed)) << 32)
@@ -146,11 +147,11 @@ private:
         return static_cast<uint32_t>(since / kSpanSeconds[level]);
     }
     // A bucket's first block: low, high and last are the block's values.
-    static void fill(std::atomic<uint32_t>* w, uint32_t level, uint32_t index, const uint32_t* metricWords) {
+    static void fill(std::atomic<uint32_t>* w, uint32_t level, uint32_t index, const std::atomic<uint32_t>* metricWords) {
         for (uint32_t offset = 0; offset < metrics_schema::kMetricWords; ++offset) {
             const int8_t slot = metrics_schema::kMetricHistorySlot[offset];
             if (slot < 0) continue;
-            const uint32_t v = metricWords[offset];
+            const uint32_t v = metricWords[offset].load(std::memory_order_relaxed);
             const uint32_t i = slotWord(level, index, static_cast<uint32_t>(slot));
             w[i].store(v, std::memory_order_relaxed);
             w[i + 1].store(v, std::memory_order_relaxed);
@@ -169,12 +170,12 @@ private:
     }
     // A block in a bucket already begun: the low and high move if the value
     // is beyond them; the last is the value.
-    static void update(std::atomic<uint32_t>* w, uint32_t level, uint32_t index, const uint32_t* metricWords) {
+    static void update(std::atomic<uint32_t>* w, uint32_t level, uint32_t index, const std::atomic<uint32_t>* metricWords) {
         for (uint32_t offset = 0; offset < metrics_schema::kMetricWords; ++offset) {
             const int8_t slot = metrics_schema::kMetricHistorySlot[offset];
             if (slot < 0) continue;
             const bool isSigned = metrics_schema::kMetricSigned[offset];
-            const uint32_t v = metricWords[offset];
+            const uint32_t v = metricWords[offset].load(std::memory_order_relaxed);
             const uint32_t i = slotWord(level, index, static_cast<uint32_t>(slot));
             if (lower(v, w[i].load(std::memory_order_relaxed), isSigned))     w[i].store(v, std::memory_order_relaxed);
             if (lower(w[i + 1].load(std::memory_order_relaxed), v, isSigned)) w[i + 1].store(v, std::memory_order_relaxed);
@@ -184,6 +185,35 @@ private:
 
     uint8_t* mRegion = nullptr;
 };
+
+// One bucket of a level, `back` buckets before the current (0: the current,
+// part-way through), for the metric at `metricOffset`. `recorded` is false
+// past what the level holds, or for a metric with no history.
+struct Bucket {
+    int64_t low = 0;
+    int64_t high = 0;
+    int64_t last = 0;
+    bool    recorded = false;
+};
+inline Bucket bucket(const uint8_t* region, uint32_t level, uint32_t back, uint32_t metricOffset) {
+    Bucket out;
+    if (!region || level >= kLevels || back >= kBuckets || metricOffset >= metrics_schema::kMetricWords) return out;
+    const int8_t slot = metrics_schema::kMetricHistorySlot[metricOffset];
+    if (slot < 0) return out;
+    const bool isSigned = metrics_schema::kMetricSigned[metricOffset];
+    const std::atomic<uint32_t>* w = words(region);
+    const uint32_t first   = w[kHdrFirst + level].load(std::memory_order_relaxed);
+    const uint32_t current = w[kHdrCurrent + level].load(std::memory_order_relaxed);
+    if (first == kNoBucket || (w[kHdrOriginLo].load(std::memory_order_relaxed) == 0 && w[kHdrOriginHi].load(std::memory_order_relaxed) == 0))
+        return out;
+    if (back > current - first) return out;   // before the first recorded
+    const uint32_t i = slotWord(level, (current - back) % kBuckets, static_cast<uint32_t>(slot));
+    out.low  = asValue(w[i].load(std::memory_order_relaxed), isSigned);
+    out.high = asValue(w[i + 1].load(std::memory_order_relaxed), isSigned);
+    out.last = asValue(w[i + 2].load(std::memory_order_relaxed), isSigned);
+    out.recorded = true;
+    return out;
+}
 
 // A reader, any thread: the last `buckets` buckets (1..kBuckets) of `level`
 // for the metric at `metricOffset` in the block.

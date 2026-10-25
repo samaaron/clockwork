@@ -539,6 +539,24 @@ ClockworkStatus clockwork_client_metrics_history(ClockworkClient* handle, uint32
     return CLOCKWORK_OK;
 }
 
+ClockworkStatus clockwork_client_metrics_history_bucket(ClockworkClient* handle, uint32_t level, uint32_t back,
+                                                        uint32_t metric_offset, ClockworkClientMetricBucket* out) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || out->struct_bytes < sizeof(uint32_t)) return CLOCKWORK_E_ARG;
+    if (c->L.metrics_history_bytes < clockwork::metrics_history::kRegionBytes) return CLOCKWORK_E_ABSENT;
+
+    const auto b = clockwork::metrics_history::bucket(c->base + c->L.metrics_history_offset, level, back, metric_offset);
+    ClockworkClientMetricBucket v{};
+    v.struct_bytes = out->struct_bytes;
+    v.recorded     = b.recorded ? 1u : 0u;
+    v.low          = b.low;
+    v.high         = b.high;
+    v.last         = b.last;
+    const size_t n = out->struct_bytes < sizeof(v) ? out->struct_bytes : sizeof(v);
+    std::memcpy(out, &v, n);
+    return CLOCKWORK_OK;
+}
+
 ClockworkStatus clockwork_client_audio_tap_open(ClockworkClient* handle, uint32_t slot,
                                             ClockworkAudioTapReader* out) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);

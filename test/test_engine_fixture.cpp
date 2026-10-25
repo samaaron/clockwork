@@ -11,6 +11,8 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include <chrono>
+#include <thread>
 #include "clockwork_client.h"
 #include "clockwork_prefix.h"
 #include "lanes/lanes_internal.h"
@@ -72,6 +74,27 @@ TEST_CASE("Fixture: a case that ends with a frame an egress ring refused fails",
           "[Fixture][egress][!shouldfail]") {
     EngineFixture fix;
     loseOneRefused();
+}
+
+// THE TEARDOWN CHECK LOOKS AT THE AUDIO (checkAudioKeptUp): a case whose audio
+// stalled for a second without saying so fails; its twin says it means to.
+TEST_CASE("Fixture: a case whose audio stalled without saying so fails", "[Fixture][audio][rt][!shouldfail]") {
+    EngineFixture fix(EngineFixture::driverConfig());   // the headless driver, on wall time
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));   // a full second rendered
+    fix.stopHeadlessDriver();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2200));   // a full second with no block
+    fix.startHeadlessDriver();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));   // and a full second after, so the stall is a completed second
+}
+
+TEST_CASE("Fixture: a case that says its audio may be away is not failed for it", "[Fixture][audio][rt]") {
+    EngineFixture fix(EngineFixture::driverConfig());
+    fix.expectAudioAway();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    fix.stopHeadlessDriver();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+    fix.startHeadlessDriver();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 }
 
 TEST_CASE("Fixture: a case that says it loses frames is not failed for them",

@@ -114,6 +114,7 @@ TEST_CASE("Watchdog: restarts a stalled audio source; what waited through the st
 
     // Kill the driver thread behind the engine's back: mActiveSource stays
     // Headless — exactly the wedge state (source believed live, no ticks).
+    fix.expectAudioAway();   // the stall is the point
     fix.stopHeadlessDriver();
 
     // Deaf: the command lands in the IN ring with nothing draining it, and no
@@ -164,6 +165,7 @@ TEST_CASE("Watchdog: holds fire while a device swap is in flight", "[Watchdog][r
 
     // Simulate a swap in flight, then stall the source underneath it.
     auto gate = fix.engine().testHoldSwapGate();
+    fix.expectAudioAway();   // the stall is the point
     fix.stopHeadlessDriver();
 
     // Stalled far past the window, but the gate is held — no recovery.
@@ -191,6 +193,7 @@ TEST_CASE("Watchdog: with no clock given, it polls on a thread of its own",
     cfg.watchdogStallMs  = 250;
     cfg.watchdogPollMs   = 50;
     EngineFixture fix(cfg);
+    fix.expectAudioAway();   // the stall is the point
     fix.stopHeadlessDriver();
     REQUIRE(fix.pollUntil([&] { return fix.engine().watchdogRecoveryCount() >= 1; }, 30000));
 }
