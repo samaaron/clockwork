@@ -113,13 +113,14 @@
  *
  *   /dummy/sink/open ,sii <target> <kind> <capacity>
  *                               -> /dummy/sink/opened ,i <sink>   (0 = refused)
- *   /dummy/sink/send ,isi <sink> <text> <delay_ms>
+ *   /dummy/sink/send ,isi <sink> <text> <delay_ms>   (negative: before the block)
  *   /dummy/sink/pending          -> /dummy/sink/still ,i <queued>
  *
  * A send is QUEUED by dsp_osc and emitted at the top of the next
  * dsp_process, and that is the whole point of the exercise rather than an
  * implementation detail: `when` is computed from THAT BLOCK'S block_time
- * (block_time + delay_ms, or 1 when the delay is zero), which is the exact
+ * (block_time + delay_ms, or 1 when the delay is zero; a negative delay
+ * dates it before the block, already past due), which is the exact
  * arithmetic a real scheduling DSP does, against the block the send is
  * actually emitted in. Sending from dsp_osc instead would prove nothing about
  * the audio thread, which is the thread the contract is really about.
@@ -178,7 +179,7 @@ constexpr uint32_t kSendMax         = 64;
 struct PendingSend {
     ClockworkSink  sink     = CLOCKWORK_SINK_NONE;
     uint32_t len      = 0;
-    uint32_t delay_ms = 0;
+    int32_t  delay_ms = 0;
     uint8_t  bytes[kSendMax] = {};
 };
 
@@ -288,12 +289,12 @@ struct DummyDsp {
     // Returns whether it was taken. A refusal leaves n_pending where it was,
     // which /dummy/sink/pending reports, so a caller that asked for more than
     // the placeholder can hold can see that it did.
-    bool queueSend(ClockworkSink sink, const char* text, uint32_t delay_ms) {
+    bool queueSend(ClockworkSink sink, const char* text, int32_t delay_ms) {
         if (!text) return false;
         return queueSendBytes(sink, reinterpret_cast<const uint8_t*>(text),
                               static_cast<uint32_t>(std::strlen(text)), delay_ms);
     }
-    bool queueSendBytes(ClockworkSink sink, const uint8_t* bytes, uint32_t n, uint32_t delay_ms) {
+    bool queueSendBytes(ClockworkSink sink, const uint8_t* bytes, uint32_t n, int32_t delay_ms) {
         if (n_pending >= kMaxPendingSends || !bytes) return false;
         if (n == 0 || n > kSendMax) return false;
         PendingSend& p = pending[n_pending++];
@@ -886,14 +887,13 @@ void dsp_process(struct Dsp* dsp,
     // Anything /dummy/sink/send queued, dated by THIS block's start. An OSC
     // timetag is 32.32 fixed point, so a millisecond is 2^32/1000 units; a
     // zero delay becomes 1, OSC's "immediately", rather than a timetag that
-    // happens to be now.
+    // happens to be now; a negative delay dates the send before the block.
     for (uint32_t i = 0; i < d->n_pending; ++i) {
         const PendingSend& p = d->pending[i];
         if (!d->host.send_sink || p.sink == CLOCKWORK_SINK_NONE) continue;
         const int64_t when = p.delay_ms == 0
             ? 1
-            : block_time + static_cast<int64_t>(
-                  (static_cast<uint64_t>(p.delay_ms) * 4294967296ull) / 1000ull);
+            : block_time + (static_cast<int64_t>(p.delay_ms) * 4294967296ll) / 1000ll;
         d->host.send_sink(d->host.ctx, p.sink, p.bytes, p.len, when);
     }
     d->n_pending = 0;
@@ -1411,13 +1411,13 @@ void dsp_osc(struct Dsp* dsp,
         const uint32_t sink = r.i32();
         if (std::strcmp(tags, ",isi") == 0) {
             const char* text = r.str();
-            const uint32_t delay_ms = r.i32();
+            const int32_t delay_ms = static_cast<int32_t>(r.i32());
             if (!r.ok) return;
             d->queueSend(sink, text, delay_ms);
         } else if (std::strcmp(tags, ",ibi") == 0) {
             uint32_t n = 0;
             const uint8_t* p = r.blob(&n);
-            const uint32_t delay_ms = r.i32();
+            const int32_t delay_ms = static_cast<int32_t>(r.i32());
             if (!r.ok || !p) return;
             d->queueSendBytes(sink, p, n, delay_ms);
         }

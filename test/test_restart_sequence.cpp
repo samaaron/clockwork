@@ -184,12 +184,16 @@ TEST_CASE("restart sequence: the watchdog's recovery from a device delivering at
     const int32_t gen = static_cast<int32_t>(fix.engine().generation());
 
     sys->useVirtualTime();
-    REQUIRE(runWatchdogUntil(fix.engine(), *sys, 50, 15000, [&] {
+    const bool recovered = runWatchdogUntil(fix.engine(), *sys, 50, 15000, [&] {
         return fix.engine().rateSkewRecoveryCount() >= 1 && heardRunning(fix, gen);
-    }));
+    });
+    INFO(fix.debugMessagesDump());
+    INFO("rate skew recoveries " << fix.engine().rateSkewRecoveryCount()
+         << ", watchdog recoveries " << fix.engine().watchdogRecoveryCount()
+         << ", heard running above " << gen << ": " << heardRunning(fix, gen));
+    REQUIRE(recovered);
     const auto heard = settledSequence(fix, *sys);
     sys->useWallTime();
-    INFO(fix.debugMessagesDump());
     CHECK(coldRestartsIn(heard, gen) >= 1);
     CHECK(heard.back().generation == static_cast<int32_t>(fix.engine().generation()));
 }

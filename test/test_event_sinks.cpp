@@ -120,7 +120,7 @@ ClockworkSink dspOpenSink(const char* target, ClockworkSinkKind kind, uint32_t c
 
 // Queue one send in the DSP. It goes out at the top of the NEXT dsp_process,
 // dated by that block's block_time — which is the whole point of the exercise.
-void dspQueueSend(ClockworkSink sink, const char* text, uint32_t delay_ms) {
+void dspQueueSend(ClockworkSink sink, const char* text, int32_t delay_ms) {
     osc_test::Builder b;
     auto& s = b.begin("/dummy/sink/send");
     s << static_cast<osc::int32>(sink) << text
@@ -399,24 +399,24 @@ TEST_CASE("sinks: a DSP that gives a time gets it honoured or told",
     const ClockworkSink sink = dspOpenSink(kDiscard, kClockworkSinkOsc, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
 
-    // 40 ms past this block's start, computed by the DSP from block_time —
-    // the arithmetic dsp_api.h says is the DSP's own.
-    dspQueueSend(sink, "twenty-past", 40);
+    // One second before this block's start, computed by the DSP from
+    // block_time — the arithmetic dsp_api.h says is the DSP's own. The sink
+    // compares the time against the wall clock, the domain a real block_time
+    // is in, and this fixture's block times never run ahead of the wall
+    // (its timeline starts at the 1970 epoch and, after another host has
+    // ticked the engine, continues from the clock that host published), so
+    // a send dated a second before its block is past due whatever ran
+    // before this case.
+    dspQueueSend(sink, "a-second-ago", -1000);
     lanes_test::tick();
     REQUIRE(settled(sink, 1));
 
     const ClockworkSinkStats s = statsOf(sink);
     REQUIRE(s.sent == 1);
     REQUIRE(s.dropped == 0);
-    // AND IT IS LATE, which is correct and worth stating rather than
-    // asserting away. LanesFixture self-clocks from kBaseNtp (the 1900→1970
-    // offset, i.e. midnight on 1 January 1970) so that a test can name the
-    // exact instant a given absolute frame is rendered at. The sink compares
-    // against the wall clock, because that is the domain a real block_time is
-    // in. So a message the DSP dates "40 ms after this block" is, in this
-    // fixture, more than half a century overdue — the sink sends it at once
-    // and says so in the one number the header calls the one worth watching.
-    // A sink that reported 0 here would be a sink whose `late` never fires.
+    // AND IT IS LATE: the sink sends it at once and says so in the one
+    // number the header calls the one worth watching. A sink that reported
+    // 0 here would be a sink whose `late` never fires.
     REQUIRE(s.late == 1);
 }
 

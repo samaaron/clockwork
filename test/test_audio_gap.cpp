@@ -18,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "FakeAudioDevice.h"
 #include "clock/ClockworkClock.h"
 #include "lanes/lanes.h"
 #include "clockwork_client.h"
@@ -229,3 +230,29 @@ TEST_CASE("the tick stamps a block in Link's clock from its samples exactly on a
     CHECK(std::llabs(int64_t(b2.block_host_micros) - int64_t(b1.block_host_micros) - 1000000) <= 1);
 }
 #endif
+
+TEST_CASE("a cold swap never moves the engine's clock back",
+          "[gap][clock][engine][ColdSwap]") {
+    // The device delivers two seconds of audio in the case's virtual time,
+    // in an instant of real time, so the engine's clock stands two seconds
+    // ahead of the wall clock. The user then reopens the device: a cold
+    // swap, a new instance over a new arena. Its clock continues from where
+    // the old one's stood. A new instance that anchored at the wall clock
+    // would hand every reader a time two seconds before the last one they
+    // read.
+    auto sys = fake_audio::makeSimpleSystem();
+    EngineFixture fix(fake_audio::fakeEngineConfig(sys, "Fake Speakers"));
+    sys->useVirtualTime();
+    sys->advanceBy(2'000'000);
+    sys->useWallTime();
+    const double before = publishedClock(fix);
+    REQUIRE(before > 0.0);
+
+    OscReply reply;
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/reopen")));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("devices/reopen.done"), reply, 15000));
+    REQUIRE(fix.waitForBlocks(8));
+    const double after = publishedClock(fix);
+    INFO("clock before the swap " << before << ", after " << after);
+    CHECK(after >= before);
+}
