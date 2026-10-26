@@ -1425,12 +1425,16 @@ export class Clockwork {
   }
 
   /**
-   * Flush pending OSC from the WASM scheduler and the IN ring.
+   * Drop everything the engine is holding: the bundles in the WASM scheduler,
+   * and the messages waiting in the IN ring, which the next block refuses to
+   * their senders as stale rather than plays. It covers what has reached the
+   * engine when the purge reaches it: a send still in transit on another port
+   * (an OscChannel in postMessage mode, a worker) arrives after the mark and
+   * plays as new, so a caller stops its senders first.
    *
-   * Uses a postMessage flag (not the ring buffer) to avoid the race where stale
-   * scheduled bundles would fire before a clearSched command could be read from
-   * the ring buffer. Resolves when the worklet acks — or, if the worklet is
-   * gone, when that ack times out.
+   * Sent as a postMessage, not through the ring, so it cannot queue behind
+   * the stale bundles it is there to drop. Resolves when the worklet acks —
+   * or, if the worklet is gone, when that ack times out.
    *
    * @returns {Promise<void>}
    */
