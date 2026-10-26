@@ -110,6 +110,11 @@ inline double ntpAtFrame(uint64_t frame) {
     return baseNtp() + static_cast<double>(frame) / kSampleRate;
 }
 
+// The engine's clock as it last published it: the NTP time of the first
+// frame of the last block rendered, by whichever host rendered it (0 before
+// the first). What a DSP's block_time comes from.
+double publishedNtp();
+
 // Boot clockwork if it is not already up; returns the block size it settled
 // on. Safe to call from every test case — only the first call does anything.
 uint32_t boot();

@@ -43,6 +43,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -399,15 +400,21 @@ TEST_CASE("sinks: a DSP that gives a time gets it honoured or told",
     const ClockworkSink sink = dspOpenSink(kDiscard, kClockworkSinkOsc, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
 
-    // One second before this block's start, computed by the DSP from
-    // block_time — the arithmetic dsp_api.h says is the DSP's own. The sink
-    // compares the time against the wall clock, the domain a real block_time
-    // is in, and this fixture's block times never run ahead of the wall
-    // (its timeline starts at the 1970 epoch and, after another host has
-    // ticked the engine, continues from the clock that host published), so
-    // a send dated a second before its block is past due whatever ran
-    // before this case.
-    dspQueueSend(sink, "a-second-ago", -1000);
+    // The DSP dates the send from its block time, by the arithmetic
+    // dsp_api.h says is its own; the sink judges lateness against the wall
+    // clock. This fixture's block times are synthetic: they start at the
+    // 1970 epoch and, once another host has ticked the engine, continue from
+    // the clock it published and then run ahead of the wall clock, because
+    // a case ticks blocks far faster than real time. So the delay is
+    // computed from where this block stands against the wall: a second
+    // before the wall clock, however far from it the block is.
+    const double blockNtp = std::max(lanes_test::ntpAtFrame(lanes_test::position()),
+                                     lanes_test::publishedNtp()
+                                         + static_cast<double>(lanes_test::kBufLength) / lanes_test::kSampleRate);
+    const double wallNtp  = wallClockNTP();
+    const int32_t delayMs = -static_cast<int32_t>(std::ceil(std::max(0.0, blockNtp - wallNtp) + 1.0) * 1000.0);
+    INFO("block time " << blockNtp << " against the wall clock " << wallNtp << ": delay " << delayMs << " ms");
+    dspQueueSend(sink, "before-the-wall", delayMs);
     lanes_test::tick();
     REQUIRE(settled(sink, 1));
 

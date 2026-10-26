@@ -68,15 +68,22 @@ ClockworkClient* openClient() {
 // last published, and tell the engine this host's audio is starting: the next
 // tick re-anchors at exactly that time (the engine floors an anchor at the
 // published sample clock), so ntpAtFrame stays exact.
-void resume() {
-    gResume = false;
+// The sample clock the engine last published, through a client: its NTP
+// time for the first frame of the last block rendered, 0 before the first.
+double readPublishedNtp() {
     ClockworkClient* c = openClient();
     ClockworkClientSampleClock sc {};
     sc.struct_bytes = sizeof sc;
     const ClockworkStatus st = clockwork_client_sample_clock(c, &sc);
     clockwork_client_close(c);
-    if (st == CLOCKWORK_OK && sc.dac_ntp > 0.0)
-        gBaseNtp = std::max(gBaseNtp, sc.dac_ntp - static_cast<double>(gSamplePos) / kSampleRate);
+    return st == CLOCKWORK_OK ? sc.dac_ntp : 0.0;
+}
+
+void resume() {
+    gResume = false;
+    const double published = readPublishedNtp();
+    if (published > 0.0)
+        gBaseNtp = std::max(gBaseNtp, published - static_cast<double>(gSamplePos) / kSampleRate);
     clockwork_audio_starts(ntpAtFrame(gSamplePos), /*monotonic_secs*/ 0.0);
 }
 } // namespace
@@ -84,6 +91,11 @@ void resume() {
 double baseNtp() {
     boot();
     return gBaseNtp;
+}
+
+double publishedNtp() {
+    boot();
+    return readPublishedNtp();
 }
 
 uint32_t metricWord(uint32_t offset) {
