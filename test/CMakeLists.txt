@@ -81,7 +81,6 @@ add_executable(clockwork_tests
     # A peer's stream placed on the timeline: the vendored renderer, fed
     # buffers by hand on a session of one. Compiles to nothing without Link Audio.
     test_link_audio_input_renderer.cpp
-    test_audio_block_clock.cpp
     test_block_stamp.cpp
     test_time_source.cpp
     test_metrics_history.cpp

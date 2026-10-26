@@ -22,6 +22,7 @@
 using clockwork::bitsToDouble;
 
 std::atomic<ClockworkClock*> g_active_clockwork_clock{nullptr};
+std::atomic<LinkAudioHost*>  g_active_link_audio{nullptr};
 
 // ── Sample clock (sample position ↔ wall-clock DAC time) ───────────────
 

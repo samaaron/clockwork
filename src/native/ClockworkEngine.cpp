@@ -23,7 +23,6 @@
 #include "shared_memory.h"
 #include "osc_debug.h"
 #include "clock/clock_math.h"
-#include "native/AudioBlockClock.h"
 #include "osc/OscReceivedElements.h"
 #include "OscBuilder.h"
 #include "osc/OscOutboundPacketStream.h"
@@ -948,6 +947,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 "supported. /clockwork/clock will reflect this engine.");
             g_active_clockwork_clock.store(&mClockworkClock, std::memory_order_release);
         }
+        g_active_link_audio.store(&mLinkAudio, std::memory_order_release);
     }
     mProcessor.initialiseDsp(
         arena,
@@ -1642,46 +1642,30 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
     if (!mManualPumpStarted) {
         mManualSamplePos = 0.0;
         mManualWall      = wallClockNTP();
-        clockwork::resetAudioBlockClock(mClockworkClock, mLinkAudio, mManualSamplePos,
-                                  mCurrentConfig.sampleRate, mManualWall);
-        clockwork_audio_starts(mManualWall, 0.0);   // the pump's audio starts now
+        clockwork_audio_starts(mManualWall, 0.0);   // the pump's audio starts now: anchored at its first block
         mManualPumpStarted = true;
     }
 
     // The manual pump renders with no live device (idle / device-loss), so
-    // "audible" == render time (latency 0).
-    // A pump keeps no wall clock: its own time stands in — the wall as it
-    // started, advanced with the audio it renders — so no gap is ever seen
-    // (a test on a virtual clock, a debugger's pause).
-    const clockwork::BlockTime bt = clockwork::beginAudioBlock(
-        mClockworkClock, mLinkAudio, mManualSamplePos,
-        static_cast<double>(mCurrentConfig.sampleRate), 0, mMetrics, mManualWall, 0.0);
-
-    // The DSP's actual block size is authoritative here; the configured buffer
-    // size can differ from the render quantum.
+    // "audible" == render time (latency 0). The pump has no wall clock: it
+    // passes its own time, the wall clock at start advanced by the audio it
+    // has rendered, so it never sees a gap (a test on a virtual clock, a
+    // debugger pause). The tick keeps the clock.
     const uint32_t blockSize = static_cast<uint32_t>(get_audio_buffer_samples());
     const uint32_t nOut = mCurrentConfig.numOutputChannels > 0
                               ? static_cast<uint32_t>(mCurrentConfig.numOutputChannels) : 2;
     const uint32_t nIn  = mCurrentConfig.numInputChannels  > 0
                               ? static_cast<uint32_t>(mCurrentConfig.numInputChannels)  : 0;
-
-    // A callback is whole blocks, stamped as the device path stamps them
-    // (ClockworkProcessor::process): from the one clock step, a block apart.
     const double   blockSeconds = static_cast<double>(blockSize) / mCurrentConfig.sampleRate;
-    const uint64_t blockMicros  = static_cast<uint64_t>(blockSeconds * 1e6);
-    double   ntp  = bt.ntp;
-    uint64_t host = bt.hostMicros;
     for (uint32_t rendered = 0; rendered < std::max(frames, blockSize); rendered += blockSize) {
+        ClockworkBlockTime time {};
+        time.audio_frames   = static_cast<uint64_t>(mManualSamplePos);
+        time.wall_ntp       = mManualWall;
+        time.monotonic_secs = 0.0;
         renderAudioBlock(mLinkAudio, blockSize, nOut, nIn,
-                         static_cast<uint32_t>(mCurrentConfig.sampleRate), ntp, ntp, 0.0, host);
+                         static_cast<uint32_t>(mCurrentConfig.sampleRate), time);
         mManualSamplePos += blockSize;
         mManualWall      += blockSeconds;
-        // Rendered to here, as the device path keeps it (tap streams anchor
-        // on it, and a restart goes on from it).
-        mClockworkClock.advanceEngineFrames(mManualSamplePos);
-        ntp += blockSeconds;
-        if (host != 0) host += blockMicros;
-
         mProcessor.processCount.fetch_add(1, std::memory_order_release);
         mProcessor.processCount.notify_all();
         if (afterEachBlock) afterEachBlock();

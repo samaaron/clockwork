@@ -669,7 +669,7 @@ public:
     };
     TestSwapHold testHoldSwapGate();
 
-    // --- Audio callback access (for preTick hook, pause/resume) ---
+    // --- Audio callback access (pause/resume) ---
     ClockworkProcessor& processor() { return mProcessor; }
 
     // CFRunLoop suppression (macOS). The host's run-loop pump calls

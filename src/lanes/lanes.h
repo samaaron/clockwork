@@ -40,12 +40,12 @@
  * Beyond the ABI calls it must still supply:
  *   - the ClockworkClock composition root: link ClockworkClock.cpp +
  *     ClockworkClockNative.cpp + TimeSource.cpp + MidiTimelines.cpp, then pick the
- *     clock profile — define CLOCKWORK_WORKLET_CLOCK for the SAB-formula clock (the
- *     host publishes NTP anchors into the arena; the web and esp32s3 hosts do
- *     this — it also registers the inline /clock route, so link
- *     EngineClock.cpp too), or
- *     leave it undefined for the wall-clock+IIR native TimeSource (the
- *     native/JUCE host does this). The LinkSession header is an inline
+ *     clock profile — define CLOCKWORK_WORKLET_CLOCK when the engine's clock
+ *     is the only clock in the process (the web and esp32s3 hosts): the clock
+ *     reads 0 until the first block anchors it, and the inline /clock route
+ *     is registered, so link EngineClock.cpp too. Leave it undefined when the
+ *     host has a wall clock the engine can read before the first block (the
+ *     native/JUCE host). The LinkSession header is an inline
  *     no-ops without CLOCKWORK_LINK, so no extra TU. Leave
  *     g_active_clockwork_clock null and the engine's clock/MIDI paths stay inert.
  * No freestanding reference host is built here, but the test suite drives
@@ -136,19 +136,24 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
  *   3. runs the DSP for one block;
  *   4. hands the rendered block to any hosted plugins and bound port sinks.
  *
- * The block's time (ClockworkBlockTime). audio_time: on native builds, the
- * NTP time (seconds since 1900) of this block's first sample, used as-is. On
- * WASM the exported clockwork_tick receives AudioContext time instead and
- * keeps time from it itself (process_audio's CLOCKWORK_WORKLET_CLOCK branch,
- * which the self-driven device build takes too): one IIR clock on every
- * target (clock/TimeSource.h), anchored by the audio thread. wall_ntp: the
- * host's wall clock now, NTP seconds — the callback's on native, Date.now()
- * in the worklet, an embedded host's own: what the worklet's clock converges
- * on. monotonic_secs: the host's monotonic clock now, where it has one (0
- * where not: the worklet). The record that the audio was away is the host's
- * to keep, a block at a time, before its clock moves (clockwork_audio_back).
- * A host rendering on no wall clock (a manual pump) passes its own time for
- * the wall and 0 for the monotonic clock, and no gap is ever seen.
+ * The block's time (ClockworkBlockTime): inputs from the host, outputs from
+ * the engine. No host keeps a clock of its own: the engine's TimeSource
+ * (clock/TimeSource.h) is the one clock on native, in the worklet and in an
+ * embedded host, and the tick anchors it, slews it, publishes it and records
+ * its history. Inputs: audio_frames, the host's count of frames rendered so
+ * far, i.e. this block's first frame (the device callback's sample position,
+ * AudioContext time in frames, an embedded host's rendered count); wall_ntp,
+ * the host's wall clock now in NTP seconds (the callback's, Date.now(), an
+ * embedded host's own); monotonic_secs, the host's monotonic clock now, or 0
+ * if it has none (the worklet); output_latency_frames, the device's output
+ * latency, 0 without a device; link_host_micros, the audio framework's
+ * playback timestamp for this block in Link's clock (CoreAudio supplies
+ * one), 0 otherwise. Outputs: block_ntp, the engine's NTP time for the
+ * block's first frame; block_host_micros, the block's Link stamp, the host's
+ * own when it gave one, else the engine's. A host with no wall clock (a
+ * manual pump) passes its own time as wall_ntp and 0 as monotonic_secs and
+ * never sees a gap. The engine detects gaps from these inputs once per block
+ * (clockwork_audio_back).
  *
  * Input audio: write into clockwork_audio_in() before the call. Output audio:
  * read clockwork_audio_out() after it — clockwork_block_size() frames per channel,
@@ -157,12 +162,16 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
  * Returns false only on fatal engine error (host should stop calling).
  */
 typedef struct ClockworkBlockTime {
-    uint32_t struct_bytes;     /* sizeof(ClockworkBlockTime): the struct may grow, a host says which it built */
-    double   audio_time;       /* the block's first sample: NTP seconds on native, AudioContext time on the web */
-    double   wall_ntp;         /* the host's wall clock now, NTP seconds */
-    double   monotonic_secs;   /* the host's monotonic clock now, seconds from any origin; 0 where it has none */
+    uint32_t struct_bytes;          /* sizeof(ClockworkBlockTime): the struct may grow, a host says which it built */
+    uint32_t output_latency_frames; /* in: what the device plays a rendered frame after; 0 with no device */
+    uint64_t audio_frames;          /* in: the host's own count of audio rendered: this block's first frame */
+    double   wall_ntp;              /* in: the host's wall clock now, NTP seconds */
+    double   monotonic_secs;        /* in: the host's monotonic clock now, seconds from any origin; 0 where it has none */
+    uint64_t link_host_micros;      /* in: the framework's playback stamp for the block in Link's clock; 0 where it gives none */
+    double   block_ntp;             /* out: the engine's time for the block's first frame, NTP seconds */
+    uint64_t block_host_micros;     /* out: the block's stamp in Link's clock (0 without Link) */
 } ClockworkBlockTime;
-bool clockwork_tick(const ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels);
+bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels);
 
 /* THE AUDIO WAS AWAY? The one rule on every target. The gap is the time that
  * passed since the last block less the audio rendered in it, by the host's
@@ -172,8 +181,8 @@ bool clockwork_tick(const ClockworkBlockTime* time, uint32_t out_channels, uint3
  * host attaching again, sees it). A host asks once a block as it hands its
  * time over, BEFORE its clock moves, with its own count of the audio rendered
  * (audio_secs, seconds from any origin): true when the gap is over
- * kClockStepSeconds, and the host anchors its clock afresh at this block
- * (resetAudioThreadTime; AudioBlockClock.h for native drivers). Nothing that
+ * kClockStepSeconds, and the tick re-anchors the clock at this block
+ * (resetAudioThreadTime). Nothing that
  * waited is dropped for a gap: it is delivered, late by the gap; a host that
  * wants it gone says so (clockwork_ingress_mark_stale). A host asks
  * clockwork_audio_starts as its audio starts —

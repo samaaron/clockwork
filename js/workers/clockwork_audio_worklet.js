@@ -1112,10 +1112,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             // is for a host that wants it gone).
                             this.wasmInstance.exports.clockwork_audio_starts((Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
                             this.wasmInstance.exports.clockwork_set_timed_event_late_limit_ms(this.schedulerLateLimitMs || 0);
-                            // The block's time, handed to every tick (ClockworkBlockTime, lanes.h): struct_bytes,
-                            // then audio_time, wall_ntp, monotonic_secs as doubles — a worklet has no monotonic clock
-                            this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(32);
-                            new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr, 1)[0] = 32;
+                            // ClockworkBlockTime (lanes.h), 64 bytes, passed to every clockwork_tick:
+                            //   +0  u32 struct_bytes        +4  u32 output_latency_frames (0: unknown in a worklet)
+                            //   +8  u64 audio_frames        +16 f64 wall_ntp
+                            //   +24 f64 monotonic_secs (0)  +32 u64 link_host_micros (0)
+                            //   +40 f64 block_ntp (out)     +48 u64 block_host_micros (out)
+                            this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(64);
+                            new Uint8Array(this.wasmMemory.buffer, this.blockTimePtr, 64).fill(0);
+                            new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr, 1)[0] = 64;
 
                             // A BUILD THAT REFUSED SAYS WHY, HERE. The engine
                             // records the reason (clockwork_boot_fail, or the
@@ -1466,10 +1470,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 // clock on every target, clock/TimeSource.h), and reads from the wall time how long the audio was away.
                 // Date.now() is whole milliseconds (a worklet has no finer clock): given as the middle of its
                 // millisecond, so the clock the engine converges on is not half a millisecond behind the wall.
-                const blockTime = new Float64Array(this.wasmMemory.buffer, this.blockTimePtr + 8, 3);
-                blockTime[0] = audioContextTime;
-                blockTime[1] = (wall + 0.5) / 1000 + NTP_EPOCH_OFFSET;
-                blockTime[2] = 0;
+                // audio_frames = the context's time in whole frames, written as two u32 words (low, high).
+                const frames = Math.round(audioContextTime * sampleRate);
+                const words = new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr + 8, 2);
+                words[0] = frames >>> 0;
+                words[1] = Math.floor(frames / 4294967296) >>> 0;
+                const blockTime = new Float64Array(this.wasmMemory.buffer, this.blockTimePtr + 16, 2);
+                blockTime[0] = (wall + 0.5) / 1000 + NTP_EPOCH_OFFSET;
+                blockTime[1] = 0;
                 const keepAlive = this.wasmInstance.exports.clockwork_tick(this.blockTimePtr, outputChannels, inputChannels);
 
                 // postMessage mode: the engine's time to each channel's port, for a worker that cannot read the arena

@@ -28,10 +28,7 @@ struct ClockworkEmbed {
     std::vector<float> outRing, inRing;
     uint32_t outHead = 0, outCount = 0;   // rendered, not yet served
     uint32_t inHead = 0,  inCount = 0;    // received, not yet ticked
-    double   ntpBase = 0;
-    uint64_t rendered = 0;
-    // Where the frame-to-NTP pair is published for clients (null: nowhere).
-    uint8_t* sampleClock = nullptr;
+    uint64_t rendered = 0;   // this host's count of the audio it has rendered: its block time's frames
 
     // Owned by this handle; the single attachment it holds.
     bool attached = false;

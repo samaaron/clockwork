@@ -13,6 +13,7 @@
 #include "dsp_api.h"      // DspFpEnv
 #include "OscTestUtils.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace lanes_test {
@@ -22,6 +23,8 @@ uint32_t   gBlockSize  = 0;
 uint64_t   gSamplePos  = 0;
 uint64_t   gDspOrigin  = 0;   // gSamplePos when freshDsp() last made an instance
 bool       gBooted     = false;
+double     gBaseNtp    = kEpochNtp;
+bool       gResume     = false;   // another host rendered since this fixture last ticked (ticked())
 
 void drainInto(std::vector<EgressFrame>& out,
                uint32_t (*drain)(ClockworkEgressFn, void*, uint32_t)) {
@@ -48,12 +51,43 @@ alignas(16) static uint8_t gAssets[kAssetsBytes];
 alignas(16) static uint8_t gReturns[kReturnsBytes];
 
 const uint8_t* guestMemory() { return gGuestMemory; }
-uint32_t metricWord(uint32_t offset) {
+namespace {
+// Open a client on the engine's arena (not the guest's reservation) to read from it.
+ClockworkClient* openClient() {
     ClockworkStatus st = CLOCKWORK_OK;
-    uint8_t* const arena = static_cast<uint8_t*>(get_shared_memory_base());   // the engine's arena, not the guest's reservation
+    uint8_t* const arena = static_cast<uint8_t*>(get_shared_memory_base());
     REQUIRE(arena != nullptr);
     ClockworkClient* c = clockwork_client_open_memory(arena, reinterpret_cast<const ClockworkArenaHeader*>(arena)->arena_bytes, &st);
     REQUIRE(c != nullptr);
+    return c;
+}
+
+// Another host (clockwork_embed_render) ticked the engine on the real wall
+// clock, so the engine's clock is now ahead of this fixture's timeline. Rebase
+// gBaseNtp so that ntpAtFrame(gSamplePos) equals the sample clock the engine
+// last published, and tell the engine this host's audio is starting: the next
+// tick re-anchors at exactly that time (the engine floors an anchor at the
+// published sample clock), so ntpAtFrame stays exact.
+void resume() {
+    gResume = false;
+    ClockworkClient* c = openClient();
+    ClockworkClientSampleClock sc {};
+    sc.struct_bytes = sizeof sc;
+    const ClockworkStatus st = clockwork_client_sample_clock(c, &sc);
+    clockwork_client_close(c);
+    if (st == CLOCKWORK_OK && sc.dac_ntp > 0.0)
+        gBaseNtp = std::max(gBaseNtp, sc.dac_ntp - static_cast<double>(gSamplePos) / kSampleRate);
+    clockwork_audio_starts(ntpAtFrame(gSamplePos), /*monotonic_secs*/ 0.0);
+}
+} // namespace
+
+double baseNtp() {
+    boot();
+    return gBaseNtp;
+}
+
+uint32_t metricWord(uint32_t offset) {
+    ClockworkClient* c = openClient();
     uint32_t words[clockwork::metrics_schema::kMetricWords] = {};
     const uint32_t n = clockwork_client_metrics(c, words, clockwork::metrics_schema::kMetricWords);
     clockwork_client_close(c);
@@ -64,7 +98,10 @@ uint8_t*       assets()       { return gAssets; }
 const uint8_t* returns()      { return gReturns; }
 
 uint32_t boot() {
-    if (gBooted) return gBlockSize;
+    if (gBooted) {
+        if (gResume) resume();
+        return gBlockSize;
+    }
     // Before clockwork_init: the reservation is read at every init_memory, and
     // widens the channel counts the DSP is allocated for.
     if (kReservedLanes > 0) clockwork_reserve_lanes(kReservedLanes);
@@ -95,7 +132,10 @@ uint32_t boot() {
     return gBlockSize;
 }
 
-void ticked(uint64_t frames) { gSamplePos += frames; }
+void ticked(uint64_t frames) {
+    gSamplePos += frames;
+    gResume = true;
+}
 
 uint64_t position() { return gSamplePos; }
 
@@ -129,7 +169,7 @@ uint64_t tick() {
     const double   ntp = ntpAtFrame(gSamplePos);
     ClockworkBlockTime time {};
     time.struct_bytes = sizeof time;
-    time.audio_time   = ntp;
+    time.audio_frames = gSamplePos;
     time.wall_ntp     = ntp;   // its own time for a wall, and no monotonic clock: a fixture sees no gap
     clockwork_tick(&time, kOutChannels, kInChannels);
     gSamplePos += gBlockSize;

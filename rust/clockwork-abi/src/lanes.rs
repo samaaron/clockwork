@@ -32,18 +32,28 @@ pub const CLOCKWORK_ATTACH_JOINED: c_int = 2;
 /// The most channels a host may reserve above the device for its own routing.
 pub const CLOCKWORK_RESERVED_LANES_MAX: u32 = 64;
 
-/// The time a host hands the engine with each block (`ClockworkBlockTime`, lanes.h).
+/// The block's time (`ClockworkBlockTime`, lanes.h): inputs from the host,
+/// outputs from the engine. No host keeps a clock of its own; the engine's
+/// clock is anchored, slewed and published by the tick.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ClockworkBlockTime {
     /// `size_of::<ClockworkBlockTime>()`: the struct may grow, a host says which it built.
     pub struct_bytes: u32,
-    /// The block's first sample: NTP seconds on native, AudioContext time on the web.
-    pub audio_time: f64,
-    /// The host's wall clock now, NTP seconds.
+    /// In: the device's output latency in frames; 0 without a device.
+    pub output_latency_frames: u32,
+    /// In: the host's count of frames rendered so far, i.e. this block's first frame.
+    pub audio_frames: u64,
+    /// In: the host's wall clock now, NTP seconds.
     pub wall_ntp: f64,
-    /// The host's monotonic clock now, seconds from any origin; 0 where it has none.
+    /// In: the host's monotonic clock now, seconds from any origin; 0 if it has none.
     pub monotonic_secs: f64,
+    /// In: the audio framework's playback timestamp for this block in Link's clock; 0 if it gives none.
+    pub link_host_micros: u64,
+    /// Out: the engine's NTP time for the block's first frame.
+    pub block_ntp: f64,
+    /// Out: the block's timestamp in Link's clock (0 without Link).
+    pub block_host_micros: u64,
 }
 
 unsafe extern "C" {
@@ -54,16 +64,20 @@ unsafe extern "C" {
     pub fn clockwork_egress_rt_drain(f: ClockworkEgressFn, ctx: *mut c_void, max_frames: u32) -> u32;
     pub fn clockwork_egress_nrt_drain(f: ClockworkEgressFn, ctx: *mut c_void, max_frames: u32) -> u32;
 
-    // ── Tick ── audio thread only. `time`: the block's time (ClockworkBlockTime,
-    // lanes.h): its first sample in seconds since 1900 (a host without a wall
-    // clock passes a base plus elapsed samples over the rate), the host's wall
-    // clock now, and its monotonic clock now (0 where it has none). false only
-    // on fatal engine error.
-    pub fn clockwork_tick(time: *const ClockworkBlockTime, out_channels: u32, in_channels: u32) -> bool;
-    // The audio was away? Asked by the tick at every block, and by a host as
-    // its audio starts, with its clocks now: what waited through a gap longer
-    // than kAudioAwaySeconds is refused as stale and the schedule cleared.
-    pub fn clockwork_audio_back(wall_ntp: f64, monotonic_secs: f64) -> bool;
+    // ── Tick ── audio thread only. `time` (ClockworkBlockTime, lanes.h)
+    // carries the host's frame count, clocks, output latency and Link stamp
+    // in, and gets the engine's block time back. A host with no wall clock
+    // passes its own time as wall_ntp and 0 as monotonic_secs and never sees
+    // a gap. Returns false only on a fatal engine error.
+    pub fn clockwork_tick(time: *mut ClockworkBlockTime, out_channels: u32, in_channels: u32) -> bool;
+    // clockwork_audio_back: called by the tick every block with the host's
+    // clocks and its rendered audio in seconds; returns true when the audio
+    // was away, in which case the clock re-anchors at that block. Nothing
+    // that waited is dropped. clockwork_audio_starts: the host's audio is
+    // starting (a device opened, an embedded host attached); the next block
+    // re-anchors the clock.
+    pub fn clockwork_audio_back(wall_ntp: f64, monotonic_secs: f64, audio_secs: f64) -> bool;
+    pub fn clockwork_audio_starts(wall_ntp: f64, monotonic_secs: f64) -> bool;
     pub fn clockwork_audio_out() -> *const f32; // channel-major, block_size frames per channel
     pub fn clockwork_audio_in() -> *mut f32; // fill before the tick
     pub fn clockwork_block_size() -> u32;

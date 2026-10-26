@@ -142,12 +142,18 @@ void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate, 
             : bitsToDouble(originBits);
     } else {
         newBaseNTP = wall(wallNtp) - sampleOffsetSec;
-        // Never behind the clock the arena already carries: a host whose wall
-        // clock lags what the last host published (a worklet made again over
-        // the same memory, an embedded host attaching again, a wall clock
-        // stepped back) goes on from it, and a reader never sees time go back.
-        if (floorNtp > 0.0 && newBaseNTP + sampleOffsetSec < floorNtp)
-            newBaseNTP = floorNtp - sampleOffsetSec;
+        // Floor: never below the sample clock already in the arena, nor
+        // below this clock's own last published time. A host whose wall
+        // clock reads earlier than that (a new worklet over the same memory,
+        // an embedded host re-attaching, possibly at another sample rate,
+        // which rebuilds the arena's sample clock, or a wall clock stepped
+        // back) continues from the floor, so readers never see time go
+        // backwards.
+        const uint64_t lastBits = mCurrentAudioThreadNTPBits.load(std::memory_order_relaxed);
+        const double   last     = lastBits ? bitsToDouble(lastBits) - globalOffsetSeconds() : 0.0;
+        const double   floorAll = std::max(floorNtp, last);
+        if (floorAll > 0.0 && newBaseNTP + sampleOffsetSec < floorAll)
+            newBaseNTP = floorAll - sampleOffsetSec;
     }
     mBaseNTPBits.store(doubleToBits(newBaseNTP), std::memory_order_relaxed);
     mCurrentAudioThreadNTPBits.store(doubleToBits(newBaseNTP + sampleOffsetSec + globalOffsetSeconds()),

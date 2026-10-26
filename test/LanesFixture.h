@@ -95,14 +95,19 @@ const uint8_t* returns();        // guest writes, client reads
 uint32_t metricWord(uint32_t offset);
 
 // The NTP instant the fixture calls frame 0. There is no real-time clock in
-// play: the fixture self-clocks from kBaseNtp + frames/rate exactly as a
+// play: the fixture self-clocks from a base NTP + frames/rate exactly as a
 // self-driven host does, so a test that wants to schedule something can name
-// the exact NTP time a given absolute frame will be rendered at.
-inline constexpr double   kBaseNtp     = 2208988800.0;
+// the exact NTP time a given absolute frame will be rendered at. The base is
+// the NTP epoch until another host ticks the engine on the real wall clock
+// (ticked()); the engine's clock never goes backwards, so at the next boot()
+// the fixture rebases onto the engine's published sample clock and its frame
+// times are exact again.
+inline constexpr double   kEpochNtp    = 2208988800.0;
+double baseNtp();
 
 // The NTP time at which absolute frame `frame` is rendered.
 inline double ntpAtFrame(uint64_t frame) {
-    return kBaseNtp + static_cast<double>(frame) / kSampleRate;
+    return baseNtp() + static_cast<double>(frame) / kSampleRate;
 }
 
 // Boot clockwork if it is not already up; returns the block size it settled
@@ -113,7 +118,8 @@ uint32_t boot();
 // out[ch][i] corresponds to stream position (returned + i).
 uint64_t tick();
 // A test that ticked the engine by another door (clockwork_embed_render)
-// says so, so this fixture's frame count stays the engine's.
+// says so, so this fixture's frame count stays the engine's, and the next
+// boot() rebases the fixture's timeline onto the engine's clock (ntpAtFrame).
 void ticked(uint64_t frames);
 
 // The stream position the next tick() renders from.

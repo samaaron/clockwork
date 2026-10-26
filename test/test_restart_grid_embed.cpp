@@ -77,6 +77,14 @@ public:
         mLastClock = sc.dac_ntp;
     }
     double clockWentBack() const { return mClockBack; }
+    // The engine's clock_anchors metric (word 63), read through the host's
+    // client. The embedded host uses the engine's clock, so its anchors are
+    // counted like every other host's.
+    uint32_t anchors() const {
+        uint32_t words[128] = {};
+        REQUIRE(clockwork_client_metrics(mC, words, 128) > 63);
+        return words[63];
+    }
     void send(const osc_test::Packet& p) {
         REQUIRE(clockwork_client_send(mC, p.ptr(), p.size(), kOrigin) == CLOCKWORK_OK);
     }
@@ -155,7 +163,8 @@ TEST_CASE("restart grid: an embedded host attaching again after the audio was aw
     host.read();
 
     for (const auto& ask : restart_model::waitingAsks()) host.send(ask);
-    const uint32_t before = generation();
+    const uint32_t before   = generation();
+    const uint32_t anchored = host.anchors();
     host.close();
     std::this_thread::sleep_for(std::chrono::milliseconds(2300));
     host.attach(48000.0);
@@ -183,4 +192,7 @@ TEST_CASE("restart grid: an embedded host attaching again after the audio was aw
     CHECK(answered == 1);
     INFO("the engine's clock, as the host's client reads it, went back by " << host.clockWentBack() << " s");
     CHECK(host.clockWentBack() == 0.0);
+    // The clock re-anchored exactly once, at the attach; the gap before it
+    // did not add a second anchor.
+    CHECK(host.anchors() == anchored + 1);
 }

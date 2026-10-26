@@ -113,6 +113,15 @@ public:
                                 double renderedFrames = 0.0, double floorNtp = 0.0);
     // Whether a reset has anchored this clock yet.
     bool   anchored() const { return mBaseNTPBits.load(std::memory_order_relaxed) != 0; }
+    // Cold boot: reset the clock to unanchored and clear the last published
+    // time and the anchor and drift counters, as the arena it publishes into
+    // is reset.
+    void   unanchor() {
+        mBaseNTPBits.store(0, std::memory_order_relaxed);
+        mCurrentAudioThreadNTPBits.store(0, std::memory_order_release);
+        mAnchors.store(0, std::memory_order_relaxed);
+        mLastDriftUs.store(0, std::memory_order_relaxed);
+    }
     // For the metrics (publishClockMetrics): the clock against the host's
     // wall clock at the last block, microseconds, signed; and how many times
     // it has been anchored afresh since boot.

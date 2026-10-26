@@ -12,6 +12,7 @@
 #pragma once
 
 #include "smoothie_worklet.h"
+#include "lanes/lanes.h"   // ClockworkBlockTime
 #include "clock/clock_math.h"
 #include <atomic>
 #include <cstdint>
@@ -23,7 +24,6 @@ class LinkAudioHost;
 struct PerformanceMetrics;
 
 extern "C" {
-    bool process_audio(double current_time, double wall_ntp, double monotonic_secs, uint32_t active_output_channels, uint32_t active_input_channels);
     void set_time_offset(double offset);
     uintptr_t get_audio_output_bus();
     uintptr_t get_audio_input_bus();
@@ -75,10 +75,7 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t numOutputChannels,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
-                      double   ntp,
-                      double   wallNtp,
-                      double   monotonicSecs,
-                      uint64_t hostMicros,
+                      ClockworkBlockTime& time,   // in: the host's frame count, clocks, latency, Link stamp; out: the block's time
                       uint32_t publishChannels = 0);
 
 class ClockworkProcessor final : public smoothie::Processor {
@@ -172,14 +169,6 @@ public:
     // Read wall clock as NTP seconds (sub-millisecond precision).
     // Public + static so HeadlessDriver can reuse the same implementation.
     static double wallClockNTP() { return ::wallClockNTP(); }
-
-    // --- Pre-tick hook (for clockwork integration) ---
-    // Called before each DSP block (mBufLen frames, not necessarily 128).
-    // samplePosition: cumulative samples processed (for beat calculation)
-    // wallMs: wall clock time in milliseconds
-    std::function<void(double samplePosition, double wallMs)> preTick;
-
-
 
 private:
     // The DSP's audio block size — the number of samples it

@@ -4,7 +4,6 @@
 // The device boot is native/ClockworkEmbedDevice.cpp.
 #include "clockwork_embed_impl.h"
 #include "lanes/lanes.h"
-#include "audio_config.h"
 #include "shared_memory.h"
 #include <chrono>
 #include <cstring>
@@ -47,16 +46,6 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         fail(status, CLOCKWORK_E_PERM);
         return nullptr;
     }
-    // The clock the arena carries, read before the attach: a host attaching
-    // again at another rate rebuilds the instance, and the rebuild resets the
-    // sample clock; the floor is what the last host published, either way.
-    double publishedDac = 0.0;
-    if (uint8_t* const old = static_cast<uint8_t*>(clockwork_lanes_base())) {
-        if (ShmReaderLayout L; ShmReaderLayout::from_arena(old, arenaHeader(old)->arena_bytes, L, nullptr)) {
-            const sample_clock_view v = read_sample_clock(old + L.sample_clock_offset);
-            if (v.valid) publishedDac = v.dac_ntp;
-        }
-    }
     const int rc = clockwork_attach(config->sample_rate, config->block_size,
                                     config->input_channels, config->output_channels,
                                     /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
@@ -79,15 +68,10 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
     h->capacity = h->block + maxFrames;
     h->outRing.assign(static_cast<size_t>(h->outChannels) * h->capacity, 0.0f);
     h->inRing.assign(static_cast<size_t>(h->inChannels ? h->inChannels : 1) * h->capacity, 0.0f);
-    // The clock goes on from where the arena's sample clock left off when the
-    // host's wall clock is behind it — a host attaching again to memory that
-    // is up, which rendered ahead of wall time — so a reader never sees time
-    // go back; otherwise it is wall time.
-    h->ntpBase  = ntpNow();
-    if (publishedDac > 0.0) {
-        const double after = publishedDac + static_cast<double>(h->block) / h->sampleRate;
-        if (after > h->ntpBase) h->ntpBase = after;
-    }
+    // The clock is the engine's. clockwork_audio_starts (below) makes the
+    // next block re-anchor it, never below the sample clock already in the
+    // arena, so a host re-attaching to memory that is still up continues
+    // from the previous time rather than going backwards.
     h->rendered = 0;
 
     ClockworkStatus st = CLOCKWORK_OK;
@@ -101,11 +85,7 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         return nullptr;
     }
     h->ownsClient = true;
-    // The clock this render keeps, published where a client reads which
-    // frame is heard when, as a device host's is.
-    if (ShmReaderLayout L; ShmReaderLayout::from_arena(base, arenaBytes, L, nullptr))
-        h->sampleClock = base + L.sample_clock_offset;
-    // This host's audio starts now: what waited through a gap before it is stale, what it sends from here is not.
+    // This host's audio starts now: the next block re-anchors the clock.
     clockwork_audio_starts(ntpNow(), monoNow());
     g_clockwork_embed.store(h, std::memory_order_release);
     fail(status, CLOCKWORK_OK);
@@ -168,20 +148,14 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
                 h->inHead  = (h->inHead + have) % cap;
                 h->inCount -= have;
             }
-            // The audio was away? (clockwork_audio_back: the one rule on every
-            // target.) A gap anchors this host's clock afresh at this block.
-            const double wall = ntpNow();
-            const double mono = monoNow();
-            const double renderedSecs = static_cast<double>(h->rendered) / h->sampleRate;
-            if (clockwork_audio_back(wall, mono, renderedSecs)) h->ntpBase = wall - renderedSecs;
-            const double ntp = h->ntpBase + renderedSecs;
-            // Rendered is heard: the host's buffer is its own business.
-            write_sample_clock(h->sampleClock, h->rendered, static_cast<uint32_t>(h->sampleRate), ntp, 0);
+            // Pass this host's frame count and clocks to the tick, which keeps
+            // the clock. Output latency is 0: the host's own buffering is not
+            // the engine's concern.
             ClockworkBlockTime time {};
             time.struct_bytes   = sizeof time;
-            time.audio_time     = ntp;
-            time.wall_ntp       = wall;
-            time.monotonic_secs = mono;
+            time.audio_frames   = h->rendered;
+            time.wall_ntp       = ntpNow();
+            time.monotonic_secs = monoNow();
             clockwork_tick(&time, h->outChannels, h->inChannels);
             h->rendered += block;
 

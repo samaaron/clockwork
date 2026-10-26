@@ -401,6 +401,10 @@ bool ClockworkClock::audioThreadAnchored() const {
     return mImpl->timeSource.anchored();
 }
 
+void ClockworkClock::unanchorAudioThread() {
+    mImpl->timeSource.unanchor();
+}
+
 int32_t  ClockworkClock::clockDriftUs() const { return mImpl->timeSource.lastDriftUs(); }
 uint32_t ClockworkClock::clockAnchors() const { return mImpl->timeSource.anchors(); }
 

@@ -22,14 +22,13 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
+#include "lanes/lanes.h"
 #include "shared_memory.h"
 
 #include <cstdint>
 #include <cstring>
 
 extern "C" uint8_t arena_storage[];
-extern "C" bool process_audio(double current_time, double wall_ntp, double monotonic_secs,
-                              uint32_t active_output_channels, uint32_t active_input_channels);
 
 namespace {
 
@@ -43,10 +42,18 @@ RingCursors* control() {
     return reinterpret_cast<RingCursors*>(arena_storage + RING_CURSORS_START);
 }
 
-// One process_audio() block on the test thread (channel counts match the
-// fixture's 2-in/2-out world). Returning at all is itself the liveness check.
+// Tick one block on the test thread (channel counts match the fixture's
+// 2-in/2-out world) with this thread's frame count and its own time as the
+// wall clock (an arbitrary NTP time advanced by the audio rendered), so the
+// engine never sees a gap. Returning at all is itself the liveness check.
 void pump() {
-    process_audio(4'000'000'000.0 /*arbitrary NTP*/, 4'000'000'000.0, 0.0, 2, 2);
+    static uint64_t frames = 0;
+    ClockworkBlockTime time {};
+    time.struct_bytes = sizeof time;
+    time.audio_frames = frames;
+    time.wall_ntp     = 4'000'000'000.0 + static_cast<double>(frames) / 48000.0;
+    clockwork_tick(&time, 2, 2);
+    frames += 128;
 }
 
 // Drain whatever boot traffic is queued, then park both cursors at 0 so the

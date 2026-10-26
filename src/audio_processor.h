@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdarg>
 #include "shared_memory.h"
+#include "lanes/lanes.h"   // ClockworkBlockTime
 #include "dsp_api.h"
 
 struct Dsp;
@@ -137,7 +138,8 @@ extern "C" {
     // Build the arena and the DSP from g_clockwork_config. Hosts call clockwork_init
     // (lanes.h), which fills that in first; this is the half a rebuild repeats.
     void init_memory();
-    EMSCRIPTEN_KEEPALIVE bool process_audio(double current_time, double wall_ntp, double monotonic_secs, uint32_t active_output_channels, uint32_t active_input_channels);
+    // The per-block body (clockwork_tick, lanes.h): the host's block time in, the engine's out.
+    bool process_audio(ClockworkBlockTime& time, uint32_t active_output_channels, uint32_t active_input_channels);
     EMSCRIPTEN_KEEPALIVE int clockwork_log(const char* fmt, ...);
     EMSCRIPTEN_KEEPALIVE int clockwork_log_va(const char* fmt, va_list args);
     EMSCRIPTEN_KEEPALIVE uint32_t get_process_count();

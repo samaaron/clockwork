@@ -258,6 +258,7 @@ public:
     void   resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
                                 double floorNtp = 0.0);
     bool   audioThreadAnchored() const;
+    void   unanchorAudioThread();   // a cold boot: the clock starts over (TimeSource::unanchor)
     int32_t  clockDriftUs() const;    // the clock against the host's wall at the last block (TimeSource::lastDriftUs)
     uint32_t clockAnchors() const;    // anchored afresh since boot (TimeSource::anchors)
     // The render NTP a reset must not go below, for a host whose blocks are
@@ -360,3 +361,9 @@ private:
 // in both SAB and PM modes). Published at engine boot, single-publisher
 // — multi-engine native is not supported.
 extern std::atomic<ClockworkClock*> g_active_clockwork_clock;
+// The LinkAudioHost that ClockworkEngine publishes alongside its clock
+// (native only; null on the web and in hosts without one). process_audio
+// uses it to stamp each block in Link's clock and to reset its block clock
+// whenever it re-anchors the engine clock.
+class LinkAudioHost;
+extern std::atomic<LinkAudioHost*> g_active_link_audio;

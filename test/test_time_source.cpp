@@ -189,7 +189,11 @@ TEST_CASE("TimeSource: an anchor settles on the median of its first readings", "
     // block stale (the thread read the wall once and rendered four).
     constexpr double burst[4] = { 0.0, -kDt, -2 * kDt, -3 * kDt };
     const double medianNoise = -kDt;   // 16 of each: the 33rd smallest is -kDt
-    // Anchored on a bad reading: 5 ms behind the truth (a stale reading).
+    // Anchor on a bad reading, 5 ms behind the truth (a stale reading), after
+    // a 1 s stall so the truth is well ahead of the clock's last published
+    // time; otherwise the floor (never below the last published time) would
+    // mask the bad reading.
+    rig.stall(1.0);
     rig.anchorOn(rig.trueWall() - 0.005);
     const uint32_t anchors = rig.ts.anchors();
 

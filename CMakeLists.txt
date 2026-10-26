@@ -1294,7 +1294,7 @@ if(EMSCRIPTEN)
     # right, and it is clockwork's to keep: the worklet is clockwork's.
     set(CLOCKWORK_WEB_EXPORTS
         ___wasm_call_ctors _clockwork_memory_claim _clockwork_init _clockwork_boot_error _clockwork_malloc_mark_boot _get_arena_base _clockwork_product_version
-        _clockwork_tick _process_audio _get_audio_output_bus _get_audio_input_bus
+        _clockwork_tick _get_audio_output_bus _get_audio_input_bus
         _get_audio_num_output_buses _get_audio_num_input_buses _get_audio_buffer_samples
         _set_time_offset _get_time_offset
         _clockwork_log _clockwork_log_va _clockwork_log_raw

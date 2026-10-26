@@ -118,17 +118,23 @@ export async function bootEngine() {
   const handle = x.clockwork_client_open_memory(arenaBase, constants.ARENA_SIZE, status);
   assert.ok(handle, "the engine's own client opened");
 
-  bootedMemory = memory; blockTime = 0;
+  bootedMemory = memory; blockTime = 0; blockFrames = 0;
   return { x, memory, arenaBase, constants, rings: engineRings(memory.buffer, arenaBase, constants), handle, status };
 }
 
-/** Run one block of the engine: the tick, its own time standing in for a wall clock, so no gap is ever seen. */
-let blockTime = 0, bootedMemory = null;
+/** Run one block of the engine: the tick, passing this host's frame count and its own time as the wall clock
+ *  (the NTP epoch plus the audio rendered so far, like a self-driven host), so the engine never sees a gap. */
+let blockTime = 0, blockFrames = 0, bootedMemory = null;
 export function block(x) {
-  // ClockworkBlockTime (lanes.h): struct_bytes, then audio_time, wall_ntp, monotonic_secs as doubles, in the engine's
-  // memory (the last booted: a test boots one engine)
-  blockTime ||= x.clockwork_worklet_alloc(32);
-  new Uint32Array(bootedMemory.buffer, blockTime, 1)[0] = 32;
-  new Float64Array(bootedMemory.buffer, blockTime + 8, 3).fill(0);
+  // ClockworkBlockTime (lanes.h), 64 bytes in the engine's memory (the last booted: a test boots one engine):
+  // u32 struct_bytes, u32 output_latency_frames (0), u64 audio_frames, f64 wall_ntp, f64 monotonic_secs (0),
+  // u64 link_host_micros (0), then the engine's outputs block_ntp and block_host_micros.
+  blockTime ||= x.clockwork_worklet_alloc(64);
+  const words = new Uint32Array(bootedMemory.buffer, blockTime, 16).fill(0);
+  words[0] = 64;
+  words[2] = blockFrames >>> 0;
+  words[3] = Math.floor(blockFrames / 4294967296) >>> 0;
+  new Float64Array(bootedMemory.buffer, blockTime + 16, 1)[0] = 2208988800 + blockFrames / 48000;
   x.clockwork_tick(blockTime, 2, 0);
+  blockFrames += 128;
 }

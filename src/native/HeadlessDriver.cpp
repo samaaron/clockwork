@@ -7,7 +7,6 @@
 #include "ClockworkProcessor.h"
 #include "RealtimeThread.h"
 #include "clock/ClockworkClock.h"
-#include "native/AudioBlockClock.h"
 #include "native/LinkAudioHost.h"
 #include "lanes/lanes.h"
 
@@ -78,18 +77,16 @@ void HeadlessDriver::processBlock(double& samplePos) {
     // Audio stamp per block, passed to both drain and publish: two stamps
     // with process_audio between would let the published stream's beat-time
     // advance at process_audio cost rather than sample rate.
-    const double wall = wallClockNTP();   // a thread of its own: its clocks are real
-    const double mono = clockwork::monotonicSeconds();
-    const clockwork::BlockTime bt = clockwork::beginAudioBlock(*mClockworkClock, *mLinkAudio, samplePos,
-                                                   static_cast<double>(mSampleRate), 0,
-                                                   mMetrics, wall, mono);
-
+    ClockworkBlockTime time {};
+    time.audio_frames   = static_cast<uint64_t>(samplePos);
+    time.wall_ntp       = wallClockNTP();   // a thread of its own: its clocks are real
+    time.monotonic_secs = clockwork::monotonicSeconds();
     renderAudioBlock(*mLinkAudio,
                      static_cast<uint32_t>(mBlockSize),
                      static_cast<uint32_t>(mNumOutputChannels),
                      static_cast<uint32_t>(mNumInputChannels),
                      static_cast<uint32_t>(mSampleRate),
-                     bt.ntp, wall, mono, bt.hostMicros);
+                     time);
     samplePos += mBlockSize;
 
     mCallback->processCount.fetch_add(1, std::memory_order_release);
@@ -129,7 +126,6 @@ void HeadlessDriver::run(const std::stop_token& stop) {
     struct timespec next{};
     clock_gettime(CLOCK_MONOTONIC, &next);
     double samplePos = 0.0;
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate, wallClockNTP());
     clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());   // this driver's audio starts now
 
     while (!stop.stop_requested()) {
@@ -151,7 +147,6 @@ void HeadlessDriver::run(const std::stop_token& stop) {
     const uint64_t blockTicks = blockNs * tbi.denom / tbi.numer;
     uint64_t nextWake = mach_absolute_time();
     double samplePos = 0.0;
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate, wallClockNTP());
     clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());   // this driver's audio starts now
 
     while (!stop.stop_requested()) {
@@ -180,7 +175,6 @@ void HeadlessDriver::run(const std::stop_token& stop) {
     QueryPerformanceCounter(&now);
     LONGLONG nextWake = now.QuadPart;
     double samplePos = 0.0;
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, samplePos, mSampleRate, wallClockNTP());
     clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());   // this driver's audio starts now
 
     while (!stop.stop_requested()) {

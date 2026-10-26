@@ -4,7 +4,6 @@
 #include "RealtimeThread.h"
 #include "clock/clock_math.h"
 #include "clock/ClockworkClock.h"
-#include "native/AudioBlockClock.h"
 #include "native/LinkAudioHost.h"
 #include "shared_memory.h"
 #include "audio_config.h"
@@ -28,19 +27,12 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t numOutputChannels,
                       uint32_t numInputChannels,
                       uint32_t sampleRate,
-                      double   ntp,
-                      double   wallNtp,
-                      double   monotonicSecs,
-                      uint64_t hostMicros,
+                      ClockworkBlockTime& time,
                       uint32_t publishChannels) {
     if (publishChannels == 0) publishChannels = numOutputChannels;
-    ClockworkBlockTime time {};
-    time.struct_bytes   = sizeof time;
-    time.audio_time     = ntp;
-    time.wall_ntp       = wallNtp;
-    time.monotonic_secs = monotonicSecs;
+    time.struct_bytes = sizeof time;
     clockwork_tick(&time, numOutputChannels, numInputChannels);
-
+    const uint64_t hostMicros = time.block_host_micros;
     // This block has read its ports (pull_port_sources, in the tick): what
     // each is at now is read when the next block begins, a block on. Dated
     // after the read, not before, because a block that found its port short
@@ -50,7 +42,6 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
     if (hostMicros != 0 && sampleRate != 0)
         linkAudio.dateReads(hostMicros + static_cast<uint64_t>(
             std::llround(1e6 * double(blockSize) / double(sampleRate))));
-
     // Publish the main sink (stereo when nOut >= 2, mono fallback for 1).
     // No-op when Link Audio is off / no subscriber.
     if (const float* outputBus = clockwork_audio_out()) {
@@ -147,9 +138,9 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate, wallClockNTP());
-    // The device's audio starts now: what waited through a gap before it is
-    // stale, what a client sends from here is not (clockwork_audio_starts).
+    // The device's audio starts now with its sample count at 0: the next
+    // block re-anchors the clock, and clockwork_audio_starts measures the
+    // gap before it.
     clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
     // A device restart can change the rate under a running engine, so the
     // endpoint is told again here as well as at initialiseDsp.
@@ -278,9 +269,9 @@ void ClockworkProcessor::resume() {
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
     mInputAccumCount = 0;      // discard stale mic samples from before pause
-    clockwork::resetAudioBlockClock(*mClockworkClock, *mLinkAudio, mSamplePosition, mSampleRate, wallClockNTP());
-    // The device's audio starts again now, its count from 0: what waited
-    // through the pause is judged by its length (clockwork_audio_starts).
+    // The device's audio starts again with its sample count at 0: the next
+    // block re-anchors the clock, and clockwork_audio_starts measures the
+    // pause as a gap.
     clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
     mCallbackCount  = 0;       // re-arm warmup for new device
     mOverrunCount   = 0;
@@ -486,23 +477,16 @@ void ClockworkProcessor::process(
     }
 
     // ── 2. Generate mBufLen-sized DSP blocks until the device's buffer is full ───
-    // One clock step per hardware callback: the sample-clock line is linear
-    // across the sub-blocks, so one anchor serves them all (per-block cursor
-    // advances happen in the loop). Negative latency reports from flaky
-    // drivers clamp to 0 — a raw cast would push the anchor ~a day ahead.
-    const clockwork::BlockTime bt = clockwork::beginAudioBlock(
-        *mClockworkClock, *mLinkAudio, mSamplePosition, static_cast<double>(mSampleRate),
-        static_cast<uint32_t>(std::max(0, mOutputLatencySamples)), mMetrics, cbWall, cbMono);
-    double wallNTP = bt.ntp;         // advanced per sub-block below
-
-    // hostTimeNs is the driver's "this buffer plays at T" timestamp (only the
-    // CoreAudio backend supplies it; the others, our PipeWire backend among
-    // them, give none). When absent, the block
-    // keeps ClockworkClock's jitter-free stamp rather than a jittery link.clock()
-    // read here.
-    uint64_t linkAudioBlockHostMicros =
-        time.hostTimeNs != 0 ? time.hostTimeNs / 1000ULL : bt.hostMicros;
-
+    // The tick keeps the clock: each sub-block passes its sample position,
+    // the callback's wall and monotonic clocks and the device's output
+    // latency in, and gets block_ntp and block_host_micros back. hostTimeNs
+    // is the driver's "this buffer plays at T" stamp in Link's clock; only
+    // the CoreAudio backend supplies it (PipeWire and the others give none).
+    // When present it is passed in and advanced one block per sub-block;
+    // otherwise the engine derives a jitter-free stamp from its clock.
+    // Negative latency reports from flaky drivers clamp to 0.
+    const uint32_t outputLatencyFrames = static_cast<uint32_t>(std::max(0, mOutputLatencySamples));
+    uint64_t linkHostMicros = time.hostTimeNs != 0 ? time.hostTimeNs / 1000ULL : 0;
 
     while (outputFilled < numSamples) {
         // Feed the DSP one full mBufLen block of input from the accumulator.
@@ -538,27 +522,24 @@ void ClockworkProcessor::process(
             }
         }
 
-        if (preTick)
-            preTick(mSamplePosition, wallNTP * 1000.0 - clockwork::kNtpEpochOffset * 1000.0);
-
-        // The one per-block body every driver runs (renderAudioBlock): the
-        // tick, dating the Link Audio reads it made, publishing the block.
-        // Native timing: wall-clock NTP as-is (only the WASM build converts
-        // its argument, from AudioContext time), advanced a block per
-        // sub-block, as the Link Audio stamp is: the audio framework's
-        // playback timestamp for THIS sub-block.
+        // renderAudioBlock, the per-block body every driver runs: the tick
+        // (which keeps the clock), then dating the Link Audio reads and
+        // publishing the block.
+        ClockworkBlockTime blockTime {};
+        blockTime.audio_frames          = static_cast<uint64_t>(mSamplePosition);
+        blockTime.wall_ntp              = cbWall;
+        blockTime.monotonic_secs        = cbMono;
+        blockTime.output_latency_frames = outputLatencyFrames;
+        blockTime.link_host_micros      = linkHostMicros;
         renderAudioBlock(*mLinkAudio,
                          static_cast<uint32_t>(mBufLen),
                          static_cast<uint32_t>(mNumOutputChannels),
                          static_cast<uint32_t>(mNumInputChannels),
                          static_cast<uint32_t>(mSampleRate),
-                         wallNTP, cbWall, cbMono, linkAudioBlockHostMicros,
+                         blockTime,
                          static_cast<uint32_t>(nOut));
-        wallNTP += static_cast<double>(mBufLen) / mSampleRate;
-        linkAudioBlockHostMicros += engineBlockMicros;
+        if (linkHostMicros != 0) linkHostMicros += engineBlockMicros;
         mSamplePosition += mBufLen;
-        // Keep tap-stream writes anchored to the block being rendered.
-        mClockworkClock->advanceEngineFrames(mSamplePosition);
 
         const float* outputBus = clockwork_audio_out();
         if (outputBus) {

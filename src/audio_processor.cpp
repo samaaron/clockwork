@@ -143,19 +143,15 @@ struct BlockOpenScope {
 };
 } // namespace
 
-// The composition-root ClockworkClock for a worklet self-clock host (WASM + the
-// self-driven device), which has no host object above the processor to own one.
-// It stands in as the active clock when no host published one before boot
-// (clock_enter_service). A host that owns a clock — the engine — publishes its
-// own to g_active_clockwork_clock and never reaches this. Capability-gated, not
-// __EMSCRIPTEN__, so WASM and the device share ONE codepath that every worklet
-// target's tests exercise.
-#if CLOCKWORK_WORKLET_CLOCK
+// Fallback ClockworkClock for hosts that have no object above the engine to
+// own one: the worklet, the self-driven device build, an embedded host and a
+// bare lanes host. clock_enter_service installs it as g_active_clockwork_clock
+// if the host did not publish a clock before boot. ClockworkEngine publishes
+// its own member clock, so the native engine never uses this one.
 static ClockworkClock& clockworkClock() {
     static ClockworkClock instance;
     return instance;
 }
-#endif
 #include <emscripten/webaudio.h>
 extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, for the assets area that grows to it
 #include <algorithm>
@@ -199,6 +195,9 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 #include "lanes/ring_drain.h"
 #include "lanes/ring_marks.h"       // where a generation's messages end in the in ring
 #include "metrics_history.h"        // what every counter and gauge did over the last hour
+#ifndef __EMSCRIPTEN__
+#include "native/LinkAudioHost.h"   // the block's stamp in Link's clock (g_active_link_audio)
+#endif
 #include "workers/RingBufferWriter.h"   // the in ring's writer lock, which a teardown's mark takes
 
 // Pre-allocated heap for RT-safe allocations
@@ -1292,12 +1291,11 @@ extern "C" {
     // sleep — Clockwork drops a message only for want of room, and counts
     // it (PerformanceMetrics); a host that wants what waited gone says so
     // itself (clockwork_ingress_mark_stale, the page's purge()). One line
-    // says the gap. Every host asks once a block as it hands its time over,
-    // before its clock moves (AudioBlockClock.h, the worklet's block below,
-    // an embedded host's render), and as its audio starts
-    // (clockwork_audio_starts): judged by time alone then, as nothing was
-    // rendered, and its first block after is never a gap — the host's count
-    // of the audio rendered starts over with it.
+    // says the gap. process_audio calls audio_gap once per block, for every
+    // host, before the clock moves. clockwork_audio_starts also calls it when
+    // a host's audio starts, with audio_secs = -1: the gap is then judged by
+    // time alone, and the first block after it is never a gap because the
+    // host's frame count starts over.
     static double g_last_audio_secs = -1.0;   // the host's count at the last block; < 0: its audio just started
 
     static bool audio_gap(double wall_ntp, double monotonic_secs, double audio_secs) {
@@ -1321,19 +1319,14 @@ extern "C" {
     EMSCRIPTEN_KEEPALIVE bool clockwork_audio_back(double wall_ntp, double monotonic_secs, double audio_secs) {
         return audio_gap(wall_ntp, monotonic_secs, audio_secs);
     }
-#if CLOCKWORK_WORKLET_CLOCK
-    // The worklet's block clock is kept in process_audio, so its start is
-    // recorded here: a worklet made again over the same memory finds the last
-    // one's clock there, anchored, and its context's sample counter may have
-    // started over — so, as a native host anchors at its device start, its
-    // clock anchors afresh at its first block (never below the clock the
-    // arena carries).
+    // clockwork_audio_starts: the host's audio is starting (a device opened
+    // with its sample count at 0, a new worklet over the same memory whose
+    // AudioContext time may have restarted, an embedded host attaching). The
+    // next block re-anchors the clock, never below the sample clock already
+    // in the arena.
     static bool g_anchor_at_first_block = false;
-#endif
     EMSCRIPTEN_KEEPALIVE bool clockwork_audio_starts(double wall_ntp, double monotonic_secs) {
-#if CLOCKWORK_WORKLET_CLOCK
         g_anchor_at_first_block = true;
-#endif
         return audio_gap(wall_ntp, monotonic_secs, -1.0);
     }
 
@@ -1882,16 +1875,21 @@ extern "C" {
     // step, native bound after boot and the worklet inside it, and a reset
     // added between the two wiped the web's stamp to the 1900 epoch
     // (2026-10-16).
-    static void clock_enter_service() {
-#if CLOCKWORK_WORKLET_CLOCK
+    static void clock_enter_service(bool cold_boot) {
         ClockworkClock* none = nullptr;
         g_active_clockwork_clock.compare_exchange_strong(none, &clockworkClock(), std::memory_order_acq_rel);
-#endif
+        // Every boot re-anchors the clock at the first block that follows,
+        // whichever host drives it. A cold boot also resets the clock
+        // (unanchor), as it resets the arena; a rebuild keeps the clock's
+        // last time as a floor so time never goes backwards.
+        g_anchor_at_first_block = true;
+        if (cold_boot)
+            if (ClockworkClock* c = g_active_clockwork_clock.load(std::memory_order_acquire)) c->unanchorAudioThread();
         ClockworkClock* clock = g_active_clockwork_clock.load(std::memory_order_acquire);
         if (!clock) return;   // a host with no clock at all
         clock->bindStateToShm(reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START));
-        // The sample clock, as native's driver publishes it (AudioBlockClock.h), here once a block: the one reading of
-        // the engine's time a thread without the audio context can take, a host's worker included (OscChannel#now).
+        // The sample clock, published by process_audio once per block: how threads without the audio context
+        // (a host's worker, OscChannel#now) read the engine's time.
         clock->bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
         clock->bindGlobalOffset(global_offset);
     }
@@ -1970,7 +1968,7 @@ extern "C" {
         // host's anchors, the guest's persistent region on a cold boot.
         // Before anything below writes into a region.
         reset_regions(cold_boot);
-        clock_enter_service();
+        clock_enter_service(cold_boot);
 
 #if CLOCKWORK_SYNTH
         // ── Clockwork's own ingress root ──────────────────────────────────
@@ -2835,10 +2833,9 @@ extern "C" {
             return;
         }
         // The same instance, back, every region as it was, as at any hot
-        // restart. Its clock comes into service again: on a worklet whose
-        // new context starts its time over, nothing is published as the
-        // engine's time until the host has written the new context's start.
-        clock_enter_service();
+        // restart. The clock re-enters service and re-anchors at the next
+        // block, never below its last time.
+        clock_enter_service(/*cold_boot*/ false);
         if (step == clockwork::RestartStep::Reconfigure) clockwork_announce_facts(now.sample_rate, 0);
     }
 
@@ -2974,12 +2971,13 @@ extern "C" {
     }
 #endif
 
-    // Main audio processing function - called once per block (the lanes tick,
-    // clockwork_tick, wraps this).
-    // current_time: AudioContext.currentTime (WASM) or wall-clock NTP (native)
+    // The per-block body on every host; clockwork_tick (lanes.h) wraps it.
+    // `time` carries the host's frame count, wall and monotonic clocks,
+    // output latency and Link stamp in, and gets block_ntp and
+    // block_host_micros back (ClockworkBlockTime).
     // active_output_channels / active_input_channels: live channel counts
     EMSCRIPTEN_KEEPALIVE
-    bool process_audio(double current_time, double wall_ntp, double monotonic_secs, uint32_t active_output_channels, uint32_t active_input_channels) {
+    bool process_audio(ClockworkBlockTime& time, uint32_t active_output_channels, uint32_t active_input_channels) {
         InstanceRingScope instance_ring;   // the audio thread writes the instance's ring
         BlockOpenScope block_open;         // until the block is done (g_block_open)
         clockwork_pool_register_engine_thread();  // pool ownership follows the audio thread
@@ -3011,48 +3009,55 @@ extern "C" {
         // waits, silent, for a block when it can.
         if (!say_owed()) return true;
 
-#if CLOCKWORK_WORKLET_CLOCK
-        // The audio was away? (clockwork_audio_back: the one rule, every
-        // target.) The worklet's block clock is kept here, so it asks here,
-        // before the clock moves: a gap anchors it afresh at this block.
-        const bool gap = clockwork_audio_back(wall_ntp, monotonic_secs, current_time);
-#endif
+        // The engine's clock, kept here on every target (clock/TimeSource.h).
+        // The host passed its frame count and clocks in `time`. This block:
+        //   - re-anchors the clock if the audio was away (clockwork_audio_back)
+        //     or the host's audio just started (clockwork_audio_starts);
+        //   - otherwise slews it toward the host's wall clock;
+        //   - publishes the block's first frame and its NTP time to the sample
+        //     clock, as DAC time when the host reported an output latency, for
+        //     readers on other threads (OscChannel#now, a client's sample clock).
+        // A block that is not rendered publishes nothing. A freewheeling clock
+        // has no wall clock, keeps time from its samples alone and never sees
+        // a gap.
+        const double rate = static_cast<double>(metrics->audio_sample_rate.load(std::memory_order_relaxed));
+        const double sample_pos = static_cast<double>(time.audio_frames);
+        ClockworkClock* clk = g_active_clockwork_clock.load(std::memory_order_acquire);
+        const bool freewheel = clk && clk->freewheelClock();
+        const bool gap = !freewheel && rate > 0.0
+                      && clockwork_audio_back(time.wall_ntp, time.monotonic_secs, sample_pos / rate);
 
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().drainPendingClear();
 #endif
 
-#if CLOCKWORK_WORKLET_CLOCK
-        // The worklet's clock is the audio thread's own, the same clock as
-        // native's (clock/TimeSource.h): the context's time is its sample
-        // counter, the host's wall time what it follows — converging on it,
-        // or anchored afresh where no block was rendered meanwhile (the
-        // context suspended, a reload, which onto a new context starts the
-        // sample counter over). Anchored at its first block, never below what
-        // the arena's sample clock already says, so a new worklet over the
-        // same memory goes on from the old one's time. Published every block:
-        // this block's first frame and its NTP time, for readers on other
-        // threads (OscChannel#now). The worklet knows no device latency, so
-        // the frame is stamped as rendered. A block that is not rendered (the
-        // context suspended) publishes nothing: the clock stands still, as
-        // the audio does.
-        const double rate = static_cast<double>(metrics->audio_sample_rate.load(std::memory_order_relaxed));
-        double current_ntp = clockworkClock().now();
-        if (rate > 0.0) {
-            const double sample_pos = current_time * rate;
-            ClockworkClock& clk = clockworkClock();
-            if (!clk.audioThreadAnchored() || gap || g_anchor_at_first_block) {
-                g_anchor_at_first_block = false;
-                clk.resetAudioThreadTime(sample_pos, rate, wall_ntp, clk.floorRenderNtp(0));
-            }
-            current_ntp = clk.updateAudioThreadNTP(sample_pos, rate, wall_ntp);
-            clk.publishSampleClock(sample_pos, rate, current_ntp, 0);
-        }
-#else
-        // Native hosts keep the same clock themselves, a callback at a time
-        // (AudioBlockClock.h): current_time is the block's NTP already.
-        const double current_ntp = current_time;
+        double current_ntp = clk ? clk->now() : time.wall_ntp;
+        uint64_t host_micros = 0;
+        if (clk && rate > 0.0) {
+#ifndef __EMSCRIPTEN__
+            LinkAudioHost* link = g_active_link_audio.load(std::memory_order_acquire);
 #endif
+            const bool anchoring = !clk->audioThreadAnchored() || gap || g_anchor_at_first_block;
+            if (anchoring) {
+                g_anchor_at_first_block = false;
+                clk->resetAudioThreadTime(sample_pos, rate, time.wall_ntp,
+                                          clk->floorRenderNtp(time.output_latency_frames));
+#ifndef __EMSCRIPTEN__
+                if (link) link->resetBlockClock();
+#endif
+            }
+            current_ntp = clk->updateAudioThreadNTP(sample_pos, rate, time.wall_ntp);
+            clk->publishSampleClock(sample_pos, rate, current_ntp, time.output_latency_frames);
+            // Publish the clock metrics immediately on an anchor, not at the
+            // next flush, so readers and the history see it on that block.
+            if (anchoring) clk->publishClockMetrics(metrics, current_ntp, 4.0);
+#ifndef __EMSCRIPTEN__
+            // The block's Link stamp: the host's link_host_micros when it gave one, else derived from the clock.
+            if (link) host_micros = static_cast<uint64_t>(std::max<int64_t>(0, link->blockHostMicros(sample_pos, rate)));
+#endif
+        }
+        time.block_ntp = current_ntp;
+        time.block_host_micros = time.link_host_micros ? time.link_host_micros : host_micros;
 
         // Load-add-store, not fetch_add: this counter has exactly one writer
         // (the audio thread, here) and readers only ever load it, so the
@@ -3106,9 +3111,15 @@ extern "C" {
             }
             const uint32_t flush_period = (derived != 0u) ? derived : 16u;
             if ((pc % flush_period) == 0u) {
-#if CLOCKWORK_WORKLET_CLOCK
-                clockworkClock().publishClockMetrics(metrics, current_ntp, 4.0);
+                if (clk) {
+                    clk->publishClockMetrics(metrics, current_ntp, 4.0);
+#ifndef __EMSCRIPTEN__
+                    if (LinkAudioHost* link = g_active_link_audio.load(std::memory_order_acquire)) {
+                        clk->publishLinkMetrics(metrics, 4.0);
+                        link->publishMetrics(metrics);
+                    }
 #endif
+                }
                 metrics->in_buffer_used_bytes.store(in_used, std::memory_order_relaxed);
                 metrics->in_buffer_peak_bytes.store(local_in_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 metrics->out_buffer_used_bytes.store(out_used, std::memory_order_relaxed);
@@ -3321,6 +3332,9 @@ extern "C" {
                 // docs/PORTS.md for the only tap that exists so far.
                 push_port_sinks(QUANTUM_SIZE);
             }
+            // Advance the engine frame count past this block; tap streams anchor on it (every host, as
+            // the device path did before).
+            if (clk) clk->advanceEngineFrames(sample_pos + static_cast<double>(QUANTUM_SIZE));
             // The scope, at the device edge: what leaves for the device
             // this block (after the guest, after the port sinks) and what
             // arrived from it (as the guest saw it). Every host, every
