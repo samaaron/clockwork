@@ -187,11 +187,12 @@ void JNIClassBase::initialise (JNIEnv* env, jobject context)
 
                     MemoryOutputStream uncompressedByteCode;
 
-                    {
-                        MemoryInputStream rawGZipData (byteCode, byteCodeSize, false);
-                        GZIPDecompressorInputStream gzipStream (&rawGZipData, false, GZIPDecompressorInputStream::gzipFormat);
-                        uncompressedByteCode.writeFromInputStream (gzipStream, -1);
-                    }
+                    // JUCE embedded these classes as gzipped dex and inflated them
+                    // through its GZIP stream, which Smoothie no longer carries (the
+                    // zip classes and zlib are gone: nothing else used them). Android
+                    // support is pending: store the classes uncompressed, or inflate
+                    // them with the platform zlib, when Clockwork takes Android on.
+                    #error "Smoothie on Android: the embedded Java classes need a loader; see the note above"
 
                     if (sdkVersion >= 26)
                     {

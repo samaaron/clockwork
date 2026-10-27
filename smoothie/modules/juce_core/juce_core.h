@@ -115,22 +115,6 @@
  #define JUCE_DONT_AUTOLINK_TO_WIN32_LIBRARIES 0
 #endif
 
-/** Config: JUCE_INCLUDE_ZLIB_CODE
-    This can be used to disable Juce's embedded 3rd-party zlib code.
-    You might need to tweak this if you're linking to an external zlib library in your app,
-    but for normal apps, this option should be left alone.
-
-    If you disable this, you might also want to set a value for JUCE_ZLIB_INCLUDE_PATH, to
-    specify the path where your zlib headers live.
-*/
-#ifndef JUCE_INCLUDE_ZLIB_CODE
- #define JUCE_INCLUDE_ZLIB_CODE 1
-#endif
-
-#ifndef JUCE_ZLIB_INCLUDE_PATH
- #define JUCE_ZLIB_INCLUDE_PATH <zlib.h>
-#endif
-
 /** Config: JUCE_USE_CURL
     Enables http/https support via libcurl (Linux only). Enabling this will add an additional
     run-time dynamic dependency to libcurl.
@@ -344,9 +328,6 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 #include "unit_tests/juce_UnitTest.h"
 #include "xml/juce_XmlDocument.h"
 #include "xml/juce_XmlElement.h"
-#include "zip/juce_GZIPCompressorOutputStream.h"
-#include "zip/juce_GZIPDecompressorInputStream.h"
-#include "zip/juce_ZipFile.h"
 #include "containers/juce_PropertySet.h"
 #include "memory/juce_SharedResourcePointer.h"
 #include "memory/juce_AllocationHooks.h"

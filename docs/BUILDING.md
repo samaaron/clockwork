@@ -161,7 +161,6 @@ attached. See [BOUNDARY.md](BOUNDARY.md#5-the-dummy-dsp).
 | `CLOCKWORK_STANDALONE` | ON when top-level | the scheduler host (`clockwork-scheduler-host`) and this suite |
 | `CLOCKWORK_CARGO_OFFLINE` | OFF | build the Rust subsystems with `--offline` (`--locked` is always passed) |
 | `CLOCKWORK_RUST` | ON | build the Rust subsystems' umbrella staticlib with cargo. OFF for a Rust embedder (`rust/clockwork-sys`), which takes the subsystem crates itself; the targets that link a binary here — `CLOCKWORK_STANDALONE`, `BUILD_TESTS`, `CLOCKWORK_PLUGINS`, `CLOCKWORK_NIF` — must be OFF with it |
-| `CLOCKWORK_SYSTEM_ZLIB` | OFF | link the system zlib instead of compiling the copy inside smoothie (distro builds) |
 | `CLOCKWORK_SYSTEM_STB` | OFF | take stb_vorbis from the system stb (pkg-config `stb`; Debian's `libstb-dev`) instead of the vendored copy (distro builds) |
 | `CLOCKWORK_PLUGIN_BRIDGE_DIR` | empty | a directory the engine also searches for the plugin bridge, after "beside its own executable" — for an installed layout that keeps the bridge out of PATH (`/usr/libexec/<pkg>`) |
 | `CLOCKWORK_LINK` | **OFF** | Ableton Link tempo, transport and peers — GPL-2.0-or-later, see below |
@@ -184,7 +183,7 @@ options for that, and what stays vendored and why:
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DCLOCKWORK_SYSTEM_ZLIB=ON -DCLOCKWORK_SYSTEM_STB=ON \
+      -DCLOCKWORK_SYSTEM_STB=ON \
       -DCLOCKWORK_CARGO_OFFLINE=ON \
       -DCLOCKWORK_PLUGINS=OFF \
       -DCLOCKWORK_PLUGIN_BRIDGE_DIR=/usr/libexec/<pkg> .
@@ -192,7 +191,6 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 
 | in the tree | distro switch | if there is none, why not |
 |---|---|---|
-| zlib (inside smoothie) | `CLOCKWORK_SYSTEM_ZLIB` → `zlib1g-dev` | |
 | stb_vorbis (`src/vendor/stb`, v1.22 unmodified) | `CLOCKWORK_SYSTEM_STB` → `libstb-dev` | |
 | the Rust crates | `CLOCKWORK_CARGO_OFFLINE` with a `cargo vendor` tree, or the archive's `librust-*` packages | |
 | CLAP and VST3 SDKs | `CLOCKWORK_PLUGINS=OFF` | fetched at configure time; no distro packages them |

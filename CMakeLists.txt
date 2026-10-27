@@ -265,11 +265,6 @@ option(CLOCKWORK_ASIO "Compile JUCE's ASIO backend on Windows (Steinberg SDK, ta
 # Unlicense or MIT-0 and stb_vorbis is public domain or MIT, so the whole
 # path is permissive and a commercial embedder links clockwork and ships.
 option(CLOCKWORK_CARGO_OFFLINE  "Build the Rust subsystems with --offline (requires pre-vendored crates)" OFF)
-# Smoothie compiles the zlib inside juce_core unless told otherwise. A distro
-# build must link the system zlib instead (Debian refuses embedded copies of
-# it): this sets JUCE_INCLUDE_ZLIB_CODE=0 and links ZLIB::ZLIB. See
-# smoothie/CMakeLists.txt.
-option(CLOCKWORK_SYSTEM_ZLIB    "Link the system zlib instead of the copy inside smoothie" OFF)
 # stb_vorbis is vendored unmodified (src/vendor/stb, v1.22). A distro build can
 # take the packaged one instead — Debian's libstb-dev ships the declarations as
 # <stb/stb_vorbis.h> and the implementation in libstb, with a pkg-config file —

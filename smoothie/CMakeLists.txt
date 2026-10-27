@@ -43,19 +43,6 @@ target_compile_definitions(smoothie PUBLIC
     $<$<NOT:$<CONFIG:Debug>>:NDEBUG=1>
 )
 
-# juce_core carries its own zlib and compiles it by default. A distro build
-# must use the system one instead — an embedded zlib is a security-update
-# problem the distro will not accept — so CLOCKWORK_SYSTEM_ZLIB turns the
-# bundled code off (JUCE_INCLUDE_ZLIB_CODE=0 makes juce_core include <zlib.h>
-# in its zlibNamespace) and links ZLIB::ZLIB. Off, the tree stays
-# self-contained, which is what macOS and Windows builds rely on.
-if(CLOCKWORK_SYSTEM_ZLIB)
-    find_package(ZLIB REQUIRED)
-    target_compile_definitions(smoothie PUBLIC JUCE_INCLUDE_ZLIB_CODE=0)
-    target_link_libraries(smoothie PUBLIC ZLIB::ZLIB)
-    message(STATUS "smoothie: system zlib ${ZLIB_VERSION_STRING} (JUCE_INCLUDE_ZLIB_CODE=0)")
-endif()
-
 if(APPLE)
     # Framework lists from the vendored modules' metadata blocks:
     # core: Cocoa Foundation IOKit Security | audio_basics: Accelerate |
