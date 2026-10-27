@@ -723,7 +723,8 @@ mod tests {
         let mut c = connect(port);
         c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "reachable over loopback");
-        assert!(!clockwork_log::capture::logged("full control"), "a loopback bind is not open");
+        // The capture is process-wide, so ask about this socket's own address.
+        assert!(!clockwork_log::capture::logged(&format!("TCP bound to 127.0.0.1:{port}")), "a loopback bind is not open");
         stop(h);
 
         let (h, port) = start_tcp_on(&cap, "0.0.0.0", 4);

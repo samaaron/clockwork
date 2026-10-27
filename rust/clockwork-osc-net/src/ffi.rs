@@ -611,11 +611,13 @@ mod tests {
         clockwork_log::capture::install();
         let socks = bind_ingress("", 0);
         assert!(!socks.is_empty());
+        // The capture is process-wide and other tests bind every interface
+        // on purpose, so ask about these sockets' own addresses.
         for s in &socks {
             let local = s.local_addr().unwrap();
             assert!(local.ip().is_loopback(), "bound {local} with no address given");
+            assert!(!clockwork_log::capture::logged(&format!("bound to {local}")), "a loopback bind is not open");
         }
-        assert!(!clockwork_log::capture::logged("full control"), "a loopback bind is not open");
 
         let open = bind_ingress("0.0.0.0", 0);
         assert_eq!(open.len(), 1);
