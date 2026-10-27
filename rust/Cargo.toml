@@ -68,6 +68,7 @@ members = [
     "clockwork-ports",
     "clockwork-sinks",
     "clockwork-ports-disk",
+    "clockwork-audio-decode",
     "clockwork-midi",
     "clockwork-gamepad",
     "clockwork-osc-net",

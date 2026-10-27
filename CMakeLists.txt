@@ -254,23 +254,13 @@ option(CLOCKWORK_ASIO "Compile JUCE's ASIO backend on Windows (Steinberg SDK, ta
 
 # ── Audio files ──────────────────────────────────────────────────────────────
 # There is no option here, and that is the point. Reading and writing audio
-# files is src/clockwork_audio_file.h, compiled into clockwork from vendored
-# single-file decoders and this repository's own FLAC encoder. No package to
-# find, nothing fetched at configure time, and the same formats on every
-# platform including WebAssembly — what a build reads is a property of the
-# source rather than of the machine it was configured on.
-#
-# This replaced libsndfile, which was LGPL and dragged ogg, vorbis, FLAC and
-# opus behind it as four more sub-projects. dr_wav, dr_flac and dr_mp3 are
-# Unlicense or MIT-0 and stb_vorbis is public domain or MIT, so the whole
-# path is permissive and a commercial embedder links clockwork and ships.
+# files is src/clockwork_audio_file.h: the decoders are the Rust crate
+# clockwork-audio-decode (symphonia, MPL-2.0, in the umbrella staticlib) and
+# the writers and FLAC encoder are this repository's own. No package to find,
+# nothing fetched at configure time, and the same formats on every platform
+# including WebAssembly — what a build reads is a property of the source
+# rather than of the machine it was configured on.
 option(CLOCKWORK_CARGO_OFFLINE  "Build the Rust subsystems with --offline (requires pre-vendored crates)" OFF)
-# stb_vorbis is vendored unmodified (src/vendor/stb, v1.22). A distro build can
-# take the packaged one instead — Debian's libstb-dev ships the declarations as
-# <stb/stb_vorbis.h> and the implementation in libstb, with a pkg-config file —
-# so the copy here is not compiled and the system library is linked. The other
-# codecs (dr_wav, dr_flac, dr_mp3) have no distro package and stay vendored.
-option(CLOCKWORK_SYSTEM_STB     "Use the system stb (pkg-config: stb) for stb_vorbis instead of the vendored copy" OFF)
 # libsamplerate is vendored unmodified (src/vendor/libsamplerate, 0.2.2, its
 # medium sinc converter: see CLOCKWORK.md there) for the Link Audio input
 # renderer. A distro build can link the packaged one instead — Debian's
@@ -728,23 +718,12 @@ elseif(CLOCKWORK_LINK)
         COMPILE_DEFINITIONS "ENABLE_SINC_MEDIUM_CONVERTER;HAVE_STDBOOL_H;PACKAGE=\"libsamplerate\";VERSION=\"0.2.2\"")
 endif()
 
-# Audio file reading and writing (src/clockwork_audio_file.h). The decoders are
-# vendored single-file libraries; flac_encoder.cpp is clockwork's own, because
-# the permissive single-file codecs decode and do not encode.
+# Audio file reading and writing (src/clockwork_audio_file.h). The decoders
+# are Rust (rust/clockwork-audio-decode, in the umbrella staticlib); the file
+# reading, the writers and the FLAC encoder are here.
 set(CLOCKWORK_AUDIO_FILE_SOURCES
     ${CLOCKWORK_SRC}/clockwork_audio_file.cpp
     ${CLOCKWORK_SRC}/flac_encoder.cpp)
-if(CLOCKWORK_SYSTEM_STB)
-    # The system stb: declarations from <stb/stb_vorbis.h>, the decoder from
-    # libstb. clockwork_audio_file.cpp switches its include on the define.
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(STB REQUIRED IMPORTED_TARGET stb)
-    message(STATUS "clockwork: system stb ${STB_VERSION} for stb_vorbis (CLOCKWORK_SYSTEM_STB)")
-else()
-    # Compiled as its own translation unit: consumers include it with
-    # STB_VORBIS_HEADER_ONLY and get the declarations alone.
-    list(APPEND CLOCKWORK_AUDIO_FILE_SOURCES ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c)
-endif()
 
 # oscpack (MIT, Ross Bencina) — src/vendor/oscpack.
 set(OSCPACK_SOURCES
@@ -763,10 +742,6 @@ add_library(clockwork STATIC
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_INCLUDE_DIRS})
 if(CLOCKWORK_FLOAT_FLAGS)
     target_compile_options(clockwork PUBLIC ${CLOCKWORK_FLOAT_FLAGS})
-endif()
-if(CLOCKWORK_SYSTEM_STB)
-    target_compile_definitions(clockwork PRIVATE CLOCKWORK_SYSTEM_STB=1)
-    target_link_libraries(clockwork PUBLIC PkgConfig::STB)
 endif()
 if(CLOCKWORK_LINK AND CLOCKWORK_SYSTEM_SAMPLERATE)
     target_link_libraries(clockwork PUBLIC PkgConfig::SAMPLERATE)
@@ -799,11 +774,6 @@ target_compile_definitions(clockwork PUBLIC ${CLOCKWORK_COMPILE_DEFS})
 # that surfaced it. Anything linking clockwork now gets the standard with it.
 target_compile_features(clockwork PUBLIC cxx_std_20)
 
-# The audio path reads and writes through memory buffers; the file entry points
-# open their own handles. stb_vorbis's stdio wrapper is unused either way, so
-# it is compiled out rather than left as an unreferenced dependency on a file
-# system that a WebAssembly build does not have.
-target_compile_definitions(clockwork PRIVATE STB_VORBIS_NO_STDIO)
 if(CLOCKWORK_DEVICE)
     target_link_libraries(clockwork PUBLIC smoothie)
 endif()
@@ -904,9 +874,8 @@ elseif(UNIX)
     target_link_libraries(clockwork PUBLIC Threads::Threads rt ${CMAKE_DL_LIBS})
 endif()
 
-# The vendored single-file libraries (dr_libs, stb) are system headers to this
-# build: included as <dr_libs/...>, they warn as their authors left them and the
-# analyzer leaves them be — they are not ours to fix.
+# The vendored libraries are system headers to this build: they warn as their
+# authors left them and the analyzer leaves them be — they are not ours to fix.
 target_include_directories(clockwork SYSTEM PRIVATE ${CLOCKWORK_SRC}/vendor)
 
 if(MSVC)
@@ -1138,6 +1107,7 @@ endif()
 # ships with the crate that implements it, the way every other Rust subsystem's
 # does.
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_RUST_DIR}/clockwork-ports-disk/cpp)
+target_include_directories(clockwork PRIVATE ${CLOCKWORK_RUST_DIR}/clockwork-audio-decode/cpp)
 
 # The timed-event store has no option and no boundary file either, for the same
 # reason: src/scheduler/Scheduler.h and src/scheduler/schedule_parse.h are the
@@ -1258,10 +1228,10 @@ if(EMSCRIPTEN)
     set(CLOCKWORK_WEB_ASSERTIONS 0 CACHE STRING "emscripten -sASSERTIONS")
     set(CLOCKWORK_WEB_SAFE_HEAP 0 CACHE STRING "emscripten -sSAFE_HEAP")
     option(CLOCKWORK_WEB_KEEP_NAMES "Keep function names in the module (--profiling-funcs)" OFF)
-    # The audio file codecs (dr_wav, dr_flac, dr_mp3, stb_vorbis, the FLAC
-    # encoder) are a native concern: on the web, samples arrive already
-    # decoded through the browser's own decoder and nothing records to a
-    # file. Opt in for a client that decodes in the module.
+    # The audio file codecs (the Rust decoders, the FLAC encoder) are a
+    # native concern: on the web, samples arrive already decoded through the
+    # browser's own decoder and nothing records to a file. Opt in for a
+    # client that decodes in the module.
     option(CLOCKWORK_WEB_AUDIO_FILES "Export the audio file codecs to the web client" OFF)
     # A product may export more of its own (CLOCKWORK_WEB_EXTRA_EXPORTS).
     set(CLOCKWORK_WEB_EXTRA_EXPORTS "" CACHE STRING "Extra exported functions, ';'-separated, with their leading underscore")
@@ -1598,11 +1568,9 @@ if(CLOCKWORK_WERROR AND NOT MSVC)
             target_compile_options(${_t} PRIVATE -Werror)
         endif()
     endforeach()
-    # The vendored sources compiled into the library (stb_vorbis, oscpack,
-    # libsamplerate) warn as their authors left them: theirs to fix, not ours
-    # to fail on.
+    # The vendored sources compiled into the library (oscpack, libsamplerate)
+    # warn as their authors left them: theirs to fix, not ours to fail on.
     set_source_files_properties(
-        ${CLOCKWORK_SRC}/vendor/stb/stb_vorbis.c
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
         ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp

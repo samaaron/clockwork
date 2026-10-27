@@ -531,7 +531,7 @@ TEST_CASE("ports: the WAV the sink writes is the WAV another decoder reads",
     // The round trip above would pass against a private format that only this
     // code can read. An independent implementation is what makes it a WAV: the
     // sink's writer is hand-written Rust in rust/clockwork-ports-disk, and the
-    // reader here is the vendored dr_wav behind clockwork_audio_file.h. They
+    // reader here is the Rust decoder behind clockwork_audio_file.h. They
     // share no line of code, so agreement is agreement about the format.
     Ports guard;
     const auto dir  = tempDir("wav_decode");

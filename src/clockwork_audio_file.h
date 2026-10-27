@@ -51,15 +51,20 @@
  * is what lets a take of unknown duration be written to disk as it happens.
  *
  *
- * ── LICENCE ─────────────────────────────────────────────────────────────────
+ * ── WHAT DECODES IT, AND ITS LICENCE ────────────────────────────────────────
  *
- * The whole path is permissive. Decoding is dr_wav, dr_flac and dr_mp3
- * (Unlicense or MIT-0, at the user's choice, under src/vendor/dr_libs) and
- * stb_vorbis (public domain or MIT, under src/vendor/stb). Encoding is this
- * repository's own: dr_wav writes the WAV, src/flac_encoder.h writes the FLAC.
- * Nothing here is copyleft, nothing here is fetched at build time, and nothing
- * here is a system dependency — a commercial embedder links clockwork and
- * ships.
+ * Decoding is Rust: rust/clockwork-audio-decode, on the symphonia crates,
+ * which are pure Rust with no unsafe code of their own. A sample file is the
+ * widest door clockwork has to bytes from strangers, and a bounds-checked
+ * decoder closes the class of fault a C one is prone to. What a header
+ * claims never sizes an allocation: an uncompressed file's length is bounded
+ * by its bytes, a compressed file's by the decode limit below. Encoding is
+ * this repository's own: the WAV writer here, src/flac_encoder.h for FLAC.
+ *
+ * symphonia is MPL-2.0, file-scoped: it asks nothing of clockwork's own
+ * files, and nothing of a product that ships them. Nothing here is fetched at
+ * build time and nothing is a system dependency — a commercial embedder
+ * links clockwork and ships.
  *
  *
  * ── THREADS ─────────────────────────────────────────────────────────────────
@@ -106,7 +111,9 @@ typedef enum ClockworkAudioEncoding {
     CLOCKWORK_AUDIO_ENCODING_PCM_S24 = 2,
     CLOCKWORK_AUDIO_ENCODING_PCM_S32 = 3,
     CLOCKWORK_AUDIO_ENCODING_FLOAT32 = 4,
-    CLOCKWORK_AUDIO_ENCODING_COMPRESSED = 5
+    CLOCKWORK_AUDIO_ENCODING_COMPRESSED = 5,
+    CLOCKWORK_AUDIO_ENCODING_PCM_8   = 6,   /* unsigned in a WAV, signed in an AIFF; decoded, not written */
+    CLOCKWORK_AUDIO_ENCODING_FLOAT64 = 7    /* decoded, not written */
 } ClockworkAudioEncoding;
 
 /* ── What a file turned out to be ────────────────────────────────────────────
@@ -136,7 +143,10 @@ double clockwork_audio_duration(const ClockworkAudioInfo* info);
  * calls rather than the ANSI code page.
  *
  * Probe reads headers alone: enough to size a buffer, choose a target rate, or
- * show a user what a file is, without paying for the samples.
+ * show a user what a file is, without paying for the samples. Its frame count
+ * is what the file says, bounded by what the file holds for an uncompressed
+ * one; an MP3 with no length header says nothing, and the probe says zero.
+ * A decode's frame count is what came out.
  *
  * Decode hands back one allocation of `frames * channels` interleaved floats,
  * released with clockwork_audio_free. The out-pointer is set only on success,
@@ -162,6 +172,20 @@ ClockworkStatus clockwork_audio_decode_memory(const void* data, size_t bytes,
 /* Release what decode allocated. A null pointer is accepted and ignored, so
  * an error path need not branch. */
 void clockwork_audio_free(void* interleaved);
+
+/* ── The decode limit ────────────────────────────────────────────────────────
+ *
+ * The most bytes of float one decode may hand back, for the whole process. A
+ * file's header says how long it is, and a hostile header says anything: a
+ * claim past the limit is refused as CLOCKWORK_E_TOO_BIG before a byte is
+ * allocated, and a lossy file that decodes to more than it claimed is refused
+ * the moment it passes the limit. A file larger than the limit is refused by
+ * the path forms before it is read, since no file decodes to less than its
+ * own size by more than a header. The default is 1 GiB, or 256 MiB in a
+ * WebAssembly build; a host with its own budget sets its own. Zero restores
+ * the default. */
+void clockwork_audio_set_decode_limit(uint64_t max_bytes);
+uint64_t clockwork_audio_decode_limit(void);
 
 /* ── Writing ─────────────────────────────────────────────────────────────────
  *

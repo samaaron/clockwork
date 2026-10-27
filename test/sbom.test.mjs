@@ -65,7 +65,7 @@ test("clockwork's own crates are the subject, not components", () => {
 test("the vendored code a default build compiles in, and only that", () => {
   for (const t of TARGETS) {
     const n = names(t);
-    for (const always of ["oscpack", "dr_wav", "dr_flac", "dr_mp3", "stb_vorbis"]) assert.ok(n.has(always), `${t}: ${always}`);
+    assert.ok(n.has("oscpack"), `${t}: oscpack`);
     // Off by default, or never shipped.
     for (const off of ["Catch2", "Ableton", "Erlang/OTP", "Steinberg", "libsamplerate"]) assert.ok(!n.has(off), `${t} lists ${off}`);
   }
@@ -135,33 +135,33 @@ test("a clean scan: every component queried, forks said to be forks, no open adv
   assert.equal(queried.length, distinct.size, "one query per distinct component");
   assert.ok(queried.some((q) => q.commit === "4f43011b96eb0636104cb3e433894cda98243626"), "JUCE's fork point is queried");
   assert.ok(lines.some((l) => l.startsWith("JUCE") && l.includes("fork of 4f43011")), "Smoothie is reported as a fork of JUCE");
-  assert.ok(lines.some((l) => l.startsWith("dr_wav") && l.includes("commit 019e75b")), "an unmodified copy is reported by its commit");
+  assert.ok(lines.some((l) => l.startsWith("CLAP") && l.includes("commit 195b42a")), "an unmodified copy is reported by its commit");
   assert.match(lines.at(-1), /0 advisories, 0 accepted by docs\/vex.cdx.json, 0 open/);
 });
 
 test("an advisory fails the scan, and a VEX statement for that component accepts it", async () => {
-  const osv = async (qs) => qs.map((q) => (q.commit === "1ee679ca2ef753a528db5ba6801e1067b40481b8" ? ["OSV-2020-1372"] : []));
+  const osv = async (qs) => qs.map((q) => (q.commit === "77ef129cf58123a4fe9cf0f8f928fbd9515478b7" ? ["OSV-2020-1372"] : []));
   const open = await scan(files, { ...quiet, osv, tag: recorded });
   assert.deepEqual(open.problems, ["1 open advisories"]);
-  assert.ok(open.lines.some((l) => l.startsWith("stb_vorbis 1.22") && l.endsWith("1: OSV-2020-1372")));
+  assert.ok(open.lines.some((l) => l.startsWith("oscpack 1.1.0") && l.endsWith("1: OSV-2020-1372")));
 
-  const statement = { id: "OSV-2020-1372", affects: [{ ref: "stb_vorbis" }], analysis: { state: "not_affected", justification: "code_not_present" } };
+  const statement = { id: "OSV-2020-1372", affects: [{ ref: "oscpack" }], analysis: { state: "not_affected", justification: "code_not_present" } };
   const accepted = await scan(files, { ...quiet, osv, tag: recorded, vex: { vulnerabilities: [statement] } });
   assert.deepEqual(accepted.problems, []);
-  assert.ok(accepted.lines.some((l) => l.startsWith("stb_vorbis 1.22") && l.endsWith("1: OSV-2020-1372 (not_affected)")));
+  assert.ok(accepted.lines.some((l) => l.startsWith("oscpack 1.1.0") && l.endsWith("1: OSV-2020-1372 (not_affected)")));
 
   // A statement for another component, or one under investigation, accepts nothing.
-  for (const wrong of [{ ...statement, affects: [{ ref: "oscpack" }] }, { ...statement, analysis: { state: "in_triage" } }]) {
+  for (const wrong of [{ ...statement, affects: [{ ref: "clap" }] }, { ...statement, analysis: { state: "in_triage" } }]) {
     const r = await scan(files, { ...quiet, osv, tag: recorded, vex: { vulnerabilities: [wrong] } });
     assert.ok(r.problems.includes("1 open advisories"), JSON.stringify(wrong));
   }
 });
 
 test("a VEX statement that matches nothing is stale and fails the scan", async () => {
-  const stale = { id: "CVE-2000-0001", affects: [{ ref: "stb_vorbis" }], analysis: { state: "resolved" } };
+  const stale = { id: "CVE-2000-0001", affects: [{ ref: "oscpack" }], analysis: { state: "resolved" } };
   const { problems } = await scan(files, { ...quiet, tag: recorded, vex: { vulnerabilities: [stale] } });
   assert.equal(problems.length, 1);
-  assert.match(problems[0], /CVE-2000-0001 for stb_vorbis matches no advisory the scan found; stale/);
+  assert.match(problems[0], /CVE-2000-0001 for oscpack matches no advisory the scan found; stale/);
 });
 
 test("a fetched library whose tag no longer points at the recorded commit fails the scan", async () => {

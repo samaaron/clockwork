@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-audio-decode"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The decoders behind clockwork_audio_file.h: WAV, AIFF, RF64, Wave64, FLAC, MP3 and Ogg Vorbis to interleaved float, held to a size limit, in Rust."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Pure Rust, no unsafe of its own, MPL-2.0 (file-scoped, so nothing of
+# clockwork's is touched by it). Only the formats clockwork_audio_file.h
+# promises are compiled in; the metadata readers are what let an ID3 tag in
+# front of an MP3 be stepped over.
+symphonia = { version = "0.6", default-features = false, features = [
+    "wav", "aiff", "flac", "mp3", "ogg", "vorbis", "pcm", "adpcm", "id3v2", "id3v1",
+] }

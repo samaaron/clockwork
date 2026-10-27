@@ -136,6 +136,7 @@ add_executable(clockwork_tests
     # decoders, this repository's FLAC encoder, and the versioned structs
     # they fill. Needs no device and no engine.
     test_audio_file.cpp
+    test_audio_fixtures.cpp
 
     # What the product is called and the banner it boots with
     # (src/clockwork_product.h): clockwork's own by default, the product's
@@ -270,7 +271,8 @@ target_include_directories(clockwork_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(clockwork_tests ${CLOCKWORK_DSP})
 target_link_libraries(clockwork_tests PRIVATE ${CLOCKWORK_LIB_GROUP} clockwork_comms Catch2::Catch2)
 target_compile_definitions(clockwork_tests PRIVATE
-    RING_WIRE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ring_wire.txt")
+    RING_WIRE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ring_wire.txt"
+    CLOCKWORK_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
 
 target_compile_definitions(clockwork_tests PRIVATE
     JUCE_APPLICATION_NAME_STRING="clockwork-tests"

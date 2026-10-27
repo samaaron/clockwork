@@ -24,6 +24,7 @@ confidence-threshold = 0.9
 # the first CI run to ever execute is what said so.
 exceptions = [
     { crate = "clockwork-abi", allow = ["AGPL-3.0-or-later"] },
+    { crate = "clockwork-audio-decode", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-bridge-native", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-client", allow = ["AGPL-3.0-or-later"] },
     { crate = "clockwork-clock", allow = ["AGPL-3.0-or-later"] },

@@ -72,6 +72,9 @@ clockwork-heap = { path = "../clockwork-heap" }
 # in the archive whatever else this build turned off.
 clockwork-ports = { path = "../clockwork-ports" }
 clockwork-ports-disk = { path = "../clockwork-ports-disk" }
+# The sample-file decoders behind clockwork_audio_file.h. Not optional: the
+# client header promises every format on every platform.
+clockwork-audio-decode = { path = "../clockwork-audio-decode" }
 # The event-sink substrate, and not optional for the same reason ports is not:
 # DspHost hands every DSP a sink handle and a send, so the clockwork_sink_* symbols
 # must be in the archive whatever else this build turned off. Its ENDPOINTS

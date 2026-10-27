@@ -1,55 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * clockwork_audio_file.cpp — the decoders and the writers behind
- * clockwork_audio_file.h.
+ * clockwork_audio_file.cpp — the file reading, the versioned info and the
+ * writers behind clockwork_audio_file.h.
  *
- * Each container is recognised from its own first bytes rather than from the
- * name it was saved under, so a .wav that is really an AIFF still loads. The
- * file entry points read the bytes and hand them to the memory entry points:
- * one implementation of every format, and the path a browser takes is the path
- * a desktop takes.
+ * Decoding is Rust: rust/clockwork-audio-decode, reached through
+ * clockwork_audio_decode.h. It recognises each container from its own first
+ * bytes rather than from the name it was saved under, so a .wav that is
+ * really an AIFF still loads, and it hands its frames into a buffer this
+ * side grows with realloc, so what a caller frees with clockwork_audio_free
+ * is a plain malloc block. The file entry points read the bytes and hand
+ * them to the memory entry points: one path for a disk, a socket and a
+ * browser's ArrayBuffer.
+ *
+ * Writing is this file's own: a WAV header and its patched sizes, and the
+ * FLAC encoder in flac_encoder.h.
  */
 #include "clockwork_audio_file.h"
+#include "clockwork_audio_decode.h"
 #include "owner.h"
 #include "flac_encoder.h"
 
-// A build with no file system still reads and writes audio: the memory
-// entry points are the whole API there, and the path ones report absent.
-#if defined(CLOCKWORK_AUDIO_NO_STDIO)
-  #define DR_WAV_NO_STDIO
-  #define DR_FLAC_NO_STDIO
-  #define DR_MP3_NO_STDIO
-#endif
-
-#define DR_WAV_IMPLEMENTATION
-#define DRWAV_NO_STDIO_WARNINGS
-#include <dr_libs/dr_wav.h>
-
-#define DR_FLAC_IMPLEMENTATION
-#define DR_FLAC_NO_OGG
-#include <dr_libs/dr_flac.h>
-
-#define DR_MP3_IMPLEMENTATION
-#include <dr_libs/dr_mp3.h>
-
-// stb_vorbis is compiled as its own translation unit; this pulls in only its
-// declarations — from the system stb when the build asked for it
-// (CLOCKWORK_SYSTEM_STB: Debian's libstb-dev names the file stb_vorbis.h and
-// puts the decoder in libstb), else from the vendored copy.
-#define STB_VORBIS_HEADER_ONLY
-#ifdef CLOCKWORK_SYSTEM_STB
-#  include <stb/stb_vorbis.h>
-#else
-#  include <stb/stb_vorbis.c>   // NOLINT(bugprone-suspicious-include): a single-file library, built here
-#endif
-
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>   // std::malloc, std::free: not reached through every standard library (libc++ 23 needs it named)
+#include <cstdlib>   // std::malloc, std::realloc, std::free
 #include <cstring>
-#include <array>
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -78,59 +55,29 @@ ClockworkStatus fillInfo(ClockworkAudioInfo* out, const ClockworkAudioInfo& full
     return CLOCKWORK_OK;
 }
 
-bool startsWith(const uint8_t* d, size_t n, size_t at, const char* tag) {
-    const size_t len = std::strlen(tag);
-    return n >= at + len && std::memcmp(d + at, tag, len) == 0;
+ClockworkAudioInfo toInfo(const ClockworkAudioDecodeInfo& d) {
+    ClockworkAudioInfo info{};
+    info.struct_bytes = sizeof(info);
+    info.format      = d.format;
+    info.encoding    = d.encoding;
+    info.channels    = d.channels;
+    info.sample_rate = d.sample_rate;
+    info.source_bits = d.source_bits;
+    info.frames      = d.frames;
+    return info;
 }
 
-// The first sixteen bytes of a Wave64 file: the RIFF GUID.
-constexpr std::array<uint8_t, 16> kW64Riff = {
-    0x72,0x69,0x66,0x66, 0x2E,0x91, 0xCF,0x11, 0xA5,0xD6,
-    0x28,0xDB,0x04,0xC1,0x00,0x00
-};
-
-ClockworkAudioFormat sniff(const uint8_t* d, size_t n) {
-    if (d == nullptr || n < 4) return CLOCKWORK_AUDIO_FORMAT_UNKNOWN;
-
-    if (startsWith(d, n, 0, "fLaC")) return CLOCKWORK_AUDIO_FORMAT_FLAC;
-    if (startsWith(d, n, 0, "OggS")) return CLOCKWORK_AUDIO_FORMAT_OGG;
-    if (startsWith(d, n, 0, "RF64")) return CLOCKWORK_AUDIO_FORMAT_RF64;
-    if (n >= 16 && std::memcmp(d, kW64Riff.data(), kW64Riff.size()) == 0)
-        return CLOCKWORK_AUDIO_FORMAT_W64;
-    if ((startsWith(d, n, 0, "RIFF") || startsWith(d, n, 0, "RIFX"))
-        && startsWith(d, n, 8, "WAVE"))
-        return CLOCKWORK_AUDIO_FORMAT_WAV;
-    if (startsWith(d, n, 0, "FORM")
-        && (startsWith(d, n, 8, "AIFF") || startsWith(d, n, 8, "AIFC")))
-        return CLOCKWORK_AUDIO_FORMAT_AIFF;
-
-    // MP3 carries no container magic. An ID3 tag, or a frame sync with a
-    // layer III version that is not the reserved one, is as much as there is
-    // to go on — and it is what every player uses.
-    if (startsWith(d, n, 0, "ID3")) return CLOCKWORK_AUDIO_FORMAT_MP3;
-    if (d[0] == 0xFF && (static_cast<uint32_t>(d[1]) & 0xE0u) == 0xE0u
-        && (static_cast<uint32_t>(d[1]) & 0x18u) != 0x08u
-        && (static_cast<uint32_t>(d[1]) & 0x06u) == 0x02u)
-        return CLOCKWORK_AUDIO_FORMAT_MP3;
-
-    return CLOCKWORK_AUDIO_FORMAT_UNKNOWN;
-}
-
-uint32_t encodingOfWav(const drwav& wav) {
-    if (wav.translatedFormatTag == DR_WAVE_FORMAT_IEEE_FLOAT)
-        return CLOCKWORK_AUDIO_ENCODING_FLOAT32;
-    switch (wav.bitsPerSample) {
-    case 16: return CLOCKWORK_AUDIO_ENCODING_PCM_S16;
-    case 24: return CLOCKWORK_AUDIO_ENCODING_PCM_S24;
-    case 32: return CLOCKWORK_AUDIO_ENCODING_PCM_S32;
-    default: return CLOCKWORK_AUDIO_ENCODING_UNKNOWN;
-    }
-}
+// ── The decode limit ─────────────────────────────────────────────────────────
+#if defined(__EMSCRIPTEN__)
+constexpr uint64_t kDefaultDecodeLimit = 256ull * 1024 * 1024;
+#else
+constexpr uint64_t kDefaultDecodeLimit = 1024ull * 1024 * 1024;
+#endif
+std::atomic<uint64_t> gDecodeLimit{kDefaultDecodeLimit};
 
 // ── Reading a whole file ─────────────────────────────────────────────────────
 // Decoding needs every byte, so the file entry points read the file and then
-// take the memory path. One decoder per format, reached the same way from a
-// disk, a socket or a browser's ArrayBuffer.
+// take the memory path.
 #if defined(CLOCKWORK_AUDIO_NO_STDIO)
 ClockworkStatus slurp(const char*, std::vector<uint8_t>&) {
     return CLOCKWORK_E_ABSENT;
@@ -154,6 +101,10 @@ ClockworkStatus slurp(const char* path, std::vector<uint8_t>& out) {
     if (std::fseek(f.get(), 0, SEEK_END) != 0) return CLOCKWORK_E_ARG;
     const long size = std::ftell(f.get());
     if (size < 0) return CLOCKWORK_E_ARG;
+    // No file decodes to less than its own size by more than its header, so
+    // one past the decode limit is refused here, before a byte of it is
+    // read: the limit bounds what a file costs, not only what it yields.
+    if (static_cast<uint64_t>(size) > gDecodeLimit.load(std::memory_order_relaxed)) return CLOCKWORK_E_TOO_BIG;
     if (std::fseek(f.get(), 0, SEEK_SET) != 0) return CLOCKWORK_E_ARG;
 
     out.resize(static_cast<size_t>(size));
@@ -163,155 +114,10 @@ ClockworkStatus slurp(const char* path, std::vector<uint8_t>& out) {
 }
 #endif
 
-// ── Per-format probes and decodes ────────────────────────────────────────────
-// `samples` null means probe only: headers are read, the audio is not.
-
-ClockworkStatus readWav(const uint8_t* d, size_t n, ClockworkAudioFormat fmt,
-                        ClockworkAudioInfo& info, float** samples) {
-    drwav wav;
-    if (!drwav_init_memory(&wav, d, n, nullptr)) return CLOCKWORK_E_ARG;
-
-    info.format      = fmt;
-    info.encoding    = encodingOfWav(wav);
-    info.channels    = wav.channels;
-    info.sample_rate = wav.sampleRate;
-    info.source_bits = wav.bitsPerSample;
-    info.frames      = wav.totalPCMFrameCount;
-
-    ClockworkStatus st = CLOCKWORK_OK;
-    if (samples != nullptr) {
-        const size_t count = static_cast<size_t>(info.frames) * info.channels;
-        // The caller's, given back through clockwork_audio_free, which is free():
-        // malloc is the contract, not a choice.
-        gsl::owner<float*> buf = static_cast<float*>(std::malloc(std::max<size_t>(count, 1) * sizeof(float)));   // NOLINT(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory)
-        if (buf == nullptr) st = CLOCKWORK_E_NOMEM;
-        else if (drwav_read_pcm_frames_f32(&wav, info.frames, buf) != info.frames) {
-            std::free(buf);   // NOLINT(cppcoreguidelines-no-malloc)
-            st = CLOCKWORK_E_ARG;
-        } else {
-            *samples = buf;
-        }
-    }
-    drwav_uninit(&wav);
-    return st;
-}
-
-ClockworkStatus readFlac(const uint8_t* d, size_t n,
-                         ClockworkAudioInfo& info, float** samples) {
-    drflac* flac = drflac_open_memory(d, n, nullptr);
-    if (flac == nullptr) return CLOCKWORK_E_ARG;
-
-    info.format      = CLOCKWORK_AUDIO_FORMAT_FLAC;
-    info.channels    = flac->channels;
-    info.sample_rate = flac->sampleRate;
-    info.source_bits = flac->bitsPerSample;
-    info.frames      = flac->totalPCMFrameCount;
-    info.encoding    = flac->bitsPerSample == 16 ? CLOCKWORK_AUDIO_ENCODING_PCM_S16
-                     : flac->bitsPerSample == 24 ? CLOCKWORK_AUDIO_ENCODING_PCM_S24
-                                                 : CLOCKWORK_AUDIO_ENCODING_PCM_S32;
-
-    ClockworkStatus st = CLOCKWORK_OK;
-    if (samples != nullptr) {
-        const size_t count = static_cast<size_t>(info.frames) * info.channels;
-        gsl::owner<float*> buf = static_cast<float*>(std::malloc(std::max<size_t>(count, 1) * sizeof(float)));   // NOLINT(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory): the caller's, freed by clockwork_audio_free
-        if (buf == nullptr) st = CLOCKWORK_E_NOMEM;
-        else if (drflac_read_pcm_frames_f32(flac, info.frames, buf) != info.frames) {
-            std::free(buf);   // NOLINT(cppcoreguidelines-no-malloc)
-            st = CLOCKWORK_E_ARG;
-        } else {
-            *samples = buf;
-        }
-    }
-    drflac_close(flac);
-    return st;
-}
-
-ClockworkStatus readMp3(const uint8_t* d, size_t n,
-                        ClockworkAudioInfo& info, float** samples) {
-    drmp3 mp3;
-    if (!drmp3_init_memory(&mp3, d, n, nullptr)) return CLOCKWORK_E_ARG;
-
-    const drmp3_uint64 frames = drmp3_get_pcm_frame_count(&mp3);
-    info.format      = CLOCKWORK_AUDIO_FORMAT_MP3;
-    info.encoding    = CLOCKWORK_AUDIO_ENCODING_COMPRESSED;
-    info.channels    = mp3.channels;
-    info.sample_rate = mp3.sampleRate;
-    info.source_bits = 0;
-    info.frames      = frames;
-
-    ClockworkStatus st = CLOCKWORK_OK;
-    if (samples != nullptr) {
-        const size_t count = static_cast<size_t>(frames) * info.channels;
-        gsl::owner<float*> buf = static_cast<float*>(std::malloc(std::max<size_t>(count, 1) * sizeof(float)));   // NOLINT(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory): the caller's, freed by clockwork_audio_free
-        if (buf == nullptr) {
-            st = CLOCKWORK_E_NOMEM;
-        } else {
-            drmp3_seek_to_pcm_frame(&mp3, 0);
-            const drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, frames, buf);
-            // A truncated stream decodes to fewer frames than the scan
-            // promised; the silence keeps the buffer the length the caller was
-            // told it is.
-            if (got < frames)
-                std::memset(buf + got * info.channels, 0,
-                            static_cast<size_t>(frames - got) * info.channels * sizeof(float));
-            *samples = buf;
-        }
-    }
-    drmp3_uninit(&mp3);
-    return st;
-}
-
-ClockworkStatus readOgg(const uint8_t* d, size_t n,
-                        ClockworkAudioInfo& info, float** samples) {
-    int err = 0;
-    stb_vorbis* v = stb_vorbis_open_memory(d, static_cast<int>(n), &err, nullptr);
-    if (v == nullptr) return CLOCKWORK_E_ARG;
-
-    const stb_vorbis_info vi = stb_vorbis_get_info(v);
-    const unsigned int frames = stb_vorbis_stream_length_in_samples(v);
-
-    info.format      = CLOCKWORK_AUDIO_FORMAT_OGG;
-    info.encoding    = CLOCKWORK_AUDIO_ENCODING_COMPRESSED;
-    info.channels    = static_cast<uint32_t>(vi.channels);
-    info.sample_rate = static_cast<uint32_t>(vi.sample_rate);
-    info.source_bits = 0;
-    info.frames      = frames;
-
-    ClockworkStatus st = CLOCKWORK_OK;
-    if (samples != nullptr) {
-        const size_t count = static_cast<size_t>(frames) * info.channels;
-        gsl::owner<float*> buf = static_cast<float*>(std::malloc(std::max<size_t>(count, 1) * sizeof(float)));   // NOLINT(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory): the caller's, freed by clockwork_audio_free
-        if (buf == nullptr) {
-            st = CLOCKWORK_E_NOMEM;
-        } else {
-            const int got = stb_vorbis_get_samples_float_interleaved(
-                v, vi.channels, buf, static_cast<int>(count));
-            if (got >= 0 && static_cast<unsigned>(got) < frames)
-                std::memset(buf + static_cast<size_t>(got) * info.channels, 0,
-                            static_cast<size_t>(frames - got) * info.channels * sizeof(float));
-            *samples = buf;
-        }
-    }
-    stb_vorbis_close(v);
-    return st;
-}
-
-ClockworkStatus readAny(const void* data, size_t bytes,
-                        ClockworkAudioInfo& info, float** samples) {
-    const uint8_t* d = static_cast<const uint8_t*>(data);
-    if (d == nullptr || bytes == 0) return CLOCKWORK_E_ARG;
-
-    switch (sniff(d, bytes)) {
-    case CLOCKWORK_AUDIO_FORMAT_WAV:
-    case CLOCKWORK_AUDIO_FORMAT_AIFF:
-    case CLOCKWORK_AUDIO_FORMAT_W64:
-    case CLOCKWORK_AUDIO_FORMAT_RF64:
-        return readWav(d, bytes, sniff(d, bytes), info, samples);
-    case CLOCKWORK_AUDIO_FORMAT_FLAC: return readFlac(d, bytes, info, samples);
-    case CLOCKWORK_AUDIO_FORMAT_OGG:  return readOgg(d, bytes, info, samples);
-    case CLOCKWORK_AUDIO_FORMAT_MP3:  return readMp3(d, bytes, info, samples);
-    default:                          return CLOCKWORK_E_VERSION;
-    }
+// realloc, in the shape the decoder grows its output through. The block is
+// the caller's from the first byte, released with clockwork_audio_free.
+void* grow(void* block, size_t bytes) {
+    return std::realloc(block, bytes);   // NOLINT(cppcoreguidelines-no-malloc): the contract, see clockwork_audio_free
 }
 
 // ── Float to the integer the file wants ──────────────────────────────────────
@@ -337,11 +143,12 @@ double clockwork_audio_duration(const ClockworkAudioInfo* info) {
 ClockworkStatus clockwork_audio_probe_memory(const void* data, size_t bytes,
                                              ClockworkAudioInfo* info) {
     if (info == nullptr) return CLOCKWORK_E_ARG;
-    ClockworkAudioInfo full{};
-    full.struct_bytes = sizeof(full);
-    const ClockworkStatus st = readAny(data, bytes, full, nullptr);
+    if (data == nullptr || bytes == 0) return CLOCKWORK_E_ARG;
+    ClockworkAudioDecodeInfo d{};
+    const auto st = static_cast<ClockworkStatus>(
+        clockwork_audio_decode_probe(static_cast<const uint8_t*>(data), bytes, &d));
     if (st != CLOCKWORK_OK) return st;
-    return fillInfo(info, full);
+    return fillInfo(info, toInfo(d));
 }
 
 ClockworkStatus clockwork_audio_probe_file(const char* path,
@@ -356,13 +163,16 @@ ClockworkStatus clockwork_audio_decode_memory(const void* data, size_t bytes,
                                               ClockworkAudioInfo* info,
                                               float** out_interleaved) {
     if (info == nullptr || out_interleaved == nullptr) return CLOCKWORK_E_ARG;
-    ClockworkAudioInfo full{};
-    full.struct_bytes = sizeof(full);
-    gsl::owner<float*> samples = nullptr;
-    const ClockworkStatus st = readAny(data, bytes, full, &samples);
-    if (st != CLOCKWORK_OK) return st;
+    if (data == nullptr || bytes == 0) return CLOCKWORK_E_ARG;
 
-    const ClockworkStatus fst = fillInfo(info, full);
+    ClockworkAudioDecodeInfo d{};
+    gsl::owner<float*> samples = nullptr;
+    const auto st = static_cast<ClockworkStatus>(clockwork_audio_decode_run(
+        static_cast<const uint8_t*>(data), bytes, clockwork_audio_decode_limit(),
+        &grow, &d, &samples));
+    if (st != CLOCKWORK_OK) { std::free(samples); return st; }   // NOLINT(cppcoreguidelines-no-malloc): what was grown so far
+
+    const ClockworkStatus fst = fillInfo(info, toInfo(d));
     if (fst != CLOCKWORK_OK) { std::free(samples); return fst; }   // NOLINT(cppcoreguidelines-no-malloc)
     *out_interleaved = samples;
     return CLOCKWORK_OK;
@@ -379,7 +189,15 @@ ClockworkStatus clockwork_audio_decode_file(const char* path,
 }
 
 void clockwork_audio_free(gsl::owner<void*> interleaved) {   // the caller's, given back here
-    std::free(interleaved);   // NOLINT(cppcoreguidelines-no-malloc): what the decoders hand out
+    std::free(interleaved);   // NOLINT(cppcoreguidelines-no-malloc): what grow hands out
+}
+
+void clockwork_audio_set_decode_limit(uint64_t max_bytes) {
+    gDecodeLimit.store(max_bytes == 0 ? kDefaultDecodeLimit : max_bytes, std::memory_order_relaxed);
+}
+
+uint64_t clockwork_audio_decode_limit(void) {
+    return gDecodeLimit.load(std::memory_order_relaxed);
 }
 
 int clockwork_audio_can_write(uint32_t format, uint32_t encoding) {
@@ -404,40 +222,88 @@ struct ClockworkAudioWriter {
     bool     toMemory = false;
     ClockworkStatus status = CLOCKWORK_OK;
 
-    // WAV. dr_wav owns the growing buffer for a memory writer and hands it
-    // back at uninit; a path writer's file is `fp` below, reached through
-    // callbacks, so a WAV and a FLAC are created the same way.
-    drwav  wav{};
-    bool   wavOpen = false;
-    gsl::owner<void*> wavMemory = nullptr;   // dr_wav's, freed with free()
-    size_t wavMemoryLen = 0;
-    std::vector<uint8_t> scratch;
-
-    // The file, for a path writer of either format.
+    // Where the bytes go: a memory writer keeps them, a path writer's file is
+    // `fp`, and a WAV and a FLAC are fed the same way.
+    std::vector<uint8_t> memory;
     gsl::owner<std::FILE*> fp = nullptr;
 
-    // FLAC. A path writer streams frames out as they are encoded; a memory
-    // writer keeps them, since the stream info at the front is patched at the
-    // end either way.
+    // WAV: the sample bytes written so far, for the sizes patched at close.
+    uint64_t wavDataBytes = 0;
+    std::vector<uint8_t> scratch;
+
+    // FLAC: blocks are gathered and encoded as they fill.
     std::unique_ptr<FlacEncoder> flac;
+    std::vector<int32_t> block;    // interleaved, up to kBlockSize frames
+    uint32_t blockFrames = 0;
+    std::vector<uint8_t> frameBytes;
 
     // A writer dropped before close — open() failing after it took a file,
     // or a caller that never closed — gives back what it holds.
     ~ClockworkAudioWriter() {
-        if (wavOpen) drwav_uninit(&wav);
-        std::free(wavMemory);   // NOLINT(cppcoreguidelines-no-malloc): dr_wav's, by its own contract
         if (fp) std::fclose(fp);
     }
     ClockworkAudioWriter() = default;
     ClockworkAudioWriter(const ClockworkAudioWriter&) = delete;
     ClockworkAudioWriter& operator=(const ClockworkAudioWriter&) = delete;
-    std::vector<int32_t> block;    // interleaved, up to kBlockSize frames
-    uint32_t blockFrames = 0;
-    std::vector<uint8_t> frameBytes;
-    std::vector<uint8_t> memory;
 };
 
 namespace {
+
+// Bytes to wherever this writer sends them.
+bool emit(ClockworkAudioWriter* w, const uint8_t* data, size_t len) {
+    if (len == 0) return true;
+    if (w->toMemory) {
+        w->memory.insert(w->memory.end(), data, data + len);
+        return true;
+    }
+    return std::fwrite(data, 1, len, w->fp) == len;
+}
+
+void put16(std::vector<uint8_t>& v, uint32_t x) {
+    v.push_back(static_cast<uint8_t>(x));
+    v.push_back(static_cast<uint8_t>(x >> 8));
+}
+void put32(std::vector<uint8_t>& v, uint32_t x) {
+    put16(v, x & 0xFFFFu);
+    put16(v, x >> 16);
+}
+
+constexpr size_t kWavRiffSizeAt = 4;
+constexpr size_t kWavDataSizeAt = 40;
+constexpr size_t kWavHeaderBytes = 44;
+
+uint32_t wavBits(const ClockworkAudioWriter* w) {
+    return w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S16 ? 16u
+         : w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S24 ? 24u : 32u;
+}
+
+// The 44-byte RIFF/WAVE header, its sizes zero until close patches them.
+std::vector<uint8_t> wavHeader(const ClockworkAudioWriter* w) {
+    const uint32_t bits = wavBits(w);
+    const uint32_t blockAlign = w->channels * bits / 8;
+    std::vector<uint8_t> h;
+    h.reserve(kWavHeaderBytes);
+    h.insert(h.end(), {'R', 'I', 'F', 'F'}); put32(h, 0);
+    h.insert(h.end(), {'W', 'A', 'V', 'E'});
+    h.insert(h.end(), {'f', 'm', 't', ' '}); put32(h, 16);
+    put16(h, w->encoding == CLOCKWORK_AUDIO_ENCODING_FLOAT32 ? 3u : 1u);   // IEEE float or PCM
+    put16(h, w->channels);
+    put32(h, w->sampleRate);
+    put32(h, w->sampleRate * blockAlign);
+    put16(h, blockAlign);
+    put16(h, bits);
+    h.insert(h.end(), {'d', 'a', 't', 'a'}); put32(h, 0);
+    return h;
+}
+
+// The two sizes a RIFF carries, which a WAV past 4 GB cannot: that is what
+// RF64 is for, and this writer does not write one.
+bool wavSizes(const ClockworkAudioWriter* w, uint32_t& riff, uint32_t& data) {
+    if (w->wavDataBytes > 0xFFFFFFFFull - (kWavHeaderBytes - 8)) return false;
+    data = static_cast<uint32_t>(w->wavDataBytes);
+    riff = static_cast<uint32_t>(w->wavDataBytes + kWavHeaderBytes - 8);
+    return true;
+}
 
 bool flushFlacBlock(ClockworkAudioWriter* w) {
     if (w->blockFrames == 0) return true;
@@ -445,12 +311,7 @@ bool flushFlacBlock(ClockworkAudioWriter* w) {
     w->flac->encodeBlock(w->block.data(), w->blockFrames, w->frameBytes);
     w->blockFrames = 0;
     if (w->frameBytes.empty()) return false;
-    if (w->toMemory) {
-        w->memory.insert(w->memory.end(), w->frameBytes.begin(), w->frameBytes.end());
-        return true;
-    }
-    return std::fwrite(w->frameBytes.data(), 1, w->frameBytes.size(), w->fp)
-           == w->frameBytes.size();
+    return emit(w, w->frameBytes.data(), w->frameBytes.size());
 }
 
 // Hand a vector's contents to a caller that will release them with
@@ -464,13 +325,9 @@ bool handOver(const std::vector<uint8_t>& src, void** bytes, size_t* len) {
     return true;
 }
 
-} // namespace
-
-namespace {
-
 // Everything an open does before it knows where the bytes are going.
 gsl::owner<ClockworkAudioWriter*> validateAndMake(const ClockworkAudioWriterConfig* config,
-                                      ClockworkStatus* status) {
+                                                  ClockworkStatus* status) {
     const auto fail = [status](ClockworkStatus s) -> ClockworkAudioWriter* {
         if (status != nullptr) *status = s;
         return nullptr;
@@ -491,19 +348,6 @@ gsl::owner<ClockworkAudioWriter*> validateAndMake(const ClockworkAudioWriterConf
     return w;
 }
 
-drwav_data_format wavFormat(const ClockworkAudioWriter* w) {
-    drwav_data_format fmt{};
-    fmt.container     = drwav_container_riff;
-    fmt.format        = w->encoding == CLOCKWORK_AUDIO_ENCODING_FLOAT32
-                          ? DR_WAVE_FORMAT_IEEE_FLOAT : DR_WAVE_FORMAT_PCM;
-    fmt.channels      = w->channels;
-    fmt.sampleRate    = w->sampleRate;
-    fmt.bitsPerSample = w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S16 ? 16
-                      : w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S24 ? 24
-                                                                        : 32;
-    return fmt;
-}
-
 uint32_t flacBits(const ClockworkAudioWriter* w) {
     return w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S16 ? 16u : 24u;
 }
@@ -514,6 +358,17 @@ bool startFlac(ClockworkAudioWriter* w) {
     if (!w->flac->valid()) return false;
     w->block.resize(static_cast<size_t>(FlacEncoder::kBlockSize) * w->channels);
     return true;
+}
+
+// The header of either format, as the first bytes out.
+bool startStream(ClockworkAudioWriter* w) {
+    if (w->format == CLOCKWORK_AUDIO_FORMAT_WAV) {
+        const auto h = wavHeader(w);
+        return emit(w, h.data(), h.size());
+    }
+    if (!startFlac(w)) return false;
+    const auto hdr = w->flac->header();
+    return emit(w, hdr.data(), hdr.size());
 }
 
 #if !defined(CLOCKWORK_AUDIO_NO_STDIO)
@@ -539,19 +394,18 @@ gsl::owner<std::FILE*> createFile(const char* path) {
     return f;
 #endif
 }
-
-// dr_wav's way to the writer's file; the RIFF sizes are patched at close
-// through the seek.
-size_t wavWrite(void* user, const void* data, size_t bytes) {
-    return std::fwrite(data, 1, bytes, static_cast<ClockworkAudioWriter*>(user)->fp);
-}
-drwav_bool32 wavSeek(void* user, int offset, drwav_seek_origin origin) {
-    const int whence = origin == DRWAV_SEEK_SET ? SEEK_SET
-                     : origin == DRWAV_SEEK_CUR ? SEEK_CUR : SEEK_END;
-    return std::fseek(static_cast<ClockworkAudioWriter*>(user)->fp, offset, whence) == 0
-         ? DRWAV_TRUE : DRWAV_FALSE;
-}
 #endif
+
+// Write `bytes` over the stream at `at`: into the memory, or through a seek.
+bool patch(ClockworkAudioWriter* w, size_t at, const uint8_t* bytes, size_t len) {
+    if (w->toMemory) {
+        if (w->memory.size() < at + len) return false;
+        std::memcpy(w->memory.data() + at, bytes, len);
+        return true;
+    }
+    return std::fseek(w->fp, static_cast<long>(at), SEEK_SET) == 0
+        && std::fwrite(bytes, 1, len, w->fp) == len;
+}
 
 } // namespace
 
@@ -573,22 +427,9 @@ gsl::owner<ClockworkAudioWriter*> clockwork_audio_writer_open(
     std::unique_ptr<ClockworkAudioWriter> w(validateAndMake(config, status));
     if (w == nullptr) return nullptr;
 
-    const bool wav = w->format == CLOCKWORK_AUDIO_FORMAT_WAV;
-    if (!wav && !startFlac(w.get())) return fail(CLOCKWORK_E_ARG);
-
     w->fp = createFile(path);
     if (w->fp == nullptr) return fail(CLOCKWORK_E_PERM);   // nothing created to clean up
-
-    if (wav) {
-        const drwav_data_format fmt = wavFormat(w.get());
-        if (!drwav_init_write(&w->wav, &fmt, &wavWrite, &wavSeek, w.get(), nullptr))
-            return fail(CLOCKWORK_E_PERM);   // the writer closes its file
-        w->wavOpen = true;
-    } else {
-        const auto hdr = w->flac->header();
-        if (std::fwrite(hdr.data(), 1, hdr.size(), w->fp) != hdr.size())
-            return fail(CLOCKWORK_E_PERM);   // the writer closes its file
-    }
+    if (!startStream(w.get())) return fail(CLOCKWORK_E_PERM);   // the writer closes its file
 
     if (status != nullptr) *status = CLOCKWORK_OK;
     return w.release();
@@ -606,18 +447,7 @@ gsl::owner<ClockworkAudioWriter*> clockwork_audio_writer_open_memory(
     std::unique_ptr<ClockworkAudioWriter> w(validateAndMake(config, status));
     if (w == nullptr) return nullptr;
     w->toMemory = true;
-
-    if (w->format == CLOCKWORK_AUDIO_FORMAT_WAV) {
-        const drwav_data_format fmt = wavFormat(w.get());
-        if (!drwav_init_memory_write(&w->wav, &w->wavMemory, &w->wavMemoryLen,
-                                     &fmt, nullptr))
-            return fail(CLOCKWORK_E_NOMEM);
-        w->wavOpen = true;
-    } else {
-        if (!startFlac(w.get())) return fail(CLOCKWORK_E_ARG);
-        const auto hdr = w->flac->header();
-        w->memory.assign(hdr.begin(), hdr.end());
-    }
+    if (!startStream(w.get())) return fail(CLOCKWORK_E_ARG);
 
     if (status != nullptr) *status = CLOCKWORK_OK;
     return w.release();
@@ -633,28 +463,33 @@ ClockworkStatus clockwork_audio_writer_write(ClockworkAudioWriter* w,
     const size_t samples = static_cast<size_t>(frames) * w->channels;
 
     if (w->format == CLOCKWORK_AUDIO_FORMAT_WAV) {
-        const void* src = interleaved;
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(interleaved);
+        size_t len = samples * sizeof(float);
         if (w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S16) {
             w->scratch.resize(samples * 2);
-            auto* p = reinterpret_cast<int16_t*>(w->scratch.data());
-            for (size_t i = 0; i < samples; ++i)
-                p[i] = static_cast<int16_t>(quantize(interleaved[i], 32767));
-            src = w->scratch.data();
-        } else if (w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S24) {
-            w->scratch.resize(samples * 3);
-            uint8_t* p = w->scratch.data();
             for (size_t i = 0; i < samples; ++i) {
-                const uint32_t v = static_cast<uint32_t>(quantize(interleaved[i], 8388607));
-                p[i * 3 + 0] = static_cast<uint8_t>(v & 0xFFu);
-                p[i * 3 + 1] = static_cast<uint8_t>((v >> 8u) & 0xFFu);
-                p[i * 3 + 2] = static_cast<uint8_t>((v >> 16u) & 0xFFu);
+                const auto v = static_cast<uint32_t>(quantize(interleaved[i], 32767));
+                w->scratch[i * 2 + 0] = static_cast<uint8_t>(v & 0xFFu);
+                w->scratch[i * 2 + 1] = static_cast<uint8_t>((v >> 8u) & 0xFFu);
             }
             src = w->scratch.data();
+            len = w->scratch.size();
+        } else if (w->encoding == CLOCKWORK_AUDIO_ENCODING_PCM_S24) {
+            w->scratch.resize(samples * 3);
+            for (size_t i = 0; i < samples; ++i) {
+                const auto v = static_cast<uint32_t>(quantize(interleaved[i], 8388607));
+                w->scratch[i * 3 + 0] = static_cast<uint8_t>(v & 0xFFu);
+                w->scratch[i * 3 + 1] = static_cast<uint8_t>((v >> 8u) & 0xFFu);
+                w->scratch[i * 3 + 2] = static_cast<uint8_t>((v >> 16u) & 0xFFu);
+            }
+            src = w->scratch.data();
+            len = w->scratch.size();
         }
-        if (drwav_write_pcm_frames(&w->wav, frames, src) != frames) {
+        if (!emit(w, src, len)) {
             w->status = CLOCKWORK_E_PERM;
             return w->status;
         }
+        w->wavDataBytes += len;
         w->frames += frames;
         return CLOCKWORK_OK;
     }
@@ -699,62 +534,40 @@ ClockworkStatus clockwork_audio_writer_close(ClockworkAudioWriter* w,
     if (w == nullptr) return CLOCKWORK_OK;
     std::unique_ptr<ClockworkAudioWriter> owned(w);
 
+    const auto note = [w](ClockworkStatus s) { if (w->status == CLOCKWORK_OK) w->status = s; };
+
     if (w->format == CLOCKWORK_AUDIO_FORMAT_WAV) {
-        // dr_wav patches the RIFF sizes here, and for a memory writer this is
-        // where the finished buffer appears.
-        if (w->wavOpen) drwav_uninit(&w->wav);
-        w->wavOpen = false;
-        if (w->fp != nullptr) {
-            if (std::fclose(w->fp) != 0 && w->status == CLOCKWORK_OK)
-                w->status = CLOCKWORK_E_PERM;
-            w->fp = nullptr;
+        // The RIFF and data sizes, now the totals are known.
+        uint32_t riff = 0, data = 0;
+        if (!wavSizes(w, riff, data)) {
+            note(CLOCKWORK_E_TOO_BIG);
+        } else {
+            std::vector<uint8_t> four;
+            put32(four, riff);
+            if (!patch(w, kWavRiffSizeAt, four.data(), 4)) note(CLOCKWORK_E_PERM);
+            four.clear();
+            put32(four, data);
+            if (!patch(w, kWavDataSizeAt, four.data(), 4)) note(CLOCKWORK_E_PERM);
         }
-        if (w->toMemory) {
-            if (out_bytes != nullptr && out_bytes_len != nullptr) {
-                *out_bytes = w->wavMemory;
-                *out_bytes_len = w->wavMemoryLen;
-            } else {
-                std::free(w->wavMemory);   // NOLINT(cppcoreguidelines-no-malloc): dr_wav's
-            }
-            w->wavMemory = nullptr;
-        }
-        return w->status;
+    } else {
+        if (!flushFlacBlock(w)) note(CLOCKWORK_E_PERM);
+        // The stream info written at open could not know the totals. Now it
+        // can, so it is written again over the placeholder.
+        const auto tail = w->flac->finalStreamInfo();
+        if (!patch(w, FlacEncoder::kStreamInfoOffset, tail.data(), tail.size()))
+            note(w->toMemory ? CLOCKWORK_E_NOMEM : CLOCKWORK_E_PERM);
     }
-
-    if (!w->toMemory && w->fp == nullptr) return w->status;
-
-    if (!flushFlacBlock(w) && w->status == CLOCKWORK_OK)
-        w->status = CLOCKWORK_E_PERM;
-
-    // The stream info written at open could not know the totals. Now it can,
-    // so it is written again over the placeholder.
-    const auto tail = w->flac->finalStreamInfo();
 
     if (w->toMemory) {
-        if (w->memory.size() >= FlacEncoder::kStreamInfoOffset + tail.size())
-            std::memcpy(w->memory.data() + FlacEncoder::kStreamInfoOffset,
-                        tail.data(), tail.size());
-        else if (w->status == CLOCKWORK_OK)
-            w->status = CLOCKWORK_E_NOMEM;
-
         if (out_bytes != nullptr && out_bytes_len != nullptr
-            && !handOver(w->memory, out_bytes, out_bytes_len)
-            && w->status == CLOCKWORK_OK)
-            w->status = CLOCKWORK_E_NOMEM;
+            && !handOver(w->memory, out_bytes, out_bytes_len))
+            note(CLOCKWORK_E_NOMEM);
         return w->status;
     }
 
-    if (std::fseek(w->fp, static_cast<long>(FlacEncoder::kStreamInfoOffset),
-                   SEEK_SET) == 0) {
-        if (std::fwrite(tail.data(), 1, tail.size(), w->fp) != tail.size()
-            && w->status == CLOCKWORK_OK)
-            w->status = CLOCKWORK_E_PERM;
-    } else if (w->status == CLOCKWORK_OK) {
-        w->status = CLOCKWORK_E_PERM;
+    if (w->fp != nullptr) {
+        if (std::fclose(w->fp) != 0) note(CLOCKWORK_E_PERM);
+        w->fp = nullptr;
     }
-
-    if (std::fclose(w->fp) != 0 && w->status == CLOCKWORK_OK)
-        w->status = CLOCKWORK_E_PERM;
-    w->fp = nullptr;
     return w->status;
 }

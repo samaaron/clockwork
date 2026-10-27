@@ -10,36 +10,5 @@
       "name": "clockwork"
     }
   },
-  "vulnerabilities": [
-    {
-      "id": "OSV-2020-1372",
-      "source": { "name": "OSV", "url": "https://osv.dev/vulnerability/OSV-2020-1372" },
-      "affects": [{ "ref": "stb_vorbis" }],
-      "analysis": {
-        "state": "not_affected",
-        "justification": "code_not_present",
-        "detail": "stbi__build_huffman is in stb_image.h, the JPEG loader in the same repository. Clockwork carries only stb_vorbis.c (src/vendor/stb); OSV matches the whole repository at the vendored commit."
-      }
-    },
-    {
-      "id": "OSV-2020-1478",
-      "source": { "name": "OSV", "url": "https://osv.dev/vulnerability/OSV-2020-1478" },
-      "affects": [{ "ref": "stb_vorbis" }],
-      "analysis": {
-        "state": "not_affected",
-        "justification": "code_not_present",
-        "detail": "load_jpeg_image is in stb_image.h. Clockwork carries only stb_vorbis.c."
-      }
-    },
-    {
-      "id": "OSV-2021-1239",
-      "source": { "name": "OSV", "url": "https://osv.dev/vulnerability/OSV-2021-1239" },
-      "affects": [{ "ref": "stb_vorbis" }],
-      "analysis": {
-        "state": "not_affected",
-        "justification": "code_not_present",
-        "detail": "stbi__load_and_postprocess_8bit is in stb_image.h. Clockwork carries only stb_vorbis.c."
-      }
-    }
-  ]
+  "vulnerabilities": []
 }

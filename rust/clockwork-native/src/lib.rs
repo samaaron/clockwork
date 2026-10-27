@@ -55,6 +55,11 @@ pub use clockwork_sinks;
 /// reverse, so "the substrate mentions no endpoint" is checked by the build.
 pub use clockwork_ports_disk;
 
+/// The sample-file decoders (`clockwork_audio_decode_*`,
+/// clockwork-audio-decode/cpp/clockwork_audio_decode.h), which
+/// clockwork_audio_file.cpp calls for every format the client header promises.
+pub use clockwork_audio_decode;
+
 // No DSP and no guest are re-exported here, because neither is in this
 // repository. The guest supplies `clockwork_engine_*` / `clockwork_perform_osc_*` itself
 // (see src/engine_api.h and src/scheduler/guest_schedule.h) and is linked
