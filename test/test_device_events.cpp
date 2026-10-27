@@ -400,23 +400,34 @@ TEST_CASE("DeviceEvents: a device that goes while a recovery runs and comes back
     // messages wait. Without the callback watchdog (off in this config, on in
     // Sonic Pi's) the one way out is the OS reporting a change — which it
     // does for every device that comes back.
-    auto sys = makeSimpleSystem();
+    //
+    // One output only: with a second one the recovery lands on it and the
+    // engine is never idle (the simple system has Fake Interface, and this
+    // case ran on it until 2026-10-27, seeing "no source" only for the
+    // instant between the detach and the reopen).
+    auto sys = std::make_shared<FakeSystem>();
+    auto speakers = device("Fake Speakers", 2, 0);
+    sys->types.push_back({ "FakeDriver", { speakers }, 0 });
     auto cfg = fakeEngineConfig(sys, "Fake Speakers");
     cfg.watchdogRecoveryCooldownMs = 0;
     EngineFixture fix(cfg);
-    auto speakers = sys->device("Fake Speakers");
     REQUIRE(fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback);
 
-    // Gone, and the OS says so: the reopen finds no device, and the engine is idle.
+    // Gone, and the OS says so: the recovery finds no device and finishes
+    // with the engine idle. The device comes back after that, not during it.
     speakers->hidden = true;
     REQUIRE(sys->reportListChanged());
     REQUIRE(fix.pollUntil([&] { return fix.engine().audioSource() == ClockworkEngine::AudioSource::None; }, 5000));
+    REQUIRE(fix.pollUntil([&] { return !fix.engine().recoveryInFlight(); }, 5000));
     INFO(fix.debugMessagesDump());
+    CHECK(fix.engine().audioSource() == ClockworkEngine::AudioSource::None);
 
     // Back, and the OS says so: reopened, and answering again.
     speakers->hidden = false;
     REQUIRE(sys->reportListChanged());
-    REQUIRE(fix.pollUntil([&] { return fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback; }, 5000));
+    const bool reopened = fix.pollUntil([&] { return fix.engine().audioSource() == ClockworkEngine::AudioSource::RealCallback; }, 5000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(reopened);
     OscReply reply;
     const bool answered = fix.pollUntil([&] {
         fix.send(osc_test::message("/dummy/ping"));
