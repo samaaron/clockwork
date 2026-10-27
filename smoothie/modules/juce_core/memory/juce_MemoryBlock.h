@@ -218,57 +218,6 @@ public:
     void swapWith (MemoryBlock& other) noexcept;
 
     //==============================================================================
-    /** Attempts to parse the contents of the block as a zero-terminated UTF8 string. */
-    String toString() const;
-
-    //==============================================================================
-    /** Parses a string of hexadecimal numbers and writes this data into the memory block.
-
-        The block will be resized to the number of valid bytes read from the string.
-        Non-hex characters in the string will be ignored.
-
-        @see String::toHexString()
-    */
-    void loadFromHexString (StringRef sourceHexString);
-
-    //==============================================================================
-    /** Sets a number of bits in the memory block, treating it as a long binary sequence. */
-    void setBitRange (size_t bitRangeStart,
-                      size_t numBits,
-                      int binaryNumberToApply) noexcept;
-
-    /** Reads a number of bits from the memory block, treating it as one long binary sequence */
-    int getBitRange (size_t bitRangeStart,
-                     size_t numBitsToRead) const noexcept;
-
-    //==============================================================================
-    /** Returns a string of characters in a JUCE-specific text encoding that represents the
-        binary contents of this block.
-
-        This uses a JUCE-specific (i.e. not standard!) 64-bit encoding system to convert binary
-        data into a string of ASCII characters for purposes like storage in XML.
-        Note that this proprietary format is mainly kept here for backwards-compatibility, and
-        you may prefer to use the Base64::toBase64() method if you want to use the standard
-        base-64 encoding.
-
-        @see fromBase64Encoding, Base64::toBase64, Base64::convertToBase64
-    */
-    String toBase64Encoding() const;
-
-    /** Takes a string created by MemoryBlock::toBase64Encoding() and extracts the original data.
-
-        The string passed in must have been created by to64BitEncoding(), and this
-        block will be resized to recreate the original data block.
-
-        Note that these methods use a JUCE-specific (i.e. not standard!) 64-bit encoding system.
-        You may prefer to use the Base64::convertFromBase64() method if you want to use the
-        standard base-64 encoding.
-
-        @see toBase64Encoding, Base64::convertFromBase64
-    */
-    bool fromBase64Encoding  (StringRef encodedString);
-
-    //==============================================================================
    #ifndef DOXYGEN
     [[deprecated ("Use the replaceAll method instead, which will also replace the data when numBytes == 0.")]]
     void replaceWith (const void* srcData, size_t numBytes)

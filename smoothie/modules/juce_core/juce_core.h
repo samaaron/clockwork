@@ -149,10 +149,6 @@
  #define JUCE_ENABLE_ALLOCATION_HOOKS 0
 #endif
 
-#ifndef JUCE_STRING_UTF_TYPE
- #define JUCE_STRING_UTF_TYPE 8
-#endif
-
 //==============================================================================
 //==============================================================================
 
@@ -180,19 +176,7 @@ namespace juce
 #include "maths/juce_MathsFunctions.h"
 #include "memory/juce_ByteOrder.h"
 #include "memory/juce_Atomic.h"
-#include "text/juce_CharacterFunctions.h"
-
-JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4514 4996)
-
-#include "text/juce_CharPointer_UTF8.h"
-#include "text/juce_CharPointer_UTF16.h"
-#include "text/juce_CharPointer_UTF32.h"
-#include "text/juce_CharPointer_ASCII.h"
-
-JUCE_END_IGNORE_WARNINGS_MSVC
-
 #include "text/juce_String.h"
-#include "text/juce_StringRef.h"
 #include "logging/juce_Logger.h"
 #include "memory/juce_LeakedObjectDetector.h"
 #include "memory/juce_ContainerDeletePolicy.h"
@@ -215,7 +199,6 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 #include "containers/juce_OwnedArray.h"
 #include "containers/juce_ReferenceCountedArray.h"
 #include "containers/juce_SingleThreadedAbstractFifo.h"
-#include "text/juce_NewLine.h"
 #include "text/juce_StringArray.h"
 #include "system/juce_SystemStats.h"
 #include "misc/juce_Functional.h"
