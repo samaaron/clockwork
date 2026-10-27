@@ -131,6 +131,7 @@ add_executable(clockwork_tests
     # DSP on. The ring's own arithmetic and its no-allocation rule are pinned
     # in Rust, where the allocator can actually be seen.
     test_ports.cpp
+    test_samples_through_engine.cpp
 
     # Reading and writing audio files (src/clockwork_audio_file.h): the
     # decoders, this repository's FLAC encoder, and the versioned structs

@@ -133,6 +133,15 @@ ring: a host prints those lines (or not), the test fixture captures them and
 shows them when a test fails, and the engine itself writes nothing to stdio.
 `scripts/check-logging.sh` enforces that, and CI runs it.
 
+The audio file path is tried on files from the world as well as the
+fixtures: `scripts/check-samples.sh` takes every sample Sonic Pi ships (the
+`supersonic-scsynth-samples` npm package, at a pinned version, cached under
+`build/`) the whole way round — decoded by clockwork and by ffmpeg and
+compared sample for sample, played through the pumped engine, written back
+out and read by both (`test/test_samples_through_engine.cpp`). Run it after a
+build and before pushing a change to the decoders, the writers or the audio
+path; CI runs the same script. Needs npm and ffmpeg.
+
 ## Choosing a DSP
 
 `-DCLOCKWORK_DSP=<name>` selects a directory under `dsp/` holding a

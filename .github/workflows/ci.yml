@@ -248,6 +248,18 @@ jobs:
             build/test/clockwork_engine_tests "~[rt]" --order rand --rng-seed "$GITHUB_RUN_NUMBER" --durations yes
           fi
 
+      # Real sample files the whole way round: every sample Sonic Pi ships
+      # (the npm package, at a pinned version), decoded by clockwork and by
+      # ffmpeg and compared, played through the pumped engine, written back
+      # out and read by both. One platform is enough for files; the same
+      # script runs locally before a push.
+      - name: Install ffmpeg
+        if: matrix.platform == 'linux-x64'
+        run: sudo apt-get install -y ffmpeg
+      - name: Every sample Sonic Pi ships, the whole way round
+        if: matrix.platform == 'linux-x64'
+        run: scripts/check-samples.sh
+
   # ------------------------------------------------- linux-x86 (i686, 32-bit) --
   # Also where the Rust workspace's i686 tests run: it links ALSA and libudev,
   # which the container has as native i386 packages and an x86_64 runner does
