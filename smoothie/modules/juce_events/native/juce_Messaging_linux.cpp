@@ -37,11 +37,9 @@ public:
                                             {
                                                 while (auto msg = popNextMessage (fd))
                                                 {
-                                                    JUCE_TRY
                                                     {
                                                         msg->messageCallback();
                                                     }
-                                                    JUCE_CATCH_EXCEPTION
                                                 }
                                             });
     }
@@ -320,11 +318,6 @@ bool MessageManager::postMessageToSystemQueue (MessageManager::MessageBase* cons
     }
 
     return false;
-}
-
-void MessageManager::broadcastMessage (const String&)
-{
-    // TODO
 }
 
 namespace detail

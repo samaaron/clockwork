@@ -285,18 +285,4 @@ private:
     bool hasBeenInitialised = false;
 };
 
-//==============================================================================
-File juce_getExecutableFile();
-
-void juce_juceEventsAndroidStartApp();
-void juce_juceEventsAndroidStartApp()
-{
-    auto dllPath = juce_getExecutableFile().getFullPathName();
-    auto addr = reinterpret_cast<juce::JUCEApplicationBase*(*)()> (DynamicLibrary (dllPath)
-                                                                    .getFunction ("juce_CreateApplication"));
-
-    if (addr != nullptr)
-        JuceAppLifecycle::getInstance (addr);
-}
-
 } // namespace juce

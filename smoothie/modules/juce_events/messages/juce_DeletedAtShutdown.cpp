@@ -60,7 +60,6 @@ void DeletedAtShutdown::deleteAll()
 
     for (int i = localCopy.size(); --i >= 0;)
     {
-        JUCE_TRY
         {
             auto* deletee = localCopy.getUnchecked (i);
 
@@ -74,7 +73,6 @@ void DeletedAtShutdown::deleteAll()
 
             delete deletee;
         }
-        JUCE_CATCH_EXCEPTION
     }
 
     // if this fails, then it's likely that some new DeletedAtShutdown objects were

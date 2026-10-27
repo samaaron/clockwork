@@ -37,77 +37,11 @@ struct AppDelegateClass final : public ObjCClass<NSObject>
 {
     AppDelegateClass()  : ObjCClass ("JUCEAppDelegate_")
     {
-        addMethod (@selector (applicationWillFinishLaunching:), [] (id self, SEL, NSNotification*)
-        {
-            JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
-            [[NSAppleEventManager sharedAppleEventManager] setEventHandler: self
-                                                               andSelector: @selector (getUrl:withReplyEvent:)
-                                                             forEventClass: kInternetEventClass
-                                                                andEventID: kAEGetURL];
-            JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-        });
-
-        addMethod (@selector (applicationShouldTerminate:), [] (id /*self*/, SEL, NSApplication*)
-        {
-            if (auto* app = JUCEApplicationBase::getInstance())
-            {
-                app->systemRequestedQuit();
-
-                if (! MessageManager::getInstance()->hasStopMessageBeenSent())
-                    return NSTerminateCancel;
-            }
-
-            return NSTerminateNow;
-        });
-
-        addMethod (@selector (applicationWillTerminate:), [] (id /*self*/, SEL, NSNotification*)
-        {
-            JUCEApplicationBase::appWillTerminateByForce();
-        });
-
-        addMethod (@selector (application:openFile:), [] (id /*self*/, SEL, NSApplication*, NSString* filename)
-        {
-            if (auto* app = JUCEApplicationBase::getInstance())
-            {
-                app->anotherInstanceStarted (quotedIfContainsSpaces (filename));
-                return YES;
-            }
-
-            return NO;
-        });
-
-        addMethod (@selector (application:openFiles:), [] (id /*self*/, SEL, NSApplication*, NSArray* filenames)
-        {
-            if (auto* app = JUCEApplicationBase::getInstance())
-            {
-                StringArray files;
-
-                for (NSString* f in filenames)
-                    files.add (quotedIfContainsSpaces (f));
-
-                if (files.size() > 0)
-                    app->anotherInstanceStarted (files.joinIntoString (" "));
-            }
-        });
-
         addMethod (@selector (applicationDidBecomeActive:), [] (id /*self*/, SEL, NSNotification*)  { focusChanged(); });
         addMethod (@selector (applicationDidResignActive:), [] (id /*self*/, SEL, NSNotification*)  { focusChanged(); });
         addMethod (@selector (applicationWillUnhide:),      [] (id /*self*/, SEL, NSNotification*)  { focusChanged(); });
 
         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
-        addMethod (@selector (getUrl:withReplyEvent:), [] (id /*self*/, SEL, NSAppleEventDescriptor* event, NSAppleEventDescriptor*)
-        {
-            if (auto* app = JUCEApplicationBase::getInstance())
-                app->anotherInstanceStarted (quotedIfContainsSpaces ([[event paramDescriptorForKeyword: keyDirectObject] stringValue]));
-        });
-
-        addMethod (@selector (broadcastMessageCallback:), [] (id /*self*/, SEL, NSNotification* n)
-        {
-            NSDictionary* dict = (NSDictionary*) [n userInfo];
-            auto messageString = nsStringToJuce ((NSString*) [dict valueForKey: nsStringLiteral ("message")]);
-            MessageManager::getInstance()->deliverBroadcastMessage (messageString);
-        });
-
         addMethod (@selector (mainMenuTrackingBegan:), [] (id /*self*/, SEL, NSNotification*)
         {
             NullCheckedInvocation::invoke (menuTrackingChangedCallback, true);
@@ -256,29 +190,14 @@ public:
                        name: NSMenuDidEndTrackingNotification object: nil];
         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
-        if (JUCEApplicationBase::isStandaloneApp())
-        {
-            [NSApp setDelegate: delegate];
+        [center addObserver: delegate selector: @selector (applicationDidResignActive:)
+                       name: NSApplicationDidResignActiveNotification object: NSApp];
 
-            JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
-            [[NSDistributedNotificationCenter defaultCenter] addObserver: delegate
-                                                                selector: @selector (broadcastMessageCallback:)
-                                                                    name: getBroadcastEventName()
-                                                                  object: nil
-                                                      suspensionBehavior: NSNotificationSuspensionBehaviorDeliverImmediately];
-            JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-        }
-        else
-        {
-            [center addObserver: delegate selector: @selector (applicationDidResignActive:)
-                           name: NSApplicationDidResignActiveNotification object: NSApp];
+        [center addObserver: delegate selector: @selector (applicationDidBecomeActive:)
+                       name: NSApplicationDidBecomeActiveNotification object: NSApp];
 
-            [center addObserver: delegate selector: @selector (applicationDidBecomeActive:)
-                           name: NSApplicationDidBecomeActiveNotification object: NSApp];
-
-            [center addObserver: delegate selector: @selector (applicationWillUnhide:)
-                           name: NSApplicationWillUnhideNotification object: NSApp];
-        }
+        [center addObserver: delegate selector: @selector (applicationWillUnhide:)
+                       name: NSApplicationWillUnhideNotification object: NSApp];
     }
 
     ~AppDelegate()
@@ -286,21 +205,7 @@ public:
         [[NSRunLoop currentRunLoop] cancelPerformSelectorsWithTarget: delegate];
         [[NSNotificationCenter defaultCenter] removeObserver: delegate];
 
-        if (JUCEApplicationBase::isStandaloneApp())
-        {
-            [NSApp setDelegate: nil];
-
-            [[NSDistributedNotificationCenter defaultCenter] removeObserver: delegate
-                                                                       name: getBroadcastEventName()
-                                                                     object: nil];
-        }
-
         [delegate release];
-    }
-
-    static NSString* getBroadcastEventName()
-    {
-        return juceStringToNS ("juce_" + String::toHexString (File::getSpecialLocation (File::currentExecutableFile).hashCode64()));
     }
 
     MessageQueue messageQueue;
@@ -317,23 +222,7 @@ void MessageManager::runDispatchLoop()
             // must only be called by the message thread!
             jassert (isThisTheMessageThread());
 
-           #if JUCE_CATCH_UNHANDLED_EXCEPTIONS
-            @try
-            {
-                [NSApp run];
-            }
-            @catch (NSException* e)
-            {
-                // An AppKit exception will kill the app, but at least this provides a chance to log it.,
-                std::runtime_error ex (std::string ("NSException: ") + [[e name] UTF8String] + ", Reason:" + [[e reason] UTF8String]);
-                JUCEApplicationBase::sendUnhandledException (&ex, __FILE__, __LINE__);
-            }
-            @finally
-            {
-            }
-           #else
             [NSApp run];
-           #endif
         }
     }
 }
@@ -424,71 +313,5 @@ bool MessageManager::postMessageToSystemQueue (MessageBase* message)
     appDelegate->messageQueue.post (message);
     return true;
 }
-
-void MessageManager::broadcastMessage (const String& message)
-{
-    NSDictionary* info = [NSDictionary dictionaryWithObject: juceStringToNS (message)
-                                                     forKey: nsStringLiteral ("message")];
-
-    [[NSDistributedNotificationCenter defaultCenter] postNotificationName: AppDelegate::getBroadcastEventName()
-                                                                   object: nil
-                                                                 userInfo: info];
-}
-
-//==============================================================================
-#if JUCE_MAC
-struct MountedVolumeListChangeDetector::Pimpl
-{
-    Pimpl (MountedVolumeListChangeDetector& d)  : owner (d)
-    {
-        static ObserverClass cls;
-        delegate = [cls.createInstance() init];
-        ObserverClass::setOwner (delegate, this);
-
-        NSNotificationCenter* nc = [[NSWorkspace sharedWorkspace] notificationCenter];
-
-        JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
-        [nc addObserver: delegate selector: @selector (changed:) name: NSWorkspaceDidMountNotification   object: nil];
-        [nc addObserver: delegate selector: @selector (changed:) name: NSWorkspaceDidUnmountNotification object: nil];
-        JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-    }
-
-    ~Pimpl()
-    {
-        [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver: delegate];
-        [delegate release];
-    }
-
-private:
-    MountedVolumeListChangeDetector& owner;
-    id delegate;
-
-    struct ObserverClass final : public ObjCClass<NSObject>
-    {
-        ObserverClass()  : ObjCClass<NSObject> ("JUCEDriveObserver_")
-        {
-            addIvar<Pimpl*> ("owner");
-
-            JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
-            addMethod (@selector (changed:), changed);
-            JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-
-            addProtocol (@protocol (NSTextInput));
-            registerClass();
-        }
-
-        static Pimpl* getOwner (id self)                { return getIvar<Pimpl*> (self, "owner"); }
-        static void setOwner (id self, Pimpl* owner)    { object_setInstanceVariable (self, "owner", owner); }
-
-        static void changed (id self, SEL, NSNotification*)
-        {
-            getOwner (self)->owner.mountedVolumeListChanged();
-        }
-    };
-};
-
-MountedVolumeListChangeDetector::MountedVolumeListChangeDetector()  { pimpl.reset (new Pimpl (*this)); }
-MountedVolumeListChangeDetector::~MountedVolumeListChangeDetector() {}
-#endif
 
 } // namespace juce

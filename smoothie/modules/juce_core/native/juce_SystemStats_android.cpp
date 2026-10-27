@@ -186,15 +186,6 @@ String SystemStats::getUserLanguage()    { return AndroidStatsHelpers::getLocale
 String SystemStats::getUserRegion()      { return AndroidStatsHelpers::getLocaleValue (true); }
 String SystemStats::getDisplayLanguage() { return getUserLanguage() + "-" + getUserRegion(); }
 
-String SystemStats::getUniqueDeviceID()
-{
-    auto id = String ((uint64_t) AndroidStatsHelpers::getAndroidID().hashCode64());
-
-    // Please tell someone at JUCE if this occurs
-    jassert (id.isNotEmpty());
-    return id;
-}
-
 //==============================================================================
 void CPUInformation::initialise() noexcept
 {

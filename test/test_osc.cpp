@@ -14,20 +14,14 @@
 #include "OscTestUtils.h"
 #include "clock/clock_math.h"   // wallClockNTP; WallClock.h was a shim for this
 
-#include <juce_core/juce_core.h>
+#include "UdpTestSocket.h"
 #include <chrono>
-
-#ifndef _WIN32
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 #ifdef CLOCKWORK_OSC
 
-// True if this host can bind the IPv6 loopback. juce::DatagramSocket is IPv4-only
-// so it can't be used to probe; use a raw socket (Unix only — Windows v6 coverage
-// comes from the cross-platform Rust subsystem tests).
+// True if this host can bind the IPv6 loopback. The test socket is IPv4-only,
+// so probe with a raw socket (Unix only — Windows v6 coverage comes from the
+// cross-platform Rust subsystem tests).
 static bool ipv6_loopback_available() {
 #ifdef _WIN32
     return false;
@@ -75,12 +69,7 @@ TEST_CASE("OSC cue server forwards inbound external OSC as a cue", "[osc]") {
     EngineFixture fx;
 
     // Pick a free UDP port, then hand it to the cue server (probe closes first).
-    int cuePort = 0;
-    {
-        juce::DatagramSocket probe;
-        REQUIRE(probe.bindToPort(0, "127.0.0.1"));
-        cuePort = probe.getBoundPort();
-    }
+    const int cuePort = test_udp::freeLoopbackPort();
 
     osc_test::Builder cfg;
     cfg.begin("/clockwork/osc/cue-server/config")
@@ -94,14 +83,13 @@ TEST_CASE("OSC cue server forwards inbound external OSC as a cue", "[osc]") {
     ext.begin("/hello") << static_cast<osc::int32>(42) << "world";
     osc_test::Packet extPkt = ext.end();
 
-    juce::DatagramSocket sender;
-    REQUIRE(sender.bindToPort(0, "127.0.0.1"));
+    test_udp::Socket sender;
+    REQUIRE(sender.bound());
 
     // The cue server binds on its recv thread, so resend until a cue comes back.
     OscReply r;
     const bool got = fx.pollUntil([&] {
-        sender.write("127.0.0.1", cuePort,
-                     extPkt.ptr(), static_cast<int>(extPkt.size()));
+        sender.send("127.0.0.1", cuePort, extPkt.ptr(), extPkt.size());
         return fx.waitForReply("/external-osc-cue", r, 50);
     }, 4000);
     REQUIRE(got);
@@ -126,9 +114,9 @@ TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
     EngineFixture fx;
 
     // A listener the test owns and binds, so there's no port race.
-    juce::DatagramSocket listener;
-    REQUIRE(listener.bindToPort(0, "127.0.0.1"));
-    const int targetPort = listener.getBoundPort();
+    test_udp::Socket listener;
+    REQUIRE(listener.bound());
+    const int targetPort = listener.port();
 
     // Outbound uses the subsystem's own send socket, so no cue-server config is
     // needed here — just schedule and read.
@@ -144,13 +132,13 @@ TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
     fx.waitForBlocks(5);   // let the scheduler drain + the dispatch thread send
 
     char buf[1024];
-    juce::String senderIp;
+    std::string senderIp;
     int senderPort = 0;
     bool got = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (std::chrono::steady_clock::now() < deadline) {
-        if (listener.waitUntilReady(true, 50) == 1) {
-            const int n = listener.read(buf, sizeof(buf), false, senderIp, senderPort);
+        {
+            const int n = listener.recv(buf, sizeof(buf), 50, &senderIp, &senderPort);
             if (n > 0) {
                 auto pr = osc_test::parseReply(reinterpret_cast<const uint8_t*>(buf),
                                                static_cast<uint32_t>(n));
@@ -170,12 +158,7 @@ TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
 TEST_CASE("OSC self-loop: sending to our own cue port comes back as a cue", "[osc]") {
     EngineFixture fx;
 
-    int cuePort = 0;
-    {
-        juce::DatagramSocket probe;
-        REQUIRE(probe.bindToPort(0, "127.0.0.1"));
-        cuePort = probe.getBoundPort();
-    }
+    const int cuePort = test_udp::freeLoopbackPort();
     osc_test::Builder cfg;
     cfg.begin("/clockwork/osc/cue-server/config")
         << static_cast<osc::int32>(cuePort)
@@ -210,12 +193,7 @@ TEST_CASE("OSC self-loop works over IPv6 (::1)", "[osc]") {
     if (!ipv6_loopback_available()) { SUCCEED("no IPv6 loopback here"); return; }
     EngineFixture fx;
 
-    int cuePort = 0;
-    {
-        juce::DatagramSocket probe;
-        REQUIRE(probe.bindToPort(0, "127.0.0.1"));
-        cuePort = probe.getBoundPort();
-    }
+    const int cuePort = test_udp::freeLoopbackPort();
     osc_test::Builder cfg;
     cfg.begin("/clockwork/osc/cue-server/config")
         << static_cast<osc::int32>(cuePort)
@@ -247,10 +225,9 @@ TEST_CASE("OSC self-loop works over IPv6 (::1)", "[osc]") {
 // payload cap so an over-large message is never silently swallowed.
 TEST_CASE("OSC out: large message delivered, engine survives", "[osc]") {
     EngineFixture fx;
-    juce::DatagramSocket listener;
-    REQUIRE(listener.bindToPort(0, "127.0.0.1"));
-    listener.waitUntilReady(false, 50);
-    const int targetPort = listener.getBoundPort();
+    test_udp::Socket listener;
+    REQUIRE(listener.bound());
+    const int targetPort = listener.port();
 
     auto blobMsg = [](const char* addr, size_t blobBytes) {
         std::vector<uint8_t> blob(blobBytes, 0xAB);
@@ -264,11 +241,11 @@ TEST_CASE("OSC out: large message delivered, engine survives", "[osc]") {
     // one only the 64 KB class carries. Each must arrive whole.
     auto receive = [&](const char* addr, size_t expectBytes) -> bool {
         static char buf[70000];
-        juce::String ip; int fromPort = 0;
+        std::string ip; int fromPort = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (listener.waitUntilReady(true, 50) == 1) {
-                int n = listener.read(buf, sizeof(buf), false, ip, fromPort);
+            {
+                int n = listener.recv(buf, sizeof(buf), 50, &ip, &fromPort);
                 if (n > 0) {
                     CHECK(osc_test::parseReply(reinterpret_cast<uint8_t*>(buf), (uint32_t)n).address == addr);
                     CHECK(static_cast<size_t>(n) > expectBytes);
@@ -301,15 +278,15 @@ TEST_CASE("OSC out: large message delivered, engine survives", "[osc]") {
     // Engine still alive and serving OSC afterwards.
     OscReply r;
     int cuePort = 0;
-    { juce::DatagramSocket probe; REQUIRE(probe.bindToPort(0, "127.0.0.1")); cuePort = probe.getBoundPort(); }
+    cuePort = test_udp::freeLoopbackPort();
     osc_test::Builder cfg;
     cfg.begin("/clockwork/osc/cue-server/config") << static_cast<osc::int32>(cuePort)
         << static_cast<osc::int32>(1) << static_cast<osc::int32>(1);
     fx.send(cfg.end());
-    juce::DatagramSocket sender; REQUIRE(sender.bindToPort(0, "127.0.0.1"));
+    test_udp::Socket sender; REQUIRE(sender.bound());
     const bool alive = fx.pollUntil([&] {
         auto m = osc_test::message("/alive");
-        sender.write("127.0.0.1", cuePort, m.ptr(), static_cast<int>(m.size()));
+        sender.send("127.0.0.1", cuePort, m.ptr(), m.size());
         return fx.waitForReply("/external-osc-cue", r, 50);
     }, 3000);
     CHECK(alive);

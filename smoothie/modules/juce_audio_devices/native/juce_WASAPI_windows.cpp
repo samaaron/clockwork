@@ -1991,65 +1991,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WASAPIAudioIODeviceType)
 };
 
-//==============================================================================
-struct MMDeviceMasterVolume
-{
-    MMDeviceMasterVolume()
-    {
-        ComSmartPtr<IMMDeviceEnumerator> enumerator;
-
-        if (check (enumerator.CoCreateInstance (__uuidof (MMDeviceEnumerator))))
-        {
-            ComSmartPtr<IMMDevice> device;
-
-            if (check (enumerator->GetDefaultAudioEndpoint (eRender, eConsole, device.resetAndGetPointerAddress())))
-                check (device->Activate (__uuidof (IAudioEndpointVolume), CLSCTX_INPROC_SERVER, nullptr,
-                                         (void**) endpointVolume.resetAndGetPointerAddress()));
-        }
-    }
-
-    float getGain() const
-    {
-        float vol = 0.0f;
-
-        if (endpointVolume != nullptr)
-            check (endpointVolume->GetMasterVolumeLevelScalar (&vol));
-
-        return vol;
-    }
-
-    bool setGain (float newGain) const
-    {
-        return endpointVolume != nullptr
-                && check (endpointVolume->SetMasterVolumeLevelScalar (jlimit (0.0f, 1.0f, newGain), nullptr));
-    }
-
-    bool isMuted() const
-    {
-        BOOL mute = 0;
-        return endpointVolume != nullptr
-                 && check (endpointVolume->GetMute (&mute)) && mute != 0;
-    }
-
-    bool setMuted (bool shouldMute) const
-    {
-        return endpointVolume != nullptr
-                && check (endpointVolume->SetMute (shouldMute, nullptr));
-    }
-
-    ComSmartPtr<IAudioEndpointVolume> endpointVolume;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MMDeviceMasterVolume)
-};
-
 } // namespace WasapiClasses
-
-//==============================================================================
-#define JUCE_SYSTEMAUDIOVOL_IMPLEMENTED 1
-float JUCE_CALLTYPE SystemAudioVolume::getGain()              { return WasapiClasses::MMDeviceMasterVolume().getGain(); }
-bool  JUCE_CALLTYPE SystemAudioVolume::setGain (float gain)   { return WasapiClasses::MMDeviceMasterVolume().setGain (gain); }
-bool  JUCE_CALLTYPE SystemAudioVolume::isMuted()              { return WasapiClasses::MMDeviceMasterVolume().isMuted(); }
-bool  JUCE_CALLTYPE SystemAudioVolume::setMuted (bool mute)   { return WasapiClasses::MMDeviceMasterVolume().setMuted (mute); }
 
 JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 

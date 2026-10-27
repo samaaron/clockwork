@@ -14,25 +14,24 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdio>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <string>
-
-#include <juce_core/juce_core.h>
 
 namespace {
 
 struct TempFile {
-    juce::File file;
+    std::filesystem::path file;
     explicit TempFile(const char* name)
-        : file(juce::File::getSpecialLocation(juce::File::tempDirectory)
-                   .getChildFile("clockwork-bridge-path-" + juce::String(name) + "-"
-                                 + juce::String(juce::Random::getSystemRandom().nextInt64())))
+        : file(std::filesystem::temp_directory_path()
+               / ("clockwork-bridge-path-" + std::string(name) + "-"
+                  + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
     {
-        file.replaceWithText("not a bridge, but a file that is there");
+        std::ofstream(file) << "not a bridge, but a file that is there";
     }
-    ~TempFile() { file.deleteFile(); }
-    std::string path() const { return file.getFullPathName().toStdString(); }
+    ~TempFile() { std::filesystem::remove(file); }
+    std::string path() const { return file.string(); }
 };
 
 } // namespace

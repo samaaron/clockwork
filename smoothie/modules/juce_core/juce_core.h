@@ -115,27 +115,6 @@
  #define JUCE_DONT_AUTOLINK_TO_WIN32_LIBRARIES 0
 #endif
 
-/** Config: JUCE_USE_CURL
-    Enables http/https support via libcurl (Linux only). Enabling this will add an additional
-    run-time dynamic dependency to libcurl.
-
-    If you disable this then https/ssl support will not be available on Linux.
-*/
-#ifndef JUCE_USE_CURL
- #define JUCE_USE_CURL 1
-#endif
-
-/** Config: JUCE_LOAD_CURL_SYMBOLS_LAZILY
-    If enabled, JUCE will load libcurl lazily when required (for example, when WebInputStream
-    is used). Enabling this flag may also help with library dependency errors as linking
-    libcurl at compile-time may instruct the linker to hard depend on a specific version
-    of libcurl. It's also useful if you want to limit the amount of JUCE dependencies and
-    you are not using WebInputStream or the URL classes.
-*/
-#ifndef JUCE_LOAD_CURL_SYMBOLS_LAZILY
- #define JUCE_LOAD_CURL_SYMBOLS_LAZILY 0
-#endif
-
 /** Config: JUCE_CATCH_UNHANDLED_EXCEPTIONS
     If enabled, this will add some exception-catching code to forward unhandled exceptions
     to your JUCEApplicationBase::unhandledException() callback.
@@ -191,13 +170,6 @@ namespace juce
 {
     class StringRef;
     class MemoryBlock;
-    class File;
-    class InputStream;
-    class OutputStream;
-    class DynamicObject;
-    class FileInputStream;
-    class FileOutputStream;
-    class XmlElement;
 
     extern JUCE_API bool JUCE_CALLTYPE juce_isRunningUnderDebugger() noexcept;
     extern JUCE_API void JUCE_CALLTYPE logAssertion (const char* file, int line) noexcept;
@@ -227,113 +199,40 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 #include "memory/juce_HeapBlock.h"
 #include "memory/juce_MemoryBlock.h"
 #include "memory/juce_ReferenceCountedObject.h"
-#include "memory/juce_ScopedPointer.h"
-#include "memory/juce_OptionalScopedPointer.h"
 #include "containers/juce_Optional.h"
-#include "containers/juce_Enumerate.h"
 #include "containers/juce_ScopedValueSetter.h"
 #include "memory/juce_Singleton.h"
 #include "memory/juce_WeakReference.h"
 #include "threads/juce_ScopedLock.h"
 #include "threads/juce_CriticalSection.h"
 #include "maths/juce_Range.h"
-#include "maths/juce_NormalisableRange.h"
-#include "maths/juce_StatisticsAccumulator.h"
 #include "containers/juce_ElementComparator.h"
 #include "containers/juce_ArrayAllocationBase.h"
 #include "containers/juce_ArrayBase.h"
 #include "containers/juce_Array.h"
-#include "containers/juce_LinkedListPointer.h"
 #include "misc/juce_ScopeGuard.h"
 #include "containers/juce_ListenerList.h"
 #include "containers/juce_OwnedArray.h"
 #include "containers/juce_ReferenceCountedArray.h"
-#include "containers/juce_SortedSet.h"
-#include "containers/juce_SparseSet.h"
-#include "containers/juce_AbstractFifo.h"
 #include "containers/juce_SingleThreadedAbstractFifo.h"
 #include "text/juce_NewLine.h"
-#include "text/juce_StringPool.h"
-#include "text/juce_Identifier.h"
 #include "text/juce_StringArray.h"
 #include "system/juce_SystemStats.h"
-#include "memory/juce_HeavyweightLeakedObjectDetector.h"
-#include "text/juce_StringPairArray.h"
-#include "text/juce_TextDiff.h"
-#include "text/juce_LocalisedStrings.h"
-#include "text/juce_Base64.h"
 #include "misc/juce_Functional.h"
 #include "containers/juce_Span.h"
 #include "misc/juce_Result.h"
-#include "misc/juce_Uuid.h"
-#include "misc/juce_ConsoleApplication.h"
-#include "containers/juce_Variant.h"
-#include "containers/juce_NamedValueSet.h"
-#include "javascript/juce_JSON.h"
-#include "containers/juce_DynamicObject.h"
-#include "containers/juce_HashMap.h"
 #include "containers/juce_FixedSizeFunction.h"
-#include "time/juce_RelativeTime.h"
 #include "time/juce_Time.h"
-#include "streams/juce_InputStream.h"
-#include "streams/juce_OutputStream.h"
-#include "streams/juce_BufferedInputStream.h"
-#include "streams/juce_MemoryInputStream.h"
-#include "streams/juce_MemoryOutputStream.h"
-#include "streams/juce_SubregionStream.h"
-#include "streams/juce_InputSource.h"
-#include "files/juce_File.h"
-#include "files/juce_DirectoryIterator.h"
-#include "files/juce_RangedDirectoryIterator.h"
-#include "files/juce_FileInputStream.h"
-#include "files/juce_FileOutputStream.h"
-#include "files/juce_FileSearchPath.h"
-#include "files/juce_MemoryMappedFile.h"
-#include "files/juce_TemporaryFile.h"
-#include "files/juce_FileFilter.h"
-#include "files/juce_WildcardFileFilter.h"
-#include "streams/juce_FileInputSource.h"
-#include "logging/juce_FileLogger.h"
-#include "javascript/juce_JSONUtils.h"
-#include "serialisation/juce_Serialisation.h"
-#include "javascript/juce_JSONSerialisation.h"
-#include "javascript/juce_Javascript.h"
 #include "maths/juce_BigInteger.h"
-#include "maths/juce_Expression.h"
 #include "maths/juce_Random.h"
 #include "misc/juce_RuntimePermissions.h"
-#include "misc/juce_WindowsRegistry.h"
-#include "threads/juce_ChildProcess.h"
 #include "threads/juce_DynamicLibrary.h"
-#include "threads/juce_InterProcessLock.h"
 #include "threads/juce_Process.h"
 #include "threads/juce_SpinLock.h"
 #include "threads/juce_WaitableEvent.h"
 #include "threads/juce_Thread.h"
-#include "threads/juce_HighResolutionTimer.h"
-#include "threads/juce_ThreadLocalValue.h"
-#include "threads/juce_ThreadPool.h"
-#include "threads/juce_TimeSliceThread.h"
-#include "threads/juce_ReadWriteLock.h"
-#include "threads/juce_ScopedReadLock.h"
-#include "threads/juce_ScopedWriteLock.h"
-#include "network/juce_IPAddress.h"
-#include "network/juce_MACAddress.h"
-#include "network/juce_NamedPipe.h"
-#include "network/juce_Socket.h"
-#include "network/juce_URL.h"
-#include "network/juce_WebInputStream.h"
-#include "streams/juce_URLInputSource.h"
-#include "time/juce_PerformanceCounter.h"
-#include "unit_tests/juce_UnitTest.h"
-#include "xml/juce_XmlDocument.h"
-#include "xml/juce_XmlElement.h"
-#include "containers/juce_PropertySet.h"
 #include "memory/juce_SharedResourcePointer.h"
 #include "memory/juce_AllocationHooks.h"
-#include "memory/juce_Reservoir.h"
-#include "files/juce_AndroidDocument.h"
-#include "streams/juce_AndroidDocumentInputSource.h"
 
 #include "detail/juce_CallbackListenerList.h"
 
@@ -349,10 +248,6 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 #if JUCE_CORE_INCLUDE_JNI_HELPERS && JUCE_ANDROID
  #include <jni.h>
  #include "native/juce_JNIHelpers_android.h"
-#endif
-
-#if JUCE_UNIT_TESTS
- #include "unit_tests/juce_UnitTestCategories.h"
 #endif
 
 #ifndef DOXYGEN

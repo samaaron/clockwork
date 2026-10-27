@@ -24,9 +24,6 @@ namespace juce
 {
 
 class MessageManagerLock;
-class ThreadPoolJob;
-class ActionListener;
-class ActionBroadcaster;
 
 //==============================================================================
 /** See MessageManager::callFunctionOnMessageThread() for use of this function type. */
@@ -151,27 +148,6 @@ public:
         is running it.
     */
     static bool existsAndIsCurrentThread() noexcept;
-
-    //==============================================================================
-    /** Sends a message to all other JUCE applications that are running.
-
-        @param messageText      the string that will be passed to the actionListenerCallback()
-                                method of the broadcast listeners in the other app.
-        @see registerBroadcastListener, ActionListener
-    */
-    static void broadcastMessage (const String& messageText);
-
-    /** Registers a listener to get told about broadcast messages.
-
-        The actionListenerCallback() callback's string parameter
-        is the message passed into broadcastMessage().
-
-        @see broadcastMessage
-    */
-    void registerBroadcastListener (ActionListener* listener);
-
-    /** Deregisters a broadcast listener. */
-    void deregisterBroadcastListener (ActionListener* listener);
 
     //==============================================================================
     /** Internal class used as the base class for all message objects.
@@ -334,7 +310,6 @@ private:
     friend class QuitMessage;
     friend class MessageManagerLock;
 
-    std::unique_ptr<ActionBroadcaster> broadcaster;
     Atomic<int> quitMessagePosted { 0 }, quitMessageReceived { 0 };
     Thread::ThreadID messageThreadId;
     Atomic<Thread::ThreadID> threadWithLock;
@@ -434,14 +409,6 @@ public:
     MessageManagerLock (Thread* threadToCheckForExitSignal = nullptr);
 
     //==============================================================================
-    /** This has the same behaviour as the other constructor, but takes a ThreadPoolJob
-        instead of a thread.
-
-        See the MessageManagerLock (Thread*) constructor for details on how this works.
-    */
-    MessageManagerLock (ThreadPoolJob* jobToCheckForExitSignal);
-
-    //==============================================================================
     /** Releases the current thread's lock on the message manager.
 
         Make sure this object is created and deleted by the same thread,
@@ -461,7 +428,7 @@ private:
     bool locked;
 
     //==============================================================================
-    bool attemptLock (Thread*, ThreadPoolJob*);
+    bool attemptLock (Thread*);
     void exitSignalSent() override;
 
     JUCE_DECLARE_NON_COPYABLE (MessageManagerLock)

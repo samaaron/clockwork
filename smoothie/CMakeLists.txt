@@ -46,7 +46,7 @@ target_compile_definitions(smoothie PUBLIC
 if(APPLE)
     # Framework lists from the vendored modules' metadata blocks:
     # core: Cocoa Foundation IOKit Security | audio_basics: Accelerate |
-    # audio_devices: CoreAudio CoreMIDI AudioToolbox
+    # audio_devices: CoreAudio AudioToolbox
     target_link_libraries(smoothie PUBLIC
         "-framework Cocoa"
         "-framework Foundation"
@@ -54,7 +54,6 @@ if(APPLE)
         "-framework Security"
         "-framework Accelerate"
         "-framework CoreAudio"
-        "-framework CoreMIDI"
         "-framework AudioToolbox")
 elseif(WIN32)
     # MSVC: the modules pull their platform libs via #pragma comment(lib,...).

@@ -21,8 +21,11 @@
  */
 #pragma once
 
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
+#include <system_error>
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -32,6 +35,8 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
+#elif defined(__APPLE__)
+#  include <mach-o/dyld.h>
 #endif
 
 namespace clockwork_path {
@@ -82,6 +87,31 @@ inline std::string last_error_text(unsigned long code) {
 inline std::filesystem::path from_utf8(const std::string& s) { return std::filesystem::path(s); }
 inline std::string to_utf8(const std::filesystem::path& p) { return p.string(); }
 #endif
+
+// The running executable, as the OS names it; empty when the OS will not
+// say. Where the plugin bridge is looked for "beside the executable".
+inline std::filesystem::path current_executable() {
+#if defined(_WIN32)
+    std::wstring buf(32768, L'\0');
+    const DWORD n = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0 || n >= buf.size()) return {};
+    buf.resize(n);
+    return std::filesystem::path(buf);
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
+    buf.resize(std::strlen(buf.c_str()));
+    std::error_code ec;
+    const auto resolved = std::filesystem::canonical(buf, ec);
+    return ec ? std::filesystem::path(buf) : resolved;
+#else
+    std::error_code ec;
+    const auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    return ec ? std::filesystem::path() : p;
+#endif
+}
 
 // One argument for a Windows command line, spelled so that the C runtime's
 // argv parser in the child reads back exactly `arg`. Windows has no argv:

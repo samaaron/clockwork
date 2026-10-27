@@ -35,7 +35,7 @@ namespace juce
     Occasionally you may want to declare one as a static variable, but in that case the usual
     C++ static object order-of-construction warnings should be heeded.
 
-    @see ScopedLock, ScopedTryLock, ScopedUnlock, SpinLock, ReadWriteLock, Thread, InterProcessLock
+    @see ScopedLock, ScopedTryLock, ScopedUnlock, SpinLock, ReadWriteLock, Thread
 
     @tags{Core}
 */

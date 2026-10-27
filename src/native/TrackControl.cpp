@@ -26,7 +26,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
-#include <juce_core/juce_core.h>
+#include "clockwork_path.h"   // current_executable: the bridge is looked for beside it
 
 #include <array>
 #include <algorithm>
@@ -358,57 +358,62 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
 
 // ── The bridge's life ────────────────────────────────────────────────────────
 
+// A regular file at `p` (a symlink to one counts).
+static bool isFile(const std::filesystem::path& p) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(p, ec);
+}
+
 std::string TrackControl::findBridge() const {
     const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE");   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
-    const juce::File self = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
-    return resolveBridge(mConfiguredExe, env ? env : "", self.getParentDirectory().getFullPathName().toStdString());
+    const auto self = clockwork_path::current_executable();
+    return resolveBridge(mConfiguredExe, env ? env : "", clockwork_path::to_utf8(self.parent_path()));
 }
 
 std::string TrackControl::resolveBridge(const std::string& configured, const std::string& envOverride,
                                         const std::string& exeDir) {
     // the host's word first: a path it was given is one it put the bridge at
     if (!configured.empty()) {
-        if (juce::File(configured).existsAsFile()) return configured;
+        if (isFile(clockwork_path::from_utf8(configured))) return configured;
         clockwork_log("[tracks] the configured plugin bridge is not there: %s (looking beside the executable instead)",
                       configured.c_str());
     }
-    if (!envOverride.empty() && juce::File(envOverride).existsAsFile()) return envOverride;
+    if (!envOverride.empty() && isFile(clockwork_path::from_utf8(envOverride))) return envOverride;
     return findBridgeBeside(exeDir);
 }
 
 std::string TrackControl::findBridgeBeside(const std::string& exeDir) {
-    const juce::File dir(exeDir);
+    using clockwork_path::to_utf8;
+    const auto dir = clockwork_path::from_utf8(exeDir);
 #if defined(_WIN32)
-    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".exe");
+    const auto sibling = dir / (CLOCKWORK_PLUGIN_BRIDGE_NAME ".exe");
 #elif defined(__APPLE__)
     // An app bundle beside the engine, so the process has a bundle identifier
     // (what OBS and ScreenCaptureKit select an application by). A bare binary
     // of the same name is still accepted, for a build that predates the bundle.
-    const juce::File bundled = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".app")
-                                  .getChildFile("Contents/MacOS/" CLOCKWORK_PLUGIN_BRIDGE_NAME);
-    if (bundled.existsAsFile()) return bundled.getFullPathName().toStdString();
-    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    const auto bundled = dir / (CLOCKWORK_PLUGIN_BRIDGE_NAME ".app") / "Contents/MacOS" / CLOCKWORK_PLUGIN_BRIDGE_NAME;
+    if (isFile(bundled)) return to_utf8(bundled);
+    const auto sibling = dir / CLOCKWORK_PLUGIN_BRIDGE_NAME;
 #else
-    const juce::File sibling = dir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME);
+    const auto sibling = dir / CLOCKWORK_PLUGIN_BRIDGE_NAME;
 #endif
-    if (sibling.existsAsFile()) return sibling.getFullPathName().toStdString();
+    if (isFile(sibling)) return to_utf8(sibling);
 #ifdef CLOCKWORK_PLUGIN_BRIDGE_DIR
     // An installed layout: the bridge lives where the package put it
     // (CLOCKWORK_PLUGIN_BRIDGE_DIR at configure time — /usr/libexec/<pkg>,
     // say), not beside an engine that sits in /usr/bin.
-    const juce::File installDir(CLOCKWORK_PLUGIN_BRIDGE_DIR);
+    const auto installDir = clockwork_path::from_utf8(CLOCKWORK_PLUGIN_BRIDGE_DIR);
 #if defined(__APPLE__)
     // The bundle shape, installed: what `cmake --install` puts there on macOS.
-    const juce::File installedBundle = installDir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME ".app")
-                                           .getChildFile("Contents/MacOS/" CLOCKWORK_PLUGIN_BRIDGE_NAME);
-    if (installedBundle.existsAsFile()) return installedBundle.getFullPathName().toStdString();
+    const auto installedBundle = installDir / (CLOCKWORK_PLUGIN_BRIDGE_NAME ".app") / "Contents/MacOS" / CLOCKWORK_PLUGIN_BRIDGE_NAME;
+    if (isFile(installedBundle)) return to_utf8(installedBundle);
 #endif
-    const juce::File installed = installDir.getChildFile(CLOCKWORK_PLUGIN_BRIDGE_NAME
+    const auto installed = installDir / (CLOCKWORK_PLUGIN_BRIDGE_NAME
 #if defined(_WIN32)
-                                                         ".exe"
+                                         ".exe"
 #endif
-                                                         );
-    if (installed.existsAsFile()) return installed.getFullPathName().toStdString();
+                                         );
+    if (isFile(installed)) return to_utf8(installed);
 #endif
     return {};
 }

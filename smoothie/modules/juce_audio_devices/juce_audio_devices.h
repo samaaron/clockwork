@@ -160,8 +160,6 @@
 #endif
 
 //==============================================================================
-#include "midi_io/juce_MidiDevices.h"
-#include "midi_io/juce_MidiMessageCollector.h"
 
 namespace juce
 {
@@ -180,7 +178,6 @@ namespace juce
 
 #include "audio_io/juce_AudioIODevice.h"
 #include "audio_io/juce_AudioIODeviceType.h"
-#include "audio_io/juce_SystemAudioVolume.h"
 
 #if JUCE_IOS
  #include "native/juce_Audio_ios.h"

@@ -72,28 +72,11 @@
 
 #include "messages/juce_MessageManager.h"
 #include "messages/juce_Message.h"
-#include "messages/juce_MessageListener.h"
 #include "messages/juce_CallbackMessage.h"
 #include "messages/juce_DeletedAtShutdown.h"
 #include "messages/juce_NotificationType.h"
-#include "messages/juce_ApplicationBase.h"
 #include "messages/juce_Initialisation.h"
-#include "messages/juce_MountedVolumeListChangeDetector.h"
-#include "broadcasters/juce_ActionBroadcaster.h"
-#include "broadcasters/juce_ActionListener.h"
 #include "broadcasters/juce_AsyncUpdater.h"
-#include "broadcasters/juce_LockingAsyncUpdater.h"
-#include "broadcasters/juce_ChangeListener.h"
-#include "broadcasters/juce_ChangeBroadcaster.h"
-#include "timers/juce_Timer.h"
-#include "timers/juce_TimedCallback.h"
-#include "timers/juce_MultiTimer.h"
-#include "interprocess/juce_ChildProcessManager.h"
-#include "interprocess/juce_InterprocessConnection.h"
-#include "interprocess/juce_InterprocessConnectionServer.h"
-#include "interprocess/juce_ConnectedChildProcess.h"
-#include "interprocess/juce_NetworkServiceDiscovery.h"
-#include "native/juce_ScopedLowPowerModeDisabler.h"
 
 #if JUCE_LINUX || JUCE_BSD
  #include "native/juce_EventLoop_linux.h"
@@ -104,6 +87,5 @@
   #include "native/juce_HiddenMessageWindow_windows.h"
  #endif
  #if JUCE_EVENTS_INCLUDE_WINRT_WRAPPER
-  #include "native/juce_WinRTWrapper_windows.h"
  #endif
 #endif

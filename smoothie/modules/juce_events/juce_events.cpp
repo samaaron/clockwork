@@ -35,10 +35,6 @@
 #define JUCE_CORE_INCLUDE_COM_SMART_PTR 1
 #define JUCE_EVENTS_INCLUDE_WIN32_MESSAGE_WINDOW 1
 
-#if JUCE_USE_WINRT_MIDI
- #define JUCE_EVENTS_INCLUDE_WINRT_WRAPPER 1
-#endif
-
 #include "juce_events.h"
 
 //==============================================================================
@@ -54,22 +50,9 @@
 #endif
 
 //==============================================================================
-#include "messages/juce_ApplicationBase.cpp"
 #include "messages/juce_DeletedAtShutdown.cpp"
-#include "messages/juce_MessageListener.cpp"
 #include "messages/juce_MessageManager.cpp"
-#include "broadcasters/juce_ActionBroadcaster.cpp"
 #include "broadcasters/juce_AsyncUpdater.cpp"
-#include "broadcasters/juce_LockingAsyncUpdater.cpp"
-#include "broadcasters/juce_ChangeBroadcaster.cpp"
-#include "timers/juce_MultiTimer.cpp"
-#include "timers/juce_Timer.cpp"
-#include "interprocess/juce_ChildProcessManager.cpp"
-#include "interprocess/juce_InterprocessConnection.cpp"
-#include "interprocess/juce_InterprocessConnectionServer.cpp"
-#include "interprocess/juce_ConnectedChildProcess.cpp"
-#include "interprocess/juce_NetworkServiceDiscovery.cpp"
-#include "native/juce_ScopedLowPowerModeDisabler.cpp"
 
 //==============================================================================
 #if JUCE_MAC || JUCE_IOS
@@ -86,7 +69,6 @@
  #include "native/juce_RunningInUnity.h"
  #include "native/juce_Messaging_windows.cpp"
  #if JUCE_EVENTS_INCLUDE_WINRT_WRAPPER
-  #include "native/juce_WinRTWrapper_windows.cpp"
  #endif
 
 #elif JUCE_LINUX || JUCE_BSD

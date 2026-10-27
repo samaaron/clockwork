@@ -47,15 +47,7 @@
 #include <mach/mach_time.h>
 #endif
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
+#include "UdpTestSocket.h"
 
 namespace {
 
@@ -73,47 +65,20 @@ osc_test::Packet scheduled(double whenNtp, const osc_test::Packet& inner) {
     return b.end();
 }
 
-// A UDP socket on a free loopback port, with a timed receive.
+// A UDP socket on a free loopback port, with a timed receive that notes the
+// wall NTP time the packet was read.
 struct Receiver {
-    int      fd   = -1;
-    uint16_t port = 0;
+    test_udp::Socket socket;
+    int port = 0;
 
     Receiver() {
-#ifdef _WIN32
-        WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
-        fd = static_cast<int>(socket(AF_INET, SOCK_DGRAM, 0));
-        sockaddr_in a{};
-        a.sin_family      = AF_INET;
-        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        a.sin_port        = 0;
-        REQUIRE(bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
-        socklen_t len = sizeof a;
-        REQUIRE(getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) == 0);
-        port = ntohs(a.sin_port);
-    }
-    ~Receiver() {
-#ifdef _WIN32
-        closesocket(fd); WSACleanup();
-#else
-        close(fd);
-#endif
+        REQUIRE(socket.bound());
+        port = socket.port();
     }
 
-    // Blocks up to timeoutSec. On success fills `bytes` and returns the wall
-    // NTP time the packet was read.
     bool receive(std::vector<uint8_t>& bytes, double& arrivedNtp, double timeoutSec) {
-#ifdef _WIN32
-        DWORD tv = static_cast<DWORD>(timeoutSec * 1000);
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof tv);
-#else
-        timeval tv{};
-        tv.tv_sec  = static_cast<long>(timeoutSec);
-        tv.tv_usec = static_cast<long>((timeoutSec - tv.tv_sec) * 1e6);
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-#endif
         uint8_t buf[2048];
-        const auto n = recv(fd, reinterpret_cast<char*>(buf), sizeof buf, 0);
+        const int n = socket.recv(buf, sizeof buf, static_cast<int>(timeoutSec * 1000));
         if (n <= 0) return false;
         arrivedNtp = wallClockNTP();
         bytes.assign(buf, buf + n);

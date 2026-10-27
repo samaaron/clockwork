@@ -95,9 +95,4 @@ bool MessageManager::postMessageToSystemQueue (MessageManager::MessageBase* cons
     return true;
 }
 
-void MessageManager::broadcastMessage (const String&)
-{
-    // N/A on current iOS
-}
-
 } // namespace juce

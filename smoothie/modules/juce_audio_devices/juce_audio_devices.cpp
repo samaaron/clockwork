@@ -35,56 +35,35 @@
 #define JUCE_CORE_INCLUDE_NATIVE_HEADERS 1
 #define JUCE_EVENTS_INCLUDE_WIN32_MESSAGE_WINDOW 1
 
-#ifndef JUCE_USE_WINRT_MIDI
- #define JUCE_USE_WINRT_MIDI 0
-#endif
-
-#if JUCE_USE_WINRT_MIDI
- #define JUCE_EVENTS_INCLUDE_WINRT_WRAPPER 1
-#endif
-
 #include "juce_audio_devices.h"
 
 #include "audio_io/juce_SampleRateHelpers.cpp"
-#include "midi_io/juce_MidiDevices.cpp"
 
 //==============================================================================
 #if JUCE_MAC || JUCE_IOS
  #include <juce_audio_basics/native/juce_CoreAudioTimeConversions_mac.h>
  #include <juce_audio_basics/native/juce_AudioWorkgroup_mac.h>
- #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
- #include <juce_audio_basics/midi/ump/juce_UMP.h>
- #include "midi_io/ump/juce_UMPBytestreamInputHandler.h"
- #include "midi_io/ump/juce_UMPU32InputHandler.h"
 #endif
 
 #if JUCE_MAC
  #define Point CarbonDummyPointName
  #define Component CarbonDummyCompName
  #import <CoreAudio/AudioHardware.h>
- #import <CoreMIDI/MIDIServices.h>
  #import <AudioToolbox/AudioServices.h>
  #undef Point
  #undef Component
 
  #include "native/juce_CoreAudio_mac.cpp"
- #include "native/juce_CoreMidi_mac.mm"
 
 #elif JUCE_IOS
  #import <AudioToolbox/AudioToolbox.h>
  #import <AVFoundation/AVFoundation.h>
- #import <CoreMIDI/MIDIServices.h>
-
- #if TARGET_OS_SIMULATOR
-  #import <CoreMIDI/MIDINetworkSession.h>
- #endif
 
  #if JUCE_MODULE_AVAILABLE_juce_graphics
   #include <juce_graphics/native/juce_CoreGraphicsHelpers_mac.h>
  #endif
 
  #include "native/juce_Audio_ios.cpp"
- #include "native/juce_CoreMidi_mac.mm"
 
 //==============================================================================
 #elif JUCE_WINDOWS
@@ -121,7 +100,6 @@
  #endif
 
  #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
- #include "native/juce_Midi_windows.cpp"
 
  #if JUCE_ASIO
   /* This is very frustrating - we only need to use a handful of definitions from
@@ -192,7 +170,6 @@
 
  #if ! JUCE_BELA
   #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
-  #include "native/juce_Midi_linux.cpp"
  #endif
 
 //==============================================================================
@@ -207,7 +184,6 @@ namespace juce
 #include "native/juce_Audio_android.cpp"
 
  #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
- #include "native/juce_Midi_android.cpp"
 
  #if JUCE_USE_ANDROID_OPENSLES || JUCE_USE_ANDROID_OBOE
   #include "native/juce_HighPerformanceAudioHelpers_android.h"
@@ -246,17 +222,5 @@ namespace juce
 
 #endif
 
-#if ! JUCE_SYSTEMAUDIOVOL_IMPLEMENTED
-namespace juce
-{
-    // None of these methods are available. (On Windows you might need to enable WASAPI for this)
-    float JUCE_CALLTYPE SystemAudioVolume::getGain()         { jassertfalse; return 0.0f; }
-    bool  JUCE_CALLTYPE SystemAudioVolume::setGain (float)   { jassertfalse; return false; }
-    bool  JUCE_CALLTYPE SystemAudioVolume::isMuted()         { jassertfalse; return false; }
-    bool  JUCE_CALLTYPE SystemAudioVolume::setMuted (bool)   { jassertfalse; return false; }
-}
-#endif
-
 #include "audio_io/juce_AudioIODevice.cpp"
 #include "audio_io/juce_AudioIODeviceType.cpp"
-#include "midi_io/juce_MidiMessageCollector.cpp"

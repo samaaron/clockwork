@@ -53,29 +53,6 @@ public:
 
     JUCE_DECLARE_SINGLETON (InternalMessageQueue, false)
 
-    //==============================================================================
-    void broadcastMessage (const String& message)
-    {
-        auto localCopy = message;
-
-        Array<HWND> windows;
-        EnumWindows (&broadcastEnumWindowProc, (LPARAM) &windows);
-
-        for (int i = windows.size(); --i >= 0;)
-        {
-            COPYDATASTRUCT data;
-            data.dwData = broadcastMessageMagicNumber;
-            data.cbData = (DWORD) (((size_t) localCopy.length() + 1) * sizeof (CharPointer_UTF32::CharType));
-            data.lpData = (void*) localCopy.toUTF32().getAddress();
-
-            DWORD_PTR result;
-            SendMessageTimeout (windows.getUnchecked (i), WM_COPYDATA,
-                                (WPARAM) juce_messageWindowHandle,
-                                (LPARAM) &data,
-                                SMTO_BLOCK | SMTO_ABORTIFHUNG, 8000, &result);
-        }
-    }
-
     void postMessage (MessageManager::MessageBase* message)
     {
         bool shouldTriggerMessageQueueDispatch = false;
@@ -157,12 +134,6 @@ private:
                 return 0;
             }
 
-            if (message == WM_COPYDATA)
-            {
-                handleBroadcastMessage (reinterpret_cast<const COPYDATASTRUCT*> (lParam));
-                return 0;
-            }
-
             if (message == WM_SETTINGCHANGE)
                 NullCheckedInvocation::invoke (settingChangeCallback);
         }
@@ -170,47 +141,13 @@ private:
         return DefWindowProc (h, message, wParam, lParam);
     }
 
-    static BOOL CALLBACK broadcastEnumWindowProc (HWND hwnd, LPARAM lParam)
-    {
-        if (hwnd != juce_messageWindowHandle)
-        {
-            TCHAR windowName[64] = { 0 }; // no need to read longer strings than this
-            GetWindowText (hwnd, windowName, 63);
-
-            if (String (windowName) == messageWindowName)
-                reinterpret_cast<Array<HWND>*> (lParam)->add (hwnd);
-        }
-
-        return TRUE;
-    }
-
     static void dispatchMessage (MessageManager::MessageBase* message)
     {
-        JUCE_TRY
         {
             message->messageCallback();
         }
-        JUCE_CATCH_EXCEPTION
 
         message->decReferenceCount();
-    }
-
-    static void handleBroadcastMessage (const COPYDATASTRUCT* data)
-    {
-        if (data != nullptr && data->dwData == broadcastMessageMagicNumber)
-        {
-            struct BroadcastMessage final : public CallbackMessage
-            {
-                BroadcastMessage (CharPointer_UTF32 text, size_t length) : message (text, length) {}
-                void messageCallback() override { MessageManager::getInstance()->deliverBroadcastMessage (message); }
-
-                String message;
-            };
-
-            (new BroadcastMessage (CharPointer_UTF32 ((const CharPointer_UTF32::CharType*) data->lpData),
-                                   data->cbData / sizeof (CharPointer_UTF32::CharType)))
-                ->post();
-        }
     }
 
     void dispatchMessages()
@@ -236,7 +173,6 @@ private:
 
     //==============================================================================
     static constexpr unsigned int customMessageID = WM_USER + 123;
-    static constexpr unsigned int broadcastMessageMagicNumber = 0xc403;
     static const TCHAR messageWindowName[];
 
     std::unique_ptr<HiddenMessageWindow> messageWindow;
@@ -277,12 +213,6 @@ bool MessageManager::postMessageToSystemQueue (MessageManager::MessageBase* cons
     return false;
 }
 
-void MessageManager::broadcastMessage (const String& value)
-{
-    if (auto* queue = InternalMessageQueue::getInstanceWithoutCreating())
-        queue->broadcastMessage (value);
-}
-
 //==============================================================================
 void MessageManager::doPlatformSpecificInitialisation()
 {
@@ -295,31 +225,5 @@ void MessageManager::doPlatformSpecificShutdown()
     InternalMessageQueue::deleteInstance();
     OleUninitialize();
 }
-
-//==============================================================================
-struct MountedVolumeListChangeDetector::Pimpl
-{
-    explicit Pimpl (MountedVolumeListChangeDetector& d)
-        : owner (d)
-    {
-        File::findFileSystemRoots (lastVolumeList);
-    }
-
-    void systemDeviceChanged()
-    {
-        Array<File> newList;
-        File::findFileSystemRoots (newList);
-
-        if (std::exchange (lastVolumeList, newList) != newList)
-            owner.mountedVolumeListChanged();
-    }
-
-    DeviceChangeDetector detector { L"MountedVolumeList", [this] { systemDeviceChanged(); } };
-    MountedVolumeListChangeDetector& owner;
-    Array<File> lastVolumeList;
-};
-
-MountedVolumeListChangeDetector::MountedVolumeListChangeDetector()  { pimpl.reset (new Pimpl (*this)); }
-MountedVolumeListChangeDetector::~MountedVolumeListChangeDetector() {}
 
 } // namespace juce

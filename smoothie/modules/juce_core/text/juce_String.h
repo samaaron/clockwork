@@ -1488,12 +1488,6 @@ std::basic_ostream <wchar_t, traits>& JUCE_CALLTYPE operator<< (std::basic_ostre
     return stream << stringToWrite.toWideCharPointer();
 }
 
-/** Writes a string to an OutputStream as UTF8. */
-JUCE_API OutputStream& JUCE_CALLTYPE operator<< (OutputStream& stream, const String& stringToWrite);
-
-/** Writes a string to an OutputStream as UTF8. */
-JUCE_API OutputStream& JUCE_CALLTYPE operator<< (OutputStream& stream, StringRef stringToWrite);
-
 } // namespace juce
 
 #ifndef DOXYGEN

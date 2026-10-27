@@ -20,7 +20,7 @@
 #include "EngineFixture.h"
 #include "OscTestUtils.h"
 #include "clockwork_prefix.h"
-#include <juce_core/juce_core.h>   // DatagramSocket: the test speaks UDP to the engine
+#include "UdpTestSocket.h"        // the test speaks UDP to the engine
 
 #include <chrono>
 #include <string>
@@ -60,9 +60,9 @@ TEST_CASE("client verbs: a MIDI send is accepted, not refused", "[client_verbs][
 TEST_CASE("client verbs: an immediate OSC send reaches its endpoint", "[client_verbs][osc]") {
     EngineFixture fx;
 
-    juce::DatagramSocket listener;
-    REQUIRE(listener.bindToPort(0, "127.0.0.1"));
-    const int targetPort = listener.getBoundPort();
+    test_udp::Socket listener;
+    REQUIRE(listener.bound());
+    const int targetPort = listener.port();
 
     const auto inner = osc_test::message("/now", static_cast<int32_t>(11));
     osc_test::Builder b;
@@ -73,14 +73,14 @@ TEST_CASE("client verbs: an immediate OSC send reaches its endpoint", "[client_v
 
     // Not scheduled, so not held: the sink releases it at once.
     char buf[1024];
-    juce::String ip;
+    std::string ip;
     int fromPort = 0;
     bool got = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (!got && std::chrono::steady_clock::now() < deadline) {
         fx.pumpBlock();   // pumped: the audio thread hands the sink the send
-        if (listener.waitUntilReady(true, 50) == 1) {
-            const int n = listener.read(buf, sizeof(buf), false, ip, fromPort);
+        {
+            const int n = listener.recv(buf, sizeof(buf), 50, &ip, &fromPort);
             if (n > 0) {
                 const auto p = osc_test::parseReply(reinterpret_cast<const uint8_t*>(buf),
                                                     static_cast<uint32_t>(n));

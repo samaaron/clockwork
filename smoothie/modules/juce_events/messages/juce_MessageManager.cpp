@@ -28,14 +28,10 @@ MessageManager::MessageManager() noexcept
 {
     JUCE_VERSION_ID
 
-    if (JUCEApplicationBase::isStandaloneApp())
-        Thread::setCurrentThreadName ("JUCE Message Thread");
 }
 
 MessageManager::~MessageManager() noexcept
 {
-    broadcaster.reset();
-
     doPlatformSpecificShutdown();
 
     jassert (instance == this);
@@ -107,12 +103,10 @@ void MessageManager::runDispatchLoop()
 
     while (quitMessageReceived.get() == 0)
     {
-        JUCE_TRY
         {
             if (! detail::dispatchNextMessageOnSystemQueue (false))
                 Thread::sleep (1);
         }
-        JUCE_CATCH_EXCEPTION
     }
 }
 
@@ -131,12 +125,10 @@ bool MessageManager::runDispatchLoopUntil (int millisecondsToRunFor)
 
     while (quitMessageReceived.get() == 0)
     {
-        JUCE_TRY
         {
             if (! detail::dispatchNextMessageOnSystemQueue (millisecondsToRunFor >= 0))
                 Thread::sleep (1);
         }
-        JUCE_CATCH_EXCEPTION
 
         if (millisecondsToRunFor >= 0 && Time::currentTimeMillis() >= endTime)
             break;
@@ -202,27 +194,6 @@ bool MessageManager::callAsync (std::function<void()> fn)
     };
 
     return (new AsyncCallInvoker (std::move (fn)))->post();
-}
-
-//==============================================================================
-void MessageManager::deliverBroadcastMessage (const String& value)
-{
-    if (broadcaster != nullptr)
-        broadcaster->sendActionMessage (value);
-}
-
-void MessageManager::registerBroadcastListener (ActionListener* const listener)
-{
-    if (broadcaster == nullptr)
-        broadcaster.reset (new ActionBroadcaster());
-
-    broadcaster->addActionListener (listener);
-}
-
-void MessageManager::deregisterBroadcastListener (ActionListener* const listener)
-{
-    if (broadcaster != nullptr)
-        broadcaster->removeActionListener (listener);
 }
 
 //==============================================================================
@@ -440,26 +411,16 @@ void MessageManager::Lock::setAcquired (bool x) const noexcept
 
 //==============================================================================
 MessageManagerLock::MessageManagerLock (Thread* threadToCheck)
-    : locked (attemptLock (threadToCheck, nullptr))
+    : locked (attemptLock (threadToCheck))
 {}
 
-MessageManagerLock::MessageManagerLock (ThreadPoolJob* jobToCheck)
-    : locked (attemptLock (nullptr, jobToCheck))
-{}
-
-bool MessageManagerLock::attemptLock (Thread* threadToCheck, ThreadPoolJob* jobToCheck)
+bool MessageManagerLock::attemptLock (Thread* threadToCheck)
 {
-    jassert (threadToCheck == nullptr || jobToCheck == nullptr);
-
     if (threadToCheck != nullptr)
         threadToCheck->addListener (this);
 
-    if (jobToCheck != nullptr)
-        jobToCheck->addListener (this);
-
     // tryEnter may have a spurious abort (return false) so keep checking the condition
-    while ((threadToCheck == nullptr || ! threadToCheck->threadShouldExit())
-             && (jobToCheck == nullptr || ! jobToCheck->shouldExit()))
+    while (threadToCheck == nullptr || ! threadToCheck->threadShouldExit())
     {
         if (mmLock.tryEnter())
             break;
@@ -470,14 +431,6 @@ bool MessageManagerLock::attemptLock (Thread* threadToCheck, ThreadPoolJob* jobT
         threadToCheck->removeListener (this);
 
         if (threadToCheck->threadShouldExit())
-            return false;
-    }
-
-    if (jobToCheck != nullptr)
-    {
-        jobToCheck->removeListener (this);
-
-        if (jobToCheck->shouldExit())
             return false;
     }
 

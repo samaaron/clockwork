@@ -76,11 +76,9 @@ private:
 
         JUCE_AUTORELEASEPOOL
         {
-            JUCE_TRY
             {
                 nextMessage->messageCallback();
             }
-            JUCE_CATCH_EXCEPTION
         }
 
         return true;

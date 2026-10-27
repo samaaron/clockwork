@@ -226,54 +226,7 @@ template <typename T, typename OnError = IgnoreUnused>
     return result;
 }
 
-struct SystemVol
-{
-    explicit SystemVol (AudioObjectPropertySelector selector) noexcept
-        : outputDeviceID (audioObjectGetProperty<AudioDeviceID> (kAudioObjectSystemObject, { kAudioHardwarePropertyDefaultOutputDevice,
-                                                                                             kAudioObjectPropertyScopeGlobal,
-                                                                                             juceAudioObjectPropertyElementMain }).value_or (kAudioObjectUnknown)),
-          addr { selector, kAudioDevicePropertyScopeOutput, juceAudioObjectPropertyElementMain }
-    {}
-
-    float getGain() const noexcept
-    {
-        return audioObjectGetProperty<Float32> (outputDeviceID, addr).value_or (0.0f);
-    }
-
-    bool setGain (float gain) const noexcept
-    {
-        return audioObjectSetProperty (outputDeviceID, addr, static_cast<Float32> (gain));
-    }
-
-    bool isMuted() const noexcept
-    {
-        return audioObjectGetProperty<UInt32> (outputDeviceID, addr).value_or (0) != 0;
-    }
-
-    bool setMuted (bool mute) const noexcept
-    {
-        return audioObjectSetProperty (outputDeviceID, addr, static_cast<UInt32> (mute ? 1 : 0));
-    }
-
-private:
-    AudioDeviceID outputDeviceID;
-    AudioObjectPropertyAddress addr;
-};
-
 JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-
-constexpr auto juceAudioHardwareServiceDeviceProperty_VirtualMainVolume =
-       #if defined (MAC_OS_VERSION_12_0)
-        kAudioHardwareServiceDeviceProperty_VirtualMainVolume;
-       #else
-        kAudioHardwareServiceDeviceProperty_VirtualMasterVolume;
-       #endif
-
-#define JUCE_SYSTEMAUDIOVOL_IMPLEMENTED 1
-float JUCE_CALLTYPE SystemAudioVolume::getGain()              { return SystemVol (juceAudioHardwareServiceDeviceProperty_VirtualMainVolume).getGain(); }
-bool  JUCE_CALLTYPE SystemAudioVolume::setGain (float gain)   { return SystemVol (juceAudioHardwareServiceDeviceProperty_VirtualMainVolume).setGain (gain); }
-bool  JUCE_CALLTYPE SystemAudioVolume::isMuted()              { return SystemVol (kAudioDevicePropertyMute).isMuted(); }
-bool  JUCE_CALLTYPE SystemAudioVolume::setMuted (bool mute)   { return SystemVol (kAudioDevicePropertyMute).setMuted (mute); }
 
 //==============================================================================
 struct CoreAudioClasses

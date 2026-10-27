@@ -67,11 +67,6 @@ inline NSURL* createNSURLFromFile (const String& f)
     return [NSURL fileURLWithPath: juceStringToNS (f)];
 }
 
-inline NSURL* createNSURLFromFile (const File& f)
-{
-    return createNSURLFromFile (f.getFullPathName());
-}
-
 inline NSArray* createNSArrayFromStringArray (const StringArray& strings)
 {
     auto array = [[NSMutableArray alloc] initWithCapacity: (NSUInteger) strings.size()];
@@ -80,53 +75,6 @@ inline NSArray* createNSArrayFromStringArray (const StringArray& strings)
         [array addObject: juceStringToNS (string)];
 
     return [array autorelease];
-}
-
-inline NSData* varToJsonData (const var& varToParse)
-{
-    return [juceStringToNS (JSON::toString (varToParse)) dataUsingEncoding: NSUTF8StringEncoding];
-}
-
-inline var jsonDataToVar (NSData* jsonData)
-{
-    auto* jsonString = [[NSString alloc] initWithData: jsonData
-                                             encoding: NSUTF8StringEncoding];
-
-    jassert (jsonString != nullptr);
-    return JSON::parse (nsStringToJuce ([jsonString autorelease]));
-}
-
-// If for any reason the given var cannot be converted into a valid dictionary
-// an empty dictionary will be returned instead
-inline NSDictionary* varToNSDictionary (const var& varToParse)
-{
-    NSError* error { nullptr };
-    NSDictionary* dictionary = [NSJSONSerialization JSONObjectWithData: varToJsonData (varToParse)
-                                                               options: NSJSONReadingMutableContainers
-                                                                 error: &error];
-
-    if (dictionary == nullptr || error != nullptr)
-        return @{};
-
-    return dictionary;
-}
-
-inline NSData* jsonObjectToData (const NSObject* jsonObject)
-{
-    NSError* error { nullptr };
-    auto* jsonData = [NSJSONSerialization dataWithJSONObject: jsonObject
-                                                     options: 0
-                                                       error: &error];
-
-    jassert (error == nullptr);
-    jassert (jsonData != nullptr);
-
-    return jsonData;
-}
-
-inline var nsDictionaryToVar (const NSDictionary* dictionary)
-{
-    return jsonDataToVar (jsonObjectToData (dictionary));
 }
 
 #if JUCE_MAC

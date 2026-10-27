@@ -210,44 +210,6 @@ bool Thread::setPriority (Priority priority)
 }
 
 //==============================================================================
-JUCE_API bool JUCE_CALLTYPE Process::isForegroundProcess()
-{
-   if (SystemStats::isRunningInAppExtensionSandbox())
-       return true;
-
-   #if JUCE_MAC
-    return [NSApp isActive];
-   #else
-    return isIOSAppActive;
-   #endif
-}
-
-JUCE_API void JUCE_CALLTYPE Process::makeForegroundProcess()
-{
-   #if JUCE_MAC
-    if (! SystemStats::isRunningInAppExtensionSandbox())
-        [NSApp activateIgnoringOtherApps: YES];
-   #endif
-}
-
-JUCE_API void JUCE_CALLTYPE Process::hide()
-{
-    if (! SystemStats::isRunningInAppExtensionSandbox())
-    {
-       #if JUCE_MAC
-        [NSApp hide: nil];
-       #elif JUCE_IOS
-        [[UIApplication sharedApplication] performSelector: @selector (suspend)];
-       #endif
-    }
-}
-
-JUCE_API void JUCE_CALLTYPE Process::raisePrivilege() {}
-JUCE_API void JUCE_CALLTYPE Process::lowerPrivilege() {}
-
-JUCE_API void JUCE_CALLTYPE Process::setPriority (ProcessPriority) {}
-
-//==============================================================================
 JUCE_API bool JUCE_CALLTYPE juce_isRunningUnderDebugger() noexcept
 {
     struct kinfo_proc info;

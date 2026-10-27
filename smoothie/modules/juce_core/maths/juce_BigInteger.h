@@ -336,7 +336,4 @@ private:
     JUCE_LEAK_DETECTOR (BigInteger)
 };
 
-/** Writes a BigInteger to an OutputStream as a UTF8 decimal string. */
-OutputStream& JUCE_CALLTYPE operator<< (OutputStream& stream, const BigInteger& value);
-
 } // namespace juce
