@@ -3,9 +3,9 @@
 /*
  * test_main.cpp — the test binary's entry point.
  *
- * JUCE wants its GUI/message-loop scaffolding initialised before any
- * AudioDeviceManager or Thread work (on Windows that is COM init), so the
- * session runs inside a ScopedJuceInitialiser_GUI.
+ * The device layer wants its message system up before any device or Thread
+ * work (on Windows that is COM init), so the session starts the platform
+ * through Smoothie's worklet, the same call every host makes.
  *
  * It also installs a global RT-allocation listener. The audio path sets a
  * thread-local guard (src/rt_alloc.h) and this binary's operator new/delete
@@ -26,7 +26,7 @@
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
 #if CLOCKWORK_DEVICE
-#include <juce_events/juce_events.h>
+#include "smoothie_worklet.h"   // startPlatform
 #endif
 
 #include <cstdio>
@@ -121,9 +121,9 @@ int main(int argc, char* argv[]) {
     // (DebugTail.h); Catch2 reports first, then hands the signal back here.
     debug_tail::installFatalHandlers();
 #if CLOCKWORK_DEVICE
-    // Only the device layer needs a JUCE message loop. A deviceless build has
-    // no JUCE at all, so there is nothing to initialise.
-    juce::ScopedJuceInitialiser_GUI juceInit;
+    // Only the device layer needs a message loop. A deviceless build has no
+    // Smoothie at all, so there is nothing to start.
+    smoothie::startPlatform();
 #endif
     return runSession(argc, argv);
 }
