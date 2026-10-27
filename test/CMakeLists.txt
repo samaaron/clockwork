@@ -409,6 +409,7 @@ add_executable(clockwork_engine_tests
     test_pumped_device.cpp
     test_embed_device.cpp
     test_client_rings.cpp
+    test_smoothie_text.cpp
     # The engine as a whole: lifecycle, config, state machine, the control
     # plane, the watchdog, swaps and their recovery, device selection, the
     # no-device and fake-device boots, and the subsystems reached through

@@ -383,11 +383,13 @@ private:
         return pos (last ? hay.rfind (needle) : hay.find (needle));
     }
 
-    /** Up to 15 significant digits, trailing zeros dropped: how JUCE printed a double. */
+    /** Six significant digits, trailing zeros dropped: JUCE streamed the
+        number at the default precision, so a float and a double print alike
+        and a rate prints as "48000". */
     static std::string fromDouble (double value)
     {
         char buf[32];
-        std::snprintf (buf, sizeof (buf), "%.15g", value);
+        std::snprintf (buf, sizeof (buf), "%g", value);
         return buf;
     }
 

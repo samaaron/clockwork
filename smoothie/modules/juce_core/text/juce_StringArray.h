@@ -147,6 +147,25 @@ public:
             strings.erase (strings.begin() + index);
     }
 
+    /** Moves the entry at `currentIndex` to `newIndex`, the others closing up:
+        on { a, b, c, d } move (2, 0) gives { c, a, b, d }. An index that is not
+        in the array does nothing, so a move of what indexOf did not find is
+        harmless. */
+    void move (int currentIndex, int newIndex) noexcept
+    {
+        if (! inRange (currentIndex) || currentIndex == newIndex)
+            return;
+
+        newIndex = std::clamp (newIndex, 0, size() - 1);
+        auto first = strings.begin() + std::min (currentIndex, newIndex);
+        auto last  = strings.begin() + std::max (currentIndex, newIndex) + 1;
+
+        if (currentIndex < newIndex)
+            std::rotate (first, first + 1, last);
+        else
+            std::rotate (first, last - 1, last);
+    }
+
     void removeRange (int startIndex, int numberToRemove)
     {
         const auto from = std::clamp (startIndex, 0, size());
