@@ -385,8 +385,8 @@ public:
 
     int getXRunCount() const noexcept override          { return xruns; }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double sr, int bufferSizeSamples) override
     {
         if (isOpen())
@@ -639,8 +639,8 @@ public:
     double getCurrentSampleRate() override       { return currentSampleRate; }
     int getCurrentBitDepth() override            { return currentBitDepth; }
 
-    BigInteger getActiveOutputChannels() const override    { return currentChansOut; }
-    BigInteger getActiveInputChannels() const override     { return currentChansIn; }
+    ChannelMask getActiveOutputChannels() const override    { return currentChansOut; }
+    ChannelMask getActiveInputChannels() const override     { return currentChansIn; }
 
     int getOutputLatencyInSamples() override     { return outputLatency; }
     int getInputLatencyInSamples() override      { return inputLatency; }
@@ -748,7 +748,7 @@ private:
     int currentBlockSizeSamples = 0;
     int currentBitDepth = 16;
     double currentSampleRate = 0;
-    BigInteger currentChansOut, currentChansIn;
+    ChannelMask currentChansOut, currentChansIn;
     AudioIODeviceCallback* currentCallback = {};
     CriticalSection callbackLock;
 
@@ -868,8 +868,8 @@ private:
         return bufferSizeSamples;
     }
 
-    int resetBuffers (const BigInteger& inputChannels,
-                      const BigInteger& outputChannels)
+    int resetBuffers (const ChannelMask& inputChannels,
+                      const ChannelMask& outputChannels)
     {
         numActiveInputChans = 0;
         numActiveOutputChans = 0;

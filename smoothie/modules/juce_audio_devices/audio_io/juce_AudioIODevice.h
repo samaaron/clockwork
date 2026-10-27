@@ -180,14 +180,14 @@ public:
 
         Returns nullopt if the device doesn't supply a default layout.
     */
-    virtual std::optional<BigInteger> getDefaultOutputChannels() const { return {}; }
+    virtual std::optional<ChannelMask> getDefaultOutputChannels() const { return {}; }
 
     /** For devices that support a default layout, returns the channels that are enabled in the
         default layout.
 
         Returns nullopt if the device doesn't supply a default layout.
     */
-    virtual std::optional<BigInteger> getDefaultInputChannels()  const { return {}; }
+    virtual std::optional<ChannelMask> getDefaultInputChannels()  const { return {}; }
 
     //==============================================================================
     /** Returns the set of sample-rates this device supports.
@@ -209,9 +209,9 @@ public:
     //==============================================================================
     /** Tries to open the device ready to play.
 
-        @param inputChannels        a BigInteger in which a set bit indicates that the corresponding
+        @param inputChannels        a ChannelMask in which a set bit indicates that the corresponding
                                     input channel should be enabled
-        @param outputChannels       a BigInteger in which a set bit indicates that the corresponding
+        @param outputChannels       a ChannelMask in which a set bit indicates that the corresponding
                                     output channel should be enabled
         @param sampleRate           the sample rate to try to use - to find out which rates are
                                     available, see getAvailableSampleRates()
@@ -221,8 +221,8 @@ public:
                     opening the device
         @see close
     */
-    virtual String open (const BigInteger& inputChannels,
-                         const BigInteger& outputChannels,
+    virtual String open (const ChannelMask& inputChannels,
+                         const ChannelMask& outputChannels,
                          double sampleRate,
                          int bufferSizeSamples) = 0;
 
@@ -285,13 +285,13 @@ public:
         enabled.
         @see getOutputChannelNames
     */
-    virtual BigInteger getActiveOutputChannels() const = 0;
+    virtual ChannelMask getActiveOutputChannels() const = 0;
 
     /** Returns a mask showing which of the available input channels are currently
         enabled.
         @see getInputChannelNames
     */
-    virtual BigInteger getActiveInputChannels() const = 0;
+    virtual ChannelMask getActiveInputChannels() const = 0;
 
     /** Returns the device's output latency.
 

@@ -190,7 +190,7 @@ public:
         return AndroidHighPerformanceAudioHelpers::getAvailableBufferSizes (getNativeBufferSize(), getAvailableSampleRates());
     }
 
-    String open (const BigInteger& inputChannels, const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double requestedSampleRate, int bufferSize) override
     {
         close();
@@ -247,8 +247,8 @@ public:
     bool isOpen() override                              { return deviceOpen; }
     int getCurrentBufferSizeSamples() override          { return actualBufferSize; }
     int getCurrentBitDepth() override                   { return session->getCurrentBitDepth(); }
-    BigInteger getActiveOutputChannels() const override { return activeOutputChans; }
-    BigInteger getActiveInputChannels() const override  { return activeInputChans; }
+    ChannelMask getActiveOutputChannels() const override { return activeOutputChans; }
+    ChannelMask getActiveInputChannels() const override  { return activeInputChans; }
     String getLastError() override                      { return lastError; }
     bool isPlaying() override                           { return callback.get() != nullptr; }
     int getXRunCount() const noexcept override          { return session->getXRunCount(); }
@@ -984,7 +984,7 @@ private:
     int actualBufferSize = 0, sampleRate = 0;
     bool deviceOpen = false;
     String lastError;
-    BigInteger activeOutputChans, activeInputChans;
+    ChannelMask activeOutputChans, activeInputChans;
     Atomic<AudioIODeviceCallback*> callback { nullptr };
 
     int inputDeviceId;

@@ -244,8 +244,8 @@ public:
     }
     int getDefaultBufferSize() override { return 128; }
 
-    juce::String open(const juce::BigInteger& inputChannels,
-                      const juce::BigInteger& outputChannels,
+    juce::String open(const juce::ChannelMask& inputChannels,
+                      const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         std::lock_guard<std::recursive_mutex> lk(mLifecycle);
         primary()->opens.fetch_add(1);
@@ -333,8 +333,8 @@ public:
     int getCurrentBufferSizeSamples() override { return mBufferSize; }
     double getCurrentSampleRate() override { return mRate; }
     int getCurrentBitDepth() override { return 32; }
-    juce::BigInteger getActiveOutputChannels() const override { return mActiveOut; }
-    juce::BigInteger getActiveInputChannels() const override { return mActiveIn; }
+    juce::ChannelMask getActiveOutputChannels() const override { return mActiveOut; }
+    juce::ChannelMask getActiveInputChannels() const override { return mActiveIn; }
     int getOutputLatencyInSamples() override { return 0; }
     int getInputLatencyInSamples() override { return 0; }
 
@@ -451,7 +451,7 @@ private:
     // whether this device has joined it, and when its next block falls due.
     bool   mJoinedVirtual = false;
     double mNextUs = 0;
-    juce::BigInteger mActiveOut, mActiveIn;
+    juce::ChannelMask mActiveOut, mActiveIn;
     int mOpenOuts = 0, mOpenIns = 0;
     std::thread mThread;
     std::recursive_mutex mLifecycle;

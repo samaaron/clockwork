@@ -464,7 +464,7 @@ public:
 
     bool isOk() const noexcept   { return defaultBufferSize > 0 && defaultSampleRate > 0; }
 
-    bool openClient (const double newSampleRate, const BigInteger& newChannels, const int bufferSizeSamples)
+    bool openClient (const double newSampleRate, const ChannelMask& newChannels, const int bufferSizeSamples)
     {
         sampleRate = newSampleRate;
         channels = newChannels;
@@ -537,12 +537,12 @@ public:
         isActive = true;
     }
 
-    std::optional<BigInteger> getDefaultLayout() const
+    std::optional<ChannelMask> getDefaultLayout() const
     {
         if (countNumberOfBits ((uint64) defaultFormatChannelMask) == defaultNumChannels)
-            return BigInteger ((int64) defaultFormatChannelMask);
+            return ChannelMask ((int64) defaultFormatChannelMask);
 
-        BigInteger integer;
+        ChannelMask integer;
         integer.setRange (0, defaultNumChannels, true);
         return integer;
     }
@@ -560,7 +560,7 @@ public:
     DWORD defaultFormatChannelMask = 0;
     Array<double> rates;
     HANDLE clientEvent = {};
-    BigInteger channels;
+    ChannelMask channels;
     Array<int> channelMaps;
     UINT32 actualBufferSize = 0;
     int bytesPerSample = 0, bytesPerFrame = 0;
@@ -965,7 +965,7 @@ public:
         close();
     }
 
-    bool open (double newSampleRate, const BigInteger& newChannels, int bufferSizeSamples)
+    bool open (double newSampleRate, const ChannelMask& newChannels, int bufferSizeSamples)
     {
         return openClient (newSampleRate, newChannels, bufferSizeSamples)
                 && (numChannels == 0 || check (client->GetService (__uuidof (IAudioCaptureClient),
@@ -1113,7 +1113,7 @@ public:
         close();
     }
 
-    bool open (double newSampleRate, const BigInteger& newChannels, int bufferSizeSamples)
+    bool open (double newSampleRate, const ChannelMask& newChannels, int bufferSizeSamples)
     {
         return openClient (newSampleRate, newChannels, bufferSizeSamples)
                 && (numChannels == 0 || check (client->GetService (__uuidof (IAudioRenderClient),
@@ -1389,22 +1389,22 @@ public:
     int getCurrentBitDepth() override                       { return 32; }
     int getOutputLatencyInSamples() override                { return latencyOut; }
     int getInputLatencyInSamples() override                 { return latencyIn; }
-    BigInteger getActiveOutputChannels() const override     { return outputDevice != nullptr ? outputDevice->channels : BigInteger(); }
-    BigInteger getActiveInputChannels() const override      { return inputDevice  != nullptr ? inputDevice->channels  : BigInteger(); }
+    ChannelMask getActiveOutputChannels() const override     { return outputDevice != nullptr ? outputDevice->channels : ChannelMask(); }
+    ChannelMask getActiveInputChannels() const override      { return inputDevice  != nullptr ? inputDevice->channels  : ChannelMask(); }
     String getLastError() override                          { return lastError; }
     int getXRunCount() const noexcept override              { return inputDevice != nullptr ? inputDevice->xruns : -1; }
 
-    std::optional<BigInteger> getDefaultOutputChannels() const override
+    std::optional<ChannelMask> getDefaultOutputChannels() const override
     {
         return outputDevice != nullptr ? outputDevice->getDefaultLayout() : std::nullopt;
     }
 
-    std::optional<BigInteger> getDefaultInputChannels() const override
+    std::optional<ChannelMask> getDefaultInputChannels() const override
     {
         return inputDevice != nullptr ? inputDevice->getDefaultLayout() : std::nullopt;
     }
 
-    String open (const BigInteger& inputChannels, const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
         close();

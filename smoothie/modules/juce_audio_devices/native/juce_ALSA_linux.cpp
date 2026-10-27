@@ -133,7 +133,7 @@ static void getDeviceProperties (const String& deviceID,
     }
 }
 
-static void ensureMinimumNumBitsSet (BigInteger& chans, int minNumChans)
+static void ensureMinimumNumBitsSet (ChannelMask& chans, int minNumChans)
 {
     int i = 0;
 
@@ -497,8 +497,8 @@ public:
         close();
     }
 
-    void open (BigInteger inputChannels,
-               BigInteger outputChannels,
+    void open (ChannelMask inputChannels,
+               ChannelMask outputChannels,
                double newSampleRate,
                int newBufferSize)
     {
@@ -780,7 +780,7 @@ public:
     String error;
     double sampleRate = 0;
     int bufferSize = 0, outputLatency = 0, inputLatency = 0;
-    BigInteger currentInputChans, currentOutputChans;
+    ChannelMask currentInputChans, currentOutputChans;
 
     Array<double> sampleRates;
     StringArray channelNamesOut, channelNamesIn;
@@ -881,8 +881,8 @@ public:
 
     int getDefaultBufferSize() override                      { return 512; }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double sampleRate,
                  int bufferSizeSamples) override
     {
@@ -927,8 +927,8 @@ public:
     double getCurrentSampleRate() override           { return internal.sampleRate; }
     int getCurrentBitDepth() override                { return internal.getBitDepth(); }
 
-    BigInteger getActiveOutputChannels() const override    { return internal.currentOutputChans; }
-    BigInteger getActiveInputChannels() const override     { return internal.currentInputChans; }
+    ChannelMask getActiveOutputChannels() const override    { return internal.currentOutputChans; }
+    ChannelMask getActiveInputChannels() const override     { return internal.currentInputChans; }
 
     int getOutputLatencyInSamples() override         { return internal.outputLatency; }
     int getInputLatencyInSamples() override          { return internal.inputLatency; }

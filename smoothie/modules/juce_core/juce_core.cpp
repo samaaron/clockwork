@@ -125,7 +125,6 @@
 #include "containers/juce_OwnedArray.cpp"
 #include "containers/juce_ReferenceCountedArray.cpp"
 #include "logging/juce_Logger.cpp"
-#include "maths/juce_BigInteger.cpp"
 #include "maths/juce_Random.cpp"
 #include "memory/juce_MemoryBlock.cpp"
 #include "memory/juce_AllocationHooks.cpp"

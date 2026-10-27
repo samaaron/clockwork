@@ -64,8 +64,8 @@ public:
     int getDefaultBufferSize() override                    { return defaultSettings.periodSize; }
 
     //==============================================================================
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double sampleRate,
                  int bufferSizeSamples) override
     {
@@ -213,8 +213,8 @@ public:
     int getCurrentBufferSizeSamples() override            { return (int) actualBufferSize; }
     double getCurrentSampleRate() override                { return 44100.0; }
     int getCurrentBitDepth() override                     { return 16; }
-    BigInteger getActiveOutputChannels() const override   { BigInteger b; b.setRange (0, actualNumberOfOutputs, true); return b; }
-    BigInteger getActiveInputChannels() const override    { BigInteger b; b.setRange (0, actualNumberOfInputs, true);  return b; }
+    ChannelMask getActiveOutputChannels() const override   { ChannelMask b; b.setRange (0, actualNumberOfOutputs, true); return b; }
+    ChannelMask getActiveInputChannels() const override    { ChannelMask b; b.setRange (0, actualNumberOfInputs, true);  return b; }
     int getOutputLatencyInSamples() override              { /* TODO */ return 0; }
     int getInputLatencyInSamples() override               { /* TODO */ return 0; }
     int getXRunCount() const noexcept override            { return underruns; }
@@ -307,7 +307,7 @@ private:
     }
 
     //==============================================================================
-    static int getNumContiguousSetBits (const BigInteger& value) noexcept
+    static int getNumContiguousSetBits (const ChannelMask& value) noexcept
     {
         int bit = 0;
 

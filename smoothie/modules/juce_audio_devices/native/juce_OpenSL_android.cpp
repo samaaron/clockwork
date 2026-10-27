@@ -857,8 +857,8 @@ public:
                                                                             getAvailableSampleRates());
     }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double requestedSampleRate,
                  int bufferSize) override
     {
@@ -913,7 +913,7 @@ public:
             if (numInputChannels > 0 && numOutputChannels > 0 && RuntimePermissions::isGranted (RuntimePermissions::recordAudio))
             {
                 // New versions of the Android emulator do not seem to support audio input anymore on OS X
-                activeInputChans = BigInteger (0);
+                activeInputChans = ChannelMask (0);
                 numInputChannels = 0;
 
                 session.reset (OpenSLSession::create (numInputChannels, numOutputChannels,
@@ -949,8 +949,8 @@ public:
     bool isOpen() override                              { return deviceOpen; }
     int getCurrentBufferSizeSamples() override          { return actualBufferSize * audioBuffersToEnqueue; }
     int getCurrentBitDepth() override                   { return (session != nullptr && session->supportsFloatingPoint() ? 32 : 16); }
-    BigInteger getActiveOutputChannels() const override { return activeOutputChans; }
-    BigInteger getActiveInputChannels() const override  { return activeInputChans; }
+    ChannelMask getActiveOutputChannels() const override { return activeOutputChans; }
+    ChannelMask getActiveInputChannels() const override  { return activeInputChans; }
     String getLastError() override                      { return lastError; }
     bool isPlaying() override                           { return callback != nullptr; }
     int getXRunCount() const noexcept override          { return (session != nullptr ? session->getXRunCount() : -1); }
@@ -1029,7 +1029,7 @@ private:
     int inputLatency, outputLatency;
     bool deviceOpen = false, audioProcessingEnabled = true;
     String lastError;
-    BigInteger activeOutputChans, activeInputChans;
+    ChannelMask activeOutputChans, activeInputChans;
     AudioIODeviceCallback* callback = nullptr;
 
     std::unique_ptr<OpenSLSession> session;

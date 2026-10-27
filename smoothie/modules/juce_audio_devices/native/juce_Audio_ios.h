@@ -29,7 +29,7 @@ class iOSAudioIODevice : public AudioIODevice
 {
 public:
     //==============================================================================
-    String open (const BigInteger&, const BigInteger&, double, int) override;
+    String open (const ChannelMask&, const ChannelMask&, double, int) override;
     void close() override;
 
     void start (AudioIODeviceCallback*) override;
@@ -56,8 +56,8 @@ public:
 
     int getCurrentBitDepth() override;
 
-    BigInteger getActiveOutputChannels() const override;
-    BigInteger getActiveInputChannels() const override;
+    ChannelMask getActiveOutputChannels() const override;
+    ChannelMask getActiveInputChannels() const override;
 
     int getOutputLatencyInSamples() override;
     int getInputLatencyInSamples() override;

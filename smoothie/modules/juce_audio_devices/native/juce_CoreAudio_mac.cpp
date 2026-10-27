@@ -411,7 +411,7 @@ public:
                                                                 juceAudioObjectPropertyElementMain }, err2log()).value_or (0) != 0;
     }
 
-    bool updateDetailsFromDevice (const BigInteger& activeIns, const BigInteger& activeOuts)
+    bool updateDetailsFromDevice (const ChannelMask& activeIns, const ChannelMask& activeOuts)
     {
         if (! isDeviceAlive())
             return false;
@@ -615,7 +615,7 @@ public:
     }
 
     //==============================================================================
-    String reopen (const BigInteger& ins, const BigInteger& outs, double newSampleRate, int bufferSizeSamples)
+    String reopen (const ChannelMask& ins, const ChannelMask& outs, double newSampleRate, int bufferSizeSamples)
     {
         stop (false);
 
@@ -876,7 +876,7 @@ public:
     //==============================================================================
     struct Stream
     {
-        Stream (bool isInput, CoreAudioInternal& parent, const BigInteger& activeRequested)
+        Stream (bool isInput, CoreAudioInternal& parent, const ChannelMask& activeRequested)
             : input (isInput),
               latency (getLatencyFromDevice (isInput, parent)),
               bitDepth (getBitDepthFromDevice (isInput, parent)),
@@ -931,7 +931,7 @@ public:
             return result;
         }
 
-        static Array<CallbackDetailsForChannel> getChannelInfos (bool isInput, CoreAudioInternal& parent, const BigInteger& active)
+        static Array<CallbackDetailsForChannel> getChannelInfos (bool isInput, CoreAudioInternal& parent, const ChannelMask& active)
         {
             return visitChannels (isInput, parent,
                                   [&] (const auto& args) -> std::optional<CallbackDetailsForChannel>
@@ -1029,7 +1029,7 @@ public:
         const int latency;
         const int bitDepth;
         const StringArray chanNames;
-        const BigInteger activeChans;
+        const ChannelMask activeChans;
         const Array<CallbackDetailsForChannel> channelInfo;
         const int channels = 0;
         Float64 previousSampleTime;
@@ -1056,7 +1056,7 @@ public:
     static int          getChannels         (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, &Stream::channels); }
     static int          getNumChannelNames  (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, &Stream::chanNames).size(); }
     static String       getChannelNames     (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, &Stream::chanNames).joinIntoString (" "); }
-    static BigInteger   getActiveChannels   (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, &Stream::activeChans); }
+    static ChannelMask   getActiveChannels   (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, &Stream::activeChans); }
     static float**      getTempBuffers      (const std::unique_ptr<Stream>& ptr) { return getWithDefault (ptr, [] (auto& s) { return s.tempBuffers.get(); }); }
 
     //==============================================================================
@@ -1278,8 +1278,8 @@ public:
         return best;
     }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
         isOpen_ = true;
@@ -1305,8 +1305,8 @@ public:
         internal->stop (false);
     }
 
-    BigInteger getActiveOutputChannels()      const override { return CoreAudioInternal::getActiveChannels (internal->outStream); }
-    BigInteger getActiveInputChannels()       const override { return CoreAudioInternal::getActiveChannels (internal->inStream); }
+    ChannelMask getActiveOutputChannels()      const override { return CoreAudioInternal::getActiveChannels (internal->outStream); }
+    ChannelMask getActiveInputChannels()       const override { return CoreAudioInternal::getActiveChannels (internal->inStream); }
     int getOutputLatencyInSamples()                 override { return CoreAudioInternal::getLatency (internal->outStream); }
     int getInputLatencyInSamples()                  override { return CoreAudioInternal::getLatency (internal->inStream); }
 
@@ -1755,7 +1755,7 @@ public:
         return sizes.isEmpty() ? bufferSizes : sizes;
     }
 
-    String open (const BigInteger& inputChannels, const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
         close();
@@ -1769,10 +1769,10 @@ public:
 
         inner = std::make_unique<CoreAudioIODevice> (deviceType, getName(), aggregate->getID(), aggregate->getID());
 
-        BigInteger outs = outputChannels;
+        ChannelMask outs = outputChannels;
         outs.setRange (outputChannelNames.size(), 256, false);
 
-        BigInteger ins;
+        ChannelMask ins;
         for (int i = 0; i < inputChannelNames.size(); ++i)
             if (inputChannels[i])
                 ins.setBit (i + inputOffset);
@@ -1805,14 +1805,14 @@ public:
     int getXRunCount() const noexcept override     { return inner != nullptr ? inner->getXRunCount() : -1; }
     AudioWorkgroup getWorkgroup() const override   { return inner != nullptr ? inner->getWorkgroup() : AudioWorkgroup{}; }
 
-    BigInteger getActiveOutputChannels() const override
+    ChannelMask getActiveOutputChannels() const override
     {
-        return inner != nullptr ? inner->getActiveOutputChannels() : BigInteger();
+        return inner != nullptr ? inner->getActiveOutputChannels() : ChannelMask();
     }
 
-    BigInteger getActiveInputChannels() const override
+    ChannelMask getActiveInputChannels() const override
     {
-        BigInteger active;
+        ChannelMask active;
 
         if (inner != nullptr)
             for (int i = 0; i < inputChannelNames.size(); ++i)

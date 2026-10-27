@@ -272,7 +272,7 @@ public:
         }
     }
 
-    String open (const BigInteger& inputChannels, const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double /* sampleRate */, int /* bufferSizeSamples */) override
     {
         if (client == nullptr)
@@ -389,8 +389,8 @@ public:
     String getLastError() override                   { return lastError; }
     int getXRunCount() const noexcept override       { return xruns.load (std::memory_order_relaxed); }
 
-    BigInteger getActiveOutputChannels() const override  { return activeOutputChannels; }
-    BigInteger getActiveInputChannels()  const override  { return activeInputChannels;  }
+    ChannelMask getActiveOutputChannels() const override  { return activeOutputChannels; }
+    ChannelMask getActiveInputChannels()  const override  { return activeInputChannels;  }
 
     int getOutputLatencyInSamples() override
     {
@@ -494,7 +494,7 @@ private:
 
     void updateActivePorts()
     {
-        BigInteger newOutputChannels, newInputChannels;
+        ChannelMask newOutputChannels, newInputChannels;
 
         for (int i = 0; i < outputPorts.size(); ++i)
             if (juce::jack_port_connected (outputPorts.getUnchecked (i)))
@@ -568,7 +568,7 @@ private:
     int totalNumberOfInputChannels = 0;
     int totalNumberOfOutputChannels = 0;
     Array<jack_port_t*> inputPorts, outputPorts;
-    BigInteger activeInputChannels, activeOutputChannels;
+    ChannelMask activeInputChannels, activeOutputChannels;
 
     std::atomic<int> xruns { 0 };
 

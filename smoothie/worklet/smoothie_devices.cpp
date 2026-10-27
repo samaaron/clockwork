@@ -356,7 +356,7 @@ std::string DeviceSession::open(const DeviceRequest& request) {
     }
     s.settled = {};
 
-    juce::BigInteger outs, ins;
+    juce::ChannelMask outs, ins;
     if (!want.output.empty() && want.outputChannels > 0) outs.setRange(0, want.outputChannels, true);
     if (!want.input.empty() && want.inputChannels > 0) ins.setRange(0, want.inputChannels, true);
     if (outs.isZero() && ins.isZero()) {

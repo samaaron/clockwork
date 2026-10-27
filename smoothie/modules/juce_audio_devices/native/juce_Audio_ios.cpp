@@ -448,8 +448,8 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         JUCE_IOS_AUDIO_LOG ("Actual buffer size: " << bufferSize);
     }
 
-    String open (const BigInteger& inputChannelsWanted,
-                 const BigInteger& outputChannelsWanted,
+    String open (const ChannelMask& inputChannelsWanted,
+                 const ChannelMask& outputChannelsWanted,
                  double sampleRateWanted, int bufferSizeWanted)
     {
         close();
@@ -1209,7 +1209,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         class IOChannelConfig
         {
         public:
-            IOChannelConfig (const bool isInput, const BigInteger requiredChannels)
+            IOChannelConfig (const bool isInput, const ChannelMask requiredChannels)
                 : hardwareChannelNames (getHardwareChannelNames (isInput)),
                   numHardwareChannels (hardwareChannelNames.size()),
                   areChannelsAccessible ((! isInput) || [AVAudioSession sharedInstance].isInputAvailable),
@@ -1248,7 +1248,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
             const int numHardwareChannels;
             const bool areChannelsAccessible;
 
-            const BigInteger activeChannels;
+            const ChannelMask activeChannels;
             const int numActiveChannels;
 
             const Array<int> activeChannelIndices, inactiveChannelIndices;
@@ -1273,8 +1273,8 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
                 return result;
             }
 
-            static BigInteger limitRequiredChannelsToHardware (const int numHardwareChannelsAvailable,
-                                                               BigInteger requiredChannels)
+            static ChannelMask limitRequiredChannelsToHardware (const int numHardwareChannelsAvailable,
+                                                               ChannelMask requiredChannels)
             {
                 requiredChannels.setRange (numHardwareChannelsAvailable,
                                            requiredChannels.getHighestBit() + 1,
@@ -1283,7 +1283,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
                 return requiredChannels;
             }
 
-            static Array<int> getActiveChannelIndices (const BigInteger activeChannelsToIndex)
+            static Array<int> getActiveChannelIndices (const ChannelMask activeChannelsToIndex)
             {
                 Array<int> result;
 
@@ -1314,8 +1314,8 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
             }
         };
 
-        void reconfigure (const BigInteger requiredInputChannels,
-                          const BigInteger requiredOutputChannels)
+        void reconfigure (const ChannelMask requiredInputChannels,
+                          const ChannelMask requiredOutputChannels)
         {
             inputs .reset (new IOChannelConfig (true,  requiredInputChannels));
             outputs.reset (new IOChannelConfig (false, requiredOutputChannels));
@@ -1349,7 +1349,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
 
     IOChannelData channelData;
 
-    BigInteger requestedInputChannels, requestedOutputChannels;
+    ChannelMask requestedInputChannels, requestedOutputChannels;
 
     bool isRunning = false;
 
@@ -1402,7 +1402,7 @@ iOSAudioIODevice::iOSAudioIODevice (iOSAudioIODeviceType* ioDeviceType, const St
 }
 
 //==============================================================================
-String iOSAudioIODevice::open (const BigInteger& inChans, const BigInteger& outChans,
+String iOSAudioIODevice::open (const ChannelMask& inChans, const ChannelMask& outChans,
                                double requestedSampleRate, int requestedBufferSize)
 {
     return pimpl->open (inChans, outChans, requestedSampleRate, requestedBufferSize);
@@ -1432,8 +1432,8 @@ double iOSAudioIODevice::getCurrentSampleRate()                     { return pim
 
 int iOSAudioIODevice::getCurrentBitDepth()                          { return 16; }
 
-BigInteger iOSAudioIODevice::getActiveInputChannels() const         { return pimpl->channelData.inputs->activeChannels; }
-BigInteger iOSAudioIODevice::getActiveOutputChannels() const        { return pimpl->channelData.outputs->activeChannels; }
+ChannelMask iOSAudioIODevice::getActiveInputChannels() const         { return pimpl->channelData.inputs->activeChannels; }
+ChannelMask iOSAudioIODevice::getActiveOutputChannels() const        { return pimpl->channelData.outputs->activeChannels; }
 
 int iOSAudioIODevice::getInputLatencyInSamples()                    { return roundToInt (pimpl->sampleRate * [AVAudioSession sharedInstance].inputLatency); }
 int iOSAudioIODevice::getOutputLatencyInSamples()                   { return roundToInt (pimpl->sampleRate * [AVAudioSession sharedInstance].outputLatency); }

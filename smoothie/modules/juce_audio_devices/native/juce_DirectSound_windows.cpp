@@ -769,8 +769,8 @@ public:
         close();
     }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double newSampleRate, int newBufferSize) override
     {
         lastError = openDevice (inputChannels, outputChannels, newSampleRate, newBufferSize);
@@ -793,8 +793,8 @@ public:
     bool isOpen() override                              { return isOpen_ && isThreadRunning(); }
     int getCurrentBufferSizeSamples() override          { return bufferSizeSamples; }
     double getCurrentSampleRate() override              { return sampleRate; }
-    BigInteger getActiveOutputChannels() const override { return enabledOutputs; }
-    BigInteger getActiveInputChannels() const override  { return enabledInputs; }
+    ChannelMask getActiveOutputChannels() const override { return enabledOutputs; }
+    ChannelMask getActiveInputChannels() const override  { return enabledInputs; }
     int getOutputLatencyInSamples() override            { return (int) (getCurrentBufferSizeSamples() * 1.5); }
     int getInputLatencyInSamples() override             { return getOutputLatencyInSamples(); }
     StringArray getOutputChannelNames() override        { return outChannels; }
@@ -897,14 +897,14 @@ private:
 
     int bufferSizeSamples = 0;
     double sampleRate = 0;
-    BigInteger enabledInputs, enabledOutputs;
+    ChannelMask enabledInputs, enabledOutputs;
     AudioBuffer<float> inputBuffers, outputBuffers;
 
     AudioIODeviceCallback* callback = nullptr;
     CriticalSection startStopLock;
 
-    String openDevice (const BigInteger& inputChannels,
-                       const BigInteger& outputChannels,
+    String openDevice (const ChannelMask& inputChannels,
+                       const ChannelMask& outputChannels,
                        double sampleRate_, int bufferSizeSamples_);
 
     void closeDevice()
@@ -1098,8 +1098,8 @@ private:
 };
 
 //==============================================================================
-String DSoundAudioIODevice::openDevice (const BigInteger& inputChannels,
-                                        const BigInteger& outputChannels,
+String DSoundAudioIODevice::openDevice (const ChannelMask& inputChannels,
+                                        const ChannelMask& outputChannels,
                                         double sampleRate_, int bufferSizeSamples_)
 {
     closeDevice();

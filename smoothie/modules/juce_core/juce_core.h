@@ -223,7 +223,6 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 #include "misc/juce_Result.h"
 #include "containers/juce_FixedSizeFunction.h"
 #include "time/juce_Time.h"
-#include "maths/juce_BigInteger.h"
 #include "maths/juce_Random.h"
 #include "misc/juce_RuntimePermissions.h"
 #include "threads/juce_DynamicLibrary.h"

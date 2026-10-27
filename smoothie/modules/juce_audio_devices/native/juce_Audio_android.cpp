@@ -156,8 +156,8 @@ public:
 
     int getDefaultBufferSize() override                 { return 2048; }
 
-    String open (const BigInteger& inputChannels,
-                 const BigInteger& outputChannels,
+    String open (const ChannelMask& inputChannels,
+                 const ChannelMask& outputChannels,
                  double requestedSampleRate,
                  int bufferSize) override
     {
@@ -279,8 +279,8 @@ public:
     int getCurrentBufferSizeSamples() override           { return actualBufferSize; }
     int getCurrentBitDepth() override                    { return 16; }
     double getCurrentSampleRate() override               { return sampleRate; }
-    BigInteger getActiveOutputChannels() const override  { return activeOutputChans; }
-    BigInteger getActiveInputChannels() const override   { return activeInputChans; }
+    ChannelMask getActiveOutputChannels() const override  { return activeOutputChans; }
+    ChannelMask getActiveInputChannels() const override   { return activeInputChans; }
     String getLastError() override                       { return lastError; }
     bool isPlaying() override                            { return isRunning && callback != nullptr; }
 
@@ -403,7 +403,7 @@ private:
     int actualBufferSize;
     bool isRunning;
     String lastError;
-    BigInteger activeOutputChans, activeInputChans;
+    ChannelMask activeOutputChans, activeInputChans;
     GlobalRef outputDevice, inputDevice;
     AudioBuffer<float> inputChannelBuffer, outputChannelBuffer;
     jmethodID getUnderrunCount = nullptr;
