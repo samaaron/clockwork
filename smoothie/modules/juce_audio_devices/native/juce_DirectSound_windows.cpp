@@ -753,14 +753,14 @@ public:
     {
         if (outputDeviceIndex_ >= 0)
         {
-            outChannels.add (TRANS ("Left"));
-            outChannels.add (TRANS ("Right"));
+            outChannels.add (String ("Left"));
+            outChannels.add (String ("Right"));
         }
 
         if (inputDeviceIndex_ >= 0)
         {
-            inChannels.add (TRANS ("Left"));
-            inChannels.add (TRANS ("Right"));
+            inChannels.add (String ("Left"));
+            inChannels.add (String ("Right"));
         }
     }
 

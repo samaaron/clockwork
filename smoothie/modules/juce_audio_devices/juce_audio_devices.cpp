@@ -76,31 +76,6 @@
   #include "native/juce_DirectSound_windows.cpp"
  #endif
 
- #if JUCE_USE_WINRT_MIDI && (JUCE_MSVC || JUCE_CLANG)
-  /* If you cannot find any of the header files below then you are probably
-     attempting to use the Windows 10 Bluetooth Low Energy API. For this to work you
-     need to install version 10.0.14393.0 of the Windows Standalone SDK and you may
-     need to add the path to the WinRT headers to your build system. This path should
-     have the form "C:\Program Files (x86)\Windows Kits\10\Include\10.0.14393.0\winrt".
-
-     Also please note that Microsoft's Bluetooth MIDI stack has multiple issues, so
-     this API is EXPERIMENTAL - use at your own risk!
-  */
-  #include <windows.devices.h>
-  #include <windows.devices.midi.h>
-  #include <windows.devices.enumeration.h>
-
-  JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4265)
-  #include <wrl/event.h>
-  JUCE_END_IGNORE_WARNINGS_MSVC
-
-  JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4467)
-  #include <robuffer.h>
-  JUCE_END_IGNORE_WARNINGS_MSVC
- #endif
-
- #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
-
  #if JUCE_ASIO
   /* This is very frustrating - we only need to use a handful of definitions from
      a couple of the header files in Steinberg's ASIO SDK, and it'd be easy to copy
@@ -161,16 +136,10 @@
      files.
   */
   #include <Bela.h>
-  #include <Midi.h>
-  #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
   #include "native/juce_Bela_linux.cpp"
  #endif
 
  #undef SIZEOF
-
- #if ! JUCE_BELA
-  #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
- #endif
 
 //==============================================================================
 #elif JUCE_ANDROID
@@ -182,8 +151,6 @@ namespace juce
 } // namespace juce
 
 #include "native/juce_Audio_android.cpp"
-
- #include <juce_audio_basics/midi/juce_MidiDataConcatenator.h>
 
  #if JUCE_USE_ANDROID_OPENSLES || JUCE_USE_ANDROID_OBOE
   #include "native/juce_HighPerformanceAudioHelpers_android.h"

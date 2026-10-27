@@ -87,48 +87,5 @@ private:
     }
 };
 
-//==============================================================================
-class DeviceChangeDetector  : private Timer
-{
-public:
-    DeviceChangeDetector (const wchar_t* const name, std::function<void()> onChangeIn)
-        : messageWindow (name, (WNDPROC) deviceChangeEventCallback),
-          onChange (std::move (onChangeIn))
-    {
-        SetWindowLongPtr (messageWindow.getHWND(), GWLP_USERDATA, (LONG_PTR) this);
-    }
-
-    void triggerAsyncDeviceChangeCallback()
-    {
-        // We'll pause before sending a message, because on device removal, the OS hasn't always updated
-        // its device lists correctly at this point. This also helps avoid repeated callbacks.
-        startTimer (500);
-    }
-
-private:
-    HiddenMessageWindow messageWindow;
-    std::function<void()> onChange;
-
-    static LRESULT CALLBACK deviceChangeEventCallback (HWND h, const UINT message,
-                                                       const WPARAM wParam, const LPARAM lParam)
-    {
-        if (message == WM_DEVICECHANGE
-             && (wParam == 0x8000 /*DBT_DEVICEARRIVAL*/
-                  || wParam == 0x8004 /*DBT_DEVICEREMOVECOMPLETE*/
-                  || wParam == 0x0007 /*DBT_DEVNODES_CHANGED*/))
-        {
-            ((DeviceChangeDetector*) GetWindowLongPtr (h, GWLP_USERDATA))
-                ->triggerAsyncDeviceChangeCallback();
-        }
-
-        return DefWindowProc (h, message, wParam, lParam);
-    }
-
-    void timerCallback() override
-    {
-        stopTimer();
-        NullCheckedInvocation::invoke (onChange);
-    }
-};
 
 } // namespace juce
