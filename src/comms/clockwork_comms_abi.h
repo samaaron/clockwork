@@ -45,9 +45,10 @@ typedef void (*clockwork_osc_stream_packet_fn)(void* ctx, uint32_t conn_id,
                                         const uint8_t* osc, uint32_t len);
 typedef void (*clockwork_osc_stream_closed_fn)(void* ctx, uint32_t conn_id);
 
-/* TCP on `port` bound to `bind_addr` (empty = all IPv4 interfaces; pass "::"
- * for IPv6). Port 0 binds ephemerally — read it back with clockwork_osc_stream_port.
- * Null on bind failure. */
+/* TCP on `port` bound to `bind_addr` (empty = loopback; "0.0.0.0" for every
+ * IPv4 interface, "::" for IPv6 — nothing authenticates, so the log notes an
+ * open bind). Port 0 binds ephemerally — read it back with
+ * clockwork_osc_stream_port. Null on bind failure. */
 ClockworkOscStream* clockwork_osc_tcp_start(void* ctx, clockwork_osc_stream_packet_fn on_packet,
                               clockwork_osc_stream_closed_fn on_closed, int32_t port,
                               const uint8_t* bind_addr, uint32_t bind_addr_len,

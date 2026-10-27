@@ -55,28 +55,49 @@ macro_rules! log {
     };
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A sink that keeps every line, for a crate's tests: [`capture::install`]
+/// first thing in the test process (the first installer wins, so it then sees
+/// every line any test logs) and ask [`capture::logged`] what has been seen.
+#[doc(hidden)]
+pub mod capture {
+    use std::ffi::c_char;
     use std::sync::Mutex;
 
     static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    extern "C" fn capture(p: *const c_char, n: u32) {
+    extern "C" fn keep(p: *const c_char, n: u32) {
         // SAFETY: `emit` passes the pointer and length of a live `&str`,
         // which outlives this call.
         let bytes = unsafe { std::slice::from_raw_parts(p.cast::<u8>(), n as usize) };
         SEEN.lock().unwrap().push(String::from_utf8_lossy(bytes).into_owned());
     }
 
+    pub fn install() {
+        super::install(keep);
+    }
+
+    /// Has a line containing `text` been logged since the capture was installed?
+    pub fn logged(text: &str) -> bool {
+        SEEN.lock().unwrap().iter().any(|l| l.contains(text))
+    }
+
+    /// Every line so far, in order.
+    pub fn lines() -> Vec<String> {
+        SEEN.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
     #[test]
     fn an_installed_sink_receives_every_line_and_the_first_install_sticks() {
-        install(capture);
+        capture::install();
         log!("hello {}", 42);
         extern "C" fn other(_: *const c_char, _: u32) { panic!("second install must not win") }
         install(other);
         log!("again");
-        let seen = SEEN.lock().unwrap();
-        assert_eq!(seen.as_slice(), ["hello 42", "again"]);
+        assert_eq!(capture::lines(), ["hello 42", "again"]);
     }
 }

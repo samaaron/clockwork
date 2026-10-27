@@ -105,6 +105,15 @@ fn bind_v6(addr: Ipv6Addr, port: u16) -> std::io::Result<UdpSocket> {
     Ok(sock.into())
 }
 
+// Say once per socket where an open bind landed: see `crate::note_bind`.
+fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>) {
+    for s in socks {
+        if let Ok(local) = s.local_addr() {
+            crate::note_bind(what, local);
+        }
+    }
+}
+
 // Re-frame one inbound message as /external-osc-cue and emit it. Recurses into
 // bundles, forwarding each contained message.
 fn forward(host: &Host, ip: &str, port: i32, pkt: &OscPacket) {
@@ -195,6 +204,7 @@ impl ClockworkOsc {
         if socks.is_empty() {
             return;
         }
+        note_binds("cue server", socks.iter().map(|(_, s)| s));
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut joins = Vec::new();
@@ -270,6 +280,7 @@ fn start_ingress(host: Host, port: u16, loopback: bool) -> Option<ClockworkOscIn
     if socks.is_empty() {
         return None;
     }
+    note_binds("UDP ingress", &socks);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut joins = Vec::new();
@@ -327,17 +338,18 @@ fn run_raw_server_src(socket: UdpSocket, stop: Arc<AtomicBool>, host: HostSrc) {
     }
 }
 
-// Bind the ingress socket(s) for `bind_addr`: empty -> all interfaces, dual-stack
-// (0.0.0.0 + ::); a literal IP -> exactly that address (its family); otherwise a
-// hostname is resolved. Each family is best-effort.
+// Bind the ingress socket(s) for `bind_addr`: empty -> loopback, dual-stack
+// (127.0.0.1 + ::1), because nothing authenticates and every interface is
+// something a host asks for by name; a literal IP -> exactly that address (its
+// family); otherwise a hostname is resolved. Each family is best-effort.
 fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
     let mut socks = Vec::new();
     if bind_addr.is_empty() {
-        match UdpSocket::bind(("0.0.0.0", port)) {
+        match UdpSocket::bind(("127.0.0.1", port)) {
             Ok(s) => socks.push(s),
             Err(e) => clockwork_log::log!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
         }
-        match bind_v6(Ipv6Addr::UNSPECIFIED, port) {
+        match bind_v6(Ipv6Addr::LOCALHOST, port) {
             Ok(s) => socks.push(s),
             Err(e) => clockwork_log::log!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
         }
@@ -351,6 +363,7 @@ fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
             Err(e) => clockwork_log::log!("[osc] ingress bind {bind_addr}:{port} failed: {e}"),
         }
     }
+    note_binds("UDP ingress", &socks);
     socks
 }
 
@@ -481,8 +494,9 @@ pub extern "C" fn clockwork_osc_ingress_start(
 }
 
 /// Start a source-bearing OSC ingress on `port`, bound to `bind_addr` (a byte
-/// string, ptr+len; empty = all interfaces, else an IPv4/IPv6 literal or hostname
-/// — e.g. "127.0.0.1" for loopback). Each received datagram is delivered verbatim
+/// string, ptr+len; empty = loopback on both families, else an IPv4/IPv6 literal
+/// or hostname — "0.0.0.0" for every interface, which the log notes, since
+/// nothing authenticates). Each received datagram is delivered verbatim
 /// to `emit` ALONG WITH the sender's (ip, port), so the caller can intern an
 /// origin token and reply to it. Returns an owning pointer (null on bind failure);
 /// free with [`clockwork_osc_ingress_stop`]. `ctx`/`emit` must outlive it.
@@ -586,6 +600,40 @@ mod tests {
             clockwork_osc_send(h, host.as_ptr(), host.len() as u32, port as i32,
                         data.as_ptr(), data.len() as u32);
         }
+    }
+
+    // Nothing authenticates a network transport: a client that reaches the
+    // port has full control. So no address means loopback, and a bind on
+    // anything else is something the host asked for by name, which the log
+    // says once.
+    #[test]
+    fn no_address_means_loopback_and_an_open_bind_is_logged() {
+        clockwork_log::capture::install();
+        let socks = bind_ingress("", 0);
+        assert!(!socks.is_empty());
+        for s in &socks {
+            let local = s.local_addr().unwrap();
+            assert!(local.ip().is_loopback(), "bound {local} with no address given");
+        }
+        assert!(!clockwork_log::capture::logged("full control"), "a loopback bind is not open");
+
+        let open = bind_ingress("0.0.0.0", 0);
+        assert_eq!(open.len(), 1);
+        let local = open[0].local_addr().unwrap();
+        assert!(clockwork_log::capture::logged(&format!("UDP ingress bound to {local}: any client that reaches it has full control")));
+    }
+
+    // The cue server's `loopback = 0` is the same open bind, logged the same way.
+    #[test]
+    fn cue_server_on_every_interface_is_logged() {
+        clockwork_log::capture::install();
+        let collector = Box::new(Collector(Mutex::new(Vec::new())));
+        let ctx = &*collector as *const Collector as *mut c_void;
+        let h = clockwork_osc_create(ctx, collect);
+        let port = free_port();
+        configure(h, port, false, true);
+        assert!(clockwork_log::capture::logged(&format!("cue server bound to 0.0.0.0:{port}: any client that reaches it has full control")));
+        destroy(h);
     }
 
     // INBOUND: external OSC on the cue port (IPv4 and IPv6) is forwarded as an

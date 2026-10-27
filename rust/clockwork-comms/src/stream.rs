@@ -445,11 +445,19 @@ fn start_socket_server<A: Acceptor>(
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
+/// The address a TCP server binds when given `addr`: loopback when given
+/// nothing, because nothing authenticates and every interface is something a
+/// host asks for by name.
+fn bind_address(addr: &str) -> &str {
+    if addr.is_empty() { "127.0.0.1" } else { addr }
+}
+
 /// Start a TCP OSC server on `port` bound to `bind_addr` (byte string,
-/// ptr+len; empty = all IPv4 interfaces, else an address literal — pass "::"
-/// for IPv6). Pass port 0 to bind an ephemeral port and read it back with
-/// [`clockwork_osc_stream_port`]. Returns an owning pointer (null on bind failure);
-/// free with [`clockwork_osc_stream_stop`]. `ctx` and both callbacks must outlive it.
+/// ptr+len; empty = loopback, else an address literal — "0.0.0.0" for every
+/// IPv4 interface, "::" for IPv6; the log notes an open bind). Pass port 0 to
+/// bind an ephemeral port and read it back with [`clockwork_osc_stream_port`].
+/// Returns an owning pointer (null on bind failure); free with
+/// [`clockwork_osc_stream_stop`]. `ctx` and both callbacks must outlive it.
 ///
 /// # Safety
 /// `bind_addr` is null or readable for `bind_addr_len` bytes.
@@ -474,7 +482,7 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
             let bytes = unsafe { slice::from_raw_parts(bind_addr, bind_addr_len as usize) };
             std::str::from_utf8(bytes).unwrap_or("")
         };
-        let addr = if addr.is_empty() { "0.0.0.0" } else { addr };
+        let addr = bind_address(addr);
         let listener = match TcpListener::bind((addr, port as u16)) {
             Ok(l) => l,
             Err(e) => {
@@ -482,6 +490,9 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
                 return std::ptr::null_mut();
             }
         };
+        if let Ok(local) = listener.local_addr() {
+            clockwork_osc_net::note_bind("TCP", local);
+        }
         let bound = listener.local_addr().map(|a| a.port() as i32).unwrap_or(port);
         if listener.set_nonblocking(true).is_err() {
             return std::ptr::null_mut();
@@ -681,9 +692,8 @@ mod tests {
         Some(body)
     }
 
-    fn start_tcp(cap: &Cap, max_conns: u32) -> (*mut ClockworkOscStream, u16) {
+    fn start_tcp_on(cap: &Cap, bind: &str, max_conns: u32) -> (*mut ClockworkOscStream, u16) {
         let ctx = cap as *const Cap as *mut c_void;
-        let bind = "127.0.0.1";
         // SAFETY: `bind` is a live str.
         let h = unsafe {
             clockwork_osc_tcp_start(ctx, on_packet, on_closed, 0,
@@ -694,6 +704,31 @@ mod tests {
         let port = unsafe { clockwork_osc_stream_port(h) };
         assert!(port > 0, "port-0 start should report the real bound port");
         (h, port as u16)
+    }
+    fn start_tcp(cap: &Cap, max_conns: u32) -> (*mut ClockworkOscStream, u16) {
+        start_tcp_on(cap, "127.0.0.1", max_conns)
+    }
+
+    // Nothing authenticates TCP: a client that reaches the port has full
+    // control. So no address means loopback, reachable from this machine, and
+    // a bind on anything else is something the host asked for by name, which
+    // the log says once.
+    #[test]
+    fn tcp_with_no_address_binds_loopback_and_an_open_bind_is_logged() {
+        assert_eq!(bind_address(""), "127.0.0.1");
+        assert_eq!(bind_address("0.0.0.0"), "0.0.0.0");
+        clockwork_log::capture::install();
+        let cap = Cap::new();
+        let (h, port) = start_tcp_on(&cap, "", 4);
+        let mut c = connect(port);
+        c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
+        assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "reachable over loopback");
+        assert!(!clockwork_log::capture::logged("full control"), "a loopback bind is not open");
+        stop(h);
+
+        let (h, port) = start_tcp_on(&cap, "0.0.0.0", 4);
+        assert!(clockwork_log::capture::logged(&format!("TCP bound to 0.0.0.0:{port}: any client that reaches it has full control")));
+        stop(h);
     }
 
     fn connect(port: u16) -> TcpStream {

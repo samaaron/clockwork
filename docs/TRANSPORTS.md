@@ -24,6 +24,12 @@ outbound OSC are unaffected, and `-u` still numbers the shared-memory segment.
 | `--pipe <name>` | Named pipe, owner-only DACL, no remote clients | stream, local |
 | `--shm-commands` | the segment's peer command plane | ring, local |
 
+**Nothing authenticates.** A client that reaches a port has full control of the
+engine, as with scsynth. So the two network transports bind loopback unless
+`-B` names an address, and a host that binds every interface asked for it by
+name: the engine logs one line saying the port accepts any client that reaches
+it. The local transports are owner-only by file mode or DACL.
+
 `--uds` and `--uds-dgram` are macOS and Linux; `--pipe` is Windows. They are
 the same idea — local IPC addressed by a path rather than an IP — on the two
 platform families.

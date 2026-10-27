@@ -26,6 +26,17 @@ pub mod out;
 // about. What stays is what the ENGINE itself needs a socket for: the cue
 // server and outbound OSC.
 
+/// Nothing authenticates a network transport: a client that reaches the port
+/// has full control of the engine. Loopback keeps that to this machine, so
+/// every transport binds loopback unless given an address, and a host that
+/// binds anything else asked for it by name. Say so once, where it bound.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn note_bind(what: &str, local: std::net::SocketAddr) {
+    if !local.ip().is_loopback() {
+        clockwork_log::log!("[osc] {what} bound to {local}: any client that reaches it has full control, nothing authenticates");
+    }
+}
+
 /// Does this receive error leave the socket usable, so the loop should poll
 /// again rather than tear the connection down?
 ///
