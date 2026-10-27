@@ -1786,7 +1786,7 @@ class WASAPIAudioIODeviceType final : public AudioIODeviceType
 {
 public:
     explicit WASAPIAudioIODeviceType (WASAPIDeviceMode mode)
-        : AudioIODeviceType (getDeviceTypename (mode)),
+        : AudioIODeviceType (getDeviceTypename (mode).toStdString()),
           deviceMode (mode)
     {
     }

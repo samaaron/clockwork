@@ -971,7 +971,7 @@ class ALSAAudioIODeviceType final : public AudioIODeviceType
 {
 public:
     ALSAAudioIODeviceType (bool onlySoundcards, const String& deviceTypeName)
-        : AudioIODeviceType (deviceTypeName),
+        : AudioIODeviceType (deviceTypeName.toStdString()),
           listOnlySoundcards (onlySoundcards)
     {
        #if ! JUCE_ALSA_LOGGING
