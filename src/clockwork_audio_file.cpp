@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>   // std::malloc, std::free: not reached through every standard library (libc++ 23 needs it named)
 #include <cstring>
 #include <array>
 #if defined(_WIN32)

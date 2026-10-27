@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.25.0"
   },
   "dependencies": {
     "@thi.ng/malloc": "^6.1.0"
