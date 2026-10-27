@@ -121,7 +121,7 @@ TEST_CASE("String: UTF-8 in and out, wide characters on the way to the OS", "[sm
     CHECK(std::string(s.toRawUTF8()) == s.toStdString());
     CHECK(std::string(s.toUTF8()) == s.toStdString());
     CHECK(String(s.toWideCharPointer()) == s);              // round trip through UTF-16 or UTF-32
-    CHECK(String(L"Ü") == "\xc3\x9c");
+    CHECK(String(L"\u00dc") == "\xc3\x9c");                // escaped: MSVC reads a raw character in the system code page
     CHECK(String::fromUTF8("abc", 2) == "ab");
     CHECK(String::fromUTF8("abc") == "abc");
     CHECK(String::fromUTF8(nullptr).isEmpty());
