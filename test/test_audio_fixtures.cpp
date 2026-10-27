@@ -324,22 +324,51 @@ TEST_CASE("audio fixtures: a probe agrees with a decode, and the file path with 
 
 TEST_CASE("audio fixtures: the same bytes decode the same on every thread at once",
           "[audio][file][fixtures]") {
+    // Catch2's assertions are the test thread's alone, so the workers only
+    // decode and keep what they got; every comparison is made back here.
     const std::vector<std::string> names = {"flac-s16.flac", "mp3-cbr.mp3", "ogg-q3.ogg", "wav-s24.wav"};
+    std::vector<std::vector<uint8_t>> bytes;
     std::vector<Decoded> alone;
-    for (const auto& n : names) alone.push_back(decodeFixture(n));
+    for (const auto& n : names) {
+        bytes.push_back(readFile(kFixtures / n));
+        alone.push_back(decodeBytes(bytes.back()));
+        REQUIRE(alone.back().status == CLOCKWORK_OK);
+    }
 
+    struct Outcome { ClockworkStatus status; std::vector<float> samples; };
+    const auto decodeQuietly = [](const std::vector<uint8_t>& in) {
+        Outcome o{CLOCKWORK_E_ARG, {}};
+        ClockworkAudioInfo info{};
+        info.struct_bytes = sizeof(info);
+        float* out = nullptr;
+        o.status = clockwork_audio_decode_memory(in.data(), in.size(), &info, &out);
+        if (o.status == CLOCKWORK_OK && out != nullptr) {
+            o.samples.assign(out, out + static_cast<size_t>(info.frames) * info.channels);
+            clockwork_audio_free(out);
+        }
+        return o;
+    };
+
+    constexpr int kThreads = 8, kRounds = 5;
+    std::vector<std::vector<Outcome>> outcomes(kThreads);
     std::vector<std::thread> threads;
-    std::vector<int> mismatches(8, 0);
-    for (int t = 0; t < 8; ++t)
+    for (int t = 0; t < kThreads; ++t)
         threads.emplace_back([&, t] {
-            for (int round = 0; round < 5; ++round)
-                for (size_t i = 0; i < names.size(); ++i) {
-                    const auto d = decodeFixture(names[i]);
-                    if (d.status != CLOCKWORK_OK || d.samples != alone[i].samples) ++mismatches[t];
-                }
+            for (int round = 0; round < kRounds; ++round)
+                for (const auto& b : bytes) outcomes[static_cast<size_t>(t)].push_back(decodeQuietly(b));
         });
     for (auto& t : threads) t.join();
-    for (int m : mismatches) CHECK(m == 0);
+
+    for (int t = 0; t < kThreads; ++t) {
+        REQUIRE(outcomes[static_cast<size_t>(t)].size() == names.size() * kRounds);
+        for (size_t i = 0; i < outcomes[static_cast<size_t>(t)].size(); ++i) {
+            const auto& got = outcomes[static_cast<size_t>(t)][i];
+            const auto& want = alone[i % names.size()];
+            INFO("thread " << t << ", " << names[i % names.size()]);
+            REQUIRE(got.status == CLOCKWORK_OK);
+            REQUIRE(got.samples == want.samples);
+        }
+    }
 }
 
 // ── Files cut short, and bytes that are not audio ───────────────────────────

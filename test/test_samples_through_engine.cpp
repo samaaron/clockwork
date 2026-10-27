@@ -42,11 +42,15 @@
 #include <filesystem>
 #include <string>
 #include <vector>
-#if !defined(_WIN32)
-#include <unistd.h>   // getpid
-#else
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
 #include <process.h>
 #define getpid _getpid
+#define popen _popen     // the same calls, as MSVC spells them
+#define pclose _pclose
+#else
+#include <unistd.h>   // getpid
 #endif
 
 namespace {
@@ -100,8 +104,11 @@ std::string shellQuote(const fs::path& p) {
 // What a command prints, as bytes.
 std::vector<uint8_t> run(const std::string& command) {
     std::vector<uint8_t> out;
-    std::FILE* pipe = ::popen(command.c_str(), "r");
+    std::FILE* pipe = ::popen(command.c_str(), "r");   // binary on Windows: _popen reads "r" as text
     REQUIRE(pipe != nullptr);
+#if defined(_WIN32)
+    _setmode(_fileno(pipe), _O_BINARY);
+#endif
     uint8_t buf[1 << 16];
     for (size_t n; (n = std::fread(buf, 1, sizeof buf, pipe)) > 0;) out.insert(out.end(), buf, buf + n);
     REQUIRE(::pclose(pipe) == 0);
@@ -273,8 +280,14 @@ void writeAndReadBack(const fs::path& tmp, const std::string& name, const Decode
 // fixtures, visibly; pointed at a directory, it fails instead: a run that
 // asked for the samples and could not judge them did not look.
 bool haveFfmpeg() {
-    std::FILE* pipe = ::popen("ffmpeg -version >/dev/null 2>&1 && ffprobe -version >/dev/null 2>&1", "r");
-    return pipe != nullptr && ::pclose(pipe) == 0;
+    for (const char* tool : {"ffmpeg -version", "ffprobe -version"}) {
+        std::FILE* pipe = ::popen(tool, "r");
+        if (pipe == nullptr) return false;
+        char buf[256];
+        while (std::fgets(buf, sizeof buf, pipe) != nullptr) {}   // drained, not shown
+        if (::pclose(pipe) != 0) return false;
+    }
+    return true;
 }
 
 TEST_CASE("samples: every file decodes as ffmpeg decodes it, plays through the engine unchanged, "
