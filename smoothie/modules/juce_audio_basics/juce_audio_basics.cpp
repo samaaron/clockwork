@@ -58,6 +58,7 @@
  #include <arm_neon.h>
 #endif
 
+#include "buffers/juce_AudioDataConverters.cpp"
 #include "buffers/juce_FloatVectorOperations.cpp"
 #include "buffers/juce_AudioChannelSet.cpp"
 #include "utilities/juce_AudioWorkgroup.cpp"

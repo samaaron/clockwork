@@ -83,6 +83,7 @@
 
 //==============================================================================
 JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4661)
+#include "buffers/juce_AudioDataConverters.h"
 #include "buffers/juce_FloatVectorOperations.h"
 JUCE_END_IGNORE_WARNINGS_MSVC
 #include "buffers/juce_AudioSampleBuffer.h"

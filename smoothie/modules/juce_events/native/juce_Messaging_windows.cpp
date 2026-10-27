@@ -96,8 +96,7 @@ public:
             }
             else if (m.message == WM_QUIT)
             {
-                if (auto* app = JUCEApplicationBase::getInstance())
-                    app->systemRequestedQuit();
+                // There is no application object to ask; the host owns quitting.
             }
             else if (isEventBlockedByModalComps == nullptr || ! isEventBlockedByModalComps (m))
             {

@@ -53,6 +53,7 @@
 #include "messages/juce_DeletedAtShutdown.cpp"
 #include "messages/juce_MessageManager.cpp"
 #include "broadcasters/juce_AsyncUpdater.cpp"
+#include "timers/juce_Timer.cpp"
 
 //==============================================================================
 #if JUCE_MAC || JUCE_IOS

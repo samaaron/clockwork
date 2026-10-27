@@ -77,6 +77,7 @@
 #include "messages/juce_NotificationType.h"
 #include "messages/juce_Initialisation.h"
 #include "broadcasters/juce_AsyncUpdater.h"
+#include "timers/juce_Timer.h"
 
 #if JUCE_LINUX || JUCE_BSD
  #include "native/juce_EventLoop_linux.h"

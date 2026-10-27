@@ -132,7 +132,6 @@ fn main() {
     let osc = cache.flag("CLOCKWORK_OSC");
     let scheduler = cache.flag("CLOCKWORK_SCHEDULER");
     let link = cache.flag("CLOCKWORK_LINK");
-    let system_zlib = cache.flag("CLOCKWORK_SYSTEM_ZLIB");
     let comms = env::var_os("CARGO_FEATURE_COMMS").is_some();
 
     let mut targets = vec!["clockwork".to_string(), dsp.clone()];
@@ -214,12 +213,8 @@ fn main() {
                     "Security",
                     "Accelerate",
                     "CoreAudio",
-                    "CoreMIDI",
                     "AudioToolbox",
                 ]);
-            }
-            if system_zlib {
-                sys.dylibs(["z"]);
             }
             sys.dylibs(["c++"]);
         }
@@ -237,9 +232,6 @@ fn main() {
             }
             if gamepad {
                 sys.dylibs(["udev"]);
-            }
-            if system_zlib {
-                sys.dylibs(["z"]);
             }
             let cxx = if matches!(os.as_str(), "freebsd" | "openbsd" | "netbsd" | "dragonfly") {
                 "c++"

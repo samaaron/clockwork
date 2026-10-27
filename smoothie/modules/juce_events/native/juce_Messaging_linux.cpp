@@ -271,34 +271,8 @@ private:
 JUCE_IMPLEMENT_SINGLETON (InternalRunLoop)
 
 //==============================================================================
-namespace LinuxErrorHandling
-{
-    static bool keyboardBreakOccurred = false;
-
-    static void keyboardBreakSignalHandler (int sig)
-    {
-        if (sig == SIGINT)
-            keyboardBreakOccurred = true;
-    }
-
-    static void installKeyboardBreakHandler()
-    {
-        struct sigaction saction;
-        sigset_t maskSet;
-        sigemptyset (&maskSet);
-        saction.sa_handler = keyboardBreakSignalHandler;
-        saction.sa_mask = maskSet;
-        saction.sa_flags = 0;
-        sigaction (SIGINT, &saction, nullptr);
-    }
-}
-
-//==============================================================================
 void MessageManager::doPlatformSpecificInitialisation()
 {
-    if (JUCEApplicationBase::isStandaloneApp())
-        LinuxErrorHandling::installKeyboardBreakHandler();
-
     InternalRunLoop::getInstance();
     InternalMessageQueue::getInstance();
 }
@@ -327,9 +301,6 @@ bool dispatchNextMessageOnSystemQueue (bool returnIfNoPendingMessages)
 {
     for (;;)
     {
-        if (LinuxErrorHandling::keyboardBreakOccurred)
-            JUCEApplicationBase::quit();
-
         if (auto* runLoop = InternalRunLoop::getInstanceWithoutCreating())
         {
             if (runLoop->dispatchPendingEvents())
