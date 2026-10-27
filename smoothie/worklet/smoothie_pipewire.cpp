@@ -716,8 +716,8 @@ public:
 
     ~PipeWireAudioIODevice() override { close(); }
 
-    std::vector<std::string> get$1ChannelNames() override { return juce::toStdStrings($2); }
-    juce::StringArray getInputChannelNames() override  { return channelNames(mInInfo, "In"); }
+    std::vector<std::string> getOutputChannelNames() override { return juce::toStdStrings(channelNames(mOutInfo, "Out")); }
+    std::vector<std::string> getInputChannelNames() override  { return juce::toStdStrings(channelNames(mInInfo, "In")); }
 
     juce::Array<double> getAvailableSampleRates() override {
         // The daemon resamples any stream rate to the graph rate, so all the
@@ -778,7 +778,7 @@ public:
         if (err.isNotEmpty()) {
             close();
             mLastError = err;
-            return err;
+            return err.toStdString();
         }
 
         mActiveOut.clear();
@@ -1107,8 +1107,8 @@ public:
 
     ~PatchbayAudioIODevice() override { close(); }
 
-    std::vector<std::string> get$1ChannelNames() override { return juce::toStdStrings($2); }
-    juce::StringArray getInputChannelNames() override  { return portNames("in_"); }
+    std::vector<std::string> getOutputChannelNames() override { return juce::toStdStrings(portNames("out_")); }
+    std::vector<std::string> getInputChannelNames() override  { return juce::toStdStrings(portNames("in_")); }
 
     // The graph decides the real rate; open() reports it back, and the
     // engine adopts actual-over-requested the same way it does for a
@@ -1240,7 +1240,7 @@ public:
         if (err.isNotEmpty()) {
             close();
             mLastError = err;
-            return err;
+            return err.toStdString();
         }
 
         if (const int seen = mObservedRate.load(std::memory_order_relaxed))
