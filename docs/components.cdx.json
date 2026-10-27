@@ -1,0 +1,785 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "library",
+      "bom-ref": "clockwork",
+      "name": "clockwork",
+      "licenses": [
+        {
+          "expression": "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/samaaron/clockwork"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "oscpack",
+      "name": "oscpack",
+      "version": "1.1.0",
+      "author": "Ross Bencina",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/RossBencina/oscpack"
+        }
+      ],
+      "pedigree": {
+        "notes": "The osc/ half only. Three changes, in src/vendor/oscpack/CLOCKWORK-CHANGES.md: 64-bit detection on every LP64 target, the malformed-message exception thrown rather than only constructed, and a rename that goes with it."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/oscpack"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "77ef129cf58123a4fe9cf0f8f928fbd9515478b7"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/oscpack/CHANGES"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "Changes for the (\\d+\\.\\d+\\.\\d+) release"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "libsamplerate",
+      "name": "libsamplerate",
+      "version": "0.2.2",
+      "author": "Erik de Castro Lopo",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause"
+        }
+      ],
+      "purl": "pkg:github/libsndfile/libsamplerate@0.2.2",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/libsndfile/libsamplerate"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/libsndfile/libsamplerate/releases/download/0.2.2/libsamplerate-0.2.2.tar.xz",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "3258da280511d24b49d6b08615bbe824d0cacc9842b0e4caf11c52cf2b043893"
+            }
+          ]
+        }
+      ],
+      "pedigree": {
+        "notes": "A subset of the release, byte for byte: see src/vendor/libsamplerate/CLOCKWORK.md."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/libsamplerate"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "c96f5e3de9c4488f4e6c97f59f5245f22fda22f7"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/libsamplerate/CLOCKWORK.md"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "libsamplerate-(\\d+\\.\\d+\\.\\d+)\\.tar"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_LINK"
+        },
+        {
+          "name": "clockwork:unless",
+          "value": "CLOCKWORK_SYSTEM_SAMPLERATE"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "dr_wav",
+      "name": "dr_wav",
+      "version": "0.14.6",
+      "author": "David Reid",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT-0"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "03e70c1a2d9787cd7ed3e966c075bea7bac6373f759db9cd7ca9ccdfc4ec4493"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/mackron/dr_libs"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/dr_libs/dr_wav.h"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "019e75ba8e9ac47222dfb87671029812069f68dc"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/dr_libs/dr_wav.h"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "dr_wav - v(\\d+\\.\\d+\\.\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "dr_flac",
+      "name": "dr_flac",
+      "version": "0.13.4",
+      "author": "David Reid",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT-0"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "111144e778f55738db6851cb226015c419e00d04b916a09506d4856d9cff945c"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/mackron/dr_libs"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/dr_libs/dr_flac.h"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "dfe8377631000664666519fdb83da193fd8037f4"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/dr_libs/dr_flac.h"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "dr_flac - v(\\d+\\.\\d+\\.\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "dr_mp3",
+      "name": "dr_mp3",
+      "version": "0.7.4",
+      "author": "David Reid",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT-0"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "997b7ee18de6e6b81e2a83f1ea9fc62aef25c62b28d48db95635f49e65de0a2f"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/mackron/dr_libs"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/dr_libs/dr_mp3.h"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "51e61d308dde6b437fce0c5fabb32cd86b40f4d7"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/dr_libs/dr_mp3.h"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "dr_mp3 - v(\\d+\\.\\d+\\.\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "stb_vorbis",
+      "name": "stb_vorbis",
+      "version": "1.22",
+      "author": "Sean Barrett",
+      "licenses": [
+        {
+          "expression": "MIT OR Unlicense"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/nothings/stb"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/vendor/stb/stb_vorbis.c"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "1ee679ca2ef753a528db5ba6801e1067b40481b8"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "src/vendor/stb/stb_vorbis.c"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "Ogg Vorbis audio decoder - v(\\d+\\.\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        },
+        {
+          "name": "clockwork:unless",
+          "value": "CLOCKWORK_SYSTEM_STB"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "juce",
+      "name": "JUCE (juce_core, juce_events, juce_audio_basics, juce_audio_devices)",
+      "version": "7.0.12",
+      "author": "Raw Material Software",
+      "licenses": [
+        {
+          "expression": "ISC"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/juce-framework/JUCE"
+        }
+      ],
+      "pedigree": {
+        "notes": "Smoothie: a maintained fork of JUCE 7's four ISC-licensed modules, the native audio-device layer. See smoothie/README.md."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "smoothie"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "4f43011b96eb0636104cb3e433894cda98243626"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "smoothie/modules/juce_core/system/juce_StandardHeader.h"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "JUCE_MAJOR_VERSION\\s+(\\d+)[\\s\\S]*?JUCE_MINOR_VERSION\\s+(\\d+)[\\s\\S]*?JUCE_BUILDNUMBER\\s+(\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_DEVICE"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "midir",
+      "name": "midir",
+      "version": "0.11.0",
+      "author": "Patrick Reisert",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/midir@0.11.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Boddlnagg/midir"
+        }
+      ],
+      "pedigree": {
+        "notes": "A fork, consumed by rust/clockwork-midi as a path dependency: see external/midir/CLOCKWORK-CHANGES.md."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "external/midir"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "d8813499a0f0d2f343d3e5297719d134340acb82"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "external/midir/Cargo.toml"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "^version = \"([^\"]+)\""
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_MIDI"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "erl_nif",
+      "name": "Erlang/OTP erl_nif headers",
+      "version": "2.17",
+      "author": "Ericsson AB",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/erlang/otp"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "external/erlang_headers"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "ef687ab0ae3901da507bdedbaced1a65af6c286c"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "external/erlang_headers/erl_nif.h"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "ERL_NIF_MAJOR_VERSION (\\d+)[\\s\\S]*?ERL_NIF_MINOR_VERSION (\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_NIF"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "asio-sdk",
+      "name": "Steinberg ASIO SDK",
+      "version": "2.3.4",
+      "author": "Steinberg Media Technologies GmbH",
+      "licenses": [
+        {
+          "expression": "GPL-3.0-only OR LicenseRef-Steinberg-ASIO"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://www.steinberg.net/developers/"
+        }
+      ],
+      "pedigree": {
+        "notes": "Taken under GPLv3. Compiled only into Windows builds with CLOCKWORK_ASIO."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "external/ASIOSDK2.3.4"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:advisory_search",
+          "value": "Steinberg ASIO"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "external/ASIOSDK2.3.4/changes.txt"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "Changes in ASIO (\\d+\\.\\d+\\.\\d+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "windows"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_ASIO"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "ableton-link",
+      "name": "Ableton Link",
+      "version": "Link-4.1",
+      "author": "Ableton AG",
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "purl": "pkg:github/ableton/link@Link-4.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Ableton/link.git"
+        }
+      ],
+      "pedigree": {
+        "notes": "Fetched at configure time, then patched: external/link-*.patch, applied by external/apply-link-patches.cmake. Link carries its own copy of standalone Asio (Boost Software License 1.0).",
+        "patches": [
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "external/link-linkaudio-teardown-race.patch"
+            }
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "external/link-loopback-mode.patch"
+            }
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "external/link-monotonic-commit-timestamp.patch"
+            }
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "external/link-peer-enumeration.patch"
+            }
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "clockwork:fetch",
+          "value": "AbletonLink"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "9c9091275e707ab09d09a5a608fcdb84bf0dec85"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_LINK"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "link-audio-renderer",
+      "name": "Ableton Link LinkAudioRenderer (receive half)",
+      "version": "Link-4.1",
+      "author": "Ableton AG",
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Ableton/link.git"
+        }
+      ],
+      "pedigree": {
+        "notes": "Adapted from upstream's examples/linkaudio/LinkAudioRenderer.hpp; the changes are listed in the file's header."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "src/native/vendor/LinkAudioInputRenderer.hpp"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "9c9091275e707ab09d09a5a608fcdb84bf0dec85"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "CMakeLists.txt"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "FetchContent_Declare\\(AbletonLink[\\s\\S]*?GIT_TAG\\s+(\\S+)"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_LINK_AUDIO"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "clap",
+      "name": "CLAP",
+      "version": "1.2.10",
+      "author": "free-audio",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:github/free-audio/clap@1.2.10",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/free-audio/clap.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:fetch",
+          "value": "clap"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "195b42a004144fab0b3cf95e9c067187d15365b7"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_PLUGINS"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "vst3-pluginterfaces",
+      "name": "VST 3 pluginterfaces",
+      "version": "v3.8.1_build_84",
+      "author": "Steinberg Media Technologies GmbH",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:github/steinbergmedia/vst3_pluginterfaces@v3.8.1_build_84",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/steinbergmedia/vst3_pluginterfaces.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:fetch",
+          "value": "vst3_pluginterfaces"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "4f547e8e102b47de4a8b8aaf343c73b700786372"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native"
+        },
+        {
+          "name": "clockwork:option",
+          "value": "CLOCKWORK_PLUGINS"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "catch2",
+      "name": "Catch2",
+      "version": "v3.5.2",
+      "licenses": [
+        {
+          "expression": "BSL-1.0"
+        }
+      ],
+      "scope": "excluded",
+      "purl": "pkg:github/catchorg/catch2@v3.5.2",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/catchorg/Catch2.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "clockwork:fetch",
+          "value": "Catch2"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "no"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "05e10dfccc28c7f973727c54f850237d07d5e10f"
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "none"
+        }
+      ]
+    }
+  ]
+}

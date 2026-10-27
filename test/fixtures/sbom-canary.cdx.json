@@ -1,0 +1,42 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "library",
+      "bom-ref": "sbom-canary",
+      "name": "sbom-canary",
+      "description": "Not a product. Three components with known advisories, one looked up each way: the scan must fail on this file, which proves it looks."
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lodash@4.17.15",
+      "name": "lodash",
+      "version": "4.17.15",
+      "purl": "pkg:npm/lodash@4.17.15"
+    },
+    {
+      "type": "library",
+      "bom-ref": "canary-zlib",
+      "name": "zlib",
+      "version": "1.2.3",
+      "properties": [
+        { "name": "clockwork:modified", "value": "no" },
+        { "name": "clockwork:upstream_commit", "value": "abf180a067223611620dd97dd5681df7c7fa7c9b" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "canary-search",
+      "name": "zlib (by NVD keyword)",
+      "version": "any",
+      "properties": [
+        { "name": "clockwork:advisory_search", "value": "zlib inflate" }
+      ]
+    }
+  ]
+}
