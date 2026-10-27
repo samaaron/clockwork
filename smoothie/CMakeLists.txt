@@ -64,7 +64,23 @@ elseif(UNIX)
     find_package(ALSA REQUIRED)
     target_link_libraries(smoothie PUBLIC
         Threads::Threads ALSA::ALSA ${CMAKE_DL_LIBS} rt)
-    # JACK + PipeWire backends are dlopen'd at runtime — compile-time flag
-    # only, no link dependency (see root CMakeLists for the PipeWire glue).
+    # JACK + PipeWire backends are dlopen'd at runtime — compile-time flags
+    # only, no link dependency.
     target_compile_definitions(smoothie PUBLIC JUCE_JACK=1)
+
+    # Smoothie's own PipeWire driver (worklet/smoothie_pipewire.cpp). Only
+    # libpipewire-0.3's headers are needed, and only at build time; without
+    # them the driver is simply not compiled and CLOCKWORK_PIPEWIRE is unset.
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(PIPEWIRE libpipewire-0.3)
+    endif()
+    if(PIPEWIRE_FOUND)
+        target_sources(smoothie PRIVATE worklet/smoothie_pipewire.cpp)
+        target_compile_definitions(smoothie PUBLIC CLOCKWORK_PIPEWIRE=1)
+        target_include_directories(smoothie PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+        message(STATUS "PipeWire driver: enabled (libpipewire-0.3 ${PIPEWIRE_VERSION})")
+    else()
+        message(STATUS "PipeWire driver: disabled (libpipewire-0.3 headers not found)")
+    endif()
 endif()

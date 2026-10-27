@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
-// Copyright (c) 2025 Sam Aaron
+// SPDX-License-Identifier: ISC
+// Copyright (c) 2025-2026 Sam Aaron
 /*
- * PipeWireAudio.h — native PipeWire audio backend (Linux)
+ * smoothie_pipewire.h — the PipeWire driver (Linux), Smoothie's own
  *
  * A driver (a juce::AudioIODeviceType) named "PipeWire" that talks to the PipeWire
  * daemon directly via libpipewire-0.3 instead of going through the ALSA or
@@ -16,13 +16,15 @@
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
 
 #include <memory>
+#include <string>
 
 namespace smoothie { struct DriverFactory; }   // smoothie_juce_drivers.h
 
 // The platform's drivers (smoothie::platformDrivers) and, when libpipewire
 // loads, the PipeWire driver after them: what a device session is made of on
-// a Linux build with PipeWire.
-std::shared_ptr<const smoothie::DriverFactory> platformDriversWithPipeWire();
+// a Linux build with PipeWire. `clientName` is what the daemon shows for
+// this process's streams and nodes.
+std::shared_ptr<const smoothie::DriverFactory> platformDriversWithPipeWire(std::string clientName);
 
 // Names the engine's device-switch policy needs: the patchbay is an
 // exclusive duplex device (both sides on one filter node — see

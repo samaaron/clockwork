@@ -124,7 +124,6 @@ add_executable(clockwork_tests
     test_sink_profile.cpp
     test_ring_wire_conformance.cpp
     test_server_shm_security.cpp
-    test_hardening_policy.cpp
     test_transports.cpp
 
     # The port substrate (rust/clockwork-ports) through its C ABI, its two

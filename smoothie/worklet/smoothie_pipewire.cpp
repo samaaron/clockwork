@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
-// Copyright (c) 2025 Sam Aaron
+// SPDX-License-Identifier: ISC
+// Copyright (c) 2025-2026 Sam Aaron
 /*
- * PipeWireAudio.cpp — native PipeWire audio backend (Linux)
+ * smoothie_pipewire.cpp — the PipeWire driver (Linux), Smoothie's own
  *
  * Structure mirrors JUCE's JACK backend: a process-lifetime connection to the
  * daemon (PipeWireSystem), a device type that snapshots the node graph, and a
@@ -20,14 +20,14 @@
 
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
 
-#include "PipeWireAudio.h"
+#include "smoothie_pipewire.h"
 #include "smoothie_juce_drivers.h"
-#include "owner.h"
 
 #include <dlfcn.h>
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,8 +44,11 @@
 #include <spa/param/audio/type-info.h>
 #include <spa/utils/result.h>
 
-extern "C" int clockwork_log(const char* fmt, ...);
-extern "C" const char* clockwork_app_name();
+// The name the host gave its PipeWire client, from platformDriversWithPipeWire.
+static std::string& pipeWireClientName() {
+    static std::string name = "smoothie";
+    return name;
+}
 
 #ifndef PW_KEY_TARGET_OBJECT
 #define PW_KEY_TARGET_OBJECT "target.object"
@@ -57,9 +60,20 @@ extern "C" const char* clockwork_app_name();
 #define PW_KEY_NODE_MAX_LATENCY "node.max-latency"
 #endif
 
-#include "HardeningPolicy.h"
-
 namespace {
+
+// Smoothie's drivers log through juce::Logger, which the host routes
+// (smoothie::routeDeviceLog).
+__attribute__((format(printf, 1, 2)))
+void logLine(const char* fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof buf, fmt, args);
+    va_end(args);
+    juce::Logger::writeToLog(juce::String(juce::CharPointer_UTF8(buf)));
+}
+
 
 constexpr const char* kDefaultDeviceName = "System Default";
 
@@ -222,7 +236,7 @@ struct PwNodeInfo {
 class PipeWireSystem {
 public:
     static PipeWireSystem& instance() {
-        static gsl::owner<PipeWireSystem*> s = new PipeWireSystem();   // the process's, never freed (see above)
+        static PipeWireSystem* const s = new PipeWireSystem();   // NOLINT(cppcoreguidelines-owning-memory): the process's, never freed (see above)
         return *s;
     }
 
@@ -250,7 +264,7 @@ public:
             api.init(nullptr, nullptr);
             mLoop = api.thread_loop_new("clockwork-pw", nullptr);
             if (mLoop == nullptr || api.thread_loop_start(mLoop) != 0) {
-                clockwork_log("PipeWire: failed to start thread loop");
+                logLine("PipeWire: failed to start thread loop");
                 if (mLoop != nullptr) { api.thread_loop_destroy(mLoop); mLoop = nullptr; }
                 return false;
             }
@@ -274,7 +288,7 @@ public:
                     }
                 };
                 e.error = [](void*, uint32_t id, int, int res, const char* message) {
-                    clockwork_log("PipeWire core error: id=%u res=%d (%s)",
+                    logLine("PipeWire core error: id=%u res=%d (%s)",
                            id, res, message != nullptr ? message : "");
                 };
                 return e;
@@ -290,7 +304,7 @@ public:
                 return e;
             }();
             pw_registry_add_listener(mRegistry, &mRegistryHook, &registryEvents, this);
-            clockwork_log("PipeWire connected (libpipewire %s)", api.get_library_version());
+            logLine("PipeWire connected (libpipewire %s)", api.get_library_version());
         }
         unlock();
         return mCore != nullptr;
@@ -580,9 +594,10 @@ private:
             for (const auto& n : mNodes)
                 if (n.isSink == sink)
                     present.push_back(n.nodeName);
-            const bool missing = hardening::defaultNodeMissing(want, present);
+            const bool missing = !want.empty() && !present.empty()
+                                 && std::find(present.begin(), present.end(), want) == present.end();
             if (missing && !warned)
-                clockwork_log("PipeWire: configured default %s '%s' is not present in the "
+                logLine("PipeWire: configured default %s '%s' is not present in the "
                        "graph — audio may route to a fallback device (stale "
                        "session-manager state from a removed sound card?)",
                        sink ? "output" : "input", want.c_str());
@@ -716,8 +731,8 @@ public:
 
     int getDefaultBufferSize() override { return 256; }
 
-    juce::String open(const juce::BigInteger& inputChannels,
-                      const juce::BigInteger& outputChannels,
+    juce::String open(const juce::ChannelMask& inputChannels,
+                      const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         close();
         auto& sys = PipeWireSystem::instance();
@@ -819,8 +834,8 @@ public:
     double getCurrentSampleRate() override     { return mRate; }
     int getCurrentBitDepth() override          { return 32; }
 
-    juce::BigInteger getActiveOutputChannels() const override { return mActiveOut; }
-    juce::BigInteger getActiveInputChannels() const override  { return mActiveIn; }
+    juce::ChannelMask getActiveOutputChannels() const override { return mActiveOut; }
+    juce::ChannelMask getActiveInputChannels() const override  { return mActiveIn; }
 
     // One quantum each way is what the graph adds between our node and the
     // device node; device-internal latency is not visible through the stream
@@ -859,7 +874,7 @@ private:
         auto& A = sys.api;
 
         // pw_properties copies its values, so the temporaries are safe.
-        const juce::String appName(clockwork_app_name());
+        const juce::String appName(pipeWireClientName().c_str());
         const juce::String inputNodeName = appName + " Input";
         pw_properties* props = A.properties_new(
             PW_KEY_MEDIA_TYPE, "Audio",
@@ -924,7 +939,7 @@ private:
         e.state_changed = [](void* /*data*/, pw_stream_state /*old*/, pw_stream_state state,
                              const char* error) {
             if (state == PW_STREAM_STATE_ERROR)
-                clockwork_log("PipeWire stream error: %s", error != nullptr ? error : "unknown");
+                logLine("PipeWire stream error: %s", error != nullptr ? error : "unknown");
             auto& sys = PipeWireSystem::instance();
             sys.api.thread_loop_signal(sys.loop(), false);
         };
@@ -1062,7 +1077,7 @@ private:
     int mNumOut = 0, mNumIn = 0;
     bool mIsOpen = false;
     juce::String mLastError;
-    juce::BigInteger mActiveOut, mActiveIn;
+    juce::ChannelMask mActiveOut, mActiveIn;
 
     juce::AudioIODeviceCallback* mCallback = nullptr;
     juce::CriticalSection mCallbackLock;
@@ -1108,8 +1123,8 @@ public:
 
     int getDefaultBufferSize() override { return 256; }
 
-    juce::String open(const juce::BigInteger& inputChannels,
-                      const juce::BigInteger& outputChannels,
+    juce::String open(const juce::ChannelMask& inputChannels,
+                      const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         close();
         auto& sys = PipeWireSystem::instance();
@@ -1146,8 +1161,8 @@ public:
             PW_KEY_MEDIA_TYPE, "Audio",
             PW_KEY_MEDIA_CATEGORY, "Duplex",
             PW_KEY_MEDIA_ROLE, "DSP",
-            PW_KEY_APP_NAME, clockwork_app_name(),
-            PW_KEY_NODE_NAME, clockwork_app_name(),
+            PW_KEY_APP_NAME, pipeWireClientName().c_str(),
+            PW_KEY_NODE_NAME, pipeWireClientName().c_str(),
             PW_KEY_NODE_ALWAYS_PROCESS, "true",
             nullptr);
         std::array<char, 64> tmp{};
@@ -1157,7 +1172,7 @@ public:
         snprintf(tmp.data(), tmp.size(), "%d/%d", std::max(mBufFrames * 2, 2048), mRate);
         A.properties_set(props, PW_KEY_NODE_MAX_LATENCY, tmp.data());
 
-        mFilter = A.filter_new(sys.core(), clockwork_app_name(), props);
+        mFilter = A.filter_new(sys.core(), pipeWireClientName().c_str(), props);
         if (mFilter == nullptr) {
             err = "pw_filter_new failed";
         } else {
@@ -1167,7 +1182,7 @@ public:
                 e.state_changed = [](void* /*data*/, pw_filter_state /*old*/,
                                      pw_filter_state state, const char* error) {
                     if (state == PW_FILTER_STATE_ERROR)
-                        clockwork_log("PipeWire filter error: %s", error != nullptr ? error : "unknown");
+                        logLine("PipeWire filter error: %s", error != nullptr ? error : "unknown");
                     auto& s = PipeWireSystem::instance();
                     s.api.thread_loop_signal(s.loop(), false);
                 };
@@ -1283,8 +1298,8 @@ public:
     double getCurrentSampleRate() override     { return mRate; }
     int getCurrentBitDepth() override          { return 32; }
 
-    juce::BigInteger getActiveOutputChannels() const override { return mActiveOut; }
-    juce::BigInteger getActiveInputChannels() const override  { return mActiveIn; }
+    juce::ChannelMask getActiveOutputChannels() const override { return mActiveOut; }
+    juce::ChannelMask getActiveInputChannels() const override  { return mActiveIn; }
 
     int getOutputLatencyInSamples() override { return mBufFrames; }
     int getInputLatencyInSamples() override  { return mBufFrames; }
@@ -1372,7 +1387,7 @@ private:
             if (link != nullptr)
                 links.proxies.push_back(link);
         }
-        clockwork_log("PipeWire patchbay: auto-linked %d %s port(s) to node %u",
+        logLine("PipeWire patchbay: auto-linked %d %s port(s) to node %u",
                (int) links.proxies.size(), playback ? "out" : "in", target.nodeId);
     }
 
@@ -1447,7 +1462,7 @@ private:
     std::atomic<bool> mClosing { false };
     std::atomic<int> mObservedRate { 0 };
     juce::String mLastError;
-    juce::BigInteger mActiveOut, mActiveIn;
+    juce::ChannelMask mActiveOut, mActiveIn;
 
     juce::AudioIODeviceCallback* mCallback = nullptr;
     juce::CriticalSection mCallbackLock;
@@ -1587,7 +1602,8 @@ private:
 
 } // namespace
 
-std::shared_ptr<const smoothie::DriverFactory> platformDriversWithPipeWire() {
+std::shared_ptr<const smoothie::DriverFactory> platformDriversWithPipeWire(std::string clientName) {
+    pipeWireClientName() = std::move(clientName);
     auto factory = std::make_shared<smoothie::DriverFactory>();
     factory->make = [] {
         smoothie::Drivers drivers = smoothie::platformDrivers();

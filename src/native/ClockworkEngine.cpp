@@ -14,7 +14,7 @@
 #include "clock/MidiClockOut.h"
 #include "DevicePolicy.h"
 #include "AsioDriverCheck.h"
-#include "PipeWireAudio.h"
+#include "smoothie_pipewire.h"
 #include "audio_processor.h"
 #include "lanes/lanes.h"
 #include "lanes/lanes_internal.h"   // clockwork_egress_nrt_free: the control pass's room check
@@ -191,7 +191,7 @@ std::unique_ptr<smoothie::DeviceSession> ClockworkEngine::makeDeviceSession() {
     auto drivers = driverFactory();
 #if defined(__linux__) && defined(CLOCKWORK_PIPEWIRE)
     // The platform's drivers and the PipeWire one beside them.
-    if (!drivers) drivers = platformDriversWithPipeWire();
+    if (!drivers) drivers = platformDriversWithPipeWire(clockwork_app_name());
 #endif
     return std::make_unique<smoothie::DeviceSession>(std::move(options), drivers);
 }

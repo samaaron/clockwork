@@ -808,24 +808,6 @@ if(CLOCKWORK_DEVICE)
     target_link_libraries(clockwork PUBLIC smoothie)
 endif()
 
-# Native PipeWire backend on Linux. libpipewire-0.3 is dlopen'd at runtime, so
-# only its headers are needed and only at build time; without them the backend
-# is simply not compiled.
-if(UNIX AND NOT APPLE AND CLOCKWORK_DEVICE)
-    find_package(PkgConfig QUIET)
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(PIPEWIRE libpipewire-0.3)
-    endif()
-    if(PIPEWIRE_FOUND)
-        target_sources(clockwork PRIVATE ${NATIVE_SRC}/PipeWireAudio.cpp)
-        target_compile_definitions(clockwork PUBLIC CLOCKWORK_PIPEWIRE=1)
-        target_include_directories(clockwork PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
-        message(STATUS "PipeWire backend: enabled (libpipewire-0.3 ${PIPEWIRE_VERSION})")
-    else()
-        message(STATUS "PipeWire backend: disabled (libpipewire-0.3 headers not found)")
-    endif()
-endif()
-
 if(WIN32 AND CLOCKWORK_ASIO)
     # JUCE's juce_ASIO_windows.cpp includes the SDK headers when JUCE_ASIO=1.
     # ASIOSDK_DIR points at another copy's common/ directory; default is the
