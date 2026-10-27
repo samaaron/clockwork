@@ -92,7 +92,7 @@ EngineFixture::EngineFixture(const ClockworkEngine::Config& cfg,
 void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStartsAfterMs,
                          const std::function<void(ClockworkEngine&)>& beforeInit) {
     mManualPump = cfg.manualAudioPump;
-    mAudioCanary = !cfg.manualAudioPump && cfg.headless;   // the headless driver, on wall time
+    mAudioCanary = !cfg.manualAudioPump && cfg.headless && !cfg.headlessPacer;   // the headless driver, on wall time
     mSampleRate = cfg.sampleRate;
 
     mEngine.onReply = [this](const uint8_t* data, uint32_t size) {

@@ -427,6 +427,7 @@ add_executable(clockwork_engine_tests
     test_control_plane_liveness.cpp
     test_ingest_overload.cpp
     test_callback_watchdog.cpp
+    test_headless_pacing.cpp
     test_audio_gap.cpp
     test_late_events.cpp
     test_cold_swap_recovery.cpp

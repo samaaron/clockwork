@@ -3108,6 +3108,7 @@ bool ClockworkEngine::startAudioSource() {
         mHeadlessDriver->setClockworkClock(&mClockworkClock);
         mHeadlessDriver->setLinkAudio(&mLinkAudio);
         mHeadlessDriver->setMetrics(mMetrics);
+        mHeadlessDriver->setPacer(mCurrentConfig.headlessPacer);
         mHeadlessDriver->start();
         mActiveSource.store(AudioSource::Headless, std::memory_order_release);
     } else {

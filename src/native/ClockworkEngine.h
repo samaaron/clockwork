@@ -65,6 +65,7 @@ struct DeviceRequest;    // smoothie_devices.h
 struct DriverFactory;    // smoothie_juce_drivers.h: it brings JUCE, which no host needs
 }
 class HeadlessDriver;
+struct HeadlessPacer;
 
 class ClockworkEngine {
     friend class EngineFixture;
@@ -182,6 +183,12 @@ public:
         // watchdogPoll() itself, so time passes only when the test says.
         // Empty: steady_clock, polled every watchdogPollMs on a thread.
         std::function<int64_t()> watchdogClockMs;
+        // The headless driver's clock, for a test: what time it is, how to
+        // sleep until a time, and the wall clocks a block is stamped with
+        // (HeadlessPacer). Set, the driver renders a block only when this
+        // says its time has come, however late that is, so a case says how
+        // a starved machine wakes it. Empty: the platform's timer.
+        std::shared_ptr<HeadlessPacer> headlessPacer;
         // The host drains the egress rings itself, through the client API
         // (clockwork_client_poll on egressClient()), and routes what it takes
         // to its transport — as the JavaScript client does on the web. The
