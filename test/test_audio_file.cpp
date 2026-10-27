@@ -17,7 +17,7 @@
  *     format a browser's own decoder refuses, so it is the reason the
  *     decoding is compiled in rather than borrowed from the platform.
  *   - the WAV a writer produces is parsed here against the RIFF chunk layout,
- *     so "it is a WAV" is checked against the format and not against dr_wav.
+ *     so "it is a WAV" is checked against the format and not against a decoder.
  *
  * FLAC round trips are exact on purpose: the format is lossless, so anything
  * short of bit-identical is a bug rather than a tolerance.
@@ -371,7 +371,7 @@ TEST_CASE("audio file: a writer's memory and its file agree byte for byte",
           "[audio][file]") {
     // The two destinations are one encoder. If they ever diverge, a browser
     // and a desktop would produce different files from the same take. Both
-    // formats: the WAV's file goes through dr_wav's callbacks, the FLAC's is
+    // formats: the WAV's file goes through fwrite and a seek, the FLAC's is
     // written here, and either is the writer's own file.
     const uint32_t format = GENERATE(CLOCKWORK_AUDIO_FORMAT_WAV, CLOCKWORK_AUDIO_FORMAT_FLAC);
     const bool wav = format == CLOCKWORK_AUDIO_FORMAT_WAV;
@@ -551,4 +551,28 @@ TEST_CASE("flac encoder: a flat block and an incompressible one take their own s
         // Whatever it chose, it did not make the data bigger than raw by much.
         CHECK(out.size() <= 4096 * 3 + 64);
     }
+}
+
+TEST_CASE("flac encoder: the stream says its block size is fixed, whatever the last block held",
+          "[audio][file][flac]") {
+    // STREAMINFO's minimum and maximum block size are the block size the
+    // stream uses, the last block excluded: equal, which is how a FLAC says
+    // its frames are numbered by frame and not by sample. The encoder used
+    // to write the last block's shorter length as the minimum; the reference
+    // decoder forgave it and symphonia, correctly, did not (2026-10-27).
+    const auto pcm = signal(9000, 2);   // two whole blocks and a short one
+    const auto out = encodeToMemory(CLOCKWORK_AUDIO_FORMAT_FLAC,
+                                    CLOCKWORK_AUDIO_ENCODING_PCM_S16, 2, 44100, pcm);
+    REQUIRE(out.status == CLOCKWORK_OK);
+    REQUIRE(out.bytes.size() > 26);
+    const auto be16 = [&](size_t at) { return (uint32_t(out.bytes[at]) << 8) | out.bytes[at + 1]; };
+    CHECK(be16(8) == FlacEncoder::kBlockSize);    // minimum
+    CHECK(be16(10) == FlacEncoder::kBlockSize);   // maximum
+
+    ClockworkAudioInfo info{};
+    info.struct_bytes = sizeof(info);
+    float* got = nullptr;
+    REQUIRE(clockwork_audio_decode_memory(out.bytes.data(), out.bytes.size(), &info, &got) == CLOCKWORK_OK);
+    CHECK(info.frames == 9000);
+    clockwork_audio_free(got);
 }

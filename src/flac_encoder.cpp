@@ -246,10 +246,15 @@ std::vector<uint8_t> FlacEncoder::finalStreamInfo() const {
     body.reserve(kStreamInfoBytes);
     BitWriter bw(body);
 
-    // Before any frame these totals are zero, which is how a FLAC stream says
-    // "unknown"; close writes this block again with them filled in.
-    bw.write(mMinBlock ? mMinBlock : kBlockSize, 16);
-    bw.write(mMaxBlock ? mMaxBlock : kBlockSize, 16);
+    // Before any frame the frame sizes and the total are zero, which is how
+    // a FLAC stream says "unknown"; close writes this block again with them
+    // filled in. The block size is fixed, and said so: both fields are the
+    // block size, the last block excluded as the format requires. A smaller
+    // minimum would declare a variable-blocksize stream, whose frames are
+    // numbered by sample rather than by frame, and a decoder that believed
+    // it would lose its place after the first frame.
+    bw.write(kBlockSize, 16);
+    bw.write(kBlockSize, 16);
     bw.write(mMinFrame, 24);
     bw.write(mMaxFrame, 24);
     bw.write(mSampleRate, 20);
@@ -391,8 +396,6 @@ void FlacEncoder::encodeBlock(const int32_t* interleaved, uint32_t frames,
         static_cast<uint32_t>(out.size() - frameStart);
     mMinFrame = mMinFrame ? std::min(mMinFrame, frameBytes) : frameBytes;
     mMaxFrame = std::max(mMaxFrame, frameBytes);
-    mMinBlock = mMinBlock ? std::min(mMinBlock, frames) : frames;
-    mMaxBlock = std::max(mMaxBlock, frames);
 
     mTotalFrames += frames;
     ++mFrameNumber;

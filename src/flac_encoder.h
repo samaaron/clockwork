@@ -85,7 +85,6 @@ private:
 
     uint64_t mTotalFrames = 0;
     uint32_t mFrameNumber = 0;
-    uint32_t mMinBlock = 0, mMaxBlock = 0;
     uint32_t mMinFrame = 0, mMaxFrame = 0;
     std::array<uint64_t, 7> mKinds{};
 
