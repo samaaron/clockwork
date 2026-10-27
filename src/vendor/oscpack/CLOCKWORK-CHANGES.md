@@ -3,7 +3,7 @@
 
 # oscpack in clockwork
 
-The `osc/` half of oscpack **release 1.1.0** (Ross Bencina, MIT), with three
+The `osc/` half of oscpack **release 1.1.0** (Ross Bencina, MIT), with four
 changes. They are why clockwork carries this copy rather than linking a
 packaged oscpack (Debian's `liboscpack-dev` is 1.1.0 unmodified), and a
 packager wanting to unvendor it should know each one:
@@ -23,6 +23,14 @@ packager wanting to unvendor it should know each one:
 
 3. **`argument_` → `argumentPtr_`** in the argument accessors of
    `OscReceivedElements.cpp`, a rename that goes with the previous change.
+
+4. **A bundle element's size is checked against what is left before the
+   pointer advances.** `ReceivedBundle::Init` in 1.1.0 computes
+   `p += 4 + elementSize` in unsigned 32-bit arithmetic and only then checks
+   `p > end_`; an element size near 2^32 wraps the sum to a small number, the
+   pointer does not move, and the loop never ends. Found by
+   `test/fuzz/fuzz_osc_received` (2026-10-26); pinned by `test/test_oscpack.cpp`.
+   Not in upstream master as of 2026.
 
 Everything else is 1.1.0 byte for byte. The `ip/` half (sockets, the
 listener) is not carried at all: clockwork's transports are its own

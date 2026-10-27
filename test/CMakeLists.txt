@@ -55,6 +55,7 @@ add_executable(clockwork_tests
 
     # OSC: the codec, the ingress router, and the one prefix clockwork keeps.
     test_osc_codec.cpp
+    test_oscpack.cpp
     test_osc_ingress.cpp
     test_clockwork_sys.cpp
     test_host_forward.cpp

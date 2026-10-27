@@ -774,10 +774,17 @@ void ReceivedBundle::Init( const char *bundle, osc_bundle_element_size_t size )
         if( (elementSize & ((uint32)0x03)) != 0 )
             throw MalformedBundleException( "bundle element size must be multiple of four" );
 
-        p += osc::OSC_SIZEOF_INT32 + elementSize;
-        if( p > end_ )
+        // The element must fit in what is left of the bundle, checked before
+        // the pointer moves: OSC_SIZEOF_INT32 + elementSize is unsigned 32-bit
+        // arithmetic, and a size near 2^32 wraps it to a small number, so the
+        // pointer would not advance and this loop would never end. `remaining`
+        // is at most a valid element size, so the comparison cannot wrap.
+        // (clockwork change 4, CLOCKWORK-CHANGES.md)
+        const uint32 remaining = (uint32)( end_ - (p + osc::OSC_SIZEOF_INT32) );
+        if( elementSize > remaining )
             throw MalformedBundleException( "packet too short for bundle element" );
 
+        p += osc::OSC_SIZEOF_INT32 + elementSize;
         ++elementCount_;
     }
 
