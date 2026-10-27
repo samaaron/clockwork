@@ -225,11 +225,11 @@ public:
     ~iOSAudioIODeviceType() override;
 
     void scanForDevices() override;
-    StringArray getDeviceNames (bool) const override;
+    std::vector<std::string> getDeviceNames (bool) const override;
     int getDefaultDeviceIndex (bool) const override;
     int getIndexOfDevice (AudioIODevice*, bool) const override;
     bool hasSeparateInputsAndOutputs() const override;
-    AudioIODevice* createDevice (const String&, const String&) override;
+    AudioIODevice* createDevice (const std::string&, const std::string&) override;
 
 private:
     void handleRouteChange (AVAudioSessionRouteChangeReason);
@@ -448,7 +448,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         JUCE_IOS_AUDIO_LOG ("Actual buffer size: " << bufferSize);
     }
 
-    String open (const ChannelMask& inputChannelsWanted,
+    std::string open (const ChannelMask& inputChannelsWanted,
                  const ChannelMask& outputChannelsWanted,
                  double sampleRateWanted, int bufferSizeWanted)
     {
@@ -483,7 +483,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         if (! createAudioUnit())
         {
             lastError = "Couldn't open the device";
-            return lastError;
+            return lastError.toStdString();
         }
 
         const ScopedLock sl (callbackLock);
@@ -493,7 +493,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         if (callback != nullptr)
             callback->audioDeviceAboutToStart (&owner);
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close()
@@ -748,7 +748,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         const ScopedLock sl (callbackLock);
 
         if (callback != nullptr)
-            callback->audioDeviceError (reason);
+            callback->audioDeviceError (reason.toStdString());
     }
 
     void handleStatusChange (bool enabled, const char* reason)
@@ -1420,10 +1420,10 @@ bool iOSAudioIODevice::setAudioPreprocessingEnabled (bool enabled)  { return pim
 
 bool iOSAudioIODevice::isPlaying()                                  { return pimpl->isRunning && pimpl->callback != nullptr; }
 bool iOSAudioIODevice::isOpen()                                     { return pimpl->isRunning; }
-String iOSAudioIODevice::getLastError()                             { return pimpl->lastError; }
+std::string iOSAudioIODevice::getLastError()                        { return pimpl->lastError.toStdString(); }
 
-StringArray iOSAudioIODevice::getOutputChannelNames()               { return pimpl->channelData.outputs->hardwareChannelNames; }
-StringArray iOSAudioIODevice::getInputChannelNames()                { return pimpl->channelData.inputs->areChannelsAccessible ? pimpl->channelData.inputs->hardwareChannelNames : StringArray(); }
+std::vector<std::string> iOSAudioIODevice::getOutputChannelNames() { return toStdStrings (pimpl->channelData.outputs->hardwareChannelNames); }
+std::vector<std::string> iOSAudioIODevice::getInputChannelNames()  { return toStdStrings ($1); }
 
 int iOSAudioIODevice::getDefaultBufferSize()                        { return pimpl->defaultBufferSize; }
 int iOSAudioIODevice::getCurrentBufferSizeSamples()                 { return pimpl->bufferSize; }
@@ -1463,12 +1463,12 @@ iOSAudioIODeviceType::~iOSAudioIODeviceType()
 
 // The list of devices is updated automatically
 void iOSAudioIODeviceType::scanForDevices() {}
-StringArray iOSAudioIODeviceType::getDeviceNames (bool) const             { return { iOSAudioDeviceName }; }
+std::vector<std::string> iOSAudioIODeviceType::getDeviceNames (bool) const { return { iOSAudioDeviceName }; }
 int iOSAudioIODeviceType::getDefaultDeviceIndex (bool) const              { return 0; }
 int iOSAudioIODeviceType::getIndexOfDevice (AudioIODevice*, bool) const   { return 0; }
 bool iOSAudioIODeviceType::hasSeparateInputsAndOutputs() const            { return false; }
 
-AudioIODevice* iOSAudioIODeviceType::createDevice (const String& outputDeviceName, const String& inputDeviceName)
+AudioIODevice* iOSAudioIODeviceType::createDevice (const std::string& outputDeviceName, const std::string& inputDeviceName)
 {
     return new iOSAudioIODevice (this, outputDeviceName, inputDeviceName);
 }

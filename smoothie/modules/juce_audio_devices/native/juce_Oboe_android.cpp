@@ -190,7 +190,7 @@ public:
         return AndroidHighPerformanceAudioHelpers::getAvailableBufferSizes (getNativeBufferSize(), getAvailableSampleRates());
     }
 
-    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
+    std::string open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double requestedSampleRate, int bufferSize) override
     {
         close();
@@ -238,7 +238,7 @@ public:
         if (! deviceOpen)
             lastError = "Failed to create audio session";
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override                               { stop(); }
@@ -249,7 +249,7 @@ public:
     int getCurrentBitDepth() override                   { return session->getCurrentBitDepth(); }
     ChannelMask getActiveOutputChannels() const override { return activeOutputChans; }
     ChannelMask getActiveInputChannels() const override  { return activeInputChans; }
-    String getLastError() override                      { return lastError; }
+    std::string getLastError() override$1{ return lastError.toStdString(); }
     bool isPlaying() override                           { return callback.get() != nullptr; }
     int getXRunCount() const noexcept override          { return session->getXRunCount(); }
 
@@ -1085,8 +1085,8 @@ public:
 
     bool hasSeparateInputsAndOutputs() const override  { return true; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceName,
+                                 const std::string& inputDeviceName)$1
     {
         auto outputDeviceInfo = getDeviceInfoForName (outputDeviceName, false);
         auto inputDeviceInfo  = getDeviceInfoForName (inputDeviceName, true);

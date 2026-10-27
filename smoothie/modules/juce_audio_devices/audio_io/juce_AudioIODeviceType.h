@@ -36,13 +36,13 @@ namespace juce
 
     for (int i = 0; i < types.size(); ++i)
     {
-        String typeName (types[i]->getTypeName());  // This will be things like "DirectSound", "CoreAudio", etc.
+        std::string typeName (types[i]->getTypeName());  // This will be things like "DirectSound", "CoreAudio", etc.
 
         types[i]->scanForDevices();                 // This must be called before getting the list of devices
 
-        StringArray deviceNames (types[i]->getDeviceNames());  // This will now return a list of available devices of this type
+        std::vector<std::string> deviceNames (types[i]->getDeviceNames());  // This will now return a list of available devices of this type
 
-        for (int j = 0; j < deviceNames.size(); ++j)
+        for (size_t j = 0; j < deviceNames.size(); ++j)
         {
             AudioIODevice* device = types[i]->createDevice (deviceNames [j]);
 
@@ -66,7 +66,7 @@ public:
 
         This will be something like "DirectSound", "ASIO", "CoreAudio", "ALSA", etc.
     */
-    const String& getTypeName() const noexcept                      { return typeName; }
+    const std::string& getTypeName() const noexcept                 { return typeName; }
 
     //==============================================================================
     /** Refreshes the object's cached list of known devices.
@@ -83,7 +83,7 @@ public:
         @param wantInputNames    for devices which have separate inputs and outputs
                                  this determines which list of names is returned
     */
-    virtual StringArray getDeviceNames (bool wantInputNames = false) const = 0;
+    virtual std::vector<std::string> getDeviceNames (bool wantInputNames = false) const = 0;
 
     /** Returns the name of the default device.
 
@@ -109,8 +109,8 @@ public:
         The deviceName must be one of the strings returned by getDeviceNames(), and
         scanForDevices() must have been called before this method is used.
     */
-    virtual AudioIODevice* createDevice (const String& outputDeviceName,
-                                         const String& inputDeviceName) = 0;
+    virtual AudioIODevice* createDevice (const std::string& outputDeviceName,
+                                         const std::string& inputDeviceName) = 0;
 
     //==============================================================================
     /** smoothie addition: what a device is, as its driver says without
@@ -129,27 +129,27 @@ public:
         int numInputChannels = -1;
         Array<double> sampleRates;    /**< empty: can't say without opening it */
         Array<int> bufferSizes;       /**< empty: can't say without opening it */
-        String kind;                  /**< the driver's own word for how it is
+        std::string kind;             /**< the driver's own word for how it is
                                            connected, for logs ("usb ", "blue") */
     };
 
     /** smoothie addition: the traits of the device getDeviceNames lists as
         `deviceName`. The default knows nothing about it.
     */
-    virtual DeviceTraits getDeviceTraits (const String& deviceName) const;
+    virtual DeviceTraits getDeviceTraits (const std::string& deviceName) const;
 
     /** smoothie addition: the operating system's default output (or input)
         among this type's devices, by the name getDeviceNames gives it; empty
         when the type has no such thing (ASIO) or can't say. The default
         answers by getDefaultDeviceIndex.
     */
-    virtual String getSystemDefaultDeviceName (bool forInput) const;
+    virtual std::string getSystemDefaultDeviceName (bool forInput) const;
 
     /** smoothie addition: the name of the application the devices are
         opened for, for what a type makes in the operating system's name (a
         CoreAudio aggregate device, a PipeWire node). The default keeps none.
     */
-    virtual void setClientName (const String& name);
+    virtual void setClientName (const std::string& name);
 
     //==============================================================================
     /** smoothie addition: what a device-change sink is told changed. */
@@ -211,7 +211,7 @@ public:
    #endif
 
 protected:
-    explicit AudioIODeviceType (const String& typeName);
+    explicit AudioIODeviceType (std::string typeName);
 
     /** smoothie addition: tells the sink, if one is set, on the calling
         thread (see setDeviceChangeSink). Replaces JUCE's
@@ -220,7 +220,7 @@ protected:
     void reportDeviceChange (DeviceChange change);
 
 private:
-    String typeName;
+    std::string typeName;
     CriticalSection sinkLock;
     std::function<void (DeviceChange)> deviceChangeSink;
 

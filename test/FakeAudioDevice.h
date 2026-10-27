@@ -200,20 +200,18 @@ public:
     FakeAudioIODevice(std::shared_ptr<FakeSystem> system,
                       std::shared_ptr<FakeDeviceSpec> outSpec,
                       std::shared_ptr<FakeDeviceSpec> inSpec,
-                      const juce::String& typeName)
-        : juce::AudioIODevice(outSpec ? juce::String(outSpec->name)
-                                      : juce::String(inSpec->name),
-                              typeName),
+                      std::string typeName)
+        : juce::AudioIODevice(outSpec ? outSpec->name : inSpec->name, std::move(typeName)),
           mSystem(std::move(system)), mOut(std::move(outSpec)), mIn(std::move(inSpec)) {}
 
     ~FakeAudioIODevice() override { close(); }
 
     // Open, the channels it was opened with — a driver's are read when it
     // opens, as CoreAudio's are — until it opens again.
-    juce::StringArray getOutputChannelNames() override {
+    std::vector<std::string> getOutputChannelNames() override {
         return channelNames(mOpen ? mOpenOuts : liveOuts(), "Out");
     }
-    juce::StringArray getInputChannelNames() override {
+    std::vector<std::string> getInputChannelNames() override {
         return channelNames(mOpen ? mOpenIns : liveIns(), "In");
     }
 
@@ -244,7 +242,7 @@ public:
     }
     int getDefaultBufferSize() override { return 128; }
 
-    juce::String open(const juce::ChannelMask& inputChannels,
+    std::string open(const juce::ChannelMask& inputChannels,
                       const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         std::lock_guard<std::recursive_mutex> lk(mLifecycle);
@@ -254,9 +252,9 @@ public:
         // Nothing reads the wording: the engine attributes input-side
         // failures by retrying output-only, not by parsing these.
         if (primary()->failOpen || primary()->dead.load())
-            return "Failed to open device: " + juce::String(primary()->name);
+            return "Failed to open device: " + primary()->name;
         if (mIn && mIn->failInputOpen && inputChannels.countNumberOfSetBits() > 0)
-            return "Failed to open input device: " + juce::String(mIn->name);
+            return "Failed to open input device: " + mIn->name;
 
         // Clamp requested bits to capacity — CoreAudio semantics.
         mOpenOuts = liveOuts();
@@ -329,7 +327,7 @@ public:
     bool joinedVirtualTime() const { return !mPlaying.load() || mJoinedVirtual; }
 
     bool isPlaying() override { return mPlaying.load(); }
-    juce::String getLastError() override { return {}; }
+    std::string getLastError() override { return {}; }
     int getCurrentBufferSizeSamples() override { return mBufferSize; }
     double getCurrentSampleRate() override { return mRate; }
     int getCurrentBitDepth() override { return 32; }
@@ -353,10 +351,10 @@ private:
     int liveOuts() const { return mOut ? mOut->maxOutputChannels : 0; }
     int liveIns()  const { return mIn  ? mIn->maxInputChannels   : 0; }
 
-    static juce::StringArray channelNames(int count, const char* stem) {
-        juce::StringArray names;
+    static std::vector<std::string> channelNames(int count, const char* stem) {
+        std::vector<std::string> names;
         for (int i = 0; i < count; ++i)
-            names.add(juce::String(stem) + " " + juce::String(i + 1));
+            names.push_back(std::string(stem) + " " + std::to_string(i + 1));
         return names;
     }
 
@@ -464,8 +462,7 @@ private:
 class FakeAudioIODeviceType : public juce::AudioIODeviceType {
 public:
     FakeAudioIODeviceType(std::shared_ptr<FakeSystem> system, size_t typeIndex)
-        : juce::AudioIODeviceType(
-              juce::String(system->types[typeIndex].typeName)),
+        : juce::AudioIODeviceType(system->types[typeIndex].typeName),
           mSystem(std::move(system)), mTypeIndex(typeIndex) {
         std::lock_guard<std::mutex> lk(mSystem->liveTypesMutex);
         mSystem->liveTypes.push_back(this);
@@ -489,35 +486,35 @@ public:
     }
 
     // The default by name, or none (ASIO).
-    juce::String getSystemDefaultDeviceName(bool forInput) const override {
+    std::string getSystemDefaultDeviceName(bool forInput) const override {
         if (!spec().namesDefault) return {};
         return juce::AudioIODeviceType::getSystemDefaultDeviceName(forInput);
     }
 
-    DeviceTraits getDeviceTraits(const juce::String& deviceName) const override {
+    DeviceTraits getDeviceTraits(const std::string& deviceName) const override {
         DeviceTraits t;
         for (auto& d : spec().devices) {
-            if (d->hidden.load() || juce::String(d->name) != deviceName) continue;
+            if (d->hidden.load() || d->name != deviceName) continue;
             t.wireless          = d->wireless;
             t.isVirtual         = d->isVirtual;
             t.aggregateClass    = d->aggregateClass;
             t.pairs             = spec().pairsDevices && d->pairs();
             t.numOutputChannels = d->maxOutputChannels;
             t.numInputChannels  = d->maxInputChannels;
-            t.kind              = juce::String(d->kind);
+            t.kind              = d->kind;
         }
         return t;
     }
 
     void scanForDevices() override { mScanned = true; }
 
-    juce::StringArray getDeviceNames(bool wantInputNames) const override {
-        juce::StringArray names;
+    std::vector<std::string> getDeviceNames(bool wantInputNames) const override {
+        std::vector<std::string> names;
         for (auto& d : spec().devices) {
             if (d->hidden.load()) continue;
             if (wantInputNames ? d->maxInputChannels > 0
                                : d->maxOutputChannels > 0)
-                names.add(juce::String(d->name));
+                names.push_back(d->name);
         }
         return names;
     }
@@ -528,15 +525,15 @@ public:
 
     int getIndexOfDevice(juce::AudioIODevice* device, bool asInput) const override {
         if (!device) return -1;
-        return getDeviceNames(asInput).indexOf(device->getName());
+        return juce::indexOfName(getDeviceNames(asInput), device->getName());
     }
 
     bool hasSeparateInputsAndOutputs() const override { return true; }
 
-    juce::AudioIODevice* createDevice(const juce::String& outputDeviceName,
-                                      const juce::String& inputDeviceName) override {
-        auto out = find(outputDeviceName.toStdString());
-        auto in  = find(inputDeviceName.toStdString());
+    juce::AudioIODevice* createDevice(const std::string& outputDeviceName,
+                                      const std::string& inputDeviceName) override {
+        auto out = find(outputDeviceName);
+        auto in  = find(inputDeviceName);
         if (!out && !in) return nullptr;
         // Two devices that don't both pair are refused, as CoreAudio does,
         // and any two where the driver pairs none (ASIO).

@@ -29,7 +29,7 @@ class iOSAudioIODevice : public AudioIODevice
 {
 public:
     //==============================================================================
-    String open (const ChannelMask&, const ChannelMask&, double, int) override;
+    std::string open (const ChannelMask&, const ChannelMask&, double, int) override;
     void close() override;
 
     void start (AudioIODeviceCallback*) override;
@@ -43,11 +43,11 @@ public:
     //==============================================================================
     bool isPlaying() override;
     bool isOpen() override;
-    String getLastError() override;
+    std::string getLastError() override;
 
     //==============================================================================
-    StringArray getOutputChannelNames() override;
-    StringArray getInputChannelNames() override;
+    std::vector<std::string> getOutputChannelNames() override;
+    std::vector<std::string> getInputChannelNames() override;
 
     int getDefaultBufferSize() override;
     int getCurrentBufferSizeSamples() override;

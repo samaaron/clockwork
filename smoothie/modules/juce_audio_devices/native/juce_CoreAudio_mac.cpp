@@ -1205,7 +1205,7 @@ private:
         JUCE_COREAUDIOLOG (errorMessage);
 
         if (callback != nullptr)
-            callback->audioDeviceError (errorMessage);
+            callback->audioDeviceError (errorMessage.toStdString());
 
         return false;
     }
@@ -1222,7 +1222,7 @@ public:
                        const String& deviceName,
                        AudioDeviceID inputDeviceId,
                        AudioDeviceID outputDeviceId)
-        : AudioIODevice (deviceName, "CoreAudio"),
+        : AudioIODevice (deviceName.toStdString(), "CoreAudio"),
           deviceType (dt)
     {
         internal = [this, &inputDeviceId, &outputDeviceId]
@@ -1250,8 +1250,8 @@ public:
         close();
     }
 
-    StringArray getOutputChannelNames() override        { return internal->outStream != nullptr ? internal->outStream->chanNames : StringArray(); }
-    StringArray getInputChannelNames() override         { return internal->inStream  != nullptr ? internal->inStream ->chanNames : StringArray(); }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (internal->outStream != nullptr ? internal->outStream->chanNames : StringArray()); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (internal->inStream  != nullptr ? internal->inStream ->chanNames : StringArray()); }
 
     bool isOpen() override                              { return isOpen_; }
 
@@ -1263,7 +1263,7 @@ public:
     int getCurrentBufferSizeSamples() override          { return internal->getBufferSize(); }
     int getXRunCount() const noexcept override          { return internal->xruns; }
 
-    int getIndexOfDevice (bool asInput) const           { return deviceType->getDeviceNames (asInput).indexOf (getName()); }
+    int getIndexOfDevice (bool asInput) const           { return indexOfName (deviceType->getDeviceNames (asInput), getName()); }
 
     int getDefaultBufferSize() override
     {
@@ -1278,7 +1278,7 @@ public:
         return best;
     }
 
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
@@ -1292,11 +1292,11 @@ public:
             sampleRate = internal->getNominalSampleRate();
 
         lastError = internal->reopen (inputChannels, outputChannels, sampleRate, bufferSizeSamples);
-        JUCE_COREAUDIOLOG ("Opened: " << getName());
+        JUCE_COREAUDIOLOG ("Opened: " << String (getName()));
 
         isOpen_ = lastError.isEmpty();
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -1331,9 +1331,9 @@ public:
         return internal->isPlaying();
     }
 
-    String getLastError() override
+    std::string getLastError() override
     {
-        return lastError;
+        return lastError.toStdString();
     }
 
     bool setCurrentSampleRate (double newSampleRate)
@@ -1702,7 +1702,7 @@ class CoreAudioPairedDevice final : public AudioIODevice
 public:
     CoreAudioPairedDevice (CoreAudioIODeviceType* type, const String& outputName, const String& inputNameIn,
                            AudioDeviceID outputIDIn, AudioDeviceID inputIDIn, const String& clientNameIn)
-        : AudioIODevice (outputName, "CoreAudio"),
+        : AudioIODevice (outputName.toStdString(), "CoreAudio"),
           deviceType (type),
           inputName (inputNameIn),
           outputID (outputIDIn),
@@ -1712,8 +1712,8 @@ public:
         // Described from its two devices, before any aggregate exists.
         CoreAudioIODevice output (type, outputName, 0, outputID);
         CoreAudioIODevice input  (type, inputName, inputID, 0);
-        outputChannelNames = output.getOutputChannelNames();
-        inputChannelNames  = input.getInputChannelNames();
+        outputChannelNames = toStringArray (output.getOutputChannelNames());
+        inputChannelNames  = toStringArray (input.getInputChannelNames());
         defaultBufferSize  = output.getDefaultBufferSize();
         bufferSizes        = output.getAvailableBufferSizes();
 
@@ -1737,8 +1737,8 @@ public:
 
     String getInputDeviceName() const       { return inputName; }
 
-    StringArray getOutputChannelNames() override        { return outputChannelNames; }
-    StringArray getInputChannelNames() override         { return inputChannelNames; }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (outputChannelNames); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (inputChannelNames); }
     Array<double> getAvailableSampleRates() override    { return sampleRates; }
     int getDefaultBufferSize() override                 { return driftFloor (defaultBufferSize); }
 
@@ -1755,7 +1755,7 @@ public:
         return sizes.isEmpty() ? bufferSizes : sizes;
     }
 
-    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
+    std::string open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
         close();
@@ -1765,9 +1765,9 @@ public:
         aggregate = CoreAudioAggregate::create (outputID, inputID, clientName, lastError);
 
         if (aggregate == nullptr)
-            return lastError;
+            return lastError.toStdString();
 
-        inner = std::make_unique<CoreAudioIODevice> (deviceType, getName(), aggregate->getID(), aggregate->getID());
+        inner = std::make_unique<CoreAudioIODevice> (deviceType, String (getName()), aggregate->getID(), aggregate->getID());
 
         ChannelMask outs = outputChannels;
         outs.setRange (outputChannelNames.size(), 256, false);
@@ -1782,7 +1782,7 @@ public:
         if (lastError.isNotEmpty())
             close();
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -1795,7 +1795,7 @@ public:
     void start (AudioIODeviceCallback* callback) override   { if (inner != nullptr) inner->start (callback); }
     void stop() override                           { if (inner != nullptr) inner->stop(); }
     bool isPlaying() override                      { return inner != nullptr && inner->isPlaying(); }
-    String getLastError() override                 { return lastError; }
+    std::string getLastError() override                 { return lastError.toStdString(); }
 
     int getCurrentBufferSizeSamples() override     { return inner != nullptr ? inner->getCurrentBufferSizeSamples() : 0; }
     double getCurrentSampleRate() override         { return inner != nullptr ? inner->getCurrentSampleRate() : 0.0; }
@@ -1950,7 +1950,7 @@ public:
     // (nothing has scanned them, or the device has only just arrived). Never
     // one of our aggregates: macOS can make one the default for a moment as
     // it is made, and it is no device of this type's.
-    String getSystemDefaultDeviceName (bool forInput) const override
+    std::string getSystemDefaultDeviceName (bool forInput) const override
     {
         const auto deviceID = defaultDeviceID (forInput);
 
@@ -1962,16 +1962,17 @@ public:
 
         for (int i = 0; i < ids.size(); ++i)
             if (ids.getUnchecked (i) == deviceID)
-                return names[i];
+                return names[i].toStdString();
 
-        return deviceName (deviceID);
+        return deviceName (deviceID).toStdString();
     }
 
     // smoothie: how the device is connected (its HAL transport type) and
     // what that makes it; its channels from its stream configuration, so
     // nothing is opened to ask.
-    DeviceTraits getDeviceTraits (const String& name) const override
+    DeviceTraits getDeviceTraits (const std::string& nameIn) const override
     {
+        const String name (nameIn);
         DeviceTraits traits;
         const auto deviceID = deviceIDForName (name);
 
@@ -2054,12 +2055,12 @@ public:
         outputDeviceNames.appendNumbersToDuplicates (false, true);
     }
 
-    StringArray getDeviceNames (bool wantInputNames) const override
+    std::vector<std::string> getDeviceNames (bool wantInputNames) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
-        return wantInputNames ? inputDeviceNames
-                              : outputDeviceNames;
+        return toStdStrings (wantInputNames ? inputDeviceNames
+                                            : outputDeviceNames);
     }
 
     int getDefaultDeviceIndex (bool forInput) const override
@@ -2097,16 +2098,17 @@ public:
 
         if (auto* d = dynamic_cast<CoreAudioPairedDevice*> (device))
             return (asInput ? inputDeviceNames : outputDeviceNames)
-                       .indexOf (asInput ? d->getInputDeviceName() : d->getName());
+                       .indexOf (asInput ? d->getInputDeviceName() : String (d->getName()));
 
         return -1;
     }
 
     bool hasSeparateInputsAndOutputs() const override    { return true; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn) override
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
         auto inputIndex  = inputDeviceNames.indexOf (inputDeviceName);
@@ -2135,7 +2137,7 @@ public:
         // traits say why): refused, and the owner opens the output alone.
         for (const auto& name : { outputDeviceName, inputDeviceName })
         {
-            if (! getDeviceTraits (name).pairs)
+            if (! getDeviceTraits (name.toStdString()).pairs)
             {
                 Logger::writeToLog ("[aggregate] '" + name + "' can't be paired with another device");
                 return nullptr;
@@ -2146,7 +2148,7 @@ public:
                                                         outputDeviceID, inputDeviceID, clientName).release();
     }
 
-    void setClientName (const String& name) override    { clientName = name; }
+    void setClientName (const std::string& name) override { clientName = String (name); }
 
     // smoothie: an open device's change, to the sink.
     void reportOpenDeviceChange()

@@ -857,7 +857,7 @@ public:
                                                                             getAvailableSampleRates());
     }
 
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double requestedSampleRate,
                  int bufferSize) override
@@ -934,7 +934,7 @@ public:
             lastError = "Unknown error initializing opensl session";
 
         deviceOpen = (session != nullptr);
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -951,7 +951,7 @@ public:
     int getCurrentBitDepth() override                   { return (session != nullptr && session->supportsFloatingPoint() ? 32 : 16); }
     ChannelMask getActiveOutputChannels() const override { return activeOutputChans; }
     ChannelMask getActiveInputChannels() const override  { return activeInputChans; }
-    String getLastError() override                      { return lastError; }
+    std::string getLastError() override$1{ return lastError.toStdString(); }
     bool isPlaying() override                           { return callback != nullptr; }
     int getXRunCount() const noexcept override          { return (session != nullptr ? session->getXRunCount() : -1); }
 
@@ -1081,8 +1081,8 @@ public:
     int getIndexOfDevice (AudioIODevice* device, bool) const override            { return device != nullptr ? 0 : -1; }
     bool hasSeparateInputsAndOutputs() const override                            { return false; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceName,
+                                 const std::string& inputDeviceName)$1
     {
         std::unique_ptr<OpenSLAudioIODevice> dev;
 

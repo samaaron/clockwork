@@ -701,7 +701,7 @@ class PipeWireAudioIODevice final : public juce::AudioIODevice {
 public:
     PipeWireAudioIODevice(const juce::String& outName, const juce::String& inName,
                           PwNodeInfo outInfo, PwNodeInfo inInfo)
-        : juce::AudioIODevice(outName.isNotEmpty() ? outName : inName, "PipeWire"),
+        : juce::AudioIODevice((outName.isNotEmpty() ? outName : inName).toStdString(), "PipeWire"),
           outputName(outName), inputName(inName),
           mOutInfo(std::move(outInfo)), mInInfo(std::move(inInfo)) {
         // Nodes whose ports weren't visible at scan time (and the default
@@ -716,7 +716,7 @@ public:
 
     ~PipeWireAudioIODevice() override { close(); }
 
-    juce::StringArray getOutputChannelNames() override { return channelNames(mOutInfo, "Out"); }
+    std::vector<std::string> get$1ChannelNames() override { return juce::toStdStrings($2); }
     juce::StringArray getInputChannelNames() override  { return channelNames(mInInfo, "In"); }
 
     juce::Array<double> getAvailableSampleRates() override {
@@ -731,14 +731,14 @@ public:
 
     int getDefaultBufferSize() override { return 256; }
 
-    juce::String open(const juce::ChannelMask& inputChannels,
+    std::string open(const juce::ChannelMask& inputChannels,
                       const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         close();
         auto& sys = PipeWireSystem::instance();
         if (!sys.ensureConnected()) {
             mLastError = "PipeWire daemon is not reachable";
-            return mLastError;
+            return mLastError.toStdString();
         }
 
         mRate = sampleRate > 0 ? (int) sampleRate : 48000;
@@ -752,7 +752,7 @@ public:
                      : 0;
         if (mNumOut == 0 && mNumIn == 0) {
             mLastError = "no channels requested";
-            return mLastError;
+            return mLastError.toStdString();
         }
 
         mOutPtrs.assign((size_t) std::max(mNumOut, 1), nullptr);
@@ -828,7 +828,7 @@ public:
 
     bool isOpen() override    { return mIsOpen; }
     bool isPlaying() override { return mCallback != nullptr; }
-    juce::String getLastError() override { return mLastError; }
+    std::string getLastError() override { return mLastError.toStdString(); }
 
     int getCurrentBufferSizeSamples() override { return mBufFrames; }
     double getCurrentSampleRate() override     { return mRate; }
@@ -1107,7 +1107,7 @@ public:
 
     ~PatchbayAudioIODevice() override { close(); }
 
-    juce::StringArray getOutputChannelNames() override { return portNames("out_"); }
+    std::vector<std::string> get$1ChannelNames() override { return juce::toStdStrings($2); }
     juce::StringArray getInputChannelNames() override  { return portNames("in_"); }
 
     // The graph decides the real rate; open() reports it back, and the
@@ -1123,7 +1123,7 @@ public:
 
     int getDefaultBufferSize() override { return 256; }
 
-    juce::String open(const juce::ChannelMask& inputChannels,
+    std::string open(const juce::ChannelMask& inputChannels,
                       const juce::ChannelMask& outputChannels,
                       double sampleRate, int bufferSizeSamples) override {
         close();
@@ -1131,7 +1131,7 @@ public:
         auto& A = sys.api;
         if (!sys.ensureConnected()) {
             mLastError = "PipeWire daemon is not reachable";
-            return mLastError;
+            return mLastError.toStdString();
         }
 
         mClosing.store(false, std::memory_order_relaxed);
@@ -1143,7 +1143,7 @@ public:
                     : juce::jlimit(1, kPatchbayChans, inputChannels.getHighestBit() + 1);
         if (mNumOut == 0 && mNumIn == 0) {
             mLastError = "no channels requested";
-            return mLastError;
+            return mLastError.toStdString();
         }
 
         mOutPorts.assign((size_t) mNumOut, nullptr);
@@ -1292,7 +1292,7 @@ public:
 
     bool isOpen() override    { return mIsOpen; }
     bool isPlaying() override { return mCallback != nullptr; }
-    juce::String getLastError() override { return mLastError; }
+    std::string getLastError() override { return mLastError.toStdString(); }
 
     int getCurrentBufferSizeSamples() override { return mBufFrames; }
     double getCurrentSampleRate() override     { return mRate; }
@@ -1547,9 +1547,9 @@ public:
         inputNames.add(kPatchbayDeviceName);
     }
 
-    juce::StringArray getDeviceNames(bool wantInputNames) const override {
+    std::vector<std::string> getDeviceNames(bool wantInputNames) const override {
         jassert(hasScanned);
-        return wantInputNames ? inputNames : outputNames;
+        return juce::toStdStrings(wantInputNames ? inputNames : outputNames);
     }
 
     int getDefaultDeviceIndex(bool /*forInput*/) const override {
@@ -1569,8 +1569,9 @@ public:
         return -1;
     }
 
-    juce::AudioIODevice* createDevice(const juce::String& outputDeviceName,
-                                      const juce::String& inputDeviceName) override {
+    juce::AudioIODevice* createDevice(const std::string& outputDeviceNameIn,
+                                      const std::string& inputDeviceNameIn) override {
+        const juce::String outputDeviceName(outputDeviceNameIn), inputDeviceName(inputDeviceNameIn);
         jassert(hasScanned);
         // The patchbay's ports live on one filter node, so selecting it on
         // either side selects it for both — a stream device can't share the

@@ -845,7 +845,7 @@ public:
                        const String& deviceTypeName,
                        const String& inputDeviceID,
                        const String& outputDeviceID)
-        : AudioIODevice (deviceName, deviceTypeName),
+        : AudioIODevice (deviceName.toStdString(), deviceTypeName.toStdString()),
           inputId (inputDeviceID),
           outputId (outputDeviceID),
           internal (inputDeviceID, outputDeviceID)
@@ -857,8 +857,8 @@ public:
         close();
     }
 
-    StringArray getOutputChannelNames() override            { return internal.channelNamesOut; }
-    StringArray getInputChannelNames() override             { return internal.channelNamesIn; }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (internal.channelNamesOut); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (internal.channelNamesIn); }
 
     Array<double> getAvailableSampleRates() override        { return internal.sampleRates; }
 
@@ -881,7 +881,7 @@ public:
 
     int getDefaultBufferSize() override                      { return 512; }
 
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double sampleRate,
                  int bufferSizeSamples) override
@@ -909,7 +909,7 @@ public:
                        sampleRate, bufferSizeSamples);
 
         isOpen_ = internal.error.isEmpty();
-        return internal.error;
+        return internal.error.toStdString();
     }
 
     void close() override
@@ -921,7 +921,7 @@ public:
 
     bool isOpen() override                           { return isOpen_; }
     bool isPlaying() override                        { return isStarted && internal.error.isEmpty(); }
-    String getLastError() override                   { return internal.error; }
+    std::string getLastError() override              { return internal.error.toStdString(); }
 
     int getCurrentBufferSizeSamples() override       { return internal.bufferSize; }
     double getCurrentSampleRate() override           { return internal.sampleRate; }
@@ -1011,11 +1011,11 @@ public:
         outputNames.appendNumbersToDuplicates (false, true);
     }
 
-    StringArray getDeviceNames (bool wantInputNames) const override
+    std::vector<std::string> getDeviceNames (bool wantInputNames) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
-        return wantInputNames ? inputNames : outputNames;
+        return toStdStrings (wantInputNames ? inputNames : outputNames);
     }
 
     int getDefaultDeviceIndex (bool forInput) const override
@@ -1039,9 +1039,10 @@ public:
         return -1;
     }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn) override
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
         auto inputIndex = inputNames.indexOf (inputDeviceName);
@@ -1051,7 +1052,7 @@ public:
                                             : inputDeviceName);
 
         if (inputIndex >= 0 || outputIndex >= 0)
-            return new ALSAAudioIODevice (deviceName, getTypeName(),
+            return new ALSAAudioIODevice (deviceName, String (getTypeName()),
                                           inputIds [inputIndex],
                                           outputIds [outputIndex]);
 

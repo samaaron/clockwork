@@ -55,6 +55,8 @@
 
 #include <juce_events/juce_events.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <string>
+#include <vector>
 
 #if JUCE_MODULE_AVAILABLE_juce_graphics
 #include <juce_graphics/juce_graphics.h>

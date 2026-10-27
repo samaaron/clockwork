@@ -23,6 +23,40 @@
 namespace juce
 {
 
+//==============================================================================
+/** Smoothie addition: the device interface speaks std::string; a driver that
+    keeps JUCE strings inside converts at its boundary with these. */
+inline std::vector<std::string> toStdStrings (const StringArray& names)
+{
+    std::vector<std::string> out;
+    out.reserve (static_cast<size_t> (names.size()));
+
+    for (const auto& n : names)
+        out.push_back (n.toStdString());
+
+    return out;
+}
+
+inline StringArray toStringArray (const std::vector<std::string>& names)
+{
+    StringArray out;
+
+    for (const auto& n : names)
+        out.add (String (n));
+
+    return out;
+}
+
+/** Smoothie addition: where `name` is in `names`, or -1. */
+inline int indexOfName (const std::vector<std::string>& names, const std::string& name)
+{
+    for (size_t i = 0; i < names.size(); ++i)
+        if (names[i] == name)
+            return static_cast<int> (i);
+
+    return -1;
+}
+
 class AudioIODevice;
 
 /**
@@ -127,7 +161,7 @@ public:
         Be aware that this could be called by any thread! And not all devices perform
         this callback.
     */
-    virtual void audioDeviceError (const String& errorMessage);
+    virtual void audioDeviceError (const std::string& errorMessage);
 };
 
 //==============================================================================
@@ -155,24 +189,24 @@ public:
 
     //==============================================================================
     /** Returns the device's name, (as set in the constructor). */
-    const String& getName() const noexcept                          { return name; }
+    const std::string& getName() const noexcept                     { return name; }
 
     /** Returns the type of the device.
 
         E.g. "CoreAudio", "ASIO", etc. - this comes from the AudioIODeviceType that created it.
     */
-    const String& getTypeName() const noexcept                      { return typeName; }
+    const std::string& getTypeName() const noexcept                 { return typeName; }
 
     //==============================================================================
     /** Returns the names of all the available output channels on this device.
         To find out which of these are currently in use, call getActiveOutputChannels().
     */
-    virtual StringArray getOutputChannelNames() = 0;
+    virtual std::vector<std::string> getOutputChannelNames() = 0;
 
     /** Returns the names of all the available input channels on this device.
         To find out which of these are currently in use, call getActiveInputChannels().
     */
-    virtual StringArray getInputChannelNames() = 0;
+    virtual std::vector<std::string> getInputChannelNames() = 0;
 
     //==============================================================================
     /** For devices that support a default layout, returns the channels that are enabled in the
@@ -221,7 +255,7 @@ public:
                     opening the device
         @see close
     */
-    virtual String open (const ChannelMask& inputChannels,
+    virtual std::string open (const ChannelMask& inputChannels,
                          const ChannelMask& outputChannels,
                          double sampleRate,
                          int bufferSizeSamples) = 0;
@@ -260,7 +294,7 @@ public:
     virtual bool isPlaying() = 0;
 
     /** Returns the last error that happened if anything went wrong. */
-    virtual String getLastError() = 0;
+    virtual std::string getLastError() = 0;
 
     //==============================================================================
     /** Returns the buffer size that the device is currently using.
@@ -368,11 +402,11 @@ public:
     //==============================================================================
 protected:
     /** Creates a device, setting its name and type member variables. */
-    AudioIODevice (const String& deviceName,
-                   const String& typeName);
+    AudioIODevice (std::string deviceName,
+                   std::string typeName);
 
     /** @internal */
-    String name, typeName;
+    std::string name, typeName;
 };
 
 } // namespace juce

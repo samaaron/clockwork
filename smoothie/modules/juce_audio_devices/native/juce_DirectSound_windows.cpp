@@ -746,7 +746,7 @@ public:
     DSoundAudioIODevice (const String& deviceName,
                          const int outputDeviceIndex_,
                          const int inputDeviceIndex_)
-        : AudioIODevice (deviceName, "DirectSound"),
+        : AudioIODevice (deviceName.toStdString(), "DirectSound"),
           Thread ("JUCE DSound"),
           outputDeviceIndex (outputDeviceIndex_),
           inputDeviceIndex (inputDeviceIndex_)
@@ -769,14 +769,14 @@ public:
         close();
     }
 
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double newSampleRate, int newBufferSize) override
     {
         lastError = openDevice (inputChannels, outputChannels, newSampleRate, newBufferSize);
         isOpen_ = lastError.isEmpty();
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -797,8 +797,8 @@ public:
     ChannelMask getActiveInputChannels() const override  { return enabledInputs; }
     int getOutputLatencyInSamples() override            { return (int) (getCurrentBufferSizeSamples() * 1.5); }
     int getInputLatencyInSamples() override             { return getOutputLatencyInSamples(); }
-    StringArray getOutputChannelNames() override        { return outChannels; }
-    StringArray getInputChannelNames() override         { return inChannels; }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (outChannels); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (inChannels); }
 
     Array<double> getAvailableSampleRates() override
     {
@@ -875,7 +875,7 @@ public:
     }
 
     bool isPlaying() override            { return isStarted && isOpen_ && isThreadRunning(); }
-    String getLastError() override       { return lastError; }
+    std::string getLastError() override  { return lastError.toStdString(); }
 
     int getXRunCount() const noexcept override
     {
@@ -1229,12 +1229,12 @@ public:
         deviceList.scan();
     }
 
-    StringArray getDeviceNames (bool wantInputNames) const override
+    std::vector<std::string> getDeviceNames (bool wantInputNames) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
-        return wantInputNames ? deviceList.inputDeviceNames
-                              : deviceList.outputDeviceNames;
+        return toStdStrings (wantInputNames ? deviceList.inputDeviceNames
+                                            : deviceList.outputDeviceNames);
     }
 
     int getDefaultDeviceIndex (bool /*forInput*/) const override
@@ -1256,9 +1256,10 @@ public:
 
     bool hasSeparateInputsAndOutputs() const override   { return true; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn) override
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
         const int outputIndex = deviceList.outputDeviceNames.indexOf (outputDeviceName);

@@ -1239,7 +1239,7 @@ public:
                          const String& inputDeviceID,
                          WASAPIDeviceMode mode,
                          std::function<void()> reportChangeIn)
-        : AudioIODevice (deviceName, typeNameIn),
+        : AudioIODevice (deviceName.toStdString(), typeNameIn.toStdString()),
           Thread ("JUCE WASAPI"),
           outputDeviceId (outputDeviceID),
           inputDeviceId (inputDeviceID),
@@ -1358,24 +1358,24 @@ public:
         return false;
     }
 
-    StringArray getOutputChannelNames() override
+    std::vector<std::string> getOutputChannelNames() override
     {
-        StringArray outChannels;
+        std::vector<std::string> outChannels;
 
         if (outputDevice != nullptr)
             for (int i = 1; i <= outputDevice->maxNumChannels; ++i)
-                outChannels.add ("Output channel " + String (i));
+                outChannels.push_back ("Output channel " + std::to_string (i));
 
         return outChannels;
     }
 
-    StringArray getInputChannelNames() override
+    std::vector<std::string> getInputChannelNames() override
     {
-        StringArray inChannels;
+        std::vector<std::string> inChannels;
 
         if (inputDevice != nullptr)
             for (int i = 1; i <= inputDevice->maxNumChannels; ++i)
-                inChannels.add ("Input channel " + String (i));
+                inChannels.push_back ("Input channel " + std::to_string (i));
 
         return inChannels;
     }
@@ -1391,7 +1391,7 @@ public:
     int getInputLatencyInSamples() override                 { return latencyIn; }
     ChannelMask getActiveOutputChannels() const override     { return outputDevice != nullptr ? outputDevice->channels : ChannelMask(); }
     ChannelMask getActiveInputChannels() const override      { return inputDevice  != nullptr ? inputDevice->channels  : ChannelMask(); }
-    String getLastError() override                          { return lastError; }
+    std::string getLastError() override                     { return lastError.toStdString(); }
     int getXRunCount() const noexcept override              { return inputDevice != nullptr ? inputDevice->xruns : -1; }
 
     std::optional<ChannelMask> getDefaultOutputChannels() const override
@@ -1404,7 +1404,7 @@ public:
         return inputDevice != nullptr ? inputDevice->getDefaultLayout() : std::nullopt;
     }
 
-    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
+    std::string open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double sampleRate, int bufferSizeSamples) override
     {
         close();
@@ -1413,7 +1413,7 @@ public:
         if (sampleRates.size() == 0 && inputDevice != nullptr && outputDevice != nullptr)
         {
             lastError = String ("The input and output devices don't share a common sample rate!");
-            return lastError;
+            return lastError.toStdString();
         }
 
         currentBufferSizeSamples  = bufferSizeSamples <= 0 ? defaultBufferSize : jmax (bufferSizeSamples, minBufferSize);
@@ -1422,14 +1422,14 @@ public:
         if (inputDevice != nullptr && ! inputDevice->open (currentSampleRate, inputChannels, bufferSizeSamples))
         {
             lastError = String ("Couldn't open the input device!");
-            return lastError;
+            return lastError.toStdString();
         }
 
         if (outputDevice != nullptr && ! outputDevice->open (currentSampleRate, outputChannels, bufferSizeSamples))
         {
             close();
             lastError = String ("Couldn't open the output device!");
-            return lastError;
+            return lastError.toStdString();
         }
 
         if (isExclusiveMode (deviceMode))
@@ -1439,7 +1439,7 @@ public:
             {
                 close();
                 lastError = String ("Couldn't open the output device (buffer size mismatch)");
-                return lastError;
+                return lastError.toStdString();
             }
 
             currentBufferSizeSamples = (int) (outputDevice != nullptr ? outputDevice->actualBufferSize
@@ -1463,7 +1463,7 @@ public:
             {
                 close();
                 lastError = String ("Couldn't start the input device!");
-                return lastError;
+                return lastError.toStdString();
             }
         }
 
@@ -1475,12 +1475,12 @@ public:
             {
                 close();
                 lastError = String ("Couldn't start the output device!");
-                return lastError;
+                return lastError.toStdString();
             }
         }
 
         isOpen_ = true;
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -1798,12 +1798,12 @@ public:
         devices = scan();
     }
 
-    StringArray getDeviceNames (bool wantInputNames) const override
+    std::vector<std::string> getDeviceNames (bool wantInputNames) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
-        return wantInputNames ? devices.inputDeviceNames
-                              : devices.outputDeviceNames;
+        return toStdStrings (wantInputNames ? devices.inputDeviceNames
+                                            : devices.outputDeviceNames);
     }
 
     int getDefaultDeviceIndex (bool /*forInput*/) const override
@@ -1825,9 +1825,10 @@ public:
 
     bool hasSeparateInputsAndOutputs() const override    { return true; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn) override
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
         std::unique_ptr<WASAPIAudioIODevice> device;
@@ -1839,7 +1840,7 @@ public:
         {
             device.reset (new WASAPIAudioIODevice (outputDeviceName.isNotEmpty() ? outputDeviceName
                                                                                  : inputDeviceName,
-                                                   getTypeName(),
+                                                   String (getTypeName()),
                                                    devices.outputDeviceIds[outputIndex],
                                                    devices.inputDeviceIds [inputIndex],
                                                    deviceMode,

@@ -66,17 +66,10 @@ Drivers platformDrivers() {
 
 namespace {
 
-std::vector<std::string> toStrings(const juce::StringArray& names) {
-    std::vector<std::string> out;
-    out.reserve(static_cast<size_t>(names.size()));
-    for (const auto& n : names) out.push_back(n.toStdString());
-    return out;
-}
-
 bool listed(const juce::AudioIODeviceType& type, bool asInput, const std::string& name) {
     const juce::String wanted = juce::String(name).trim();
     for (const auto& n : type.getDeviceNames(asInput))
-        if (n.trim().equalsIgnoreCase(wanted)) return true;
+        if (juce::String(n).trim().equalsIgnoreCase(wanted)) return true;
     return false;
 }
 
@@ -105,8 +98,8 @@ int chooseBuffer(juce::AudioIODevice& device, int wanted) {
 // What a running device reports about itself, as a Processor takes it.
 DeviceInfo describe(juce::AudioIODevice& device) {
     DeviceInfo d;
-    d.driver              = device.getTypeName().toStdString();
-    d.name                = device.getName().toStdString();
+    d.driver              = device.getTypeName();
+    d.name                = device.getName();
     d.sampleRate          = device.getCurrentSampleRate();
     d.bufferFrames        = device.getCurrentBufferSizeSamples();
     d.inputChannels       = device.getActiveInputChannels().countNumberOfSetBits();
@@ -115,9 +108,9 @@ DeviceInfo describe(juce::AudioIODevice& device) {
     d.outputLatencyFrames = device.getOutputLatencyInSamples();
     const auto names  = device.getOutputChannelNames();
     const auto active = device.getActiveOutputChannels();
-    d.outputs.reserve(static_cast<size_t>(names.size()));
-    for (int i = 0; i < names.size(); ++i)
-        d.outputs.push_back({ names[i].toStdString(), active[i] });
+    d.outputs.reserve(names.size());
+    for (size_t i = 0; i < names.size(); ++i)
+        d.outputs.push_back({ names[i], active[static_cast<int>(i)] });
     return d;
 }
 
@@ -201,7 +194,7 @@ struct DeviceSession::Impl {
 
     juce::AudioIODeviceType* find(const std::string& name) const {
         for (const auto& t : types)
-            if (t->getTypeName().toStdString() == name) return t.get();
+            if (t->getTypeName() == name) return t.get();
         return nullptr;
     }
 
@@ -227,16 +220,16 @@ DeviceSession::DeviceSession(Options options, const std::shared_ptr<const Driver
                                                      : DeviceChange::openDevice);
             });
         if (!mImpl->options.clientName.empty())
-            type->setClientName(juce::String(mImpl->options.clientName));
+            type->setClientName(mImpl->options.clientName);
         type->scanForDevices();
     }
     for (auto& type : mImpl->types)
-        if (!type->getDeviceNames(false).isEmpty() || !type->getDeviceNames(true).isEmpty()) {
-            mImpl->driver = type->getTypeName().toStdString();
+        if (!type->getDeviceNames(false).empty() || !type->getDeviceNames(true).empty()) {
+            mImpl->driver = type->getTypeName();
             break;
         }
     if (mImpl->driver.empty() && !mImpl->types.empty())
-        mImpl->driver = mImpl->types.front()->getTypeName().toStdString();
+        mImpl->driver = mImpl->types.front()->getTypeName();
 }
 
 DeviceSession::~DeviceSession() {
@@ -247,7 +240,7 @@ DeviceSession::~DeviceSession() {
 
 std::vector<std::string> DeviceSession::drivers() const {
     std::vector<std::string> names;
-    for (const auto& t : mImpl->types) names.push_back(t->getTypeName().toStdString());
+    for (const auto& t : mImpl->types) names.push_back(t->getTypeName());
     return names;
 }
 
@@ -265,19 +258,19 @@ void DeviceSession::scanAll() {
 
 std::vector<std::string> DeviceSession::deviceNames(const std::string& driver, bool inputs) const {
     auto* type = mImpl->find(driver);
-    return type ? toStrings(type->getDeviceNames(inputs)) : std::vector<std::string>{};
+    return type ? type->getDeviceNames(inputs) : std::vector<std::string>{};
 }
 
 std::string DeviceSession::defaultDevice(const std::string& driver, bool input) const {
     auto* type = mImpl->find(driver);
-    return type ? type->getSystemDefaultDeviceName(input).toStdString() : std::string();
+    return type ? type->getSystemDefaultDeviceName(input) : std::string();
 }
 
 DeviceTraits DeviceSession::traits(const std::string& driver, const std::string& device) const {
     DeviceTraits out;
     auto* type = mImpl->find(driver);
     if (!type) return out;
-    const auto t = type->getDeviceTraits(juce::String(device));
+    const auto t = type->getDeviceTraits(device);
     out.wireless       = t.wireless;
     out.isVirtual      = t.isVirtual;
     out.aggregateClass = t.aggregateClass;
@@ -286,7 +279,7 @@ DeviceTraits DeviceSession::traits(const std::string& driver, const std::string&
     out.inputChannels  = t.numInputChannels;
     out.sampleRates.assign(t.sampleRates.begin(), t.sampleRates.end());
     out.bufferSizes.assign(t.bufferSizes.begin(), t.bufferSizes.end());
-    out.kind = t.kind.toStdString();
+    out.kind = t.kind;
     return out;
 }
 
@@ -294,15 +287,14 @@ std::optional<DeviceProbe> DeviceSession::probe(const std::string& driver,
                                                 const std::string& device, bool asInput) {
     auto* type = mImpl->find(driver);
     if (!type) return std::nullopt;
-    const juce::String name(device);
-    std::unique_ptr<juce::AudioIODevice> asked(asInput ? type->createDevice({}, name)
-                                                       : type->createDevice(name, {}));
+    std::unique_ptr<juce::AudioIODevice> asked(asInput ? type->createDevice({}, device)
+                                                       : type->createDevice(device, {}));
     if (!asked) return std::nullopt;
     DeviceProbe p;
     for (double r : asked->getAvailableSampleRates()) p.sampleRates.push_back(r);
     for (int b : asked->getAvailableBufferSizes()) p.bufferSizes.push_back(b);
-    p.outputChannels = asked->getOutputChannelNames().size();
-    p.inputChannels  = asked->getInputChannelNames().size();
+    p.outputChannels = static_cast<int>(asked->getOutputChannelNames().size());
+    p.inputChannels  = static_cast<int>(asked->getInputChannelNames().size());
     return p;
 }
 
@@ -345,13 +337,13 @@ std::string DeviceSession::open(const DeviceRequest& request) {
             return "No such device: " + want.output;
         if (!want.input.empty() && !listed(*type, true, want.input))
             return "No such device: " + want.input;
-        s.device.reset(type->createDevice(juce::String(want.output), juce::String(want.input)));
+        s.device.reset(type->createDevice(want.output, want.input));
         if (!s.device)
             return "Can't open '" + (want.output.empty() ? want.input : want.output)
                  + "' on " + want.driver;
-        if (const auto err = s.device->getLastError(); err.isNotEmpty()) {
+        if (const auto err = s.device->getLastError(); !err.empty()) {
             s.device.reset();
-            return err.toStdString();
+            return err;
         }
     }
     s.settled = {};
@@ -364,15 +356,15 @@ std::string DeviceSession::open(const DeviceRequest& request) {
         return "Nothing to open: the request asks for no channels";
     }
 
-    juce::String err = s.device->open(ins, outs, chooseRate(*s.device, want.sampleRate),
-                                      chooseBuffer(*s.device, want.bufferFrames));
-    if (err.isEmpty()) {
+    std::string err = s.device->open(ins, outs, chooseRate(*s.device, want.sampleRate),
+                                     chooseBuffer(*s.device, want.bufferFrames));
+    if (err.empty()) {
         s.device->start(&s.callback);
         err = s.device->getLastError();
     }
-    if (err.isNotEmpty()) {
+    if (!err.empty()) {
         s.closeDevice();
-        return err.toStdString();
+        return err;
     }
 
     s.settled = want;
@@ -396,13 +388,13 @@ std::optional<OpenDevice> DeviceSession::current() const {
     if (!dev) return std::nullopt;
     OpenDevice d;
     d.driver        = mImpl->settled.driver;
-    d.name          = dev->getName().toStdString();
+    d.name          = dev->getName();
     d.sampleRate    = dev->getCurrentSampleRate();
     d.bufferFrames  = dev->getCurrentBufferSizeSamples();
     d.activeOutputs = dev->getActiveOutputChannels().countNumberOfSetBits();
     d.activeInputs  = dev->getActiveInputChannels().countNumberOfSetBits();
-    d.outputs       = dev->getOutputChannelNames().size();
-    d.inputs        = dev->getInputChannelNames().size();
+    d.outputs       = static_cast<int>(dev->getOutputChannelNames().size());
+    d.inputs        = static_cast<int>(dev->getInputChannelNames().size());
     d.outputLatencyFrames = dev->getOutputLatencyInSamples();
     d.inputLatencyFrames  = dev->getInputLatencyInSamples();
     // Its inputs come from the input it was opened with — the output itself

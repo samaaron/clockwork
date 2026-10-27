@@ -39,22 +39,22 @@ public:
     }
 
     //==============================================================================
-    StringArray getOutputChannelNames() override
+    std::vector<std::string> getOutputChannelNames() override
     {
-        StringArray result;
+        std::vector<std::string> result;
 
         for (int i = 1; i <= actualNumberOfOutputs; i++)
-            result.add ("Out #" + std::to_string (i));
+            result.push_back ("Out #" + std::to_string (i));
 
         return result;
     }
 
-    StringArray getInputChannelNames() override
+    std::vector<std::string> getInputChannelNames() override
     {
-        StringArray result;
+        std::vector<std::string> result;
 
         for (int i = 1; i <= actualNumberOfInputs; i++)
-            result.add ("In #" + std::to_string (i));
+            result.push_back ("In #" + std::to_string (i));
 
         return result;
     }
@@ -64,7 +64,7 @@ public:
     int getDefaultBufferSize() override                    { return defaultSettings.periodSize; }
 
     //==============================================================================
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double sampleRate,
                  int bufferSizeSamples) override
@@ -72,7 +72,7 @@ public:
         if (sampleRate != 44100.0 && sampleRate != 0.0)
         {
             lastError = "Bela audio outputs only support 44.1 kHz sample rate";
-            return lastError;
+            return lastError.toStdString();
         }
 
         settings = defaultSettings;
@@ -113,7 +113,7 @@ public:
         if (Bela_initAudio (&settings, this) != 0 || ! isBelaOpen)
         {
             lastError = "Bela_initAutio failed";
-            return lastError;
+            return lastError.toStdString();
         }
 
         actualNumberOfInputs  = jmin (numIns, actualNumberOfInputs);
@@ -183,7 +183,7 @@ public:
                 else
                 {
                     lastError = "Bela_StartAudio failed";
-                    callback->audioDeviceError (lastError);
+                    callback->audioDeviceError (lastError.toStdString());
                 }
             }
         }
@@ -207,7 +207,7 @@ public:
     }
 
     bool isPlaying() override         { return isRunning; }
-    String getLastError() override    { return lastError; }
+    std::string getLastError() override { return lastError.toStdString(); }
 
     //==============================================================================
     int getCurrentBufferSizeSamples() override            { return (int) actualBufferSize; }
@@ -348,13 +348,13 @@ struct BelaAudioIODeviceType final : public AudioIODeviceType
 {
     BelaAudioIODeviceType() : AudioIODeviceType ("Bela") {}
 
-    StringArray getDeviceNames (bool) const override                       { return StringArray (BelaAudioIODevice::belaTypeName); }
+    std::vector<std::string> getDeviceNames (bool) const override          { return { BelaAudioIODevice::belaTypeName }; }
     void scanForDevices() override                                         {}
     int getDefaultDeviceIndex (bool) const override                        { return 0; }
     int getIndexOfDevice (AudioIODevice* device, bool) const override      { return device != nullptr ? 0 : -1; }
     bool hasSeparateInputsAndOutputs() const override                      { return false; }
 
-    AudioIODevice* createDevice (const String& outputName, const String& inputName) override
+    AudioIODevice* createDevice (const std::string& outputName, const std::string& inputName) override
     {
         // TODO: switching whether to support analog/digital with possible multiple Bela device types?
         if (outputName == BelaAudioIODevice::belaTypeName || inputName == BelaAudioIODevice::belaTypeName)

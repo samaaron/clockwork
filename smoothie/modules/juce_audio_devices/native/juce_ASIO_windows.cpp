@@ -313,7 +313,7 @@ class ASIOAudioIODevice final : public AudioIODevice
 public:
     ASIOAudioIODevice (ASIOAudioIODeviceType* ownerType, const String& devName,
                        CLSID clsID, int slotNumber)
-       : AudioIODevice (devName, "ASIO"),
+       : AudioIODevice (devName.toStdString(), "ASIO"),
          owner (ownerType),
          classId (clsID)
     {
@@ -376,8 +376,8 @@ public:
         }
     }
 
-    StringArray getOutputChannelNames() override        { return outputChannelNames; }
-    StringArray getInputChannelNames() override         { return inputChannelNames; }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (outputChannelNames); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (inputChannelNames); }
 
     Array<double> getAvailableSampleRates() override    { return sampleRates; }
     Array<int> getAvailableBufferSizes() override       { return bufferSizes; }
@@ -385,7 +385,7 @@ public:
 
     int getXRunCount() const noexcept override          { return xruns; }
 
-    String open (const ChannelMask& inputChannels,
+    std::string open (const ChannelMask& inputChannels,
                  const ChannelMask& outputChannels,
                  double sr, int bufferSizeSamples) override
     {
@@ -602,7 +602,7 @@ public:
         }
 
         needToReset = false;
-        return error;
+        return error.toStdString();
     }
 
     void close() override
@@ -669,7 +669,7 @@ public:
             lastCallback->audioDeviceStopped();
     }
 
-    String getLastError() override           { return error; }
+    std::string getLastError() override      { return error.toStdString(); }
     bool hasControlPanel() const override    { return true; }
 
     bool showControlPanel() override
@@ -845,7 +845,7 @@ private:
 
         // unfortunate workaround for certain drivers which crash if you make
         // dynamic changes to the buffer size...
-        shouldUsePreferredSize = shouldUsePreferredSize || getName().containsIgnoreCase ("Digidesign");
+        shouldUsePreferredSize = shouldUsePreferredSize || String (getName()).containsIgnoreCase ("Digidesign");
 
         if (shouldUsePreferredSize)
         {
@@ -1156,7 +1156,7 @@ private:
 
         // Get error message if init() failed, or if it's a buggy Denon driver,
         // which returns true from init() even when it fails.
-        if ((! initOk) || getName().containsIgnoreCase ("denon dj asio"))
+        if ((! initOk) || String (getName()).containsIgnoreCase ("denon dj asio"))
             driverError = getLastDriverError();
 
         if ((! initOk) && driverError.isEmpty())
@@ -1174,7 +1174,7 @@ private:
     String openDevice()
     {
         // open the device and get its info..
-        JUCE_ASIO_LOG ("opening device: " + getName());
+        JUCE_ASIO_LOG ("opening device: " + String (getName()));
 
         needToReset = false;
         outputChannelNames.clear();
@@ -1190,7 +1190,7 @@ private:
         currentCallback = nullptr;
         error.clear();
 
-        if (getName().isEmpty())
+        if (getName().empty())
             return error;
 
         long err = 0;
@@ -1467,10 +1467,10 @@ public:
         }
     }
 
-    StringArray getDeviceNames (bool /*wantInputNames*/) const override
+    std::vector<std::string> getDeviceNames (bool /*wantInputNames*/) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
-        return deviceNames;
+        return toStdStrings (deviceNames);
     }
 
     int getDefaultDeviceIndex (bool) const override
@@ -1505,14 +1505,15 @@ public:
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
-        return d == nullptr ? -1 : deviceNames.indexOf (d->getName());
+        return d == nullptr ? -1 : deviceNames.indexOf (String (d->getName()));
     }
 
     bool hasSeparateInputsAndOutputs() const override    { return false; }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName) override
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn) override
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         // ASIO can't open two different devices for input and output - they must be the same one.
         jassert (inputDeviceName == outputDeviceName || outputDeviceName.isEmpty() || inputDeviceName.isEmpty());
         jassert (hasScanned); // need to call scanForDevices() before doing this
@@ -1540,7 +1541,7 @@ public:
     }
 
     // smoothie: ASIO has drivers, not an operating-system default.
-    String getSystemDefaultDeviceName (bool) const override    { return {}; }
+    std::string getSystemDefaultDeviceName (bool) const override { return {}; }
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (ASIOAudioIODeviceType)
 

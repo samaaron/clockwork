@@ -23,8 +23,8 @@
 namespace juce
 {
 
-AudioIODeviceType::AudioIODeviceType (const String& name)
-    : typeName (name)
+AudioIODeviceType::AudioIODeviceType (std::string name)
+    : typeName (std::move (name))
 {
 }
 
@@ -33,18 +33,18 @@ AudioIODeviceType::~AudioIODeviceType()
 }
 
 //==============================================================================
-AudioIODeviceType::DeviceTraits AudioIODeviceType::getDeviceTraits (const String&) const
+AudioIODeviceType::DeviceTraits AudioIODeviceType::getDeviceTraits (const std::string&) const
 {
     return {};
 }
 
-void AudioIODeviceType::setClientName (const String&) {}
+void AudioIODeviceType::setClientName (const std::string&) {}
 
-String AudioIODeviceType::getSystemDefaultDeviceName (bool forInput) const
+std::string AudioIODeviceType::getSystemDefaultDeviceName (bool forInput) const
 {
     const auto names = getDeviceNames (forInput);
     const auto index = getDefaultDeviceIndex (forInput);
-    return isPositiveAndBelow (index, names.size()) ? names[index] : String();
+    return isPositiveAndBelow (index, static_cast<int> (names.size())) ? names[static_cast<size_t> (index)] : std::string();
 }
 
 //==============================================================================

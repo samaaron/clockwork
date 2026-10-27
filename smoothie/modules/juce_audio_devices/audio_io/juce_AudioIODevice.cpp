@@ -31,14 +31,14 @@ void AudioIODeviceCallback::audioDeviceIOCallbackWithContext ([[maybe_unused]] c
                                                               [[maybe_unused]] const AudioIODeviceCallbackContext& context) {}
 
 //==============================================================================
-AudioIODevice::AudioIODevice (const String& deviceName, const String& deviceTypeName)
-    : name (deviceName), typeName (deviceTypeName)
+AudioIODevice::AudioIODevice (std::string deviceName, std::string deviceTypeName)
+    : name (std::move (deviceName)), typeName (std::move (deviceTypeName))
 {
 }
 
 AudioIODevice::~AudioIODevice() {}
 
-void AudioIODeviceCallback::audioDeviceError (const String&)    {}
+void AudioIODeviceCallback::audioDeviceError (const std::string&) {}
 bool AudioIODevice::setAudioPreprocessingEnabled (bool)         { return false; }
 bool AudioIODevice::hasControlPanel() const                     { return false; }
 int  AudioIODevice::getXRunCount() const noexcept               { return -1; }

@@ -164,7 +164,7 @@ public:
     JackAudioIODevice (const String& inName,
                        const String& outName,
                        std::function<void()> notifyIn)
-        : AudioIODevice (outName.isEmpty() ? inName : outName, "JACK"),
+        : AudioIODevice ((outName.isEmpty() ? inName : outName).toStdString(), "JACK"),
           inputName (inName),
           outputName (outName),
           notifyChannelsChanged (std::move (notifyIn))
@@ -183,7 +183,7 @@ public:
             juce::jack_set_error_function (errorCallback);
 
             // open input ports
-            const StringArray inputChannels (getInputChannelNames());
+            const StringArray inputChannels (toStringArray (getInputChannelNames()));
             for (int i = 0; i < inputChannels.size(); ++i)
             {
                 String inputChannelName;
@@ -194,7 +194,7 @@ public:
             }
 
             // open output ports
-            const StringArray outputChannels (getOutputChannelNames());
+            const StringArray outputChannels (toStringArray (getOutputChannelNames()));
             for (int i = 0; i < outputChannels.size(); ++i)
             {
                 String outputChannelName;
@@ -230,8 +230,8 @@ public:
         return names;
     }
 
-    StringArray getOutputChannelNames() override         { return getChannelNames (outputName, true); }
-    StringArray getInputChannelNames() override          { return getChannelNames (inputName, false); }
+    std::vector<std::string> getOutputChannelNames() override { return toStdStrings (getChannelNames (outputName, true)); }
+    std::vector<std::string> getInputChannelNames() override  { return toStdStrings (getChannelNames (inputName, false)); }
 
     Array<double> getAvailableSampleRates() override
     {
@@ -272,13 +272,13 @@ public:
         }
     }
 
-    String open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
+    std::string open (const ChannelMask& inputChannels, const ChannelMask& outputChannels,
                  double /* sampleRate */, int /* bufferSizeSamples */) override
     {
         if (client == nullptr)
         {
             lastError = "No JACK client running";
-            return lastError;
+            return lastError.toStdString();
         }
 
         lastError.clear();
@@ -337,7 +337,7 @@ public:
 
         updateActivePorts();
 
-        return lastError;
+        return lastError.toStdString();
     }
 
     void close() override
@@ -386,7 +386,7 @@ public:
     bool isOpen() override                           { return deviceIsOpen; }
     bool isPlaying() override                        { return callback != nullptr; }
     int getCurrentBitDepth() override                { return 32; }
-    String getLastError() override                   { return lastError; }
+    std::string getLastError() override              { return lastError.toStdString(); }
     int getXRunCount() const noexcept override       { return xruns.load (std::memory_order_relaxed); }
 
     ChannelMask getActiveOutputChannels() const override  { return activeOutputChannels; }
@@ -619,10 +619,10 @@ public:
         }
     }
 
-    StringArray getDeviceNames (bool wantInputNames) const
+    std::vector<std::string> getDeviceNames (bool wantInputNames) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
-        return wantInputNames ? inputNames : outputNames;
+        return toStdStrings (wantInputNames ? inputNames : outputNames);
     }
 
     int getDefaultDeviceIndex (bool /* forInput */) const
@@ -644,9 +644,10 @@ public:
         return -1;
     }
 
-    AudioIODevice* createDevice (const String& outputDeviceName,
-                                 const String& inputDeviceName)
+    AudioIODevice* createDevice (const std::string& outputDeviceNameIn,
+                                 const std::string& inputDeviceNameIn)
     {
+        const String outputDeviceName (outputDeviceNameIn), inputDeviceName (inputDeviceNameIn);
         jassert (hasScanned); // need to call scanForDevices() before doing this
 
         const int inputIndex = inputNames.indexOf (inputDeviceName);
