@@ -133,6 +133,14 @@ test("after a reload over the same memory the reply rings keep their place, and 
     const word = (byte) => byte / 4;
     const ring = (head, tail, read) => ({ head: Atomics.load(cursors, word(head)), tail: Atomics.load(cursors, word(tail)),
                                           read: Atomics.load(cursors, word(read)) });
+    // The reader gives the writer its space back at the start of its next poll, and it polls again as soon as it has
+    // posted a frame because the head is still ahead of the tail. So the sync's reply can reach the page before that
+    // give-back has happened. Wait for the tail to catch up before sampling, with a bound: if it never catches up the
+    // assertions below fail.
+    const handedBack = async (head, tail, read) => {
+      for (let i = 0; i < 400 && Atomics.load(cursors, word(tail)) !== Atomics.load(cursors, word(head)); i++) await new Promise((r) => setTimeout(r, 5));
+      return ring(head, tail, read);
+    };
     let setups = 0;
     cw.on("in:osc", ({ oscData }) => { if (window.Clockwork.osc.decode(oscData)[0] === "/clockwork/setup") setups++; });
     // The instance's ring well along before the reload: a hundred answers, read.
@@ -142,8 +150,8 @@ test("after a reload over the same memory the reply rings keep their place, and 
     const other = cw.audioContext.sampleRate === 44100 ? 48000 : 44100;
     const reload = await within(cw.reload({ audioContext: new AudioContext({ sampleRate: other }) }), 15000);
     await within(cw.sync(), 5000);
-    const after = { out: ring(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ),
-                    nrt: ring(offs.NRT_OUT_HEAD, offs.NRT_OUT_TAIL, offs.NRT_OUT_READ) };
+    const after = { out: await handedBack(offs.OUT_HEAD, offs.OUT_TAIL, offs.OUT_READ),
+                    nrt: await handedBack(offs.NRT_OUT_HEAD, offs.NRT_OUT_TAIL, offs.NRT_OUT_READ) };
     const corrupted = cw.getMetrics()?.oscInCorrupted;
     await cw.shutdown();
     return { init, reload, before, after, corrupted, setups };
