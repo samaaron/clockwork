@@ -11,6 +11,11 @@ import { test, expect, boot } from "./fixtures.mjs";
 test("getMetricsHistory() shows the last second's blocks, on either transport", async ({ page, clockworkConfig }) => {
   await boot(page);
   const r = await page.evaluate(async ([config]) => {
+    // The history's minutes are the engine clock's whole minutes, and the engine clock starts on the wall's. A run
+    // that straddles one has two of them, rightly, so this one starts clear of a boundary: the case takes under two
+    // seconds, and if fewer than five are left in this minute it waits for the next.
+    const left = 60000 - (Date.now() % 60000);
+    if (left < 5000) await new Promise((res) => setTimeout(res, left + 250));
     const cw = new window.Clockwork(config);
     await cw.init();
     await new Promise((res) => setTimeout(res, 1300));   // a second and a bit of blocks
