@@ -70,6 +70,19 @@ struct Chunk {
     claimed: u64,
 }
 
+/// The most channels a fmt or COMM chunk may declare. The decoder's channel
+/// mask stops far below this, so no file it could read is lost. What is
+/// refused is a count the decoder multiplies in 16 bits before it checks it:
+/// 45,314 channels at 16 bits overflowed there and panicked (the finding is
+/// in corpus/regressions).
+const MAX_CHANNELS: u16 = 64;
+
+fn le16(d: &[u8], at: usize) -> Option<u16> {
+    d.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+}
+fn be16(d: &[u8], at: usize) -> Option<u16> {
+    d.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
 fn le32(d: &[u8], at: usize) -> Option<u32> {
     d.get(at..at + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -143,6 +156,19 @@ fn walk_w64(d: &[u8]) -> Vec<Chunk> {
     out
 }
 
+/// The channel count the format chunk declares: a WAVE fmt's second field,
+/// an AIFF COMM's first. A file without one is not a file the decoder could
+/// read.
+fn declared_channels(d: &[u8], chunks: &[Chunk], big_endian: bool) -> Option<u16> {
+    if big_endian {
+        let comm = chunks.iter().find(|c| &c.id == b"COMM")?;
+        be16(&d[..comm.start + comm.len], comm.start)
+    } else {
+        let fmt = chunks.iter().find(|c| &c.id == b"fmt ")?;
+        le16(&d[..fmt.start + fmt.len], fmt.start + 2)
+    }
+}
+
 /// The header of a RIFF/WAVE or FORM/AIFF rebuilt from `chunks`, with the
 /// `data_id` chunk last and its size the clamped one; every other chunk is
 /// copied through unchanged, so a WAVE_FORMAT_EXTENSIBLE fmt, a fact chunk or
@@ -156,6 +182,10 @@ fn rebuild<'a>(
     big_endian: bool,
 ) -> Option<Normalised<'a>> {
     let data = chunks.iter().find(|c| &c.id == data_id)?;
+    let channels = declared_channels(d, chunks, big_endian)?;
+    if channels == 0 || channels > MAX_CHANNELS {
+        return None;
+    }
     let put32 = |v: &mut Vec<u8>, x: u32| {
         v.extend_from_slice(&if big_endian {
             x.to_be_bytes()
@@ -355,6 +385,49 @@ mod tests {
     fn a_header_with_no_data_chunk_is_not_a_file() {
         let d = &wav(400, 100)[..36];
         assert!(normalise(d, Format::Wav).is_none());
+    }
+
+    fn with_channels(mut d: Vec<u8>, n: u16) -> Vec<u8> {
+        d[22..24].copy_from_slice(&n.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn a_channel_count_the_decoder_cannot_hold_is_refused() {
+        // 45,314 channels at 16 bits overflowed the decoder's 16-bit block
+        // align arithmetic: the nightly fuzz run's first finding.
+        assert!(normalise(&with_channels(wav(400, 100), 45_314), Format::Wav).is_none());
+        assert!(normalise(&with_channels(wav(400, 100), 0), Format::Wav).is_none());
+        assert!(normalise(&with_channels(wav(400, 100), MAX_CHANNELS + 1), Format::Wav).is_none());
+        assert!(normalise(&with_channels(wav(400, 100), MAX_CHANNELS), Format::Wav).is_some());
+        assert!(normalise(&with_channels(wav(400, 100), 2), Format::Wav).is_some());
+    }
+
+    fn aiff(channels: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"FORM");
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.extend_from_slice(b"AIFF");
+        v.extend_from_slice(b"COMM");
+        v.extend_from_slice(&18u32.to_be_bytes());
+        v.extend_from_slice(&channels.to_be_bytes());
+        v.extend_from_slice(&100u32.to_be_bytes());
+        v.extend_from_slice(&16u16.to_be_bytes());
+        v.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100 as an 80-bit float
+        v.extend_from_slice(b"SSND");
+        v.extend_from_slice(&408u32.to_be_bytes());
+        v.extend_from_slice(&[0u8; 8]);
+        v.extend_from_slice(&[0u8; 400]);
+        v
+    }
+
+    #[test]
+    fn an_aiff_comm_is_held_to_the_same_count() {
+        assert!(normalise(&aiff(2), Format::Aiff).is_some());
+        assert!(normalise(&aiff(MAX_CHANNELS), Format::Aiff).is_some());
+        assert!(normalise(&aiff(0), Format::Aiff).is_none());
+        assert!(normalise(&aiff(MAX_CHANNELS + 1), Format::Aiff).is_none());
+        assert!(normalise(&aiff(45_314), Format::Aiff).is_none());
     }
 
     #[test]
