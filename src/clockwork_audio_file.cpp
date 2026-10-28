@@ -337,6 +337,17 @@ gsl::owner<ClockworkAudioWriter*> validateAndMake(const ClockworkAudioWriterConf
         return fail(CLOCKWORK_E_VERSION);
     if (config->channels == 0 || config->sample_rate == 0)
         return fail(CLOCKWORK_E_ARG);
+    // What the writer accepts, the decoder must read back: it holds a file to
+    // 64 channels, and a WAV header holds the count in sixteen bits. The
+    // encoder fuzz target's first finding was a count of 3,144,564,541
+    // written as its low sixteen bits.
+    if (config->channels > CLOCKWORK_AUDIO_MAX_CHANNELS)
+        return fail(CLOCKWORK_E_ARG);
+    // A rate above a FLAC header's twenty bits is refused for WAV too, so the
+    // two formats take the same rates and a WAV byte rate never wraps past
+    // 32 bits: the target's second finding, 3,209,342,020 Hz in stereo.
+    if (config->sample_rate > CLOCKWORK_AUDIO_MAX_SAMPLE_RATE)
+        return fail(CLOCKWORK_E_ARG);
     if (!clockwork_audio_can_write(config->format, config->encoding))
         return fail(CLOCKWORK_E_ABSENT);
 

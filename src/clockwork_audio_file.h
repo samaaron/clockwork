@@ -136,6 +136,14 @@ typedef struct ClockworkAudioInfo {
  * declares no rate, so a caller dividing by it does not have to guard. */
 double clockwork_audio_duration(const ClockworkAudioInfo* info);
 
+/* The most channels a file may hold: a decode refuses a file declaring more,
+ * and a writer refuses to open with more. */
+#define CLOCKWORK_AUDIO_MAX_CHANNELS 64u
+
+/* The highest sample rate a writer opens with, for WAV and FLAC alike: the
+ * most a FLAC header's twenty-bit field holds. */
+#define CLOCKWORK_AUDIO_MAX_SAMPLE_RATE 1048575u
+
 /* ── Reading ─────────────────────────────────────────────────────────────────
  *
  * A path, here and for the writer, is UTF-8 on every platform: it arrives as

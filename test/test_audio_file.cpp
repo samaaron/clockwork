@@ -340,6 +340,83 @@ TEST_CASE("audio file: refusals are told apart", "[audio][file]") {
     CHECK(st == CLOCKWORK_E_VERSION);
 }
 
+TEST_CASE("audio file: a channel count the decoder cannot read is refused at open",
+          "[audio][file]") {
+    // The encoder fuzz target's first finding: a WAV opened with 3,144,564,541
+    // channels was written with the count cut to its low sixteen bits in the
+    // header. What the writer accepts, the decoder must be able to read, and
+    // the decoder holds a file to 64 channels.
+    ClockworkAudioWriterConfig cfg{};
+    cfg.struct_bytes = sizeof(cfg);
+    cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
+    cfg.encoding = CLOCKWORK_AUDIO_ENCODING_PCM_S16;
+    cfg.sample_rate = 44100;
+
+    for (const uint32_t channels : {65u, 70'000u, 3'144'564'541u}) {
+        INFO(channels << " channels");
+        cfg.channels = channels;
+        ClockworkStatus st = CLOCKWORK_OK;
+        CHECK(clockwork_audio_writer_open_memory(&cfg, &st) == nullptr);
+        CHECK(st == CLOCKWORK_E_ARG);
+        cfg.format = CLOCKWORK_AUDIO_FORMAT_FLAC;
+        st = CLOCKWORK_OK;
+        CHECK(clockwork_audio_writer_open_memory(&cfg, &st) == nullptr);
+        CHECK(st == CLOCKWORK_E_ARG);
+        cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
+    }
+
+    cfg.channels = 64;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkAudioWriter* w = clockwork_audio_writer_open_memory(&cfg, &st);
+    REQUIRE(w != nullptr);
+    CHECK(st == CLOCKWORK_OK);
+    clockwork_audio_writer_close(w, nullptr, nullptr);
+}
+
+TEST_CASE("audio file: a sample rate no header can hold is refused at open",
+          "[audio][file]") {
+    // The encoder fuzz target's second finding: a stereo 16-bit WAV opened at
+    // 3,209,342,020 Hz was written with its byte rate wrapped past 32 bits. A
+    // FLAC header holds a rate in twenty bits, and the writer holds both
+    // formats to that, so a rate one format takes the other takes too.
+    ClockworkAudioWriterConfig cfg{};
+    cfg.struct_bytes = sizeof(cfg);
+    cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
+    cfg.encoding = CLOCKWORK_AUDIO_ENCODING_PCM_S16;
+    cfg.channels = 2;
+
+    for (const uint32_t rate : {CLOCKWORK_AUDIO_MAX_SAMPLE_RATE + 1, 3'209'342'020u}) {
+        INFO(rate << " Hz");
+        cfg.sample_rate = rate;
+        ClockworkStatus st = CLOCKWORK_OK;
+        CHECK(clockwork_audio_writer_open_memory(&cfg, &st) == nullptr);
+        CHECK(st == CLOCKWORK_E_ARG);
+        cfg.format = CLOCKWORK_AUDIO_FORMAT_FLAC;
+        st = CLOCKWORK_OK;
+        CHECK(clockwork_audio_writer_open_memory(&cfg, &st) == nullptr);
+        CHECK(st == CLOCKWORK_E_ARG);
+        cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
+    }
+
+    // The limit itself opens, with the most bytes a frame can hold, and the
+    // header's byte rate is right.
+    cfg.encoding = CLOCKWORK_AUDIO_ENCODING_FLOAT32;
+    cfg.channels = CLOCKWORK_AUDIO_MAX_CHANNELS;
+    cfg.sample_rate = CLOCKWORK_AUDIO_MAX_SAMPLE_RATE;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkAudioWriter* w = clockwork_audio_writer_open_memory(&cfg, &st);
+    REQUIRE(w != nullptr);
+    CHECK(st == CLOCKWORK_OK);
+    void* bytes = nullptr;
+    size_t len = 0;
+    REQUIRE(clockwork_audio_writer_close(w, &bytes, &len) == CLOCKWORK_OK);
+    REQUIRE(len >= 44);
+    const auto* b = static_cast<const uint8_t*>(bytes);
+    const uint32_t byteRate = b[28] | (b[29] << 8u) | (b[30] << 16u) | (static_cast<uint32_t>(b[31]) << 24u);
+    CHECK(byteRate == CLOCKWORK_AUDIO_MAX_SAMPLE_RATE * CLOCKWORK_AUDIO_MAX_CHANNELS * 4u);
+    clockwork_audio_free(bytes);
+}
+
 TEST_CASE("audio file: samples past full scale clamp rather than wrap",
           "[audio][file]") {
     // A bus that clipped hands over values outside the range an integer format
