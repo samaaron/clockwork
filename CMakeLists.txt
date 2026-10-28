@@ -402,36 +402,10 @@ endif()
 
 # ─── Ableton Link (opt-in, GPL) ──────────────────────────────────────────────
 if(CLOCKWORK_LINK)
-    message(STATUS "Ableton Link: fetching Link-4.1.1 (GPL-2.0-or-later)")
-    FetchContent_Declare(AbletonLink
-        GIT_REPOSITORY https://github.com/Ableton/link.git
-        GIT_TAG        Link-4.1.1
-        GIT_SHALLOW    TRUE
-        # Link patches, applied through cmake -P so no Unix shell is needed on
-        # Windows. Two of them are not optional: LinkSession.cpp calls
-        # loopbackOnly() and sessionPeers(), which Link-4.1.1 does not have —
-        # this option could not build without them, which is why it had never
-        # been built. See each patch header for what it does and why.
-        PATCH_COMMAND  ${CMAKE_COMMAND}
-                       -DLINK_PATCH_DIR=${CMAKE_CURRENT_LIST_DIR}/external
-                       -P ${CMAKE_CURRENT_LIST_DIR}/external/apply-link-patches.cmake)
-    FetchContent_GetProperties(AbletonLink)
-    if(NOT abletonlink_POPULATED)
-        FetchContent_Populate(AbletonLink)
-    endif()
-    # AbletonLinkConfig.cmake hard-sets CMAKE_CXX_STANDARD 17 in the calling
-    # scope — save/restore so C++20 survives.
-    set(_saved_cxx_standard ${CMAKE_CXX_STANDARD})
-    include(${abletonlink_SOURCE_DIR}/AbletonLinkConfig.cmake)
-    set(CMAKE_CXX_STANDARD ${_saved_cxx_standard})
-    # ConfigureAbletonLink declares `add_library(Ableton::Link IMPORTED
-    # INTERFACE)`, and an imported target belongs to the directory that created
-    # it — here. Anything outside this subdirectory that names it gets "the
-    # target was not found", which is what the out-of-process Link peer under
-    # test/native hit. Promote it so siblings can link it too.
-    if(TARGET Ableton::Link)
-        set_target_properties(Ableton::Link PROPERTIES IMPORTED_GLOBAL TRUE)
-    endif()
+    # The pin, the patches and the Ableton::Link target, shared with the fuzz
+    # build (test/fuzz) so they are stated once.
+    include(${CMAKE_CURRENT_LIST_DIR}/external/fetch-link.cmake)
+    clockwork_fetch_link()
 else()
     message(STATUS "Ableton Link disabled — ClockworkClock uses its local-state backing")
 endif()

@@ -14,7 +14,8 @@
  * keeps that list true.
  *
  *   node scripts/sbom.mjs check
- *       Fails when vendored code or a FetchContent_Declare has no entry in the
+ *       Fails when vendored code or a FetchContent_Declare (in a CMakeLists.txt
+ *       or an external/fetch-*.cmake) has no entry in the
  *       list, when an entry's path is gone, when an entry's version is not
  *       the GIT_TAG the build fetches or not what the vendored source itself
  *       says (clockwork:version_file and clockwork:version_pattern name where
@@ -93,7 +94,9 @@ function cmakeFiles(dir, out = []) {
     if (SKIP.has(name) || name.startsWith("build")) continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) cmakeFiles(p, out);
-    else if (name === "CMakeLists.txt") out.push(p);
+    // A fetch shared between the main tree and the fuzz build lives in
+    // external/fetch-<name>.cmake, read like a CMakeLists.txt.
+    else if (name === "CMakeLists.txt" || /^fetch-.*\.cmake$/.test(name)) out.push(p);
   }
   return out;
 }
