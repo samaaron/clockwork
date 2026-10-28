@@ -19,6 +19,22 @@
 pub mod container;
 pub mod ffi;
 
+/// What the fuzzer does to a file's bytes, as a function: probe, decode under
+/// a limit a fuzzer's machine can hold, and touch the last sample so a short
+/// buffer shows up. rust/fuzz's `audio_decode` target calls this under
+/// libFuzzer; the corpus test below calls it over corpus/ on every push.
+pub fn exercise(data: &[u8]) {
+    let _ = probe(data);
+    let mut out: Vec<f32> = Vec::new();
+    if let Ok(info) = decode(data, 64 * 1024 * 1024, &mut out) {
+        let samples = info.frames * u64::from(info.channels);
+        assert_eq!(out.len() as u64, samples);
+        if let Some(last) = out.last() {
+            std::hint::black_box(*last);
+        }
+    }
+}
+
 use std::io::Cursor;
 
 use symphonia::core::audio::sample::SampleFormat;
@@ -402,38 +418,11 @@ mod tests {
         assert_eq!(probe(b"RIFF\0\0\0\0WAVE"), Err(Refusal::Malformed));
     }
 
-    /// The fuzz seeds and every crasher the fuzzer ever found (corpus/, the
-    /// seeds rust/fuzz's audio_decode target starts from), decoded as a
-    /// test: deterministic, on every push.
+    /// The fuzz seeds and every crasher the fuzzer ever found (corpus/),
+    /// through the fuzz body as a test: deterministic, on every push.
     #[test]
     fn the_fuzz_corpus_replays() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
-        let mut seen = 0;
-        for dir in ["seeds", "regressions"] {
-            let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
-                continue;
-            };
-            for e in entries {
-                let p = e.unwrap().path();
-                if p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-                {
-                    continue;
-                }
-                let bytes = std::fs::read(&p).unwrap();
-                let _ = probe(&bytes);
-                let mut out = Vec::new();
-                if let Ok(info) = decode(&bytes, 64 * 1024 * 1024, &mut out) {
-                    assert_eq!(
-                        out.len() as u64,
-                        info.frames * u64::from(info.channels),
-                        "{}",
-                        p.display()
-                    );
-                }
-                seen += 1;
-            }
-        }
-        assert!(seen > 0, "no corpus at {}", root.display());
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-audio-decode/corpus");
     }
 }

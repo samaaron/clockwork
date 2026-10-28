@@ -57,6 +57,11 @@ See [docs/BUILDING.md](docs/BUILDING.md).
 
 This project was developed with Claude Code.
 
+## Security
+
+Report a vulnerability privately: see [SECURITY.md](SECURITY.md). What clockwork
+defends against, and what it trusts, is in [docs/THREATS.md](docs/THREATS.md).
+
 ## Licensing
 
 AGPL-3.0-or-later, or a commercial licence - see [LICENSE](LICENSE).

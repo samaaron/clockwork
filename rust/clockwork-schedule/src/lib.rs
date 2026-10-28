@@ -64,3 +64,29 @@ pub use parse::{Packet, SCHEDULE_ADDR};
 pub use store::{Event, Store, MAX_SLOT_COUNT};
 #[cfg(feature = "store")]
 pub use tag::{tag_hash, TAG_DEFAULT, TAG_SYNTH};
+
+/// What the fuzzer does to a `/clockwork/schedule` wire form, as a function:
+/// read its bundle time if it is one, parse it, and check a parse that says
+/// ok points at a blob inside the message. rust/fuzz's `schedule_parse`
+/// target calls this under libFuzzer; the corpus test calls it over corpus/
+/// (the seeds, and every crasher kept) on every push.
+pub fn exercise(data: &[u8]) {
+    if parse::is_bundle(data) {
+        let _ = parse::bundle_timetag(data);
+    }
+    let p = parse::parse(data);
+    if p.ok {
+        let end = p.blob_off.checked_add(p.blob_len as usize);
+        assert!(end.is_some_and(|e| e <= data.len()), "blob outside the message");
+        assert_eq!(p.blob(data).len(), p.blob_len as usize);
+    }
+}
+
+#[cfg(test)]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), super::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-schedule/corpus");
+    }
+}

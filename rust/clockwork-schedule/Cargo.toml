@@ -34,3 +34,6 @@ parse = []
 # fall out of step with the prefix — the property the C++ parser was fixed to
 # have and that this port must not lose.
 clockwork-osc = { path = "../clockwork-osc" }
+
+[dev-dependencies]
+clockwork-corpus = { path = "../clockwork-corpus" }

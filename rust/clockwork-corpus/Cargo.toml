@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-corpus"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "Replays a crate's fuzz corpus through its fuzz body, as a test. A dev-dependency of every crate that keeps one; never in the staticlib."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]

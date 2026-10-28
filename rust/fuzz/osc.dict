@@ -1,0 +1,5 @@
+# Words the OSC parsers branch on, so the fuzzer need not find them byte by byte.
+"#bundle\x00"
+"/clockwork/schedule\x00"
+"/clockwork/"
+",ifsbhtdSTFNIcrm[]"

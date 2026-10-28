@@ -69,3 +69,25 @@ impl Refusal {
         }
     }
 }
+
+/// What the fuzzer does to bytes from the network, as a function: decode them
+/// as a message and as a packet, and check that what decodes re-encodes to
+/// itself. rust/fuzz's `osc_packet` target calls this under libFuzzer; the
+/// corpus test calls it over corpus/ (the seeds, and every crasher kept) on
+/// every push, so nothing found is ever found twice.
+pub fn exercise(data: &[u8]) {
+    let _ = decode(data);
+    let Some(first) = decode_packet(data) else { return };
+    let once = encode_packet(&first);
+    let again = decode_packet(&once).expect("an encoded packet decodes");
+    assert_eq!(once, encode_packet(&again), "encoding is not stable");
+}
+
+#[cfg(test)]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), super::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-osc/corpus");
+    }
+}

@@ -16,3 +16,6 @@ crate-type = ["rlib"]
 [features]
 default = ["std"]
 std = []
+
+[dev-dependencies]
+clockwork-corpus = { path = "../clockwork-corpus" }

@@ -23,3 +23,7 @@ crate-type = ["rlib"]
 symphonia = { version = "0.6", default-features = false, features = [
     "wav", "aiff", "flac", "mp3", "ogg", "vorbis", "pcm", "adpcm", "id3v2", "id3v1",
 ] }
+
+[dev-dependencies]
+# replay, for the corpus test
+clockwork-corpus = { path = "../clockwork-corpus" }

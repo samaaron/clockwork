@@ -1,0 +1,151 @@
+# clockwork security CI
+#
+# What docs/THREATS.md and SECURITY.md promise, checked:
+#
+#   sbom       docs/components.cdx.json still lists every vendored library and
+#              every fetch at the version the build takes; one CycloneDX SBOM
+#              per CI target is uploaded as an artifact; and every component
+#              of every document is looked up in OSV (crates and npm packages
+#              by purl, vendored code by its upstream commit) or the NVD,
+#              failing on any advisory not accepted by docs/vex.cdx.json. The
+#              scan then runs over a fixture with known advisories and must
+#              fail, which proves it looks. Daily as well as on every push: a
+#              new advisory against an unchanged dependency changes nothing
+#              in the repository to trigger a run, and a failed scheduled run
+#              is mailed to the workflow's author, which is how it is heard.
+#   replay     every fuzz target over its corpus, the seeds and every crasher
+#              ever found, deterministically, on every push: the Rust bodies
+#              under cargo test (each crate's corpus test), the C and C++ ones
+#              under ASan and UBSan. Red here means a change broke something.
+#   fuzz       nightly only: each target under libFuzzer for two hours. A
+#              crasher is sealed to .github/fuzz-crasher.pub before it is
+#              uploaded (scripts/encrypt-crasher.sh), since an artifact on a
+#              public repository is readable by anyone signed in. A crasher,
+#              once fixed, is committed to the target's corpus/regressions and
+#              replayed on every push from then on.
+
+name: security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------- sbom --
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Every vendored library and fetch is listed
+        run: node scripts/sbom.mjs check
+      - name: One SBOM per target
+        run: node scripts/sbom.mjs target all build/sbom "$(git rev-parse --short HEAD)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clockwork-sboms
+          path: build/sbom/clockwork-*.cdx.json
+      - name: Every component looked up, no open advisory
+        run: node scripts/sbom.mjs scan build/sbom/clockwork-*.cdx.json
+      - name: The scan fails on known advisories
+        run: |
+          if node scripts/sbom.mjs scan test/fixtures/sbom-canary.cdx.json; then
+            echo "the scan passed a fixture with known advisories; it is not looking"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------- replay --
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: The Rust targets, over their corpora, as the crates' own tests
+        run: |
+          cd rust
+          cargo test -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode corpus -- --nocapture 2>&1 | tee ../replay-rust.log
+          # Three corpus tests ran, and said so: a crate whose corpus test
+          # vanished would otherwise pass this step in silence.
+          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 3
+      - name: The C and C++ targets, over their corpora, under ASan and UBSan
+        run: |
+          CC=gcc CXX=g++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-fuzz --parallel 2
+          build-fuzz/fuzz_osc_received rust/clockwork-osc/corpus test/fuzz/corpus/osc_received
+          build-fuzz/fuzz_osc_reader rust/clockwork-osc/corpus test/fuzz/corpus/osc_reader
+
+  # ------------------------------------------------------------------- fuzz --
+  # Nightly, and by hand. Not on a push: a run bounded by time can go red by
+  # chance, and a red push must always mean a change.
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: osc_packet,        kind: rust, seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
+          - { target: schedule_parse,    kind: rust, seeds: rust/clockwork-schedule/corpus,     dict: rust/fuzz/osc.dict }
+          - { target: audio_decode,      kind: rust, seeds: rust/clockwork-audio-decode/corpus, dict: rust/fuzz/audio.dict }
+          - { target: fuzz_osc_received, kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
+          - { target: fuzz_osc_reader,   kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        if: matrix.kind == 'rust'
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.kind == 'rust'
+        with:
+          workspaces: rust/fuzz
+      - name: cargo-fuzz
+        if: matrix.kind == 'rust'
+        run: cargo install cargo-fuzz --locked
+      - name: Build (C++)
+        if: matrix.kind == 'cpp'
+        run: |
+          CC=clang CXX=clang++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-fuzz --target ${{ matrix.target }} --parallel 2
+      - name: Fuzz ${{ matrix.target }} for two hours
+        run: |
+          mkdir -p corpus artifacts
+          if [[ "${{ matrix.kind }}" == "rust" ]]; then
+            cargo +nightly fuzz run --fuzz-dir rust/fuzz ${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions -- \
+              -dict=${{ matrix.dict }} -max_total_time=7200 -rss_limit_mb=1024 -malloc_limit_mb=256 -artifact_prefix=artifacts/
+          else
+            build-fuzz/${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions \
+              -dict=${{ matrix.dict }} -max_total_time=7200 -rss_limit_mb=1024 -malloc_limit_mb=256 -artifact_prefix=artifacts/
+          fi
+      - name: Seal the crasher
+        if: failure()
+        run: |
+          # The artifact names the target and the hash of each input, which is
+          # enough to talk about it; the bytes travel sealed.
+          ls -la artifacts/ ; sha256sum artifacts/* || true
+          scripts/encrypt-crasher.sh artifacts ${{ matrix.target }}-crasher
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ matrix.target }}-crasher
+          path: |
+            ${{ matrix.target }}-crasher.tar.enc
+            ${{ matrix.target }}-crasher.key.enc

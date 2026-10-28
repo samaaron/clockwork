@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+#
+# Fuzz targets for the Rust parsers that read bytes from outside the process:
+# the OSC codec every network transport hands its datagrams to, the
+# "/clockwork/schedule" wire form, and the sample-file decoders. Run with cargo-fuzz on nightly:
+#
+#   cargo +nightly fuzz run osc_packet --fuzz-dir rust/fuzz
+#
+# Its own workspace, so the main one (and cargo-deny's licence gate over it)
+# never sees libfuzzer-sys or needs nightly.
+[package]
+name = "clockwork-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+clockwork-osc = { path = "../clockwork-osc" }
+clockwork-schedule = { path = "../clockwork-schedule", default-features = false, features = ["parse"] }
+clockwork-audio-decode = { path = "../clockwork-audio-decode" }
+
+[[bin]]
+name = "osc_packet"
+path = "fuzz_targets/osc_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schedule_parse"
+path = "fuzz_targets/schedule_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audio_decode"
+path = "fuzz_targets/audio_decode.rs"
+test = false
+doc = false
+bench = false
