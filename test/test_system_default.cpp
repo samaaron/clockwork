@@ -225,7 +225,6 @@ TEST_CASE("SystemDefault: a default that will not open is tried once each time "
     REQUIRE(sys->reportListChanged());
     deviceLaneDone(fix.engine());
     const int tried = phones->opens.load();
-    INFO(fix.debugMessagesDump());
     REQUIRE(tried > 0);
 
     for (int i = 0; i < 3; ++i) REQUIRE(sys->reportListChanged());
@@ -241,6 +240,56 @@ TEST_CASE("SystemDefault: a default that will not open is tried once each time "
     setDefault(fix, *sys, 2);
     REQUIRE(sys->reportDefaultChanged());
     deviceLaneDone(fix.engine());
+    INFO(fix.debugMessagesDump());
+    CHECK(phones->opens.load() > tried);
+}
+
+TEST_CASE("SystemDefault: a default seen back on the playing device while a recovery "
+          "is in flight is still a move, so a default that would not open is tried "
+          "when it moves back", "[SystemDefault]") {
+    // The watchdog claims the recovery slot on a stall and posts the recovery
+    // onto the device lane, where the pass that is already due runs first.
+    // That pass returned before noting where the default had gone, so the
+    // default then moving back to the device that would not open looked like
+    // no move at all, and the device was never tried again. A loaded CI
+    // runner stalls the fake device's callbacks often enough to hit this.
+    const Driver driver = GENERATE(from_range(waysADefaultMoveIsHeard()));
+    CAPTURE(fake_audio::driverName(driver));
+    auto sys = systemOn(driver);
+    auto phones = addHeadphones(*sys);
+    phones->failOpen = true;
+    auto cfg = fakeEngineConfig(sys, "Fake Interface");
+    cfg.watchdogRecoveryCooldownMs = 0;
+    EngineFixture fix(cfg);
+    REQUIRE(fix.engine().setDeviceMode("system").empty());
+    REQUIRE(fix.engine().currentDevice().name == "Fake Speakers");
+
+    {
+        auto hold = fix.engine().testHoldSwapGate();
+        phones->hidden = false;
+        sys->types[0].defaultDeviceIndex = 2;
+    }
+    REQUIRE(sys->reportListChanged());
+    deviceLaneDone(fix.engine());
+    const int tried = phones->opens.load();
+    REQUIRE(tried > 0);
+
+    // The default moves back to the speakers, and a recovery is claimed
+    // before the lane can look: the pass runs with the slot held.
+    {
+        auto hold = fix.engine().testHoldSwapGate();
+        sys->types[0].defaultDeviceIndex = 0;
+        REQUIRE(sys->reportDefaultChanged());
+        std::string reason;
+        REQUIRE(fix.engine().requestAudioRecovery(reason));
+    }
+    deviceLaneDone(fix.engine());
+    checkPlayingOn(fix, "Fake Speakers");
+
+    setDefault(fix, *sys, 2);
+    REQUIRE(sys->reportDefaultChanged());
+    deviceLaneDone(fix.engine());
+    INFO(fix.debugMessagesDump());
     CHECK(phones->opens.load() > tried);
 }
 

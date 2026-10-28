@@ -4712,9 +4712,11 @@ bool ClockworkEngine::reconcileOpenDevice() {
 }
 
 bool ClockworkEngine::followDefaultOutput() {
-    // A queued recovery opens the default itself.
-    if (!mDevices || mReopenInProgress.load()) return false;
+    if (!mDevices) return false;
 
+    // Every pass records where the default is, so a default that moves away
+    // and back while a recovery holds the slot still counts as a move. Only
+    // the open below waits for the recovery.
     const SystemDefaultOutput def = systemDefaultOutput();
     const auto dev = mDevices->current();
     const std::string currentOutput = dev ? dev->name : std::string();
@@ -4725,6 +4727,9 @@ bool ClockworkEngine::followDefaultOutput() {
         return false;
     }
     if (def.name != mUnopenableDefault) mUnopenableDefault.clear();
+
+    // A queued recovery opens the default itself.
+    if (mReopenInProgress.load()) return false;
 
     // Not our own aggregates, not virtual devices (an app may spawn one and
     // macOS make it the default), and never away from a device the user
