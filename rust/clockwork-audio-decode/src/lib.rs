@@ -188,6 +188,20 @@ pub fn decode(bytes: &[u8], max_bytes: u64, out: &mut dyn Output) -> Result<Info
         if n == 0 {
             continue;
         }
+        // A frame decoded at a layout other than the stream's (an MP3 frame
+        // header can say mono at 24 kHz under a stereo 44.1 kHz stream) would
+        // put fewer samples in the block than frames times channels promises:
+        // the fourth fuzz finding. Stop at it with what played at the
+        // stream's layout; a file that opens like that is refused.
+        let spec = decoded.spec();
+        if spec.channels().count() as u32 != opened.info.channels
+            || spec.rate() != opened.info.sample_rate
+        {
+            if frames > 0 {
+                break;
+            }
+            return Err(Refusal::Malformed);
+        }
         handed += n * bytes_per_frame;
         if handed > max_bytes {
             return Err(Refusal::TooBig);
