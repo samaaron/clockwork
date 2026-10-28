@@ -72,6 +72,7 @@ uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 #include "dsp_api.h"  // the contract with the DSP
 #include "restart_plan.h"   // the least audio coming back does (come_back)
 #include "guest_malloc.h"       // every call into the DSP is marked, so its mallocs are counted as its own
+#include "guest_fence.h"        // and, under AddressSanitizer in a harness that arms it, the arena it may not touch is poisoned
 #include "shm_tap_stream.hpp"   // the tap slots DspHost::scope_* hand a DSP
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
 #include "clockwork_port_bus.h" // ...and which DSP channels they occupy
@@ -827,12 +828,16 @@ extern "C" {
     // so its diagnostics land in the same debug stream; open_sink/send_sink are its
     // own output path; free_bytes gives back what clockwork allocated. A DSP needs no
     // client registry held on its behalf — it answers the origin it was given.
+    // Every host callback is the engine's own work inside the guest's call:
+    // HostCallScope lifts the guest fence for its body (guest_fence.h).
     static int dsp_host_emit_osc(void* /*ctx*/, uint32_t origin,
                            const uint8_t* bytes, uint32_t len) {
+        HostCallScope host;
         return emit_osc_out(origin, bytes, len) ? 1 : 0;
     }
 
     static void dsp_host_log(void* /*ctx*/, int /*level*/, const char* text) {
+        HostCallScope host;
         if (text) clockwork_log("%s", text);
     }
 
@@ -867,6 +872,7 @@ extern "C" {
 
     static ClockworkSink dsp_host_open_sink(void* /*ctx*/, ClockworkSinkKind kind,
                                       const char* target, uint32_t capacity) {
+        HostCallScope host;
         const ClockworkSink sink = clockwork_sink_open(kind, target, capacity);
         if (sink == CLOCKWORK_SINK_NONE) return CLOCKWORK_SINK_NONE;
         for (auto& slot : g_dsp_sinks) {
@@ -887,6 +893,7 @@ extern "C" {
 
     static int dsp_host_send_sink(void* /*ctx*/, ClockworkSink sink,
                                   const uint8_t* bytes, uint32_t len, int64_t when) {
+        HostCallScope host;
         return clockwork_sink_send(sink, bytes, len, when);
     }
 
@@ -907,6 +914,7 @@ extern "C" {
         // assets is the client's and the guest knows so (dsp_api.h, "Bulk").
         // This used to be a no-op on web for fear of exactly that pointer,
         // which meant every block a web guest ever freed was leaked.
+        HostCallScope host;
         if (ptr) clockwork_pool_free(ptr);
     }
 
@@ -915,6 +923,7 @@ extern "C" {
     // thread, where it answers NULL rather than blocking when it cannot meet
     // a request (dsp_api.h).
     static void* dsp_host_alloc_bytes(void* /*ctx*/, size_t bytes) {
+        HostCallScope host;
         return bytes ? clockwork_pool_alloc(bytes) : nullptr;
     }
 
@@ -926,6 +935,7 @@ extern "C" {
     // through to the substrate, which owns slots by the handle's address.
     static int dsp_host_tap_open(void* /*ctx*/, uint32_t index, uint32_t channels,
                                    DspTapHandle* hnd) {
+        HostCallScope host;
         if (!hnd) return 0;
         if (index > (uint32_t)INT32_MAX || channels > (uint32_t)INT32_MAX) return 0;
         if (!clockwork_tap_get(nullptr, (int)index, (int)channels, 0, hnd)) return 0;
@@ -937,6 +947,7 @@ extern "C" {
     static void dsp_host_tap_write(void* /*ctx*/, DspTapHandle* hnd,
                                      const float* const* channels, uint32_t n_channels,
                                      uint32_t frames) {
+        HostCallScope host;
         if (!hnd || !hnd->slot || !channels || n_channels == 0 || frames == 0) return;
         // The writer takes a full set of channel pointers; short by some, the
         // last one given fills the rest, as ScopeOut2 always did.
@@ -948,6 +959,7 @@ extern "C" {
     }
 
     static void dsp_host_tap_close(void* /*ctx*/, DspTapHandle* hnd) {
+        HostCallScope host;
         if (hnd) clockwork_tap_release(nullptr, hnd);
     }
 
@@ -1078,6 +1090,7 @@ extern "C" {
 
     // DspHost::asset_release — the guest is done; the committing client hears.
     static int dsp_host_asset_release(void* /*ctx*/, uint32_t id) {
+        HostCallScope host;
         AssetSlot* s = asset_lookup(id);
         if (!s) return 0;
         const uint32_t origin = s->origin;
@@ -1131,6 +1144,7 @@ extern "C" {
     // dropped. Not the default tag: that is clockwork's own schedule verb,
     // and not the guest's to clear.
     static void dsp_host_flush_schedule(void* /*ctx*/) {
+        HostCallScope host;
 #if CLOCKWORK_SCHEDULER
         clockwork_engine_schedule().flush(SCHED_TAG_SYNTH);
 #endif
@@ -1936,6 +1950,7 @@ extern "C" {
 #endif
         if (cold_boot) {
             shared_memory = base;
+            clockwork_guest_fence_arena(base);
             // A new engine, not a rebuild of the one that was running.
             reset_engine_diagnostics();
             // The table every reader takes the layout from, first, so nothing
@@ -2888,6 +2903,7 @@ extern "C" {
 #endif
         g_owned_fast_bytes = g_owned_bulk_bytes = 0;
         memory_initialized = false;
+        clockwork_guest_fence_arena(nullptr);
         shared_memory = nullptr;
         cursors = nullptr;
         metrics = nullptr;

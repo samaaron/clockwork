@@ -10,6 +10,7 @@
 
 #include "lanes/lanes.h"
 #include "audio_processor.h"   // destroy_dsp, rebuild_dsp
+#include "guest_fence.h"       // armed here: one thread, so the fence can hold every region
 #include "dsp_api.h"      // DspFpEnv
 #include "OscTestUtils.h"
 
@@ -118,6 +119,10 @@ uint32_t boot() {
     // widens the channel counts the DSP is allocated for.
     if (kReservedLanes > 0) clockwork_reserve_lanes(kReservedLanes);
     if (kLinkAudioLanes > 0) clockwork_reserve_link_audio_lanes(kLinkAudioLanes);
+    // This thread is the only one that touches the arena, so the guest fence
+    // can hold every region the guest was not handed (guest_fence.h); in a
+    // build without AddressSanitizer this arms nothing.
+    clockwork_guest_fence_arm(true);
     // This fixture arms nothing on the thread that ticks, so denormals are
     // honoured, and it says so — the guest reports what it was told
     // (test_dsp_regions.cpp), which is the declaration's whole job.

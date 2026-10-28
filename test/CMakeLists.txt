@@ -168,6 +168,9 @@ add_executable(clockwork_tests
     # survive that and another be cleared by it — which is the whole difference
     # between DspConfig::persistent and DspConfig::guest_memory.
     test_dsp_regions.cpp
+    # The guest keeps to the regions it was handed: a fence under
+    # AddressSanitizer, proved by a child that must die.
+    test_guest_fence.cpp
     test_restarts.cpp
     # The least a restart does, as a rule alone; the hosts that ask it are
     # pinned in test_restarts.cpp and test_device_policy.cpp.
@@ -272,6 +275,7 @@ target_include_directories(clockwork_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(clockwork_tests ${CLOCKWORK_DSP})
 target_link_libraries(clockwork_tests PRIVATE ${CLOCKWORK_LIB_GROUP} clockwork_comms Catch2::Catch2)
 target_compile_definitions(clockwork_tests PRIVATE
+    CLOCKWORK_TESTS_BINARY="$<TARGET_FILE:clockwork_tests>"
     RING_WIRE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ring_wire.txt"
     CLOCKWORK_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
 

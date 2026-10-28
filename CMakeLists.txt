@@ -630,6 +630,9 @@ set(CLOCKWORK_CORE_SOURCES
     # What the guest takes from malloc, counted (src/guest_malloc.h). The
     # wrappers inside it link only where the link can wrap (the web).
     ${CLOCKWORK_SRC}/guest_malloc.cpp
+    # The arena the guest may not touch, poisoned while it runs: AddressSanitizer
+    # builds, armed by a single-threaded harness (src/guest_fence.h).
+    ${CLOCKWORK_SRC}/guest_fence.cpp
     ${CLOCKWORK_SRC}/tap_streams.cpp
     ${CLOCKWORK_SRC}/mem_region.cpp
     ${CLOCKWORK_SRC}/engine_support.cpp

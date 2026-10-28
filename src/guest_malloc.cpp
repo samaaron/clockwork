@@ -12,6 +12,7 @@
 // malloc.
 
 #include "guest_malloc.h"
+#include "guest_fence.h"
 
 #include <atomic>
 
@@ -48,8 +49,16 @@ inline void count_call() {
 #endif
 }  // namespace
 
-void clockwork_guest_call_begin(GuestCall kind) { g_open = kind; clockwork_router_guest_enter(); }
-void clockwork_guest_call_end() { clockwork_router_guest_exit(); g_open = GuestCall::None; }
+void clockwork_guest_call_begin(GuestCall kind) {
+    g_open = kind;
+    clockwork_router_guest_enter();
+    clockwork_guest_fence_close();   // from here the arena is the guest's regions only (guest_fence.h)
+}
+void clockwork_guest_call_end() {
+    clockwork_guest_fence_open();
+    clockwork_router_guest_exit();
+    g_open = GuestCall::None;
+}
 
 size_t clockwork_guest_malloc_bytes() {
     const int64_t held = g_held.load(std::memory_order_relaxed);

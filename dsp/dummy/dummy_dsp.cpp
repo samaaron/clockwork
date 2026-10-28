@@ -1042,6 +1042,17 @@ void dsp_osc(struct Dsp* dsp,
         }
         return;
     }
+    // /dummy/poke ,ii <address high word> <address low word> — write one byte
+    // at an address a test names, from inside this guest entry point. A guest
+    // that behaves never does this; the guest fence test (test_guest_fence.cpp)
+    // uses it to prove that one which does is caught.
+    if (addressIs(bytes, len, "/dummy/poke")) {
+        uint32_t hi = 0, lo = 0;
+        if (!readTwoInts(bytes, len, "/dummy/poke", &hi, &lo)) return;
+        auto* at = reinterpret_cast<volatile uint8_t*>((uint64_t(hi) << 32) | uint64_t(lo));
+        *at = static_cast<uint8_t>(*at + 1);
+        return;
+    }
     // How many times THIS instance took new device facts (dsp_reconfigure),
     // and the output ceiling it renders to now: a test's proof that a hot
     // restart kept the instance and told it, where a cold one would answer
