@@ -44,6 +44,10 @@ export function runSabWorker(config) {
         // The engine's rings, for js/lib/ring.js to read. Nothing compiled
         // runs here (docs/THREADS.md).
         rings: null,
+        // The loops inside their wait right now (one, when all is well); for a
+        // handler a test adds, which answers the question through its port.
+        liveLoops: () => live,
+        staleReads: () => staleReads,
     };
 
     let running = false;
@@ -60,6 +64,12 @@ export function runSabWorker(config) {
     // the loop that replaced it: one more loop for each time, every one woken by every frame (and a watcher, which
     // keeps its own place, shown each frame by each of them).
     let generation = 0;
+    // How many loops are inside their wait right now. One, when all is well: a loop that was stopped or replaced
+    // leaves at its next wake, and a test proves it by asking after a frame has woken every loop there is.
+    let live = 0;
+    // Reads made by a loop after it was stopped or replaced: by the rule above, none, ever. Counted rather than
+    // assumed, so a test can ask.
+    let staleReads = 0;
 
     async function initRingBuffer(buffer, base, constants) {
         ctx.sharedBuffer = buffer;
@@ -90,6 +100,11 @@ export function runSabWorker(config) {
     }
 
     function waitLoop(mine) {
+        live++;
+        try { waitLoopBody(mine); } finally { live--; }
+    }
+
+    function waitLoopBody(mine) {
         const hIdx = headIndex(ctx.RING_CURSOR_INDICES);
         // A reader that CONSUMES leaves its position in the ring's own tail, so
         // "nothing to do" is head === tail. A reader that only WATCHES keeps its
@@ -112,6 +127,7 @@ export function runSabWorker(config) {
                 }
                 lastHead = Atomics.load(ctx.atomicView, hIdx);
 
+                if (!running || mine !== generation) staleReads++;
                 const results = readMessages(ctx);
                 if (results && results.length > 0) {
                     postResults(results);
@@ -128,6 +144,11 @@ export function runSabWorker(config) {
     // parking the thread, so the host's own work — its messages, its timers — keeps running between frames.
     // Where it is missing, a short sleep stands in: slower to wake, but it still yields.
     async function waitLoopAsync(mine) {
+        live++;
+        try { await waitLoopAsyncBody(mine); } finally { live--; }
+    }
+
+    async function waitLoopAsyncBody(mine) {
         const hIdx = headIndex(ctx.RING_CURSOR_INDICES);
         const tIdx = tailIndex ? tailIndex(ctx.RING_CURSOR_INDICES) : -1;
         let lastHead = -1;
@@ -152,6 +173,7 @@ export function runSabWorker(config) {
                 }
                 lastHead = Atomics.load(ctx.atomicView, hIdx);
 
+                if (!running || mine !== generation) staleReads++;
                 const results = readMessages(ctx);
                 if (results && results.length > 0) {
                     postResults(results);

@@ -51,8 +51,10 @@ test("a reader the host runs on a port of its own, yielding between frames, hear
 });
 
 test("a reader the host runs on a port of its own has one loop reading, however many times it is stopped and started", async ({ page, clockworkConfig, clockworkMode }) => {
-  // Counted from inside: the pump's own read, with every pass of it counted. One loop makes a pass each time the ring
-  // moves; a loop left over from each reload wakes with it too, and makes one more.
+  // Counted from inside: how many loops are inside their wait, and how many reads a loop made after it was stopped
+  // or replaced. A loop that was stopped or replaced leaves at its next wake without reading, and a reply to a sync
+  // is a frame that wakes every loop there is, so after a sync there is one loop and no stale read, or there is a
+  // leak. Both counts are exact; nothing here is a timer.
   test.skip(clockworkMode !== "sab", "a host's reader is the SAB transport's");
   await boot(page);
   const r = await page.evaluate(async ([config, withinSrc]) => {
@@ -64,7 +66,6 @@ test("a reader the host runs on a port of its own has one loop reading, however 
         const { calculateOutControlIndices } = await import("${location.origin}/js/lib/ring_cursor_offsets.js");
         const { EgressReader } = await import("${location.origin}/js/lib/ring.js");
         const port = data.port;
-        let passes = 0;
         let reader = null;
         runSabWorker({
           name: "CountingReader", endpoint: port, initMetrics: false,
@@ -72,49 +73,45 @@ test("a reader the host runs on a port of its own has one loop reading, however 
           headIndex: (idx) => idx.OUT_HEAD, tailIndex: (idx) => idx.OUT_TAIL,
           onInit: (ctx) => { reader = new EgressReader(ctx.rings); },
           readMessages: () => {
-            passes++;
             const messages = [];
             reader?.poll(0, (bytes, origin, route, sequence) => messages.push({ oscData: bytes.slice(), sequence, timestamp: 0 }));
             return messages;
           },
           postResults: (messages) => port.postMessage({ type: "messages", messages }),
-          extraHandlers: { passes: () => port.postMessage({ type: "passes", passes }) },
+          extraHandlers: { loops: (_, ctx) => port.postMessage({ type: "loops", loops: ctx.liveLoops(), stale: ctx.staleReads() }) },
         });
       };`;
     const host = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })), { type: "module" });
     const channel = new MessageChannel();
     host.postMessage({ port: channel.port2 }, [channel.port2]);
-    const passes = () => new Promise((resolve) => {
-      const on = ({ data }) => { if (data.type === "passes") { channel.port1.removeEventListener("message", on); resolve(data.passes); } };
+    const loops = () => new Promise((resolve) => {
+      const on = ({ data }) => { if (data.type === "loops") { channel.port1.removeEventListener("message", on); resolve({ loops: data.loops, stale: data.stale }); } };
       channel.port1.addEventListener("message", on);
-      channel.port1.postMessage({ type: "passes" });
+      channel.port1.postMessage({ type: "loops" });
     });
     const cw = new window.Clockwork({ ...config, oscInEndpoint: channel.port1 });
     const init = await within(cw.init(), 10000);
     if (init.error || !init.settled) { host.terminate(); return { init }; }
-    // what one reply costs in passes, before any reload and after three
-    const cost = async () => {
-      await new Promise((r) => setTimeout(r, 200));
-      const before = await passes();
-      await within(cw.sync(), 5000);
-      await new Promise((r) => setTimeout(r, 200));
-      return (await passes()) - before;
-    };
-    const first = await cost();
+    // Loops inside their wait once a reply has woken every one of them.
+    const settled = async () => { await within(cw.sync(), 5000); return loops(); };
+    const first = await settled();
     for (let i = 0; i < 3; i++) await cw.reload();
-    const afterReloads = await cost();
-    // A reload's own traffic usually wakes the old loop while the reader is stopped, and it ends. With nothing on the
-    // ring between 'stop' and 'start' it sleeps through both — and wakes, to a running reader, beside the new loop.
+    const afterReloads = await settled();
+    // Stopped and started with nothing on the ring between: a loop parked in its wait sleeps through both and
+    // wakes to a running reader, beside the loop that replaced it, unless the generation it belongs to sends it away.
     for (let i = 0; i < 3; i++) { channel.port1.postMessage({ type: "stop" }); channel.port1.postMessage({ type: "start" }); }
-    const later = await cost();
+    const later = await settled();
     await cw.shutdown();
     host.terminate();
     return { init, first, afterReloads, later };
   }, [clockworkConfig, within]);
   expect(r.init.error ?? null).toBeNull();
-  expect(r.first, "the reader made no pass when a reply arrived").toBeGreaterThan(0);
-  expect(r.afterReloads, "more passes per reply after reloads: a loop from before a reload is still reading").toBe(r.first);
-  expect(r.later, "more passes per reply after a stop and start: the loop from before is still reading").toBe(r.first);
+  expect(r.first.loops, "no loop was reading").toBe(1);
+  expect(r.first.stale, "a read by a loop that was stopped or replaced").toBe(0);
+  expect(r.afterReloads.loops, "a loop from before a reload is still reading").toBe(1);
+  expect(r.afterReloads.stale, "a loop from before a reload read after it was replaced").toBe(0);
+  expect(r.later.loops, "the loop from before a stop and start is still reading").toBe(1);
+  expect(r.later.stale, "the loop from before a stop and start read after it was replaced").toBe(0);
 });
 
 test("after a reload over the same memory the reply rings keep their place, and the page reads on from it", async ({ page, clockworkConfig, clockworkMode }) => {
