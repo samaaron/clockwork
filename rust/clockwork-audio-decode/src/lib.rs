@@ -42,10 +42,11 @@ use symphonia::core::codecs::audio::well_known::*;
 use symphonia::core::codecs::audio::{AudioCodecId, AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error;
-use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::probe::{Hint, Probe};
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::default::formats::{AiffReader, FlacReader, MpaReader, OggReader, WavReader};
 
 /// The container, with the values of `ClockworkAudioFormat`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,19 +210,29 @@ struct Opened<'a> {
 }
 
 fn open(bytes: &[u8]) -> Result<Opened<'_>, Refusal> {
-    let format = sniff(bytes);
-    if format == Format::Unknown {
-        return Err(Refusal::NotAudio);
-    }
-
+    let (bytes, format) = container::body(bytes);
     let source: Box<dyn MediaSource + '_> = match format {
+        Format::Unknown => return Err(Refusal::NotAudio),
         Format::Wav | Format::Aiff | Format::Rf64 | Format::W64 => {
             Box::new(container::normalise(bytes, format).ok_or(Refusal::Malformed)?)
         }
-        _ => Box::new(Cursor::new(bytes)),
+        Format::Flac | Format::Ogg | Format::Mp3 => Box::new(Cursor::new(bytes)),
     };
     let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
-    let reader = symphonia::default::get_probe()
+    // Only the reader for the format the bytes were sniffed as. Symphonia's
+    // stock probe scans a stream for the marker of any format it knows, and
+    // a WAV header buried in what the bytes said was an MP3 reached the WAV
+    // reader that way, past the normaliser: the second fuzz finding.
+    let mut probe = Probe::new();
+    match format {
+        Format::Unknown => return Err(Refusal::NotAudio),
+        Format::Wav | Format::Rf64 | Format::W64 => probe.register_format::<WavReader<'_>>(),
+        Format::Aiff => probe.register_format::<AiffReader<'_>>(),
+        Format::Flac => probe.register_format::<FlacReader<'_>>(),
+        Format::Ogg => probe.register_format::<OggReader<'_>>(),
+        Format::Mp3 => probe.register_format::<MpaReader<'_>>(),
+    }
+    let reader = probe
         .probe(
             &Hint::new(),
             mss,
@@ -325,6 +336,44 @@ mod tests {
         v.sort();
         assert!(v.len() >= 30);
         v
+    }
+
+    #[test]
+    fn a_format_buried_behind_another_is_not_reached() {
+        // The bytes say MP3, so the MP3 reader is the only one that reads
+        // them. A WAV behind the sync is never found by scanning: that is how
+        // a fmt chunk got past the WAV normaliser to the decoder (the second
+        // fuzz finding, in corpus/regressions).
+        let mut d = vec![0xFF, 0xFB, 0x90, 0x00];
+        d.extend_from_slice(&[0u8; 240]);
+        d.extend_from_slice(&fixture("wav-s16.wav"));
+        assert_eq!(sniff(&d), Format::Mp3);
+        assert_eq!(probe(&d), Err(Refusal::Malformed));
+        let mut out = Vec::new();
+        assert_eq!(decode(&d, u64::MAX, &mut out), Err(Refusal::Malformed));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_id3_tag_in_front_of_a_flac_is_a_flac() {
+        // Some taggers put an ID3v2 tag in front of a FLAC. The tag is
+        // stepped over and the file is read, and reported, as the FLAC it is.
+        let tagged = fixture("mp3-id3v2.mp3");
+        assert_eq!(&tagged[..3], b"ID3");
+        let size = tagged[6..10]
+            .iter()
+            .fold(0usize, |n, &b| (n << 7) | usize::from(b & 0x7F));
+        let tag = &tagged[..10 + size];
+        let flac = fixture("flac-s16.flac");
+        let mut d = tag.to_vec();
+        d.extend_from_slice(&flac);
+        assert_eq!(sniff(&d), Format::Flac);
+        let mut plain = Vec::new();
+        let want = decode(&flac, u64::MAX, &mut plain).unwrap();
+        let mut out = Vec::new();
+        let got = decode(&d, u64::MAX, &mut out).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(out, plain);
     }
 
     #[test]

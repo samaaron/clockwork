@@ -26,6 +26,49 @@ const W64_RIFF: [u8; 16] = [
 
 /// What the bytes are, from their first bytes alone and never from a name.
 pub fn sniff(d: &[u8]) -> Format {
+    body(d).1
+}
+
+/// The bytes the decoder reads, and what they are. An ID3v2 tag in front
+/// says nothing about what follows it (an MP3 nearly always, a FLAC from
+/// some taggers), so the tag is stepped over and what is behind it is
+/// sniffed; an MP3's ID3v1 tag at the end is cut off the same way. The
+/// decoder never sees a tag, so it has no reason to look past the format
+/// it was given.
+pub fn body(d: &[u8]) -> (&[u8], Format) {
+    let mut rest = d;
+    while rest.starts_with(b"ID3") {
+        match after_id3v2(rest) {
+            Some(r) => rest = r,
+            // A tag cut short: an MP3 as far as anyone can tell, and the MP3
+            // reader will say whether it is one.
+            None => return (rest, Format::Mp3),
+        }
+    }
+    let format = match sniff_bytes(rest) {
+        // A tag with nothing readable behind it is taken for an MP3 too.
+        Format::Unknown if rest.len() != d.len() => Format::Mp3,
+        f => f,
+    };
+    if format == Format::Mp3 && rest.len() >= 128 && rest[rest.len() - 128..].starts_with(b"TAG") {
+        rest = &rest[..rest.len() - 128];
+    }
+    (rest, format)
+}
+
+/// The bytes after an ID3v2 tag at the front of `d`, if the whole tag is
+/// there: a ten-byte header whose size is four seven-bit bytes, and a
+/// ten-byte footer when flag bit 4 says so.
+fn after_id3v2(d: &[u8]) -> Option<&[u8]> {
+    let h = d.get(..10)?;
+    let size = h[6..10].iter().try_fold(0usize, |n, &b| {
+        (b < 0x80).then(|| (n << 7) | usize::from(b))
+    })?;
+    let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
+    d.get(10 + size + footer..)
+}
+
+fn sniff_bytes(d: &[u8]) -> Format {
     let starts = |at: usize, tag: &[u8]| d.len() >= at + tag.len() && &d[at..at + tag.len()] == tag;
     if d.len() < 4 {
         return Format::Unknown;
