@@ -310,16 +310,17 @@ jobs:
           - name: no-device
             flags: -DCLOCKWORK_DEVICE=OFF -DCLOCKWORK_PLUGINS=OFF -DCLOCKWORK_NIF=OFF
             tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests
-          # What a distribution builds: the system stb instead of the vendored
-          # copy, and the plugin bridge installed out of PATH
+          # What a distribution builds: the system libsamplerate instead of
+          # the vendored copy (Link on, since only Link Audio uses it), and
+          # the plugin bridge installed out of PATH
           # (CLOCKWORK_PLUGIN_BRIDGE_DIR). The bridge-lookup case in
           # test_plugin_bridge.cpp exercises that directory. $GITHUB_WORKSPACE,
           # not ${{ github.workspace }}: a matrix value is evaluated before the
           # job has a workspace, and the expression came out empty — the shell
           # in the Configure step expands the variable instead.
           - name: distro
-            flags: -DCLOCKWORK_SYSTEM_STB=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=$GITHUB_WORKSPACE/build/libexec
-            apt: libstb-dev
+            flags: -DCLOCKWORK_LINK=ON -DCLOCKWORK_SYSTEM_SAMPLERATE=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=$GITHUB_WORKSPACE/build/libexec
+            apt: libsamplerate0-dev
             tests: build/test/clockwork_tests build/test/clockwork_lanes_reserved_tests build/test/clockwork_attach_tests build/test/clockwork_engine_tests
     steps:
       - uses: actions/checkout@v6
