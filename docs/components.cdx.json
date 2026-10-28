@@ -341,14 +341,14 @@
       "type": "library",
       "bom-ref": "ableton-link",
       "name": "Ableton Link",
-      "version": "Link-4.1",
+      "version": "Link-4.1.1",
       "author": "Ableton AG",
       "licenses": [
         {
           "expression": "GPL-2.0-or-later"
         }
       ],
-      "purl": "pkg:github/ableton/link@Link-4.1",
+      "purl": "pkg:github/ableton/link@Link-4.1.1",
       "externalReferences": [
         {
           "type": "vcs",
@@ -395,7 +395,7 @@
         },
         {
           "name": "clockwork:upstream_commit",
-          "value": "9c9091275e707ab09d09a5a608fcdb84bf0dec85"
+          "value": "5ba907ae027a8c2ec8824463e37296dcefc5e9be"
         },
         {
           "name": "clockwork:targets",
@@ -411,7 +411,7 @@
       "type": "library",
       "bom-ref": "link-audio-renderer",
       "name": "Ableton Link LinkAudioRenderer (receive half)",
-      "version": "Link-4.1",
+      "version": "Link-4.1.1",
       "author": "Ableton AG",
       "licenses": [
         {
@@ -438,7 +438,7 @@
         },
         {
           "name": "clockwork:upstream_commit",
-          "value": "9c9091275e707ab09d09a5a608fcdb84bf0dec85"
+          "value": "5ba907ae027a8c2ec8824463e37296dcefc5e9be"
         },
         {
           "name": "clockwork:version_file",
