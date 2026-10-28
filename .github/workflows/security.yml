@@ -37,8 +37,11 @@ on:
 permissions:
   contents: read
 
+# A push supersedes the push before it. A scheduled or hand-started run is
+# two hours of fuzzing, and a push must not cancel it: those runs get a group
+# of their own, keyed on the run so they never cancel each other either.
 concurrency:
-  group: security-${{ github.ref }}
+  group: security-${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
