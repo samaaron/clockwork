@@ -200,15 +200,22 @@ fn walk_w64(d: &[u8]) -> Vec<Chunk> {
 }
 
 /// The channel count the format chunk declares: a WAVE fmt's second field,
-/// an AIFF COMM's first. A file without one is not a file the decoder could
-/// read.
+/// an AIFF COMM's first. A file declares its format exactly once: the decoder
+/// reads every chunk, the ones after the data too, so a second fmt or COMM
+/// would reach it unchecked (the nightly fuzz run's third finding). A file
+/// without one, or with two, is not a file the decoder could read.
 fn declared_channels(d: &[u8], chunks: &[Chunk], big_endian: bool) -> Option<u16> {
+    let id: &[u8; 4] = if big_endian { b"COMM" } else { b"fmt " };
+    let mut found = chunks.iter().filter(|c| &c.id == id);
+    let format = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    let upto = &d[..format.start + format.len];
     if big_endian {
-        let comm = chunks.iter().find(|c| &c.id == b"COMM")?;
-        be16(&d[..comm.start + comm.len], comm.start)
+        be16(upto, format.start)
     } else {
-        let fmt = chunks.iter().find(|c| &c.id == b"fmt ")?;
-        le16(&d[..fmt.start + fmt.len], fmt.start + 2)
+        le16(upto, format.start + 2)
     }
 }
 
@@ -444,6 +451,26 @@ mod tests {
         assert!(normalise(&with_channels(wav(400, 100), MAX_CHANNELS + 1), Format::Wav).is_none());
         assert!(normalise(&with_channels(wav(400, 100), MAX_CHANNELS), Format::Wav).is_some());
         assert!(normalise(&with_channels(wav(400, 100), 2), Format::Wav).is_some());
+    }
+
+    #[test]
+    fn a_second_format_chunk_is_refused() {
+        // The nightly fuzz run's third finding: a well-formed fmt, then a
+        // data chunk, then a second fmt declaring 45,314 channels. The decoder
+        // reads every chunk, so a file may declare its format exactly once.
+        let mut d = wav(400, 100);
+        d.extend_from_slice(b"fmt ");
+        d.extend_from_slice(&16u32.to_le_bytes());
+        for x in [1u16, 45_314] {
+            d.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [44100u32, 44100 * 4] {
+            d.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [4u16, 16] {
+            d.extend_from_slice(&x.to_le_bytes());
+        }
+        assert!(normalise(&d, Format::Wav).is_none());
     }
 
     fn aiff(channels: u16) -> Vec<u8> {
