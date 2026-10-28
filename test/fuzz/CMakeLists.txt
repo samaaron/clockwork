@@ -47,3 +47,11 @@ clockwork_fuzz_target(fuzz_osc_received fuzz_osc_received.cpp
     ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp)
 
 clockwork_fuzz_target(fuzz_osc_reader fuzz_osc_reader.cpp)
+
+# The audio writer: a WAV header and its patched sizes, and the FLAC encoder
+# of flac_encoder.cpp. Its decoder-facing calls are stubbed (audio_decode_stubs.cpp)
+# so the Rust workspace stays out of this build.
+clockwork_fuzz_target(fuzz_audio_encode fuzz_audio_encode.cpp audio_decode_stubs.cpp
+    ${CLOCKWORK_SRC}/clockwork_audio_file.cpp
+    ${CLOCKWORK_SRC}/flac_encoder.cpp)
+target_include_directories(fuzz_audio_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../rust/clockwork-audio-decode/cpp)

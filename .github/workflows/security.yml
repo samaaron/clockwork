@@ -95,6 +95,7 @@ jobs:
           cmake --build build-fuzz --parallel 2
           build-fuzz/fuzz_osc_received rust/clockwork-osc/corpus test/fuzz/corpus/osc_received
           build-fuzz/fuzz_osc_reader rust/clockwork-osc/corpus test/fuzz/corpus/osc_reader
+          build-fuzz/fuzz_audio_encode test/fuzz/corpus/audio_encode
 
   # ------------------------------------------------------------------- fuzz --
   # Nightly, and by hand. Not on a push: a run bounded by time can go red by
@@ -112,6 +113,7 @@ jobs:
           - { target: audio_decode,      kind: rust, seeds: rust/clockwork-audio-decode/corpus, dict: rust/fuzz/audio.dict }
           - { target: fuzz_osc_received, kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_osc_reader,   kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
+          - { target: fuzz_audio_encode, kind: cpp,  seeds: test/fuzz/corpus/audio_encode,     dict: rust/fuzz/audio.dict }
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
