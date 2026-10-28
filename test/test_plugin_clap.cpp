@@ -39,7 +39,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -86,16 +85,6 @@ double decode_le_double(const uint8_t* b) {
     return d;
 }
 
-std::filesystem::path write_junk_file() {
-    static int seq = 0;
-    auto path = std::filesystem::temp_directory_path() /
-                ("clockwork-not-a-plugin-" + std::to_string(++seq) + ".bin");
-    std::ofstream f(path, std::ios::binary);
-    f << "this is not a shared object, let alone a CLAP one\n";
-    f.close();
-    return path;
-}
-
 } // namespace
 
 TEST_CASE("clap: scanning finds the in-tree test plugin", "[plugin][clap]") {
@@ -123,7 +112,7 @@ TEST_CASE("clap: scan reports the count even with no room to write it", "[plugin
 
 TEST_CASE("clap: scanning something that is not a plugin refuses rather than fails",
           "[plugin][clap]") {
-    const auto junk = write_junk_file();
+    const auto junk = writeJunkFile(".bin");
     CHECK(clap_host::scan(junk.string().c_str(), nullptr, 0) == 0);
 
     PluginDesc descs[2]{};
@@ -156,7 +145,7 @@ TEST_CASE("clap: opening a path that is not there fails with a message", "[plugi
 
     // Same for a file that exists but is not a plugin, and for an index past
     // the end of a file that is.
-    const auto junk = write_junk_file();
+    const auto junk = writeJunkFile(".bin");
     err = nullptr;
     CHECK(clap_host::open(junk.string().c_str(), 0, kSampleRate, kMaxBlock, &err) == nullptr);
     CHECK(err != nullptr);

@@ -9,8 +9,18 @@
  * LoadLibrary rather than dlopen; a shim under dlfcn's names keeps those
  * cases reading as the one thing they are everywhere. The path is UTF-8 (it
  * came from CMake), so it goes through the wide entry point.
+ *
+ * writeJunkFile() makes a file that is not a plugin, for the scan and open
+ * cases. Its name carries the process id: ctest runs every case in a process
+ * of its own, four at a time, and when two cases write one name each
+ * truncates the file under the other's dlopen, which the loader answers with
+ * SIGBUS (the native macOS job on ad566ff).
  */
 #pragma once
+
+#include <filesystem>
+#include <fstream>
+#include <string>
 
 #if defined(_WIN32)
 #  ifndef NOMINMAX
@@ -31,6 +41,20 @@ static inline void* dlsym(void* h, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(h), name));
 }
 static inline int dlclose(void* h) { return FreeLibrary(static_cast<HMODULE>(h)) ? 0 : -1; }
+static inline unsigned long dsoTestPid() { return GetCurrentProcessId(); }
 #else
 #  include <dlfcn.h>
+#  include <unistd.h>
+static inline unsigned long dsoTestPid() { return static_cast<unsigned long>(::getpid()); }
 #endif
+
+// A fresh file in the temp directory that is not a plugin; `suffix` is its
+// extension, ".bin" or ".vst3". The caller removes it.
+static inline std::filesystem::path writeJunkFile(const char* suffix) {
+    static int seq = 0;
+    const auto path = std::filesystem::temp_directory_path()
+                    / ("clockwork-not-a-plugin-" + std::to_string(dsoTestPid()) + "-"
+                       + std::to_string(++seq) + suffix);
+    std::ofstream(path, std::ios::binary) << "this is not a shared object, let alone a plugin\n";
+    return path;
+}
