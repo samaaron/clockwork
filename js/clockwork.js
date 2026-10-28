@@ -40,6 +40,10 @@ const PURGE_ACK_TIMEOUT_MS = 1000;
 // How long a worklet being let go has to say it rendered its last block (#retireWorklet). A live one answers within a
 // render quantum; one that does not is gone, or stalled, and in SAB mode the stop word keeps it from rendering again.
 const RETIRE_ACK_TIMEOUT_MS = 250;
+// How long init() and a reload wait for the context they started to be running (#contextStarted). One that will
+// start does so in tens of milliseconds; one the browser will not start without a press (iOS) never answers, and
+// is left suspended at this bound for the host to start with one.
+const CONTEXT_START_WAIT_MS = 1000;
 // Interval for metrics/tree snapshots in postMessage mode (ms)
 const SNAPSHOT_INTERVAL_MS = 150;
 import { MemoryLayout } from "./memory_layout.js";
@@ -200,6 +204,8 @@ export class Clockwork {
   #nodeIdCounter = 1000;
 
   #previousAudioContextState = null;
+  // The resume() #initializeAudioContext started, waited on (bounded) before the engine says it is up
+  #contextStarting = null;
   // Whether the engine made its context (and so closes it), or the host handed it one (the host's to close)
   #ownsAudioContext = false;
   #nextAudioContext = null;   // a context the next reload moves onto (reload()'s option: recover()'s spare)
@@ -532,6 +538,8 @@ export class Clockwork {
       await this.#initializeOSC();
       stillWanted();
       await this.#initializeFront();
+      stillWanted();
+      await this.#contextStarted();
       stillWanted();
       await this.#finishInitialization();
     } catch (error) {
@@ -1041,6 +1049,7 @@ export class Clockwork {
       await this.#initializeAudioWorklet(wasmBytes);
       await this.#initializeOSC();
       await this.#initializeFront();
+      await this.#contextStarted();
       // The definition/buffer restores below go to the new instance once it
       // is processing: two increasing reads of process_count prove the
       // engine is pumping.
@@ -1925,7 +1934,7 @@ export class Clockwork {
     // Started here, synchronously, before anything is awaited. init() and recover() are called from inside a press,
     // and a browser lets audio start only within one: a context born suspended (iOS, a page's autoplay rules) would
     // otherwise stay suspended, and the clock that waits on it would wait for nothing.
-    if (ctx.state !== 'running') ctx.resume().catch(() => {});
+    this.#contextStarting = ctx.state !== 'running' ? ctx.resume().catch(() => {}) : null;
 
     this.#previousAudioContextState = ctx.state;
     this.#onContextState = () => {
@@ -2330,6 +2339,24 @@ export class Clockwork {
       }
     } catch (e) {
       console.error('[Clockwork] Failed to decode OSC message:', e);
+    }
+  }
+
+  // The context #initializeAudioContext started, running before the engine says it is up: init() and a reload
+  // return with it going, so a page that reads the context or the clock the moment they return finds them so.
+  // Started synchronously there, for a press; waited on here, once everything else is built. Bounded
+  // (CONTEXT_START_WAIT_MS): a browser that starts audio only inside a press leaves resume() unanswered, and the
+  // engine comes up with the context suspended, for the host to start; 'audiocontext:resumed' says when it does.
+  async #contextStarted() {
+    const starting = this.#contextStarting;
+    this.#contextStarting = null;
+    if (!starting) return;
+    let timer = null;
+    const bound = new Promise((r) => { timer = setTimeout(r, CONTEXT_START_WAIT_MS); });
+    try {
+      await Promise.race([starting, bound]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

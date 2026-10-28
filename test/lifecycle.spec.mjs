@@ -111,6 +111,52 @@ test("init() starts a context that begins suspended, rather than hanging on it",
   expect(r.initialized).toBe(true);
 });
 
+test("init() returns with the context it started running, however long the browser takes to start it", async ({ page, clockworkConfig }) => {
+  // init() starts the context synchronously (a press allows it only then) and must not say it is up before the
+  // context is: a page that reads the context or the clock the moment init() returns finds them going. The browser
+  // is made slow here, 300 ms to start, so the order is the same on every machine: an init that does not wait loses.
+  await boot(page);
+  const r = await page.evaluate(async ([config, withinSrc]) => {
+    const within = eval(withinSrc);
+    const ctx = new AudioContext();
+    await ctx.suspend();
+    const resume = ctx.resume.bind(ctx);
+    ctx.resume = () => new Promise((r) => setTimeout(r, 300)).then(resume);
+    const cw = new window.Clockwork({ ...config, audioContext: ctx });
+    const init = await within(cw.init(), 12000);
+    const out = { init, context: ctx.state, initialized: cw.initialized };
+    if (init.settled) await cw.shutdown();
+    await ctx.close();
+    return out;
+  }, [clockworkConfig, within]);
+  expect(r.init.settled, "init() never settled").toBe(true);
+  expect(r.init.error ?? null).toBeNull();
+  expect(r.context, "init() returned before the context it started was running").toBe("running");
+  expect(r.initialized).toBe(true);
+});
+
+test("init() does not wait for ever on a context the browser will not start", async ({ page, clockworkConfig }) => {
+  // A browser that starts audio only inside a press (iOS) leaves resume() unanswered outside one. init() waits for
+  // the context a bounded while and then returns, the context still suspended, for the host to start with a press.
+  await boot(page);
+  const r = await page.evaluate(async ([config, withinSrc]) => {
+    const within = eval(withinSrc);
+    const ctx = new AudioContext();
+    await ctx.suspend();
+    ctx.resume = () => new Promise(() => {});   // never answered, as without a press
+    const cw = new window.Clockwork({ ...config, audioContext: ctx });
+    const init = await within(cw.init(), 8000);
+    const out = { init, context: ctx.state, initialized: cw.initialized };
+    if (init.settled) await cw.shutdown();
+    await ctx.close();
+    return out;
+  }, [clockworkConfig, within]);
+  expect(r.init.settled, "init() waited for ever on a context that will not start").toBe(true);
+  expect(r.init.error ?? null).toBeNull();
+  expect(r.context).toBe("suspended");
+  expect(r.initialized).toBe(true);
+});
+
 test("resume() on an engine that is already running changes nothing, and drops nothing scheduled", async ({ page, clockworkConfig }) => {
   // resume() is what a host calls when it is not sure — back to the tab, a press after a stall. On an engine that
   // never stopped it must be free: a purge here throws away every bundle scheduled ahead, and the music with it.
