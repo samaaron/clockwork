@@ -13,9 +13,15 @@
 //! first frame is anything else, or that has not sent it within
 //! [`AUTH_DEADLINE`], is closed and counted, and the host never hears of it.
 //!
-//! Admission control happens once, at accept: at most `max_conns` concurrent
-//! connections; an accept beyond the cap is immediately closed so the excess
-//! client sees a crisp reset instead of a silent hang. Connection ids are
+//! One client. A server has at most one connection that presented the
+//! secret, and one more still waiting to. A connection made while a client is
+//! in is closed at accept, and one that presents the secret once a client is
+//! in is closed then, so the excess client sees a crisp reset instead of a
+//! silent hang. A connection made while one is waiting is closed at accept
+//! too: nothing displaces a connection, so no newcomer can push one out, and
+//! a silent connection holds the door for [`AUTH_DEADLINE`] at most. What
+//! stands behind the one client, and how many it serves, is the host's.
+//! Connection ids are
 //! minted monotonically from 1 and never reused — the C++ transport uses them
 //! directly as origin tokens (0 = in-process caller, so ids start at 1).
 //!
@@ -128,6 +134,9 @@ pub(crate) enum Gate {
     Open,
     /// The first frame was something else; the connection closes.
     Refused,
+    /// The secret was presented with the cap already full; the connection
+    /// closes, and the host never hears of it.
+    OverCap,
 }
 
 /// Look at the first frame in `acc`, before anything is delivered.
@@ -224,7 +233,7 @@ pub fn exercise(data: &[u8]) {
             if at_gate == Gate::Waiting {
                 at_gate = check_auth(&mut acc, &secret);
                 match at_gate {
-                    Gate::Refused => break,
+                    Gate::Refused | Gate::OverCap => break,
                     Gate::Waiting => {
                         assert!(acc.len() < auth.len(), "more than the secret's frame held for it");
                         continue;
@@ -405,10 +414,30 @@ impl Acceptor for UnixListener {
 
 type Writer = Arc<Mutex<Box<dyn ConnWriter>>>;
 
+/// One accepted connection: its writer, and whether it has presented the
+/// secret, which is what the cap counts.
+struct Conn {
+    writer: Writer,
+    open: bool,
+}
+
+/// Whether a connection that just presented the secret may open: under the
+/// registry lock, so two cannot both become the client.
+fn admit(conns: &Mutex<HashMap<u32, Conn>>, id: u32) -> bool {
+    let mut conns = conns.lock().unwrap();
+    if conns.values().any(|c| c.open) {
+        return false;
+    }
+    if let Some(c) = conns.get_mut(&id) {
+        c.open = true;
+    }
+    true
+}
+
 /// State shared between the accept loop, reader threads, and the C ABI.
 struct Shared {
     stop: AtomicBool,
-    conns: Mutex<HashMap<u32, Writer>>,
+    conns: Mutex<HashMap<u32, Conn>>,
     next_id: AtomicU32, // conn ids from 1, never reused (0 = in-process)
     readers: Mutex<Vec<JoinHandle<()>>>,
     secret: ClockworkCommsSecret,
@@ -426,7 +455,7 @@ impl StreamServerImpl for SocketServer {
     fn send(&self, conn_id: u32, data: &[u8]) -> bool {
         // Clone the writer handle out of the registry, then write outside the
         // registry lock — a slow client must not stall unrelated sends.
-        let writer = self.shared.conns.lock().unwrap().get(&conn_id).cloned();
+        let writer = self.shared.conns.lock().unwrap().get(&conn_id).map(|c| c.writer.clone());
         let Some(writer) = writer else { return false };
         let err = match write_frame(&mut **writer.lock().unwrap(), &frame_packet(data)) {
             Ok(()) => return true,
@@ -440,8 +469,8 @@ impl StreamServerImpl for SocketServer {
         // client that went WRITE_TIMEOUT without reading, anything else failed
         // outright.
         clockwork_log::log!("[osc] stream conn {conn_id} dropped — reply write failed: {err}");
-        if let Some(w) = self.shared.conns.lock().unwrap().remove(&conn_id) {
-            w.lock().unwrap().shutdown_both();
+        if let Some(c) = self.shared.conns.lock().unwrap().remove(&conn_id) {
+            c.writer.lock().unwrap().shutdown_both();
         }
         false
     }
@@ -458,8 +487,8 @@ impl Drop for SocketServer {
         self.shared.stop.store(true, Ordering::Relaxed);
         // Shut every connection down so blocked readers return immediately
         // rather than waiting out their read timeout.
-        for w in self.shared.conns.lock().unwrap().values() {
-            w.lock().unwrap().shutdown_both();
+        for c in self.shared.conns.lock().unwrap().values() {
+            c.writer.lock().unwrap().shutdown_both();
         }
         if let Some(j) = self.accept_join.take() {
             let _ = j.join();
@@ -487,7 +516,7 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
         if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
             gate = Gate::Refused;
         }
-        if gate == Gate::Refused {
+        if gate == Gate::Refused || gate == Gate::OverCap {
             break;
         }
         match conn.read(&mut tmp) {
@@ -496,6 +525,9 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
                 acc.extend_from_slice(&tmp[..n]);
                 if gate == Gate::Waiting {
                     gate = check_auth(&mut acc, &shared.secret);
+                    if gate == Gate::Open && !admit(&shared.conns, id) {
+                        gate = Gate::OverCap;
+                    }
                     if gate != Gate::Open {
                         continue;
                     }
@@ -514,11 +546,13 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
     }
     // Leave the registry, then tell the host — subscription lifetime ==
     // connection lifetime. Suppressed during stop: the host is tearing down.
-    if let Some(w) = shared.conns.lock().unwrap().remove(&id) {
-        w.lock().unwrap().shutdown_both();
+    if let Some(c) = shared.conns.lock().unwrap().remove(&id) {
+        c.writer.lock().unwrap().shutdown_both();
     }
     if gate == Gate::Refused {
         refuse(&shared.refused, id);
+    } else if gate == Gate::OverCap {
+        clockwork_log::log!("[osc] stream conn {id} closed — over the connection cap");
     } else if !shared.stop.load(Ordering::Relaxed) && gate == Gate::Open {
         if let Some(why) = why {
             clockwork_log::log!("[osc] stream conn {id} dropped — {why}");
@@ -552,14 +586,17 @@ fn reap_finished_readers(shared: &Shared) {
     }
 }
 
-fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host, max_conns: usize) {
+fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
     while !shared.stop.load(Ordering::Relaxed) {
         reap_finished_readers(&shared);
         match listener.accept_one() {
             Ok(conn) => {
-                // Admission control: over the cap → drop immediately, so the
-                // excess client sees a crisp reset instead of a silent hang.
-                if shared.conns.lock().unwrap().len() >= max_conns {
+                // Admission control: with a client in, or one still to present
+                // the secret, drop at once, so the excess client sees a crisp
+                // reset instead of a silent hang. Nothing displaces a
+                // connection: a newcomer that could would be a way in for
+                // whoever connects most.
+                if !shared.conns.lock().unwrap().is_empty() {
                     drop(conn);
                     continue;
                 }
@@ -571,7 +608,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host, max_con
                     }
                     Err(_) => continue,
                 };
-                shared.conns.lock().unwrap().insert(id, writer);
+                shared.conns.lock().unwrap().insert(id, Conn { writer, open: false });
                 let (t_shared, t_host) = (shared.clone(), host);
                 if let Ok(j) = std::thread::Builder::new()
                     .name("ss-osc-stream".into())
@@ -594,7 +631,6 @@ fn start_socket_server<A: Acceptor>(
     listener: A,
     host: Host,
     secret: ClockworkCommsSecret,
-    max_conns: u32,
     port: i32,
     path: Option<PathBuf>,
 ) -> Option<ClockworkOscStream> {
@@ -606,11 +642,10 @@ fn start_socket_server<A: Acceptor>(
         secret,
         refused: AtomicU64::new(0),
     });
-    let max = max_conns.max(1) as usize;
     let t_shared = shared.clone();
     let accept_join = std::thread::Builder::new()
         .name("ss-osc-accept".into())
-        .spawn(move || run_accept(listener, t_shared, host, max))
+        .spawn(move || run_accept(listener, t_shared, host))
         .ok()?;
     Some(ClockworkOscStream(Box::new(SocketServer {
         shared,
@@ -666,7 +701,6 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
     port: i32,
     bind_addr: *const u8,
     bind_addr_len: u32,
-    max_conns: u32,
 ) -> *mut ClockworkOscStream {
     no_unwind(std::ptr::null_mut(), || {
         // SAFETY: null or live, per the contract.
@@ -699,7 +733,7 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
             return std::ptr::null_mut();
         }
         let host = Host { ctx, on_packet, on_closed };
-        match start_socket_server(listener, host, secret, max_conns, bound, None) {
+        match start_socket_server(listener, host, secret, bound, None) {
             Some(srv) => Box::into_raw(Box::new(srv)),
             None => std::ptr::null_mut(),
         }
@@ -722,7 +756,6 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     secret: *const ClockworkCommsSecret,
     path: *const u8,
     path_len: u32,
-    max_conns: u32,
 ) -> *mut ClockworkOscStream {
     #[cfg(unix)]
     {
@@ -760,7 +793,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
                 return std::ptr::null_mut();
             }
             let host = Host { ctx, on_packet, on_closed };
-            match start_socket_server(listener, host, secret, max_conns, 0, Some(pb)) {
+            match start_socket_server(listener, host, secret, 0, Some(pb)) {
                 Some(srv) => Box::into_raw(Box::new(srv)),
                 None => std::ptr::null_mut(),
             }
@@ -768,7 +801,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     }
     #[cfg(not(unix))]
     {
-        let _ = (ctx, on_packet, on_closed, secret, path, path_len, max_conns);
+        let _ = (ctx, on_packet, on_closed, secret, path, path_len);
         std::ptr::null_mut()
     }
 }
@@ -924,12 +957,12 @@ mod tests {
         Some(body)
     }
 
-    fn start_tcp_on(cap: &Cap, bind: &str, max_conns: u32) -> (*mut ClockworkOscStream, u16) {
+    fn start_tcp_on(cap: &Cap, bind: &str) -> (*mut ClockworkOscStream, u16) {
         let ctx = cap as *const Cap as *mut c_void;
         // SAFETY: `bind` is a live str.
         let h = unsafe {
             clockwork_osc_tcp_start(ctx, on_packet, on_closed, test_secret(), 0,
-                             bind.as_ptr(), bind.len() as u32, max_conns)
+                             bind.as_ptr(), bind.len() as u32)
         };
         assert!(!h.is_null(), "tcp server should start");
         // SAFETY: just started, not yet stopped.
@@ -937,8 +970,8 @@ mod tests {
         assert!(port > 0, "port-0 start should report the real bound port");
         (h, port as u16)
     }
-    fn start_tcp(cap: &Cap, max_conns: u32) -> (*mut ClockworkOscStream, u16) {
-        start_tcp_on(cap, "127.0.0.1", max_conns)
+    fn start_tcp(cap: &Cap) -> (*mut ClockworkOscStream, u16) {
+        start_tcp_on(cap, "127.0.0.1")
     }
 
     // The secret crosses TCP in the clear. So no address means loopback,
@@ -950,7 +983,7 @@ mod tests {
         assert_eq!(bind_address("0.0.0.0"), "0.0.0.0");
         clockwork_log::capture::install();
         let cap = Cap::new();
-        let (h, port) = start_tcp_on(&cap, "", 4);
+        let (h, port) = start_tcp_on(&cap, "");
         let mut c = connect(port);
         c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "reachable over loopback");
@@ -958,7 +991,7 @@ mod tests {
         assert!(!clockwork_log::capture::logged(&format!("TCP bound to 127.0.0.1:{port}")), "a loopback bind is not open");
         stop(h);
 
-        let (h, port) = start_tcp_on(&cap, "0.0.0.0", 4);
+        let (h, port) = start_tcp_on(&cap, "0.0.0.0");
         assert!(clockwork_log::capture::logged(&format!("TCP bound to 0.0.0.0:{port}: the secret crosses the network in the clear")));
         stop(h);
     }
@@ -986,7 +1019,7 @@ mod tests {
     #[test]
     fn a_connection_that_does_not_start_with_the_secret_gets_nothing() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let other = ClockworkCommsSecret::generate().unwrap();
         for first in [frame(&encode("/clockwork/status", &[])), frame(&other.auth_packet())] {
             let mut c = connect_without_secret(port);
@@ -1005,7 +1038,7 @@ mod tests {
     #[test]
     fn the_secret_split_across_writes_opens_the_connection() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let mut c = connect_without_secret(port);
         let mut bytes = frame(&test_secret().auth_packet());
         bytes.extend_from_slice(&frame(&encode("/after-the-secret", &[])));
@@ -1024,7 +1057,7 @@ mod tests {
     #[test]
     fn a_connection_that_sends_nothing_is_closed_at_the_deadline() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let t0 = Instant::now();
         let mut c = connect_without_secret(port);
         assert!(closed_by_server(&mut c));
@@ -1042,7 +1075,7 @@ mod tests {
         // SAFETY: a null secret is what this case passes; `bind` is a live str.
         let h = unsafe {
             clockwork_osc_tcp_start(ctx, on_packet, on_closed, std::ptr::null(), 0,
-                                    bind.as_ptr(), bind.len() as u32, 4)
+                                    bind.as_ptr(), bind.len() as u32)
         };
         assert!(h.is_null());
         #[cfg(unix)]
@@ -1052,7 +1085,7 @@ mod tests {
             // SAFETY: as above; `p` is a live str.
             let h = unsafe {
                 clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, std::ptr::null(),
-                                               p.as_ptr(), p.len() as u32, 4)
+                                               p.as_ptr(), p.len() as u32)
             };
             assert!(h.is_null());
             assert!(!path.exists(), "nothing bound");
@@ -1064,7 +1097,7 @@ mod tests {
     #[test]
     fn tcp_round_trip() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
         let msg = encode("/clockwork/status", &[]);
@@ -1088,7 +1121,7 @@ mod tests {
     #[test]
     fn tcp_split_frame_reassembles() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
         let msg = encode("/s_new", &[OscArg::Str("sine".into()), OscArg::Int(1001)]);
@@ -1114,7 +1147,7 @@ mod tests {
     #[test]
     fn tcp_coalesced_frames_both_arrive() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
         let mut both = frame(&encode("/one", &[]));
@@ -1130,33 +1163,51 @@ mod tests {
         stop(h);
     }
 
-    // Admission control: with max_conns=2, the third connection is accepted
-    // then immediately closed (crisp EOF), and the first two keep working.
+    // One client. A second connection that presents the secret while one is
+    // in is closed then, and the one in place keeps working.
     #[test]
-    fn tcp_connection_cap() {
+    fn a_second_client_is_closed_while_one_is_in() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 2);
-
+        let (h, port) = start_tcp(&cap);
         let mut c1 = connect(port);
+        c1.write_all(&frame(&encode("/first", &[]))).unwrap();
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
+
         let mut c2 = connect(port);
-        // Ensure both are registered before probing the cap.
-        c1.write_all(&frame(&encode("/a", &[]))).unwrap();
-        c2.write_all(&frame(&encode("/b", &[]))).unwrap();
+        let _ = c2.write_all(&frame(&encode("/second", &[])));
+        assert!(closed_by_server(&mut c2));
+        assert_eq!(refused(h), 0, "the second client did present the secret");
+
+        c1.write_all(&frame(&encode("/still-first", &[]))).unwrap();
         assert!(wait_until(|| cap.packets.lock().unwrap().len() == 2));
+        assert!(cap.packets.lock().unwrap().iter().all(|(id, _)| *id == 1));
+        stop(h);
+    }
 
-        let mut c3 = connect(port);
-        let mut buf = [0u8; 1];
-        // The over-cap connection is closed by the server: read yields EOF.
-        let got = c3.read(&mut buf);
-        assert!(matches!(got, Ok(0)) || got.is_err(),
-                "over-cap connection should be closed, got {got:?}");
+    // A connection that has not presented the secret holds the door for at
+    // most AUTH_DEADLINE, and nothing displaces it before then: a newcomer,
+    // the client with the secret included, is closed at accept and tries
+    // again. That is chosen over evicting the silent connection, which would
+    // let whoever connects most push anyone out.
+    #[test]
+    fn a_silent_connection_holds_the_door_for_the_deadline_and_no_longer() {
+        let cap = Cap::new();
+        let (h, port) = start_tcp(&cap);
+        let t0 = Instant::now();
+        let mut silent = connect_without_secret(port);
+        // One accept thread takes connections in the order they were made.
+        let mut meanwhile = connect(port);
+        assert!(closed_by_server(&mut meanwhile), "a connection made while one waits is closed at accept");
+        assert!(t0.elapsed() < AUTH_DEADLINE, "closed at accept, not at the deadline");
 
-        // Established clients are unaffected.
-        c1.write_all(&frame(&encode("/still-alive", &[]))).unwrap();
-        assert!(wait_until(|| cap.packets.lock().unwrap().iter().any(|(_, b)| {
-            decode(b).map(|m| m.addr == "/still-alive").unwrap_or(false)
-        })));
+        assert!(closed_by_server(&mut silent), "the silent connection is closed at the deadline");
+        assert!(t0.elapsed() >= AUTH_DEADLINE);
+        assert!(wait_until(|| refused(h) == 1));
 
+        let mut c = connect(port);
+        c.write_all(&frame(&encode("/in-after-the-silent", &[]))).unwrap();
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1), "the client with the secret gets in");
+        assert!(cap.closed.lock().unwrap().is_empty(), "the host heard of neither of the others");
         stop(h);
     }
 
@@ -1165,7 +1216,7 @@ mod tests {
     #[test]
     fn tcp_disconnect_fires_on_closed() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
 
         let mut c = connect(port);
         c.write_all(&frame(&encode("/hello", &[]))).unwrap();
@@ -1188,7 +1239,7 @@ mod tests {
     #[test]
     fn tcp_oversize_frame_closes_connection() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
 
         let mut c = connect(port);
         c.write_all(&frame(&encode("/id-probe", &[]))).unwrap();
@@ -1209,7 +1260,7 @@ mod tests {
     #[test]
     fn tcp_conn_ids_never_reused() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
 
         let mut seen = Vec::new();
         for _ in 0..3 {
@@ -1314,8 +1365,10 @@ mod tests {
                 shutdowns: shutdowns.clone(),
             };
             let shared = empty_shared();
-            shared.conns.lock().unwrap()
-                .insert(1, Arc::new(Mutex::new(Box::new(w) as Box<dyn ConnWriter>)));
+            shared.conns.lock().unwrap().insert(1, Conn {
+                writer: Arc::new(Mutex::new(Box::new(w) as Box<dyn ConnWriter>)),
+                open: true,
+            });
             let server = SocketServer {
                 shared,
                 accept_join: None,
@@ -1457,7 +1510,7 @@ mod tests {
     #[test]
     fn stop_is_prompt() {
         let cap = Cap::new();
-        let (h, port) = start_tcp(&cap, 4);
+        let (h, port) = start_tcp(&cap);
         let _c = connect(port); // an open connection must not delay stop
         let t0 = Instant::now();
         stop(h);
@@ -1491,7 +1544,7 @@ mod tests {
             // SAFETY: `p` is a live str.
             let h = unsafe {
                 clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, test_secret(),
-                                        p.as_ptr(), p.len() as u32, 4)
+                                        p.as_ptr(), p.len() as u32)
             };
             assert!(!h.is_null(), "uds stream server should start over a stale file");
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();

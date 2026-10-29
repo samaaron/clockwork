@@ -141,6 +141,7 @@ mod imp {
     /// CloseHandle (no write-after-close, no handle-reuse ABA).
     struct PipeConn {
         state: Mutex<(HANDLE, bool)>, // (handle, closed)
+        open: AtomicBool,             // presented the secret: counts against the cap
     }
     // SAFETY: the handle is only ever used under the mutex, which is what
     // makes a send and the reader's close unable to overlap.
@@ -191,6 +192,19 @@ mod imp {
         next_id: AtomicU32, // conn ids from 1, never reused (0 = in-process)
         secret: ClockworkCommsSecret,
         refused: AtomicU64,
+    }
+
+    /// Whether a client that just presented the secret may open: under the
+    /// registry lock, so two cannot both become the client.
+    fn admit(shared: &Shared, id: u32) -> bool {
+        let conns = shared.conns.lock().unwrap();
+        if conns.values().any(|c| c.open.load(Ordering::Relaxed)) {
+            return false;
+        }
+        if let Some(c) = conns.get(&id) {
+            c.open.store(true, Ordering::Relaxed);
+        }
+        true
     }
 
     pub(super) struct PipeServer {
@@ -246,7 +260,8 @@ mod imp {
     }
 
     /// Serve one connected client until EOF/violation/stop, and say where it
-    /// got with the secret. Peek + read run under the connection's state lock,
+    /// got with the secret. The cap counts clients that presented it; the
+    /// instances beyond it hold the ones still to. Peek + read run under the connection's state lock,
     /// so they can never race a concurrent close() (drop path) or send(); the
     /// idle sleep is outside the lock.
     fn serve_client(conn: &PipeConn, id: u32, shared: &Shared, host: &Host) -> Gate {
@@ -261,7 +276,7 @@ mod imp {
             if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
                 gate = Gate::Refused;
             }
-            if gate == Gate::Refused {
+            if gate == Gate::Refused || gate == Gate::OverCap {
                 break;
             }
             let got: u32 = {
@@ -314,6 +329,9 @@ mod imp {
             acc.extend_from_slice(&tmp[..got as usize]);
             if gate == Gate::Waiting {
                 gate = check_auth(&mut acc, &shared.secret);
+                if gate == Gate::Open && !admit(shared, id) {
+                    gate = Gate::OverCap;
+                }
                 if gate != Gate::Open {
                     continue;
                 }
@@ -327,12 +345,13 @@ mod imp {
 
     /// One pipe instance: (create if needed →) wait for a client → serve →
     /// disconnect → loop. `pre` carries the first, squat-checked instance
-    /// (as usize — a raw HANDLE isn't Send).
+    /// (as usize — a raw HANDLE isn't Send); `instances` is how many the pipe
+    /// has in all.
     fn run_instance(
         mut pre: Option<usize>,
         name_w: Vec<u16>,
         sd: Arc<OwnerSd>,
-        max_conns: u32,
+        instances: u32,
         shared: Arc<Shared>,
         host: Host,
     ) {
@@ -353,7 +372,7 @@ mod imp {
                             PIPE_ACCESS_DUPLEX,
                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT
                                 | PIPE_REJECT_REMOTE_CLIENTS,
-                            max_conns,
+                            instances,
                             PIPE_BUF_BYTES,
                             PIPE_BUF_BYTES,
                             0,
@@ -392,8 +411,13 @@ mod imp {
             }
 
             let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-            let conn = Arc::new(PipeConn { state: Mutex::new((handle, false)) });
-            shared.conns.lock().unwrap().insert(id, conn.clone());
+            let conn = Arc::new(PipeConn { state: Mutex::new((handle, false)), open: AtomicBool::new(false) });
+            {
+                // One instance is the client's and one is for a connection
+                // still to present the secret; the OS refuses a third. Nothing
+                // displaces a connection.
+                shared.conns.lock().unwrap().insert(id, conn.clone());
+            }
 
             let gate = serve_client(&conn, id, &shared, &host);
 
@@ -401,6 +425,8 @@ mod imp {
             conn.close();
             if gate == Gate::Refused {
                 refuse(&shared.refused, id);
+            } else if gate == Gate::OverCap {
+                clockwork_log::log!("[osc] pipe conn {id} closed — over the connection cap");
             } else if gate == Gate::Open && !shared.stop.load(Ordering::Relaxed) {
                 host.closed(id);
             }
@@ -411,7 +437,6 @@ mod imp {
         host: Host,
         secret: ClockworkCommsSecret,
         name: &str,
-        max_conns: u32,
     ) -> Option<super::ClockworkOscStream> {
         let full = if name.starts_with(r"\\.\pipe\") {
             name.to_string()
@@ -420,7 +445,9 @@ mod imp {
         };
         let name_w = wide(&full);
         let sd = Arc::new(owner_only_sd()?);
-        let max = max_conns.max(1);
+        // Two instances: the client's, and one for a connection still to
+        // present the secret, so a silent one never holds the client's.
+        let instances = 2;
 
         // First instance is created here, squat-checked, so a hostile process
         // already holding the name fails the START (and start returns null)
@@ -437,7 +464,7 @@ mod imp {
                 name_w.as_ptr(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                max,
+                instances,
                 PIPE_BUF_BYTES,
                 PIPE_BUF_BYTES,
                 0,
@@ -457,12 +484,12 @@ mod imp {
             refused: AtomicU64::new(0),
         });
         let mut threads = Vec::new();
-        for i in 0..max {
+        for i in 0..instances {
             let pre = if i == 0 { Some(first as usize) } else { None };
             let (t_name, t_sd, t_shared) = (name_w.clone(), sd.clone(), shared.clone());
             if let Ok(j) = std::thread::Builder::new()
                 .name("ss-osc-pipe".into())
-                .spawn(move || run_instance(pre, t_name, t_sd, max, t_shared, host))
+                .spawn(move || run_instance(pre, t_name, t_sd, instances, t_shared, host))
             {
                 threads.push(j);
             }
@@ -494,7 +521,6 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
     secret: *const crate::secret::ClockworkCommsSecret,
     name: *const u8,
     name_len: u32,
-    max_conns: u32,
 ) -> *mut ClockworkOscStream {
     #[cfg(windows)]
     {
@@ -515,7 +541,7 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
                 return std::ptr::null_mut();
             }
             let host = crate::stream::Host { ctx, on_packet, on_closed };
-            match imp::start(host, secret, name, max_conns) {
+            match imp::start(host, secret, name) {
                 Some(srv) => Box::into_raw(Box::new(srv)),
                 None => std::ptr::null_mut(),
             }
@@ -523,7 +549,7 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
     }
     #[cfg(not(windows))]
     {
-        let _ = (ctx, on_packet, on_closed, secret, name, name_len, max_conns);
+        let _ = (ctx, on_packet, on_closed, secret, name, name_len);
         std::ptr::null_mut()
     }
 }

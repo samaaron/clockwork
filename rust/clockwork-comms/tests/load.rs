@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use clockwork_osc::{decode, encode, OscArg};
 
 // Medium load: 4 connections × 25k = 100k messages through the stream servers.
-const CONNS: usize = 4;
-const PER_CONN: i32 = 25_000;
+const CONNS: usize = 1; // one client: a server serves one connection
+const PER_CONN: i32 = 100_000;
 const LARGE_EVERY: i32 = 500; // a ~100 KiB frame periodically, to stress reassembly
 const SPLIT_EVERY: i32 = 97; // split some frames mid-wire, to stress the accumulator
 
@@ -195,7 +195,6 @@ fn tcp_load() {
             0,
             bind.as_ptr(),
             bind.len() as u32,
-            CONNS as u32,
         )
     };
     assert!(!handle.is_null(), "tcp server should start");
@@ -225,7 +224,6 @@ fn uds_stream_load() {
             secret(),
             ps.as_ptr(),
             ps.len() as u32,
-            CONNS as u32,
         )
     };
     assert!(!handle.is_null(), "uds stream server should start");
@@ -251,7 +249,6 @@ fn pipe_load() {
             secret(),
             name.as_ptr(),
             name.len() as u32,
-            CONNS as u32,
         )
     };
     assert!(!handle.is_null(), "named-pipe server should start");

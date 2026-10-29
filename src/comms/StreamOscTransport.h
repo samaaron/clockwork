@@ -14,7 +14,7 @@
  * transports' address bookkeeping — no OriginTable, no LRU eviction (an
  * established client can never be churned out by strangers), and subscription
  * lifetime == connection lifetime: on_closed prunes the client from every
- * notify audience. Admission control is the Rust leaf's max_conns cap.
+ * notify audience. The Rust leaf admits one client.
  *
  * The NRT gateway is the sole caller of the IOscTransport methods, but
  * on_closed fires on a reader thread — one mutex covers the audience lists
@@ -44,7 +44,6 @@ public:
     ~StreamOscTransport() override;
 
     void setIngest(IngestFn fn) { mIngest = std::move(fn); }
-    void setMaxConnections(uint32_t n) { mMaxConns = n; }
     // The host's secret (clockwork_comms_abi.h), read by start(); the server
     // keeps its own copy, so `secret` need only live until then. Without one
     // start() fails.
@@ -100,7 +99,6 @@ private:
     int          mPort = 0;             // Tcp
     std::string  mBindAddress;          // Tcp
     std::string  mEndpoint;             // Uds path / pipe name
-    uint32_t     mMaxConns = 4;
     // Published once it is listening: start() may come after the engine is
     // up, its gateway already broadcasting through this transport (a boot
     // that says setup), so the gateway reads it with one load. stop() frees

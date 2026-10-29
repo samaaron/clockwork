@@ -110,7 +110,6 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect 
     IngestLog log;
     StreamOscTransport t;
     t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
-    t.setMaxConnections(4);
     t.initialiseTcp(0, "127.0.0.1");  // port 0 → ephemeral, read back below
     t.setSecret(testSecret());
     REQUIRE(t.start());

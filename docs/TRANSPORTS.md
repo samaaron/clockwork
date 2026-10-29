@@ -51,9 +51,11 @@ user's SID, and rejects remote clients.
 
 **Stream or datagram** is the other axis, and it decides what the transport has
 to do. A stream is a connection carrying a byte sequence, so it needs an accept
-loop, an admission cap (`--max-connections`, default 4, clamped to 1-1024) and
-length-prefixed
-framing to find message boundaries. A datagram arrives already delimited: no
+loop, admission (one client: one connection that presented the secret and one
+still presenting it, anything more closed at accept; nothing displaces a
+connection, so a silent one holds the door for 2 s at most and never the
+client's place) and length-prefixed framing to find message boundaries. What stands behind the one client, and
+how many things it serves, is the host's. A datagram arrives already delimited: no
 connection, no accept, no framing, and `--max-connections` means nothing. TCP,
 UDS-stream and the named pipe share `StreamOscTransport` for that reason; UDP
 and UDS-dgram do not.
