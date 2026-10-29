@@ -16,7 +16,7 @@
  *     walking it one byte at a time, and
  *   - counts the drop.
  *
- * Manual-pump + udpPort 0: this thread is the sole process_audio() caller and
+ * Manual-pump + shmSegment false: this thread is the sole process_audio() caller and
  * the arena is the in-process arena_storage, so writing raw frames into
  * it races nothing.
  */

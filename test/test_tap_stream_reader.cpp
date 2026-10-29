@@ -212,7 +212,7 @@ TEST_CASE("tap-stream: headless engine publishes an advancing sample clock",
     ClockworkEngine::Config cfg;
     cfg.sampleRate        = 48000;
     cfg.bufferSize        = 128;
-    cfg.udpPort           = 57317;  // non-zero enables shared memory
+    cfg.shmSegment           = true;  // non-zero enables shared memory
     cfg.headless          = true;
     cfg.numOutputChannels = 2;
     cfg.numInputChannels  = 0;

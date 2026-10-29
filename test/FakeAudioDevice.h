@@ -763,7 +763,7 @@ inline ClockworkEngine::Config fakeEngineConfig(
         const std::string& bootOutput) {
     ClockworkEngine::Config cfg;
     cfg.sampleRate           = 48000;
-    cfg.udpPort              = 0;
+    cfg.shmSegment              = false;
     cfg.headless             = false;
     cfg.numOutputChannels    = 2;
     cfg.numInputChannels     = 0;   // skip mac aggregate-promotion CoreAudio reads

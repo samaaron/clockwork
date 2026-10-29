@@ -73,7 +73,7 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     if (config->app_name && *config->app_name) cfg.appName = config->app_name;
     if (config->device && *config->device)     cfg.hardwareDevice = config->device;
     if (config->driver && *config->driver)     cfg.audioDriver    = config->driver;   // resolveBootDriver, as --audio-driver
-    cfg.udpPort          = 0;      // in-process: no command socket, no segment
+    cfg.shmSegment       = false;  // in-process: no segment
     cfg.hostDrainsEgress = true;   // the embedder polls the client; the gateway must not also drain
     cfg.callbackWatchdog = true;
     d->engine->init(cfg);          // opens the device; the callback ticks from here

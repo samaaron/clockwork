@@ -46,7 +46,7 @@ ClockworkEngine::Config EngineFixture::defaultConfig() {
     ClockworkEngine::Config cfg;
     cfg.sampleRate        = 48000;
     cfg.bufferSize        = 128;
-    cfg.udpPort           = 0;
+    cfg.shmSegment           = false;
     cfg.headless          = true;
     // The live engine leaves the counts at kAutoChannelCount so the device's
     // real width is used; without a device that means nothing, and a case

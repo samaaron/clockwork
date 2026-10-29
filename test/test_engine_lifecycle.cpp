@@ -65,7 +65,7 @@ TEST_CASE("isRunning returns true after init", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     engine.init(cfg);
     CHECK(engine.isRunning());
     engine.shutdown();
@@ -76,7 +76,7 @@ TEST_CASE("isRunning returns false after shutdown", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     engine.init(cfg);
     REQUIRE(engine.isRunning());
     engine.shutdown();
@@ -88,7 +88,7 @@ TEST_CASE("Double init is safe", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -105,7 +105,7 @@ TEST_CASE("Double shutdown is safe", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -128,7 +128,7 @@ TEST_CASE("Lanes entry points reject after shutdown (process-local arena)",
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;   // process-local arena
+    cfg.shmSegment  = false;   // process-local arena
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -144,7 +144,7 @@ TEST_CASE("Lanes entry points reject after shutdown (shm-backed arena)",
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 57123;   // non-zero → arena lives in the public shm segment
+    cfg.shmSegment  = true;   // non-zero → arena lives in the public shm segment
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
@@ -164,7 +164,7 @@ TEST_CASE("Null onReply callback does not crash", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     engine.init(cfg);
 
     // A command that produces a reply, with nobody to give it to.
@@ -184,7 +184,7 @@ TEST_CASE("Null onDebug callback does not crash", "[lifecycle]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     engine.init(cfg);
 
     auto pkt = osc_test::message("/dummy/ping");

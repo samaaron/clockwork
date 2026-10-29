@@ -555,8 +555,8 @@ static ERL_NIF_TERM nif_start(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[
 
     LifecycleCmd cmd;
     cmd.op = LifecycleOp::Start;
-    cmd.cfg.udpPort = 0;  // NIF mode: egress is enif_send, not UDP; 0 also means
-                          // no SHM segment (-u > 0 is what creates it)
+    cmd.cfg.shmSegment = false;  // NIF mode: egress is enif_send; no segment, nothing
+                                 // in another process reads it
     cmd.refused = parse_config(env, argv[0], cmd.cfg);
     enif_self(env, &cmd.pid);
     cmd.notify = true;

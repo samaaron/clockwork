@@ -828,7 +828,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // -- Create shared memory (owned by engine, survives cold swaps) --------
     // Anonymous: nothing is named, nothing is cleaned up. Readers get it from
     // the host's attach endpoint (shm_attach.hpp) via shmNativeHandle().
-    if (cfg.udpPort > 0) {
+    if (cfg.shmSegment) {
         try {
             mShmemCreator = std::make_unique<shm_segment_creator>(cfg.assetsBytes, cfg.returnsBytes);
             // Point the engine's whole shared_memory.h arena at the public
@@ -994,7 +994,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             mPeerPlane.store(mShmemCreator->get_peer_plane(), std::memory_order_release);
         } else {
             clockwork_log("[engine] WARNING: shmCommands requested but there is "
-                            "no SHM segment (udpPort == 0) — command plane disabled");
+                            "no SHM segment (!shmSegment) — command plane disabled");
         }
     }
 

@@ -11,7 +11,7 @@
  *  - An external observer can mmap the segment via shm_segment_client
  *    and read the same metrics struct that engine writers update.
  *
- * EngineFixture defaults to udpPort = 0 which skips shm creation; this
+ * EngineFixture defaults to shmSegment = false which skips shm creation; this
  * spec uses a non-zero port + headless so the redirect path exercises.
  */
 #include <catch2/catch_test_macros.hpp>
@@ -30,14 +30,14 @@ ClockworkEngine::Config metricsShmConfig(unsigned port) {
     ClockworkEngine::Config cfg;
     cfg.sampleRate    = 48000;
     cfg.bufferSize    = 128;
-    cfg.udpPort       = port;  // non-zero enables the public shm segment
+    cfg.shmSegment       = true;  // non-zero enables the public shm segment
     cfg.headless      = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     return cfg;
 }
 }  // namespace
 
-TEST_CASE("metrics-shm: engine.getMetrics() points into the public segment when udpPort > 0",
+TEST_CASE("metrics-shm: engine.getMetrics() points into the public segment when shmSegment",
           "[metrics][shm]") {
     constexpr unsigned kPort = 57211;
     EngineFixture fx(metricsShmConfig(kPort));

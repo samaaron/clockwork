@@ -231,7 +231,7 @@ TEST_CASE("host control: the peer command plane rides the host's pass",
     ClockworkEngine::Config cfg;
     cfg.sampleRate        = 48000;
     cfg.bufferSize        = 128;
-    cfg.udpPort           = kPort;   // non-zero creates the public segment
+    cfg.shmSegment           = true;   // non-zero creates the public segment
     cfg.headless          = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmCommands       = true;

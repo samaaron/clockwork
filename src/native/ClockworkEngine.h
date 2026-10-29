@@ -95,7 +95,10 @@ public:
                                                // default (see chooseBlockSize). Clamped to
                                                // [32, kMaxBlockSize]. WASM ignores it (must
                                                // equal the 128-sample render quantum).
-        int    udpPort                  = 57110;
+        bool   shmSegment               = true;    // create the public shared-memory
+                                                   // segment another process can be
+                                                   // handed (shm_attach.hpp); false
+                                                   // keeps the arena process-local
         int    numOutputChannels        = kAutoChannelCount;
         int    numInputChannels         = kAutoChannelCount;
         // THE GUEST'S OWN CONFIGURATION, as opaque bytes. Clockwork copies
@@ -207,8 +210,7 @@ public:
                                                    // command plane (shm_peer_plane.h)
                                                    // in the control pass and publish
                                                    // the plane for ShmTransport.
-                                                   // Needs udpPort > 0 (which is
-                                                   // what creates the segment).
+                                                   // Needs shmSegment.
         std::string bindAddress       = "127.0.0.1"; // localhost only; use -B to override
         std::string hardwareDevice;                // -H flag: fuzzy match on "Driver : Device"
         std::string inputDevice;                   // -H input name (first of two, or the
@@ -282,7 +284,7 @@ public:
 
     // The public segment's OS handle, for the attach endpoint to duplicate
     // into readers (shm_attach::server) and for an in-process reader to
-    // shm_dup_handle. Invalid when there is no segment (udpPort == 0, or
+    // shm_dup_handle. Invalid when there is no segment (!shmSegment, or
     // creation failed) and after shutdown(). Owned by the engine.
     detail_shm_segment::shm_native_handle shmNativeHandle() const {
         return mShmemCreator ? mShmemCreator->native_handle()
@@ -331,7 +333,7 @@ public:
 
     // The OSC ingress: classify a raw packet at the boundary and hand it to its
     // side — clockwork's own dispatch for "/clockwork/...", the DSP for
-    // everything else. Every transport (UDP, NIF send_osc) funnels into this;
+    // everything else. Every transport (a stream peer, NIF send_osc) funnels into this;
     // the engine owns the routing, the transports know only their medium.
     // Adding a clockwork subsystem is one ClockworkSysRoutes::add of a sub-namespace;
     // it cannot move the boundary, because the boundary has no table to register in.
@@ -1024,7 +1026,7 @@ private:
     // off the audio thread — on the engine's gateway thread, woken every audio
     // block via processCount, or on the host's own (Config::hostDrivesControl,
     // controlPass()). Native-only (wasm has no NRT thread).
-    // Sized so a whole UDP datagram inside /clockwork/osc/send — the widest
+    // Sized so a whole 64 KiB datagram inside /clockwork/osc/send — the widest
     // control message a client can put on the wire — crosses this hop with
     // room for a few more behind it. A frame that will not fit is dropped and
     // counted, and the log says so. Allocated with the engine, not held in it:
@@ -1412,7 +1414,7 @@ private:
     std::unique_ptr<shm_segment_creator> mShmemCreator;
 
     // The engine's own handle onto the client boundary. Every message that
-    // reaches ingest() — a UDP datagram, a stream peer, an in-process call —
+    // reaches ingest() — a stream peer, a shared-memory peer, an in-process call —
     // goes out through this, so a remote client's traffic and an embedder's
     // meet the same code. Opened over the arena at init, closed at shutdown.
     struct ClockworkClient* mClientHandle = nullptr;

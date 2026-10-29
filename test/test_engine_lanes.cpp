@@ -6,7 +6,7 @@
  * WHY A WHOLE ENGINE. LanesFixture hands the guest pointers the test itself
  * allocated, so it can say nothing about where an engine gets them from — and
  * that is the whole question here. EngineFixture boots a ClockworkEngine with
- * `udpPort = 0`: no POSIX segment, because there is no second process to share
+ * `shmSegment = false`: no POSIX segment, because there is no second process to share
  * one with. That is the embedded case, and a plugin is the example — its
  * client is the host application, in this process, reading in place.
  *
@@ -43,7 +43,7 @@ osc_test::ParsedReply askGuest(Engine& e, const char* verb, const char* replyAdd
 
 TEST_CASE("engine: the guest gets both bulk lanes with no shared segment",
           "[boundary][regions][engine]") {
-    Engine e;   // udpPort = 0 — the embedded case, no segment
+    Engine e;   // shmSegment = false — the embedded case, no segment
 
     const auto r = askGuest(e, "/dummy/region/lanes", "/dummy/region/lanes-is");
 

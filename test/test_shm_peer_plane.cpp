@@ -31,7 +31,7 @@ ClockworkEngine::Config planeConfig(unsigned port) {
     ClockworkEngine::Config cfg;
     cfg.sampleRate   = 48000;
     cfg.bufferSize   = 128;
-    cfg.udpPort      = port;   // non-zero enables the public shm segment
+    cfg.shmSegment      = true;   // non-zero enables the public shm segment
     cfg.headless     = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmCommands  = true;

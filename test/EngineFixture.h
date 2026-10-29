@@ -158,7 +158,7 @@ struct Engine {
         };
         ClockworkEngine::Config cfg;
         cfg.sampleRate        = kSampleRate;
-        cfg.udpPort           = 0;       // no SHM segment, no cleanup of a real one
+        cfg.shmSegment           = false;       // no SHM segment, no cleanup of a real one
         cfg.numOutputChannels = 2;
         cfg.numInputChannels  = 0;
         cfg.headless          = true;

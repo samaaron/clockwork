@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Sam Aaron
 #include "EngineFixture.h"
 
-TEST_CASE("Engine boots with udpPort > 0 (cross-process shm)", "[shm-repro]") {
+TEST_CASE("Engine boots with shmSegment (cross-process shm)", "[shm-repro]") {
     ClockworkEngine::Config cfg;
     cfg.sampleRate       = 48000;
     cfg.bufferSize       = 128;
-    cfg.udpPort          = 30099;  // non-zero → creates POSIX shm
+    cfg.shmSegment          = true;  // non-zero → creates POSIX shm
     cfg.headless         = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
 

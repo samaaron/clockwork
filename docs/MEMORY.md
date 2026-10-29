@@ -30,7 +30,7 @@ callback, the worklet, the DAW's process thread, or an embedded task.
 
 | area | holds | writer → reader | web (Sonic Pi Web) | native (Sonic Pi) | plugin (attach) | embedded (ESP32) |
 |---|---|---|---|---|---|---|
-| **arena** `ring_buffer_storage` | the table, state, scope, taps, message rings, guest window, config, persist (1.3) | per region | 6.4 MB static in the wasm data segment, seen by every JS thread | 52 MiB; in the segment when `udpPort > 0`, else static | 52 MiB static; no segment, so no other process can see it | 205 KB static, the whole block in PSRAM (`COLD_BSS`) |
+| **arena** `ring_buffer_storage` | the table, state, scope, taps, message rings, guest window, config, persist (1.3) | per region | 6.4 MB static in the wasm data segment, seen by every JS thread | 52 MiB; in the segment when `shmSegment`, else static | 52 MiB static; no segment, so no other process can see it | 205 KB static, the whole block in PSRAM (`COLD_BSS`) |
 | **scheduler store** | timed messages | engine thread | 790 KB static | 594 KB static | 594 KB | 135 KB static, in **internal SRAM** (no `COLD_BSS`, though the comments say otherwise) |
 | **audio staging** `static_audio_bus/in` | the block's channel buffers | engine thread | 2 × 64 KB | 2 × 512 KB | 2 × 512 KB | 2 × 512 B |
 | **clockwork heap** (TLSF pool, `rust/clockwork-heap`) | everything the guest takes through `DspHost::alloc_bytes`, plus clockwork's own | engine thread, lock-free; foreign threads get system memory | 76 MiB, carved from the placement arena; may grow **once**, by 4 MiB, inside it | 64 MiB from `malloc` + a 16 MiB spare, re-armed by the NRT thread | 64 MiB + 16 MiB | 80 KiB from fast RAM, clamped; a 256 KiB spare from PSRAM, re-armed never (no NRT thread) |
@@ -39,7 +39,7 @@ callback, the worklet, the DAW's process thread, or an embedded task.
 | **guest bulk memory** `memory_bulk` | cold guest state | guest only | NULL | NULL | NULL | 2 MiB from PSRAM, always |
 | **assets** | client → guest bulk: **the sample pool** | client writes; guest reads in place; **and writes** (1.4) | 4 MiB at boot, grows in 32 MiB steps to 768 MiB (96 MiB on a phone); the top of wasm memory | 512 MiB of address space, launch-sized (clockwork's default is 8 MiB); in the segment, or `new[]` without one | **none**; an asset commit is refused | none unless the host passes one |
 | **returns** | guest → client bulk | guest writes; client reads | 4 MiB, **unused** | 8 MiB; `/b_write` staging only | none | none |
-| **segment header + peer plane** | where the blob is; two OSC rings for one trusted peer | creator; peer ↔ NRT thread | — | 256 B + 393 KB, only with `udpPort > 0` | — | — |
+| **segment header + peer plane** | where the blob is; two OSC rings for one trusted peer | creator; peer ↔ NRT thread | — | 256 B + 393 KB, only with `shmSegment` | — | — |
 | **plugin-track bridge segment** | send/return audio rings, three message rings, a 4 MB JSON mirror | engine ↔ the bridge child process | — | 5.3 MB, one named segment per engine pid | present but silent (no lanes reserved) | — |
 | **asset table** | id → committing client | engine thread | 48 KB static | 48 KB | 48 KB | 48 KB |
 | **system malloc** | Rust sink queues and port rings, `ClockworkProcessor` buffers, the C client handle, **scsynth's synthdefs** (`new` on the engine thread) — *as surveyed; step 6 in Part 4 moved the queues to the rust heap and the synthdefs to the clockwork heap* | various | yes | yes | yes | yes, **not tier-routed** |

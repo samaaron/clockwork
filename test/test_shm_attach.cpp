@@ -38,7 +38,7 @@ namespace {
 
 ClockworkEngine::Config attachConfig(unsigned port) {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
-    cfg.udpPort = static_cast<int>(port);   // non-zero is what creates the segment
+    cfg.shmSegment = true;   // non-zero is what creates the segment
     return cfg;
 }
 

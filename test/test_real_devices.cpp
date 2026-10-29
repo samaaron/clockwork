@@ -41,7 +41,7 @@ using Clock = std::chrono::steady_clock;
 ClockworkEngine::Config realConfig() {
     ClockworkEngine::Config cfg;
     cfg.sampleRate        = 48000;
-    cfg.udpPort           = 0;
+    cfg.shmSegment           = false;
     cfg.headless          = false;
     cfg.numOutputChannels = 2;
     cfg.numInputChannels  = 1;   // the default microphone, paired at boot

@@ -266,14 +266,14 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     uint64_t ordinary = 0;
     {
         ClockworkEngine::Config plain = cfg;
-        plain.udpPort = segment ? 57342 : 0;
+        plain.shmSegment = segment;
         const uint64_t before = residentBytes();
         EngineFixture small(plain);
         ordinary = grownSince(before);
     }
 
     cfg.assetsBytes = want;
-    cfg.udpPort    = segment ? 57341 : 0;
+    cfg.shmSegment    = segment;
     const uint64_t before = residentBytes();
     EngineFixture fx(cfg);
     REQUIRE(fx.engine().guestAssetsBytes() == want);
@@ -337,7 +337,7 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
 
 TEST_CASE("asset: a client over the segment sees the same assets", "[asset][shm]") {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
-    cfg.udpPort = 57340;   // non-zero: the engine carves the lanes from a public segment
+    cfg.shmSegment = true;   // non-zero: the engine carves the lanes from a public segment
     EngineFixture fx(cfg);
 
     ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;

@@ -129,7 +129,7 @@ public:
         if (tweak) tweak(cfg);
         if (reader == Reader::ShmPeer) {
             REQUIRE(port != 0);
-            cfg.udpPort     = port;   // the public segment, and its plane
+            cfg.shmSegment     = true;   // the public segment, and its plane
             cfg.shmCommands = true;
             mFix = std::make_unique<EngineFixture>(cfg, [this](ClockworkEngine& e) {
                 mTransport = std::make_unique<PeerBeside>(e);

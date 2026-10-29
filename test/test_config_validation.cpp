@@ -21,7 +21,7 @@ TEST_CASE("Default Config values are correct", "[config]") {
 
     CHECK(cfg.sampleRate             == 48000);
     CHECK(cfg.bufferSize             == 0);   // 0 = auto (smallest multiple of 128)
-    CHECK(cfg.udpPort                == 57110);
+    CHECK(cfg.shmSegment             == true);
     // Default is "auto" (-1) — JUCE/CoreAudio clamps to the device's real
     // channel count. Headless test fixtures override these to get
     // predictable 2-in / 2-out behaviour.
@@ -41,7 +41,7 @@ TEST_CASE("Engine boots with minimum viable config", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless    = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort     = 0;
+    cfg.shmSegment     = false;
     clockwork::guest_config_text::set(cfg.guestConfig, "maxNodes", "4");
     clockwork::guest_config_text::set(cfg.guestConfig, "numBuffers", "4");
     clockwork::guest_config_text::set(cfg.guestConfig, "maxGraphDefs", "4");
@@ -69,7 +69,7 @@ TEST_CASE("A guest config larger than its region refuses init", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     // valid lines, more of them than the region holds
     while (cfg.guestConfig.size() + 1 <= GUEST_CONFIG_SIZE)
         cfg.guestConfig += "# a comment line the guest ignores, one of many\n";
@@ -90,7 +90,7 @@ TEST_CASE("Engine boots with large config values", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     clockwork::guest_config_text::set(cfg.guestConfig, "maxNodes", "4096");
     clockwork::guest_config_text::set(cfg.guestConfig, "numBuffers", "4096");
     engine.init(cfg);
@@ -109,7 +109,7 @@ TEST_CASE("Engine boots at 44100 Hz", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     cfg.sampleRate = 44100;
     engine.init(cfg);
 
@@ -125,7 +125,7 @@ TEST_CASE("Engine boots at 96000 Hz", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     cfg.sampleRate = 96000;
     engine.init(cfg);
 
@@ -143,7 +143,7 @@ TEST_CASE("Engine boots with bufferSize=64", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     cfg.bufferSize = 64;
     engine.init(cfg);
 
@@ -159,7 +159,7 @@ TEST_CASE("Engine boots with bufferSize=256", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     cfg.bufferSize = 256;
     engine.init(cfg);
 
@@ -175,7 +175,7 @@ TEST_CASE("Engine boots with bufferSize=512", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort    = 0;
+    cfg.shmSegment    = false;
     cfg.bufferSize = 512;
     engine.init(cfg);
 
@@ -196,20 +196,21 @@ TEST_CASE("headless=true skips audio device", "[config]") {
 
 }
 
-// ── 7. udpPort=0 disables UDP listener ──────────────────────────────────────
+// ── 7. shmSegment=false boots without a segment ─────────────────────────────
 
-TEST_CASE("udpPort=0 disables UDP listener", "[config]") {
+TEST_CASE("shmSegment=false boots without a segment", "[config]") {
     ClockworkEngine engine;
     engine.onReply = [](const uint8_t*, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort  = 0;
+    cfg.shmSegment  = false;
     engine.init(cfg);
 
-    // Engine should still be running, just without UDP
+    // Running, with a process-local arena and nothing to hand another process.
     CHECK(engine.isRunning());
+    CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmNativeHandle()));
 
     engine.shutdown();
     CHECK_FALSE(engine.isRunning());
@@ -224,7 +225,7 @@ TEST_CASE("Engine boots with mono output", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless          = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort           = 0;
+    cfg.shmSegment           = false;
     cfg.numOutputChannels = 1;
     engine.init(cfg);
 
@@ -242,7 +243,7 @@ TEST_CASE("Engine boots with zero input channels", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless         = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort          = 0;
+    cfg.shmSegment          = false;
     cfg.numInputChannels = 0;
     engine.init(cfg);
 
@@ -260,7 +261,7 @@ TEST_CASE("Engine boots with small numControlBusChannels", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless              = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort               = 0;
+    cfg.shmSegment               = false;
     clockwork::guest_config_text::set(cfg.guestConfig, "numControlBusChannels", "128");
     engine.init(cfg);
 
@@ -278,7 +279,7 @@ TEST_CASE("Engine boots with small realTimeMemorySize", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless           = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort            = 0;
+    cfg.shmSegment            = false;
     clockwork::guest_config_text::set(cfg.guestConfig, "realTimeMemorySize", "256");
     engine.init(cfg);
 
@@ -294,7 +295,7 @@ TEST_CASE("Engine boots with large realTimeMemorySize", "[config]") {
     ClockworkEngine::Config cfg;
     cfg.headless           = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
-    cfg.udpPort            = 0;
+    cfg.shmSegment            = false;
     clockwork::guest_config_text::set(cfg.guestConfig, "realTimeMemorySize", "32768");
     engine.init(cfg);
 
