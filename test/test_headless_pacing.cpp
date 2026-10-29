@@ -37,9 +37,19 @@ struct Paced {
     EngineFixture fix;
 
     // The engine boots on a free-running pacer; then the case takes the time.
+    // How many blocks the boot rendered depends on how fast the machine ran
+    // it, and the clock's anchor settles over kAnchorSettleBlocks of them and
+    // takes up its residual over more (TimeSource.h): a case that woke the
+    // driver late inside that window saw a different clock each run (under
+    // TSan, 12–20 ms behind the wall). So every case starts from a settled
+    // clock: a window and a half of on-time wakes first.
     Paced() : fix(config(pacer)) {
         pacer->hold();
         REQUIRE(pacer->settle());
+        for (uint32_t i = 0; i < clockwork::kAnchorSettleBlocks * 3 / 2; ++i) {
+            pacer->advance(kBlockNs);
+            REQUIRE(pacer->settle());
+        }
     }
 
     static ClockworkEngine::Config config(const std::shared_ptr<FakePacer>& p) {

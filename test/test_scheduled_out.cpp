@@ -115,7 +115,14 @@ struct VirtualDestination {
     std::vector<Packet> packets;
 
     VirtualDestination() {
-        REQUIRE(MIDIClientCreate(CFSTR("clockwork-engine-tests"), nullptr, nullptr, &client) == noErr);
+        // kMIDIServerStartErr (-304): the machine's MIDI server did not start,
+        // which a GitHub macOS runner does now and then (2026-10-28, -29).
+        // Nothing of ours is under test without one, so the case is skipped
+        // and says so, rather than failed for the runner.
+        const OSStatus created = MIDIClientCreate(CFSTR("clockwork-engine-tests"), nullptr, nullptr, &client);
+        if (created == kMIDIServerStartErr)
+            SKIP("CoreMIDI's server did not start on this machine (MIDIClientCreate: -304)");
+        REQUIRE(created == noErr);
         REQUIRE(MIDIDestinationCreate(client, CFSTR("clockworkenginetest"), &VirtualDestination::onRead,
                                       this, &dest) == noErr);
     }
