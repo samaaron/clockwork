@@ -54,8 +54,12 @@ session replaces, is not carried.
   `MidiMessage`.
 - `scripts/check-drivers.sh` compiles Smoothie alone for iOS (device and
   simulator), Android (with an NDK) and Bela (against `check/bela/Bela.h`, a
-  stand-in for the SDK's header); the ci.yml `drivers` job runs it on every
-  push.
+  stand-in for the SDK's header); the ci.yml `drivers` job runs the iOS and
+  Bela builds on every push. The Android driver is kept but not yet ported
+  to the audited core: it needs a loader for the embedded Java classes (the
+  GZIP stream that inflated them is gone), the `std::string` and
+  `ChannelMask` device interface, and a message loop without
+  `JUCEApplicationBase`.
 - The `juce` namespace and per-file copyright headers are retained, as the ISC
   licence requires. Smoothie is the subproject/target name, not a rename.
 

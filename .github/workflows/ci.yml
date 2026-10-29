@@ -299,9 +299,6 @@ jobs:
           - os: ubuntu-latest
             name: bela
             targets: 1
-          - os: ubuntu-latest
-            name: android
-            targets: 1
     steps:
       - uses: actions/checkout@v6
 
@@ -314,13 +311,9 @@ jobs:
       - name: Compile the drivers
         shell: bash
         run: |
-          # The Ubuntu image carries an NDK; the Bela row hides it so each
-          # Linux row builds one target.
-          if [ "${{ matrix.name }}" = android ]; then
-            export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
-          else
-            unset ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME
-          fi
+          # The Ubuntu image carries an NDK; hidden so the Linux row builds
+          # Bela. The Android driver is not ported to the audited core yet.
+          unset ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME
           scripts/check-drivers.sh build-drivers | tee drivers.log
           grep -q "check-drivers: ${{ matrix.targets }} target(s) built" drivers.log
 
