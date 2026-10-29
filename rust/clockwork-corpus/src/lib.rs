@@ -24,10 +24,8 @@ use std::path::Path;
 /// through `body`, dotfiles skipped; how many there were, so a test can
 /// refuse an empty corpus rather than pass over nothing.
 pub fn replay(manifest_dir: &str, body: fn(&[u8])) -> usize {
-    println!(
-        "corpus replay built as the fuzzer builds: {}",
-        if cfg!(fuzzing) { "yes" } else { "no" }
-    );
+    let how = if cfg!(fuzzing) { "yes" } else { "no" };
+    println!("corpus replay built as the fuzzer builds: {how}"); // stdio-ok: test output the replay job counts
     let root = Path::new(manifest_dir).join("corpus");
     let mut n = 0;
     for dir in ["seeds", "regressions"] {
