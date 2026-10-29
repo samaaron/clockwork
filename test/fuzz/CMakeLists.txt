@@ -57,6 +57,13 @@ clockwork_fuzz_target(fuzz_audio_encode fuzz_audio_encode.cpp audio_decode_stubs
     ${CLOCKWORK_SRC}/flac_encoder.cpp)
 target_include_directories(fuzz_audio_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../rust/clockwork-audio-decode/cpp)
 
+# The audio thread's own verbs and the refusal it builds from a frame it would
+# not take: the frame is a peer's bytes, validated by nothing before.
+clockwork_fuzz_target(fuzz_clockwork_sys fuzz_clockwork_sys.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp)
+
 # The ring drain over a ring and cursors another process wrote: the peer
 # plane's command ring (shm_peer_plane.h), filled by a peer with the segment.
 clockwork_fuzz_target(fuzz_ring_drain fuzz_ring_drain.cpp)

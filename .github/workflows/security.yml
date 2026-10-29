@@ -107,6 +107,7 @@ jobs:
           build-fuzz/fuzz_audio_encode test/fuzz/corpus/audio_encode
           build-fuzz/fuzz_link_wire test/fuzz/corpus/link_wire
           build-fuzz/fuzz_ring_drain test/fuzz/corpus/ring_drain
+          build-fuzz/fuzz_clockwork_sys test/fuzz/corpus/clockwork_sys
 
   # ------------------------------------------------------------------- fuzz --
   # Nightly, and by hand. Not on a push: a run bounded by time can go red by
@@ -129,6 +130,7 @@ jobs:
           - { target: fuzz_audio_encode, kind: cpp,  seeds: test/fuzz/corpus/audio_encode,     dict: rust/fuzz/audio.dict }
           - { target: fuzz_link_wire,    kind: cpp,  seeds: test/fuzz/corpus/link_wire,        dict: rust/fuzz/link.dict }
           - { target: fuzz_ring_drain,   kind: cpp,  seeds: test/fuzz/corpus/ring_drain,       dict: rust/fuzz/ring.dict }
+          - { target: fuzz_clockwork_sys, kind: cpp,  seeds: test/fuzz/corpus/clockwork_sys,    dict: rust/fuzz/osc.dict }
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly

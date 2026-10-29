@@ -79,13 +79,22 @@ inline std::atomic<uint32_t>& clockwork_sys_refusals_dropped() {
 }
 
 template <class Emit>
-void clockwork_sys_refuse(const uint8_t* data, uint32_t /*len*/, const char* reason,
+void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
                           uint32_t generation, Emit&& emit) {
+    // The address echoed is the frame's, read within `len` only: the frame
+    // is a peer's bytes that nothing validated, and one with no NUL in it
+    // would otherwise be read to whatever follows it in the ring. At most
+    // the first 255 bytes, which is more than any address of ours.
+    std::array<char, 256> addr{};
+    const size_t limit = len < addr.size() - 1 ? len : addr.size() - 1;
+    size_t n = 0;
+    while (n < limit && data[n] != '\0') ++n;
+    std::memcpy(addr.data(), data, n);
     std::array<char, 512> buf{};
     try {
         osc::OutboundPacketStream ps(buf.data(), buf.size());
         ps << osc::BeginMessage(CLOCKWORK_SYS("error"))
-           << reinterpret_cast<const char*>(data) << reason
+           << addr.data() << reason
            << static_cast<osc::int32>(generation) << osc::EndMessage;
         emit(reinterpret_cast<const uint8_t*>(ps.Data()),
              static_cast<uint32_t>(ps.Size()));
