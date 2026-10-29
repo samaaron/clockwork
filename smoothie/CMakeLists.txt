@@ -83,7 +83,8 @@ elseif(ANDROID)
     # OpenSL ES, which the NDK carries. Oboe (JUCE_USE_ANDROID_OBOE) is a
     # library of its own and is not fetched until an Android host needs it.
     target_link_libraries(smoothie PUBLIC OpenSLES log android)
-    target_compile_definitions(smoothie PUBLIC JUCE_USE_ANDROID_OBOE=0 JUCE_USE_ANDROID_OPENSLES=1)
+    # JUCE_ANDROID is not derived from the compiler's defines (juce_TargetPlatform.h).
+    target_compile_definitions(smoothie PUBLIC JUCE_ANDROID=1 JUCE_USE_ANDROID_OBOE=0 JUCE_USE_ANDROID_OPENSLES=1)
 elseif(UNIX)
     # core metadata: rt dl pthread | audio_devices metadata: alsa
     find_package(Threads REQUIRED)
