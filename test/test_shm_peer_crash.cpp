@@ -20,6 +20,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "TestSecret.h"
 #include "clockwork_prefix.h"
 #include "OscTestUtils.h"
 #include "shm_peer_plane.h"
@@ -93,19 +94,24 @@ struct AttachServer {
         : endpoint(shm_attach::default_endpoint(port) + "." + std::to_string(getpid())) {
         std::string err;
         REQUIRE(server.start(endpoint, fx.engine().shmNativeHandle(),
-                             fx.engine().shmSegmentSize(), &err));
+                             fx.engine().shmSegmentSize(), testSecret(), &err));
     }
 };
 
-// Spawn the peer helper; block until it prints "ready" (attached).
+// Spawn the peer helper with the secret on its stdin; block until it prints
+// "ready" (attached).
 pid_t spawnPeer(const char* mode, const std::string& endpoint, int count = 0) {
     int fds[2];
     REQUIRE(pipe(fds) == 0);
+    int in[2];
+    REQUIRE(pipe(in) == 0);
     pid_t pid = fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
         close(fds[0]);
+        close(in[1]);
         dup2(fds[1], STDOUT_FILENO);
+        dup2(in[0], STDIN_FILENO);
         std::string countStr = std::to_string(count);
         execl(CLOCKWORK_TEST_SHM_PEER_BINARY, "peer_shm",
               mode, endpoint.c_str(),
@@ -114,6 +120,15 @@ pid_t spawnPeer(const char* mode, const std::string& endpoint, int count = 0) {
         _exit(127);  // exec failed
     }
     close(fds[1]);
+    close(in[0]);
+    {
+        static const char hex[] = "0123456789abcdef";
+        std::string line;
+        for (const uint8_t b : testSecretBytes()) { line += hex[b >> 4]; line += hex[b & 15]; }
+        line += '\n';
+        REQUIRE(write(in[1], line.data(), line.size()) == static_cast<ssize_t>(line.size()));
+    }
+    close(in[1]);
     // Gate on "ready" so kills land during ring writes, not during attach.
     char buf[8] = {};
     ssize_t n = read(fds[0], buf, sizeof(buf) - 1);

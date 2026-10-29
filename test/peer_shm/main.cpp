@@ -8,6 +8,9 @@
  * The engine echoes each id as the last argument of its tempo.reply, which is
  * how the parent checks completeness and order.
  *
+ * The engine's secret comes on stdin as 64 hex digits and a newline, as a
+ * launcher gives it to any peer; the attach endpoint asks for it.
+ *
  * Modes (prints "ready" on stdout once attached):
  *   burst <endpoint> <count>   write ids 1..count (retry on ring-full), exit 0
  *   spam <endpoint>            write frames with increasing ids until killed
@@ -83,8 +86,19 @@ int main(int argc, char* argv[]) {
         // engine hands its anonymous segment over the attach endpoint. The
         // client mapping must outlive every plane access; keep it for the
         // whole process lifetime.
+        char line[80] = {};
+        uint8_t secret[32];
+        if (!std::fgets(line, sizeof line, stdin) || std::strlen(line) < 64) {
+            std::fprintf(stderr, "peer_shm: no secret on stdin\n");
+            return 3;
+        }
+        for (int i = 0; i < 32; ++i) {
+            unsigned v = 0;
+            if (std::sscanf(line + 2 * i, "%2x", &v) != 1) { std::fprintf(stderr, "peer_shm: bad secret\n"); return 3; }
+            secret[i] = static_cast<uint8_t>(v);
+        }
         std::string err;
-        const auto handle = shm_attach::receive(endpoint, &err);
+        const auto handle = shm_attach::receive(endpoint, secret, &err);
         if (!detail_shm_segment::shm_handle_valid(handle)) {
             std::fprintf(stderr, "peer_shm: attach at %s failed: %s\n", endpoint.c_str(), err.c_str());
             return 3;

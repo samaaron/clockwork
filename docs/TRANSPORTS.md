@@ -115,10 +115,14 @@ connected.
 
 `--shm-endpoint <path|pipe>` names it. Unset, it is derived from the port:
 `$XDG_RUNTIME_DIR/clockwork-shm-<port>.sock`, else `$TMPDIR/…`, else a
-uid-tagged path under `/tmp`; on Windows `\\.\pipe\clockwork-shm-<port>`. Both
-sides check the peer's uid (owner-only DACL on Windows), so a reader that only
-knows the port still meets its own engine and nobody else's. The C client API
-does the whole hand-off: `clockwork_client_open_shm(endpoint)`, with
+uid-tagged path under `/tmp`; on Windows `\\.\pipe\clockwork-shm-<port>`. The
+segment holds the command ring, so attaching is a command path and asks for
+the per-boot secret: a reader's first frame on the endpoint is the same auth
+frame the stream transports take, and a reader that sends anything else, or
+nothing within 2 s, gets no hand-off and is counted. Both sides also check
+the peer's uid (owner-only DACL on Windows), so a reader that only knows the
+port still meets its own engine and nobody else's. The C client API does the
+whole hand-off: `clockwork_client_open_shm(endpoint, secret)`, with
 `clockwork_client_default_endpoint(port)` for the derived name.
 
 ## Origins

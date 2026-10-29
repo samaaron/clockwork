@@ -19,6 +19,7 @@
 //! Both processes are the same machine (native endianness), so integers are
 //! read/written with `to_ne_bytes`, matching the C++ `memcpy`s.
 
+use crate::secret::ClockworkCommsSecret;
 use std::sync::atomic::{fence, AtomicI32, AtomicU32, Ordering};
 
 const SEG_MAGIC: u32 = 0x5C09_E00C; // shm_segment_header::MAGIC (E00C: the arena describes itself)
@@ -88,11 +89,21 @@ impl Drop for Segment {
 // The segment is anonymous (shm_segment.hpp): the engine serves a duplicate of
 // its handle from an attach endpoint (shm_attach.hpp) — a Unix socket that
 // passes the descriptor as SCM_RIGHTS, or a Windows named pipe over which the
-// engine duplicates the handle into this process. Both ends check the peer is
-// the same user; a planted endpoint hands over nothing.
+// engine duplicates the handle into this process. The client presents the
+// secret's auth frame first (crate::secret), and both ends check the peer is
+// the same user; a planted endpoint hands over nothing, and nothing is handed
+// to a peer without the secret.
 
 const ATTACH_MAGIC: u32 = 0x4357_4154; // "CWAT", shm_attach::MAGIC
-const ATTACH_VERSION: u32 = 1;
+const ATTACH_VERSION: u32 = 2;
+
+/// The frame a peer sends first: the auth packet after its 4-byte length.
+fn auth_frame(secret: &ClockworkCommsSecret) -> Vec<u8> {
+    let packet = secret.auth_packet();
+    let mut out = (packet.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(&packet);
+    out
+}
 const HELLO_LEN: usize = 24; // magic u32, version u32, size u64, handle u64
 
 fn parse_hello(buf: &[u8]) -> Result<(u64, u64), String> {
@@ -130,9 +141,10 @@ pub fn default_endpoint(port: u32) -> String {
 }
 
 #[cfg(unix)]
-fn open_segment(endpoint: &str) -> Result<Segment, String> {
+fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment, String> {
+    use std::io::Write;
     use std::os::unix::io::AsRawFd;
-    let stream = std::os::unix::net::UnixStream::connect(endpoint)
+    let mut stream = std::os::unix::net::UnixStream::connect(endpoint)
         .map_err(|e| format!("connect {endpoint}: {e}"))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -173,6 +185,9 @@ fn open_segment(endpoint: &str) -> Result<Segment, String> {
     if peer_uid != unsafe { libc::geteuid() } {
         return Err(format!("the engine at {endpoint} is not running as this user"));
     }
+    stream
+        .write_all(&auth_frame(secret))
+        .map_err(|e| format!("could not present the secret to {endpoint}: {e}"))?;
 
     // One recvmsg: the hello in the data, the descriptor in the ancillary.
     let mut hello = [0u8; HELLO_LEN];
@@ -250,9 +265,9 @@ fn open_segment(endpoint: &str) -> Result<Segment, String> {
 }
 
 #[cfg(windows)]
-fn open_segment(endpoint: &str) -> Result<Segment, String> {
+fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, ReadFile, OPEN_EXISTING};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, OPEN_EXISTING};
     use windows_sys::Win32::System::Memory::{
         MapViewOfFile, VirtualQuery, FILE_MAP_ALL_ACCESS, MEMORY_BASIC_INFORMATION,
     };
@@ -269,7 +284,7 @@ fn open_segment(endpoint: &str) -> Result<Segment, String> {
     unsafe {
         let mut pipe = INVALID_HANDLE_VALUE;
         for _ in 0..3 {
-            pipe = CreateFileW(name.as_ptr(), 0x8000_0000 /* GENERIC_READ */, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut());
+            pipe = CreateFileW(name.as_ptr(), 0x8000_0000 | 0x4000_0000 /* GENERIC_READ | GENERIC_WRITE */, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut());
             if pipe != INVALID_HANDLE_VALUE {
                 break;
             }
@@ -281,11 +296,24 @@ fn open_segment(endpoint: &str) -> Result<Segment, String> {
         if pipe == INVALID_HANDLE_VALUE {
             return Err(format!("open {path}: {}", std::io::Error::last_os_error()));
         }
+        let frame = auth_frame(secret);
+        let mut written: u32 = 0;
+        let sent = WriteFile(pipe, frame.as_ptr(), frame.len() as u32, &mut written, std::ptr::null_mut());
+        if sent == 0 || written as usize != frame.len() {
+            CloseHandle(pipe);
+            return Err(format!("could not present the secret to {path}"));
+        }
         let mut hello = [0u8; HELLO_LEN];
         let mut got: u32 = 0;
         let ok = ReadFile(pipe, hello.as_mut_ptr(), HELLO_LEN as u32, &mut got, std::ptr::null_mut());
         CloseHandle(pipe);
-        if ok == 0 || got as usize != HELLO_LEN {
+        if ok == 0 || got == 0 {
+            return Err(format!("refused by {path}: the secret was not accepted"));
+        }
+        if got == 0 {
+        return Err(format!("refused by {endpoint}: the secret was not accepted"));
+    }
+    if got as usize != HELLO_LEN {
             return Err(format!("malformed hand-off from {path}"));
         }
         let (_size, handle) = parse_hello(&hello)?;
@@ -372,8 +400,10 @@ impl ShmPeer {
     /// Attach through the engine's endpoint (`default_endpoint(port)` unless it
     /// was started with --shm-endpoint) and locate the peer plane, validating
     /// the magic and cross-checking the geometry the header and plane both carry.
-    pub fn open(endpoint: &str) -> Result<ShmPeer, String> {
-        let seg = open_segment(endpoint)?;
+    /// `secret` is the engine's per-boot secret; the endpoint hands the
+    /// segment only to a peer that presents it.
+    pub fn open(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<ShmPeer, String> {
+        let seg = open_segment(endpoint, secret)?;
         if seg.len < 128 {
             return Err("segment smaller than a header".into());
         }

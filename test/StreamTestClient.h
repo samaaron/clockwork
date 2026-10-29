@@ -27,15 +27,10 @@
 #include <vector>
 
 #include "clockwork_comms_abi.h"
+#include "TestSecret.h"
 
 // The secret every stream transport a test starts is given (setSecret), and
-// that connectTcp and connectUnixStream present first.
-inline const ClockworkCommsSecret* testSecret() {
-    static const std::unique_ptr<ClockworkCommsSecret, void (*)(ClockworkCommsSecret*)> secret{
-        clockwork_comms_secret_generate(), &clockwork_comms_secret_free};
-    return secret.get();
-}
-
+// that connectTcp and connectUnixStream present first: testSecret().
 inline std::vector<uint8_t> authPacket(const ClockworkCommsSecret* secret) {
     std::vector<uint8_t> out(256);
     out.resize(clockwork_comms_secret_auth_packet(secret, out.data(),

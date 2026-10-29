@@ -156,14 +156,16 @@ ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
     return reinterpret_cast<ClockworkClient*>(c.release());
 }
 
-ClockworkClient* clockwork_client_open_shm(const char* endpoint, ClockworkStatus* out_status) {
+ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* secret,
+                                           ClockworkStatus* out_status) {
     if (!endpoint || !*endpoint) { fail(out_status, CLOCKWORK_E_NOT_FOUND); return nullptr; }
+    if (!secret) { fail(out_status, CLOCKWORK_E_ARG); return nullptr; }
     std::string err;
-    const auto h = shm_attach::receive(endpoint, &err);
+    const auto h = shm_attach::receive(endpoint, secret, &err);
     if (!detail_shm_segment::shm_handle_valid(h)) {
-        // No engine at the endpoint, or not ours. Either way there is nothing
-        // to attach to.
-        fail(out_status, CLOCKWORK_E_NOT_FOUND);
+        // Refused: an engine answered and did not accept the secret. Else no
+        // engine at the endpoint, or not ours: nothing to attach to.
+        fail(out_status, err.rfind("refused by", 0) == 0 ? CLOCKWORK_E_PERM : CLOCKWORK_E_NOT_FOUND);
         return nullptr;
     }
 #ifdef _WIN32
@@ -182,7 +184,7 @@ uint32_t clockwork_client_default_endpoint(uint32_t port, char* buf, uint32_t ca
     return need;
 }
 #else
-ClockworkClient* clockwork_client_open_shm(const char*, ClockworkStatus* out_status) {
+ClockworkClient* clockwork_client_open_shm(const char*, const uint8_t*, ClockworkStatus* out_status) {
     // No segment in a browser: the engine's arena IS this heap, so a client
     // there opens it by address.
     fail(out_status, CLOCKWORK_E_NOT_FOUND);

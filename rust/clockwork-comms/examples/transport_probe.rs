@@ -55,7 +55,9 @@ fn report(reply: &[u8]) {
     }
 }
 
-fn run(proto: &str, target: &str, auth: &[u8], probe: &[u8]) -> Result<Vec<u8>, String> {
+fn run(proto: &str, target: &str, secret: &clockwork_comms::secret::ClockworkCommsSecret, probe: &[u8]) -> Result<Vec<u8>, String> {
+    let auth = frame(&secret.auth_packet());
+    let auth = auth.as_slice();
     match proto {
         "tcp" => {
             let mut s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
@@ -103,7 +105,7 @@ fn run(proto: &str, target: &str, auth: &[u8], probe: &[u8]) -> Result<Vec<u8>, 
                 Ok(port) => clockwork_comms::shm::default_endpoint(port),
                 Err(_) => target.to_string(),
             };
-            let peer = clockwork_comms::shm::ShmPeer::open(&endpoint)?;
+            let peer = clockwork_comms::shm::ShmPeer::open(&endpoint, secret)?;
             peer.attach(std::process::id());
             if !peer.write_cmd(probe) {
                 return Err("command ring full".into());
@@ -267,7 +269,9 @@ fn pipe_load(mut f: std::fs::File, count: i32) -> Result<String, String> {
     Ok(format!("{count} in {secs:.2}s = {:.0} msg/s", count as f64 / secs))
 }
 
-fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, String> {
+fn load(proto: &str, target: &str, secret: &clockwork_comms::secret::ClockworkCommsSecret, count: i32) -> Result<String, String> {
+    let auth = frame(&secret.auth_packet());
+    let auth = auth.as_slice();
     match proto {
         "tcp" => {
             let mut s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
@@ -307,7 +311,7 @@ fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, St
                 Ok(port) => clockwork_comms::shm::default_endpoint(port),
                 Err(_) => target.to_string(),
             };
-            let peer = clockwork_comms::shm::ShmPeer::open(&endpoint)?;
+            let peer = clockwork_comms::shm::ShmPeer::open(&endpoint, secret)?;
             peer.attach(std::process::id());
             let t0 = Instant::now();
             let (mut sent, mut got, mut last, mut disorder) = (0i32, 0i64, 0i32, false);
@@ -343,12 +347,9 @@ fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, St
     }
 }
 
-/// The framed auth packet for a stream transport, from the secret on stdin;
-/// nothing for the others. Exits when a stream transport has no secret.
-fn auth_for(proto: &str) -> Vec<u8> {
-    if !matches!(proto, "tcp" | "uds" | "pipe") {
-        return Vec::new();
-    }
+/// The host's secret, from stdin as 64 hex digits and a newline. Exits
+/// without one: every protocol asks for it.
+fn secret_from_stdin(proto: &str) -> clockwork_comms::secret::ClockworkCommsSecret {
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     let hex = line.trim_end();
@@ -359,7 +360,7 @@ fn auth_for(proto: &str) -> Vec<u8> {
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
         .and_then(clockwork_comms::secret::ClockworkCommsSecret::from_bytes);
     match secret {
-        Some(secret) => frame(&secret.auth_packet()),
+        Some(secret) => secret,
         None => {
             eprintln!("{proto}: the host's secret is read from stdin: 64 hex digits and a newline");
             std::process::exit(2);
@@ -378,10 +379,10 @@ fn main() {
             eprintln!("load: <count> must be a positive integer");
             std::process::exit(2);
         }
-        let auth = auth_for(&proto);
+        let secret = secret_from_stdin(&proto);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(load(&proto, &target, &auth, count));
+            let _ = tx.send(load(&proto, &target, &secret, count));
         });
         match rx.recv_timeout(LOAD_TIMEOUT + Duration::from_secs(2)) {
             Ok(Ok(summary)) => println!("LOAD OK {} {}: {summary}", args[2], args[3]),
@@ -409,11 +410,11 @@ fn main() {
     // read timeout, so a server that accepts the pipe but never replies would
     // otherwise hang forever (and hang clockwork, which runs us with no outer
     // timeout of its own). Run the probe on a worker and give up if it stalls.
-    let auth = auth_for(&proto);
+    let secret = secret_from_stdin(&proto);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let probe = encode("/clockwork/status", &[]);
-        let _ = tx.send(run(&proto, &target, &auth, &probe));
+        let _ = tx.send(run(&proto, &target, &secret, &probe));
     });
     match rx.recv_timeout(TIMEOUT + Duration::from_secs(1)) {
         Ok(Ok(reply)) => report(&reply),

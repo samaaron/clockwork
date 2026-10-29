@@ -157,7 +157,7 @@ extern "C" {
     pub fn clockwork_client_abi_version() -> u32;
     pub fn clockwork_client_status_text(s: ClockworkStatus) -> *const c_char;
 
-    pub fn clockwork_client_open_shm(endpoint: *const c_char, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
+    pub fn clockwork_client_open_shm(endpoint: *const c_char, secret: *const u8, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
     pub fn clockwork_client_default_endpoint(port: u32, buf: *mut c_char, cap: u32) -> u32;
     pub fn clockwork_client_open_shm_handle(native_handle: isize, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
     pub fn clockwork_client_open_memory(base: *mut c_void, bytes: u32, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;

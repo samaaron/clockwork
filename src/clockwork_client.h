@@ -159,8 +159,12 @@ typedef struct ClockworkClient ClockworkClient;
  * its handle on connect, and only to a client running as the same user. An
  * engine started with -u 0 has no segment and no endpoint; that, an engine
  * that is not there, and one whose layout this build does not recognise are
- * all CLOCKWORK_E_NOT_FOUND. */
-ClockworkClient* clockwork_client_open_shm(const char* endpoint, ClockworkStatus* out_status);
+ * all CLOCKWORK_E_NOT_FOUND. `secret` is the engine's per-boot secret, 32
+ * bytes (clockwork_comms_secret.h): the endpoint hands the segment only to a
+ * reader that presents it. Null is CLOCKWORK_E_ARG; refused is
+ * CLOCKWORK_E_PERM. */
+ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* secret,
+                                           ClockworkStatus* out_status);
 
 /* The endpoint an engine on `port` serves at unless told otherwise: under
  * XDG_RUNTIME_DIR or TMPDIR on POSIX, \\.\pipe\clockwork-shm-<port> on

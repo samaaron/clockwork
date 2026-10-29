@@ -49,7 +49,7 @@ impl ClockworkCommsSecret {
 
     /// Whether `packet` is exactly this secret's auth packet. Every byte is
     /// looked at, so how long it takes says nothing about where it differs.
-    pub(crate) fn admits(&self, packet: &[u8]) -> bool {
+    pub fn admits(&self, packet: &[u8]) -> bool {
         let want = self.auth_packet();
         if packet.len() != want.len() {
             return false;
@@ -132,6 +132,41 @@ pub unsafe extern "C" fn clockwork_comms_secret_auth_packet(
     // SAFETY: `out` is writable for `cap` bytes and `packet` fits.
     unsafe { std::ptr::copy_nonoverlapping(packet.as_ptr(), out, packet.len()) };
     packet.len() as u32
+}
+
+/// A copy a server can own. Null for null. Free with
+/// [`clockwork_comms_secret_free`].
+///
+/// # Safety
+/// `secret` is null or live.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_comms_secret_clone(
+    secret: *const ClockworkCommsSecret,
+) -> *mut ClockworkCommsSecret {
+    if secret.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: live, per the contract.
+    Box::into_raw(Box::new(unsafe { &*secret }.clone()))
+}
+
+/// 1 if `packet` is exactly this secret's auth packet, compared in time that
+/// does not depend on where it differs; 0 otherwise, and for nulls.
+///
+/// # Safety
+/// `secret` is null or live; `packet` is null or readable for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_comms_secret_admits(
+    secret: *const ClockworkCommsSecret,
+    packet: *const u8,
+    len: u32,
+) -> i32 {
+    if secret.is_null() || packet.is_null() {
+        return 0;
+    }
+    // SAFETY: live and readable for `len` bytes, per the contract.
+    let (secret, packet) = unsafe { (&*secret, std::slice::from_raw_parts(packet, len as usize)) };
+    secret.admits(packet) as i32
 }
 
 /// # Safety

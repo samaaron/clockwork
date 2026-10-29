@@ -451,6 +451,7 @@ fn an_endpoint_is_named_by_port_and_an_engine_that_is_not_there_is_not_found() {
     let ep = Client::default_endpoint(57_110);
     assert!(ep.contains("57110"), "{ep}");
     assert_ne!(Client::default_endpoint(57_111), ep);
-    assert_eq!(Client::open_shm(&ep).err(), Some(Error::NotFound));
-    assert_eq!(Client::open_shm("bad\0endpoint").err(), Some(Error::Arg));
+    let secret = [7u8; 32];
+    assert_eq!(Client::open_shm(&ep, &secret).err(), Some(Error::NotFound));
+    assert_eq!(Client::open_shm("bad\0endpoint", &secret).err(), Some(Error::Arg));
 }

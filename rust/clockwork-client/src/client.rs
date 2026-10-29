@@ -92,12 +92,15 @@ impl Client {
     /// what it was started with as `--shm-endpoint`). `NotFound` for no
     /// engine there, an engine started with `-u 0`, or a layout this build
     /// does not recognise.
-    pub fn open_shm(endpoint: &str) -> Result<Client> {
+    /// `secret` is the engine's per-boot secret: the endpoint hands the
+    /// segment only to a reader that presents it, and refuses with
+    /// [`Error::Perm`] otherwise.
+    pub fn open_shm(endpoint: &str, secret: &[u8; 32]) -> Result<Client> {
         let endpoint = CString::new(endpoint).map_err(|_| Error::Arg)?;
         let mut st = ClockworkStatus::OK;
-        // SAFETY: a NUL-terminated string that outlives the call, and a live
-        // out-pointer.
-        let raw = unsafe { clockwork_client_open_shm(endpoint.as_ptr(), &mut st) };
+        // SAFETY: a NUL-terminated string and a 32-byte array that outlive the
+        // call, and a live out-pointer.
+        let raw = unsafe { clockwork_client_open_shm(endpoint.as_ptr(), secret.as_ptr(), &mut st) };
         Self::opened(raw, st, true)
     }
 

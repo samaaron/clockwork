@@ -14,16 +14,21 @@
 //  its engine (Sonic Pi's daemon does) still needs the GUI to reach the
 //  segment.
 //
-//  PROTOCOL. Connect; the server sends one `hello` (magic, version, segment
-//  size, and on Windows the duplicated handle value) with the descriptor
-//  riding alongside on POSIX, then closes. No request, no state: attaching is
-//  the connection.
+//  PROTOCOL. Connect; the client sends the secret's auth frame (a 4-byte
+//  big-endian length, then /clockwork/auth with the 32 bytes as a blob, the
+//  same first frame the stream transports ask for); the server sends one
+//  `hello` (magic, version, segment size, and on Windows the duplicated
+//  handle value) with the descriptor riding alongside on POSIX, then closes.
+//  A client whose first frame is anything else, or that sends none within
+//  AUTH_DEADLINE, gets nothing and is counted.
 //
-//  TRUST. The endpoint lives in a per-user directory (XDG_RUNTIME_DIR or
-//  TMPDIR, both 0700) with a 0600 socket, and BOTH ends check the peer's uid:
-//  the server hands memory only to its own user, and a client refuses a
-//  server run by anyone else, so a planted path yields nothing. On Windows
-//  the pipe carries an owner-only DACL and rejects remote clients.
+//  TRUST. The segment holds the command ring, so attaching is a command
+//  path and asks for the per-boot secret (clockwork_comms_secret.h). The
+//  endpoint also lives in a per-user directory (XDG_RUNTIME_DIR or TMPDIR,
+//  both 0700) with a 0600 socket, and BOTH ends check the peer's uid: the
+//  server hands memory only to its own user, and a client refuses a server
+//  run by anyone else, so a planted path yields nothing. On Windows the pipe
+//  carries an owner-only DACL and rejects remote clients.
 //
 //  The default endpoint is derived from the engine's port so that a launcher
 //  and a reader that only share the port still meet; --shm-endpoint names any
@@ -32,8 +37,10 @@
 #pragma once
 
 #include "shm_segment.hpp"
+#include "clockwork_comms_secret.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -78,8 +85,29 @@ struct hello {
                         // POSIX: 0, the descriptor travels as ancillary data
 };
 static constexpr uint32_t MAGIC   = 0x43574154;  // "CWAT"
-static constexpr uint32_t VERSION = 1;
+static constexpr uint32_t VERSION = 2;           // 2: the client's auth frame comes first
 static_assert(sizeof(hello) == 24, "hello is a wire format");
+
+// How long the server waits for a client's auth frame.
+static constexpr std::chrono::seconds AUTH_DEADLINE { 2 };
+
+// What the client sends first: the secret's auth packet, framed. The packet
+// is "/clockwork/auth" then ",b" then the blob, each OSC-padded to four
+// bytes: 16 + 4 + 4 + 32 = 56 bytes, after a 4-byte big-endian length.
+// clockwork_comms_secret_auth_packet encodes the same bytes; a test holds
+// the two together.
+static constexpr uint32_t AUTH_PACKET_LEN = 56;
+static constexpr uint32_t AUTH_FRAME_LEN  = 4 + AUTH_PACKET_LEN;
+inline std::array<uint8_t, AUTH_FRAME_LEN> auth_frame(const uint8_t* secret32) {
+    std::array<uint8_t, AUTH_FRAME_LEN> f {};
+    f[3] = AUTH_PACKET_LEN;
+    static constexpr char kAddr[16] = "/clockwork/auth";   // 15 chars + NUL
+    std::memcpy(f.data() + 4, kAddr, 16);
+    std::memcpy(f.data() + 20, ",b\0\0", 4);
+    f[27] = 32;                                            // blob length, big-endian
+    std::memcpy(f.data() + 28, secret32, 32);
+    return f;
+}
 
 // The endpoint an engine on `port` uses unless told otherwise. A per-user
 // location: on Linux the session runtime dir, on macOS the per-user TMPDIR,
@@ -181,12 +209,15 @@ public:
     server& operator=(const server&) = delete;
 
     // Bind the endpoint and serve `segment` (not owned; must outlive the
-    // server) of `size` bytes to every same-user connection until stop().
-    // False, with `err` filled, when the endpoint cannot be bound.
+    // server) of `size` bytes to every same-user connection that presents
+    // `secret` (copied; the caller's may go), until stop(). False, with `err`
+    // filled, when there is no secret or the endpoint cannot be bound.
     bool start(const std::string& endpoint, shm_native_handle segment, uint64_t size,
-               std::string* err) {
+               const ClockworkCommsSecret* secret, std::string* err) {
         stop();
         if (!shm_handle_valid(segment)) { if (err) *err = "no segment to serve"; return false; }
+        if (!secret) { if (err) *err = "no secret: the attach endpoint asks every reader for it"; return false; }
+        mSecret   = clockwork_comms_secret_clone(secret);
         mEndpoint = endpoint;
         mSegment  = segment;
         mSize     = size;
@@ -269,10 +300,14 @@ public:
         mListen = -1;
         ::unlink(mEndpoint.c_str());
 #endif
+        clockwork_comms_secret_free(mSecret);
+        mSecret = nullptr;
     }
 
     const std::string& endpoint() const { return mEndpoint; }
     bool running() const { return mThread.joinable(); }
+    // Connections closed for not presenting the secret.
+    uint64_t refused() const { return mRefused.load(std::memory_order_relaxed); }
 
 private:
 #ifdef _WIN32
@@ -280,9 +315,9 @@ private:
         SECURITY_ATTRIBUTES sa { sizeof(SECURITY_ATTRIBUTES), mSd, FALSE };
         return CreateNamedPipeW(
             mPipeName.c_str(),
-            PIPE_ACCESS_OUTBOUND | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+            PIPE_ACCESS_DUPLEX | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            PIPE_UNLIMITED_INSTANCES, sizeof(hello), sizeof(hello), 0, &sa);
+            PIPE_UNLIMITED_INSTANCES, sizeof(hello), AUTH_FRAME_LEN, 0, &sa);
     }
 
     void serve_loop(HANDLE instance, const std::stop_token& stop) {
@@ -320,7 +355,30 @@ private:
         }
     }
 
+    // The client's auth frame, within AUTH_DEADLINE, or false. ReadFile on a
+    // synchronous pipe would block for ever on a silent client, so the bytes
+    // are waited for with PeekNamedPipe first.
+    bool admit(HANDLE instance) {
+        const auto deadline = std::chrono::steady_clock::now() + AUTH_DEADLINE;
+        DWORD avail = 0;
+        while (true) {
+            if (!PeekNamedPipe(instance, nullptr, 0, nullptr, &avail, nullptr)) return false;
+            if (avail >= AUTH_FRAME_LEN) break;
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            Sleep(10);
+        }
+        std::array<uint8_t, AUTH_FRAME_LEN> frame {};
+        DWORD got = 0;
+        if (!ReadFile(instance, frame.data(), AUTH_FRAME_LEN, &got, nullptr) || got != AUTH_FRAME_LEN)
+            return false;
+        const uint32_t len = (uint32_t(frame[0]) << 24) | (uint32_t(frame[1]) << 16)
+                           | (uint32_t(frame[2]) << 8) | uint32_t(frame[3]);
+        return len == AUTH_PACKET_LEN
+            && clockwork_comms_secret_admits(mSecret, frame.data() + 4, AUTH_PACKET_LEN) == 1;
+    }
+
     void serve_one(HANDLE instance) {
+        if (!admit(instance)) { mRefused.fetch_add(1, std::memory_order_relaxed); return; }
         hello h { MAGIC, VERSION, mSize, 0 };
         ULONG pid = 0;
         if (GetNamedPipeClientProcessId(instance, &pid)) {
@@ -361,9 +419,27 @@ private:
         }
     }
 
+    // The client's auth frame, within AUTH_DEADLINE, or false.
+    bool admit(int conn) {
+        timeval tv { static_cast<time_t>(AUTH_DEADLINE.count()), 0 };
+        ::setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        std::array<uint8_t, AUTH_FRAME_LEN> frame {};
+        size_t got = 0;
+        while (got < frame.size()) {
+            const ssize_t n = ::recv(conn, frame.data() + got, frame.size() - got, 0);
+            if (n <= 0) return false;   // closed, or the deadline
+            got += static_cast<size_t>(n);
+        }
+        const uint32_t len = (uint32_t(frame[0]) << 24) | (uint32_t(frame[1]) << 16)
+                           | (uint32_t(frame[2]) << 8) | uint32_t(frame[3]);
+        return len == AUTH_PACKET_LEN
+            && clockwork_comms_secret_admits(mSecret, frame.data() + 4, AUTH_PACKET_LEN) == 1;
+    }
+
     void serve_one(int conn) {
         uid_t uid = static_cast<uid_t>(-1);
         if (!peer_uid(conn, &uid) || uid != ::geteuid()) return;   // not ours: nothing
+        if (!admit(conn)) { mRefused.fetch_add(1, std::memory_order_relaxed); return; }
 
         hello h { MAGIC, VERSION, mSize, 0 };
         iovec iov { &h, sizeof h };
@@ -387,25 +463,30 @@ private:
 
     int mListen = -1;
 #endif
-    std::string        mEndpoint;
-    shm_native_handle  mSegment = shm_invalid_handle;
-    uint64_t           mSize = 0;
-    std::jthread       mThread;   // joins in its destructor; stop() is request_stop + join
+    std::string            mEndpoint;
+    shm_native_handle      mSegment = shm_invalid_handle;
+    uint64_t               mSize = 0;
+    ClockworkCommsSecret*  mSecret = nullptr;
+    std::atomic<uint64_t>  mRefused { 0 };
+    std::jthread           mThread;   // joins in its destructor; stop() is request_stop + join
 };
 
 // ── Client: the reader's side ─────────────────────────────────────────────
 
-// Connect to `endpoint` and receive the segment. The returned handle is owned
-// by the caller (hand it to shm_segment_client); invalid, with `err` filled,
-// when there is no engine there, it is not ours, or the hand-off was
+// Connect to `endpoint`, present the secret (its 32 bytes) and receive the
+// segment. The returned handle is owned by the caller (hand it to
+// shm_segment_client); invalid, with `err` filled, when there is no engine
+// there, it is not ours, the secret was refused, or the hand-off was
 // malformed. `size_out`, if given, receives the length the server declared.
-inline shm_native_handle receive(const std::string& endpoint, std::string* err,
-                                 uint64_t* size_out = nullptr) {
+inline shm_native_handle receive(const std::string& endpoint, const uint8_t* secret32,
+                                 std::string* err, uint64_t* size_out = nullptr) {
+    if (!secret32) { if (err) *err = "no secret to present"; return shm_invalid_handle; }
+    const auto frame = auth_frame(secret32);
 #ifdef _WIN32
     const std::wstring name = pipe_path(endpoint);
     HANDLE pipe = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        pipe = CreateFileW(name.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (pipe != INVALID_HANDLE_VALUE) break;
         if (GetLastError() != ERROR_PIPE_BUSY) break;
         WaitNamedPipeW(name.c_str(), 1000);   // every instance is mid-hand-off; wait for one
@@ -414,11 +495,21 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
         if (err) *err = "open " + endpoint + ": " + clockwork_path::last_error_text(GetLastError());
         return shm_invalid_handle;
     }
+    DWORD written = 0;
+    if (!WriteFile(pipe, frame.data(), AUTH_FRAME_LEN, &written, nullptr) || written != AUTH_FRAME_LEN) {
+        if (err) *err = "could not present the secret to " + endpoint;
+        CloseHandle(pipe);
+        return shm_invalid_handle;
+    }
     hello h {};
     DWORD got = 0;
     const BOOL ok = ReadFile(pipe, &h, sizeof h, &got, nullptr);
     CloseHandle(pipe);
-    if (!ok || got != sizeof h || h.magic != MAGIC || h.version != VERSION) {
+    if (!ok || got == 0) {
+        if (err) *err = "refused by " + endpoint + ": the secret was not accepted";
+        return shm_invalid_handle;
+    }
+    if (got != sizeof h || h.magic != MAGIC || h.version != VERSION) {
         if (err) *err = "malformed hand-off from " + endpoint;
         return shm_invalid_handle;
     }
@@ -453,6 +544,22 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
     timeval tv { 2, 0 };
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
+    // The secret first; a server that refuses it closes without a hello.
+    size_t sent = 0;
+    while (sent < frame.size()) {
+#if defined(MSG_NOSIGNAL)
+        const ssize_t n = ::send(fd, frame.data() + sent, frame.size() - sent, MSG_NOSIGNAL);
+#else
+        const ssize_t n = ::send(fd, frame.data() + sent, frame.size() - sent, 0);
+#endif
+        if (n <= 0) {
+            if (err) *err = "could not present the secret to " + endpoint + ": " + errnoText();
+            ::close(fd);
+            return -1;
+        }
+        sent += static_cast<size_t>(n);
+    }
+
     hello h {};
     iovec iov { &h, sizeof h };
     alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> ctl{};
@@ -469,6 +576,10 @@ inline shm_native_handle receive(const std::string& endpoint, std::string* err,
         if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS
             && c->cmsg_len >= CMSG_LEN(sizeof(int)))
             std::memcpy(&received, CMSG_DATA(c), sizeof(int));
+    }
+    if (got == 0) {
+        if (err) *err = "refused by " + endpoint + ": the secret was not accepted";
+        return -1;
     }
     if (got != static_cast<ssize_t>(sizeof h) || (static_cast<unsigned>(msg.msg_flags) & static_cast<unsigned>(MSG_CTRUNC)) != 0u
         || h.magic != MAGIC || h.version != VERSION || received < 0) {

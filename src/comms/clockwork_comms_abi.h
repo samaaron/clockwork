@@ -12,31 +12,18 @@
 
 #include <stdint.h>
 #include "clockwork_osc.h"   /* the emit callback types the transports share with the cue server */
+#include "clockwork_comms_secret.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* ── The secret ───────────────────────────────────────────────────────────────
- * Every stream server starts with the host's secret and refuses to start
- * without one. Whoever launches the host makes 32 random bytes and gets them
- * to the host by a path other processes cannot read: never the command line
- * or the environment. Where the host reads them is the host's decision. A
- * client's first frame on a connection must be the secret's auth packet
- * (/clockwork/auth, the 32 bytes as a blob); nothing is delivered before it,
- * and a connection whose first frame is anything else, or that sends none
- * within 2 s, is closed and counted. */
-typedef struct ClockworkCommsSecret ClockworkCommsSecret;
-/* The 32 bytes the launcher made. Null for all zeros. */
-ClockworkCommsSecret* clockwork_comms_secret_from_bytes(const uint8_t* bytes);
-/* A new secret from the OS random source, for a process that launches its
- * own clients. Null if the source fails. */
-ClockworkCommsSecret* clockwork_comms_secret_generate(void);
-/* The packet a client sends first (unframed OSC), written to `out`. Returns
- * its length, or 0 for a null secret or an `out` too short. */
-uint32_t clockwork_comms_secret_auth_packet(const ClockworkCommsSecret* secret,
-                                            uint8_t* out, uint32_t cap);
-void clockwork_comms_secret_free(ClockworkCommsSecret* secret);
+ * Every stream server starts with the host's secret (clockwork_comms_secret.h)
+ * and refuses to start without one. A client's first frame on a connection
+ * must be the secret's auth packet; nothing is delivered before it, and a
+ * connection whose first frame is anything else, or that sends none within
+ * 2 s, is closed and counted. */
 
 /* ── Stream servers: TCP, UDS stream, Windows named pipes ─────────────────────
  * Connection-oriented OSC over one shared wire format: each packet is preceded
