@@ -15,6 +15,8 @@
 #include "clock/clock_math.h"   // wallClockNTP; WallClock.h was a shim for this
 
 #include "UdpTestSocket.h"
+#include "clockwork_event_sink.h"
+#include <array>
 #include <chrono>
 
 #ifdef CLOCKWORK_OSC
@@ -150,6 +152,67 @@ TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
         }
     }
     REQUIRE(got);
+}
+
+// Is an OSC sink open to this "host:port"? /clockwork/osc/send opens one on
+// first use, so this says whether a send was ever made, whether or not its
+// datagram has arrived yet.
+static bool oscSinkOpenTo(const std::string& target) {
+    std::array<ClockworkSink, 64> open{};
+    const uint32_t n = clockwork_sink_list(open.data(), static_cast<uint32_t>(open.size()));
+    for (uint32_t i = 0; i < n && i < open.size(); ++i) {
+        const char* t = clockwork_sink_target(open[i]);
+        if (clockwork_sink_kind(open[i]) == kClockworkSinkOsc && t && target == t) return true;
+    }
+    return false;
+}
+
+// The cue port is data only. A datagram on it that carries a command, here a
+// scheduled /clockwork/osc/send due now, comes back as a cue and is never run:
+// nothing reaches the send's target and no sink opens to it. The same bytes
+// sent as a command do send, so the listener and the sink list are shown to
+// see a send when there is one.
+TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs it", "[osc]") {
+    EngineFixture fx;
+
+    test_udp::Socket listener;
+    REQUIRE(listener.bound());
+    const std::string target = "127.0.0.1:" + std::to_string(listener.port());
+
+    osc_test::Builder inner;
+    inner.begin("/world") << static_cast<osc::int32>(7);
+    const osc_test::Packet command =
+        scheduleOscSend(wallClockNTP() - 1.0, "127.0.0.1", listener.port(), inner.end());
+
+    const int cuePort = test_udp::freeLoopbackPort();
+    osc_test::Builder cfg;
+    cfg.begin("/clockwork/osc/cue-server/config")
+        << static_cast<osc::int32>(cuePort)
+        << static_cast<osc::int32>(1)
+        << static_cast<osc::int32>(1);
+    fx.send(cfg.end());
+
+    test_udp::Socket sender;
+    REQUIRE(sender.bound());
+    OscReply cue;
+    REQUIRE(fx.pollUntil([&] {
+        sender.send("127.0.0.1", cuePort, command.ptr(), command.size());
+        return fx.waitForReply("/external-osc-cue", cue, 50);
+    }, 4000));
+    CHECK(cue.parsed().argString(2) == CLOCKWORK_SYS("schedule"));
+
+    fx.waitForBlocks(5);   // as long as the command path takes to send it
+    char buf[1024];
+    CHECK(listener.recv(buf, sizeof(buf), 200) <= 0);
+    CHECK_FALSE(oscSinkOpenTo(target));
+
+    fx.send(command);
+    fx.waitForBlocks(5);
+    const int n = listener.recv(buf, sizeof(buf), 2000);
+    REQUIRE(n > 0);
+    CHECK(osc_test::parseReply(reinterpret_cast<const uint8_t*>(buf),
+                               static_cast<uint32_t>(n)).address == "/world");
+    CHECK(oscSinkOpenTo(target));
 }
 
 // Self-loop: a client that targets its own cue port — the engine sends to
