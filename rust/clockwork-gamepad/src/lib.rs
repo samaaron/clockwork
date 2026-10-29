@@ -49,3 +49,18 @@ pub mod wasm;
 pub use device as backend;
 #[cfg(target_os = "macos")]
 pub use gc as backend;
+
+/// The byte seam of this crate, for the fuzzer and the corpus test: a
+/// client's `/clockwork/gamepad/*` command ([`schema::decode_out`]).
+pub fn exercise(data: &[u8]) {
+    let _ = schema::decode_out(data);
+}
+
+#[cfg(test)]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), super::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-gamepad/corpus");
+    }
+}

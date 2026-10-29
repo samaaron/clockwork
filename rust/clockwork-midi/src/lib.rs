@@ -44,3 +44,23 @@ pub mod stamp;
 pub mod watcher;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
+
+/// The two byte seams of this crate, for the fuzzer and the corpus test: a
+/// MIDI port's bytes ([`message::exercise_in`]) and a client's
+/// `/clockwork/midi/*` command ([`schema::decode_out`]), each fed the same
+/// input.
+pub fn exercise(data: &[u8]) {
+    message::exercise_in(data);
+    if let Ok(OutCommand::Send { msg, .. }) = decode_out(data) {
+        assert!(!msg.encode().is_empty(), "a decoded send encodes to nothing");
+    }
+}
+
+#[cfg(test)]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), super::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-midi/corpus");
+    }
+}

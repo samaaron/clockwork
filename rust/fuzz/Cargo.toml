@@ -4,8 +4,9 @@
 # Fuzz targets for the Rust parsers that read bytes from outside the process:
 # the OSC codec every network transport hands its datagrams to, the cue
 # server's re-framing of what it receives, the framing of the TCP and Unix
-# stream transports, the "/clockwork/schedule" wire form, and the sample-file
-# decoders. Run with cargo-fuzz on nightly:
+# stream transports, the "/clockwork/schedule" wire form, the sample-file
+# decoders, and the MIDI and gamepad subsystems' bytes from a port and from a
+# client. Run with cargo-fuzz on nightly:
 #
 #   cargo +nightly fuzz run osc_packet --fuzz-dir rust/fuzz
 #
@@ -31,6 +32,8 @@ clockwork-schedule = { path = "../clockwork-schedule", default-features = false,
 clockwork-audio-decode = { path = "../clockwork-audio-decode" }
 clockwork-comms = { path = "../clockwork-comms" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }
+clockwork-midi = { path = "../clockwork-midi" }
+clockwork-gamepad = { path = "../clockwork-gamepad" }
 
 [[bin]]
 name = "osc_packet"
@@ -63,6 +66,20 @@ bench = false
 [[bin]]
 name = "cue_reframe"
 path = "fuzz_targets/cue_reframe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "midi"
+path = "fuzz_targets/midi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gamepad"
+path = "fuzz_targets/gamepad.rs"
 test = false
 doc = false
 bench = false

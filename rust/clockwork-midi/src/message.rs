@@ -316,6 +316,27 @@ impl MidiMessage {
     }
 }
 
+/// What the fuzzer does to bytes a MIDI port delivered: parse them as one
+/// message and check that what parses encodes to bytes that parse back to
+/// the same message, with every reading of it total. rust/fuzz's `midi`
+/// target calls this under libFuzzer; the crate's corpus test calls it over
+/// corpus/ on every push.
+pub fn exercise_in(bytes: &[u8]) {
+    let Some(msg) = MidiMessage::parse(bytes) else { return };
+    let again = MidiMessage::parse(&msg.encode()).expect("an encoded message parses");
+    assert_eq!(again, msg, "encode then parse is not the message");
+    let mut args = [0i32; 3];
+    let _ = msg.data_args(&mut args);
+    let _ = (msg.kind(), msg.channel(), msg.is_clock_pulse());
+    for ch in [0u8, 1, 16, 17, 255] {
+        let moved = msg.with_channel(ch);
+        let _ = MidiMessage::parse(&moved.encode()).expect("a re-channelled message parses");
+    }
+    if let Some(osc) = crate::schema::encode_in_at("port", &msg, 0xdead_beef_0000_0001) {
+        clockwork_osc::osc::decode(&osc).expect("an inbound event encodes as a message");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

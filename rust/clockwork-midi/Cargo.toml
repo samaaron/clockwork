@@ -71,3 +71,6 @@ midir = { path = "../../external/midir" }
 # wasm-bindgen (Web MIDI I/O is done in JS).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+
+[dev-dependencies]
+clockwork-corpus = { path = "../clockwork-corpus" }

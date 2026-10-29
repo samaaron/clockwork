@@ -156,6 +156,7 @@ name = "clockwork-gamepad"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "clockwork-corpus",
  "clockwork-osc",
  "gilrs",
  "objc2",
@@ -182,6 +183,7 @@ name = "clockwork-midi"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "clockwork-corpus",
  "clockwork-log",
  "clockwork-osc",
  "core-foundation",

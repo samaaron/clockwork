@@ -1,0 +1,12 @@
+# The gamepad verbs the decoder branches on, and their type tags.
+"/clockwork/gamepad/out/rumble\x00"
+"/clockwork/gamepad/out/rumble_stop\x00"
+"/clockwork/gamepad/enable\x00"
+"/clockwork/gamepad/devices/list\x00"
+"/clockwork/gamepad/devices/get\x00"
+"/clockwork/gamepad/refresh\x00"
+"/clockwork/gamepad/notify/subscribe\x00"
+"/clockwork/gamepad/notify/unsubscribe\x00"
+",sffi"
+",s\x00\x00"
+",si\x00\x00"

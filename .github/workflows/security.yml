@@ -82,6 +82,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      - name: Install dependencies
+        # midir links ALSA and gilrs links libudev: what the MIDI and gamepad
+        # crates' tests build against.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - name: The Rust targets, over their corpora, as the crates' own tests
         # Built as the fuzzer builds. A dependency may skip a check under
         # cfg(fuzzing) so the fuzzer gets past it (symphonia's FLAC reader
@@ -92,12 +96,12 @@ jobs:
           RUSTFLAGS: --cfg fuzzing
         run: |
           cd rust
-          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode -p clockwork-comms -p clockwork-osc-net corpus -- --nocapture 2>&1 | tee ../replay-rust.log
-          # Five corpus tests ran, and said so: a crate whose corpus test
+          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode -p clockwork-comms -p clockwork-osc-net -p clockwork-midi -p clockwork-gamepad corpus -- --nocapture 2>&1 | tee ../replay-rust.log
+          # Seven corpus tests ran, and said so: a crate whose corpus test
           # vanished would otherwise pass this step in silence.
-          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 5
+          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 7
           # And each said it was built as the fuzzer builds.
-          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 5
+          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 7
       - name: The C and C++ targets, over their corpora, under ASan and UBSan
         run: |
           CC=gcc CXX=g++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -125,6 +129,8 @@ jobs:
           - { target: audio_decode,      kind: rust, seeds: rust/clockwork-audio-decode/corpus, dict: rust/fuzz/audio.dict }
           - { target: stream_frames,     kind: rust, seeds: rust/clockwork-comms/corpus,        dict: rust/fuzz/osc.dict }
           - { target: cue_reframe,       kind: rust, seeds: rust/clockwork-osc-net/corpus,      dict: rust/fuzz/osc.dict }
+          - { target: midi,              kind: rust, seeds: rust/clockwork-midi/corpus,         dict: rust/fuzz/midi.dict }
+          - { target: gamepad,           kind: rust, seeds: rust/clockwork-gamepad/corpus,      dict: rust/fuzz/gamepad.dict }
           - { target: fuzz_osc_received, kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_osc_reader,   kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_audio_encode, kind: cpp,  seeds: test/fuzz/corpus/audio_encode,     dict: rust/fuzz/audio.dict }
@@ -141,7 +147,9 @@ jobs:
           workspaces: rust/fuzz
       - name: cargo-fuzz
         if: matrix.kind == 'rust'
-        run: cargo install cargo-fuzz --locked
+        run: |
+          sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+          cargo install cargo-fuzz --locked
       - name: Build (C++)
         if: matrix.kind == 'cpp'
         run: |
