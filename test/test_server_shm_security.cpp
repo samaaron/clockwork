@@ -31,8 +31,8 @@ TEST_CASE("shm-security: tap readers pin the client mapping (no dangling reads)"
 
     // A GUI hands reader copies to long-lived widgets, then remaps on engine
     // cold swap by destroying its client. The reader must keep the old mapping
-    // alive: 2026-07-11 this exact sequence was a GUI segfault (poll timer →
-    // atomic load through the munmapped slot pointer).
+    // alive, or a widget's poll timer does an atomic load through the
+    // munmapped slot pointer.
     auto client = std::make_unique<shm_segment_client>(shm_dup_handle(creator.native_handle()));
     auto reader = client->get_tap_stream_reader(0);
     client.reset();

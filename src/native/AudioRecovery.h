@@ -109,36 +109,34 @@ private:
 };
 
 // What to do about a skew verdict that keeps coming back. The monitor above
-// measures; this decides the remedy, and it exists because the obvious
-// remedy — reopen the device — is the wrong tool for one whole class of
-// fault. A device clocked at 44.1 kHz that reports 48 kHz (a USB mixer
-// through Apple's class driver, sonic-pi#3565) delivers 0.919x real time
-// forever: reopening it at the nominal rate reproduces the exact condition
-// that triggered the reopen, and the watchdog measures it again ten seconds
-// later. Left alone that is a storm — 79 cold swaps in one session, each one
-// stopping the client's jobs and re-initialising its world.
+// measures; this decides the remedy, because reopening the device is the
+// wrong tool for one class of fault. A device clocked at 44.1 kHz that
+// reports 48 kHz (a USB mixer through Apple's class driver) delivers 0.919x
+// real time permanently: reopening it at the nominal rate reproduces the
+// condition that triggered the reopen, the watchdog measures it again, and
+// every reopen is a cold swap that stops the client's jobs and
+// re-initialises its world.
 //
 // So: a skew that is TRANSIENT (a post-sleep timer free-run) is fixed by a
 // reopen, and gets one. A skew that comes back with the SAME ratio after
 // each reopen is a property of the device, and after `maxRecoveries` of them
 // the remedy changes: the next swap asks for the rate the device is actually
 // delivering (ratio x nominal), which is the only rate it can keep time at.
-// If it skews at that rate too, the device is lying in a way no rate request
-// corrects, and the policy gives up for the session: the engine keeps
-// playing, off-pitch, and says so once. Never another swap.
+// If it skews at that rate too, no rate request corrects the device, and the
+// policy gives up for the session: the engine keeps playing, off-pitch, and
+// says so once. Never another swap.
 //
 // A device RUN AT ANOTHER RATE by someone else is a different fault with a
 // different tell. CoreAudio shares one device between its clients and the
-// last rate request wins: Loopback's pass-through held the headphone jack at
-// 48 kHz under an engine at 44.1 kHz (2026-10-15, 15:41). Each reopen at the
-// session rate took the device back for a moment, the other party set its
-// rate again, and the skew returned read at a different ratio every time —
-// the flip lands inside a window — so to a ratio-only policy it was always a
-// new fault, the adopt never came, and the engine swapped every ten seconds.
-// The driver says what is happening all along: the device REPORTS a rate
-// other than the session's. A verdict carrying such a report is that fault
-// whatever its ratio, one reopen is allowed to win the device back, and the
-// next verdict still reporting the other rate adopts it.
+// last rate request wins: another client holds the device at 48 kHz under an
+// engine at 44.1 kHz. Each reopen at the session rate takes the device back
+// for a moment, the other client sets its rate again, and the skew returns
+// read at a different ratio every time (the flip lands inside a window), so
+// a ratio-only policy sees a new fault each time, never adopts, and swaps on
+// every watchdog pass. The driver reports what is happening: the device
+// REPORTS a rate other than the session's. A verdict carrying such a report
+// is that fault whatever its ratio, one reopen is allowed to win the device
+// back, and the next verdict still reporting the other rate adopts it.
 enum class RateSkewAction {
     Recover,            // reopen at the nominal rate, as for a transient skew
     AdoptRate,          // reopen asking for the verdict's rate (adoptRate)

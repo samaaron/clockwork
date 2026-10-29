@@ -7,10 +7,8 @@
  * every block it renders moves time forward by a block, and everything
  * scheduled is scheduled against that. Its pacing runs on OS timers, which
  * wake late on a starved machine, a laptop on battery, a loaded CI runner.
- * On 2026-10-27 a MacBook at 11% woke the driver 85 ms late on every block;
- * the driver dropped the backlog each time and rendered one block per wake,
- * and the engine's clock fell to a tenth of real time until the machine was
- * plugged in.
+ * A driver that drops the backlog on every late wake and renders one block
+ * per wake runs the engine's clock at a fraction of real time.
  *
  * These cases hand the driver a FakePacer and say exactly when it wakes,
  * so the rule is pinned without a timer in sight: a late wake under the
@@ -39,10 +37,10 @@ struct Paced {
     // The engine boots on a free-running pacer; then the case takes the time.
     // How many blocks the boot rendered depends on how fast the machine ran
     // it, and the clock's anchor settles over kAnchorSettleBlocks of them and
-    // takes up its residual over more (TimeSource.h): a case that woke the
-    // driver late inside that window saw a different clock each run (under
-    // TSan, 12–20 ms behind the wall). So every case starts from a settled
-    // clock: a window and a half of on-time wakes first.
+    // takes up its residual over more (TimeSource.h): a case that wakes the
+    // driver late inside that window sees a different clock each run. So
+    // every case starts from a settled clock: a window and a half of on-time
+    // wakes first.
     Paced() : fix(config(pacer)) {
         pacer->hold();
         REQUIRE(pacer->settle());
@@ -85,9 +83,9 @@ TEST_CASE("HeadlessDriver: wakes on time render one block a period", "[HeadlessD
 TEST_CASE("HeadlessDriver: wakes 85 ms late still render every block, and the clock stays on the wall",
           "[HeadlessDriver][pacing]") {
     // A starved machine: every wake lands 85 ms past its deadline. The
-    // blocks owed are rendered as a burst and time is not lost. The old
-    // rule dropped the backlog past eight blocks (21 ms) and rendered one
-    // block per wake: a clock at a tenth of real time.
+    // blocks owed are rendered as a burst and time is not lost. Dropping
+    // the backlog here would render one block per wake: a clock at a tenth
+    // of real time.
     Paced p;
     const uint32_t before = p.blocks();
     const int64_t lateNs = 85'000'000;

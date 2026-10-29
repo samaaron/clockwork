@@ -3,11 +3,11 @@
 //! The cue port's rate limit.
 //!
 //! The cue port takes datagrams from anyone who can reach it and needs no
-//! secret, so it is the one way in that a stranger can flood. Two token
-//! buckets bound what gets through: one for the port as a whole and one per
-//! sender address. Each holds one second's worth of cues at its rate and
-//! refills continuously; a cue with no token in either bucket is dropped,
-//! and the server counts the drop. A rate of 0 means no limit on that side.
+//! secret, so it is the port a stranger can flood. Two token buckets bound
+//! what gets through: one for the port as a whole and one per sender
+//! address. Each holds one second's worth of cues at its rate and refills
+//! continuously; a cue with no token in either bucket is dropped, and the
+//! server counts the drop. A rate of 0 means no limit on that side.
 //!
 //! The per-sender table holds [`SENDERS`] addresses. A new sender takes the
 //! slot of the one seen longest ago, so a flood from spoofed addresses

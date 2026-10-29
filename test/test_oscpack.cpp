@@ -36,10 +36,10 @@ osc::ReceivedPacket packetOf(const std::vector<uint32_t>& words) {
 
 TEST_CASE("oscpack: a bundle element larger than what is left of the bundle is refused",
           "[osc][oscpack]") {
-    // Change 4: 1.1.0 added the element size to the pointer in 32-bit unsigned
-    // arithmetic and compared the pointer afterwards, so a size near 2^32
-    // wrapped the sum, the pointer stayed where it was, and the loop never
-    // ended. A size of 32 with nothing after it is the plain case.
+    // Change 4: upstream adds the element size to the pointer in 32-bit
+    // unsigned arithmetic and compares the pointer afterwards, so a size near
+    // 2^32 wraps the sum, the pointer stays where it is, and the loop never
+    // ends. A size of 32 with nothing after it is the plain case.
     for (const uint32_t size : { 0xFFFFFFFCu, 0xFFFFFFF8u, 0x80000000u, 32u }) {
         const auto words = bundleWithElementSize(size);
         const auto packet = packetOf(words);

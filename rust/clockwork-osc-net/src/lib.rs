@@ -26,11 +26,11 @@ pub mod out;
 pub mod limit;
 
 // The command transports — UDS datagram, the TCP/UDS stream servers, the
-// Windows named pipe, and the SHM peer client — are NOT here any more. They
-// are a client's concern (an engine has no sockets; whoever embeds it opens
-// them) and live in the clockwork-comms crate, which this crate knows nothing
-// about. What stays is what the ENGINE itself needs a socket for: the cue
-// server and outbound OSC.
+// Windows named pipe, and the SHM peer client — are a client's concern (an
+// engine has no sockets; whoever embeds it opens them) and live in the
+// clockwork-comms crate, which this crate knows nothing about. This crate
+// has only what the ENGINE itself needs a socket for: the cue server and
+// outbound OSC.
 
 /// Every network port binds loopback unless given an address, so a host that
 /// binds anything else asked for it by name. Say so once, where it bound, and

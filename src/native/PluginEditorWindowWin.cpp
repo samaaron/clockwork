@@ -38,9 +38,8 @@
  * process blocking stalls the other). The window floats, as a DAW's plugin
  * editor does, and a plugin that crashes takes this process and not the GUI.
  *
- * WRITTEN AGAINST THE WIN32 API ON A MAC. CI compiles it on Windows, warnings
- * as errors, but it has never been run there and no test opens an editor;
- * when one does, this paragraph should go.
+ * CI compiles this on Windows with warnings as errors; no test opens an
+ * editor.
  */
 #if defined(_WIN32)
 

@@ -200,12 +200,11 @@ void OscEgress::sendStateChange(const char* state, const char* reason) {
 }
 
 // Caller-targeted statechange. Connection-oriented clients (TCP/UDS/pipe)
-// can only register AFTER engine init — the boot-time statechange broadcast
-// fired into an audience they hadn't joined yet, so a new registrant is
-// sent the current lifecycle state directly (see the /clockwork/notify
-// handler). UDP clients registered pre-init via the boot queue and never
-// needed this. Deliberately state-only: /clockwork/setup is a rebuild
-// EVENT and must never be replayed to late joiners.
+// can only register AFTER engine init, so the boot-time statechange
+// broadcast never reaches them; a new registrant is sent the current
+// lifecycle state directly (see the /clockwork/notify handler).
+// Deliberately state-only: /clockwork/setup is a rebuild EVENT and must
+// never be replayed to late joiners.
 void OscEgress::sendStateChangeTo(uint32_t token, const char* state, const char* reason) {
     const OscPacket packet = stateChange(state, reason, generationNow());
     // reply routing: this is part of the direct response to the caller's

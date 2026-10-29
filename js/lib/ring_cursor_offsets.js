@@ -56,7 +56,7 @@ export const IN_WRITE_LOCK = 40;
 // The engine's control pass drains the control ring, so a boundary writes a
 // control verb of clockwork's there (docs/RESTARTS.md, "The control ring").
 // Never raised by the worklet, which has no control pass: the web's writer
-// reads it, finds it down, and writes every verb to the in ring as before.
+// reads it, finds it down, and writes every verb to the in ring.
 export const STATUS_CONTROL_SERVED = 1 << 5;
 
 // Where clockwork_client_poll has read each egress ring to; the tail follows

@@ -23,12 +23,11 @@
 //! and the cost is honest: an "immediately" message waits up to [`TICK`]
 //! before it goes out.
 //!
-//! Which is the strongest possible argument for `when`. A DSP that says WHEN
-//! IT MEANS pays none of this: the message is picked up on some earlier tick,
-//! held, and released at its time — the poll interval becomes scheduling slack
-//! instead of latency. The 500 µs is only ever paid by a producer that decided
-//! at the last possible moment, and that producer had already decided to be
-//! late.
+//! A DSP that says WHEN IT MEANS pays none of this: the message is picked up
+//! on some earlier tick, held, and released at its time — the poll interval
+//! becomes scheduling slack instead of latency. The 500 µs is only ever paid
+//! by a producer that decided at the last possible moment, and that producer
+//! had already decided to be late.
 //!
 //! When a message IS being held, the sleep shortens to land on it rather than
 //! waiting out the tick, so the release is limited by the OS timer's own

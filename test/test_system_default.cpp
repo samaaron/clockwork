@@ -4,13 +4,11 @@
  * test_system_default.cpp — system mode follows the system default, and
  * following it is not choosing it.
  *
- * Seen at a gig (2026-10-02, Sonic Pi 5.0.0 on macOS): in system mode the
- * engine followed the default to the built-in speakers, and that follow went
- * through switchDevice as if the user had picked them — so the speakers became
- * the pinned output. When the headphones were plugged in, the default moved
- * to them and the engine logged "pinned='MacBook Pro Speakers'; not following":
- * the sound stayed on the speakers while the headphone jack, and the PA on it,
- * stayed silent. Every follow after the first was refused the same way.
+ * A follow that goes through switchDevice as if the user had picked the
+ * device makes that device the pinned output: the next time the default
+ * moves (headphones plugged in) the engine logs "pinned=...; not following",
+ * the sound stays where it was, and every follow after the first is refused
+ * the same way.
  *
  * One rule on every platform, looked at afresh each time anything about the
  * devices changes: in system mode, the engine plays on the default. An OS
@@ -249,10 +247,11 @@ TEST_CASE("SystemDefault: a default seen back on the playing device while a reco
           "when it moves back", "[SystemDefault]") {
     // The watchdog claims the recovery slot on a stall and posts the recovery
     // onto the device lane, where the pass that is already due runs first.
-    // That pass returned before noting where the default had gone, so the
-    // default then moving back to the device that would not open looked like
-    // no move at all, and the device was never tried again. A loaded CI
-    // runner stalls the fake device's callbacks often enough to hit this.
+    // That pass must note where the default has gone even when it returns
+    // early for the held slot: otherwise the default moving back to the
+    // device that would not open looks like no move at all, and the device
+    // is never tried again. A stalled fake callback (a loaded machine) is
+    // enough to reach this.
     const Driver driver = GENERATE(from_range(waysADefaultMoveIsHeard()));
     CAPTURE(fake_audio::driverName(driver));
     auto sys = systemOn(driver);
@@ -401,9 +400,8 @@ TEST_CASE("SystemDefault: a device plugged in as the new default is followed, "
 
 // "System default" means nothing on a driver with none (ASIO). Choosing it
 // there moves to a driver that has one and plays on its default: the boot's
-// driver when that has one, otherwise the first that does. The engine used
-// to ask which platform it was built for (Windows only, naming DirectSound);
-// it asks the drivers now, so every machine runs this.
+// driver when that has one, otherwise the first that does. The engine asks
+// the drivers, not the build platform, so every machine runs this.
 TEST_CASE("SystemDefault: choosing the system default on a driver with none "
           "plays on the default of a driver that has one", "[SystemDefault]") {
     auto output = [](const char* name) {

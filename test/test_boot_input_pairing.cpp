@@ -6,10 +6,10 @@
  *
  * With inputs enabled and a blank input name, JUCE's initialise fills the
  * name with the type default (insertDefaultDeviceNames). On macOS that
- * implicit pick opened the default mic through JUCE's Combiner — the
- * intermittent RC6 boot SIGSEGV / distorted-audio reports. The engine's
- * contract: input pairing is always an explicit engine decision (same-device
- * full duplex at open, or aggregate promotion after it).
+ * implicit pick opens the default mic through JUCE's Combiner, which can
+ * crash the boot or distort the audio. The engine's contract: input pairing
+ * is always an explicit engine decision (same-device full duplex at open, or
+ * aggregate promotion after it).
  *
  * The explicit decision has its own failures: the user's saved microphone has
  * to be the one paired, an unplugged one must not cost the boot its output,
@@ -122,8 +122,8 @@ TEST_CASE("Boot: a saved microphone known by another driver's name doesn't cost 
     // One MOTU box as Windows lists it: "MOTU Pro Audio" under ASIO, where
     // the input menu mirrors the output, and "Speakers (MOTU)" and "In 1-2
     // (MOTU)" under Windows Audio. The microphone was saved while on ASIO.
-    // Tried under Windows Audio, it was "No such device" with the output
-    // already open, and the engine came up with no device at all.
+    // Tried under Windows Audio it is "No such device" with the output
+    // already open, and the engine would come up with no device at all.
     auto machine = [] {
         auto sys = std::make_shared<fake_audio::FakeSystem>();
         sys->types.push_back({ "Windows Audio", { device("Speakers (MOTU)", 2, 0),

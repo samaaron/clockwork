@@ -39,9 +39,8 @@ const std::filesystem::path kFixtures = CLOCKWORK_AUDIO_FIXTURES;
 // How far a lossy decode may sit from ffmpeg's, of full scale. Two decoders
 // of the same MP3 or Vorbis stream agree to the sample: the specifications
 // define the output, and the only slack is arithmetic precision. Measured
-// 2026-10-27 at 1.4e-7 over every lossy fixture, so this is a hundred times
-// that, and a one-sample shift between the two would fail it by a mile, as
-// it should.
+// at 1.4e-7 over every lossy fixture, so this is a hundred times that, and a
+// one-sample shift between the two fails it by a mile, as it should.
 constexpr float kLossyTolerance = 1e-5f;
 
 // make.py's signal: runs, a ramp and steps, different per channel.
@@ -419,9 +418,8 @@ TEST_CASE("audio fixtures: bytes that are not audio are refused", "[audio][file]
 TEST_CASE("audio fixtures: a header's claim does not size the allocation",
           "[audio][file][fixtures][security]") {
     // The data chunk says 100 kB of frames; the file holds 4410. What comes
-    // back is what was there. The old decoders either refused the file or
-    // handed back the claim padded with silence, and sized the buffer from
-    // the claim either way.
+    // back is what was there: not a refusal, not the claim padded with
+    // silence, and no buffer sized from the claim.
     const auto generous = craftWav(100000 * 4, 4410);
     const auto d = decodeBytes(generous);
     REQUIRE(d.status == CLOCKWORK_OK);
@@ -448,8 +446,7 @@ TEST_CASE("audio fixtures: a compressed claim past the decode limit is refused b
           "[audio][file][fixtures][security]") {
     // A compressed file's length cannot be checked against its size, so the
     // claim is held to the limit instead: past it, the file is refused as
-    // too big rather than attempted. The fuzzer found the FLAC form of this
-    // (a 379-byte file asking for 496 GB) on 2026-10-27.
+    // too big rather than attempted (a 379-byte FLAC can ask for 496 GB).
 
     // FLAC: the stream info's 36-bit total-samples field, set to its maximum.
     auto flac = readFile(kFixtures / "flac-s16.flac");

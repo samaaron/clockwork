@@ -7,8 +7,7 @@
  * queue on or off, and that is the point of them: a guest that holds its own
  * schedule builds without the queue, and MIDI clock out must still work
  * there. Compiling these only alongside the queue would leave that build
- * untested. A suite that
- * only ran in one of the two configurations was exactly how that survived.
+ * untested.
  *
  * DEVICE-INDEPENDENT BY CONSTRUCTION. Most of what matters here is *when* a
  * tick is released, not what a port did with it, so the assertions are on
@@ -497,8 +496,7 @@ TEST_CASE("midi clock: naming the same port twice reuses one sink",
 // to a sink. tests/midi_endpoint.rs (Rust) proves a sink reaches a real port in
 // time order. NEITHER proves the join: a tick could be handed to a sink handle
 // that resolves to nothing and every counter here would still read correctly,
-// because the ticks WERE handed over. That is exactly the shape of the bug this
-// file was written after.
+// because the ticks WERE handed over.
 //
 // So this drives the whole path — MidiClockOut → clockwork_sink_send → the drain →
 // MidiIo → ALSA → the kernel — and then reads the pulses back. `Midi Through`
@@ -558,10 +556,8 @@ void transport_cb(void*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int
 //
 // Matched case-insensitively, because the handle is NORMALISED: "Midi Through
 // Port-0" on client 14 enumerates as "midi_through_midi_through_port-0_14_0".
-// Searching for the friendly name finds nothing — which is the same mistake
-// rust/clockwork-midi/tests/clock_accuracy.rs made, where it left four tests
-// unable to pass on Linux, and which this test made too before it ever ran.
-// Hence `needle` is spelled in the normalised vocabulary.
+// Searching for the friendly name finds nothing, so `needle` is spelled in
+// the normalised vocabulary.
 std::string findPort(const std::vector<std::string>& ports, const char* needle) {
     auto lower = [](std::string v) {
         for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

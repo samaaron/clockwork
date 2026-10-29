@@ -18,36 +18,29 @@
  * The pool is the segregated-fit pool in rust/clockwork-heap, operated
  * lock-free by the engine thread, with frees from any other thread parked
  * on a lock-free stack the engine drains, and a census (bytes in use, the
- * most ever) that reaches the metrics. The law (2026-08-21): no locks of
- * any kind on the audio thread, and no malloc there beyond our own arena
- * management.
+ * most ever) that reaches the metrics. No locks of any kind on the audio
+ * thread, and no malloc there beyond our own arena management.
  *
  * THE POOL NEVER GROWS. The guest declares what it needs and gets exactly
  * that (dsp_api.h); a pool that fills answers NULL, loudly, and the fix is
- * the guest's declaration or the host's floor. Until 2026-10-15 a spare
- * block was kept armed so the pool could grow once; it was a hedge against
- * the declaration being wrong, sat oddly beside a model in which the
- * declaration is the budget, and cost a block, an area, a knob and a
- * growth path. Gone.
+ * the guest's declaration or the host's floor. There is no spare block and
+ * no growth path: the declaration is the budget.
  *
- * Until 2026-10-15 this was clockwork's own heap, sized by clockwork and
- * named as clockwork's; the guest's memory was then in two places, one the
- * guest carved and one clockwork allocated. Now the span is the guest's,
- * sized by what the guest declares, and clockwork only runs the allocator.
+ * The span is the guest's, sized by what the guest declares; clockwork only
+ * runs the allocator over it.
  *
- * WHAT THE POOL REFUSES, AND HOW TO HUNT. A block given back twice is
- * refused and counted (the pool's double_frees; clockwork logs the pointer
- * once), since linking it into the free list twice would corrupt the pool.
- * An overrun it cannot refuse: a guest writing past its allocation smashes
- * the next block's header, and the pool finds out at some later operation,
- * far from the cause, as a lock that will not lock or a size that is not
- * one. CLOCKWORK_POOL_CHECK=1 in the environment walks the whole pool after
- * every allocation and free on the engine thread and stops at the first
- * one that leaves it broken, naming the operation, the bad block and the
- * allocation before it — the one that most likely overran. A hunt, never a
- * build setting: the walk is the whole pool, every time. Found this way,
- * 2026-10-15: scsynth's audio bus, sized by an option, narrower than the
- * channels the host handed it.
+ * WHAT THE POOL REFUSES, AND HOW TO FIND AN OVERRUN. A block given back
+ * twice is refused and counted (the pool's double_frees; clockwork logs the
+ * pointer once), since linking it into the free list twice would corrupt
+ * the pool. An overrun it cannot refuse: a guest writing past its
+ * allocation smashes the next block's header, and the pool finds out at
+ * some later operation, far from the cause, as a lock that will not lock or
+ * a size that is not one. CLOCKWORK_POOL_CHECK=1 in the environment walks
+ * the whole pool after every allocation and free on the engine thread and
+ * stops at the first one that leaves it broken, naming the operation, the
+ * bad block and the allocation before it (the one that most likely
+ * overran). A diagnostic, not a build setting: the walk is the whole pool,
+ * every time.
  *
  * Also here, because its block is taken beside the guest's: the RT router's
  * block, the one clockwork's own Rust subsystems allocate from while an

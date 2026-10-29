@@ -73,10 +73,10 @@ set -e
 # X.": no such file, a compile error, a missing compile command); the rest
 # were. The progress lines are not counted — a run of one file prints none.
 # One file's compile error takes every file after it in the same invocation
-# down with it (seen 2026-10-06: a Homebrew LLVM older than the SDK it was
-# pointed at failed in <random>, and 41 of 50 files went unanalysed while
-# the log showed one error), so the count below is the honest one and a
-# single error is worth chasing before anything else.
+# down with it (a Homebrew LLVM older than the SDK it is pointed at fails in
+# <random>, and most of the list goes unanalysed behind that one error), so
+# the count below is what the run covered and a single error is worth
+# chasing before anything else.
 FAILED=$(grep -c '^Error while processing' "$ERR" || true)
 ANALYSED=$(( ${#FILES[@]} - FAILED ))
 SUPPRESSED=$({ grep -o 'Suppressed [0-9]* warnings' "$ERR" || true; } | awk '{ s += $2 } END { print s + 0 }')

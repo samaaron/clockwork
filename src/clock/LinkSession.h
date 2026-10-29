@@ -67,15 +67,14 @@ public:
     void startWorker();
 
     // Anchor the beat grid to wall time when the clock enters service, exactly
-    // as the session-of-one below does. Link was TRUSTED to establish the
-    // origin through its own callbacks — but those fire only on a change or a
-    // peer, so at boot with neither, the grid stayed at origin 0. A grid at
-    // origin 0 reads out beats as seconds since 1900 (~4e9), which a client
-    // adopts; the FIRST tempo change then re-anchors to Link's own small beat,
-    // shifting the domain under that client and throwing every held beat ~4e9
-    // seconds off. Placing a real epoch here keeps beats small and consistent
-    // from the first read, so a tempo change is continuous. Definition shared
-    // in body with the no-Link path; defined in the .cpp, where Impl's clock
+    // as the session-of-one below does. Link's callbacks establish the origin
+    // only on a tempo change or a peer, so at boot with neither the grid
+    // would stay at origin 0: beats read as seconds since 1900 (~4e9), a
+    // client adopts them, and the first tempo change re-anchors to Link's own
+    // small beat and moves every beat that client holds by ~4e9 seconds.
+    // Placing a real epoch here keeps beats small and consistent from the
+    // first read, so a tempo change is continuous. Definition shared in body
+    // with the no-Link path; defined in the .cpp, where Impl's clock
     // reference lives.
     void anchorToWallClockIfUnset();
 
@@ -178,19 +177,16 @@ public:
      * These initialise to 0 (shared_memory.h): "beat 0 happened at NTP second
      * 0" — midnight, 1st January 1900 — and "no transport transition yet". On
      * the Ableton path Link establishes both through its callbacks and the
-     * zeros are never seen. Nothing else did, so on a no-Link build every
-     * beat<->time answer came back relative to 1900 (rpc/time_at_beat for beat
-     * 8 at 60bpm replied 8000000us — 8 seconds after 1900, and ~4e15us away
-     * from the NTP domain the reply is documented to be in), and
-     * transport/time replied its 0 sentinel forever.
+     * zeros are never seen. Without this, a no-Link build answers every
+     * beat<->time question relative to 1900 (rpc/time_at_beat for beat 8 at
+     * 60bpm replies 8000000us, ~4e15us from the NTP domain the reply is in)
+     * and transport/time replies its 0 sentinel forever.
      *
-     * CALLED WHEN THE CLOCK ENTERS SERVICE, NOT WHEN ONE IS CONSTRUCTED. This
-     * first ran from startWorker() in ClockworkClock's constructor, which anchored
-     * every ClockworkClock ever built — including the bare ones the beat-math unit
-     * tests construct, which legitimately expect an origin of 0 so they can
-     * assert beatAtTime(0) == 0. Binding into the shared arena is the moment a
-     * clock starts answering real clients, and is the moment to give it a real
-     * epoch.
+     * CALLED WHEN THE CLOCK ENTERS SERVICE, NOT WHEN ONE IS CONSTRUCTED. The
+     * bare clocks the beat-math unit tests construct expect an origin of 0 so
+     * they can assert beatAtTime(0) == 0. Binding into the shared arena is
+     * the moment a clock starts answering real clients, and is the moment to
+     * give it a real epoch.
      *
      * Skipped if an origin already exists, so a restore or a client that set
      * its own grid is not stamped over.
@@ -210,18 +206,17 @@ public:
         s->setTransport(false, now);
     }
 
-    // A tempo change must not move the beat that is playing — the rule and
-    // its history are with clockwork::retempoOrigin (clock_math.h); the session-of-
-    // one was the backing that once forgot it. An unanchored grid stays
+    // A tempo change must not move the beat that is playing — the rule is
+    // clockwork::retempoOrigin (clock_math.h). An unanchored grid stays
     // unanchored: anchorToWallClockIfUnset owns placing it.
     //
     // AND IT MUST BE ANNOUNCED. On the Ableton path Link invokes the tempo
     // callback for a local commit as it does for a peer's, and the engine turns
     // that into /clockwork/clock/notify/tempo — which is how a client that set
     // the tempo through another client learns of it (a language runtime hears a
-    // GUI's change this way, and re-anchors its beat on it). This session once
-    // dropped the callback on the floor, so a Link-less engine changed tempo
-    // in silence and every other client kept the old one.
+    // GUI's change this way, and re-anchors its beat on it). The callback is
+    // fired here for the same reason: without it a Link-less engine changes
+    // tempo in silence and every other client keeps the old one.
     //
     // The beat held is the one at atNtpSeconds, the instant the tempo changes
     // (0: now) — ClockworkClock::setBpm says why a caller gives one.

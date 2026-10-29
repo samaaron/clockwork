@@ -241,9 +241,9 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
           "[shm][peer][load]") {
     // Every control verb a peer writes is answered into its reply ring, which
     // is finite; a peer that writes more than the ring holds before it reads
-    // used to lose the surplus (rep_dropped), silently to the asker. The
-    // control pass now leaves a verb in the control ring while the peer's
-    // reply ring is nearly full, and answers it once the peer has read.
+    // must not lose the surplus (rep_dropped). The control pass leaves a verb
+    // in the control ring while the peer's reply ring is nearly full, and
+    // answers it once the peer has read.
     // Pumped: the pass runs on the audio block, so the case controls when.
     constexpr unsigned kPort = 57227;
 

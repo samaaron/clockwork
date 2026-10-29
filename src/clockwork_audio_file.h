@@ -5,8 +5,8 @@
  *
  * clockwork_client.h moves opaque bytes between a client and an engine. This
  * moves audio between a file and a client, and it sits beside that header for
- * the same reason: every consumer needs it, each was writing its own, and the
- * copies disagreed. A GUI loading a sample, a recorder writing a session, a
+ * the same reason: every consumer needs it, and separate copies would
+ * disagree. A GUI loading a sample, a recorder writing a session, a
  * browser tab that has fetched an ArrayBuffer and a command-line tool all want
  * the same two verbs, so they are declared once.
  *

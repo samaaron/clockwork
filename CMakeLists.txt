@@ -3,8 +3,8 @@
 #
 # clockwork — everything around a realtime audio engine, without the DSP.
 #
-# Derived from a synth engine's build, with everything on the DSP's side of the
-# boundary removed: no synthesis, no graph, no definition formats, no ESP32.
+# Everything on the DSP's side of the boundary is out of scope: no synthesis,
+# no graph, no definition formats.
 #
 # VST3 and CLAP appear here, but as a HOST — clockwork loads and runs other
 # people's plugins (plugins/, src/plugin_*). Being a plugin is a different
@@ -162,8 +162,8 @@ option(CLOCKWORK_WERROR  "Compiler warnings in Clockwork's own targets are error
 # applied to every language and the link, because a flag handed to CMAKE_C_FLAGS
 # and CMAKE_CXX_FLAGS alone misses the Objective-C++ that smoothie's JUCE
 # compiles as on macOS — and a thread stop whose atomics are not instrumented
-# reads to ThreadSanitizer as no synchronisation at all (2026-10-07: hundreds
-# of "races" across stopThread, every one an artefact of that gap).
+# reads to ThreadSanitizer as no synchronisation at all, so it reports every
+# thread stop as a race.
 set(CLOCKWORK_SANITIZE "" CACHE STRING "Sanitizer(s) to build the whole tree with: address,undefined or thread (empty for none)")
 if(CLOCKWORK_SANITIZE)
     add_compile_options(-fsanitize=${CLOCKWORK_SANITIZE} -fno-omit-frame-pointer)
@@ -233,10 +233,7 @@ option(CLOCKWORK_LINK_AUDIO "Link peer audio in and publish out (needs CLOCKWORK
 #
 # src/nif/ is one of the reference hosts lanes.h names — a host that drives the
 # engine through the ABI and contains no DSP knowledge, which is how "the boundary
-# is host-agnostic" gets to be a checkable claim rather than an assertion. It
-# came across with the extraction and its BUILD RULE DID NOT, so it has not
-# been compiled here since: the source sat next to a CMakeLists that had never
-# heard of it.
+# is host-agnostic" gets to be a checkable claim rather than an assertion.
 #
 # The OTP headers are vendored (external/erlang_headers, Apache-2.0, (c)
 # Ericsson) so building the NIF needs no Erlang installation — only running its
@@ -302,11 +299,10 @@ set(CLOCKWORK_PLUGIN_BRIDGE_DIR "" CACHE PATH
 # The bridge's identity to macOS. On macOS the bridge is built as an app
 # bundle, <name>.app, because a bare executable has no bundle identifier and
 # anything that picks an application by one — OBS's application capture, a
-# ScreenCaptureKit filter, TCC — then cannot pick the bridge at all: its
-# editor windows were listed by OBS but unselectable. (An Info.plist embedded
-# in the executable's __info_plist section is NOT enough: LaunchServices
-# reports a bundle identifier only for a bundle on disk; tried.) An embedder
-# sets this beside the name.
+# ScreenCaptureKit filter, TCC — then cannot pick the bridge at all. An
+# Info.plist embedded in the executable's __info_plist section is not enough:
+# LaunchServices reports a bundle identifier only for a bundle on disk. An
+# embedder sets this beside the name.
 set(CLOCKWORK_PLUGIN_BRIDGE_BUNDLE_ID "org.clockwork.plugin-bridge" CACHE STRING
     "Bundle identifier of the plugin-bridge app bundle (macOS)")
 
@@ -345,9 +341,9 @@ int main() { return 0; }
         # For this tree, here; for whoever links clockwork, as a PUBLIC option
         # on the library targets below. An embedder's host and tests make the
         # same exactness claims against the same arithmetic, and
-        # add_compile_options stops at this directory — an embedder's i386
-        # build compiled its own targets wide and failed on values that print
-        # identically on both sides of the ==.
+        # add_compile_options stops at this directory: without the PUBLIC
+        # option an embedder's i386 targets compile wide and fail on values
+        # that print identically on both sides of the ==.
         add_compile_options(${CLOCKWORK_FLOAT_FLAGS})
     endif()
 endif()
@@ -367,11 +363,10 @@ endif()
 # TLS relocation (R_X86_64_TPOFF32) has no non-PIC form in a .so at all, so
 # the link fails outright instead of degrading.
 #
-# HERE, not beside the NIF target below, and that is the whole point: this
-# variable initialises a target's POSITION_INDEPENDENT_CODE as the target is
-# CREATED, so setting it after add_library(clockwork) reaches nothing already
-# defined. It read as correct beside the NIF and did nothing. macOS's
-# relocation model is indifferent, so only a Linux nif build ever said so.
+# Here, not beside the NIF target below: this variable initialises a target's
+# POSITION_INDEPENDENT_CODE as the target is created, so setting it after
+# add_library(clockwork) reaches nothing already defined. macOS's relocation
+# model is indifferent, so only a Linux nif build fails without it.
 if(CLOCKWORK_NIF)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -413,8 +408,7 @@ endif()
 # ─── Paths ───────────────────────────────────────────────────────────────────
 # CURRENT, not CMAKE_SOURCE_DIR. When clockwork is embedded as a
 # subdirectory, CMAKE_SOURCE_DIR is the EMBEDDER's root and every path built
-# from it points into the wrong repository — which is how the plugin
-# subdirectories failed the first time an embedder tried to build.
+# from it points into the wrong repository.
 set(CLOCKWORK_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(NATIVE_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/src/native")
 set(WORKERS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/workers")
@@ -537,13 +531,12 @@ set(CLOCKWORK_COMPILE_DEFS
     # The Windows version clockwork targets. Stated, because otherwise a
     # dependency states it: asio — vendored inside Ableton Link, and reached
     # from HeadlessDriver.cpp once CLOCKWORK_LINK_AUDIO is on — defines
-    # _WIN32_WINNT as Windows 7 when nothing else has, and prints a message
-    # asking to be told. Windows 7 hides the high-resolution waitable timer
-    # that driver asks for, so the build failed in exactly the configuration
-    # docs/BUILDING.md says to test.
+    # _WIN32_WINNT as Windows 7 when nothing else has. Windows 7 hides the
+    # high-resolution waitable timer that driver asks for, so a Windows Link
+    # Audio build fails.
     $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>
 
-    # The audio path is compiled in. This flag has never meant "the DSP itself":
+    # The audio path is compiled in. This flag does not mean "the DSP itself":
     # it gates clockwork's engine lifecycle, per-block render and audio route
     # — all of which clockwork owns and drives through dsp_api.h. What
     # actually makes sound behind that call is the DSP's, and is not in this
@@ -736,19 +729,15 @@ target_compile_definitions(clockwork PUBLIC ${CLOCKWORK_COMPILE_DEFS})
 # beside CLOCKWORK_DSP and CLOCKWORK_RUST_WORKSPACE, and a consumer may be a sibling
 # directory rather than a child, which PARENT_SCOPE does not reach.
 #
-# EXPORTED BECAUSE THE ALTERNATIVE FAILED SILENTLY. An embedder's shm peer read
-# a variable that was set nowhere — left behind when the extraction renamed
-# the upstream variable and moved it in here. CMake expands an
-# unset variable to nothing without complaint, so the peer was built with no
-# profile at all and every layout constant quietly took its default. A consumer
-# should not have to guess this list, and should not be able to miss it by
-# typo.
+# Exported under one name because CMake expands an unset variable to nothing
+# without complaint: a consumer that guessed the list wrong would build with
+# no profile at all and every layout constant at its default.
 
 # C++20 as a USAGE REQUIREMENT, not just a directory variable. CMAKE_CXX_STANDARD
 # above applies to this directory and stops at the submodule boundary, so an
-# embedder's own targets compiled as C++17 and failed on things clockwork's
-# headers and an embedder's tests both use — std::atomic::notify_all was the one
-# that surfaced it. Anything linking clockwork now gets the standard with it.
+# embedder's own targets would otherwise compile as C++17 and fail on what
+# clockwork's headers use (std::atomic::notify_all, for one). Anything linking
+# clockwork gets the standard with it.
 target_compile_features(clockwork PUBLIC cxx_std_20)
 
 if(CLOCKWORK_DEVICE)
@@ -795,8 +784,8 @@ if(CLOCKWORK_NIF)
         # too — the exact path the static `clockwork` target already writes.
         # link.exe refuses that outright: "LNK1149: output filename matches
         # input filename". The .dll does not collide (it is redirected to the
-        # build root below); the .lib nobody redirected did. Unix has no import
-        # library, so this is inert there.
+        # build root below); the .lib would. Unix has no import library, so
+        # this is inert there.
         ARCHIVE_OUTPUT_NAME "clockwork_nif"
         # The build root on every platform and configuration, not Release/ or
         # Debug/, so erlang:load_nif finds it at one path.
@@ -1076,9 +1065,9 @@ if(CLOCKWORK_OSC)
     target_compile_definitions(clockwork PUBLIC CLOCKWORK_OSC=1)
 endif()
 
-# The port substrate has no option and no boundary file. src/clockwork_ports.h is the
-# contract and it lives with clockwork (Sam wrote it before the crate did);
-# audio_processor.cpp calls clockwork_port_read/clockwork_port_write directly, so there is
+# The port substrate has no option and no boundary file. src/clockwork_ports.h
+# is the contract and part of clockwork; audio_processor.cpp calls
+# clockwork_port_read/clockwork_port_write directly, so there is
 # nothing to switch off — with no port bound the two calls scan an empty table
 # and return. Only the DISK endpoints' header needs an include path, because it
 # ships with the crate that implements it, the way every other Rust subsystem's
@@ -1114,9 +1103,8 @@ endif()
 # ─── The DSP ─────────────────────────────────────────────────────────────────
 # Everything above is clockwork. Everything the DSP owns is behind
 # src/dsp_api.h — the entry points docs/BOUNDARY.md lists — and arrives as one
-# more static library named by CLOCKWORK_DSP. The count lived here too and went
-# stale: dsp_asset was added and this comment still said seven. The header is
-# the list; nothing else should restate its length.
+# more static library named by CLOCKWORK_DSP. The header is the list; nothing
+# else restates its length.
 if(CLOCKWORK_DSP_DIR)
     get_filename_component(CLOCKWORK_DSP_SRC_DIR "${CLOCKWORK_DSP_DIR}"
                            ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
@@ -1144,20 +1132,18 @@ message(STATUS "DSP: ${CLOCKWORK_DSP}")
 if(APPLE OR MSVC OR EMSCRIPTEN)
     set(CLOCKWORK_LIB_GROUP clockwork ${CLOCKWORK_DSP} ${CLOCKWORK_RUST_LIB})
 else()
-    # $<TARGET_FILE:clockwork>, not the target NAME. CMake reorders a named
-    # target by its own dependency rules and hoisted libtau.a OUT of
-    # the group — so the Rust staticlib, still inside it, could not reach back
-    # for the C++ symbols it calls (clockwork_shm_base, clockwork_tap_geometry) and the
-    # link failed. A file path stays where it is put. The DSP was already
-    # pinned this way; clockwork was not.
+    # $<TARGET_FILE:clockwork>, not the target NAME: CMake reorders a named
+    # target by its own dependency rules and can hoist it out of the group,
+    # leaving the Rust staticlib inside unable to reach back for the C++
+    # symbols it calls (clockwork_shm_base, clockwork_tap_geometry). A file
+    # path stays where it is put.
     # BOTH forms of clockwork, deliberately. The target carries the usage
     # requirements — include directories and compile definitions — which a
     # bare file path does not; $<TARGET_FILE:> pins the archive INSIDE the
-    # group, which a target name does not, because CMake reorders named
-    # targets by its own dependency rules and hoisted this one out. Without
-    # the file, the Rust staticlib cannot reach back for the C++ symbols it
-    # calls; without the target, nothing that links this can find a header.
-    # The archive appearing twice on the line costs nothing.
+    # group, which a target name does not. Without the file, the Rust
+    # staticlib cannot reach back for the C++ symbols it calls; without the
+    # target, nothing that links this can find a header. The archive
+    # appearing twice on the line costs nothing.
     set(CLOCKWORK_LIB_GROUP
         clockwork
         -Wl,--start-group
@@ -1166,8 +1152,8 @@ else()
 endif()
 
 # What an EMBEDDER links. CLOCKWORK_LIB_GROUP above is a plain variable in
-# this directory's scope, so it is empty in a parent project — a consumer that
-# used it got clockwork with no DSP in the link line and a page of undefined
+# this directory's scope, so it is empty in a parent project: a consumer
+# using it would get clockwork with no DSP in the link line and undefined
 # dsp_* references. An INTERFACE target carries the same flags across the
 # directory boundary, including the --start-group/--end-group pair
 # the clockwork/DSP call cycle needs.
@@ -1180,9 +1166,9 @@ endif()
 add_library(clockwork_bundle INTERFACE)
 target_link_libraries(clockwork_bundle INTERFACE ${CLOCKWORK_LIB_GROUP})
 # The group names the DSP by FILE so it stays inside --start-group, and a file
-# path creates no dependency edge — so a consumer linking the bundle got
-# "No rule to make target" for the DSP's archive unless it happened to build
-# the guest first. The bundle carries that ordering itself now.
+# path creates no dependency edge, so without this a consumer linking the
+# bundle gets "No rule to make target" for the DSP's archive unless the guest
+# happens to build first.
 add_dependencies(clockwork_bundle ${CLOCKWORK_DSP})
 if(CLOCKWORK_RUST)
     add_dependencies(clockwork_bundle clockwork_rust)
@@ -1283,12 +1269,12 @@ if(EMSCRIPTEN)
 endif()
 
 # ── Windows version resource ─────────────────────────────────────────────────
-# src/native/clockwork_version.rc.in existed as a template that nothing configured, so
-# a Windows build carried NO version information at all: Explorer showed a bare
-# filename, and so did every UAC and device-permission dialog. It is generated
-# now, and attached to clockwork_bundle as an INTERFACE source so an
-# EMBEDDER's executable gets it without knowing it exists — the same reason the
-# link group is a target rather than a variable.
+# src/native/clockwork_version.rc.in is configured here and attached to
+# clockwork_bundle as an INTERFACE source so an EMBEDDER's executable gets it
+# without knowing it exists — the same reason the link group is a target
+# rather than a variable. Without it a Windows build carries no version
+# information: Explorer and every UAC and device-permission dialog show a
+# bare filename.
 if(WIN32)
     # Windows wants the version as four comma-separated fields.
     # Windows wants numbers: a product's version, or none (0.0.0.0) standalone
@@ -1327,13 +1313,8 @@ endif()
 # ─── The standalone SCHEDULER host ───────────────────────────────────────────
 # A different program from the one above: an OSC/MIDI event scheduler with no
 # synthesis engine, driving the timed store off the wall clock. lanes.h points
-# at this shape as what a minimal host looks like.
-#
-# BUILT NOW, and that is the whole change. Its own header said "not built here:
-# no target in CMakeLists.txt compiles this file" — five files describing a
-# program this tree did not produce, so nothing could tell whether they still
-# compiled against a boundary that had moved underneath them. A reference host that
-# is not built is not a reference, it is a document that looks like code.
+# at this shape as what a minimal host looks like. Built with the standalone
+# tree so it keeps compiling against the boundary.
 #
 # Needs the timed store, because scheduling is the entire program: with
 # CLOCKWORK_SCHEDULER=OFF there is nothing for it to be.

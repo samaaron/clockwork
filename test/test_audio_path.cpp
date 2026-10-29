@@ -87,9 +87,8 @@ float expectedSample(uint32_t channel, uint64_t frameIndex,
 // whole process, and other cases rebuild the DSP on it (test_dsp_regions.cpp,
 // test_event_sinks.cpp): after one of those the instance's frame 0 is no
 // longer the fixture's, and every index below is off by however far the
-// stream had run. These cases passed in the order the files are compiled in
-// and failed in any order that put a rebuild first. So each starts a stream
-// of its own and counts from there (lanes_test::freshDsp, ::dspFrame).
+// stream had run, and the cases would depend on run order. So each starts a
+// stream of its own and counts from there (lanes_test::freshDsp, ::dspFrame).
 uint32_t freshStream() {
     const uint32_t bl = lanes_test::boot();
     lanes_test::freshDsp();
@@ -287,10 +286,9 @@ TEST_CASE("audio path: an OSC message reaches the DSP and moves the edges",
     // and classified by clockwork, routed past "/clockwork/" to the default
     // route, handed to dsp_osc — and then OBSERVED in the samples, because the
     // pulse grid it reconfigures is the thing this file already knows how to
-    // check to the frame. It is the case that would catch clockwork silently
-    // dropping DSP-bound messages, which is not hypothetical: a host driving
-    // the lanes ABI alone published no ingress root at all until this boundary was
-    // narrowed, and every message it wrote was drained and discarded.
+    // check to the frame. It is the case that catches clockwork silently
+    // dropping DSP-bound messages: a host with no ingress root has every
+    // message it writes drained and discarded, and the grid never changes.
     const uint32_t bl = freshStream();
 
     constexpr uint32_t kNewWidthMs  = 5;

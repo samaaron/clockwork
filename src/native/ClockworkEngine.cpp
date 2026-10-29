@@ -322,9 +322,9 @@ void ClockworkEngine::setEngineState(EngineState state, const std::string& reaso
                    engineStateToString(prev), stateStr,
                    reason.empty() ? "-" : reason.c_str());
 
-    // /clockwork/setup is not a state's: the rebuild says it, as the new
-    // instance's first word on its ring (rebuild_dsp), ahead of anything the
-    // instance answers whenever this transition is said.
+    // /clockwork/setup is not sent with a state change: rebuild_dsp sends it
+    // as the new instance's first message on its ring, ahead of anything
+    // the instance answers.
     mEgress.sendStateChange(stateStr, reason.c_str());
 }
 
@@ -336,8 +336,8 @@ void ClockworkEngine::snapshotStateTo(uint32_t token) {
     // Statechange only: lifecycle state is idempotent display state, safe to
     // replay to a late registrant. /clockwork/setup is deliberately NOT
     // replayed — it is an EVENT ("the DSP was rebuilt; reset what you were
-    // tracking") and replaying it forced clients into spurious reinits. Late
-    // joiners query config instead (devices/report, shm metrics).
+    // tracking") and a replay would make the client reinit with nothing
+    // rebuilt. Late joiners query config instead (devices/report, shm metrics).
     //
     // An error replays with its reason rather than "snapshot": a client that
     // arrives after the transition has no other way to learn why.
@@ -351,8 +351,8 @@ void ClockworkEngine::snapshotStateTo(uint32_t token) {
 }
 
 ClockworkEngine::~ClockworkEngine() {
-    // A destructor that throws ends the process, and there is no one left to
-    // answer: what shutdown could not do is logged and let go.
+    // A destructor that throws ends the process: shutdown's failures are
+    // logged and swallowed.
     try {
         shutdown();
     } catch (const std::exception& e) {
@@ -365,9 +365,8 @@ ClockworkEngine::~ClockworkEngine() {
 
 void ClockworkEngine::init(const Config& cfg) {
     if (mRunning.load()) return;
-    // What the devices depend on, started from the thread that boots the
-    // engine: the one every host started it on, before the engine did it for
-    // them (smoothie_worklet.h).
+    // The platform services the devices depend on, started from the thread
+    // that boots the engine (smoothie_worklet.h).
     smoothie::startPlatform();
     // The guest's config goes to it in a region of GUEST_CONFIG_SIZE bytes, its
     // NUL included. One that does not fit is refused here, before anything is
@@ -486,14 +485,10 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
 #ifdef _WIN32
     // Default to WASAPI shared mode ("Windows Audio") on Windows when no
     // driver preference is supplied, DirectSound only if WASAPI is absent.
-    // DirectSound was the historical default, kept against a WASAPI
-    // shared-mode crackle nobody had confirmed. Measured on Windows 11
-    // ARM64 (2026-09-09, an embedded engine at 0.8% DSP load, zero
-    // callback overruns): DirectSound at its 2560-frame duplex buffer put
-    // 85 discontinuities into 15 s of output that the offline render of
-    // the same piece did not have — the clock-rate skew of two DirectSound
-    // streams, audible as constant pops — while WASAPI on the same device
-    // put in 2, the same as a WAV played by the OS. A --audio-driver
+    // DirectSound runs its input and output as two streams whose clocks
+    // skew against each other, which puts audible discontinuities into
+    // duplex output at its 2560-frame buffer; WASAPI shared mode on the
+    // same device plays as cleanly as the OS does. A --audio-driver
     // request overrides this below.
     if (platformSetup) {
         for (const char* preferred : { "Windows Audio", "DirectSound" }) {
@@ -533,15 +528,15 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
         }
     }
 
-    // What boot opens is decided before anything is opened, and opened once:
-    // every open is heard — a click, a moment of silence on whatever else
-    // plays through the device, on CoreAudio an aggregate made and pulled
-    // down. The output is -H's device, else the default (a wired one in
-    // place of a wireless default); the input is the user's when it can
-    // play with that output, else the default input when inputs are wanted
-    // and -H named none; the rate and buffer are the session's. What won't
-    // open gives way a part at a time: the input, then -H's device, then
-    // the default's input, then the driver.
+    // Decide what boot opens before opening anything, and open it once:
+    // every open is audible (a click, a gap in whatever else plays through
+    // the device, on CoreAudio an aggregate created and torn down). The
+    // output is -H's device, else the default (a wired one in place of a
+    // wireless default); the input is the user's when it can pair with that
+    // output, else the default input when inputs are wanted and -H named
+    // none; the rate and buffer are the session's. Whatever fails to open
+    // is dropped a part at a time: the input, then -H's device, then the
+    // default's input, then the driver.
 
     // The session's rate and buffer, on whatever request boot makes. Auto
     // buffer: the smallest the device offers from 128 up — asked for as 128,
@@ -800,9 +795,9 @@ void ClockworkEngine::initAudioDevice(const Config& cfg) {
     }
 
     // Read what the device actually settled on and override config to match —
-    // INCLUDING bufferSize. Leaving it unset made every pre-first-swap consumer
-    // (headless driver configure, SwapResult.bufferSize, state events) read the
-    // requested value instead of the real one.
+    // INCLUDING bufferSize: every pre-first-swap consumer (headless driver
+    // configure, SwapResult.bufferSize, state events) reads the config, and
+    // must see the real value, not the requested one.
     if (const auto dev = mDevices->current()) {
         mCurrentConfig.sampleRate        = static_cast<int>(dev->sampleRate);
         mCurrentConfig.bufferSize        = dev->bufferFrames;
@@ -982,8 +977,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         mShmemCreator->publish();
 
     // The engine's own client handle over the arena, opened once, here: the
-    // gateway thread below and any caller's ingest both use it, and opening it
-    // on first use from whichever came first was a race between the two.
+    // gateway thread below and any caller's ingest both use it, so opening
+    // it lazily from whichever came first would race.
     openClient();
 
     // Publish the peer command plane only when enabled: the gateway task below
@@ -1019,9 +1014,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // The egress rings' consumer is EITHER this pass or the host
     // (Config::hostDrainsEgress). Draining here goes through the client API
     // like any client's would — one poll, both rings — and routes through
-    // the same table a host uses (EgressRouter.h). A host that drains still
-    // needs the off-audio-thread heap maintenance the drain used to carry,
-    // so that runs here regardless.
+    // the same table a host uses (EgressRouter.h). The off-audio-thread
+    // heap maintenance (interceptBufferFreed) runs here either way, since a
+    // host that drains does not call it.
     if (cfg.hostDrainsEgress) {
         mNrtGateway.addTask([this]() { interceptBufferFreed(nullptr, 0); });
     } else {
@@ -1050,8 +1045,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             [this](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t seq) {
                 // Written for an instance that has gone, or between instances
                 // (mPeerMarks): refused to the peer, naming the generation that
-                // closed, and done with. Clockwork's own verbs go to the door
-                // as ever: the engine answers those with or without a guest.
+                // closed, then consumed. Clockwork's verbs that need no guest are
+                // not refused: the engine answers those with or without one.
                 if (const RingMark* mark = mPeerMarks.of(seq);
                     mark && !clockwork_sys_answers_without_guest(d, n)) {
                     if (clockwork_egress_nrt_free() < 1024) return ClockworkDrainVerdict::Retain;   // its refusal waits for room
@@ -1235,27 +1230,26 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // The control ring (lanes.h, docs/RESTARTS.md): clockwork's own control
     // verbs, written by every boundary — this engine's ingest, a client in
     // another process — with no audio block between them and this pass. An
-    // immediate verb: its time is now, and the block it would have ridden
-    // is nobody's, so no envelope. What the hop above carries is the other
-    // kind: a control verb fired by the scheduler on the audio thread.
+    // immediate verb's time is now and it belongs to no block, so it has no
+    // envelope. The NRT ring drain above carries the other kind: a control
+    // verb fired by the scheduler on the audio thread.
     {
         auto* arena = static_cast<uint8_t*>(clockwork_lanes_base());
         auto* ctl   = reinterpret_cast<ControlRingCursors*>(arena + CONTROL_RING_START);
         // A verb's answers pass through two rings that refuse a frame with
         // no room: the engine's egress ring (NRT_OUT_RING_SIZE), and, for a
-        // peer, that peer's reply ring (ShmTransport). The pass answers as
-        // fast as it can, so a ring of verbs whose answers are larger than
-        // they are overflowed the first (a peer lost 296 of 6000 on CI,
-        // 2026-10-16, and the line logging it rode the same full ring), and a
-        // peer that reads slowly filled the second. Before the control ring
-        // the audio thread's block paced the verbs, which hid both. Now a
-        // verb waits in the control ring while either ring lacks room for
-        // its answers, and is answered on a later pass, once the egress has
-        // been drained (that task runs first in every pass) and the peer has
-        // read (ring_drain.h, Retain). The room a pass leaves for one verb's
-        // answers is 16 KB where the ring has it; a smaller ring (a small
-        // profile, src/memory_profile.h) offers all it has, once drained —
-        // a verb then waits for an empty ring, which every pass drains to.
+        // peer, that peer's reply ring (ShmTransport). Nothing paces the
+        // verbs in the control ring, so a run of verbs whose answers are
+        // larger than they are can fill the first, and a peer that reads
+        // slowly can fill the second; either way the answers (and the log
+        // line reporting the loss) are dropped. So a verb stays in the
+        // control ring while either ring lacks room for its answers and is
+        // handled on a later pass, after the egress drain (the first task
+        // of every pass) and after the peer has read (ring_drain.h, Retain).
+        // The room required for one verb's answers is 16 KB where the ring
+        // has it; a smaller ring (a small profile, src/memory_profile.h)
+        // requires all it has, so a verb then waits for an empty ring,
+        // which every pass drains to.
         constexpr uint32_t kAnswerRoom = std::min<uint32_t>(16 * 1024, NRT_OUT_RING_SIZE - 1);
         static_assert(kAnswerRoom < SHM_PEER_REP_RING_SIZE,
                       "a ring smaller than the room would hold every verb forever");
@@ -1301,8 +1295,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     });
 
     // The NRT egress lane is taken by the same poll as the OUT ring (the
-    // client API reads both), in the drain above or in the host's — there is
-    // no separate drain of it here any more.
+    // client API reads both), in the drain above or in the host's; it has
+    // no separate drain here.
 
     // -- Audio callback wiring ---------------------------------------------
     mProcessor.setClockworkClock(&mClockworkClock);
@@ -1373,15 +1367,15 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // The pass must be running before the audio source starts, otherwise
     // OUT/NRT-out ring buffers can back up during the audio thread's first
     // few hundred ticks (~ms) before any reader is draining them. A host that
-    // drives control is expected to be calling controlPass() from here on:
-    // the door opens, and no thread of the engine's is started for it. The
-    // door opens ONLY then — with the engine's own thread on the pass, a
-    // host's controlPass() is refused, so the two can never overlap.
+    // drives control calls controlPass() from here on: mControlOpen is set
+    // and no engine thread is started for the pass. mControlOpen is set ONLY
+    // then — with the engine's own thread on the pass, a host's
+    // controlPass() is refused, so the two can never overlap.
     if (cfg.hostDrivesControl) mControlOpen.store(true, std::memory_order_release);
     else                       mNrtGateway.start();
-    // The pass drains the control ring from here: said in the arena, so every
-    // boundary — this engine's ingest, a client in another process — writes
-    // a control verb there from now on (lanes.h, clockwork_control_serve).
+    // The pass drains the control ring from here: recorded in the arena, so
+    // every boundary — this engine's ingest, a client in another process —
+    // writes control verbs there from now on (lanes.h, clockwork_control_serve).
     clockwork_control_serve(1);
     // The pass now drains NRT-out — off-audio-thread debug (clockwork_log) routes there
     // instead of the single-writer RT-out ring. Kept true through shutdown's thread
@@ -1454,10 +1448,10 @@ void ClockworkEngine::shutdown() {
     // acceptable, the consumer is going away.
     //
     // Two ways the pass may be running. The engine's own gateway thread is
-    // joined. A host's thread cannot be: the door controlPass() comes through
-    // is closed instead, and a pass already inside is waited for — the same
-    // guarantee as the join, that no pass runs past this line. A host that
-    // keeps calling after this gets false and nothing else.
+    // joined. A host's thread cannot be: mControlOpen is cleared instead and
+    // a pass already inside controlPass() is waited for — the same guarantee
+    // as the join, that no pass runs past this line. A host that keeps
+    // calling after this gets false and nothing else.
     // No pass drains the control ring from here: a boundary that writes a
     // control verb now writes it to the in ring, as a build with no control
     // pass always does, and the shutdown's own drain below is the last.
@@ -1770,17 +1764,16 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
             mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    // No guest instance to take it: the boundary said so to this door, and
-    // this door says so to the asker, in the words every refusal uses, so a
-    // transport's peer and an in-process caller hear the same thing as a
-    // sender on the lanes ABI does (docs/RESTARTS.md). The status goes back
-    // too, for a door that reads statuses.
+    // No guest instance to take it: refuse it to the sender with the
+    // standard refusal, so a transport's peer and an in-process caller get
+    // the same reply as a sender on the lanes ABI does (docs/RESTARTS.md).
+    // The status is returned too, for a caller that reads statuses.
     if (status == CLOCKWORK_E_NO_INSTANCE)
         mEgress.refuse(originToken, data, size, CLOCKWORK_REFUSED_NO_INSTANCE);
     return status;
 }
 
-// --- The host's door onto the control pass (Config::hostDrivesControl). The
+// --- The host's entry to the control pass (Config::hostDrivesControl). The
 // pass itself is mNrtGateway's registry; this only guards it against
 // shutdown, the way the gateway thread's join does. Open from the point
 // init() would have started the thread; closed by shutdown(), which then
@@ -1790,8 +1783,8 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
 //
 // ONE THREAD, enforced rather than trusted: the pass is single-consumer
 // through and through, so a second caller arriving while one is inside gets
-// false and touches nothing. That is the difference between a host that
-// misreads the contract and a corrupted ring.
+// false and touches nothing; a host that calls from two threads gets a
+// refusal, not a corrupted ring.
 bool ClockworkEngine::controlPass() {
     if (!mControlOpen.load(std::memory_order_acquire)) return false;
     mControlPassesInFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -1852,7 +1845,7 @@ void ClockworkEngine::resumeControlPass() {
 // slot for the token and none for `when`, so the message is prefixed with
 // NrtEnvelope. A verb fired from the scheduler reaches the audio thread up to one
 // block early; without the envelope the time is lost on this hop and every
-// scheduled note leaves at block time (test_scheduled_out.cpp caught it).
+// scheduled note leaves at block time (test_scheduled_out.cpp).
 bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
                                       const uint8_t* data, std::size_t len) {
     auto* self = static_cast<ClockworkEngine*>(ctx);
@@ -2153,10 +2146,10 @@ void ClockworkEngine::watchdogPoll() {
             // policy: a later verdict is a new fault, not the
             // continuation of this one. As many good windows in a row as
             // it takes bad ones to reach a verdict, for the same reason:
-            // one window can be a transient. A 0.919x device on a loaded
-            // macOS runner read one 300 ms window just after its reopen
-            // as healthy (2026-09-19), which restarted the streak and
-            // cost a fourth swap.
+            // one window can be a transient. A skewed device can read one
+            // window just after its reopen as healthy; ending the episode
+            // on that one window restarts the streak and costs an extra
+            // swap.
             if (w.rateSkew.windowsCompleted() != w.skewWindowsSeen) {
                 w.skewWindowsSeen = w.rateSkew.windowsCompleted();
                 w.skewGoodWindows = w.rateSkew.lastWindowGood() ? w.skewGoodWindows + 1 : 0;
@@ -2573,8 +2566,8 @@ void ClockworkEngine::sendDeviceReport() {
     //         Flags are comma-separated capability tokens
     //         ("follows-default", "exclusive-duplex", "synthetic"), "" = plain.
     // Counts-first throughout so parsers never type-sniff. The packet is the
-    // size the table needs (oscPacketOf): a table too big for a fixed buffer
-    // used to be dropped, and before that threw into the reporting thread.
+    // size the table needs (oscPacketOf), so no table overflows a fixed
+    // buffer.
     const OscPacket tablePacket = oscPacketOf(8192, [&](osc::OutboundPacketStream& tableMsg) {
         tableMsg << osc::BeginMessage(CLOCKWORK_SYS("device-table"))
                  << currentDriver().c_str()
@@ -3084,8 +3077,8 @@ bool ClockworkEngine::startAudioSource() {
     const AudioSource desired = desiredAudioSource();
     if (desired == AudioSource::RealCallback) {
         // Bracket the attach with log lines: a silent process death in this
-        // window (seen in the wild on a virtual 8-out device) is only
-        // localisable if the log shows exactly how far we got — nothing after
+        // window is only localisable if the log shows exactly how far the
+        // attach got — nothing after
         // "attaching" = died inside the driver's start path; "attached" but no
         // "[juce] first audio callback" = died before the device's IO thread
         // reached our callback. The gateway thread drains the ring on its own,
@@ -3320,9 +3313,9 @@ ClockworkEngine::Restart::Restart(ClockworkEngine& engine, bool cold)
     : mEngine(engine), mCold(cold) {}
 
 ClockworkEngine::Restart::~Restart() {
-    // A way out that never resumed audio: the pass is let go here, and the
-    // gate goes with the lock. The processor stays paused, as it did: the
-    // swap that left early says what state the engine is in.
+    // An exit that never resumed audio: the pass is released here, and the
+    // gate with the lock. The processor stays paused; the swap that
+    // returned early reports what state the engine is in.
     if (mCold && !mResumed) mEngine.resumeControlPass();
 }
 
@@ -3350,9 +3343,9 @@ ClockworkEngine::Restart::Facts ClockworkEngine::Restart::deviceFacts() const {
 void ClockworkEngine::Restart::teardown() {
     mFactsBefore = deviceFacts();
     // The schedule is the instance's, and empty from restarting
-    // (docs/RESTARTS.md, rule 6). What waits in the in ring for it is
-    // answered by the teardown's mark (destroy_dsp): until then, a block of
-    // the fade takes it as any block would.
+    // (docs/RESTARTS.md, rule 6). Messages waiting in the in ring for the
+    // instance are answered by the teardown's mark (destroy_dsp): until
+    // then, a block of the fade takes them as any block would.
     if (mCold) clear_scheduler();
     mEngine.fadeOutAndPause();
     // A cold restart re-inits the arena (destroy_dsp / rebuild_dsp →
@@ -3380,12 +3373,12 @@ void ClockworkEngine::Restart::teardown() {
         mEngine.markPeerPlane(CLOCKWORK_REFUSED_REBUILDING);
         destroy_dsp();
     }
-    // What the engine has said so far reaches its clients now, not when audio
-    // resumes: the pass is parked for the whole swap, and a device can take
-    // seconds to open — the user's notice before a recovery, this swap's own
-    // account of itself, the old instance's last words and the teardown's
-    // refusals. Nothing is lost by waiting (the reply rings outlive the
-    // instance); it is only late.
+    // Deliver what is on the egress rings now, not when audio resumes: the
+    // pass is parked for the whole swap, and a device can take seconds to
+    // open. That includes the recovery notice, this swap's state change,
+    // the old instance's last replies and the teardown's refusals. The
+    // reply rings outlive the instance, so nothing is lost by waiting; it
+    // is only late.
     if (mCold) drain();
 }
 
@@ -3407,8 +3400,9 @@ void ClockworkEngine::Restart::build(double rate) {
 }
 
 bool ClockworkEngine::Restart::resumeAudio() {
-    // The instance survived; a fact its setup named may not have (a bigger
-    // buffer, a rate it takes live): told on its ring before it runs again.
+    // The instance survived; a fact its setup announced may have changed
+    // (a bigger buffer, a rate it takes live): announce it on the ring
+    // before the instance runs again.
     if (!mCold) {
         const Facts now = deviceFacts();
         if (now != mFactsBefore) clockwork_announce_facts(now.rate, static_cast<uint32_t>(now.buffer));
@@ -3622,16 +3616,15 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
     }
     if (!plan.error.empty()) {
         result.error = plan.error;
-        // Every way out of here says why, through the funnel: the client's
-        // log pane sees it, and so does a test's captured debug stream. A swap
-        // that failed silently read as a flake on a CI runner, and was — until
-        // this line — indistinguishable from one.
+        // Every way out of here logs why: the client's log pane sees it, and
+        // so does a test's captured debug stream, so a refused swap is
+        // distinguishable from a flake.
         clockwork_log("[switchDevice] refused: %s", result.error.c_str());
         return result;
     }
 
-    // Execute the plan's bookkeeping decisions + the logs the old inline
-    // code emitted (provenance flags exist for exactly this).
+    // Execute the plan's bookkeeping decisions and log each one (the plan's
+    // provenance flags exist for exactly this).
     if (plan.abandonDriverIntent) {
         clockwork_log(
             "[device-setup] abandoning pending driver intent '%s' "
@@ -3926,8 +3919,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
         }
         // Built for whatever is open now: the device that was playing, put
         // back, or the default when that has gone too, which can run at
-        // another rate. Built at the old rate, a default at another played
-        // everything at the wrong speed and pitch.
+        // another rate. A DSP built at the old rate on a default at another
+        // plays everything at the wrong speed and pitch.
         if (isCold) restart.build(takeOpenDeviceGeometry(currentRate, false));
         restart.resumeAudio();
         result.error = errStr;
@@ -4228,9 +4221,9 @@ double ClockworkEngine::snapToAdvertisedRate(const std::string& output, double s
 
 std::string ClockworkEngine::inputToReopenWith() const {
     // The user's input while it is attached, else the input last played
-    // with — whatever was open is not taken on trust: opened in and out on
-    // Loopback, a recovery once came back recording from the default input
-    // (2026-10-16). None when no inputs are open.
+    // with. Not whatever the session has open: after a recovery that can be
+    // the default input rather than the one the user chose. None when no
+    // inputs are open.
     if (mCurrentConfig.numInputChannels <= 0) return {};
     std::vector<std::string> inputNames;
     for (auto& d : listDevices(false))
@@ -4286,7 +4279,7 @@ SwapResult ClockworkEngine::openChosenDevices(double sampleRate) {
 
     // None chosen, or it will not play: the system default. A wired one by
     // name, as any device; the driver opens a wireless one itself (opening
-    // AirPlay by name never did reliably), and the default of a driver that
+    // AirPlay by name is unreliable), and the default of a driver that
     // has one when this one has none (ASIO).
     const SystemDefaultOutput def = systemDefaultOutput();
     if (!def.name.empty() && !def.wireless && def.name != chosen)
@@ -4321,8 +4314,8 @@ SwapResult ClockworkEngine::enableInputChannels(int numChannels) {
     // -1 means "re-enable inputs": resolved against the boot -i flag and
     // clamped to the device's probed input capacity. The clamp is what
     // keeps the auto-max request off WASAPI, which refuses an open asking
-    // for more inputs than exist (CoreAudio silently clamps instead, which
-    // is how the unclamped path went unnoticed on mac).
+    // for more inputs than exist (CoreAudio silently clamps instead, so
+    // the unclamped request only fails on Windows).
     if (numChannels != 0) {
         int probed = -1;
         if (mDevices && !inputName.empty())
@@ -4344,8 +4337,8 @@ SwapResult ClockworkEngine::enableInputChannels(int numChannels) {
     // Refuse "disable inputs" on ASIO. ASIO drivers are full-duplex
     // single-device by spec — one stream owns both directions.
     // Reconfiguring with input=0 while keeping output crashes real
-    // drivers (MOTU Pro Audio observed). Output-only is served by
-    // switching driver to Windows Audio / DirectSound.
+    // drivers. Output-only is served by switching driver to Windows
+    // Audio / DirectSound.
     if (numChannels == 0 && mDevices) {
         if (const auto dev = mDevices->current()) {
             if (dev->driver == "ASIO") {
@@ -4785,11 +4778,10 @@ std::string ClockworkEngine::openSystemDefault() {
     // like any device the engine switches to: switchDevice keeps the input,
     // rebuilds when the rate differs, and goes back when it won't open. The
     // driver opens a wireless one itself (AirPlay, Bluetooth): CoreAudio's
-    // default route reaches AirPlay, which opening by name never did
-    // reliably. So it does when it names none (ASIO), by way of a driver that
-    // has one. The driver's answer decides, on every platform: Linux and
-    // Windows used to take the driver's way for every default, and no Mac run
-    // went that way (test_no_audio_device.cpp).
+    // default route reaches AirPlay, which opening by name does not
+    // reliably. The same path serves a driver that names no default (ASIO),
+    // through a driver that has one. The driver's answer decides, on every
+    // platform (test_no_audio_device.cpp).
     const SystemDefaultOutput def = systemDefaultOutput();
     if (!def.name.empty() && !def.wireless) {
         std::string inputName;
@@ -4810,8 +4802,8 @@ std::string ClockworkEngine::openSystemDefault() {
 
 std::string ClockworkEngine::openDriverDefault() {
     // The init and what follows it are one mutation: under the gate
-    // throughout, so no other swap drives the manager in between (two at once
-    // wedged DirectSound's callback thread in a cursor-poll spin).
+    // throughout, so no other swap drives the session in between (two at
+    // once can wedge DirectSound's callback thread in its cursor poll).
     std::unique_lock<std::recursive_mutex> swapGate;
     if (!tryAcquireSwapGate(swapGate, 30, 100)) {
         clockwork_log("[device-setup] system mode init refused: "

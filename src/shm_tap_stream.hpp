@@ -58,9 +58,9 @@ inline constexpr uint32_t TAP_DISPLAY_WINDOW_MS = 250;
 // TAP_READ_MARGIN_FRAMES clear of the ring's oldest edge. The sum must
 // fit in the ring, or the audible window is overwritten before anyone reads
 // it and copy_window has nothing to hand back: every scope flat while the
-// engine renders perfectly (an AirPlay output reporting two seconds of
-// latency, 2026-10-06). The engine checks this at every device start and
-// says so when it fails.
+// engine renders perfectly (an AirPlay output can report two seconds of
+// latency). The engine checks this at every device start and says so when
+// it fails.
 inline constexpr bool shm_tap_ring_covers(uint32_t latency_frames, double sample_rate) {
     constexpr uint32_t cap = TAP_RING_FRAMES;
     constexpr uint32_t margin =   // as copy_window clamps it for small rings

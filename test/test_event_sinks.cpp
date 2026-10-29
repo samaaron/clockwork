@@ -26,8 +26,7 @@
  * have to stand up a receiver in C++ on three platforms. That the bytes are
  * also correct on the wire is asserted in Rust, against a real socket.
  *
- * LAST IN THE FILE LIST on purpose, and for the same reason
- * test_stream_identity.cpp used to be: its final case rebuilds the DSP, which
+ * LAST IN THE FILE LIST on purpose: its final case rebuilds the DSP, which
  * restarts the placeholder's absolute frame counter, so anything asserting
  * pulse phase must already have run.
  */
@@ -210,8 +209,7 @@ TEST_CASE("sinks: a destination that is not there is refused at open",
           "[sinks]") {
     Sinks guard;
     // The refusal is the feature. A sink that opened onto nothing would accept
-    // every message, deliver none, and report `sent` for all of them — which
-    // is the silent-drop shape clockwork has been bitten by before.
+    // every message, deliver none, and report `sent` for all of them.
     REQUIRE(clockwork_sink_open(kClockworkSinkOsc, "not-a-destination", 64) == CLOCKWORK_SINK_NONE);
     REQUIRE(clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:0", 64) == CLOCKWORK_SINK_NONE);
     REQUIRE(clockwork_sink_open(kClockworkSinkOsc, nullptr, 64) == CLOCKWORK_SINK_NONE);

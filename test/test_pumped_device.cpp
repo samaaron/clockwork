@@ -145,7 +145,7 @@ TEST_CASE("pumped device: callbacks of any size give back the stream, nothing lo
     echo(e);
     const int block = static_cast<int>(clockwork_block_size());
     // Straight from the engine, whose output the standard fixes: a
-    // std::uniform_int_distribution is each library's own, and gave each
+    // std::uniform_int_distribution is each library's own, and gives each
     // platform different sizes for the same seed.
     std::mt19937 rng(seed);
     const auto size = [&rng] { return 1 + static_cast<int>(rng() % kLargest); };

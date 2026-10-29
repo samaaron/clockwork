@@ -160,8 +160,7 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     // NOTHING IS DRAINED WHILE THIS RUNS, which is what makes it an
     // assertion. Pumping between sends would free space either way and the
     // count would come out the same whether the ring charged for the bound or
-    // for the message — an earlier version of this case did exactly that and
-    // passed against a writer that charged the bound.
+    // for the message.
     uint32_t sent = 0;
     while (true) {
         uint8_t* room = clockwork_client_send_begin(c, bound, &st);
@@ -224,8 +223,7 @@ TEST_CASE("client abi: a reservation given back leaves the ring working",
 TEST_CASE("client abi: a second reservation is refused rather than deadlocked",
           "[client][abi][reserve]") {
     // Beginning twice would take a lock this thread already holds. That is a
-    // hang, not an error, so it is caught before the lock is touched — and a
-    // test that hangs instead of failing is the reason to pin it.
+    // hang, not an error, so it is refused before the lock is touched.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* c = openInProcess(&st);
@@ -616,14 +614,12 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
 //                          &cursors->in_head, &cursors->in_tail, ...)
 //
 // Two sources of truth for one address. They agree only while the table the
-// engine publishes matches the constants the engine compiled, and nothing
-// asserted that they do. If they ever diverge the failure is silent in the
-// worst way: a client's send lands where the drain never looks, so the ring the
-// engine reads stays empty forever. Nothing is dropped and nothing is
-// corrupted — there is simply never anything there — and the only visible
-// symptom is that messages are never answered.
+// engine publishes matches the constants the engine compiled. If they
+// diverge, a client's send lands where the drain never looks, so the ring the
+// engine reads stays empty: nothing is dropped and nothing is corrupted, and
+// the only visible symptom is that messages are never answered.
 //
-// Asserted here rather than inferred from a timeout somewhere downstream.
+// Asserted here rather than inferred from a timeout downstream.
 TEST_CASE("the arena's published layout is the one the audio thread compiled",
           "[client][layout]") {
     Engine e;   // boots the engine, which writes the arena header
@@ -656,31 +652,18 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
 //
 // A client caches the arena base it was opened over (ClientImpl::base, from
 // clockwork_lanes_base()). A cold device switch runs rebuild_dsp -> init_memory,
-// and init_memory is what resolves that base.
-// So if a swap ever re-points the arena, every client opened before it is
-// writing into memory the audio thread has stopped reading — silently, because
-// the write still succeeds and the layouts are identical.
+// and init_memory is what resolves that base. If a swap re-points the arena,
+// every client opened before it writes into memory the audio thread has
+// stopped reading, and the write still succeeds because the layouts are
+// identical: the callback keeps ticking, nothing is dropped or corrupted,
+// and nothing arrives.
 //
-// The existing cold-swap coverage cannot see this: test_cold_swap_recovery.cpp
-// drives the engine through ingest(), which never goes near a client's cached
-// base. Nothing has tested a client across a swap at all.
+// test_cold_swap_recovery.cpp drives the engine through ingest(), which never
+// goes near a client's cached base, so this case sends through a client.
 //
-// Not hypothetical. On a macOS x64 runner whose Null Audio Device produces no
-// callbacks, the engine recovers with exactly this forced cold switch — and
-// from that moment the embed's client sends land nowhere:
-//
-//     ticks 3760 (the callback is fine after recovery)
-//     engine_processed 0, in_ring_used 0, in_ring_peak 0  (nothing arrives)
-//     in_dropped 0, in_corrupted 0                        (nothing refused)
-//
-// arm64 opens its device first time, never recovers, and never sees this.
-//
-// NOTE, so nobody reads more into this case than it earns: it passes, and it
-// exercises a VOLUNTARY switchDevice. The CI failure comes in by another door —
-// a device that opens, produces no callbacks for 5 s, and is cold-switched by
-// the watchdog's recovery. Same function, different entry, and only the
-// recovery entry has ever failed. So this is a regression guard for coverage
-// that did not exist, not a reproduction of that bug.
+// It exercises a voluntary switchDevice. The watchdog's recovery of a device
+// that produces no callbacks reaches the same function by another entry;
+// this case pins the base across the swap, not that entry.
 TEST_CASE("a client still reaches the engine after a cold device swap",
           "[client][coldswap]") {
     Engine e;

@@ -203,8 +203,7 @@ TEST_CASE("Router: a prefix without a trailing '/' claims whole segments only",
     ingestAddr(ix, "/t/param/edit"); // the namespace under it
     CHECK(verb.calls == 2);
     // A longer sibling is a different verb: it stays with the namespace, so a
-    // "params" listing never lands on the handler for "param" (which was how
-    // the plugin-parameter listing got dropped on the audio thread).
+    // "params" listing never lands on the handler for "param".
     ingestAddr(ix, "/t/params");
     CHECK(verb.calls == 2);
     CHECK(ns.calls == 1);
@@ -455,10 +454,9 @@ TEST_CASE("boundary: the prefix is the only thing that decides clockwork vs DSP"
         "/clockwork-sys",             // no trailing slash: a different component
         "/clockwork-sysx/ping",
         "/clockworks/ping",           // near-miss: the prefix needs its slash
-        // THE REGRESSION GUARD. Every one of these was a clockwork verb before
-        // the namespaces moved under the prefix. They must now reach the DSP
-        // like any other address: if one of these is still answered here, the
-        // migration left a second predicate behind.
+        // Clockwork's verbs spelled outside the prefix. Each must reach the
+        // DSP like any other address: one answered here is a second predicate
+        // beside the prefix.
         "/clock/tempo/get",
         "/engine/record/start",
         "/midi/out/note_on",
@@ -495,14 +493,14 @@ TEST_CASE("boundary: a clockwork route cannot be spelled outside the prefix",
     Recorder     dsp, mistake;
     SysRoute     answered;
 
-    // Someone tries to register "/clock/" the old way.
+    // An absolute address, "/clock/", handed to add().
     REQUIRE(sysRoutes.add("/clock/", &sink, &mistake));
     sysRoutes.setFallback(&sysRoute, &answered);
     boundary.setSys(&ClockworkSysRoutes::route, &sysRoutes);
     boundary.setDsp(&sink, &dsp);
 
-    // What they actually registered is "/clockwork//clock/" — inside the prefix.
-    // The old address is untouched and still the DSP's.
+    // What it registers is "/clockwork//clock/" — inside the prefix.
+    // "/clock/" itself is untouched and still the DSP's.
     const auto old = osc_test::message("/clock/tempo/get", (int32_t)1);
     CHECK(boundary.ingest(old.ptr(), old.size(), nullptr));
     CHECK(dsp.calls == 1);

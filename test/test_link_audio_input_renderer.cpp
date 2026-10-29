@@ -359,8 +359,8 @@ TEST_CASE("input renderer: stamps that jitter by under a frame are one stream, n
           "[link-audio][renderer]") {
     // A real publisher's stamps are rounded through beats and microseconds:
     // consecutive buffers abut to within a frame, not exactly. That is one
-    // continuous stream, rendered by its frames, as upstream always did; a
-    // hole is a millisecond or more, a buffer that never came.
+    // continuous stream, rendered by its frames; a hole is a millisecond or
+    // more, a buffer that never came.
     Session session;
     Renderer renderer(session.link);
     renderer.setLatencySeconds(0.0);
@@ -384,7 +384,7 @@ TEST_CASE("input renderer: a few frames' disagreement is steered over the render
           "[link-audio][renderer]") {
     // Two sample clocks never quite agree; the block stamp steers. A render
     // asked for a couple of frames later than the stream's own clock says is
-    // bent to meet it, as upstream always did, and the place is kept.
+    // bent to meet it, and the place is kept.
     Session session;
     Renderer renderer(session.link);
     renderer.setLatencySeconds(0.0);
@@ -475,10 +475,10 @@ TEST_CASE("input renderer: a re-measured clock that moves the timeline tens of m
     // Over WiFi, with a second peer in the session, Link's measurements of the
     // clock offset move the timeline under a stream by tens of milliseconds
     // at a time, not one or two. Nothing was missed and nothing stalled: the
-    // stream is whole, the target moved. Given up as lost, that is a resync
-    // and a hole in the audio at every measurement — a glitch every few
-    // seconds through a whole jam. It is steered to, as a small step is, and
-    // the stream is in its new place within a few seconds with nothing heard.
+    // stream is whole, the target moved. Treated as a lost place, that would
+    // be a resync and a hole in the audio at every measurement. It is steered
+    // to, as a small step is, and the stream is in its new place within a few
+    // seconds with nothing heard.
     Session session;
     Renderer renderer(session.link);
     renderer.setLatencySeconds(0.0);
@@ -519,12 +519,12 @@ TEST_CASE("input renderer: a re-measured clock that moves the timeline tens of m
 
 TEST_CASE("input renderer: a clock re-measured again and again is one stream, never a lost place",
           "[link-audio][renderer]") {
-    // What a jam over WiFi with a second peer does: Link re-measures the clock
-    // to its peers over and over, and the timeline swings under the stream,
-    // one way and back, tens of milliseconds at a time. Each swing given up as
-    // a lost place was a resync; on a real session that was 79 in ten seconds.
-    // The stream is steered through every swing and never stepped, and once
-    // the timeline is back where it began the stream is back in its place.
+    // Over WiFi with a second peer, Link re-measures the clock to its peers
+    // over and over, and the timeline swings under the stream, one way and
+    // back, tens of milliseconds at a time: several swings a second. Each
+    // swing treated as a lost place would be a resync. The stream is steered
+    // through every swing and never stepped, and once the timeline is back
+    // where it began the stream is back in its place.
     Session session;
     Renderer renderer(session.link);
     renderer.setLatencySeconds(0.0);

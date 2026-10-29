@@ -101,12 +101,10 @@ pub extern "C" fn clockwork_port_is_open(port: c_uint) -> c_int {
 
 /// The direction the port was opened with, or 0 if it is not open.
 ///
-/// NOT in the original `src/clockwork_ports.h`, and added because every consumer
-/// needs it: `clockwork_port_list` hands back both directions mixed, and a caller
-/// that means to read sources cannot tell which of them it may read. Without
-/// this clockwork would have to keep its own shadow record of a fact the
-/// substrate already knows, which is the kind of duplication ports exist to
-/// end.
+/// Every consumer needs it: `clockwork_port_list` hands back both directions
+/// mixed, and a caller that means to read sources cannot tell which of them
+/// it may read without keeping its own shadow record of a fact the substrate
+/// already knows.
 #[no_mangle]
 pub extern "C" fn clockwork_port_direction(port: c_uint) -> c_int {
     registry::acquire(port).map_or(0, |h| h.get().direction as c_int)

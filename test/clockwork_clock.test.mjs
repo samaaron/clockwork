@@ -2,10 +2,9 @@
 // Copyright (c) 2026 Sam Aaron
 //
 // ClockworkClock (js/lib/clockwork_clock.js) over a SharedArrayBuffer, with no browser:
-// a tempo change must not move the beat that is playing. The C++ session
-// writers learned this on 2026-09-01 (test_clock_tempo_change.cpp); the JS
-// writer, which is the one a web page's setBpm actually reaches, had the same
-// bug and no test.
+// a tempo change must not move the beat that is playing. The same rule holds
+// for the C++ session writers (test_clock_tempo_change.cpp); the JS writer is
+// the one a web page's setBpm reaches.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ClockworkClock } from "../js/lib/clockwork_clock.js";

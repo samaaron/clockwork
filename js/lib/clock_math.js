@@ -27,7 +27,7 @@ export function originFor(beat, t, bpm) {
  * A tempo change must not move the beat that is playing. This is the origin
  * that holds the beat playing at `now` under `oldBpm` still at `now` under
  * `newBpm`. An unanchored grid (origin 0) or a nonsensical old tempo is
- * returned untouched — see clock_math.h retempoOrigin for the history.
+ * returned untouched — see clock_math.h retempoOrigin for why.
  */
 export function retempoOrigin(origin, oldBpm, newBpm, now) {
   if (origin === 0 || !(oldBpm >= 1)) return origin;

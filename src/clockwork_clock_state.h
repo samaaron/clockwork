@@ -99,8 +99,8 @@ constexpr double kDefaultBpm = 120.0;
 // not only mapped over shared memory — ClockworkClock::Impl declares one as an
 // ordinary member (`ownedState`), the private state a clock answers from before
 // the engine binds it into the arena. Without these, a freshly constructed
-// ClockworkClock reported whatever the stack held: isLinkEnabled() came back true
-// on a build with no Link compiled in at all.
+// ClockworkClock answers from whatever the stack held (isLinkEnabled() true
+// on a build with no Link compiled in, say).
 //
 // Mapping a region and casting to this type is unaffected — nothing is
 // constructed there, so nothing is written. initDefaults() below is still the

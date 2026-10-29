@@ -172,12 +172,6 @@ pub unsafe extern "C" fn clockwork_sink_list(out: *mut c_uint, cap: c_uint) -> c
     unsafe { registry::list(out, cap) }
 }
 
-/// Close every open sink.
-///
-/// NOT in the original `src/clockwork_event_sink.h`, and added for the same two
-/// reasons `clockwork_port_close_all` was: shutdown wants one call rather than a
-/// list-and-loop, and one test case must not be able to leak slots into the
-/// next. Never the audio thread's.
 /// Cancel everything one sink is holding; returns how many were cancelled.
 /// A closed, stale or invented handle cancels nothing and answers 0.
 #[no_mangle]
@@ -191,6 +185,9 @@ pub extern "C" fn clockwork_sink_flush_all() -> c_uint {
     crate::registry::flush_all()
 }
 
+/// Close every open sink: shutdown wants one call rather than a list-and-loop,
+/// and one test case must not leak slots into the next. Never the audio
+/// thread's. What a sink still held is discarded, not sent.
 #[no_mangle]
 pub extern "C" fn clockwork_sink_close_all() {
     let _scope = clockwork_heap::router::EngineScope::enter();   // what this opens or frees is the router's

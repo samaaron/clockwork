@@ -94,7 +94,7 @@ pub fn storage_bytes(capacity_frames: u32, channels: u32) -> usize {
 /// the consumer reads another through the same `&FrameRing`, and memory
 /// reached through a shared reference is immutable unless it is in a cell:
 /// this is what makes those writes defined rather than a write through a
-/// pointer that only ever granted reads (Miri caught the earlier shape).
+/// pointer that only ever granted reads.
 ///
 /// Borrowed counters are not trusted (`src/clockwork_ports.h`): the other process
 /// may be dead, wedged or hostile, and the arithmetic below is saturating

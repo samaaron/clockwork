@@ -21,9 +21,8 @@ function ringWithHeader(length) {
 
 test("a length whose footprint rounding overflows is dropped and the tail resynced", () => {
   // (0xFFFFFFFF + 3) & ~3 is 0 in int32 arithmetic: a footprint of nothing
-  // passes every fit check while the payload claimed 4 GB. Found by
-  // fuzz_ring_drain against the C++ walk (2026-10-29); the same arithmetic
-  // is here.
+  // passes every fit check while the payload claimed 4 GB. The C++ walk has
+  // the same arithmetic (fuzz_ring_drain covers it there).
   const { ring, words } = ringWithHeader(0xFFFFFFFF);
   const state = { lastSeq: -1 };
   const delivered = [];
@@ -47,7 +46,7 @@ test("a length past the ring is dropped and the tail resynced", () => {
 test("a padding marker the writer did not wrap for is corruption and not a loop", () => {
   // A header-only frame at 0, a marker at 16, head at 32: the writer never
   // wrapped, so following the marker back to 0 would deliver the same frame
-  // for ever. Found by fuzz_ring_drain against the C++ walk (2026-10-29).
+  // for ever.
   const words = new Int32Array(4);
   const ring = ringAt(new ArrayBuffer(SIZE), 0, SIZE, words, { head: 0, tail: 1, sequence: 2, lock: 3 });
   ring.view.setUint32(0, 0xDEADBEEF, true);

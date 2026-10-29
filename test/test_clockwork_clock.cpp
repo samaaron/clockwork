@@ -460,12 +460,12 @@ TEST_CASE("ClockworkClock: a local setBpm fires the tempo callback exactly once"
 TEST_CASE("ClockworkClock: binding into the arena anchors the Link grid so beats stay small and a tempo change is continuous",
           "[ClockworkClock][Link]") {
     // The engine binds its clock into the SHM arena at init (bindStateToShm),
-    // which is where the grid gets a real epoch. The Link path once left this a
-    // no-op, trusting Link's callbacks — which do not fire at boot — so the grid
-    // sat at origin 0 and read out epoch-scale beats (~4e9 = seconds since
-    // 1900). A client adopted those, and the first tempo change re-anchored to
-    // Link's own small beat, shifting the domain under the client: a held beat
-    // resolved to a time ~4e9 seconds away, and a Link-mode sleep never woke.
+    // which is where the grid gets a real epoch. Link's callbacks do not fire
+    // at boot, so without the anchor the grid sits at origin 0 and reads out
+    // epoch-scale beats (~4e9 = seconds since 1900); a client that adopts
+    // those has the domain shift under it at the first tempo change, which
+    // re-anchors to Link's own small beat: a held beat resolves to a time
+    // ~4e9 seconds away, and a Link-mode sleep never wakes.
     ClockworkClock sc;
     ClockworkClockState region;
     ClockworkClockState::initDefaults(region);
@@ -474,7 +474,7 @@ TEST_CASE("ClockworkClock: binding into the arena anchors the Link grid so beats
     const double now = wallClockNTP();
     const double beatNow = sc.beatAtTime(now, 4.0);
     // Anchored to wall time: the current beat is small (a few seconds past
-    // boot), not epoch-scale. Without the anchor this was ~8e9.
+    // boot), not epoch-scale (~8e9 without the anchor).
     CHECK(beatNow < 1.0e6);
 
     // And the beat playing now stays put across a tempo change.
@@ -497,12 +497,12 @@ TEST_CASE("ClockworkClock: the arena grid and Link's own grid agree from the bin
           "[ClockworkClock][Link]") {
     // Link's timeline is born with the clock: beat 0 at construction. The
     // arena grid is anchored at the bind — after the engine has brought up
-    // its audio device, 0.8 s later on a laptop. Nothing reconciled the two,
-    // and the first tempo change did: applyTempoChange trusts Link's beat and
-    // re-anchored the arena grid to it, moving every beat a client held by
-    // the boot gap. A Sonic Pi thread sleeping on the shared clock saw its
-    // next beat land 775 ms in the past and was thrown for being behind. The
-    // test above never saw it: its gap is microseconds and its margin 0.5 s.
+    // its audio device, which can be most of a second later. The two must
+    // agree at the bind: applyTempoChange trusts Link's beat and re-anchors
+    // the arena grid to it, so a bind that did not reconcile them would move
+    // every beat a client holds by the boot gap at the first tempo change.
+    // The case above cannot see this: its gap is microseconds and its margin
+    // 0.5 s.
     ClockworkClock sc;
     std::this_thread::sleep_for(std::chrono::milliseconds(400));   // the boot gap
     ClockworkClockState region;
@@ -528,11 +528,9 @@ TEST_CASE("ClockworkClock: the arena grid and Link's own grid agree from the bin
 TEST_CASE("ClockworkClock: when Link's session moves its grid under the clock, the arena grid follows",
           "[ClockworkClock][Link]") {
     // Joining a session realigns this peer's timeline to the session's grid.
-    // That is Link's doing, and Link has no callback for it: the arena grid
-    // kept the old grid until the next tempo change snapped it across (two
-    // engines in one session: 3.3 beats, 687 ms, on a nudge from 60 to 61).
-    // The worker's tick now keeps the arena grid on Link's, so the move
-    // lands when the session moves, not on some later tempo change.
+    // That is Link's doing, and Link has no callback for it, so the worker's
+    // tick keeps the arena grid on Link's: the move lands when the session
+    // moves, not when the next tempo change re-anchors the arena grid.
     ClockworkClock sc;
     ClockworkClockState region;
     ClockworkClockState::initDefaults(region);
@@ -735,10 +733,10 @@ TEST_CASE("ClockworkClock: midi tempo de-jitters a wobbly clock",
 
 TEST_CASE("ClockworkClock: midi stall-and-burst keeps both beat and tempo",
           "[ClockworkClock][midi]") {
-    // Field capture 2026-06-11 (MOTU rig): the tick stream periodically stalls
-    // ~120ms then flushes the queued ticks ~300µs apart. The burst ticks are
-    // real (each is 1/24 beat) so they must all land in the beat count, while
-    // the garbage arrival intervals must not disturb the tempo.
+    // Some interfaces stall the tick stream ~120ms then flush the queued
+    // ticks ~300µs apart. The burst ticks are real (each is 1/24 beat) so
+    // they must all land in the beat count, while the garbage arrival
+    // intervals must not disturb the tempo.
     ClockworkClock sc;
     const int id = sc.claimMidiTimeline("portA", "Port A");
     const double iv = 60.0 / 111.0 / 24.0 * 1e6;          // ~111 BPM interval

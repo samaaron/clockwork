@@ -144,8 +144,7 @@ Packet messageWithBlob(const char* address, const void* blobData, size_t blobSiz
     // Sized to the blob rather than to a fixed 64 KB. A blob is the one
     // argument whose size is not bounded by anything in the message format, so
     // a fixed staging buffer here caps what the SUITE can test rather than
-    // what clockwork can carry — and it did: the first case to send a 64 KB
-    // blob failed with "out of buffer memory" from oscpack, which reads like a
+    // what clockwork can carry: oscpack's "out of buffer memory" reads like a
     // clockwork limit and is not one.
     std::vector<char> buf(blobSize + 1024);   // address, type tag, size word, padding
     osc::OutboundPacketStream s(buf.data(), buf.size());

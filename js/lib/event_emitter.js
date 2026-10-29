@@ -102,7 +102,7 @@ export class EventEmitter {
    */
   async emitAsync(event, ...args) {
     // What the listeners threw, handed back: one failing listener does not stop the others, but its failure is the
-    // caller's to report — logged here and dropped, a host's broken 'setup' looked like a boot that went fine
+    // caller's to report. Logged here and dropped, a failing 'setup' listener would look like a boot that went fine.
     const errors = [];
     const listeners = this.#listeners.get(event);
     if (listeners) {

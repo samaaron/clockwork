@@ -88,7 +88,7 @@ export class PostMessageTransport extends Transport {
             this.#handleWorkletMessage(event.data);
         };
         // Only now may the worklet drain the egress this way: a batch posted
-        // before the handler above existed went to nobody.
+        // before the handler above is attached is lost.
         this.#workletPort.postMessage({ type: 'listening' });
 
         // Producers postMessage OSC straight to the worklet, which classifies

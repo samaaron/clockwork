@@ -44,9 +44,8 @@ void drainInto(std::vector<EgressFrame>& out,
 } // namespace
 
 // Reserved for the guest. Static rather than heap-allocated so its lifetime is
-// the process's: clockwork holds the pointer across every rebuild, and a
-// region that outlived neither would be a use-after-free the tests would find
-// in the most confusing possible way.
+// the process's: clockwork holds the pointer across every rebuild, so a
+// region with a shorter lifetime would be a use-after-free.
 alignas(16) static uint8_t gGuestMemory[kGuestMemoryBytes];
 alignas(16) static uint8_t gAssets[kAssetsBytes];
 alignas(16) static uint8_t gReturns[kReturnsBytes];

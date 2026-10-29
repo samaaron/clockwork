@@ -8,9 +8,8 @@
  * next block reads from there (LinkAudioBridge::dateReads). Three drivers
  * render blocks — the device callback, the headless thread, the manual pump
  * — and each has to date, or the endpoint waits for a date that never comes
- * and every buffer the peer sends is dropped at the door, with nothing in
- * the counters a client reads to say why. The device callback did exactly
- * that once, when the dating moved into a body only the other two ran.
+ * and every buffer the peer sends is dropped on arrival, with nothing in
+ * the counters a client reads to say why.
  *
  * No peer here: dating does not need one, and a count of dated blocks
  * against blocks rendered says whether a driver does it.

@@ -30,14 +30,13 @@
  * however that app needs. It is not Clockwork's.
  *
  *
- * ── WHAT THIS REPLACES ──────────────────────────────────────────────────────
+ * ── ONE IMPLEMENTATION ──────────────────────────────────────────────────────
  *
- * Every consumer has so far written the ring arithmetic itself: the sequence
- * numbers, the wrap, the padding marker, the alignment, the read-head dance
- * against a producer that never blocks. That is a page of subtle code, it was
- * written at least three times, and a mistake in it does not fail cleanly — it
- * yields a torn message, or a reader that stalls, at a moment nobody can
- * reproduce. Once is enough.
+ * The ring arithmetic — the sequence numbers, the wrap, the padding marker,
+ * the alignment, the read head against a producer that never blocks — is a
+ * page of subtle code, and a mistake in it does not fail cleanly: it yields a
+ * torn message, or a reader that stalls, at a moment nobody can reproduce. It
+ * is written once, here, and every consumer uses it.
  *
  * With one exception, made on purpose (docs/THREADS.md). In a browser, a
  * thread other than the audio worklet cannot run this code without a stack
@@ -536,9 +535,8 @@ double clockwork_client_ntp_at_frame(const ClockworkClientSampleClock* clock, ui
  *
  * A tap is a ring of audio the engine keeps filling, and reading one is the
  * same three steps wherever it is done: find the slot, ask how far the audible
- * edge has reached, copy a window back from it. Every consumer that has drawn
- * a waveform has written those steps itself against the ring's internals; this
- * is them, once.
+ * edge has reached, copy a window back from it. Those steps are here, once,
+ * rather than in every consumer that draws a waveform.
  *
  * A slot is a small integer. Which slot carries what is between the engine's
  * embedder and its guest — clockwork numbers them and does not name them.

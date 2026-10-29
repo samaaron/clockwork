@@ -4,8 +4,8 @@
 //!
 //! This crate is the implementation of `src/clockwork_event_sink.h`, and that
 //! header, not this comment, is the contract. What is worth saying here is the
-//! shape of the code and the two decisions the header could not make because
-//! nothing existed yet when it was written:
+//! shape of the code and the two decisions the header leaves to the
+//! implementation:
 //!
 //! * [`queue`] — one bounded, allocation-free message queue. Multi-producer
 //!   (the header's own diagram has two: a DSP on the audio thread and

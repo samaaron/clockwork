@@ -14,8 +14,7 @@
  *     because the output has gone, re-attach to the preferred output, or
  *     pair again to pick up an input?
  *
- * Each scenario here corresponds to a bug we've fixed or a behaviour
- * we want to lock in going forward.
+ * Each case pins one decision.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "DevicePolicy.h"
@@ -130,8 +129,8 @@ TEST_CASE("BootFallback: skip the default itself when it's in the list",
 //
 // The default-output listener fires whenever the system default changes.
 // Following the wrong target cold-swaps (and on macOS rebuilds a pair's
-// aggregate), which perturbs the device list and re-fires the listener: the
-// storm/freeze. These cases lock in what we will and won't chase.
+// aggregate), which perturbs the device list and re-fires the listener, and
+// the loop runs away. These cases pin which targets are followed.
 // =============================================================================
 
 static bool follow(const std::string& nd, const std::string& cur, bool virt) {
@@ -152,10 +151,9 @@ TEST_CASE("FollowDefault: virtual device (NDI/Loopback) → do NOT follow",
 // switchDevice's auto-enable block and enableInputChannels resolve the -1
 // sentinel against the boot -i flag, and the result must be clamped to the
 // device's probed capacity: WASAPI rejects setAudioDeviceSetup outright
-// when asked for more inputs than exist (CoreAudio silently clamps, which
-// is how the unclamped kRequestMaxChannels path shipped). Previously
-// enableInputChannels resolved WITHOUT clamping — the Windows boot path
-// (enableInputChannels(-1) from Main) sent 64 input bits into WASAPI.
+// when asked for more inputs than exist (CoreAudio clamps on its own, so an
+// unclamped request only fails on Windows). The Windows boot path
+// (enableInputChannels(-1) from Main) must not send 64 input bits into WASAPI.
 // =============================================================================
 
 static int width(int requested, int boot, int probed) {
@@ -164,8 +162,7 @@ static int width(int requested, int boot, int probed) {
 
 TEST_CASE("InputWidth: auto sentinel + boot auto-max clamps to probed count",
           "[InputWidth]") {
-    // THE Windows boot bug: -i -1 → kRequestMaxChannels must not survive
-    // a successful probe.
+    // -i -1 → kRequestMaxChannels must not survive a successful probe.
     REQUIRE(width(-1, -1, 2) == 2);
     REQUIRE(width(-1, -1, 8) == 8);
 }
@@ -189,10 +186,8 @@ TEST_CASE("InputWidth: explicit request clamps to probed capacity",
 // chooseBootInputDevice
 // =============================================================================
 // The embedder hands the user's saved input over (SuperSonic: scsynth's -H);
-// boot pairs the opened output with this choice.
-// Before it existed, boot always paired the system default input and the
-// user's saved input arrived one cold swap later (a whole second studio
-// boot).
+// boot pairs the opened output with this choice, so the saved input is up
+// from the first open rather than one cold swap later.
 
 static std::string chooseInput(const std::string& requested,
                                const std::string& fallback,
@@ -450,20 +445,18 @@ static const std::vector<std::pair<std::string, std::string>> kInputTable = {
 
 TEST_CASE("ScopeInputs: stale cross-driver pref stops pairing instead of "
           "failing the open", "[ScopeInputs][BootInput]") {
-    // The shipped regression: prefs held driver "Windows Audio" with input
-    // "MOTU Pro Audio" (ASIO's name for the same box, saved while on ASIO --
-    // where the input selector mirrors the output). Unscoped, that name is
-    // present in the enumeration, so pairing was attempted and JUCE answered
-    // "No such device" with the output already open, dropping the engine to
-    // no device at all.
+    // Prefs can hold driver "Windows Audio" with input "MOTU Pro Audio"
+    // (ASIO's name for the same box, saved while on ASIO -- where the input
+    // selector mirrors the output). Unscoped, that name is present in the
+    // enumeration, so pairing is attempted and JUCE answers "No such device"
+    // with the output already open, dropping the engine to no device at all.
     //
     // Scoped, the name is simply not a candidate, so the choice falls back to
     // the system default: pairing is skipped and boot keeps its output.
     const auto scoped = scopeInputsToDriver(kInputTable, "Windows Audio");
     REQUIRE(chooseInput("MOTU Pro Audio", "", scoped).empty());
 
-    // Unscoped is what the bug did: the ASIO name resolves and would be
-    // handed to the open path.
+    // Unscoped, the ASIO name resolves and would be handed to the open path.
     const auto unscoped = scopeInputsToDriver(kInputTable, "");
     REQUIRE(chooseInput("MOTU Pro Audio", "", unscoped) == "MOTU Pro Audio");
 

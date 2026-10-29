@@ -125,7 +125,7 @@ fn the_host_takes_midi_only_and_only_while_installed() {
     }
 
     // Uninstalled: a MIDI port that does not exist is refused at open, as
-    // this build refused it before there was a host.
+    // without a host.
     clockwork_sink_set_host_emit(None);
     let target = CString::new("No Such Port, Surely").unwrap();
     // SAFETY: a NUL-terminated target.

@@ -322,14 +322,14 @@ TEST_CASE("tap-stream: copy_triggered_window zero-fills like copy_window",
                       [](float v) { return v == 0.0f; }));
 }
 
-// A wireless output (AirPlay 2026-10-06: a DMP-A6 at 44.1 kHz reporting
-// 88712 frames, two seconds, of output latency) puts the audible window two
-// seconds behind the writer. A ring sized only for the display window had
-// overwritten that window long before anyone read it: copy_window handed
-// back nothing and every scope, in every client, drew a flat line while the
-// engine rendered perfectly. The ring must cover the latency a real device
-// reports, plus the longest window a consumer draws, plus the read margin —
-// and the rule is a pure function the engine checks at every device start.
+// A wireless output (AirPlay at 44.1 kHz reports 88712 frames, two seconds,
+// of output latency) puts the audible window two seconds behind the writer.
+// A ring sized only for the display window overwrites that window before
+// anyone reads it: copy_window hands back nothing and every scope draws a
+// flat line while the engine renders. The ring must cover the latency a
+// real device reports, plus the longest window a consumer draws, plus the
+// read margin — and the rule is a pure function the engine checks at every
+// device start.
 TEST_CASE("tap-stream: the ring covers a two-second output latency",
           "[tap][stream][sampleclock][latency]") {
     constexpr uint32_t kRate    = 44100;

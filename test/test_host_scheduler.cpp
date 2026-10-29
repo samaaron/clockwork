@@ -4,11 +4,9 @@
  * test_host_scheduler.cpp — the standalone scheduler host's logic:
  * src/host/host_scheduler.h, src/host/host_outbound.h and src/host/osc_reader.h.
  *
- * Brought across from supersonic's test/host/host_tests.cpp, where it ran as
- * its own main() against the same three headers. Here it is Catch2, the
- * messages come from oscpack rather than a hand encoder, and the addresses
- * are the ones the host actually answers to now — /clockwork/schedule,
- * /clockwork/sched/flush, /clockwork/osc/send, /clockwork/midi/....
+ * The messages come from oscpack, and the addresses are the ones the host
+ * answers to — /clockwork/schedule, /clockwork/sched/flush,
+ * /clockwork/osc/send, /clockwork/midi/....
  *
  * The host is HostScheduler::ingest() from a recv thread and tick() from the
  * one thread that owns the store; between them the generic Scheduler, and on

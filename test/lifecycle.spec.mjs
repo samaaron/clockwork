@@ -3,9 +3,9 @@
 /*
  * The client's lifecycle: starting, stopping, suspending, resuming, recovering, reloading.
  *
- * boot.spec.mjs starts clockwork and shuts it down. Nothing tested what happens in between, and every one of these
- * was found by a host instead — an app on a phone whose audio came back dead after an interruption, or never
- * started. The guest is dsp/dummy, as in boot.spec.mjs: the host is what is tested.
+ * boot.spec.mjs starts clockwork and shuts it down; these cover what happens in between, as a host sees it (an app
+ * on a phone whose audio must come back after an interruption). The guest is dsp/dummy, as in boot.spec.mjs: the
+ * host is what is tested.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 

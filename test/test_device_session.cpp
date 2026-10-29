@@ -224,9 +224,8 @@ TEST_CASE("device session: choosing a driver opens nothing, and opening on anoth
     CHECK_FALSE(session.selectDriver("NoDriver"));
     CHECK(opensOf(*sys) == 0);
 
-    // From a device on one driver to a device on the other: JUCE's manager
-    // opened the new driver's default on the way, and then the device asked
-    // for. The session opens the one asked for.
+    // From a device on one driver to a device on the other: the session opens
+    // the one asked for, not the new driver's default on the way to it.
     REQUIRE(session.selectDriver("FakeDriver"));
     DeviceRequest mic;
     mic.input = "Fake Microphone";

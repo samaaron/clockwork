@@ -14,27 +14,21 @@
 
     Memory Layout:
       0-14MB:   WASM Heap (emscripten malloc, static data, stack) — and the
-                ring buffers, which are a static array in the data segment and
-                have always lived here rather than in a region of their own
+                ring buffers, which are a static array in the data segment,
+                not a region of their own
       14MB+:    Guest memory — opaque to clockwork, grows on demand
 
-    Clockwork DOES NOT KNOW WHAT IS IN THE GUEST REGION. Until 2026-08-31
-    this file named two regions above the heap — an "RT Pool (engine's
-    real-time allocator)" and a "Buffer Pool (audio samples)" — and sized the
-    first from a real-time-memory field inside one engine's own config. That
-    is one guest's memory plan written into clockwork, and a guest that has
-    neither an RT allocator nor audio samples had to pretend.
-
-    So there is one region now, and the guest subdivides it. Clockwork
-    reserves the address space, commits the initial slice, grows it on
-    request, and moves opaque bytes into it. What those bytes mean — an
+    Clockwork does not know what is in the guest region. There is one
+    region and the guest subdivides it; naming sub-regions here (an RT pool,
+    a sample buffer pool) would write one guest's memory plan into clockwork.
+    Clockwork reserves the address space, commits the initial slice, grows
+    it on request, and moves opaque bytes into it. What those bytes mean — an
     allocator arena, sample frames, anything else — is the guest's business
     and is decided by the guest's own client code.
 
     THE RINGS ARE INSIDE THE HEAP, not above it. `arena_storage` is a
-    static array, so the linker places it in the data segment; measured
-    2026-08-22 the regions span 6.72MB from `arenaBase`, all of it inside
-    what was then an 8MB heap — leaving about 1MB for malloc and the stack.
+    static array, so the linker places it in the data segment; the regions
+    span about 6.72MB from `arenaBase`, all of it inside the heap.
 
     The number that matters is guestMemoryOffset, because emscripten's malloc
     does not know about any of these regions: it starts after the static data
@@ -43,18 +37,15 @@
     of that gap — malloc gets the whole of it, and only their SUM decides
     anything.
 
-    Measured 2026-08-22: static data ends at ~7.4MB, so an 11MB
-    guestMemoryOffset left ~3.6MB for malloc — and a client asking for a large
-    guest region used very nearly all of it, so raising the OSC IN ring by
-    256KB was enough to push malloc into the guest's region and crash the
-    renderer. The gap is 14MB now.
+    Static data ends at about 7.4MB, so the rest of the gap is malloc's whole
+    budget. With a gap only a few MB past the static data, a few hundred KB
+    more in a ring is enough to push malloc into the guest's region and
+    corrupt it. The gap is guestMemoryOffset, the sum of the three.
 
-    Nothing measures this margin from a booted engine any more; two specs that
-    did (rt_pool_isolation, memory_headroom) were cited here long after they
-    stopped existing. What catches it now is in C++: clockwork_init refuses to boot
-    when malloc's frontier reaches a guest region the host placed itself, with
-    the two addresses in the message; and the guest's spans now come out of
-    the engine's own memory below that frontier, so there is nothing to reach.
+    Nothing in JS measures this margin. clockwork_init refuses to boot when
+    malloc's frontier reaches a guest region the host placed itself, with the
+    two addresses in the message; and the guest's spans come out of the
+    engine's own memory below that frontier, so there is nothing to reach.
 */
 
 /**
@@ -67,8 +58,6 @@ export const MemoryLayout = {
     /**
      * WASM heap size in bytes
      * Space for emscripten malloc, static data, and stack.
-     * Reduced from implicit 16MB since the guest's region became a region of
-     * its own, then given back the 3MB reserved next door but never used.
      * Holds the static ring-buffer array (6.72MB measured) plus malloc and
      * the stack, so treat the difference as the real malloc budget and
      * re-measure with `sonic.bufferConstants` after changing any region size.
@@ -79,13 +68,7 @@ export const MemoryLayout = {
     wasmHeapSize: 24 * 1024 * 1024,  // 24MB — see the measurement below
 
     /*
-     * WHY 24MB, MEASURED 2026-08-31.
-     *
-     * This said 12MB, and that raising it to 20MB "made things worse" and
-     * must not be repeated. The reasoning in that note was right about the
-     * pressure and wrong about the cause, so it is replaced rather than kept:
-     * raising the floor was never the problem, and the arithmetic here has
-     * never actually fit.
+     * WHY 24MB.
      *
      * What this space must hold, measured on the web build:
      *
@@ -96,21 +79,15 @@ export const MemoryLayout = {
      *                                                --------
      *                                                15.7 MB +
      *
-     * against a floor of 12MB + 2MB. It does not fit and never did. clockwork_heap
-     * is claimed with malloc, so it simply ran past the line: measured, its
-     * backing ended at 0x01113F48 (17.08 MB) while the guest's region began
-     * at 0x00E00000 (14.00 MB). Clockwork's heap and the guest's memory
-     * overlapped by 3.08 MB on EVERY boot, and nothing anywhere said so.
+     * A smaller floor does not fit: clockwork_heap is claimed with malloc, so
+     * its backing runs past guestMemoryOffset and the two allocators share
+     * bytes on every boot with nothing reporting it. Changing the floor then
+     * only moves which bytes are shared, which shows up as unrelated tests
+     * failing.
      *
-     * That is what the tests of the time were reacting to. They did not break
-     * because the gap grew; they broke because moving the gap moved which
-     * bytes two allocators shared, and any change to this number reshuffled a
-     * corruption that was always present.
-     *
-     * So the floor is now big enough to hold what is measured above, and
-     * the boot REFUSES TO RUN if the heap's end reaches the guest region
-     * (see clockwork_heap_backing_end). If that ever fires, raise this number —
-     * do not go looking for which test is flaky.
+     * So the floor holds what is measured above, and the boot refuses to run
+     * if the heap's end reaches the guest region (see
+     * clockwork_heap_backing_end). If that fires, raise this number.
      */
 
     /**
@@ -125,7 +102,7 @@ export const MemoryLayout = {
      * exports every start and size at runtime. Read them from a booted engine
      * (`sonic.bufferConstants`) and measure.
      *
-     * Measured on the web build, 2026-08-22: the regions span 6.474MB from
+     * Measured on the web build: the regions span 6.474MB from
      * `arenaBase`, of which TAPS is 4.097MB, SCOPE 1.500MB and
      * the OSC rings 1.125MB (IN 1MB + OUT 128KB). They sit inside the WASM
      * heap below, not in the reservation named here.
@@ -139,13 +116,7 @@ export const MemoryLayout = {
      * malloc at init_memory and hands it to clockwork::mem::set_arena, so it has to
      * be budgeted here or that malloc pushes the break upward into the guest.
      *
-     * 32MB because that is exactly what the guest region used to lend back for
-     * this. Until 2026-09-01 the client carved an RT arena (RT_ARENA_MIN, 32MB)
-     * out of the FRONT of its own region and passed the offset to the engine
-     * through a config-block slot; guestMemorySize was 36MB for that reason,
-     * "32MB RT pool + 4MB buffers". The 32MB moved here and the guest region
-     * kept the 4MB it was actually using, so the total is unchanged. The
-     * guest's two spans now come out of it — its fast memory, sized to what
+     * 32MB: the guest's two spans come out of it — its fast memory, sized to what
      * it declares (dsp_memory_bytes: scsynth's tables and its pool), and its
      * bulk memory, which takes what is left after the RT router's block
      * (CLOCKWORK_GUEST_MEMORY_BULK_BYTES, CLOCKWORK_FAST_RESERVE in
@@ -214,7 +185,7 @@ export const MemoryLayout = {
      * only the committed size grows into it. That is why this is a build-time
      * cap rather than something a caller can lift at runtime.
      *
-     * Measured 2026-08-31: growth works because the memory is created with
+     * Growth works because the memory is created with
      * `shared: true`. A non-shared WebAssembly.Memory DETACHES its old
      * ArrayBuffer on grow() and every view over it throws; a shared one does
      * not, and pre-existing views keep reading. The growable allocator relies

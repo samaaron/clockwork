@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 //
-// The dev server every clockwork product needs and each used to write:
+// The dev server for clockwork products:
 // static files with the two cross-origin isolation headers the SAB
 // transport needs, and HTTPS on request — AudioWorklet is a secure-context
 // feature, so a page reached over plain http on a LAN address boots no

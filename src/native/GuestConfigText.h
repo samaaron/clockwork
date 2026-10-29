@@ -12,15 +12,13 @@
  * guest it boots.
  *
  * The hosts here — the native engine, the NIF, and the web client — agree on
- * TEXT: lines of `name=value`, terminated by NUL. It replaces a positional
- * block of uint32 slots that two writers and one reader had to agree on
- * index by index, and did not: a native write at slot 7 was read as slot 10
- * once, and every test passed over it because a wrong slot held a plausible
- * number. A name cannot be off by one. What the names ARE is the guest's to
- * say (a guest's own header lists them); a host that wants to set one writes
- * the name it was given and its value, and a guest that does not know the
- * name refuses the boot with the line, rather than booting with a silently
- * different configuration.
+ * TEXT: lines of `name=value`, terminated by NUL. Names, not positional
+ * uint32 slots: a slot index two writers and one reader disagree on still
+ * reads as a plausible number, while a name cannot be off by one. What the
+ * names ARE is the guest's to say (a guest's own header lists them); a host
+ * that wants to set one writes the name it was given and its value, and a
+ * guest that does not know the name refuses the boot with the line, rather
+ * than booting with a silently different configuration.
  *
  * The two helpers keep one line per name.
  */

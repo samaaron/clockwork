@@ -86,12 +86,11 @@ double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate
     // floor the arena carries) is taken up by slowing, kAnchorTakeUpShare of
     // a block a block, so a reader never sees time go back and the clock is
     // on the wall within a few dozen blocks. Settled: the IIR's pull,
-    // bounded (kClockSlewPerBlock) — the clock is the ruler everything is
-    // scheduled on, and a ruler that flexes under what is already on it
-    // misplaces it. Real drift is well under the bound and followed in full;
-    // a wall clock set back is followed the same way; and as the bound is
-    // far under a block a reader never sees time go back, whatever the wall
-    // did.
+    // bounded (kClockSlewPerBlock) — everything is scheduled against this
+    // clock, and moving it moves what is already scheduled. Real drift is
+    // well under the bound and followed in full; a wall clock set back is
+    // followed the same way; and as the bound is far under a block a reader
+    // never sees time go back, whatever the wall did.
     const double blockSec = std::max(0.0, samplePosition - mLastSamplePos) / sampleRate;
     mLastSamplePos = samplePosition;
     double pull = 0.0;

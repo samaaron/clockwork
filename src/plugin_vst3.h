@@ -42,13 +42,13 @@ uint32_t  latency(const Instance* p);
 uint32_t  param_count(const Instance* p);
 int       param_info(const Instance* p, uint32_t index, PluginParam* out);
 void      param_set(Instance* p, uint32_t id, double value, uint32_t frame_offset);
-// Queue a note for the next block. `on` selects note-on or note-off.
 // The session clock, read per block to fill ProcessContext's musical fields.
 void      set_clock(Instance* p, const struct ClockworkClockState* clock);
 // A timeline to render the coming blocks against instead of the clock; NULL
 // returns to the clock. Audio thread (plugin_host.h plugin_set_timeline).
 void      set_timeline(Instance* p, const struct ClockworkTimeline* timeline);
 
+// Queue a note for the next block. `on` selects note-on or note-off.
 void      note(Instance* p, bool on, int16_t channel, int16_t pitch,
                float velocity, uint32_t frame_offset);
 // A MIDI controller and pitch bend, delivered as the parameter the plugin's

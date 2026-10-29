@@ -6,7 +6,7 @@
  *
  * Every device the engine opens is opened, driven and closed on its device
  * lane (ClockworkEngine::deviceTaskLoop). On Windows the device layer is COM,
- * and its drivers expect what JUCE's message thread used to give them: one
+ * and its drivers expect what a JUCE message thread gives them: one
  * thread in a single-threaded apartment (an ASIO driver is an apartment-
  * threaded COM object with no proxies, usable only from the thread that made
  * it) that dispatches its window messages while it waits (some drivers run

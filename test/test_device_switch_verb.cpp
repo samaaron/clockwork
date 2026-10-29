@@ -9,9 +9,9 @@
  * records the outcome from switch.done — Sonic Pi saves its output choice then,
  * and only then.
  *
- * Seen with Sonic Pi 5.0.0 (2026-10-02): picking "OS Default" never produced a
- * switch.done, so the choice was never saved, and every later launch booted
- * pinned to the device the user had picked before it.
+ * A switch to the system default must produce a switch.done too: without one
+ * the client never saves the choice, and every later launch boots pinned to
+ * the device picked before it.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -165,10 +165,10 @@ TEST_CASE("SwitchVerb: rapid picks collapse to the last, which alone ends in "
 
 TEST_CASE("SwitchVerb: a pick made while another is switching is not lost",
           "[SwitchVerb]") {
-    // The debounce worker had taken the first pick and was switching to it
-    // when the second came. The second found the worker running and left it
-    // to the worker, which then finished the first and stopped: the second
-    // was never switched to, and never answered, until the next pick.
+    // A second pick that arrives while the debounce worker is switching to
+    // the first must not be left to that worker alone: a worker that
+    // finishes the first and stops leaves the second unswitched and
+    // unanswered until the next pick.
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
@@ -203,9 +203,9 @@ TEST_CASE("SwitchVerb: a pick made while another is switching is not lost",
 
 TEST_CASE("SwitchVerb: a menu label sent as the input, such as '-- None --', is "
           "refused by name and the engine plays on where it was", "[SwitchVerb]") {
-    // Seen from the field: the GUI's display string for "no input" leaked onto
-    // the wire. Refused before anything is torn down, with the name in the
-    // error, rather than failing halfway through a swap.
+    // A GUI display string for "no input" is not a device name. Refused
+    // before anything is torn down, with the name in the error, rather than
+    // failing halfway through a swap.
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
@@ -237,12 +237,12 @@ TEST_CASE("SwitchVerb: a menu label sent as the input, such as '-- None --', is 
 
 TEST_CASE("SwitchVerb: an output name longer than any device's is refused in "
           "switch.done, and the engine plays on where it was", "[SwitchVerb]") {
-    // A name is whatever a client sends. Refusing this one built a switch.done
-    // carrying it twice (asked for, and in the error) in a fixed 2 KB buffer.
-    // That threw on the device lane, where nothing catches: std::terminate,
-    // and any host the engine is embedded in with it. Then, built to fit, the
-    // switch.done was bigger than an egress frame and was dropped unsaid.
-    // Now no device lane is troubled with it: refused at once, echoed cut.
+    // A name is whatever a client sends. A switch.done carrying it twice
+    // (asked for, and in the error) must neither overflow a fixed reply
+    // buffer on the device lane, where nothing catches and a throw is
+    // std::terminate for the process and any host the engine is embedded in,
+    // nor outgrow an egress frame and be dropped. So no device lane sees it:
+    // refused at once, echoed cut.
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
@@ -271,9 +271,9 @@ TEST_CASE("SwitchVerb: an output name longer than any device's is refused in "
 
 TEST_CASE("SwitchVerb: turning inputs off while following the system default "
           "keeps following it", "[SwitchVerb]") {
-    // Turning the mic off is not choosing an output. It used to lock the
-    // engine to whatever it was playing on (manual mode), and from then on a
-    // change of the system default was ignored.
+    // Turning the mic off is not choosing an output: it must not lock the
+    // engine to whatever it is playing on (manual mode), which would ignore
+    // every later change of the system default.
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     REQUIRE(fix.engine().setDeviceMode("system").empty());
@@ -305,7 +305,7 @@ TEST_CASE("InputsVerb: turning inputs off while following the system default "
 TEST_CASE("InputsVerb: turning inputs on for an eight-input interface opens all eight, "
           "and turning them back on after off opens all eight again", "[SwitchVerb]") {
     // Sonic Pi boots with inputs off (-i 0), which says nothing about how many
-    // the user wants once they turn them on. Capping at stereo left an
+    // the user wants once they turn them on. A cap at stereo would leave an
     // eight-input interface at two.
     auto sys = std::make_shared<fake_audio::FakeSystem>();
     auto box = std::make_shared<fake_audio::FakeDeviceSpec>();

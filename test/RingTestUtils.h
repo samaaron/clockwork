@@ -10,10 +10,10 @@
  * loop would dispatch.
  *
  * `Scheduler` is duck-typed, exactly as clockwork_fire_due() duck-types it: anything
- * with popDue/release fits. Naming a concrete scheduler here once broke every
- * test that included this header, whether it used a scheduler or not, when
- * that class moved; clockwork's own instantiation is EngineScheduler
- * (src/scheduler/engine_schedule.h) and this header still does not name it.
+ * with popDue/release fits. Naming a concrete scheduler here would couple
+ * every test that includes this header to that class, whether it uses a
+ * scheduler or not; clockwork's own instantiation is EngineScheduler
+ * (src/scheduler/engine_schedule.h) and this header does not name it.
  */
 #pragma once
 

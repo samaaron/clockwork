@@ -6,11 +6,10 @@
  *
  * Every open of a device is heard: a click, a dropout, a moment of silence
  * on whatever else plays through it, and on CoreAudio an aggregate made and
- * pulled down again. JUCE's device manager opened the system defaults first
- * and then whatever was wanted, so the engine did too — a recovery opened the
- * default and then the user's device; a boot opened the output, then again
- * with the user's microphone, then again at the session's rate. These pin
- * the opens to what was asked for: the user's devices, once.
+ * pulled down again. These pin the opens to what was asked for: the user's
+ * devices, once — a boot opens the output with the user's microphone at the
+ * session's rate in one go, and a recovery opens the user's devices without
+ * the system default on the way.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"

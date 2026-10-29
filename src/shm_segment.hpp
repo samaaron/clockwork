@@ -64,8 +64,8 @@ inline uint64_t detail_random_u64() {
     return (static_cast<uint64_t>(rd()) << 32u) ^ static_cast<uint64_t>(rd());
 }
 
-// The sample clock is declared with the layout it reads (shared_memory.h);
-// named here too because that is where callers have always found it.
+// The sample clock is declared with the layout it reads (shared_memory.h)
+// and re-exported here.
 using ::sample_clock_view;
 using ::read_sample_clock;
 
@@ -79,11 +79,9 @@ using std::string;
 // (shm_peer_plane.h) sits after the blob: it is native-segment-only (its
 // consumers are the native host and an external peer), so the arena layout —
 // and with it the web SAB and embedded profiles — is untouched by it.
-// Raised from 128 to 256 when the guest-memory fields were added: the header
-// had grown to exactly 128 bytes, so the next two words overflowed it and the
-// static_assert below caught it. Headroom, not a snug fit — every field added
-// here is a region someone needs to find without compile-time knowledge, and
-// running out of room is not a reason to make one harder to find.
+// Headroom, not a snug fit: every field added to the header is a region a
+// reader needs to find without compile-time knowledge, and the static_assert
+// below fails the build if the header outgrows this.
 static constexpr size_t SHM_BLOB_OFFSET = 256;  // aligned, >= sizeof(shm_segment_header)
 // Rounded up to 8: the arena total is only guaranteed 4-aligned, and the peer
 // plane header is alignas(8).
@@ -440,30 +438,11 @@ inline void shm_remove(const string& name) {
 //   node-tree, scope and tap streams are all addressed by their
 //   shared_memory.h offsets and observable cross-process for free.
 //
-// MAGIC history:
-//   0x5C09E001  initial (scope + control busses only)
-//   0x5C09E002  added metrics + node tree mirror
-//   0x5C09E003  added shm_audio_buffer multi-slot ring
-//   0x5C09E004  unified: segment == shared_memory.h arena blob (rings in
-//               segment; scope fixed-inline; TLSF pool + control busses removed)
-//   0x5C09E006  + Link metrics fields (METRICS_SIZE 184→232)
-//   0x5C09E007  appended the peer command plane after the arena blob
-//               (shm_peer_plane.h: SPSC command + reply rings)
-//   0x5C09E008  tap slots became lossless cursor-ring streams
-//               (shm_tap_stream.hpp) + ClockworkClock sample-clock region appended
-//               to the arena (engine-frames ↔ DAC-NTP mapping)
-//   0x5C09E009  guest memory regions (assets/returns) after the plane
-//   0x5C09E00A  channel map region
-//   0x5C09E00B  self-describing for readers: control/clock-state/native-stats/
-//               sample-clock/channel-map sizes and the scope geometry
-//               appended, and readers (shm_segment_client, clockwork_client)
-//               address every region through the header (ShmReaderLayout)
-//               instead of their own build's constants. The segment is also
-//               anonymous from here: no name, handed over by shm_attach.hpp.
-//   0x5C09E00C  the arena describes itself (clockwork_arena.h): the blob's
-//               regions left this header for the arena's own, which every
-//               reader — in-process, segment, worklet — takes the same way.
-//               This header keeps only what is segment-relative.
+// MAGIC changes with the layout; a reader accepts the current value only. The
+// blob's regions are described by the arena's own header (clockwork_arena.h),
+// which every reader (in-process, segment, worklet) takes the same way; this
+// header keeps only what is segment-relative. The segment is anonymous: no
+// name, handed over by shm_attach.hpp.
 //
 // Publication: the creator zeroes the whole segment and writes the header
 // geometry, but defers the MAGIC store. The engine then populates the arena
@@ -481,7 +460,7 @@ inline void shm_remove(const string& name) {
 // changes propagate through the header rather than requiring a hand-synced copy.
 // All offsets are relative to the arena blob base (segment + blob_offset).
 struct shm_segment_header {
-    // E00C: the arena describes itself. Every region INSIDE the blob is in the
+    // The arena describes itself. Every region INSIDE the blob is in the
     // arena's own header (clockwork_arena.h, at blob_offset), read by every
     // kind of reader the same way; this header names only what is
     // segment-relative — where the blob is, and the regions that sit after it.
@@ -696,9 +675,6 @@ struct native_stats {
 
 class shm_segment_creator {
 public:
-    // control_busses is accepted for call-site compatibility but unused: the
-    // unified arena is fixed-size and control busses are process-local (heap),
-    // so they don't live in the segment.
     // The lanes are the caller's to size (a host's launch config); the
     // segment is as large as they need. NOT cleared here: fresh anonymous
     // memory is zero on every platform, and clearing it would commit every
@@ -844,9 +820,9 @@ public:
 
         shm = std::make_unique<shm_segment>(handle.ptr, false);
     }
-    // Only a real handle. Before the segment was anonymous this took a PORT,
-    // and a port converts silently to an int — which then fails at fstat
-    // rather than at compile time. Any other integer type is refused here.
+    // Only a real handle. Any other integer (a port number, say) would convert
+    // silently to an int and fail at fstat rather than at compile time, so
+    // every other integer type is refused here.
     template <typename T>
     explicit shm_segment_client(T) = delete;
 

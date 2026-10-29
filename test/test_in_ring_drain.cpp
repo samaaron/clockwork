@@ -8,10 +8,9 @@
  * native, a cross-process writer to the public shm segment) places in the IN
  * ring. The cursors and frame headers are therefore NOT trusted. These tests
  * inject frames the writer would never produce and assert the drain:
- *   - terminates (a length < header size previously underflowed the payload
- *     size and left the tail un-advanced → an infinite loop on the audio
- *     thread; if that regresses, process_audio() never returns and the test
- *     times out),
+ *   - terminates (a length < header size that underflows the payload size
+ *     and leaves the tail un-advanced is an infinite loop on the audio
+ *     thread: process_audio() never returns and the test times out),
  *   - resyncs the tail to head (dropping the suspect region) rather than
  *     walking it one byte at a time, and
  *   - counts the drop.
@@ -87,9 +86,9 @@ TEST_CASE("in-ring-drain: zero-length frame does not hang and is dropped",
     const uint32_t droppedBefore =
         control() ? fx.engine().getMetrics().messages_dropped.load() : 0;
 
-    // length == 0 < sizeof(Message): the pre-fix payload-size computation
-    // underflowed and the drop path advanced the tail by length (0), spinning
-    // forever. If pump() returns, the lower-bound guard fired.
+    // length == 0 < sizeof(Message): without the lower-bound guard the
+    // payload-size computation underflows and the drop path advances the
+    // tail by length (0), spinning forever. If pump() returns, the guard fired.
     injectHeader(MESSAGE_MAGIC, 0);
     pump();
 
@@ -123,7 +122,7 @@ TEST_CASE("in-ring-drain: a length whose footprint rounding overflows is dropped
 
     // (0xFFFFFFFF + 3) & ~3 is 0 in 32 bits: a footprint of nothing passes
     // every fit check, and the payload the header claims is 4 GB from a
-    // pointer inside the ring. Found by fuzz_ring_drain (2026-10-29).
+    // pointer inside the ring.
     injectHeader(MESSAGE_MAGIC, 0xFFFFFFFFu);
     pump();
 
@@ -141,8 +140,7 @@ TEST_CASE("in-ring-drain: a padding marker the writer did not wrap for is corrup
 
     // A header-only frame at 0, a padding marker at 16, and head at 32: the
     // writer never wrapped (head is past the marker), so following the marker
-    // back to 0 would deliver the same frame for ever, every pass. Found by
-    // fuzz_ring_drain (2026-10-29).
+    // back to 0 would deliver the same frame for ever, every pass.
     const uint32_t frame[4] = { MESSAGE_MAGIC, sizeof(Message), 0, 0 };
     const uint32_t pad[4]   = { PADDING_MAGIC, 0, 0, 0 };
     std::memcpy(arena_storage + IN_RING_START, frame, sizeof frame);

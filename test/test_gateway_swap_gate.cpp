@@ -8,10 +8,9 @@
  * pass that waits for the swap gate waits for the swap, and the swap waits
  * for it: the park gives up after 2 s and rebuilds the arena under a pass
  * still in flight, and a run of swaps stalls the engine's replies and logging
- * for as long as they last. Found by the device-event race case
- * (test_device_events.cpp) on CI, 2026-10-04: the Tracks bridge read the
- * device's buffer size through currentDevice() every 64 passes. Asking the
- * engine about its devices over OSC did the same.
+ * for as long as they last. The pass reaches the device in two ways: the
+ * Tracks bridge reads its buffer size through currentDevice() every 64
+ * passes, and a device query over OSC reads it; neither may wait on the gate.
  *
  * Each case holds the gate as a swap does, and needs the pass to keep
  * running: every pong it waits for is delivered by a pass.

@@ -57,7 +57,7 @@ TEST_CASE("clockwork-sys: the prefix rule claims exactly clockwork's namespace",
     REQUIRE_FALSE(claims("/clockworks/ping"));
     REQUIRE_FALSE(claims("/clockwork-system-status"));
     REQUIRE_FALSE(claims("/clockwork-sys/ping"));
-    // The names clockwork USED to answer on are now the DSP's like any other.
+    // Any other prefix is the DSP's, however engine-like it reads.
     REQUIRE_FALSE(claims("/engine/status"));
     REQUIRE_FALSE(claims("/clock/tempo/get"));
     REQUIRE_FALSE(claims("/dsp-probe/ping"));
@@ -184,15 +184,13 @@ TEST_CASE("clockwork-sys: which of clockwork's verbs the audio thread answers, a
     CHECK_FALSE(clockwork_sys_control_takes(bundle.ptr(), bundle.size()));
 }
 
-// NOTE: the end-to-end cases that pushed these verbs through the IN ring and
-// read the replies off the RT egress ring are deliberately NOT here. They need
-// a DSP attached to boot clockwork, and the boundary that defines a DSP is being
-// redesigned. They also surfaced something worth fixing first, recorded here
-// so it is not lost: driven through the lanes ABI alone, g_active_split used
-// to be left unset, so OSC written to the IN ring was drained and dropped
-// with "no backend for OSC". init_memory now publishes a default boundary by
-// compare-exchange for exactly that case (audio_processor.cpp), so a bare
-// lanes host does have a router; ClockworkEngine still overwrites it at boot.
+// NOTE: the end-to-end cases that push these verbs through the IN ring and
+// read the replies off the RT egress ring are deliberately NOT here: they need
+// a DSP attached to boot clockwork. A host driven through the lanes ABI alone
+// has a router because init_memory publishes a default boundary by
+// compare-exchange (audio_processor.cpp); without one, OSC written to the IN
+// ring is drained and dropped with "no backend for OSC". ClockworkEngine
+// overwrites that default at boot.
 
 // docs/SURFACE.md's line, as code: the client half is what a build may
 // compile out (CLOCKWORK_CLIENT_VERBS), the transport half never. The

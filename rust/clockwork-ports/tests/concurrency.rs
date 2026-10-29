@@ -54,8 +54,7 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
     // The producer's block must NOT divide the ring's capacity, or the write
     // cursor stays aligned to it and a push NEVER straddles the wrap — the
     // ring's hardest case would then go unexercised for the whole run. 100
-    // against 1024 misaligns immediately and keeps misaligning. (Found by
-    // mutation: deleting the wrap-segment copy left this test green.)
+    // against 1024 misaligns immediately and keeps misaligning.
     const BLOCK: usize = 100;
 
     let port = open("concurrency-source", SOURCE, CH as u32, 1024);
@@ -234,15 +233,15 @@ fn a_port_closed_under_a_live_reader_keeps_reads_whole() {
     // The block is deliberately large (2048 frames) so the reader spends a
     // long time inside one read and the close has somewhere to land.
     //
-    // HONEST LIMIT: this is a smoke test, not a proof. Mutation-checked by
-    // dropping `refs(w) != 0` from the reclaim condition in registry.rs — so a
-    // closed slot IS freed under a live reader — and it stayed green, because
-    // the freed port and the one opened a microsecond later come out of the
-    // same allocator block and read alike. The rule itself is pinned
-    // deterministically in registry.rs's own tests
-    // (`a_closed_slot_stays_reserved_while_a_reader_is_inside_it`), which does
-    // catch that mutation. What this case is worth is the churn: four thousand
-    // opens, fills and closes against a reader that never stops.
+    // LIMIT: this is a smoke test, not a proof. With `refs(w) != 0` dropped
+    // from the reclaim condition in `clockwork-slots` — a closed slot freed
+    // under a live reader — this case can stay green, because the freed port
+    // and the one opened a microsecond later come out of the same allocator
+    // block and read alike. The rule itself is pinned deterministically in
+    // `clockwork-slots`'s own tests
+    // (`a_closed_slot_stays_reserved_while_a_reader_is_inside_it`). What this
+    // case is worth is the churn: four thousand opens, fills and closes
+    // against a reader that never stops.
     const ROUNDS: u32 = 4_000;
     const BLOCK: usize = 2048;
 

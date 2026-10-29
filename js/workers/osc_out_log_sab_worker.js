@@ -12,8 +12,7 @@
  * Being overtaken is normal and expected. Writers reserve space against the
  * ENGINE's position and know nothing about a watcher, so a logger that falls
  * behind has its unread bytes overwritten. The tap resynchronises to the
- * newest traffic and counts what went past; that recovery used to be hand-
- * written here, peeking at frame magic to guess whether it had been lapped.
+ * newest traffic and counts what went past.
  */
 
 import { calculateInControlIndices } from '../lib/ring_cursor_offsets.js';

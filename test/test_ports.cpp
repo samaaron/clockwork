@@ -401,9 +401,8 @@ TEST_CASE("ports: a producer thread and an audio loop reconcile exactly",
     // The PRODUCER's block deliberately does not divide the 1024-frame ring.
     // With 128 against 1024 the write cursor stays aligned and a push never
     // straddles the wrap, so the ring's hardest case goes unexercised for the
-    // whole run — deleting the wrap-segment copy left this case green until
-    // the block became 100. The consumer reads 128, which is what an audio
-    // callback would do.
+    // whole run and a broken wrap-segment copy passes. The consumer reads
+    // 128, which is what an audio callback would do.
     constexpr uint32_t kProduce = 100;
     constexpr uint32_t kBlock   = 128;
 

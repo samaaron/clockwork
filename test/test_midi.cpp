@@ -88,9 +88,8 @@ TEST_CASE("/clockwork/midi/refresh broadcasts a ports update", "[midi]") {
 
     // The refresh enumerates the OS's devices, behind the hot-swap watcher's
     // own start-up refreshes on the same lock. On Windows that is WinRT, and
-    // on a loaded runner one enumeration has taken over two seconds (ci run
-    // 40837679771), so the wait is bounded only against a broadcast that
-    // never comes.
+    // one enumeration can take seconds on a loaded machine, so the wait is
+    // bounded only against a broadcast that never comes.
     OscReply r;
     CHECK(fx.waitForReply("/clockwork/midi/ports", r, 30000));
 }
@@ -162,7 +161,7 @@ TEST_CASE("/schedule-wrapped /midi/clock/beat reaches the engine clock-out", "[m
     // schedule→fire→dispatch round trip and reach MidiClockOut
     // via the unified dispatch (same path an immediate /midi/clock/beat would hit).
     // The precise per-beat tick count is covered by test_midi_clock_out.cpp, which
-    // drives MidiClockOut directly; fired output now flows through the private
+    // drives MidiClockOut directly; fired output flows through the private
     // control ring (not the outbound ring), so it isn't tapped here — this asserts
     // the integration path is live and crash-free.
     EngineFixture fx;

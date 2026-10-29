@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn placeholder_is_a_never_seen_timeline() {
         // 60 BPM free-run from the epoch: what a client asking about an
-        // unclaimed port has always been told.
+        // unclaimed port is told.
         let t = Timeline::placeholder(-1);
         assert_eq!(t.id, -1);
         assert_eq!(t.bpm, Timeline::FALLBACK_BPM);

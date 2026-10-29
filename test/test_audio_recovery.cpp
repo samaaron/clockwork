@@ -106,10 +106,10 @@ TEST_CASE("RateSkewMonitor: a nominal rate change re-anchors",
 }
 
 // ── RateSkewPolicy ───────────────────────────────────────────────────────────
-// The property that would have caught the storm as a design flaw: against a
-// PERSISTENT mismatch the old remedy was an action that reproduced the
-// mismatch, without limit. sonic-pi#3565: a mixer clocked at 44.1k reporting
-// 48k, 79 cold swaps in one session, each one stopping the client's jobs.
+// Against a PERSISTENT mismatch, a remedy that reproduces the mismatch (a
+// cold swap at the reported rate) must not repeat without limit: a mixer
+// clocked at 44.1k that reports 48k would otherwise cold-swap on every bad
+// window, each swap stopping the client's jobs.
 
 using clockwork::audio::RateSkewAction;
 using clockwork::audio::RateSkewPolicy;
@@ -155,7 +155,7 @@ TEST_CASE("RateSkewPolicy: a different ratio is a different fault",
     policy.acted(at(0.919));
     policy.acted(at(0.919));
     CHECK(policy.streak() == 2);
-    // Not the mixer's 0.919 any more: a 0.3x free-run restarts the count, so
+    // A different ratio: a 0.3x free-run restarts the count, so
     // two unrelated episodes cannot add up to "persistent".
     REQUIRE(policy.next(at(0.3)) == RateSkewAction::Recover);
     policy.acted(at(0.3));

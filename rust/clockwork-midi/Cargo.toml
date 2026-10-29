@@ -31,10 +31,9 @@ default = []
 # builds by CMake (--features winrt).
 winrt = ["midir/winrt"]
 
-# midir provides the actual device IO on both targets (CoreMIDI/ALSA/WinMM/WinRT
-# natively, Web MIDI on wasm). Vendored from a patched fork (adds webmidi
-# `send_at`); the path is finalised to a submodule/vendor dir in the build-wiring
-# step. Native target only for now; the wasm target is added with the web boundary.
+# midir provides the native device IO (CoreMIDI/ALSA/WinMM/WinRT), vendored in
+# external/midir with a webmidi `send_at` patch. Native target only: on wasm
+# the Web MIDI I/O is done in JS and this crate supplies the shared logic.
 # coremidi_send_timestamped: stamp outgoing CoreMIDI packets with the host time
 # at send (instead of 0 = "now"). The receiver then gets a precise hardware
 # timestamp, so the engine's pulse anchoring uses real pulse times rather than

@@ -9,10 +9,9 @@
  * gives (js/lib/host_front.js), so a client reads the same refusal on every
  * host, and the generation it was refused in (docs/RESTARTS.md).
  * A typo, or a verb from a newer client, is "unknown clockwork verb"; a verb
- * that exists but whose arguments it cannot read is "malformed".
- *
- * The subsystems' namespaces (midi/, gamepad/, osc/) once answered neither:
- * the Rust decoders returned nothing for both, and the verb was dropped.
+ * that exists but whose arguments it cannot read is "malformed". The
+ * subsystems' namespaces (midi/, gamepad/, osc/) answer both: a verb the Rust
+ * decoder returns nothing for is refused, not dropped.
  */
 #include <catch2/catch_test_macros.hpp>
 

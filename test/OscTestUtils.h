@@ -3,11 +3,9 @@
 /*
  * OscTestUtils.h — OSC message builder and reply parser for clockwork tests.
  *
- * Deliberately smaller than the version this was taken from. That one also
- * carried builders for a DSP's own words — program images, definition blobs,
- * a uuid argument type — and none of those belong in a repository whose claim
- * is that it contains neither guest's vocabulary. What is left is generic OSC:
- * build a message, read one back.
+ * Generic OSC only: build a message, read one back. Builders for a guest's
+ * own words (program images, definition blobs, a uuid argument type) do not
+ * belong here, because this repository contains no guest's vocabulary.
  *
  * Uses the vendored oscpack (src/vendor/oscpack, MIT, Ross Bencina) for
  * encoding, and a hand-rolled reader for decoding so a malformed reply is a

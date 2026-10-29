@@ -10,17 +10,16 @@
  * nothing left to decide, and therefore nothing for a scheduler to decide.
  *
  * NOT A SCHEDULER FEATURE. Routing ticks through clockwork's timed queue would
- * make a build with the queue compiled out have no spread clock at all — and a
- * DSP that is already a scheduler, and so wants no queue, is the last thing
- * that should lose timed output.
+ * leave a build with the queue compiled out (a DSP that schedules for itself)
+ * with no spread clock at all.
  *
  * A tick goes straight to a MIDI sink carrying its own time
  * (clockwork_event_sink.h), and the sink honours that time at the edge: a CoreMIDI
- * packet timestamp, an ALSA queue, Web MIDI's send(bytes, ts). That is TIGHTER
- * than the queue path even where the queue exists, because the timestamp stops
- * being re-derived at each hop and is instead handed to the platform that
- * actually delivers it. Clockwork's own queue is now one possible consumer of
- * outgoing events, not a stage every one of them must pass through.
+ * packet timestamp, an ALSA queue, Web MIDI's send(bytes, ts). That is tighter
+ * than the queue path even where the queue exists: the timestamp is not
+ * re-derived at each hop but handed to the platform that delivers it.
+ * Clockwork's own queue is one possible consumer of outgoing events, not a
+ * stage every one of them must pass through.
  *
  * TWO WAYS TO ASK FOR A CLOCK. onBeat() is the client's: one beat's worth of
  * pulses spread over a duration it names, per beat, per request. follow() is
@@ -35,13 +34,13 @@
  * nothing to update, and nothing is ever recorded twice; a transport change
  * records one Start or Stop at the transition the timeline reports.
  *
- * THE HORIZON IS THE PRICE OF PRE-COMMITTING. A pulse in the ring is on the
- * grid as it was when tick() ran; a tempo change reaches the wire only after
- * the pulses already recorded — at most kFollowHorizonSeconds of them, five
- * at 120 BPM. The horizon has to exceed the gap between ticks, with margin,
- * or a late tick starves the port: the producer runs once per audio block on
- * the control pass, and a block is a few tens of milliseconds at most, so a
- * tenth of a second covers a block missed outright. The floor of what is
+ * THE HORIZON. A pulse in the ring is on the grid as it was when tick() ran;
+ * a tempo change reaches the wire only after the pulses already recorded — at
+ * most kFollowHorizonSeconds of them, five at 120 BPM. The horizon has to
+ * exceed the gap between ticks, with margin, or a late tick starves the port:
+ * the producer runs once per audio block on the control pass, and a block is
+ * a few tens of milliseconds at most, so a tenth of a second covers a block
+ * missed outright. The floor of what is
  * already recorded is kept so a follower that starts, or re-syncs after its
  * grid jumped, begins after it, and a pulse a tempo rise moved behind it is
  * held to it: the ring stays in time order, which generate() relies on.

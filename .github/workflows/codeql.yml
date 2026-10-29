@@ -29,7 +29,7 @@ on:
     branches: [main, master]
   pull_request:
   schedule:
-    - cron: "17 4 * * 1"   # Mondays, early: the query packs move under us
+    - cron: "17 4 * * 1"   # weekly: the query packs update independently of the code
 
 permissions:
   contents: read
@@ -37,8 +37,8 @@ permissions:
 
 jobs:
   # Each of our queries has a source file with a known violation and the
-  # result it must report: a query that stops seeing fails here, so a quiet
-  # green cannot pass for a clean engine. A job of its own, away from init:
+  # result it must report: a query that misses it fails here. A job
+  # of its own, away from init:
   # init's tracer on Windows takes in every process the job starts, the
   # test's own extraction too, and leaves its database empty; and init
   # refuses to run in a job that has run setup-codeql.
@@ -75,8 +75,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # the Linux category keeps the name the analysis has always had, so
-          # its alerts carry on rather than start again under a new one
+          # the Linux category keeps the name its alerts are filed under so
+          # they stay attached to it
           - os: ubuntu-latest
             platform: linux
             category: /language:c-cpp

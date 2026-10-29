@@ -11,7 +11,7 @@
  * hands OSC out through `Emit`, which in the bridge writes the OUT ring and
  * in a test can be a vector.
  *
- * TWO HALVES ON TWO THREADS, as before the move:
+ * TWO HALVES ON TWO THREADS:
  *
  *   PLAYING a track — note, cc, bend, notes_off, param, plugin/param — is
  *   applyRealtime, called on the bridge's audio thread with the frame offset

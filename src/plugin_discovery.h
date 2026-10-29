@@ -3,11 +3,8 @@
 /*
  * plugin_discovery.h — where plugins live, and what is in them.
  *
- * plugin_host.h can describe a plugin you already have the path of. Nothing
- * could FIND one, so every consumer ended up with a string literal in it: this
- * repository's own panel shipped with "/Library/Audio/Plug-Ins/VST3/Surge
- * XT.vst3" compiled in, which is a demo of the loader rather than a plugin
- * host. This is the other half.
+ * plugin_host.h can describe a plugin you already have the path of. This is
+ * the half that finds one, so no consumer needs a path compiled in.
  *
  * NOT REALTIME-SAFE, and considerably worse than that: scanning OPENS each
  * plugin, which runs third-party initialisation code, touches the filesystem,

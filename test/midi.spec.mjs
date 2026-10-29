@@ -144,7 +144,6 @@ test("a scheduled note reaches the port at its moment, stamped with it", async (
 test("a scheduled note that names its own moment is sent at that moment", async ({ page, clockworkConfig }) => {
   // A send's trailing timetag is the message's own time and wins over the
   // time it was scheduled for, as it does natively (MidiControl::handleOutVerb).
-  // The front once stamped such a note with the schedule's time instead.
   const r = await run(page, clockworkConfig, async ({ clockwork, until }) => {
     clockwork.send("/clockwork/midi/out/enable", "*", 1);
     const now = window.Clockwork.osc.ntpNow();
@@ -192,21 +191,11 @@ test("a note the guest sends itself reaches the port stamped with its moment", a
   // moment ON THE OUTPUT TIMELINE — so the gap between the two is the audio
   // path's own latency, plus a block or so of placement. Derived from what the
   // browser reports rather than named as a constant, because a constant here
-  // measures the machine's output buffer and nothing else.
-  //
-  // The old flat 40 ms said so plainly once it met a headless runner, which
-  // reports baseLatency 10.02 ms + outputLatency 32.0 ms = 42.02 ms:
-  //
-  //     SAB      40.988   40.859     ~1.2 ms under the latency sum, both runs
-  //     non-SAB  33.601   36.796     5-8 ms under it
-  //
-  // Every sample sits below the sum, and the SAB path tracks it to within half
-  // a block — systematic, not jitter. A 40 ms limit was therefore guaranteed to
-  // fail on any box whose buffer exceeds 40 ms and to pass on any box below it,
-  // which is not a fact about clockwork.
-  //
-  // This is STRICTER than the old constant wherever the old one passed: an
-  // interface with 8 ms of latency now gets a ~18.7 ms budget, not 40.
+  // measures the machine's output buffer and nothing else: a flat limit fails
+  // on any box whose buffer exceeds it and passes on any box below it. The
+  // offset sits just under the latency sum (within half a block on the SAB
+  // path), so the budget is that sum plus four blocks, which is also tighter
+  // than a flat limit on a low-latency interface.
   // Web Audio reports both latencies in SECONDS.
   const audio = r.audio ?? {};
   const latencyMs = ((audio.baseLatency ?? 0) + (audio.outputLatency ?? 0)) * 1000;
@@ -335,9 +324,8 @@ test("the guest's own time runs true across several sends", async ({ page, clock
   // clocks with a constant offset between them — the audio path's output
   // latency — so it can only pass by carrying a tolerance big enough to swallow
   // a quantity the test does not control. That tolerance is a property of the
-  // machine, not of clockwork: a headless runner's 42 ms buffer failed a 40 ms
-  // limit that a laptop passes, and neither result says anything about whether
-  // the guest's time is carried faithfully.
+  // machine (its output buffer), not of clockwork, and passing or failing it
+  // says nothing about whether the guest's time is carried faithfully.
   //
   // Several sends at known offsets answer it properly. Fit stamp = a + b*asked:
   //
@@ -404,26 +392,17 @@ test("the guest's own time runs true across several sends", async ({ page, clock
       `latencySum=${latencyMs.toFixed(2)}ms block=${blockMs.toFixed(2)}ms rate=${audio.sampleRate}Hz`,
   );
 
-  // The bound, from the noise rather than from optimism.
-  //
-  // A first run said 1% was wrong: one transport fit perfectly (slope 1.00000,
-  // residuals all zero) while the other carried residuals to +/-4.27 ms, and a
-  // line through points that scattered by that much over a 400 ms span has a
-  // slope uncertain by 2*4.27/400 ~= 2.1% — which is exactly the 1.02133 it
-  // reported. The slope was not wrong; the bound was, and it was a guess.
-  //
-  // So the span is now 800 ms rather than 400, which halves that uncertainty
-  // for free, and the bound is 3% — comfortably above a noise floor near 1%,
-  // and far below the thing worth catching: mistaking 44.1 kHz for 48 is an 8%
-  // error and would still be unmissable.
+  // The bound, from the noise rather than from optimism. Residuals of a few
+  // ms (block quantisation on one transport) over an 800 ms span make the
+  // slope uncertain by about 1% (2 x residual / span), so the bound is 3%:
+  // above that noise floor and far below the thing worth catching, since
+  // mistaking 44.1 kHz for 48 is an 8% error.
   expect(slope, `time ran at ${(slope * 100).toFixed(2)}% of rate; residuals [${residuals.map((v) => v.toFixed(2))}]`)
     .toBeGreaterThan(0.97);
   expect(slope).toBeLessThan(1.03);
 
-  // Deliberately generous on first introduction: no run has reported a
-  // residual yet, and inventing a tight bound before seeing one is how the
-  // other timing tests here became flaky. The [time-fit] line above prints
-  // them every run — tighten this once there are numbers behind it.
+  // A generous bound: the [time-fit] line above prints the residuals every
+  // run, and a tighter bound needs numbers behind it.
   expect(worst, `worst residual ${worst.toFixed(2)} ms, residuals [${residuals.map((v) => v.toFixed(2))}]`)
     .toBeLessThan(4 * blockMs);
 });

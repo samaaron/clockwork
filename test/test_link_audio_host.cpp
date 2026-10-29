@@ -199,10 +199,10 @@ TEST_CASE("link audio: lanes with no pair free refuse", "[link-audio]") {
 
 TEST_CASE("link audio: a busIdx near the integer ceiling cannot wrap into a pass",
           "[link-audio]") {
-    // Written as `busIdx + 1 >= inChannels` this was a real hazard: at
-    // UINT32_MAX the addition wraps to 0, which is < any width, and a wildly
-    // out-of-range subscription would have been ACCEPTED and then silently
-    // skipped for ever by pull_port_sources.
+    // Written as `busIdx + 1 >= inChannels` the check wraps: at UINT32_MAX
+    // the addition gives 0, which is < any width, so a wildly out-of-range
+    // subscription would be ACCEPTED and then skipped for ever by
+    // pull_port_sources.
     CHECK_FALSE(link_audio::channelPairFits(UINT32_MAX, 40));
     CHECK_FALSE(link_audio::channelPairFits(UINT32_MAX, UINT32_MAX));
     CHECK_FALSE(link_audio::channelPairFits(UINT32_MAX - 1, UINT32_MAX));

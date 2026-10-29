@@ -408,8 +408,8 @@ TEST_CASE("vst3: an edit made in the plugin's own editor reaches the processor",
     CHECK(seen.id == 0);
     CHECK(seen.norm == 1.0);
 
-    // ...and, the part that has never worked in any host that stops there,
-    // the processor applies it on the next block.
+    // ...and, the part a host that only listens misses, the processor
+    // applies it on the next block.
     constexpr uint32_t kFrames = 32;
     Block in(2, kFrames), out(2, kFrames);
     for (uint32_t i = 0; i < kFrames; ++i) { in.ch[0][i] = 1.0f; in.ch[1][i] = 1.0f; }
@@ -446,8 +446,8 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
     int num = 0, den = 0;
     unsigned state = 0;
 
-    // No clock: no musical time, and a transport that is said to roll, as it
-    // always was for a plugin with no host tempo.
+    // No clock: no musical time, and a transport that is said to roll, as
+    // for any plugin with no host tempo.
     plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK((state & ProcessContext::kTempoValid) == 0);

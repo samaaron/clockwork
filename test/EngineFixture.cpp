@@ -28,9 +28,8 @@ bool engine_test::hostDrivesControlByDefault() {
 
 // Caller holds mReplyMutex.
 // The last few held, and how many there are: a case that polls for a reply
-// dumps this on every attempt, and a recovery loop can hold a thousand (the
-// engine's own log, dumped once by the case, was buried under fifty copies
-// of them in CI, 2026-10-23).
+// dumps this on every attempt, and a recovery loop can hold a thousand, which
+// would bury the engine's own log.
 static std::string dumpReplies(const std::vector<OscReply>& replies) {
     if (replies.empty()) return "(none)";
     constexpr size_t kShown = 12;
@@ -64,8 +63,7 @@ void EngineFixture::pumpByDefault(ClockworkEngine::Config& cfg) {
     // asserts can depend on how a real-time driver was scheduled, or on a
     // runner being busy. A case whose claim is about real time asks for the
     // headless driver itself (driverConfig), and is tagged [rt].
-    // CLOCKWORK_TEST_REALTIME=1 runs the whole suite on the driver instead,
-    // the shape it once had.
+    // CLOCKWORK_TEST_REALTIME=1 runs the whole suite on the driver instead.
     const char* realtime = std::getenv("CLOCKWORK_TEST_REALTIME");
     const bool pumped = !(realtime && *realtime == '1');
     cfg.manualAudioPump = pumped;
@@ -111,9 +109,9 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
         mDebugMessages.push_back(msg);
     };
 
-    // A host's thread, when the config says the host runs the control plane.
-    // Started first: it spins on a closed door until init opens it, so the
-    // pass is running from the moment the engine needs one.
+    // The host's control thread, when the config says the host runs the
+    // control plane. Started first: it spins until init opens the control
+    // ring, so the pass is running from the moment the engine needs one.
     if (cfg.hostDrivesControl && hostControlStartsAfterMs <= 0) mHostControl.start(mEngine);
 
     if (beforeInit) beforeInit(mEngine);
@@ -126,12 +124,12 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
         });
     }
 
-    // Boot barrier: a pong means the whole loop is live. Waited for as long as
-    // it takes, within a bound that only a broken boot reaches, and said
-    // loudly: a pong given up on still comes, and a case's own ping would
-    // take it for its answer (test_engine_fixture.cpp). Not waited for when
-    // no answer can reach this fixture: nothing rendering, no guest running
-    // to hear the ping, or a host draining the egress itself.
+    // Boot barrier: a pong means the whole loop is live. The bound is one
+    // only a broken boot reaches, and a timeout fails the case outright: a
+    // pong given up on still arrives, and a case's own ping would take it
+    // for its answer (test_engine_fixture.cpp). Skipped when no answer can
+    // reach this fixture: nothing rendering, no guest running to hear the
+    // ping, or a host draining the egress itself.
     const bool renders = mManualPump
         || mEngine.audioSource() != ClockworkEngine::AudioSource::None;
     if (renders && mEngine.engineState() == EngineState::Running && !cfg.hostDrainsEgress) {
@@ -218,8 +216,8 @@ bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {
     auto rendered = [&] {
         return mEngine.processor().processCount.load(std::memory_order_acquire) - start;
     };
-    // Manual pump: the case is the clock. The blocks are rendered here, now,
-    // however busy the machine is — no deadline to miss.
+    // Manual pump: the case is the clock. The blocks are rendered here, so
+    // there is no deadline to miss however busy the machine is.
     if (mManualPump) {
         pumpBlock(n);
         return rendered() >= n;
@@ -289,8 +287,8 @@ void EngineFixture::pumpBlock(uint32_t n) {
         return;
     }
     // A driver thread is rendering: a block pumped here would be a second
-    // renderer, which the engine refuses. What a test means by "pump n" with
-    // a driver running is "let n blocks pass" — so wait for the driver's.
+    // renderer, which the engine refuses. With a driver running, "pump n"
+    // means "let n blocks pass", so wait for the driver's.
     if (!waitForBlocks(n))
         WARN("pumpBlock(" << n << "): the driver rendered no block within the wait");
 }

@@ -4,8 +4,8 @@
  * test_host_forward.cpp — the host as the end of clockwork's chain.
  *
  * On a host with no NRT thread, a /clockwork/ verb the audio thread does not
- * answer itself has nowhere to go. Until now it was refused there. A host
- * may instead have a FRONT — a thread of its own that answers the control
+ * answer itself has nowhere to go, and is refused there. A host may instead
+ * have a FRONT — a thread of its own that answers the control
  * verbs, which on the web is the client's main thread, the only place Web
  * MIDI and the Gamepad API exist — and with clockwork_host_forward(1) the
  * audio thread forwards to it: the verb goes back out over the egress, to
@@ -15,8 +15,8 @@
  * bytes in the IN ring, one block rendered, frames off the RT egress ring.
  * What these pin:
  *
- *   - forwarding off (a bare host's default): an unknown verb is refused as
- *     it always was, to its sender;
+ *   - forwarding off (a bare host's default): an unknown verb is refused to
+ *     its sender;
  *   - forwarding on: the same verb comes back to its sender, whole, inside a
  *     bundle whose timetag is 1 — it never waited;
  *   - a verb the scheduler fired comes back inside a bundle whose timetag is

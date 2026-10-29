@@ -26,8 +26,8 @@
  *
  * A handle is an opaque pointer, not a slot: an endpoint is addressed only by
  * its owner, never enumerated, and never outlives it, so none of the reasons a
- * PORT has a slot apply. A second registry here would be the mistake ports
- * were built to stop.
+ * PORT has a slot apply. A second registry here would duplicate the slot
+ * table.
  */
 #ifndef CLOCKWORK_DISK_H
 #define CLOCKWORK_DISK_H

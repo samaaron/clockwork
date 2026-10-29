@@ -113,10 +113,8 @@ export class ClockworkClock {
    * That instant is `atNtpSeconds` when one is given — a scheduler changes
    * the tempo where the change will be heard, its schedule-ahead after now,
    * and the grid must agree with the beats it has already worked out — and
-   * otherwise now. Before this, setBpm stored the tempo against the old
-   * origin and every web tempo change jumped the beat — the same defect the
-   * C++ sessions had (test_clock_tempo_change.cpp), on the path a page
-   * actually calls.
+   * otherwise now. Storing the tempo against the old origin would jump the
+   * beat on every tempo change (test_clock_tempo_change.cpp).
    *
    * @param {number} bpm
    * @param {number} [atNtpSeconds=0] — the instant the tempo changes; 0 is now

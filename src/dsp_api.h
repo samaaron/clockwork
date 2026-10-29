@@ -241,7 +241,7 @@ typedef enum DspFpEnv {
    the tap substrate spells out (rust/clockwork-taps), and a DSP treats it
    as opaque apart from two reads: `slot` is non-NULL while the handle owns a
    slot, and `channels` is how many channels that slot carries, as clamped by
-   the host. The other two are historical and 0. */
+   the host. The other two are unused and 0. */
 typedef struct DspTapHandle {
     void*    slot;
     float*   data;
@@ -454,8 +454,8 @@ typedef struct DspInfo {
        and the version of that format. Clockwork copies them into the arena
        table's window entry when the guest binds (CLOCKWORK_GEOM_WINDOW_MAGIC,
        CLOCKWORK_GEOM_WINDOW_VERSION), where every reader of the table finds
-       them. 0 and 0: undeclared — a client reading the window is on its own,
-       as it always was. */
+       them. 0 and 0: undeclared — a client reading the window is on its
+       own. */
     uint32_t window_magic;
     uint32_t window_version;
     /* WHAT DEVICE CHANGE THE INSTANCE CAN TAKE LIVE (DSP_SURVIVES_*). A

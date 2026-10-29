@@ -7,9 +7,9 @@
  * IIR step (updateAudioThreadNTP) toward the wall time the HOST hands over
  * with the block — native's callback reads its own wall clock, the worklet
  * passes Date.now(), an embedded host its own — and now() returns the latest
- * value. The clock is the ruler everything is scheduled on, so the IIR's pull
- * is bounded (kClockSlewPerBlock, a few µs a block: more than crystals drift
- * by) and what is on the ruler stays where its sender put it. An anchor is
+ * value. Everything is scheduled against this clock, so the IIR's pull is
+ * bounded (kClockSlewPerBlock, a few µs a block: more than crystals drift
+ * by) and what is already scheduled stays where its sender put it. An anchor is
  * one reading, out by up to a render burst where the host reads Date.now(),
  * so it settles: the clock holds the reading for kAnchorSettleBlocks, then
  * moves once to the median of the readings meanwhile, and the bound holds it
@@ -21,14 +21,12 @@
  * clock that converges from seconds behind runs fast until it has caught up
  * and everything scheduled against it plays compressed. The audio thread
  * anchors itself on its first block, and a host at its audio start and after
- * a gap; nothing else writes its time, so
- * no block ever reads an anchor someone else is half-way through rewriting
- * (the page used to write an NTP start and a drift into the arena, in steps,
- * and a new worklet over the same memory published whatever mix was there:
- * the clock stepped back 0.7 s in Clockwork's own test and 13.7 s under Sonic
- * Pi, 2026-10-23). Time never goes back: a reset has a floor, the clock the
- * arena already carries (ClockworkClock::floorRenderNtp), and the bound is far
- * under a block.
+ * a gap; nothing else writes its time, so no block reads an anchor another
+ * writer is half-way through (a start and a drift written into the arena in
+ * separate steps let a new worklet over the same memory publish a mix of
+ * old and new and step the clock back). Time never goes back: a reset has a
+ * floor, the clock the arena already carries (ClockworkClock::floorRenderNtp),
+ * and the bound is far under a block.
  *
  * Freewheel mode bypasses the drift IIR and derives NTP purely from sample
  * position (deterministic for offline / accuracy tests).

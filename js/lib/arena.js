@@ -5,14 +5,12 @@
  *
  * Mirrors src/clockwork_arena.h: the header at the front of the arena, its
  * table of areas, its table of regions, the ids, and what each entry's
- * geometry words mean. Read BY ID, never by position — a reader that walked
- * the table positionally was the drift this replaces (BufferLayout, read as
- * uint32View[n]).
+ * geometry words mean. Read BY ID, never by position: a reader that walks
+ * the table positionally drifts when an entry moves.
  *
  * `readArena(buffer, base)` returns the header, the areas, a `region(id)`
- * lookup, and `constants` — the flat object the rest of the JS has always
- * consumed (IN_RING_START, METRICS_SIZE, TAPS_SLOTS, …), now derived from
- * the table rather than declared beside it.
+ * lookup, and `constants` — the flat object the rest of the JS consumes
+ * (IN_RING_START, METRICS_SIZE, TAPS_SLOTS, …), derived from the table.
  */
 
 export const ARENA_MAGIC = 0x43574152;      // 'CWAR'
@@ -209,7 +207,7 @@ export function readArena(buffer, base) {
  * with one load, rather than from a readArena snapshot.
  */
 const GENERATION_WORD = 13;
-/** The word itself, to read again and again without making a view each time (a door asks it on every send). */
+/** The word itself, to read again and again without making a view each time (a door reads it on every send). */
 export function generationView(buffer, base) {
   return new Uint32Array(buffer, base + GENERATION_WORD * 4, 1);
 }
@@ -223,7 +221,7 @@ export function hasInstance(word) { return (word & 1) === 0; }
 
 /**
  * The flat constants object the JS runtime consumes, derived from the table.
- * The names are the ones shared_memory.h has always used, so a reader of
+ * The names are the ones shared_memory.h uses, so a reader of
  * either side recognises them; the values come from THIS engine's table.
  */
 function constantsFrom(region, h) {

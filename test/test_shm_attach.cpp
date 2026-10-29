@@ -44,7 +44,7 @@ ClockworkEngine::Config attachConfig(unsigned port) {
 
 // An endpoint no other test, and no other process running these tests, is
 // using: the derived name carries the case's port (unique to the case) and
-// this process's id (unique to the run — two runs at once once shared it).
+// this process's id (unique to the run, so two runs at once do not share it).
 std::string endpointFor(unsigned port) {
 #ifdef _WIN32
     const auto pid = static_cast<unsigned long>(_getpid());

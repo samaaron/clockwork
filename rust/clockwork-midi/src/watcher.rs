@@ -366,7 +366,7 @@ mod imp {
     fn announce_loop(stop: Arc<AtomicBool>, coalescer: Coalescer) {
         // No sequencer (a CI runner, a container): nothing to watch, and
         // asking ALSA prints "open /dev/snd/seq failed" on stderr for every
-        // engine booted — once per test, by the hundred (2026-10-15).
+        // engine booted.
         if !crate::device::sequencer_present() {
             return;
         }

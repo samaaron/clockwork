@@ -8,8 +8,7 @@
  * because the awkward decisions are only made when the ring is nearly full as
  * it wraps — and a test that sends and waits drains as it goes, so the tail is
  * always far away and the decision that could be wrong is never the decision
- * being made. Two deliberately broken ring implementations passed an
- * end-to-end suite unchanged, which is what prompted this file.
+ * being made: a broken ring implementation can pass an end-to-end suite.
  *
  * Here the drain is the test's to schedule, so the states can be constructed:
  * a ring filled and left unread, a producer that keeps going after a refusal,
@@ -150,10 +149,9 @@ TEST_CASE("client rings: a second handle polling takes from the first",
     // tail follows a poll late, when the batch's bytes are given back). Two handles
     // are two ways of reaching the same queue, not two copies of the stream.
     //
-    // This replaced a case that asserted the opposite. It passed for two
-    // years' worth of runs because both handles saw nothing at all — the
-    // engine's own gateway had already drained the ring — so `na == nb` was
-    // `0 == 0` and would have held however the cursors were wired.
+    // Asserted on the region, not on poll counts: the engine's own gateway
+    // drains the ring, so both handles usually see nothing and `0 == 0`
+    // would hold however the cursors were wired.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* a = openClient(&st);
@@ -176,11 +174,11 @@ TEST_CASE("client rings: a second handle polling takes from the first",
 
 TEST_CASE("client tap: a watcher sees traffic the consumer already took",
           "[client][rings][tap]") {
-    // THE CASE THE OLD TEST WAS REACHING FOR. The engine's gateway drains the
-    // egress ring, which is why a client polling it usually finds nothing —
-    // and why "watch" cannot be built out of "take". A tap has its own cursor
-    // and reads the bytes where they lie, so a frame already consumed is still
-    // there to be seen until a writer overwrites it.
+    // The engine's gateway drains the egress ring, which is why a client
+    // polling it usually finds nothing — and why "watch" cannot be built out
+    // of "take". A tap has its own cursor and reads the bytes where they lie,
+    // so a frame already consumed is still there to be seen until a writer
+    // overwrites it.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* c = openClient(&st);
@@ -252,8 +250,8 @@ TEST_CASE("client tap: the ingress ring can be watched but not drained",
 
 TEST_CASE("client tap: two taps do not shorten each other's view",
           "[client][rings][tap]") {
-    // The property the old two-handle case claimed and could not deliver.
-    // Here it is real, because each tap carries its own cursor.
+    // Each tap carries its own cursor, so one draining takes nothing from
+    // the other.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* c = openClient(&st);

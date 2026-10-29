@@ -340,7 +340,7 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
     // a device callback of B blocks pulls B in a row while the bridge, on
     // another core, may already be answering the first of them — so up to
     // B-1 blocks beyond slack-1 are the bridge being on time, not late, and
-    // trimming those skipped a real block whenever the bridge was quick.
+    // trimming those skips a real block whenever the bridge is quick.
     const uint32_t block = clockwork_block_size();
     const uint32_t slack = std::max<uint32_t>(1, h->slack_blocks.load(std::memory_order_relaxed));
     const uint32_t perCallback = std::max<uint32_t>(1, (self->mDeviceBufferFrames + block - 1) / std::max<uint32_t>(1, block));

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
 //! The slot ownership rule, which is the one thing in this crate that is not
-//! incidental — and had no test.
+//! incidental.
 //!
 //! A tap slot can be re-claimed by a new unit while a superseded one is
 //! still alive under an FX tail. The older unit's late destructor must not
@@ -242,8 +242,8 @@ fn a_handle_whose_slot_is_outside_the_region_touches_nothing() {
     // A handle can outlive the region it was claimed in: the segment is
     // created and destroyed with the engine, and a scope unit under an FX
     // tail can tear down after that. Its slot pointer then lands in memory
-    // the current region does not cover. Release used to treat "cannot
-    // identify the slot" as "free it anyway" and store 0 through that
+    // the current region does not cover. A release that treated "cannot
+    // identify the slot" as "free it anyway" would store 0 through that
     // pointer, into whatever lives there now.
     //
     // The decoy stands in for that memory: a slot-shaped buffer, marked

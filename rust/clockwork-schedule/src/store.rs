@@ -22,9 +22,9 @@
 //! Ordering is a binary min-heap of `(when, stability)`. `stability` is a
 //! monotonic counter stamped at `add` and never reset, so no two live entries
 //! can compare equal: the pop order is a total order fixed entirely by the
-//! call sequence, not by the heap's internal arrangement. That is why this
-//! implementation and the C++ one it replaces pop identically without either
-//! having to reproduce the other's sift.
+//! call sequence, not by the heap's internal arrangement, so any
+//! implementation with the same key pops identically without reproducing
+//! this one's sift.
 //!
 //! # Real-time safety
 //!
@@ -63,10 +63,10 @@ struct Slot {
     in_use: bool,
     /// Still in the queue, i.e. not yet handed out by `pop_due`.
     ///
-    /// `in_use` alone conflated two states — "this slot is occupied" and "this
-    /// event has not fired yet" — and both flush and rebuild_heap read it as
-    /// the second. Between pop_due and release a slot is occupied but NOT
-    /// pending: the caller is holding that event and reading its payload.
+    /// Distinct from `in_use`, which says only that the slot is occupied:
+    /// between pop_due and release a slot is occupied but NOT pending, because
+    /// the caller is holding that event and reading its payload, and flush and
+    /// rebuild_heap must see only the pending ones.
     pending: bool,
     next_free: i32,
 }

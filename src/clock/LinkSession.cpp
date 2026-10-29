@@ -146,10 +146,10 @@ struct LinkSession::Impl {
 
     // Keep the arena grid on Link's. Link moves the session timeline on its
     // own — joining a session adopts that session's grid, phase-aligned —
-    // and has no callback for it. The arena grid kept the old grid until the
-    // next tempo change snapped it across (applyTempoChange trusts Link's
-    // beat): two engines in one session sat 3.3 beats apart, and a nudge
-    // from 60 to 61 bpm moved every beat a client held by 687 ms. Runs off
+    // and has no callback for it. Without this the arena grid keeps the old
+    // grid until the next tempo change snaps it across (applyTempoChange
+    // trusts Link's beat): two engines in one session sit beats apart, and a
+    // small tempo change moves every beat a client holds. Runs off
     // the worker's tick and on a peer change. A tempo change in flight (the
     // mirror already at the new tempo, Link not yet) is applyTempoChange's
     // to settle; an unanchored grid is the bind's to place.
@@ -252,8 +252,8 @@ void LinkSession::setBpm(double bpm, double atNtpSeconds) {
     // /clockwork/clock/notify/tempo broadcast for this local set. Firing appTempoCb here
     // as well would double-notify (and double re-anchor) on every local set.
     // RE-ANCHOR WITH IT (ClockworkClockState::retempo): this write is synchronous
-    // while the callback's re-anchor is not, so without it every local tempo
-    // change opened a window where the mirror reported a jumped beat.
+    // while the callback's re-anchor is not, so writing the tempo alone opens
+    // a window where the mirror reports a jumped beat.
     if (ClockworkClockState* s = mImpl->clock.state()) s->retempo(bpm, at);
 }
 
@@ -427,13 +427,12 @@ void LinkSession::anchorToWallClockIfUnset() {
     const double now = wallClockNTP();
     s->setOrigin(now);
     s->setTransport(false, now);
-    // Link's own timeline was born with this clock — beat 0 at construction,
+    // Link's own timeline starts with this clock — beat 0 at construction,
     // which on a real boot is the better part of a second before the bind
     // (the audio device comes up in between). Put its beat 0 at the bind as
-    // well, so the two grids agree from a client's first read. They did not:
-    // the first tempo change re-anchored this grid to Link's beat
-    // (applyTempoChange), and moved every beat a client held by the boot gap
-    // — 775 ms in a Sonic Pi session, and a thread thrown for being behind.
+    // well, so the two grids agree from a client's first read; otherwise the
+    // first tempo change re-anchors this grid to Link's beat
+    // (applyTempoChange) and moves every beat a client holds by the boot gap.
     // Forced, not requested: nothing has joined yet (Link is enabled after
     // the bind), so there is no session phase to keep.
     auto st = mImpl->link.captureAppSessionState();

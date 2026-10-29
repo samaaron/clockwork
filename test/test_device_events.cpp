@@ -5,16 +5,12 @@
  *
  * An OS tells the device layer about a device coming or going on a thread of
  * its own, at a moment of its own; the engine must be safe whatever it is in
- * the middle of. Sonic Pi 5.0.0 (SuperSonic 0.71.0) crashed twice in two days
- * on exactly this: SIGSEGV in the device manager's own list-change handling
- * as headphones were unplugged (2026-10-02, copying currentSetup out of a
- * manager whose memory was gone), and SIGSEGV in a message-loop callback
- * after a Bluetooth headset went away (2026-10-03). Each time the audio
- * engine process died: the device manager closed and reopened devices by
- * itself on the thread the change arrived on, while the engine's device lane
- * was rebuilding that same manager.
+ * the middle of. A device manager that closes and reopens devices by itself
+ * on the thread the change arrives on races the engine's device lane
+ * rebuilding that same manager: a use of freed memory and a dead engine
+ * process.
  *
- * The device layer now hands every change to the engine, and the device lane
+ * The device layer hands every change to the engine, and the device lane
  * decides what it means: the device that was playing has gone, the user's
  * device is back, or only the list to report has changed. Run the race case
  * under AddressSanitizer (build-asan) too: a use of freed memory shows there
@@ -150,10 +146,10 @@ TEST_CASE("DeviceEvents: the user's device plugged back in is played on again, "
 
 TEST_CASE("DeviceEvents: a device the user picks while theirs is unplugged is kept "
           "when theirs comes back", "[DeviceEvents]") {
-    // Sonic Pi, 2026-10-08: the interface dropped out, the engine fell back to
-    // the speakers, the user picked the speakers in the menu, and the interface
-    // took the engine back with it when it returned. A pick of the device
-    // already playing is a pick all the same.
+    // The interface drops out, the engine falls back to the speakers, and the
+    // user picks the speakers in the menu. A pick of the device already
+    // playing is a pick all the same: the interface returning must not take
+    // the engine back with it.
     auto sys = makeSimpleSystem();                // the default is Fake Speakers
     EngineFixture fix(fakeEngineConfig(sys, "Fake Interface"));
     subscribe(fix);
@@ -211,9 +207,9 @@ TEST_CASE("DeviceEvents: a device -H names loosely that is absent at boot is pla
 
 TEST_CASE("DeviceEvents: the session's buffer size is kept through an unplug and back",
           "[DeviceEvents]") {
-    // Sonic Pi asks for 64 frames. With the interface unplugged the engine
-    // played on at the default device's own size, and kept it when the
-    // interface came back.
+    // The session asks for 64 frames. The fallback to the default device and
+    // the return to the interface both keep that size rather than adopting
+    // the device's own.
     auto sys = makeSimpleSystem();                // the fakes' own buffer is 128
     auto cfg = fakeEngineConfig(sys, "Fake Interface");
     cfg.bufferSize = 64;
@@ -276,16 +272,14 @@ TEST_CASE("DeviceEvents: the user's microphone plugged back in is recorded from 
 TEST_CASE("DeviceEvents: the user's microphone is recorded from again after the "
           "watchdog's recovery of the output",
           "[DeviceEvents][Watchdog][RateSkew]") {
-    // 2026-10-16: opened in and out on Loopback, a rate-skew recovery came
-    // back playing on Loopback and recording from the system default input
-    // (an aggregate built for the pair). The recovery rebuilds the device
-    // manager on the system defaults and reopens the pinned output from
-    // there — but passed no input name, so the fresh manager's default
-    // input stood. The pinned input is the user's choice as much as the
-    // output is: the same recovery keeps both.
+    // A rate-skew recovery rebuilds the device manager on the system defaults
+    // and reopens the pinned output from there. It must pass the pinned input
+    // name too, or the fresh manager's default input stands. The pinned input
+    // is the user's choice as much as the output is: the same recovery keeps
+    // both.
     auto sys = makeSimpleSystem();
-    // A virtual input ahead of every other in the driver's list — a webcam's
-    // microphone, NDI — is what a reopen that names no input ends up on:
+    // A virtual input ahead of every other in the driver's list (a webcam's
+    // microphone, NDI) is where a reopen that names no input ends up:
     // recovery's fresh manager stands on the system defaults, and the switch
     // falls back to the first input the driver lists.
     {
@@ -299,7 +293,7 @@ TEST_CASE("DeviceEvents: the user's microphone is recorded from again after the 
         sys->types[0].defaultDeviceIndex = 1;   // the speakers out; the interface in
     }
     // A microphone paired with the speakers, and an interface played and
-    // recorded on as one device — as Loopback was.
+    // recorded on as one device.
     const auto [output, input] = GENERATE(
         std::pair<std::string, std::string>{ "Fake Speakers",  "Fake Microphone" },
         std::pair<std::string, std::string>{ "Fake Interface", "Fake Interface" });
@@ -372,11 +366,10 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     }
     stop = true;
     os.join();
-    // The device is back, and the OS says so, as it always does: its last
-    // report before this may have said "gone" and still be on its way, and a
-    // reopen on it finds no device and goes idle — where, with no watchdog
-    // in this config, only the OS's next word brings the engine back (the
-    // x86 runner, 2026-10-23, where that word never came).
+    // The device is back, and the OS says so. The OS thread's last report
+    // may have said "gone" and still be in flight; a reopen on it finds no
+    // device and goes idle, and with no watchdog in this config only the
+    // next OS report brings the engine back. So report once more here.
     speakers->hidden = false;
     sys->reportListChanged();
 
@@ -397,14 +390,13 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
 TEST_CASE("DeviceEvents: a device that goes while a recovery runs and comes back is reopened "
           "from idle when the OS says so, with no watchdog", "[DeviceEvents]") {
     // The engine with no device is idle: it renders nothing and the guest's
-    // messages wait. Without the callback watchdog (off in this config, on in
-    // Sonic Pi's) the one way out is the OS reporting a change — which it
-    // does for every device that comes back.
+    // messages wait. Without the callback watchdog (off in this config) only
+    // the OS reporting a change brings it back, which it does for every
+    // device that comes back.
     //
     // One output only: with a second one the recovery lands on it and the
-    // engine is never idle (the simple system has Fake Interface, and this
-    // case ran on it until 2026-10-27, seeing "no source" only for the
-    // instant between the detach and the reopen).
+    // engine is never idle (the simple system's Fake Interface would show
+    // "no source" only for the instant between the detach and the reopen).
     auto sys = std::make_shared<FakeSystem>();
     auto speakers = device("Fake Speakers", 2, 0);
     sys->types.push_back({ "FakeDriver", { speakers }, 0 });
@@ -440,12 +432,12 @@ TEST_CASE("DeviceEvents: a device that goes while a recovery runs and comes back
 
 TEST_CASE("DeviceEvents: a recovery that waits for a device change leaves the "
           "device phase idle once both are done", "[DeviceEvents]") {
-    // CI, 2026-10-17, the case above: a recovery marked the phase Recovering
-    // before it held the swap gate, so one queued behind a switch saved the
-    // switch's Swapping as the phase to put back, and put it back after the
-    // switch had finished. With the phase stuck at Swapping the watchdog,
-    // which opens no device while a change is in flight, never opened one
-    // again: the engine stopped answering.
+    // A recovery must mark the phase Recovering only once it holds the swap
+    // gate. One that marks it first, queued behind a switch, saves the
+    // switch's Swapping as the phase to put back and restores it after the
+    // switch has finished. With the phase stuck at Swapping the watchdog,
+    // which opens no device while a change is in flight, never opens one
+    // again and the engine stops answering.
     auto cfg = fakeEngineConfig(makeSimpleSystem(), "Fake Speakers");
     cfg.watchdogRecoveryCooldownMs = 0;
     EngineFixture fix(cfg);
@@ -486,7 +478,7 @@ TEST_CASE("DeviceEvents: a recovery that waits for a device change leaves the "
 // interface's control panel turning outputs on or off). The OS says so on a
 // thread of its own; the engine looks at the device as its driver reports
 // it now and acts where that differs from what it is playing. The device
-// layer no longer restarts the device by itself behind the engine's back.
+// layer does not restart the device by itself.
 
 TEST_CASE("DeviceEvents: the device played on dying where it stands is left "
           "for one that plays", "[DeviceEvents]") {
@@ -531,10 +523,10 @@ TEST_CASE("DeviceEvents: the device played on losing channels is played on "
 
 TEST_CASE("DeviceEvents: a device that cannot be opened again leaves the engine "
           "on the default at the default's rate", "[DeviceEvents]") {
-    // Sonic Pi, 2026-10-12: headphones at 44.1 kHz reported no channels, so
-    // the engine opened them again; that failed, putting them back failed
-    // too, and it fell back to the default, an interface running at 48 kHz,
-    // with the DSP still built at 44.1 kHz.
+    // Headphones at 44.1 kHz report no channels, so the engine opens them
+    // again; that fails, putting them back fails too, and it falls back to
+    // the default, a device running at 48 kHz. The DSP must be rebuilt at
+    // 48 kHz, not left at 44.1 kHz.
     auto sys = makeSimpleSystem();                // the default is Fake Speakers
     sys->at("Fake Speakers").sampleRates = { 48000.0 };
     auto cfg = fakeEngineConfig(sys, "Fake Interface");

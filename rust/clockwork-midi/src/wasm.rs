@@ -72,8 +72,6 @@ pub fn midi_in_osc_at(port: &str, bytes: &[u8], when: u64) -> Option<Vec<u8>> {
 /// The web is where a timestamp is worth the most: MIDIOutput.send(bytes,
 /// timestamp) is scheduled by the browser, and handing it a future time is
 /// TIGHTER than racing to deliver on time across the worklet/main boundary.
-/// Until this carried `when`, every web send was immediate whatever the verb
-/// asked for.
 pub fn midi_out_decode(osc: &[u8]) -> Option<Vec<u8>> {
     let (port, bytes, when) = match decode_out(osc).ok()? {
         OutCommand::Send { port, msg, when } => {

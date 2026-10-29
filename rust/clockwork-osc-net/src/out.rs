@@ -2,13 +2,12 @@
 // Copyright (c) 2025-2026 Sam Aaron
 //! Outbound OSC: one pair of sockets, and the family choice they make.
 //!
-//! Extracted from `ClockworkOsc` when the event sinks arrived (`src/clockwork_event_sink.h`)
-//! and needed to send to a `host:port` without owning the cue server. There is
-//! exactly one interesting decision in it and it should not be made twice: a
-//! hostname can resolve to several addresses in either family, so a sender
-//! binds one socket per family and uses whichever the first usable resolved
-//! address wants. Written a second time, the second copy is the one that
-//! quietly only does IPv4.
+//! Shared by the cue server's C ABI and the event sinks
+//! (`src/clockwork_event_sink.h`), which send to a `host:port` without owning
+//! the cue server. There is exactly one interesting decision in it and it is
+//! made once: a hostname can resolve to several addresses in either family,
+//! so a sender binds one socket per family and uses whichever the first
+//! usable resolved address wants.
 
 use std::net::{Ipv6Addr, ToSocketAddrs, UdpSocket};
 

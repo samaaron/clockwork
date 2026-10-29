@@ -20,8 +20,8 @@
  *       the GIT_TAG the build fetches or not what the vendored source itself
  *       says (clockwork:version_file and clockwork:version_pattern name where
  *       to read it), when an entry names no targets, or when it names a CMake
- *       option that does not exist. A new vendored library that nobody listed
- *       is how an SBOM quietly stops being one.
+ *       option that does not exist. An unlisted vendored library makes the
+ *       SBOM incomplete.
  *
  *   node scripts/sbom.mjs target <name>|all [outdir] [version]
  *       Writes CycloneDX 1.6 JSON for one CI target (linux-x64, linux-arm64,

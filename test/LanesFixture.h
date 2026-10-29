@@ -11,8 +11,8 @@
  *
  * Clockwork is a process singleton — one arena, one clock, one ingress —
  * so booting is done ONCE for the whole test binary and every test shares it.
- * That is not a shortcut: it is what a host does, and a test that re-booted
- * per case would be testing a lifecycle no host performs.
+ * That is what a host does; a test that re-booted per case would be testing
+ * a lifecycle no host performs.
  *
  * tick() returns the ABSOLUTE frame index of the block it just rendered, which
  * is what lets a test assert exact sample values against a formula rather than
@@ -29,9 +29,8 @@ namespace lanes_test {
 // wraparound and multi-channel arithmetic are exercised for real.
 inline constexpr double   kSampleRate  = 48000.0;
 inline constexpr uint32_t kOutChannels = 2;
-// Two in as well as two out. Clockwork owns the input staging buffer now
-// (it used to hand the DSP an address computed inside the DSP's own bus pool),
-// so a session with no input channels would leave that half of dsp_process
+// Two in as well as two out. Clockwork owns the input staging buffer, so a
+// session with no input channels would leave that half of dsp_process
 // untested — see the echo case in test_dsp_boundary.cpp.
 inline constexpr uint32_t kInChannels  = 2;
 inline constexpr uint32_t kBufLength   = 64;
@@ -59,11 +58,11 @@ inline constexpr uint32_t kLinkAudioLanes = LANES_FIXTURE_LINK_AUDIO_LANES;
 
 // ── The two regions the fixture supplies as a host ──────────────────────────
 //
-// A host that hands the guest neither a config block nor a memory region is a
-// host that leaves half of DspConfig untested, so this one supplies both. The
-// values are sentinels chosen to be recognisable in a hex dump and impossible
-// to produce by accident: a test asserting on them is asserting that
-// clockwork carried these exact bytes, not that it produced a plausible number.
+// The fixture supplies both a config block and a memory region, so all of
+// DspConfig is exercised. The values are sentinels chosen to be recognisable
+// in a hex dump and impossible to produce by accident: a test asserting on
+// them is asserting that clockwork carried these exact bytes, not that it
+// produced a plausible number.
 inline constexpr uint32_t kGuestConfigSlots[4] = {
     0xC0FFEE01u, 0xC0FFEE02u, 0xC0FFEE03u, 0xC0FFEE04u
 };
@@ -71,9 +70,8 @@ inline constexpr uint32_t kGuestConfigSlots[4] = {
 // Multi-megabyte, on purpose. This is the bulk channel — the region a client
 // writes a sample into and a guest writes a rendered blob into — so a fixture
 // that could only hold a few kilobytes would test the plumbing at a size where
-// the plumbing is not the point. 4 MB is enough to be honestly "bulk" and
-// small enough that dsp_new can still scan the whole thing to prove it arrived
-// zeroed.
+// the plumbing is not the point. 4 MB is bulk-sized and small enough that
+// dsp_new can still scan the whole thing to prove it arrived zeroed.
 //
 // It is also comfortably larger than the egress ring (RT_OUT_RING_SIZE, 128 KB),
 // which lets a test ask for a payload the ring cannot carry and watch it be
@@ -122,7 +120,7 @@ uint32_t boot();
 // Render one block. Returns the absolute frame index of its FIRST sample, so
 // out[ch][i] corresponds to stream position (returned + i).
 uint64_t tick();
-// A test that ticked the engine by another door (clockwork_embed_render)
+// A test that ticked the engine by another path (clockwork_embed_render)
 // says so, so this fixture's frame count stays the engine's, and the next
 // boot() rebases the fixture's timeline onto the engine's clock (ntpAtFrame).
 void ticked(uint64_t frames);
@@ -139,12 +137,12 @@ uint64_t position();
 // one that booted is assuming the order the suite ran in.
 uint64_t freshDsp();
 
-// The host coming back over the memory it ran in: clockwork_init again, on
-// the arena that is up, with the fixture's own regions — what a page whose
-// worklet the browser took away does, reloaded over the same memory, and a
-// host whose device came back. `config` stands in for the guest's config
-// block. A case that comes back with other facts comes back with the
-// fixture's own before it ends.
+// Re-init over the memory the engine ran in: clockwork_init again, on the
+// arena that is up, with the fixture's own regions — what a page does when it
+// reloads its worklet over the same memory, and what a host does when its
+// device comes back. `config` stands in for the guest's config block. A case
+// that calls this with other values calls it again with the fixture's own
+// before it ends.
 void comeBack(double rate = kSampleRate, uint32_t block = kBufLength,
               uint32_t inputs = kInChannels, uint32_t outputs = kOutChannels,
               const uint32_t (&config)[4] = kGuestConfigSlots);

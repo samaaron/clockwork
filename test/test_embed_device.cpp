@@ -21,8 +21,8 @@ namespace {
 // handle — so these cases run it on the fake system through the process
 // default drivers (ClockworkEngine::setDefaultDrivers): two
 // drivers, each with a device that ticks on a thread of its own, as the
-// platform's would. Until 2026-10-16 they booted on the machine's own
-// output, which changed its rate and buffer under whatever was playing
+// platform's would. They never open the machine's own output, which would
+// change its rate and buffer under whatever is playing
 // (test/RealDeviceGuard.h); the one case about the real device is hidden
 // below. The guard reinstalls its refusing factory when each case ends.
 struct OnFakeDevices {
@@ -225,25 +225,16 @@ TEST_CASE("embed: boot opens the machine's own device and ticks", "[.hardware][e
 // ── The Rust boot test's path, in C++ where everything is reachable ──────────
 //
 // rust/clockwork-client/tests/boot.rs does exactly this — boot NO_INPUT, send
-// /dummy/ping through the embed's client, wait for the pong — and on macOS x64
-// it has never once succeeded, while arm64 passes every run. Its counters say:
-//
-//     ticks 4108 (0 -> 4108)        the device callback is fine
-//     engine_processed 0 -> 0       the drain consumed nothing
-//     in_ring_used/peak 0 -> 0      the engine's head never moved
-//     in_dropped 0, in_corrupted 0  nothing was refused
-//
-// So a client send returns OK while the ring the audio thread reads stays
-// empty. The published layout matches this build's constants (asserted in
-// test_client_abi.cpp), and clockwork_lanes_base() is the same global the
-// drain addresses — so by inspection the two should be the same memory, and
-// on one platform they behave as though they are not.
-//
-// Mirrored here because the native job runs on macOS x64 too, and a C++ case
-// can be stepped through, printed from, and read. If this fails there, the
-// fault is in the engine and Rust is merely the messenger; if it passes while
-// the Rust test fails, the difference is in the binding and that is where to
-// look. Either answer is worth one run.
+// /dummy/ping through the embed's client, wait for the pong. Mirrored here
+// because a C++ case can be stepped through, printed from, and read. The
+// fault it separates: a client send that returns OK while the ring the audio
+// thread reads stays empty (ticks climbing, messages_processed and the in
+// ring's used/peak not moving, nothing dropped or corrupted) means the write
+// and the read are not addressing the same memory, although the published
+// layout matches this build's constants (test_client_abi.cpp) and
+// clockwork_lanes_base() is the global the drain addresses. If this fails,
+// the fault is in the engine; if it passes while the Rust test fails, the
+// difference is in the binding.
 TEST_CASE("embed: a client send reaches the engine's ingress", "[embed][engine][ingress]") {
     OnFakeDevices devices;
     ClockworkEmbedConfig cfg {};
@@ -269,10 +260,7 @@ TEST_CASE("embed: a client send reaches the engine's ingress", "[embed][engine][
     // everything below needs one: the ingress drain runs ON the audio thread,
     // so with no ticks there is no drain and "the engine never saw the ping"
     // would be true of any machine rather than a finding about this one. Wait
-    // for the callback to start and skip if it does not — which leaves the
-    // case biting exactly where it matters, since the macOS x64 runner this
-    // exists for ticks perfectly well (4108 times in 15s) and still loses the
-    // message.
+    // for the callback to start and skip if it does not.
     uint32_t ticksBefore = metric(0);
     for (int i = 0; i < 100 && metric(0) == ticksBefore; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

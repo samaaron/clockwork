@@ -41,7 +41,7 @@ test("the epoch offset is the NTP one, not the Unix one", () => {
 
 test("the top bit being set is not a negative time", () => {
   // A present-day timetag has its top bit set. Read as signed anywhere in the
-  // chain it goes negative, which is the trap this tree has hit four times.
+  // chain it goes negative.
   const now = unixMsToTimetag(Date.now());
   assert.ok(now > (1n << 63n), "a present-day timetag has its top bit set");
   const at = timetagToPerfMs(now, 0);

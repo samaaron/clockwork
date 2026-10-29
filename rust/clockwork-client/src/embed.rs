@@ -183,7 +183,7 @@ impl Device {
 /// closes the engine — a booted one closes its device and shuts down, an
 /// attached one detaches — and the client with it.
 ///
-/// One engine per process today: a second boot or attach is refused with
+/// One engine per process: a second boot or attach is refused with
 /// [`Error::Perm`].
 ///
 /// Derefs to its [`Client`], so `embed.send(..)` and `embed.poll()` are the

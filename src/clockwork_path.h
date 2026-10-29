@@ -124,7 +124,7 @@ inline std::filesystem::path current_executable() {
 //     quote — is doubled, since only then does the parser take them as
 //     literal backslashes rather than as escaping the quote.
 //
-// The last rule is the one that gets missed, and the everyday case it exists
+// The last rule is the easy one to miss, and the everyday case it exists
 // for is a path that ends in a backslash. An empty argument is "" so that
 // it survives as a (empty) argument at all. Pure string work, so it compiles
 // and is tested on every platform; the Windows spawn feeds it UTF-16.

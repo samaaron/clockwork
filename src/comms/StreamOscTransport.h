@@ -10,11 +10,11 @@
  * and the 4-byte big-endian length-prefixed wire format).
  *
  * A connection id IS the origin token: minted from 1 by the Rust leaf, never
- * reused, dead the moment the connection closes. That collapses the datagram
- * old datagram transports' address bookkeeping — no origin table, no LRU eviction (an
- * established client can never be churned out by strangers), and subscription
- * lifetime == connection lifetime: on_closed prunes the client from every
- * notify audience. The Rust leaf admits one client.
+ * reused, dead the moment the connection closes. So there is no origin table
+ * and no LRU eviction (an established client can never be churned out by
+ * strangers), and subscription lifetime == connection lifetime: on_closed
+ * prunes the client from every notify audience. The Rust leaf admits one
+ * client.
  *
  * The NRT gateway is the sole caller of the IOscTransport methods, but
  * on_closed fires on a reader thread — one mutex covers the audience lists

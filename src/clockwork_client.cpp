@@ -344,7 +344,7 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out || max == 0) return 0;
 
-    // The same counters the engine's own drain kept: reply and notification
+    // The same counters the engine's own drain keeps: reply and notification
     // volume, and ring health. They live in the segment so an observer outside
     // this process can see them, which is why a client bumps them rather than
     // keeping a private tally.

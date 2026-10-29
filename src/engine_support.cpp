@@ -58,7 +58,6 @@ extern "C" void clockwork_publish_nrt_blocking(uint32_t maxPassUs, uint32_t rece
  *
  * clockwork's knob rather than any DSP's — nrt_render sets it from --seed —
  * so it lives here and is handed over in DspConfig::deterministic_seed at
- * dsp_new(). It was named g_dsp_deterministic_seed while the DSP reached in
- * and read it; nothing reaches in any more, so it takes clockwork prefix.
+ * dsp_new(). The DSP never reads it directly.
  */
 extern "C" { int32_t clockwork_deterministic_seed = 0; }

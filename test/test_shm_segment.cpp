@@ -80,8 +80,8 @@ TEST_CASE("shm-security: the segment is anonymous, owner-sized and close-on-exec
 }
 
 TEST_CASE("shm-security: two creators never share memory", "[shm][security]") {
-    // With names, two engines on one port collided (and a planted name could
-    // be adopted). With no names there is nothing to collide on: each creator
+    // A named segment lets two engines on one port collide, and a planted name
+    // be adopted. With no names there is nothing to collide on: each creator
     // gets its own pages, whatever else exists.
     shm_segment_creator a;
     shm_segment_creator b;
@@ -118,9 +118,9 @@ TEST_CASE("shm-security: stream readers pin the client mapping (no dangling read
     creator.publish();
 
     // An observer hands reader copies to long-lived widgets, then remaps by
-    // destroying its client. The reader must keep the old mapping alive:
-    // 2026-07-11 this exact sequence was a GUI segfault (poll timer → atomic
-    // load through the munmapped slot pointer).
+    // destroying its client. The reader must keep the old mapping alive, or a
+    // widget's poll timer makes an atomic load through the munmapped slot
+    // pointer.
     auto client = std::make_unique<shm_segment_client>(shm_dup_handle(creator.native_handle()));
     auto reader = client->get_tap_stream_reader(0);
     client.reset();
@@ -287,8 +287,8 @@ TEST_CASE("shm: the guest's region is shared, and addressed by offset",
     // Two regions in the segment, one writer each: the client-written assets and
     // the guest-written returns. They must not overlap, or "one writer" is a
     // claim the layout itself contradicts. The guest's arena is deliberately
-    // NOT here — no client maps it, and while it was here it existed only when
-    // a client did.
+    // NOT here — no client maps it, and in the segment it would exist only
+    // while a client did.
     uint8_t*       engineSide = creator.get_returns();
     const uint8_t* clientSide = client.get_returns();  // const: the guest writes this
     REQUIRE(engineSide != nullptr);

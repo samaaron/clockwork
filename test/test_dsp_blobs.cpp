@@ -8,13 +8,11 @@
  * leaves as an argument of the message DspHost::emit_osc is given. Neither
  * direction needs clockwork to know what the bytes are.
  *
- * That is worth pinning precisely because it was not always so. A definition
- * used to have a path of its own: a verb declared in DspInfo so clockwork
- * could recognise the message carrying one, an entry point asking the guest to
- * read a name out of the bytes, and a cache keyed on that name. Samples — the
- * other obvious large payload — never got one, and were left to the client to
- * re-send. Removing the special case removed no capability, because the
- * general path was already carrying the other half of the traffic.
+ * That is worth pinning: a path of its own for one kind of payload (a verb
+ * declared in DspInfo so clockwork can recognise the message carrying it, an
+ * entry point asking the guest to read a name out of the bytes, a cache keyed
+ * on that name) adds no capability, because the general path carries every
+ * other large payload, samples included.
  *
  * SO WHY IS THERE A CEILING AT ALL, if the mechanism is symmetric? Because a
  * message is the wrong vehicle for bulk in EITHER direction, and the boundary is
@@ -223,10 +221,9 @@ TEST_CASE("blobs: a blob too big for the egress ring is refused, and the guest i
     const auto a = osc_test::parseReply(ack->data.data(),
                                         static_cast<uint32_t>(ack->data.size()));
 
-    // TOLD NO, which is the whole case. emit_osc returned void until
-    // 2026-09-01, so this answered 1 whether the frame was queued or dropped —
-    // and the guest's only other signal, STATUS_BUFFER_FULL, is a global flag
-    // it would have to poll and could not attribute to its own message.
+    // TOLD NO, which is the whole case: the return value is the one signal a
+    // guest can attribute to its own message. The other, STATUS_BUFFER_FULL,
+    // is a global flag it would have to poll.
     REQUIRE(a.argInt(0) == 0);
 
     // And nothing arrived, so the refusal is a refusal rather than a truncation.

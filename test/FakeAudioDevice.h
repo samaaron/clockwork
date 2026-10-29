@@ -59,7 +59,7 @@ struct FakeDeviceSpec {
     std::atomic<bool> failStart { false };
     // A lying device: the rate its callbacks actually keep time at, whatever
     // rate it was opened at and reports. 0 = honest (ticks at the open rate).
-    // sonic-pi#3565's mixer: reports 48000, delivers ~44100.
+    // E.g. a mixer that reports 48000 and delivers ~44100.
     double deliveredRate = 0;
     // Unplugged: absent from every device list and refused by name until it
     // comes back. Atomic: a case flips it on a running engine.
@@ -70,8 +70,8 @@ struct FakeDeviceSpec {
     // open succeeds or fails: a moment inside a swap a case can act in,
     // between the old device's teardown and anything built for this one.
     std::function<void()> onOpen;
-    // Gone where it stands: still listed, but its driver says it is no
-    // longer alive, and it cannot be opened.
+    // Dead in place: still listed, but its driver says it is no longer
+    // alive, and it cannot be opened.
     std::atomic<bool> dead { false };
     // What its driver says it is (AudioIODeviceType::DeviceTraits): how it
     // is connected, in the driver's own word, and what that makes it.

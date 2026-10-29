@@ -99,9 +99,8 @@ TEST_CASE("EngineState: switchDevice in headless doesn't change state", "[Engine
 // real-time pool larger than it) is an engine in error, not a running
 // one, and every client can learn why: the engine still answers its own
 // verbs, and a late registrant's state replay carries the guest's reason.
-// Before this, the engine reported "running" with no guest inside, nothing
-// drained its ingress, and a client's /clockwork/notify timed out — the
-// reason reached only the log.
+// An engine that reports "running" with no guest inside drains no ingress,
+// and a client's /clockwork/notify times out with the reason only in the log.
 
 namespace {
 ClockworkEngine::Config askingForAPool(size_t bytes) {
@@ -139,9 +138,9 @@ TEST_CASE("EngineState: a guest that does not come up leaves the engine in error
 
 // A guest's reason is its own, at any length the boot keeps (511 bytes, with
 // "<guest> did not start: " in front), and a client that registers is told it
-// whole. One too long for a fixed reply buffer threw inside the notify
-// handler: the client was answered notify.reply, then refused the verb as
-// unknown, and never learned the engine was in error.
+// whole. A reason too long for a fixed reply buffer must not throw inside the
+// notify handler: the client would be answered notify.reply, then refused the
+// verb as unknown, and never learn the engine is in error.
 TEST_CASE("EngineState: a guest that refuses at length: a client that registers is told the whole reason",
           "[EngineState][guest-failed]") {
     const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";
@@ -252,11 +251,6 @@ TEST_CASE("EngineState: a new arena starts empty, whatever the memory held befor
         static_cast<const uint8_t*>(clockwork_lanes_base()) + NODE_ID_COUNTER_START);
     CHECK(counter->load(std::memory_order_acquire) == 0);
 }
-
-// ── Recording survives pause/resume (hot swap) ──────────────────────────────
-
-// (A recording case lived here. The engine opens no files now; session
-// recording is the client's — SuperSonic's front, test_front_recording.cpp.)
 
 TEST_CASE("EngineState: purge clears stale messages after cold swap",
           "[EngineState][atomicity]") {
@@ -421,9 +415,8 @@ TEST_CASE("EngineState: the transport stamp is a real time from boot, not the 19
     // The clock enters service in init_memory, after the layout and the
     // reset, on every target (audio_processor.cpp, clock_enter_service):
     // its transport stamp is anchored to wall time as it binds. The web half
-    // of this pin is test/channel_clock.spec.mjs; a reset that ran after the
-    // web's bind wiped the stamp to 0 there while native, which bound later,
-    // read a real time (2026-10-16). One order now, pinned on both.
+    // of this pin is test/channel_clock.spec.mjs: a reset that runs after the
+    // bind wipes the stamp to 0, so the order is pinned on both targets.
     EngineFixture fix;
     fix.send(osc_test::message("/clockwork/clock/transport/time/get"));
     OscReply r;

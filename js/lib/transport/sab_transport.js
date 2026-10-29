@@ -225,10 +225,10 @@ export class SABTransport extends Transport {
         return this.#initialized && !this._disposed;
     }
 
-    // The readers stopped, and heard to have stopped, before they are let go: a reader that read on — parked in
-    // Atomics.wait, where neither a message nor terminate() reaches it at once — would take what the next engine
-    // says first (sab_worker_loop.js, the stop a parked thread sees). Told in memory and by message, its ring's
-    // waiters woken, and waited for, within a bound a reader that is already gone reaches.
+    // Stop the readers and wait for them to confirm before terminating them. A reader parked in Atomics.wait
+    // sees neither a message nor terminate() at once, and one still reading would take the next engine's first
+    // replies (sab_worker_loop.js). So: set the stop word, post stop, wake the ring's waiters, then wait with a
+    // bound that a reader which is already gone also satisfies.
     dispose() {
         if (this._disposed) return Promise.resolve();
         this.#disposing ??= this.#stopReaders();

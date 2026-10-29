@@ -75,7 +75,7 @@ pub struct DspConfig {
 /// shape the tap substrate spells out (rust/clockwork-taps). Opaque to a
 /// DSP apart from two reads: `slot` is non-NULL while the handle owns a slot,
 /// and `channels` is how many that slot carries, as the host clamped it. The
-/// other two are historical and 0.
+/// other two are unused and 0.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DspTapHandle {

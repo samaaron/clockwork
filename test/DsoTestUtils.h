@@ -14,7 +14,7 @@
  * cases. Its name carries the process id: ctest runs every case in a process
  * of its own, four at a time, and when two cases write one name each
  * truncates the file under the other's dlopen, which the loader answers with
- * SIGBUS (the native macOS job on ad566ff).
+ * SIGBUS.
  */
 #pragma once
 

@@ -174,10 +174,9 @@ TEST_CASE("midi/clock/follow refuses a name that is nothing, and claims a midi:<
 }
 
 // A port name is whatever a client sends, and each of these replies echoes
-// it. They were built in a fixed 2 KB buffer outside the parse's try, so a
-// longer name threw on the engine's control thread, where nothing catches:
-// std::terminate, from one message on a local socket, and any host the
-// engine is embedded in with it.
+// it. A name longer than the reply buffer must not throw on the engine's
+// control thread, where nothing catches: that is std::terminate, from one
+// message on a local socket, and any host the engine is embedded in with it.
 TEST_CASE("midi/clock/follow, followers and unfollow answer a port name of any length",
           "[engine][midi][clock]") {
     Engine e;

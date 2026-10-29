@@ -65,8 +65,7 @@ size_t clockwork_sched_bytes_needed(uint32_t slot_count, uint32_t data_pool_size
  * initialisation — before the heap is arranged. The allocation fails, this
  * returns null, and a null handle then refuses every add exactly as a full
  * queue does. A scheduler that was never built is indistinguishable from a
- * busy one, which is how the web build ran for its whole life with a
- * scheduler that accepted nothing.
+ * busy one.
  *
  * `mem` must be writable for `len` bytes and must outlive the scheduler.
  * Do not pass the result to clockwork_sched_free; the memory is not ours.

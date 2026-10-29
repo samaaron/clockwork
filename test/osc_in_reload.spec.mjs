@@ -3,9 +3,9 @@
 /*
  * A host's own OSC-in reader (oscInEndpoint) across reloads.
  *
- * How Sonic Pi runs it: in a worker that is also something else, on a MessagePort, waiting without blocking. A reload
- * stops the reader, hands it a new ring and starts it again — and the loop from before, parked in Atomics.waitAsync,
- * woke with the next frame, found the reader running again and read on beside the new one. One more loop per reload.
+ * A host runs it in a worker that is also something else, on a MessagePort, waiting without blocking. A reload stops
+ * the reader, hands it a new ring and starts it again; the loop from before, parked in Atomics.waitAsync, wakes with
+ * the next frame and must leave rather than find the reader running again and read on beside the new one.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -13,9 +13,9 @@ import { test, expect, boot } from "./fixtures.mjs";
 const within = `(p, ms) => Promise.race([p.then((v) => ({ settled: true, value: v }), (e) => ({ settled: true, error: String(e?.message ?? e) })), new Promise((r) => setTimeout(() => r({ settled: false }), ms))])`;
 
 test("a reader the host runs on a port of its own, yielding between frames, hears each reply once across reloads", async ({ page, clockworkConfig, clockworkMode }) => {
-  // How a host embeds the reader in a worker that is also something else (Sonic Pi's runtime): runOscInPump on a
-  // MessagePort, non-blocking. Each reload stopped it and started it again while its loop from before was parked in
-  // Atomics.waitAsync — and that loop woke with the next frame and read on, beside the new one.
+  // How a host embeds the reader in a worker that is also something else: runOscInPump on a MessagePort,
+  // non-blocking. Each reload stops it and starts it again while its loop from before is parked in Atomics.waitAsync;
+  // that loop must not wake with the next frame and read on beside the new one.
   test.skip(clockworkMode !== "sab", "a host's reader is the SAB transport's");
   await boot(page);
   const r = await page.evaluate(async ([config, withinSrc]) => {

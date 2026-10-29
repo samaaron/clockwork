@@ -6,12 +6,12 @@
  * A GUI fills its output, input, driver and rate menus from the engine's device
  * report alone (/clockwork/devices, /clockwork/input-devices, /clockwork/info and
  * the per-driver /clockwork/device-table), so what the report offers is what the
- * user can choose. Each rule here came from a menu that misled someone: the same
- * output listed once per driver, a microphone that vanished from the list after
- * failing once, a report sent while the device list was half rebuilt that
- * deselected the user's microphone, rates offered that the microphone could not
- * run at, ALSA devices offered that PipeWire holds and nothing can open, and no
- * way to go back to following the system default.
+ * user can choose. Each rule here is a way a menu can mislead: the same output
+ * listed once per driver, a microphone dropped from the list after failing
+ * once, a report sent while the device list is half rebuilt that deselects
+ * the user's microphone, rates offered that the microphone cannot run at,
+ * ALSA devices offered that PipeWire holds and nothing can open, and no way
+ * to go back to following the system default.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"

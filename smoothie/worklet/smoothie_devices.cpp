@@ -73,10 +73,10 @@ bool listed(const juce::AudioIODeviceType& type, bool asInput, const std::string
     return false;
 }
 
-// What JUCE's AudioDeviceManager chose from a request, kept as it was: the
-// rate asked for when the device offers it, else the one it runs at, else
-// the lowest from 44.1 kHz up; the buffer asked for when offered, else the
-// device's default.
+// The rate and buffer chosen from a request, by JUCE's AudioDeviceManager
+// rule: the rate asked for when the device offers it, else the one it runs
+// at, else the lowest from 44.1 kHz up; the buffer asked for when offered,
+// else the device's default.
 double chooseRate(juce::AudioIODevice& device, double wanted) {
     const auto rates = device.getAvailableSampleRates();
     if (wanted > 0 && rates.contains(wanted)) return wanted;

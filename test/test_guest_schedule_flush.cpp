@@ -5,11 +5,10 @@
  *
  * A client sends its notes early, as timestamped bundles, and clockwork holds
  * them until each falls due (SCHED_TAG_SYNTH). The guest holds none of them,
- * so its own clearing verb (scsynth's /clearSched) cleared nothing: Sonic Pi
- * pressed Stop, and half a second of notes still played; the engine rebuilt
- * for a device change, and they played into the empty world. DspHost::
- * flush_schedule is the guest's way to drop them; the dummy guest's
- * /dummy/flush calls it.
+ * so its own clearing verb (scsynth's /clearSched) clears none of them, and
+ * a Stop or a rebuild for a device change leaves half a second of notes to
+ * play. DspHost::flush_schedule is the guest's way to drop them; the dummy
+ * guest's /dummy/flush calls it.
  *
  * The case is the clock (manual pump, freewheel): nothing falls due unless
  * the case renders it, so a bundle dated by the wall clock half a second

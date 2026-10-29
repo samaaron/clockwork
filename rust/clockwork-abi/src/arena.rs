@@ -161,8 +161,7 @@ impl ClockworkArenaRegion {
     pub const CLOCKWORK_NRT_OUT_RING: Self = Self(13);
     /// Clockwork's own control verbs, written at the boundary and drained by
     /// the control pass with no audio block in the loop (docs/RESTARTS.md).
-    /// A later addition: numbered after the guest's regions, laid out in the
-    /// transport area.
+    /// Numbered after the guest's regions, laid out in the transport area.
     pub const CLOCKWORK_CONTROL_RING: Self = Self(17);
     // guest-public
     pub const GUEST_WINDOW: Self = Self(14);

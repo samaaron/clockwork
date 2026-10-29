@@ -47,18 +47,18 @@ namespace {
 // does. 0 where it cannot be read (Windows), which the case below takes as
 // "nothing to measure here".
 //
-// NOT THE PEAK. This read ru_maxrss, the process's high-water mark, which
-// only moves when the process goes higher than it has ever been — so in a
-// suite run in one process, where earlier cases had already been higher, a
-// lane committed whole at boot would not have moved it at all, and the case
-// passed without measuring anything. Alone, it measured the boot and failed.
+// NOT THE PEAK. ru_maxrss, the process's high-water mark, only moves when
+// the process goes higher than it has ever been, so in a suite run in one
+// process, where earlier cases have already been higher, a lane committed
+// whole at boot would not move it at all and the case would pass without
+// measuring anything.
 uint64_t residentBytes() {
 #if defined(__APPLE__)
     // The footprint, not the resident set: under memory pressure macOS
     // compresses pages straight out of the resident set, and a lane just
-    // written then reads as half its size (seen on a CI runner, 2026-10-07).
-    // The footprint is what the system itself accounts a process by, and it
-    // counts a compressed page as still the process's.
+    // written then reads as half its size. The footprint is what the system
+    // itself accounts a process by, and it counts a compressed page as still
+    // the process's.
     task_vm_info_data_t info {};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO,
@@ -307,7 +307,7 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
 
     // AND THE MEASUREMENT CAN SEE A LANE THAT IS WRITTEN. Half of it, touched
     // a page at a time, must show up in the resident set — otherwise "it did
-    // not grow" above is what a ruler that reads nothing would say as well.
+    // not grow" above could be a measurement that reads nothing.
     if (before != 0) {
         const uint64_t half = want / 2;
         const uint64_t untouched = residentBytes();

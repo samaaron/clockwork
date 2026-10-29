@@ -45,8 +45,7 @@ inline constexpr size_t CLOCKWORK_SYS_PREFIX_LEN  = sizeof(CLOCKWORK_SYS_PREFIX)
 // policy: a bundle begins "#bundle", not "/", so it has no single address to
 // match on. It may contain many, addressed anywhere. Rather than open it and
 // route each element — which would mean splitting a bundle whose whole purpose
-// is to be applied atomically at one time — the entire bundle goes to the DSP,
-// which is what upstream did too.
+// is to be applied atomically at one time — the entire bundle goes to the DSP.
 //
 // A future timetag does NOT change that. Clockwork may HOLD the bundle (when
 // the DSP does not hold its own schedule) and deliver it later, but it delivers

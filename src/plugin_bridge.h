@@ -128,10 +128,10 @@ constexpr uint32_t DEFAULT_SLACK     = 2;
 // bridge takes to wake — so the return must already hold B, plus two: one
 // because the bridge can render a block while the callback is still pulling
 // (a slack of exactly B counts that as stale and drops it, a click per
-// callback), one for scheduling jitter. DEFAULT_SLACK is the floor, and was
-// the whole story when every callback was one or two blocks; a 1024-frame
-// WASAPI buffer ticks eight, and at slack two played a quarter of each
-// callback and dropped the rest — a 375 Hz buzz over the piece. Bounded by
+// callback), one for scheduling jitter. DEFAULT_SLACK is the floor, enough
+// for a callback of one or two blocks; a 1024-frame WASAPI buffer ticks
+// eight, and at slack two would play a quarter of each callback and drop
+// the rest — a 375 Hz buzz. Bounded by
 // the ring: AUDIO_RING_FRAMES holds sixteen blocks of 128, one stays free.
 // `override` (CLOCKWORK_PLUGIN_BRIDGE_SLACK in the environment) wins within
 // bounds; 0 means none.

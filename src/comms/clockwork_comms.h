@@ -9,8 +9,8 @@
  * the transports here. Each of these listens on the wire, writes what it
  * receives through the client boundary with an origin token of its own
  * minting, and resolves that token back to a connection when the engine
- * replies. Every notify audience lives here, on the client's side, because
- * "who is on the other end" was never the engine's question.
+ * replies. Every notify audience is kept here, on the client's side: the
+ * engine does not know who is on the other end.
  *
  * This is the native counterpart of what the JavaScript client does for the
  * worklet: the wire is the client's, on every platform. A host links

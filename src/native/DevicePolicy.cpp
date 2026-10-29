@@ -195,10 +195,9 @@ DeviceListSelection selectReportedDevices(
     }
 
     // Inputs that failed against this output are deliberately NOT removed.
-    // Quarantining them meant the list quietly shrank as the user worked
-    // through it, with nothing said and no way back — the app appeared to be
-    // losing hardware. A device that cannot open says so when it is picked,
-    // every time, which is duller and much easier to understand.
+    // Quarantining them shrinks the list as the user works through it, with
+    // nothing said and no way back, which reads as the app losing hardware.
+    // A device that cannot open says so when it is picked, every time.
     (void)knownBadInputsForCurrent;
 
     if (!currentOutputName.empty()) {
@@ -686,16 +685,16 @@ ExclusivePair resolveExclusiveDuplexPair(const std::string& requestedOutput,
     // The exclusive device is carried-over state only.
     //
     // Held as the INPUT, it yields: the output the user just named has to open,
-    // and #3553 showed the pair being reconciled back onto the patchbay and the
-    // input amputated anyway.
+    // and otherwise the pair is reconciled back onto the patchbay and the
+    // input dropped anyway.
     //
     // Held as the OUTPUT, it stays. The session manager links each side of the
     // filter node independently, so the node keeps its output ports while the
-    // input ports take their signal from another device — verified on PipeWire
-    // with out_1..out_16 on the filter node and in_1/in_2 fed from the default
-    // capture source. Yielding here would drop a 16-channel output the user
-    // chose in order to honour an input, and force a channel-count cold swap
-    // for a pair the device layer opens as asked.
+    // input ports take their signal from another device (on PipeWire,
+    // out_1..out_16 stay on the filter node while in_1/in_2 are fed from the
+    // default capture source). Yielding here would drop a 16-channel output
+    // the user chose in order to honour an input, and force a channel-count
+    // cold swap for a pair the device layer opens as asked.
     if (inIsX)
         p.input = "__none__";
     return p;

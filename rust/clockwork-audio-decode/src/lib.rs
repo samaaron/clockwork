@@ -3,11 +3,11 @@
 //! The decoders behind `clockwork_audio_file.h`.
 //!
 //! A sample file comes from a user, from the web or from someone else's
-//! project: it is the widest door clockwork has to untrusted bytes, and it
-//! used to be answered by four single-file C libraries. This crate answers
-//! it in Rust, with symphonia doing the decoding and this code doing what a
-//! decoder cannot: deciding what a file is, holding its output to a limit,
-//! and refusing what a header claims when the file cannot back it up.
+//! project: it is the widest door clockwork has to untrusted bytes. This
+//! crate answers it in Rust, with symphonia doing the decoding and this code
+//! doing what a decoder cannot: deciding what a file is, holding its output
+//! to a limit, and refusing what a header claims when the file cannot back it
+//! up.
 //!
 //! What comes out is interleaved 32-bit float, however the file stored its
 //! samples, handed to an [`Output`] a frame block at a time so the buffer
@@ -190,9 +190,9 @@ pub fn decode(bytes: &[u8], max_bytes: u64, out: &mut dyn Output) -> Result<Info
         }
         // A frame decoded at a layout other than the stream's (an MP3 frame
         // header can say mono at 24 kHz under a stereo 44.1 kHz stream) would
-        // put fewer samples in the block than frames times channels promises:
-        // the fourth fuzz finding. Stop at it with what played at the
-        // stream's layout; a file that opens like that is refused.
+        // put fewer samples in the block than frames times channels promises.
+        // Stop at it with what played at the stream's layout; a file that
+        // opens like that is refused.
         let spec = decoded.spec();
         if spec.channels().count() as u32 != opened.info.channels
             || spec.rate() != opened.info.sample_rate
@@ -234,9 +234,9 @@ fn open(bytes: &[u8]) -> Result<Opened<'_>, Refusal> {
     };
     let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
     // Only the reader for the format the bytes were sniffed as. Symphonia's
-    // stock probe scans a stream for the marker of any format it knows, and
-    // a WAV header buried in what the bytes said was an MP3 reached the WAV
-    // reader that way, past the normaliser: the second fuzz finding.
+    // stock probe scans a stream for the marker of any format it knows, so
+    // a WAV header buried in what the bytes said was an MP3 would reach the
+    // WAV reader past the normaliser.
     let mut probe = Probe::new();
     match format {
         Format::Unknown => return Err(Refusal::NotAudio),
@@ -355,9 +355,8 @@ mod tests {
     #[test]
     fn a_format_buried_behind_another_is_not_reached() {
         // The bytes say MP3, so the MP3 reader is the only one that reads
-        // them. A WAV behind the sync is never found by scanning: that is how
-        // a fmt chunk got past the WAV normaliser to the decoder (the second
-        // fuzz finding, in corpus/regressions).
+        // them. A WAV behind the sync is never found by scanning: scanning
+        // would hand a fmt chunk to the decoder past the WAV normaliser.
         let mut d = vec![0xFF, 0xFB, 0x90, 0x00];
         d.extend_from_slice(&[0u8; 240]);
         d.extend_from_slice(&fixture("wav-s16.wav"));
@@ -481,8 +480,8 @@ mod tests {
         assert_eq!(probe(b"RIFF\0\0\0\0WAVE"), Err(Refusal::Malformed));
     }
 
-    /// The fuzz seeds and every crasher the fuzzer ever found (corpus/),
-    /// through the fuzz body as a test: deterministic, on every push.
+    /// The fuzz seeds and regression inputs (corpus/), through the fuzz
+    /// body as a test: deterministic, on every push.
     #[test]
     fn the_fuzz_corpus_replays() {
         let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), exercise);

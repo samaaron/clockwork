@@ -22,12 +22,12 @@
 //! Nothing else in this crate knows which platform it is on, and no caller
 //! knows at all.
 //!
-//! # The native `send_at`, and what it cost
+//! # The native `send_at`
 //!
-//! Landed 2026-08-30. `MidiOutputConnection::send_at(bytes, delay)` is uniform
-//! across midir's backends, and [`MidiEndpoint`] asks the device — not the
-//! target OS — whether it can hold a message, because it depends on whether a
-//! queue was actually allocated.
+//! `MidiOutputConnection::send_at(bytes, delay)` is uniform across midir's
+//! backends, and [`MidiEndpoint`] asks the device — not the target OS —
+//! whether it can hold a message, because it depends on whether a queue was
+//! actually allocated.
 //!
 //! A DELAY rather than an absolute timestamp, because a delay is the one form
 //! every backend honours natively: ALSA schedules relative to its queue,
@@ -36,13 +36,13 @@
 //! and would push that choice onto every caller.
 //!
 //! Per backend:
-//!   * **ALSA** — output had no queue at all (`set_direct()` bypasses it), so
-//!     `send_at` allocates and starts one and schedules RELATIVE, which is what
-//!     avoids mapping our clock onto the queue's. The shared client gets one
-//!     queue for the whole client, queues being
-//!     client-scoped. Measured on an idle box: sd 0.33ms, offset +1.0ms.
-//!   * **CoreMIDI** — already built a timestamped packet and stamped it "now";
-//!     the change is a future host time. WRITTEN BUT NOT YET RUN ON macOS.
+//!   * **ALSA** — output has no queue by default (`set_direct()` bypasses
+//!     it), so `send_at` allocates and starts one and schedules RELATIVE,
+//!     which is what avoids mapping our clock onto the queue's. The shared
+//!     client gets one queue for the whole client, queues being
+//!     client-scoped.
+//!   * **CoreMIDI** — the output packet carries a timestamp; `send_at` stamps
+//!     it with a future host time instead of "now".
 //!   * **WinMM** — no timestamped short-message send exists, so it refuses and
 //!     the sink goes on holding the message itself. This is why the substrate
 //!     must still be able to hold: one backend never gaining it is the normal
@@ -52,8 +52,8 @@
 //!     lives on the main thread, so js/lib/midi_manager.js calls
 //!     `MIDIOutput.send(bytes, timestamp)` there directly.
 //!
-//! `src/clockwork_event_sink.h` did not change, and no caller or DSP did either —
-//! which is what it meant for the contract to be "shaped for it".
+//! None of this reaches `src/clockwork_event_sink.h`, a caller or a DSP: the
+//! contract is the same whichever backend holds the message.
 //!
 use std::sync::Mutex;
 
@@ -229,8 +229,7 @@ impl MidiEndpoint {
     /// named port does not exist. Refusing is the point: `MidiIo::send` to an
     /// unopened port is a silent no-op, and a sink that opened onto nothing
     /// and then dropped every message into it would be indistinguishable from
-    /// one that worked — which is the failure mode clockwork has been bitten
-    /// by before (see the note on silent control-name drops).
+    /// one that worked.
     ///
     /// `"*"` means every currently open output and enables nothing, matching
     /// what `/clockwork/midi/out/*` already means by it.

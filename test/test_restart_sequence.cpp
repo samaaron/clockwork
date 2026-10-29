@@ -89,10 +89,10 @@ bool heardRunning(EngineFixture& fix, int32_t above) {
 // The sequence once it has settled, read on the watchdog's clock: its last
 // word a running naming the generation open now, and nothing more said for a
 // further stall window, so every restart in it is complete. A recovery
-// the engine asked for itself can start after the one a case waited for —
-// the stall watchdog firing before the restored device has ticked, on a
-// slow runner (2026-10-16) — and a sequence read mid-restart has a
-// restarting with no setup and running behind it yet.
+// the engine asked for itself can start after the one a case waited for
+// (the stall watchdog firing before the restored device has ticked), and a
+// sequence read mid-restart has a restarting with no setup and running
+// behind it yet.
 std::vector<Said> settledSequence(EngineFixture& fix, fake_audio::FakeSystem& sys) {
     REQUIRE(runWatchdogUntil(fix.engine(), sys, 50, 20000, [&] {
         const auto h = sequenceHeard(fix);

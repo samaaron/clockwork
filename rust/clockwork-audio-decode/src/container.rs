@@ -116,8 +116,7 @@ struct Chunk {
 /// The most channels a fmt or COMM chunk may declare. The decoder's channel
 /// mask stops far below this, so no file it could read is lost. What is
 /// refused is a count the decoder multiplies in 16 bits before it checks it:
-/// 45,314 channels at 16 bits overflowed there and panicked (the finding is
-/// in corpus/regressions).
+/// 45,314 channels at 16 bits overflows there and panics.
 const MAX_CHANNELS: u16 = 64;
 
 fn le16(d: &[u8], at: usize) -> Option<u16> {
@@ -202,8 +201,8 @@ fn walk_w64(d: &[u8]) -> Vec<Chunk> {
 /// The channel count the format chunk declares: a WAVE fmt's second field,
 /// an AIFF COMM's first. A file declares its format exactly once: the decoder
 /// reads every chunk, the ones after the data too, so a second fmt or COMM
-/// would reach it unchecked (the nightly fuzz run's third finding). A file
-/// without one, or with two, is not a file the decoder could read.
+/// would reach it unchecked. A file without one, or with two, is not a file
+/// the decoder could read.
 fn declared_channels(d: &[u8], chunks: &[Chunk], big_endian: bool) -> Option<u16> {
     let id: &[u8; 4] = if big_endian { b"COMM" } else { b"fmt " };
     let mut found = chunks.iter().filter(|c| &c.id == id);
@@ -444,8 +443,8 @@ mod tests {
 
     #[test]
     fn a_channel_count_the_decoder_cannot_hold_is_refused() {
-        // 45,314 channels at 16 bits overflowed the decoder's 16-bit block
-        // align arithmetic: the nightly fuzz run's first finding.
+        // 45,314 channels at 16 bits overflows the decoder's 16-bit block
+        // align arithmetic.
         assert!(normalise(&with_channels(wav(400, 100), 45_314), Format::Wav).is_none());
         assert!(normalise(&with_channels(wav(400, 100), 0), Format::Wav).is_none());
         assert!(normalise(&with_channels(wav(400, 100), MAX_CHANNELS + 1), Format::Wav).is_none());
@@ -455,9 +454,9 @@ mod tests {
 
     #[test]
     fn a_second_format_chunk_is_refused() {
-        // The nightly fuzz run's third finding: a well-formed fmt, then a
-        // data chunk, then a second fmt declaring 45,314 channels. The decoder
-        // reads every chunk, so a file may declare its format exactly once.
+        // A well-formed fmt, then a data chunk, then a second fmt declaring
+        // 45,314 channels. The decoder reads every chunk, so a file may
+        // declare its format exactly once.
         let mut d = wav(400, 100);
         d.extend_from_slice(b"fmt ");
         d.extend_from_slice(&16u32.to_le_bytes());

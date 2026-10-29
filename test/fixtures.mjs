@@ -5,8 +5,8 @@
  *
  * `clockworkConfig` points every test at the artifacts build-web.sh produces and at
  * the transport the current project selects. Both transports run always: SAB
- * and postMessage differ in who can see the guest's heap, and that difference
- * is where clockwork's own defects have consistently lived.
+ * and postMessage differ in who can see the guest's heap, and a defect on one
+ * side of that difference is invisible from the other.
  */
 import { test as base } from "@playwright/test";
 
@@ -29,10 +29,9 @@ export const test = base.extend({
       workletUrl: "/dist/workers/clockwork_audio_worklet.js",
       snapshotIntervalMs: 25,
       // No output device: Chromium renders a context whose sink is "none"
-      // without opening the machine's hardware, which a test page has no
-      // business doing — one suite run opened a developer's sound card 198
-      // times and clicked it on every start (2026-10-16). The graph, the
-      // worklet and the engine run exactly as with a device.
+      // without opening the machine's hardware, which a test page must not
+      // do (every start would click the sound card). The graph, the worklet
+      // and the engine run exactly as with a device.
       audioContextOptions: { sinkId: { type: "none" } },
     });
   },

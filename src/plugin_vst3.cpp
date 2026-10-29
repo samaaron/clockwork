@@ -5,9 +5,9 @@
  *
  * Hand-rolled COM, against Steinberg's interface headers only: no SDK base/
  * or public.sdk/ is fetched or compiled, so nothing here inherits from
- * FObject, uses IPtr, or links a hosting helper. The headers are MIT as of
- * VST3 3.8.1 (v3.8.1_build_84 is the first tag carrying an MIT LICENSE.txt);
- * everything at 3.8.0 and earlier is Steinberg-proprietary OR GPLv3.
+ * FObject, uses IPtr, or links a hosting helper. The headers are MIT from
+ * VST3 3.8.1; 3.8.0 and earlier are Steinberg-proprietary OR GPLv3, so
+ * nothing older is pinned.
  *
  * WHAT THE HOST SIDE ACTUALLY OWES A VST3 PLUGIN, and what each entry point
  * therefore does:
@@ -408,11 +408,9 @@ private:
 /*
  * Note events for the block.
  *
- * A synth needs notes and the boundary had none: plugin_host.h enumerated
- * parameters and stopped there, which is enough for an effect and leaves an
- * instrument permanently silent. ProcessData::inputEvents was passed as
- * nullptr, so Surge XT loaded, reported 2855 parameters, and could not be
- * played.
+ * A synth needs notes: parameters alone are enough for an effect and leave
+ * an instrument permanently silent. With ProcessData::inputEvents null a
+ * synth loads, reports its parameters, and cannot be played.
  *
  * Fixed capacity, filled between blocks and drained by the plugin during
  * process. Overflow drops rather than grows: this is read on the audio thread,
@@ -1082,7 +1080,7 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
     // Owned until it is handed back: every way out before the end tears it
     // down (TornDown), so a throw between — a buffer that cannot be
     // allocated, a plugin that throws from a call — leaks neither the
-    // instance nor the module it loaded, as the matching deletes used to.
+    // instance nor the module it loaded.
     std::unique_ptr<Instance, TornDown> p(new Instance());
     p->sampleRate = sample_rate;
     p->maxBlock   = max_block;
@@ -1327,10 +1325,9 @@ Instance* open(const char* path, uint32_t index, double sample_rate,
 
 // ── Editor ───────────────────────────────────────────────────────────────────
 //
-// The header used to say "NO GUI", and for a headless engine that was right:
-// there is no window and no native event loop to give a plugin. Hosting one
-// inside an application that HAS both is a different situation, and the boundary
-// should let that application ask.
+// A headless engine has no window and no native event loop to give a plugin.
+// Hosting one inside an application that HAS both is a different situation,
+// and the boundary lets that application ask.
 //
 // Deliberately thin. Clockwork creates the view, attaches it to a native
 // parent the caller already owns, and reports the size the plugin wants; it
@@ -1522,9 +1519,8 @@ void process(Instance* p, const float* const* in, uint32_t n_in,
         ctx.tempo = bt.bpm;
         ctx.state |= ProcessContext::kTempoValid;
 
-        // kPlaying reflects the transport rather than being asserted. A plugin
-        // that gates on play/stop was previously told the transport was always
-        // rolling.
+        // kPlaying reflects the transport rather than being asserted, for a
+        // plugin that gates on play/stop.
         if (bt.playing) ctx.state |= ProcessContext::kPlaying;
 
         // The beat at the START of this block, in quarter notes — which is
@@ -1549,8 +1545,8 @@ void process(Instance* p, const float* const* in, uint32_t n_in,
         ctx.barPositionMusic = bt.barStartBeat;
         ctx.state |= ProcessContext::kBarPositionValid;
     } else {
-        // No clock: say the transport is rolling, which is what a plugin with
-        // no host tempo has always been told here.
+        // No clock: say the transport is rolling, as a plugin with no host
+        // tempo expects.
         ctx.state |= ProcessContext::kPlaying;
     }
 

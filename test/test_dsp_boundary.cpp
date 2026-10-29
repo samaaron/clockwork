@@ -12,8 +12,8 @@
  *     to dsp_osc(), and the DSP answers through DspHost::emit_osc with the
  *     origin it was handed — which must arrive on the RT egress ring, routed
  *     to that same origin. Nothing in that chain is a clockwork type: the boundary
- *     carries a uint32 token in and a uint32 token out, where it used to carry
- *     the previous engine's reply-address struct holding a function pointer.
+ *     carries a uint32 token in and a uint32 token out, never an engine
+ *     struct or a function pointer.
  *
  *   - dsp_describe(), and the one branch it governs. holds_schedule is read
  *     once at boot and decides where a timed message waits; the placeholder
@@ -151,19 +151,17 @@ TEST_CASE("dsp boundary: dsp_describe answers before any instance exists",
     // The placeholder keeps no schedule, so clockwork holds timed messages
     // for it — which is what the scheduled case below relies on.
     CHECK(info->holds_schedule == 0);
-    // The memory wants, the one thing the declaration has ever grown by. They
-    // are static for the same reason holds_schedule is: a host checks them
-    // against its memory profile before booting audio, and refuses rather
-    // than spills (test_dsp_regions.cpp). The placeholder's are modest so
-    // every host in this tree meets them.
+    // The memory wants are static for the same reason holds_schedule is: a
+    // host checks them against its memory profile before booting audio, and
+    // refuses rather than spills (test_dsp_regions.cpp). The placeholder's
+    // are modest so every host in this tree meets them.
     CHECK(info->memory_bytes_wanted == 512u * 1024u);
     CHECK(info->memory_bulk_bytes_wanted == 128u * 1024u);
-    // Five fields, and that is the whole declaration. Before the wants it had
-    // only ever shrunk: verbs naming a guest's definitions went when
-    // DspConfig::persistent took over surviving a rebuild
-    // (test_dsp_regions.cpp); stream_verb went when the channel map took over
-    // saying which channel is which, which a guest reads rather than is told
-    // (test_channel_map.cpp).
+    // Five fields, and that is the whole declaration. A guest's definitions
+    // survive a rebuild through DspConfig::persistent (test_dsp_regions.cpp),
+    // and the channel map says which channel is which, which a guest reads
+    // rather than is told (test_channel_map.cpp), so neither needs a verb
+    // declared here.
 }
 
 // Only in a build that HAS a store to wait in. The other configuration —
@@ -248,8 +246,7 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
 TEST_CASE("dsp boundary: sched/flush drops what /clockwork/schedule holds, as natively",
           "[boundary][lanes][scheduler]") {
     // The flush is the store's, and the store is the same on every host, so
-    // every host answers it: a worklet once refused it as an unknown verb,
-    // leaving a client nothing to cancel a pending note with.
+    // every host answers it: a client can cancel a pending note on any host.
     const uint32_t bl = lanes_test::boot();
     lanes_test::drainRt();
 
@@ -282,9 +279,8 @@ TEST_CASE("dsp boundary: sched/flush drops what /clockwork/schedule holds, as na
 
 TEST_CASE("dsp boundary: a /clockwork/schedule it cannot read is refused to the sender",
           "[boundary][lanes][scheduler]") {
-    // Counted in the drop metric as it always was, and now ALSO answered: the
-    // metric says something was lost, the refusal tells the client which
-    // message and why.
+    // Counted in the drop metric and answered: the metric says something was
+    // lost, the refusal tells the client which message and why.
     lanes_test::boot();
     lanes_test::drainRt();
 
@@ -311,14 +307,11 @@ TEST_CASE("dsp boundary: input reaches the DSP on the channel the host filled",
           "[boundary][lanes][audio]") {
     // The input half of dsp_process, which nothing else here touches.
     //
-    // Clockwork owns this buffer now. get_audio_input_bus() used to return
-    // an address computed INSIDE the DSP's own signal storage — base +
-    // outputs*block, the previous engine's internal channel layout, arithmetic
-    // clockwork had no business doing on memory it did not own. It is now
-    // clockwork's own channel-major staging, and dsp_process is handed
-    // channel pointers into it. If that wiring were wrong the DSP would read silence, or the wrong
-    // channel, or memory belonging to something else — and nothing but this
-    // would notice.
+    // Clockwork owns this buffer: its own channel-major staging, never an
+    // address computed inside the DSP's own signal storage, and dsp_process
+    // is handed channel pointers into it. If that wiring were wrong the DSP
+    // would read silence, or the wrong channel, or memory belonging to
+    // something else — and nothing but this would notice.
     //
     // The placeholder's echo mode makes it observable: output channel c is
     // input channel c, verbatim, so a distinguishable value per channel says

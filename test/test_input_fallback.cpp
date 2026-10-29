@@ -83,8 +83,8 @@ TEST_CASE("InputFallback: result flags input as unavailable with reason",
 TEST_CASE("InputFallback: persistent failure fails the swap after an "
           "attributing retry", "[InputFallback]") {
     // The fault is attributed by RETRYING output-only, not by matching
-    // device names inside JUCE's error text (the old contract — it broke
-    // silently whenever the wording changed). A failure that persists
+    // device names inside JUCE's error text (a match on wording breaks
+    // silently whenever the wording changes). A failure that persists
     // without the input is not the input's fault: the swap fails and no
     // input-unavailable flag is raised.
     EngineFixture fix;

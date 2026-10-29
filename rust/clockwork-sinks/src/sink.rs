@@ -260,11 +260,11 @@ impl Sink {
         // 2. Everything due, in that order — plus, for an endpoint that
         //    schedules for itself, everything within the look-ahead window.
         //
-        //    NOT the lot at once, which is what this did first. Handing a
-        //    message to the kernel or the MIDI server is irreversible: it can
-        //    no longer be cancelled, and a run-stop that cannot cancel a note
-        //    an hour out is not a run-stop. Holding everything instead trades
-        //    the platform's timer for our thread's wakeup.
+        //    Not the lot at once. Handing a message to the kernel or the
+        //    MIDI server is irreversible: it cannot be cancelled after that,
+        //    and a run-stop that cannot cancel a note an hour out is not a
+        //    run-stop. Holding everything instead trades the platform's timer
+        //    for our thread's wakeup.
         //
         //    The window buys both. Beyond it the message stays here and a
         //    flush can still reach it; inside it the platform does the fine
@@ -517,12 +517,8 @@ mod tests {
     #[test]
     fn an_endpoint_that_schedules_is_handed_the_future_and_counts_it() {
         // Within the look-ahead, an endpoint that schedules takes the message
-        // WITH ITS TIME and the sink lets go of it.
-        //
-        // This once asserted the same for a message a whole second out, when
-        // the handoff was all-or-nothing. It is bounded now: past the window a
-        // message stays here, which is what keeps it cancellable. The clause
-        // that changed is the distance, not the behaviour inside the window.
+        // WITH ITS TIME and the sink lets go of it. Past the window a message
+        // stays here, which is what keeps it cancellable.
         let (sink, ep) = capture_sink(64);
         ep.set_schedules(true);
         let base = time::now();
@@ -628,9 +624,9 @@ mod flush_tests {
 
     #[test]
     fn an_endpoint_that_schedules_is_handed_only_the_look_ahead() {
-        // The whole point of the window. Before this, `schedules` handed over
-        // EVERYTHING at once, which made a message an hour out as
-        // uncancellable as one a millisecond out.
+        // The point of the window: a `schedules` endpoint handed everything
+        // at once would make a message an hour out as uncancellable as one a
+        // millisecond out.
         let (sink, ep) = capture_sink(64);
         ep.set_schedules(true);
         let now = time::now();

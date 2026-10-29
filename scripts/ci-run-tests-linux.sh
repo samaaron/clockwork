@@ -2,10 +2,9 @@
 # Run the test binaries given as arguments, and if one stops making progress,
 # print what every thread in it was doing before the job is killed.
 #
-# A hung test otherwise reaches us as a step timeout and nothing else: on
-# 2026-09-19 the engine suite stopped inside one case on linux-arm64 (the
-# first such hang in 25 runs) and the log ended there, with no way to tell
-# which lock it was on. --durations names the case; this names the threads.
+# A hung test otherwise reaches the log as a step timeout and nothing else,
+# with no way to tell which lock it was on. --durations names the case; this
+# names the threads.
 #
 # Nothing is installed and nothing is slowed down while the tests behave:
 # gdb is fetched only once a binary has overrun, which is also why this is

@@ -7,11 +7,8 @@
  * a synth, a plugin, or something else — and that product's name is the
  * one that belongs in a banner, in a log line, in the port list another MIDI
  * application shows, and in the name of a shared-memory segment two processes
- * rendezvous on.
- *
- * Until an embedder existed, every one of those was the literal "clockwork",
- * which is correct only for clockwork running standalone. The first embedder's
- * boot introduced itself as clockwork; that is the bug this header fixes.
+ * rendezvous on. The literal "clockwork" is correct in those places only for
+ * clockwork running standalone.
  *
  * Set CLOCKWORK_PRODUCT_NAME from CMake:
  *

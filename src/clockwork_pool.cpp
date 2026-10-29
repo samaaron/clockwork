@@ -8,17 +8,16 @@
  * guest's bulk span and adds what the engine needs around it: engine-thread
  * ownership with no locks, frees from other threads parked and drained, the
  * hooks the Rust router serves a Rust guest's allocations through, and the
- * RT router's block. The pool never grows (clockwork_pool.h). An allocator is
- * exactly the kind of pointer arithmetic worth confining to one audited
- * file, and it corrupted the system heap once while it was not.
+ * RT router's block. The pool never grows (clockwork_pool.h). All of the
+ * allocator's pointer arithmetic is confined to this one file.
  *
  * Thread safety: the pool is owned by the engine thread and taken lock-free.
  * The engine thread (registered per block, and at boot) operates on it
  * directly; a foreign thread never touches it — its allocations come from the
  * system allocator, and its frees of pool memory are parked on a lock-free
  * Treiber stack (the freed block's own bytes carry the link) that the engine
- * drains on its next allocation or free. The law this serves: no locks of any
- * kind on the audio thread, and no malloc there beyond our arena management.
+ * drains on its next allocation or free. This keeps locks of any kind off the
+ * audio thread, and malloc there limited to our arena management.
  */
 
 #include "clockwork_pool.h"
@@ -60,7 +59,7 @@ static void* g_pool = nullptr;           // the Rust pool's handle; NULL = no po
 
 // CLOCKWORK_POOL_CHECK=1 in the environment: walk the whole pool after every
 // allocation and free on the engine thread and stop at the first one that
-// leaves it broken, naming the operation. A hunt, never a build setting:
+// leaves it broken, naming the operation. A diagnostic, not a build setting:
 // the walk is the whole pool, every time.
 static int g_pool_check = -1;
 static bool pool_check_wanted() {

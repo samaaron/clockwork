@@ -39,8 +39,7 @@
 // says it means to (EngineFixture::expectEgressRefusals,
 // expectEgressUndelivered). The line logging a refusal rides the same full
 // ring, so the count is the only trace: checked as every fixture's engine goes
-// down, so whichever case loses one says so by name (a peer lost 296 replies
-// of 6000 on CI, 2026-10-16, with no case noticing).
+// down, so whichever case loses one fails by name.
 struct EgressLossExpected {
     bool refused = false;
     bool undelivered = false;
@@ -256,9 +255,9 @@ SwapResult switchWhenFree(Fix& fix, Args&&... args) {
 // The engine answers /clockwork/notify with notify.reply and THEN a snapshot
 // of its state (snapshotStateTo: reason "snapshot", or an error's own
 // reason). Both are the handshake, not anything the case heard happen, so
-// both are in before the slate is cleared. Cleared on the reply alone, the
-// snapshot landed after the clear on a slow runner, and a restart sequence
-// began with a "running" no restart had said (CI, 2026-10-16).
+// both are in before the slate is cleared. Clearing on the reply alone lets
+// the snapshot land after the clear, where a case reads its "running" as a
+// state change it never heard happen.
 template <typename Fix>
 void subscribe(Fix& fix) {
     fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
@@ -334,10 +333,9 @@ public:
     // spent: timeoutMs of audio, pumped a block a turn (what the audio thread
     // answers after so many blocks arrives on audio time, however slow the
     // machine), and timeoutMs of wall clock (what one of the engine's threads
-    // delivers once woken needs real time to run). One budget alone was
-    // wrong: the wall clock ran out before the audio on a loaded runner, each
-    // turn's sleep stretched (SuperSonic's SendReply at 2 Hz, macOS arm64 CI,
-    // 2026-10-14).
+    // delivers once woken needs real time to run). Either budget alone fails
+    // on a loaded machine, where each turn's sleep stretches and the wall
+    // clock runs out before the audio does.
     template <typename Pred>
     bool pollUntil(Pred pred, int timeoutMs = 2000) {
         const auto deadline = std::chrono::steady_clock::now()

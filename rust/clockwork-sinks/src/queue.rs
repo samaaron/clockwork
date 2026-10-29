@@ -155,9 +155,8 @@ impl MsgQueue {
     fn slot(&self, index: usize) -> *mut u8 {
         // A pointer with the whole allocation's provenance, offset into it.
         // Not `payload[0].get()`: a reference to element 0 covers one byte,
-        // and a pointer derived from it may not be used past that byte —
-        // Miri reports the write to cell 1 as undefined behaviour, exactly
-        // as it did for the frame ring before the same fix.
+        // and a pointer derived from it may not be used past that byte, so
+        // a write to cell 1 through it is undefined behaviour.
         // SAFETY: every caller masks `index` below the capacity, and the
         // allocation is `capacity * cell_bytes` bytes; `raw_get` makes no
         // reference along the way.

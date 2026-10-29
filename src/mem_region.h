@@ -16,9 +16,8 @@
  *                buffers, heap overflow). ESP32 → PSRAM.
  *
  * On single-region platforms (desktop, WASM, NIF) both tiers compile straight to
- * std::malloc / std::free with no wrapper — zero overhead and byte-for-byte the
- * behaviour these allocations had before. The tier is then purely documentation
- * of intent that an embedded build acts on.
+ * std::malloc / std::free with no wrapper and zero overhead. The tier is then
+ * purely documentation of intent that an embedded build acts on.
  *
  * UNLESS THE HOST SUPPLIES AN ARENA. set_arena() points the single-region
  * backend at a fixed span the host owns, and every allocation then comes from
@@ -27,15 +26,11 @@
  * That is not a wasm special case, it is what wasm needs and nothing else has:
  * emscripten's malloc starts after the static data and grows upward into
  * whatever comes next, and what comes next is the guest's region. An
- * 8 MB real-time pool taken with malloc walks straight into it. The engine used
- * to dodge this by having its client pre-carve a block and pass the offset in
- * through a config-block slot, which the guest read out of two file-scope
- * externs — one allocation path on native and a different one on web, and the
- * web one bypassed this interface entirely.
+ * 8 MB real-time pool taken with malloc walks straight into it.
  *
  * A host that calls set_arena() gets bounded allocation with no system calls;
- * a host that does not gets std::malloc exactly as before. The caller's code
- * is the same either way, which is the whole point.
+ * a host that does not gets std::malloc. The caller's code is the same either
+ * way.
  */
 #pragma once
 #include <cstddef>

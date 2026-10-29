@@ -793,7 +793,7 @@ pub fn timetag_of(t: std::time::SystemTime) -> u64 {
 ///
 /// Timetags are compared as UNSIGNED. A present-day timetag has its top bit
 /// set, so as an i64 it is negative and every signed comparison gets the answer
-/// exactly backwards — a trap this tree has hit three times in different files.
+/// exactly backwards.
 #[cfg(feature = "std")]
 pub fn delay_until(when: u64) -> Option<std::time::Duration> {
     // 0 and 1 are the OSC "immediately" sentinels: not a moment, so nothing to

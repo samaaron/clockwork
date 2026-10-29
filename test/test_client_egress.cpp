@@ -105,9 +105,9 @@ TEST_CASE("client egress: with the host draining, the engine's gateway leaves th
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
     cfg.hostDrainsEgress = true;
     EngineFixture fx(cfg);
-    // The fixture listens through the engine's transport, which the gateway
-    // used to feed. Nothing reaches it now: the frames wait in the rings for
-    // the host.
+    // The fixture listens through the engine's transport. With the host
+    // draining, the gateway does not feed it: the frames wait in the rings
+    // for the host.
     fx.send(osc_test::message("/dummy/ping"));
     OscReply r;
     CHECK_FALSE(fx.waitForReply("/dummy/pong", r, 400));
@@ -130,8 +130,7 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     // That is only sound if the space stays the caller's until it polls
     // again: a tail given back to the writer at poll time lets the audio
     // thread lap the ring and write a new reply over the one still being read.
-    // Seen once under TSan on a loaded CI runner (2026-10-07), never locally:
-    // the window is microseconds wide, so the ring is filled by hand here.
+    // The window is microseconds wide, so the ring is filled by hand here.
     engine_test::Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrainsEgress = true; });
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);

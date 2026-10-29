@@ -96,11 +96,11 @@ impl GamepadIo {
         // but withholds their input. The call must run on the main queue: on
         // macOS 14 (Sonoma) it takes GameController's legacy HID-monitor path,
         // which dispatch_assert_queue()s the main queue and SIGTRAPs the
-        // process when called from this poll thread (an embedder crashed at
-        // boot on Sonoma this way). The main CFRunLoop drains the main
-        // queue in hosts that pump it (the standalone does); in hosts that
-        // don't, the block never runs and pads stay silent — the same
-        // degraded-but-alive behaviour documented above for a missing pump.
+        // process when called from this poll thread. The main CFRunLoop
+        // drains the main queue in hosts that pump it (the standalone does);
+        // in hosts that don't, the block never runs and pads stay silent —
+        // the same degraded-but-alive behaviour documented above for a
+        // missing pump.
         // SAFETY: `_dispatch_main_q` is the process's main queue and lives as
         // long as the process; the work function ignores its context.
         unsafe {

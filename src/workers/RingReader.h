@@ -114,9 +114,9 @@ public:
     // This thread is the sole non-RT consumer: a handler that blocks stops every
     // later control command AND the egress drains registered behind it, so the
     // server keeps accepting packets it can no longer answer. Nothing about that
-    // is visible from outside — socket up, process alive, audio ticking — which
-    // is how one stall cost a user a 30 s boot and told them only that the
-    // client would not connect.
+    // is visible from outside — socket up, process alive, audio ticking — so a
+    // stall shows only as a client that cannot connect. These counters make
+    // it visible.
 
     // Longest drain pass observed, microseconds (high-water mark).
     uint32_t maxPassUs() const { return mMaxPassUs.load(std::memory_order_relaxed); }

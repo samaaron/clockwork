@@ -36,8 +36,8 @@ fn serialise() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// A sink onto a capture endpoint, drained only when the test says so.
-// One class of ordinary cells, `capacity` deep: the shape every sink had
-// before profiles, which is what "full" and "wider than a cell" below mean.
+// One class of ordinary cells, `capacity` deep, which is what "full" and
+// "wider than a cell" below mean.
 fn manual(capacity: u32) -> (u32, Arc<CaptureEndpoint>) {
     let ep = Arc::new(CaptureEndpoint::new());
     let h = registry::open_with_layout(KIND_OSC, "capture:0",
@@ -323,8 +323,8 @@ fn an_osc_sink_puts_bytes_on_a_real_socket_without_being_pumped() {
     let mut buf = [0u8; 256];
     let n = listener.recv(&mut buf).expect("the drain thread delivered nothing");
     assert_eq!(&buf[..n], body, "the bytes arrived exactly as sent");
-    // The datagram can land before the drain thread has bumped its counter
-    // (seen on Windows CI): the bytes prove delivery, the count follows.
+    // The datagram can land before the drain thread has bumped its counter:
+    // the bytes prove delivery, the count follows.
     let want = Stats { sent: 1, dropped: 0, late: 0, scheduled: 0, cancelled: 0 };
     let deadline = Instant::now() + Duration::from_secs(30);   // wedge-only
     while stats_of(h) != want && Instant::now() < deadline {

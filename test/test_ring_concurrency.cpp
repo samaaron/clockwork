@@ -158,8 +158,7 @@ TEST_CASE("MPSC ring: concurrent producers and a drainer lose no frames",
 // NRT-out ring instead, so RT-out never gets a second writer. This drives clockwork_log
 // from the (non-audio) test thread and asserts the frame lands in NRT-out and
 // leaves RT-out untouched; and that with no drainer (self-driven target) it falls
-// back to RT-out. Deterministic, no reader thread — before the fix clockwork_log always
-// hit RT-out.
+// back to RT-out. Deterministic, no reader thread.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST_CASE("off-audio-thread clockwork_log routes to NRT-out, not the RT-out ring",
           "[RingConcurrency]") {

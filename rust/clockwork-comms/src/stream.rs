@@ -19,7 +19,7 @@
 //! in is closed then, so the excess client sees a crisp reset instead of a
 //! silent hang. A connection made while one is waiting is closed at accept
 //! too: nothing displaces a connection, so no newcomer can push one out, and
-//! a silent connection holds the door for [`AUTH_DEADLINE`] at most. What
+//! a silent connection holds its slot for [`AUTH_DEADLINE`] at most. What
 //! stands behind the one client, and how many it serves, is the host's.
 //! Connection ids are
 //! minted monotonically from 1 and never reused — the C++ transport uses them
@@ -1184,7 +1184,7 @@ mod tests {
         stop(h);
     }
 
-    // A connection that has not presented the secret holds the door for at
+    // A connection that has not presented the secret holds its slot for at
     // most AUTH_DEADLINE, and nothing displaces it before then: a newcomer,
     // the client with the secret included, is closed at accept and tries
     // again. That is chosen over evicting the silent connection, which would
@@ -1424,8 +1424,8 @@ mod tests {
                    "resume must continue from the offset, not restart the frame");
     }
 
-    // EINTR mid-write is the write-side twin of the reader fix: a signal must
-    // not cost a frame or a connection.
+    // EINTR mid-write, as on the read side: a signal must not cost a frame
+    // or a connection.
     #[test]
     fn interrupted_write_is_retried() {
         let msg = encode("/clockwork/status", &[OscArg::Int(1)]);

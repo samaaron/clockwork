@@ -3,21 +3,20 @@
 //! The pool's defining property: allocation cost does not depend on how much
 //! is already in it.
 //!
-//! This is a guard, not a benchmark. Before the size-class index, `alloc` was
-//! a first-fit walk over every block from the area start and `free` walked the
-//! whole area to coalesce, so both were linear in pool occupancy. On the audio
-//! thread that is not a slow allocator, it is a broken one: a few hundred live
-//! synths took allocation from nanoseconds to hundreds of microseconds, the
-//! block deadline went with it, and the engine stopped dead rather than
-//! degrading.
+//! This is a guard, not a benchmark. A first-fit `alloc` that walks every
+//! block from the area start, or a `free` that walks the whole area to
+//! coalesce, is linear in pool occupancy. On the audio thread that is not a
+//! slow allocator, it is a broken one: a few hundred live synths take
+//! allocation from nanoseconds to hundreds of microseconds, past the block
+//! deadline, and the engine stops rather than degrading.
 //!
 //! The pool is constant-time by construction — two bitmap scans, no walk —
 //! so there is no loop to count: only a measurement of the cost can catch a
 //! walk someone adds later. What is measured is the thread's own CPU time,
 //! not the wall clock: time the thread spends preempted or waiting is not in
 //! it, so a busy machine cannot make the pool look slower than it is, and
-//! only work the pool does can. The regression it guards against was 90x to
-//! 170x, against ~1x for the pool as it is.
+//! only work the pool does can. A linear walk measures 90x to 170x on it,
+//! against ~1x for the pool as it is.
 //!
 //! The pool's code is the same for every target, wasm included, so measuring
 //! it natively — where a thread CPU clock exists — covers the AudioWorklet's
@@ -90,10 +89,10 @@ fn cpu_per_op(setup: impl Fn(&mut HeapPool) -> Vec<*mut u8>, size: usize) -> f64
 }
 
 /// TLSF measures 1.0x across these ranges on the thread's CPU clock (0.99x
-/// and 1.00x on an M-series Mac), and the linear walk it replaced measured
-/// 90x and 170x. Measured on a clock load cannot inflate, the bound can sit
-/// close enough to catch a walk over a fraction of the pool, and still far
-/// from anything a cache's worth of difference between machines makes.
+/// and 1.00x on an M-series Mac), and a linear walk measures 90x and 170x.
+/// Measured on a clock load cannot inflate, the bound can sit close enough
+/// to catch a walk over a fraction of the pool, and still far from anything
+/// a cache's worth of difference between machines makes.
 const MAX_RATIO: f64 = 5.0;
 
 #[test]

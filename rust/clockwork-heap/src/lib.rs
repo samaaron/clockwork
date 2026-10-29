@@ -24,10 +24,10 @@
 //!
 //! Because on the audio thread the worst case is the only case that matters.
 //! An allocator whose cost grows with what it already holds does not get
-//! slower gracefully: a few hundred live synths took a first-fit walk from
-//! nanoseconds to hundreds of microseconds, that blew the block deadline, the
-//! engine could not retire voices fast enough to recover, and it stopped
-//! dead. Bounded time is a correctness property here, not a performance one.
+//! slower gracefully: a first-fit walk over a few hundred live blocks takes
+//! hundreds of microseconds, which exceeds the block deadline, and once
+//! blocks are missed voices cannot be retired fast enough to recover.
+//! Bounded time is a correctness property here, not a performance one.
 //!
 //! So free blocks are filed by size class rather than searched for. A request
 //! is mapped to a class, rounded up so that anything in the class it lands in
@@ -67,8 +67,7 @@ pub mod router;
 
 /// Bytes a pool spends on its own bookkeeping at the head of every area.
 ///
-/// A caller sizing a backing block adds this to the space it wants usable,
-/// the way it did for the pool this replaces.
+/// A caller sizing a backing block adds this to the space it wants usable.
 pub const AREA_OVERHEAD: usize = 64;
 
 /// Every payload is 16-byte aligned: the ugens' SIMD paths assume at least
@@ -408,8 +407,7 @@ impl HeapPool {
         // Asked for exactly this many bytes and given exactly this many:
         // rounding the request up here would have the pool believe in space
         // the caller never allocated, and it would write past the end of the
-        // block. That is not hypothetical — it corrupted the system heap the
-        // first time.
+        // block into the system heap.
         // SAFETY: the host's callback has no preconditions beyond a size.
         let mem = unsafe { new_area(self.area_ctx, size) };
         if mem.is_null() {
@@ -532,11 +530,9 @@ impl HeapPool {
 
             // Coalesce with the physical neighbours, both in constant time:
             // the successor is one step forward, the predecessor is what
-            // prev_size names. The previous version walked the whole area on
-            // every call, excused by "free is not on the audio path" — it
-            // is. Every synth that ends frees from the block callback, and
-            // that walk is what made a few hundred voices cost milliseconds
-            // apiece.
+            // prev_size names. Free is on the audio path: every synth that
+            // ends frees from the block callback, so a walk of the whole area
+            // here would cost milliseconds per voice at a few hundred voices.
             if !(*b).last {
                 let n = Block::next(b);
                 if (*n).free {
@@ -1083,9 +1079,10 @@ mod tests {
 
     // A request bigger than any block this heap can hold — a guest asking for
     // a real-time pool of most of the address space — is a failed allocation,
-    // like any other the heap cannot meet. It was a panic, in a function the
-    // C side calls, so the process aborted: a size class past FL_COUNT, or a
-    // size that wrapped round to a small one in align_up.
+    // like any other the heap cannot meet. A panic here would abort the
+    // process (the C side calls this function); the two ways to panic are a
+    // size class past FL_COUNT and a size that wraps round to a small one in
+    // align_up.
     #[test]
     fn a_request_larger_than_any_block_is_null_not_a_panic() {
         let mut p = pool(64 * 1024, 64 * 1024);
@@ -1230,10 +1227,9 @@ mod tests {
 
     #[test]
     fn survives_a_long_mixed_run() {
-        // The shape that found the original bug: many allocations and frees
-        // in a pattern that forces splitting, coalescing and growth. Every
-        // payload is written and read back, so an overlap or an overrun shows
-        // up as wrong data rather than as luck.
+        // Many allocations and frees in a pattern that forces splitting,
+        // coalescing and growth. Every payload is written and read back, so
+        // an overlap or an overrun shows up as wrong data rather than as luck.
         let mut p = pool(32 * 1024 + AREA_OVERHEAD, 32 * 1024);
         let mut live: Vec<(*mut u8, usize, u8)> = Vec::new();
         let mut rng: u32 = 0x1234_5678;
@@ -1245,7 +1241,7 @@ mod tests {
         };
 
         // Miri interprets every payload byte; the native run keeps the full
-        // 20k-step churn that found the original bug.
+        // 20k-step churn.
         let steps: u32 = if cfg!(miri) { 600 } else { 20_000 };
         for step in 0..steps {
             let free_it = !live.is_empty() && (next() % 3 == 0);

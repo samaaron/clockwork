@@ -65,7 +65,7 @@ int32_t clockwork_osc_send(ClockworkOsc* handle, const uint8_t* host, uint32_t h
                            int32_t port, const uint8_t* data, uint32_t len);
 
 /* The command transports — UDS datagram, the TCP/UDS stream servers and the
- * Windows named pipe — are a CLIENT library's ABI now, in
+ * Windows named pipe — are a CLIENT library's ABI, in
  * src/comms/clockwork_comms_abi.h (crate clockwork-comms). */
 
 #ifdef __cplusplus

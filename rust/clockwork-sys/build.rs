@@ -103,15 +103,14 @@ fn main() {
     let clockwork_src = cache.path("Clockwork_SOURCE_DIR");
 
     // A change to the C++ must reach a host's next `cargo build`, or a fix
-    // in the engine is tested against the archive the last build left —
-    // which is how a header's new promise once passed a Rust test that
-    // linked the old library. Cargo re-runs this script when anything under
-    // these paths changes: the tree's root CMakeLists.txt (an embedding
-    // project's, or this one's), and clockwork's own sources, device layer,
-    // in-tree DSPs and CMake modules. Not the whole source tree: that would
-    // include a project's node_modules, its C++ build directories and
-    // cargo's own target directory, and the last of those changes on every
-    // build. A DSP outside the tree names itself through CLOCKWORK_DSP_DIR.
+    // in the engine is tested against the archive the last build left. Cargo
+    // re-runs this script when anything under these paths changes: the
+    // tree's root CMakeLists.txt (an embedding project's, or this one's), and
+    // clockwork's own sources, device layer, in-tree DSPs and CMake modules.
+    // Not the whole source tree: that would include a project's
+    // node_modules, its C++ build directories and cargo's own target
+    // directory, and the last of those changes on every build. A DSP outside
+    // the tree names itself through CLOCKWORK_DSP_DIR.
     let mut watched = vec![source.join("CMakeLists.txt")];
     for sub in ["CMakeLists.txt", "src", "dsp", "smoothie", "cmake"] {
         watched.push(clockwork_src.join(sub));

@@ -4,11 +4,10 @@
  * clockwork_ports.h — audio crossing the boundary, in one shape.
  *
  * Clockwork moves audio between the audio thread and something that is not
- * the audio thread in seven different places, and every one grew its own
- * plumbing: a threaded file writer, two shared-memory rings with different
- * protocols, Link's aux publish, Link's peer input, and the device in both
- * directions. An eighth — streaming a sample off disk — was wanted and never
- * built, and would have been a ninth invention.
+ * the audio thread in several places: a threaded file writer, shared-memory
+ * rings, Link's aux publish, Link's peer input, the device in both
+ * directions, a sample streamed off disk. Each would otherwise need its own
+ * plumbing.
  *
  * They are one object. A PORT is:
  *

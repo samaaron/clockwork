@@ -31,8 +31,7 @@ parse = []
 [dependencies]
 # For `clockwork_sys!`, the ONE place the reserved prefix is spelled in the Rust tree.
 # The schedule parser derives every byte offset from it, so the parser cannot
-# fall out of step with the prefix — the property the C++ parser was fixed to
-# have and that this port must not lose.
+# fall out of step with the prefix.
 clockwork-osc = { path = "../clockwork-osc" }
 
 [dev-dependencies]

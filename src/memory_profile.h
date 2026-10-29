@@ -88,10 +88,10 @@
   // The guest's fast working memory when the guest declares no fast want of
   // its own: 80 KB of internal SRAM. Sized to hold a server guest's dsp_new
   // hot working set (audio/control buses, per-sample wire scratch) so the
-  // render reads SRAM. Measured on the ESP32-S3 (as the heap's fast area,
-  // which this replaces): 48 KB overflows into PSRAM and the render distorts;
-  // 64 KB is the floor; 80 KB adds headroom for larger scenes. A guest's own
-  // figure (DspInfo::memory_bytes_wanted, dsp_memory_bytes) wins over this.
+  // render reads SRAM. Measured on the ESP32-S3: 48 KB overflows into PSRAM
+  // and the render distorts; 64 KB is the floor; 80 KB adds headroom for
+  // larger scenes. A guest's own figure (DspInfo::memory_bytes_wanted,
+  // dsp_memory_bytes) wins over this.
   #ifndef CLOCKWORK_GUEST_MEMORY_FAST_BYTES
   #define CLOCKWORK_GUEST_MEMORY_FAST_BYTES 81920
   #endif
@@ -245,11 +245,10 @@
 #define CLOCKWORK_GUEST_MEMORY_FAST_BYTES 0u
 #endif
 // BULK: the span the guest's pool runs over (clockwork_pool.h) — everything
-// it allocates as it runs. 64 MB on the desktop and the NIF, where it used
-// to be clockwork's own heap of the same size. On the web the figure is a
-// ceiling and the span takes what is left of the engine's memory after the
-// fast span and the RT router's block (less CLOCKWORK_FAST_RESERVE, the
-// arena's own headers), which is what the client sized that memory for
+// it allocates as it runs. 64 MB on the desktop and the NIF. On the web the
+// figure is a ceiling and the span takes what is left of the engine's memory
+// after the fast span and the RT router's block (less CLOCKWORK_FAST_RESERVE,
+// the arena's own headers), which is what the client sized that memory for
 // (memArenaSize in js/memory_layout.js). The embedded profiles set their
 // own, above. The pool never grows: a guest that needs more declares more.
 #ifndef CLOCKWORK_GUEST_MEMORY_BULK_BYTES
@@ -336,10 +335,10 @@
 // inline scopes scroll ~250ms) plus the reader's margin — the rule is
 // shm_tap_ring_covers (shm_tap_stream.hpp), checked at every device
 // start. Natively a wireless output can report two seconds (an AirPlay
-// receiver: 88712 frames @ 44.1k, 2026-10-06; a 16384 ring had every scope
-// flat while the engine rendered): 131072 ≈ 2.7s @ 48k, 1 MB per stereo
-// slot, and the segment is anonymous memory committed only as a slot is
-// written, so idle slots cost nothing. The web renders into a worklet with
+// receiver reports 88712 frames @ 44.1k, which leaves every scope flat on a
+// 16384 ring): 131072 ≈ 2.7s @ 48k, 1 MB per stereo slot, and the segment is
+// anonymous memory committed only as a slot is written, so idle slots cost
+// nothing. The web renders into a worklet with
 // tens of ms of latency and budgets its arena to the byte
 // (js/memory_layout.js): 16384 ≈ 340ms @ 48k, 128KB per slot, 4 MB for the
 // guest's 32.
@@ -374,21 +373,6 @@
   #define CLOCKWORK_FAST_RESERVE (64 * 1024)
   #endif
 #endif
-
-
-// A RUST-SIDE ENGINE ARENA WAS DECLARED HERE and never wired up.
-//
-// CLOCKWORK_RUST_ARENA_SIZE (12 MB) had no reader anywhere in the tree, and the
-// mechanism its comment described is not built: rust/clockwork-heap's RtRouter
-// exists but is never installed as #[global_allocator] and router::arm is
-// never called outside its own tests. The comment also still sized itself
-// against a "32 MB reserved RT region" that js/memory_layout.js replaced with
-// an opaque guest region. A constant nobody reads, describing a mechanism
-// nobody installed, against a layout that no longer exists.
-//
-// If the router is ever installed it will need a size again — and it should be
-// measured then rather than inherited from this one, which was a census of one
-// particular guest.
 
 // The RT router's block (rust/clockwork-heap/src/router.rs): what clockwork's
 // Rust subsystems allocate inside an engine entry point — a sink's or a port's

@@ -107,7 +107,7 @@ public:
     int bufferLength() const { return mBufLen; }
 
     // Wire the engine-owned ClockworkClock. ClockworkClock owns audio-thread NTP
-    // derivation (the IIR previously inlined here, now in ClockworkClockNative).
+    // derivation (the IIR in ClockworkClockNative).
     // Must be called before any audio callback or initialiseDsp.
     void setClockworkClock(ClockworkClock* sc) { mClockworkClock = sc; }
     // Wire the engine-owned Link Audio host: the block stamp in Link's domain,

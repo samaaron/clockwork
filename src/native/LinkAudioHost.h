@@ -8,8 +8,7 @@
  * everything else — the publish gate and main sink, the aux sinks, the peer
  * channels and input subscriptions, and the block stamp in Link's own clock
  * domain. ClockworkEngine owns one of these beside its ClockworkClock, and hands it to
- * the audio drivers and the OSC control surface that used to reach through
- * the clock for it.
+ * the audio drivers and the OSC control surface.
  *
  * It borrows the clock's Link session and never talks to Link on its own:
  * the sinks and subscriptions bind to the session's current substrate, so

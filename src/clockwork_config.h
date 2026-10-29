@@ -16,10 +16,10 @@
 // ─── Which Clockwork ─────────────────────────────────────────────────────────
 // Clockwork has no version number of its own. It is taken as a git submodule,
 // pinned to a commit, so the commit is what says which Clockwork a build is: a
-// number kept by hand beside it only drifts (0.71.0 stood from the split until
-// it was taken out). The build passes the commit in, as git names it in this
-// repository (CMakeLists.txt; a product's own build does the same): its short
-// hash, with "-dirty" when the tree had changes. Without one it is "unknown".
+// number kept by hand beside it only drifts. The build passes the commit in,
+// as git names it in this repository (CMakeLists.txt; a product's own build
+// does the same): its short hash, with "-dirty" when the tree had changes.
+// Without one it is "unknown".
 //
 // Compatibility is not this: CLOCKWORK_CLIENT_ABI_VERSION (clockwork_client.h),
 // the feature bits and the asserted shared-memory layout say what a client may

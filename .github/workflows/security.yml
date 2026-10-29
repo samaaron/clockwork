@@ -12,7 +12,7 @@
 #              fail, which proves it looks. Daily as well as on every push: a
 #              new advisory against an unchanged dependency changes nothing
 #              in the repository to trigger a run, and a failed scheduled run
-#              is mailed to the workflow's author, which is how it is heard.
+#              is mailed to the workflow's author.
 #   replay     every fuzz target over its corpus, the seeds and every crasher
 #              ever found, deterministically, on every push: the Rust bodies
 #              under cargo test (each crate's corpus test), the C and C++ ones

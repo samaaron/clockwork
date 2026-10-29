@@ -69,7 +69,7 @@ pub use tag::{tag_hash, TAG_DEFAULT, TAG_SYNTH};
 /// read its bundle time if it is one, parse it, and check a parse that says
 /// ok points at a blob inside the message. rust/fuzz's `schedule_parse`
 /// target calls this under libFuzzer; the corpus test calls it over corpus/
-/// (the seeds, and every crasher kept) on every push.
+/// on every push.
 pub fn exercise(data: &[u8]) {
     if parse::is_bundle(data) {
         let _ = parse::bundle_timetag(data);

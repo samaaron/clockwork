@@ -25,14 +25,11 @@
  * A self-driven host (browser worklet, embedded, the test suite's fixture)
  * drives the engine through just: clockwork_init() once, then per block
  * clockwork_ingress_write() → clockwork_tick() → read clockwork_audio_out() → clockwork_egress_rt_drain().
- * That is now the whole contract for OSC as well as audio: clockwork_init publishes an
+ * That is the whole contract for OSC as well as audio: clockwork_init publishes an
  * ingress root of its own — "/clockwork/" answered by clockwork, everything
  * else handed to the DSP — so a minimal host's messages reach the DSP with no
- * registration on its part. (They did not, until the boundary narrowing: the root
- * was registered only on worklet builds, and a lanes-only host had every
- * message it wrote drained, unrouted and dropped.) A full host that wants
- * control planes of its own publishes g_active_split after boot and
- * overrides it.
+ * registration on its part. A full host that wants control planes of its
+ * own publishes g_active_split after boot and overrides it.
  *
  * A host defines no link-time globals for this: the region a DSP may publish
  * through is DspConfig::shm_window, filled in by clockwork at dsp_new().
@@ -182,10 +179,10 @@ bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in
  * time over, BEFORE its clock moves, with its own count of the audio rendered
  * (audio_secs, seconds from any origin): true when the gap is over
  * kClockStepSeconds, and the tick re-anchors the clock at this block
- * (resetAudioThreadTime). Nothing that
- * waited is dropped for a gap: it is delivered, late by the gap; a host that
- * wants it gone says so (clockwork_ingress_mark_stale). A host asks
- * clockwork_audio_starts as its audio starts —
+ * (resetAudioThreadTime). Nothing queued is dropped for a gap: it is
+ * delivered, late by the gap; a host that wants it gone says so
+ * (clockwork_ingress_mark_stale). A host asks clockwork_audio_starts as its
+ * audio starts —
  * a device opened, an embedded host attached, a worklet made — judged by time
  * alone, as nothing was rendered meanwhile; its first block after is never a
  * gap, as its count of the audio starts over with it. */
@@ -219,8 +216,8 @@ int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   
  * first clockwork_tick. Every host boots through this one call.
  *
  * All of it is Clockwork geometry — what the host opened, and how loud to be
- * about it. The guest's own configuration is not here and never was
- * clockwork's business; see guest_config below.
+ * about it. The guest's own configuration is not clockwork's business; see
+ * guest_config below.
  *
  *   sample_rate      the device's rate, which always wins.
  *   block_size       frames per dsp_process call; 0 asks for the platform
@@ -239,13 +236,13 @@ int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   
  * allocate, and clockwork's promise about it is that nothing else will. Bulk
  * does not travel through it: `assets` is written by the client and only read by
  * the guest, `returns` the reverse, so no region has two writers. It is an ABSOLUTE address, not an offset from the arena — on web the
- * JS memory layout chooses it as a position in the wasm heap, and treating it
- * as arena-relative put it a whole arena_storage too high. (JavaScript
+ * JS memory layout chooses it as a position in the wasm heap, and an
+ * arena-relative reading lands a whole arena_storage too high. (JavaScript
  * passes it as a plain number: a wasm32 pointer IS a number, which is why this
- * is a pointer here rather than the uint32 it was first written as — that
- * could not hold a native address at all.) Pass NULL/0 for "no reserved
- * region", which is what a host does when the guest claims its own memory from
- * the system, as the native host does.
+ * is a pointer rather than a uint32 — a uint32 could not hold a native
+ * address.) Pass NULL/0 for "no reserved region", which is what a host does
+ * when the guest claims its own memory from the system, as the native host
+ * does.
  *
  * ── guest_config ───────────────────────────────────────────────────────────
  * Bytes for the GUEST, opaque to clockwork, which copies them into the
@@ -352,9 +349,7 @@ uint32_t clockwork_attached(void);
  * A device switch can change how many channels are open, and the rebuilt DSP
  * has to be built at the new count or audio written to a channel the boot-time
  * count did not cover lands on an internal bus instead of on hardware. Takes
- * effect at the next dsp_new, not on the running instance. Native hosts used
- * to reach into the config block for this, which is what made the block look
- * like clockwork state.
+ * effect at the next dsp_new, not on the running instance.
  */
 void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_channels);
 
@@ -413,7 +408,7 @@ const char* clockwork_boot_error(void);
  * opens from then on (clockwork_event_sink.h, clockwork_sink_set_host_emit):
  * a guest's send goes out the same way, "/clockwork/midi/sink/send ,sb
  * <port> <bytes>" in a bundle carrying the send's time, for the host to put
- * on the port with that time. One fact, one switch: the host is the far end. */
+ * on the port with that time. */
 void clockwork_host_forward(int on);
 int  clockwork_host_forwards(void);
 
@@ -468,16 +463,16 @@ int clockwork_region_has_reset(uint32_t region_id);
  * perform inside its block (clockwork_sys_is_audio_verb) — have a ring of
  * their own in the arena (CONTROL_RING_START, lifetime arena), so that the
  * pass answering them has no audio block between it and the verb: a stopped
- * device, a stalled callback or a reopen blocked inside a driver no longer
- * silences the engine's own voice (docs/RESTARTS.md, "The control ring").
+ * device, a stalled callback or a reopen blocked inside a driver cannot
+ * block the engine's control replies (docs/RESTARTS.md, "The control ring").
  *
  * The engine SERVES it: it says so here once its control pass drains the
  * ring, and the word (STATUS_CONTROL_SERVED in the cursors region) is what
  * every boundary reads — clockwork_ingress_write, clockwork_client_send in
  * any process — to write a control verb there rather than on the in ring.
  * Until it is said, and in a build with no control pass, every verb rides
- * the in ring as it always did and the audio thread forwards control along
- * its chain. Lowered at shutdown. */
+ * the in ring and the audio thread forwards control along its chain.
+ * Lowered at shutdown. */
 void clockwork_control_serve(int on);
 int  clockwork_control_served(void);
 

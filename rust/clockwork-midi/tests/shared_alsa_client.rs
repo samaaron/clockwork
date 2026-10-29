@@ -2,12 +2,12 @@
 // Copyright (c) 2025 Sam Aaron
 //! Linux/ALSA resource-usage contract for `device::MidiIo`.
 //!
-//! Regression test: the old midir path opened *one ALSA
-//! sequencer client per port* (and one queue per input port), so enabling every
-//! port at boot exhausted the kernel's seq client/queue tables and any later
-//! `snd_seq_open` (e.g. `aplaymidi`) failed with "Cannot allocate memory". The
-//! fix shares a single client across all inputs and a single client across all
-//! outputs, so the count is constant regardless of how many ports are open.
+//! Opening *one ALSA sequencer client per port* (and one queue per input
+//! port) exhausts the kernel's seq client/queue tables once every port is
+//! enabled at boot, and any later `snd_seq_open` (e.g. `aplaymidi`) fails
+//! with "Cannot allocate memory". `MidiIo` shares a single client across all
+//! inputs and a single client across all outputs, so the count is constant
+//! regardless of how many ports are open.
 //!
 //! Ignored by default: needs a real ALSA sequencer and creates virtual ports, so
 //! it is timing-dependent and unsuitable for CI. Run on a Linux dev box with:
@@ -132,10 +132,10 @@ fn one_client_per_side_regardless_of_port_count() {
         ids.len()
     );
 
-    // At most one queue per SIDE, not one per port. Two, since 2026-08-30:
-    // the input client has always had one (to timestamp incoming events) and
-    // the output client gained one for `send_at`, which is what lets the kernel
-    // hold a scheduled message instead of a thread of ours.
+    // At most one queue per SIDE, not one per port. Two: the input client
+    // has one (to timestamp incoming events) and the output client one for
+    // `send_at`, which is what lets the kernel hold a scheduled message
+    // instead of a thread of ours.
     //
     // The bound that matters is not the constant but that it IS a constant:
     // >=3 ports are open on each side above, so a regression to one queue per

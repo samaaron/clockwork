@@ -11,8 +11,7 @@
 //! A handle is an opaque pointer rather than a slot number. Endpoints are not
 //! addressed by anyone but their owner, do not need to be enumerable, and do
 //! not need to survive their owner — none of the reasons a port has a slot
-//! apply, and inventing a second registry for them would be the mistake ports
-//! were built to stop.
+//! apply, and a second registry for them would duplicate the slot table.
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};

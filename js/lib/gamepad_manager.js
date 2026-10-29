@@ -36,8 +36,8 @@ import init, {
 
 // The product's name out of the browser's id for a pad, as a native host's controller library reports it: Chrome
 // and Edge add "(STANDARD GAMEPAD Vendor: 045e Product: 0b13)", or "(XInput STANDARD GAMEPAD)", and Firefox and
-// Safari put the vendor and product first ("045e-0b13-"). Named from the id as it came, the handle of the same pad
-// was a different address on web and native, and a long one (/gamepad:xbox_wireless_controller_(standard_…).
+// Safari put the vendor and product first ("045e-0b13-"). Named from the id as it comes, the same pad's handle
+// would be a different address on web and native, and a long one (/gamepad:xbox_wireless_controller_(standard_…).
 export function productName(id) {
   const name = String(id)
     .replace(/\s*\([^()]*(?:STANDARD GAMEPAD|Vendor:)[^()]*\)\s*$/i, "")
@@ -104,7 +104,7 @@ export class GamepadManager {
   // its buttons and sticks, and only every idlePollIntervalMs while none is,
   // to notice one arriving where a browser fires no gamepadconnected (the
   // event itself is still heard at once). A host that turns gamepads on for
-  // everyone no longer runs a 125 Hz timer on the main thread of every page
+  // everyone does not run a 125 Hz timer on the main thread of every page
   // that has no pad.
   _pace() {
     if (!this._running) return;

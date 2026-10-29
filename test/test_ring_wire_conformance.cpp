@@ -6,10 +6,9 @@
  * (RingBufferWriter.h writer + ring_drain.h reader) and require
  * byte-identical results.
  *
- * The corpus is checked in and was generated from the JS ring
- * implementation. A change that alters the wire — framing, padding,
- * alignment, cursor advance — fails this replay, so the C++ side cannot
- * drift from the corpus silently.
+ * The corpus is checked in, generated from the JS ring implementation. A
+ * change that alters the wire — framing, padding, alignment, cursor advance —
+ * fails this replay, so the C++ side cannot drift from the corpus silently.
  */
 #include <catch2/catch_test_macros.hpp>
 

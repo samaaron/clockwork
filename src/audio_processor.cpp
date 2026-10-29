@@ -343,11 +343,11 @@ extern "C" {
     // needs only 8. FAST RAM, on a tiered device too: the arena's cursors,
     // rings, scope and metrics are touched every block (the table says which,
     // per region: ClockworkArenaEntry::tier, clockwork_arena.h), and a hot
-    // region in PSRAM is the measured distortion case. The bulk-tier regions
-    // in it — the taps, the window, the guest's persistent store — are kept
-    // small by the tiered profiles (memory_profile.h) so the whole span fits
-    // beside the heap and the audio task's stack. It used to carry
-    // CLOCKWORK_COLD_BSS, which put all of it in PSRAM.
+    // region in PSRAM distorts the audio. The bulk-tier regions in it — the
+    // taps, the window, the guest's persistent store — are kept small by the
+    // tiered profiles (memory_profile.h) so the whole span fits beside the
+    // heap and the audio task's stack. Not CLOCKWORK_COLD_BSS: that would put
+    // all of it in PSRAM.
 #ifndef __EMSCRIPTEN__
     alignas(16) uint8_t arena_storage[ARENA_SIZE];
 
@@ -386,13 +386,12 @@ extern "C" {
     // spans are all per-build), so replacing it frees nothing live. THE
     // BLOCK IS CUT IN TWO BY HAND — the fast span, then the bulk span — and
     // clockwork::mem is not involved: natively it stays the system
-    // allocator, as it always was. (A first version installed the block as
-    // the placement arena; a test fixture that boots one engine for the
-    // whole process then had every later test's "system" allocation come
-    // out of the engine's block and freed as the system's, which CI's
-    // one-process shuffled run found, 2026-10-15.) The block goes with the
-    // engine (teardown_memory). A tiered device has real regions to place
-    // into and no block.
+    // allocator. The block is never installed as the placement arena: a
+    // fixture that boots one engine for the whole process would then have
+    // every later test's "system" allocation come out of the engine's block
+    // and be freed as the system's. The block goes with the engine
+    // (teardown_memory). A tiered device has real regions to place into and
+    // no block.
     uint8_t* g_engine_block       = nullptr;
     size_t   g_engine_block_bytes = 0;
 
@@ -672,11 +671,11 @@ extern "C" {
     // init_memory, because a rebuild may be at another rate.
     std::atomic<uint32_t> metrics_flush_period{0};
 
-    // A NEW ENGINE STARTS THESE OVER. They are the process's, not an engine's,
-    // so a second engine in one process — a test suite, the NIF, an embedder
-    // that closes and boots again — used to inherit the first one's: it
-    // published the last engine's buffer peaks as its own from its first
-    // flush, and a limiter the last engine had used up kept this one's first
+    // A NEW ENGINE STARTS THESE OVER. They are the process's, not an engine's:
+    // without the reset a second engine in one process — a test suite, the NIF,
+    // an embedder that closes and boots again — inherits the first one's,
+    // publishes the last engine's buffer peaks as its own from its first
+    // flush, and a limiter the last engine used up keeps this one's first
     // error out of the log. (A purge clears the peaks too: clear_scheduler.)
     static void reset_engine_diagnostics() {
         local_in_peak.store(0, std::memory_order_relaxed);
@@ -905,15 +904,14 @@ extern "C" {
     }
 
     // Give back bytes taken through alloc_bytes (dsp_api.h). Only the
-    // pointer crosses: what the bytes were is the guest's business, and was
-    // the whole problem with the OSC verb this replaces.
+    // pointer crosses: what the bytes were is the guest's business.
     static void dsp_host_free_bytes(void* /*ctx*/, void* ptr) {
         // What arrives here came from alloc_bytes, on every target: a guest
         // whose buffer points into the client's assets (an asset, or a sample
         // the client placed there) does not hand that range to us — the
         // assets is the client's and the guest knows so (dsp_api.h, "Bulk").
-        // This used to be a no-op on web for fear of exactly that pointer,
-        // which meant every block a web guest ever freed was leaked.
+        // So the free is real on the web too; a no-op here leaks every block
+        // the guest frees.
         HostCallScope host;
         if (ptr) clockwork_pool_free(ptr);
     }
@@ -1235,9 +1233,8 @@ extern "C" {
 
     // The latest a timed event may play, set by the host (lanes.h): 0 allows
     // any lateness. A host whose engine can be flooded sets one, because a
-    // backlog played minutes late is worse than a backlog not played (a
-    // mashed bench once snowballed to 4.5 s behind); clockwork itself never
-    // drops for lateness.
+    // backlog played seconds late is worse than a backlog not played;
+    // clockwork itself never drops for lateness.
     static std::atomic<uint32_t> g_timed_event_late_limit_ms{0};
     EMSCRIPTEN_KEEPALIVE void clockwork_set_timed_event_late_limit_ms(uint32_t ms) {
         g_timed_event_late_limit_ms.store(ms, std::memory_order_relaxed);
@@ -1301,7 +1298,7 @@ extern "C" {
     // clock converged from seconds behind runs fast until it has caught up,
     // and everything scheduled against it plays compressed). Nothing that
     // waited is dropped for it: what queued is delivered and what was
-    // scheduled fires, late by the gap, as scsynth has always done after a
+    // scheduled fires, late by the gap, as scsynth does after a
     // sleep — Clockwork drops a message only for want of room, and counts
     // it (PerformanceMetrics); a host that wants what waited gone says so
     // itself (clockwork_ingress_mark_stale, the page's purge()). One line
@@ -1497,7 +1494,7 @@ extern "C" {
             // UNSIGNED comparison, and it matters: a present-day OSC timetag has its top bit
             // set, so as an int64 it is NEGATIVE and a signed `tt > 1` is false for every
             // real time — classifying every timestamped bundle as immediate, so clockwork
-            // never held one at all.
+            // would hold none.
             const uint64_t tt = clockwork_bundle_timetag(data);
             if (tt > 1u) when = static_cast<int64_t>(tt);
         } else if (len >= CLOCKWORK_SYS_PADDED("schedule") &&
@@ -1529,7 +1526,7 @@ extern "C" {
 
 #if CLOCKWORK_SCHEDULER
         // `== 0 || == 1`, NOT `<= 1`, for the reason note_lateness spells out:
-        // a real timetag is negative as an int64, so `<= 1` sent every
+        // a real timetag is negative as an int64, so `<= 1` would send every
         // scheduled message straight through instead of parking it.
         if (when == 0 || when == 1 || !clockworkHolds) {
             // Immediate, or a DSP that holds its own schedule: straight
@@ -1740,9 +1737,9 @@ extern "C" {
     static void reset_guest_config() {}
     // Nobody but the guest can draw it, and the guest cannot tell "restored
     // after a device switch" from "a previous engine in this process left
-    // its table behind": an engine that never asked for /notify once
-    // inherited a registration and started answering a client that had not
-    // spoken. Clockwork owns the arena's lifetime, so clockwork decides.
+    // its table behind": an engine that never asked for /notify would
+    // inherit a registration and answer a client that had not spoken.
+    // Clockwork owns the arena's lifetime, so clockwork decides.
     static void reset_guest_persist() { memset(shared_memory + GUEST_PERSIST_START, 0, GUEST_PERSIST_SIZE); }
 
     struct RegionReset { uint32_t id; void (*reset)(); };
@@ -1884,11 +1881,10 @@ extern "C" {
     // the engine its member; a worklet host nothing, so the processor's own
     // instance stands in — and it is bound here to the clock state (its
     // transport stamp anchored to wall time as it binds, bindStateToShm),
-    // to the sample clock, and to the host's global offset. Every build: a rebuild binds the same instance to
-    // the same regions again, which is a no-op. Before this step was one
-    // step, native bound after boot and the worklet inside it, and a reset
-    // added between the two wiped the web's stamp to the 1900 epoch
-    // (2026-10-16).
+    // to the sample clock, and to the host's global offset. Every build: a
+    // rebuild binds the same instance to the same regions again, which is a
+    // no-op. After the reset on every host: a reset after the bind wipes the
+    // stamp to the 1900 epoch.
     static void clock_enter_service(bool cold_boot) {
         ClockworkClock* none = nullptr;
         g_active_clockwork_clock.compare_exchange_strong(none, &clockworkClock(), std::memory_order_acq_rel);
@@ -2149,10 +2145,10 @@ extern "C" {
         // position in the wasm heap chosen by the JS memory layout
         // (wasmHeapSize + ringBufferReserved), and the client maps it that
         // way. Adding it to shared_memory — arena_storage, a static
-        // array at whatever address the linker picked — put the region exactly
-        // arenaBase bytes too high, overrunning into the buffer pool
-        // above it. That only shows when the static layout moves, because the
-        // size of the overrun IS arena_storage's address.
+        // array at whatever address the linker picked — would put the region
+        // exactly arenaBase bytes too high, overrunning into the buffer pool
+        // above it, and that only shows when the static layout moves, because
+        // the size of the overrun IS arena_storage's address.
         //
         /*
          * THE PLACEMENT ARENA, and it goes in before anything allocates —
@@ -2204,9 +2200,8 @@ extern "C" {
              * so it comes back holding everything the dead engine placed in it
              * — the guest's instance and its real-time pool (scsynth's is 8 MB)
              * above all. Nothing ever frees them: the old worklet is gone, not
-             * torn down. The first reload still fit; the second asked for the
-             * pool, found half of it, and the engine came up with no DSP,
-             * processing silence with no error anywhere a page could see.
+             * torn down. Left in place, a later reload cannot fit the pool and
+             * the engine comes up with no DSP, processing silence.
              *
              * Nothing of that engine is alive — its thread is gone, and the
              * product re-sends what it held (restoreClientState) — so the arena
@@ -2217,10 +2212,9 @@ extern "C" {
             clockwork_pool_abandon();
             g_dsp = nullptr;
             // The guest's spans are in the arena too: forgotten, so they are
-            // carved again below in the same order as a first boot. Keeping
-            // them while the heap was rebuilt from the arena's start put the
-            // heap's backing over the guest's memory (found by the reload
-            // test the day the guest's tables moved into that memory).
+            // carved again below in the same order as a first boot. Kept
+            // while the heap is rebuilt from the arena's start, they would
+            // lie under the heap's backing.
             g_owned_fast = nullptr; g_owned_fast_bytes = 0;
             g_owned_bulk = nullptr; g_owned_bulk_bytes = 0;
             clockwork::mem::reset_arena();
@@ -2464,8 +2458,7 @@ extern "C" {
         /*
          * A SPAN THE HOST PLACED ITSELF (the legacy guestMemorySize slice)
          * lies above malloc's frontier, and malloc grows upward into whatever
-         * comes next. Measured 2026-08-31, before the engine's memory was one
-         * block, the engine ran 3.08 MB into it on every boot. Failing loud
+         * comes next, so the heap can run into it at boot. Failing loud
          * here costs a boot; not failing costs corruption that presents as
          * anything at all. A span clockwork took itself lies inside the
          * engine's memory, below the frontier, and overlaps nothing.
@@ -2567,7 +2560,6 @@ extern "C" {
             // Which guest, and which window layout: into the table, for the
             // readers of the window (shared_memory.h arenaSetGuestWindowIdentity).
             arenaSetGuestWindowIdentity(shared_memory, info->window_magic, info->window_version);
-            // The other declaration read here: the address this DSP wants to
             // Kept, not printed here. Who the guest is belongs with the rest of
             // the identity — the banner, the version, the rate — and that is
             // printed further down, once there is an engine to be identified.
@@ -3076,11 +3068,11 @@ extern "C" {
         time.block_host_micros = time.link_host_micros ? time.link_host_micros : host_micros;
 
         // Load-add-store, not fetch_add: this counter has exactly one writer
-        // (the audio thread, here) and readers only ever load it, so the
-        // read-modify-write bought nothing. It cost something, though —
-        // ESP-IDF builds with -mdisable-hardware-atomics, so every atomic RMW
-        // is a call into libatomic that takes a critical section, once a
-        // block, for an increment nobody was racing.
+        // (the audio thread, here) and readers only ever load it, so a
+        // read-modify-write buys nothing and costs something: ESP-IDF builds
+        // with -mdisable-hardware-atomics, so every atomic RMW is a call into
+        // libatomic that takes a critical section, once a block, for an
+        // increment nothing races.
         const uint32_t pc = metrics->process_count.load(std::memory_order_relaxed) + 1;
         metrics->process_count.store(pc, std::memory_order_relaxed);
         // The hour's history of every counter and gauge, a bucket at a time
@@ -3275,7 +3267,7 @@ extern "C" {
             // keeps its own timetag — it is due within THIS block, so the
             // difference from currentOscTime is exactly the sub-block offset
             // the DSP needs, and flattening it to "now" would throw away the
-            // sample accuracy the old dsp_set_sample_offset path had.
+            // sample accuracy.
             clockwork_fire_due(clockwork_engine_schedule(), nextOscTime, currentOscTime,
                 [](const uint8_t* d, uint32_t n, uint32_t origin,
                    int64_t when, int64_t blockTime) {
@@ -3344,12 +3336,10 @@ extern "C" {
                 }
 
                 // Sinks after: what a sink records is what the DSP actually
-                // emitted, which is the "post" answer to open question 1 in
-                // docs/PORTS.md for the only tap that exists so far.
+                // emitted (the "post" answer to open question 1 in docs/PORTS.md).
                 push_port_sinks(QUANTUM_SIZE);
             }
-            // Advance the engine frame count past this block; tap streams anchor on it (every host, as
-            // the device path did before).
+            // Advance the engine frame count past this block; tap streams anchor on it, on every host.
             if (clk) clk->advanceEngineFrames(sample_pos + static_cast<double>(QUANTUM_SIZE));
             // The scope, at the device edge: what leaves for the device
             // this block (after the guest, after the port sinks) and what
@@ -3426,10 +3416,9 @@ extern "C" {
      * clockwork_log writes an OSC message into the debug ring for a worker to drain
      * and forward. That works once the engine is running and is worth nothing
      * before it: every FATAL below describes a boot that is about to not
-     * happen, so the ring it wrote to is a ring nobody ever reads. Measured
-     * 2026-09-01 — an early return out of init_memory surfaced to the client
-     * as "AudioWorklet initialization timeout", with the actual reason sitting
-     * in a buffer that was discarded.
+     * happen, so the ring it wrote to is a ring nobody ever reads, and an
+     * early return out of init_memory would reach the client as an
+     * initialisation timeout with the reason in a discarded buffer.
      *
      * So these go straight out: the browser console on web, stderr on native.
      * Both are visible with no engine, which is the only property that
@@ -3839,10 +3828,10 @@ bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
 //
 // Native forwards a claimed verb the audio thread does not answer to the
 // control pass (nrtForwardSink), and the refusal for an unknown one happens
-// at the far end of that hop. A host with no thread to forward to has, so
-// far, refused here. But a host may have a FRONT — a thread of its own that
-// answers the control verbs, which on the web is the client's main thread,
-// the only place Web MIDI and the Gamepad API exist at all. With
+// at the far end of that hop. A host with no thread to forward to refuses
+// here, unless it has a FRONT — a thread of its own that answers the control
+// verbs, which on the web is the client's main thread, the only place Web
+// MIDI and the Gamepad API exist at all. With
 // g_host_forward set, that front is the far end: the verb goes out over the
 // egress, to the origin that sent it, and the host answers or refuses it.
 //
@@ -4061,9 +4050,9 @@ bool clockwork_dsp_default_route(void* /*routeCtx*/, const void* callCtx,
     using namespace engine;
     if (!g_dsp) return true;
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    // blockTime was already on the context and simply was not being passed:
-    // without it the DSP can only difference against the block it last
-    // RENDERED, which is one behind the block this message is for.
+    // blockTime goes too: without it the DSP can only difference against the
+    // block it last RENDERED, which is one behind the block this message is
+    // for.
     GuestCallScope guest(GuestCall::Processing);
     dsp_osc(g_dsp, data, static_cast<uint32_t>(len),
             cc ? cc->when : 1, cc ? cc->sourceId : 0,

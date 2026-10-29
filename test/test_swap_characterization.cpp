@@ -4,18 +4,14 @@
  * test_swap_characterization.cpp — pins the device swap subsystem's CURRENT
  * behaviour against fake devices (FakeAudioDevice.h), warts included.
  *
- * These are characterization tests in the Feathers sense: they are the
- * safety net under the switchDevice/enableInputChannels/switchDriver/
- * recovery refactor. When a later phase changes one of these behaviours
- * ON PURPOSE, update the pinned expectation in the same commit and say
- * why in its message. A surprise failure here means the refactor changed
- * behaviour it didn't mean to.
+ * These are characterization tests: they pin what switchDevice,
+ * enableInputChannels, switchDriver and recovery do. A behaviour changed on
+ * purpose updates the pinned expectation in the same change; a surprise
+ * failure here is a behaviour change nobody meant.
  *
  * Everything runs against a real device session (smoothie_devices.h)
  * whose only drivers are fakes — the session's logic (name validation,
- * the rate and buffer it chooses, driver changes) is its own. First suite
- * in the repo to exercise these paths off-hardware; before the fake
- * drivers every engine device test ran with no devices at all.
+ * the rate and buffer it chooses, driver changes) is its own.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "DeviceInvariants.h"
@@ -240,8 +236,8 @@ TEST_CASE("Swap: a microphone sits out while a wireless output plays, and is "
 
 TEST_CASE("Swap: a microphone paired with an interface sits out while an aggregate "
           "output plays, and is back on the interface", "[SwapChar][inputs]") {
-    // As this Mac has them: a USB interface with its own inputs, the built-in
-    // microphone, and an aggregate a user made in Audio MIDI Setup.
+    // A USB interface with its own inputs, the built-in microphone, and an
+    // aggregate a user made in Audio MIDI Setup.
     auto sys = std::make_shared<FakeSystem>();
     auto motu = std::make_shared<FakeDeviceSpec>();
     motu->name = "Fake MOTU";

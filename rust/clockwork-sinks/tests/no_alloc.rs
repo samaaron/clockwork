@@ -80,8 +80,8 @@ static ALLOC: Counting = Counting;
 fn arm() { COUNT.with(|c| c.set(0)); ARMED.with(|a| a.set(true)); }
 fn disarm() -> usize { ARMED.with(|a| a.set(false)); COUNT.with(|c| c.get()) }
 
-// One class of ordinary cells, `capacity` deep: the shape every sink had
-// before profiles, which is what "full" and "wider than a cell" below mean.
+// One class of ordinary cells, `capacity` deep, which is what "full" and
+// "wider than a cell" below mean.
 fn manual(capacity: u32) -> (u32, Arc<CaptureEndpoint>) {
     let ep = Arc::new(CaptureEndpoint::new());
     let h = registry::open_with_layout(KIND_OSC, "capture:0",

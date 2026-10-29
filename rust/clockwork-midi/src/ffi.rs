@@ -153,9 +153,9 @@ impl ClockworkMidi {
 
             // One immediate clock pulse, for a caller that wants a single 0xF8.
             // Continuous-clock generation + transport + beat-bursts are owned by
-            // the engine's ClockworkClock-timed MidiClockOut (C++), which since
-            // 2026-08-30 hands each tick straight to a sink carrying its own
-            // time — those pulses do NOT come back through here.
+            // the engine's ClockworkClock-timed MidiClockOut (C++), which
+            // hands each tick straight to a sink carrying its own time —
+            // those pulses do NOT come back through here.
             OutCommand::ClockTick { port } => self.io.lock().unwrap().send(&port, &[0xF8]),
             // Per-port clock-follow toggle. Every enabled input is tracked by
             // default; this opts a port out (mute) or back in. Muting stops the

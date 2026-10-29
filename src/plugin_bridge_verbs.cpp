@@ -206,8 +206,8 @@ void TrackVerbs::sendTracks(const char* address, uint32_t replyToken) {
      * outside this repository: a field inserted before the nodes would
      * shift every one of them. A reader is NOT untouched by what follows,
      * though, if it insists on "no more arguments" once it has counted
-     * the nodes — Sonic Pi's did, and rejected every list that had a
-     * track in it (2026-09-07). Trailing fields still need their readers.
+     * the nodes: it rejects every list that has a track in it. Trailing
+     * fields still need their readers.
      */
     const uint32_t n = clockwork_track_list(nullptr, 0);
     std::vector<ClockworkTrackInfo> tracks(n ? n : 1);
@@ -664,8 +664,8 @@ bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t siz
              * broadcastError). One page because a synth publishes thousands
              * of parameters — Surge XT, 2855 — and the whole list is bigger
              * than the egress ring: it is drained only after this handler
-             * returns, so a handler that framed sixty pages at once lost
-             * everything past the first twenty. Each page carries the total
+             * returns, so framing every page at once loses everything past
+             * what the ring holds. Each page carries the total
              * and its offset; the client asks for `offset + count` next
              * until it has the lot. A page holds up to 48 parameters and
              * stays under 6 KB, so it always fits one frame however long the

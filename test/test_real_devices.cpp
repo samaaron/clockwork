@@ -152,7 +152,7 @@ int ourAggregates() {
 }
 
 // Aggregates an earlier engine left: smoothie's of a process that is gone,
-// or one named the ways engines named them before smoothie made them.
+// or one under a legacy engine name.
 std::vector<std::string> leftoverAggregates() {
     std::vector<std::string> left;
     const std::string mine = "smoothie.aggregate." + std::to_string(getpid()) + ".";

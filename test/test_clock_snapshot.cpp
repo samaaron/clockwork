@@ -4,9 +4,9 @@
  * test_clock_snapshot.cpp — /clockwork/clock/state/get on the native engine.
  *
  * The whole clock in one reply, answered on the audio thread from the mirror
- * the engine publishes (clockwork_sys.h). The web has always answered it
- * (test_dsp_boundary.cpp); natively the verb went to the control thread's
- * clock handler, which does not know it, and the client was told the verb is
+ * the engine publishes (clockwork_sys.h). The web answers it the same way
+ * (test_dsp_boundary.cpp); natively the verb must not go to the control
+ * thread's clock handler, which does not know it and would report it
  * unsupported.
  */
 #include <catch2/catch_test_macros.hpp>

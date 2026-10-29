@@ -3,10 +3,10 @@
 /*
  * test_shm_audio_buffer.cpp — the audio capture region.
  *
- * The second-largest region in the arena (1.5 MB) and the second one with no
- * test: a rolling window of recent output that a client pulls at its own pace,
- * for recording, level meters, or anything that wants the audio without being
- * on the audio thread. The writer never blocks and never waits for a reader —
+ * The second-largest region in the arena (1.5 MB): a rolling window of recent
+ * output that a client pulls at its own pace, for recording, level meters, or
+ * anything that wants the audio without being on the audio thread. The
+ * writer never blocks and never waits for a reader —
  * it laps one instead, which is the design and the thing most worth pinning.
  *
  * The contract that matters is what happens WHEN THE READER FALLS BEHIND. A
@@ -91,7 +91,7 @@ TEST_CASE("shm audio: a pull spanning the ring wrap is contiguous",
     // A capacity the block size does NOT divide, so a write straddles the
     // boundary rather than always landing on it — the arrangement in which a
     // dropped modulo still places every sample correctly and the test proves
-    // nothing. (It caught exactly that in the tap-stream ring.)
+    // nothing.
     const uint32_t cap = 3000;
     REQUIRE(w.activate(2, 48000, cap));
     REQUIRE(cap % 512 != 0);
@@ -231,7 +231,7 @@ TEST_CASE("shm audio: an oversized capacity is refused, not clamped silently",
 // The writer takes the caller's count of channel pointers and never reads
 // past it: a slot formatted for more channels than the caller supplied is
 // left as it was, cursor included, rather than read from pointers the
-// caller never set (clang-analyzer's finding on the device tap, 2026-10-07).
+// caller never set.
 TEST_CASE("audio buffer: a write with fewer channels than the slot's writes nothing", "[shm][audio]") {
     auto mem = std::make_unique<shm_audio_buffer>();
     memset(static_cast<void*>(mem.get()), 0, sizeof(shm_audio_buffer));

@@ -301,8 +301,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             finish(s);
             return true;
         }
-        // Combined variants — one round-trip where clients previously chained
-        // two or three serial RPCs (every client sleep/sync boundary).
+        // Combined variants — one round-trip in place of two or three serial
+        // RPCs (every client sleep/sync boundary).
         if (std::strcmp(verb, "rpc/beat_phase_at_time") == 0) {
             auto it = msg.ArgumentsBegin();
             if (it == msg.ArgumentsEnd() || !it->IsInt64()) return true;

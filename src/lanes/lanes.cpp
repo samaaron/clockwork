@@ -275,8 +275,8 @@ int64_t clockwork_block_time(void) {
 extern uint8_t* g_external_segment;
 
 // How many hosts hold the engine. Not atomic: attach and detach are control
-// calls, made from a host's setup path, never from the audio thread — the same
-// place clockwork_init has always been called from.
+// calls, made from a host's setup path, never from the audio thread, like
+// clockwork_init.
 static uint32_t g_attached = 0;
 
 // Can the running engine serve a host that asked for this?

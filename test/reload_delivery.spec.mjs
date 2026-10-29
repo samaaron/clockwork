@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * Nothing sent around a reload is lost. The client's own comment says the
- * first message or two after a reload could go missing on the reused-SAB
- * path, and #syncWithRetry stands guard against it; a product's restore step
- * (restoreClientState) sends before that sync and waits for nothing. These
- * cases send bursts at both moments, the instant reload() returns and inside
- * the restore step, and count every answer. Written 2026-10-28 to reproduce a
- * sample missing after a reload (SuperSonic's lifecycle_buffers case, once,
- * 2026-10-08): 150 reloads a case on each transport lost nothing, so this is
- * the guard that says so on every push.
+ * Nothing sent around a reload is lost. On the reused-SAB path the first
+ * message or two after a reload are the ones at risk, and #syncWithRetry
+ * covers them; a product's restore step (restoreClientState) sends before
+ * that sync and waits for nothing. These cases send bursts at both moments,
+ * the instant reload() returns and inside the restore step, and count every
+ * answer.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 const within = `(p, ms) => Promise.race([p.then((v) => ({ settled: true, value: v }), (e) => ({ settled: true, error: String(e?.message ?? e) })), new Promise((r) => setTimeout(() => r({ settled: false }), ms))])`;

@@ -47,10 +47,9 @@ TEST_CASE("engine: the guest gets both bulk lanes with no shared segment",
 
     const auto r = askGuest(e, "/dummy/region/lanes", "/dummy/region/lanes-is");
 
-    // NOT NULL, and the size the profile asks for. Reverting to
-    // `mShmemCreator ? get_assets() : nullptr` fails here, which is the point
-    // of the case: the previous shape was silent, and a guest with no returns
-    // simply published nothing.
+    // NOT NULL, and the size the profile asks for. A shape like
+    // `mShmemCreator ? get_assets() : nullptr` fails here: it hands an
+    // embedded guest no returns, and the guest then publishes nothing.
     CHECK(r.argInt(0) == static_cast<int32_t>(CLOCKWORK_ASSETS_BYTES));
     CHECK(r.argInt(1) == static_cast<int32_t>(CLOCKWORK_RETURNS_BYTES));
 
@@ -66,11 +65,11 @@ TEST_CASE("engine: the arena is there with no shared segment too",
           "[boundary][regions][engine]") {
     Engine e;
 
-    // The guest's working memory used to be carved from the segment, so an
-    // embedded engine handed its guest none at all; now clockwork reserves it
-    // from its fast tier, sized to the guest's want (the dummy's static
-    // figure), on every boot path. Asserted here rather than only in the
-    // lanes fixture because this is the boot path that had the bug.
+    // Clockwork reserves the guest's working memory from its fast tier, sized
+    // to the guest's want (the dummy's static figure), on every boot path —
+    // not from the segment, which an embedded engine has none of. Asserted
+    // here rather than only in the lanes fixture because this is the boot
+    // path without a segment.
     const auto r = askGuest(e, "/dummy/region/memory", "/dummy/region/memory-is");
 
     // The fast span is the fast want (dsp_api.h); the bulk want is a span of
@@ -84,11 +83,10 @@ TEST_CASE("engine: the arena is there with no shared segment too",
 // ── The engine's memory is one block natively too ───────────────────────────
 //
 // On the web the guest's spans are carved from one block; a desktop engine
-// took separate mallocs for them until 2026-10-15. Now it claims one block
-// too (ENGINE_MEMORY), sized to the build, and carves the same things from
-// it. The arena is not in it (static, or a segment
-// other processes map), nor the RT router's block (the process's, while the
-// block is a build's).
+// claims one block too (ENGINE_MEMORY), sized to the build, and carves the
+// same things from it rather than taking separate mallocs. The arena is not
+// in it (static, or a segment other processes map), nor the RT router's
+// block (the process's, while the block is a build's).
 TEST_CASE("engine: the guest's memory is carved from the engine's one block",
           "[boundary][regions][engine]") {
     Engine e;
@@ -126,10 +124,9 @@ TEST_CASE("engine: the guest's memory is carved from the engine's one block",
 
 // The block is cut by hand and clockwork::mem is never pointed at it:
 // natively it stays the system allocator, while an engine runs and after it
-// goes. A first version installed the block as the placement arena, and a
-// fixture that boots one engine for the whole process then had every later
-// test's "system" memory come out of the engine's block and freed as the
-// system's — which is what CI's one-process shuffled run found (2026-10-15).
+// goes. Installing the block as the placement arena would have a fixture that
+// boots one engine for the whole process hand every later test's "system"
+// memory out of the engine's block, freed as the system's.
 TEST_CASE("engine: the engine's block is not the placement arena, while it runs or after",
           "[boundary][regions][engine]") {
     {

@@ -15,15 +15,15 @@
  *
  * ONE PREFIX IS RESERVED, and it is the same in every product that embeds
  * clockwork: "/clockwork/", claimed by clockwork_sys_claims() (clockwork_prefix.h)
- * and answered here. It is not configurable by the product or the guest, and
- * that is a decision (2026-09-11), not an omission: keeping the string fixed
- * keeps the split mechanical and keeps clockwork's verbs portable across
- * products. A guest's own vocabulary lives under a prefix of its choosing —
+ * and answered here. It is not configurable by the product or the guest:
+ * keeping the string fixed keeps the split mechanical and keeps clockwork's
+ * verbs portable across products. A guest's own vocabulary lives under a
+ * prefix of its choosing —
  * SuperSonic's scsynth uses "/supersonic/" — which clockwork never claims and
  * reserves nothing about; to the product's client the two sit side by side.
  *
  * There is exactly ONE predicate, and it is clockwork_sys_claims() in clockwork_prefix.h.
- * Every clockwork verb lives under the prefix now -- the clock, MIDI, gamepad,
+ * Every clockwork verb is under the prefix -- the clock, MIDI, gamepad,
  * OSC and scheduler surfaces included -- so there is nothing else to decide.
  * The prefix itself is spelled ONCE, in CLOCKWORK_SYS_PREFIX_LIT; every clockwork
  * address in the C++ tree is built from it with CLOCKWORK_SYS(), so changing the

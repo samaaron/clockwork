@@ -5,10 +5,9 @@
  *
  * The schema (js/lib/metrics_schema.js) is where a metric is declared, and
  * the reader (js/lib/metrics_reader.js) is where getMetrics() is built, by
- * hand. A metric added to one and not the other is a panel row that reads
- * undefined, or a value no client can ask for. Clockwork's own suite did not
- * compare the two, and a new counter (egressFramesRefused, slot 55) reached
- * the schema without the reader on 2026-10-16; SuperSonic's suite caught it.
+ * hand. A metric in the schema and not the reader is a panel row that reads
+ * undefined; one in the reader and not the schema is a value no client can
+ * ask for.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 

@@ -246,8 +246,8 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
             int32_t seq = static_cast<int32_t>(hdr.sequence);
             if (st.lastSeq >= 0) {
                 // Unsigned before the add: the sequence after 0x7FFFFFFF is 0,
-                // and a signed add there is undefined (a peer writes any
-                // sequence it likes; found by fuzz_ring_drain).
+                // and a signed add there is undefined (a peer may write any
+                // sequence; fuzz_ring_drain covers it).
                 const int32_t expected = static_cast<int32_t>((static_cast<uint32_t>(st.lastSeq) + 1u) & 0x7FFFFFFFu);
                 if (seq != expected) {
                     const int32_t gap = static_cast<int32_t>(

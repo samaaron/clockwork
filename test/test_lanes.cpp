@@ -588,8 +588,7 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
 TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or for its size, is counted as refused, and as nothing else",
           "[lanes][abi][egress]") {
     // A refused reply is one a client never gets, and the line logging it
-    // rides the same full ring, so the count is the only trace: a peer lost
-    // 296 replies of 6000 on CI with no counter moving (2026-10-16).
+    // rides the same full ring, so the count is the only trace.
     // messages_dropped is the way in's; the way out has its own.
     LanesArena arena;
     const uint8_t payload[60] = {'/', 'x', 0, 0};

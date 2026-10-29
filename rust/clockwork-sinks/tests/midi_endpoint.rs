@@ -1,27 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
-//! The MIDI endpoint, and an honest account of how far it is tested here.
+//! The MIDI endpoint, and how far it is tested here.
 //!
 //! # What is tested unconditionally
 //!
 //! The BOUNDARY: that a MIDI sink refuses to open when there is nothing to
-//! open onto. That is not a consolation prize — it is the single most
-//! important thing about this endpoint. `MidiIo::send` to a port that is not
-//! open is a silent no-op, so a sink that opened optimistically would accept
-//! every message, deliver none, and report `sent` for all of them. Clockwork
-//! has been bitten by exactly that shape before (unknown `/s_new` control
-//! names vanishing without an error, which hid a whole routing chain being
-//! bypassed). A refusal at open is what makes the failure visible.
+//! open onto. `MidiIo::send` to a port that is not open is a silent no-op, so
+//! a sink that opened optimistically would accept every message, deliver
+//! none, and report `sent` for all of them. A refusal at open is what makes
+//! the failure visible.
 //!
 //! # What is NOT tested here, and why
 //!
 //! Bytes actually reaching a MIDI port. It needs a virtual/loopback port,
-//! which needs the ALSA sequencer (`/dev/snd/seq`) or CoreMIDI, and the box
-//! this was written on has neither — `snd_seq_hw_open` answers "Permission
-//! denied", which is also why `clockwork-midi`'s own
-//! `tests/virtual_loopback.rs` is `#[ignore]`d. So the case below is written
-//! and marked the same way rather than skipped or faked, and on a machine with
-//! a sequencer it runs:
+//! which needs the ALSA sequencer (`/dev/snd/seq`) or CoreMIDI, so the case
+//! below is `#[ignore]`d, as `clockwork-midi`'s own `tests/virtual_loopback.rs`
+//! is, and on a machine with a sequencer it runs:
 //!
 //! ```text
 //! cargo test -p clockwork-sinks --test midi_endpoint -- --ignored

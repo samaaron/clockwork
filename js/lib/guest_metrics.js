@@ -18,10 +18,9 @@
  * `guestMetricsPanels` is the shape the metrics schema's layout uses, so the
  * guest's numbers appear in the metrics UI beside clockwork's.
  *
- * This file was js/lib/dsp_profile.js until 2026-09-13, when the rest of
- * the "DSP profile" went: the sync barrier became clockwork's own verb, and
- * a product refusing its engine's dangerous verbs, or naming the address its
- * refusals come on, is the product's business in its own send()/request().
+ * Nothing else is declared here: the sync barrier is clockwork's own verb,
+ * and refusing an engine's dangerous verbs, or naming the address refusals
+ * come on, is the product's business in its own send()/request().
  */
 import { GUEST_METRICS_COUNT } from "./metrics_offsets.js";
 

@@ -30,9 +30,9 @@ TEST_CASE("Engine starts in non-running state before init", "[lifecycle]") {
 // =============================================================================
 //
 // SuperSonic's main does, and so does every test here. An engine with its big
-// buffers inside it was 340 KB or more: most of a 512 KB macOS thread stack, and
-// on arm64 Ubuntu's gcc 13 and 14 describe the prologue of a frame that big
-// wrongly, so an exception thrown through it found no handler and terminated.
+// buffers inside it is hundreds of KB: most of a 512 KB macOS thread stack, and
+// on arm64 Ubuntu gcc 13 and 14 describe the prologue of a frame that big
+// wrongly, so an exception thrown through it finds no handler and terminates.
 
 namespace {
 // Called through volatile pointers, so neither is inlined into the test: the
@@ -276,10 +276,9 @@ TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pum
     // A cold swap tears the DSP down and builds it again. A manual pump is
     // not a source the swap can stop: its caller's thread arrives when it
     // likes, and a block rendered against the DSP being freed is a data race
-    // (TSan caught one: a pumped test's wait against destroy_dsp on the
-    // device lane). The engine drops such a block, as a device callback is
-    // dropped while its device is stopped, and renders again once audio has
-    // restarted.
+    // with destroy_dsp on the device lane. The engine drops such a block, as
+    // a device callback is dropped while its device is stopped, and renders
+    // again once audio has restarted.
     EngineFixture fix;
     auto& engine = fix.engine();
 

@@ -62,8 +62,7 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             // in-received moving but out-sent not means it arrived and was not
             // answered, out-sent moving means it was answered and the client
             // never saw it, and dropped/corrupted moving means a ring refused
-            // it. Without them a failure is just "no pong", which is where
-            // this test sat while the timeout took the blame.
+            // it. Without them a failure is just "no pong".
             let counts = |e: &Embed| {
                 let m = e.metrics();
                 (
@@ -85,14 +84,13 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             };
             // Wait for the callback to be live before sending. Boot waits 5s
             // for a first tick and returns either way; a device that opened
-            // and never started (macos-15-intel's Null Audio Device at 128
-            // frames, every run) is then recovered by the watchdog with a
-            // cold swap, and a cold swap purges the ingress ring. A ping
-            // sent into that window is discarded, not delayed — the
-            // failure read engine_processed 0 and in_ring_peak 0 with the
-            // ticks moving — so the 15s below waited on nothing. The tick
-            // count moving is what this test's name asserts; ask for it
-            // first, then send into a ring nothing is about to purge.
+            // and never started (a CI runner's null audio device) is then
+            // recovered by the watchdog with a cold swap, and a cold swap
+            // purges the ingress ring. A ping sent into that window is
+            // discarded, not delayed, and the 15s below would wait on
+            // nothing. The tick count moving is what this test's name
+            // asserts; ask for it first, then send into a ring nothing is
+            // about to purge.
             let ticks_at_boot = counts(&e).0;
             let deadline = Instant::now() + Duration::from_secs(15);
             while counts(&e).0 == ticks_at_boot {

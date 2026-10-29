@@ -3,11 +3,10 @@
 /*
  * The engine's clock in a worker: OscChannel#now.
  *
- * A worker cannot see the AudioContext, so a host that schedules from one (Sonic Pi's runtime) was posted the time by
- * its page once a second, and counted on from it. That time went stale: a phone's audio away for six seconds, the
- * engine rebuilt on the tap, and the next Run started six seconds late. The channel now reads the audio thread's own
- * time — the sample clock it publishes (SAB), or its word down the channel's port (postMessage) — and this is what
- * that time must be: the page's engine clock, standing still with the audio, and following it back.
+ * A worker cannot see the AudioContext. A time the page posts once a second and the worker counts on from goes
+ * stale whenever the audio is away: the next run then starts late by the gap. The channel reads the audio thread's
+ * own time — the sample clock it publishes (SAB), or its word down the channel's port (postMessage) — and this is
+ * what that time must be: the page's engine clock, standing still with the audio, and following it back.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -81,10 +80,9 @@ test("a worker's channel reads the engine's clock: with the page's, still while 
 
 test("the transport stamp is a real time from boot, not the 1900 epoch", async ({ page, clockworkConfig }) => {
   // The worklet clock anchors the transport stamp into the clock state as it
-  // binds, during init_memory; a region reset that ran after it wiped the
-  // stamp to 0 (NTP 1900) on the web, where native had re-anchored later
-  // (2026-10-16). The reply must carry the anchor, so a client's arithmetic
-  // across it is not 126 years out.
+  // binds, during init_memory; a region reset run after it would wipe the
+  // stamp to 0 (NTP 1900). The reply must carry the anchor, so a client's
+  // arithmetic across it is not 126 years out.
   await boot(page);
   const r = await page.evaluate(async (config) => {
     const osc = window.Clockwork.osc;

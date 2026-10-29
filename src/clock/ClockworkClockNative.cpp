@@ -292,22 +292,16 @@ void ClockworkClock::setStartStopChangedCallback(
 
 void ClockworkClock::setLinkVisibility(LinkVisibility v) {
 #if !CLOCKWORK_LINK
-    // NO LINK COMPILED IN MEANS NO VISIBILITY TO SET, and saying otherwise is
-    // a lie that travels.
-    //
-    // This function is common to both build shapes, and below it sets
-    // SC_FLAG_LINK_ENABLED for any non-Off visibility. On a no-Link build
-    // setLinkEnabled(true) still reached here — lastNonOffVisibility() answers
-    // LoopbackOnly from the stub — so the flag went up with no session behind
-    // it. That flag is not private: it lives in the shared clock state, part of
-    // the published ClockworkClock protocol any client can read (the bit is named in
-    // js/lib/clockwork_clock_protocol.js), so raising it advertised a capability the
-    // build does not have.
-    //
-    // Same family as the beat_origin_ntp epoch bug: a path upstream never
-    // compiled, because it defaults Link ON, promoted to the shipping path by
-    // clockwork defaulting it OFF (Link is opt-in). Clamp it here, at the
-    // single writer, rather than teaching each reader to distrust the flag.
+    // No Link compiled in means no visibility to set. This function is common
+    // to both build shapes, and below it sets SC_FLAG_LINK_ENABLED for any
+    // non-Off visibility. On a no-Link build setLinkEnabled(true) reaches
+    // here — lastNonOffVisibility() answers LoopbackOnly from the
+    // stub — and would raise the flag with no session behind it. The flag is
+    // not private: it is in the shared clock state, part of the published
+    // ClockworkClock protocol any client can read (the bit is named in
+    // js/lib/clockwork_clock_protocol.js), so raising it advertises a
+    // capability the build does not have. Clamp it here, at the single
+    // writer, rather than teaching each reader to distrust the flag.
     v = LinkVisibility::Off;
 #endif
     if (v == getLinkVisibility()) return;

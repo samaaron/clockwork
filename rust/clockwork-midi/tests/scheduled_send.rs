@@ -114,8 +114,7 @@ fn scheduled_sends_arrive_in_order_however_they_were_queued() {
 #[test]
 #[ignore = "needs real ALSA/CoreMIDI virtual ports; run with --ignored --nocapture"]
 fn scheduled_delivery_is_tighter_than_our_own_polling() {
-    // The number this whole change exists for. 24 pulses at a 20.83 ms spacing
-    // is one beat of MIDI clock at 120 BPM.
+    // 24 pulses at a 20.83 ms spacing is one beat of MIDI clock at 120 BPM.
     let origin = Instant::now();
     let (mut conn, arrivals, _dst) = virtual_pair("ss-sched-jitter", origin);
 

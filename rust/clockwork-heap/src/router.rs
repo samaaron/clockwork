@@ -2,12 +2,12 @@
 // Copyright (c) 2025 Sam Aaron
 //! The RT router — a global allocator that keeps the engine inside its arena.
 //!
-//! The law this enforces (Sam, 2026-08-21): **no locks of any kind on the
-//! audio thread, and no malloc except our own arena management.** The render
-//! path already allocates nothing; this covers the control path — `/d_recv`,
-//! `/s_new`, `/n_set` all execute on the audio thread in every deployment of
-//! this engine, worklet and native alike, and their `HashMap`s and `Vec`s
-//! used to reach whatever the platform's malloc was.
+//! The rule this enforces: **no locks of any kind on the audio thread, and
+//! no malloc except our own arena management.** The render path allocates
+//! nothing; this covers the control path — `/d_recv`, `/s_new`, `/n_set`
+//! all execute on the audio thread in every deployment of this engine,
+//! worklet and native alike, and their `HashMap`s and `Vec`s would otherwise
+//! reach the platform's malloc.
 //!
 //! Mechanism: at boot (control time, before the first render) the host arms
 //! the router with one contiguous region claimed from the system allocator —
@@ -71,8 +71,7 @@ static REGION_LEN: AtomicUsize = AtomicUsize::new(0);
 static POOL: AtomicPtr<HeapPool> = AtomicPtr::new(ptr::null_mut());
 /// The arming state machine: 0 unarmed, 1 arming, 2 armed. One variable
 /// rather than two, so a waiter's conclusion rests on a single release/
-/// acquire pair and not on reasoning across `ARMING` and `POOL`. An earlier
-/// version used a flag plus `armed()` and Miri found the hole in it.
+/// acquire pair and not on reasoning across `ARMING` and `POOL`.
 ///
 /// `arm` promises that subsequent calls are ignored, which is only true if a
 /// caller that finds arming already under way *waits* for it: returning early
@@ -554,10 +553,9 @@ mod tests {
 
     // The pool is one engine thread's by contract (`HeapPool::alloc` takes
     // `&mut`), and the test harness runs cases on parallel threads, each of
-    // which enters engine scope on its own thread. Overlapping cases were
-    // therefore racing on the pool — a corrupted free list showed up as an
-    // allocation that missed the region, or a reclaimed block that was not
-    // the one expected — so every case that touches the arena holds this.
+    // which enters engine scope on its own thread. Overlapping cases would
+    // race on the pool and corrupt its free list, so every case that touches
+    // the arena holds this.
     static ENGINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn engine() -> std::sync::MutexGuard<'static, ()> {
         ENGINE.lock().unwrap_or_else(|e| e.into_inner())
@@ -714,17 +712,16 @@ mod tests {
     #[test]
     fn concurrent_arming_arms_exactly_once() {
         let _engine = engine();
-        // The bug this pins: `arm` used to check POOL and then act, so every
-        // thread that got past the null check allocated its OWN region and
-        // called arm_region, each overwriting REGION. A block handed out from
-        // the first pool then sat outside the region the last writer named,
-        // so `in_region` said false for memory the arena really owned — and
-        // every region but the last leaked.
+        // What this pins: an `arm` that checks POOL and then acts lets every
+        // thread past the null check allocate its own region and call
+        // arm_region, each overwriting REGION. A block handed out from the
+        // first pool then sits outside the region the last writer named, so
+        // `in_region` says false for memory the arena really owns, and every
+        // region but the last leaks.
         //
         // Only the arming races here. The pool itself is single-engine-thread
         // by contract — `HeapPool::alloc` takes `&mut` — so allocating from
-        // sixteen threads at once would be `&mut` aliasing, which is what an
-        // earlier draft of this test did until Miri said so.
+        // sixteen threads at once would be `&mut` aliasing.
         //
         // Spawn latency alone is longer than an arm takes, so without a
         // rendezvous the first thread is finished before the second starts

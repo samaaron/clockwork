@@ -7,8 +7,7 @@
 //! the size of every struct and the offset of every field with what these
 //! declarations say. A field added to a header without its twin here fails
 //! that test rather than being read as another field's bytes on the next
-//! boot — which is how a guest's hand-copied `DspConfig` once drifted three
-//! fields out of line and read its config through the wrong pointers.
+//! boot.
 //!
 //! * [`dsp_api`] — what a GUEST implements (`src/dsp_api.h`): the structs the
 //!   host hands it and the entry points it exports.

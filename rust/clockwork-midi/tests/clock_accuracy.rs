@@ -72,10 +72,8 @@ fn create(ctx: *mut Ctx) -> *mut ClockworkMidi {
 ///
 /// That handle is the NORMALISED, dedup'd form of the full OS port name, not
 /// the name the virtual port was created with: on ALSA it carries the owning
-/// client too, on CoreMIDI it does not. These cases hardcoded the bare name, so
-/// they could only ever pass on macOS — and being `#[ignore]`d, nothing noticed
-/// until the box they could not run on got a MIDI device. tests/
-/// virtual_loopback.rs always did it this way; this file did not.
+/// client too, on CoreMIDI it does not, so a hardcoded bare name only ever
+/// matches on macOS.
 ///
 /// Must be called AFTER the virtual port exists and after `create()`, which is
 /// what publishes the shared `MidiIo` this reads.

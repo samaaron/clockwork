@@ -3,10 +3,10 @@
 /*
  * flac_encoder.h — a FLAC encoder, in the subset a recorder uses.
  *
- * dr_flac decodes; this writes. It exists because the permissive decoders are
- * decoders: every FLAC encoder that could have been vendored instead is either
- * copyleft or a sub-project with its own build, and clockwork's recorder needs
- * one file's worth of the format rather than all of it.
+ * Decoding is rust/clockwork-audio-decode; this writes. Every FLAC encoder
+ * that could be vendored instead is either copyleft or a sub-project with its
+ * own build, and clockwork's recorder needs one file's worth of the format
+ * rather than all of it.
  *
  * WHAT IT PRODUCES is a compliant FLAC stream that any decoder reads: fixed
  * blocksize, independent channels, fixed polynomial predictors of order 0 to 4

@@ -91,8 +91,8 @@ using detail_shm_segment::shm_close;
 // starts dropping the oldest — at least this many, and never fewer than the
 // engine's slack: a device callback of B blocks posts B at once, and the
 // engine sized its slack to that (slack_for), so B waiting is on time, not
-// behind. Four was a fixed idea of a small callback; a 1024-frame buffer
-// handed eight, and this dropped half of every one of them.
+// behind. A fixed four would drop half of the eight blocks a 1024-frame
+// callback hands over.
 constexpr uint32_t CATCH_UP_BLOCKS = 4;
 // How many control frames the main thread takes per turn of its loop, so a
 // flood of parameter pages cannot starve the editor windows of events.
@@ -342,8 +342,8 @@ int run(int32_t enginePid) {
     // over shared memory) and shows no window, so without saying otherwise it
     // is a candidate for App Nap, which throttles its timers and can hold its
     // render thread for longer than the engine waits (TrackControl's
-    // HUNG_BLOCKS) before replacing it. Seen 2026-10-05: an idle host replaced
-    // twice in forty minutes with nothing in its log. Held for the run.
+    // HUNG_BLOCKS) before replacing it, leaving no trace in its log. Held
+    // for the run.
     const ClockworkLatencyCritical latencyCritical("renders the engine's plugin tracks");
 #endif
     const auto bridge = std::make_unique<Bridge>();   // its verbs object is handed to the track layer, so not on this stack
@@ -385,11 +385,9 @@ int run(int32_t enginePid) {
     }
     // Per-monitor DPI awareness, declared before any window exists (it
     // cannot be changed after). Without it Windows bitmap-scales every plugin
-    // editor on a high-DPI display, and a blurred Surge is the first thing a
-    // person with a 4K laptop would see of this feature. The call is looked up
-    // by name because it arrived in Windows 10 1703 and older SDK headers do
-    // not declare it; where it is missing the process simply runs unaware, as
-    // it did before.
+    // editor on a high-DPI display. The call is looked up by name because it
+    // arrived in Windows 10 1703 and older SDK headers do not declare it;
+    // where it is missing the process runs DPI-unaware.
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
         using SetCtx = BOOL (WINAPI*)(HANDLE);
         if (auto set = reinterpret_cast<SetCtx>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")))

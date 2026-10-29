@@ -21,9 +21,8 @@ function(clockwork_fetch_link)
         GIT_SHALLOW    TRUE
         # Link patches, applied through cmake -P so no Unix shell is needed on
         # Windows. Two of them are not optional: LinkSession.cpp calls
-        # loopbackOnly() and sessionPeers(), which Link-4.1.1 does not have —
-        # this option could not build without them, which is why it had never
-        # been built. See each patch header for what it does and why.
+        # loopbackOnly() and sessionPeers(), which Link-4.1.1 does not have.
+        # See each patch header for what it does and why.
         PATCH_COMMAND  ${CMAKE_COMMAND}
                        -DLINK_PATCH_DIR=${CMAKE_CURRENT_FUNCTION_LIST_DIR}
                        -P ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apply-link-patches.cmake)
@@ -38,9 +37,9 @@ function(clockwork_fetch_link)
     set(CMAKE_CXX_STANDARD ${_saved_cxx_standard})
     # ConfigureAbletonLink declares `add_library(Ableton::Link IMPORTED
     # INTERFACE)`, and an imported target belongs to the directory that created
-    # it — here. Anything outside this subdirectory that names it gets "the
-    # target was not found", which is what the out-of-process Link peer under
-    # test/native hit. Promote it so siblings can link it too.
+    # it — here. Anything outside this subdirectory that names it (the
+    # out-of-process Link peer under test/native) gets "the target was not
+    # found". Promote it so siblings can link it too.
     if(TARGET Ableton::Link)
         set_target_properties(Ableton::Link PROPERTIES IMPORTED_GLOBAL TRUE)
     endif()

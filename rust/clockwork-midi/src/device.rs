@@ -306,7 +306,7 @@ fn is_own_port(raw: &str) -> bool {
 /// True when a raw port name is a software synth the OS advertises rather than
 /// a device anyone patched in.
 ///
-/// So far that means one thing: Microsoft's GS Wavetable Synth, which every
+/// That means one thing: Microsoft's GS Wavetable Synth, which every
 /// Windows install carries. It is not hardware, it is not low latency (tens of
 /// milliseconds before a note sounds, which is the whole budget of a timing
 /// engine), and no pro audio host offers it as a real output. It being always

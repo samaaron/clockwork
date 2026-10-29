@@ -5,9 +5,7 @@
  *
  * A case that boots an engine on the machine's own output changes that
  * device's sample rate and buffer size under every other app playing on
- * it: on 2026-10-16 one run of this suite started the built-in output 42
- * times and flipped the system device between 48 kHz and 44.1 kHz every
- * 1.5 s, with dropouts and clicks in whatever was playing. Nothing the
+ * it, with dropouts and clicks in whatever is playing. Nothing the
  * suite claims needs the hardware: cases run headless (EngineFixture) or on
  * the fake system (FakeAudioDevice.h), and the few that are ABOUT the
  * hardware carry the hidden [.hardware] tag and run only when named.

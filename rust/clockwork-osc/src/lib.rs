@@ -73,8 +73,7 @@ impl Refusal {
 /// What the fuzzer does to bytes from the network, as a function: decode them
 /// as a message and as a packet, and check that what decodes re-encodes to
 /// itself. rust/fuzz's `osc_packet` target calls this under libFuzzer; the
-/// corpus test calls it over corpus/ (the seeds, and every crasher kept) on
-/// every push, so nothing found is ever found twice.
+/// corpus test calls it over corpus/ on every push.
 pub fn exercise(data: &[u8]) {
     let _ = decode(data);
     let Some(first) = decode_packet(data) else { return };

@@ -168,10 +168,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
         // postMessage mode drains the egress on the main thread's behalf, and
         // a batch posted before the transport has a handler on this port is
-        // delivered to nobody. The engine speaks as it boots — the banner,
-        // the version, "engine ready" — and every one of those lines was
-        // lost that way. So the frames stay in the ring until the transport
-        // says it is listening; the ring is theirs to wait in.
+        // delivered to nobody. The engine speaks as it boots (the banner,
+        // the version, "engine ready"), so the frames stay in the ring until
+        // the transport says it is listening.
         this.egressListening = false;
         this.port.onmessage = this.handleMessage.bind(this);
     }
@@ -524,7 +523,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         return true;
     }
 
-    // Note: SAB mode OSC logging is now handled by osc_out_log_sab_worker
+    // Note: SAB mode OSC logging is handled by osc_out_log_sab_worker
     // The worker uses Atomics.wait() on IN_HEAD for instant wake when messages arrive
 
     // Read OSC replies from OUT ring buffer and send via postMessage
@@ -536,7 +535,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         const C = PM_POOL_CONFIG;
 
         // The frames, the magic, the padding marker at the end of the ring and
-        // the tail that has to be published after them are all in the C now.
+        // the tail that has to be published after them are all in the C.
         // What is left here is the copy into the pool that postMessage sends.
         const got = this.wasmExports.clockwork_client_poll(
             this.clientHandle, this.pollMessages,
@@ -891,8 +890,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     // Store the guest's encoded config and sampleRate for C++ initialization
                     this.guestConfigBytes = data.guestConfigBytes || null;
                     // Clockwork's own number, in its own word: how many
-                    // channels to read from the device. It used to come out
-                    // of an input bus-channel count in one engine's config.
+                    // channels to read from the device.
                     this.inputChannels = data.inputChannels ?? 0;
                     this.outputChannels = data.outputChannels ?? 2;
                     this.sampleRate = data.sampleRate || 48000;  // Fallback to 48000 if not provided
@@ -934,9 +932,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                              * or misaligned. Emscripten's own JS glue supplies
                              * them; this worklet instantiates the module
                              * itself, so without these the build will not
-                             * INSTANTIATE at all — which is how the strongest
-                             * memory diagnostic came to be unusable exactly
-                             * when it was needed. They cost nothing in a
+                             * INSTANTIATE at all. They cost nothing in a
                              * normal build, where nothing imports them.
                              */
                             segfault: (...a) => {
@@ -1004,21 +1000,17 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             fd_close: () => 0,
                             /*
                              * THE MODULE'S ONLY WAY TO SPEAK BEFORE THE ENGINE
-                             * EXISTS, and it used to return 0 and discard the
-                             * bytes.
+                             * EXISTS.
                              *
                              * clockwork_log writes an OSC message into the debug ring
                              * for a worker to drain, which is worth nothing
                              * during boot — nothing drains that ring until the
                              * engine is running. Everything else the module
                              * prints (scprintf, an abort, a failed placement)
-                             * arrives here as a write to fd 2, and a stub
-                             * returning 0 told it the bytes were written.
-                             *
-                             * Measured 2026-09-01: a boot that ended in
-                             * init_memory surfaced to the client as
-                             * "AudioWorklet initialization timeout" with the
-                             * reason discarded at this line.
+                             * arrives here as a write to fd 2. A stub that
+                             * returns 0 and discards the bytes turns a boot
+                             * that dies in init_memory into an initialization
+                             * timeout with no reason.
                              */
                             fd_write: (fd, iov, iovcnt, pnum) => {
                                 const view = new DataView(memory.buffer);
@@ -1031,7 +1023,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                                     // AudioWorkletGlobalScope has no
                                     // TextDecoder, and a diagnostic channel
                                     // that throws while reporting a failure is
-                                    // worse than the silence it replaced.
+                                    // worse than silence.
                                     for (let j = 0; j < len; j++)
                                         text += String.fromCharCode(u8[ptr + j]);
                                     written += len;
@@ -1126,13 +1118,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             // guest's own from dsp_new) and goes on answering
                             // its own verbs with no guest, so the arena is up
                             // and nothing else would tell the page: its log
-                            // line went to the console of a thread the page
+                            // line goes to the console of a thread the page
                             // cannot see, and the metrics show an engine that
-                            // never ticks. Measured 2026-10-15: Sonic Pi Web
-                            // with no sound and nothing in its log, for a
-                            // pool that did not fit. So the reason goes to the
-                            // client as the init's error, and init() rejects
-                            // with it.
+                            // never ticks. So the reason goes to the client
+                            // as the init's error, and init() rejects with it.
                             const refused = this.bootError();
                             if (refused) {
                                 console.error('[AudioWorklet] the engine refused to boot: ' + refused);
@@ -1297,11 +1286,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
              * The other half of copyBufferData, and the reason it exists.
              *
              * In postMessage mode the client has no view of the worklet's heap
-             * at all, so a guest that produced a blob there had no way to hand
-             * it back — readReturns simply threw, and the bulk channel was
-             * one-directional on this transport alone. The worklet CAN see the
-             * heap, so it copies the range out and transfers the buffer, which
-             * is the same trick copyBufferData plays going the other way.
+             * at all, so a guest that produces a blob there cannot hand it
+             * back by itself. The worklet CAN see the heap, so it copies the
+             * range out and transfers the buffer, which is the same trick
+             * copyBufferData plays going the other way.
              *
              * TRANSFERRED, not structured-cloned: the copy below is the only
              * one, and handing the buffer over detaches it here rather than

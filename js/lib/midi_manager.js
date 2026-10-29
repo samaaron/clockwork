@@ -123,8 +123,8 @@ export class MidiManager {
     const set = input ? this._inEnabled : this._outEnabled;
     const known = input ? this._inputs : this._outputs;
     // "*" is a STANDING instruction, not a list taken once. A named port enabled before it is plugged in opens
-    // when it appears; "*" used to mean only the ports there happened to be, so a client had to send it again
-    // on every hotplug to keep the same promise. It is remembered here instead.
+    // when it appears, and "*" is remembered here so a port that appears later opens too, without the client
+    // sending it again on every hotplug.
     if (port === "*") {
       if (input) this._inAll = enabled; else this._outAll = enabled;
       if (!enabled) set.clear();

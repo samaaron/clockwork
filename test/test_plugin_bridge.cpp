@@ -527,7 +527,7 @@ TEST_CASE("a bridge from another generation does not stay", "[plugin][bridge]") 
 }
 
 TEST_CASE("the slack a device callback implies", "[plugin][bridge]") {
-    // One or two blocks per callback: the floor, which is where this began.
+    // One or two blocks per callback: the floor.
     REQUIRE(slack_for(0, kBlock) == DEFAULT_SLACK);
     REQUIRE(slack_for(128, kBlock) == DEFAULT_SLACK);
     REQUIRE(slack_for(256, kBlock) == 4);
@@ -554,11 +554,11 @@ TEST_CASE("the slack a device callback implies", "[plugin][bridge]") {
 // kPer + 2 serves a whole callback. That is a fact about the ring, and it is
 // true at any clock speed.
 //
-// Pacing this against a wall clock instead measured the machine. On a runner
-// preempted for 119 ms the absolute deadlines had all passed, five callbacks
-// fired back to back with no gap, and 275 of 320 pulls came back offset — with
-// the bridge having rendered 96% of blocks throughout. That run said nothing
-// about the bridge. The wall clock lives in the hidden [.cadence] case below.
+// Pacing this against a wall clock would measure the machine instead: a
+// runner preempted for several callback periods finds every absolute deadline
+// passed, fires those callbacks back to back with no gap, and the pulls come
+// back offset whatever the bridge rendered. The wall clock lives in the hidden
+// [.cadence] case below.
 static int callbacksOfEight(Engine& e, int callbacks, std::vector<float>& got) {
     constexpr uint32_t kPer = 8;
     e.perCallback = kPer;
@@ -617,14 +617,13 @@ TEST_CASE("a callback of eight blocks is served whole at the slack the device im
 }
 
 TEST_CASE("a callback of eight blocks at the old slack of two is mostly silence", "[plugin][bridge][.]") {
-    // The failure this guards against, kept as a fact rather than a memory:
-    // the bridge cannot answer six pulls that are microseconds apart, so at
-    // slack two most of every callback is the prime's silence and the late
-    // render is trimmed away — heard as a 375 Hz buzz over the music.
+    // The failure slack_for() exists to prevent: the bridge cannot answer six
+    // pulls that are microseconds apart, so at slack two most of every
+    // callback is the prime's silence and the late render is trimmed away,
+    // heard as a 375 Hz buzz over the music.
     //
     // HIDDEN ([.]): it asserts the bridge is too slow, so a fast enough host
-    // fails it. A GitHub macOS arm64 runner kept up for 250 of 320 pulls and
-    // got 70 wrong against the 161 this needs. Run it by name to see it.
+    // fails it. Run it by name to see it.
     Engine e(DEFAULT_SLACK);
     REQUIRE(e.spawn(false));
     e.trackWithGain();
@@ -639,11 +638,10 @@ TEST_CASE("a callback of eight blocks at the old slack of two is mostly silence"
 // HIDDEN ([.]), so catch_discover_tests never registers it and CI never runs
 // it. What it reports is a property of the MACHINE — whether this host can
 // present a device's cadence to a separate process — and a shared runner
-// cannot. A GitHub macOS runner held the aggregate (864 ms against 853 ms of
-// device time) while stalling 119 ms on a single callback, which is five
-// periods; the absolute deadlines had then all passed, five callbacks fired
-// back to back, and the stream came back offset. None of that is a fact about
-// the bridge, so none of it should fail a build. Run it by name for the
+// cannot: one stall of several periods on a single callback passes every
+// absolute deadline, the callbacks fire back to back, and the stream comes
+// back offset while the aggregate timing still holds. None of that is a fact
+// about the bridge, so none of it should fail a build. Run it by name for the
 // numbers:
 //
 //     clockwork_tests "the cadence this machine can hold"

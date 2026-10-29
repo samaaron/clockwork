@@ -208,9 +208,9 @@ struct Instance {
 
     std::atomic<uint32_t> latency_frames{0};
 
-    /* Host-callback observations. Nothing acts on them yet — nothing here
-       re-activates the plugin or calls its on_main_thread — but they are recorded
-       rather than dropped so the next version has something to act on. */
+    /* Host-callback observations. Nothing acts on them — nothing here
+       re-activates the plugin or calls its on_main_thread — but they are
+       recorded rather than dropped. */
     std::atomic<bool> want_restart{false};
     std::atomic<bool> want_process{false};
     std::atomic<bool> want_callback{false};
@@ -820,13 +820,11 @@ int param_info(const Instance* p, uint32_t index, PluginParam* out) {
        comes back empty rather than dangling. */
     out->name = (index < p->param_names.size()) ? p->param_names[index].c_str() : "";
 
-    /* GROUPING AND AUTOMATABILITY WERE NEVER SET HERE, and both defaults are
-       actively wrong: a caller zero-inits PluginParam, so every CLAP parameter
-       came back automatable = 0, and a host that filters on it — as any host
+    /* Grouping and automatability must both be set: a caller zero-inits
+       PluginParam, and a host that filters on automatable — as any host
        showing a panel must, since that flag is the only thing separating
-       controls from internals — rendered a CLAP plugin with no parameters at
-       all. It looked like a plugin with nothing to offer rather than a field
-       nobody filled in. */
+       controls from internals — would render a plugin whose parameters all
+       read 0 as a plugin with no parameters at all. */
     out->automatable = (info.flags & CLAP_PARAM_IS_AUTOMATABLE) != 0;
 
     /* CLAP names the group directly, where VST3 gives a number. Hashing the

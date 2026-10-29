@@ -4,11 +4,11 @@
 //!
 //! Every crate that reads bytes from outside the process keeps a `corpus/`
 //! beside its code: `seeds/`, what its fuzz target starts from, and
-//! `regressions/`, every crasher the nightly fuzz run ever found and that
-//! was then fixed. The crate's corpus test calls [`replay`] with its fuzz
-//! body, so every push proves the whole corpus is still harmless; the nightly
-//! run (`.github/workflows/security.yml`) starts libFuzzer from the same
-//! files. A dev-dependency only: nothing here is in the staticlib.
+//! `regressions/`, inputs that reproduced a fixed bug. The crate's corpus
+//! test calls [`replay`] with its fuzz body, so every push proves the whole
+//! corpus is still harmless; the nightly run
+//! (`.github/workflows/security.yml`) starts libFuzzer from the same files. A
+//! dev-dependency only: nothing here is in the staticlib.
 //!
 //! The replay has to be built the way the fuzzer builds, with `--cfg fuzzing`
 //! (`RUSTFLAGS="--cfg fuzzing" cargo test ... corpus`). A dependency may

@@ -2,10 +2,9 @@
  * OscChannel: channels opened from a transferable, as a worker opens one,
  * each reach the engine, however many are opened.
  *
- * A channel used to stand on a client slot, and there were eight: a page that
- * opened and closed workers ran out, and the next channel could not open at
- * all. A channel now writes the ingress ring itself (js/lib/ring.js) and holds
- * nothing but the shared memory, so there is no number to run out of.
+ * A channel writes the ingress ring itself (js/lib/ring.js) and holds nothing
+ * but the shared memory: there is no per-client slot, so a page that opens
+ * and closes workers has no count to run out of.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -36,7 +35,7 @@ test("channels opened from their transferable each reach the engine, however man
     };
 
     const { transferable } = cw.createOscChannel();
-    const count = 20;   // more than the eight slots there used to be
+    const count = 20;   // enough to exhaust a small fixed slot table
     let sent = 0;
     for (let i = 0; i < count; i++) {
       const ch = await OscChannel.fromTransferable(transferable);

@@ -342,10 +342,10 @@ TEST_CASE("audio file: refusals are told apart", "[audio][file]") {
 
 TEST_CASE("audio file: a channel count the decoder cannot read is refused at open",
           "[audio][file]") {
-    // The encoder fuzz target's first finding: a WAV opened with 3,144,564,541
-    // channels was written with the count cut to its low sixteen bits in the
-    // header. What the writer accepts, the decoder must be able to read, and
-    // the decoder holds a file to 64 channels.
+    // A channel count past 16 bits must be refused, not written to the WAV
+    // header cut to its low sixteen bits. What the writer accepts, the
+    // decoder must be able to read, and the decoder holds a file to 64
+    // channels.
     ClockworkAudioWriterConfig cfg{};
     cfg.struct_bytes = sizeof(cfg);
     cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
@@ -375,10 +375,10 @@ TEST_CASE("audio file: a channel count the decoder cannot read is refused at ope
 
 TEST_CASE("audio file: a sample rate no header can hold is refused at open",
           "[audio][file]") {
-    // The encoder fuzz target's second finding: a stereo 16-bit WAV opened at
-    // 3,209,342,020 Hz was written with its byte rate wrapped past 32 bits. A
-    // FLAC header holds a rate in twenty bits, and the writer holds both
-    // formats to that, so a rate one format takes the other takes too.
+    // A rate whose WAV byte rate wraps past 32 bits must be refused, not
+    // written wrapped. A FLAC header holds a rate in twenty bits, and the
+    // writer holds both formats to that, so a rate one format takes the
+    // other takes too.
     ClockworkAudioWriterConfig cfg{};
     cfg.struct_bytes = sizeof(cfg);
     cfg.format = CLOCKWORK_AUDIO_FORMAT_WAV;
@@ -548,8 +548,7 @@ TEST_CASE("flac encoder: each fixed predictor is the one that gets chosen",
     // tries every fixed order and keeps whichever costs least, so a wrong
     // coefficient in one of them makes that order merely expensive: another
     // order wins, the stream stays lossless, and every round-trip case in this
-    // file still passes. Breaking the order-2 predictor on purpose did exactly
-    // that.
+    // file still passes.
     //
     // What separates them is WHICH ORDER WINS. A signal whose n-th difference
     // is zero is predicted exactly by fixed order n, and by order n+1 too —
@@ -634,9 +633,9 @@ TEST_CASE("flac encoder: the stream says its block size is fixed, whatever the l
           "[audio][file][flac]") {
     // STREAMINFO's minimum and maximum block size are the block size the
     // stream uses, the last block excluded: equal, which is how a FLAC says
-    // its frames are numbered by frame and not by sample. The encoder used
-    // to write the last block's shorter length as the minimum; the reference
-    // decoder forgave it and symphonia, correctly, did not (2026-10-27).
+    // its frames are numbered by frame and not by sample. Writing the last
+    // block's shorter length as the minimum passes the reference decoder but
+    // symphonia, correctly, refuses it.
     const auto pcm = signal(9000, 2);   // two whole blocks and a short one
     const auto out = encodeToMemory(CLOCKWORK_AUDIO_FORMAT_FLAC,
                                     CLOCKWORK_AUDIO_ENCODING_PCM_S16, 2, 44100, pcm);

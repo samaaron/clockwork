@@ -319,13 +319,11 @@ TEST_CASE("Scheduler - payload bytes survive pool churn intact", "[scheduler]") 
     }
 }
 
-// ── Coverage the C++ scheduler had and the Rust one had lost ─────────────────
+// ── Guarantees the store's callers rely on ───────────────────────────────────
 //
-// The store was rewritten in Rust and the suite grew — 14 cases here and 35 in
-// the crate against upstream's 9. But three things upstream asserted had no
-// equivalent on either side, and more cases is not the same as more coverage.
-// A rewrite is exactly where a specific guarantee goes missing under a larger
-// number.
+// Three guarantees pinned apart from the data-structure cases above: the
+// caller's origin survives to fire time, a due event is handed over once, and
+// events fire on the right block with no drift.
 
 TEST_CASE("Scheduler - the scheduling caller's origin survives to fire time",
           "[scheduler]") {
@@ -347,9 +345,8 @@ TEST_CASE("Scheduler - the scheduling caller's origin survives to fire time",
 
 TEST_CASE("Scheduler - a due event is handed over exactly once",
           "[scheduler][regression]") {
-    // Upstream: "EngineScheduler emits each due event once". Nothing here
-    // asserted that popDue does not hand the SAME event back on the next call —
-    // which, for a scheduler, is a doubled note rather than a late one.
+    // popDue must not hand the SAME event back on the next call — which, for
+    // a scheduler, is a doubled note rather than a late one.
     Scheduler<TestMeta, 16, 8192> s;
     REQUIRE(s.add(100, SCHED_TAG_DEFAULT, {7}, kData, 4));
 
@@ -366,7 +363,7 @@ TEST_CASE("Scheduler - a due event is handed over exactly once",
 
 TEST_CASE("Scheduler - flush cancels the pending, never the already-fired",
           "[scheduler][regression]") {
-    // Upstream: "flush only affects pending events, not fired ones". A flush
+    // A flush only affects pending events, not fired ones. A flush
     // arriving between popDue and release must not disturb the event the caller
     // is holding — it is already on its way out, and cancelling it there would
     // be a use-after-free of a payload the caller is still reading.
@@ -401,11 +398,9 @@ TEST_CASE("Scheduler - flush cancels the pending, never the already-fired",
 
 TEST_CASE("Scheduler - events fire in the first block at or after their time, "
           "never early and without drift", "[scheduler][accuracy][regression]") {
-    // Upstream's "scheduled events fire block-accurately, never early, no
-    // drift" — the only case that walked the clock a block at a time instead of
-    // asking the store a question. It is the one that would catch a store that
-    // is internally consistent and still fires on the wrong block, and it had
-    // no equivalent here at all.
+    // Walks the clock a block at a time instead of asking the store a
+    // question: the case that catches a store that is internally consistent
+    // and still fires on the wrong block.
     Scheduler<TestMeta, 512, 65536> s;
 
     constexpr int64_t kBlock = 128;

@@ -18,10 +18,9 @@
 
 using engine_test::Engine;
 
-// "/clockwork/clock/offset" was the web build's global-offset knob, forwarded
-// by the native engine to a state field the native audio thread never reads.
-// A verb the native engine does not implement is refused, like any other
-// unknown /clock verb — not silently swallowed.
+// "/clockwork/clock/offset" is the web build's global-offset knob; the native
+// audio thread reads no such field. A verb the native engine does not
+// implement is refused, like any other unknown /clock verb — not swallowed.
 TEST_CASE("clock/offset is not a native verb: refused as unsupported",
           "[engine][clock][clockwork_sys]") {
     Engine e;
@@ -62,9 +61,9 @@ TEST_CASE("clock/meter sets the session meter and the query reads it back",
 }
 
 // A command the engine cannot read is refused, and the log says which and
-// why. It was refused and nothing said: the catch that stopped it reaching
-// the parser swallowed the reason, so a client sending something broken saw
-// only an unknown-verb error, and the log showed nothing had arrived.
+// why: the catch that stops it reaching the parser must not swallow the
+// reason, or a client sending something broken sees only an unknown-verb
+// error while the log shows nothing arrived.
 TEST_CASE("a malformed engine command is refused, and the log names it",
           "[engine][control]") {
     EngineFixture fix;

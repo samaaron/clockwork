@@ -70,8 +70,7 @@ TEST_CASE("attach: boot, join, refuse, and what a joiner may not change",
     REQUIRE(clockwork_attached() == 2);
 
     // ── clockwork_init REFUSES while two hosts hold the engine ──────────────
-    // The regression this file exists for. Before the attach protocol this
-    // call was obeyed, and the first host's engine was reconfigured under it.
+    // Obeyed, this call would reconfigure the first host's engine under it.
     clockwork_init(44100.0, 512, 2, 2, 0, gArena, sizeof gArena, nullptr, 0, 0);
     REQUIRE(clockwork_sample_rate() == kRate);         // unchanged
     REQUIRE(clockwork_block_size()  == booted_block);  // unchanged
@@ -96,11 +95,8 @@ TEST_CASE("attach: boot, join, refuse, and what a joiner may not change",
 
 // ── A rebuild does not forget what is bound ─────────────────────────────────
 //
-// This is what the old announcement mechanism needed a re-announce sweep for:
-// every attachment was replayed after dsp_new so a rebuilt guest was caught
-// up. The map needs no replay — it is state, not a message — but it must not
-// be TRAMPLED by the device widths a rebuild brings, which is the one way the
-// same bug could come back.
+// The map is state, not a message, so a rebuild needs no replay of the
+// attachments; but the device widths a rebuild brings must not trample it.
 //
 // Here rather than in clockwork_tests because it re-initialises the engine,
 // and this binary is the one that already does that on purpose.

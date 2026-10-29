@@ -110,9 +110,9 @@ impl ClockEstimator {
     }
 
     fn median(&self) -> f64 {
-        // Copy into a stack buffer instead of allocating a Vec on every pulse —
-        // this runs 24×/beat per clocked device, so the per-pulse heap alloc was
-        // pure waste. The window is tiny (default 7); MAX_MEDIAN caps it safely.
+        // Copy into a stack buffer instead of allocating a Vec on every pulse:
+        // this runs 24×/beat per clocked device. The window is tiny (default
+        // 7); MAX_MEDIAN caps it safely.
         let n = self.intervals.len().min(MAX_MEDIAN);
         let mut buf = [0.0f64; MAX_MEDIAN];
         for (slot, v) in buf[..n].iter_mut().zip(self.intervals.iter()) {
@@ -203,8 +203,8 @@ mod tests {
 
     #[test]
     fn median_picks_middle_value() {
-        // Guards the stack-buffer median refactor: behaviour must match a
-        // plain sort-and-take-middle, regardless of insertion order.
+        // The stack-buffer median must match a plain sort-and-take-middle,
+        // regardless of insertion order.
         let mut e = ClockEstimator::new();
         for v in [30.0, 10.0, 20.0, 50.0, 40.0] {
             e.intervals.push_back(v);
@@ -244,9 +244,9 @@ mod tests {
 
     #[test]
     fn estimator_survives_stall_and_burst() {
-        // Field capture 2026-06-11 (MOTU rig): the tick stream periodically
-        // stalls ~120ms then flushes the queued ticks ~300µs apart. The burst
-        // must neither move the estimate nor force-resync the filter.
+        // A driver whose tick stream periodically stalls ~120ms then flushes
+        // the queued ticks ~300µs apart. The burst must neither move the
+        // estimate nor force-resync the filter.
         let mut e = ClockEstimator::new();
         let mut t = 0.0;
         feed_steady(&mut e, &mut t, 111.0, 100);

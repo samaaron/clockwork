@@ -154,8 +154,8 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             // Through the sink for the endpoint, carrying the message's time:
             // for a send inside "/clockwork/schedule" that is the moment it was
             // scheduled for (nrtForwardSink threads it here), and the sink
-            // holds it to that moment. Sending it now, as this once did, let
-            // it go at the block it fired in. 0 and 1 both mean now.
+            // holds it to that moment; sending it at once would release it
+            // at the block it fired in. 0 and 1 both mean now.
             const ClockworkSink sink = sinkFor(host, port);
             const int64_t when = meta.when ? meta.when : 1;
             if (sink == CLOCKWORK_SINK_NONE ||

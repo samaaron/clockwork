@@ -287,8 +287,8 @@ uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {
  * waiting for the audio thread). The endpoint drains the renderer into the
  * port as fast as there is room, so the renderer alone sits near empty while
  * the stream is perfectly healthy: counted alone, a working subscription
- * reported Dropout for ever, and the metric read 0 ms. Lock-free, so the
- * audio thread's metrics read it too.
+ * reads as Dropout and the metric as 0 ms. Lock-free, so the audio
+ * thread's metrics read it too.
  */
 float LinkAudioBridge::bufferedSecondsOf(const InputSubscription& sub) const {
     const uint32_t rate = mSampleRate.load(std::memory_order_relaxed);
@@ -555,8 +555,8 @@ void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
     constexpr double kQuantum = 4.0;
 
     // Scheduled as the audio thread is: this feeds it, and from an ordinary
-    // thread's place in the queue it was tens of milliseconds late on a busy
-    // machine while the ring ran dry. Asked once, at this worker's own pace
+    // thread's place in the queue it runs tens of milliseconds late on a busy
+    // machine while the ring runs dry. Asked once, at this worker's own pace
     // (a chunk at the sample rate), and answered in the log and through
     // endpointRealtime(); the engine can only ask.
     {

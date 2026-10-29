@@ -5,8 +5,7 @@
 //! The clock snapshot ([`crate::Clock`]) is anchored in NTP seconds, and an
 //! OSC bundle's timetag is NTP in 32.32 fixed point. A host that schedules
 //! against the engine needs "now" in both forms and the arithmetic between
-//! them, and every host that has written it has written it slightly
-//! differently. This is it, once, with the epoch offset spelled out.
+//! them. This is it, once, with the epoch offset spelled out.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

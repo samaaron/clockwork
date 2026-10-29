@@ -307,8 +307,8 @@ static bool value_as_text(ErlNifEnv* env, ERL_NIF_TERM value, std::string& out) 
 // buffer, headless. EVERY OTHER KEY IS THE GUEST'S and goes into
 // Config::guestConfig as a `name=value` line, spelled as the caller spelled
 // it (GuestConfigText.h): clockwork does not know the guest's words, and a
-// guest that does not know a name refuses the boot with the line, which is
-// the error a misspelt option deserves rather than silence.
+// guest that does not know a name refuses the boot with the line, so a
+// misspelt option fails the boot rather than being ignored.
 //
 // Returns "" when every key was read, else why the first that could not be was
 // refused: a key that is not an atom, a device value that is not an integer, a

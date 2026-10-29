@@ -2,8 +2,7 @@
 // Copyright (c) 2025 Sam Aaron
 /*
  * DevicePolicy.h — the swap and hot-plug decisions, as pure functions so the
- * rules can be unit-tested without a real audio device. EACH ONE CORRESPONDS TO
- * A BUG THAT HAS BEEN FIXED AND SHOULD STAY FIXED.
+ * rules can be unit-tested without a real audio device.
  *
  * Internal: tests and ClockworkEngine.cpp include it; embedders see only
  * ClockworkEngine.h.
@@ -30,15 +29,15 @@ inline constexpr int kRequestMaxChannels = 64;
 // against the boot -i flag: an explicit boot count wins; otherwise the
 // device's full width is requested (kRequestMaxChannels) — a boot with
 // inputs disabled (-i 0) says nothing about how many the user wants once
-// they turn inputs on, so it must not cap them at stereo (that cap left
-// multichannel interfaces at 2 inputs after a live enable). Stereo is
+// they turn inputs on, so it must not cap them at stereo (that cap would
+// leave a multichannel interface at 2 inputs after a live enable). Stereo is
 // requested only when inputs were boot-disabled AND the probe failed:
 // WASAPI rejects an over-request outright, so with no capacity known the
 // safe number is the one every device has.
 // The result — auto or explicit — is then clamped to `probedMax`, the
 // device's probed input capacity (<= 0 = probe failed / unknown, no
 // clamp). SHARED by switchDevice's auto-enable and enableInputChannels:
-// resolving them separately shipped 64 input bits into WASAPI on the
+// resolving them separately lets 64 input bits reach WASAPI on the
 // enableInputChannels(-1) path.
 int resolveInputWidth(int requested, int bootInputChannels, int probedMax);
 
@@ -73,10 +72,9 @@ double resolveWirelessExitRate(double requestedRate,
 //     setDeviceMode(name), not this auto-follow, so it's unaffected.
 //   - pinnedOutputDevice is non-empty (-H / GUI device choice,
 //     mPreferredOutputDevice): the pin always wins. Following would turn
-//     a hardware event into a device switch the user never asked for —
-//     and the setDeviceMode("") routing erases the pin (#3555 follow-on:
-//     a healthy -H 'Testy' boot was yanked onto the wireless system
-//     default). The hot-plug reconciler owns returning to the pin.
+//     a hardware event into a device switch the user never asked for,
+//     and the setDeviceMode("") routing erases the pin. The hot-plug
+//     reconciler owns returning to the pin.
 bool shouldFollowDefaultOutputChange(const std::string& newDefault,
                                      const std::string& currentOutput,
                                      bool newDefaultIsVirtual,
@@ -171,8 +169,8 @@ std::vector<std::string> scopeInputsToDriver(
 // Decide which input device the boot open pairs with the opened output.
 // The embedder passes the user's saved input (scsynth's -H, for SuperSonic).
 // `visibleInputs` are the inputs that can pair with that output (the caller
-// leaves out any its driver won't pair — #3555: a Bluetooth HFP mic in an
-// aggregate made a 16 kHz engine and corrupted the heap).
+// leaves out any its driver won't pair: a Bluetooth HFP mic in an
+// aggregate makes a 16 kHz engine).
 //   - requestedInput visible (exact or the driver's "<name> (N)" form,
 //     resolveJuceDeviceName) → the resolved name
 //   - otherwise (no request / "__none__" / unplugged / can't pair) →
@@ -214,7 +212,7 @@ BootDriverChoice resolveBootDriver(const std::string& requested,
 // NAME wins, not the driver the user chose: "Speakers (X)" saved under
 // "Windows Audio" would open under "DirectSound" purely because
 // "DirectSound : Speakers (X)" is the shorter string. An empty
-// preferredDriver keeps the historical global match.
+// preferredDriver matches across every driver.
 std::string resolveBootHardwareMatch(
     const std::string& requested,
     const std::string& preferredDriver,
@@ -371,7 +369,7 @@ std::string resolveSwapTarget(
 // The entire decision half of switchDevice, pure. The engine builds a
 // SwapSnapshot (every probe/lookup the decisions need), planSwap decides,
 // and the executor applies the plan without deciding anything further.
-// Decision order is contractual and mirrors years of field fixes:
+// Decision order is contractual:
 //   1. scope resolution (resolveSwapScope) + pending-intent abandonment;
 //   2. name resolution per side (resolveSwapTarget), cross-driver latch;
 //   3. ASIO full-duplex input mirroring;
@@ -384,8 +382,7 @@ std::string resolveSwapTarget(
 //      the DSP instance, whose channel counts are only re-read when it
 //      is rebuilt);
 //   7. cold = forced || channels || cross-driver || rate change.
-// Provenance flags exist so the executor can log exactly what the old
-// inline code logged.
+// Provenance flags let the executor log where each decision came from.
 struct SwapPlanRequest {
     std::string outputName, inputName;   // raw; sentinels included
     double sampleRate = 0;               // 0 = unspecified

@@ -4,9 +4,9 @@
  * plugin_host.h — what clockwork needs from a plugin, whatever format it is.
  *
  * One abstraction, one thin adapter per format: CLAP (`plugin_clap.cpp`) and
- * VST3 (`plugin_vst3.cpp`), with AU and LV2 later on the same boundary. Both
- * formats are MIT — CLAP always was, and Steinberg relicensed VST3 at 3.8.1 —
- * so licensing chooses nothing here and this is purely an engineering shape.
+ * VST3 (`plugin_vst3.cpp`); AU and LV2 would sit on the same boundary. Both
+ * formats are MIT (VST3 from 3.8.1), so licensing chooses nothing here and
+ * this is purely an engineering shape.
  *
  * MODELLED ON CLAP, NOT ON THE INTERSECTION. CLAP is the more expressive and
  * more explicit of the two, so the VST3 adapter emulates what it can and
@@ -22,20 +22,18 @@
  * backend and its main thread already pumps a Cocoa run loop for AUHAL and
  * GameController. See plugin_editor_window.h.
  *
- * PLACEMENT. v1 hosts inline: clockwork runs the DSP, then the plugin, then
- * the device, all in one callback, so nothing is delayed. The send/return
- * placement — a plugin running beside the DSP, its output returning next block
- * — needs the port substrate in docs/PORTS.md and waits for it. Inline needs
- * no rings at all, which is why this can exist before that does.
+ * PLACEMENT is the caller's. This runs one plugin for one block and knows
+ * nothing of where the audio comes from or goes: the tracks (plugin_track.h)
+ * and the bridge (plugin_bridge.h) decide that.
  *
  * NOT REALTIME-SAFE, AND CANNOT BE. Plugins allocate, take locks and
  * occasionally do file IO on the audio thread, and clockwork asserts the
  * opposite with rt_alloc::Guard. Hosting one means accepting that a third
  * party can violate that guarantee inside plugin_process — the guard is
  * therefore suspended across that call, deliberately and visibly, rather than
- * being quietly weakened everywhere. A plugin that crashes takes the audio
- * thread with it; out-of-process hosting is the only real answer to that and
- * is not attempted here.
+ * being quietly weakened everywhere. A plugin that crashes takes its process
+ * with it, which is why the tracks run in the bridge process rather than the
+ * engine (plugin_bridge.h).
  */
 #ifndef CLOCKWORK_PLUGIN_HOST_H
 #define CLOCKWORK_PLUGIN_HOST_H
@@ -219,9 +217,8 @@ void plugin_set_timeline(struct HostedPlugin* p, const struct ClockworkTimeline*
  * 0-based.
  *
  * These exist because an instrument is not addressable through parameters. An
- * effect needs none of this and a DSP that only enumerates parameters can host
- * effects and nothing else — which is what this header did before, and why a
- * loaded synth stayed silent.
+ * effect needs none of this; a host that only enumerates parameters can host
+ * effects and nothing else, and a loaded synth stays silent.
  */
 void plugin_note_on(struct HostedPlugin* p, int16_t channel, int16_t pitch,
                     float velocity, uint32_t frame_offset);

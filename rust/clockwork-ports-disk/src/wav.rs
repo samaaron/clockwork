@@ -2,12 +2,11 @@
 // Copyright (c) 2025-2026 Sam Aaron
 //! WAV, parsed and written by hand.
 //!
-//! No codec crate, and that is a deliberate cost. This repository vendors no
-//! decoding stack, and the claim that clockwork contains no DSP and pulls in
-//! no media libraries is worth more than the two hundred lines saved — a codec
-//! dependency arrives with its own licence, its own transitive tree and its own
-//! opinions about resampling. What is needed here is a chunk walk and two
-//! sample conversions.
+//! No codec crate: this is a streaming endpoint that reads a frame at a time
+//! as the audio thread drains it, and what it needs is a chunk walk and two
+//! sample conversions. The full decoder set is `clockwork-audio-decode`,
+//! which decodes a whole file into memory for a sample loader; see
+//! `cpp/clockwork_disk.h` for why the two stay separate.
 //!
 //! Supported: 16-bit integer PCM (`WAVE_FORMAT_PCM`) and 32-bit IEEE float
 //! (`WAVE_FORMAT_IEEE_FLOAT`), plus `WAVE_FORMAT_EXTENSIBLE` whose subformat

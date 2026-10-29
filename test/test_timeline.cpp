@@ -9,9 +9,7 @@
  * clockwork::Timeline in NTP seconds. The /clockwork/clock rpc verbs answer from that
  * copy and nothing else, so what a client is told is exactly what
  * timeline(id) says, in one domain, with no per-call clock conversion in
- * between. (They used to answer through Ableton Link's per-boot microsecond
- * clock, converting NTP in and out around every call, in two code paths that
- * had to agree.)
+ * between.
  *
  * The registry itself is tested in Rust (rust/clockwork-clock); this pins the C++
  * boundary over it and the wire behaviour of the verbs.

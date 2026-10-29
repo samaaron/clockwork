@@ -116,7 +116,7 @@ struct VirtualDestination {
 
     VirtualDestination() {
         // kMIDIServerStartErr (-304): the machine's MIDI server did not start,
-        // which a GitHub macOS runner does now and then (2026-10-28, -29).
+        // which happens on a CI runner.
         // Nothing of ours is under test without one, so the case is skipped
         // and says so, rather than failed for the runner.
         const OSStatus created = MIDIClientCreate(CFSTR("clockwork-engine-tests"), nullptr, nullptr, &client);
@@ -187,10 +187,8 @@ TEST_CASE("scheduled OSC leaves at its time, not when the scheduler fired it",
     // reaches the sink. pump() renders its 0.4 s in a few milliseconds and
     // stops, and this engine has only what the test renders — a running one
     // has a device supplying blocks forever. So keep the blocks coming for a
-    // moment, as the MIDI case below and EngineFixture::reply() already do.
-    // Without this the case failed on every run on Windows ARM64 (the send
-    // never reached OscControl), though the block counter ticks after the
-    // render, so the exact wake that was lost there is not yet pinned down.
+    // moment, as the MIDI case below and EngineFixture::reply() already do;
+    // otherwise the send may never reach OscControl.
     for (int i = 0; i < 20; ++i) {
         e.engine.pumpAudioBlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

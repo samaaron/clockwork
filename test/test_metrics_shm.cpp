@@ -99,9 +99,9 @@ TEST_CASE("metrics-shm: increments via engine writes are visible through client"
 TEST_CASE("metrics: a new engine's buffer peaks are its own",
           "[metrics]") {
     // The peaks are tracked in the process and published by whichever engine
-    // is running. They used to be cleared by a purge and by nothing else, so
-    // an engine booted after another published that one's peaks as its own
-    // from its first flush. One wide message through the first engine, then a
+    // is running. A boot must clear them, not only a purge, or an engine
+    // booted after another publishes that one's peaks as its own from its
+    // first flush. One wide message through the first engine, then a
     // second engine that is sent nothing wider than a ping.
     const std::vector<uint8_t> wide(4000, 0x5a);
     {
@@ -127,8 +127,8 @@ TEST_CASE("metrics: the engine publishes how much its scheduler holds",
           "[metrics][scheduler]") {
     // A reader that sees the queue's depth needs its capacity to know how
     // close to full it is: events, and bytes, since it is full when it runs
-    // out of either. The web client once read both from constants the arena
-    // never carried, so every reader was told 0.
+    // out of either. The engine publishes both; a reader that takes them
+    // from constants the arena does not carry reads 0.
     EngineFixture fix;
     const auto& m = fix.engine().getMetrics();
 #if CLOCKWORK_SCHEDULER

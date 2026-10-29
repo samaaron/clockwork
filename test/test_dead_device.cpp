@@ -4,18 +4,10 @@
  * test_dead_device.cpp — a device that opens and starts but never delivers
  * a block (FakeDeviceSpec::failStart).
  *
- * Seen on macOS with Sonic Pi 5.0.0 (SuperSonic 0.71.0), twice:
- *   - a workshop laptop (2026-09-29): Bluetooth earbuds dropped, the engine
- *     followed the system default back to the built-in speakers, and the
- *     speakers never called back;
- *   - a gig (2026-10-02): the GUI's restore moved a session that was playing
- *     on the headphone jack onto the speakers, which never called back.
- * Both times the swap waited 5 s for a first block, logged "audio callbacks
- * not firing", and reported success anyway — so the GUI showed a device that
- * was producing nothing. A recovery onto such a device reported it
- * "restored" in the same way. A device that never ticks is a failed swap,
- * exactly as a device that refuses to open is: say so, and go back to the
- * device that was playing.
+ * A swap or recovery onto such a device must not report success after its
+ * wait for a first block runs out. A device that never ticks is a failed
+ * swap, exactly as a device that refuses to open is: say so, and go back to
+ * the device that was playing.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -124,9 +116,8 @@ TEST_CASE("DeadDevice: a recovery whose pinned device delivers no audio, while t
           "system default does, is reported restored on the default",
           "[DeadDevice][recovery]") {
     // Recovery opens the system default on a fresh manager, then retargets the
-    // pinned device (the gig: pinned speakers, default the headphone jack).
-    // The pin is silent; the default it went back to plays. That is audio
-    // restored — on the device that plays — not "device down".
+    // pinned device. The pin is silent; the default it went back to plays.
+    // That is audio restored — on the device that plays — not "device down".
     auto sys = makeSimpleSystem();             // the default is Fake Speakers
     auto cfg = fakeEngineConfig(sys, "Fake Interface");
     cfg.watchdogRecoveryCooldownMs = 0;

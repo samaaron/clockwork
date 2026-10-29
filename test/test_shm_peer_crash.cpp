@@ -47,8 +47,7 @@
 // Sanitizer builds run several times slower, and this test also churns child
 // processes (fork/exec/SIGKILL) that contend with the engine's threads — so a
 // fixed 2s reply/poll timeout can expire before a perfectly live engine
-// answers. Scale the waits up under a sanitizer build only. Mirrors
-// kTimeoutScale in test_scheduling_accuracy.cpp.
+// answers. Scale the waits up under a sanitizer build only.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 constexpr int kTimeoutScale = 4;
 #elif defined(__has_feature)
@@ -198,18 +197,12 @@ TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls
         REQUIRE(m.osc_in_corrupted.load(std::memory_order_relaxed) == 0);
 
         // The corpse leaves its backlog behind, and it must drain now that
-        // nobody is writing. This is the stronger claim, and the one the ping
-        // below was standing in for badly: a peer dying mid-write leaves the
-        // ring full, and if the engine could not work through that it would sit
-        // there forever.
+        // nobody is writing: a peer dying mid-write leaves the ring full, and
+        // an engine that could not work through that would sit there forever.
         //
-        // It also has to happen BEFORE the ping. `spam` writes as fast as it
-        // can, and a failing run caught cycle 7 with the ingress ring at its
-        // 786,400-byte ceiling and 20,067 messages drained during the ten
-        // seconds the ping supposedly "went unanswered". The engine was never
-        // stalled — one ping was racing a flood, and its pong was one reply
-        // among twenty thousand. That measured the test's luck, not the
-        // engine's health.
+        // It has to drain BEFORE the ping. `spam` writes as fast as it can, so
+        // a ping sent into the flood races some twenty thousand replies, and
+        // its timeout measures the race rather than the engine.
         const bool drained = fx.pollUntil([&] {
             return m.in_buffer_used_bytes.load(std::memory_order_relaxed) == 0;
         }, kEngineWaitMs);
@@ -236,7 +229,7 @@ TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls
         // the corpse; messages_processed moving means the drain is consuming; a
         // full ingress ring with neither moving is the stall this case exists
         // to catch. Without these numbers there is nothing to tell a deadlock
-        // from a hiccup — which is how the flood above went unnoticed.
+        // from a hiccup.
         OscReply reply;
         const uint32_t ticksBefore = m.process_count.load(std::memory_order_relaxed);
         const uint32_t procBefore  = m.messages_processed.load(std::memory_order_relaxed);

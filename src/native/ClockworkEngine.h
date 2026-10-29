@@ -58,7 +58,8 @@
 #include "shm_segment.hpp"
 #include <memory>
 
-// Held, not seen: a host that includes this header needs neither.
+// Forward declarations only: a host that includes this header needs neither
+// definition.
 namespace smoothie {
 class DeviceSession;     // smoothie_devices.h
 struct DeviceRequest;    // smoothie_devices.h
@@ -229,7 +230,7 @@ public:
                                                    // user-facing name.
         // The plugin bridge's executable, when the host knows where it put it
         // (on macOS the binary inside the .app). Empty: found beside this
-        // process's executable, as before (TrackControl::resolveBridge). An
+        // process's executable (TrackControl::resolveBridge). An
         // application with the engine linked in sets this: "beside the
         // executable" is then the application's own layout, which the engine
         // cannot know.
@@ -361,8 +362,8 @@ public:
     // through and through, so a host calls this from one thread and no other.
     // Call it often — the engine's own gateway runs it every audio block —
     // and stop calling it before shutdown(), which waits for a pass in
-    // flight and then closes the door. Never blocks: an empty pass takes
-    // nothing and returns. False when the door is closed — before init, after
+    // flight and then refuses further calls. Never blocks: an empty pass takes
+    // nothing and returns. False when the pass is not open — before init, after
     // shutdown, or whenever the engine runs its own gateway thread (the
     // config did not say the host drives) — or when another thread is inside
     // the pass. Each is a misuse, refused rather than let corrupt a ring.
@@ -418,10 +419,8 @@ public:
     // reopening devices takes seconds (on Windows listDevices() activates every
     // device through COM), while the gateway is the sole consumer of control
     // commands and the sole deliverer of replies — doing it there stalls every
-    // other client, which once cost a user a boot. Named device
-    // switches already run on their own worker; this applies the same
-    // discipline to the paths that didn't. Replies still work from here: the
-    // egress accepts off-thread producers (sendSwitchDone always has).
+    // other client, and a client's boot handshake can time out. Replies
+    // still work from here: the egress accepts off-thread producers.
     // False when the lane has stopped (shutdown) and the task was dropped.
     bool postDeviceTask(std::function<void()> task);
 
@@ -534,7 +533,7 @@ public:
     // through without a full engine restart. The input is the user's
     // (inputToReopenWith). sampleRate > 0 makes the reopen an explicit rate
     // request (snapped to the device's advertised rates); 0 keeps the
-    // session rate, as a reopen always did.
+    // session rate.
     SwapResult               reopenCurrentDevice(double sampleRate = 0);
 
     // --- Input channel management ---
@@ -633,9 +632,9 @@ public:
 
     // The one authoritative answer to "is a device mutation in flight".
     // Set via PhaseGuard by switchDevice (Swapping) and recoverAudio
-    // (Recovering), each once it holds the swap gate. Replaces probing the
-    // swap gate with try_lock/unlock (a TOCTOU, and a false positive
-    // whenever a mere reader held the gate).
+    // (Recovering), each once it holds the swap gate. Not read by probing
+    // the swap gate with try_lock/unlock: that is a TOCTOU, and a false
+    // positive whenever a mere reader holds the gate.
     enum class DevicePhase : uint8_t { Idle, Swapping, Recovering };
     DevicePhase devicePhase() const { return mDevicePhase.load(); }
     // A recovery accepted and not yet finished — including one queued on the
@@ -683,8 +682,8 @@ public:
 
     // CFRunLoop suppression (macOS). The host's run-loop pump calls
     // isRunLoopSuppressed() each tick and sleeps instead of pumping
-    // while true. Nothing in the engine sets it any more: the device
-    // layer pairs devices without the run loop.
+    // while true. Nothing in the engine sets it: the device layer pairs
+    // devices without the run loop.
     bool isRunLoopSuppressed() const { return mSuppressRunLoop.load(); }
     void setRunLoopSuppressed(bool v) { mSuppressRunLoop.store(v); }
 
@@ -829,11 +828,10 @@ private:
     //   RealCallback: the device session's open device runs our
     //                 ClockworkProcessor.
     //   Headless:     a high-priority timer thread (HeadlessDriver) fakes
-    //                 the same contract when no device is available. Used
-    //                 for explicit cfg.headless==true, for boot-time
-    //                 device-init failures (issue #3526: ALSA/PipeWire
-    //                 "no channels"), and for cold-swap rollback when no
-    //                 usable device is left.
+    //                 the same contract. Explicit only (cfg.headless): the
+    //                 test harness and a host that drives no device.
+    // With neither — no open device and no headless mode — the source is None
+    // and the watchdog starts a device when one appears (desiredAudioSource).
     //
     // mActiveSource is the source of truth. Every device-swap path goes
     // through stopAudioSource() then startAudioSource() so the "exactly
@@ -1065,9 +1063,9 @@ private:
     // is the sole transport caller, so no engine thread ever touches a
     // socket. (Web has no NRT thread.)
     RingReader                mNrtGateway{"clockwork-NrtGateway"};
-    // The door controlPass() comes through: open from the point init() would
-    // start the gateway thread until shutdown() closes it, which then waits
-    // for a pass in flight — the host-driven equivalent of the thread join.
+    // Whether controlPass() may run: set from the point init() would start
+    // the gateway thread until shutdown() clears it, which then waits for a
+    // pass in flight — the host-driven equivalent of the thread join.
     std::atomic<bool>         mControlOpen{false};
     std::atomic<uint32_t>     mControlPassesInFlight{0};
     // Held by the one thread inside the pass; a second is refused.
@@ -1209,9 +1207,9 @@ private:
     // ── Explicit device-mutation phase (enum declared public, above) ────
     std::atomic<DevicePhase>   mDevicePhase { DevicePhase::Idle };
     // Made only by a holder of the swap gate, so the phases put back nest as
-    // the gate's holders do. One made while waiting for the gate saved the
-    // holder's phase and put it back after the holder had finished, leaving
-    // the engine Swapping for good (CI, 2026-10-17).
+    // the gate's holders do. One made while waiting for the gate would save
+    // the holder's phase and put it back after the holder had finished,
+    // leaving the engine Swapping for good.
     struct PhaseGuard {
         std::atomic<DevicePhase>& phase;
         DevicePhase prev;
@@ -1263,10 +1261,10 @@ private:
         // healthy (healthy) — see RateSkewPolicy. "The same fault" is judged
         // with twice the skew tolerance: a verdict is one noisy measurement
         // against 1.0, but two consecutive verdicts are two noisy
-        // measurements against each other, and a 0.919x device read as 0.89x
-        // then 0.94x on a loaded machine (macOS CI, 2026-09-13) is still one
-        // device — with the tolerance alone the streak restarted at every
-        // wobble and the adopt came after five plain reopens instead of two.
+        // measurements against each other, so one device on a loaded machine
+        // can read 0.89x then 0.94x — with the tolerance alone the streak
+        // restarts at every wobble and the adopt comes after several plain
+        // reopens instead of two.
         // A verdict also carries the rate the device's driver reports
         // (mReportedDeviceRate): one that disagrees with the session's is a
         // device someone else runs at their rate, adopted on the second.
@@ -1419,16 +1417,14 @@ private:
     // meet the same code. Opened over the arena at init, closed at shutdown.
     struct ClockworkClient* mClientHandle = nullptr;
 
-    // Opened on first use by whichever side gets there first — ingest or the
-    // egress gateway. Not at construction: `shared_memory` is not chosen until
-    // init_memory() runs.
-    // Opened once in bringUp, after the arena is published and before any thread can ask for it.
+    // Opened once in initEngine, after the arena is published and before any
+    // thread can ask for it. Not at construction: `shared_memory` is not
+    // chosen until init_memory() runs.
     void openClient();
 
-    // The guest's arena (DspConfig::arena). NOT in the shared segment: no
-    // client maps it, and while it lived there it existed only when a client
-    // did — an engine embedded with no segment handed its guest no working
-    // memory at all. Allocated once and reused across cold swaps;
+    // The guest's arena (DspConfig::arena) is NOT in the shared segment: no
+    // client maps it, and an engine embedded with no segment must still hand
+    // its guest working memory. Allocated once and reused across cold swaps;
     // audio_processor zeroes it at every dsp_new.
 
     // The assets area and returns when there is no segment to carve them from — one

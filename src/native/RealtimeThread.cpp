@@ -65,8 +65,7 @@ RealtimeResult elevateCurrentThreadToRealtime() {
     // Two independent measures; either alone is a win:
     //  * MMCSS "Pro Audio" registration — the OS-blessed audio-thread
     //    protection (the same scheduler class the WASAPI engine uses).
-    //  * THREAD_PRIORITY_TIME_CRITICAL — the classic boost the previous
-    //    engine always applied on Windows.
+    //  * THREAD_PRIORITY_TIME_CRITICAL — the plain Win32 priority boost.
     DWORD taskIndex = 0;
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
     if (mmcss)

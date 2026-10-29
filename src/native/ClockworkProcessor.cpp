@@ -111,7 +111,7 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
     // the guest's block travels as bytes it copies without reading; the guest's
     // region travels as a base and a length. That region is NULL when there is
     // no public segment — a headless engine has no client to share bulk with,
-    // so a guest allocates from the system as it always did.
+    // so a guest allocates from the system.
     clockwork_init(static_cast<double>(sampleRate),
              static_cast<uint32_t>(mBufLen),
              static_cast<uint32_t>(numInputChannels),
@@ -211,8 +211,8 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     // accumulator falls short by on a buffer that is not a multiple of the
     // block. Every block the DSP is then handed is a whole one of input, and
     // the latency such a device needs is taken once, here, rather than as
-    // short gaps of silence through its first callbacks — the latency it
-    // used to settle at, without the clicks on the way. A buffer that is a
+    // short gaps of silence through its first callbacks: the same latency
+    // it settles at, without the clicks on the way. A buffer that is a
     // multiple of the block primes nothing.
     if (hwBufSize > 0 && mBufLen > 0) {
         std::fill(mInputAccum.begin(), mInputAccum.end(), 0.0f);
@@ -491,8 +491,8 @@ void ClockworkProcessor::process(
     while (outputFilled < numSamples) {
         // Feed the DSP one full mBufLen block of input from the accumulator.
         // If the accumulator doesn't have a full block yet (common at startup
-        // when HW buffer < mBufLen), fall back to zero-padding the rest —
-        // but this is now a rare edge case, not the common path.
+        // when HW buffer < mBufLen), fall back to zero-padding the rest;
+        // a rare edge case, not the common path.
         float* inputBus = clockwork_audio_in();
         if (inputBus && nIn > 0) {
             int usable = std::min(mInputAccumCount, mBufLen);

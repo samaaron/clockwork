@@ -53,10 +53,7 @@ namespace detail_shm_audio {
 // to CLOCKWORK_TAP_CHANNELS (memory_profile.h); `enabled` says the tap is
 // live (the device has that direction); the cursor is monotonic and a
 // reader catches up losslessly from its own position (shm_audio_buffer_reader).
-//
-// `holds` remains in the header for readers of the previous protocol, in
-// which a guest wrote slot 0 while a client held it. Clockwork neither
-// counts nor gates on it: the taps flow from boot.
+// The taps flow from boot: nothing gates them.
 inline constexpr uint32_t SCOPE_SLOTS       = 2;
 inline constexpr uint32_t SCOPE_OUT_SLOT    = 0;
 inline constexpr uint32_t SCOPE_IN_SLOT     = 1;
@@ -135,8 +132,8 @@ public:
     // Appends num_frames of num_channels: the caller's count of the pointers
     // it passes, read once from the slot it filled them for. A slot wanting
     // more channels than that is not written — never read past what the
-    // caller filled (the analyzer's finding, 2026-10-07: the slot's count
-    // read a second time here could, in principle, exceed the first).
+    // caller filled (the slot's count is read once: a second read could
+    // exceed the first).
     void write(const float* const* channel_data, uint32_t num_channels, uint32_t num_frames) {
         if (!_buf || num_frames == 0) return;
         uint64_t pos = _buf->write_position.load(std::memory_order_relaxed);

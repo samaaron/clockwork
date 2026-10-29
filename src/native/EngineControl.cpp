@@ -368,9 +368,9 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             // own default until something moves.
             // Subscribing is idempotent and clients confirm by resending
             // with a token until acked — so ack and snapshot regardless of
-            // whether this call newly registered the caller. (Gating the ack
-            // on "newly registered" made every confirm after the first
-            // untokened subscribe time out.)
+            // whether this call newly registered the caller: gating the ack
+            // on "newly registered" would time out every confirm after the
+            // first untokened subscribe.
             mEgress->subscribeCallerToLinkNotify(token);
             ackSubscribeIfTokened(mEgress, token, data, size,
                                   CLOCKWORK_SYS("clock/notify/subscribe.reply"));
@@ -492,9 +492,9 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
         if (std::strcmp(addr, CLOCKWORK_SYS("notify")) == 0) {
             // Register the caller as a notify target for lifecycle events.
             // Registration is device-free by design: enumerating devices here
-            // put a Windows COM probe of every device (pathological with
-            // virtual drivers like Voicemeeter installed) directly in the path
-            // of the client's boot handshake. Clients that want the
+            // would put a Windows COM probe of every device (pathological with
+            // virtual drivers like Voicemeeter installed) in the path of the
+            // client's boot handshake. Clients that want the
             // device list ask for it with /clockwork/devices/report.
             mEgress->subscribeCaller(token);
             std::array<char, 128> buf{};
@@ -633,9 +633,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // device output-only, which enableInputChannels refuses because it
             // crashes real drivers.
             // Turning inputs off leaves the output mode alone: in system mode the
-            // engine goes on following the default. (It used to lock the output
-            // into manual mode here, against a list-change reinit that system
-            // mode no longer does.)
+            // engine goes on following the default.
             if (inputDevName == "__none__") {
                 mEngine->postDeviceTask([this, devName, inputDevName] {
                     finishSwitch(mEngine->enableInputChannels(0), devName, inputDevName);
@@ -667,9 +665,8 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/report")) == 0) {
             // Register the caller for /clockwork/devices pushes: the same
-            // audience as /clockwork/notify. The integer argument named a
-            // reply port when the command port was UDP; it is accepted and
-            // ignored.
+            // audience as /clockwork/notify. The integer argument (a reply
+            // port, for a UDP command port) is accepted and ignored.
             mEgress->subscribeCaller(token);
             // listDevices() is the ~10 s Windows COM probe — never inline here.
             mEngine->postDeviceTask([this] { mEngine->sendDeviceReport(); });

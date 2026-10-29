@@ -30,8 +30,7 @@
 //!
 //! Pure ring-and-slot logic with no C++ dependency, running
 //! on the realtime thread, where a use-after-free is a crash in the audio
-//! callback and memory safety is worth the most. Written in C++ first it would
-//! only have been written twice.
+//! callback and memory safety is worth the most.
 
 pub mod ffi;
 pub mod registry;

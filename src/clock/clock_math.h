@@ -36,14 +36,14 @@ inline constexpr double kMicrobeatsPerBeat = 1.0e6;
 inline constexpr double kDriftIirGain = 0.01;
 
 // The most the audio thread's clock moves against its sample counter in one
-// block, either way (TimeSource): the clock is the ruler everything is
-// scheduled on, and a ruler that flexes under what is already on it misplaces
-// it — a bundle placed 50 ms ahead lands within 40 µs of where its sender
-// worked it out. Two microseconds a block is 1500 ppm at 128 frames and
-// 48 kHz: more than any two crystals disagree by, so real drift is followed in
-// full, and the residual an anchor leaves (one wall reading can be off by a
-// render burst, ~7 ms) is taken up over seconds rather than at once. Far under
-// a block, so a reading never goes back.
+// block, either way (TimeSource): everything is scheduled against this clock,
+// and moving it moves what is already scheduled — with the bound, a bundle
+// placed 50 ms ahead lands within 40 µs of where its sender worked it out.
+// Two microseconds a block is 1500 ppm at 128 frames and 48 kHz: more than
+// any two crystals disagree by, so real drift is followed in full, and the
+// residual an anchor leaves (one wall reading can be off by a render burst,
+// ~7 ms) is taken up over seconds rather than at once. Far under a block, so
+// a reading never goes back.
 inline constexpr double kClockSlewPerBlock = 2.0e-6;
 
 // An anchor is one wall reading, and one reading can be out by a render burst
@@ -103,10 +103,9 @@ inline double retempoOrigin(double origin, double oldBpm, double newBpm, double 
 
 }  // namespace clockwork
 
-// Current wall-clock time as NTP seconds (global name: pre-dates the
-// namespace and is referenced unqualified across the native tree and the
-// shm reader side). The engine's TimeSource and every cross-process
-// sample-clock reader must use this one formula.
+// Current wall-clock time as NTP seconds (global name: referenced unqualified
+// across the native tree and the shm reader side). The engine's TimeSource
+// and every cross-process sample-clock reader must use this one formula.
 inline double wallClockNTP() {
     return std::chrono::duration<double>(
                std::chrono::system_clock::now().time_since_epoch()).count()

@@ -6,7 +6,7 @@
  * Validates that:
  *   - switchDriver with same rate = hot swap
  *   - switchDriver with different rate = cold swap (guest rebuilt)
- *   - Exactly one pair of swap events per switchDriver call (option 3 semantics)
+ *   - Exactly one pair of swap events per switchDriver call
  *   - Engine remains responsive after driver-switch cold swap
  *   - SwapResult reports correct type and sample rate
  */

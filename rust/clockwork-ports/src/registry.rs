@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 Sam Aaron
 //! The port table: what sits in a slot, and the arguments a port refuses.
 //!
-//! # The slot discipline is not here any more
+//! # The slot discipline is in `clockwork-slots`
 //!
 //! `clockwork_ports.h` says a slot goes silent the instant it is closed, that a
 //! closed slot must read as silence rather than fault, and that it is not
@@ -12,11 +12,10 @@
 //! state and a refcount. The whole argument for it, and its own tests, live
 //! there.
 //!
-//! It moved because `src/clockwork_event_sink.h` wants the identical rule for a
-//! different payload: an event sink is also a stable slot, also closed from a
-//! control thread while the audio thread is inside it, and also forbidden a
-//! mutex on the send path. Two copies of that discipline would have been one
-//! too many — the second is the copy that quietly loses a subtlety.
+//! It is shared because `src/clockwork_event_sink.h` wants the identical rule
+//! for a different payload: an event sink is also a stable slot, also closed
+//! from a control thread while the audio thread is inside it, and also
+//! forbidden a mutex on the send path. One copy serves both.
 //!
 //! What is left here is what is genuinely a PORT: the ring, the channel count,
 //! the direction, the name, the two counters, and the argument checks that say

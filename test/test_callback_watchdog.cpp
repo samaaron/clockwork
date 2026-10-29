@@ -242,9 +242,9 @@ TEST_CASE("Watchdog: with no clock given, it polls on a thread of its own",
 TEST_CASE("SwapGate: bounded acquisition fails while held, succeeds after release",
           "[Watchdog][SwapGate]") {
     // The primitive setDeviceMode's system-default reinit uses to serialise
-    // against in-flight swaps (the unguarded interleave was the wedge's root
-    // cause; the JUCE-manager race itself needs real devices, so the gate is
-    // what's testable headlessly).
+    // against in-flight swaps (an unguarded interleave wedges the engine; the
+    // device-manager race itself needs real devices, so the gate is what's
+    // testable headlessly).
     EngineFixture fix;  // watchdog off
 
     // The gate is recursive, so it must be held by ANOTHER thread to contend a

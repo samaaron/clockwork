@@ -16,10 +16,10 @@
  * clockwork_tests is written against kInChannels/kOutChannels. A second
  * geometry needs a second process.
  *
- * What this pins that nothing else did: a subscription is validated against
- * the width the DSP ALLOCATED, not the width the device happens to have. The
- * two are different by construction — a lane sits above every device channel —
- * so measuring against the device refuses every request a client can make.
+ * What this pins: a subscription is validated against the width the DSP
+ * ALLOCATED, not the width the device happens to have. The two are different
+ * by construction — a lane sits above every device channel — so measuring
+ * against the device refuses every request a client can make.
  */
 #include "LanesFixture.h"
 #include "OscTestUtils.h"
@@ -107,7 +107,7 @@ TEST_CASE("reserved lanes: a subscription is measured against the allocated widt
 
     // A stereo pair at the lane base is exactly what a client subscribes to.
     // Against the allocated width it fits; against the DEVICE width it does
-    // not, and measuring against the device is what refused every real
+    // not, and measuring against the device would refuse every real
     // subscription.
     REQUIRE(link_audio::channelPairFits(base, allocatedIn));
     REQUIRE_FALSE(link_audio::channelPairFits(base, lanes_test::kInChannels));

@@ -19,8 +19,7 @@
 // that needs certainty appends an int32 correlation token (the same
 // scheme as the /clockwork/clock request/reply verbs) and resends until
 // the token comes back on
-// "<verb>.reply". Token-less subscribes keep their historical
-// no-reply behaviour, so existing clients see no new traffic.
+// "<verb>.reply". Token-less subscribes get no reply.
 //
 // The LAST int32 argument is the token, matching the rpc convention of
 // appending it after the verb's own arguments.

@@ -25,7 +25,7 @@ class IOscTransport {
 public:
     virtual ~IOscTransport() = default;
 
-    // WHAT DID NOT ARRIVE IS SAID. A send returns false, and a broadcast the
+    // Non-delivery is reported. A send returns false, and a broadcast the
     // number of its audience it did not reach, when the frame was meant for a
     // destination and could not be handed to it: a token no peer answers to
     // any more, a connection that refused the write, a datagram the socket

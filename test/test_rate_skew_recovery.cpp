@@ -4,20 +4,20 @@
  * test_rate_skew_recovery.cpp — the rate-skew watchdog against a device that
  * keeps time at a rate other than the one it reports.
  *
- * sonic-pi#3565: a USB mixer reports 48000 Hz to the OS and delivers ~44,100
- * frames a second. The watchdog measured it correctly (0.919x) and recovered
- * with a cold swap that reopened the device at the same 48000 — the exact
- * condition that triggered it — every ten seconds, 79 times in one session,
- * each swap stopping the client's jobs. The remedy is RateSkewPolicy: at most
- * N recoveries, the last of which requests the measured rate, and no further
- * swaps if the device skews at that rate too. The engine keeps playing.
+ * A device can report 48000 Hz to the OS and deliver ~44,100 frames a
+ * second. The watchdog measures the ratio (0.919x); a recovery that only
+ * reopens the device at the same 48000 reproduces the condition that
+ * triggered it, and repeats every ten seconds, each swap stopping the
+ * client's jobs. RateSkewPolicy bounds it: at most N recoveries, the last
+ * of which requests the measured rate, and no further swaps if the device
+ * skews at that rate too. The engine keeps playing.
  *
  * The fake device lies the same way (FakeDeviceSpec::deliveredRate), and
  * the case keeps the clock: the device delivers exactly the frames due by it
  * and the watchdog measures against it (fake_audio::runWatchdogUntil), so
  * every window reads the device's true ratio whatever the machine is doing,
- * and a session that took the mixer ten minutes plays out exactly the same
- * way every time, in a moment.
+ * and a session of many minutes plays out the same way every run, in a
+ * moment.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -142,17 +142,15 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
 TEST_CASE("RateSkew: a device someone else holds at its own rate is adopted on the "
           "second recovery, whatever the ratio",
           "[RateSkew][Watchdog]") {
-    // 2026-10-15, 15:41 and 16:00: Loopback's pass-through held the headphone
-    // jack at 48 kHz while the engine ran at 44.1 kHz, and later held its own
-    // device at 48 kHz. The engine reopened at its rate, Loopback set the
-    // device's back, and the skew returned read at a different ratio each
-    // time (0.87x, then 1.09x — the flip lands inside a window): a different
-    // fault to the policy every time, so the adopt never came and the engine
-    // cold-swapped every ten seconds, each swap stopping the user's runs. The
-    // device's driver said what was happening all along ("reports 44100 Hz;
-    // the engine runs at 48000 Hz"): a report that disagrees with the session
-    // rate is the fault, whatever the ratio, and after one reopen has failed
-    // to win the device back, the reported rate is adopted.
+    // Another app (a loopback driver's pass-through) can hold a device at its
+    // own rate. The engine reopens at its rate, the other party sets the
+    // device back, and the skew returns at a different ratio each time (the
+    // flip lands inside a window): a ratio-keyed policy sees a different
+    // fault every time, never adopts, and cold-swaps every ten seconds. The
+    // device's driver reports the held rate throughout: a report that
+    // disagrees with the session rate is the fault, whatever the ratio, and
+    // after one reopen has failed to win the device back, the reported rate
+    // is adopted.
     auto sys = makeSimpleSystem();
     auto& speakers = sys->at("Fake Speakers");
     speakers.heldRate = 44100.0;   // held at 44.1k elsewhere; the engine opens it at 48k
@@ -163,8 +161,8 @@ TEST_CASE("RateSkew: a device someone else holds at its own rate is adopted on t
     // After each reopen at 48k the other party sets the device back, and
     // its driver reports the rate again (CoreAudio's listener fires for the
     // other party's request as for the engine's own). Once adopted, the
-    // device is honest at 44.1k. The varying ratios of the real fight are
-    // the policy's unit case; here the device keeps time at 44.1k throughout.
+    // device is honest at 44.1k. Varying ratios are the policy's unit case;
+    // here the device keeps time at 44.1k throughout.
     sys->useVirtualTime();
     REQUIRE(runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
         sys->reportOpenDeviceChanged();
@@ -231,8 +229,8 @@ TEST_CASE("RateSkew: an honest device is never recovered", "[RateSkew][Watchdog]
 
 TEST_CASE("RateSkew: a device racing at nearly five times its rate is recovered, and "
           "the engine keeps playing", "[RateSkew][Watchdog]") {
-    // The other way round from the mixer: a driver's timer free-running fast
-    // (seen just before a wake), so every scheduled note comes early.
+    // The other way round: a driver's timer free-running fast, so every
+    // scheduled note comes early.
     auto sys = makeSimpleSystem();
     sys->at("Fake Speakers").deliveredRate = 230400.0;   // 4.8x its 48000
     EngineFixture fix(lyingDeviceConfig(sys));

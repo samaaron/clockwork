@@ -33,11 +33,12 @@ extern "C" {
  * one connection that presented the secret and one still presenting it. A
  * connect while a client is in, or while one is still presenting, is closed
  * at once (TCP/UDS) or fails busy (pipes); one that presents the secret once a
- * client is in is closed then. Nothing displaces a connection, so a silent
- * one holds the door for 2 s at most and never the client's place. What
- * stands behind the one client is the host's. Connection ids are
- * minted from 1 and never reused — a transport uses them directly as origin
- * tokens (0 = the in-process caller). `on_closed` fires once when a
+ * client is in is closed then. Nothing displaces a connection: a silent one
+ * blocks a new connect for at most the 2 s auth window, and never displaces
+ * the client that is in. Multiplexing behind the one client is the host's
+ * job. Connection ids are minted from 1 and never reused — a transport uses
+ * them directly as origin tokens (0 = the in-process caller). `on_closed`
+ * fires once when a
  * connection that presented the secret ends (EOF, error, protocol violation)
  * but not during server stop, so a transport can drop that client's
  * subscriptions: subscription

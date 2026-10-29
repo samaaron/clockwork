@@ -216,8 +216,7 @@ constexpr uint32_t SAMPLE_CLOCK_LAST_MONO      = 40;  // f64 the host's monotoni
 //
 // Here rather than with the segment because it is pure arithmetic over the
 // offsets above and a tap reader: no mapping, no POSIX, nothing a browser
-// build cannot have. shm_segment.hpp re-exports it for callers that knew it
-// there.
+// build cannot have. shm_segment.hpp re-exports it.
 struct sample_clock_view {
     uint64_t engine_frames = 0;
     double   dac_ntp = 0.0;
@@ -343,7 +342,7 @@ constexpr uint32_t GUEST_PERSIST_SIZE  = GUEST_PERSIST_BYTES;
 // Link peer is guessing at an index and finding out by refusal.
 //
 // TWO HALVES, because the two readers want different things and paying for
-// both everywhere is what made the earlier answers expensive.
+// both everywhere is expensive.
 //
 //   HOT — one atomic word per channel. A DSP about to process channel c reads
 //   in_channel[c] and knows what it is holding. The read IS the lookup: no
@@ -434,7 +433,7 @@ constexpr uint32_t METRICS_HISTORY_START = alignArena16(METRICS_START + METRICS_
 constexpr uint32_t METRICS_HISTORY_SIZE  = clockwork::metrics_history::kRegionBytes;
 constexpr uint32_t NATIVE_STATS_START    = alignArena16(METRICS_HISTORY_START + METRICS_HISTORY_SIZE);
 // The host's clock anchors, as one region: the NTP start time (f64) then the
-// two offsets. The three names below are what the code has always used.
+// two offsets.
 constexpr uint32_t CLOCK_ANCHORS_START   = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
 constexpr uint32_t GLOBAL_OFFSET_START   = CLOCK_ANCHORS_START;
 constexpr uint32_t CLOCK_ANCHORS_SIZE    = GLOBAL_OFFSET_SIZE;   // the host's global offset, and nothing else: the clock anchors itself
@@ -662,7 +661,7 @@ struct alignas(4) PerformanceMetrics {
     // the slots after it are one address space, and stays 0.
     std::atomic<uint32_t> _client_side;             // 52
     // The guest's pool and the rust heap, written at the metrics flush
-    // (shared C++), in the slots 53-57 that once held the buffer pool's metrics.
+    // (shared C++), slots 53-57.
     std::atomic<uint32_t> guest_pool_used_bytes;    // 53: bytes in use in the guest's pool now (its bulk memory)
     std::atomic<uint32_t> guest_pool_peak_bytes;    // 54: the most ever
     // Frames an egress ring refused, for want of room or for their size —
@@ -670,8 +669,7 @@ struct alignas(4) PerformanceMetrics {
     // (clockwork_egress_nrt_write): a reply, a broadcast or a log line the
     // clients never get. Zero in a
     // healthy engine; the line logging a refusal rides the same full ring, so
-    // this count is the only trace (2026-10-16). Held the pool's growth count
-    // until the pool stopped growing (2026-10-15).
+    // this count is the only trace.
     std::atomic<uint32_t> egress_frames_refused;    // 55
     std::atomic<uint32_t> rust_heap_used_bytes;     // 56: bytes in use in the RT router's block
     std::atomic<uint32_t> rust_heap_fallbacks;      // 57: Rust allocations that fell back to the system allocator
@@ -728,7 +726,7 @@ enum StatusFlags : uint32_t {
     // clockwork's is written there by every boundary, where no audio block
     // is between it and its answer. Raised once the pass drains it, lowered
     // at shutdown; off in a build with no control pass (the worklet, the
-    // lanes alone), where every verb rides the in ring as it always did.
+    // lanes alone), where every verb rides the in ring.
     STATUS_CONTROL_SERVED = 1u << 5u
 };
 
@@ -1059,8 +1057,9 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    kTransport,
         kChange, kFast, kColdBoot);
-    // Cold boot, not rebuild: what waited for an instance that went is the
-    // next drain's to refuse, below the teardown's mark (docs/RESTARTS.md).
+    // Cold boot, not rebuild: messages queued for a torn-down instance stay in
+    // the ring and the next drain refuses them, below the teardown's mark
+    // (docs/RESTARTS.md).
     put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    kTransport,
         kBlock, kFast, kColdBoot,
         { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });

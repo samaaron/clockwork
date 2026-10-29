@@ -117,9 +117,8 @@ pub struct ClockworkOsc {
     // Outbound sockets (ephemeral source ports), one per family, bound once at
     // create. Separate from the cue sockets so outbound works regardless of cue
     // state and a socket never sends to its own bound port. In `out` rather
-    // than inline because the event sinks send to a host:port too, and the
-    // family choice below is the kind of thing that goes wrong in its second
-    // copy.
+    // than inline because the event sinks send to a host:port too and share
+    // the family choice.
     out: Option<crate::out::OscSender>,
     cues_on: Arc<AtomicBool>,
     cue: Mutex<CueState>,

@@ -12,10 +12,8 @@
  * answer counted refused, so a client can see that it overloaded the engine
  * and by how much. An answer the egress ring has no room for is dropped, as
  * a command the command ring has no room for is: the audio thread never waits
- * for a client to read. SuperSonic 0.90.1's
- * publish was stopped by a transport test that did just that: its TCP load
- * sent 5,000 commands at once, a loaded Windows runner's engine fell behind,
- * and the probe waited for replies to commands that had been dropped.
+ * for a client to read. A client that waits for a reply to every command it
+ * sent, without reading these counters, waits for ever on a loaded engine.
  *
  * Unix-only: the client side uses POSIX sockets directly.
  */

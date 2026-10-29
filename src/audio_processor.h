@@ -32,10 +32,8 @@ extern "C" {
     // Static ring buffer (allocated in WASM data segment)
     // This is separate from the engine heap, preventing memory conflicts
     // ARENA_SIZE is computed in shared_memory.h from the build's
-    // sizing flags; do not restate it here as a number. The figures that used
-    // to sit on this line ("~1.4MB ... audio capture ~375KB") were wrong by
-    // more than 4x and omitted the tap region entirely. On the web build it
-    // measures 6.72MB, of which TAPS is 4.1MB.
+    // sizing flags; do not restate it here as a number: it changes with the
+    // profile.
 #ifndef __EMSCRIPTEN__
     extern uint8_t arena_storage[ARENA_SIZE];
 #endif
@@ -59,11 +57,10 @@ extern "C" {
     // Real-pointer arena base, valid on every runtime (native + WASM).
     void* get_shared_memory_base();
     // Clockwork's own geometry, set by clockwork_init and re-read on every
-    // rebuild. Held here rather than in the guest's config block, which is
-    // where three of these used to make a round trip: the host wrote the block
-    // size and the channel counts in at boot and init_memory read them straight
-    // back out, so clockwork's own decisions arrived as if they were the
-    // guest's configuration.
+    // rebuild. Held here rather than in the guest's config block: a host
+    // writing the block size and channel counts into the block at boot for
+    // init_memory to read back would present clockwork's own decisions as
+    // the guest's configuration.
     struct ClockworkConfig {
         double   sample_rate        = 0.0;
         uint32_t block_size         = 0;   // 0 = platform default
@@ -111,10 +108,10 @@ extern "C" {
     // memory_bulk_bytes_wanted), stated once so the boot path and a test agree:
     //
     //   has_bulk_tier != 0: each want against its own span — what the boot
-    //                       always uses now that the bulk span exists on
-    //                       every host (dsp_api.h);
-    //   has_bulk_tier == 0: `arena` must hold BOTH wants (the old
-    //                       single-region rule, kept for its test).
+    //                       uses, since the bulk span exists on every host
+    //                       (dsp_api.h);
+    //   has_bulk_tier == 0: `arena` must hold BOTH wants (the single-region
+    //                       rule, kept for its test).
     //
     // A zero want is always met. Nothing here spills: a fast want is never
     // satisfied from bulk, because that is a performance cliff with no error.

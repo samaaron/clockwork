@@ -4,12 +4,11 @@
  * test_clock_state.cpp — the ClockworkClockState write protocol, in one place.
  *
  * ClockworkClockState has coherence rules (origin before tempo, timestamp before
- * transport flag) that used to live as comments beside ~15 hand-written
- * store() sequences across three files, plus the tempo re-anchor rule
- * (a tempo change must not move the beat that is playing) copied into each
- * of them. These tests pin the rules to the struct's own mutators so a writer
- * that goes through them cannot get the ordering or the arithmetic wrong, and
- * nothing here sleeps: the beat is evaluated at a `now` the test chooses.
+ * transport flag) and the tempo re-anchor rule (a tempo change must not move
+ * the beat that is playing). These tests pin the rules to the struct's own
+ * mutators so a writer that goes through them cannot get the ordering or the
+ * arithmetic wrong, and nothing here sleeps: the beat is evaluated at a `now`
+ * the test chooses.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>

@@ -8,7 +8,7 @@
 
 /*
  * shm_peer_plane.h — the cross-process OSC command plane appended to the
- * native SHM segment (shm_segment.hpp, MAGIC ≥ 0x5C09E007): one trusted
+ * native SHM segment (shm_segment.hpp): one trusted
  * external peer (e.g. a language runtime) sends commands and receives replies
  * through a pair of message-framed SPSC rings, using the same wire format as
  * every other clockwork ring (ring/ring.h; RingBufferWriter / ring_drain).

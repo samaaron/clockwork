@@ -67,8 +67,8 @@ add_executable(clockwork_tests
     test_schedule_parse.cpp
     test_clock_math.cpp
     # What a tempo change does to the beat that is playing. Runs against
-    # whichever backing is compiled — the session-of-one or Link — because the
-    # two disagreed and both were wrong.
+    # whichever backing is compiled — the session-of-one or Link — so both
+    # are held to the same answer.
     test_clock_tempo_change.cpp
     # The ClockworkClockState write protocol: ordering and the re-anchor, on the
     # struct's own mutators, with no sleeping.
@@ -191,10 +191,9 @@ add_executable(clockwork_tests
     # the reader falls behind, which is the case these pin hardest.
     test_shm_audio_buffer.cpp
 
-    # MIDI clock out. NOT gated on CLOCKWORK_SCHEDULER: its whole point is
-    # that 24 pulses a beat are ClockworkClock's business and arrive whether or not
-    # this build compiled the timed queue. Gating it is how the gap it now
-    # covers went unnoticed.
+    # MIDI clock out. Not gated on CLOCKWORK_SCHEDULER: the 24 pulses a beat
+    # are ClockworkClock's business and arrive whether or not this build
+    # compiled the timed queue.
     test_midi_clock_out.cpp
 )
 # The override unit is what a product's build looks like: the product header
@@ -249,8 +248,8 @@ endif()
 # suite that applies to it. test_scheduler.cpp pins the store's contract and
 # cannot be compiled without one; test_scheduler_absent.cpp pins what a build
 # with no store does instead, and cannot be compiled with one. Neither is
-# skipped at runtime: a case that reports "passed" because it never ran is the
-# thing this project keeps finding out the hard way.
+# skipped at runtime: a case that reports "passed" because it never ran
+# proves nothing.
 if(CLOCKWORK_SCHEDULER)
     target_sources(clockwork_tests PRIVATE test_scheduler.cpp)
     # The standalone scheduler host's logic (src/host/host_scheduler.h): the

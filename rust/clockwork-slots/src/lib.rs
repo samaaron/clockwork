@@ -5,19 +5,18 @@
 //!
 //! # Why this is its own crate
 //!
-//! It was written once, for `clockwork-ports`, and then the event sinks
-//! turned out to want exactly the same thing: a handle that stays valid for
-//! the life of what is in the slot, a close that takes effect at once on a
-//! control thread while the audio thread is inside, and no lock anywhere on
-//! the read path. `src/clockwork_ports.h` and `src/clockwork_event_sink.h` each state that
-//! rule in their own words, and the rule is the same rule.
+//! `clockwork-ports` and the event sinks want exactly the same thing: a
+//! handle that stays valid for the life of what is in the slot, a close that
+//! takes effect at once on a control thread while the audio thread is
+//! inside, and no lock anywhere on the read path. `src/clockwork_ports.h` and
+//! `src/clockwork_event_sink.h` each state that rule in their own words, and
+//! the rule is the same rule.
 //!
-//! Two copies of a lock-free lifetime discipline is one copy too many — the
-//! second is the one that quietly loses a subtlety and takes a year to find
-//! out. So the table moved here, generic over what sits in the slot, and both
-//! disciplines stand on it. This crate is deliberately the whole of what they
-//! share: the ring, the policy for not keeping up, and the endpoint are all
-//! different between frames and events, and none of them is here.
+//! One copy of a lock-free lifetime discipline serves both: the table is
+//! generic over what sits in the slot, and both disciplines stand on it. This
+//! crate is deliberately the whole of what they share: the ring, the policy
+//! for not keeping up, and the endpoint are all different between frames and
+//! events, and none of them is here.
 //!
 //! # The problem
 //!
@@ -424,12 +423,11 @@ mod tests {
         let _g = LOCK.lock().unwrap();
         TABLE.close_all();
         // The property the whole one-word slot design exists for, tested
-        // directly rather than through a race that may or may not happen.
-        // (Established by mutation: a stress test that closed slots under a
-        // live reader thread twenty thousand times did NOT notice the refcount
-        // being dropped from the reclaim condition, because the freed occupant
-        // and its replacement come from the same allocator block and look
-        // alike. This does, every time.)
+        // directly rather than through a race that may or may not happen: a
+        // stress test that closes slots under a live reader thread cannot
+        // detect the refcount dropped from the reclaim condition, because the
+        // freed occupant and its replacement come from the same allocator
+        // block and look alike. This observes the word itself.
         let h = TABLE.open(|| Thing { tag: 2 });
         assert_ne!(h, HANDLE_NONE);
         let held = TABLE.acquire(h).expect("an open slot must be enterable");

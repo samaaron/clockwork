@@ -52,8 +52,8 @@ bool aligned16(void* p) { return (reinterpret_cast<uintptr_t>(p) & 15u) == 0; }
 
 TEST_CASE("mem arena: without a span, allocation is the system's", "[mem]") {
     // largest_free reporting SIZE_MAX is what tells the heap and the RT pool
-    // "no region bounds you, your compile-time cap wins" — the behaviour every
-    // native build has always had.
+    // "no region bounds you, your compile-time cap wins" — the behaviour of a
+    // native build.
     REQUIRE(clockwork::mem::largest_free(Tier::Fast) == SIZE_MAX);
     REQUIRE(clockwork::mem::arena_size() == 0);
     REQUIRE(clockwork::mem::arena_available() == 0);

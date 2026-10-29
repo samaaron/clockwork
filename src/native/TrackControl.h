@@ -26,7 +26,7 @@
  *   audio thread and one that loses it gives the stream back — a claim and
  *   a release are a few atomic stores.
  *
- *   THE WIRE. "/clockwork/track/…" arrives here as it always did. The six
+ *   THE WIRE. "/clockwork/track/…" arrives here. The six
  *   verbs that PLAY a track (note, cc, bend, notes_off, param, plugin/param)
  *   are audio-thread routes: each is turned into a frame offset and put on
  *   the realtime ring for the bridge's audio thread to apply within the same

@@ -4,22 +4,14 @@
  * Fail the build on an import that can never resolve.
  *
  * esbuild emits `import-is-undefined` when a module imports a name its target
- * does not export. That is normally a warning; here it is an error, because
- * in this codebase it has twice meant dead code that looked alive:
+ * does not export. That is normally a warning; here it is an error: indexing
+ * a typed array with `undefined` neither throws nor writes, so a metric
+ * written through a renamed offset constant stays at zero, and a metric
+ * reading zero looks exactly like a metric with nothing to report. No test
+ * can see that.
  *
- *   - the worklet wrote seven metrics through MetricsOffsets names that a
- *     rename had already replaced with ENGINE_*. Indexing a typed array with
- *     `undefined` neither throws nor writes, so the counters simply stayed at
- *     zero.
- *   - metrics_reader.js wrote four more into CTX_BUFFER_POOL_* after those
- *     offsets became the guest range.
- *
- * Eleven silently dead writes, none of which any test could see, because a
- * metric reading zero looks exactly like a metric with nothing to report.
- *
- * It also catches a module that does not PARSE — which is how
- * midi_manager.js shipped for months with one import statement pasted into
- * the middle of another.
+ * It also catches a module that does not PARSE, such as one import statement
+ * pasted into the middle of another.
  */
 import { build } from "esbuild";
 import { readdirSync, statSync, existsSync } from "node:fs";

@@ -151,9 +151,9 @@ TEST_CASE("ColdSwapRecovery: a rebuild whose guest does not come up leaves the e
 
 // The same failure with a reason at length, a client listening, and the swap
 // asked for as a client asks: devices/switch, so the work runs on the device
-// lane. Broadcasting the error state threw there (a fixed reply buffer), and
-// nothing on the lane catches, so std::terminate took the process, and any
-// host the engine is embedded in.
+// lane. Broadcasting the error state must not throw there (a fixed reply
+// buffer): nothing on the lane catches, so a throw is std::terminate for the
+// process and any host the engine is embedded in.
 TEST_CASE("ColdSwapRecovery: a rebuild that refuses at length tells a listening client why, and the engine answers on",
           "[ColdSwapRecovery][guest-failed]") {
     const std::string reason = "refused: " + std::string(460, 'x') + " (last words)";

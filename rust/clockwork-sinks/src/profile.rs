@@ -43,7 +43,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The one-class shape: what every sink was before profiles.
+    /// The one-class shape.
     pub fn single(cell_bytes: u32, cells: u32) -> Layout {
         Layout::normalise(vec![Class { cell_bytes, cells }]).expect("one non-empty class")
     }

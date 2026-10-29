@@ -8,8 +8,8 @@ import { generationView, hasInstance } from './arena.js';
 import { sampleClockReader } from './sample_clock.js';
 import { answersWithoutGuest, REASON_NO_INSTANCE } from './clockwork_sys.js';
 
-/** What a refused send says (`lastRefusal`): the ring had no room. A moment,
- *  not a verdict: the ring drains every block, so the sender sends again. */
+/** What a refused send says (`lastRefusal`): the ring had no room. Transient:
+ *  the ring drains every block, so the sender sends again. */
 export const REASON_RING_FULL = "ring full";
 
 // postMessage mode: how far past the audio thread's last word on the time the channel will count by the wall clock.
@@ -207,16 +207,16 @@ export class OscChannel {
      * (the engine's OscIngress + BundleScheduler) — the producer never classifies.
      *
      * In SAB mode a send is refused for two reasons, and `lastRefusal` says
-     * which. The ring was FULL (REASON_RING_FULL): a moment, not a verdict —
+     * which. The ring was FULL (REASON_RING_FULL): transient, because
      * producers take turns on the ring's write lock, waiting rather than
      * giving up, so contention between a worker and the main thread costs a
      * moment instead of a dropped message, and a ring that is really full
      * drains next block. Or there is NO INSTANCE (REASON_NO_INSTANCE): the
      * engine is between guests, nothing was written, and the message is sent
      * again after /clockwork/setup; a message under /clockwork/ is never
-     * refused for this (docs/RESTARTS.md). This is the boundary saying so to
-     * the one who sent it, as clockwork_client_send says it to its caller:
-     * the owner hears it through `onRefused` as well, with the bytes.
+     * refused for this (docs/RESTARTS.md). The boundary reports this to the
+     * sender, as clockwork_client_send reports it to its caller: the owner
+     * is also called through `onRefused`, with the bytes.
      *
      * @param {Uint8Array} oscData - OSC message bytes
      * @returns {boolean} true if sent
@@ -246,7 +246,7 @@ export class OscChannel {
             return true;
         }
         if (this.#metricsView) {
-            // The ring had no room. Counted so the loss isn't silent.
+            // The ring had no room; counted.
             Atomics.add(this.#metricsView, MetricsOffsets.RING_BUFFER_DIRECT_WRITE_FAILS, 1);
         }
         return this.#refuse(bytes, REASON_RING_FULL);
@@ -261,7 +261,7 @@ export class OscChannel {
     /** Why the last send was refused (REASON_NO_INSTANCE, REASON_RING_FULL), or null when it was written. */
     get lastRefusal() { return this.#lastRefusal; }
 
-    /** The owner's ear for a refusal: called with the bytes that were not
+    /** The owner's refusal callback: called with the bytes that were not
      *  written and the reason, in the call to send() that refused them. */
     set onRefused(fn) { this.#onRefused = typeof fn === 'function' ? fn : null; }
     get onRefused() { return this.#onRefused; }

@@ -2,9 +2,8 @@
 // Copyright (c) 2026 Sam Aaron
 /*
  * test_master_tap.cpp — the OUT slot on a device host: clockwork writes the
- * master mix into it from the device callback, from boot, held by nobody.
- * The previous protocol had the guest write slot 0 while a client held it;
- * a client now finds the mix in the tap with no verb sent to anyone.
+ * master mix into it from the device callback, from boot, held by nobody:
+ * a client finds the mix in the tap with no verb sent to anyone.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"

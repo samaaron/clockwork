@@ -46,10 +46,9 @@
  * DSP grows a web path and a native path for a decision that is not its
  * business.
  *
- * (Our vendored midir grew a native `send_at` on 2026-08-30: CoreMIDI schedules
- * everywhere but iOS, ALSA where its sequencer gave it a queue, and WinMM has
- * none and refuses, so the sink holds the message itself. This contract was
- * shaped for it, and its arrival changed no DSP and no caller.)
+ * (Our vendored midir has a native `send_at`: CoreMIDI schedules everywhere
+ * but iOS, ALSA where its sequencer gives it a queue; WinMM has none and
+ * refuses, so the sink holds the message itself.)
  *
  * NOT FOR ANSWERING CLIENTS. `DspHost::emit_osc` already replies to a request
  * or notifies listeners, carrying an origin token — reply routing a sink has

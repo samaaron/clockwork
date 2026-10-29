@@ -3,7 +3,7 @@
 /*
  * tap_streams.cpp — what the Rust tap crate needs from the host.
  *
- * Claiming and releasing a tap slot is Rust now
+ * Claiming and releasing a tap slot is Rust
  * (rust/clockwork-taps/src/lib.rs). Two things it cannot know on its own
  * stay here: where shared memory currently is, and how this build carved up
  * the tap region. Both are answers, not logic — the geometry is a set of

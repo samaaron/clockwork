@@ -120,9 +120,7 @@ public:
 
     // The store owns pools addressed by raw pointer; copying the handle would
     // give two schedulers one queue — the copy's handle would still point into
-    // the original's arena. (The C++ this replaced held a std::atomic member
-    // and was non-copyable for the same practical reason, so no call site
-    // loses anything.)
+    // the original's arena.
     Scheduler(const Scheduler&)            = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
@@ -136,9 +134,8 @@ public:
      * shape, and every call on a null handle then answers the empty thing —
      * add refuses, next_time says i64::MAX. That is indistinguishable from a
      * queue that is merely full, which is a legitimate overload state, so a
-     * scheduler that was never built reports itself as a busy one. It did
-     * exactly that for the whole life of the web build. Anything that counts
-     * a refusal should say which of the two it is.
+     * scheduler that was never built reports itself as a busy one. Anything
+     * that counts a refusal should say which of the two it is.
      */
     bool ready() const { return mStore != nullptr; }
 
@@ -206,8 +203,7 @@ private:
      * clockwork_sched_new_in_place.
      *
      * A file-scope or function-local static Scheduler therefore carries its
-     * queue in BSS — which is exactly where the C++ scheduler this replaced
-     * kept its storage, and why that one could not fail to exist.
+     * queue in BSS, where it cannot fail to exist.
      */
     alignas(16) std::array<uint8_t, kArenaBytes> mArena{};
     ClockworkSched* mStore;

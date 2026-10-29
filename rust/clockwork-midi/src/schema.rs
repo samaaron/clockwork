@@ -519,8 +519,8 @@ mod when_tests {
 
     #[test]
     fn no_timetag_means_now() {
-        // Every existing client sends four arguments and keeps working: an
-        // absent time is 0, which is the OSC sentinel for immediately.
+        // Four arguments and no time: an absent time is 0, which is the OSC
+        // sentinel for immediately.
         match decode_out(&note_on_bytes(None)) {
             Ok(OutCommand::Send { when, .. }) => assert_eq!(when, 0),
             other => panic!("expected a Send, got {other:?}"),

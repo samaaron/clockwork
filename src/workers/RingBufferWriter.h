@@ -190,9 +190,9 @@ public:
         unlock(write_lock);
     }
 
-    // The ring's writer lock, as every write takes it, for one who must stand
-    // between two writes without writing: what is published before it is
-    // taken is all there is until it is let go.
+    // The ring's writer lock, as every write takes it, for a caller that must
+    // hold the ring between two writes without writing: nothing is published
+    // while it is held.
     static void lock(std::atomic<int32_t>* write_lock) {
         int32_t expected = 0;
         while (!write_lock->compare_exchange_weak(expected, 1,

@@ -14,13 +14,8 @@
  * worker thread renders the peer's stream into it with clockwork_port_produce, and
  * pull_port_sources reads it into the DSP's input channels just before
  * dsp_process. That is the same route a WAV file takes, and clockwork_ports.h names
- * both cases in its own list of the plumbings it exists to replace.
- *
- * It used to write into the DSP's signal storage directly and stamp the bus's
- * freshness counter so the guest's input reads would accept it — scsynth's
- * protocol, in clockwork, through accessors the boundary narrowing removed. The
- * result was a bridge that could not link and a guest that had to be compiled
- * for peer audio to exist at all.
+ * both cases in its own list of the plumbings it exists to replace. Nothing
+ * here reaches into the guest's storage, so peer audio needs no guest.
  *
  * PRODUCING AHEAD IS SAFE BECAUSE THE RENDERER WORKS IN BEATS. It converts a
  * host time to a beat range through the session state and reads the peer's
@@ -140,12 +135,9 @@ constexpr double kMaxInputLatencySeconds = 2.0;
 // out. An explicit choice — the CLOCKWORK_LINK_AUDIO option in CMakeLists.txt, which
 // defines CLOCKWORK_WITH_LINK_AUDIO — not one implied by anything else.
 //
-// IT DOES NOT DEPEND ON A DSP, and used to: the condition here was
-// `CLOCKWORK_LINK && CLOCKWORK_SYNTH`, so peer audio existed only in a build that had
-// compiled a guest. That is backwards. Link audio is clockwork moving frames
+// IT DOES NOT DEPEND ON A GUEST. Link audio is clockwork moving frames
 // between an endpoint and its channels, which is the same job whether the
-// guest is scsynth, the dummy, or absent — and it is emphatically not something a
-// guest enables.
+// guest is scsynth, the dummy, or absent, so no guest option gates it.
 //
 // It is separate from CLOCKWORK_LINK because it pulls in the GPL renderer
 // and a network endpoint, neither of which tempo sync needs. TEMPO, TRANSPORT
@@ -181,12 +173,10 @@ public:
      *
      * The worker is joined FIRST so nothing is rendering into a port while it
      * is being closed. Then the subscriptions go, which is what returns their
-     * slots: the registry holds 64, they are reclaimed on close, and a bridge
-     * that dropped its subscriptions without closing them leaked one per
-     * subscription per engine. In a process that builds an engine per test
-     * that is a slow exhaustion — the early tests pass, the later ones cannot
-     * open a port at all, and the symptom is a subscription refused for no
-     * visible reason.
+     * slots: the registry holds 64 and reclaims them only on close, so a
+     * bridge that drops its subscriptions without closing them leaks one slot
+     * per subscription per engine, and a process that builds an engine per
+     * test eventually cannot open a port at all.
      */
     ~LinkAudioBridge() {
         stopEndpoint();
@@ -228,7 +218,7 @@ public:
 
     // ─── Endpoint: peer audio into a source port ──────────────────────────
     //
-    // There is no RT-thread drain any more. Each subscription owns a source
+    // There is no RT-thread drain. Each subscription owns a source
     // port attached to its channel pair (clockwork_port_bus.h), a worker thread
     // fills it with clockwork_port_produce, and pull_port_sources reads it into the
     // DSP's input channels just before dsp_process — the same route disk
@@ -348,7 +338,7 @@ private:
     // Lock-free fast path for the empty case.
     std::atomic<size_t> mInputSubCount{0};
     // Serialises mInputSubs mutation against the endpoint worker and the
-    // app-thread listInputs. No audio thread takes this any more.
+    // app-thread listInputs. No audio thread takes this.
     mutable std::mutex mInputSubMutex;
 
     // ─── The endpoint ─────────────────────────────────────────────────────

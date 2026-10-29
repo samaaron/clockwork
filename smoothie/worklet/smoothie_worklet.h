@@ -68,8 +68,7 @@ public:
 // Brings up what the platform's devices depend on: JUCE's message system.
 // Once per process, from the first call, on the calling thread — which
 // becomes its message thread — and never taken down: JUCE's singletons are
-// not made to come back after they go, and every host before this held them
-// for the life of the process anyway. Whatever opens a device calls this; a
+// not made to come back after they go. Whatever opens a device calls this; a
 // host need not.
 void startPlatform();
 

@@ -18,13 +18,10 @@
     about where the secret comes from), and serves one client at a time.
 
     Built as `clockwork-scheduler-host` when CLOCKWORK_STANDALONE and
-    CLOCKWORK_SCHEDULER are both on. It was not, for a while, and its own
-    header said so: five files describing a program this tree did not produce,
-    so nothing could tell whether they still compiled against a boundary that had
-    moved underneath them. A reference host that is not built is not a
-    reference, it is a document shaped like code.
+    CLOCKWORK_SCHEDULER are both on, so it is compiled against the current
+    boundary.
 
-    Still not covered by a test — it is a main(), a socket and a wall clock,
+    Not covered by a test — it is a main(), a socket and a wall clock,
     and what it demonstrates (the lanes ABI driving the timed store) is pinned
     in test_lanes.cpp and test_scheduler.cpp against the same calls.
 */

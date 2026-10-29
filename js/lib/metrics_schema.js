@@ -138,8 +138,7 @@ export const METRICS_SCHEMA = {
     totalFramesDurationMs:        { offset: 89, webOnly: true, type: 'counter',  unit: 'ms',    description: 'Chrome only: total audio rendered duration' },
     hasPlaybackStats:             { offset: 90, webOnly: true, type: 'gauge',    unit: 'bool',  description: '1 if Chrome playbackStats API is available, 0 otherwise' },
 
-    // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush; the slots the buffer
-    // pool's metrics once held)
+    // The guest's pool and the rust heap [53-57] (shared C++, written at the metrics flush)
     guestPoolUsedBytes:           { offset: 53, type: 'gauge',    unit: 'bytes', description: 'Bytes in use in the guest\'s pool now: what it has allocated from its bulk memory (payloads as carved)' },
     guestPoolPeakBytes:           { offset: 54, type: 'gauge',    unit: 'bytes', description: 'The most bytes ever in use in the guest\'s pool' },
     egressFramesRefused:          { offset: 55, type: 'counter',  unit: 'count', description: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got. 0 in a healthy engine' },
@@ -228,11 +227,9 @@ export const METRICS_SCHEMA = {
           { label: 'direct write fails', cells: [{ key: 'ringBufferDirectWriteFails', kind: 'error' }] },
         ]
       },
-      // A panel of one engine's sample-pool and definition counters used to
-      // sit here. A panel is a claim about what a guest HAS, so it moved out
-      // with the metrics it displays: a guest supplies its own through
-      // `metricsPanels` on its profile, and one with no pool shows no panel
-      // rather than four empty rows.
+      // No guest panel here: a panel is a claim about what a guest has, so a
+      // guest supplies its own through `metricsPanels` on its profile, and one
+      // with no pool shows no panel rather than four empty rows.
       {
         title: 'AudioWorklet',
         rows: [

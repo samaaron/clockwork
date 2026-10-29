@@ -12,7 +12,7 @@
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
 #include "OscTestUtils.h"
-#include "clock/clock_math.h"   // wallClockNTP; WallClock.h was a shim for this
+#include "clock/clock_math.h"   // wallClockNTP
 
 #include "UdpTestSocket.h"
 #include "clockwork_event_sink.h"

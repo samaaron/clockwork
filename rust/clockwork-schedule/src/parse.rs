@@ -11,12 +11,12 @@
 //!
 //! # Every offset is derived, none is written down
 //!
-//! The C++ parser this replaces once carried hand-counted byte offsets, and
-//! they were silently wrong the moment the reserved prefix changed length —
-//! the parser kept reading, at the wrong bytes. So the constants below are
-//! computed from `clockwork_sys!("schedule")`, the one place the Rust tree spells
-//! the prefix (`clockwork-osc`). Changing the prefix moves them; nothing here
-//! needs editing, and nothing here may be replaced by a number.
+//! Hand-counted byte offsets go wrong the moment the reserved prefix changes
+//! length: the parser keeps reading, at the wrong bytes. So the constants
+//! below are computed from `clockwork_sys!("schedule")`, the one place the
+//! Rust tree spells the prefix (`clockwork-osc`). Changing the prefix moves
+//! them; nothing here needs editing, and nothing here may be replaced by a
+//! number.
 
 use clockwork_osc::clockwork_sys;
 
@@ -144,7 +144,7 @@ pub fn parse(s: &[u8]) -> Packet {
     let n = be_u32(&s[p..p + 4]);
     p += 4;
     // Checked, so a lying blob length cannot wrap into a range that looks
-    // contained. C++ compared raw pointers here and would have wrapped.
+    // contained, as a raw pointer comparison would.
     match (p as u64).checked_add(n as u64) {
         Some(e) if e <= end as u64 => {}
         _ => return miss,

@@ -201,9 +201,9 @@ TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
 
     // No wake word: the reader passes on its own clock, so nothing this thread
     // does after start() is ordered before the handler — only the thread's
-    // creation is. A wake bumped here straight after start() ordered it on a
-    // quick machine and hid that pause() read mThread while start() was still
-    // assigning it (TSan, a slow CI runner, 2026-10-16).
+    // creation is. A wake bumped here straight after start() would order it
+    // on a quick machine and hide a pause() that reads mThread while start()
+    // is still assigning it.
     RingReader reader("test-ringreader-selfpause");
     // Mirrors a drain handler that triggers a device swap: the swap parks the
     // readers, including the one whose handler is running — asking whether the
@@ -231,8 +231,7 @@ TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
 //
 // One thread drains control commands AND the egress behind them, so a handler
 // that blocks stops clockwork answering anything while its socket stays up
-// and its audio keeps ticking. That failure mode produced no log line, no
-// metric and no test signal — the only evidence was a long silence.
+// and its audio keeps ticking, with no log line or metric of its own.
 //
 // These pin the measurement rather than any particular slow caller: whatever
 // blocks, the reader must be able to say how long for, and say it WHILE stuck

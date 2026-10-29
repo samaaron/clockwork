@@ -7,12 +7,10 @@
  *
  * engine_schedule.h — clockwork's own timed queue.
  *
- * This replaces scheduler/dsp_schedule.h, which declared nine entry points a
- * DSP had to implement so clockwork could park, flush, count and clear a
- * schedule it did not own. None of that crossed the boundary: dsp_api.h says a DSP
- * either holds its own schedule or does not, and either way Clockwork keeps
- * a queue — timed MIDI output and timed OSC forwarding are its own features
- * and exist with no DSP attached at all.
+ * A DSP implements nothing for this: dsp_api.h says a DSP either holds its
+ * own schedule or does not, and either way Clockwork keeps a queue — timed
+ * MIDI output and timed OSC forwarding are its own features and exist with
+ * no DSP attached at all.
  *
  * So everything here is clockwork-internal. Nothing in this file is implemented
  * by, or visible to, a DSP; the only thing a DSP ever sees of a timed message
@@ -44,13 +42,11 @@
  * The composition rule, in one line: WITH THE OPTION OFF, holds_schedule IS
  * MOOT. There is nowhere to hold anything, so every message forwards at once
  * carrying its original timetag, whatever the DSP declared — including a DSP
- * that declared holds_schedule = 0 and therefore asked clockwork to hold. It
- * asked for something the build cannot provide, and the honest answer is to
- * hand it the message with its time intact and let it decide, rather than to
- * drop it or to flatten the time to "now". The one thing that does NOT go
- * quietly is /clockwork/schedule itself, which is refused with a reason naming
- * the option: a verb that vanishes without explanation is the worst outcome of
- * the three.
+ * that declared holds_schedule = 0 and therefore asked clockwork to hold. The
+ * build cannot hold it, so the message is handed on with its time intact
+ * rather than dropped or flattened to "now". /clockwork/schedule itself is
+ * refused with a reason naming the option, so the verb does not vanish
+ * without explanation.
  */
 #pragma once
 

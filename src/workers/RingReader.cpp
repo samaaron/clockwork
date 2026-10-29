@@ -8,8 +8,8 @@
 
 // The reader whose thread this is, set by run() before its first pass, so
 // running() and pause() can answer a call from its own handler without
-// reading mThread — which start() is still assigning when a first pass's
-// handler can already be running (TSan, CI, 2026-10-16).
+// reading mThread — which start() may still be assigning while a first
+// pass's handler is already running.
 static thread_local const RingReader* tReaderOfThisThread = nullptr;
 
 void RingReader::start() {

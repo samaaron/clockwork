@@ -13,11 +13,10 @@
  * Pure byte work — no synth, no engine globals.
  *
  * The parsing itself is Rust (rust/clockwork-schedule/src/parse.rs), reached
- * through clockwork_schedule.h; what remains here is the C++ spelling of it. The
- * property that matters survived the move: every byte offset is derived from
- * the reserved prefix, on that side from `clockwork_sys!("schedule")` as it was here
- * from CLOCKWORK_SYS(...), so the parser cannot fall out of step with the prefix. It
- * once could, and did.
+ * through clockwork_schedule.h; what remains here is the C++ spelling of it.
+ * Every byte offset is derived from the reserved prefix, on that side from
+ * `clockwork_sys!("schedule")` and here from CLOCKWORK_SYS(...), so the parser
+ * cannot fall out of step with the prefix.
  */
 #pragma once
 
@@ -25,18 +24,17 @@
 
 #include "clockwork_schedule.h"
 
-// Kept although nothing below spells either any more: this header's includers
-// have always reached the reserved prefix and the shared clock arithmetic
-// through it (test_schedule_parse.cpp asserts clockwork_ntp_to_timetag against
-// clockwork::ntpToOscTimetag), and quietly dropping them from a header is a
-// change to its contract rather than a tidy-up.
+// Nothing below spells either, but this header's includers reach the reserved
+// prefix and the shared clock arithmetic through it (test_schedule_parse.cpp
+// asserts clockwork_ntp_to_timetag against clockwork::ntpToOscTimetag);
+// dropping them is a change to the header's contract.
 #include "clockwork_prefix.h"
 #include "../clock/clock_math.h"
 
 // NTP-seconds (double) → OSC int64 timetag (seconds<<32 | fraction).
 // The same formula as clockwork::ntpToOscTimetag in clock_math.h, which
 // test_schedule_parse.cpp checks by comparing the two results directly — so
-// that assertion now also compares this side of the ABI with the other.
+// that assertion also compares this side of the ABI with the other.
 inline int64_t clockwork_ntp_to_timetag(double ntp) {
     return clockwork_sched_ntp_to_timetag(ntp);
 }

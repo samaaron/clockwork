@@ -5,10 +5,9 @@
  *
  * The boundary moves data in three shapes and this file is about the third.
  * Messages are pinned in test_dsp_boundary.cpp and test_osc_ingress.cpp; audio is
- * pinned in test_audio_path.cpp and test_ports.cpp. Regions had nothing at
- * all: DspConfig hands the guest five blocks of shared memory with five
- * different sets of promises attached, and until this file not one of those
- * promises was checked by anything.
+ * pinned in test_audio_path.cpp and test_ports.cpp. Regions are pinned here:
+ * DspConfig hands the guest five blocks of shared memory with five different
+ * sets of promises attached.
  *
  *   guest_config   host writes, guest reads, clockwork only carries
  *   guest_memory   clockwork reserves and zeroes, guest owns outright
@@ -103,9 +102,8 @@ TEST_CASE("regions: the guest is handed the host's config block, byte for byte",
     // guest that needs to know reads its own length out of its own layout.
     REQUIRE(r.argInt(0) == static_cast<int32_t>(GUEST_CONFIG_SIZE));
 
-    // The sentinels the fixture wrote, in order, unchanged. This is the claim
-    // that survived the 2026-09-01 change: clockwork copies these bytes and
-    // reads none of them.
+    // The sentinels the fixture wrote, in order, unchanged: clockwork copies
+    // these bytes and reads none of them.
     REQUIRE(static_cast<uint32_t>(r.argInt(1)) == lanes_test::kGuestConfigSlots[0]);
     REQUIRE(static_cast<uint32_t>(r.argInt(2)) == lanes_test::kGuestConfigSlots[1]);
     REQUIRE(static_cast<uint32_t>(r.argInt(3)) == lanes_test::kGuestConfigSlots[2]);
@@ -119,15 +117,13 @@ TEST_CASE("regions: clockwork's geometry reaches the guest without a round trip"
 
     const auto r = ask("/dummy/region/geometry", "/dummy/region/geometry-is");
 
-    // What the fixture told clockwork_init, arriving as DspConfig fields. Until
-    // 2026-09-01 three of these four made a round trip through the config
-    // block above — the host wrote them into it and init_memory read them
-    // back — so a host that wanted to say "two channels" had to know one
-    // engine's option layout. The assertion that matters is that these agree
+    // What the fixture told clockwork_init, arriving as DspConfig fields, not
+    // through the config block above (a host that had to write its geometry
+    // into the block for init_memory to read back would need to know one
+    // engine's option layout). The assertion that matters is that these agree
     // with the ARGUMENTS, while the slots asserted above are the host's
-    // private sentinels: the two are now completely independent, and a
-    // regression that reconnected them would have to change one to match the
-    // other.
+    // private sentinels: the two are independent, and a regression that
+    // reconnected them would have to change one to match the other.
     REQUIRE(r.argInt(0) == static_cast<int32_t>(lanes_test::kSampleRate));
     REQUIRE(r.argInt(1) == static_cast<int32_t>(lanes_test::kBufLength));
     REQUIRE(r.argInt(2) == static_cast<int32_t>(lanes_test::kInChannels));
@@ -505,19 +501,17 @@ TEST_CASE("regions: a blob clockwork has no verb for survives a rebuild",
     lanes_test::boot();
     lanes_test::drainRt();
 
-    // THIS IS WHAT REPLACED THE DEFINITION CACHE, so it is worth a case of its
-    // own rather than being folded into the one above.
+    // A case of its own rather than folded into the one above: clockwork keeps
+    // no per-category cache of what clients send (a cache keyed by a verb and
+    // a name the guest reads out of each blob covers only the category it was
+    // built for, and leaves samples and anything else a guest invents to the
+    // client to re-send).
     //
-    // Clockwork used to keep a copy of every definition a client sent, by
-    // being told which verb carried one and asking the guest to read a name
-    // out of each blob. It worked for exactly the category somebody had built
-    // it for: samples, and anything else a guest invented, had no equivalent
-    // and were left to the client to re-send.
-    //
-    // The replacement makes no distinction, because it never looks. The guest
-    // writes what it wants to keep, clockwork guarantees the bytes across a
-    // rebuild, and clockwork cannot tell a definition from a sample from
-    // anything else — which is the property that makes it work for all three.
+    // The persist region makes no distinction, because clockwork never looks.
+    // The guest writes what it wants to keep, clockwork guarantees the bytes
+    // across a rebuild, and clockwork cannot tell a definition from a sample
+    // from anything else — which is the property that makes it work for all
+    // three.
     //
     // The value below stands in for a blob whose meaning clockwork has no
     // way to learn. Nothing in the boundary names it, and nothing has to.
@@ -542,8 +536,7 @@ TEST_CASE("regions: a blob clockwork has no verb for survives a rebuild",
     //
     // Asserted by writing again and reading the generation back, not by
     // expecting a particular number at birth: ctest runs each case in its own
-    // process, so a case that assumed an earlier one had already bumped the
-    // counter passed under a filter and failed in the suite.
+    // process, so the counter's value here depends on which cases ran first.
     const auto again = osc_test::message("/dummy/region/persist", 0x2, 0);
     REQUIRE(lanes_test::ingress(again.ptr(), again.size(), kClient));
     const auto frames = lanes_test::tickUntil(4, "/dummy/region/persist-gen");

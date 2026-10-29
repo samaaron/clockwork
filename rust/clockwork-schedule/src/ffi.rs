@@ -17,8 +17,8 @@
 //!    a `u32` are performed in `u64`; there is no formatting, no `unwrap`, no
 //!    slicing by a caller-supplied index that has not already been bounded.
 //!    The only allocation is in `clockwork_sched_new`, whose failure is a null
-//!    return rather than a panic (an allocator failure itself aborts, and has
-//!    always aborted, in both languages).
+//!    return rather than a panic (an allocator failure itself aborts, in
+//!    both languages).
 //! 2. Belt as well as braces: since Rust 1.81 a `panic!` reaching an
 //!    `extern "C"` frame aborts the process rather than unwinding into C++,
 //!    so even a bug here is a crash with a message and not UB.
@@ -80,8 +80,7 @@ pub extern "C" fn clockwork_sched_bytes_needed(
 }
 
 /// Build a scheduler inside memory the caller owns. Allocates nothing, so it
-/// cannot fail for want of a heap — which is the failure that left the web
-/// build with a scheduler that silently accepted nothing.
+/// cannot fail for want of a heap.
 ///
 /// # Safety
 /// `mem` must point at `len` writable bytes that outlive the scheduler.

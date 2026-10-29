@@ -11,9 +11,8 @@
  *   - Empty deviceName does NOT clobber mPreferredOutputDevice (rate /
  *     buffer tweaks shouldn't reset the user's device preference)
  *
- * These scenarios have all caused bugs in the past. The engine keeps
- * most of this state in private members; these tests drive it through
- * the public API and assert on user-visible consequences.
+ * The engine keeps most of this state in private members; these tests drive
+ * it through the public API and assert on user-visible consequences.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"

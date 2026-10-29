@@ -28,8 +28,8 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 // At most this many /clockwork/sync ids unanswered at once in a stream load.
 // The engine takes what its command ring holds and drops the rest, counting
 // them (engineMessagesDropped): a client that sends more than it can take is
-// in error, and this probe measures transports, not the engine's limits. All
-// 5000 at once filled the ring on a loaded runner and lost commands.
+// in error, and this probe measures transports, not the engine's limits; a
+// whole load sent at once fills the ring and loses commands.
 const STREAM_WINDOW: i64 = 256;
 
 fn frame(pkt: &[u8]) -> Vec<u8> {

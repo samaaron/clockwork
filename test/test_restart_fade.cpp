@@ -6,10 +6,9 @@
  * Every restart stops the device and starts it again: a buffer change, a rate
  * change, a switch, an input turned on or off. Stopped mid-waveform, the
  * output steps from wherever the wave was to silence, and started again it
- * steps back: two clicks each time, heard on every restart in Sonic Pi
- * (2026-10-17). These listen to what a fake device plays across restarts,
- * with the dummy guest's 440 Hz tone, and hold every step to what the tone
- * makes on its own.
+ * steps back: two clicks each time. These listen to what a fake device plays
+ * across restarts, with the dummy guest's 440 Hz tone, and hold every step
+ * to what the tone makes on its own.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"

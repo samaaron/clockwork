@@ -341,12 +341,10 @@ private:
                                    || GetLastError() == ERROR_PIPE_CONNECTED;
             if (stop.stop_requested()) { CloseHandle(instance); break; }
             // The next instance BEFORE this one is served, so the name always
-            // has an instance behind it. Made only after, there was a moment
-            // between closing this one and making the next with none, and a
-            // second reader connecting in it was told the pipe did not exist
-            // — which a client takes as final, as it should when nothing is
-            // serving. Now it finds the next instance, or for the moment
-            // before this one is closed a busy one, which it waits on.
+            // has an instance behind it. A second reader connecting meanwhile
+            // finds the next instance, or for the moment before this one is
+            // closed a busy one, which it waits on; with no instance it would
+            // be told the pipe does not exist, which a client takes as final.
             HANDLE next = connected ? make_instance(false) : INVALID_HANDLE_VALUE;
             if (connected) serve_one(instance);
             DisconnectNamedPipe(instance);

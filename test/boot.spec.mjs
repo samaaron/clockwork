@@ -3,17 +3,12 @@
 /*
  * Can clockwork start, at all, in a browser?
  *
- * Every one of these would have failed for most of this project's life, and
- * none of them could have been written: there was no page, no server, no
- * config, and no JS build, so nothing clockwork owned could construct its
- * own client. The defects that shipped as a result were not subtle —
- * cell_pool.js was referenced and never written, midi_manager.js had one
- * import statement pasted inside another and never parsed — they were simply
- * unobservable from here.
+ * The client is constructed from clockwork's own page, server, config and JS
+ * build, so a module that does not load or parse fails here rather than in a
+ * host.
  *
  * The guest is dsp/dummy. It declares holds_schedule 0, so these also
- * exercise clockwork's scheduler, which accepted nothing at all in wasm
- * until 2026-08-31.
+ * exercise clockwork's scheduler in wasm.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -63,10 +58,8 @@ test("what the engine says as it boots reaches the 'debug' event", async ({ page
 test("a boot the engine refuses rejects init() with the engine's reason", async ({ page, clockworkConfig }) => {
   // The engine's memory sized below what the guest declares: the engine
   // refuses, records why, and keeps answering its own verbs with no guest.
-  // Until 2026-10-15 nothing carried that reason to the page — the log line
-  // went to the worklet's console and the client saw an engine that never
-  // ticked (Sonic Pi Web, with no sound and an empty log). Now init()
-  // rejects with the engine's own words, and the client is left as it was
+  // init() rejects with the engine's own words rather than leaving the page
+  // with an engine that never ticks, and the client is left as it was
   // before init, ready to be asked again.
   await boot(page);
   const r = await page.evaluate(async (config) => {
@@ -232,12 +225,10 @@ test("the guest's window reaches the client whole, on either transport", async (
   // followed by the window, contiguous because shared_memory.h puts them that
   // way for this copy.
   //
-  // So the snapshot has to be measured with the same constant at both ends. It
-  // was not: the worklet sized it with a name that no longer existed, which is
-  // undefined in JavaScript rather than an error, so the length came out NaN
-  // and the copy came out EMPTY. Nothing failed at the seam — readWindow()
-  // returned an offset and a size quite happily, and the first consumer to
-  // cast the buffer threw instead.
+  // So the snapshot has to be measured with the same constant at both ends. A
+  // worklet that sizes it with an undefined name gets a NaN length and an
+  // empty copy, and nothing fails at the seam: readWindow() returns an offset
+  // and a size, and the first consumer to cast the buffer throws instead.
   //
   // Casting it is therefore the assertion. A consumer reads the version stamp
   // at the front, which is the one field the window's contract fixes.
@@ -273,8 +264,8 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
 
     // Two regions, one writer each. The client writes the assets area and the guest
     // only reads it; the guest writes the returns area and the client only reads it.
-    // That is the whole reason there are two: with a single region both ends
-    // wrote into the same bytes and nothing arbitrated between them.
+    // That is the whole reason there are two: a single region would have both
+    // ends writing into the same bytes with nothing arbitrating between them.
     const assets  = clockwork.assets();
     const returns = clockwork.returns();
     const arena  = clockwork.guestMemory();
@@ -362,8 +353,7 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
   expect(r.returns.size, "no returns reported").toBeGreaterThan(0);
 
   // Disjointness is the invariant, not a layout detail: an assets area that overlaps
-  // the arena is a client with a pointer into the guest's allocator, which is
-  // exactly the arrangement these two regions replaced.
+  // the arena is a client with a pointer into the guest's allocator.
   expect(r.lanesOverlap, "the assets area and the returns area share bytes").toBe(false);
   expect(r.assetsHitsArena, "the assets area overlaps the guest's arena").toBe(false);
   expect(r.returnsHitsArena, "the returns area overlaps the guest's arena").toBe(false);
@@ -373,9 +363,8 @@ test("the bulk lanes are one-way, and both carry, on either transport", async ({
   expect(r.sawAssets[0], "the guest read a different number of bytes").toBe(r.stagedLen);
   expect(r.sawAssets[1], "the guest hashed different bytes than were staged").toBe(r.stagedHash);
 
-  // BOTH TRANSPORTS. Reading back used to throw in postMessage mode, on the
-  // true observation that the client cannot see the worklet's heap — but the
-  // worklet can, so it does the copy and transfers the result.
+  // BOTH TRANSPORTS. In postMessage mode the client cannot see the worklet's
+  // heap, so the worklet does the copy and transfers the result.
   expect(r.produced, "the guest never answered /dummy/blob/produce").not.toBe(null);
   expect(r.produced[1], "the guest wrote nothing into the returns area").toBeGreaterThan(0);
   expect(r.readHash, "the bytes read back hash differently than the guest's").toBe(r.produced[2]);

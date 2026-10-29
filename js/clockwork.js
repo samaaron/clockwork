@@ -71,8 +71,7 @@ function formatOscArg(a, maxLen) {
 }
 
 // A packet as text: a message as `/address arg, arg`; a bundle as its messages, a line each (the time it is for is
-// the event's scheduledTime). A bundle used to throw here, which the caller swallowed, so nothing sent as a
-// bundle ever reached out:text.
+// the event's scheduledTime). Bundles must format, not throw: the caller swallows a throw and out:text loses them.
 function formatOscText(decoded, maxLen) {
   if (decoded?.packets) return decoded.packets.map((p) => formatOscText(p, maxLen)).join('\n');
   const args = decoded.slice(1).map((a) => formatOscArg(a, maxLen)).join(', ');
@@ -245,11 +244,10 @@ export class Clockwork {
     const mem = overrides ? { ...MemoryLayout, ...overrides } : { ...MemoryLayout };
     // Re-derive computed values, since spreading an object loses its getters.
     //
-    // This has to stay the same sum as MemoryLayout.guestMemoryOffset. It did
-    // not when memArenaSize was added: the region moved up by 32MB and this
-    // copy of the formula did not, so every guest write was checked against a
-    // base 32MB below the real one and refused. ?? rather than ||, so a
-    // deliberate 0 for any part is not silently replaced by the default.
+    // This has to stay the same sum as MemoryLayout.guestMemoryOffset: a copy
+    // of the formula that misses a region checks every guest write against the
+    // wrong base and refuses it. ?? rather than ||, so a deliberate 0 for any
+    // part is not replaced by the default.
     // The ASSETS IS LAST and everything else is fixed, because only the top
     // region can grow in place — see MemoryLayout.assetsOffset, which says why
     // bulk in is the thing that grows and the arena is not.
@@ -310,9 +308,7 @@ export class Clockwork {
     const guestOptions = { ...options.guestOptions };
     // The transport, unless the caller says: SAB where the page is
     // cross-origin isolated (the headers are there, so the lower-latency
-    // path is open), postMessage everywhere else. Until 2026-09-13 the
-    // default was postMessage even on an isolated page, and every product
-    // wrote this line itself.
+    // path is open), postMessage everywhere else.
     const mode = options.mode || (globalThis.crossOriginIsolated ? 'sab' : 'postMessage');
 
     // What the guest declares about itself: its metrics (js/lib/guest_metrics.js).
@@ -903,15 +899,8 @@ export class Clockwork {
     const resumed = this.#instanceGeneration() === before;
 
     // Everything a new instance was not given, put back by the only party
-    // that knows what it was.
-    //
-    // Clockwork used to restore one category itself — definitions — by
-    // watching for the verb that carried them, reading a name out of each blob
-    // through the profile, and replaying the lot here. Two categories, two
-    // mechanisms, and clockwork's one worked only for the guest that had
-    // declared its vocabulary. Now there is one, and it covers definitions,
-    // samples and whatever else a guest invents, because the product re-sends
-    // rather than clockwork replaying.
+    // that knows what it was: the product re-sends definitions, samples and
+    // whatever else the guest holds; clockwork replays nothing itself.
     //
     // BEFORE the sync below, so one barrier covers all of it.
     if (!resumed) {
@@ -923,10 +912,9 @@ export class Clockwork {
     }
 
     // Verified, not assumed: the first message or two after a reload can
-    // still go missing (observed on the reused-SAB path even with the ring
-    // epoch, engine-pumping wait and writer-lock fixes — the pipe is
-    // reliable from roughly half a second in). Recovery code retries with
-    // short timeouts instead of betting ten seconds on the first attempt.
+    // go missing on the reused-SAB path (the pipe is reliable from roughly
+    // half a second in), so this retries with short timeouts instead of
+    // betting ten seconds on the first attempt.
     await this.#syncWithRetry();
 
     // Only now 'setup' and 'ready': a host rebuilds on a new instance (its groups, its FX), and what it builds
@@ -1370,8 +1358,7 @@ export class Clockwork {
 
   /**
    * Send a message and wait for its reply — the request/reply shape every
-   * guest's verbs have (`/tau/spawn` → `/tau/spawned`, `/d_recv` → `/done`),
-   * which each product wrote for itself until 2026-09-13.
+   * guest's verbs have (`/tau/spawn` → `/tau/spawned`, `/d_recv` → `/done`).
    *
    * Resolves with the decoded reply (`[address, ...args]`): the first
    * inbound message at `reply`, or the first for which `match(msg)` is true
@@ -1687,9 +1674,9 @@ export class Clockwork {
   }
 
   /**
-   * Something went wrong that a caller should hear of in every build, not only a
-   * development one's console: said there, and emitted as 'warning' ({ message })
-   * so a host can show it in its own log.
+   * A fault a caller should hear of in every build, not only a development
+   * one's console: logged there, and emitted as 'warning' ({ message }) so a
+   * host can show it in its own log.
    */
   #warn(message) {
     console.warn(`[Clockwork] ${message}`);
@@ -1762,8 +1749,7 @@ export class Clockwork {
    * the guest, in order. Clockwork's own verb (`/clockwork/sync` →
    * `/clockwork/synced`), answered on the audio thread at the point the
    * message is reached in the drain — so it works for every guest, with
-   * nothing declared. Until 2026-09-13 it borrowed the guest's word
-   * (`/sync` for scsynth) through a profile.
+   * nothing declared.
    */
   async sync(syncId = Math.floor(Math.random() * 2147483647), timeoutMs = SYNC_TIMEOUT_MS) {
     this.#ensureInitialized("sync");
@@ -2450,7 +2436,7 @@ export class Clockwork {
             resolve();
            } catch (error) {
             // This handler is async and its timeout is already cleared: a throw here (the clock waiting on a
-            // context that never started) was an unhandled rejection, and init() never settled at all.
+            // context that never started) is otherwise an unhandled rejection, and init() never settles.
             reject(new Error(`the audio clock did not start (audio context ${this.#audioContext?.state ?? 'gone'}): ${error?.message ?? error}`));
            }
           } else {

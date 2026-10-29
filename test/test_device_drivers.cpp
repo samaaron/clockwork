@@ -12,10 +12,10 @@
  * choosing it opens nothing until its device is picked, and a boot that saved
  * ASIO without a device stays on the platform's driver.
  *
- * Each of these was a bug: a DirectSound session moved to Windows Audio by a
- * pick of its own device, an ASIO device pick flipping the driver behind the
- * user's back, a recovery between the two steps eating the ASIO choice, and a
- * saved device booting under whichever driver had the shortest name.
+ * The cases pin: a DirectSound session stays on DirectSound when its own
+ * device is picked, an ASIO device pick does not flip the driver, a recovery
+ * between the two steps keeps the ASIO choice, and a saved device boots under
+ * the saved driver rather than whichever has the shortest name.
  *
  * The fake drivers carry Windows' names. Nothing here is Windows-only: the
  * engine treats these drivers by name on every platform.

@@ -38,7 +38,7 @@ command -v emcc >/dev/null || {
     echo "emcc not found. Run: source <emsdk>/emsdk_env.sh" >&2; exit 1; }
 
 # emsdk ships its own node; prefer it so the build does not depend on a system
-# node that may not exist (this box has none on PATH).
+# node that may not exist.
 NODE="$(command -v node || ls -d "${EMSDK:-/nonexistent}"/node/*/bin/node 2>/dev/null | head -1)"
 [ -x "$NODE" ] || { echo "no node found for the memory config reader" >&2; exit 1; }
 
@@ -120,12 +120,9 @@ fi
 
 # ── The client and the workers ───────────────────────────────────────────────
 #
-# This step did not exist. build-web.sh produced a wasm module and nothing to
-# drive it, so clockwork's own JS could not be loaded in a browser at all:
-# growable_buffer_pool.js imports the bare specifier "@thi.ng/malloc", which
-# no browser resolves without a bundler or an import map. Clockwork could
-# therefore not construct its own client — which is why nothing it owned ever
-# noticed that cell_pool.js had never been written.
+# The JavaScript needs a bundler: growable_buffer_pool.js imports the bare
+# specifier "@thi.ng/malloc", which no browser resolves without a bundler or
+# an import map.
 #
 # Skipped with a warning rather than failing: the wasm is useful on its own,
 # and a box without node should still get one.

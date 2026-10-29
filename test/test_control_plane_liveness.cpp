@@ -4,18 +4,11 @@
  * test_control_plane_liveness.cpp — registering for notifications must not
  * touch the audio device.
  *
- * The reported failure: the engine boots on Windows, opens a DirectSound
- * device, prints its banner — and then answers nothing. The first client's
- * /clockwork/notify is acked, the second's never is, so that client gives
- * up after 30 s. The reporter could reproduce it at will by launching
- * Voicemeeter first.
- *
- * Registration used to trigger a device report for each newly-seen client. On
- * Windows that report enumerates every device through COM, which is where
- * Voicemeeter's virtual drivers turn a fast probe into a pathological one —
- * putting it squarely in the path of a boot handshake. Clients that want
- * the device list ask for it (/clockwork/devices/report), so the unsolicited
- * probe bought nothing and cost the boot.
+ * A device report for each newly-seen client would put a device enumeration
+ * (on Windows, every device through COM, which virtual drivers can make
+ * slow) in the path of the boot handshake, and a second client's
+ * /clockwork/notify would then wait behind the first client's probe. Clients
+ * that want the device list ask for it (/clockwork/devices/report).
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -48,9 +41,8 @@ TEST_CASE("Notify registration stays device-free for every new client",
           "[control][notify]") {
     EngineFixture fix;
 
-    // A second client registers after the first, from a different origin. It
-    // was that second registration — a fresh client, so a fresh probe — that
-    // landed in the boot handshake.
+    // A second client registers after the first, from a different origin: a
+    // fresh client must not mean a fresh probe.
     for (int i = 0; i < 3; ++i) {
         OscReply r;
         fix.send(osc_test::message("/clockwork/notify"));
@@ -76,11 +68,11 @@ bool answeredWithoutAudio(EngineFixture& fix, const char* address, int ms) {
 
 TEST_CASE("Clockwork's own control verbs are answered while no audio block renders; the audio thread's wait for one",
           "[control][notify][control-ring]") {
-    // The boot handshake is a control verb: Spider registers and waits. A
-    // device that stops right after boot, or a reopen that blocks inside the
-    // driver, used to leave it unanswered because the answer rode the audio
-    // thread (docs/RESTARTS.md, "The control ring"). Here no block renders
-    // at all — the pump is the case's, and the case never pumps.
+    // The boot handshake is a control verb: a client registers and waits. Its
+    // answer must not ride the audio thread, or a device that stops right
+    // after boot, or a reopen that blocks inside the driver, leaves it
+    // unanswered (docs/RESTARTS.md, "The control ring"). Here no block
+    // renders at all — the pump is the case's, and the case never pumps.
     auto cfg = EngineFixture::defaultConfig();
     cfg.manualAudioPump = true;
     EngineFixture fix(cfg);
@@ -99,8 +91,8 @@ TEST_CASE("Clockwork's own control verbs are answered while no audio block rende
     CHECK(answeredWithoutAudio(fix, CLOCKWORK_SYS("pong"), 2000));
 }
 
-// The device list must still be available on request — the fix removes the
-// unsolicited probe, not the feature.
+// The device list is available on request: only the unsolicited probe is
+// absent, not the feature.
 TEST_CASE("Device report is still delivered when asked for", "[control][notify]") {
     EngineFixture fix;
 
@@ -116,8 +108,8 @@ TEST_CASE("Device report is still delivered when asked for", "[control][notify]"
 // A UDP client names the port it wants the list on, since it may listen on a
 // socket other than the one it sends from. A stream client (TCP, UDS, a pipe,
 // shared memory) has no port to name: its connection is what is subscribed.
-// One that names a port anyway — a client written for UDP, moved to TCP — was
-// subscribed to nothing, and never heard the list.
+// One that names a port anyway — a client written for UDP, moved to TCP —
+// is subscribed all the same.
 TEST_CASE("Device report reaches a stream client that names a port",
           "[control][notify][transport]") {
     StreamOscTransport tcp;
@@ -156,9 +148,8 @@ TEST_CASE("Device report reaches a stream client that names a port",
 }
 #endif
 
-// Device commands now run on the device worker rather than the gateway, so the
-// thing to pin is that their replies still arrive — an offloaded command that
-// silently stops answering is a worse bug than the one being fixed.
+// Device commands run on the device worker rather than the gateway, so the
+// thing to pin is that their replies still arrive.
 TEST_CASE("Offloaded device commands still reply", "[control][notify]") {
     EngineFixture fix;
     OscReply r;
@@ -177,19 +168,18 @@ TEST_CASE("Offloaded device commands still reply", "[control][notify]") {
 
 // The control thread is the sole non-RT consumer: whatever it does while
 // handling one client's registration is time every other client spends
-// unanswered. What parked it was device work done inline — a probe of every
-// device — and device work takes the swap gate. So the registrations are made
+// unanswered. Device work takes the swap gate, so the registrations are made
 // while a swap holds it: each is answered all the same, where inline device
-// work would wait for the swap and never answer. Structural, not a duration a
-// loaded machine can overrun (test_gateway_swap_gate.cpp holds the same line
-// for every device question).
+// work (a probe of every device) would wait for the swap and never answer.
+// Structural, not a duration a loaded machine can overrun
+// (test_gateway_swap_gate.cpp holds the same line for every device question).
 TEST_CASE("Registering clients does not park the control thread",
           "[control][blocking][notify]") {
     EngineFixture fix;
     auto swap = fix.engine().testHoldSwapGate();
 
-    // Five origins register during a real boot — the second of them was what
-    // parked the thread behind the first one's device probe.
+    // Five origins register during a real boot; none may wait behind
+    // another's device work.
     for (int i = 0; i < 5; ++i) {
         OscReply r;
         fix.send(osc_test::message("/clockwork/notify"));
@@ -202,12 +192,11 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     // The control pass answers every verb in the control ring in one pass,
     // and a verb's replies go to the engine's egress ring, which is finite
     // (NRT_OUT_RING_SIZE) and refuses a reply with no room. A ring of verbs
-    // whose replies are larger than the verbs themselves overflowed it: the
-    // surplus was refused, and the line logging the refusal rode the same
-    // full ring, so nothing said so (a peer lost 296 replies of 6000 on CI,
-    // 2026-10-16). The pass now leaves a verb in the control ring while the
-    // egress ring lacks room for its answer, and answers it on the next pass,
-    // once the egress has been drained.
+    // whose replies are larger than the verbs themselves can overflow it, and
+    // the line logging a refusal rides the same full ring. The pass leaves a
+    // verb in the control ring while the egress ring lacks room for its
+    // answer, and answers it on the next pass, once the egress has been
+    // drained.
     ClockworkEngine engine;
     std::mutex mu;
     std::vector<std::vector<uint8_t>> replies;

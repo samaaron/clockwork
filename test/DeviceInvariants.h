@@ -10,15 +10,11 @@
  *                      =>  blocks keep coming
  *                      =>  the DSP is built at the device's rate
  *
- * The two cases Linux CI failed on 2026-10-05 broke it: the engine named the
- * device it had opened, still said it was waiting for one, and rendered
- * nothing. A case that checks this after each step catches that wherever it
- * happens, not only where a case thought to look.
- *
- * Sonic Pi broke the last on 2026-10-12: a failed swap fell back to a 48 kHz
- * interface with the DSP still built at 44.1 kHz, and for two hours everything
- * played 8.8% fast and sharp while the clock kept the device's time, so a
- * two-second loop finished early and left a gap.
+ * Checked after each step, so a break shows wherever it happens: an engine
+ * that names an open device while still waiting for one and rendering
+ * nothing, or a failed swap that falls back to a 48 kHz interface with the
+ * DSP still built at 44.1 kHz (everything plays 8.8% fast while the clock
+ * keeps the device's time).
  *
  * Fake-device engines only: a headless or manual-pump engine has no device by
  * design.

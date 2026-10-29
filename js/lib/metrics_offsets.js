@@ -122,8 +122,8 @@ export const CLOCK_PHASE_CENTI = 48;  // phase within quantum * 100
 export const CLOCK_PLAYING     = 49;  // transport 0/1
 
 // The engine's clock against the host's wall clock, smoothed as the clock is, microseconds, signed (int32 bits): what
-// the clock nudges by (clock/TimeSource.h), on every target. Near 0 and steady is locked. It once held the page's
-// own drift estimate; the engine keeps its clock itself now.
+// the clock nudges by (clock/TimeSource.h), on every target. Near 0 and steady is locked. The engine writes it;
+// the page does not estimate drift itself.
 export const CLOCK_DRIFT_US = 50;
 
 // Every word of the C++ struct, the heap's census at 53-57, the guest's
@@ -143,10 +143,8 @@ export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 
 export const CTX_CLOCK_OFFSET_MS = 51;             // Clock offset for multi-system sync (int32, ms)
 export const CTX_AUDIO_CONTEXT_STATE = 52;          // Enum: 0=unknown,1=running,2=suspended,3=closed,4=interrupted
 // 53-57 are the guest's pool's and the rust heap's census, in the C++ struct
-// and the SAB (written by the engine at its metrics flush): the slots that
-// once held the buffer pool's metrics, the loaded synthdef count and the
-// scheduler's capacity, holes until now. The reader copies them from the SAB
-// with the rest of the struct (SAB_METRICS_WORDS).
+// and the SAB (written by the engine at its metrics flush). The reader copies
+// them from the SAB with the rest of the struct (SAB_METRICS_WORDS).
 export const GUEST_POOL_USED_BYTES = 53;  // bytes in use in the guest's pool now (its bulk memory)
 export const GUEST_POOL_PEAK_BYTES = 54;  // the most ever
 export const EGRESS_FRAMES_REFUSED = 55;  // frames an egress ring refused, for want of room or for their size (0 in a healthy engine)

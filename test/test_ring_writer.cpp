@@ -15,7 +15,7 @@
  * reader. A test that sends messages and pumps blocks never lands on that: the
  * ring is either comfortably empty or comfortably full. Deleting the check
  * entirely leaves an end-to-end suite — and the client-boundary ring cases
- * beside this file — passing, which is how this file came to exist.
+ * beside this file — passing.
  *
  * So the head and tail are set by hand. Nothing is running; the writer is
  * called against a plain buffer, which is the only way to sit exactly on the

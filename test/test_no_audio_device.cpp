@@ -10,9 +10,9 @@
  * driver: headless is an explicit mode only (Config::headless).
  *
  * The machine is a fake one whose devices are all unplugged, so the device
- * manager exists and initialises and opens nothing — what PipeWire's "no
- * channels" default sink did to a JUCE ALSA boot (#3526) — and nothing on the
- * machine running the case can reach it.
+ * manager exists and initialises and opens nothing (as a default sink with
+ * no channels does to an ALSA boot), and nothing on the machine running the
+ * case can reach it.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -88,9 +88,9 @@ TEST_CASE("NoAudioDevice: with no device to open, the engine waits for one and "
 // over Bluetooth): a driver may open the two in different ways, and the
 // engine must play on what it opens either way. The watchdog looks only when
 // the driver hears nothing, so where the OS says so it is the engine's answer
-// to the OS that is tested, not a recovery that would cover for it. Linux CI
-// caught the engine opening the device and then waiting on (2026-10-05),
-// which no Mac run could: only CoreAudio's way was ever exercised here.
+// to the OS that is tested, not a recovery that would cover for it. Each
+// driver's way is exercised: an engine that opens the device and then keeps
+// waiting fails here on that driver.
 TEST_CASE("NoAudioDevice: a device plugged in while the engine waits is played "
           "on, at once when the OS says so and found by the watchdog when it "
           "does not", "[NoAudioDevice]") {

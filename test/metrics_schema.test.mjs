@@ -10,18 +10,16 @@
  * generated from it by scripts/gen-metrics-schema-header.mjs and committed, so
  * a native GUI can read metric names and descriptions without shelling out to
  * node. Two files saying the same thing, one written by hand and one by a
- * script that nobody is obliged to run.
+ * script nothing obliges anyone to run.
  *
- * NOTHING ENFORCED IT until now, and the failure is quiet by construction: a
- * metric added or renumbered in the JS shows up in the web UI immediately and
- * in the native one never, or — worse — the native one keeps reporting the
- * PREVIOUS occupant of a slot under the new name. Removing three native stats
- * on 2026-09-01 renumbered everything after them, which is exactly the edit
- * that would have left the header describing the old layout.
+ * The failure is quiet by construction: a metric added or renumbered in the
+ * JS shows up in the web UI immediately and in the native one never, or the
+ * native one keeps reporting the previous occupant of a slot under the new
+ * name. Removing a native stat renumbers everything after it.
  *
  * So the test is the regeneration itself: render from the JS source and
- * compare, byte for byte, with what is checked in. It cannot drift without
- * saying so, and the fix it names is one command.
+ * compare, byte for byte, with what is checked in. The fix it names is one
+ * command.
  */
 
 import { test } from "node:test";

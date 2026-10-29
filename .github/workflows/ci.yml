@@ -55,8 +55,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-24.04, not -latest: on 2026-10-29 -latest became 26.04
-          # ("resolute"), which apt.llvm.org does not serve yet.
+          # ubuntu-24.04, not -latest: apt.llvm.org does not serve the 26.04
+          # image yet.
           - os: ubuntu-24.04
             platform: linux-x64
           - os: macos-latest
@@ -197,13 +197,11 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 2
 
-      # THE SUITE IS RUN TWICE, because each way sees what the other cannot.
+      # The suite runs twice, because each way sees what the other cannot.
       #
       # Each case in a process of its own (ctest): a case that only passes
       # after another has run — reading a value an earlier case left in the
-      # process — fails here and nowhere else. Two did, for months, with this
-      # workflow green: a memory check against the process's high-water mark,
-      # and a metric read before it was published.
+      # process — fails here and nowhere else.
       #
       # The pumped cases depend on no thread's timing, so they run in
       # parallel; the real-time ones (label rt: [rt]) have a step of their
@@ -224,9 +222,9 @@ jobs:
       # a failed job runs the same order again. Catch2 prints it first
       # ("Randomness seeded to"); locally, --order rand --rng-seed <that>.
       #
-      # The engine suite hangs now and then on windows-x64. --durations prints
-      # each case as it ends, so a hang names the case after the last one
-      # printed, and the step timeout stops it well short of the job's.
+      # --durations prints each case as it ends, so a hang in the engine suite
+      # names the case after the last one printed, and the step timeout stops
+      # it well short of the job's.
       - name: Test (one process, shuffled)
         shell: bash
         timeout-minutes: 15
@@ -269,8 +267,8 @@ jobs:
   # Node to execute JS actions, which an i386 rootfs cannot load.
   native-linux-x86:
     name: native (linux-x86)
-    # ubuntu-24.04, not -latest: on the 26.04 image (2026-10-29) apt inside
-    # the i386 container reached no Debian mirror and installed nothing.
+    # ubuntu-24.04, not -latest: on the 26.04 image apt inside the i386
+    # container reaches no Debian mirror.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -362,8 +360,8 @@ jobs:
           # (CLOCKWORK_PLUGIN_BRIDGE_DIR). The bridge-lookup case in
           # test_plugin_bridge.cpp exercises that directory. $GITHUB_WORKSPACE,
           # not ${{ github.workspace }}: a matrix value is evaluated before the
-          # job has a workspace, and the expression came out empty — the shell
-          # in the Configure step expands the variable instead.
+          # job has a workspace, so the expression is empty; the shell in the
+          # Configure step expands the variable instead.
           - name: distro
             flags: -DCLOCKWORK_LINK=ON -DCLOCKWORK_SYSTEM_SAMPLERATE=ON -DCLOCKWORK_PLUGIN_BRIDGE_DIR=$GITHUB_WORKSPACE/build/libexec
             apt: libsamplerate0-dev
@@ -491,8 +489,8 @@ jobs:
     name: rust (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     # 45, not 30: clippy and the release tests are two full builds, and the
-    # Intel macOS runner took 7, 15 and then over 30 minutes for the same code
-    # (2026-10-07). The target cache below keeps the usual run well under it.
+    # Intel macOS runner can take over 30 minutes for them. The target cache
+    # below keeps the usual run well under it.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -520,8 +518,8 @@ jobs:
         with:
           workspaces: rust
       # The native job's list, not the crates' alone: clockwork-sys builds
-      # the engine from its build script, so the workspace now needs what
-      # the C++ needs — cmake, and JACK's and PipeWire's headers for the
+      # the engine from its build script, so the workspace needs what the
+      # C++ needs — cmake, and JACK's and PipeWire's headers for the
       # device layer.
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -567,10 +565,10 @@ jobs:
         run: cargo check --workspace --all-targets --exclude clockwork-sys --exclude clockwork-client --manifest-path rust/Cargo.toml
 
   # Miri interprets the unsafe crates' tests with aliasing and data-race
-  # checking. Twice now it has found undefined behaviour the native tests
-  # passed with: a pointer derived from one element of a slice and walked
-  # across the whole allocation, in the frame ring and again in the sink
-  # queue. The heavy tests shorten themselves under `cfg!(miri)`.
+  # checking, which catches undefined behaviour the native tests pass with,
+  # such as a pointer derived from one element of a slice and walked across
+  # the whole allocation. The heavy tests shorten themselves under
+  # `cfg!(miri)`.
   miri:
     name: miri
     runs-on: ubuntu-latest
@@ -663,9 +661,8 @@ jobs:
           targets: wasm32-unknown-emscripten, wasm32-unknown-unknown
       - run: npm ci
       # build-web.sh calls build-web-subsystems.sh, which needs the wasm-bindgen
-      # CLI at exactly the version rust/Cargo.lock pins — the glue it writes and
-      # the ABI the crate compiled are one contract. Nothing installed it here,
-      # so the engine's wasm built and the subsystems step then refused.
+      # CLI at exactly the version rust/Cargo.lock pins: the glue it writes and
+      # the ABI the crate compiled are one contract.
       - name: Install wasm-bindgen-cli at the version Cargo.lock pins
         run: |
           WANT="$(awk '/^name = "wasm-bindgen"$/{getline; sub(/version = /,""); gsub(/"/,""); print}' rust/Cargo.lock)"
