@@ -85,6 +85,11 @@ elseif(ANDROID)
     target_link_libraries(smoothie PUBLIC OpenSLES log android)
     # JUCE_ANDROID is not derived from the compiler's defines (juce_TargetPlatform.h).
     target_compile_definitions(smoothie PUBLIC JUCE_ANDROID=1 JUCE_USE_ANDROID_OBOE=0 JUCE_USE_ANDROID_OPENSLES=1)
+    # cpu-features is in the NDK's sources tree, not its sysroot, and is
+    # compiled into whatever uses it.
+    set(_smoothie_cpufeatures "${CMAKE_ANDROID_NDK}/sources/android/cpufeatures")
+    target_include_directories(smoothie PRIVATE "${_smoothie_cpufeatures}")
+    target_sources(smoothie PRIVATE "${_smoothie_cpufeatures}/cpu-features.c")
 elseif(UNIX)
     # core metadata: rt dl pthread | audio_devices metadata: alsa
     find_package(Threads REQUIRED)
