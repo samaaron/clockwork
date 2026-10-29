@@ -88,7 +88,7 @@ pub(crate) fn frame_packet(data: &[u8]) -> Vec<u8> {
 /// Feed newly-read bytes into the accumulator and deliver every complete
 /// frame. Returns false on a protocol violation (zero-length or oversize
 /// frame) — the caller closes the connection.
-pub(crate) fn drain_frames(acc: &mut Vec<u8>, host: &Host, conn: u32) -> bool {
+pub(crate) fn drain_frames(acc: &mut Vec<u8>, mut deliver: impl FnMut(&[u8])) -> bool {
     loop {
         if acc.len() < 4 {
             return true;
@@ -100,8 +100,70 @@ pub(crate) fn drain_frames(acc: &mut Vec<u8>, host: &Host, conn: u32) -> bool {
         if acc.len() < 4 + len {
             return true;
         }
-        host.packet(conn, &acc[4..4 + len]);
+        deliver(&acc[4..4 + len]);
         acc.drain(..4 + len);
+    }
+}
+
+/// What the fuzzer does to the bytes a stream client sends. The low four bits
+/// of the first byte say how many reads to cut the stream into, the next two
+/// bytes per read give each read's length, and the rest is the stream. The
+/// stream goes through [`drain_frames`] three ways: in one read, in the
+/// input's reads, and a byte at a time. Each way must deliver the frames a
+/// plain walk of the length prefixes finds, refuse a bad length exactly when
+/// the walk does, and hold no more than one unfinished frame between reads.
+/// rust/fuzz's `stream_frames` target calls this under libFuzzer; the corpus
+/// test calls it over corpus/ on every push.
+pub fn exercise(data: &[u8]) {
+    let Some((&first, mut stream)) = data.split_first() else { return };
+    let mut reads = Vec::new();
+    for _ in 0..first & 0x0f {
+        let Some((n, rest)) = stream.split_first_chunk::<2>() else { return };
+        reads.push(usize::from(u16::from_be_bytes(*n)));
+        stream = rest;
+    }
+
+    let mut want = Vec::new();
+    let mut pos = 0;
+    let mut refused = false;
+    while let Some(head) = stream.get(pos..pos + 4) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        if len == 0 || len > MAX_FRAME {
+            refused = true;
+            break;
+        }
+        let Some(osc) = stream.get(pos + 4..pos + 4 + len) else { break };
+        want.push(osc);
+        pos += 4 + len;
+    }
+
+    let mut cut = Vec::new();
+    let mut at = 0;
+    for n in reads {
+        let end = (at + n).min(stream.len());
+        cut.push(&stream[at..end]);
+        at = end;
+    }
+    cut.push(&stream[at..]);
+    let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+
+    for reads in [&[stream][..], &cut, &bytes] {
+        let mut acc = Vec::new();
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        let mut ok = true;
+        for read in reads {
+            acc.extend_from_slice(read);
+            if !drain_frames(&mut acc, |osc| got.push(osc.to_vec())) {
+                ok = false;
+                break;
+            }
+            assert!(acc.len() < 4 + MAX_FRAME, "more than one unfinished frame held");
+        }
+        assert_eq!(got, want, "the frames delivered are not the stream's frames");
+        assert_eq!(ok, !refused, "a bad length refused at a different place");
+        if ok {
+            assert_eq!(acc, &stream[pos..], "the unfinished frame held is not the stream's tail");
+        }
     }
 }
 
@@ -337,7 +399,7 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
             Ok(0) => break, // EOF — peer gone
             Ok(n) => {
                 acc.extend_from_slice(&tmp[..n]);
-                if !drain_frames(&mut acc, &host, id) {
+                if !drain_frames(&mut acc, |osc| host.packet(id, osc)) {
                     why = Some("protocol violation (bad frame length)".into());
                     break;
                 }

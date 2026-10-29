@@ -295,7 +295,7 @@ mod imp {
                 continue;
             }
             acc.extend_from_slice(&tmp[..got as usize]);
-            if !drain_frames(&mut acc, host, id) {
+            if !drain_frames(&mut acc, |osc| host.packet(id, osc)) {
                 break; // protocol violation — drop the connection
             }
         }

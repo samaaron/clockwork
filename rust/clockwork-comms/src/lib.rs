@@ -24,3 +24,12 @@ pub mod uds;
 // Cross-process SHM peer client (the peer side of the SHM command plane) — used
 // by the transport harness to drive --shm-commands end-to-end. Not a C ABI.
 pub mod shm;
+
+#[cfg(test)]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), crate::stream::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-comms/corpus");
+    }
+}

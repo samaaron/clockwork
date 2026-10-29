@@ -92,12 +92,12 @@ jobs:
           RUSTFLAGS: --cfg fuzzing
         run: |
           cd rust
-          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode corpus -- --nocapture 2>&1 | tee ../replay-rust.log
-          # Three corpus tests ran, and said so: a crate whose corpus test
+          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode -p clockwork-comms corpus -- --nocapture 2>&1 | tee ../replay-rust.log
+          # Four corpus tests ran, and said so: a crate whose corpus test
           # vanished would otherwise pass this step in silence.
-          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 3
+          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 4
           # And each said it was built as the fuzzer builds.
-          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 3
+          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 4
       - name: The C and C++ targets, over their corpora, under ASan and UBSan
         run: |
           CC=gcc CXX=g++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -121,6 +121,7 @@ jobs:
           - { target: osc_packet,        kind: rust, seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: schedule_parse,    kind: rust, seeds: rust/clockwork-schedule/corpus,     dict: rust/fuzz/osc.dict }
           - { target: audio_decode,      kind: rust, seeds: rust/clockwork-audio-decode/corpus, dict: rust/fuzz/audio.dict }
+          - { target: stream_frames,     kind: rust, seeds: rust/clockwork-comms/corpus,        dict: rust/fuzz/osc.dict }
           - { target: fuzz_osc_received, kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_osc_reader,   kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_audio_encode, kind: cpp,  seeds: test/fuzz/corpus/audio_encode,     dict: rust/fuzz/audio.dict }

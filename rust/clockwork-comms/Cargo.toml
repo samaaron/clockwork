@@ -18,6 +18,9 @@ clockwork-osc = { path = "../clockwork-osc" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }
 clockwork-log = { path = "../clockwork-log" }
 
+[dev-dependencies]
+clockwork-corpus = { path = "../clockwork-corpus" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

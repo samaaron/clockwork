@@ -138,6 +138,7 @@ version = "0.1.0"
 name = "clockwork-comms"
 version = "0.1.0"
 dependencies = [
+ "clockwork-corpus",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-osc-net",
