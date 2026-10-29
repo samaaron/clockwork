@@ -37,15 +37,16 @@ bool StreamOscTransport::start() {
     ClockworkOscStream* server = nullptr;
     switch (mKind) {
     case Kind::Tcp:
-        server = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mPort,
+        server = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mSecret, mPort,
                                          reinterpret_cast<const uint8_t*>(mBindAddress.data()),
                                          static_cast<uint32_t>(mBindAddress.size()), mMaxConns);
         break;
     case Kind::Uds:
-        server = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
+        server = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, mSecret, ep, epLen,
+                                                mMaxConns);
         break;
     case Kind::Pipe:
-        server = clockwork_osc_pipe_start(this, &onPacket, &onClosed, ep, epLen, mMaxConns);
+        server = clockwork_osc_pipe_start(this, &onPacket, &onClosed, mSecret, ep, epLen, mMaxConns);
         break;
     case Kind::None:
         break;
@@ -62,6 +63,11 @@ void StreamOscTransport::stop() {
 int StreamOscTransport::boundPort() const {
     auto* server = mServer.load(std::memory_order_acquire);
     return server ? clockwork_osc_stream_port(server) : 0;
+}
+
+uint64_t StreamOscTransport::refusedConnections() const {
+    auto* server = mServer.load(std::memory_order_acquire);
+    return server ? clockwork_osc_stream_refused(server) : 0;
 }
 
 // Rust reader thread → ingest carrying the connection id as the origin token.

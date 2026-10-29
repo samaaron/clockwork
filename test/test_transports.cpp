@@ -112,6 +112,7 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect 
     t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
     t.setMaxConnections(4);
     t.initialiseTcp(0, "127.0.0.1");  // port 0 → ephemeral, read back below
+    t.setSecret(testSecret());
     REQUIRE(t.start());
     REQUIRE(t.boundPort() > 0);
 
@@ -141,6 +142,32 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect 
     t.stop();
 }
 
+// The secret through the C++ class: a transport given none does not start,
+// and a client whose first frame is not the secret gets nothing in, is closed
+// and is counted.
+TEST_CASE("StreamOscTransport/TCP: no secret, no port, and a client without it gets nothing",
+          "[transport][tcp][secret]") {
+    IngestLog log;
+    StreamOscTransport bare;
+    bare.initialiseTcp(0, "127.0.0.1");
+    CHECK_FALSE(bare.start());
+
+    StreamOscTransport t;
+    t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
+    t.initialiseTcp(0, "127.0.0.1");
+    t.setSecret(testSecret());
+    REQUIRE(t.start());
+
+    const int fd = connectTcpWithoutSecret(t.boundPort());
+    writeFramed(fd, message("/status").data);
+    CHECK(readFramed(fd).empty());   // closed, not answered
+    REQUIRE(waitUntil([&] { return t.refusedConnections() == 1; }));
+    CHECK(log.count() == 0);
+    close(fd);
+
+    t.stop();
+}
+
 TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
           "[transport][uds]") {
     IngestLog log;
@@ -148,6 +175,7 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
     t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
     std::string path = tmpSock("st.sock");
     t.initialiseUds(path);
+    t.setSecret(testSecret());
     REQUIRE(t.start());
 
     struct stat st{};

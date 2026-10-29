@@ -28,14 +28,13 @@ pub mod out;
 // about. What stays is what the ENGINE itself needs a socket for: the cue
 // server and outbound OSC.
 
-/// Nothing authenticates a network transport: a client that reaches the port
-/// has full control of the engine. Loopback keeps that to this machine, so
-/// every transport binds loopback unless given an address, and a host that
-/// binds anything else asked for it by name. Say so once, where it bound.
+/// Every network port binds loopback unless given an address, so a host that
+/// binds anything else asked for it by name. Say so once, where it bound, and
+/// what that exposes: `exposes` finishes the sentence.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn note_bind(what: &str, local: std::net::SocketAddr) {
+pub fn note_bind(what: &str, local: std::net::SocketAddr, exposes: &str) {
     if !local.ip().is_loopback() {
-        clockwork_log::log!("[osc] {what} bound to {local}: any client that reaches it has full control, nothing authenticates");
+        clockwork_log::log!("[osc] {what} bound to {local}: {exposes}");
     }
 }
 

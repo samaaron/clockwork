@@ -45,6 +45,10 @@ public:
 
     void setIngest(IngestFn fn) { mIngest = std::move(fn); }
     void setMaxConnections(uint32_t n) { mMaxConns = n; }
+    // The host's secret (clockwork_comms_abi.h), read by start(); the server
+    // keeps its own copy, so `secret` need only live until then. Without one
+    // start() fails.
+    void setSecret(const ClockworkCommsSecret* secret) { mSecret = secret; }
 
     // Pick exactly one endpoint before start().
     void initialiseTcp(int port, const std::string& bindAddress);
@@ -57,6 +61,8 @@ public:
     // The actual bound TCP port (differs from the requested one for port-0
     // starts); 0 for path/name-addressed servers.
     int boundPort() const;
+    // Connections closed for not presenting the secret.
+    uint64_t refusedConnections() const;
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
     bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
@@ -90,6 +96,7 @@ private:
     void removeConn(std::vector<uint32_t>& list, uint32_t token);
 
     Kind         mKind = Kind::None;
+    const ClockworkCommsSecret* mSecret = nullptr;
     int          mPort = 0;             // Tcp
     std::string  mBindAddress;          // Tcp
     std::string  mEndpoint;             // Uds path / pipe name

@@ -24,11 +24,21 @@ outbound OSC are unaffected, and `-u` still numbers the shared-memory segment.
 | `--pipe <name>` | Named pipe, owner-only DACL, no remote clients | stream, local |
 | `--shm-commands` | the segment's peer command plane | ring, local |
 
-**Nothing authenticates.** A client that reaches a port has full control of the
-engine, as with scsynth. So the two network transports bind loopback unless
-`-B` names an address, and a host that binds every interface asked for it by
-name: the engine logs one line saying the port accepts any client that reaches
-it. The local transports are owner-only by file mode or DACL.
+**The stream transports ask for a secret.** TCP, the Unix stream socket and
+the named pipe start only with the host's per-boot secret: 32 random bytes
+that whoever launches the host gets to it by a path other processes cannot
+read, never the command line or the environment; where the host reads them
+is the host's decision (`clockwork_comms_secret_from_bytes`). A client's first
+frame on a connection must be `/clockwork/auth` with the 32 bytes as a blob.
+Nothing is delivered before it, and a connection that sends anything else
+first, or nothing within 2 s, is closed and counted. The secret crosses TCP in
+the clear, so TCP binds loopback unless `-B` names an address, and the log
+says so once when it binds anything else.
+
+**The datagram transports do not ask for it.** A client that reaches UDP or
+the Unix datagram socket has full control of the engine, as with scsynth. UDP
+binds loopback unless `-B` names an address and logs an open bind the same
+way. The local transports are owner-only by file mode or DACL as well.
 
 `--uds` and `--uds-dgram` are macOS and Linux; `--pipe` is Windows. They are
 the same idea — local IPC addressed by a path rather than an IP — on the two

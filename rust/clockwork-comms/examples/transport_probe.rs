@@ -12,7 +12,10 @@
 //!
 //! Exit 0 = success; nonzero = transport error, timeout, or a failed load
 //! invariant. Stream transports (tcp/uds/pipe) speak the shared 4-byte
-//! big-endian length-prefixed framing; datagram transports send raw packets.
+//! big-endian length-prefixed framing, and first present the host's secret,
+//! which the probe reads from its stdin as 64 hex digits and a newline, the
+//! form the harness gives both processes; datagram transports send raw
+//! packets.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
@@ -64,7 +67,7 @@ fn report(reply: &[u8]) {
     }
 }
 
-fn run(proto: &str, target: &str, probe: &[u8]) -> Result<Vec<u8>, String> {
+fn run(proto: &str, target: &str, auth: &[u8], probe: &[u8]) -> Result<Vec<u8>, String> {
     match proto {
         "udp" => {
             let s = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
@@ -78,6 +81,7 @@ fn run(proto: &str, target: &str, probe: &[u8]) -> Result<Vec<u8>, String> {
             let mut s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
             s.set_read_timeout(Some(TIMEOUT)).ok();
             s.set_write_timeout(Some(TIMEOUT)).ok();
+            s.write_all(auth).map_err(|e| format!("send: {e}"))?;
             s.write_all(&frame(probe)).map_err(|e| format!("send: {e}"))?;
             read_frame(&mut s).map_err(|e| format!("recv: {e}"))
         }
@@ -87,6 +91,7 @@ fn run(proto: &str, target: &str, probe: &[u8]) -> Result<Vec<u8>, String> {
                 .map_err(|e| format!("connect: {e}"))?;
             s.set_read_timeout(Some(TIMEOUT)).ok();
             s.set_write_timeout(Some(TIMEOUT)).ok();
+            s.write_all(auth).map_err(|e| format!("send: {e}"))?;
             s.write_all(&frame(probe)).map_err(|e| format!("send: {e}"))?;
             read_frame(&mut s).map_err(|e| format!("recv: {e}"))
         }
@@ -121,6 +126,7 @@ fn run(proto: &str, target: &str, probe: &[u8]) -> Result<Vec<u8>, String> {
                 .write(true)
                 .open(&full)
                 .map_err(|e| format!("open {full}: {e}"))?;
+            f.write_all(auth).map_err(|e| format!("send: {e}"))?;
             f.write_all(&frame(probe)).map_err(|e| format!("send: {e}"))?;
             // A pipe File has no read timeout; the wall-clock cap in main()
             // bounds this read so a silent server can't hang the probe.
@@ -420,18 +426,20 @@ impl Drop for DgramSock {
     }
 }
 
-fn load(proto: &str, target: &str, count: i32) -> Result<String, String> {
+fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, String> {
     match proto {
         "tcp" => {
-            let s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
+            let mut s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
             s.set_read_timeout(Some(LOAD_TIMEOUT)).ok();
+            s.write_all(auth).map_err(|e| format!("send: {e}"))?;
             stream_load(s, count)
         }
         #[cfg(unix)]
         "uds" => {
-            let s = std::os::unix::net::UnixStream::connect(target)
+            let mut s = std::os::unix::net::UnixStream::connect(target)
                 .map_err(|e| format!("connect: {e}"))?;
             s.set_read_timeout(Some(LOAD_TIMEOUT)).ok();
+            s.write_all(auth).map_err(|e| format!("send: {e}"))?;
             stream_load(s, count)
         }
         #[cfg(windows)]
@@ -441,11 +449,12 @@ fn load(proto: &str, target: &str, count: i32) -> Result<String, String> {
             } else {
                 format!(r"\\.\pipe\{target}")
             };
-            let f = std::fs::OpenOptions::new()
+            let mut f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&full)
                 .map_err(|e| format!("open {full}: {e}"))?;
+            f.write_all(auth).map_err(|e| format!("send: {e}"))?;
             pipe_load(f, count)
         }
         "udp" => {
@@ -507,6 +516,30 @@ fn load(proto: &str, target: &str, count: i32) -> Result<String, String> {
     }
 }
 
+/// The framed auth packet for a stream transport, from the secret on stdin;
+/// nothing for the others. Exits when a stream transport has no secret.
+fn auth_for(proto: &str) -> Vec<u8> {
+    if !matches!(proto, "tcp" | "uds" | "pipe") {
+        return Vec::new();
+    }
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    let hex = line.trim_end();
+    let bytes: Option<Vec<u8>> = (hex.len() == 64)
+        .then(|| (0..64).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect())
+        .flatten();
+    let secret = bytes
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .and_then(clockwork_comms::secret::ClockworkCommsSecret::from_bytes);
+    match secret {
+        Some(secret) => frame(&secret.auth_packet()),
+        None => {
+            eprintln!("{proto}: the host's secret is read from stdin: 64 hex digits and a newline");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -518,9 +551,10 @@ fn main() {
             eprintln!("load: <count> must be a positive integer");
             std::process::exit(2);
         }
+        let auth = auth_for(&proto);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(load(&proto, &target, count));
+            let _ = tx.send(load(&proto, &target, &auth, count));
         });
         match rx.recv_timeout(LOAD_TIMEOUT + Duration::from_secs(2)) {
             Ok(Ok(summary)) => println!("LOAD OK {} {}: {summary}", args[2], args[3]),
@@ -548,10 +582,11 @@ fn main() {
     // read timeout, so a server that accepts the pipe but never replies would
     // otherwise hang forever (and hang clockwork, which runs us with no outer
     // timeout of its own). Run the probe on a worker and give up if it stalls.
+    let auth = auth_for(&proto);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let probe = encode("/clockwork/status", &[]);
-        let _ = tx.send(run(&proto, &target, &probe));
+        let _ = tx.send(run(&proto, &target, &auth, &probe));
     });
     match rx.recv_timeout(TIMEOUT + Duration::from_secs(1)) {
         Ok(Ok(reply)) => report(&reply),

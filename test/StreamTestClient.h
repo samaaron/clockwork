@@ -3,7 +3,8 @@
 /*
  * StreamTestClient.h — a blocking client for clockwork's stream transports
  * (TCP and UDS stream), for tests that talk to one through a real socket:
- * connect, write a length-prefixed OSC frame, read one back.
+ * connect and present the secret, write a length-prefixed OSC frame, read
+ * one back.
  *
  * Unix-only: POSIX sockets, used directly.
  */
@@ -21,8 +22,26 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "clockwork_comms_abi.h"
+
+// The secret every stream transport a test starts is given (setSecret), and
+// that connectTcp and connectUnixStream present first.
+inline const ClockworkCommsSecret* testSecret() {
+    static const std::unique_ptr<ClockworkCommsSecret, void (*)(ClockworkCommsSecret*)> secret{
+        clockwork_comms_secret_generate(), &clockwork_comms_secret_free};
+    return secret.get();
+}
+
+inline std::vector<uint8_t> authPacket(const ClockworkCommsSecret* secret) {
+    std::vector<uint8_t> out(256);
+    out.resize(clockwork_comms_secret_auth_packet(secret, out.data(),
+                                                  static_cast<uint32_t>(out.size())));
+    return out;
+}
 
 inline void writeFramed(int fd, const std::vector<uint8_t>& pkt) {
     uint32_t be = htonl(static_cast<uint32_t>(pkt.size()));
@@ -55,7 +74,7 @@ inline void setRecvTimeout(int fd) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
-inline int connectTcp(int port) {
+inline int connectTcpWithoutSecret(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     REQUIRE(fd >= 0);
     sockaddr_in sa{};
@@ -67,6 +86,12 @@ inline int connectTcp(int port) {
     return fd;
 }
 
+inline int connectTcp(int port) {
+    const int fd = connectTcpWithoutSecret(port);
+    writeFramed(fd, authPacket(testSecret()));
+    return fd;
+}
+
 inline int connectUnixStream(const std::string& path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     REQUIRE(fd >= 0);
@@ -75,6 +100,7 @@ inline int connectUnixStream(const std::string& path) {
     std::strncpy(sa.sun_path, path.c_str(), sizeof(sa.sun_path) - 1);
     REQUIRE(connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0);
     setRecvTimeout(fd);
+    writeFramed(fd, authPacket(testSecret()));
     return fd;
 }
 

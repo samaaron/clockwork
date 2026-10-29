@@ -99,6 +99,13 @@ mod stream_abi {
     pub use clockwork_comms::stream::{
         clockwork_osc_stream_port, clockwork_osc_stream_stop, clockwork_osc_tcp_start, ClockworkOscStream,
     };
+    use clockwork_comms::secret::ClockworkCommsSecret;
+
+    /// The secret every server here starts with and every client presents.
+    pub fn secret() -> &'static ClockworkCommsSecret {
+        static SECRET: std::sync::OnceLock<ClockworkCommsSecret> = std::sync::OnceLock::new();
+        SECRET.get_or_init(|| ClockworkCommsSecret::generate().expect("an OS random source"))
+    }
 
     pub extern "C" fn on_packet(ctx: *mut c_void, conn: u32, osc: *const u8, len: u32) {
         // SAFETY: `ctx` is the `Arc<Sink>` the test holds until after the
@@ -109,8 +116,10 @@ mod stream_abi {
     pub extern "C" fn on_closed(_ctx: *mut c_void, _conn: u32) {}
 }
 
-/// One client: send ids 1..=PER_CONN in order, some large, some split mid-frame.
+/// One client: the secret, then ids 1..=PER_CONN in order, some large, some
+/// split mid-frame.
 fn blast_stream<W: std::io::Write>(mut w: W) {
+    w.write_all(&frame(&stream_abi::secret().auth_packet())).unwrap();
     for id in 1..=PER_CONN {
         let framed = frame(&load_msg(id, id % LARGE_EVERY == 0));
         if id % SPLIT_EVERY == 0 && framed.len() > 8 {
@@ -182,6 +191,7 @@ fn tcp_load() {
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,
+            secret(),
             0,
             bind.as_ptr(),
             bind.len() as u32,
@@ -212,6 +222,7 @@ fn uds_stream_load() {
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,
+            secret(),
             ps.as_ptr(),
             ps.len() as u32,
             CONNS as u32,
@@ -237,6 +248,7 @@ fn pipe_load() {
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,
+            secret(),
             name.as_ptr(),
             name.len() as u32,
             CONNS as u32,

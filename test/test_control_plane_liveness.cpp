@@ -127,6 +127,7 @@ TEST_CASE("Device report reaches a stream client that names a port",
         engine.ingest(d, n, token);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
+    tcp.setSecret(testSecret());
     engine.setTransport(&tcp);
     auto cfg = EngineFixture::defaultConfig();
     cfg.hostDrivesControl = false;   // the engine runs its own control pass

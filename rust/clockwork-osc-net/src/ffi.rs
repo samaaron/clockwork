@@ -106,13 +106,16 @@ fn bind_v6(addr: Ipv6Addr, port: u16) -> std::io::Result<UdpSocket> {
 }
 
 // Say once per socket where an open bind landed: see `crate::note_bind`.
-fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>) {
+fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>, exposes: &str) {
     for s in socks {
         if let Ok(local) = s.local_addr() {
-            crate::note_bind(what, local);
+            crate::note_bind(what, local, exposes);
         }
     }
 }
+
+const CUES_EXPOSED: &str = "anyone who reaches it can send cues";
+const UDP_EXPOSED: &str = "any client that reaches it has full control, nothing authenticates";
 
 // Re-frame one inbound message as /external-osc-cue and emit it. Recurses into
 // bundles, forwarding each contained message.
@@ -241,7 +244,7 @@ impl ClockworkOsc {
         if socks.is_empty() {
             return;
         }
-        note_binds("cue server", socks.iter().map(|(_, s)| s));
+        note_binds("cue server", socks.iter().map(|(_, s)| s), CUES_EXPOSED);
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut joins = Vec::new();
@@ -317,7 +320,7 @@ fn start_ingress(host: Host, port: u16, loopback: bool) -> Option<ClockworkOscIn
     if socks.is_empty() {
         return None;
     }
-    note_binds("UDP ingress", &socks);
+    note_binds("UDP ingress", &socks, UDP_EXPOSED);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut joins = Vec::new();
@@ -400,7 +403,7 @@ fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
             Err(e) => clockwork_log::log!("[osc] ingress bind {bind_addr}:{port} failed: {e}"),
         }
     }
-    note_binds("UDP ingress", &socks);
+    note_binds("UDP ingress", &socks, UDP_EXPOSED);
     socks
 }
 
@@ -639,10 +642,9 @@ mod tests {
         }
     }
 
-    // Nothing authenticates a network transport: a client that reaches the
-    // port has full control. So no address means loopback, and a bind on
-    // anything else is something the host asked for by name, which the log
-    // says once.
+    // Nothing authenticates the UDP ingress: a client that reaches the port
+    // has full control. So no address means loopback, and a bind on anything
+    // else is something the host asked for by name, which the log says once.
     #[test]
     fn no_address_means_loopback_and_an_open_bind_is_logged() {
         clockwork_log::capture::install();
@@ -662,7 +664,8 @@ mod tests {
         assert!(clockwork_log::capture::logged(&format!("UDP ingress bound to {local}: any client that reaches it has full control")));
     }
 
-    // The cue server's `loopback = 0` is the same open bind, logged the same way.
+    // The cue server's `loopback = 0` is an open bind too, logged with what it
+    // exposes: cues, never commands.
     #[test]
     fn cue_server_on_every_interface_is_logged() {
         clockwork_log::capture::install();
@@ -671,7 +674,7 @@ mod tests {
         let h = clockwork_osc_create(ctx, collect);
         let port = free_port();
         configure(h, port, false, true);
-        assert!(clockwork_log::capture::logged(&format!("cue server bound to 0.0.0.0:{port}: any client that reaches it has full control")));
+        assert!(clockwork_log::capture::logged(&format!("cue server bound to 0.0.0.0:{port}: {CUES_EXPOSED}")));
         destroy(h);
     }
 

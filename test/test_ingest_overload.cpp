@@ -113,6 +113,7 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
         engine.ingest(d, n, token);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
+    tcp.setSecret(testSecret());
     engine.setTransport(&tcp);
     auto cfg = EngineFixture::driverConfig();   // the engine draining under load on its own: nobody here to pump it
     cfg.hostDrivesControl = false;   // the engine runs its own control pass
@@ -216,6 +217,7 @@ TEST_CASE("Answers to a client that has gone are counted undelivered",
         engine.ingest(d, n, token);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
+    tcp.setSecret(testSecret());
     engine.setTransport(&tcp);
     auto cfg = EngineFixture::defaultConfig();   // pumped: no block but this case's
     cfg.hostDrivesControl = true;                 // and no pass but this case's

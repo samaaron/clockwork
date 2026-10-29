@@ -7,6 +7,12 @@
 //! (the usual OSC-over-stream framing). A frame longer than [`MAX_FRAME`] or
 //! of zero length is a protocol violation and closes the connection.
 //!
+//! Every server starts with the host's secret (`secret.rs`) and refuses to
+//! start without one. The first frame on every connection must be the
+//! secret's auth packet. Nothing is delivered before it; a connection whose
+//! first frame is anything else, or that has not sent it within
+//! [`AUTH_DEADLINE`], is closed and counted, and the host never hears of it.
+//!
 //! Admission control happens once, at accept: at most `max_conns` concurrent
 //! connections; an accept beyond the cap is immediately closed so the excess
 //! client sees a crisp reset instead of a silent hang. Connection ids are
@@ -14,13 +20,16 @@
 //! directly as origin tokens (0 = in-process caller, so ids start at 1).
 //!
 //! On disconnect (EOF, error, or protocol violation) the connection leaves
-//! the registry and `on_closed` fires, so the transport can drop that
+//! the registry and, if it got past the secret, `on_closed` fires, so the
+//! transport can drop that
 //! client's notify subscriptions — subscription lifetime == connection
 //! lifetime. `on_closed` is suppressed during server stop (the host is
 //! tearing down and must not be re-entered).
 
 use std::ffi::c_void;
 use std::slice;
+
+use crate::secret::ClockworkCommsSecret;
 
 /// Longest accepted frame payload. Sized to admit whatever blob the DSP's
 /// define verb carries (the native IN ring is hundreds of KB for that reason), matching
@@ -51,6 +60,8 @@ pub(crate) trait StreamServerImpl: Send {
     fn port(&self) -> i32 {
         0
     }
+    /// Connections closed for not presenting the secret.
+    fn refused(&self) -> u64;
 }
 
 /// The host callbacks + opaque context, shared by every reader thread.
@@ -105,31 +116,87 @@ pub(crate) fn drain_frames(acc: &mut Vec<u8>, mut deliver: impl FnMut(&[u8])) ->
     }
 }
 
-/// What the fuzzer does to the bytes a stream client sends. The low four bits
-/// of the first byte say how many reads to cut the stream into, the next two
-/// bytes per read give each read's length, and the rest is the stream. The
-/// stream goes through [`drain_frames`] three ways: in one read, in the
-/// input's reads, and a byte at a time. Each way must deliver the frames a
-/// plain walk of the length prefixes finds, refuse a bad length exactly when
-/// the walk does, and hold no more than one unfinished frame between reads.
-/// rust/fuzz's `stream_frames` target calls this under libFuzzer; the corpus
-/// test calls it over corpus/ on every push.
+/// How long a new connection has to present the secret.
+pub(crate) const AUTH_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Where a connection stands with the secret.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Gate {
+    /// Not enough bytes yet to tell.
+    Waiting,
+    /// The first frame was the secret's auth packet, and is consumed.
+    Open,
+    /// The first frame was something else; the connection closes.
+    Refused,
+}
+
+/// Look at the first frame in `acc`, before anything is delivered.
+pub(crate) fn check_auth(acc: &mut Vec<u8>, secret: &ClockworkCommsSecret) -> Gate {
+    if acc.len() < 4 {
+        return Gate::Waiting;
+    }
+    let len = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
+    if len != secret.auth_packet().len() {
+        return Gate::Refused;
+    }
+    if acc.len() < 4 + len {
+        return Gate::Waiting;
+    }
+    if !secret.admits(&acc[4..4 + len]) {
+        return Gate::Refused;
+    }
+    acc.drain(..4 + len);
+    Gate::Open
+}
+
+/// What the fuzzer does to the bytes a stream client sends, read the way the
+/// server reads them: the secret first, then the framing. The low four bits
+/// of the first byte say how many reads to cut the stream into, and bit 4
+/// puts a fixed secret's auth frame in front of the stream, which the fuzzer
+/// would never guess; without it, the stream's own first frame meets the
+/// gate. The next two bytes per read give each read's length, and the rest
+/// is the stream. It goes through [`check_auth`] and [`drain_frames`] three
+/// ways: in one read, in the input's reads, and a byte at a time. Each way
+/// must decide on the secret where a plain walk of the bytes does, deliver
+/// nothing before it, deliver after it the frames the walk finds, refuse a
+/// bad length where the walk does, and hold no more than one unfinished
+/// frame between reads. rust/fuzz's `stream_frames` target calls this under
+/// libFuzzer; the corpus test calls it over corpus/ on every push.
 pub fn exercise(data: &[u8]) {
-    let Some((&first, mut stream)) = data.split_first() else { return };
+    let secret = ClockworkCommsSecret::from_bytes(std::array::from_fn(|i| i as u8 + 1))
+        .expect("a secret that is not all zeros");
+    let auth = frame_packet(&secret.auth_packet());
+    let Some((&first, mut rest)) = data.split_first() else { return };
     let mut reads = Vec::new();
     for _ in 0..first & 0x0f {
-        let Some((n, rest)) = stream.split_first_chunk::<2>() else { return };
+        let Some((n, tail)) = rest.split_first_chunk::<2>() else { return };
         reads.push(usize::from(u16::from_be_bytes(*n)));
-        stream = rest;
+        rest = tail;
     }
+    let with_secret;
+    let stream = if first & 0x10 != 0 {
+        with_secret = [&auth[..], rest].concat();
+        &with_secret[..]
+    } else {
+        rest
+    };
 
+    let gate = match stream.get(..4) {
+        None => Gate::Waiting,
+        Some(head) if head != &auth[..4] => Gate::Refused,
+        Some(_) => match stream.get(..auth.len()) {
+            None => Gate::Waiting,
+            Some(f) if f == &auth[..] => Gate::Open,
+            Some(_) => Gate::Refused,
+        },
+    };
     let mut want = Vec::new();
-    let mut pos = 0;
-    let mut refused = false;
-    while let Some(head) = stream.get(pos..pos + 4) {
+    let mut pos = auth.len();
+    let mut framed = true;
+    while let Some(head) = stream.get(pos..pos + 4).filter(|_| gate == Gate::Open) {
         let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
         if len == 0 || len > MAX_FRAME {
-            refused = true;
+            framed = false;
             break;
         }
         let Some(osc) = stream.get(pos + 4..pos + 4 + len) else { break };
@@ -150,19 +217,34 @@ pub fn exercise(data: &[u8]) {
     for reads in [&[stream][..], &cut, &bytes] {
         let mut acc = Vec::new();
         let mut got: Vec<Vec<u8>> = Vec::new();
+        let mut at_gate = Gate::Waiting;
         let mut ok = true;
         for read in reads {
             acc.extend_from_slice(read);
+            if at_gate == Gate::Waiting {
+                at_gate = check_auth(&mut acc, &secret);
+                match at_gate {
+                    Gate::Refused => break,
+                    Gate::Waiting => {
+                        assert!(acc.len() < auth.len(), "more than the secret's frame held for it");
+                        continue;
+                    }
+                    Gate::Open => {}
+                }
+            }
             if !drain_frames(&mut acc, |osc| got.push(osc.to_vec())) {
                 ok = false;
                 break;
             }
             assert!(acc.len() < 4 + MAX_FRAME, "more than one unfinished frame held");
         }
+        assert_eq!(at_gate, gate, "the secret decided at a different place");
         assert_eq!(got, want, "the frames delivered are not the stream's frames");
-        assert_eq!(ok, !refused, "a bad length refused at a different place");
-        if ok {
-            assert_eq!(acc, &stream[pos..], "the unfinished frame held is not the stream's tail");
+        if gate == Gate::Open {
+            assert_eq!(ok, framed, "a bad length refused at a different place");
+            if ok {
+                assert_eq!(acc, &stream[pos..], "the unfinished frame held is not the stream's tail");
+            }
         }
     }
 }
@@ -175,10 +257,10 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clockwork_osc::ffi::no_unwind;
 
@@ -329,6 +411,8 @@ struct Shared {
     conns: Mutex<HashMap<u32, Writer>>,
     next_id: AtomicU32, // conn ids from 1, never reused (0 = in-process)
     readers: Mutex<Vec<JoinHandle<()>>>,
+    secret: ClockworkCommsSecret,
+    refused: AtomicU64,
 }
 
 struct SocketServer {
@@ -364,6 +448,9 @@ impl StreamServerImpl for SocketServer {
     fn port(&self) -> i32 {
         self.port
     }
+    fn refused(&self) -> u64 {
+        self.shared.refused.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for SocketServer {
@@ -394,11 +481,25 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
     // EOF is the client's decision and stays quiet; anything else is the
     // server hanging up on a live client, so say so.
     let mut why: Option<String> = None;
+    let opened = Instant::now();
+    let mut gate = Gate::Waiting;
     while !shared.stop.load(Ordering::Relaxed) {
+        if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
+            gate = Gate::Refused;
+        }
+        if gate == Gate::Refused {
+            break;
+        }
         match conn.read(&mut tmp) {
             Ok(0) => break, // EOF — peer gone
             Ok(n) => {
                 acc.extend_from_slice(&tmp[..n]);
+                if gate == Gate::Waiting {
+                    gate = check_auth(&mut acc, &shared.secret);
+                    if gate != Gate::Open {
+                        continue;
+                    }
+                }
                 if !drain_frames(&mut acc, |osc| host.packet(id, osc)) {
                     why = Some("protocol violation (bad frame length)".into());
                     break;
@@ -416,11 +517,22 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
     if let Some(w) = shared.conns.lock().unwrap().remove(&id) {
         w.lock().unwrap().shutdown_both();
     }
-    if !shared.stop.load(Ordering::Relaxed) {
+    if gate == Gate::Refused {
+        refuse(&shared.refused, id);
+    } else if !shared.stop.load(Ordering::Relaxed) && gate == Gate::Open {
         if let Some(why) = why {
             clockwork_log::log!("[osc] stream conn {id} dropped — {why}");
         }
         host.closed(id);
+    }
+}
+
+/// Count a connection closed for not presenting the secret, and say so for
+/// the first few: anything on the machine can connect, so a stream of them
+/// must not become a stream of log lines.
+pub(crate) fn refuse(refused: &AtomicU64, id: u32) {
+    if refused.fetch_add(1, Ordering::Relaxed) < 5 {
+        clockwork_log::log!("[osc] stream conn {id} refused — its first frame was not the secret, or it sent none in time");
     }
 }
 
@@ -481,6 +593,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host, max_con
 fn start_socket_server<A: Acceptor>(
     listener: A,
     host: Host,
+    secret: ClockworkCommsSecret,
     max_conns: u32,
     port: i32,
     path: Option<PathBuf>,
@@ -490,6 +603,8 @@ fn start_socket_server<A: Acceptor>(
         conns: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(1),
         readers: Mutex::new(Vec::new()),
+        secret,
+        refused: AtomicU64::new(0),
     });
     let max = max_conns.max(1) as usize;
     let t_shared = shared.clone();
@@ -507,9 +622,26 @@ fn start_socket_server<A: Acceptor>(
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
+/// A copy of the secret a start function was given. A start without one says
+/// so and returns null before it binds anything.
+///
+/// # Safety
+/// `secret` is null or live.
+pub(crate) unsafe fn take_secret(
+    what: &str,
+    secret: *const ClockworkCommsSecret,
+) -> Option<ClockworkCommsSecret> {
+    if secret.is_null() {
+        clockwork_log::log!("[osc] {what} not started: no secret");
+        return None;
+    }
+    // SAFETY: live, per the contract.
+    Some(unsafe { &*secret }.clone())
+}
+
 /// The address a TCP server binds when given `addr`: loopback when given
-/// nothing, because nothing authenticates and every interface is something a
-/// host asks for by name.
+/// nothing. The secret crosses the wire in the clear, so a port on the
+/// network is something a host asks for by name.
 fn bind_address(addr: &str) -> &str {
     if addr.is_empty() { "127.0.0.1" } else { addr }
 }
@@ -520,20 +652,27 @@ fn bind_address(addr: &str) -> &str {
 /// bind an ephemeral port and read it back with [`clockwork_osc_stream_port`].
 /// Returns an owning pointer (null on bind failure); free with
 /// [`clockwork_osc_stream_stop`]. `ctx` and both callbacks must outlive it.
+/// The server keeps its own copy of `secret`, and without one does not start.
 ///
 /// # Safety
-/// `bind_addr` is null or readable for `bind_addr_len` bytes.
+/// `secret` is null or live; `bind_addr` is null or readable for
+/// `bind_addr_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_tcp_start(
     ctx: *mut c_void,
     on_packet: StreamPacketFn,
     on_closed: StreamClosedFn,
+    secret: *const ClockworkCommsSecret,
     port: i32,
     bind_addr: *const u8,
     bind_addr_len: u32,
     max_conns: u32,
 ) -> *mut ClockworkOscStream {
     no_unwind(std::ptr::null_mut(), || {
+        // SAFETY: null or live, per the contract.
+        let Some(secret) = (unsafe { take_secret("TCP", secret) }) else {
+            return std::ptr::null_mut();
+        };
         if !(0..=65535).contains(&port) {
             return std::ptr::null_mut();
         }
@@ -553,14 +692,14 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
             }
         };
         if let Ok(local) = listener.local_addr() {
-            clockwork_osc_net::note_bind("TCP", local);
+            clockwork_osc_net::note_bind("TCP", local, "the secret crosses the network in the clear");
         }
         let bound = listener.local_addr().map(|a| a.port() as i32).unwrap_or(port);
         if listener.set_nonblocking(true).is_err() {
             return std::ptr::null_mut();
         }
         let host = Host { ctx, on_packet, on_closed };
-        match start_socket_server(listener, host, max_conns, bound, None) {
+        match start_socket_server(listener, host, secret, max_conns, bound, None) {
             Some(srv) => Box::into_raw(Box::new(srv)),
             None => std::ptr::null_mut(),
         }
@@ -571,15 +710,16 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
 /// socket file is created 0600, replacing a stale file — put it in a 0700
 /// directory for the full owner-only guarantee). Null on failure, and always
 /// null on Windows (see `pipe.rs` for the named-pipe analogue). Free with
-/// [`clockwork_osc_stream_stop`].
+/// [`clockwork_osc_stream_stop`]. Without a secret it does not start.
 ///
 /// # Safety
-/// `path` is null or readable for `path_len` bytes.
+/// `secret` is null or live; `path` is null or readable for `path_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     ctx: *mut c_void,
     on_packet: StreamPacketFn,
     on_closed: StreamClosedFn,
+    secret: *const ClockworkCommsSecret,
     path: *const u8,
     path_len: u32,
     max_conns: u32,
@@ -588,6 +728,10 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     {
         no_unwind(std::ptr::null_mut(), || {
             use std::os::unix::fs::PermissionsExt;
+            // SAFETY: null or live, per the contract.
+            let Some(secret) = (unsafe { take_secret("UDS stream", secret) }) else {
+                return std::ptr::null_mut();
+            };
             if path.is_null() {
                 return std::ptr::null_mut();
             }
@@ -616,7 +760,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
                 return std::ptr::null_mut();
             }
             let host = Host { ctx, on_packet, on_closed };
-            match start_socket_server(listener, host, max_conns, 0, Some(pb)) {
+            match start_socket_server(listener, host, secret, max_conns, 0, Some(pb)) {
                 Some(srv) => Box::into_raw(Box::new(srv)),
                 None => std::ptr::null_mut(),
             }
@@ -624,7 +768,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     }
     #[cfg(not(unix))]
     {
-        let _ = (ctx, on_packet, on_closed, path, path_len, max_conns);
+        let _ = (ctx, on_packet, on_closed, secret, path, path_len, max_conns);
         std::ptr::null_mut()
     }
 }
@@ -641,6 +785,21 @@ pub unsafe extern "C" fn clockwork_osc_stream_port(handle: *mut ClockworkOscStre
     }
     // SAFETY: a live handle, per the contract.
     unsafe { (*handle).0.port() }
+}
+
+/// How many connections this server has closed for not presenting the secret:
+/// a first frame that was anything else, or none within the deadline. 0 for a
+/// null handle.
+///
+/// # Safety
+/// `handle` is null or a live handle from a stream start function.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_osc_stream_refused(handle: *mut ClockworkOscStream) -> u64 {
+    if handle.is_null() {
+        return 0;
+    }
+    // SAFETY: a live handle, per the contract.
+    unsafe { (*handle).0.refused() }
 }
 
 /// Send one OSC packet, framed, to connection `conn_id`. Returns 1 on send,
@@ -688,8 +847,15 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::{Duration, Instant};
     use clockwork_osc::{decode, encode, OscArg};
+
+    // One secret for every server these cases start; `connect` presents it.
+    fn test_secret() -> &'static ClockworkCommsSecret {
+        static SECRET: OnceLock<ClockworkCommsSecret> = OnceLock::new();
+        SECRET.get_or_init(|| ClockworkCommsSecret::generate().expect("an OS random source"))
+    }
 
     // Capture (conn_id, packet) deliveries and closed conn ids.
     struct Cap {
@@ -721,6 +887,10 @@ mod tests {
     fn stop(h: *mut ClockworkOscStream) {
         // SAFETY: see above.
         unsafe { clockwork_osc_stream_stop(h) };
+    }
+    fn refused(h: *mut ClockworkOscStream) -> u64 {
+        // SAFETY: see above.
+        unsafe { clockwork_osc_stream_refused(h) }
     }
 
     // Waits and read timeouts in these cases are bounded only against what
@@ -758,7 +928,7 @@ mod tests {
         let ctx = cap as *const Cap as *mut c_void;
         // SAFETY: `bind` is a live str.
         let h = unsafe {
-            clockwork_osc_tcp_start(ctx, on_packet, on_closed, 0,
+            clockwork_osc_tcp_start(ctx, on_packet, on_closed, test_secret(), 0,
                              bind.as_ptr(), bind.len() as u32, max_conns)
         };
         assert!(!h.is_null(), "tcp server should start");
@@ -771,10 +941,9 @@ mod tests {
         start_tcp_on(cap, "127.0.0.1", max_conns)
     }
 
-    // Nothing authenticates TCP: a client that reaches the port has full
-    // control. So no address means loopback, reachable from this machine, and
-    // a bind on anything else is something the host asked for by name, which
-    // the log says once.
+    // The secret crosses TCP in the clear. So no address means loopback,
+    // reachable from this machine, and a bind on anything else is something
+    // the host asked for by name, which the log says once.
     #[test]
     fn tcp_with_no_address_binds_loopback_and_an_open_bind_is_logged() {
         assert_eq!(bind_address(""), "127.0.0.1");
@@ -790,14 +959,104 @@ mod tests {
         stop(h);
 
         let (h, port) = start_tcp_on(&cap, "0.0.0.0", 4);
-        assert!(clockwork_log::capture::logged(&format!("TCP bound to 0.0.0.0:{port}: any client that reaches it has full control")));
+        assert!(clockwork_log::capture::logged(&format!("TCP bound to 0.0.0.0:{port}: the secret crosses the network in the clear")));
         stop(h);
     }
 
-    fn connect(port: u16) -> TcpStream {
+    fn connect_without_secret(port: u16) -> TcpStream {
         let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         s
+    }
+    fn connect(port: u16) -> TcpStream {
+        let mut s = connect_without_secret(port);
+        s.write_all(&frame(&test_secret().auth_packet())).unwrap();
+        s
+    }
+    fn closed_by_server(c: &mut TcpStream) -> bool {
+        let mut buf = [0u8; 1];
+        let got = c.read(&mut buf);
+        matches!(got, Ok(0)) || got.is_err()
+    }
+
+    // A first frame that is anything but the secret closes the connection,
+    // whatever follows it: a command, or the auth packet of another secret.
+    // Nothing is delivered, the refusal is counted, and the host never hears
+    // of the connection.
+    #[test]
+    fn a_connection_that_does_not_start_with_the_secret_gets_nothing() {
+        let cap = Cap::new();
+        let (h, port) = start_tcp(&cap, 4);
+        let other = ClockworkCommsSecret::generate().unwrap();
+        for first in [frame(&encode("/clockwork/status", &[])), frame(&other.auth_packet())] {
+            let mut c = connect_without_secret(port);
+            c.write_all(&first).unwrap();
+            let _ = c.write_all(&frame(&encode("/after", &[])));
+            assert!(closed_by_server(&mut c));
+        }
+        assert!(wait_until(|| refused(h) == 2), "both refusals counted");
+        assert!(cap.packets.lock().unwrap().is_empty(), "nothing delivered");
+        assert!(cap.closed.lock().unwrap().is_empty(), "the host never heard of them");
+        stop(h);
+    }
+
+    // The secret may arrive in any number of reads, and what follows it in
+    // the same reads is delivered.
+    #[test]
+    fn the_secret_split_across_writes_opens_the_connection() {
+        let cap = Cap::new();
+        let (h, port) = start_tcp(&cap, 4);
+        let mut c = connect_without_secret(port);
+        let mut bytes = frame(&test_secret().auth_packet());
+        bytes.extend_from_slice(&frame(&encode("/after-the-secret", &[])));
+        for piece in bytes.chunks(7) {
+            c.write_all(piece).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
+        assert_eq!(decode(&cap.packets.lock().unwrap()[0].1).unwrap().addr, "/after-the-secret");
+        assert_eq!(refused(h), 0);
+        stop(h);
+    }
+
+    // A connection that says nothing holds its slot until the deadline, and
+    // no longer.
+    #[test]
+    fn a_connection_that_sends_nothing_is_closed_at_the_deadline() {
+        let cap = Cap::new();
+        let (h, port) = start_tcp(&cap, 4);
+        let t0 = Instant::now();
+        let mut c = connect_without_secret(port);
+        assert!(closed_by_server(&mut c));
+        assert!(t0.elapsed() >= AUTH_DEADLINE, "closed before the deadline: {:?}", t0.elapsed());
+        assert!(wait_until(|| refused(h) == 1));
+        assert!(cap.closed.lock().unwrap().is_empty());
+        stop(h);
+    }
+
+    #[test]
+    fn a_server_without_a_secret_does_not_start() {
+        let cap = Cap::new();
+        let ctx = &*cap as *const Cap as *mut c_void;
+        let bind = "127.0.0.1";
+        // SAFETY: a null secret is what this case passes; `bind` is a live str.
+        let h = unsafe {
+            clockwork_osc_tcp_start(ctx, on_packet, on_closed, std::ptr::null(), 0,
+                                    bind.as_ptr(), bind.len() as u32, 4)
+        };
+        assert!(h.is_null());
+        #[cfg(unix)]
+        {
+            let path = std::env::temp_dir().join(format!("ss-no-secret-{}.sock", std::process::id()));
+            let p = path.to_str().unwrap();
+            // SAFETY: as above; `p` is a live str.
+            let h = unsafe {
+                clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, std::ptr::null(),
+                                               p.as_ptr(), p.len() as u32, 4)
+            };
+            assert!(h.is_null());
+            assert!(!path.exists(), "nothing bound");
+        }
     }
 
     // One client: framed packet in → on_packet with a conn id >= 1; framed
@@ -1004,6 +1263,8 @@ mod tests {
             conns: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
             readers: Mutex::new(Vec::new()),
+            secret: test_secret().clone(),
+            refused: AtomicU64::new(0),
         })
     }
 
@@ -1180,6 +1441,7 @@ mod tests {
             on_closed,
         };
         let conn = ScriptedReader(VecDeque::from(vec![
+            Ok(frame(&test_secret().auth_packet())),
             Err(std::io::Error::from(ErrorKind::Interrupted)),
             Ok(frame(&encode("/after-eintr", &[]))),
         ]));
@@ -1228,7 +1490,7 @@ mod tests {
             let p = path.to_str().unwrap();
             // SAFETY: `p` is a live str.
             let h = unsafe {
-                clockwork_osc_uds_stream_start(ctx, on_packet, on_closed,
+                clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, test_secret(),
                                         p.as_ptr(), p.len() as u32, 4)
             };
             assert!(!h.is_null(), "uds stream server should start over a stale file");
@@ -1237,6 +1499,7 @@ mod tests {
 
             let mut c = UnixStream::connect(&path).unwrap();
             c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            c.write_all(&frame(&test_secret().auth_packet())).unwrap();
             c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
             assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
             let (conn, bytes) = cap.packets.lock().unwrap()[0].clone();
