@@ -260,7 +260,9 @@ std::string EngineFixture::debugMessagesDump() const {
 void EngineFixture::sayTimedOut(const std::string& addr, int timeoutMs, const std::string& held) {
     const int n = ++mTimeouts[addr];
     if (n == 1)
-        UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after " << timeoutMs << "ms; replies held:" << held);
+        UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out after " << timeoutMs
+                      << "ms; replies held:" << held
+                      << "\nengine debug lines:" << debugMessagesDump());
     else
         UNSCOPED_INFO("waitForReply(\"" << addr << "\") timed out again (" << n << " times)");
 }

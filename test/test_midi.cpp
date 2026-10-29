@@ -86,8 +86,13 @@ TEST_CASE("/clockwork/midi/refresh broadcasts a ports update", "[midi]") {
     fx.clearReplies();
     fx.send(osc_test::message("/clockwork/midi/refresh"));
 
+    // The refresh enumerates the OS's devices, behind the hot-swap watcher's
+    // own start-up refreshes on the same lock. On Windows that is WinRT, and
+    // on a loaded runner one enumeration has taken over two seconds (ci run
+    // 40837679771), so the wait is bounded only against a broadcast that
+    // never comes.
     OscReply r;
-    CHECK(fx.waitForReply("/clockwork/midi/ports", r));
+    CHECK(fx.waitForReply("/clockwork/midi/ports", r, 30000));
 }
 
 // ── The client half: midi/out/* and midi/clock/beat ──────────────────────────
