@@ -168,7 +168,6 @@ Thread::ThreadID Thread::getThreadId() const noexcept
 void Thread::signalThreadShouldExit()
 {
     shouldExit = true;
-    listeners.call ([] (Listener& l) { l.exitSignalSent(); });
 }
 
 bool Thread::threadShouldExit() const
@@ -234,16 +233,6 @@ bool Thread::stopThread (const int timeOutMilliseconds)
     }
 
     return true;
-}
-
-void Thread::addListener (Listener* listener)
-{
-    listeners.add (listener);
-}
-
-void Thread::removeListener (Listener* listener)
-{
-    listeners.remove (listener);
 }
 
 bool Thread::isRealtime() const

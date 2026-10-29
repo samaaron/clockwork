@@ -34,8 +34,7 @@ namespace juce
     This class also contains some thread-related static methods, such
     as sleep(), yield(), getCurrentThreadId() etc.
 
-    @see CriticalSection, WaitableEvent, Process, ThreadWithProgressWindow,
-         MessageManagerLock
+    @see CriticalSection, WaitableEvent, Process
 
     @tags{Core}
 */
@@ -390,29 +389,6 @@ public:
     */
     bool waitForThreadToExit (int timeOutMilliseconds) const;
 
-    //==============================================================================
-    /** Used to receive callbacks for thread exit calls */
-    class JUCE_API Listener
-    {
-    public:
-        virtual ~Listener() = default;
-
-        /** Called if Thread::signalThreadShouldExit was called.
-            @see Thread::threadShouldExit, Thread::addListener, Thread::removeListener
-        */
-        virtual void exitSignalSent() = 0;
-    };
-
-    /** Add a listener to this thread which will receive a callback when
-        signalThreadShouldExit was called on this thread.
-
-        @see signalThreadShouldExit, removeListener
-    */
-    void addListener (Listener*);
-
-    /** Removes a listener added with addListener. */
-    void removeListener (Listener*);
-
     /** Returns true if this Thread represents a realtime thread. */
     bool isRealtime() const;
 
@@ -590,7 +566,6 @@ private:
     uint32 affinityMask = 0;
     bool deleteOnThreadEnd = false;
     std::atomic<bool> shouldExit { false };
-    ListenerList<Listener, Array<Listener*, CriticalSection>> listeners;
 
    #if JUCE_ANDROID || JUCE_LINUX || JUCE_BSD
     std::atomic<Priority> priority;

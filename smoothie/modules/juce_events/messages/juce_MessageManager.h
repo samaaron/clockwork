@@ -23,8 +23,6 @@
 namespace juce
 {
 
-class MessageManagerLock;
-
 //==============================================================================
 /** See MessageManager::callFunctionOnMessageThread() for use of this function type. */
 using MessageCallbackFunction = void* (void* userData);
@@ -34,7 +32,7 @@ using MessageCallbackFunction = void* (void* userData);
 /**
     This class is in charge of the application's event-dispatch loop.
 
-    @see Message, CallbackMessage, MessageManagerLock, JUCEApplication, JUCEApplicationBase
+    @see Message, CallbackMessage, JUCEApplication, JUCEApplicationBase
 
     @tags{Events}
 */
@@ -109,7 +107,6 @@ public:
                             void* myCallbackFunction (void*) @endcode
         @param userData     a user-defined pointer that will be passed to the function that gets called
         @returns            the value that the callback function returns.
-        @see MessageManagerLock
     */
     void* callFunctionOnMessageThread (MessageCallbackFunction* callback, void* userData);
 
@@ -129,20 +126,6 @@ public:
         @see setCurrentThreadAsMessageThread
     */
     Thread::ThreadID getCurrentMessageThread() const noexcept            { return messageThreadId; }
-
-    /** Returns true if the caller thread has currently got the message manager locked.
-
-        see the MessageManagerLock class for more info about this.
-
-        This will be true if the caller is the message thread, because that automatically
-        gains a lock while a message is being dispatched.
-    */
-    bool currentThreadHasLockedMessageManager() const noexcept;
-
-    /** Returns true if there's an instance of the MessageManager, and if the current thread
-        has the lock on it.
-    */
-    static bool existsAndIsLockedByCurrentThread() noexcept;
 
     /** Returns true if there's an instance of the MessageManager, and if the current thread
         is running it.
@@ -169,130 +152,6 @@ public:
     };
 
     //==============================================================================
-    /** A lock you can use to lock the message manager. You can use this class with
-        the RAII-based ScopedLock classes.
-    */
-    class JUCE_API  Lock
-    {
-    public:
-        /**
-            Creates a new critical section to exclusively access methods which can
-            only be called when the message manager is locked.
-
-            Unlike CriticalSection, multiple instances of this lock class provide
-            exclusive access to a single resource - the MessageManager.
-        */
-        Lock();
-
-        /** Destructor. */
-        ~Lock();
-
-        /** Acquires the message manager lock.
-
-            If the caller thread already has exclusive access to the MessageManager, this method
-            will return immediately.
-            If another thread is currently using the MessageManager, this will wait until that
-            thread releases the lock to the MessageManager.
-
-            This call will only exit if the lock was acquired by this thread. Calling abort while
-            a thread is waiting for enter to finish, will have no effect.
-
-            @see exit, abort
-         */
-         void enter() const noexcept;
-
-         /** Attempts to lock the message manager and exits if abort is called.
-
-            This method behaves identically to enter, except that it will abort waiting for
-            the lock if the abort method is called.
-
-            Unlike other JUCE critical sections, this method **will** block waiting for the lock.
-
-            To ensure predictable behaviour, you should re-check your abort condition if tryEnter
-            returns false.
-
-            This method can be used if you want to do some work while waiting for the
-            MessageManagerLock:
-
-            void doWorkWhileWaitingForMessageManagerLock()
-            {
-                MessageManager::Lock::ScopedTryLockType mmLock (messageManagerLock);
-
-                while (! mmLock.isLocked())
-                {
-                     while (workQueue.size() > 0)
-                     {
-                          auto work = workQueue.pop();
-                          doSomeWork (work);
-                     }
-
-                     // this will block until we either have the lock or there is work
-                     mmLock.retryLock();
-                }
-
-                // we have the mmlock
-                // do some message manager stuff like resizing and painting components
-            }
-
-            // called from another thread
-            void addWorkToDo (Work work)
-            {
-                 queue.push (work);
-                 messageManagerLock.abort();
-            }
-
-            @returns false if waiting for a lock was aborted, true if the lock was acquired.
-            @see enter, abort, ScopedTryLock
-        */
-        bool tryEnter() const noexcept;
-
-        /** Releases the message manager lock.
-            @see enter, ScopedLock
-        */
-        void exit() const noexcept;
-
-        /** Unblocks a thread which is waiting in tryEnter
-            Call this method if you want to unblock a thread which is waiting for the
-            MessageManager lock in tryEnter.
-            This method does not have any effect on a thread waiting for a lock in enter.
-            @see tryEnter
-        */
-        void abort() const noexcept;
-
-        //==============================================================================
-        /** Provides the type of scoped lock to use with a CriticalSection. */
-        using ScopedLockType = GenericScopedLock<Lock>;
-
-        /** Provides the type of scoped unlocker to use with a CriticalSection. */
-        using ScopedUnlockType = GenericScopedUnlock<Lock>;
-
-        /** Provides the type of scoped try-locker to use with a CriticalSection. */
-        using ScopedTryLockType = GenericScopedTryLock<Lock>;
-
-    private:
-        struct BlockingMessage;
-        friend class ReferenceCountedObjectPtr<BlockingMessage>;
-
-        bool exclusiveTryAcquire (bool) const noexcept;
-        bool tryAcquire (bool) const noexcept;
-
-        void setAcquired (bool success) const noexcept;
-
-        //==============================================================================
-        // This mutex is used to make this lock type behave like a normal mutex.
-        // If multiple threads call enter() simultaneously, only one will succeed in gaining
-        // this mutex. The mutex is released again in exit().
-        mutable CriticalSection entryMutex;
-
-        // This mutex protects the other data members of the lock from concurrent access, which
-        // happens when the BlockingMessage calls setAcquired to indicate that the lock was gained.
-        mutable std::mutex mutex;
-        mutable ReferenceCountedObjectPtr<BlockingMessage> blockingMessage;
-        mutable std::condition_variable condvar;
-        mutable bool abortWait = false, acquired = false;
-    };
-
-    //==============================================================================
    #ifndef DOXYGEN
     // Internal methods - do not use!
     void deliverBroadcastMessage (const String&);
@@ -308,11 +167,9 @@ private:
     friend class MessageBase;
     class QuitMessage;
     friend class QuitMessage;
-    friend class MessageManagerLock;
 
     Atomic<int> quitMessagePosted { 0 }, quitMessageReceived { 0 };
     Thread::ThreadID messageThreadId;
-    Atomic<Thread::ThreadID> threadWithLock;
     mutable std::mutex messageThreadIdMutex;
 
     static bool postMessageToSystemQueue (MessageBase*);
@@ -323,125 +180,6 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MessageManager)
 };
 
-
-//==============================================================================
-/** Used to make sure that the calling thread has exclusive access to the message loop.
-
-    Because it's not thread-safe to call any of the Component or other UI classes
-    from threads other than the message thread, one of these objects can be used to
-    lock the message loop and allow this to be done. The message thread will be
-    suspended for the lifetime of the MessageManagerLock object, so create one on
-    the stack like this: @code
-    void MyThread::run()
-    {
-        someData = 1234;
-
-        const MessageManagerLock mmLock;
-        // the event loop will now be locked so it's safe to make a few calls..
-
-        myComponent->setBounds (newBounds);
-        myComponent->repaint();
-
-        // ..the event loop will now be unlocked as the MessageManagerLock goes out of scope
-    }
-    @endcode
-
-    Obviously be careful not to create one of these and leave it lying around, or
-    your app will grind to a halt!
-
-    MessageManagerLocks are re-entrant, so can be safely nested if the current thread
-    already has the lock.
-
-    Another caveat is that using this in conjunction with other CriticalSections
-    can create lots of interesting ways of producing a deadlock! In particular, if
-    your message thread calls stopThread() for a thread that uses these locks,
-    you'll get an (occasional) deadlock..
-
-    @see MessageManager, MessageManager::currentThreadHasLockedMessageManager
-
-    @tags{Events}
-*/
-class JUCE_API MessageManagerLock      : private Thread::Listener
-{
-public:
-    //==============================================================================
-    /** Tries to acquire a lock on the message manager.
-
-        The constructor attempts to gain a lock on the message loop, and the lock will be
-        kept for the lifetime of this object.
-
-        Optionally, you can pass a thread object here, and while waiting to obtain the lock,
-        this method will keep checking whether the thread has been given the
-        Thread::signalThreadShouldExit() signal. If this happens, then it will return
-        without gaining the lock. If you pass a thread, you must check whether the lock was
-        successful by calling lockWasGained(). If this is false, your thread is being told to
-        die, so you should take evasive action.
-
-        If you pass nullptr for the thread object, it will wait indefinitely for the lock - be
-        careful when doing this, because it's very easy to deadlock if your message thread
-        attempts to call stopThread() on a thread just as that thread attempts to get the
-        message lock.
-
-        If the calling thread already has the lock, nothing will be done, so it's safe and
-        quick to use these locks recursively.
-
-        E.g.
-        @code
-        void run()
-        {
-            ...
-
-            while (! threadShouldExit())
-            {
-                MessageManagerLock mml (Thread::getCurrentThread());
-
-                if (! mml.lockWasGained())
-                    return; // another thread is trying to kill us!
-
-                ..do some locked stuff here..
-            }
-
-            ..and now the MM is now unlocked..
-        }
-        @endcode
-
-    */
-    MessageManagerLock (Thread* threadToCheckForExitSignal = nullptr);
-
-    //==============================================================================
-    /** Releases the current thread's lock on the message manager.
-
-        Make sure this object is created and deleted by the same thread,
-        otherwise there are no guarantees what will happen!
-   */
-    ~MessageManagerLock() override;
-
-    //==============================================================================
-    /** Returns true if the lock was successfully acquired.
-        (See the constructor that takes a Thread for more info).
-    */
-    bool lockWasGained() const noexcept                     { return locked; }
-
-private:
-    //==============================================================================
-    MessageManager::Lock mmLock;
-    bool locked;
-
-    //==============================================================================
-    bool attemptLock (Thread*);
-    void exitSignalSent() override;
-
-    JUCE_DECLARE_NON_COPYABLE (MessageManagerLock)
-};
-
-//==============================================================================
-/** This macro is used to catch unsafe use of functions which expect to only be called
-    on the message thread, or when a MessageManagerLock is in place.
-    It will also fail if you try to use the function before the message manager has been
-    created, which could happen if you accidentally invoke it during a static constructor.
-*/
-#define JUCE_ASSERT_MESSAGE_MANAGER_IS_LOCKED \
-    jassert (juce::MessageManager::existsAndIsLockedByCurrentThread());
 
 /** This macro is used to catch unsafe use of functions which expect to only be called
     on the message thread.

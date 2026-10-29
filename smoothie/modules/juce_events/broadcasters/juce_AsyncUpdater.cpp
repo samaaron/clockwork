@@ -48,13 +48,11 @@ AsyncUpdater::AsyncUpdater()
 
 AsyncUpdater::~AsyncUpdater()
 {
-    // You're deleting this object with a background thread while there's an update
-    // pending on the main event thread - that's pretty dodgy threading, as the callback could
-    // happen after this destructor has finished. You should either use a MessageManagerLock while
-    // deleting this object, or find some other way to avoid such a race condition.
+    // An update still pending while another thread deletes this object can
+    // call back after the destructor: delete it on the message thread.
     jassert ((! isUpdatePending())
               || MessageManager::getInstanceWithoutCreating() == nullptr
-              || MessageManager::getInstanceWithoutCreating()->currentThreadHasLockedMessageManager());
+              || MessageManager::getInstanceWithoutCreating()->isThisTheMessageThread());
 
     activeMessage->shouldDeliver.set (0);
 }
@@ -79,7 +77,7 @@ void AsyncUpdater::cancelPendingUpdate() noexcept
 void AsyncUpdater::handleUpdateNowIfNeeded()
 {
     // This can only be called by the event thread.
-    JUCE_ASSERT_MESSAGE_MANAGER_IS_LOCKED
+    JUCE_ASSERT_MESSAGE_THREAD
 
     if (activeMessage->shouldDeliver.exchange (0) != 0)
         handleAsyncUpdate();
