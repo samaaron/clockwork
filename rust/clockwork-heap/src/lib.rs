@@ -782,7 +782,7 @@ pub unsafe extern "C" fn clockwork_heap_pool_check(pool: *const c_void) -> i32 {
         if (p.sl_bitmap[f] != 0) != (p.fl_bitmap & (1u32 << f) != 0) { return 6; }
         for l in 0..SL_COUNT {
             let head = p.heads[f][l];
-            if (!head.is_null()) != (p.sl_bitmap[f] & (1u32 << l) != 0) { return 6; }
+            if head.is_null() == (p.sl_bitmap[f] & (1u32 << l) != 0) { return 6; }
             let mut b = head;
             let mut back: *mut Block = core::ptr::null_mut();
             let mut steps = 0usize;
