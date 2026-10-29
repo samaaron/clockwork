@@ -74,6 +74,7 @@ ClockworkCommsSecret* read_secret() {
     return clockwork_comms_secret_from_bytes(bytes);
 }
 void osc_emit_noop(void*, int32_t, const uint8_t*, uint32_t) {}
+void osc_dropped_noop(void*, uint32_t) {}
 
 #ifdef CLOCKWORK_WITH_MIDI
 void midi_emit_noop(void*, int32_t, const uint8_t*, uint32_t) {}
@@ -102,7 +103,7 @@ int main(int argc, char** argv) {
     int control_port = argc > 1 ? std::atoi(argv[1]) : 4560;
     int loopback     = argc > 2 ? std::atoi(argv[2]) : 1;
 
-    ClockworkOsc* osc = clockwork_osc_create(nullptr, osc_emit_noop);
+    ClockworkOsc* osc = clockwork_osc_create(nullptr, osc_emit_noop, osc_dropped_noop);
     if (!osc) {
         std::fprintf(stderr, "clockwork-scheduler: failed to create OSC subsystem\n");
         return 1;

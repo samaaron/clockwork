@@ -165,7 +165,8 @@ export const MALLOC_BYTES_AFTER_BOOT = 61;   // bytes taken since then and still
 // both in the C++ struct and the SAB.
 export const EGRESS_FRAMES_UNDELIVERED = 62;
 export const CLOCK_ANCHORS = 63;
-export const SCHEDULER_LATE_DROPPED = 64;   // timed events dropped as later than the host allows   // times the engine's clock was anchored afresh since boot: its first block, back after being away, a new context
+export const SCHEDULER_LATE_DROPPED = 64;   // timed events dropped as later than the host allows
+export const CUES_DROPPED = 65;             // cues the cue port's rate limit dropped (native only: the web has no cue port)
 export const CTX_IN_BUFFER_CAPACITY = 80;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 81;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 82;        // Static from bufferConstants

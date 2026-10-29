@@ -173,6 +173,8 @@ export class MetricsReader {
       clockAnchors: m[MetricsOffsets.CLOCK_ANCHORS],
       // timed events dropped as later than the host allows (0 unless a host set a limit)
       engineSchedulerLateDropped: m[MetricsOffsets.SCHEDULER_LATE_DROPPED],
+      // cues the cue port's rate limit dropped (0 on the web, which has no cue port)
+      cuesDropped: m[MetricsOffsets.CUES_DROPPED],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)

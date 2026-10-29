@@ -16,6 +16,8 @@
 #include "clockwork_event_sink.h"
 #include "clockwork_sys.h"        // CLOCKWORK_REFUSED_*
 #include "clockwork_config.h"   // clockwork_log
+#include "shared_memory.h"      // PerformanceMetrics
+#include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
 #include <array>
@@ -48,9 +50,10 @@ bool argBool(osc::ReceivedMessage::const_iterator& it,
 }
 } // namespace
 
-void OscControl::init(OscEgress* egress) {
+void OscControl::init(OscEgress* egress, PerformanceMetrics* metrics) {
     mEgress = egress;
-    if (!mOsc) mOsc = clockwork_osc_create(this, &OscControl::emitCb);
+    mMetrics = metrics;
+    if (!mOsc) mOsc = clockwork_osc_create(this, &OscControl::emitCb, &OscControl::droppedCb);
 }
 
 void OscControl::shutdown() {
@@ -65,6 +68,11 @@ void OscControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t le
     if (!self->mEgress) return;
     if (kind == CLOCKWORK_OSC_EMIT_BROADCAST)
         self->mEgress->broadcastOscNotify(osc, len);
+}
+
+void OscControl::droppedCb(void* ctx, uint32_t n) {
+    auto* self = static_cast<OscControl*>(ctx);
+    if (self->mMetrics) self->mMetrics->cues_dropped.fetch_add(n, std::memory_order_relaxed);
 }
 
 void OscControl::applyCueConfig() {
@@ -184,6 +192,23 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
         } else if (std::strcmp(addr, CLOCKWORK_SYS("osc/cue-server/loopback")) == 0) {
             mLoopback = argBool(it, end, mLoopback);
             applyCueConfig();
+        } else if (std::strcmp(addr, CLOCKWORK_SYS("osc/cue-server/limit")) == 0) {
+            const int perSecond = argInt(it, end, -1);
+            const int perSender = argInt(it, end, -1);
+            if (perSecond < 0 || perSender < 0) {
+                if (mEgress) mEgress->refuse(token, data, size, "limit takes two ints: cues per second for the port and for each sender, 0 for none");
+                return true;
+            }
+            if (mOsc) clockwork_osc_set_limit(mOsc, perSecond, perSender);
+            // Answered once set: a client that sends cues right after knows
+            // the limit they meet.
+            std::array<char, 96> buf{};
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("osc/cue-server/limit.reply"))
+              << static_cast<osc::int32>(perSecond) << static_cast<osc::int32>(perSender)
+              << osc::EndMessage;
+            if (mEgress) mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                                        static_cast<uint32_t>(s.Size()));
         } else if (mEgress) {
             mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
         }

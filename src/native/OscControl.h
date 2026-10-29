@@ -20,10 +20,11 @@
 struct ClockworkOsc;       // rust/clockwork-osc-net/cpp/clockwork_osc.h
 class OscEgress;
 struct DrainCallCtx;
+struct PerformanceMetrics;
 
 class OscControl {
 public:
-    void init(OscEgress* egress);
+    void init(OscEgress* egress, PerformanceMetrics* metrics);
     void shutdown();
 
     // Handle one "/clockwork/osc/" control command off the audio thread (the control pass):
@@ -34,6 +35,10 @@ public:
     //   /clockwork/osc/cue-server/config <port:i> <loopback:i|T/F> <cues_on:i|T/F>
     //   /clockwork/osc/cue-server/cues-on  <i|T/F>   — toggle inbound cue forwarding
     //   /clockwork/osc/cue-server/loopback <i|T/F>   — loopback-only vs all interfaces
+    //   /clockwork/osc/cue-server/limit <per-second:i> <per-sender:i> — the cue port's rate
+    //       limit, 0 for none on that side (default 2000 and 1000); cues over it are
+    //       dropped and counted (PerformanceMetrics::cues_dropped). Answered to the
+    //       caller with limit.reply <per-second:i> <per-sender:i> once it is set.
     //   /clockwork/osc/notify/subscribe | /clockwork/osc/notify/unsubscribe
     // Returns true (always, for an "/clockwork/osc/" prefix).
     bool handleOscCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size);
@@ -42,6 +47,8 @@ private:
     // clockwork_osc emit callback (ctx = this): an /external-osc-cue push for inbound
     // external OSC. May fire on the cue server's recv thread.
     static void emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
+    // clockwork_osc dropped callback: n cues the rate limit dropped, counted.
+    static void droppedCb(void* ctx, uint32_t n);
     // Push the current (port, loopback, cues_on) to the subsystem (idempotent;
     // the Rust side only rebinds when the port/loopback actually change).
     void applyCueConfig();
@@ -58,6 +65,7 @@ private:
 #endif
 
     OscEgress* mEgress = nullptr;
+    PerformanceMetrics* mMetrics = nullptr;
     ClockworkOsc*     mOsc      = nullptr;
     int        mPort     = 0;      // cue port (0 = unbound)
     bool       mLoopback = true;   // loopback-only by default

@@ -21,6 +21,10 @@ pub use ffi::exercise;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod out;
 
+// The cue port's rate limit: two token buckets, the port's and each sender's.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod limit;
+
 // The command transports — UDS datagram, the TCP/UDS stream servers, the
 // Windows named pipe, and the SHM peer client — are NOT here any more. They
 // are a client's concern (an engine has no sockets; whoever embeds it opens

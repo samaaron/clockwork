@@ -53,7 +53,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 65 in use
+constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 66 in use
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -702,7 +702,11 @@ struct alignas(4) PerformanceMetrics {
     // any lateness and nothing is ever dropped for it). Not a want-of-room
     // drop: those are scheduler_queue_dropped.
     std::atomic<uint32_t> scheduler_late_dropped;    // 64
-    std::atomic<uint32_t> reserved[15];              // 65-79: room for what comes next, 0
+    // Cues the cue port's rate limit dropped (clockwork_osc_set_limit,
+    // /clockwork/osc/cue-server/limit): a sender over its rate, or the port
+    // over its own. 0 unless someone floods it.
+    std::atomic<uint32_t> cues_dropped;              // 65
+    std::atomic<uint32_t> reserved[14];              // 66-79: room for what comes next, 0
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -1271,6 +1275,7 @@ CLOCKWORK_ASSERT_METRIC(egress_frames_undelivered,       62);
 CLOCKWORK_ASSERT_METRIC(clock_drift_us,                  50);
 CLOCKWORK_ASSERT_METRIC(clock_anchors,                   63);
 CLOCKWORK_ASSERT_METRIC(scheduler_late_dropped,          64);
+CLOCKWORK_ASSERT_METRIC(cues_dropped,                    65);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
 // regions that follow (ClockworkClockState) are 8-byte aligned and read via

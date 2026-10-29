@@ -1162,7 +1162,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // control (forwarded to the NRT thread); outbound user OSC is
     // "/clockwork/osc/send" (immediate, or wrapped in "/clockwork/schedule" for
     // timed sends).
-    mOscControl.init(&mEgress);
+    mOscControl.init(&mEgress, mMetrics);
     mControlRoutes.add("osc/", &ClockworkEngine::routeTo<OscControl, &OscControl::handleOscCommand>, &mOscControl);
 #endif
 #if CLOCKWORK_HAS_PLUGIN_TRACKS

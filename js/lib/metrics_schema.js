@@ -159,6 +159,8 @@ export const METRICS_SCHEMA = {
     egressFramesUndelivered:      { offset: 62, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full. 0 in a healthy engine' },
     clockAnchors:                 { offset: 63, type: 'counter',  unit: 'count', description: 'Times the audio clock was re-anchored since boot' },
     engineSchedulerLateDropped:   { offset: 64, type: 'counter',  unit: 'count', description: 'Timed events dropped for coming due later than the host allows (schedulerLateLimitMs); 0 unless a host set a limit' },
+    // The cue port's rate limit (clockwork_osc_set_limit): counted by the cue server, which the web has none of.
+    cuesDropped:                  { offset: 65, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Cues the cue port\'s rate limit dropped: a sender over its rate, or the port over its own. 0 unless someone floods it' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -211,6 +213,7 @@ export const METRICS_SCHEMA = {
           { label: 'dropped',     tooltip: 'Messages refused on the way in', cells: [{ key: 'engineMessagesDropped', kind: 'error' }] },
           { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
           { label: 'undelivered', tooltip: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full', cells: [{ key: 'egressFramesUndelivered', kind: 'error' }] },
+          { label: 'cues dropped', tooltip: 'Cues the cue port\'s rate limit dropped: a sender over its rate, or the port over its own', cells: [{ key: 'cuesDropped', kind: 'error' }] },
           { label: 'clock',       tooltip: 'The difference between the audio clock and the wall clock (µs, signed) and number of times it was re-anchored since boot', cells: [{ key: 'clockDriftUs', format: 'signed' }, { text: ' µs', kind: 'muted' }, { sep: ' | ' }, { key: 'clockAnchors', kind: 'muted' }, { text: ' anchors', kind: 'muted' }] },
           { label: 'debug',       tooltip: COMPOSITES.debugCountBytes.description, cells: [{ key: 'debugMessagesReceived', kind: 'muted' }, { text: ' (' }, { key: 'debugBytesReceived', kind: 'muted', format: 'bytes' }, { text: ')' }] },
         ]

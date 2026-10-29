@@ -18,14 +18,20 @@
 //! emit callback (which may fire on a cue recv thread, so the host impl must be
 //! thread-safe). The subsystem owns its UDP sockets + recv threads and never
 //! touches the audio thread.
+//!
+//! The cue port needs no secret, so a rate limit ([`crate::limit`]) bounds
+//! what it forwards: [`DEFAULT_CUES_PER_SECOND`] for the port and
+//! [`DEFAULT_CUES_PER_SENDER`] for each address, changed by
+//! [`clockwork_osc_set_limit`]. A cue over the limit is dropped and counted
+//! through the dropped callback.
 
 use std::ffi::c_void;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -33,16 +39,29 @@ use clockwork_osc::{decode, decode_packet, encode, OscArg, OscMessage, OscPacket
 // Emit-callback shape + panic fence, shared across the subsystem C ABIs.
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST};
 
+use crate::limit::Limiter;
+
+/// The rate limit a new instance starts with: cues per second for the port
+/// and for each sender. 0 is no limit.
+pub const DEFAULT_CUES_PER_SECOND: u32 = 2000;
+pub const DEFAULT_CUES_PER_SENDER: u32 = 1000;
+
+/// Counts cues the rate limit dropped: `n` more, on a cue recv thread.
+pub type DroppedFn = extern "C" fn(ctx: *mut c_void, n: u32);
+
 // Process-wide cap on "dropped malformed inbound OSC" log lines, so a junk
 // flood can't spam the log.
 static MALFORMED_LOGGED: AtomicU32 = AtomicU32::new(0);
+// The same cap on "over the limit" lines.
+static LIMITED_LOGGED: AtomicU32 = AtomicU32::new(0);
 
-/// The host emit callback + opaque context, made Send/Sync so the cue recv
+/// The host callbacks + opaque context, made Send/Sync so the cue recv
 /// threads can hold a copy.
 #[derive(Clone, Copy)]
 struct Host {
     ctx: *mut c_void,
     emit: EmitFn,
+    dropped: DroppedFn,
 }
 // SAFETY: `ctx` is an opaque token this crate never dereferences, only hands
 // back to `emit`, and the C++ engine's contract is that it outlives the
@@ -54,6 +73,18 @@ unsafe impl Sync for Host {}
 impl Host {
     fn emit(&self, osc: &[u8]) {
         (self.emit)(self.ctx, EMIT_BROADCAST, osc.as_ptr(), osc.len() as u32);
+    }
+
+    // `n` cues from `ip` dropped by the limit: counted, and said in the log
+    // the first few times.
+    fn dropped(&self, ip: IpAddr, n: u32, limit: &Mutex<Limiter>) {
+        (self.dropped)(self.ctx, n);
+        if LIMITED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
+            let (port, sender) = limit.lock().unwrap_or_else(PoisonError::into_inner).rates();
+            clockwork_log::log!(
+                "[osc] cue port: dropping cues from {ip}: over the limit ({port}/s for the port, {sender}/s a sender)"
+            );
+        }
     }
 }
 
@@ -92,6 +123,8 @@ pub struct ClockworkOsc {
     out: Option<crate::out::OscSender>,
     cues_on: Arc<AtomicBool>,
     cue: Mutex<CueState>,
+    // The rate limit, shared with the recv threads.
+    limit: Arc<Mutex<Limiter>>,
 }
 
 // A dual-stack-safe IPv6 UDP bind: only_v6(true) so it coexists with the IPv4
@@ -116,24 +149,22 @@ fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>, ex
 
 const CUES_EXPOSED: &str = "anyone who reaches it can send cues";
 
-// Re-frame one inbound message as /external-osc-cue and emit it. Recurses into
-// bundles, forwarding each contained message.
-fn forward(emit: &mut impl FnMut(&[u8]), ip: &str, port: i32, pkt: &OscPacket) {
+// The messages in a packet, bundles flattened in order.
+fn flatten<'a>(pkt: &'a OscPacket, out: &mut Vec<&'a OscMessage>) {
     match pkt {
-        OscPacket::Message(m) => {
-            let mut args = Vec::with_capacity(m.args.len() + 3);
-            args.push(OscArg::Str(ip.to_string()));
-            args.push(OscArg::Int(port));
-            args.push(OscArg::Str(m.addr.clone()));
-            args.extend(m.args.iter().cloned());
-            emit(&encode("/external-osc-cue", &args));
-        }
-        OscPacket::Bundle(b) => {
-            for el in &b.elements {
-                forward(emit, ip, port, el);
-            }
-        }
+        OscPacket::Message(m) => out.push(m),
+        OscPacket::Bundle(b) => b.elements.iter().for_each(|el| flatten(el, out)),
     }
+}
+
+// One inbound message re-framed as /external-osc-cue <ip> <port> <address> <args...>.
+fn reframe(ip: &str, port: i32, m: &OscMessage) -> Vec<u8> {
+    let mut args = Vec::with_capacity(m.args.len() + 3);
+    args.push(OscArg::Str(ip.to_string()));
+    args.push(OscArg::Int(port));
+    args.push(OscArg::Str(m.addr.clone()));
+    args.extend(m.args.iter().cloned());
+    encode("/external-osc-cue", &args)
 }
 
 /// What the fuzzer does to a datagram from anyone who can reach the cue port:
@@ -144,20 +175,12 @@ fn forward(emit: &mut impl FnMut(&[u8]), ip: &str, port: i32, pkt: &OscPacket) {
 /// rust/fuzz's `cue_reframe` target calls this under libFuzzer; the corpus
 /// test calls it over corpus/ on every push.
 pub fn exercise(data: &[u8]) {
-    fn flatten<'a>(pkt: &'a OscPacket, out: &mut Vec<&'a OscMessage>) {
-        match pkt {
-            OscPacket::Message(m) => out.push(m),
-            OscPacket::Bundle(b) => b.elements.iter().for_each(|el| flatten(el, out)),
-        }
-    }
     let Some(pkt) = decode_packet(data) else { return };
     let mut messages = Vec::new();
     flatten(&pkt, &mut messages);
 
     for (ip, port) in [("203.0.113.7", 57120), ("2001:db8::7", 65535)] {
-        let mut cues = Vec::new();
-        forward(&mut |osc: &[u8]| cues.push(osc.to_vec()), ip, port, &pkt);
-        assert_eq!(cues.len(), messages.len(), "not one cue per message");
+        let cues: Vec<Vec<u8>> = messages.iter().map(|m| reframe(ip, port, m)).collect();
         for (cue, m) in cues.iter().zip(&messages) {
             let cue = decode(cue).expect("a cue decodes");
             assert_eq!(cue.addr, "/external-osc-cue");
@@ -172,7 +195,13 @@ pub fn exercise(data: &[u8]) {
     }
 }
 
-fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, cues_on: Arc<AtomicBool>, host: Host) {
+fn run_cue_server(
+    socket: UdpSocket,
+    stop: Arc<AtomicBool>,
+    cues_on: Arc<AtomicBool>,
+    host: Host,
+    limit: Arc<Mutex<Limiter>>,
+) {
     // Timed read so the loop wakes to check `stop`; ~0% idle CPU.
     let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
     let mut buf = vec![0u8; 65536];
@@ -180,21 +209,43 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, cues_on: Arc<AtomicB
         match socket.recv_from(&mut buf) {
             Ok((n, src)) => {
                 // Drain regardless, but only forward when cue reception is on.
-                if cues_on.load(Ordering::Relaxed) {
-                    match decode_packet(&buf[..n]) {
-                        // Fence the codec/emit so a panic drops one datagram rather
-                        // than silently killing the recv thread (server bound-but-deaf).
-                        Some(pkt) => no_unwind((), || {
-                            let (ip, port) = (src.ip().to_string(), src.port() as i32);
-                            forward(&mut |osc: &[u8]| host.emit(osc), &ip, port, &pkt)
-                        }),
-                        // Don't silently swallow junk — surface the first few so a
-                        // misbehaving external sender is debuggable (cap to avoid a
-                        // flood).
-                        None => {
-                            if MALFORMED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-                                clockwork_log::log!("[osc] dropped malformed inbound OSC from {} ({n} bytes)", src.ip());
-                            }
+                if !cues_on.load(Ordering::Relaxed) {
+                    continue;
+                }
+                // A datagram costs one cue before it is decoded: a flood over
+                // the limit is dropped without the decoding.
+                let (ip, now) = (src.ip(), Instant::now());
+                if limit.lock().unwrap_or_else(PoisonError::into_inner).take(ip, now, 1) == 0 {
+                    host.dropped(ip, 1, &limit);
+                    continue;
+                }
+                match decode_packet(&buf[..n]) {
+                    // Fence the codec/emit so a panic drops one datagram rather
+                    // than silently killing the recv thread (server bound-but-deaf).
+                    Some(pkt) => no_unwind((), || {
+                        let mut messages = Vec::new();
+                        flatten(&pkt, &mut messages);
+                        // A bundle's further messages cost one each; what the
+                        // limit does not grant is dropped from the end.
+                        let total = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+                        let mut granted = total.min(1);
+                        if total > 1 {
+                            granted += limit.lock().unwrap_or_else(PoisonError::into_inner).take(ip, now, total - 1);
+                        }
+                        let (ip_text, port) = (ip.to_string(), i32::from(src.port()));
+                        for m in &messages[..granted as usize] {
+                            host.emit(&reframe(&ip_text, port, m));
+                        }
+                        if granted < total {
+                            host.dropped(ip, total - granted, &limit);
+                        }
+                    }),
+                    // Don't silently swallow junk — surface the first few so a
+                    // misbehaving external sender is debuggable (cap to avoid a
+                    // flood).
+                    None => {
+                        if MALFORMED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
+                            clockwork_log::log!("[osc] dropped malformed inbound OSC from {ip} ({n} bytes)");
                         }
                     }
                 }
@@ -248,10 +299,11 @@ impl ClockworkOsc {
         let stop = Arc::new(AtomicBool::new(false));
         let mut joins = Vec::new();
         for (fam, sock) in socks {
-            let (t_stop, t_on, t_host) = (stop.clone(), self.cues_on.clone(), self.host);
+            let (t_stop, t_on, t_host, t_limit) =
+                (stop.clone(), self.cues_on.clone(), self.host, self.limit.clone());
             if let Ok(j) = std::thread::Builder::new()
                 .name("ss-osc-cue".into())
-                .spawn(move || run_cue_server(sock, t_stop, t_on, t_host))
+                .spawn(move || run_cue_server(sock, t_stop, t_on, t_host, t_limit))
             {
                 joins.push(j);
                 clockwork_log::log!("[osc] cue server listening on port {port} {fam} ({scope})");
@@ -266,26 +318,54 @@ impl ClockworkOsc {
     fn send(&self, host: &str, port: u16, data: &[u8]) -> bool {
         self.out.as_ref().is_some_and(|out| out.send(host, port, data))
     }
+
+    fn set_limit(&self, per_second: u32, per_sender: u32) {
+        self.limit.lock().unwrap_or_else(PoisonError::into_inner).set(per_second, per_sender, Instant::now());
+        clockwork_log::log!("[osc] cue port limit: {per_second}/s for the port, {per_sender}/s a sender (0 = none)");
+    }
 }
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
 /// Create the OSC subsystem. Returns an owning pointer (null on failure); free
-/// with [`clockwork_osc_destroy`]. `ctx`/`emit` must stay valid until then.
+/// with [`clockwork_osc_destroy`]. `ctx`, `emit` and `dropped` must stay
+/// valid until then.
 #[no_mangle]
-pub extern "C" fn clockwork_osc_create(ctx: *mut c_void, emit: EmitFn) -> *mut ClockworkOsc {
+pub extern "C" fn clockwork_osc_create(ctx: *mut c_void, emit: EmitFn, dropped: DroppedFn) -> *mut ClockworkOsc {
     no_unwind(std::ptr::null_mut(), || {
         let out = crate::out::OscSender::new();
         if out.is_none() {
             clockwork_log::log!("[osc] failed to open any outbound socket");
         }
         Box::into_raw(Box::new(ClockworkOsc {
-            host: Host { ctx, emit },
+            host: Host { ctx, emit, dropped },
             out,
             cues_on: Arc::new(AtomicBool::new(false)),
             cue: Mutex::new(CueState { server: None, port: 0, loopback: true }),
+            limit: Arc::new(Mutex::new(Limiter::new(
+                DEFAULT_CUES_PER_SECOND,
+                DEFAULT_CUES_PER_SENDER,
+                Instant::now(),
+            ))),
         }))
     })
+}
+
+/// Set the cue port's rate limit: `per_second` cues for the port, `per_sender`
+/// for each address; 0 or less is no limit on that side. Off the audio thread.
+///
+/// # Safety
+/// `handle` is null or a live handle from [`clockwork_osc_create`].
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_osc_set_limit(handle: *mut ClockworkOsc, per_second: i32, per_sender: i32) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: a live handle, per the contract.
+    let me = unsafe { &*handle };
+    no_unwind((), || {
+        me.set_limit(u32::try_from(per_second).unwrap_or(0), u32::try_from(per_sender).unwrap_or(0));
+    });
 }
 
 /// Destroy the subsystem: stops the cue recv threads and closes the sockets.
@@ -360,16 +440,38 @@ mod tests {
     use std::time::{Duration, Instant};
     use clockwork_osc::{decode, encode, OscArg, OscMessage};
 
-    // Capture emitted /external-osc-cue packets via the C emit callback.
-    struct Collector(Mutex<Vec<Vec<u8>>>);
+    // Capture emitted /external-osc-cue packets and the dropped count via the
+    // C callbacks.
+    struct Collector(Mutex<Vec<Vec<u8>>>, AtomicU32);
+    impl Collector {
+        fn new() -> Box<Self> {
+            Box::new(Collector(Mutex::new(Vec::new()), AtomicU32::new(0)))
+        }
+        fn dropped(&self) -> u32 {
+            self.1.load(Ordering::Relaxed)
+        }
+    }
     extern "C" fn collect(ctx: *mut c_void, _kind: i32, osc: *const u8, len: u32) {
         // SAFETY: `ctx` is the boxed `Collector` each test passes and keeps
         // alive until after destroy; `osc`/`len` is the callback's contract.
         let (c, bytes) = unsafe { (&*ctx.cast::<Collector>(), slice::from_raw_parts(osc, len as usize)) };
         c.0.lock().unwrap().push(bytes.to_vec());
     }
+    extern "C" fn count_dropped(ctx: *mut c_void, n: u32) {
+        // SAFETY: as for `collect`.
+        let c = unsafe { &*ctx.cast::<Collector>() };
+        c.1.fetch_add(n, Ordering::Relaxed);
+    }
     // The C ABI, with the test's contract stated once: `h` is a live handle
     // from `clockwork_osc_create`, destroyed exactly once at the end.
+    fn create(c: &Collector) -> *mut ClockworkOsc {
+        let ctx = c as *const Collector as *mut c_void;
+        clockwork_osc_create(ctx, collect, count_dropped)
+    }
+    fn set_limit(h: *mut ClockworkOsc, per_second: i32, per_sender: i32) {
+        // SAFETY: see above.
+        unsafe { clockwork_osc_set_limit(h, per_second, per_sender) };
+    }
     fn configure(h: *mut ClockworkOsc, port: u16, loopback: bool, cues_on: bool) {
         // SAFETY: see above.
         unsafe { clockwork_osc_configure(h, port as i32, loopback as i32, cues_on as i32) };
@@ -413,9 +515,8 @@ mod tests {
     #[test]
     fn cue_server_on_every_interface_is_logged() {
         clockwork_log::capture::install();
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
+        let collector = Collector::new();
+        let h = create(&collector);
         let port = free_port();
         configure(h, port, false, true);
         assert!(clockwork_log::capture::logged(&format!("cue server bound to 0.0.0.0:{port}: {CUES_EXPOSED}")));
@@ -426,9 +527,8 @@ mod tests {
     // /external-osc-cue carrying the correct sender family.
     #[test]
     fn inbound_ipv4_and_ipv6() {
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
+        let collector = Collector::new();
+        let h = create(&collector);
         let have_v6 = v6_loopback_available();
 
         let port = free_port();
@@ -465,9 +565,8 @@ mod tests {
     // OUTBOUND: clockwork_osc_send delivers to an IPv4 and an IPv6 listener.
     #[test]
     fn outbound_ipv4_and_ipv6() {
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
+        let collector = Collector::new();
+        let h = create(&collector);
         let inner = encode("/bar", &[OscArg::Int(7)]);
         let mut buf = [0u8; 1024];
 
@@ -497,9 +596,8 @@ mod tests {
     // as a cue regardless of which family localhost resolves to.
     #[test]
     fn self_loop_localhost() {
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
+        let collector = Collector::new();
+        let h = create(&collector);
         let port = free_port();
         configure(h, port, true, true);
         std::thread::sleep(Duration::from_millis(150));
@@ -519,9 +617,8 @@ mod tests {
     // received but dropped (no cue); flipping it on (no rebind) resumes cues.
     #[test]
     fn cues_on_gates_forwarding() {
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
+        let collector = Collector::new();
+        let h = create(&collector);
         let port = free_port();
         configure(h, port, true, false);
         std::thread::sleep(Duration::from_millis(150)); // recv threads bind (and drop)
@@ -546,4 +643,95 @@ mod tests {
         drop(collector);
     }
 
+    // A bound cue server, forwarding, with the given limit.
+    fn serving(c: &Collector, per_second: i32, per_sender: i32) -> (*mut ClockworkOsc, u16) {
+        let h = create(c);
+        let port = free_port();
+        configure(h, port, true, true);
+        set_limit(h, per_second, per_sender);
+        // The first datagram a case sends arrives, not lost to a bind still
+        // in progress on the recv thread.
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let probe = encode("/probe", &[]);
+        assert!(wait_until(|| {
+            let _ = s.send_to(&probe, ("127.0.0.1", port));
+            !cues(c).is_empty()
+        }));
+        // Probes still in flight land before the counts start from zero.
+        let mut seen = cues(c).len();
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let now = cues(c).len();
+            if now == seen {
+                break;
+            }
+            seen = now;
+        }
+        c.0.lock().unwrap().clear();
+        c.1.store(0, Ordering::Relaxed);
+        set_limit(h, per_second, per_sender); // the probes' tokens back
+        (h, port)
+    }
+
+    // A flood over the limit: the limit's worth gets through, the rest is
+    // dropped and counted, and every datagram sent is one or the other.
+    #[test]
+    fn a_flood_is_cut_to_the_limit_and_the_rest_counted() {
+        clockwork_log::capture::install();
+        let collector = Collector::new();
+        let (h, port) = serving(&collector, 3, 3);
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let msg = encode("/flood", &[OscArg::Int(1)]);
+        let started = Instant::now();
+        for _ in 0..40 {
+            s.send_to(&msg, ("127.0.0.1", port)).unwrap();
+        }
+        assert!(wait_until(|| cues(&collector).len() as u32 + collector.dropped() == 40),
+                "every datagram is a cue or a counted drop: {} cues, {} dropped",
+                cues(&collector).len(), collector.dropped());
+        let elapsed = started.elapsed().as_secs_f64();
+        let got = cues(&collector).len() as f64;
+        assert!(got >= 3.0, "the limit's own burst gets through: {got}");
+        assert!(got <= 3.0 + 3.0 * elapsed + 1.0, "{got} cues in {elapsed:.2}s is over 3/s");
+        assert!(clockwork_log::capture::logged("cue port: dropping cues from 127.0.0.1: over the limit (3/s for the port, 3/s a sender)"));
+        destroy(h);
+    }
+
+    // A bundle's messages are cues one by one: a sender's limit cuts the
+    // bundle, and the cut is counted.
+    #[test]
+    fn a_bundle_is_cut_to_what_the_sender_has_left() {
+        let collector = Collector::new();
+        let (h, port) = serving(&collector, 0, 5);
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bundle = clockwork_osc::encode_packet(&OscPacket::Bundle(clockwork_osc::OscBundle {
+            timetag: 1,
+            elements: (0..8).map(|i| OscPacket::Message(OscMessage { addr: format!("/m{i}"), args: vec![] })).collect(),
+        }));
+        s.send_to(&bundle, ("127.0.0.1", port)).unwrap();
+        assert!(wait_until(|| cues(&collector).len() as u32 + collector.dropped() == 8));
+        let got = cues(&collector);
+        assert_eq!(got.len(), 5);
+        assert_eq!(collector.dropped(), 3);
+        // The first five, in order.
+        for (i, cue) in got.iter().enumerate() {
+            assert_eq!(cue.args.get(2).and_then(|a| a.as_str()), Some(format!("/m{i}").as_str()));
+        }
+        destroy(h);
+    }
+
+    // 0 0 is no limit: a flood is forwarded whole.
+    #[test]
+    fn no_limit_forwards_everything() {
+        let collector = Collector::new();
+        let (h, port) = serving(&collector, 0, 0);
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let msg = encode("/all", &[]);
+        for _ in 0..200 {
+            s.send_to(&msg, ("127.0.0.1", port)).unwrap();
+        }
+        assert!(wait_until(|| cues(&collector).len() == 200), "{} of 200 arrived", cues(&collector).len());
+        assert_eq!(collector.dropped(), 0);
+        destroy(h);
+    }
 }

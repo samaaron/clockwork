@@ -215,6 +215,71 @@ TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs
     CHECK(oscSinkOpenTo(target));
 }
 
+// The cue port's rate limit: a flood from one sender is cut to the limit,
+// every cue over it is counted in cues_dropped, and `limit 0 0` turns the
+// limit off.
+TEST_CASE("OSC cue server rate limit cuts a flood and counts what it dropped", "[osc]") {
+    EngineFixture fx;
+    const auto& m = fx.engine().getMetrics();
+    const int cuePort = test_udp::freeLoopbackPort();
+
+    osc_test::Builder cfg;
+    cfg.begin("/clockwork/osc/cue-server/config")
+        << static_cast<osc::int32>(cuePort) << static_cast<osc::int32>(1) << static_cast<osc::int32>(1);
+    fx.send(cfg.end());
+    auto setLimit = [&](int perSecond, int perSender) {
+        osc_test::Builder b;
+        b.begin("/clockwork/osc/cue-server/limit")
+            << static_cast<osc::int32>(perSecond) << static_cast<osc::int32>(perSender);
+        fx.send(b.end());
+        OscReply ack;
+        REQUIRE(fx.waitForReply("/clockwork/osc/cue-server/limit.reply", ack));
+        CHECK(ack.parsed().argInt(0) == perSecond);
+        CHECK(ack.parsed().argInt(1) == perSender);
+    };
+    auto cuesHeard = [&] {
+        uint32_t n = 0;
+        for (const auto& r : fx.allReplies()) if (r.address == "/external-osc-cue") ++n;
+        return n;
+    };
+
+    test_udp::Socket sender;
+    REQUIRE(sender.bound());
+    osc_test::Builder ext;
+    ext.begin("/flood") << static_cast<osc::int32>(1);
+    const osc_test::Packet pkt = ext.end();
+
+    // The cue server binds on its recv thread: probe until one lands, let the
+    // probes in flight land too, then start the counts afresh.
+    OscReply r;
+    REQUIRE(fx.pollUntil([&] {
+        sender.send("127.0.0.1", cuePort, pkt.ptr(), pkt.size());
+        return fx.waitForReply("/external-osc-cue", r, 50);
+    }, 4000));
+    fx.waitForBlocks(20);
+    fx.clearReplies();
+    const uint32_t droppedBefore = m.cues_dropped.load();
+
+    setLimit(3, 3);
+    const auto started = std::chrono::steady_clock::now();
+    for (int i = 0; i < 40; ++i) sender.send("127.0.0.1", cuePort, pkt.ptr(), pkt.size());
+    REQUIRE(fx.pollUntil([&] { return cuesHeard() + (m.cues_dropped.load() - droppedBefore) == 40u; }, 10000));
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    const uint32_t heard = cuesHeard();
+    INFO(heard << " cues in " << elapsed << " s with a limit of 3/s");
+    CHECK(heard >= 3u);                                   // the limit's own burst
+    CHECK(static_cast<double>(heard) <= 3.0 + 3.0 * elapsed + 1.0);
+    CHECK(m.cues_dropped.load() - droppedBefore == 40u - heard);
+
+    // Off: the whole flood arrives and nothing more is counted.
+    fx.clearReplies();
+    const uint32_t droppedAfter = m.cues_dropped.load();
+    setLimit(0, 0);
+    for (int i = 0; i < 100; ++i) sender.send("127.0.0.1", cuePort, pkt.ptr(), pkt.size());
+    REQUIRE(fx.pollUntil([&] { return cuesHeard() == 100u; }, 10000));
+    CHECK(m.cues_dropped.load() == droppedAfter);
+}
+
 // Self-loop: a client that targets its own cue port — the engine sends to
 // its OWN cue port and must receive it back as a cue. "localhost"
 // resolves in the cue socket's family, so it lands rather than going astray.
