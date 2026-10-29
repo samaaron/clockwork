@@ -9,6 +9,14 @@
 //! body, so every push proves the whole corpus is still harmless; the nightly
 //! run (`.github/workflows/security.yml`) starts libFuzzer from the same
 //! files. A dev-dependency only: nothing here is in the staticlib.
+//!
+//! The replay has to be built the way the fuzzer builds, with `--cfg fuzzing`
+//! (`RUSTFLAGS="--cfg fuzzing" cargo test ... corpus`). A dependency may
+//! skip a check under that cfg so the fuzzer can get past it: symphonia's
+//! FLAC reader skips the frame header checksum. A crasher found behind such a
+//! check is refused at the check by an ordinary test build, so its replay
+//! passes whether or not the bug behind it is fixed. Every replay says how it
+//! was built, and the replay job counts the lines.
 
 use std::path::Path;
 
@@ -16,13 +24,22 @@ use std::path::Path;
 /// through `body`, dotfiles skipped; how many there were, so a test can
 /// refuse an empty corpus rather than pass over nothing.
 pub fn replay(manifest_dir: &str, body: fn(&[u8])) -> usize {
+    println!(
+        "corpus replay built as the fuzzer builds: {}",
+        if cfg!(fuzzing) { "yes" } else { "no" }
+    );
     let root = Path::new(manifest_dir).join("corpus");
     let mut n = 0;
     for dir in ["seeds", "regressions"] {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
         for entry in entries {
             let path = entry.expect("a corpus entry").path();
-            if path.file_name().is_some_and(|f| f.to_string_lossy().starts_with('.')) {
+            if path
+                .file_name()
+                .is_some_and(|f| f.to_string_lossy().starts_with('.'))
+            {
                 continue;
             }
             body(&std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));

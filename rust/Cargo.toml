@@ -95,6 +95,9 @@ lto = true
 # operation, and every unsafe fn documents its contract.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
+# The corpus replay is built with `--cfg fuzzing`, as the fuzzer builds
+# (clockwork-corpus, and the replay job in .github/workflows/security.yml).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 # The MSRV is 1.85, Debian trixie's rustc (the distro build compiles these
@@ -104,3 +107,9 @@ manual_is_multiple_of = "allow"
 undocumented_unsafe_blocks = "warn"
 missing_safety_doc = "warn"
 ptr_as_ptr = "warn"
+
+# symphonia-bundle-flac 0.6.1 with one change of clockwork's, carried until
+# upstream releases it: external/symphonia-bundle-flac/CLOCKWORK-CHANGES.md.
+# The fuzz workspace (fuzz/Cargo.toml) carries the same table.
+[patch.crates-io]
+symphonia-bundle-flac = { path = "../external/symphonia-bundle-flac" }

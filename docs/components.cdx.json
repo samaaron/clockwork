@@ -240,6 +240,54 @@
     },
     {
       "type": "library",
+      "bom-ref": "symphonia-bundle-flac",
+      "name": "symphonia-bundle-flac",
+      "version": "0.6.1",
+      "author": "Philip Deljanov",
+      "licenses": [
+        {
+          "expression": "MPL-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/symphonia-bundle-flac@0.6.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pdeljanov/Symphonia"
+        }
+      ],
+      "pedigree": {
+        "notes": "The crates.io package with one change, replacing it through [patch.crates-io] in rust/Cargo.toml and rust/fuzz/Cargo.toml: see external/symphonia-bundle-flac/CLOCKWORK-CHANGES.md."
+      },
+      "properties": [
+        {
+          "name": "clockwork:path",
+          "value": "external/symphonia-bundle-flac"
+        },
+        {
+          "name": "clockwork:modified",
+          "value": "yes"
+        },
+        {
+          "name": "clockwork:upstream_commit",
+          "value": "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+        },
+        {
+          "name": "clockwork:version_file",
+          "value": "external/symphonia-bundle-flac/Cargo.toml"
+        },
+        {
+          "name": "clockwork:version_pattern",
+          "value": "^version = \"([^\"]+)\""
+        },
+        {
+          "name": "clockwork:targets",
+          "value": "native,web"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "erl_nif",
       "name": "Erlang/OTP erl_nif headers",
       "version": "2.17",

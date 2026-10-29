@@ -48,3 +48,7 @@ path = "fuzz_targets/audio_decode.rs"
 test = false
 doc = false
 bench = false
+
+# As the main workspace: external/symphonia-bundle-flac/CLOCKWORK-CHANGES.md.
+[patch.crates-io]
+symphonia-bundle-flac = { path = "../../external/symphonia-bundle-flac" }

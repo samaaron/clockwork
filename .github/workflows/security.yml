@@ -83,12 +83,21 @@ jobs:
         with:
           workspaces: rust
       - name: The Rust targets, over their corpora, as the crates' own tests
+        # Built as the fuzzer builds. A dependency may skip a check under
+        # cfg(fuzzing) so the fuzzer gets past it (symphonia's FLAC reader
+        # skips the frame header checksum), and a crasher found behind that
+        # check would be refused at it by an ordinary test build: its replay
+        # would pass whether or not the bug was fixed.
+        env:
+          RUSTFLAGS: --cfg fuzzing
         run: |
           cd rust
-          cargo test -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode corpus -- --nocapture 2>&1 | tee ../replay-rust.log
+          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode corpus -- --nocapture 2>&1 | tee ../replay-rust.log
           # Three corpus tests ran, and said so: a crate whose corpus test
           # vanished would otherwise pass this step in silence.
           test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 3
+          # And each said it was built as the fuzzer builds.
+          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 3
       - name: The C and C++ targets, over their corpora, under ASan and UBSan
         run: |
           CC=gcc CXX=g++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
