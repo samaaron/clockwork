@@ -51,7 +51,11 @@ session replaces, is not carried.
   session replaces; and Inter-App Audio in the iOS driver (the play head,
   host MIDI, host icon and app switch), which Apple deprecated in iOS 13 for
   AUv3 and which was the driver's only use of `AudioPlayHead` and
-  `MidiMessage`.
+  `MidiMessage`; and from `juce_core` and `juce_events` the classes nothing
+  in the four modules uses: `AllocationHooks`, `Span`, `EnumHelpers`,
+  `CallbackListenerList`, `ArrayAllocationBase`, `Random` (its two callers
+  use `std::random_device`), `Optional` (`std::optional`), `Result`,
+  `MessageManager::Lock`, `MessageManagerLock` and `Thread::Listener`.
 - `scripts/check-drivers.sh` compiles Smoothie alone for iOS (device and
   simulator), Android (with an NDK) and Bela (against `check/bela/Bela.h`, a
   stand-in for the SDK's header); the ci.yml `drivers` job runs the iOS and

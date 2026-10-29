@@ -138,7 +138,7 @@
     {
       "type": "library",
       "bom-ref": "juce",
-      "name": "JUCE (juce_core, juce_events, juce_audio_basics, juce_audio_devices)",
+      "name": "Smoothie (JUCE 7.0.12: juce_core, juce_events, juce_audio_basics, juce_audio_devices)",
       "version": "7.0.12",
       "author": "Raw Material Software",
       "licenses": [
@@ -153,7 +153,7 @@
         }
       ],
       "pedigree": {
-        "notes": "Smoothie: a maintained fork of JUCE 7's four ISC-licensed modules, the native audio-device layer. See smoothie/README.md."
+        "notes": "Smoothie: a maintained fork of JUCE 7's four ISC-licensed modules, the native audio-device layer, with the unused classes removed and the device interface moved to std::string. Looked up by the upstream commit, so JUCE advisories still match. See smoothie/README.md."
       },
       "properties": [
         {

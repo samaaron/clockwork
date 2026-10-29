@@ -71,10 +71,10 @@ test("the vendored code a default build compiles in, and only that", () => {
   }
   for (const t of TARGETS.filter((t) => t !== "web")) {
     const n = names(t);
-    for (const native of ["JUCE", "midir", "CLAP", "VST"]) assert.ok(n.has(native), `${t}: ${native}`);
+    for (const native of ["Smoothie", "midir", "CLAP", "VST"]) assert.ok(n.has(native), `${t}: ${native}`);
   }
   const web = names("web");
-  for (const notWeb of ["JUCE", "midir", "CLAP", "VST"]) assert.ok(!web.has(notWeb), `web lists ${notWeb}`);
+  for (const notWeb of ["Smoothie", "midir", "CLAP", "VST"]) assert.ok(!web.has(notWeb), `web lists ${notWeb}`);
 });
 
 test("the crates follow the platform", () => {
@@ -134,7 +134,7 @@ test("a clean scan: every component queried, forks said to be forks, no open adv
   const distinct = new Set(TARGETS.flatMap((t) => docs[t].components.map((c) => `${c.name}@${c.version}`)));
   assert.equal(queried.length, distinct.size, "one query per distinct component");
   assert.ok(queried.some((q) => q.commit === "4f43011b96eb0636104cb3e433894cda98243626"), "JUCE's fork point is queried");
-  assert.ok(lines.some((l) => l.startsWith("JUCE") && l.includes("fork of 4f43011")), "Smoothie is reported as a fork of JUCE");
+  assert.ok(lines.some((l) => l.startsWith("Smoothie") && l.includes("fork of 4f43011")), "Smoothie is reported as a fork of JUCE");
   assert.ok(lines.some((l) => l.startsWith("CLAP") && l.includes("commit 195b42a")), "an unmodified copy is reported by its commit");
   assert.match(lines.at(-1), /0 advisories, 0 accepted by docs\/vex.cdx.json, 0 open/);
 });
