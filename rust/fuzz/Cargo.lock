@@ -89,9 +89,7 @@ version = "0.1.0"
 dependencies = [
  "clockwork-log",
  "clockwork-osc",
- "libc",
  "socket2",
- "windows-sys",
 ]
 
 [[package]]

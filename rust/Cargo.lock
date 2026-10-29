@@ -223,9 +223,7 @@ dependencies = [
  "clockwork-corpus",
  "clockwork-log",
  "clockwork-osc",
- "libc",
  "socket2",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
