@@ -55,7 +55,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # ubuntu-24.04, not -latest: on 2026-10-29 -latest became 26.04
+          # ("resolute"), which apt.llvm.org does not serve yet.
+          - os: ubuntu-24.04
             platform: linux-x64
           - os: macos-latest
             platform: macos-arm64
@@ -267,7 +269,9 @@ jobs:
   # Node to execute JS actions, which an i386 rootfs cannot load.
   native-linux-x86:
     name: native (linux-x86)
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not -latest: on the 26.04 image (2026-10-29) apt inside
+    # the i386 container reached no Debian mirror and installed nothing.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
