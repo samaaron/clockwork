@@ -55,3 +55,21 @@ clockwork_fuzz_target(fuzz_audio_encode fuzz_audio_encode.cpp audio_decode_stubs
     ${CLOCKWORK_SRC}/clockwork_audio_file.cpp
     ${CLOCKWORK_SRC}/flac_encoder.cpp)
 target_include_directories(fuzz_audio_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../rust/clockwork-audio-decode/cpp)
+
+# Ableton Link's wire: the session discovery messages, the ping and pong
+# measurement messages and the Link Audio messages, parsed by upstream's own
+# code at the same pin and with the same patches the engine builds (the
+# fetch is shared, external/fetch-link.cmake). Anyone on the network segment
+# can send any of them. The fetch needs the network, so a build without it
+# can leave Link out.
+option(CLOCKWORK_FUZZ_LINK "Build the Link wire target (fetches Link)" ON)
+if(CLOCKWORK_FUZZ_LINK)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../external/fetch-link.cmake)
+    clockwork_fetch_link()
+    clockwork_fuzz_target(fuzz_link_wire fuzz_link_wire.cpp)
+    target_link_libraries(fuzz_link_wire PRIVATE Ableton::Link)
+    # Writes one well-formed message of each kind as the seeds the target
+    # starts from (corpus/link_wire/seeds), with upstream's own encoders.
+    add_executable(link_wire_seeds link_wire_seeds.cpp)
+    target_link_libraries(link_wire_seeds PRIVATE Ableton::Link)
+endif()
