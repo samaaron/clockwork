@@ -13,6 +13,7 @@ set(PATCHES
     "${LINK_PATCH_DIR}/link-peer-enumeration.patch"
     "${LINK_PATCH_DIR}/link-monotonic-commit-timestamp.patch"
     "${LINK_PATCH_DIR}/link-linkaudio-teardown-race.patch"
+    "${LINK_PATCH_DIR}/link-string-bounds.patch"
 )
 
 find_package(Git REQUIRED)

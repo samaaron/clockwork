@@ -381,6 +381,12 @@
             "diff": {
               "url": "external/link-peer-enumeration.patch"
             }
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "external/link-string-bounds.patch"
+            }
           }
         ]
       },

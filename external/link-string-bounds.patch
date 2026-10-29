@@ -1,0 +1,44 @@
+Bound a wire string to the bytes that are there.
+
+Deserialize<std::string> reads a 32-bit length off the wire and builds the
+string from that many bytes without checking them against the end of the
+datagram, so a peer announcement whose name claims a length of gigabytes
+reads past the socket buffer. Every other deserializer in the file refuses a
+short input with a range_error; this one now does the same.
+
+Reachable by anyone on the network segment, through the Link Audio
+messenger: a peer announcement carries the peer's name (PeerInfo) and its
+channels' names (ChannelAnnouncements). The session discovery messages
+carry no strings. Found by clockwork's Link wire fuzz target
+(test/fuzz/fuzz_link_wire.cpp) in its first three minutes, 2026-10-28;
+the input is corpus/link_wire/regressions/crash-0ae7e413.
+
+One-file patch:
+  - include/ableton/discovery/NetworkByteStreamSerializable.hpp
+
+Wire protocol unchanged. A message that was previously an out-of-bounds
+read is now refused as malformed, which every receiver already handles.
+
+Pinned to Link-4.1.1.
+
+diff --git a/include/ableton/discovery/NetworkByteStreamSerializable.hpp b/include/ableton/discovery/NetworkByteStreamSerializable.hpp
+index 1ca8fdd..b67861c 100644
+--- a/include/ableton/discovery/NetworkByteStreamSerializable.hpp
++++ b/include/ableton/discovery/NetworkByteStreamSerializable.hpp
+@@ -335,7 +335,15 @@ struct Deserialize<std::string>
+   {
+     const auto result = Deserialize<uint32_t>::fromNetworkByteStream(
+       std::move(bytesBegin), std::move(bytesEnd));
+-    const auto endIt = std::next(result.second, result.first);
++    // CLOCKWORK PATCH: the length came off the wire; hold it to the bytes
++    // that are there, as every other deserializer here does, rather than
++    // reading past the datagram.
++    using ItDiff = typename std::iterator_traits<It>::difference_type;
++    if (std::distance(result.second, bytesEnd) < static_cast<ItDiff>(result.first))
++    {
++      throw std::range_error("String length exceeds the bytes available");
++    }
++    const auto endIt = std::next(result.second, static_cast<ItDiff>(result.first));
+     return std::make_pair(std::string(result.second, endIt), endIt);
+   }
+ };
