@@ -47,8 +47,15 @@ session replaces, is not carried.
   builds are macOS / Windows / Linux today, while the iOS, Android and Bela
   drivers themselves are kept; `AudioSourcePlayer` and `AudioTransportSource`
   (`juce_audio_devices/sources`), which Clockwork never uses: it drives the
-  device through its own callback; and `AudioDeviceManager`, which the device
-  session replaces.
+  device through its own callback; `AudioDeviceManager`, which the device
+  session replaces; and Inter-App Audio in the iOS driver (the play head,
+  host MIDI, host icon and app switch), which Apple deprecated in iOS 13 for
+  AUv3 and which was the driver's only use of `AudioPlayHead` and
+  `MidiMessage`.
+- `scripts/check-drivers.sh` compiles Smoothie alone for iOS (device and
+  simulator), Android (with an NDK) and Bela (against `check/bela/Bela.h`, a
+  stand-in for the SDK's header); the ci.yml `drivers` job runs it on every
+  push.
 - The `juce` namespace and per-file copyright headers are retained, as the ISC
   licence requires. Smoothie is the subproject/target name, not a rename.
 

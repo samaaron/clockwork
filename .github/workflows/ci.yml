@@ -284,6 +284,48 @@ jobs:
             i386/debian:bookworm \
             bash scripts/ci-linux-x86.sh all
 
+  # ---------------------------------------------------------------- drivers --
+  # Compile Smoothie's iOS, Android and Bela drivers (scripts/check-drivers.sh).
+  # Build only: none of them can run on a runner.
+  drivers:
+    name: drivers (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: ios
+            targets: 2
+          - os: ubuntu-latest
+            name: bela
+            targets: 1
+          - os: ubuntu-latest
+            name: android
+            targets: 1
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libasound2-dev
+
+      - name: Compile the drivers
+        shell: bash
+        run: |
+          # The Ubuntu image carries an NDK; the Bela row hides it so each
+          # Linux row builds one target.
+          if [ "${{ matrix.name }}" = android ]; then
+            export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          else
+            unset ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME
+          fi
+          scripts/check-drivers.sh build-drivers | tee drivers.log
+          grep -q "check-drivers: ${{ matrix.targets }} target(s) built" drivers.log
+
   # ---------------------------------------------------------- configurations --
   # The build options the native matrix leaves at their defaults.
   configurations:

@@ -285,7 +285,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         if (category == AVAudioSessionCategoryPlayAndRecord)
         {
             options |= AVAudioSessionCategoryOptionDefaultToSpeaker
-                     | AVAudioSessionCategoryOptionAllowBluetooth
+                     | AVAudioSessionCategoryOptionAllowBluetoothHFP
                      | AVAudioSessionCategoryOptionAllowAirPlay;
 
             if (@available (iOS 10.0, *))
@@ -471,7 +471,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
                             << ", targetBufferSize: " << targetBufferSize);
 
         setAudioSessionActive (true);
-        setAudioSessionCategory (requestedInputChannels > 0 ? AVAudioSessionCategoryPlayAndRecord
+        setAudioSessionCategory (! requestedInputChannels.isZero() ? AVAudioSessionCategoryPlayAndRecord
                                                             : AVAudioSessionCategoryPlayback);
         channelData.reconfigure (requestedInputChannels, requestedOutputChannels);
         updateHardwareInfo (true);
@@ -558,191 +558,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
     }
 
     //==============================================================================
-    class PlayHead final : public AudioPlayHead
-    {
-    public:
-        explicit PlayHead (Pimpl& implIn) : impl (implIn) {}
-
-        bool canControlTransport() override                    { return canControlTransportImpl(); }
-
-        void transportPlay (bool shouldSartPlaying) override
-        {
-            if (! canControlTransport())
-                return;
-
-            HostCallbackInfo callbackInfo;
-            impl.fillHostCallbackInfo (callbackInfo);
-
-            Boolean hostIsPlaying = NO;
-            [[maybe_unused]] OSStatus err = callbackInfo.transportStateProc2 (callbackInfo.hostUserData,
-                                                                              &hostIsPlaying,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr);
-
-            jassert (err == noErr);
-
-            if (hostIsPlaying != shouldSartPlaying)
-                impl.handleAudioTransportEvent (kAudioUnitRemoteControlEvent_TogglePlayPause);
-        }
-
-        void transportRecord (bool shouldStartRecording) override
-        {
-            if (! canControlTransport())
-                return;
-
-            HostCallbackInfo callbackInfo;
-            impl.fillHostCallbackInfo (callbackInfo);
-
-            Boolean hostIsRecording = NO;
-            [[maybe_unused]] OSStatus err = callbackInfo.transportStateProc2 (callbackInfo.hostUserData,
-                                                                              nullptr,
-                                                                              &hostIsRecording,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr,
-                                                                              nullptr);
-            jassert (err == noErr);
-
-            if (hostIsRecording != shouldStartRecording)
-                impl.handleAudioTransportEvent (kAudioUnitRemoteControlEvent_ToggleRecord);
-        }
-
-        void transportRewind() override
-        {
-            if (canControlTransport())
-                impl.handleAudioTransportEvent (kAudioUnitRemoteControlEvent_Rewind);
-        }
-
-        Optional<PositionInfo> getPosition() const override
-        {
-            if (! canControlTransportImpl())
-                return {};
-
-            HostCallbackInfo callbackInfo;
-            impl.fillHostCallbackInfo (callbackInfo);
-
-            if (callbackInfo.hostUserData == nullptr)
-                return {};
-
-            Boolean hostIsPlaying               = NO;
-            Boolean hostIsRecording             = NO;
-            Float64 hostCurrentSampleInTimeLine = 0;
-            Boolean hostIsCycling               = NO;
-            Float64 hostCycleStartBeat          = 0;
-            Float64 hostCycleEndBeat            = 0;
-            auto transportErr = callbackInfo.transportStateProc2 (callbackInfo.hostUserData,
-                                                                  &hostIsPlaying,
-                                                                  &hostIsRecording,
-                                                                  nullptr,
-                                                                  &hostCurrentSampleInTimeLine,
-                                                                  &hostIsCycling,
-                                                                  &hostCycleStartBeat,
-                                                                  &hostCycleEndBeat);
-            if (transportErr == kAUGraphErr_CannotDoInCurrentContext)
-                return {};
-
-            jassert (transportErr == noErr);
-
-            PositionInfo result;
-
-            result.setTimeInSamples ((int64) hostCurrentSampleInTimeLine);
-            result.setIsPlaying     (hostIsPlaying);
-            result.setIsRecording   (hostIsRecording);
-            result.setIsLooping     (hostIsCycling);
-            result.setLoopPoints    (LoopPoints { hostCycleStartBeat, hostCycleEndBeat });
-            result.setTimeInSeconds ((double) *result.getTimeInSamples() / impl.sampleRate);
-
-            Float64 hostBeat = 0;
-            Float64 hostTempo = 0;
-            [[maybe_unused]] auto batErr = callbackInfo.beatAndTempoProc (callbackInfo.hostUserData,
-                                                                          &hostBeat,
-                                                                          &hostTempo);
-            jassert (batErr == noErr);
-
-            result.setPpqPosition (hostBeat);
-            result.setBpm         (hostTempo);
-
-            Float32 hostTimeSigNumerator = 0;
-            UInt32 hostTimeSigDenominator = 0;
-            Float64 hostCurrentMeasureDownBeat = 0;
-            [[maybe_unused]] auto timeErr = callbackInfo.musicalTimeLocationProc (callbackInfo.hostUserData,
-                                                                                  nullptr,
-                                                                                  &hostTimeSigNumerator,
-                                                                                  &hostTimeSigDenominator,
-                                                                                  &hostCurrentMeasureDownBeat);
-            jassert (timeErr == noErr);
-
-            result.setPpqPositionOfLastBarStart (hostCurrentMeasureDownBeat);
-            result.setTimeSignature (TimeSignature { (int) hostTimeSigNumerator, (int) hostTimeSigDenominator });
-
-            result.setFrameRate (AudioPlayHead::fpsUnknown);
-
-            return result;
-        }
-
-    private:
-        bool canControlTransportImpl() const { return impl.interAppAudioConnected; }
-
-        Pimpl& impl;
-    };
-
-    //==============================================================================
-   #if JUCE_MODULE_AVAILABLE_juce_graphics
-    JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wdeprecated-declarations")
-    Image getIcon (int size)
-    {
-       #if TARGET_OS_MACCATALYST
-        if (@available (macCatalyst 14.0, *))
-       #endif
-        {
-            if (interAppAudioConnected)
-            {
-                if (UIImage* hostUIImage = AudioOutputUnitGetHostIcon (audioUnit, (float) size))
-                    return juce_createImageFromUIImage (hostUIImage);
-            }
-        }
-
-        return {};
-    }
-    JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-   #endif
-
-    void switchApplication()
-    {
-        if (! interAppAudioConnected)
-            return;
-
-        CFURLRef hostUrl;
-        UInt32 dataSize = sizeof (hostUrl);
-        OSStatus err = AudioUnitGetProperty (audioUnit,
-                                             kAudioUnitProperty_PeerURL,
-                                             kAudioUnitScope_Global,
-                                             0,
-                                             &hostUrl,
-                                             &dataSize);
-        if (err == noErr)
-        {
-            if (@available (iOS 10.0, *))
-            {
-                [[UIApplication sharedApplication] openURL: (NSURL*) hostUrl
-                                                   options: @{}
-                                         completionHandler: nil];
-
-                return;
-            }
-
-            JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wdeprecated-declarations")
-            [[UIApplication sharedApplication] openURL: (NSURL*) hostUrl];
-            JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-        }
-    }
-
-    //==============================================================================
     void invokeAudioDeviceErrorCallback (const String& reason)
     {
         const ScopedLock sl (callbackLock);
@@ -811,53 +626,11 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
 
         switch (propertyID)
         {
-            case kAudioUnitProperty_IsInterAppConnected:
-                handleInterAppAudioConnectionChange();
-                return;
             case kAudioUnitProperty_StreamFormat:
                 handleStreamFormatChange();
                 return;
             default:
                 jassertfalse;
-        }
-    }
-
-    void handleInterAppAudioConnectionChange()
-    {
-        UInt32 connected;
-        UInt32 dataSize = sizeof (connected);
-        [[maybe_unused]] OSStatus err = AudioUnitGetProperty (audioUnit, kAudioUnitProperty_IsInterAppConnected,
-                                                              kAudioUnitScope_Global, 0, &connected, &dataSize);
-        jassert (err == noErr);
-
-        JUCE_IOS_AUDIO_LOG ("handleInterAppAudioConnectionChange: " << (connected ? "connected"
-                                                                                  : "disconnected"));
-
-        if (connected != interAppAudioConnected)
-        {
-            const ScopedLock myScopedLock (callbackLock);
-
-            interAppAudioConnected = connected;
-
-            UIApplicationState appstate = [UIApplication sharedApplication].applicationState;
-            bool inForeground = (appstate != UIApplicationStateBackground);
-
-            if (interAppAudioConnected || inForeground)
-            {
-                setAudioSessionActive (true);
-                AudioOutputUnitStart (audioUnit);
-
-                if (callback != nullptr)
-                    callback->audioDeviceAboutToStart (&owner);
-            }
-            else if (! inForeground)
-            {
-                AudioOutputUnitStop (audioUnit);
-                setAudioSessionActive (false);
-
-                if (callback != nullptr)
-                    callback->audioDeviceStopped();
-            }
         }
     }
 
@@ -978,43 +751,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         if (audioUnit == nullptr)
             return false;
 
-       #if JucePlugin_Enable_IAA
-        AudioComponentDescription appDesc;
-        appDesc.componentType = JucePlugin_IAAType;
-        appDesc.componentSubType = JucePlugin_IAASubType;
-        appDesc.componentManufacturer = JucePlugin_ManufacturerCode;
-        appDesc.componentFlags = 0;
-        appDesc.componentFlagsMask = 0;
-        OSStatus err = AudioOutputUnitPublish (&appDesc,
-                                               CFSTR (JucePlugin_IAAName),
-                                               JucePlugin_VersionCode,
-                                               audioUnit);
-
-        // This assert will be hit if the Inter-App Audio entitlement has not
-        // been enabled, or the description being published with
-        // AudioOutputUnitPublish is different from any in the AudioComponents
-        // array in this application's .plist file.
-        jassert (err == noErr);
-
-        err = AudioUnitAddPropertyListener (audioUnit,
-                                            kAudioUnitProperty_IsInterAppConnected,
-                                            dispatchAudioUnitPropertyChange,
-                                            this);
-        jassert (err == noErr);
-
-        AudioOutputUnitMIDICallbacks midiCallbacks;
-        midiCallbacks.userData = this;
-        midiCallbacks.MIDIEventProc = midiEventCallback;
-        midiCallbacks.MIDISysExProc = midiSysExCallback;
-        err = AudioUnitSetProperty (audioUnit,
-                                    kAudioOutputUnitProperty_MIDICallbacks,
-                                    kAudioUnitScope_Global,
-                                    0,
-                                    &midiCallbacks,
-                                    sizeof (midiCallbacks));
-        jassert (err == noErr);
-       #endif
-
         if (channelData.areInputChannelsAvailable())
         {
             const UInt32 one = 1;
@@ -1076,26 +812,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
         AudioUnitAddPropertyListener (audioUnit, kAudioUnitProperty_StreamFormat, dispatchAudioUnitPropertyChange, this);
 
         return true;
-    }
-
-    void fillHostCallbackInfo (HostCallbackInfo& callbackInfo)
-    {
-        zerostruct (callbackInfo);
-        UInt32 dataSize = sizeof (HostCallbackInfo);
-        [[maybe_unused]] OSStatus err = AudioUnitGetProperty (audioUnit,
-                                                              kAudioUnitProperty_HostCallbacks,
-                                                              kAudioUnitScope_Global,
-                                                              0,
-                                                              &callbackInfo,
-                                                              &dataSize);
-        jassert (err == noErr);
-    }
-
-    void handleAudioTransportEvent (AudioUnitRemoteControlEvent event)
-    {
-        [[maybe_unused]] OSStatus err = AudioUnitSetProperty (audioUnit, kAudioOutputUnitProperty_RemoteControlToHost,
-                                                              kAudioUnitScope_Global, 0, &event, sizeof (event));
-        jassert (err == noErr);
     }
 
     // If the routing is set to go through the receiver (i.e. the speaker, but quiet), this re-routes it
@@ -1178,30 +894,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
                                                  AudioUnitScope scope, AudioUnitElement element)
     {
         static_cast<Pimpl*> (data)->handleAudioUnitPropertyChange (unit, propertyID, scope, element);
-    }
-
-    static double getTimestampForMIDI()
-    {
-        return Time::getMillisecondCounter() / 1000.0;
-    }
-
-    static void midiEventCallback (void *client, UInt32 status, UInt32 data1, UInt32 data2, UInt32)
-    {
-        return static_cast<Pimpl*> (client)->handleMidiMessage (MidiMessage ((int) status,
-                                                                             (int) data1,
-                                                                             (int) data2,
-                                                                             getTimestampForMIDI()));
-    }
-
-    static void midiSysExCallback (void *client, const UInt8 *data, UInt32 length)
-    {
-        return static_cast<Pimpl*> (client)->handleMidiMessage (MidiMessage (data, (int) length, getTimestampForMIDI()));
-    }
-
-    void handleMidiMessage (MidiMessage msg)
-    {
-        if (messageCollector != nullptr)
-            messageCollector->addMessageToQueue (msg);
     }
 
     struct IOChannelData
@@ -1369,10 +1061,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
     Array<double> availableSampleRates;
     Array<int> availableBufferSizes;
 
-    bool interAppAudioConnected = false;
-
-    MidiMessageCollector* messageCollector = nullptr;
-
     WeakReference<iOSAudioIODeviceType> deviceType;
     iOSAudioIODevice& owner;
 
@@ -1389,7 +1077,6 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
     Float64 lastSampleTime;
     unsigned int lastNumFrames;
     int xrun;
-    PlayHead playhead { *this };
 
     JUCE_DECLARE_NON_COPYABLE (Pimpl)
 };
@@ -1402,7 +1089,7 @@ iOSAudioIODevice::iOSAudioIODevice (iOSAudioIODeviceType* ioDeviceType, const St
 }
 
 //==============================================================================
-String iOSAudioIODevice::open (const ChannelMask& inChans, const ChannelMask& outChans,
+std::string iOSAudioIODevice::open (const ChannelMask& inChans, const ChannelMask& outChans,
                                double requestedSampleRate, int requestedBufferSize)
 {
     return pimpl->open (inChans, outChans, requestedSampleRate, requestedBufferSize);
@@ -1423,7 +1110,7 @@ bool iOSAudioIODevice::isOpen()                                     { return pim
 std::string iOSAudioIODevice::getLastError()                        { return pimpl->lastError.toStdString(); }
 
 std::vector<std::string> iOSAudioIODevice::getOutputChannelNames() { return toStdStrings (pimpl->channelData.outputs->hardwareChannelNames); }
-std::vector<std::string> iOSAudioIODevice::getInputChannelNames()  { return toStdStrings ($1); }
+std::vector<std::string> iOSAudioIODevice::getInputChannelNames()  { return toStdStrings (pimpl->channelData.inputs->hardwareChannelNames); }
 
 int iOSAudioIODevice::getDefaultBufferSize()                        { return pimpl->defaultBufferSize; }
 int iOSAudioIODevice::getCurrentBufferSizeSamples()                 { return pimpl->bufferSize; }
@@ -1439,15 +1126,6 @@ int iOSAudioIODevice::getInputLatencyInSamples()                    { return rou
 int iOSAudioIODevice::getOutputLatencyInSamples()                   { return roundToInt (pimpl->sampleRate * [AVAudioSession sharedInstance].outputLatency); }
 int iOSAudioIODevice::getXRunCount() const noexcept                 { return pimpl->xrun; }
 AudioWorkgroup iOSAudioIODevice::getWorkgroup() const               { return pimpl->workgroup; }
-
-void iOSAudioIODevice::setMidiMessageCollector (MidiMessageCollector* collector) { pimpl->messageCollector = collector; }
-AudioPlayHead* iOSAudioIODevice::getAudioPlayHead() const           { return &pimpl->playhead; }
-
-bool iOSAudioIODevice::isInterAppAudioConnected() const             { return pimpl->interAppAudioConnected; }
-#if JUCE_MODULE_AVAILABLE_juce_graphics
-Image iOSAudioIODevice::getIcon (int size)                          { return pimpl->getIcon (size); }
-#endif
-void iOSAudioIODevice::switchApplication()                          { return pimpl->switchApplication(); }
 
 //==============================================================================
 iOSAudioIODeviceType::iOSAudioIODeviceType()

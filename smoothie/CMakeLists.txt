@@ -6,6 +6,18 @@
 # compatible: `modules/` is the exported include root, so existing
 # `#include <juce_core/juce_core.h>` lines resolve unchanged.
 
+# Builds on its own too (`cmake -S smoothie -B <dir>`): scripts/check-drivers.sh
+# compiles the iOS, Android and Bela drivers that way.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.22)
+    project(smoothie C CXX)
+    if(APPLE)
+        enable_language(OBJCXX)
+    endif()
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
+
 add_library(smoothie STATIC)
 
 set(_smoothy_modules juce_core juce_events juce_audio_basics juce_audio_devices)
@@ -43,7 +55,16 @@ target_compile_definitions(smoothie PUBLIC
     $<$<NOT:$<CONFIG:Debug>>:NDEBUG=1>
 )
 
-if(APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # iOS has no Cocoa or IOKit: the session is AVFoundation's, the app is UIKit's.
+    target_link_libraries(smoothie PUBLIC
+        "-framework Foundation"
+        "-framework UIKit"
+        "-framework AVFoundation"
+        "-framework Accelerate"
+        "-framework CoreAudio"
+        "-framework AudioToolbox")
+elseif(APPLE)
     # Framework lists from the vendored modules' metadata blocks:
     # core: Cocoa Foundation IOKit Security | audio_basics: Accelerate |
     # audio_devices: CoreAudio AudioToolbox
@@ -58,6 +79,11 @@ if(APPLE)
 elseif(WIN32)
     # MSVC: the modules pull their platform libs via #pragma comment(lib,...).
     target_compile_definitions(smoothie PUBLIC _UNICODE UNICODE NOMINMAX)
+elseif(ANDROID)
+    # OpenSL ES, which the NDK carries. Oboe (JUCE_USE_ANDROID_OBOE) is a
+    # library of its own and is not fetched until an Android host needs it.
+    target_link_libraries(smoothie PUBLIC OpenSLES log android)
+    target_compile_definitions(smoothie PUBLIC JUCE_USE_ANDROID_OBOE=0 JUCE_USE_ANDROID_OPENSLES=1)
 elseif(UNIX)
     # core metadata: rt dl pthread | audio_devices metadata: alsa
     find_package(Threads REQUIRED)
@@ -67,6 +93,12 @@ elseif(UNIX)
     # JACK + PipeWire backends are dlopen'd at runtime — compile-time flags
     # only, no link dependency.
     target_compile_definitions(smoothie PUBLIC JUCE_JACK=1)
+    # The Bela driver, against the SDK's Bela.h on the include path: the
+    # board's, or check/bela's stand-in for a compile check.
+    option(SMOOTHIE_BELA "Compile the Bela driver (needs Bela.h on the include path)" OFF)
+    if(SMOOTHIE_BELA)
+        target_compile_definitions(smoothie PUBLIC JUCE_BELA=1)
+    endif()
 
     # Smoothie's own PipeWire driver (worklet/smoothie_pipewire.cpp). Only
     # libpipewire-0.3's headers are needed, and only at build time; without

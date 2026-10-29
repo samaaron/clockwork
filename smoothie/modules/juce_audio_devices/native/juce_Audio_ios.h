@@ -66,17 +66,6 @@ public:
 
     AudioWorkgroup getWorkgroup() const override;
 
-    //==============================================================================
-    void setMidiMessageCollector (MidiMessageCollector*);
-    AudioPlayHead* getAudioPlayHead() const;
-
-    //==============================================================================
-    bool isInterAppAudioConnected() const;
-   #if JUCE_MODULE_AVAILABLE_juce_graphics
-    Image getIcon (int size);
-   #endif
-    void switchApplication();
-
 private:
     //==============================================================================
     iOSAudioIODevice (iOSAudioIODeviceType*, const String&, const String&);

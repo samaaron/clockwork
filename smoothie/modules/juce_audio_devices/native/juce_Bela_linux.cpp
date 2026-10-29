@@ -112,7 +112,7 @@ public:
 
         if (Bela_initAudio (&settings, this) != 0 || ! isBelaOpen)
         {
-            lastError = "Bela_initAutio failed";
+            lastError = "Bela_initAudio failed";
             return lastError.toStdString();
         }
 
@@ -182,7 +182,7 @@ public:
                 }
                 else
                 {
-                    lastError = "Bela_StartAudio failed";
+                    lastError = "Bela_startAudio failed";
                     callback->audioDeviceError (lastError.toStdString());
                 }
             }
@@ -335,8 +335,6 @@ private:
 
     HeapBlock<const float*> channelInBuffer;
     HeapBlock<float*> channelOutBuffer;
-
-    bool includeAnalogSupport;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BelaAudioIODevice)
 };
