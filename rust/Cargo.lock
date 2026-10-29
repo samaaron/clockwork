@@ -220,6 +220,7 @@ dependencies = [
 name = "clockwork-osc-net"
 version = "0.1.0"
 dependencies = [
+ "clockwork-corpus",
  "clockwork-log",
  "clockwork-osc",
  "libc",

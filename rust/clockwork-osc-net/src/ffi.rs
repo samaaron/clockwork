@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use clockwork_osc::{decode_packet, encode, OscArg, OscPacket};
+use clockwork_osc::{decode, decode_packet, encode, OscArg, OscMessage, OscPacket};
 // Emit-callback shape + panic fence, shared across the subsystem C ABIs.
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST};
 
@@ -116,7 +116,7 @@ fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>) {
 
 // Re-frame one inbound message as /external-osc-cue and emit it. Recurses into
 // bundles, forwarding each contained message.
-fn forward(host: &Host, ip: &str, port: i32, pkt: &OscPacket) {
+fn forward(emit: &mut impl FnMut(&[u8]), ip: &str, port: i32, pkt: &OscPacket) {
     match pkt {
         OscPacket::Message(m) => {
             let mut args = Vec::with_capacity(m.args.len() + 3);
@@ -124,12 +124,48 @@ fn forward(host: &Host, ip: &str, port: i32, pkt: &OscPacket) {
             args.push(OscArg::Int(port));
             args.push(OscArg::Str(m.addr.clone()));
             args.extend(m.args.iter().cloned());
-            host.emit(&encode("/external-osc-cue", &args));
+            emit(&encode("/external-osc-cue", &args));
         }
         OscPacket::Bundle(b) => {
             for el in &b.elements {
-                forward(host, ip, port, el);
+                forward(emit, ip, port, el);
             }
+        }
+    }
+}
+
+/// What the fuzzer does to a datagram from anyone who can reach the cue port:
+/// decode it as the cue server does and re-frame it, from an IPv4 and an IPv6
+/// sender. Each message in it, bundles flattened in order, must come out as
+/// exactly one `/external-osc-cue` that decodes to the sender, its port, the
+/// message's address and the message's arguments, encoded as they came in.
+/// rust/fuzz's `cue_reframe` target calls this under libFuzzer; the corpus
+/// test calls it over corpus/ on every push.
+pub fn exercise(data: &[u8]) {
+    fn flatten<'a>(pkt: &'a OscPacket, out: &mut Vec<&'a OscMessage>) {
+        match pkt {
+            OscPacket::Message(m) => out.push(m),
+            OscPacket::Bundle(b) => b.elements.iter().for_each(|el| flatten(el, out)),
+        }
+    }
+    let Some(pkt) = decode_packet(data) else { return };
+    let mut messages = Vec::new();
+    flatten(&pkt, &mut messages);
+
+    for (ip, port) in [("203.0.113.7", 57120), ("2001:db8::7", 65535)] {
+        let mut cues = Vec::new();
+        forward(&mut |osc: &[u8]| cues.push(osc.to_vec()), ip, port, &pkt);
+        assert_eq!(cues.len(), messages.len(), "not one cue per message");
+        for (cue, m) in cues.iter().zip(&messages) {
+            let cue = decode(cue).expect("a cue decodes");
+            assert_eq!(cue.addr, "/external-osc-cue");
+            let [OscArg::Str(from), OscArg::Int(from_port), OscArg::Str(addr), args @ ..] =
+                cue.args.as_slice()
+            else {
+                panic!("a cue does not start with the sender, its port and the address");
+            };
+            assert_eq!((from.as_str(), *from_port, addr), (ip, port, &m.addr));
+            assert_eq!(encode(addr, args), encode(&m.addr, &m.args), "the arguments changed");
         }
     }
 }
@@ -147,7 +183,8 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, cues_on: Arc<AtomicB
                         // Fence the codec/emit so a panic drops one datagram rather
                         // than silently killing the recv thread (server bound-but-deaf).
                         Some(pkt) => no_unwind((), || {
-                            forward(&host, &src.ip().to_string(), src.port() as i32, &pkt)
+                            let (ip, port) = (src.ip().to_string(), src.port() as i32);
+                            forward(&mut |osc: &[u8]| host.emit(osc), &ip, port, &pkt)
                         }),
                         // Don't silently swallow junk — surface the first few so a
                         // misbehaving external sender is debuggable (cap to avoid a

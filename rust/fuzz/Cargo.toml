@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Sam Aaron
 #
 # Fuzz targets for the Rust parsers that read bytes from outside the process:
-# the OSC codec every network transport hands its datagrams to, the framing
-# of the TCP and Unix stream transports, the "/clockwork/schedule" wire form,
-# and the sample-file decoders. Run with cargo-fuzz on nightly:
+# the OSC codec every network transport hands its datagrams to, the cue
+# server's re-framing of what it receives, the framing of the TCP and Unix
+# stream transports, the "/clockwork/schedule" wire form, and the sample-file
+# decoders. Run with cargo-fuzz on nightly:
 #
 #   cargo +nightly fuzz run osc_packet --fuzz-dir rust/fuzz
 #
@@ -29,6 +30,7 @@ clockwork-osc = { path = "../clockwork-osc" }
 clockwork-schedule = { path = "../clockwork-schedule", default-features = false, features = ["parse"] }
 clockwork-audio-decode = { path = "../clockwork-audio-decode" }
 clockwork-comms = { path = "../clockwork-comms" }
+clockwork-osc-net = { path = "../clockwork-osc-net" }
 
 [[bin]]
 name = "osc_packet"
@@ -54,6 +56,13 @@ bench = false
 [[bin]]
 name = "stream_frames"
 path = "fuzz_targets/stream_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cue_reframe"
+path = "fuzz_targets/cue_reframe.rs"
 test = false
 doc = false
 bench = false

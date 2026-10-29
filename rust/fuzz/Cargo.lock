@@ -70,6 +70,7 @@ dependencies = [
  "clockwork-audio-decode",
  "clockwork-comms",
  "clockwork-osc",
+ "clockwork-osc-net",
  "clockwork-schedule",
  "libfuzzer-sys",
 ]

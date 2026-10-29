@@ -12,6 +12,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
+#[cfg(not(target_arch = "wasm32"))]
+pub use ffi::exercise;
 
 // Outbound UDP, on its own so more than one subsystem can send: the cue
 // server's C ABI (`clockwork_osc_send`) and the event sinks (`src/clockwork_event_sink.h`)
@@ -48,4 +50,13 @@ pub fn note_bind(what: &str, local: std::net::SocketAddr) {
 pub fn recv_retryable(e: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod corpus {
+    #[test]
+    fn every_corpus_file_is_exercised() {
+        let n = clockwork_corpus::replay(env!("CARGO_MANIFEST_DIR"), super::exercise);
+        assert!(n > 0, "no corpus under rust/clockwork-osc-net/corpus");
+    }
 }
