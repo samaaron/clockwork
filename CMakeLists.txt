@@ -1340,6 +1340,8 @@ endif()
 if(CLOCKWORK_STANDALONE AND CLOCKWORK_SCHEDULER)
     add_executable(clockwork-scheduler-host ${CLOCKWORK_SRC}/host/main.cpp)
     add_dependencies(clockwork-scheduler-host ${CLOCKWORK_DSP})
+    # Its control port is the comms library's TCP server (clockwork_comms_abi.h).
+    target_include_directories(clockwork-scheduler-host PRIVATE ${CLOCKWORK_SRC}/comms)
     target_link_libraries(clockwork-scheduler-host PRIVATE ${CLOCKWORK_LIB_GROUP})
 endif()
 
@@ -1354,9 +1356,7 @@ endif()
 # target builds none of this.
 if(NOT EMSCRIPTEN)
 add_library(clockwork_comms STATIC
-    ${CLOCKWORK_SRC}/comms/UdpOscTransport.cpp
     ${CLOCKWORK_SRC}/comms/StreamOscTransport.cpp
-    ${CLOCKWORK_SRC}/comms/UdsDgramOscTransport.cpp
     ${CLOCKWORK_SRC}/comms/ShmTransport.cpp)
 if(CLOCKWORK_FLOAT_FLAGS)
     target_compile_options(clockwork_comms PUBLIC ${CLOCKWORK_FLOAT_FLAGS})

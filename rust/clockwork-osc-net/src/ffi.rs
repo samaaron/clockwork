@@ -20,7 +20,7 @@
 //! touches the audio thread.
 
 use std::ffi::c_void;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -115,7 +115,6 @@ fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>, ex
 }
 
 const CUES_EXPOSED: &str = "anyone who reaches it can send cues";
-const UDP_EXPOSED: &str = "any client that reaches it has full control, nothing authenticates";
 
 // Re-frame one inbound message as /external-osc-cue and emit it. Recurses into
 // bundles, forwarding each contained message.
@@ -269,163 +268,6 @@ impl ClockworkOsc {
     }
 }
 
-/// A raw OSC ingress server: receives datagrams on a bound port (IPv4 + IPv6)
-/// and hands the raw OSC bytes to the host callback without any re-framing. The
-/// standalone host uses this for its control port (`/clockwork/schedule`,
-/// `/clockwork/osc/send`, `/clockwork/sched/flush` — clockwork's reserved prefix,
-/// which this crate never inspects); the cue server above is a separate,
-/// cue-specific path.
-pub struct ClockworkOscIngress {
-    stop: Arc<AtomicBool>,
-    joins: Vec<JoinHandle<()>>,
-}
-
-impl Drop for ClockworkOscIngress {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for j in self.joins.drain(..) {
-            let _ = j.join();
-        }
-    }
-}
-
-fn run_raw_server(socket: UdpSocket, stop: Arc<AtomicBool>, host: Host) {
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
-    let mut buf = vec![0u8; 65536];
-    while !stop.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut buf) {
-            Ok((n, _src)) => no_unwind((), || host.emit(&buf[..n])),
-            Err(e) if crate::recv_retryable(&e) => {}
-            Err(_) => break,
-        }
-    }
-}
-
-fn start_ingress(host: Host, port: u16, loopback: bool) -> Option<ClockworkOscIngress> {
-    let (v4ip, v6ip) = if loopback {
-        ("127.0.0.1", Ipv6Addr::LOCALHOST)
-    } else {
-        ("0.0.0.0", Ipv6Addr::UNSPECIFIED)
-    };
-
-    let mut socks: Vec<UdpSocket> = Vec::new();
-    match UdpSocket::bind((v4ip, port)) {
-        Ok(s) => socks.push(s),
-        Err(e) => clockwork_log::log!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
-    }
-    match bind_v6(v6ip, port) {
-        Ok(s) => socks.push(s),
-        Err(e) => clockwork_log::log!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
-    }
-    if socks.is_empty() {
-        return None;
-    }
-    note_binds("UDP ingress", &socks, UDP_EXPOSED);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut joins = Vec::new();
-    for sock in socks {
-        let (t_stop, t_host) = (stop.clone(), host);
-        if let Ok(j) = std::thread::Builder::new()
-            .name("ss-osc-ingress".into())
-            .spawn(move || run_raw_server(sock, t_stop, t_host))
-        {
-            joins.push(j);
-        }
-    }
-    Some(ClockworkOscIngress { stop, joins })
-}
-
-// ── Source-bearing ingress ───────────────────────────────────────────────────
-// A raw ingress that ALSO delivers the sender's (ip, port) with each datagram, so
-// the host can intern (ip,port)->token and address a reply back later. This is
-// what an engine transport needs (the plain ingress above drops the source). It
-// also takes a bind ADDRESS string rather than a loopback bool, so the caller can
-// bind a specific NIC IP (empty = all interfaces).
-
-/// emit-with-source callback: (ctx, ip, ip_len, port, osc, len). `ip` is a byte
-/// string valid only for the call; `osc`/`len` is the verbatim datagram.
-pub type EmitSrcFn =
-    extern "C" fn(*mut c_void, *const u8, u32, i32, *const u8, u32);
-
-#[derive(Clone, Copy)]
-struct HostSrc {
-    ctx: *mut c_void,
-    emit: EmitSrcFn,
-}
-// SAFETY: as for `Host`.
-unsafe impl Send for HostSrc {}
-// SAFETY: as for `Host`.
-unsafe impl Sync for HostSrc {}
-
-impl HostSrc {
-    fn emit(&self, ip: &str, port: i32, osc: &[u8]) {
-        (self.emit)(self.ctx, ip.as_ptr(), ip.len() as u32, port, osc.as_ptr(), osc.len() as u32);
-    }
-}
-
-fn run_raw_server_src(socket: UdpSocket, stop: Arc<AtomicBool>, host: HostSrc) {
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
-    let mut buf = vec![0u8; 65536];
-    while !stop.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut buf) {
-            Ok((n, src)) => no_unwind((), || {
-                host.emit(&src.ip().to_string(), src.port() as i32, &buf[..n])
-            }),
-            Err(e) if crate::recv_retryable(&e) => {}
-            Err(_) => break,
-        }
-    }
-}
-
-// Bind the ingress socket(s) for `bind_addr`: empty -> loopback, dual-stack
-// (127.0.0.1 + ::1), because nothing authenticates and every interface is
-// something a host asks for by name; a literal IP -> exactly that address (its
-// family); otherwise a hostname is resolved. Each family is best-effort.
-fn bind_ingress(bind_addr: &str, port: u16) -> Vec<UdpSocket> {
-    let mut socks = Vec::new();
-    if bind_addr.is_empty() {
-        match UdpSocket::bind(("127.0.0.1", port)) {
-            Ok(s) => socks.push(s),
-            Err(e) => clockwork_log::log!("[osc] ingress IPv4 bind on port {port} failed: {e}"),
-        }
-        match bind_v6(Ipv6Addr::LOCALHOST, port) {
-            Ok(s) => socks.push(s),
-            Err(e) => clockwork_log::log!("[osc] ingress IPv6 bind on port {port} failed: {e}"),
-        }
-    } else {
-        let bound = match bind_addr.parse::<IpAddr>() {
-            Ok(IpAddr::V6(v6)) => bind_v6(v6, port),
-            _ => UdpSocket::bind((bind_addr, port)),  // IPv4 literal or hostname
-        };
-        match bound {
-            Ok(s) => socks.push(s),
-            Err(e) => clockwork_log::log!("[osc] ingress bind {bind_addr}:{port} failed: {e}"),
-        }
-    }
-    note_binds("UDP ingress", &socks, UDP_EXPOSED);
-    socks
-}
-
-fn start_ingress_src(host: HostSrc, port: u16, bind_addr: &str) -> Option<ClockworkOscIngress> {
-    let socks = bind_ingress(bind_addr, port);
-    if socks.is_empty() {
-        return None;
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut joins = Vec::new();
-    for sock in socks {
-        let (t_stop, t_host) = (stop.clone(), host);
-        if let Ok(j) = std::thread::Builder::new()
-            .name("ss-osc-ingress".into())
-            .spawn(move || run_raw_server_src(sock, t_stop, t_host))
-        {
-            joins.push(j);
-        }
-    }
-    Some(ClockworkOscIngress { stop, joins })
-}
-
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
 /// Create the OSC subsystem. Returns an owning pointer (null on failure); free
@@ -511,78 +353,6 @@ pub unsafe extern "C" fn clockwork_osc_send(
     })
 }
 
-/// Start a raw OSC ingress server on `port`: `loopback` != 0 binds 127.0.0.1 +
-/// ::1, else 0.0.0.0 + ::. Received datagrams are delivered to `emit` as raw OSC
-/// bytes (kind = broadcast). Returns an owning pointer (null on bind failure);
-/// free with [`clockwork_osc_ingress_stop`]. `ctx`/`emit` must outlive it.
-#[no_mangle]
-pub extern "C" fn clockwork_osc_ingress_start(
-    ctx: *mut c_void,
-    emit: EmitFn,
-    port: i32,
-    loopback: i32,
-) -> *mut ClockworkOscIngress {
-    no_unwind(std::ptr::null_mut(), || {
-        if port <= 0 || port > 65535 {
-            return std::ptr::null_mut();
-        }
-        match start_ingress(Host { ctx, emit }, port as u16, loopback != 0) {
-            Some(srv) => Box::into_raw(Box::new(srv)),
-            None => std::ptr::null_mut(),
-        }
-    })
-}
-
-/// Start a source-bearing OSC ingress on `port`, bound to `bind_addr` (a byte
-/// string, ptr+len; empty = loopback on both families, else an IPv4/IPv6 literal
-/// or hostname — "0.0.0.0" for every interface, which the log notes, since
-/// nothing authenticates). Each received datagram is delivered verbatim
-/// to `emit` ALONG WITH the sender's (ip, port), so the caller can intern an
-/// origin token and reply to it. Returns an owning pointer (null on bind failure);
-/// free with [`clockwork_osc_ingress_stop`]. `ctx`/`emit` must outlive it.
-///
-/// # Safety
-/// `bind_addr` is null or readable for `bind_addr_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_osc_ingress_start_with_src(
-    ctx: *mut c_void,
-    emit: EmitSrcFn,
-    port: i32,
-    bind_addr: *const u8,
-    bind_addr_len: u32,
-) -> *mut ClockworkOscIngress {
-    no_unwind(std::ptr::null_mut(), || {
-        if port <= 0 || port > 65535 {
-            return std::ptr::null_mut();
-        }
-        let addr = if bind_addr.is_null() {
-            ""
-        } else {
-            // SAFETY: readable for `bind_addr_len` bytes, per the contract.
-            let bytes = unsafe { slice::from_raw_parts(bind_addr, bind_addr_len as usize) };
-            std::str::from_utf8(bytes).unwrap_or("")
-        };
-        match start_ingress_src(HostSrc { ctx, emit }, port as u16, addr) {
-            Some(srv) => Box::into_raw(Box::new(srv)),
-            None => std::ptr::null_mut(),
-        }
-    })
-}
-
-/// Stop the ingress recv threads and close the sockets.
-///
-/// # Safety
-/// `handle` is null or from one of the ingress start functions, not yet
-/// stopped.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_osc_ingress_stop(handle: *mut ClockworkOscIngress) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: the box the start function leaked, freed once, here.
-    no_unwind((), || drop(unsafe { Box::from_raw(handle) }));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,10 +377,6 @@ mod tests {
     fn destroy(h: *mut ClockworkOsc) {
         // SAFETY: see above.
         unsafe { clockwork_osc_destroy(h) };
-    }
-    fn ingress_stop(ing: *mut ClockworkOscIngress) {
-        // SAFETY: from an ingress start, stopped once.
-        unsafe { clockwork_osc_ingress_stop(ing) };
     }
     fn cues(c: &Collector) -> Vec<OscMessage> {
         c.0.lock().unwrap().iter().filter_map(|b| decode(b)).collect()
@@ -640,28 +406,6 @@ mod tests {
             clockwork_osc_send(h, host.as_ptr(), host.len() as u32, port as i32,
                         data.as_ptr(), data.len() as u32);
         }
-    }
-
-    // Nothing authenticates the UDP ingress: a client that reaches the port
-    // has full control. So no address means loopback, and a bind on anything
-    // else is something the host asked for by name, which the log says once.
-    #[test]
-    fn no_address_means_loopback_and_an_open_bind_is_logged() {
-        clockwork_log::capture::install();
-        let socks = bind_ingress("", 0);
-        assert!(!socks.is_empty());
-        // The capture is process-wide and other tests bind every interface
-        // on purpose, so ask about these sockets' own addresses.
-        for s in &socks {
-            let local = s.local_addr().unwrap();
-            assert!(local.ip().is_loopback(), "bound {local} with no address given");
-            assert!(!clockwork_log::capture::logged(&format!("bound to {local}")), "a loopback bind is not open");
-        }
-
-        let open = bind_ingress("0.0.0.0", 0);
-        assert_eq!(open.len(), 1);
-        let local = open[0].local_addr().unwrap();
-        assert!(clockwork_log::capture::logged(&format!("UDP ingress bound to {local}: any client that reaches it has full control")));
     }
 
     // The cue server's `loopback = 0` is an open bind too, logged with what it
@@ -802,128 +546,4 @@ mod tests {
         drop(collector);
     }
 
-    // This machine's primary non-loopback IPv4, if any (UDP connect sets a route
-    // without sending; local_addr then reveals the chosen source IP).
-    fn primary_v4() -> Option<std::net::Ipv4Addr> {
-        let s = UdpSocket::bind("0.0.0.0:0").ok()?;
-        s.connect("8.8.8.8:80").ok()?;
-        match s.local_addr().ok()? {
-            SocketAddr::V4(a) if !a.ip().is_loopback() => Some(*a.ip()),
-            _ => None,
-        }
-    }
-
-    // Raw ingress: a datagram to the ingress port is delivered verbatim (not
-    // re-framed) to the host callback. IPv4 and IPv6 both reach it.
-    #[test]
-    fn raw_ingress_delivers_verbatim() {
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let port = free_port();
-        let ing = clockwork_osc_ingress_start(ctx, collect, port as i32, /*loopback*/ 1);
-        assert!(!ing.is_null());
-        std::thread::sleep(Duration::from_millis(150));
-
-        let msg = encode("/probe/at", &[OscArg::Long(42), OscArg::Str("verbatim".into())]);
-        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let ok = wait_until(|| {
-            let _ = s.send_to(&msg, ("127.0.0.1", port));
-            // Delivered without re-framing: address stays /probe/at, args intact.
-            cues(&collector).iter().any(|m| {
-                m.addr == "/probe/at" && m.args.get(1).and_then(|a| a.as_str()) == Some("verbatim")
-            })
-        });
-        assert!(ok, "raw ingress should deliver the datagram verbatim");
-
-        ingress_stop(ing);
-        drop(collector);
-    }
-
-    // Source-bearing ingress: the datagram is delivered verbatim AND with the
-    // sender's (ip, port), so a transport can intern an origin token and reply.
-    #[test]
-    fn ingress_with_src_delivers_sender() {
-        struct Cap(Mutex<Vec<(String, i32, Vec<u8>)>>);
-        extern "C" fn collect_src(ctx: *mut c_void, ip: *const u8, ip_len: u32,
-                                  port: i32, osc: *const u8, len: u32) {
-            // SAFETY: `ctx` is the boxed `Cap` below, alive until after the
-            // stop; the two byte strings are the callback's contract.
-            let (c, ip, bytes) = unsafe {
-                (
-                    &*ctx.cast::<Cap>(),
-                    slice::from_raw_parts(ip, ip_len as usize),
-                    slice::from_raw_parts(osc, len as usize),
-                )
-            };
-            let ips = String::from_utf8_lossy(ip).to_string();
-            let bytes = bytes.to_vec();
-            c.0.lock().unwrap().push((ips, port, bytes));
-        }
-
-        let cap = Box::new(Cap(Mutex::new(Vec::new())));
-        let ctx = &*cap as *const Cap as *mut c_void;
-        let port = free_port();
-        let bind = "127.0.0.1";
-        // SAFETY: `bind` is a live str.
-        let ing = unsafe {
-            clockwork_osc_ingress_start_with_src(ctx, collect_src, port as i32,
-                                          bind.as_ptr(), bind.len() as u32)
-        };
-        assert!(!ing.is_null());
-        std::thread::sleep(Duration::from_millis(150));
-
-        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let myport = s.local_addr().unwrap().port() as i32;
-        let msg = encode("/probe/at", &[OscArg::Long(7)]);
-        let ok = wait_until(|| {
-            let _ = s.send_to(&msg, ("127.0.0.1", port));
-            let g = cap.0.lock().unwrap();
-            g.iter().any(|(ip, p, b)| {
-                ip == "127.0.0.1" && *p == myport
-                    && decode(b).map(|m| m.addr == "/probe/at").unwrap_or(false)
-            })
-        });
-        assert!(ok, "source-bearing ingress should deliver sender ip+port + bytes");
-
-        ingress_stop(ing);
-        drop(cap);
-    }
-
-    // "Allow OSC From Other Computers" semantic: loopback-only binds 127.0.0.1
-    // (+ ::1), so a datagram to this host's real IP is NOT received; all-interfaces
-    // binds 0.0.0.0 (+ ::) and IS. Skipped if the box has no non-loopback IPv4.
-    #[test]
-    fn loopback_scope_restricts_to_local() {
-        let Some(ip) = primary_v4() else {
-            clockwork_log::log!("skip loopback_scope: no non-loopback IPv4 here");
-            return;
-        };
-        let collector = Box::new(Collector(Mutex::new(Vec::new())));
-        let ctx = &*collector as *const Collector as *mut c_void;
-        let h = clockwork_osc_create(ctx, collect);
-        let port = free_port();
-        let s = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let msg = encode("/probe", &[OscArg::Int(1)]);
-
-        // Loopback-only: a packet to our real IP must NOT reach the cue server.
-        configure(h, port, true, true);
-        std::thread::sleep(Duration::from_millis(200));
-        for _ in 0..8 {
-            let _ = s.send_to(&msg, (ip, port));
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(cues(&collector).is_empty(),
-                "loopback-only must not receive on the real IP {ip}");
-
-        // All-interfaces: now the same real-IP packet IS received.
-        configure(h, port, false, true);
-        let ok = wait_until(|| {
-            let _ = s.send_to(&msg, (ip, port));
-            !cues(&collector).is_empty()
-        });
-        assert!(ok, "all-interfaces must receive on the real IP {ip}");
-
-        destroy(h);
-        drop(collector);
-    }
 }

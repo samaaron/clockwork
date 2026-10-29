@@ -55,8 +55,6 @@ public:
         return !mNotify.empty();
     }
     bool subscribeNotify(uint32_t token) override { return mNotify.insert(token).second; }
-    // An in-process caller has no port: it is subscribed itself instead.
-    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t token) override { mNotify.erase(token); }
     void clearNotify() override { mNotify.clear(); }
 

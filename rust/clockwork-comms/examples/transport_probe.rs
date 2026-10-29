@@ -8,14 +8,13 @@
 //!   transport_probe load <proto> <target> <count> load: send <count> /clockwork/sync ids,
 //!                                                 require every /clockwork/synced reply
 //!
-//!   proto ∈ udp | tcp (host:port) | uds | uds-dgram (path, unix) | pipe (name, windows)
+//!   proto ∈ tcp (host:port) | uds (path, unix) | pipe (name, windows) | shm (endpoint or port)
 //!
 //! Exit 0 = success; nonzero = transport error, timeout, or a failed load
 //! invariant. Stream transports (tcp/uds/pipe) speak the shared 4-byte
 //! big-endian length-prefixed framing, and first present the host's secret,
 //! which the probe reads from its stdin as 64 hex digits and a newline, the
-//! form the harness gives both processes; datagram transports send raw
-//! packets.
+//! form the harness gives both processes.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
@@ -32,17 +31,6 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 // in error, and this probe measures transports, not the engine's limits. All
 // 5000 at once filled the ring on a loaded runner and lost commands.
 const STREAM_WINDOW: i64 = 256;
-// How long one datagram read waits before the load loop looks at the clock.
-const DGRAM_POLL: Duration = Duration::from_millis(100);
-// At most this many /clockwork/sync ids unanswered at once in a datagram
-// load. A Unix datagram socket on macOS holds 4,096 bytes by default and a
-// datagram costs more than its payload against that; with this few in flight
-// neither the engine's socket nor the probe's can fill, however the threads
-// are scheduled.
-const DGRAM_WINDOW: i32 = 16;
-// No reply for this long with ids unanswered means one was lost. Long enough
-// that a runner starving the engine for seconds does not read as loss.
-const DGRAM_STALL: Duration = Duration::from_secs(10);
 
 fn frame(pkt: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + pkt.len());
@@ -69,14 +57,6 @@ fn report(reply: &[u8]) {
 
 fn run(proto: &str, target: &str, auth: &[u8], probe: &[u8]) -> Result<Vec<u8>, String> {
     match proto {
-        "udp" => {
-            let s = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-            s.set_read_timeout(Some(TIMEOUT)).ok();
-            s.send_to(probe, target).map_err(|e| format!("send: {e}"))?;
-            let mut buf = [0u8; 65536];
-            let (n, _) = s.recv_from(&mut buf).map_err(|e| format!("recv: {e}"))?;
-            Ok(buf[..n].to_vec())
-        }
         "tcp" => {
             let mut s = std::net::TcpStream::connect(target).map_err(|e| format!("connect: {e}"))?;
             s.set_read_timeout(Some(TIMEOUT)).ok();
@@ -94,24 +74,6 @@ fn run(proto: &str, target: &str, auth: &[u8], probe: &[u8]) -> Result<Vec<u8>, 
             s.write_all(auth).map_err(|e| format!("send: {e}"))?;
             s.write_all(&frame(probe)).map_err(|e| format!("send: {e}"))?;
             read_frame(&mut s).map_err(|e| format!("recv: {e}"))
-        }
-        #[cfg(unix)]
-        "uds-dgram" => {
-            // Bind our own path so the server can address the reply (macOS
-            // has no autobind).
-            let own = std::env::temp_dir().join(format!("ss-probe-{}.sock", std::process::id()));
-            let _ = std::fs::remove_file(&own);
-            let s = std::os::unix::net::UnixDatagram::bind(&own)
-                .map_err(|e| format!("bind {}: {e}", own.display()))?;
-            s.set_read_timeout(Some(TIMEOUT)).ok();
-            let res = (|| {
-                s.send_to(probe, target).map_err(|e| format!("send: {e}"))?;
-                let mut buf = [0u8; 65536];
-                let (n, _) = s.recv_from(&mut buf).map_err(|e| format!("recv: {e}"))?;
-                Ok(buf[..n].to_vec())
-            })();
-            let _ = std::fs::remove_file(&own);
-            res
         }
         #[cfg(windows)]
         "pipe" => {
@@ -305,127 +267,6 @@ fn pipe_load(mut f: std::fs::File, count: i32) -> Result<String, String> {
     Ok(format!("{count} in {secs:.2}s = {:.0} msg/s", count as f64 / secs))
 }
 
-/// A send the kernel refused for want of buffer space, not for anything wrong
-/// with the socket. macOS says so with ENOBUFS when the receiving socket is
-/// full; other platforms block or report WouldBlock.
-fn send_buffer_full(e: &std::io::Error) -> bool {
-    if e.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-    const ENOBUFS: i32 = 55;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    const ENOBUFS: i32 = 105;
-    #[cfg(windows)]
-    const ENOBUFS: i32 = 10055;
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd",
-                  target_os = "linux", target_os = "android", windows)))]
-    const ENOBUFS: i32 = i32::MIN;
-    e.raw_os_error() == Some(ENOBUFS)
-}
-
-/// Send `count` /clockwork/sync ids over a datagram socket and require every
-/// /clockwork/synced reply, once and in order, with no more than DGRAM_WINDOW
-/// ids unanswered at a time. The same shape as pipe_load, for the same
-/// reason: never let a buffer fill.
-///
-/// This used to send all `count` first, ignore every send error, and only then
-/// read, allowing a quarter of the replies to go missing. A datagram socket has
-/// no backpressure — what does not fit is dropped — so the replies to
-/// everything sent while the probe was still sending had nowhere to go, and on
-/// macOS its own sends were refused the same way. The count measured
-/// scheduling, not the transport: 3,986 to 4,360 of 5,000 on green CI runs,
-/// 789 on a loaded runner on the same code. Draining replies on a second
-/// thread while sending was tried and was not enough: a starved reader still
-/// let a 4 KB socket fill, and lost up to half the replies on a loaded laptop.
-///
-/// With the window nothing is dropped however the threads are scheduled, so a
-/// missing reply is one the transport lost, and that is a failure.
-fn dgram_load(sock: &DgramSock, target: &str, count: i32) -> Result<String, String> {
-    let t0 = Instant::now();
-    let deadline = t0 + LOAD_TIMEOUT;
-    let (mut sent, mut got, mut last) = (0i32, 0i32, 0i32);
-    let mut retried = 0u64;
-    let mut progress = Instant::now();
-    let mut buf = [0u8; 65536];
-    while got < count {
-        while sent < count && sent - got < DGRAM_WINDOW {
-            let msg = sync_msg(sent + 1);
-            let give_up = Instant::now() + TIMEOUT;
-            loop {
-                match sock.send_to(&msg, target) {
-                    Ok(_) => break,
-                    Err(e) if send_buffer_full(&e) && Instant::now() < give_up => {
-                        retried += 1;
-                        std::thread::sleep(Duration::from_micros(200));
-                    }
-                    Err(e) => return Err(format!("send {}: {e}", sent + 1)),
-                }
-            }
-            sent += 1;
-        }
-        match sock.recv(&mut buf) {
-            Ok(n) => {
-                if let Some(id) = synced_id(&buf[..n]) {
-                    if id <= last {
-                        return Err(format!("out-of-order reply: {id} after {last}"));
-                    }
-                    if id != last + 1 {
-                        return Err(format!("reply {id} arrived with {} before it lost", id - last - 1));
-                    }
-                    last = id;
-                    got += 1;
-                    progress = Instant::now();
-                }
-            }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock
-                                       | std::io::ErrorKind::TimedOut
-                                       | std::io::ErrorKind::Interrupted) => {}
-            Err(e) => return Err(format!("recv after {got} replies: {e}")),
-        }
-        if progress.elapsed() >= DGRAM_STALL {
-            return Err(format!("no reply for {}s with {} unanswered: /clockwork/sync {} was lost",
-                               DGRAM_STALL.as_secs(), sent - got, got + 1));
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("only {got}/{count} replies within {}s", LOAD_TIMEOUT.as_secs()));
-        }
-    }
-    let secs = t0.elapsed().as_secs_f64();
-    Ok(format!("{count} in {secs:.2}s = {:.0} msg/s, {retried} sends retried", count as f64 / secs))
-}
-
-/// Minimal datagram abstraction over UDP and (unix) UDS datagram.
-enum DgramSock {
-    Udp(std::net::UdpSocket),
-    #[cfg(unix)]
-    Uds(std::os::unix::net::UnixDatagram, std::path::PathBuf),
-}
-impl DgramSock {
-    fn send_to(&self, buf: &[u8], target: &str) -> std::io::Result<usize> {
-        match self {
-            DgramSock::Udp(s) => s.send_to(buf, target),
-            #[cfg(unix)]
-            DgramSock::Uds(s, _) => s.send_to(buf, target),
-        }
-    }
-    fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            DgramSock::Udp(s) => s.recv(buf),
-            #[cfg(unix)]
-            DgramSock::Uds(s, _) => s.recv(buf),
-        }
-    }
-}
-#[cfg(unix)]
-impl Drop for DgramSock {
-    fn drop(&mut self) {
-        if let DgramSock::Uds(_, path) = self {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, String> {
     match proto {
         "tcp" => {
@@ -456,20 +297,6 @@ fn load(proto: &str, target: &str, auth: &[u8], count: i32) -> Result<String, St
                 .map_err(|e| format!("open {full}: {e}"))?;
             f.write_all(auth).map_err(|e| format!("send: {e}"))?;
             pipe_load(f, count)
-        }
-        "udp" => {
-            let s = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-            s.set_read_timeout(Some(DGRAM_POLL)).ok();
-            dgram_load(&DgramSock::Udp(s), target, count)
-        }
-        #[cfg(unix)]
-        "uds-dgram" => {
-            let own = std::env::temp_dir().join(format!("ss-load-{}.sock", std::process::id()));
-            let _ = std::fs::remove_file(&own);
-            let s = std::os::unix::net::UnixDatagram::bind(&own)
-                .map_err(|e| format!("bind {}: {e}", own.display()))?;
-            s.set_read_timeout(Some(DGRAM_POLL)).ok();
-            dgram_load(&DgramSock::Uds(s, own), target, count)
         }
         "shm" => {
             // Peer-plane load: keep the command ring full (it backpressures
@@ -571,7 +398,7 @@ fn main() {
     }
 
     if args.len() != 3 {
-        eprintln!("usage: transport_probe <udp|tcp|uds|uds-dgram|pipe> <target>");
+        eprintln!("usage: transport_probe <tcp|uds|pipe|shm> <target>");
         eprintln!("       transport_probe load <proto> <target> <count>");
         std::process::exit(2);
     }

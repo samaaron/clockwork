@@ -38,18 +38,6 @@ uint32_t clockwork_comms_secret_auth_packet(const ClockworkCommsSecret* secret,
                                             uint8_t* out, uint32_t cap);
 void clockwork_comms_secret_free(ClockworkCommsSecret* secret);
 
-typedef struct ClockworkOscUds ClockworkOscUds;
-typedef void (*clockwork_osc_emit_path_fn)(void* ctx, const uint8_t* peer_path, uint32_t peer_len,
-                                    const uint8_t* osc, uint32_t len);
-ClockworkOscUds* clockwork_osc_uds_dgram_start(void* ctx, clockwork_osc_emit_path_fn emit,
-                                 const uint8_t* path, uint32_t path_len);
-/* Reply to the peer bound at `path` from the server's own socket. Returns 1 on
- * send, 0 on failure/empty path. Off the audio thread. */
-int32_t clockwork_osc_uds_dgram_send(ClockworkOscUds* handle, const uint8_t* path, uint32_t path_len,
-                              const uint8_t* data, uint32_t len);
-/* Stop the recv thread, close the socket, unlink the path, free the server. */
-void clockwork_osc_uds_stop(ClockworkOscUds* handle);
-
 /* ── Stream servers: TCP, UDS stream, Windows named pipes ─────────────────────
  * Connection-oriented OSC over one shared wire format: each packet is preceded
  * by a 4-byte big-endian length (the OSC-over-stream convention; max payload

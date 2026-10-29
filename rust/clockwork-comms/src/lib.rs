@@ -21,7 +21,6 @@
 pub mod pipe;
 pub mod secret;
 pub mod stream;
-pub mod uds;
 // Cross-process SHM peer client (the peer side of the SHM command plane) — used
 // by the transport harness to drive --shm-commands end-to-end. Not a C ABI.
 pub mod shm;

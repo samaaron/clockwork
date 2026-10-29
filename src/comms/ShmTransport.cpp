@@ -56,7 +56,6 @@ bool ShmTransport::subscribeFlag(std::atomic<bool>& flag, uint32_t token) {
 bool ShmTransport::subscribeNotify(uint32_t token) { return subscribeFlag(mNotify, token); }
 // Registering an explicit localhost reply *port* is a UDP concept (the GUI's
 // /clockwork/devices/report path); the SHM peer subscribes caller-relative.
-bool ShmTransport::subscribeNotifyPort(int /*port*/) { return false; }
 void ShmTransport::unsubscribeNotify(uint32_t token) {
     if (token == SHM_PEER_ORIGIN_TOKEN) mNotify.store(false, std::memory_order_relaxed);
 }

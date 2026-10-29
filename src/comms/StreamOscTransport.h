@@ -11,7 +11,7 @@
  *
  * A connection id IS the origin token: minted from 1 by the Rust leaf, never
  * reused, dead the moment the connection closes. That collapses the datagram
- * transports' address bookkeeping — no OriginTable, no LRU eviction (an
+ * old datagram transports' address bookkeeping — no origin table, no LRU eviction (an
  * established client can never be churned out by strangers), and subscription
  * lifetime == connection lifetime: on_closed prunes the client from every
  * notify audience. The Rust leaf admits one client.
@@ -69,7 +69,6 @@ public:
     uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override;
     bool subscribeNotify(uint32_t token) override;
-    bool subscribeNotifyPort(int port) override;  // UDP-specific — false here
     void unsubscribeNotify(uint32_t token) override;
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;

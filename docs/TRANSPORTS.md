@@ -9,20 +9,23 @@ How OSC commands reach clockwork, and how replies get back.
 not a merge:
 
 ```
-ERROR: pick at most one of --tcp / --uds / --uds-dgram / --pipe / --shm-commands
+ERROR: pick at most one of --tcp / --uds / --pipe / --shm-commands
 ```
 
-Choosing an alternative *replaces* the UDP command port. The cue server and
-outbound OSC are unaffected, and `-u` still numbers the shared-memory segment.
+The cue server and outbound OSC are unaffected, and `-u` still numbers the
+shared-memory segment.
 
 | flag | transport | shape |
 |---|---|---|
-| *(none)* | UDP on `-u <port>` | datagram, network |
 | `--tcp <port>` | TCP, length-prefixed OSC (respects `-B`) | stream, network |
 | `--uds <path>` | Unix socket, file mode 0600 | stream, local |
-| `--uds-dgram <path>` | Unix socket, file mode 0600 | datagram, local |
 | `--pipe <name>` | Named pipe, owner-only DACL, no remote clients | stream, local |
 | `--shm-commands` | the segment's peer command plane | ring, local |
+
+There is no datagram command port. UDP and the Unix datagram socket were
+removed because a datagram cannot carry the secret once per connection: every
+datagram would have to carry it, and one captured datagram would give it
+away. A client that spoke to scsynth over UDP does not reach clockwork.
 
 **The stream transports ask for a secret.** TCP, the Unix stream socket and
 the named pipe start only with the host's per-boot secret: 32 random bytes
@@ -35,30 +38,22 @@ first, or nothing within 2 s, is closed and counted. The secret crosses TCP in
 the clear, so TCP binds loopback unless `-B` names an address, and the log
 says so once when it binds anything else.
 
-**The datagram transports do not ask for it.** A client that reaches UDP or
-the Unix datagram socket has full control of the engine, as with scsynth. UDP
-binds loopback unless `-B` names an address and logs an open bind the same
-way. The local transports are owner-only by file mode or DACL as well.
+The local transports are owner-only by file mode or DACL as well. `--uds` is
+macOS and Linux; `--pipe` is Windows. They are the same idea — local IPC
+addressed by a path rather than an IP — on the two platform families.
 
-`--uds` and `--uds-dgram` are macOS and Linux; `--pipe` is Windows. They are
-the same idea — local IPC addressed by a path rather than an IP — on the two
-platform families.
-
-Both socket files are created `0600`. There is a bind-then-chmod window, so put
+The socket file is created `0600`. There is a bind-then-chmod window, so put
 the socket in a `0700` directory rather than relying on the mode alone. The
 named pipe is built with an SDDL DACL admitting only SYSTEM and the current
 user's SID, and rejects remote clients.
 
-**Stream or datagram** is the other axis, and it decides what the transport has
-to do. A stream is a connection carrying a byte sequence, so it needs an accept
-loop, admission (one client: one connection that presented the secret and one
-still presenting it, anything more closed at accept; nothing displaces a
-connection, so a silent one holds the door for 2 s at most and never the
-client's place) and length-prefixed framing to find message boundaries. What stands behind the one client, and
-how many things it serves, is the host's. A datagram arrives already delimited: no
-connection, no accept, no framing, and `--max-connections` means nothing. TCP,
-UDS-stream and the named pipe share `StreamOscTransport` for that reason; UDP
-and UDS-dgram do not.
+**One client.** A stream server accepts one connection that presented the
+secret and one still presenting it; anything more is closed at accept, and
+nothing displaces a connection, so an unauthenticated connection occupies the
+server for 2 s at most and never the client's place. How many things stand
+behind the one client is the host's. TCP, the UDS stream socket and the named
+pipe share `StreamOscTransport`: an accept loop, that admission, and
+length-prefixed framing to find message boundaries.
 
 ## The transports are a client library, not the engine's
 
@@ -84,16 +79,10 @@ an engine-only build leaves the feature off and has no socket transport at
 all. What stays in the engine is what the ENGINE needs a socket for: the cue
 server and outbound OSC, in `clockwork-osc-net`.
 
-## UDP is the default, and forgiving
+## Transports start after init
 
-A UDP bind failure is logged but does not stop the server — deliberately, for
-scsynth compatibility. UDP also starts receiving *before* the engine is
-initialised and queues what arrives, flushing the queue once boot completes, so
-nothing a client sends during a slow device open bounces as ICMP — a device
-open can take many seconds.
-
-Every other transport starts *after* `clockwork_init`, because the ingress ring
-has to exist before a packet can be written to it.
+Every transport starts *after* `clockwork_init`, because the ingress ring has
+to exist before a packet can be written to it.
 
 ## --shm-commands
 
@@ -141,9 +130,9 @@ named `*_ORIGIN_TOKEN`.
 The transport mints it on the way in and resolves it on the way out — same
 object, both ends:
 
-* the socket transports intern the sender's `(ip, port)` to a stable token
-  (`OriginTable`), so a token survives a scheduled event's delay rather than
-  churning under traffic;
+* the stream transports use the connection id, minted from 1 and never
+  reused, so a token survives a scheduled event's delay and dies with its
+  connection;
 * the shm plane uses one constant, `SHM_PEER_ORIGIN_TOKEN`, because it has
   exactly one peer;
 * `0` is the in-process caller, and broadcast when replying.

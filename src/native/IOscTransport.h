@@ -7,9 +7,8 @@
  * everything platform-specific behind this interface: how a token resolves to a
  * destination, what the notify/link subscriber audiences actually are, and how a
  * packet physically leaves. This is the *only* place address/socket/pid
- * knowledge lives. Implementations: UdpOscTransport (UDP), StreamOscTransport
- * (TCP / UDS stream / named pipe), UdsDgramOscTransport (UDS datagram),
- * ShmTransport (the segment's peer plane), NifTransport (BEAM — fans out to
+ * knowledge lives. Implementations: StreamOscTransport (TCP / UDS stream /
+ * named pipe), ShmTransport (the segment's peer plane), NifTransport (BEAM — fans out to
  * the registered Erlang pids via enif_send), and CallbackTransport
  * (in-process — embedders and tests, surfacing through the engine's onReply
  * callback).
@@ -37,7 +36,7 @@ public:
 
     // Reply to the peer an origin token resolves to. `networkOnly` means "do not
     // deliver to an in-process observer" (Link snapshots): a real transport
-    // (UDP/NIF) sends regardless; a callback sink has no one it is meant for,
+    // (a socket, the NIF) sends regardless; a callback sink has no one it is meant for,
     // and drops it having missed no one.
     virtual bool send(uint32_t token, const uint8_t* data, uint32_t size,
                       bool networkOnly) = 0;
@@ -47,14 +46,10 @@ public:
     virtual uint32_t broadcastLink(const uint8_t* data, uint32_t size) = 0;
 
     // Notify-audience registry. subscribeNotify is caller-relative (resolve the
-    // token); subscribeNotifyPort targets an explicit local port (the GUI's
-    // /clockwork/devices/report reply port), and returns false on a transport
-    // whose peers have no port, where the caller is subscribed instead.
-    // subscribeNotify and the others return true if newly added.
+    // token); it and the others return true if newly added.
     // hasNotifySubscribers gates whether the engine bothers to emit.
     virtual bool hasNotifySubscribers() const = 0;
     virtual bool subscribeNotify(uint32_t token) = 0;
-    virtual bool subscribeNotifyPort(int port) = 0;
     virtual void unsubscribeNotify(uint32_t token) = 0;
     virtual void clearNotify() = 0;
 

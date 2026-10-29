@@ -56,7 +56,6 @@ public:
     uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
     bool hasNotifySubscribers() const override { return mNotify.load(std::memory_order_relaxed); }
     bool subscribeNotify(uint32_t token) override;
-    bool subscribeNotifyPort(int port) override;  // UDP-specific — false here
     void unsubscribeNotify(uint32_t token) override;
     void clearNotify() override;
     bool subscribeLink(uint32_t token) override;

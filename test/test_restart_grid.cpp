@@ -95,7 +95,6 @@ public:
     uint32_t broadcastLink(const uint8_t* d, uint32_t n) override { return peer.broadcastLink(d, n); }
     bool hasNotifySubscribers() const override { return peer.hasNotifySubscribers() || mOwn.hasNotifySubscribers(); }
     bool subscribeNotify(uint32_t t) override { return of(t).subscribeNotify(t); }
-    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t t) override { of(t).unsubscribeNotify(t); }
     void clearNotify() override { peer.clearNotify(); mOwn.clearNotify(); }
     bool subscribeLink(uint32_t t) override { return of(t).subscribeLink(t); }

@@ -154,7 +154,7 @@ static Subscribers g_subs;
 
 // ─── NifTransport — the engine→BEAM egress boundary ─────────────────────────
 //
-// The BEAM analogue of UdpOscTransport: an IOscTransport injected into the engine
+// The BEAM analogue of StreamOscTransport: an IOscTransport injected into the engine
 // (via setTransport) so the NIF is a first-class peer, not a shared-memory
 // observer. Unlike CallbackTransport it delivers Link broadcasts and the
 // networkOnly Link snapshot — a BEAM client can only see what enif_send hands
@@ -186,8 +186,6 @@ public:
         std::lock_guard<std::mutex> lk(mSubs->mutex);
         return mSubs->notifyTokens.insert(token).second;
     }
-    // A BEAM process has no port: the caller is subscribed instead.
-    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t token) override {
         std::lock_guard<std::mutex> lk(mSubs->mutex);
         mSubs->notifyTokens.erase(token);

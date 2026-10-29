@@ -237,8 +237,8 @@ is. CI runs this configuration as `config (no-device)`.
 
 ## Command transports
 
-A host links the comms client library and chooses: UDP, or `--tcp`, `--uds`,
-`--uds-dgram`, `--pipe`, `--shm-commands` in SuperSonic's host. See
+A host links the comms client library and chooses one of `--tcp`, `--uds`,
+`--pipe`, `--shm-commands` in SuperSonic's host. See
 [TRANSPORTS.md](TRANSPORTS.md).
 
 ## Embedding from Rust

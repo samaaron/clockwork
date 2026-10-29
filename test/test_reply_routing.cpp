@@ -4,61 +4,17 @@
  * test_reply_routing.cpp — the origin-token reply path.
  *
  * Replies/subscriptions are addressed by an origin token that is threaded from
- * the call ctx to each backend. Two halves are covered here:
- *   1. OriginTable — the (ip,port) ↔ stable token address book.
- *   2. OscEgress — that a per-call token is carried through to the transport for
- *      replies (dispatchEgress) and subscriptions.
+ * the call ctx to each backend: OscEgress carries a per-call token through to
+ * the transport for replies (dispatchEgress) and subscriptions.
  */
 #include <catch2/catch_test_macros.hpp>
 
-#include "comms/OriginTable.h"
 #include "native/OscEgress.h"
 #include "native/IOscTransport.h"
 #include "shared_memory.h"   // EGRESS_REPLY, EGRESS_SEND_TO_CALLER
 
 #include <string>
 #include <vector>
-
-// ── OriginTable: client (ip,port) ↔ stable, non-zero token ──────────────────
-TEST_CASE("OriginTable maps a client to a stable, non-zero token", "[origin]") {
-    OriginTable t;
-    const uint32_t a = t.intern("10.0.0.1", 4000);
-    CHECK(a >= 1u);
-    CHECK(t.intern("10.0.0.1", 4000) == a);   // same client → same token (stable)
-    CHECK(t.intern("10.0.0.2", 4000) != a);   // different ip → different token
-    CHECK(t.intern("10.0.0.1", 4001) != a);   // different port → different token
-}
-
-TEST_CASE("OriginTable resolves a token back to its client", "[origin]") {
-    OriginTable t;
-    const uint32_t tok = t.intern("192.168.1.5", 9000);
-    std::string ip; int port = 0;
-    REQUIRE(t.resolve(tok, ip, port));
-    CHECK(ip == "192.168.1.5");
-    CHECK(port == 9000);
-
-    // token 0 (in-process caller) and unknown tokens don't resolve.
-    CHECK_FALSE(t.resolve(0, ip, port));
-    CHECK(port == 0);
-    CHECK_FALSE(t.resolve(tok + 99, ip, port));
-}
-
-TEST_CASE("OriginTable evicts the least-recently-seen client when full", "[origin]") {
-    OriginTable t;
-    std::vector<uint32_t> toks;
-    for (int i = 0; i < 1024; ++i)
-        toks.push_back(t.intern("10.1." + std::to_string(i / 256) + "." +
-                                std::to_string(i % 256), 5000));
-    // Touch client 0 so it is no longer the LRU.
-    REQUIRE(t.intern("10.1.0.0", 5000) == toks[0]);
-    // A new distinct client overflows the table → evicts the current LRU
-    // (client 1), never the just-touched client 0.
-    const uint32_t extra = t.intern("10.9.9.9", 5000);
-    std::string ip; int port = 0;
-    CHECK(t.resolve(extra, ip, port));          // newcomer present
-    CHECK(t.resolve(toks[0], ip, port));        // touched client survived
-    CHECK_FALSE(t.resolve(toks[1], ip, port));  // LRU was evicted
-}
 
 // ── OscEgress: a per-call token reaches the transport ───────────────────────
 namespace {
@@ -75,7 +31,6 @@ struct MockTransport : IOscTransport {
     uint32_t broadcastLink(const uint8_t*, uint32_t) override { return 0; }
     bool hasNotifySubscribers() const override { return false; }
     bool subscribeNotify(uint32_t t) override { lastSubToken = t; return true; }
-    bool subscribeNotifyPort(int) override { return false; }
     void unsubscribeNotify(uint32_t t) override { lastSubToken = t; }
     void clearNotify() override {}
     bool subscribeLink(uint32_t t) override { lastSubToken = t; return true; }

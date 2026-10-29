@@ -132,7 +132,6 @@ bool StreamOscTransport::subscribeNotify(uint32_t token) {
 }
 // Registering an explicit localhost reply *port* is a UDP concept (the GUI's
 // /clockwork/devices/report path); a stream peer subscribes caller-relative.
-bool StreamOscTransport::subscribeNotifyPort(int /*port*/) { return false; }
 void StreamOscTransport::unsubscribeNotify(uint32_t token) {
     std::lock_guard<std::mutex> lk(mMutex);
     removeConn(mNotifyTargets, token);

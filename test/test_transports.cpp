@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_transports.cpp — acceptance tests for the kernel-ACL'd command
- * transports (StreamOscTransport over TCP + UDS stream, UdsDgramOscTransport)
- * against real client sockets. No engine: the transports talk to a recorded
+ * test_transports.cpp — acceptance tests for the stream command transport
+ * (StreamOscTransport over TCP and a UDS stream socket) against real client
+ * sockets. No engine: the transports talk to a recorded
  * ingest callback, exactly as a host wires them to engine.ingest().
  *
  * Unix-only: the client side uses POSIX sockets directly. The shared
@@ -15,7 +15,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "comms/StreamOscTransport.h"
-#include "comms/UdsDgramOscTransport.h"
 #include "OscTestUtils.h"
 #include "StreamTestClient.h"
 
@@ -78,30 +77,6 @@ std::string tmpSock(const char* name) {
 }
 
 // ── tiny blocking clients (and StreamTestClient.h) ──────────────────────────
-
-int bindUnixDgram(const std::string& path) {
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    REQUIRE(fd >= 0);
-    sockaddr_un sa{};
-    sa.sun_family = AF_UNIX;
-    std::strncpy(sa.sun_path, path.c_str(), sizeof(sa.sun_path) - 1);
-    // Bind with the precise address length: binding with sizeof(sa) makes the
-    // kernel report this peer's address NUL-padded to the full sun_path, and
-    // the server would intern (and fail to reply to) that padded path.
-    auto len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + path.size() + 1);
-    REQUIRE(bind(fd, reinterpret_cast<sockaddr*>(&sa), len) == 0);
-    setRecvTimeout(fd);
-    return fd;
-}
-
-void sendUnixDgram(int fd, const std::string& to, const std::vector<uint8_t>& pkt) {
-    sockaddr_un sa{};
-    sa.sun_family = AF_UNIX;
-    std::strncpy(sa.sun_path, to.c_str(), sizeof(sa.sun_path) - 1);
-    REQUIRE(sendto(fd, pkt.data(), pkt.size(), 0,
-                   reinterpret_cast<sockaddr*>(&sa), sizeof(sa))
-            == static_cast<ssize_t>(pkt.size()));
-}
 
 } // namespace
 
@@ -197,60 +172,6 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
     close(fd);
     t.stop();
     CHECK(access(path.c_str(), F_OK) != 0);  // stop unlinks the socket path
-}
-
-TEST_CASE("UdsDgramOscTransport: bound peers get replies, unbound peers are unaddressable",
-          "[transport][uds]") {
-    IngestLog log;
-    UdsDgramOscTransport t;
-    t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
-    std::string server = tmpSock("dg.sock");
-    t.initialise(server);
-    REQUIRE(t.start());
-
-    // Bound client: command in, reply routed back by token.
-    std::string clientPath = tmpSock("dg-client.sock");
-    int fd = bindUnixDgram(clientPath);
-    auto probe = message("/status");
-    sendUnixDgram(fd, server, probe.data);
-    REQUIRE(waitUntil([&] { return log.count() == 1; }));
-    auto [token, pkt] = log.at(0);
-    CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/status");
-
-    auto reply = message("/status.reply", 1);
-    REQUIRE(t.send(token, reply.ptr(), reply.size(), false));
-    uint8_t buf[512];
-    ssize_t n = recv(fd, buf, sizeof(buf), 0);
-    REQUIRE(n > 0);
-    CHECK(parseAddress(buf, static_cast<uint32_t>(n)) == "/status.reply");
-
-    // Same client keeps the same token (stable across packets)…
-    sendUnixDgram(fd, server, probe.data);
-    REQUIRE(waitUntil([&] { return log.count() == 2; }));
-    CHECK(log.at(1).first == token);
-
-    // …and can join a notify audience.
-    CHECK(t.subscribeNotify(token));
-    auto push = message("/clockwork/devices/changed");
-    t.broadcastNotify(push.ptr(), push.size());
-    n = recv(fd, buf, sizeof(buf), 0);
-    REQUIRE(n > 0);
-    CHECK(parseAddress(buf, static_cast<uint32_t>(n)) == "/clockwork/devices/changed");
-
-    // Unbound client: ingested, but replies and subscriptions are rejected.
-    int anon = socket(AF_UNIX, SOCK_DGRAM, 0);
-    REQUIRE(anon >= 0);
-    sendUnixDgram(anon, server, probe.data);
-    REQUIRE(waitUntil([&] { return log.count() == 3; }));
-    uint32_t anonToken = log.at(2).first;
-    CHECK_FALSE(t.send(anonToken, reply.ptr(), reply.size(), false));
-    CHECK_FALSE(t.subscribeNotify(anonToken));
-
-    close(fd);
-    close(anon);
-    unlink(clientPath.c_str());
-    t.stop();
-    CHECK(access(server.c_str(), F_OK) != 0);  // stop unlinks the socket path
 }
 
 #endif // !_WIN32

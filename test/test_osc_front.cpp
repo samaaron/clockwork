@@ -28,7 +28,6 @@ struct Inner final : IOscTransport {
     bool subscribers = true;
     bool hasNotifySubscribers() const override { return subscribers; }
     bool subscribeNotify(uint32_t) override { log.push_back("subNotify"); return true; }
-    bool subscribeNotifyPort(int) override { log.push_back("subNotifyPort"); return true; }
     void unsubscribeNotify(uint32_t) override { log.push_back("unsubNotify"); }
     void clearNotify() override { log.push_back("clearNotify"); }
     bool subscribeLink(uint32_t) override { log.push_back("subLink"); return true; }
@@ -87,13 +86,13 @@ TEST_CASE("fronted transport: every other method is the inner transport's", "[fr
     const uint8_t d[4] = {};
     t.broadcastNotify(d, 4); t.broadcastLink(d, 4);
     CHECK(t.hasNotifySubscribers());
-    CHECK(t.subscribeNotify(1)); CHECK(t.subscribeNotifyPort(2)); t.unsubscribeNotify(1); t.clearNotify();
+    CHECK(t.subscribeNotify(1)); t.unsubscribeNotify(1); t.clearNotify();
     CHECK(t.subscribeLink(1)); t.unsubscribeLink(1);
     t.broadcastMidi(d, 4); CHECK(t.subscribeMidi(1)); t.unsubscribeMidi(1);
     t.broadcastGamepad(d, 4); CHECK(t.subscribeGamepad(1)); t.unsubscribeGamepad(1);
     t.broadcastOsc(d, 4); CHECK(t.subscribeOsc(1)); t.unsubscribeOsc(1);
     const std::vector<std::string> expect = {
-        "notify", "link", "subNotify", "subNotifyPort", "unsubNotify", "clearNotify",
+        "notify", "link", "subNotify", "unsubNotify", "clearNotify",
         "subLink", "unsubLink", "midi", "subMidi", "unsubMidi",
         "gamepad", "subGamepad", "unsubGamepad", "osc", "subOsc", "unsubOsc" };
     CHECK(inner.log == expect);
