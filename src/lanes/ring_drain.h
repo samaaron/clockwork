@@ -152,9 +152,11 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
             // Writer hit end-of-ring and restarted at offset 0; follow it and
             // keep draining — the frame at 0 is already published. A padding
             // marker AT offset 0 can never be legitimately written (the whole
-            // ring lies ahead of a writer at 0), so treat it as corruption
-            // rather than spinning on it.
-            if (ut == 0) {
+            // ring lies ahead of a writer at 0), and one the writer did not
+            // wrap for (head still past it, not back at the front) is not
+            // one it wrote either: following that back to 0 would deliver
+            // the frames before it again, every pass. Both are corruption.
+            if (ut == 0 || uh > ut) {
                 if (metrics.corrupted) metrics.corrupted->fetch_add(1, std::memory_order_relaxed);
                 tailPtr->store(head, std::memory_order_release);
                 stop = ClockworkDrainStop::BadMagic;
@@ -189,15 +191,23 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
         // 4-aligned footprint (header.length is exact; the writer rounds the
         // occupancy up to 4) must lie entirely before the ring boundary —
         // in-place delivery must never read past the ring's end, even if a
-        // shared-memory writer publishes a malformed frame.
+        // shared-memory writer publishes a malformed frame. The length is
+        // held to the ring BEFORE it is rounded: rounding a length within
+        // four of 2^32 wraps to a footprint of nothing, which every fit check
+        // below would pass while the payload claimed 4 GB.
         uint32_t totalLen   = hdr.length;
+        if (totalLen < sizeof(Message) || totalLen > size) {
+            if (metrics.corrupted) metrics.corrupted->fetch_add(1, std::memory_order_relaxed);
+            tailPtr->store(head, std::memory_order_release);
+            stop = ClockworkDrainStop::BadLength;
+            break;
+        }
         uint32_t footprint  = (totalLen + 3u) & ~3u;
         // avail < footprint is corruption too: writers publish head only after
         // the complete frame, so a frame can never legitimately claim more
         // bytes than are published — waiting for the rest would stall the
         // lane forever on a bit-flipped length.
-        if (totalLen < sizeof(Message) || footprint > size ||
-            footprint > space_to_end || footprint > avail) {
+        if (footprint > size || footprint > space_to_end || footprint > avail) {
             if (metrics.corrupted) metrics.corrupted->fetch_add(1, std::memory_order_relaxed);
             tailPtr->store(head, std::memory_order_release);
             stop = ClockworkDrainStop::BadLength;
@@ -235,7 +245,10 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
         if (metrics.seqGaps) {
             int32_t seq = static_cast<int32_t>(hdr.sequence);
             if (st.lastSeq >= 0) {
-                const int32_t expected = static_cast<int32_t>(static_cast<uint32_t>(st.lastSeq + 1) & 0x7FFFFFFFu);
+                // Unsigned before the add: the sequence after 0x7FFFFFFF is 0,
+                // and a signed add there is undefined (a peer writes any
+                // sequence it likes; found by fuzz_ring_drain).
+                const int32_t expected = static_cast<int32_t>((static_cast<uint32_t>(st.lastSeq) + 1u) & 0x7FFFFFFFu);
                 if (seq != expected) {
                     const int32_t gap = static_cast<int32_t>(
                         static_cast<uint64_t>(static_cast<int64_t>(seq) - expected + 0x80000000LL) & 0x7FFFFFFFu);

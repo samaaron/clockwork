@@ -1,0 +1,3 @@
+# The ring frame magics, little-endian as they sit in memory.
+"\xef\xbe\xad\xde"
+"\xfe\xca\xdd\xba"

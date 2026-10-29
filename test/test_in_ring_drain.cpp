@@ -23,8 +23,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "lanes/lanes.h"
+#include "lanes/ring_drain.h"
 #include "shared_memory.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -110,6 +112,71 @@ TEST_CASE("in-ring-drain: over-long frame is dropped and resynced",
     auto* ctrl = control();
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
+}
+
+TEST_CASE("in-ring-drain: a length whose footprint rounding overflows is dropped and resynced",
+          "[ingress][ring][security]") {
+    EngineFixture fx(drainConfig());
+    quiesceAndReset(fx);
+
+    const uint32_t droppedBefore = fx.engine().getMetrics().messages_dropped.load();
+
+    // (0xFFFFFFFF + 3) & ~3 is 0 in 32 bits: a footprint of nothing passes
+    // every fit check, and the payload the header claims is 4 GB from a
+    // pointer inside the ring. Found by fuzz_ring_drain (2026-10-29).
+    injectHeader(MESSAGE_MAGIC, 0xFFFFFFFFu);
+    pump();
+
+    auto* ctrl = control();
+    CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
+    CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
+}
+
+TEST_CASE("in-ring-drain: a padding marker the writer did not wrap for is corruption and not a loop",
+          "[ingress][ring][security]") {
+    EngineFixture fx(drainConfig());
+    quiesceAndReset(fx);
+
+    const uint32_t droppedBefore = fx.engine().getMetrics().messages_dropped.load();
+
+    // A header-only frame at 0, a padding marker at 16, and head at 32: the
+    // writer never wrapped (head is past the marker), so following the marker
+    // back to 0 would deliver the same frame for ever, every pass. Found by
+    // fuzz_ring_drain (2026-10-29).
+    const uint32_t frame[4] = { MESSAGE_MAGIC, sizeof(Message), 0, 0 };
+    const uint32_t pad[4]   = { PADDING_MAGIC, 0, 0, 0 };
+    std::memcpy(arena_storage + IN_RING_START, frame, sizeof frame);
+    std::memcpy(arena_storage + IN_RING_START + sizeof frame, pad, sizeof pad);
+    control()->in_tail.store(0, std::memory_order_release);
+    control()->in_head.store(static_cast<int32_t>(2 * sizeof(Message)), std::memory_order_release);
+    pump();
+
+    auto* ctrl = control();
+    CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
+    CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
+}
+
+// The drain's own sequence-gap arithmetic, on a local ring: the sequence
+// after 0x7FFFFFFF is 0 and counts no gap; a real gap counts its size.
+TEST_CASE("ring-drain: the sequence wraps at 31 bits without a gap and without overflow",
+          "[ring][security]") {
+    alignas(4) uint8_t ring[256] = {};
+    const uint32_t frames[3][4] = {
+        { MESSAGE_MAGIC, sizeof(Message), 0x7FFFFFFFu, 0 },
+        { MESSAGE_MAGIC, sizeof(Message), 0u, 0 },
+        { MESSAGE_MAGIC, sizeof(Message), 5u, 0 },   // 1..4 missing: a gap of 4
+    };
+    std::memcpy(ring, frames, sizeof frames);
+    std::atomic<int32_t> head{3 * static_cast<int32_t>(sizeof(Message))}, tail{0};
+    std::atomic<uint32_t> gaps{0}, corrupted{0};
+    ClockworkDrainState st;
+    ClockworkDrainMetrics metrics{ nullptr, nullptr, &corrupted, &gaps };
+    const uint32_t consumed = clockwork_drain_ring(ring, sizeof ring, &head, &tail, st, metrics, 0,
+        [](uint32_t, const uint8_t*, uint32_t, uint32_t) { return ClockworkDrainVerdict::Consume; });
+    CHECK(consumed == 3);
+    CHECK(corrupted.load() == 0);
+    CHECK(gaps.load() == 4);
+    CHECK(tail.load() == head.load());
 }
 
 TEST_CASE("in-ring-drain: bad magic resyncs to head instead of byte-walking",

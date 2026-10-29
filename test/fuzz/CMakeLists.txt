@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Sam Aaron
 #
 # Fuzz targets for the C and C++ code that reads untrusted bytes: oscpack's
-# reader (every message a client sends the engine) and the standalone host's
-# own reader. The audio decoders are Rust and fuzzed from rust/fuzz. A build of
+# reader (every message a client sends the engine), the standalone host's
+# own reader, the ring drain over a peer's ring, the audio writer and Link's
+# wire. The audio decoders are Rust and fuzzed from rust/fuzz. A build of
 # its own, kept out of the main tree's targets, so nothing here can change
 # what clockwork ships.
 #
@@ -55,6 +56,14 @@ clockwork_fuzz_target(fuzz_audio_encode fuzz_audio_encode.cpp audio_decode_stubs
     ${CLOCKWORK_SRC}/clockwork_audio_file.cpp
     ${CLOCKWORK_SRC}/flac_encoder.cpp)
 target_include_directories(fuzz_audio_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../rust/clockwork-audio-decode/cpp)
+
+# The ring drain over a ring and cursors another process wrote: the peer
+# plane's command ring (shm_peer_plane.h), filled by a peer with the segment.
+clockwork_fuzz_target(fuzz_ring_drain fuzz_ring_drain.cpp)
+# Writes rings in the shapes the drain walks, with the real writer, as the
+# seeds the target starts from (corpus/ring_drain/seeds).
+add_executable(ring_drain_seeds ring_drain_seeds.cpp)
+target_include_directories(ring_drain_seeds PRIVATE ${CLOCKWORK_SRC})
 
 # Ableton Link's wire: the session discovery messages, the ping and pong
 # measurement messages and the Link Audio messages, parsed by upstream's own

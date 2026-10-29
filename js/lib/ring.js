@@ -239,8 +239,10 @@ export function ringDrain(ring, from, state, max, onFrame, metrics = null) {
         const magic = view.getUint32(ut, true);
         if (magic === PADDING_MAGIC) {
             // The writer went back to 0, where the next frame already is. A
-            // marker AT 0 cannot be written, so it is damage, not a loop.
-            if (ut === 0) {
+            // marker AT 0 cannot be written, and one the writer did not wrap
+            // for (head still past it) would send the walk round the frames
+            // before it again, every pass: both are damage, not a loop.
+            if (ut === 0 || (head >>> 0) > ut) {
                 count(m.corrupted, 1);
                 Atomics.store(cw, ci, head);
                 stop = 'bad-magic';
@@ -265,10 +267,20 @@ export function ringDrain(ring, from, state, max, onFrame, metrics = null) {
         const length = view.getUint32(ut + 4, true);
         const sequence = view.getUint32(ut + 8, true);
         const origin = view.getUint32(ut + 12, true);
+        // The length is held to the ring BEFORE it is rounded: rounding a
+        // length within four of 2^32 wraps (int32 arithmetic) to a footprint
+        // of nothing, which every fit check below would pass while the
+        // payload claimed 4 GB.
+        if (length < HEADER_BYTES || length > size) {
+            count(m.corrupted, 1);
+            Atomics.store(cw, ci, head);
+            stop = 'bad-length';
+            break;
+        }
         const footprint = ((length + 3) & ~3) >>> 0;
         // A frame claiming more than is published is damage too: the writer
         // publishes whole frames, so waiting for the rest would wait for ever.
-        if (length < HEADER_BYTES || footprint > size || footprint > toEnd || footprint > avail) {
+        if (footprint > size || footprint > toEnd || footprint > avail) {
             count(m.corrupted, 1);
             Atomics.store(cw, ci, head);
             stop = 'bad-length';
