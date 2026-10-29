@@ -171,7 +171,6 @@ namespace juce
     extern JUCE_API void JUCE_CALLTYPE logAssertion (const char* file, int line) noexcept;
 }
 
-#include "misc/juce_EnumHelpers.h"
 #include "memory/juce_Memory.h"
 #include "maths/juce_MathsFunctions.h"
 #include "memory/juce_ByteOrder.h"
@@ -183,7 +182,6 @@ namespace juce
 #include "memory/juce_HeapBlock.h"
 #include "memory/juce_MemoryBlock.h"
 #include "memory/juce_ReferenceCountedObject.h"
-#include "containers/juce_Optional.h"
 #include "containers/juce_ScopedValueSetter.h"
 #include "memory/juce_Singleton.h"
 #include "memory/juce_WeakReference.h"
@@ -191,7 +189,6 @@ namespace juce
 #include "threads/juce_CriticalSection.h"
 #include "maths/juce_Range.h"
 #include "containers/juce_ElementComparator.h"
-#include "containers/juce_ArrayAllocationBase.h"
 #include "containers/juce_ArrayBase.h"
 #include "containers/juce_Array.h"
 #include "misc/juce_ScopeGuard.h"
@@ -202,11 +199,8 @@ namespace juce
 #include "text/juce_StringArray.h"
 #include "system/juce_SystemStats.h"
 #include "misc/juce_Functional.h"
-#include "containers/juce_Span.h"
-#include "misc/juce_Result.h"
 #include "containers/juce_FixedSizeFunction.h"
 #include "time/juce_Time.h"
-#include "maths/juce_Random.h"
 #include "misc/juce_RuntimePermissions.h"
 #include "threads/juce_DynamicLibrary.h"
 #include "threads/juce_Process.h"
@@ -214,9 +208,7 @@ namespace juce
 #include "threads/juce_WaitableEvent.h"
 #include "threads/juce_Thread.h"
 #include "memory/juce_SharedResourcePointer.h"
-#include "memory/juce_AllocationHooks.h"
 
-#include "detail/juce_CallbackListenerList.h"
 
 #if JUCE_CORE_INCLUDE_OBJC_HELPERS && (JUCE_MAC || JUCE_IOS)
  #include "native/juce_CFHelpers_mac.h"

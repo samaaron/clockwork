@@ -82,7 +82,7 @@ public:
 private:
     static LONG_PTR getImprobableWindowNumber() noexcept
     {
-        static auto number = (LONG_PTR) Random().nextInt64();
+        static auto number = [] { std::random_device rd; return (LONG_PTR) (((uint64) rd() << 32) | rd()); }();
         return number;
     }
 };
