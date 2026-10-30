@@ -26,6 +26,13 @@ use std::path::Path;
 pub fn replay(manifest_dir: &str, body: fn(&[u8])) -> usize {
     let how = if cfg!(fuzzing) { "yes" } else { "no" };
     println!("corpus replay built as the fuzzer builds: {how}"); // stdio-ok: test output the replay job counts
+    replay_with(manifest_dir, body)
+}
+
+/// [`replay`] for a body that captures: a test that feeds the corpus to a
+/// live server and checks the server after each file. Prints no replay line,
+/// so the push replay job's count of corpus tests is unchanged by it.
+pub fn replay_with(manifest_dir: &str, mut body: impl FnMut(&[u8])) -> usize {
     let root = Path::new(manifest_dir).join("corpus");
     let mut n = 0;
     for dir in ["seeds", "regressions"] {

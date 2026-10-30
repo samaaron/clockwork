@@ -874,7 +874,7 @@ pub unsafe extern "C" fn clockwork_osc_stream_stop(handle: *mut ClockworkOscStre
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -885,28 +885,28 @@ mod tests {
     use clockwork_osc::{decode, encode, OscArg};
 
     // One secret for every server these cases start; `connect` presents it.
-    fn test_secret() -> &'static ClockworkCommsSecret {
+    pub(crate) fn test_secret() -> &'static ClockworkCommsSecret {
         static SECRET: OnceLock<ClockworkCommsSecret> = OnceLock::new();
         SECRET.get_or_init(|| ClockworkCommsSecret::generate().expect("an OS random source"))
     }
 
     // Capture (conn_id, packet) deliveries and closed conn ids.
-    struct Cap {
-        packets: Mutex<Vec<(u32, Vec<u8>)>>,
-        closed: Mutex<Vec<u32>>,
+    pub(crate) struct Cap {
+        pub(crate) packets: Mutex<Vec<(u32, Vec<u8>)>>,
+        pub(crate) closed: Mutex<Vec<u32>>,
     }
     impl Cap {
-        fn new() -> Box<Self> {
+        pub(crate) fn new() -> Box<Self> {
             Box::new(Cap { packets: Mutex::new(Vec::new()), closed: Mutex::new(Vec::new()) })
         }
     }
-    extern "C" fn on_packet(ctx: *mut c_void, conn: u32, osc: *const u8, len: u32) {
+    pub(crate) extern "C" fn on_packet(ctx: *mut c_void, conn: u32, osc: *const u8, len: u32) {
         // SAFETY: `ctx` is the boxed `Cap` each test keeps alive until after
         // the stop; `osc`/`len` is the callback's contract.
         let (c, bytes) = unsafe { (&*ctx.cast::<Cap>(), slice::from_raw_parts(osc, len as usize)) };
         c.packets.lock().unwrap().push((conn, bytes.to_vec()));
     }
-    extern "C" fn on_closed(ctx: *mut c_void, conn: u32) {
+    pub(crate) extern "C" fn on_closed(ctx: *mut c_void, conn: u32) {
         // SAFETY: as `on_packet`.
         let c = unsafe { &*ctx.cast::<Cap>() };
         c.closed.lock().unwrap().push(conn);
@@ -917,11 +917,11 @@ mod tests {
         // SAFETY: see above; `data` is a live slice.
         unsafe { clockwork_osc_stream_send(h, conn, data.as_ptr(), data.len() as u32) }
     }
-    fn stop(h: *mut ClockworkOscStream) {
+    pub(crate) fn stop(h: *mut ClockworkOscStream) {
         // SAFETY: see above.
         unsafe { clockwork_osc_stream_stop(h) };
     }
-    fn refused(h: *mut ClockworkOscStream) -> u64 {
+    pub(crate) fn refused(h: *mut ClockworkOscStream) -> u64 {
         // SAFETY: see above.
         unsafe { clockwork_osc_stream_refused(h) }
     }
@@ -929,7 +929,7 @@ mod tests {
     // Waits and read timeouts in these cases are bounded only against what
     // never comes: on a loaded machine the reader thread takes the time it
     // takes, and a passing case never waits out the bound.
-    fn wait_until(mut f: impl FnMut() -> bool) -> bool {
+    pub(crate) fn wait_until(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if f() {
@@ -940,7 +940,7 @@ mod tests {
         false
     }
 
-    fn frame(osc: &[u8]) -> Vec<u8> {
+    pub(crate) fn frame(osc: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + osc.len());
         out.extend_from_slice(&(osc.len() as u32).to_be_bytes());
         out.extend_from_slice(osc);

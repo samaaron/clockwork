@@ -553,3 +553,85 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
         std::ptr::null_mut()
     }
 }
+
+// Only a Windows runner has a named pipe: the ci.yml `rust (windows-x64)` job
+// runs these.
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::stream::tests::{frame, on_closed, on_packet, refused, stop, test_secret, wait_until, Cap};
+    use std::ffi::c_void;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::time::Duration;
+    use clockwork_osc::encode;
+
+    fn start(cap: &Cap, name: &str) -> *mut ClockworkOscStream {
+        let ctx = cap as *const Cap as *mut c_void;
+        // SAFETY: `name` is a live str; the secret outlives the server.
+        let h = unsafe {
+            clockwork_osc_pipe_start(ctx, on_packet, on_closed, test_secret(), name.as_ptr(), name.len() as u32)
+        };
+        assert!(!h.is_null(), "pipe server should start");
+        h
+    }
+
+    // A client of the pipe: the OS retries a busy instance for a while.
+    fn connect(name: &str) -> std::fs::File {
+        let path = format!(r"\\.\pipe\{name}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match OpenOptions::new().read(true).write(true).open(&path) {
+                Ok(f) => return f,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    let _ = e;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not open {path}: {e}"),
+            }
+        }
+    }
+
+    // A client that presents the secret and sends one packet, which the
+    // host receives, then leaves, which the host hears: the server is
+    // serving. `served` is how many such clients came before it; a hostile
+    // client is never reported closed, since the host never heard of it.
+    fn a_real_client_is_served(cap: &Cap, name: &str, served: usize) {
+        let before = cap.packets.lock().unwrap().len();
+        let mut c = connect(name);
+        c.write_all(&frame(&test_secret().auth_packet())).unwrap();
+        c.write_all(&frame(&encode("/alive", &[clockwork_osc::OscArg::Int(served as i32)]))).unwrap();
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() > before), "client {served} delivered");
+        drop(c);
+        assert!(wait_until(|| cap.closed.lock().unwrap().len() > served), "client {served} seen closed");
+    }
+
+    // Every file of the comms corpus, written to the pipe by a client as its
+    // first bytes, in reads cut at a few places: the server refuses or
+    // ignores it and still admits the next client that presents the secret.
+    #[test]
+    fn the_corpus_through_a_real_pipe_leaves_the_server_serving() {
+        let cap = Cap::new();
+        let name = format!("clockwork-pipe-corpus-{}", std::process::id());
+        let h = start(&cap, &name);
+        let mut hostile = 0usize;
+        let mut served = 0usize;
+        clockwork_corpus::replay_with(env!("CARGO_MANIFEST_DIR"), |data| {
+            for cut in [0usize, 1, 3, data.len() / 2] {
+                let cut = cut.min(data.len());
+                let mut c = connect(&name);
+                let _ = c.write_all(&data[..cut]);
+                std::thread::sleep(Duration::from_millis(40));
+                let _ = c.write_all(&data[cut..]);
+                std::thread::sleep(Duration::from_millis(40));
+                drop(c);
+                hostile += 1;
+            }
+            a_real_client_is_served(&cap, &name, served);
+            served += 1;
+        });
+        assert!(hostile > 0, "no corpus under rust/clockwork-comms/corpus");
+        assert!(refused(h) > 0, "the corpus holds no frame that is the secret");
+        stop(h);
+    }
+}
