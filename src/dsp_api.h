@@ -356,7 +356,8 @@ typedef struct DspHost {
      * Lock-free and callable from ANY THREAD, the audio thread included: on
      * the engine thread from the pool, and a request it cannot meet answers
      * NULL rather than blocking or growing on that thread; on any other
-     * thread from the system allocator, on that thread. 16-byte aligned.
+     * thread from the system allocator, on that thread. 64-byte aligned,
+     * so a block can hold the vectors of any SIMD width up to AVX-512.
      * A host with no pool leaves this NULL and a guest falls back to
      * whatever it has. NULL for 0 bytes. */
     void* (*alloc_bytes)(void* ctx, size_t bytes);

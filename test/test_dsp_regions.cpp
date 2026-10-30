@@ -214,6 +214,8 @@ TEST_CASE("regions: the guest's memory wants are declared, checked, and met",
     // verbatim — DENORMALS_HONOURED, because the fixture arms nothing on the
     // thread that ticks. A host that says nothing would show UNKNOWN here.
     REQUIRE(r.argInt(3) == DSP_FP_ENV_DENORMALS_HONOURED);
+    // Every alloc_bytes block, whatever its size, is 64-byte aligned.
+    REQUIRE(r.argInt(4) == 1);
 }
 
 TEST_CASE("regions: a want the host cannot meet is refused, never spilled",

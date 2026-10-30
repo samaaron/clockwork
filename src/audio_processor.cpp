@@ -903,6 +903,12 @@ extern "C" {
         }
     }
 
+    // alloc_bytes hands out kGuestBlockAlign-aligned blocks (dsp_api.h); the
+    // pool's own blocks are 16-aligned. Each block is taken kGuestBlockAlign
+    // bytes larger, the pointer handed out is rounded up to kGuestBlockAlign,
+    // and the pool's pointer is stored in the word just below it.
+    static constexpr size_t kGuestBlockAlign = 64;
+
     // Give back bytes taken through alloc_bytes (dsp_api.h). Only the
     // pointer crosses: what the bytes were is the guest's business.
     static void dsp_host_free_bytes(void* /*ctx*/, void* ptr) {
@@ -913,7 +919,7 @@ extern "C" {
         // So the free is real on the web too; a no-op here leaks every block
         // the guest frees.
         HostCallScope host;
-        if (ptr) clockwork_pool_free(ptr);
+        if (ptr) clockwork_pool_free(static_cast<void**>(ptr)[-1]);
     }
 
     // The pair of the above: the guest's pool, over its bulk memory
@@ -922,7 +928,15 @@ extern "C" {
     // a request (dsp_api.h).
     static void* dsp_host_alloc_bytes(void* /*ctx*/, size_t bytes) {
         HostCallScope host;
-        return bytes ? clockwork_pool_alloc(bytes) : nullptr;
+        if (bytes == 0 || bytes > SIZE_MAX - kGuestBlockAlign) return nullptr;
+        void* raw = clockwork_pool_alloc(bytes + kGuestBlockAlign);
+        if (!raw) return nullptr;
+        // raw is 16-aligned, so this lands 16 to 64 bytes above it.
+        const uintptr_t aligned = (reinterpret_cast<uintptr_t>(raw) + sizeof(void*) + kGuestBlockAlign - 1)
+                                  & ~uintptr_t(kGuestBlockAlign - 1);
+        void** block = reinterpret_cast<void**>(aligned);
+        block[-1] = raw;
+        return block;
     }
 
     // ── Taps (dsp_api.h, "Taps") ───────────────────────────────────────

@@ -199,6 +199,7 @@ struct RegionsAtBirth {
     uint32_t bulk_bytes      = 0;    // DspConfig::memory_bulk
     uint32_t bulk_was_zero   = 0;    // 1 = every byte zero (1 when there is none)
     uint32_t bulk_rw_ok      = 0;    // 1 = the pool answered an allocation (1 when there is none)
+    uint32_t bulk_aligned    = 0;    // 1 = every alloc_bytes block of the sizes tried is 64-byte aligned (1 when there is none)
     uint32_t fp_env          = 0;    // DspConfig::fp_env, verbatim
 
     uint32_t window_bytes    = 0;
@@ -388,9 +389,21 @@ struct DummyDsp {
                     if (p[i * 31] != static_cast<uint8_t>(0xB5 + i)) born.bulk_rw_ok = 0;
             }
             if (p && host.free_bytes) host.free_bytes(host.ctx, p);
+
+            // alloc_bytes promises 64-byte alignment (dsp_api.h) at every size.
+            static constexpr size_t kSizes[] = { 1, 16, 17, 63, 64, 100, 1000, 4096 };
+            void* blocks[sizeof kSizes / sizeof kSizes[0]] = {};
+            born.bulk_aligned = 1;
+            for (size_t i = 0; i < sizeof kSizes / sizeof kSizes[0]; ++i) {
+                blocks[i] = host.alloc_bytes(host.ctx, kSizes[i]);
+                if (!blocks[i] || reinterpret_cast<uintptr_t>(blocks[i]) % 64 != 0) born.bulk_aligned = 0;
+            }
+            for (void* b : blocks)
+                if (b && host.free_bytes) host.free_bytes(host.ctx, b);
         } else {
             born.bulk_was_zero = 1;
             born.bulk_rw_ok    = 1;
+            born.bulk_aligned  = 1;
         }
 
         born.fp_env = static_cast<uint32_t>(config.fp_env);
@@ -1336,11 +1349,11 @@ void dsp_osc(struct Dsp* dsp,
     // declaration to the guest.
     if (addressIs(bytes, len, "/dummy/region/tiers")) {
         if (d->host.emit_osc) {
-            const uint32_t v[4] = { d->born.bulk_bytes, d->born.bulk_was_zero,
-                                    d->born.bulk_rw_ok, d->born.fp_env };
+            const uint32_t v[5] = { d->born.bulk_bytes, d->born.bulk_was_zero,
+                                    d->born.bulk_rw_ok, d->born.fp_env, d->born.bulk_aligned };
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
-                                              "/dummy/region/tiers-is", v, 4);
+                                              "/dummy/region/tiers-is", v, 5);
             if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
         }
         return;
