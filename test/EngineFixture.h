@@ -414,6 +414,9 @@ private:
     std::condition_variable  mReplyCv;
     std::vector<OscReply>    mReplies;
     std::map<std::string, int> mTimeouts;   // waitForReply timeouts so far, by address
+    // Replies the client parser (clockwork_osc_decodes) would not decode:
+    // the case fails at teardown naming each one.
+    std::vector<std::string> mUndecodable;
 
     mutable std::mutex       mDebugMutex;
     std::vector<std::string> mDebugMessages;

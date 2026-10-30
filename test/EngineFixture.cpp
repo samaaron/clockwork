@@ -13,6 +13,7 @@
 #include "ClockworkProcessor.h"
 #include "HeadlessDriver.h"
 #include "clockwork_event_sink.h"
+#include "clockwork_osc.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -99,6 +100,9 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
         r.raw.assign(data, data + size);
         {
             std::lock_guard<std::mutex> lk(mReplyMutex);
+            // Every reply must decode with the parser the clients read with.
+            if (clockwork_osc_decodes(data, size) != 1)
+                mUndecodable.push_back(r.address + " (" + std::to_string(size) + " bytes)");
             mReplies.push_back(std::move(r));
         }
         mReplyCv.notify_all();
@@ -144,6 +148,13 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
 }
 
 EngineFixture::~EngineFixture() {
+    {
+        std::lock_guard<std::mutex> lk(mReplyMutex);
+        std::string list;
+        for (const auto& u : mUndecodable) list += "\n  " + u;
+        INFO("replies the client parser (clockwork-osc) would not decode:" << list);
+        CHECK(mUndecodable.empty());
+    }
     checkNoEgressLost(mEngine, mExpectedLoss);
     if (mAudioCanary) checkAudioKeptUp(mEngine, mEngine.egressClient(), mExpectedLoss);
     if (mLateHostStart.joinable()) mLateHostStart.join();

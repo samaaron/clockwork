@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "clockwork_client.h"
 #include "metrics_schema.h"
+#include "clockwork_osc.h"
 
 #include "lanes/lanes.h"
 #include "audio_processor.h"   // destroy_dsp, rebuild_dsp
@@ -32,6 +33,9 @@ void drainInto(std::vector<EgressFrame>& out,
     drain([](void* ctx, uint32_t sourceId, uint32_t route,
              const uint8_t* osc, uint32_t len, uint32_t seq) {
         auto* v = static_cast<std::vector<EgressFrame>*>(ctx);
+        // Every frame must decode with the parser the clients read with.
+        INFO("an egress frame of " << len << " bytes the client parser (clockwork-osc) would not decode");
+        CHECK(clockwork_osc_decodes(osc, len) == 1);
         EgressFrame f;
         f.sourceId = sourceId;
         f.route    = route;

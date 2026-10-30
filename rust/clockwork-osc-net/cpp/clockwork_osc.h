@@ -64,6 +64,11 @@ void clockwork_osc_set_limit(ClockworkOsc* handle, int32_t per_second, int32_t p
 int32_t clockwork_osc_send(ClockworkOsc* handle, const uint8_t* host, uint32_t host_len,
                            int32_t port, const uint8_t* data, uint32_t len);
 
+/* 1 when `data`/`len` decodes as an OSC packet with the client parser
+ * (clockwork-osc's), 0 when it does not. For tests that check every reply the
+ * engine encodes against the parser its clients read with. */
+int32_t clockwork_osc_decodes(const uint8_t* data, uint32_t len);
+
 /* The command transports — UDS datagram, the TCP/UDS stream servers and the
  * Windows named pipe — are a CLIENT library's ABI, in
  * src/comms/clockwork_comms_abi.h (crate clockwork-comms). */

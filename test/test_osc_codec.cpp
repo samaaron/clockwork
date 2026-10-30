@@ -13,6 +13,7 @@
  * parser agree about bytes, and name nothing in particular.
  */
 #include "OscTestUtils.h"
+#include "clockwork_osc.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
@@ -174,4 +175,16 @@ TEST_CASE("Builder round-trips int64 and double args", "[osc_codec]") {
     CHECK(parsed.argCount() == 2);
     CHECK(parsed.argInt64(0) == big);          // full 64 bits, no float rounding
     CHECK(parsed.argDouble(1) == Catch::Approx(1.0e-9).margin(1e-18));
+}
+
+// The client parser's verdict on the C ABI: what the fixtures run every reply
+// through.
+TEST_CASE("clockwork_osc_decodes answers for the client parser", "[osc_codec]") {
+    auto good = osc_test::message("/ping", 7);
+    CHECK(clockwork_osc_decodes(good.ptr(), good.size()) == 1);
+    // Shifted by a byte, the address no longer starts with '/'.
+    CHECK(clockwork_osc_decodes(good.ptr() + 1, good.size() - 1) == 0);
+    // Cut inside the type tags.
+    CHECK(clockwork_osc_decodes(good.ptr(), 9) == 0);
+    CHECK(clockwork_osc_decodes(nullptr, 0) == 0);
 }

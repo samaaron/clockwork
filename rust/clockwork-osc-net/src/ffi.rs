@@ -432,6 +432,23 @@ pub unsafe extern "C" fn clockwork_osc_send(
     })
 }
 
+/// Whether `data`/`len` decodes as an OSC packet with the client parser
+/// (`clockwork_osc::decode_packet`): 1 when it does, 0 when it does not or a
+/// pointer is null. For a test that checks every reply the engine encodes
+/// against the parser its clients read with.
+///
+/// # Safety
+/// `data` is null or readable for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn clockwork_osc_decodes(data: *const u8, len: u32) -> i32 {
+    if data.is_null() {
+        return 0;
+    }
+    // SAFETY: a (pointer, length) byte string, per the contract; null was refused above.
+    let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
+    no_unwind(0, || i32::from(decode_packet(bytes).is_some()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
