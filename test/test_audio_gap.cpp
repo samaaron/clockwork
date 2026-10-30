@@ -51,6 +51,18 @@ int linesSaying(EngineFixture& fix, const char* text) {
     return n;
 }
 
+// The lines saying `text` from here on. The engine records its last block
+// from boot, so a runner stalled between the fixture's boot and a test's own
+// start makes that start a gap too, and says so: a test counts what its own
+// blocks say, from just after its start.
+struct LinesSince {
+    LinesSince(EngineFixture& fix, const char* text) : fix(fix), text(text), at(linesSaying(fix, text)) {}
+    int count() const { return linesSaying(fix, text) - at; }
+    EngineFixture& fix;
+    const char* text;
+    int at;
+};
+
 }  // namespace
 
 TEST_CASE("audio gap: a block every 170 ms on a huge device buffer is not a gap", "[gap][engine]") {
@@ -60,11 +72,12 @@ TEST_CASE("audio gap: a block every 170 ms on a huge device buffer is not a gap"
     const double wall0 = wallClockNTP();
     const double mono0 = clockwork::monotonicSeconds();
     clockwork_audio_starts(wall0, mono0);
+    const LinesSince resumed(fix, "audio resumed");
     // 8192 frames at 48 kHz: a block of 170.7 ms, every 170.7 ms, the first
     // 170.7 ms after the start (the device's own first delivery: never a gap).
     for (int i = 1; i <= 20; ++i)
         REQUIRE_FALSE(clockwork_audio_back(wall0 + i * 0.1707, mono0 + i * 0.1707, (i - 1) * 0.1707));
-    CHECK(linesSaying(fix, "audio resumed") == 0);
+    CHECK(resumed.count() == 0);
 }
 
 TEST_CASE("audio gap: time passed with no audio rendered, over kClockStepSeconds, is a gap; "
@@ -75,6 +88,7 @@ TEST_CASE("audio gap: time passed with no audio rendered, over kClockStepSeconds
     const double wall0 = wallClockNTP();
     const double mono0 = clockwork::monotonicSeconds();
     clockwork_audio_starts(wall0, mono0);
+    const LinesSince resumed(fix, "audio resumed");
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.05, mono0 + 0.05, 0.05));
     // 0.55 s passed, 0.05 s of audio rendered in it.
     REQUIRE(clockwork_audio_back(wall0 + 0.6, mono0 + 0.6, 0.1));
@@ -82,7 +96,7 @@ TEST_CASE("audio gap: time passed with no audio rendered, over kClockStepSeconds
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 3600.7, mono0 + 0.7, 0.2));
     // And set back: no more a gap.
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.8, mono0 + 0.8, 0.3));
-    CHECK(linesSaying(fix, "audio resumed") == 1);
+    CHECK(resumed.count() == 1);
 }
 
 TEST_CASE("audio gap: a host with no monotonic clock is judged by its wall clock", "[gap][engine]") {
@@ -92,9 +106,10 @@ TEST_CASE("audio gap: a host with no monotonic clock is judged by its wall clock
     const double wall0 = wallClockNTP();
     const double mono0 = clockwork::monotonicSeconds();
     clockwork_audio_starts(wall0, 0.0);
+    const LinesSince resumed(fix, "audio resumed");
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.05, 0.0, 0.05));
     REQUIRE(clockwork_audio_back(wall0 + 0.6, 0.0, 0.1));
-    CHECK(linesSaying(fix, "audio resumed") == 1);
+    CHECK(resumed.count() == 1);
 }
 
 TEST_CASE("audio gap: a host whose audio starts is judged by time alone, as nothing was rendered",
@@ -105,13 +120,14 @@ TEST_CASE("audio gap: a host whose audio starts is judged by time alone, as noth
     const double wall0 = wallClockNTP();
     const double mono0 = clockwork::monotonicSeconds();
     clockwork_audio_starts(wall0, mono0);
+    const LinesSince resumed(fix, "audio resumed");
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 0.05, mono0 + 0.05, 100.0));   // a count from any origin
     // Its audio starts again 3 s on (a device opened again): the gap is the 3 s, whatever its count says.
     REQUIRE(clockwork_audio_starts(wall0 + 3.05, mono0 + 3.05));
     // And on from there: its first block, then one on time.
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 3.1, mono0 + 3.1, 0.0));
     REQUIRE_FALSE(clockwork_audio_back(wall0 + 3.15, mono0 + 3.15, 0.05));
-    CHECK(linesSaying(fix, "audio resumed") == 1);
+    CHECK(resumed.count() == 1);
 }
 
 TEST_CASE("audio gap: what waited through a gap plays when the audio is back, late by the gap, whatever "
@@ -128,17 +144,18 @@ TEST_CASE("audio gap: what waited through a gap plays when the audio is back, la
 
     // A short gap: what was sent before it is answered after it.
     clockwork_audio_starts(wall0, mono0);
+    const LinesSince resumed(fix, "audio resumed");
     REQUIRE_FALSE(clockwork_audio_back(wall0, mono0, 0.0));   // its first block
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(clockwork_audio_back(wall0 + 0.5, mono0 + 0.5, 0.0));
     REQUIRE(fix.waitForReply("/dummy/pong", r));
-    CHECK(linesSaying(fix, "audio resumed") == 1);
+    CHECK(resumed.count() == 1);
 
     // A long gap: the same.
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(clockwork_audio_back(wall0 + 5.0, mono0 + 5.0, 0.0));
     REQUIRE(fix.waitForReply("/dummy/pong", r));
-    CHECK(linesSaying(fix, "audio resumed") == 2);
+    CHECK(resumed.count() == 2);
     CHECK(linesSaying(fix, "[wake]") == 0);
     CHECK(linesSaying(fix, "stalled") == 0);
 }
@@ -183,6 +200,7 @@ TEST_CASE("the tick keeps the engine's clock, on every host: a block after a gap
     const double mono0 = clockwork::monotonicSeconds();
 
     clockwork_audio_starts(wall0, mono0);                   // this host's audio starts: anchored at its first block
+    const LinesSince resumed(fix, "audio resumed");
     tick(0, wall0, mono0);
     const uint32_t anchored = anchors(fix);
     tick(2400, wall0 + 0.05, mono0 + 0.05);                 // on time: no new anchor
@@ -194,7 +212,7 @@ TEST_CASE("the tick keeps the engine's clock, on every host: a block after a gap
     CHECK(anchors(fix) == anchored + 1);
     CHECK(t.block_ntp == Catch::Approx(wall0 + 0.8).margin(1e-5));
     CHECK(publishedClock(fix) == Catch::Approx(t.block_ntp).margin(1e-9));
-    CHECK(linesSaying(fix, "audio resumed") == 1);
+    CHECK(resumed.count() == 1);
 }
 
 TEST_CASE("the tick on a freewheeling clock sees no gap, having no wall clock", "[gap][clock][tick][engine]") {
@@ -206,11 +224,12 @@ TEST_CASE("the tick on a freewheeling clock sees no gap, having no wall clock", 
     const double wall0 = wallClockNTP();
     const double mono0 = clockwork::monotonicSeconds();
     clockwork_audio_starts(wall0, mono0);
+    const LinesSince resumed(fix, "audio resumed");
     tick(0, wall0, mono0);
     const uint32_t anchored = anchors(fix);
     const ClockworkBlockTime t = tick(128, wall0 + 0.7, mono0 + 0.7);   // 0.7 s late with one block rendered
     CHECK(anchors(fix) == anchored);
-    CHECK(linesSaying(fix, "audio resumed") == 0);
+    CHECK(resumed.count() == 0);
     REQUIRE(t.block_ntp > 0.0);
 }
 
