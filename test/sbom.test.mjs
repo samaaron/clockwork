@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,4 +184,175 @@ test("the canary fixture is looked up each of the three ways and fails on what i
   const { lines, problems } = await scan([canary], { ...quiet, osv, nvd });
   assert.deepEqual(problems, ["3 open advisories"]);
   assert.match(lines.at(-1), /1 looked up by purl, 1 by upstream commit, 1 by NVD search: 3 advisories/);
+});
+
+// A project that pins clockwork (SuperSonic's shape): its own list and
+// settings, a fork that carries another project's code inside it, and
+// clockwork at the pin. Run with --root.
+const { project, readVex } = await import(script);
+const fork = "abcdef1" + "0".repeat(33);
+const lib = "1234567" + "0".repeat(33);
+function fixtureProject(edit = (l) => l, dir = mkdtempSync(join(tmpdir(), "clockwork-sbom-project-"))) {
+  process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  mkdirSync(join(dir, "fork", "vendor", "lib"), { recursive: true });
+  writeFileSync(join(dir, "fork", "VERSION.h"), '#define FORK_COMMIT "abcdef1"\n#define V_MAJOR 1\n#define V_MINOR 2\n#define V_TWEAK "-dev"\n');
+  writeFileSync(join(dir, "CMakeLists.txt"), 'option(PRJ_THING "a thing" ON)\n');
+  symlinkSync(root, join(dir, "clockwork"));
+  const p = (name, value) => ({ name: `clockwork:${name}`, value });
+  const l = {
+    bomFormat: "CycloneDX", specVersion: "1.6", version: 1,
+    metadata: {
+      component: { type: "library", "bom-ref": "fixture", name: "fixture" },
+      properties: [p("vendor-dirs", "fork/vendor"), p("option-prefix", "PRJ_"), p("pins", "clockwork")],
+    },
+    components: [
+      { type: "library", "bom-ref": "fork", name: "fork", version: "1.2-dev", properties: [
+        p("path", "fork"), p("targets", "native,web"), p("version_file", "fork/VERSION.h"),
+        p("version_pattern", 'V_MAJOR (\\d+)[\\s\\S]*?V_MINOR (\\d+)[\\s\\S]*?V_TWEAK "([^"]*)"'),
+        p("upstream_commit", fork), p("commit_file", "fork/VERSION.h"), p("commit_pattern", 'FORK_COMMIT "([0-9a-f]+)"'), p("modified", "yes")] },
+      { type: "library", "bom-ref": "lib", name: "lib", version: "1234567", properties: [
+        p("path", "fork/vendor/lib"), p("targets", "native,web"), p("version_from", "upstream_commit"), p("upstream_commit", lib)] },
+    ],
+  };
+  writeFileSync(join(dir, "docs", "components.cdx.json"), JSON.stringify(edit(l), null, 2));
+  return dir;
+}
+const checkProject = (dir) => {
+  try {
+    return { ok: true, text: execFileSync("node", [script, "--root", dir, "check"], { encoding: "utf8", stdio: "pipe" }) };
+  } catch (e) {
+    return { ok: false, text: e.stderr.toString() };
+  }
+};
+const prop = (c, n) => c.properties?.find((x) => x.name === `clockwork:${n}`)?.value;
+
+test("a project that pins clockwork passes its check and refers to clockwork's document for each target", () => {
+  const dir = fixtureProject();
+  assert.ok(checkProject(dir).ok);
+  const outdir = join(dir, "sbom");
+  execFileSync("node", [script, "--root", dir, "target", "web", outdir, "v1"], { encoding: "utf8" });
+  const own = JSON.parse(readFileSync(join(outdir, "fixture-web.cdx.json"), "utf8"));
+  const cw = JSON.parse(readFileSync(join(outdir, "clockwork-web.cdx.json"), "utf8"));
+  const head = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  assert.equal(cw.metadata.component.version, head.slice(0, 7));
+  const pinned = own.components.find((c) => c.name === "clockwork");
+  assert.equal(pinned.version, head.slice(0, 7));
+  assert.equal(prop(pinned, "upstream_commit"), head);
+  const link = pinned.externalReferences.find((r) => r.type === "bom");
+  assert.equal(link.url, `urn:cdx:${cw.serialNumber.replace(/^urn:uuid:/, "")}/1`);
+  assert.deepEqual(own.components.map((c) => c.name).sort(), ["clockwork", "fork", "lib"]);
+});
+
+test("a fork's version is read with its pre-release suffix, and its upstream commit is held to the one its source records", () => {
+  const v = checkProject(fixtureProject((l) => { l.components[0].version = "1.2"; return l; }));
+  assert.ok(!v.ok);
+  assert.match(v.text, /fork: fork\/VERSION.h says 1.2-dev, the list says 1.2/);
+  const r = checkProject(fixtureProject((l) => {
+    l.components[0].properties.find((x) => x.name === "clockwork:upstream_commit").value = "f".repeat(40);
+    return l;
+  }));
+  assert.ok(!r.ok);
+  assert.match(r.text, /fork: fork\/VERSION.h records upstream commit abcdef1, the list records f{40}/);
+});
+
+test("code with no release versions is versioned by the first seven characters of its upstream commit", () => {
+  const r = checkProject(fixtureProject((l) => { l.components[1].version = "7654321"; return l; }));
+  assert.ok(!r.ok);
+  assert.match(r.text, /lib: versioned by its upstream commit, but 7654321 is not/);
+});
+
+test("code vendored inside a fork needs an entry of its own", () => {
+  const r = checkProject(fixtureProject((l) => { l.components.splice(1, 1); return l; }));
+  assert.ok(!r.ok);
+  assert.match(r.text, /fork\/vendor\/lib: vendored, but not in docs\/components.cdx.json/);
+});
+
+test("a project's scan applies clockwork's VEX statements from the pin as well as its own", () => {
+  const dir = fixtureProject();
+  writeFileSync(join(dir, "docs", "vex.cdx.json"), JSON.stringify({ vulnerabilities: [{ id: "TEST-1", affects: [{ ref: "fork" }], analysis: { state: "not_affected" } }] }));
+  const ids = readVex(project(dir)).vulnerabilities.map((v) => v.id);
+  const clockworks = JSON.parse(readFileSync(join(root, "docs", "vex.cdx.json"), "utf8")).vulnerabilities.map((v) => v.id);
+  assert.deepEqual(ids, ["TEST-1", ...clockworks]);
+});
+
+// A chain of pins (Sonic Pi's shape): a top project pins a middle one, which
+// pins clockwork. Each is a git checkout, as a submodule is.
+const git = (dir, ...args) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8", stdio: "pipe" });
+function commitAll(dir) {
+  git(dir, "init", "-q");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "fixture");
+  return git(dir, "rev-parse", "HEAD").trim();
+}
+function bareProject(dir, name, pins, extra = {}) {
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  const p = (n, value) => ({ name: `clockwork:${n}`, value });
+  writeFileSync(join(dir, "docs", "components.cdx.json"), JSON.stringify({
+    bomFormat: "CycloneDX", specVersion: "1.6", version: 1,
+    metadata: { component: { type: "application", "bom-ref": name, name }, properties: [p("vendor-dirs", ""), p("pins", pins)] },
+    components: [],
+  }));
+  if (extra.vex) writeFileSync(join(dir, "docs", "vex.cdx.json"), JSON.stringify({ vulnerabilities: [extra.vex] }));
+}
+function chain() {
+  const top = mkdtempSync(join(tmpdir(), "clockwork-sbom-chain-"));
+  process.on("exit", () => rmSync(top, { recursive: true, force: true }));
+  const mid = join(top, "mid");
+  fixtureProject((l) => l, mid);
+  const midCommit = commitAll(mid);
+  return { top, mid, midCommit };
+}
+const linkTo = (component, doc) => component.externalReferences.find((r) => r.type === "bom").url === `urn:cdx:${doc.serialNumber.replace(/^urn:uuid:/, "")}/1`;
+
+test("each project in a chain of pins lists its direct pins, linked to their documents", () => {
+  const { top, midCommit } = chain();
+  bareProject(top, "top", "mid");
+  const outdir = join(top, "sbom");
+  execFileSync("node", [script, "--root", top, "target", "web", outdir, "v1"], { encoding: "utf8" });
+  const read = (n) => JSON.parse(readFileSync(join(outdir, `${n}-web.cdx.json`), "utf8"));
+  const [own, mid, cw] = [read("top"), read("fixture"), read("clockwork")];
+  assert.deepEqual(own.components.map((c) => c.name), ["fixture"]);
+  assert.equal(own.components[0].version, midCommit.slice(0, 7));
+  assert.ok(linkTo(own.components[0], mid));
+  const pinned = mid.components.find((c) => c.name === "clockwork");
+  assert.ok(linkTo(pinned, cw));
+  assert.ok(!own.components.some((c) => c.name === "clockwork"), "a pin's pins are reached through it, not listed again");
+});
+
+test("a project pinned twice at one commit is written once and linked from both", () => {
+  const { top } = chain();
+  bareProject(top, "top", "mid,mid/clockwork");
+  const outdir = join(top, "sbom");
+  const text = execFileSync("node", [script, "--root", top, "target", "web", outdir, "v1"], { encoding: "utf8" });
+  assert.equal(text.match(/clockwork-web\.cdx\.json/g).length, 1);
+  const own = JSON.parse(readFileSync(join(outdir, "top-web.cdx.json"), "utf8"));
+  const cw = JSON.parse(readFileSync(join(outdir, "clockwork-web.cdx.json"), "utf8"));
+  const mid = JSON.parse(readFileSync(join(outdir, "fixture-web.cdx.json"), "utf8"));
+  assert.ok(linkTo(own.components.find((c) => c.name === "clockwork"), cw));
+  assert.ok(linkTo(mid.components.find((c) => c.name === "clockwork"), cw));
+});
+
+test("a project pinned at two commits stops the run", () => {
+  const { top } = chain();
+  const other = join(top, "other");
+  bareProject(other, "clockwork", "");
+  commitAll(other);
+  bareProject(top, "top", "mid,other");
+  let err = "";
+  try {
+    execFileSync("node", [script, "--root", top, "target", "web", join(top, "sbom"), "v1"], { encoding: "utf8", stdio: "pipe" });
+  } catch (e) {
+    err = e.stderr.toString();
+  }
+  assert.match(err, /clockwork is pinned at [0-9a-f]{7} and at [0-9a-f]{7} \(other\)/);
+});
+
+test("the VEX statements of every project in the chain apply, each tree once", () => {
+  const { top } = chain();
+  bareProject(top, "top", "mid,mid/clockwork", { vex: { id: "TOP-1", affects: [{ ref: "x" }], analysis: { state: "not_affected" } } });
+  writeFileSync(join(top, "mid", "docs", "vex.cdx.json"), JSON.stringify({ vulnerabilities: [{ id: "MID-1", affects: [{ ref: "fork" }], analysis: { state: "not_affected" } }] }));
+  const ids = readVex(project(top)).vulnerabilities.map((v) => v.id);
+  const clockworks = JSON.parse(readFileSync(join(root, "docs", "vex.cdx.json"), "utf8")).vulnerabilities.map((v) => v.id);
+  assert.deepEqual(ids, ["TOP-1", "MID-1", ...clockworks]);
 });

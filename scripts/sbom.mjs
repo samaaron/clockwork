@@ -50,19 +50,27 @@
  *       CMake fetches, the recorded commit is also checked against what the
  *       tag points at today. Needs the network.
  *
- * Needs node and cargo (for `cargo metadata`); no other tool.
+ * Every command takes `--root <dir>` to run on another project's list
+ * (project() below says what that list states). A project that pins other
+ * projects as submodules (clockwork, or a product built on it) gets their
+ * documents for each target from the pins, written beside its own, and lists
+ * each direct pin as a component referring to its document; the pins' own
+ * pins are reached the same way through them. Its scan applies the VEX
+ * statements of every project in the chain.
+ *
+ * Needs node and cargo (for `cargo metadata`, clockwork's tree only); no
+ * other tool.
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const LIST = join(ROOT, "docs", "components.cdx.json");
 
-// Where hand-carried code lives. Each entry directly under one of these must
-// be covered by a component's `clockwork:path`.
+// Where clockwork's hand-carried code lives. Each entry directly under one of
+// these must be covered by a component's `clockwork:path`.
 const VENDOR_DIRS = ["src/vendor", "src/native/vendor", "external"];
 // clockwork's own files that sit beside vendored code.
 const OWN = [/\.cmake$/, /^CLOCKWORK.*\.md$/i, /^\./];
@@ -85,15 +93,40 @@ const TARGETS = {
 
 const prop = (c, name) => c.properties?.find((p) => p.name === `clockwork:${name}`)?.value;
 
-function readList() {
-  return JSON.parse(readFileSync(LIST, "utf8"));
+// A project: the tree whose docs/components.cdx.json is read. clockwork by
+// default; `--root <dir>` names another tree, which states in its list's
+// metadata properties (each comma-separated where it is a list):
+//   clockwork:vendor-dirs    where its vendored code lives ("" for nowhere)
+//   clockwork:option-prefix  the prefix of its CMake options
+//   clockwork:skip-dirs      directories not searched for CMakeLists.txt
+//   clockwork:pins           submodules that are projects with lists of their
+//                            own (clockwork, or a product built on it); they
+//                            describe themselves, so their trees are skipped
+//                            here too
+export function project(root = ROOT) {
+  const list = JSON.parse(readFileSync(join(root, "docs", "components.cdx.json"), "utf8"));
+  const setting = (name) => prop(list.metadata ?? {}, name);
+  const csv = (v) => (v === undefined ? null : v.split(",").map((s) => s.trim()).filter(Boolean));
+  const pins = csv(setting("pins")) ?? [];
+  return {
+    root,
+    list,
+    name: list.metadata?.component?.name ?? "clockwork",
+    vendorDirs: csv(setting("vendor-dirs")) ?? VENDOR_DIRS,
+    optionPrefix: setting("option-prefix") ?? "CLOCKWORK_",
+    skipDirs: new Set([...(csv(setting("skip-dirs")) ?? []), ...pins]),
+    pins,
+    // The Rust workspace a build links crates from: clockwork's.
+    cargo: existsSync(join(root, "rust", "clockwork-native", "Cargo.toml")),
+  };
 }
 
-function cmakeFiles(dir, out = []) {
+function cmakeFiles(proj, dir = proj.root, out = []) {
   for (const name of readdirSync(dir)) {
     if (SKIP.has(name) || name.startsWith("build")) continue;
     const p = join(dir, name);
-    if (statSync(p).isDirectory()) cmakeFiles(p, out);
+    if (proj.skipDirs.has(relative(proj.root, p))) continue;
+    if (statSync(p).isDirectory()) cmakeFiles(proj, p, out);
     // A fetch shared between the main tree and the fuzz build lives in
     // external/fetch-<name>.cmake, read like a CMakeLists.txt.
     else if (name === "CMakeLists.txt" || /^fetch-.*\.cmake$/.test(name)) out.push(p);
@@ -102,14 +135,14 @@ function cmakeFiles(dir, out = []) {
 }
 
 // FetchContent_Declare(<name> ... GIT_REPOSITORY <url> GIT_TAG <tag> ...)
-function fetches() {
+function fetches(proj) {
   const found = [];
-  for (const file of cmakeFiles(ROOT)) {
+  for (const file of cmakeFiles(proj)) {
     const text = readFileSync(file, "utf8");
     for (const m of text.matchAll(/^\s*FetchContent_Declare\(\s*(\S+)([^)]*)\)/gm)) {
       const tag = /GIT_TAG\s+(\S+)/.exec(m[2])?.[1];
       const url = /GIT_REPOSITORY\s+(\S+)/.exec(m[2])?.[1];
-      found.push({ name: m[1], tag, url, file: relative(ROOT, file) });
+      found.push({ name: m[1], tag, url, file: relative(proj.root, file) });
     }
   }
   return found;
@@ -117,10 +150,12 @@ function fetches() {
 
 // CMake's options and their defaults: option(NAME "help" ON|OFF), from the
 // top-level CMakeLists.txt. What a default build turns on.
-function cmakeOptions() {
-  const text = readFileSync(join(ROOT, "CMakeLists.txt"), "utf8");
+function cmakeOptions(proj) {
   const options = new Map();
-  for (const m of text.matchAll(/^\s*option\(\s*(CLOCKWORK_[A-Z0-9_]+)\s+"(?:[^"\\]|\\.)*"\s+(ON|OFF)\s*\)/gm)) {
+  if (!existsSync(join(proj.root, "CMakeLists.txt"))) return options;
+  const text = readFileSync(join(proj.root, "CMakeLists.txt"), "utf8");
+  const re = new RegExp(`^\\s*option\\(\\s*(${proj.optionPrefix}[A-Z0-9_]+)\\s+"(?:[^"\\\\]|\\\\.)*"\\s+(ON|OFF)\\s*\\)`, "gm");
+  for (const m of text.matchAll(re)) {
     options.set(m[1], m[2] === "ON");
   }
   return options;
@@ -128,33 +163,51 @@ function cmakeOptions() {
 
 // The version a vendored file states: the pattern's capture groups, joined
 // with dots when there are several (a header that spells MAJOR, MINOR and
-// BUILD on three lines). null when the pattern matches nothing.
-function versionIn(file, pattern) {
-  const full = join(ROOT, file);
+// BUILD on three lines), except that a group starting with "-" or "+" is a
+// pre-release or build suffix and is appended as it is, and an empty group is
+// left out. null when the pattern matches nothing.
+function versionIn(proj, file, pattern) {
+  const full = join(proj.root, file);
   if (!existsSync(full)) return null;
   const m = new RegExp(pattern, "m").exec(readFileSync(full, "utf8"));
-  return m ? m.slice(1).join(".") : null;
+  if (!m) return null;
+  return m.slice(1).filter((g) => g !== "").reduce((v, g) => (/^[-+]/.test(g) ? v + g : v ? `${v}.${g}` : g), "");
 }
 
-function check() {
-  const { components } = readList();
-  const options = cmakeOptions();
+function check(proj = project()) {
+  const { components } = proj.list;
+  const options = cmakeOptions(proj);
   const problems = [];
   const paths = components.map((c) => prop(c, "path")).filter(Boolean);
 
   for (const c of components) {
     const p = prop(c, "path");
-    if (p && !existsSync(join(ROOT, p))) problems.push(`${c.name}: ${p} does not exist`);
+    if (p && !existsSync(join(proj.root, p))) problems.push(`${c.name}: ${p} does not exist`);
     if (!p && !prop(c, "fetch")) problems.push(`${c.name}: neither clockwork:path nor clockwork:fetch`);
-    // A vendored entry's version is what its source says, read every time.
+    // A vendored entry's version is what its source says, read every time;
+    // code with no release versions is versioned by its upstream commit
+    // (clockwork:version_from = upstream_commit).
     const vfile = prop(c, "version_file");
     const vpat = prop(c, "version_pattern");
-    if (p && !prop(c, "fetch") && !(vfile && vpat)) {
+    const commit = prop(c, "upstream_commit");
+    if (prop(c, "version_from") === "upstream_commit") {
+      if (!commit || c.version !== commit.slice(0, 7)) problems.push(`${c.name}: versioned by its upstream commit, but ${c.version} is not the first seven characters of it`);
+    } else if (p && !prop(c, "fetch") && !(vfile && vpat)) {
       problems.push(`${c.name}: vendored, but no clockwork:version_file and clockwork:version_pattern to read its version from`);
     } else if (vfile && vpat) {
-      const found = versionIn(vfile, vpat);
+      const found = versionIn(proj, vfile, vpat);
       if (found === null) problems.push(`${c.name}: ${vpat} matches nothing in ${vfile}`);
       else if (found !== c.version) problems.push(`${c.name}: ${vfile} says ${found}, the list says ${c.version}`);
+    }
+    // A fork whose source records the upstream commit it is synced to
+    // (clockwork:commit_file, clockwork:commit_pattern): the list's commit
+    // must be that one.
+    const cfile = prop(c, "commit_file");
+    const cpat = prop(c, "commit_pattern");
+    if (cfile && cpat) {
+      const recorded = versionIn(proj, cfile, cpat);
+      if (recorded === null) problems.push(`${c.name}: ${cpat} matches nothing in ${cfile}`);
+      else if (!commit || !commit.startsWith(recorded)) problems.push(`${c.name}: ${cfile} records upstream commit ${recorded}, the list records ${commit ?? "none"}`);
     }
     // Which builds compile it in: targets, and the options that include or exclude it.
     const targets = prop(c, "targets");
@@ -167,23 +220,25 @@ function check() {
       if (o && !options.has(o)) problems.push(`${c.name}: clockwork:${key} names ${o}, which CMakeLists.txt does not define`);
     }
     // How `scan` will look it up.
-    const commit = prop(c, "upstream_commit");
     if (commit && !/^[0-9a-f]{40}$/.test(commit)) problems.push(`${c.name}: clockwork:upstream_commit is not a full commit id`);
     if (!lookup(c)) problems.push(`${c.name}: no clockwork:upstream_commit or clockwork:advisory_search, so scan could not look it up`);
   }
 
-  for (const dir of VENDOR_DIRS) {
-    for (const name of readdirSync(join(ROOT, dir))) {
+  for (const dir of proj.vendorDirs) {
+    for (const name of readdirSync(join(proj.root, dir))) {
       if (OWN.some((re) => re.test(name))) continue;
       const p = `${dir}/${name}`;
-      // Covered by an entry for it, for something inside it, or for its parent.
-      const covered = paths.some((q) => q === p || q.startsWith(`${p}/`) || p.startsWith(`${q}/`))
+      // Covered by an entry for it, for something inside it, or for the
+      // vendor directory itself when that is one component. An entry for a
+      // directory holding a vendor directory (a fork that carries other
+      // projects' code) does not cover what is vendored inside it.
+      const covered = paths.some((q) => q === p || q.startsWith(`${p}/`) || q === dir)
         || components.some((c) => c.pedigree?.patches?.some((x) => x.diff?.url === p));
       if (!covered) problems.push(`${p}: vendored, but not in docs/components.cdx.json`);
     }
   }
 
-  for (const f of fetches()) {
+  for (const f of fetches(proj)) {
     const c = components.find((x) => prop(x, "fetch") === f.name);
     if (!c) { problems.push(`${f.file}: FetchContent_Declare(${f.name}) is not in docs/components.cdx.json`); continue; }
     if (f.tag && c.version !== f.tag) problems.push(`${f.name}: the build fetches ${f.tag}, the list says ${c.version}`);
@@ -197,7 +252,7 @@ function check() {
     for (const p of problems) console.error(`sbom: ${p}`);
     process.exit(1);
   }
-  console.log(`sbom: ${components.length} components, every vendored path and fetch accounted for`);
+  console.log(`sbom: ${proj.name}: ${components.length} components, every vendored path and fetch accounted for`);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,8 +281,8 @@ function cargoLicence(pkg) {
 // resolve graph walked from its root over normal and build dependencies (not
 // dev), as cargo resolves it for that platform. Workspace members are
 // clockwork's own and are not components of it.
-function cargoComponents(manifest, triple, features, members) {
-  const args = ["metadata", "--format-version", "1", "--locked", "--manifest-path", join(ROOT, manifest), "--filter-platform", triple];
+function cargoComponents(proj, manifest, triple, features, members) {
+  const args = ["metadata", "--format-version", "1", "--locked", "--manifest-path", join(proj.root, manifest), "--filter-platform", triple];
   if (features) args.push("--no-default-features", "--features", features.join(","));
   const meta = JSON.parse(execFileSync("cargo", args, { encoding: "utf8", maxBuffer: 64 << 20 }));
   const byId = new Map(meta.packages.map((p) => [p.id, p]));
@@ -262,9 +317,10 @@ function cargoComponents(manifest, triple, features, members) {
 
 // The packages the web client ships: package.json's `dependencies`, resolved
 // through package-lock.json, transitively; never devDependencies.
-function npmComponents() {
-  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
-  const lock = JSON.parse(readFileSync(join(ROOT, "package-lock.json"), "utf8"));
+function npmComponents(proj) {
+  if (!existsSync(join(proj.root, "package.json"))) return [];
+  const pkg = JSON.parse(readFileSync(join(proj.root, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(proj.root, "package-lock.json"), "utf8"));
   const out = [];
   const seen = new Set();
   const queue = Object.keys(pkg.dependencies ?? {});
@@ -304,24 +360,44 @@ function vendoredComponents(list, target, options) {
   });
 }
 
-function workspaceMembers() {
+function workspaceMembers(proj) {
+  if (!proj.cargo) return new Set();
   const meta = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps", "--locked",
-    "--manifest-path", join(ROOT, "rust", "Cargo.toml")], { encoding: "utf8", maxBuffer: 64 << 20 }));
+    "--manifest-path", join(proj.root, "rust", "Cargo.toml")], { encoding: "utf8", maxBuffer: 64 << 20 }));
   return new Set(meta.packages.map((p) => p.name));
 }
 
-function targetDocument(name, version, list, options, members) {
+// A pinned project as a component of the project that pins it: versioned by
+// the pinned commit, and referring by BOM-Link to its document for the target.
+function pinnedComponent(pinProj, commit, doc, file) {
+  const subject = pinProj.list.metadata.component;
+  return {
+    type: "library",
+    "bom-ref": `${pinProj.name}@${commit}`,
+    name: pinProj.name,
+    version: commit.slice(0, 7),
+    ...(subject.licenses ? { licenses: subject.licenses } : {}),
+    externalReferences: [
+      ...(subject.externalReferences ?? []),
+      { type: "bom", url: `urn:cdx:${doc.serialNumber.replace(/^urn:uuid:/, "")}/${doc.version}`, comment: basename(file) },
+    ],
+    properties: [{ name: "clockwork:upstream_commit", value: commit }],
+  };
+}
+
+function targetDocument(proj, name, version, options, members, pinned = []) {
   const target = TARGETS[name];
   if (!target) throw new Error(`unknown target ${name}; one of ${Object.keys(TARGETS).join(", ")}`);
-  const features = cargoFeatures(options, target.windows);
-  let crates = cargoComponents("rust/clockwork-native/Cargo.toml", target.triple, features, members);
-  if (target.subsystems) {
+  const features = proj.cargo ? cargoFeatures(options, target.windows) : [];
+  let crates = proj.cargo ? cargoComponents(proj, "rust/clockwork-native/Cargo.toml", target.triple, features, members) : [];
+  if (proj.cargo && target.subsystems) {
     for (const crate of ["clockwork-midi", "clockwork-gamepad"]) {
-      crates = crates.concat(cargoComponents(`rust/${crate}/Cargo.toml`, target.subsystems, null, members));
+      crates = crates.concat(cargoComponents(proj, `rust/${crate}/Cargo.toml`, target.subsystems, null, members));
     }
   }
-  const npm = target.kind === "web" ? npmComponents() : [];
-  const vendored = vendoredComponents(list, target, options);
+  const npm = target.kind === "web" ? npmComponents(proj) : [];
+  const vendored = vendoredComponents(proj.list, target, options);
+  vendored.push(...pinned);
 
   // One entry per name@version. The hand-listed entry wins: a cargo path
   // dependency such as the midir fork reaches cargo with no licence, no
@@ -330,7 +406,7 @@ function targetDocument(name, version, list, options, members) {
   for (const c of [...crates, ...npm, ...vendored]) byKey.set(`${c.name}@${c.version}`, c);
   const components = [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 
-  const subject = { ...list.metadata.component, ...(version ? { version } : {}) };
+  const subject = { ...proj.list.metadata.component, ...(version ? { version } : {}) };
   return {
     $schema: "http://cyclonedx.org/schema/bom-1.6.schema.json",
     bomFormat: "CycloneDX",
@@ -343,7 +419,7 @@ function targetDocument(name, version, list, options, members) {
       properties: [
         { name: "clockwork:target", value: name },
         { name: "clockwork:triple", value: target.triple },
-        { name: "clockwork:cargo-features", value: features.join(",") },
+        ...(proj.cargo ? [{ name: "clockwork:cargo-features", value: features.join(",") }] : []),
         { name: "clockwork:build-options", value: "CMakeLists.txt defaults" },
       ],
     },
@@ -351,27 +427,48 @@ function targetDocument(name, version, list, options, members) {
   };
 }
 
-function target(which, outdir, version) {
-  const list = readList();
-  const options = cmakeOptions();
-  const members = workspaceMembers();
+// Writes <outdir>/<project>-<target>.cdx.json for each target, and first the
+// documents of every project it pins, recursively. Each document lists the
+// project's direct pins as components referring to theirs. A project reached
+// twice at one commit (a product pinning clockwork and a product that pins
+// clockwork too) is written once; reached at two commits, the run stops,
+// since both would be written to the same file. Returns each target's
+// document and the file it was written to.
+function target(proj, which, outdir, version, done = new Map()) {
+  const options = cmakeOptions(proj);
+  const members = workspaceMembers(proj);
   const names = which === "all" ? Object.keys(TARGETS) : [which];
+  const pins = proj.pins.map((path) => {
+    const root = join(proj.root, path);
+    const commit = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const pin = project(root);
+    const seen = done.get(pin.name);
+    if (seen && seen.commit !== commit) {
+      throw new Error(`${pin.name} is pinned at ${seen.commit.slice(0, 7)} and at ${commit.slice(0, 7)} (${path})`);
+    }
+    const docs = seen ? seen.docs : target(pin, which, outdir, commit.slice(0, 7), done);
+    done.set(pin.name, { commit, docs });
+    return { pin, commit, docs };
+  });
   mkdirSync(outdir, { recursive: true });
+  const written = {};
   for (const name of names) {
-    const doc = targetDocument(name, version, list, options, members);
-    const out = join(outdir, `clockwork-${name}.cdx.json`);
+    const pinned = pins.map(({ pin, commit, docs }) => pinnedComponent(pin, commit, docs[name].doc, docs[name].file));
+    const doc = targetDocument(proj, name, version, options, members, pinned);
+    const out = join(outdir, `${proj.name}-${name}.cdx.json`);
     writeFileSync(out, JSON.stringify(doc, null, 2) + "\n");
+    written[name] = { doc, file: out };
     const kinds = { cargo: 0, npm: 0, vendored: 0 };
     for (const c of doc.components) kinds[c.purl?.startsWith("pkg:cargo/") ? "cargo" : c.purl?.startsWith("pkg:npm/") ? "npm" : "vendored"]++;
-    console.log(`sbom: ${relative(ROOT, out)}: ${doc.components.length} components (${kinds.cargo} crates, ${kinds.npm} npm, ${kinds.vendored} vendored)`);
+    console.log(`sbom: ${relative(proj.root, out)}: ${doc.components.length} components (${kinds.cargo} crates, ${kinds.npm} npm, ${kinds.vendored} vendored)`);
   }
+  return written;
 }
 
 // ---------------------------------------------------------------------------
 // Advisories
 // ---------------------------------------------------------------------------
 
-const VEX = join(ROOT, "docs", "vex.cdx.json");
 // The analysis states under which a VEX statement accepts an advisory.
 const ACCEPTED = new Set(["not_affected", "false_positive", "resolved"]);
 
@@ -414,14 +511,22 @@ function tagCommit(url, tag) {
   return (lines.find(([, ref]) => ref.endsWith("^{}")) ?? lines[0])?.[0];
 }
 
-function readVex() {
-  return existsSync(VEX) ? JSON.parse(readFileSync(VEX, "utf8")) : { vulnerabilities: [] };
+// The project's VEX statements and those of every project it pins,
+// recursively, each tree once: the pins' documents are scanned with its own.
+export function readVex(proj = project(), seen = new Set()) {
+  const key = realpathSync(proj.root);
+  if (seen.has(key)) return { vulnerabilities: [] };
+  seen.add(key);
+  const file = join(proj.root, "docs", "vex.cdx.json");
+  const own = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).vulnerabilities ?? [] : [];
+  const pinned = proj.pins.flatMap((path) => readVex(project(join(proj.root, path)), seen).vulnerabilities);
+  return { vulnerabilities: [...own, ...pinned] };
 }
 
 // Scans the documents. Returns the report lines and the problems; the
 // command exits non-zero on any problem. The lookups are parameters so the
 // tests can stand in for the network.
-export async function scan(files, { osv = osvQuery, nvd = nvdSearch, tag = tagCommit, vex = readVex() } = {}) {
+export async function scan(files, { osv = osvQuery, nvd = nvdSearch, tag = tagCommit, vex = readVex(), root = ROOT } = {}) {
   const problems = [];
   const lines = [];
   // Distinct components across the documents, by name and version.
@@ -431,7 +536,7 @@ export async function scan(files, { osv = osvQuery, nvd = nvdSearch, tag = tagCo
     for (const c of doc.components) {
       const key = `${c.name}@${c.version}`;
       if (!components.has(key)) components.set(key, { c, docs: [] });
-      components.get(key).docs.push(relative(ROOT, file));
+      components.get(key).docs.push(relative(root, file));
     }
   }
 
@@ -490,18 +595,29 @@ export async function scan(files, { osv = osvQuery, nvd = nvdSearch, tag = tagCo
 }
 
 async function main() {
-  const [cmd, ...args] = process.argv.slice(2);
-  if (cmd === "check") check();
-  else if (cmd === "target" && args.length >= 1) target(args[0], args[1] ? resolve(args[1]) : join(ROOT, "build", "sbom"), args[2]);
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf("--root");
+  const proj = project(at >= 0 ? resolve(argv[at + 1]) : ROOT);
+  if (at >= 0) argv.splice(at, 2);
+  const [cmd, ...args] = argv;
+  if (cmd === "check") check(proj);
+  else if (cmd === "target" && args.length >= 1) target(proj, args[0], args[1] ? resolve(args[1]) : join(proj.root, "build", "sbom"), args[2]);
   else if (cmd === "scan" && args.length >= 1) {
-    const { lines, problems } = await scan(args.map((a) => resolve(a)));
+    const { lines, problems } = await scan(args.map((a) => resolve(a)), { vex: readVex(proj), root: proj.root });
     for (const l of lines) console.log(l);
     for (const p of problems) console.error(`sbom: ${p}`);
     process.exit(problems.length ? 1 : 0);
   } else {
-    console.error("usage: sbom.mjs check | target <name>|all [outdir] [version] | scan <document>...");
+    console.error("usage: sbom.mjs [--root <dir>] check | target <name>|all [outdir] [version] | scan <document>...");
     process.exit(2);
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main();
+  } catch (e) {
+    console.error(`sbom: ${e.message}`);
+    process.exit(1);
+  }
+}
