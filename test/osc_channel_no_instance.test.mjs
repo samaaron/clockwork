@@ -14,8 +14,8 @@ import { REASON_NO_INSTANCE, oscAddress, isClockworkSysBytes } from "../js/lib/c
 import { readArena, readGeneration, generationView, instanceGeneration, hasInstance } from "../js/lib/arena.js";
 import * as oscFast from "../js/lib/osc_fast.js";
 import { EgressReader } from "../js/lib/ring.js";
-import { bootEngine, block, haveWasm } from "./engine_boot.mjs";
-const maybe = haveWasm ? test : test.skip;
+import { bootEngine, block, haveWasm, testIf } from "./engine_boot.mjs";
+const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
 
 maybe("a booted engine's arena names its first instance: generation 1, and one is up", async () => {
   // The word the C moves at every build (docs/RESTARTS.md), read by the

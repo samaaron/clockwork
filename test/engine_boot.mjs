@@ -5,6 +5,7 @@
 // browser runs, over the memory the worklet lays out, with nothing of the
 // browser around it. Not a test itself (no .test. in the name).
 import assert from "node:assert/strict";
+import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,16 @@ const wasmPath = path.join(here, "..", "dist", "wasm", "clockwork.wasm");
 // The tests run against whatever scripts/build-web.sh last produced. Without
 // it there is nothing to test, and skipping says so.
 export const haveWasm = fs.existsSync(wasmPath);
+
+// `test` when `have`, else a skip — or, with CLOCKWORK_REQUIRE_WASM set (the CI
+// job that builds the wasm), a failure naming what is missing.
+export function testIf(have, missing) {
+  if (have) return test;
+  if (process.env.CLOCKWORK_REQUIRE_WASM) {
+    return (name) => test(name, () => assert.fail(`${missing} is missing; run scripts/build-web.sh`));
+  }
+  return test.skip;
+}
 
 let compiled = null;
 

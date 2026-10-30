@@ -24,9 +24,9 @@ import assert from "node:assert/strict";
 
 import { ringAt, ringWrite, ringDrain, RingTap, EgressReader } from "../js/lib/ring.js";
 import * as M from "../js/lib/metrics_offsets.js";
-import { bootEngine, haveWasm } from "./engine_boot.mjs";
+import { bootEngine, haveWasm, testIf } from "./engine_boot.mjs";
 
-const maybe = haveWasm ? test : test.skip;
+const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
 
 const SEED = 0xC10C;
 const REGION_INGRESS = 7;     // ClockworkRegionId

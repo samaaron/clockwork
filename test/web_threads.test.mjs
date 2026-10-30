@@ -14,9 +14,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { ringWrite, RingTap, EgressReader } from "../js/lib/ring.js";
-import { bootEngine, block, haveWasm } from "./engine_boot.mjs";
+import { bootEngine, block, haveWasm, testIf } from "./engine_boot.mjs";
 
-const maybe = haveWasm ? test : test.skip;
+const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
 
 const pad = (n) => (n + 4) & ~3;
 function ascii(out, at, text) {

@@ -12,6 +12,7 @@
  * protocol work is not.
  */
 import { test } from "node:test";
+import { testIf } from "./engine_boot.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,7 +27,7 @@ import { FakeMidiAccess, FakeMidiInput, FakeMidiOutput } from "./web_fakes.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const wasmPath = path.join(here, "..", "dist", "wasm", "clockwork_midi_bg.wasm");
-const maybe = fs.existsSync(wasmPath) ? test : test.skip;
+const maybe = testIf(fs.existsSync(wasmPath), "the MIDI wasm module");
 const wasm = () => fs.readFileSync(wasmPath);
 
 const decode = (bytes) => oscFast.decodePacket(bytes);

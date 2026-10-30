@@ -288,10 +288,7 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
 #ifdef __APPLE__
     REQUIRE(port.find(VirtualDestination::kName) != std::string::npos);
 #else
-    if (port.empty()) {
-        WARN("no MIDI output port on this box — skipping the MIDI case");
-        return;
-    }
+    REQUIRE_FALSE(port.empty());   // run by name: a machine with no port is a failure to report
 #endif
 
     // Open the port, as a client that enables every port at boot does.

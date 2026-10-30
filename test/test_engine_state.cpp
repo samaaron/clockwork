@@ -190,16 +190,8 @@ TEST_CASE("EngineState: a guest that declares its pool's bulk memory boots, with
 
 TEST_CASE("EngineState: a bulk memory the system cannot provide stops the boot, saying why",
           "[EngineState][heap]") {
-    // The sanitizers' allocators abort the process on a request this size
-    // rather than answering NULL (allocation-size-too-big), so under them the
-    // failure this case is about cannot happen; the plain builds run it.
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-    SKIP("a sanitizer aborts on an impossible allocation instead of failing it");
-#elif defined(__has_feature)
-#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-    SKIP("a sanitizer aborts on an impossible allocation instead of failing it");
-#  endif
-#endif
+    // Under a sanitizer the allocator aborts on a request this size unless
+    // allocator_may_return_null=1 is in its options; the sanitize jobs set it.
     // Past any address space, 32-bit as much as 64-bit: near the most size_t
     // can say. (1 << 60 is no size at all where size_t is 32 bits — the shift
     // is undefined, and i386 booted a heap.) The engine caps a request to what

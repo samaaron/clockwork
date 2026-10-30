@@ -22,6 +22,7 @@
  *     acked with its token, as natively.
  */
 import { test } from "node:test";
+import { testIf } from "./engine_boot.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -38,7 +39,7 @@ import { FakeMidiAccess, FakeMidiInput, FakeMidiOutput, FakeGamepads, fakeGamepa
 const here = path.dirname(fileURLToPath(import.meta.url));
 const midiWasm = path.join(here, "..", "dist", "wasm", "clockwork_midi_bg.wasm");
 const padWasm = path.join(here, "..", "dist", "wasm", "clockwork_gamepad_bg.wasm");
-const maybe = fs.existsSync(midiWasm) && fs.existsSync(padWasm) ? test : test.skip;
+const maybe = testIf(fs.existsSync(midiWasm) && fs.existsSync(padWasm), "the MIDI and gamepad wasm modules");
 
 const decode = (bytes) => oscFast.decodePacket(bytes);
 const encode = (address, args) => oscFast.copyEncoded(oscFast.encodeMessage(address, args));

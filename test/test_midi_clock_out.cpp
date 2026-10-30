@@ -19,6 +19,7 @@
 #include "clock/MidiClockOut.h"
 #include "clock/ClockworkClock.h"
 #include "clockwork_event_sink.h"
+#include "lanes/lanes.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -479,11 +480,12 @@ TEST_CASE("midi clock: ticks reach an open port, carrying their own time",
 
 TEST_CASE("midi clock: naming the same port twice reuses one sink",
           "[midi][clock][device]") {
+    // With the host as the sinks' endpoint the port need not exist, so the
+    // case runs on a machine with no MIDI.
+    struct ForwardOff { ~ForwardOff() { clockwork_host_forward(0); } } guard;
+    clockwork_host_forward(1);
     const ClockworkSink a = midi_clock_sink_for_port("clockwork-dedupe-test");
-    if (a == CLOCKWORK_SINK_NONE) {
-        WARN("no MIDI port could be opened — skipping sink reuse.");
-        return;
-    }
+    REQUIRE(a != CLOCKWORK_SINK_NONE);
     // A second sink on the same port would double every tick on the wire.
     const ClockworkSink b = midi_clock_sink_for_port("clockwork-dedupe-test");
     CHECK(a == b);
@@ -579,15 +581,14 @@ void sendOsc(ClockworkMidi* h, const char* addr, const char* arg, int32_t on) {
 
 } // namespace
 
+// Hidden from the default run: it needs a MIDI port the machine will open
+// and loop back. Run it by name on a machine that has one.
 TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
-          "[midi][clock][device]") {
+          "[.midi-hardware][midi][clock][device]") {
     MidiCtx ctx;
     ClockworkMidi* midi = clockwork_midi_create(&ctx, emit_cb, clock_cb, transport_cb,
                                   "clockwork-clock-e2e");
-    if (!midi) {
-        WARN("no MIDI subsystem on this machine — skipping the end-to-end path");
-        return;
-    }
+    REQUIRE(midi);
     // Enumerate first: creation does not scan the OS registry, so asking for
     // the ports before a refresh answers with an empty list.
     clockwork_midi_refresh(midi);
@@ -600,9 +601,8 @@ TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
         for (const auto& p : ctx.inPorts)  all += " [" + p + "]";
         all += " outs:";
         for (const auto& p : ctx.outPorts) all += " [" + p + "]";
-        WARN("no 'Midi Through' loopback port — skipping. enumerated " << all);
         clockwork_midi_destroy(midi);
-        return;
+        FAIL("no 'Midi Through' loopback port on this machine; enumerated " << all);
     }
     INFO("loopback out=" << out << " in=" << in);
 
