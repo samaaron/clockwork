@@ -27,7 +27,9 @@
  * fixture never shuts down, so the two cannot share a process.
  */
 #include "EngineFixture.h"
+#include "ForwardedBundle.h"
 #include "OscTestUtils.h"
+#include "lanes/lanes.h"
 #include "clock/clock_math.h"
 #include "clockwork_event_sink.h"
 #include "clockwork_prefix.h"
@@ -115,13 +117,8 @@ struct VirtualDestination {
     std::vector<Packet> packets;
 
     VirtualDestination() {
-        // kMIDIServerStartErr (-304): the machine's MIDI server did not start,
-        // which happens on a CI runner.
-        // Nothing of ours is under test without one, so the case is skipped
-        // and says so, rather than failed for the runner.
         const OSStatus created = MIDIClientCreate(CFSTR("clockwork-engine-tests"), nullptr, nullptr, &client);
-        if (created == kMIDIServerStartErr)
-            SKIP("CoreMIDI's server did not start on this machine (MIDIClientCreate: -304)");
+        INFO("MIDIClientCreate: " << created << " (a GitHub runner answers -304: no MIDI server)");
         REQUIRE(created == noErr);
         REQUIRE(MIDIDestinationCreate(client, CFSTR("clockworkenginetest"), &VirtualDestination::onRead,
                                       this, &dest) == noErr);
@@ -206,8 +203,65 @@ TEST_CASE("scheduled OSC leaves at its time, not when the scheduler fired it",
     CHECK(arrived >= when - 0.001);
 }
 
-TEST_CASE("scheduled MIDI reaches its port carrying its time",
+// The same contract with the host as the sink's endpoint (clockwork_host_forward):
+// the note goes out to the host inside a bundle stamped with its moment, and
+// the sink counts it as seen before its time. No MIDI port is involved, so
+// this runs on every platform and under every sanitizer.
+TEST_CASE("scheduled MIDI reaches its sink carrying its time, with the host as the endpoint",
           "[engine][schedule][midi]") {
+    struct ForwardOff { ~ForwardOff() { clockwork_host_forward(0); } } guard;
+    clockwork_host_forward(1);
+    Engine e;
+    const char* port = "Fake Synth";
+    osc_test::Builder b;
+    b.begin(CLOCKWORK_SYS("midi/out/note_off"))
+        << port << static_cast<int32_t>(1) << static_cast<int32_t>(60) << static_cast<int32_t>(0);
+    const auto noteOff = b.end();
+    const double   when    = wallClockNTP() + kLeadSec;
+    const uint64_t whenTag = clockwork::ntpToOscTimetag(when);
+    const auto     pkt     = scheduled(when, noteOff);
+    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.pump(kLeadSec + 0.1);
+
+    // The forwarded bundle, once the control pass has handed the fired note
+    // to its sink.
+    osc_test::Forwarded fwd;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fwd.isBundle && std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lock(e.mu);
+            for (const auto& r : e.replies) {
+                if (!osc_test::isBundle(r.data(), r.size())) continue;
+                fwd = osc_test::unwrapForwarded(r.data(), r.size());
+                break;
+            }
+        }
+        e.engine.pumpAudioBlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(fwd.isBundle);
+    CHECK(fwd.timetag == whenTag);                         // the note's own moment, unchanged
+    CHECK(fwd.address == CLOCKWORK_SYS("midi/sink/send"));
+    const auto sent = osc_test::parseReply(fwd.element.data(), static_cast<uint32_t>(fwd.element.size()));
+    REQUIRE(sent.argCount() == 2);
+    CHECK(sent.argString(0) == port);
+    CHECK(sent.argBlob(1) == std::vector<uint8_t>{0x80, 60, 0});
+
+    const ClockworkSink sink = midiSinkFor(port);
+    REQUIRE(sink != CLOCKWORK_SINK_NONE);
+    ClockworkSinkStats st{};
+    REQUIRE(clockwork_sink_stats(sink, &st));
+    CHECK(st.sent == 1);
+    CHECK(st.scheduled == 1);                  // the host holds it to its time
+    CHECK(st.late == 0);                       // seen before its time, not at it
+    CHECK(st.dropped == 0);
+}
+
+// The same through a real port. Hidden from the default run: it needs a MIDI
+// server (a GitHub runner has none) and, off macOS, a port the machine will
+// open. Run it by name on a machine that has one.
+TEST_CASE("scheduled MIDI reaches its port carrying its time",
+          "[.midi-hardware][engine][schedule][midi]") {
 #ifdef __APPLE__
     VirtualDestination vd;
 #endif

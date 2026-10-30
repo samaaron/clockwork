@@ -25,6 +25,7 @@
  *     move to the host with the rest;
  *   - the switch is a switch, and turning it off restores the refusal.
  */
+#include "ForwardedBundle.h"
 #include "LanesFixture.h"
 #include "OscTestUtils.h"
 
@@ -44,25 +45,10 @@ namespace {
 constexpr uint32_t kClient = 0x40f7;   // not 0: 0 is the broadcast route
 
 // What a forwarded frame looks like once taken apart.
-struct Forwarded {
-    bool        isBundle = false;
-    uint64_t    timetag  = 0;
-    std::string address;               // of the one element inside
-    std::vector<uint8_t> element;
-};
+using osc_test::Forwarded;
 
 Forwarded unwrap(const lanes_test::EgressFrame& f) {
-    Forwarded out;
-    const auto& d = f.data;
-    if (d.size() < 20 || std::memcmp(d.data(), "#bundle", 8) != 0) return out;
-    out.isBundle = true;
-    for (int i = 0; i < 8; ++i) out.timetag = (out.timetag << 8) | d[8 + i];
-    uint32_t n = 0;
-    for (int i = 0; i < 4; ++i) n = (n << 8) | d[16 + i];
-    if (20 + n > d.size()) return out;
-    out.element.assign(d.begin() + 20, d.begin() + 20 + n);
-    out.address = osc_test::parseAddress(out.element.data(), n);
-    return out;
+    return osc_test::unwrapForwarded(f.data.data(), f.data.size());
 }
 
 // "/clockwork/midi/out/note_on ,siii * ch note vel" — the note every case sends.
@@ -85,7 +71,7 @@ const lanes_test::EgressFrame* find(const std::vector<lanes_test::EgressFrame>& 
 
 const lanes_test::EgressFrame* findBundle(const std::vector<lanes_test::EgressFrame>& frames) {
     for (const auto& f : frames)
-        if (f.data.size() >= 8 && std::memcmp(f.data.data(), "#bundle", 8) == 0) return &f;
+        if (osc_test::isBundle(f.data.data(), f.data.size())) return &f;
     return nullptr;
 }
 
