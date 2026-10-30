@@ -190,7 +190,10 @@ TEST_CASE("restart sequence: the watchdog's recovery from a device delivering at
     INFO(fix.debugMessagesDump());
     INFO("rate skew recoveries " << fix.engine().rateSkewRecoveryCount()
          << ", watchdog recoveries " << fix.engine().watchdogRecoveryCount()
-         << ", heard running above " << gen << ": " << heardRunning(fix, gen));
+         << ", heard running above " << gen << ": " << heardRunning(fix, gen)
+         << ", engine state " << static_cast<int>(fix.engine().engineState())
+         << ", device phase " << static_cast<int>(fix.engine().devicePhase())
+         << ", recovery in flight " << fix.engine().recoveryInFlight());
     REQUIRE(recovered);
     const auto heard = settledSequence(fix, *sys);
     sys->useWallTime();

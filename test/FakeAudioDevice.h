@@ -624,9 +624,13 @@ inline bool runWatchdogUntil(ClockworkEngine& engine, FakeSystem& sys, int pollM
                              int64_t forMs, const std::function<bool()>& done) {
     const int64_t end = sys.nowMs() + forMs;
     for (;;) {
+        // Time the engine spends switching a device, recovering or
+        // restarting the instance is not charged to the poll budget: virtual
+        // time advances freely until the engine is idle again.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (engine.devicePhase() != ClockworkEngine::DevicePhase::Idle
-               || engine.recoveryInFlight()) {
+               || engine.recoveryInFlight()
+               || engine.engineState() == EngineState::Restarting) {
             if (std::chrono::steady_clock::now() > deadline) return false;
             sys.advanceBy(1000);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
