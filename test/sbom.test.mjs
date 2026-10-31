@@ -268,6 +268,38 @@ test("code vendored inside a fork needs an entry of its own", () => {
   assert.match(r.text, /fork\/vendor\/lib: vendored, but not in docs\/components.cdx.json/);
 });
 
+// Code we forked and maintain as our own is listed as an ancestor in the
+// subject's pedigree, not as a component.
+const asAncestor = (l) => {
+  const [fork] = l.components.splice(0, 1);
+  l.metadata.component.pedigree = { ancestors: [fork] };
+  return l;
+};
+
+test("an ancestor is checked against its upstream commit, appears in each document's metadata and is not scanned", async () => {
+  const dir = fixtureProject(asAncestor);
+  assert.ok(checkProject(dir).ok);
+  const moved = checkProject(fixtureProject((l) => {
+    asAncestor(l).metadata.component.pedigree.ancestors[0].properties.find((x) => x.name === "clockwork:upstream_commit").value = "f".repeat(40);
+    return l;
+  }));
+  assert.ok(!moved.ok);
+  assert.match(moved.text, /fork: fork\/VERSION.h records upstream commit abcdef1, the list records f{40}/);
+
+  const outdir = join(dir, "sbom");
+  execFileSync("node", [script, "--root", dir, "target", "web", outdir, "v1"], { encoding: "utf8" });
+  const file = join(outdir, "fixture-web.cdx.json");
+  const own = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(own.metadata.component.pedigree.ancestors.map((a) => a.name), ["fork"]);
+  assert.deepEqual(own.components.map((c) => c.name).sort(), ["clockwork", "lib"]);
+
+  const queried = [];
+  const osv = async (qs) => { queried.push(...qs); return qs.map(() => []); };
+  await scan([file], { ...quiet, osv, tag: recorded, vex: { vulnerabilities: [] } });
+  assert.ok(queried.length > 0);
+  assert.ok(!queried.some((q) => q.commit === fork), "the ancestor is not looked up");
+});
+
 test("a project's scan applies clockwork's VEX statements from the pin as well as its own", () => {
   const dir = fixtureProject();
   writeFileSync(join(dir, "docs", "vex.cdx.json"), JSON.stringify({ vulnerabilities: [{ id: "TEST-1", affects: [{ ref: "fork" }], analysis: { state: "not_affected" } }] }));

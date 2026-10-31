@@ -23,6 +23,11 @@
  *       option that does not exist. An unlisted vendored library makes the
  *       SBOM incomplete.
  *
+ *       Code we forked and now maintain as our own goes in the list as an
+ *       ancestor (metadata.component.pedigree.ancestors), not as a component.
+ *       check checks its path, version and upstream commit like any entry,
+ *       target puts it in each document's metadata, and scan skips it.
+ *
  *   node scripts/sbom.mjs target <name>|all [outdir] [version]
  *       Writes CycloneDX 1.6 JSON for one CI target (linux-x64, linux-arm64,
  *       linux-x86, macos-arm64, macos-x64, windows-x64, web) or all of them,
@@ -179,8 +184,12 @@ function check(proj = project()) {
   const options = cmakeOptions(proj);
   const problems = [];
   const paths = components.map((c) => prop(c, "path")).filter(Boolean);
+  // Ancestors: code we forked and maintain as our own. Their path, version and
+  // upstream commit are checked like any entry's, but they have no targets and
+  // scan skips them.
+  const ancestors = proj.list.metadata?.component?.pedigree?.ancestors ?? [];
 
-  for (const c of components) {
+  for (const c of [...components, ...ancestors]) {
     const p = prop(c, "path");
     if (p && !existsSync(join(proj.root, p))) problems.push(`${c.name}: ${p} does not exist`);
     if (!p && !prop(c, "fetch")) problems.push(`${c.name}: neither clockwork:path nor clockwork:fetch`);
@@ -209,6 +218,8 @@ function check(proj = project()) {
       if (recorded === null) problems.push(`${c.name}: ${cpat} matches nothing in ${cfile}`);
       else if (!commit || !commit.startsWith(recorded)) problems.push(`${c.name}: ${cfile} records upstream commit ${recorded}, the list records ${commit ?? "none"}`);
     }
+    if (commit && !/^[0-9a-f]{40}$/.test(commit)) problems.push(`${c.name}: clockwork:upstream_commit is not a full commit id`);
+    if (ancestors.includes(c)) continue;
     // Which builds compile it in: targets, and the options that include or exclude it.
     const targets = prop(c, "targets");
     if (!targets) problems.push(`${c.name}: no clockwork:targets (native, web, windows, or none)`);
@@ -220,7 +231,6 @@ function check(proj = project()) {
       if (o && !options.has(o)) problems.push(`${c.name}: clockwork:${key} names ${o}, which CMakeLists.txt does not define`);
     }
     // How `scan` will look it up.
-    if (commit && !/^[0-9a-f]{40}$/.test(commit)) problems.push(`${c.name}: clockwork:upstream_commit is not a full commit id`);
     if (!lookup(c)) problems.push(`${c.name}: no clockwork:upstream_commit or clockwork:advisory_search, so scan could not look it up`);
   }
 
@@ -252,7 +262,7 @@ function check(proj = project()) {
     for (const p of problems) console.error(`sbom: ${p}`);
     process.exit(1);
   }
-  console.log(`sbom: ${proj.name}: ${components.length} components, every vendored path and fetch accounted for`);
+  console.log(`sbom: ${proj.name}: ${components.length} components${ancestors.length ? `, ${ancestors.length} ancestor(s)` : ""}, every vendored path and fetch accounted for`);
 }
 
 // ---------------------------------------------------------------------------
