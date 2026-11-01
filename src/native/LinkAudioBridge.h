@@ -153,6 +153,8 @@ constexpr double kMaxInputLatencySeconds = 2.0;
 #include "native/vendor/LinkAudioInputRenderer.hpp"
 #include "clockwork_port_bus.h"
 #include "clockwork_ports.h"
+#include "native/EndpointRequests.h"
+#include "workers/wait_word.h"
 
 #include <ableton/LinkAudio.hpp>
 
@@ -235,8 +237,9 @@ public:
 
     // Once per block, after it has read its ports: where each subscription's
     // port stands, and the host time the next block reads it at — the date
-    // of every frame the endpoint writes from there. Audio thread only: no
-    // locks, no allocation.
+    // of every frame the endpoint writes from there. Wakes the endpoint when it
+    // asked for a block or for room. Audio thread only: no locks, no
+    // allocation.
     void dateReads(uint64_t nextReadHostMicros);
 
     void publishAuxSinks(const float* busPool, uint32_t blockSize, uint32_t numBuses,
@@ -344,14 +347,22 @@ private:
     // ─── The endpoint ─────────────────────────────────────────────────────
     //
     // One worker for every subscription: it asks each port how much room there
-    // is, renders that much, and offers it. Nothing here waits on the audio
-    // thread and the audio thread never waits on this — if the worker is late
-    // the ring drains, the audio thread reads silence, and the port's own
-    // underrun counter says by how much. Same arrangement as the disk reader
-    // in rust/clockwork-ports-disk.
+    // is, renders that much, and offers it. The audio thread never waits on
+    // this — if the worker is late the ring drains, the audio thread reads
+    // silence, and the port's own underrun counter says by how much.
+    //
+    // Between passes the worker blocks on mEndpointWake (run_worker). The next
+    // peer buffer bumps it when the worker asked for one (askArrival), and so
+    // do a subscription or rate change and the stop. For what only the audio
+    // thread can tell it (a full port now has room for a chunk, or a block has
+    // dated its reads) the worker asks through mEndpointRequests, and
+    // dateReads wakes it at the block that answers.
     void startEndpoint();
     void stopEndpoint();
     void endpointLoop(const std::stop_token& stop);
+    clockwork::NextPass endpointPass();
+    ClockworkWaitWord           mEndpointWake;
+    clockwork::EndpointRequests mEndpointRequests;   // a pair of lanes per bit
 
     // ─── When each port is read ───────────────────────────────────────────
     //
@@ -381,6 +392,7 @@ private:
         std::atomic<uint32_t>      readPosition{0};
     };
     std::array<ReadDate, kLanes / 2> mReadDates;
+    static_assert(kLanes / 2 <= 32, "EndpointRequests has a bit per pair of lanes");
     void dateReadsOf(uint32_t busIdx, ClockworkPort port);
     void forgetReadDates(ClockworkPort port);
     // When the next frame written to `sub`'s port will be read; nothing until

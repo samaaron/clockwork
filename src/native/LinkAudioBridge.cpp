@@ -17,6 +17,7 @@
 
 #include "clockwork_config.h"   // clockwork_log
 #include "lanes/lanes.h"         // clockwork_link_audio_lane_base
+#include "workers/thread_name.h"
 
 #include <algorithm>
 #include <chrono>
@@ -170,7 +171,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     sub.channelName = channelName;
     sub.channelId   = newChannelId;
     sub.renderer = std::make_unique<
-        clockwork_link::LinkAudioInputRenderer<ableton::LinkAudio>>(mLink);
+        clockwork_link::LinkAudioInputRenderer<ableton::LinkAudio>>(mLink, &mEndpointWake);
     sub.renderer->subscribe(newChannelId);
 
     // The port this peer's audio arrives through, bound to the pair. Stereo
@@ -210,6 +211,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
         endInput(*replaceSlot);
         *replaceSlot = std::move(sub);
         dateReadsOf(busIdx, replaceSlot->port);
+        clockwork::bump(mEndpointWake);
         return busIdx;
     }
     mInputSubs.push_back(std::move(sub));
@@ -217,6 +219,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     mInputSubCount.store(mInputSubs.size(), std::memory_order_relaxed);
     // First subscription: the worker has something to do now.
     if (mSampleRate.load(std::memory_order_relaxed) != 0) startEndpoint();
+    clockwork::bump(mEndpointWake);
     return busIdx;
 }
 
@@ -426,6 +429,7 @@ void LinkAudioBridge::setAudioFormat(uint32_t sampleRate, uint32_t allocatedInpu
     moveToLanes(clockwork_link_audio_lane_base(), clockwork_link_audio_lanes());
     if (sampleRate != 0 && mInputSubCount.load(std::memory_order_relaxed) != 0)
         startEndpoint();
+    clockwork::bump(mEndpointWake);
 }
 
 // A wider device moves the Link Audio lanes up, and every subscription moves
@@ -491,6 +495,15 @@ void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
         d.readPosition.store(read, std::memory_order_relaxed);
         d.seq.store(seq + 2, std::memory_order_release);
     }
+
+    // What the endpoint asked to be woken for: this block, or room for a
+    // chunk in a port it found full.
+    if (mEndpointRequests.answer([this](uint32_t pair) {
+            if (pair >= mReadDates.size()) return false;
+            const ClockworkPort port = mReadDates[pair].port.load(std::memory_order_relaxed);
+            return port != CLOCKWORK_PORT_NONE && clockwork_port_writable(port) >= kEndpointChunkFrames;
+        }))
+        clockwork::bump(mEndpointWake);
 }
 
 std::optional<std::chrono::microseconds>
@@ -551,8 +564,7 @@ void LinkAudioBridge::stopEndpoint() {
  * intends.
  */
 void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
-    using namespace std::chrono_literals;
-    constexpr double kQuantum = 4.0;
+    clockwork::name_this_thread("cw-link-input");
 
     // Scheduled as the audio thread is: this feeds it, and from an ordinary
     // thread's place in the queue it runs tens of milliseconds late on a busy
@@ -568,55 +580,81 @@ void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
         mEndpointRealtime.store(static_cast<int>(rt.status), std::memory_order_release);
     }
 
-    while (!stop.stop_requested()) {
-        const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);
-        if (sr == 0) { std::this_thread::sleep_for(2ms); continue; }
+    clockwork::run_worker(mEndpointWake, stop, [this] { return endpointPass(); });
+}
 
-        bool produced = false;
-        {
-            // A blocking lock, not a try_lock: this is not the audio thread,
-            // and skipping a pass on contention would starve the ring for no
-            // benefit.
-            std::lock_guard<std::mutex> lk(mInputSubMutex);
-            if (!mInputSubs.empty()) {
-                auto sessionState = mLink.captureAppSessionState();
-                for (auto& sub : mInputSubs) {
-                    if (sub.port == CLOCKWORK_PORT_NONE || !sub.renderer) continue;
-                    if (const uint64_t trouble = troubleOf(sub); trouble > sub.troubleSeen) {
-                        sub.troubleSeen = trouble;
-                        sub.troubleAt   = std::chrono::steady_clock::now();
-                    }
+// One pass over every subscription. When nothing renders, either the peers
+// are quiet, and the worker asks the renderer to wake it on the next buffer,
+// or only the audio thread can say when there is more to do, and the worker
+// asks the audio thread. A subscription waiting on the audio thread withdraws
+// its arrival ask, because buffers keep arriving while its port is full.
+clockwork::NextPass LinkAudioBridge::endpointPass() {
+    constexpr double kQuantum = 4.0;
+    const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);
+    if (sr == 0) return clockwork::NextPass::woken();   // setAudioFormat wakes it
 
-                    uint32_t room = clockwork_port_writable(sub.port);
-                    if (room == 0) continue;
-                    if (room > kEndpointChunkFrames) room = kEndpointChunkFrames;
-
-                    const auto hostTime = nextWriteReadAt(sub, sr);
-                    if (!hostTime) continue;   // not read yet: no date to write for
-
-                    const size_t filled = sub.renderer->receive(
-                        mScratchL, mScratchR, room, sessionState,
-                        static_cast<double>(sr), *hostTime, kQuantum);
-                    if (filled == 0) continue;
-
-                    for (size_t i = 0; i < filled; ++i) {
-                        mScratchInterleaved[2 * i]     = static_cast<float>(mScratchL[i]);
-                        mScratchInterleaved[2 * i + 1] = static_cast<float>(mScratchR[i]);
-                    }
-                    clockwork_port_produce(sub.port, mScratchInterleaved,
-                                     static_cast<uint32_t>(filled));
-                    if (!sub.underrunsAtStart)
-                        sub.underrunsAtStart = clockwork_port_underruns(sub.port);
-                    produced = true;
+    bool produced = false, fresh = false;
+    uint32_t wants = 0, fullPairs = 0;
+    {
+        // A blocking lock, not a try_lock: this is not the audio thread,
+        // and skipping a pass on contention would starve the ring for no
+        // benefit.
+        std::lock_guard<std::mutex> lk(mInputSubMutex);
+        if (!mInputSubs.empty()) {
+            auto sessionState = mLink.captureAppSessionState();
+            for (auto& sub : mInputSubs) {
+                if (sub.port == CLOCKWORK_PORT_NONE || !sub.renderer) continue;
+                if (const uint64_t trouble = troubleOf(sub); trouble > sub.troubleSeen) {
+                    sub.troubleSeen = trouble;
+                    sub.troubleAt   = std::chrono::steady_clock::now();
                 }
+
+                uint32_t room = clockwork_port_writable(sub.port);
+                if (room == 0) {
+                    sub.renderer->withdrawArrival();
+                    wants |= clockwork::EndpointRequests::kRoom;
+                    fullPairs |= 1u << ((sub.busIdx - mLaneBase) / 2);
+                    continue;
+                }
+                if (room > kEndpointChunkFrames) room = kEndpointChunkFrames;
+
+                const auto hostTime = nextWriteReadAt(sub, sr);
+                if (!hostTime) {   // not read yet: no date to write for
+                    sub.renderer->withdrawArrival();
+                    wants |= clockwork::EndpointRequests::kBlock;
+                    continue;
+                }
+
+                const size_t filled = sub.renderer->receive(
+                    mScratchL, mScratchR, room, sessionState,
+                    static_cast<double>(sr), *hostTime, kQuantum);
+                if (filled == 0) {
+                    if (sub.renderer->waitsForTime()) {
+                        sub.renderer->withdrawArrival();
+                        wants |= clockwork::EndpointRequests::kBlock;
+                    } else {
+                        fresh |= sub.renderer->askArrival();
+                    }
+                    continue;
+                }
+
+                for (size_t i = 0; i < filled; ++i) {
+                    mScratchInterleaved[2 * i]     = static_cast<float>(mScratchL[i]);
+                    mScratchInterleaved[2 * i + 1] = static_cast<float>(mScratchR[i]);
+                }
+                clockwork_port_produce(sub.port, mScratchInterleaved,
+                                 static_cast<uint32_t>(filled));
+                if (!sub.underrunsAtStart)
+                    sub.underrunsAtStart = clockwork_port_underruns(sub.port);
+                produced = true;
             }
         }
-        // Nothing to do means the rings are full or the peers are quiet.
-        // Polling rather than waiting to be signalled, for the same reason the
-        // disk reader does: being signalled would mean the audio thread doing
-        // the signalling.
-        if (!produced) std::this_thread::sleep_for(1ms);
     }
+    if (produced) return clockwork::NextPass::now();
+    // Make both asks before using either answer: a new ask of either kind
+    // needs one more look.
+    const bool asked = mEndpointRequests.ask(wants, fullPairs);
+    return asked || fresh ? clockwork::NextPass::now() : clockwork::NextPass::woken();
 }
 
 bool LinkAudioBridge::publishAudioBlock(const float* leftChannel,

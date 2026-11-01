@@ -20,7 +20,11 @@
  *   - a hole in the peer's stream is nothing to render, then the stream as it
  *     resumes; one resync, no warp;
  *   - a clock re-measurement that moves the timeline under a stream by tens
- *     of milliseconds is steered to, not a lost place: no resync, no warp.
+ *     of milliseconds is steered to, not a lost place: no resync, no warp;
+ *   - a buffer that arrives wakes the endpoint when it asked for one, kept
+ *     or dropped, once per ask;
+ *   - a render that gave nothing because the stream begins after the place
+ *     asked for says it waits for time, not for audio.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -670,5 +674,57 @@ TEST_CASE("input renderer: a short hole asked across a device's block at a time 
     CHECK(resumed.maxError < kExact);
     CHECK(renderer.resyncs() == 1);
     CHECK(renderer.warps() == 0);
+}
+
+// ── What the endpoint waits on ─────────────────────────────────────────────
+//
+// The endpoint renders when there may be something to render, and blocks
+// otherwise: on a buffer arriving, or on time passing.
+
+TEST_CASE("input renderer: a buffer wakes the reader only when it asked for one, and once per ask",
+          "[link-audio][renderer]") {
+    Session session;
+    ClockworkWaitWord wake;
+    Renderer renderer(session.link, &wake);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(3);
+    CHECK(wake.value.load() == 0);    // nobody asked: a reader with a full port is not woken
+
+    CHECK(renderer.askArrival());
+    peer.publish(3);
+    CHECK(wake.value.load() == 1);    // the first answered the ask
+
+    // When the queue has no room it drops the buffer, and still wakes a
+    // reader that asked, because that reader is the one behind.
+    peer.publish(2100);
+    CHECK(renderer.askArrival());
+    peer.publish(1);
+    CHECK(renderer.droppedSourceBuffers() > 0);
+    CHECK(wake.value.load() == 2);
+}
+
+TEST_CASE("input renderer: a stream that begins after the place asked for waits for time, not audio",
+          "[link-audio][renderer]") {
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+
+    // Nothing has arrived: what comes next is a buffer.
+    CHECK(render(session, renderer, peer, peer.t0).frames == 0);
+    CHECK_FALSE(renderer.waitsForTime());
+
+    // Asked 100 ms before the stream begins: what comes next is the place.
+    peer.publish(150);
+    CHECK(render(session, renderer, peer, peer.t0 - Micros(100'000)).frames == 0);
+    CHECK(renderer.waitsForTime());
+
+    // Asked where it is: rendered, and nothing waited for.
+    CHECK(render(session, renderer, peer, framesLater(peer.t0, 4800)).frames == kRender);
+    CHECK_FALSE(renderer.waitsForTime());
+
+    // Asked past all that has arrived: what comes next is a buffer again.
+    CHECK(render(session, renderer, peer, framesLater(peer.t0, 20000)).frames == 0);
+    CHECK_FALSE(renderer.waitsForTime());
 }
 #endif  // CLOCKWORK_LINK_AUDIO

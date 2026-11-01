@@ -16,7 +16,8 @@
  * stream is read between its samples by libsamplerate's band-limited sinc
  * converter (src/vendor/libsamplerate) rather than upstream's 4-point cubic,
  * from the stream behind its start, so it lands where its stamps put it,
- * sample for sample, from its first.
+ * sample for sample, from its first; and a buffer that arrives wakes the
+ * reader when it asked for one.
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -37,6 +38,8 @@
 #include <ableton/LinkAudio.hpp>
 #include <ableton/link_audio/Queue.hpp>
 #include <ableton/util/FloatIntConversion.hpp>
+
+#include "workers/wait_word.h"
 
 #include <samplerate.h>
 
@@ -114,8 +117,11 @@ public:
     return reach(sourceRate > 0 ? outputRate / double(sourceRate) / (1.0 + kMaxBend) : 1.0);
   }
 
-  LinkAudioInputRenderer(Link& link)
+  // `wake` (optional) is bumped once per askArrival, by the next buffer that
+  // arrives, whether the queue keeps it or drops it.
+  LinkAudioInputRenderer(Link& link, ClockworkWaitWord* wake = nullptr)
     : mLink(link)
+    , mWake(wake)
   {
     // Depth sized for Live's 2 s lookahead ceiling at Link's wire
     // chunk rate (~780/s for stereo 48 kHz → 1560 needed; 2048 gives
@@ -138,6 +144,18 @@ public:
   LinkAudioInputRenderer& operator=(const LinkAudioInputRenderer&) = delete;
 
   bool hasSource() const { return mpSource != nullptr; }
+
+  // True when the last receive() gave nothing because the stream begins after
+  // the place it asked for, so rendering waits for time to pass, not for a
+  // buffer. Call from the receive() thread only.
+  bool waitsForTime() const { return mWaitsForTime; }
+
+  // Called by the reader when it has nothing to render: asks to be woken by
+  // the next buffer. Returns true if the ask is new, and then the reader must
+  // look again before it sleeps (WakeRequest). The reader withdraws the ask
+  // when it waits on something else, such as room to write into.
+  bool askArrival() noexcept { return mArrivalAsked.ask(); }
+  void withdrawArrival() noexcept { mArrivalAsked.withdraw(); }
 
   // Diagnostics — last observed info from the most-recently-delivered
   // buffer. Zero until a buffer arrives. Thread-safe: written on Link
@@ -228,6 +246,7 @@ public:
 
     if (!mpQueueWriter->retainSlot()) {
         mDroppedSourceBuffers.fetch_add(1, std::memory_order_relaxed);
+        if (mWake) mArrivalAsked.ring(*mWake);
         return;
     }
     auto& buffer = *((*mpQueueWriter)[0]);
@@ -252,6 +271,7 @@ public:
       buffer.mSamplesR[i] = r;
     }
     mpQueueWriter->releaseSlot();
+    if (mWake) mArrivalAsked.ring(*mWake);
   }
 
   void unsubscribe()
@@ -315,6 +335,8 @@ public:
         moFollowOnMicros = double(hostTime.count()) + 1e6 * double(frames) / sampleRate;
       return frames;
     };
+
+    mWaitsForTime = false;
 
     // Drain all available slots into our reader half.
     while (mpQueueReader->retainSlot()) {}
@@ -416,6 +438,7 @@ public:
              > targetBeatsAtBufferBegin + slackBeats)
     {
       lose();
+      mWaitsForTime = true;
       return rendered(0);
     }
 
@@ -866,6 +889,9 @@ private:
   };
 
   Link& mLink;
+  ClockworkWaitWord* mWake;
+  clockwork::WakeRequest mArrivalAsked;   // the reader's, rung by push
+  bool mWaitsForTime = false;   // receive() only
   std::unique_ptr<ableton::LinkAudioSource> mpSource;
   std::shared_ptr<typename Queue::Writer> mpQueueWriter;
   std::shared_ptr<typename Queue::Reader> mpQueueReader;
