@@ -32,7 +32,7 @@ const MSG_HDR: usize = 16; // sizeof(Message)
 // the lanes. The arena is in the published segment, which this peer does not
 // map: it needs only the plane.
 const HDR_MAGIC: usize = 0;
-const HDR_PEER_OFFSET: usize = 1 * 4;
+const HDR_PEER_OFFSET: usize = 4;
 const HDR_PEER_CMD_BYTES: usize = 3 * 4;
 const HDR_PEER_REP_BYTES: usize = 4 * 4;
 
