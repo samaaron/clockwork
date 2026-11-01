@@ -22,19 +22,19 @@
 use crate::secret::ClockworkCommsSecret;
 use std::sync::atomic::{fence, AtomicI32, AtomicU32, Ordering};
 
-const SEG_MAGIC: u32 = 0x5C09_E00C; // shm_segment_header::MAGIC (E00C: the arena describes itself)
+const SEG_MAGIC: u32 = 0x5C09_C00D; // shm_command_header::MAGIC: the command segment (docs/SEGMENTS.md)
 const MESSAGE_MAGIC: u32 = 0xDEAD_BEEF; // ring/ring.h
 const PADDING_MAGIC: u32 = 0xBADD_CAFE;
 const MSG_HDR: usize = 16; // sizeof(Message)
 
-// shm_segment_header field byte offsets (all u32; see shm_segment.hpp): magic,
-// blob_offset, blob_size, then peer_offset (SEGMENT-relative) and the plane
-// geometry. The regions inside the blob are not here: they are in the arena's
-// own header (clockwork_arena.h), which this peer does not read.
+// shm_command_header field byte offsets (all u32; see shm_segment.hpp): magic,
+// peer_offset (SEGMENT-relative), peer_header_bytes, the two ring sizes, then
+// the lanes. The arena is in the published segment, which this peer does not
+// map: it needs only the plane.
 const HDR_MAGIC: usize = 0;
-const HDR_PEER_OFFSET: usize = 3 * 4;
-const HDR_PEER_CMD_BYTES: usize = 5 * 4;
-const HDR_PEER_REP_BYTES: usize = 6 * 4;
+const HDR_PEER_OFFSET: usize = 1 * 4;
+const HDR_PEER_CMD_BYTES: usize = 3 * 4;
+const HDR_PEER_REP_BYTES: usize = 4 * 4;
 
 // ShmPeerPlaneHeader field byte offsets (64-byte header; shm_peer_plane.h).
 const P_OWNER_PID: usize = 0;
@@ -59,6 +59,12 @@ struct Segment {
     fd: i32,
     #[cfg(windows)]
     mapping: windows_sys::Win32::Foundation::HANDLE,
+    // The attach connection: the lease on the command segment, held for the
+    // life of the mapping and released with it.
+    #[cfg(unix)]
+    _lease: std::os::unix::net::UnixStream,
+    #[cfg(windows)]
+    lease: windows_sys::Win32::Foundation::HANDLE,
 }
 
 impl Drop for Segment {
@@ -79,6 +85,7 @@ impl Drop for Segment {
                 };
                 UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.base.cast() });
                 CloseHandle(self.mapping);
+                CloseHandle(self.lease);
             }
         }
     }
@@ -90,32 +97,44 @@ impl Drop for Segment {
 // its handle from an attach endpoint (shm_attach.hpp) — a Unix socket that
 // passes the descriptor as SCM_RIGHTS, or a Windows named pipe over which the
 // engine duplicates the handle into this process. The client presents the
-// secret's auth frame first (crate::secret), and both ends check the peer is
-// the same user; a planted endpoint hands over nothing, and nothing is handed
-// to a peer without the secret.
+// secret's auth frame first (crate::secret), then the role it asks for — a
+// peer, here — and both ends check the peer is the same user; a planted
+// endpoint hands over nothing, and nothing is handed to a peer without the
+// secret. The command segment goes to one peer at a time: the attach
+// connection is the lease, kept open for the life of the Segment, and the
+// kernel closes it when this process dies.
 
 const ATTACH_MAGIC: u32 = 0x4357_4154; // "CWAT", shm_attach::MAGIC
-const ATTACH_VERSION: u32 = 2;
+const ATTACH_VERSION: u32 = 3; // the hello's layout, as shm_attach.hpp stamps it
+const ROLE_PEER: u32 = 2;
 
-/// The frame a peer sends first: the auth packet after its 4-byte length.
-fn auth_frame(secret: &ClockworkCommsSecret) -> Vec<u8> {
+/// What a peer sends first: the auth packet after its 4-byte length, then the
+/// role word, big-endian.
+fn request(secret: &ClockworkCommsSecret) -> Vec<u8> {
     let packet = secret.auth_packet();
     let mut out = (packet.len() as u32).to_be_bytes().to_vec();
     out.extend_from_slice(&packet);
+    out.extend_from_slice(&ROLE_PEER.to_be_bytes());
     out
 }
-const HELLO_LEN: usize = 24; // magic u32, version u32, size u64, handle u64
+const HELLO_LEN: usize = 32; // magic u32, version u32, size u64, handle u64, role u32, status u32
 
-fn parse_hello(buf: &[u8]) -> Result<(u64, u64), String> {
+/// The hello's (size, handle), or why the server declined the peer.
+fn parse_hello(buf: &[u8], endpoint: &str) -> Result<(u64, u64), String> {
     if buf.len() != HELLO_LEN {
         return Err(format!("short hand-off: {} bytes", buf.len()));
     }
     let u32_at = |o: usize| u32::from_ne_bytes(buf[o..o + 4].try_into().unwrap());
     let u64_at = |o: usize| u64::from_ne_bytes(buf[o..o + 8].try_into().unwrap());
-    if u32_at(0) != ATTACH_MAGIC || u32_at(4) != ATTACH_VERSION {
-        return Err("malformed hand-off (bad magic or version)".into());
+    if u32_at(0) != ATTACH_MAGIC || u32_at(4) != ATTACH_VERSION || u32_at(24) != ROLE_PEER {
+        return Err("malformed hand-off (bad magic, version or role)".into());
     }
-    Ok((u64_at(8), u64_at(16)))
+    match u32_at(28) {
+        0 => Ok((u64_at(8), u64_at(16))),
+        1 => Err(format!("no shared-memory command plane at {endpoint}: the host did not enable one")),
+        2 => Err(format!("another peer holds the command plane at {endpoint}")),
+        s => Err(format!("the engine at {endpoint} answered with status {s}")),
+    }
 }
 
 /// The endpoint an engine on `port` serves at unless told otherwise; mirrors
@@ -186,7 +205,7 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
         return Err(format!("the engine at {endpoint} is not running as this user"));
     }
     stream
-        .write_all(&auth_frame(secret))
+        .write_all(&request(secret))
         .map_err(|e| format!("could not present the secret to {endpoint}: {e}"))?;
 
     // One recvmsg: the hello in the data, the descriptor in the ancillary.
@@ -228,14 +247,15 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
         }
         fd = received;
     }
-    drop(stream);
+    if let Err(e) = parse_hello(&hello, endpoint) {
+        if fd >= 0 {
+            // SAFETY: a descriptor we own and have not mapped.
+            unsafe { libc::close(fd) };
+        }
+        return Err(e);
+    }
     if fd < 0 {
         return Err(format!("no descriptor in the hand-off from {endpoint}"));
-    }
-    if let Err(e) = parse_hello(&hello) {
-        // SAFETY: a descriptor we own and have not mapped.
-        unsafe { libc::close(fd) };
-        return Err(e);
     }
 
     // SAFETY: a descriptor we own, a zeroed `stat` for `fstat` to fill, and
@@ -260,7 +280,7 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
             libc::close(fd);
             return Err("mmap failed".into());
         }
-        Ok(Segment { base: base.cast::<u8>(), len, fd })
+        Ok(Segment { base: base.cast::<u8>(), len, fd, _lease: stream })
     }
 }
 
@@ -296,7 +316,7 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
         if pipe == INVALID_HANDLE_VALUE {
             return Err(format!("open {path}: {}", std::io::Error::last_os_error()));
         }
-        let frame = auth_frame(secret);
+        let frame = request(secret);
         let mut written: u32 = 0;
         let sent = WriteFile(pipe, frame.as_ptr(), frame.len() as u32, &mut written, std::ptr::null_mut());
         if sent == 0 || written as usize != frame.len() {
@@ -306,31 +326,37 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
         let mut hello = [0u8; HELLO_LEN];
         let mut got: u32 = 0;
         let ok = ReadFile(pipe, hello.as_mut_ptr(), HELLO_LEN as u32, &mut got, std::ptr::null_mut());
-        CloseHandle(pipe);
         if ok == 0 || got == 0 {
+            CloseHandle(pipe);
             return Err(format!("refused by {path}: the secret was not accepted"));
         }
-        if got == 0 {
-        return Err(format!("refused by {endpoint}: the secret was not accepted"));
-    }
-    if got as usize != HELLO_LEN {
+        if got as usize != HELLO_LEN {
+            CloseHandle(pipe);
             return Err(format!("malformed hand-off from {path}"));
         }
-        let (_size, handle) = parse_hello(&hello)?;
+        let (_size, handle) = match parse_hello(&hello, &path) {
+            Ok(h) => h,
+            Err(e) => {
+                CloseHandle(pipe);
+                return Err(e);
+            }
+        };
         if handle == 0 {
+            CloseHandle(pipe);
             return Err("the engine could not duplicate its segment into this process".into());
         }
         let mapping = handle as usize as windows_sys::Win32::Foundation::HANDLE;
         let view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0); // 0 = whole mapping
         if view.Value.is_null() {
             CloseHandle(mapping);
+            CloseHandle(pipe);
             return Err("MapViewOfFile failed".into());
         }
         // Region size — the mapping has no size query, so measure the view like
         // shm_segment.hpp's shm_map_handle does.
         let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
         VirtualQuery(view.Value, &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>());
-        Ok(Segment { base: view.Value.cast::<u8>(), len: info.RegionSize, mapping })
+        Ok(Segment { base: view.Value.cast::<u8>(), len: info.RegionSize, mapping, lease: pipe })
     }
 }
 

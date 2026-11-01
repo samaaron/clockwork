@@ -58,7 +58,7 @@ maps read-only and exposes only `const` views. An in-process reader
 (a test, an embedding host's GUI) gets the same read-only descriptor from
 `shm_segment_creator::reader_handle()`.
 
-## The attach protocol, version 3
+## The attach protocol
 
 One connection, one segment. The client connects to the endpoint and sends:
 
@@ -129,7 +129,10 @@ In C++, `shm_attach::receive` is the reader's hand-off and
 mappings are `shm_segment_client` (read-only, `const` views) and
 `shm_command_client` (the plane and the lanes).
 
-The Rust `clockwork-client` crate mirrors the three opens.
+The Rust `clockwork-client` crate mirrors the three opens, and the Rust
+`clockwork_comms::shm::ShmPeer` (the transport probe's peer) speaks the same
+protocol for the command segment alone, holding its lease for the life of
+the mapping.
 
 ## The arena's table
 

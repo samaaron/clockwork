@@ -13,7 +13,7 @@
 //  rather than a message on the command transport — a host that speaks TCP to
 //  its engine still needs its GUI to reach the published segment.
 //
-//  PROTOCOL, version 3. Connect; the client sends the secret's auth frame (a
+//  PROTOCOL. Connect; the client sends the secret's auth frame (a
 //  4-byte big-endian length, then /clockwork/auth with the 32 bytes as a
 //  blob, the same first frame the stream transports ask for), then one
 //  4-byte big-endian ROLE word: 1 a reader, 2 a peer. The server answers
@@ -101,7 +101,7 @@ struct hello {
     uint32_t status;    // STATUS_*
 };
 static constexpr uint32_t MAGIC   = 0x43574154;  // "CWAT"
-static constexpr uint32_t VERSION = 3;           // 3: a role after the auth frame; two segments
+static constexpr uint32_t VERSION = 3;           // the hello's layout; a client built for another refuses it
 static_assert(sizeof(hello) == 32, "hello is a wire format");
 
 // How long the server waits for a client's auth frame and role.
@@ -486,6 +486,9 @@ private:
         shm_native_handle segment = shm_invalid_handle;
         after then = after::close;
         hello h = answer(role_of(req), &segment, &then);
+        // Claimed before the hello goes, as on POSIX; given back below if
+        // nothing is handed over.
+        if (then == after::keep_as_lease) mHolding.store(true, std::memory_order_release);
         if (shm_handle_valid(segment)) {
             ULONG pid = 0;
             if (GetNamedPipeClientProcessId(instance, &pid)) {
@@ -500,20 +503,30 @@ private:
                     CloseHandle(proc);
                 }
             }
-            if (h.handle == 0) then = after::close;   // nothing handed over: no lease
+            if (h.handle == 0 && then == after::keep_as_lease) {   // nothing handed over: no lease
+                then = after::close;
+                mHolding.store(false, std::memory_order_release);
+            }
         }
         DWORD written = 0;
-        WriteFile(instance, &h, sizeof h, &written, nullptr);
+        const BOOL wrote = WriteFile(instance, &h, sizeof h, &written, nullptr);
         FlushFileBuffers(instance);
+        if ((!wrote || written != sizeof h) && then == after::keep_as_lease) {   // the peer went: no lease
+            mHolding.store(false, std::memory_order_release);
+            return after::close;
+        }
         return then;
     }
 
     // Keep the peer's pipe instance as the lease, and watch it from a thread
     // of its own: a synchronous ReadFile returns when the peer closes or dies.
+    // The hold itself was claimed before the hello went.
     void hold_lease(HANDLE instance) {
-        release_lease();
+        if (mLease != INVALID_HANDLE_VALUE) {
+            if (mLeaseWatch.joinable()) mLeaseWatch.join();
+            CloseHandle(mLease);
+        }
         mLease = instance;
-        mHolding.store(true, std::memory_order_release);
         mLeaseWatch = std::jthread([this, instance] {
             uint8_t byte = 0;
             DWORD got = 0;
@@ -562,8 +575,7 @@ private:
             ::setsockopt(conn, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
             if (serve_one(conn) == after::keep_as_lease) {
-                mLease = conn;
-                mHolding.store(true, std::memory_order_release);
+                mLease = conn;   // the hold itself was claimed before the hello went
             } else {
                 ::close(conn);
             }
@@ -594,6 +606,10 @@ private:
         shm_native_handle segment = shm_invalid_handle;
         after then = after::close;
         const hello h = answer(role_of(req), &segment, &then);
+        // The hold is claimed BEFORE the hello goes: a peer that has its
+        // segment must already be the holder, or a second peer could be let
+        // in between the hand-off and the claim.
+        if (then == after::keep_as_lease) mHolding.store(true, std::memory_order_release);
 
         iovec iov { const_cast<hello*>(&h), sizeof h };
         alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> ctl{};
@@ -614,7 +630,10 @@ private:
 #else
         const ssize_t sent = ::sendmsg(conn, &msg, 0);
 #endif
-        if (sent != static_cast<ssize_t>(sizeof h)) return after::close;   // the peer went: no lease
+        if (sent != static_cast<ssize_t>(sizeof h)) {   // the peer went: no lease
+            if (then == after::keep_as_lease) mHolding.store(false, std::memory_order_release);
+            return after::close;
+        }
         return then;
     }
 
