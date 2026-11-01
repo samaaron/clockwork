@@ -24,6 +24,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
 #include "FakePacer.h"
+#include "ThreadWakes.h"
 #include "clockwork_client.h"
 #include "clockwork_prefix.h"
 
@@ -302,4 +303,19 @@ TEST_CASE("SwapGate: a bounded acquisition is handed the gate when its holder le
     CHECK(lk.owns_lock());
     letGo.join();
     holder.join();
+}
+
+TEST_CASE("Watchdog: its thread wakes for its samples and for nothing else",
+          "[Watchdog][rt][wakes]") {
+    if (!thread_wakes::countable()) SKIP("per-thread wake counts are read from Linux's /proc");
+    auto cfg = EngineFixture::driverConfig();
+    cfg.callbackWatchdog = true;
+    cfg.watchdogStallMs  = 60000;   // nothing here is a stall
+    cfg.watchdogPollMs   = 250;
+    EngineFixture fix(cfg);
+    // Four samples in a second. A thread that slept in short slices to
+    // notice its stop woke fifty times.
+    const auto woke = thread_wakes::over("cw-watchdog", std::chrono::seconds(1));
+    REQUIRE(woke);
+    CHECK(*woke <= 8);
 }

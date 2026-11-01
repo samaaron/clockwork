@@ -16,11 +16,11 @@
  *
  * WAKING IS CHEAP WHEN NOBODY WAITS. A waiter counts itself in `waiters`
  * before it looks at the value, and a waker looks at `waiters` after it
- * changes the value; both sides use sequentially consistent operations, so
- * one of them always sees the other. A wake with no waiter is therefore two
- * atomic operations and no system call, which is what lets the audio thread
- * wake the control pass every block. With a waiter it is one non-blocking
- * system call.
+ * changes the value, each with a sequentially consistent fence between its
+ * write and its read, so one of them always sees the other. A wake with no
+ * waiter is therefore two atomic operations and a fence, and no system call,
+ * which is what lets the audio thread wake the control pass every block. With
+ * a waiter it is one non-blocking system call.
  *
  * SHARED. A word in memory another process maps (a shared-memory segment)
  * wakes a waiter there with WaitScope::Shared. Windows has no cross-process
@@ -102,6 +102,72 @@ void wait_for_condition(ClockworkWaitWord& w, Done&& done,
         const uint32_t seen = w.value.load(std::memory_order_seq_cst);
         if (done()) return;
         wait(w, seen, scope, event);
+    }
+}
+
+// Lets a worker ask one source of work to wake it through the worker's word.
+// Until the worker asks, each ring costs the source a fence and a load; once
+// it asks, the next ring wakes it, once. Use it for a source that stays busy
+// whether or not the worker wants it, such as a stream of arrivals into a
+// ring the worker cannot drain while its output is full.
+//
+// The worker asks and then looks at what the source changes; the source
+// changes it and then rings, with a fence between on each side, so one of
+// them always sees the other. After a new ask the worker must look once more
+// before it sleeps, because a ring between its last look and the ask found
+// nothing asked.
+struct WakeRequest {
+    std::atomic<bool> asked{false};
+
+    // The worker asks. Returns true if the ask is new, and then the worker
+    // must look again before it sleeps.
+    bool ask() noexcept {
+        const bool had = asked.exchange(true, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return !had;
+    }
+    // The worker no longer wants the wake.
+    void withdraw() noexcept { asked.store(false, std::memory_order_seq_cst); }
+    // The source rings after its change. Never blocks.
+    void ring(ClockworkWaitWord& word) noexcept {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (asked.load(std::memory_order_relaxed) && asked.exchange(false, std::memory_order_seq_cst))
+            bump(word);
+    }
+};
+
+// What a worker's pass returns: run again at once, sleep until a time, or
+// sleep until the word changes.
+struct NextPass {
+    enum class Kind : uint8_t { Now, Until, Woken };
+    Kind kind;
+    WaitClock::time_point at;
+    static NextPass now() { return { Kind::Now, {} }; }
+    static NextPass until(WaitClock::time_point t) { return { Kind::Until, t }; }
+    static NextPass woken() { return { Kind::Woken, {} }; }
+};
+
+// Runs a worker thread's loop until `stop`: run `pass`, then sleep on `w` as
+// the pass asks. To give the worker something to do, change what the pass
+// looks at and then bump `w`; a stop bumps it too.
+//
+// THE ORDER IS WHAT LOSES NO WAKE. The loop reads the word first, before it
+// checks the stop and before the pass runs, and sleeps on that reading, so a
+// stop or a bump at any moment after the read ends the sleep. Read after the
+// check, a stop or a bump in between would be slept through. Every worker
+// loop in clockwork uses this function, so the order is written once.
+template <class Pass>
+void run_worker(ClockworkWaitWord& w, const std::stop_token& stop, Pass&& pass) {
+    const std::stop_callback wake(stop, [&w] { bump(w); });
+    for (;;) {
+        const uint32_t seen = w.value.load(std::memory_order_seq_cst);
+        if (stop.stop_requested()) return;
+        const NextPass next = pass();
+        switch (next.kind) {
+            case NextPass::Kind::Now:   break;
+            case NextPass::Kind::Until: wait_until(w, seen, next.at); break;
+            case NextPass::Kind::Woken: wait(w, seen); break;
+        }
     }
 }
 

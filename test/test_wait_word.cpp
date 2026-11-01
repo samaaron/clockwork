@@ -3,7 +3,7 @@
 /*
  * test_wait_word.cpp — src/workers/wait_word.h: a thread blocks on a word
  * until it changes or a deadline passes, and a wake from any thread (the
- * audio thread included) is two atomic operations when nobody waits.
+ * audio thread included) is two atomic operations and a fence when nobody waits.
  *
  *   - a wait returns when another thread bumps the word, and not before;
  *   - a timed wait returns at its deadline when nothing changes;
@@ -17,9 +17,12 @@
 
 #include "workers/wait_word.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <thread>
+#include <vector>
 
 #if !defined(_WIN32)
 #  include <sys/mman.h>
@@ -158,6 +161,130 @@ TEST_CASE("wait word: a stoppable sleep lasts to its deadline, and ends when sto
     std::stop_source done;
     done.request_stop();
     CHECK(clockwork::sleep_until(done.get_token(), steady_clock::now() + seconds(60)));
+}
+
+// ── A worker's loop ──────────────────────────────────────────────────────────
+//
+// What a lost wake looks like in a worker: it looked, found nothing, and
+// slept, while the stop or the work that came between the look and the sleep
+// waited for a wake that had already happened. Each case puts that event in
+// the worst place there is — inside the pass, after the loop has looked and
+// before it sleeps — and a lost wake shows as a loop still running at the
+// bound, released so the failure is reported rather than hung on.
+
+namespace {
+
+// Runs `loop` on a thread of its own; true if it returned within the bound.
+template <class Loop>
+bool returnsInTime(ClockworkWaitWord& w, Loop&& loop) {
+    auto done = std::async(std::launch::async, std::forward<Loop>(loop));
+    const bool finished = done.wait_for(seconds(30)) == std::future_status::ready;
+    while (done.wait_for(milliseconds(10)) != std::future_status::ready) clockwork::bump(w);
+    return finished;
+}
+
+}  // namespace
+
+TEST_CASE("wait word: a worker loop is not slept through by a stop that comes during its pass", "[wait_word][worker]") {
+    ClockworkWaitWord w;
+    std::stop_source running;
+    int passes = 0;
+    CHECK(returnsInTime(w, [&] {
+        clockwork::run_worker(w, running.get_token(), [&] {
+            if (++passes == 1) running.request_stop();
+            return clockwork::NextPass::woken();
+        });
+    }));
+    CHECK(passes == 1);
+}
+
+TEST_CASE("wait word: a worker loop is not slept through by work that comes during its pass", "[wait_word][worker]") {
+    ClockworkWaitWord w;
+    std::stop_source running;
+    int passes = 0;
+    CHECK(returnsInTime(w, [&] {
+        clockwork::run_worker(w, running.get_token(), [&] {
+            ++passes;
+            if (passes == 1) clockwork::bump(w);       // the work this pass did not see
+            if (passes == 2) running.request_stop();   // seen, by a pass of its own
+            return clockwork::NextPass::woken();
+        });
+    }));
+    CHECK(passes == 2);
+}
+
+TEST_CASE("wait word: a worker loop sleeps until the time its pass asks for, and runs again at once when asked to",
+          "[wait_word][worker]") {
+    ClockworkWaitWord w;
+    std::stop_source running;
+    std::vector<steady_clock::time_point> at;
+    const auto t0 = steady_clock::now();
+    CHECK(returnsInTime(w, [&] {
+        clockwork::run_worker(w, running.get_token(), [&] {
+            at.push_back(steady_clock::now());
+            switch (at.size()) {
+                case 1: return clockwork::NextPass::until(t0 + milliseconds(50));
+                case 2: return clockwork::NextPass::now();
+                default: running.request_stop(); return clockwork::NextPass::woken();
+            }
+        });
+    }));
+    REQUIRE(at.size() == 3);
+    CHECK(at[1] - t0 >= milliseconds(50));
+    CHECK(w.waiters.load() == 0);
+}
+
+// run_worker's order, and the order before it, against a stop in every
+// interleaving. The loop reads the word, looks at the stop, runs a pass that
+// finds nothing, and sleeps on its reading; a stop sets the flag and then
+// bumps the word, as std::stop_source does. A sleep that starts on a reading
+// the bump has already changed returns at once; one that starts on a reading
+// the bump has not changed yet is woken by it; one that starts on a reading
+// taken after the bump, with the flag missed, is never woken. The real loop
+// cannot be stopped between two of its own steps on demand, so its order is
+// checked here, exhaustively, as steps.
+TEST_CASE("wait word: a worker loop that reads its word before it looks at the stop loses no stop, in any interleaving",
+          "[wait_word][worker]") {
+    enum Step { Read, Look, Pass, Sleep };
+    // True if the stop can be slept through by a loop taking `order`.
+    const auto losesAStop = [](std::array<Step, 4> order) {
+        bool lost = false;
+        // The stop's two steps go before loop step `t` and `b` (t <= b).
+        for (int t = 0; t <= 4; ++t) {
+            for (int b = t; b <= 4; ++b) {
+                bool flag = false, stopped = false;
+                uint32_t value = 0, seen = 0;
+                for (int i = 0; i <= 4 && !stopped; ++i) {
+                    if (i == t) flag = true;
+                    if (i == b) ++value;
+                    if (i == 4) break;
+                    switch (order[i]) {
+                        case Read:  seen = value; break;
+                        case Look:  stopped = flag; break;
+                        case Pass:  break;
+                        case Sleep: break;
+                    }
+                }
+                // Asleep on `seen` with no bump to come: woken only if the
+                // bump already moved the word past what was read.
+                if (!stopped && value == seen && b < 4) lost = true;
+            }
+        }
+        return lost;
+    };
+    CHECK_FALSE(losesAStop({ Read, Look, Pass, Sleep }));   // run_worker
+    CHECK(losesAStop({ Look, Read, Pass, Sleep }));         // the order that lost it
+}
+
+TEST_CASE("wait word: a worker loop stopped before it starts runs no pass", "[wait_word][worker]") {
+    ClockworkWaitWord w;
+    std::stop_source running;
+    running.request_stop();
+    int passes = 0;
+    CHECK(returnsInTime(w, [&] {
+        clockwork::run_worker(w, running.get_token(), [&] { ++passes; return clockwork::NextPass::woken(); });
+    }));
+    CHECK(passes == 0);
 }
 
 #if !defined(_WIN32)

@@ -111,11 +111,18 @@ void os_wake_all(ClockworkWaitWord& w, WaitScope scope, WaitEvent event) {
 // sequentially consistent: either the look sees the new value, or the waker
 // sees the waiter and wakes it. The kernel's own compare closes the gap
 // between the look and the sleep.
+//
+// Each side writes one word and then reads the other, which is safe only in a
+// sequentially consistent order. A fence between the write and the read on
+// each side makes that explicit. The Rust side (rust/clockwork-wait) has the
+// same form, which loom model-checks, and either language may be on either
+// side of a shared word.
 bool wait_impl(ClockworkWaitWord& w, uint32_t old, bool timed, WaitClock::time_point deadline,
                WaitScope scope, WaitEvent event) {
     if (w.value.load(std::memory_order_seq_cst) != old) return true;
     if (timed && WaitClock::now() >= deadline) return false;
     w.waiters.fetch_add(1, std::memory_order_seq_cst);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     while (w.value.load(std::memory_order_seq_cst) == old) {
         if (timed && WaitClock::now() >= deadline) break;
         os_wait(w, old, timed, deadline, scope, event);
@@ -136,6 +143,7 @@ void wait(ClockworkWaitWord& w, uint32_t old, WaitScope scope, WaitEvent event) 
 }
 
 void notify(ClockworkWaitWord& w, WaitScope scope, WaitEvent event) noexcept {
+    std::atomic_thread_fence(std::memory_order_seq_cst);   // between the caller's change and the look at the count
     if (w.waiters.load(std::memory_order_seq_cst) != 0) os_wake_all(w, scope, event);
 }
 

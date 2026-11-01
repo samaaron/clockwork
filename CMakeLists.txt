@@ -604,6 +604,8 @@ set(CLOCKWORK_CORE_SOURCES
     # A word a thread blocks on until it changes, with a deadline: every wait
     # for another thread's work (src/workers/wait_word.h).
     ${WORKERS_SRC}/wait_word.cpp
+    # A name for each long-lived thread, as debuggers and profilers show it.
+    ${WORKERS_SRC}/thread_name.cpp
     # The guest's pool (src/clockwork_pool.h): clockwork's allocator over the
     # guest's bulk memory, and the RT router's block.
     ${CLOCKWORK_SRC}/clockwork_pool.cpp

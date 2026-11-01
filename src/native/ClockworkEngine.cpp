@@ -28,6 +28,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "RingBufferWriter.h"
 #include "IngressCallCtx.h"
+#include "workers/thread_name.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -2096,6 +2097,7 @@ int64_t ClockworkEngine::watchdogNowMs() const {
 }
 
 void ClockworkEngine::watchdogLoop(const std::stop_token& stop) {
+    clockwork::name_this_thread("cw-watchdog");
     const auto poll = std::chrono::milliseconds(mWatchdog->pollMs);
     while (!clockwork::sleep_until(stop, std::chrono::steady_clock::now() + poll))
         watchdogPoll();
