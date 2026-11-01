@@ -102,6 +102,18 @@ ClockworkStatus fail(ClockworkStatus* out, ClockworkStatus s) {
     return s;
 }
 
+// A lane as the arena's table places it, for a handle in the engine's own
+// process (an embedder's, the web's): the table names the address when the
+// lanes are the engine's own memory. Absent when they are nowhere, or in a
+// command segment this handle has no mapping of.
+ClockworkStatus laneInProcess(const uint8_t* base, uint32_t area, int writable, ClockworkRegion* out) {
+    const ClockworkArenaAreaEntry* a = clockwork_arena_area(arenaHeader(base), area);
+    if (!a || a->space != CLOCKWORK_SPACE_PROCESS || a->bytes_lo == 0) return CLOCKWORK_E_ABSENT;
+    const auto at = static_cast<uintptr_t>((uint64_t(a->base_hi) << 32) | a->base_lo);
+    *out = { reinterpret_cast<uint8_t*>(at), a->bytes_lo, writable };
+    return CLOCKWORK_OK;
+}
+
 #if !defined(__EMSCRIPTEN__)
 // This process, for the plane's owner stamp (shm_peer_attach).
 long clockwork_client_pid() {
@@ -626,14 +638,12 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
                      c->L.audio_slot_count * c->L.audio_slot_bytes, 0 };
             return CLOCKWORK_OK;
 
-        // The bulk lanes live in the command segment (docs/SEGMENTS.md). The
-        // peer sees them — its segment carries both, at offsets its header
-        // names — and the assets area is the one region a client WRITES: it
-        // is the peer's lane, and clockwork_asset_pool.h is how it carves it.
-        // A reader's segment has no lanes and a reader may not have them. An
-        // in-process handle over bare memory cannot see where the engine put
-        // them; that host reaches them through the engine it owns, and absent
-        // is the honest answer there.
+        // The bulk lanes (docs/SEGMENTS.md). The peer sees them in its command
+        // segment, at offsets its header names; a handle in the engine's own
+        // process finds them where the arena's table says they are. The
+        // assets area is the one region a client WRITES: it is the client's
+        // lane, and clockwork_asset_pool.h is how a client carves it. A
+        // reader's segment has no lanes and a reader may not have them.
         case CLOCKWORK_REGION_ASSETS:
 #if !defined(__EMSCRIPTEN__)
             if (c->commands) {
@@ -643,7 +653,7 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
             }
             if (c->mapping) return CLOCKWORK_E_PERM;
 #endif
-            return CLOCKWORK_E_ABSENT;
+            return laneInProcess(c->base, CLOCKWORK_AREA_ASSETS, 1, out);
         case CLOCKWORK_REGION_RETURNS:
 #if !defined(__EMSCRIPTEN__)
             if (c->commands) {
@@ -653,7 +663,7 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
             }
             if (c->mapping) return CLOCKWORK_E_PERM;
 #endif
-            return CLOCKWORK_E_ABSENT;
+            return laneInProcess(c->base, CLOCKWORK_AREA_RETURNS, 0, out);
 
         // The rings. Writable names who may put bytes in: an in-process
         // client writes the ingress ring through clockwork_client_send, and

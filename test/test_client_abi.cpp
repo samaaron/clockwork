@@ -370,10 +370,18 @@ TEST_CASE("client abi: regions are named, and absent is an answer",
     CHECK(reg.bytes == NATIVE_STATS_SIZE);
     CHECK(reg.writable == 0);
 
-    // A region this engine does not expose here says so rather than handing
-    // back a pointer into whatever is next along.
-    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_E_ABSENT);
+    // The lanes, where the engine carved them in this process (the case
+    // below holds them). A region this engine does not expose says so rather
+    // than handing back a pointer into whatever is next along: an engine
+    // booted with no lanes has none to name.
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_OK);
+    clockwork_client_close(c);
 
+    Engine bare([](ClockworkEngine::Config& cfg) { cfg.assetsBytes = 0; cfg.returnsBytes = 0; });
+    c = openInProcess(&st);
+    REQUIRE(st == CLOCKWORK_OK);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_E_ABSENT);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_RETURNS, &reg) == CLOCKWORK_E_ABSENT);
     clockwork_client_close(c);
 }
 
@@ -691,5 +699,31 @@ TEST_CASE("a client still reaches the engine after a cold device swap",
     // nothing about the send says so.
     CHECK(pingReaches());     // and the client is not deaf afterwards
 
+    clockwork_client_close(c);
+}
+
+// The lanes, from an in-process handle: the arena's table says where the
+// engine put them (its own process, when there is no command segment), and
+// a handle in that process resolves them — writable assets, readable
+// returns. A product's front (SuperSonic's Commands) is built on this.
+TEST_CASE("client abi: an in-process handle reaches the lanes the engine carved", "[client][abi][lanes]") {
+    Engine fx;
+    ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
+    ClockworkClient* c = openInProcess(&st);
+    REQUIRE(c != nullptr);
+
+    ClockworkRegion assets {};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &assets) == CLOCKWORK_OK);
+    CHECK(assets.writable == 1);
+    CHECK(assets.bytes == fx.engine.guestAssetsBytes());
+    CHECK(static_cast<uint8_t*>(assets.base) == fx.engine.guestAssets());
+    static_cast<uint8_t*>(assets.base)[64] = 0x5E;
+    CHECK(fx.engine.guestAssets()[64] == 0x5E);
+
+    ClockworkRegion returns {};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_RETURNS, &returns) == CLOCKWORK_OK);
+    CHECK(returns.writable == 0);
+    CHECK(returns.bytes == fx.engine.guestReturnsBytes());
+    CHECK(static_cast<const uint8_t*>(returns.base) == fx.engine.guestReturns());
     clockwork_client_close(c);
 }
