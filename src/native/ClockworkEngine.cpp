@@ -1736,6 +1736,12 @@ void ClockworkEngine::noteInFlightCommand(const uint8_t* data, uint32_t size) {
     mInFlightCommand[i] = '\0';
 }
 
+ClockworkClient* ClockworkEngine::newClient() {
+    if (!mRunning.load() || !shared_memory) return nullptr;
+    ClockworkStatus st = CLOCKWORK_OK;
+    return clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
+}
+
 void ClockworkEngine::openClient() {
     if (mClientHandle || !shared_memory) return;
     ClockworkStatus st = CLOCKWORK_OK;

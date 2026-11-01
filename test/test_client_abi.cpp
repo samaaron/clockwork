@@ -727,3 +727,28 @@ TEST_CASE("client abi: an in-process handle reaches the lanes the engine carved"
     CHECK(static_cast<const uint8_t*>(returns.base) == fx.engine.guestReturns());
     clockwork_client_close(c);
 }
+
+// A host's own handle over a running engine: what a product's front is built
+// on in-process (SuperSonic's Commands), the same handle a peer has over the
+// plane. Each caller gets its own, so a front's reservations and polls never
+// share a handle with the engine's egress drain.
+TEST_CASE("client abi: the engine hands out client handles of its own", "[client][abi]") {
+    Engine fx;
+    ClockworkClient* mine = fx.engine.newClient();
+    REQUIRE(mine != nullptr);
+    ClockworkClient* theirs = fx.engine.newClient();
+    REQUIRE(theirs != nullptr);
+    CHECK(mine != theirs);
+    CHECK(mine != fx.engine.egressClient());
+
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(clockwork_client_send(mine, ping.ptr(), ping.size(), 0xC11E) == CLOCKWORK_OK);
+    osc_test::ParsedReply r;
+    CHECK(fx.reply("/dummy/pong", r));
+    clockwork_client_close(theirs);
+    clockwork_client_close(mine);
+
+    // Before init there is no arena to hand out.
+    ClockworkEngine cold;
+    CHECK(cold.newClient() == nullptr);
+}

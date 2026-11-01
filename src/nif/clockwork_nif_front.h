@@ -5,7 +5,8 @@
  *
  * A native host installs a product's front itself. The NIF is a host clockwork
  * builds, so a product reaches it through this function instead: the NIF
- * calls it once per boot, with the engine it is booting and the door that
+ * calls it once per boot, with a client handle over the engine it booted
+ * (ClockworkEngine::newClient; the front owns it) and the door that
  * engine's replies leave by, sends every packet through what it returns, and
  * offers it every reply. SuperSonic's front reads the synthdef and sample
  * files the engine will not, as it does for SuperSonic's own server.
@@ -20,6 +21,6 @@
 
 #include <memory>
 
-class ClockworkEngine;
+struct ClockworkClient;
 
-std::unique_ptr<OscFront> clockwork_nif_make_front(ClockworkEngine& engine, IOscTransport& replies);
+std::unique_ptr<OscFront> clockwork_nif_make_front(ClockworkClient* client, IOscTransport& replies);

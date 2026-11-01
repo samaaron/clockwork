@@ -365,6 +365,13 @@ public:
     // other. Null before init.
     struct ClockworkClient* egressClient() { return mClientHandle; }
 
+    // A client handle of the caller's own over this engine's arena, the
+    // in-process equivalent of a peer's (clockwork_client.h): what a
+    // product's front is built on. One handle is for one thread, so each
+    // caller opens its own; the caller closes it (clockwork_client_close)
+    // before shutdown(). Null before init.
+    struct ClockworkClient* newClient();
+
     // ONE pass of the control plane, on the calling thread, for a host that
     // runs it (Config::hostDrivesControl): the control-ring drain — every
     // /clockwork/ verb the audio thread forwarded, answered — the peer

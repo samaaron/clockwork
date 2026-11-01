@@ -454,10 +454,14 @@ static void worker_do_start(const LifecycleCmd& cmd) {
     try {
         engine = std::make_unique<ClockworkEngine>();
         engine->onDebug = on_debug;
-        front = clockwork_nif_make_front(*engine, g_transport);
-        g_fronted.attach(&g_transport, front.get());
+        g_fronted.attach(&g_transport, nullptr);
         engine->setTransport(&g_fronted);
         engine->init(cmd.cfg);  // SLOW — no lock held
+        // The front is built on a client handle, which there is once the
+        // engine has an arena; the replies that flowed meanwhile passed
+        // straight through.
+        front = clockwork_nif_make_front(engine->newClient(), g_transport);
+        g_fronted.attach(&g_transport, front.get());
         // A boot the guest refused (an option, a heap it could not have)
         // leaves the engine in Error with the reason: not a running engine.
         if (engine->engineState() == EngineState::Error) {
