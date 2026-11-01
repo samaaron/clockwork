@@ -21,6 +21,7 @@
 #include "workers/RingBufferWriter.h"
 
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,8 +39,20 @@ ClockworkEngine::Config planeConfig(unsigned port) {
     return cfg;
 }
 
-// Write one OSC packet into the command ring exactly as a peer would.
-bool peerWrite(ShmPeerPlaneHeader* plane, const osc_test::Packet& pkt) {
+// The engine's wake event for a peer in this process: a duplicate on Windows,
+// where the client owns and closes it; elsewhere the wake word needs none.
+clockwork::WaitEvent wakeEventFor(ClockworkEngine& engine) {
+#ifdef _WIN32
+    return detail_shm_segment::shm_dup_handle(static_cast<HANDLE>(engine.shmCommandWakeEvent()));
+#else
+    (void)engine;
+    return nullptr;
+#endif
+}
+
+// Write one OSC packet into the command ring, and no more.
+bool peerWriteUnwoken(const shm_command_client& client, const osc_test::Packet& pkt) {
+    ShmPeerPlaneHeader* plane = client.get_peer_plane();
     return RingBufferWriter::write(
         shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
         &plane->cmd_head, &plane->cmd_tail,
@@ -47,9 +60,19 @@ bool peerWrite(ShmPeerPlaneHeader* plane, const osc_test::Packet& pkt) {
         pkt.ptr(), pkt.size(), 0);
 }
 
-// Drain every complete frame currently in the reply ring into `out`.
-void drainReplies(ShmPeerPlaneHeader* plane, ClockworkDrainState& st,
+// Write one OSC packet into the command ring and wake the engine, exactly as
+// a peer would.
+bool peerWrite(const shm_command_client& client, const osc_test::Packet& pkt) {
+    if (!peerWriteUnwoken(client, pkt)) return false;
+    client.wake_engine();
+    return true;
+}
+
+// Drain every complete frame currently in the reply ring into `out`, and wake
+// the engine if it waits for the room the read made, as a peer does.
+void drainReplies(const shm_command_client& client, ClockworkDrainState& st,
                   std::vector<std::vector<uint8_t>>& out) {
+    ShmPeerPlaneHeader* plane = client.get_peer_plane();
     clockwork_drain_ring(
         shm_peer_rep_ring(plane), SHM_PEER_REP_RING_SIZE,
         &plane->rep_head, &plane->rep_tail, st, ClockworkDrainMetrics{}, 0,
@@ -57,6 +80,7 @@ void drainReplies(ShmPeerPlaneHeader* plane, ClockworkDrainState& st,
             out.emplace_back(d, d + n);
             return ClockworkDrainVerdict::Consume;
         });
+    if (shm_peer_room_made(plane)) client.wake_engine();
 }
 
 // Pumped (planeConfig): the engine's pass drains the plane as the audio
@@ -78,7 +102,7 @@ TEST_CASE("shm-peer: segment publishes plane geometry and attach claims it",
     constexpr unsigned kPort = 57221;
     EngineFixture fx(planeConfig(kPort));
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()), wakeEventFor(fx.engine()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
 
@@ -107,14 +131,14 @@ TEST_CASE("shm-peer: command ring commands reach the engine and reply",
     constexpr unsigned kPort = 57222;
     EngineFixture fx(planeConfig(kPort));
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()), wakeEventFor(fx.engine()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
 
     // The fixture's transport surfaces replies for every token via onReply,
     // so the peer command's reply lands in the fixture collector.
-    REQUIRE(peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 4242)));
+    REQUIRE(peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 4242)));
 
     OscReply reply;
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), reply));
@@ -136,7 +160,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -145,9 +169,9 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     std::vector<std::vector<uint8_t>> replies;
 
     // tempo/get round trip through shared memory in both directions.
-    REQUIRE(peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 7)));
+    REQUIRE(peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 7)));
     bool got = waitUntil(engine, [&] {
-        drainReplies(plane, repState, replies);
+        drainReplies(client, repState, replies);
         return !replies.empty();
     });
     REQUIRE(got);
@@ -158,9 +182,9 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     // transport's audience flag and its .reply arrives on the reply ring.
     replies.clear();
     REQUIRE_FALSE(transport.hasNotifySubscribers());
-    REQUIRE(peerWrite(plane, osc_test::message("/clockwork/notify")));
+    REQUIRE(peerWrite(client, osc_test::message("/clockwork/notify")));
     got = waitUntil(engine, [&] {
-        drainReplies(plane, repState, replies);
+        drainReplies(client, repState, replies);
         return !replies.empty() && transport.hasNotifySubscribers();
     });
     REQUIRE(got);
@@ -190,7 +214,7 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -209,10 +233,10 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (static_cast<int>(replies.size()) < N
            && std::chrono::steady_clock::now() < deadline) {
-        while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
+        while (sent < N && peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
             ++sent;
         engine.pumpAudioBlock();   // pumped: the pass drains the ring as the audio thread ticks
-        drainReplies(plane, repState, replies);
+        drainReplies(client, repState, replies);
         if (static_cast<int>(replies.size()) < N)
             std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
@@ -256,7 +280,7 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -267,7 +291,7 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     int sent = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (sent < N && std::chrono::steady_clock::now() < deadline) {
-        while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
+        while (sent < N && peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), sent + 1)))
             ++sent;
         for (int i = 0; i < 8; ++i) engine.pumpAudioBlock();   // the pass runs; the reply ring fills; the rest waits
     }
@@ -280,7 +304,7 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     std::vector<std::vector<uint8_t>> replies;
     const auto readBy = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (static_cast<int>(replies.size()) < N && std::chrono::steady_clock::now() < readBy) {
-        drainReplies(plane, repState, replies);
+        drainReplies(client, repState, replies);
         engine.pumpAudioBlock();
     }
     REQUIRE(static_cast<int>(replies.size()) == N);
@@ -310,7 +334,7 @@ TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, 
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -319,7 +343,7 @@ TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, 
     constexpr int N = 6000;
     int sent = 0;
     for (int round = 0; sent < N && round < 1000; ++round) {
-        while (sent < N && peerWrite(plane, osc_test::message(CLOCKWORK_SYS("sync"), sent + 1)))
+        while (sent < N && peerWrite(client, osc_test::message(CLOCKWORK_SYS("sync"), sent + 1)))
             ++sent;
         for (int i = 0; i < 8; ++i) block();
     }
@@ -334,5 +358,50 @@ TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, 
          << lost << " lost at the reply ring, " << m.egress_frames_undelivered.load() << " counted undelivered");
     REQUIRE(lost > 0);
     CHECK(m.egress_frames_undelivered.load() == lost);
+    engine.shutdown();
+}
+
+// The pass takes a share of the peer's commands at a time, so the other work
+// in it is not starved, and asks for the next pass itself. Messages for the
+// guest go on to the audio thread and answer nothing in the pass, so nothing
+// else wakes it: a control verb behind more of them than one share, written
+// with a single wake, is still answered with no audio block.
+TEST_CASE("shm-peer: a verb behind more guest messages than one pass takes is answered after one wake, with no audio block",
+          "[shm][peer][wake]") {
+    auto cfg = planeConfig(57232);
+    if (!cfg.manualAudioPump || cfg.hostDrivesControl)
+        SKIP("needs the engine's own control pass and no audio thread");
+    ShmTransport     transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    engine.init(cfg);
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
+    ShmPeerPlaneHeader* plane = client.get_peer_plane();
+    REQUIRE(plane != nullptr);
+    shm_peer_attach(plane, 1);
+
+    for (int i = 0; i < 1000; ++i)
+        REQUIRE(peerWriteUnwoken(client, osc_test::message("/dummy/ping")));
+    REQUIRE(peerWriteUnwoken(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 1)));
+    client.wake_engine();
+
+    ClockworkDrainState repState;
+    std::vector<std::vector<uint8_t>> replies;
+    const auto answered = [&] {
+        for (const auto& r : replies)
+            if (std::strcmp(reinterpret_cast<const char*>(r.data()), CLOCKWORK_SYS("clock/tempo.reply")) == 0) return true;
+        return false;
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!answered() && std::chrono::steady_clock::now() < deadline) {
+        drainReplies(client, repState, replies);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(answered());
     engine.shutdown();
 }

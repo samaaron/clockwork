@@ -190,21 +190,50 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
         m.bytes     = &metrics->osc_in_bytes_received;
         m.corrupted = &metrics->osc_in_corrupted;
     }
-    return drain_egress_ring(shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
-                             &cursors->nrt_out_head, &cursors->nrt_out_tail, &cursors->nrt_out_read,
-                             g_nrt_drain_state, m, fn, ctx, max_frames);
+    const uint32_t delivered =
+        drain_egress_ring(shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
+                          &cursors->nrt_out_head, &cursors->nrt_out_tail, &cursors->nrt_out_read,
+                          g_nrt_drain_state, m, fn, ctx, max_frames);
+    clockwork_egress_nrt_room_made();
+    return delivered;
 }
 
 uint32_t clockwork_egress_nrt_max_frame(void) {
     return kNrtEgressMax - EGRESS_ROUTE_SIZE;
 }
 
-uint32_t clockwork_egress_nrt_free(void) {
-    if (!memory_initialized || !shared_memory || !cursors) return 0;
+// Raised by the control pass while it holds work for room in the NRT egress
+// ring; lowered by the reader that makes room, which wakes the pass. Process
+// wide: every reader of this ring is in the engine's process.
+static std::atomic<uint32_t> g_nrt_room_wanted{0};
+
+static uint32_t nrt_free(void) {
     return ring_free_bytes(
         static_cast<uint32_t>(cursors->nrt_out_head.load(std::memory_order_acquire)),
         static_cast<uint32_t>(cursors->nrt_out_tail.load(std::memory_order_acquire)),
         NRT_OUT_RING_SIZE);
+}
+
+// The flag goes up before the second look, and a reader looks at it after it
+// gives room back, so either the second look sees the room or the reader sees
+// the flag.
+void clockwork_egress_nrt_want_room(void) {
+    g_nrt_room_wanted.store(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+int clockwork_egress_nrt_room(uint32_t bytes) {
+    if (!memory_initialized || !shared_memory || !cursors) return 0;
+    if (nrt_free() >= bytes) return 1;
+    clockwork_egress_nrt_want_room();
+    return nrt_free() >= bytes;
+}
+
+void clockwork_egress_nrt_room_made(void) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (g_nrt_room_wanted.load(std::memory_order_relaxed) != 0
+        && g_nrt_room_wanted.exchange(0, std::memory_order_relaxed) != 0)
+        clockwork_control_wake();
 }
 
 bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,

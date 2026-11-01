@@ -17,7 +17,7 @@
 #include "smoothie_pipewire.h"
 #include "audio_processor.h"
 #include "lanes/lanes.h"
-#include "lanes/lanes_internal.h"   // clockwork_egress_nrt_free: the control pass's room check
+#include "lanes/lanes_internal.h"   // clockwork_egress_nrt_room: the control pass's room check
 #include "ring/ring.h"                // ring_free_bytes
 #include "audio_config.h"
 #include "shared_memory.h"
@@ -1054,12 +1054,14 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // reserved SHM-peer origin token — IDENTITY IS ASSIGNED HERE, NEVER TRUSTED
     // FROM SHARED MEMORY. Registered before the control-ring drain so a forwarded
     // command is handled the same pass. Bounded per pass so a flooding peer cannot
-    // starve the other drains; a full IN ring retains the frame, giving lossless
-    // backpressure through to the peer's own ring-full signal.
+    // starve the other drains, and a pass that stops at the bound asks for the
+    // next; a full IN ring retains the frame, giving lossless backpressure
+    // through to the peer's own ring-full signal.
     mNrtGateway.addTask([this]() {
         auto* plane = mPeerPlane.load(std::memory_order_acquire);
         if (!plane) return;
         constexpr uint32_t kPeerDrainMaxFrames = 256;
+        ClockworkDrainStop stop = ClockworkDrainStop::Empty;
         clockwork_drain_ring(
             shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
             &plane->cmd_head, &plane->cmd_tail, mPeerDrainState,
@@ -1067,14 +1069,16 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                             mMetrics ? &mMetrics->osc_in_corrupted : nullptr,
                             nullptr },
             kPeerDrainMaxFrames,
-            [this](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t seq) {
+            [this, plane](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t seq) {
                 // Written for an instance that has gone, or between instances
                 // (mPeerMarks): refused to the peer, naming the generation that
                 // closed, then consumed. Clockwork's verbs that need no guest are
                 // not refused: the engine answers those with or without one.
                 if (const RingMark* mark = mPeerMarks.of(seq);
                     mark && !clockwork_sys_answers_without_guest(d, n)) {
-                    if (clockwork_egress_nrt_free() < 1024) return ClockworkDrainVerdict::Retain;   // its refusal waits for room
+                    // Its refusal waits for room on both rings it passes through.
+                    if (!clockwork_egress_nrt_room(1024) || !shm_peer_reply_room(plane, 1024))
+                        return ClockworkDrainVerdict::Retain;
                     clockwork_sys_refuse(d, n, mark->reason, mark->generation,
                         [](const uint8_t* r, uint32_t rn) {
                             clockwork_egress_nrt_write(EGRESS_REPLY, SHM_PEER_ORIGIN_TOKEN, r, rn);
@@ -1094,7 +1098,9 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                     mMetrics->osc_out_bytes_sent.fetch_add(n, std::memory_order_relaxed);
                 }
                 return ClockworkDrainVerdict::Consume;
-            });
+            },
+            &stop);
+        if (stop == ClockworkDrainStop::MaxFrames) mNrtGateway.wake();
     });
 
     // The engine owns no socket. By default egress is in-process (CallbackTransport
@@ -1268,9 +1274,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         // larger than they are can fill the first, and a peer that reads
         // slowly can fill the second; either way the answers (and the log
         // line reporting the loss) are dropped. So a verb stays in the
-        // control ring while either ring lacks room for its answers and is
-        // handled on a later pass, after the egress drain (the first task
-        // of every pass) and after the peer has read (ring_drain.h, Retain).
+        // control ring while either ring lacks room for its answers
+        // (ring_drain.h, Retain), and the read that makes the room wakes the
+        // pass that handles it: the egress drain (clockwork_egress_nrt_room),
+        // or the peer's (shm_peer_reply_room).
         // The room required for one verb's answers is 16 KB where the ring
         // has it; a smaller ring (a small profile, src/memory_profile.h)
         // requires all it has, so a verb then waits for an empty ring,
@@ -1283,12 +1290,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
             RingReader::OnMessageVerdict(
             [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
-                if (clockwork_egress_nrt_free() < kAnswerRoom) return ClockworkDrainVerdict::Retain;
+                if (!clockwork_egress_nrt_room(kAnswerRoom)) return ClockworkDrainVerdict::Retain;
                 if (token == SHM_PEER_ORIGIN_TOKEN)
                     if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
-                        if (ring_free_bytes(static_cast<uint32_t>(plane->rep_head.load(std::memory_order_relaxed)),
-                                            static_cast<uint32_t>(plane->rep_tail.load(std::memory_order_acquire)),
-                                            SHM_PEER_REP_RING_SIZE) < kAnswerRoom)
+                        if (!shm_peer_reply_room(plane, kAnswerRoom))
                             return ClockworkDrainVerdict::Retain;
                 DrainCallCtx cc{ token, 0, 0 };
                 noteInFlightCommand(d, n);

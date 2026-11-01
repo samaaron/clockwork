@@ -527,10 +527,12 @@ void TrackControl::gatewayPass() {
 // drains the lanes (clockwork_egress_nrt_drain) sees a track reply the same way it
 // sees any other, the lane metrics count it, and the gateway's own NRT drain
 // (which runs after this pass) delivers it in the same wake. A refused write
-// means the lane is full; the frame stays on the OUT ring for the next pass
-// rather than being lost, and the bridge feels the back-pressure.
+// means the lane is full; the frame stays on the OUT ring, the lane's next
+// read wakes the pass that relays it, and the bridge feels the back-pressure.
+// A relay that stops at its per-pass bound asks for the next pass.
 void TrackControl::relayOut() {
     MsgRing& r = mHeader->out;
+    ClockworkDrainStop stop = ClockworkDrainStop::Empty;
     clockwork_drain_ring(out_ring(mSeg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
         256,
         [](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
@@ -539,9 +541,14 @@ void TrackControl::relayOut() {
             std::memcpy(&route, payload, sizeof route);
             const uint8_t* osc = payload + sizeof(Prefixed);
             const uint32_t oscLen = len - static_cast<uint32_t>(sizeof(Prefixed));
+            if (clockwork_egress_nrt_write(route, token, osc, oscLen)) return ClockworkDrainVerdict::Consume;
+            // Once more after asking to be woken, for room made in between.
+            clockwork_egress_nrt_want_room();
             return clockwork_egress_nrt_write(route, token, osc, oscLen)
                 ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
-        });
+        },
+        &stop);
+    if (stop == ClockworkDrainStop::MaxFrames) clockwork_control_wake();
 }
 
 void TrackControl::watchLiveness() {

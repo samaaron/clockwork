@@ -17,6 +17,7 @@
 #include <functional>
 #include "OscTestUtils.h"
 #include "clockwork_client.h"
+#include "clockwork_prefix.h"
 #include "shared_memory.h"
 
 #include <atomic>
@@ -195,4 +196,36 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     Frame pong;
     CHECK(waitForFrame([&] { e.engine.pumpAudioBlock(); }, c, "/dummy/pong", &pong, 200));
     clockwork_client_close(c);
+}
+
+// The control pass holds a verb back while the egress ring lacks room for its
+// answers. A host that drains egress itself makes that room, and the engine
+// answers the rest: the host's read wakes it, with no further write and no
+// audio block.
+TEST_CASE("client egress: verbs held for room in the egress ring are answered once the host has read, with no audio block",
+          "[client][egress][wake]") {
+    ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
+    if (!cfg.manualAudioPump || cfg.hostDrivesControl)
+        SKIP("needs the engine's own control pass and no audio thread");
+    cfg.hostDrainsEgress = true;
+    EngineFixture fx(cfg);
+    ClockworkClient* host = fx.engine().egressClient();
+    takeAll(host);   // boot's broadcasts
+
+    // A time verb's answer is larger than the verb: a full control ring of
+    // them answers with more than the egress ring holds.
+    const auto ask = osc_test::message(CLOCKWORK_SYS("clock/time/now/get"));
+    int sent = 0;
+    while (sent < 100000 && fx.engine().ingest(ask.ptr(), ask.size(), 0) == CLOCKWORK_OK) ++sent;
+    REQUIRE(sent > 0);
+
+    // Read, and only read.
+    int got = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (got < sent && std::chrono::steady_clock::now() < deadline) {
+        for (const Frame& f : takeAll(host))
+            if (f.address == CLOCKWORK_SYS("clock/time/now.reply")) ++got;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(got == sent);
 }

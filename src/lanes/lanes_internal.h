@@ -40,10 +40,21 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
 /* The most OSC bytes one NRT egress frame carries. */
 uint32_t clockwork_egress_nrt_max_frame(void);
 
-/* Free bytes in the NRT egress ring now (0 before init): what a producer
-   that would rather wait than have a frame refused checks first — the
-   control pass, before it answers a verb. */
-uint32_t clockwork_egress_nrt_free(void);
+/* Whether the NRT egress ring has `bytes` free (0 before init): what the
+   control pass checks before it answers a verb, holding the verb back rather
+   than have its answers refused. When it has not, the ring's next reader to
+   make room wakes the pass (clockwork_egress_nrt_room_made). */
+int clockwork_egress_nrt_room(uint32_t bytes);
+
+/* Ask to be woken by the next reader to make room, for a producer that holds
+   a frame after a refused write: it writes once more after asking, for room
+   made in between. */
+void clockwork_egress_nrt_want_room(void);
+
+/* Every reader of the NRT egress ring, after it gives room back
+   (clockwork_ring_give_back): wakes the control pass if it holds work for
+   room in the ring (clockwork_control_wake). */
+void clockwork_egress_nrt_room_made(void);
 
 /* Count `n` deliveries the transport could not make for a frame that left an
    egress ring (PerformanceMetrics::egress_frames_undelivered): whoever hands

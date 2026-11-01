@@ -121,6 +121,12 @@ again.
 A peer that writes and does not wake still has its command read, at the
 next audio block, but no sooner.
 
+The engine holds a peer's command back while the reply ring lacks room for
+its answers. Before it does, it sets `rep_room_wanted` in the plane header. A
+peer looks at that word after each read that moves `rep_tail`, and when it is
+set, clears it and wakes the engine as above. A peer that sends more than its
+reply ring holds, then only reads, gets every answer with no audio block.
+
 ### Clients
 
 A peer needs the published segment too (the clock, the metrics, the arena's
@@ -181,8 +187,9 @@ outside the arena. Their *space* says where: `CLOCKWORK_SPACE_COMMAND_SEGMENT`
 - `test/test_shm_attach.cpp` — the protocol: role word, 40-byte hello, a
   reader's descriptor is read-only, a peer's is not; status 1, 2 and 3; the
   lease released by close; secret refusals still silent and counted
-  separately; a peer's command answered with no audio block, and an idle
-  engine running no pass.
+  separately; a peer's command answered with no audio block, an idle engine
+  running no pass, and a peer that sends more than its reply ring holds,
+  then only reads, answered in full.
 - `test/test_shm_peer_crash.cpp` + `test/peer_shm/main.cpp` — a peer killed
   mid-traffic releases the lease and the next peer attaches.
 - `test/test_client_abi.cpp` — `send`/`poll`/`region` on a reader handle are

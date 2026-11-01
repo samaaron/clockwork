@@ -51,8 +51,11 @@
  */
 #pragma once
 
+#include "ring/ring.h"   // ring_free_bytes
+
 #include <atomic>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 // Ring capacities. The command ring is sized for the largest payloads a client
@@ -92,10 +95,19 @@ struct alignas(8) ShmPeerPlaneHeader {
     uint32_t cmd_ring_size;
     uint32_t rep_ring_size;
 
-    std::array<uint32_t, 4> _reserved;
+    // Set by the host while it holds commands back for room in the reply
+    // ring; the peer's read that makes room clears it and wakes the host
+    // (shm_peer_reply_room, shm_peer_room_made).
+    std::atomic<uint32_t> rep_room_wanted;
+
+    std::array<uint32_t, 3> _reserved;
 };
 static_assert(sizeof(ShmPeerPlaneHeader) == 64,
               "ShmPeerPlaneHeader must stay 64 bytes — the rings follow at fixed offsets");
+// The Rust peer (rust/clockwork-comms/src/shm.rs, P_*) reads these by offset.
+static_assert(offsetof(ShmPeerPlaneHeader, rep_tail) == 28 && offsetof(ShmPeerPlaneHeader, rep_dropped) == 36
+              && offsetof(ShmPeerPlaneHeader, rep_ring_size) == 44 && offsetof(ShmPeerPlaneHeader, rep_room_wanted) == 48,
+              "the Rust peer's plane offsets");
 
 constexpr uint32_t SHM_PEER_PLANE_TOTAL_SIZE =
     static_cast<uint32_t>(sizeof(ShmPeerPlaneHeader))
@@ -128,4 +140,29 @@ inline uint32_t shm_peer_attach(ShmPeerPlaneHeader* h, uint32_t pid) {
     h->rep_tail.store(h->rep_head.load(std::memory_order_acquire),
                       std::memory_order_release);
     return h->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+// Host side: whether the reply ring has `need` free bytes. When it has not,
+// the host holds the command back and the peer's next read wakes it: the flag
+// goes up before the second look, and the peer looks at the flag after it
+// moves rep_tail, so either the second look sees the room or the peer sees
+// the flag.
+inline bool shm_peer_reply_room(ShmPeerPlaneHeader* h, uint32_t need) {
+    const auto room = [h] {
+        return ring_free_bytes(static_cast<uint32_t>(h->rep_head.load(std::memory_order_relaxed)),
+                               static_cast<uint32_t>(h->rep_tail.load(std::memory_order_acquire)),
+                               SHM_PEER_REP_RING_SIZE);
+    };
+    if (room() >= need) return true;
+    h->rep_room_wanted.store(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return room() >= need;
+}
+
+// Peer side, after a read has moved rep_tail: whether the host waits for the
+// room the read made. The caller then wakes it (shm_command_client::wake_engine).
+inline bool shm_peer_room_made(ShmPeerPlaneHeader* h) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return h->rep_room_wanted.load(std::memory_order_relaxed) != 0
+        && h->rep_room_wanted.exchange(0, std::memory_order_relaxed) != 0;
 }

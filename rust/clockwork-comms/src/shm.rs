@@ -65,6 +65,7 @@ const P_REP_TAIL: usize = 28;
 const P_REP_DROPPED: usize = 36;
 const P_CMD_RING_SIZE: usize = 40;
 const P_REP_RING_SIZE: usize = 44;
+const P_REP_ROOM_WANTED: usize = 48;
 const PLANE_HDR: usize = 64;
 
 // ── platform segment mapping ─────────────────────────────────────────────────
@@ -683,6 +684,13 @@ impl ShmPeer {
                 f(&self.seg.read_bytes(self.rep_ring + ut as usize + MSG_HDR, payload_size));
             }
             tail_a.store(((ut + footprint) % sz) as i32, Ordering::Release);
+        }
+        // The engine may hold commands back for the room this read made
+        // (shm_peer_room_made in shm_peer_plane.h).
+        fence(Ordering::SeqCst);
+        let wanted = self.seg.atomic_u32(self.plane + P_REP_ROOM_WANTED);
+        if wanted.load(Ordering::Relaxed) != 0 && wanted.swap(0, Ordering::Relaxed) != 0 {
+            self.wake_engine();
         }
     }
 }

@@ -111,6 +111,59 @@ std::vector<uint8_t> authThenRole(uint32_t role) {
 }
 #endif
 
+// An engine with the shared-memory command plane served at an endpoint, its
+// own control pass, no audio thread and nothing pumped, and one peer attached
+// through the C client API: what a peer gets while no block renders.
+struct IdlePeerEngine {
+    ShmTransport       transport;
+    ClockworkEngine    engine;
+    shm_attach::server srv;
+    ClockworkClient*   peer = nullptr;
+
+    explicit IdlePeerEngine(unsigned port) {
+        engine.onDebug = [](const std::string&) {};
+        engine.onReply = [](const uint8_t*, uint32_t) {};
+        engine.setTransport(&transport);
+        engine.init(attachConfig(port, true));
+        transport.bindPlaneSlot(engine.peerPlaneSlot());
+        REQUIRE(transport.ready());
+        std::string err;
+        REQUIRE(serve(srv, endpointFor(port), engine, &err));
+        ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
+        peer = clockwork_client_open_shm_peer(endpointFor(port).c_str(), testSecretBytes().data(), &st);
+        REQUIRE(peer != nullptr);
+    }
+    ~IdlePeerEngine() {
+        if (peer) clockwork_client_close(peer);
+        srv.stop();
+        engine.shutdown();
+    }
+    static bool applies() {
+        const auto cfg = EngineFixture::defaultConfig();
+        return cfg.manualAudioPump && !cfg.hostDrivesControl;
+    }
+};
+
+// Wall clock only: nothing here renders a block.
+bool within(const std::function<bool()>& f, int ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (f()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return f();
+}
+
+// How many of `address` the peer has been sent since the last call.
+int takeReplies(ClockworkClient* peer, const char* address) {
+    ClockworkClientMessage msgs[64];
+    int got = 0;
+    for (uint32_t n; (n = clockwork_client_poll(peer, msgs, 64)) > 0;)
+        for (uint32_t i = 0; i < n; ++i)
+            if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), address) == 0) ++got;
+    return got;
+}
+
 } // namespace
 
 TEST_CASE("attach: a reader receives the published segment over the endpoint, read-only",
@@ -519,56 +572,39 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
 // engine nobody writes to runs no pass at all.
 TEST_CASE("attach: a peer's command wakes the engine's control pass, with no audio block and no timer",
           "[shm][attach][peer][wake]") {
-    constexpr unsigned kPort = 57339;
-    auto cfg = attachConfig(kPort, true);
-    if (!cfg.manualAudioPump || cfg.hostDrivesControl)
-        SKIP("needs the engine's own control pass and no audio thread");
-    ShmTransport    transport;
-    ClockworkEngine engine;
-    engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
-    engine.setTransport(&transport);
-    engine.init(cfg);
-    transport.bindPlaneSlot(engine.peerPlaneSlot());
-    REQUIRE(transport.ready());
-    const std::string ep = endpointFor(kPort);
-    shm_attach::server srv;
-    std::string err;
-    REQUIRE(serve(srv, ep, engine, &err));
-    // Wall clock only: nothing here renders a block.
-    const auto within = [](const std::function<bool()>& f, int ms) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (f()) return true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-        return f();
-    };
-
-    ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
-    ClockworkClient* peer = clockwork_client_open_shm_peer(ep.c_str(), testSecretBytes().data(), &st);
-    REQUIRE(peer != nullptr);
+    if (!IdlePeerEngine::applies()) SKIP("needs the engine's own control pass and no audio thread");
+    IdlePeerEngine e(57339);
 
     const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{4344});
-    REQUIRE(clockwork_client_send(peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
-    ClockworkClientMessage msgs[8];
-    CHECK(within([&] {
-        const uint32_t n = clockwork_client_poll(peer, msgs, 8);
-        for (uint32_t i = 0; i < n; ++i)
-            if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0)
-                return true;
-        return false;
-    }, 3000));
+    REQUIRE(clockwork_client_send(e.peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
+    CHECK(within([&] { return takeReplies(e.peer, CLOCKWORK_SYS("clock/tempo.reply")) == 1; }, 3000));
 
     // Quiet: no write, no block, no pass. A 1 ms timer would run a hundred.
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    const uint64_t settled = engine.controlPasses();
+    const uint64_t settled = e.engine.controlPasses();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    CHECK(engine.controlPasses() == settled);
+    CHECK(e.engine.controlPasses() == settled);
+}
 
-    clockwork_client_close(peer);
-    srv.stop();
-    engine.shutdown();
+// The pass holds a peer's commands back while the reply ring lacks room for
+// their answers. A peer that sends more than the reply ring holds answers for,
+// then only reads, is answered in full: reading makes the room, and the engine
+// answers the rest with no further write and no audio block.
+TEST_CASE("attach: a peer that sends more than its reply ring holds, then only reads, gets every answer with no audio block",
+          "[shm][attach][peer][wake]") {
+    if (!IdlePeerEngine::applies()) SKIP("needs the engine's own control pass and no audio thread");
+    IdlePeerEngine e(57340);
+
+    const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1});
+    int sent = 0;
+    ClockworkStatus st = CLOCKWORK_OK;
+    while (sent < 100000 && (st = clockwork_client_send(e.peer, get.ptr(), get.size(), 0)) == CLOCKWORK_OK) ++sent;
+    // Full: the command ring holds what the reply ring had no room to answer.
+    REQUIRE(st == CLOCKWORK_E_FULL);
+
+    int got = 0;
+    within([&] { got += takeReplies(e.peer, CLOCKWORK_SYS("clock/tempo.reply")); return got >= sent; }, 5000);
+    CHECK(got == sent);
 }
 
 TEST_CASE("attach: the server refuses to serve without a published segment or a secret", "[shm][attach]") {

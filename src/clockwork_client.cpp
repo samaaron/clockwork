@@ -20,6 +20,7 @@
 #include "clockwork_config.h"
 #include "in_ring_door.h"        // the in ring's boundary
 #include "lanes/lanes.h"        // clockwork_control_wake
+#include "lanes/lanes_internal.h"   // clockwork_egress_nrt_room_made
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
 #include "shm_tap_stream.hpp"
@@ -560,6 +561,8 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
             out[i].route    = CLOCKWORK_ROUTE_REPLY;
             out[i].sequence = heads[i][3];
         }
+        // The engine may hold commands back for the room this read made.
+        if (shm_peer_room_made(plane)) c->commands->wake_engine();
         return static_cast<uint32_t>(heads.size());
     }
 #endif
@@ -602,6 +605,7 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     RingCursors* ctl = c->control();
     clockwork_ring_give_back(&ctl->out_tail, &ctl->out_read);
     clockwork_ring_give_back(&ctl->nrt_out_tail, &ctl->nrt_out_read);
+    clockwork_egress_nrt_room_made();
 
     // TWO RINGS, ONE READ. The audio thread answers on the OUT ring; the NRT
     // gateway — the subsystems, the state changes, every broadcast — on the
