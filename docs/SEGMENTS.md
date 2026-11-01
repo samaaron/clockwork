@@ -67,15 +67,16 @@ One connection, one segment. The client connects to the endpoint and sends:
    stream transports take;
 2. the **role**, one 4-byte big-endian word: `1` reader, `2` peer.
 
-The server answers with one `hello`, 32 bytes, native byte order:
+The server answers with one `hello`, 40 bytes, native byte order:
 
 ```
-u32 magic     "CWAT"
-u32 version   3
-u64 size      the segment's byte length, 0 when nothing is handed over
-u64 handle    Windows: the duplicated HANDLE's value in the client; POSIX: 0
-u32 role      the role granted, as asked
-u32 status    0 ok · 1 no command segment · 2 held · 3 unknown role
+u32 magic       "CWAT"
+u32 version     4
+u64 size        the segment's byte length, 0 when nothing is handed over
+u64 handle      Windows: the duplicated HANDLE's value in the client; POSIX: 0
+u32 role        the role granted, as asked
+u32 status      0 ok · 1 no command segment · 2 held · 3 unknown role
+u64 wake_event  a peer on Windows: the engine's wake event, duplicated into the client; 0 elsewhere
 ```
 
 | the client asked for | the server |
@@ -103,6 +104,23 @@ The peer plane's own attach (`shm_peer_attach`: pid stamp, generation bump,
 writer-lock reset, stale replies skipped) stays as it is and runs after the
 hand-off; the lease is what guarantees it runs with no live producer.
 
+### Waking the engine
+
+The engine's control pass sleeps until something wakes it; it has no timer.
+The command segment's header names a wake word (`wake_offset`, a
+`ClockworkWaitWord`: a 32-bit value and a 32-bit waiter count, 8 bytes). A
+peer adds one to the value after each write to the command ring and wakes
+the address: `futex(FUTEX_WAKE)` on Linux, `os_sync_wake_by_address_all`
+with the shared flag on Apple platforms. Windows has no wait on an address
+across processes, so the engine creates an auto-reset event with the
+segment and the hello carries a duplicate the peer may only signal
+(`EVENT_MODIFY_STATE`). The peer skips the system call when the waiter count
+is zero: the engine is mid-pass and reads the new value before it sleeps
+again.
+
+A peer that writes and does not wake still has its command read, at the
+next audio block, but no sooner.
+
 ### Clients
 
 A peer needs the published segment too (the clock, the metrics, the arena's
@@ -114,7 +132,7 @@ does both in one call:
 | `clockwork_client_open_shm(endpoint, secret)` | the published segment, read-only | `CLOCKWORK_E_PERM` | `CLOCKWORK_E_PERM` |
 | `clockwork_client_open_shm_handle(handle)` | the same, from a descriptor already received | `CLOCKWORK_E_PERM` | `CLOCKWORK_E_PERM` |
 | `clockwork_client_open_shm_peer(endpoint, secret)` | both segments; the lease is held until `close` (`CLOCKWORK_E_BUSY` while another peer holds it, `CLOCKWORK_E_ABSENT` where there is no plane) | the peer plane's command ring and reply ring | the command segment's lanes |
-| `clockwork_client_open_shm_peer_handles(reader, command)` | the same, from two descriptors already received; no lease | as above | as above |
+| `clockwork_client_open_shm_peer_handles(reader, command, wake_event)` | the same, from two descriptors already received (and, on Windows, the wake event); no lease | as above | as above |
 | `clockwork_client_open_memory(base, bytes)` | the arena in this process | the arena's rings, as before | absent |
 
 Taps, metrics, metrics history, the clock, the sample clock and the scope
@@ -160,10 +178,11 @@ outside the arena. Their *space* says where: `CLOCKWORK_SPACE_COMMAND_SEGMENT`
 - `test/test_shm_segment.cpp` — two creators, two headers; the reader handle
   is read-only (a writable mapping is refused); the lanes are in the command
   segment and disjoint; the arena's table says where.
-- `test/test_shm_attach.cpp` — the protocol: role word, 32-byte hello, a
+- `test/test_shm_attach.cpp` — the protocol: role word, 40-byte hello, a
   reader's descriptor is read-only, a peer's is not; status 1, 2 and 3; the
   lease released by close; secret refusals still silent and counted
-  separately.
+  separately; a peer's command answered with no audio block, and an idle
+  engine running no pass.
 - `test/test_shm_peer_crash.cpp` + `test/peer_shm/main.cpp` — a peer killed
   mid-traffic releases the lease and the next peer attaches.
 - `test/test_client_abi.cpp` — `send`/`poll`/`region` on a reader handle are

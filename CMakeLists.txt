@@ -22,6 +22,16 @@ cmake_minimum_required(VERSION 3.24)
 # repository, "-dirty" when the tree had changes. Not a git checkout (a source
 # archive): "unknown". CLOCKWORK_COMMIT set by the caller wins.
 project(Clockwork LANGUAGES C CXX)
+
+# Apple's address wait (os_sync_wait_on_address, src/workers/wait_word.cpp)
+# is public from macOS 14.4 and iOS 17.4: the floor for every Apple build.
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 17.4)
+        message(FATAL_ERROR "Clockwork needs iOS 17.4 or later (CMAKE_OSX_DEPLOYMENT_TARGET is ${CMAKE_OSX_DEPLOYMENT_TARGET})")
+    elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.4)
+        message(FATAL_ERROR "Clockwork needs macOS 14.4 or later (CMAKE_OSX_DEPLOYMENT_TARGET is ${CMAKE_OSX_DEPLOYMENT_TARGET})")
+    endif()
+endif()
 if(NOT DEFINED CLOCKWORK_COMMIT)
     set(CLOCKWORK_COMMIT "unknown")
     find_package(Git QUIET)
@@ -591,6 +601,9 @@ set(CLOCKWORK_CORE_SOURCES
     # here; the device boot is in the device layer below.
     ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp
     ${CLOCKWORK_SRC}/lanes/lanes.cpp
+    # A word a thread blocks on until it changes, with a deadline: every wait
+    # for another thread's work (src/workers/wait_word.h).
+    ${WORKERS_SRC}/wait_word.cpp
     # The guest's pool (src/clockwork_pool.h): clockwork's allocator over the
     # guest's bulk memory, and the RT router's block.
     ${CLOCKWORK_SRC}/clockwork_pool.cpp
@@ -830,7 +843,8 @@ if(CLOCKWORK_LINK)
 endif()
 
 if(WIN32)
-    target_link_libraries(clockwork PUBLIC Ws2_32 winmm ole32)
+    # Synchronization: WaitOnAddress, the address wait under wait_word.cpp.
+    target_link_libraries(clockwork PUBLIC Ws2_32 winmm ole32 Synchronization)
 elseif(APPLE)
     target_link_libraries(clockwork PUBLIC
         "-framework CoreAudio" "-framework AudioUnit" "-framework Foundation"
@@ -1456,9 +1470,12 @@ if(CLOCKWORK_PLUGINS)
         add_library(clockwork_bridge_rust_lib STATIC IMPORTED)
         set_target_properties(clockwork_bridge_rust_lib PROPERTIES IMPORTED_LOCATION ${CLOCKWORK_BRIDGE_RUST_LIB})
 
+        # The wait word is compiled in: the bridge links the plugin host
+        # library, which waits on one, and not the core that holds it.
         add_executable(clockwork_plugin_bridge
             ${NATIVE_SRC}/PluginBridgeMain.cpp
             ${NATIVE_SRC}/RealtimeThread.cpp
+            ${WORKERS_SRC}/wait_word.cpp
             ${OSCPACK_SOURCES})
         if(APPLE)
             target_sources(clockwork_plugin_bridge PRIVATE ${NATIVE_SRC}/CocoaEventPump.mm)
@@ -1484,7 +1501,7 @@ if(CLOCKWORK_PLUGINS)
                 MACOSX_BUNDLE TRUE
                 MACOSX_BUNDLE_INFO_PLIST "${NATIVE_SRC}/bridge_info.plist.in")
         elseif(WIN32)
-            target_link_libraries(clockwork_plugin_bridge PRIVATE ntdll userenv dbghelp ws2_32)
+            target_link_libraries(clockwork_plugin_bridge PRIVATE ntdll userenv dbghelp ws2_32 Synchronization)
         else()
             target_link_libraries(clockwork_plugin_bridge PRIVATE pthread ${CMAKE_DL_LIBS})
         endif()

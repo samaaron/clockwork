@@ -29,12 +29,29 @@ const MSG_HDR: usize = 16; // sizeof(Message)
 
 // shm_command_header field byte offsets (all u32; see shm_segment.hpp): magic,
 // peer_offset (SEGMENT-relative), peer_header_bytes, the two ring sizes, then
-// the lanes. The arena is in the published segment, which this peer does not
-// map: it needs only the plane.
+// the lanes, then where the engine's wake word is. The arena is in the
+// published segment, which this peer does not map: it needs only the plane.
 const HDR_MAGIC: usize = 0;
 const HDR_PEER_OFFSET: usize = 4;
 const HDR_PEER_CMD_BYTES: usize = 3 * 4;
 const HDR_PEER_REP_BYTES: usize = 4 * 4;
+const HDR_WAKE_OFFSET: usize = 9 * 4;
+
+// ClockworkWaitWord (src/workers/wait_word.h): the value, then the count of
+// threads asleep on it. The engine's control pass sleeps on this word; a
+// write to the command ring is followed by a bump and, if anyone sleeps, a
+// wake of the operating system.
+const WAKE_VALUE: usize = 0;
+const WAKE_WAITERS: usize = 4;
+
+// Apple's cross-process address wake (os/os_sync_wait_on_address.h, macOS 14.4,
+// iOS 17.4), in libSystem.
+#[cfg(target_vendor = "apple")]
+const OS_SYNC_WAKE_BY_ADDRESS_SHARED: u32 = 1;
+#[cfg(target_vendor = "apple")]
+extern "C" {
+    fn os_sync_wake_by_address_all(addr: *mut libc::c_void, size: usize, flags: u32) -> i32;
+}
 
 // ShmPeerPlaneHeader field byte offsets (64-byte header; shm_peer_plane.h).
 const P_OWNER_PID: usize = 0;
@@ -65,6 +82,10 @@ struct Segment {
     _lease: std::os::unix::net::UnixStream,
     #[cfg(windows)]
     lease: windows_sys::Win32::Foundation::HANDLE,
+    // Windows has no cross-process address wait: the event that wakes the
+    // engine's control pass, duplicated into this process by the hand-off.
+    #[cfg(windows)]
+    wake_event: windows_sys::Win32::Foundation::HANDLE,
 }
 
 impl Drop for Segment {
@@ -86,6 +107,9 @@ impl Drop for Segment {
                 UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.base.cast() });
                 CloseHandle(self.mapping);
                 CloseHandle(self.lease);
+                if !self.wake_event.is_null() {
+                    CloseHandle(self.wake_event);
+                }
             }
         }
     }
@@ -105,7 +129,7 @@ impl Drop for Segment {
 // kernel closes it when this process dies.
 
 const ATTACH_MAGIC: u32 = 0x4357_4154; // "CWAT", shm_attach::MAGIC
-const ATTACH_VERSION: u32 = 3; // the hello's layout, as shm_attach.hpp stamps it
+const ATTACH_VERSION: u32 = 4; // the hello's layout, as shm_attach.hpp stamps it
 const ROLE_PEER: u32 = 2;
 
 /// What a peer sends first: the auth packet after its 4-byte length, then the
@@ -117,10 +141,11 @@ fn request(secret: &ClockworkCommsSecret) -> Vec<u8> {
     out.extend_from_slice(&ROLE_PEER.to_be_bytes());
     out
 }
-const HELLO_LEN: usize = 32; // magic u32, version u32, size u64, handle u64, role u32, status u32
+// magic u32, version u32, size u64, handle u64, role u32, status u32, wake_event u64
+const HELLO_LEN: usize = 40;
 
-/// The hello's (size, handle), or why the server declined the peer.
-fn parse_hello(buf: &[u8], endpoint: &str) -> Result<(u64, u64), String> {
+/// The hello's (size, handle, wake event), or why the server declined the peer.
+fn parse_hello(buf: &[u8], endpoint: &str) -> Result<(u64, u64, u64), String> {
     if buf.len() != HELLO_LEN {
         return Err(format!("short hand-off: {} bytes", buf.len()));
     }
@@ -130,7 +155,7 @@ fn parse_hello(buf: &[u8], endpoint: &str) -> Result<(u64, u64), String> {
         return Err("malformed hand-off (bad magic, version or role)".into());
     }
     match u32_at(28) {
-        0 => Ok((u64_at(8), u64_at(16))),
+        0 => Ok((u64_at(8), u64_at(16), u64_at(32))),
         1 => Err(format!("no shared-memory command plane at {endpoint}: the host did not enable one")),
         2 => Err(format!("another peer holds the command plane at {endpoint}")),
         s => Err(format!("the engine at {endpoint} answered with status {s}")),
@@ -334,15 +359,19 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
             CloseHandle(pipe);
             return Err(format!("malformed hand-off from {path}"));
         }
-        let (_size, handle) = match parse_hello(&hello, &path) {
+        let (_size, handle, wake_event) = match parse_hello(&hello, &path) {
             Ok(h) => h,
             Err(e) => {
                 CloseHandle(pipe);
                 return Err(e);
             }
         };
+        let wake = wake_event as usize as windows_sys::Win32::Foundation::HANDLE;
         if handle == 0 {
             CloseHandle(pipe);
+            if !wake.is_null() {
+                CloseHandle(wake);
+            }
             return Err("the engine could not duplicate its segment into this process".into());
         }
         let mapping = handle as usize as windows_sys::Win32::Foundation::HANDLE;
@@ -350,13 +379,22 @@ fn open_segment(endpoint: &str, secret: &ClockworkCommsSecret) -> Result<Segment
         if view.Value.is_null() {
             CloseHandle(mapping);
             CloseHandle(pipe);
+            if !wake.is_null() {
+                CloseHandle(wake);
+            }
             return Err("MapViewOfFile failed".into());
         }
         // Region size — the mapping has no size query, so measure the view like
         // shm_segment.hpp's shm_map_handle does.
         let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
         VirtualQuery(view.Value, &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>());
-        Ok(Segment { base: view.Value.cast::<u8>(), len: info.RegionSize, mapping, lease: pipe })
+        Ok(Segment {
+            base: view.Value.cast::<u8>(),
+            len: info.RegionSize,
+            mapping,
+            lease: pipe,
+            wake_event: wake,
+        })
     }
 }
 
@@ -420,6 +458,7 @@ pub struct ShmPeer {
     cmd_size: i64,
     rep_ring: usize,
     rep_size: i64,
+    wake: usize, // byte offset of the engine's wake word in the segment
 }
 
 impl ShmPeer {
@@ -464,14 +503,48 @@ impl ShmPeer {
                 "plane geometry mismatch: header {cmd_size}/{rep_size} vs plane {p_cmd}/{p_rep}"
             ));
         }
+        // The wake word: two u32 atomics, 4-aligned, inside the segment.
+        let wake = seg.read_u32(HDR_WAKE_OFFSET) as usize;
+        if wake % 4 != 0 || wake.checked_add(8).is_none_or(|e| e > seg.len) {
+            return Err(format!("wake word offset {wake} is outside the segment or misaligned"));
+        }
         Ok(ShmPeer {
             cmd_ring: plane + PLANE_HDR,
             rep_ring: plane + PLANE_HDR + cmd_size as usize,
             cmd_size: cmd_size as i64,
             rep_size: rep_size as i64,
+            wake,
             plane,
             seg,
         })
+    }
+
+    /// Wake the engine's control pass, so it reads the command ring with no
+    /// audio block and no timer: a bump of the wake word and, when the pass is
+    /// asleep on it, one wake of the operating system (wait_word.h). Never
+    /// blocks.
+    pub fn wake_engine(&self) {
+        self.seg.atomic_u32(self.wake + WAKE_VALUE).fetch_add(1, Ordering::SeqCst);
+        if self.seg.atomic_u32(self.wake + WAKE_WAITERS).load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let addr = self.seg.atomic_u32(self.wake + WAKE_VALUE) as *const AtomicU32;
+        // SAFETY: `addr` is a 4-aligned word inside the mapping (checked in
+        // `open`), shared with the engine; each call wakes waiters on it and
+        // touches nothing else.
+        unsafe {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            libc::syscall(libc::SYS_futex, addr, libc::FUTEX_WAKE, i32::MAX, std::ptr::null::<libc::timespec>(), std::ptr::null::<u32>(), 0);
+            #[cfg(target_vendor = "apple")]
+            os_sync_wake_by_address_all(addr as *mut libc::c_void, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+            #[cfg(windows)]
+            {
+                let _ = addr;
+                if !self.seg.wake_event.is_null() {
+                    windows_sys::Win32::System::Threading::SetEvent(self.seg.wake_event);
+                }
+            }
+        }
     }
 
     /// Claim the plane (shm_peer_attach): stamp pid, reset the writer lock, skip
@@ -489,7 +562,8 @@ impl ShmPeer {
     }
 
     /// Write one OSC packet into the command ring (RingBufferWriter protocol).
-    /// Returns false when the ring is full — backpressure, no blocking.
+    /// Returns false when the ring is full — backpressure, no blocking. A
+    /// written packet wakes the engine (wake_engine).
     pub fn write_cmd(&self, data: &[u8]) -> bool {
         let sz = self.cmd_size;
         let total = (MSG_HDR + data.len()) as i64;
@@ -551,6 +625,7 @@ impl ShmPeer {
         }
         head.store(((uh + aligned) % sz) as i32, Ordering::Release);
         lock.store(0, Ordering::Release);
+        self.wake_engine();
         true
     }
 

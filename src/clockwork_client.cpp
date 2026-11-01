@@ -19,6 +19,7 @@
 #include "metrics_history.h"
 #include "clockwork_config.h"
 #include "in_ring_door.h"        // the in ring's boundary
+#include "lanes/lanes.h"        // clockwork_control_wake
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
 #include "shm_tap_stream.hpp"
@@ -236,17 +237,21 @@ ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* 
 }
 
 ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t reader_handle, intptr_t command_handle,
-                                                        ClockworkStatus* out_status) {
+                                                        intptr_t wake_event, ClockworkStatus* out_status) {
     const auto command = detail_shm_segment::shm_handle_from_intptr(command_handle);
+    auto* const event  = reinterpret_cast<clockwork::WaitEvent>(wake_event);
     ClockworkClient* handle = clockwork_client_open_shm_handle(reader_handle, out_status);
     if (!handle) {
         detail_shm_segment::shm_close_native(command);
+#ifdef _WIN32
+        if (event) CloseHandle(static_cast<HANDLE>(event));
+#endif
         return nullptr;
     }
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     try {
-        // Takes the handle on every path, so nothing leaks on a refusal.
-        c->commands = std::make_unique<detail_shm_segment::shm_command_client>(command);
+        // Takes the handle and the event on every path, so nothing leaks on a refusal.
+        c->commands = std::make_unique<detail_shm_segment::shm_command_client>(command, event);
     } catch (const std::exception&) {
         clockwork_client_close(handle);
         fail(out_status, CLOCKWORK_E_NOT_FOUND);
@@ -281,13 +286,16 @@ ClockworkClient* clockwork_client_open_shm_peer(const char* endpoint, const uint
         fail(out_status, st);
         return nullptr;
     }
-    // The segment handle goes to the client; the lease stays here, held for
-    // the handle's life.
+    // The segment handle and the wake event go to the client; the lease stays
+    // here, held for the handle's life.
     const auto command = lease.handle;
-    lease.handle = detail_shm_segment::shm_invalid_handle;
+    auto* const event  = lease.wake_event;
+    lease.handle     = detail_shm_segment::shm_invalid_handle;
+    lease.wake_event = nullptr;
     ClockworkClient* handle = clockwork_client_open_shm_peer_handles(
         detail_shm_segment::shm_handle_to_intptr(reader),
-        detail_shm_segment::shm_handle_to_intptr(command), out_status);
+        detail_shm_segment::shm_handle_to_intptr(command),
+        reinterpret_cast<intptr_t>(event), out_status);
     if (!handle) return nullptr;   // the lease releases as it goes out of scope
     reinterpret_cast<ClientImpl*>(handle)->lease = std::move(lease);
     return handle;
@@ -305,7 +313,7 @@ ClockworkClient* clockwork_client_open_shm_peer(const char*, const uint8_t*, Clo
     fail(out_status, CLOCKWORK_E_NOT_FOUND);
     return nullptr;
 }
-ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t, intptr_t, ClockworkStatus* out_status) {
+ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t, intptr_t, intptr_t, ClockworkStatus* out_status) {
     fail(out_status, CLOCKWORK_E_NOT_FOUND);
     return nullptr;
 }
@@ -372,11 +380,13 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     // cannot fit an empty ring will never fit.
     if (ShmPeerPlaneHeader* plane = c->plane()) {
         if (bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return CLOCKWORK_E_TOO_BIG;
-        return RingBufferWriter::write(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
-                                       &plane->cmd_head, &plane->cmd_tail,
-                                       &plane->cmd_sequence, &plane->cmd_write_lock,
-                                       osc, bytes, origin)
-                   ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
+        if (!RingBufferWriter::write(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
+                                     &plane->cmd_head, &plane->cmd_tail,
+                                     &plane->cmd_sequence, &plane->cmd_write_lock,
+                                     osc, bytes, origin))
+            return CLOCKWORK_E_FULL;
+        c->commands->wake_engine();   // the pass reads it now, block or no block
+        return CLOCKWORK_OK;
     }
 #endif
 
@@ -398,6 +408,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
             c->L.control_ring_size - CONTROL_RING_HEADER_SIZE,
             &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
             osc, bytes, origin);
+        if (ok) clockwork_control_wake();   // the pass that drains it (lanes.h)
         return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
     }
 
@@ -472,6 +483,7 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
                                  &plane->cmd_head, &plane->cmd_sequence,
                                  &plane->cmd_write_lock, c->pending, bytes, origin);
         c->pending = {};
+        c->commands->wake_engine();
         return CLOCKWORK_OK;
     }
 #endif

@@ -14,7 +14,8 @@ static thread_local const RingReader* tReaderOfThisThread = nullptr;
 
 void RingReader::start() {
     if (mThread.joinable()) return;
-    mThread = std::jthread([this](const std::stop_token& stop) { run(stop); });
+    const uint32_t seen = mWake->value.load(std::memory_order_seq_cst);
+    mThread = std::jthread([this, seen](const std::stop_token& stop) { run(stop, seen); });
 }
 
 bool RingReader::running() const {
@@ -30,15 +31,8 @@ void RingReader::stop() {
 }
 
 void RingReader::wakeForStop() {
-    // A bare notify cannot break std::atomic::wait(old): the wait only returns
-    // when the value DIFFERS from old, so the value must change first. Bump-then-
-    // notify guarantees the run loop wakes, sees the stop, and exits with no
-    // dependence on an external processCount tick.
-    if (mWake) {
-        mWake->fetch_add(1, std::memory_order_release);
-        mWake->notify_all();
-    }
-    resume();  // release a thread parked on mPauseRequest
+    wake();    // out of the wait for work
+    resume();  // out of a park
 }
 
 bool RingReader::pause() {
@@ -48,29 +42,29 @@ bool RingReader::pause() {
     // thread) is by definition not draining concurrently with it.
     if (tReaderOfThisThread == this) return true;
     if (!mThread.joinable()) return true;
-    mPauseRequest.store(1, std::memory_order_release);
-    // Kick the wake word so a reader blocked on it re-checks the request.
-    if (mWake) {
-        mWake->fetch_add(1, std::memory_order_release);
-        mWake->notify_all();
+    // An odd count is "pause asked"; this ask is the count it makes.
+    uint32_t ask = mPauseRequests.value.load(std::memory_order_seq_cst);
+    if ((ask & 1u) == 0) {
+        ask = mPauseRequests.value.fetch_add(1, std::memory_order_seq_cst) + 1;
+        clockwork::notify(mPauseRequests);
     }
-    // Park acknowledgement normally lands within one drain pass. Bound the wait
-    // anyway: a reader wedged behind a foreign lock must degrade to an unparked
+    wake();   // a reader waiting for work comes round to the park
+    // The acknowledgement normally lands within one drain pass. The deadline
+    // stays: a reader wedged behind a foreign lock must degrade to an unparked
     // (pre-pause) swap, not hang the device switch.
-    for (int waited = 0; mParked.load(std::memory_order_acquire) == 0; ++waited) {
-        if (waited >= 2000) {
-            clockwork_log("[%s] pause: reader did not park within 2s — "
-                    "proceeding unparked", mName);
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return true;
+    const bool parked = clockwork::wait_for_condition(
+        mParkedAt, [&] { return mParkedAt.value.load(std::memory_order_acquire) == ask; },
+        clockwork::WaitClock::now() + std::chrono::seconds(2));
+    if (!parked)
+        clockwork_log("[%s] pause: reader did not park within 2s — proceeding unparked", mName);
+    return parked;
 }
 
 void RingReader::resume() {
-    mPauseRequest.store(0, std::memory_order_release);
-    mPauseRequest.notify_all();
+    uint32_t ask = mPauseRequests.value.load(std::memory_order_seq_cst);
+    while ((ask & 1u) != 0
+           && !mPauseRequests.value.compare_exchange_weak(ask, ask + 1, std::memory_order_seq_cst)) {}
+    clockwork::notify(mPauseRequests);
 }
 
 void RingReader::addDrain(uint8_t*              buffer,
@@ -128,37 +122,27 @@ void RingReader::drainOne(Drain& d) {
                   });
 }
 
-void RingReader::run(const std::stop_token& stop) {
+void RingReader::run(const std::stop_token& stop, uint32_t seen) {
     tReaderOfThisThread = this;
-    const std::stop_callback wake(stop, [this] { wakeForStop(); });
-    if (mWake) mLastWake = mWake->load(std::memory_order_relaxed);
+    const std::stop_callback wakeOnStop(stop, [this] { wakeForStop(); });
 
     while (!stop.stop_requested()) {
-        if (mWake) {
-            // Woken by the word — an audio block, a stop — or by the clock:
-            // the control ring (docs/RESTARTS.md) is written by boundaries
-            // in any process while no block renders, and a word that only
-            // the audio thread moves would leave it unread exactly when it
-            // matters. One millisecond is the bound; a block arriving sooner
-            // wakes the pass as before.
-            if (mWake->load(std::memory_order_acquire) == mLastWake)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            mLastWake = mWake->load(std::memory_order_acquire);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
+        // Asleep until the word changes: an audio block, a write to a ring
+        // this drains (in this process or a peer's), a pause, a stop.
+        clockwork::wait(*mWake, seen, mWakeScope, mWakeEvent);
+        // Read before the pass: a wake that lands while the pass runs is a
+        // change the next wait sees at once, and another pass.
+        seen = mWake->value.load(std::memory_order_seq_cst);
         if (stop.stop_requested()) break;
 
-        if (mPauseRequest.load(std::memory_order_acquire)) {
-            // Acknowledge between drain passes — the release-store makes every
-            // write of the pass visible to the pauser — then sleep until
-            // resume() (or exit) clears the request.
-            mParked.store(1, std::memory_order_release);
-            while (mPauseRequest.load(std::memory_order_acquire) &&
-                   !stop.stop_requested())
-                mPauseRequest.wait(1, std::memory_order_acquire);
-            mParked.store(0, std::memory_order_relaxed);
+        const uint32_t ask = mPauseRequests.value.load(std::memory_order_seq_cst);
+        if ((ask & 1u) != 0) {
+            // Acknowledge between drain passes — the release makes every write
+            // of the pass visible to the pauser — then sleep until resume()
+            // (or a stop, which resumes) moves the count on.
+            mParkedAt.value.store(ask, std::memory_order_release);
+            clockwork::notify(mParkedAt);
+            clockwork::wait(mPauseRequests, ask);
             continue;
         }
 
@@ -173,6 +157,7 @@ void RingReader::pass() {
     mPassStartUs.store(startUs, std::memory_order_relaxed);
 
     for (auto& d : mDrains) drainOne(d);
+    mPasses.fetch_add(1, std::memory_order_relaxed);
 
     const uint64_t elapsed = nowUs() - startUs;
     mPassStartUs.store(0, std::memory_order_relaxed);

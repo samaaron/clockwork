@@ -328,7 +328,7 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
             detail_shm_segment::shm_handle_to_intptr(
                 detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle())),
             detail_shm_segment::shm_handle_to_intptr(
-                detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), &st);
+                detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), 0, &st);
         REQUIRE(c != nullptr);
         ClockworkRegion region {};
         REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &region) == CLOCKWORK_OK);
@@ -349,7 +349,7 @@ TEST_CASE("asset: a client over the segment sees the same assets", "[asset][shm]
         detail_shm_segment::shm_handle_to_intptr(
             detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle())),
         detail_shm_segment::shm_handle_to_intptr(
-            detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), &st);
+            detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), 0, &st);
     REQUIRE(c != nullptr);
 
     ClockworkRegion assets {};

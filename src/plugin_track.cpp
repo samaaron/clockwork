@@ -37,6 +37,7 @@
 #include "plugin_editor_window.h"
 #include "plugin_host.h"
 #include "clockwork_path.h"
+#include "workers/wait_word.h"
 
 #include <algorithm>
 #include <atomic>
@@ -50,7 +51,6 @@
 #include <array>
 #include <string_view>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -144,6 +144,7 @@ struct Snapshot {
 
 std::atomic<gsl::owner<Snapshot*>> g_snap{nullptr};   // what the audio thread reads
 std::atomic<uint64_t>  g_epoch{0};        // bumped by the audio thread per block
+ClockworkWaitWord      g_epochMoved;      // bumped after g_epoch, for retire to wait on
 
 std::mutex g_mu;                          // control-thread mutations only
 std::vector<std::unique_ptr<Track>> g_tracks;   // display order
@@ -235,6 +236,7 @@ void track_process_at(float* const* in, uint32_t n_in, float* const* out, uint32
     // Published before the walk, so a control thread that swaps mid-block can
     // tell that this block has begun and must be waited out.
     g_epoch.fetch_add(1, std::memory_order_acq_rel);
+    clockwork::bump(g_epochMoved);
 
     if (!in || frames == 0) return;
     if (frames > kMaxBlock) frames = kMaxBlock;
@@ -375,11 +377,9 @@ void retire(gsl::owner<Snapshot*> old) {
     if (!old) return;
     const uint64_t start = g_epoch.load(std::memory_order_acquire);
     if (start == 0) { delete old; return; }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-    while (g_epoch.load(std::memory_order_acquire) < start + 2) {
-        if (std::chrono::steady_clock::now() >= deadline) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    clockwork::wait_for_condition(
+        g_epochMoved, [start] { return g_epoch.load(std::memory_order_acquire) >= start + 2; },
+        clockwork::WaitClock::now() + std::chrono::milliseconds(250));
     delete old;
 }
 

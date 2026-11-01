@@ -3,22 +3,20 @@
 /*
  * test_ring_reader.cpp — clockwork's non-realtime ring reader thread.
  *
- * Contract pinned here: RingReader runs a thread that blocks on an external
- * wake word (std::atomic<uint32_t>, in production the audio callback's
- * processCount) and drains one or more Message-framed rings on each wake. It
- * is pure transport — it never looks inside a frame — so everything below
- * uses arbitrary byte payloads and holds whichever DSP is attached.
+ * Contract pinned here: RingReader runs a thread that blocks on its wake word
+ * (src/workers/wait_word.h) and runs one pass of its drains each time the
+ * word changes: the audio thread wakes it every block, a writer of a ring it
+ * drains wakes it after the write, a peer in another process wakes it
+ * through a shared word. It never wakes on a timer. It is pure transport — it
+ * never looks inside a frame — so everything below uses arbitrary byte
+ * payloads and holds whichever DSP is attached.
  *
- *   1. Stopping the reader must NOT depend on anyone bumping the wake word.
- *      std::atomic::wait(old) only returns when the value DIFFERS from `old`,
- *      so a bare notify_all() (value unchanged) cannot break the wait — the
- *      stop path must change the value. Without that, stop() hangs until its
- *      join timeout, and under a driver that has stopped ticking nothing else
- *      ever wakes the reader.
+ *   1. Stopping the reader does not depend on anyone else waking it.
  *
- *   2. The happy path still works: a frame written to a drained ring and
- *      followed by a wake-word bump is delivered to the onMessage callback,
- *      payload and origin token intact.
+ *   2. A frame written to a drained ring and followed by one wake is
+ *      delivered to the onMessage callback, payload and origin token intact.
+ *      An idle reader runs no pass at all, and no wake is lost however the
+ *      writes, the wakes and the passes interleave.
  *
  *   3. pause() is quiescent and safe from any thread: once it returns, no
  *      drain runs until resume() (a device swap resets the ring/drain state
@@ -66,10 +64,8 @@ struct CaseClock {
 
 TEST_CASE("RingReader stops promptly when its wake word is never bumped",
           "[RingReader]") {
-    std::atomic<uint32_t> wake{0};
 
     auto reader = std::make_unique<RingReader>("test-ringreader-stop");
-    reader->setWake(&wake);
     reader->start();
 
     // Give the run loop time to reach its blocking wait on `wake`.
@@ -95,7 +91,6 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
 
     std::mutex rxMutex;
     std::string received;
@@ -103,7 +98,6 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
     std::atomic<int> gotCount{0};
 
     RingReader reader("test-ringreader-drain");
-    reader.setWake(&wake);
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
         [&](uint32_t sourceId, const uint8_t* p, uint32_t n, uint32_t) {
@@ -123,18 +117,11 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
         buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
         payload.data(), static_cast<uint32_t>(payload.size()), kSourceId));
 
-    // Wake the reader the way the audio callback does: bump the value and
-    // notify. The real callback does this every audio block, so keep bumping
-    // until the message is drained (a single bump can be missed if the reader
-    // latches the post-bump value before parking — a benign lost-wakeup that
-    // the continuous tick self-corrects).
-    const auto deadline = steady_clock::now() + seconds(2);
-    while (gotCount.load(std::memory_order_acquire) == 0
-           && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
-        std::this_thread::sleep_for(milliseconds(2));
-    }
+    // One wake, as a writer gives it: the reader runs a pass and delivers.
+    reader.wake();
+    const auto deadline = steady_clock::now() + seconds(10);
+    while (gotCount.load(std::memory_order_acquire) == 0 && steady_clock::now() < deadline)
+        std::this_thread::yield();
 
     REQUIRE(gotCount.load(std::memory_order_acquire) == 1);
     REQUIRE(gotSource.load(std::memory_order_acquire) == kSourceId);
@@ -148,7 +135,6 @@ TEST_CASE("RingReader pause parks draining until resume", "[RingReader]") {
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<int> gotCount{0};
 
     RingReader reader("test-ringreader-pause");
@@ -157,7 +143,6 @@ TEST_CASE("RingReader pause parks draining until resume", "[RingReader]") {
     reader.pause();
     reader.resume();
 
-    reader.setWake(&wake);
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
         [&](uint32_t, const uint8_t*, uint32_t, uint32_t) {
@@ -175,8 +160,7 @@ TEST_CASE("RingReader pause parks draining until resume", "[RingReader]") {
         buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
         payload.data(), static_cast<uint32_t>(payload.size()), 0));
     for (int i = 0; i < 50; i++) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(2));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) == 0);
@@ -186,8 +170,7 @@ TEST_CASE("RingReader pause parks draining until resume", "[RingReader]") {
     const auto deadline = steady_clock::now() + seconds(2);
     while (gotCount.load(std::memory_order_acquire) == 0
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(2));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) == 1);
@@ -199,11 +182,11 @@ TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
     std::atomic<bool> sawRunning{false};
     std::atomic<int> passes{0};
 
-    // No wake word: the reader passes on its own clock, so nothing this thread
-    // does after start() is ordered before the handler — only the thread's
-    // creation is. A wake bumped here straight after start() would order it
-    // on a quick machine and hide a pause() that reads mThread while start()
-    // is still assigning it.
+    // The wakes come from a thread started before start(), so nothing this
+    // thread does after start() is ordered before the handler — only the
+    // reader thread's creation is. A wake bumped here straight after start()
+    // would order it on a quick machine and hide a pause() that reads mThread
+    // while start() is still assigning it.
     RingReader reader("test-ringreader-selfpause");
     // Mirrors a drain handler that triggers a device swap: the swap parks the
     // readers, including the one whose handler is running — asking whether the
@@ -215,6 +198,12 @@ TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
         }
         passes.fetch_add(1, std::memory_order_release);
     });
+    std::jthread waker([&](const std::stop_token& st) {
+        while (!st.stop_requested()) {
+            reader.wake();
+            std::this_thread::yield();
+        }
+    });
     reader.start();
 
     // If self-pause deadlocked, the task would never complete a second pass.
@@ -222,6 +211,8 @@ TEST_CASE("RingReader pause from its own thread is a no-op, not a deadlock",
     while (passes.load(std::memory_order_acquire) < 2
            && steady_clock::now() < deadline)
         std::this_thread::sleep_for(milliseconds(2));
+    waker.request_stop();
+    waker.join();
     REQUIRE(selfPaused.load());
     CHECK(sawRunning.load());
     REQUIRE(passes.load(std::memory_order_acquire) >= 2);
@@ -301,11 +292,9 @@ TEST_CASE("RingReader reports how long a blocking handler held the thread",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<int> gotCount{0};
 
     RingReader reader("test-ringreader-slow");
-    reader.setWake(&wake);
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
         [&](uint32_t, const uint8_t*, uint32_t, uint32_t) {
@@ -329,8 +318,7 @@ TEST_CASE("RingReader reports how long a blocking handler held the thread",
     const auto deadline = steady_clock::now() + seconds(5);
     while (gotCount.load(std::memory_order_acquire) == 0
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(5));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
@@ -354,13 +342,11 @@ TEST_CASE("RingReader tracks the worst pass in the recent window",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<int> gotCount{0};
 
     CaseClock clock;
 
     RingReader reader("test-ringreader-recent");
-    reader.setWake(&wake);
     // On the case's clock: the handler holds the thread for exactly 120 ms of
     // it, and the passes around it take nothing.
     reader.setClock(clock.reading());
@@ -383,8 +369,7 @@ TEST_CASE("RingReader tracks the worst pass in the recent window",
     const auto deadline = steady_clock::now() + seconds(5);
     while (gotCount.load(std::memory_order_acquire) == 0
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(5));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
@@ -406,12 +391,10 @@ TEST_CASE("RingReader lets a slow pass go from the recent window once the window
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<int> gotCount{0};
     CaseClock clock;
 
     RingReader reader("test-ringreader-window");
-    reader.setWake(&wake);
     reader.setClock(clock.reading());
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
@@ -430,8 +413,7 @@ TEST_CASE("RingReader lets a slow pass go from the recent window once the window
     const auto deadline = steady_clock::now() + seconds(5);
     while (gotCount.load(std::memory_order_acquire) == 0
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(5));
     }
     REQUIRE(gotCount.load(std::memory_order_acquire) >= 1);
@@ -454,7 +436,6 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<bool> release{false};
     std::atomic<bool> inHandler{false};
 
@@ -467,7 +448,6 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
         std::atomic<bool>& release;
         ~LetGo() { release.store(true, std::memory_order_release); }
     } letGo{release};
-    reader.setWake(&wake);
     // On the case's clock: the stall lasts exactly as long as the case moves
     // the clock on while the handler is held, and idle passes take nothing.
     reader.setClock(clock.reading());
@@ -492,8 +472,7 @@ TEST_CASE("RingReader exposes a stall while it is still stuck",
     auto deadline = steady_clock::now() + seconds(5);
     while (!inHandler.load(std::memory_order_acquire)
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(5));
     }
     REQUIRE(inHandler.load(std::memory_order_acquire));
@@ -519,12 +498,10 @@ TEST_CASE("RingReader reports a slow pass to its observer",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<uint32_t> reportedUs{0};
     std::atomic<int> reports{0};
 
     RingReader reader("test-ringreader-report");
-    reader.setWake(&wake);
     reader.setSlowPassThresholdUs(50'000);
     reader.onSlowPass([&](uint32_t us) {
         reportedUs.store(us, std::memory_order_release);
@@ -546,8 +523,7 @@ TEST_CASE("RingReader reports a slow pass to its observer",
     const auto deadline = steady_clock::now() + seconds(5);
     while (reports.load(std::memory_order_acquire) == 0
            && steady_clock::now() < deadline) {
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(5));
     }
 
@@ -560,12 +536,10 @@ TEST_CASE("RingReader stays quiet when passes are quick",
     constexpr uint32_t kSize = 4096;
     std::vector<uint8_t> buffer(kSize, 0);
     std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
-    std::atomic<uint32_t> wake{0};
     std::atomic<int> reports{0};
     std::atomic<int> gotCount{0};
 
     RingReader reader("test-ringreader-quiet");
-    reader.setWake(&wake);
     reader.setSlowPassThresholdUs(250'000);
     // Passes are timed on the case's clock, which stands still: a pass the
     // machine preempts is still a quick pass, as it is in the reader's terms.
@@ -584,10 +558,86 @@ TEST_CASE("RingReader stays quiet when passes are quick",
         REQUIRE(RingBufferWriter::write(
             buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
             payload.data(), static_cast<uint32_t>(payload.size()), 0));
-        wake.fetch_add(1, std::memory_order_release);
-        wake.notify_all();
+        reader.wake();
         std::this_thread::sleep_for(milliseconds(2));
     }
 
     REQUIRE(reports.load(std::memory_order_acquire) == 0);
+}
+
+// The reader runs a pass when something gives it work, and otherwise sleeps:
+// no timer, so an idle engine costs no wakeups.
+TEST_CASE("RingReader: an idle reader runs no pass", "[RingReader][wake]") {
+    RingReader reader("test-ringreader-idle");
+    std::atomic<int> passes{0};
+    reader.addTask([&] { passes.fetch_add(1, std::memory_order_relaxed); });
+    reader.start();
+    std::this_thread::sleep_for(milliseconds(100));   // what a 1 ms timer would fill with a hundred passes
+    CHECK(passes.load() == 0);
+    CHECK(reader.passes() == 0);
+
+    reader.wake();
+    const auto deadline = steady_clock::now() + seconds(10);
+    while (reader.passes() == 0 && steady_clock::now() < deadline) std::this_thread::yield();
+    CHECK(reader.passes() == 1);
+    std::this_thread::sleep_for(milliseconds(50));
+    CHECK(reader.passes() == 1);   // one wake, one pass
+}
+
+// A writer that wakes the reader after every write never has a frame left in
+// the ring, however its writes and the reader's passes interleave: a wake that
+// lands while a pass runs makes the reader pass again.
+TEST_CASE("RingReader: no wake is lost, however writes and passes interleave", "[RingReader][wake]") {
+    constexpr uint32_t kSize = 64 * 1024;
+    constexpr int kFrames = 50'000;
+    std::vector<uint8_t> buffer(kSize, 0);
+    std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
+    std::atomic<int> delivered{0};
+
+    RingReader reader("test-ringreader-nolost");
+    reader.addDrain(buffer.data(), kSize, &head, &tail,
+        [&](uint32_t, const uint8_t*, uint32_t, uint32_t) { delivered.fetch_add(1, std::memory_order_release); },
+        RingReader::Metrics{});
+    reader.start();
+
+    const uint32_t frame = 0xC10C;
+    for (int i = 0; i < kFrames; ++i) {
+        // A full ring is backpressure: the writer waits for the reader to
+        // drain, as a client retries a full ingress ring.
+        while (!RingBufferWriter::write(buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
+                                        &frame, sizeof frame, 1))
+            std::this_thread::yield();
+        reader.wake();
+    }
+    const auto deadline = steady_clock::now() + seconds(10);
+    while (delivered.load(std::memory_order_acquire) < kFrames && steady_clock::now() < deadline)
+        std::this_thread::yield();
+    INFO("delivered " << delivered.load() << " of " << kFrames << " in " << reader.passes() << " passes");
+    CHECK(delivered.load() == kFrames);
+}
+
+// The audio thread wakes the reader every block: with the reader asleep that
+// is one wake of the operating system; with the reader busy it is none, only
+// the word.
+TEST_CASE("RingReader: a wake while the reader is busy costs no system call", "[RingReader][wake]") {
+    RingReader reader("test-ringreader-busy");
+    std::atomic<bool> inPass{false}, release{false};
+    reader.addTask([&] {
+        inPass.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+    });
+    reader.start();
+    reader.wake();
+    const auto entered = steady_clock::now() + seconds(10);
+    while (!inPass.load(std::memory_order_acquire) && steady_clock::now() < entered)
+        std::this_thread::yield();
+    REQUIRE(inPass.load(std::memory_order_acquire));
+    // Busy in a pass: nobody is waiting on the word, so a wake is the word only.
+    CHECK(reader.wakeWord()->waiters.load() == 0);
+    reader.wake();
+    release.store(true, std::memory_order_release);
+    // The wake that landed mid-pass is a second pass, not a lost one.
+    const auto deadline = steady_clock::now() + seconds(10);
+    while (reader.passes() < 2 && steady_clock::now() < deadline) std::this_thread::yield();
+    CHECK(reader.passes() == 2);
 }

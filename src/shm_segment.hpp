@@ -35,6 +35,7 @@
 #include "shared_memory.h"
 #include "shm_peer_plane.h"
 #include "clockwork_path.h"
+#include "workers/wait_word.h"
 
 #include <algorithm>
 #include <atomic>
@@ -535,6 +536,7 @@ static_assert(sizeof(shm_segment_header) <= SHM_BLOB_OFFSET,
 // ──── The command segment's header ──────────────────────────────────────
 //
 //   shm_command_header        (MAGIC + where everything in it is)
+//   the control pass's wake word (ClockworkWaitWord, at wake_offset)
 //   <pad to SHM_COMMAND_HEADER_BYTES>
 //   ShmPeerPlaneHeader, command ring, reply ring   (shm_peer_plane.h)
 //   assets area                                    (the peer writes)
@@ -559,7 +561,18 @@ struct shm_command_header {
     uint32_t assets_size;
     uint32_t returns_offset;
     uint32_t returns_size;
+    // The word the engine's control pass sleeps on (src/workers/wait_word.h):
+    // the peer bumps it with WaitScope::Shared after each write to the command
+    // ring, so the pass wakes with no audio block and no timer. On Windows,
+    // which has no cross-process address wait, the bump also signals the event
+    // the attach hand-off gave the peer.
+    uint32_t wake_offset;
 };
+static constexpr size_t SHM_COMMAND_WAKE_OFFSET = 128;   // inside the header's reserved span, 8-aligned
+static_assert(sizeof(shm_command_header) <= SHM_COMMAND_WAKE_OFFSET,
+              "shm_command_header runs into the wake word");
+static_assert(SHM_COMMAND_WAKE_OFFSET + sizeof(ClockworkWaitWord) <= SHM_COMMAND_HEADER_BYTES,
+              "the wake word must fit the header's reserved span");
 static_assert(sizeof(shm_command_header) <= SHM_COMMAND_HEADER_BYTES,
               "shm_command_header must fit within SHM_COMMAND_HEADER_BYTES");
 static_assert(SHM_PEER_OFFSET % 8 == 0,
@@ -782,13 +795,42 @@ public:
         header_->assets_size    = static_cast<uint32_t>(lanes_.assets_size);
         header_->returns_offset = static_cast<uint32_t>(lanes_.returns_offset);
         header_->returns_size   = static_cast<uint32_t>(lanes_.returns_size);
+        header_->wake_offset    = static_cast<uint32_t>(SHM_COMMAND_WAKE_OFFSET);
+        wake_ = new (base + SHM_COMMAND_WAKE_OFFSET) ClockworkWaitWord();
+#ifdef _WIN32
+        // Windows has no cross-process address wait: the peer wakes the pass
+        // through this auto-reset event, a handle to which the attach hand-off
+        // duplicates into it.
+        wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!wake_event_) {
+            const std::string why = clockwork_path::last_error_text(GetLastError());
+            shm_close(handle);
+            throw std::runtime_error("CreateEvent for the command segment's wake failed: " + why);
+        }
+#endif
         shm_peer_plane_init(peer_);
         std::atomic_thread_fence(std::memory_order_release);
         header_->magic = shm_command_header::MAGIC;
     }
     shm_command_segment_creator(const shm_command_segment_creator&) = delete;
     shm_command_segment_creator& operator=(const shm_command_segment_creator&) = delete;
-    ~shm_command_segment_creator() { shm_close(handle); }
+    ~shm_command_segment_creator() {
+#ifdef _WIN32
+        if (wake_event_) CloseHandle(wake_event_);
+#endif
+        shm_close(handle);
+    }
+
+    // The word the engine's control pass sleeps on, in this segment so the
+    // peer wakes it; on Windows also the event a peer signals (null elsewhere).
+    ClockworkWaitWord*   wake_word() const { return wake_; }
+    clockwork::WaitEvent wake_event() const {
+#ifdef _WIN32
+        return wake_event_;
+#else
+        return nullptr;
+#endif
+    }
 
     // The read-write handle the attach endpoint duplicates into the one peer.
     // Not owned by the caller.
@@ -823,6 +865,10 @@ private:
     shm_handle          handle;
     shm_command_header* header_ = nullptr;
     ShmPeerPlaneHeader* peer_   = nullptr;
+    ClockworkWaitWord*  wake_   = nullptr;
+#ifdef _WIN32
+    HANDLE              wake_event_ = nullptr;
+#endif
 };
 
 
@@ -1005,9 +1051,10 @@ class shm_command_client {
 public:
     // From a handle the engine handed over: shm_attach::receive_command_plane()
     // across processes, shm_dup_handle() within one. Owned here from this
-    // point, including when the constructor throws.
-    explicit shm_command_client(shm_native_handle received)
-        : handle_(shm_map_handle(received, /*writable=*/true))
+    // point, including when the constructor throws. `wake_event` is the
+    // Windows event the hand-off gave with it (null elsewhere), owned here too.
+    explicit shm_command_client(shm_native_handle received, clockwork::WaitEvent wake_event = nullptr)
+        : handle_(shm_map_handle(received, /*writable=*/true)), wake_event_(wake_event)
     {
         try {
             if (handle_.size < sizeof(shm_command_header))
@@ -1031,14 +1078,19 @@ public:
             if (!within(header->assets_offset, header->assets_size)
                 || !within(header->returns_offset, header->returns_size))
                 throw std::runtime_error("Shared memory lanes outside the segment");
+            if (!within(header->wake_offset, sizeof(ClockworkWaitWord))
+                || header->wake_offset % alignof(ClockworkWaitWord) != 0)
+                throw std::runtime_error("Shared memory wake word outside the segment");
             auto* base = static_cast<uint8_t*>(handle_.ptr);
             peer_         = reinterpret_cast<ShmPeerPlaneHeader*>(base + header->peer_offset);
             assets_       = base + header->assets_offset;
             assets_size_  = header->assets_size;
             returns_      = base + header->returns_offset;
             returns_size_ = header->returns_size;
+            wake_         = reinterpret_cast<ClockworkWaitWord*>(base + header->wake_offset);
         } catch (...) {
             shm_close(handle_);
+            close_wake_event();
             throw;
         }
     }
@@ -1046,9 +1098,17 @@ public:
     explicit shm_command_client(T) = delete;
     shm_command_client(const shm_command_client&) = delete;
     shm_command_client& operator=(const shm_command_client&) = delete;
-    ~shm_command_client() { shm_close(handle_); }
+    ~shm_command_client() {
+        shm_close(handle_);
+        close_wake_event();
+    }
 
     ShmPeerPlaneHeader* get_peer_plane() const { return peer_; }
+
+    // Wake the engine's control pass: after each write to the command ring, so
+    // it is read with no audio block and no timer. Never blocks.
+    void wake_engine() const { clockwork::bump(*wake_, clockwork::WaitScope::Shared, wake_event_); }
+    ClockworkWaitWord* wake_word() const { return wake_; }
 
     /*
      * The lanes — where bulk lives, in both directions.
@@ -1088,12 +1148,21 @@ public:
     }
 
 private:
-    shm_handle          handle_;
-    ShmPeerPlaneHeader* peer_         = nullptr;
-    uint8_t*            assets_       = nullptr;
-    size_t              assets_size_  = 0;
-    uint8_t*            returns_      = nullptr;
-    size_t              returns_size_ = 0;
+    void close_wake_event() {
+#ifdef _WIN32
+        if (wake_event_) CloseHandle(static_cast<HANDLE>(wake_event_));
+#endif
+        wake_event_ = nullptr;
+    }
+
+    shm_handle           handle_;
+    clockwork::WaitEvent wake_event_   = nullptr;
+    ShmPeerPlaneHeader*  peer_         = nullptr;
+    uint8_t*             assets_       = nullptr;
+    size_t               assets_size_  = 0;
+    uint8_t*             returns_      = nullptr;
+    size_t               returns_size_ = 0;
+    ClockworkWaitWord*   wake_         = nullptr;
 };
 
 } /* namespace detail_shm_segment */

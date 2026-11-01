@@ -1018,10 +1018,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
 
     // -- The control pass. Everything registered on mNrtGateway from here
     //    down is ONE pass, run in order by one thread: the engine's gateway
-    //    thread, woken every audio block via processCount — or the host's
-    //    own, through controlPass(), when Config::hostDrivesControl says the
-    //    host runs the control plane. The registry is the same either way;
-    //    only whose thread walks it differs.
+    //    thread, woken at the end of every block and by every write to a ring
+    //    it drains — or the host's own, through controlPass(), when
+    //    Config::hostDrivesControl says the host runs the control plane. The
+    //    registry is the same either way; only whose thread walks it differs.
     //
     //    Drain #1 = the RT egress lane (OUT ring), through the CLIENT
     //    BOUNDARY. The pass is the ring's single consumer, so it holds the
@@ -1029,7 +1029,13 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     //    in-process client's therefore come off the ring by the same code, as
     //    they already go on by it (see ingest). (Drain #2 = the control ring,
     //    added with the NRT plane below.)
-    mNrtGateway.setWake(&mProcessor.processCount);
+    // The pass sleeps on its own word until there is work. With the shared-memory
+    // command plane that word lives in the command segment, so the peer in
+    // another process wakes it after it writes (docs/SEGMENTS.md); every
+    // other waker is in this process.
+    if (mCommandCreator)
+        mNrtGateway.setWake(mCommandCreator->wake_word(), clockwork::WaitScope::Shared,
+                            mCommandCreator->wake_event());
     // The egress rings' consumer is EITHER this pass or the host
     // (Config::hostDrainsEgress). Draining here goes through the client API
     // like any client's would — one poll, both rings — and routes through
@@ -1390,8 +1396,15 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // and no engine thread is started for the pass. mControlOpen is set ONLY
     // then — with the engine's own thread on the pass, a host's
     // controlPass() is refused, so the two can never overlap.
-    if (cfg.hostDrivesControl) mControlOpen.store(true, std::memory_order_release);
-    else                       mNrtGateway.start();
+    if (cfg.hostDrivesControl) {
+        mControlOpen.store(true, std::memory_order_release);
+    } else {
+        mNrtGateway.start();
+        // What wakes it: the end of every block, and a write to a ring it
+        // drains from any thread in this process (lanes.h).
+        mProcessor.setControlPass(&mNrtGateway);
+        clockwork_control_waker(&mControlWaker);
+    }
     // The pass drains the control ring from here: recorded in the arena, so
     // every boundary — this engine's ingest, a client in another process —
     // writes control verbs there from now on (lanes.h, clockwork_control_serve).
@@ -1476,8 +1489,11 @@ void ClockworkEngine::shutdown() {
     // pass always does, and the shutdown's own drain below is the last.
     clockwork_control_serve(0);
     mControlOpen.store(false, std::memory_order_release);
-    while (mControlPassesInFlight.load(std::memory_order_acquire) != 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    clockwork::wait_for_condition(mControlPassesInFlight, [this] {
+        return mControlPassesInFlight.value.load(std::memory_order_acquire) == 0;
+    });
+    clockwork_control_waker(nullptr);
+    mProcessor.setControlPass(nullptr);
     mNrtGateway.stop();
 
     // Tear down the MIDI subsystem before mEgress/mClockworkClock: clockwork_midi_destroy
@@ -1541,11 +1557,6 @@ void ClockworkEngine::shutdown() {
     if (mDeviceTaskThread.joinable()) mDeviceTaskThread.join();
 
     mHeadlessDriver->stop();
-
-    // Wake the readers so they can exit. Both wait on processCount; bump it so
-    // wait() sees a change and returns.
-    mProcessor.processCount.fetch_add(1, std::memory_order_release);
-    mProcessor.processCount.notify_all();
 
     // Unpublish from the /clockwork/clock queries only if we're the current
     // publisher — never stomp another engine's pointer.
@@ -1680,8 +1691,7 @@ void ClockworkEngine::pumpAudioCallback(uint32_t frames,
                          static_cast<uint32_t>(mCurrentConfig.sampleRate), time);
         mManualSamplePos += blockSize;
         mManualWall      += blockSeconds;
-        mProcessor.processCount.fetch_add(1, std::memory_order_release);
-        mProcessor.processCount.notify_all();
+        mProcessor.blockDone();
         if (afterEachBlock) afterEachBlock();
     }
 }
@@ -1813,20 +1823,22 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
 // refusal, not a corrupted ring.
 bool ClockworkEngine::controlPass() {
     if (!mControlOpen.load(std::memory_order_acquire)) return false;
-    mControlPassesInFlight.fetch_add(1, std::memory_order_acq_rel);
+    mControlPassesInFlight.value.fetch_add(1, std::memory_order_acq_rel);
     bool ran = false;
     // The pass is taken, then the park looked at — both seq_cst, against the
     // park's store-then-look (see parkControlPass).
-    if (mControlOpen.load(std::memory_order_acquire) && !mControlPassBusy.exchange(true)) {
+    if (mControlOpen.load(std::memory_order_acquire) && mControlPassBusy.value.exchange(1) == 0) {
         if (!mControlParked.load()) {
             mControlPassThread.store(std::this_thread::get_id());
             mNrtGateway.pass();
             mControlPassThread.store(std::thread::id{});
             ran = true;
         }
-        mControlPassBusy.store(false);
+        mControlPassBusy.value.store(0);
+        clockwork::notify(mControlPassBusy);   // a park waiting for the pass to end
     }
-    mControlPassesInFlight.fetch_sub(1, std::memory_order_acq_rel);
+    mControlPassesInFlight.value.fetch_sub(1, std::memory_order_acq_rel);
+    clockwork::notify(mControlPassesInFlight);   // a shutdown waiting for the last pass
     return ran;
 }
 
@@ -1843,15 +1855,12 @@ bool ClockworkEngine::parkControlPass() {
     mControlParked.store(true);
     // A swap run from inside a pass is not draining beside it.
     if (mControlPassThread.load() == std::this_thread::get_id()) return true;
-    for (int waited = 0; mControlPassBusy.load(); ++waited) {
-        if (waited >= 2000) {
-            clockwork_log("[control] park: the host's pass did not finish within 2s — "
-                          "proceeding unparked");
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return true;
+    const bool ended = clockwork::wait_for_condition(
+        mControlPassBusy, [this] { return mControlPassBusy.value.load() == 0; },
+        clockwork::WaitClock::now() + std::chrono::seconds(2));
+    if (!ended)
+        clockwork_log("[control] park: the host's pass did not finish within 2s — proceeding unparked");
+    return ended;
 }
 
 void ClockworkEngine::resumeControlPass() {
@@ -1900,9 +1909,9 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
                           static_cast<unsigned>(len), static_cast<unsigned>(kNrtMaxCommand));
         }
     }
-    // The control pass drains this ring — the gateway thread every audio
-    // block (it waits on processCount), a host whenever it passes — so no
-    // wake is needed here. A full ring (or an oversize command) drops the
+    // The control pass drains this ring — the gateway thread at the end of
+    // this block (blockDone), a host whenever it passes — so no wake is needed
+    // here. A full ring (or an oversize command) drops the
     // control message — count it rather than losing it silently (sender gets
     // no reply).
     if (!ok && self->mMetrics)
@@ -2136,7 +2145,7 @@ void ClockworkEngine::watchdogPoll() {
     if (benign) return;
 
     const int64_t  t     = watchdogNowMs();
-    const uint32_t count = mProcessor.processCount.load(std::memory_order_acquire);
+    const uint32_t count = mProcessor.processCount.value.load(std::memory_order_acquire);
     w.liveness.observe(count, t);
     const auto ph = w.liveness.phase(t);
 
@@ -3098,7 +3107,7 @@ bool ClockworkEngine::startAudioSource() {
         return true;
     }
 
-    uint32_t before = mProcessor.processCount.load(std::memory_order_acquire);
+    uint32_t before = mProcessor.processCount.value.load(std::memory_order_acquire);
 
     const AudioSource desired = desiredAudioSource();
     if (desired == AudioSource::RealCallback) {
@@ -3178,16 +3187,17 @@ void ClockworkEngine::fadeOutAndPause() {
                                                      microseconds(3'000'000LL * buffer / rate));
         const auto start = steady_clock::now();
         auto lastBlock = start;
-        uint32_t count = mProcessor.processCount.load(std::memory_order_acquire);
+        uint32_t count = mProcessor.processCount.value.load(std::memory_order_acquire);
         while (!mProcessor.isPaused()) {
-            const auto now = steady_clock::now();
-            if (now - lastBlock > patience || now - start > seconds(1)) {
+            const auto giveUp = std::min(lastBlock + patience, start + seconds(1));
+            if (steady_clock::now() >= giveUp) {
                 clockwork_log("[engine] restart: the device stopped calling before its fade-out ended");
                 break;
             }
-            std::this_thread::sleep_for(milliseconds(1));
-            if (const uint32_t c = mProcessor.processCount.load(std::memory_order_acquire); c != count) {
-                count     = c;
+            // Asleep until the next block: the audio thread pauses itself at
+            // the fade's end before it counts that block.
+            if (clockwork::wait_until(mProcessor.processCount, count, giveUp)) {
+                count     = mProcessor.processCount.value.load(std::memory_order_acquire);
                 lastBlock = steady_clock::now();
             }
         }
@@ -3197,13 +3207,9 @@ void ClockworkEngine::fadeOutAndPause() {
 
 bool ClockworkEngine::waitForFirstAudioTick(uint32_t before) {
     constexpr int kTimeoutMs = 5000;
-    auto start = std::chrono::steady_clock::now();
-    auto deadline = start + std::chrono::milliseconds(kTimeoutMs);
-    while (mProcessor.processCount.load(std::memory_order_acquire) == before
-           && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    bool ticked = mProcessor.processCount.load(std::memory_order_acquire) != before;
+    const auto start = std::chrono::steady_clock::now();
+    const bool ticked = clockwork::wait_until(mProcessor.processCount, before,
+                                              start + std::chrono::milliseconds(kTimeoutMs));
     if (!ticked) {
         clockwork_log(
                 "[engine] WARNING: audio callbacks not firing after %d ms, "

@@ -13,6 +13,8 @@
 
 #include "smoothie_worklet.h"
 #include "lanes/lanes.h"   // ClockworkBlockTime
+#include "workers/RingReader.h"
+#include "workers/wait_word.h"
 #include "clock/clock_math.h"
 #include <atomic>
 #include <cstdint>
@@ -119,8 +121,21 @@ public:
     // publishes nothing rather than reading a global that may be stale.
     void setMetrics(PerformanceMetrics* m) { mMetrics = m; }
 
-    // C++20 atomic wait — equivalent of JS Atomics.wait()/notify()
-    std::atomic<uint32_t> processCount{0};
+    // Blocks rendered, from any driver. A thread that waits for a block (the
+    // first one at boot, a fade-out's end) blocks on this word
+    // (src/workers/wait_word.h); the watchdog reads it.
+    ClockworkWaitWord processCount;
+
+    // The end of a block, from every driver: count it, wake whoever waits for
+    // one, and wake the control pass, which drains what the block wrote. Two
+    // atomic operations each when nobody waits; never blocks.
+    void blockDone() noexcept {
+        clockwork::bump(processCount);
+        if (RingReader* r = mControlPass.load(std::memory_order_acquire)) r->wake();
+    }
+    // The control pass the engine runs on a thread of its own; null while it
+    // has none (a host runs the pass, or the engine is down).
+    void setControlPass(RingReader* r) { mControlPass.store(r, std::memory_order_release); }
 
     // Nominal rate and buffer size of the currently-open device (set in
     // deviceStarting; 0 before the first device). Atomic because the
@@ -171,6 +186,7 @@ public:
     static double wallClockNTP() { return ::wallClockNTP(); }
 
 private:
+    std::atomic<RingReader*> mControlPass{nullptr};
     // The DSP's audio block size — the number of samples it
     // processes per tick. Matches the hardware callback size when set at
     // init so the process loop is 1:1 (no accumulator / prefetch dance).

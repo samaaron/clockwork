@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <thread>
 
 #ifdef _WIN32
@@ -57,7 +58,11 @@ uint32_t encodeQuery(uint8_t* out, size_t cap, int32_t id) {
     return static_cast<uint32_t>(total);
 }
 
-// Write one frame, retrying on ring-full (the engine drains every block).
+// The mapping, for its wake: set once attached.
+const shm_command_client* g_client = nullptr;
+
+// Write one frame, retrying on ring-full, and wake the engine's control pass
+// so it reads it with or without an audio block.
 void writeQuery(ShmPeerPlaneHeader* plane, int32_t id) {
     uint8_t msg[64];
     const uint32_t len = encodeQuery(msg, sizeof msg, id);
@@ -68,6 +73,7 @@ void writeQuery(ShmPeerPlaneHeader* plane, int32_t id) {
                msg, len, 0)) {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
+    if (g_client) g_client->wake_engine();
 }
 
 } // namespace
@@ -107,8 +113,10 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "peer_shm: attach at %s failed: %s\n", endpoint.c_str(), err.c_str());
             return 3;
         }
-        static shm_command_client client(detail_shm_segment::shm_dup_handle(lease.handle));
+        static shm_command_client client(detail_shm_segment::shm_dup_handle(lease.handle),
+                                         std::exchange(lease.wake_event, nullptr));
         plane = client.get_peer_plane();
+        g_client = &client;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "peer_shm: cannot map the segment from %s: %s\n", endpoint.c_str(), e.what());
         return 3;

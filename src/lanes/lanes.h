@@ -476,6 +476,21 @@ int clockwork_region_has_reset(uint32_t region_id);
 void clockwork_control_serve(int on);
 int  clockwork_control_served(void);
 
+/* What wakes the pass that drains the control ring and the NRT egress ring:
+ * called after every write to either from a thread in this process (the
+ * audio thread's writes are woken once, at the end of its block). Set by the
+ * engine while its control pass has a thread of its own, cleared (null)
+ * before that thread stops; the waker must outlive its registration. With
+ * none set a write wakes nothing, which is right for a host that runs the
+ * pass itself and for the web, whose reader waits on the rings. Never
+ * blocks. */
+typedef struct ClockworkControlWaker {
+    void (*wake)(void* ctx);
+    void* ctx;
+} ClockworkControlWaker;
+void clockwork_control_waker(const ClockworkControlWaker* waker);
+void clockwork_control_wake(void);
+
 /* ── What the guest instance survives (dsp_api.h, DspInfo::survives) ──────
  * The kinds of device change the linked guest takes live, read once at boot
  * from dsp_describe; 0 for a guest that survives nothing, and before a

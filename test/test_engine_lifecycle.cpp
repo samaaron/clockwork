@@ -291,9 +291,9 @@ TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pum
             std::unique_lock<std::mutex> lk(mu);
             cv.wait(lk, [&] { return dspDown; });
         }
-        const uint32_t before = engine.processor().processCount.load(std::memory_order_acquire);
+        const uint32_t before = engine.processor().processCount.value.load(std::memory_order_acquire);
         for (int i = 0; i < 8; ++i) engine.pumpAudioBlock();
-        renderedDuring = engine.processor().processCount.load(std::memory_order_acquire) - before;
+        renderedDuring = engine.processor().processCount.value.load(std::memory_order_acquire) - before;
         {
             std::lock_guard<std::mutex> lk(mu);
             pumped = true;
@@ -317,9 +317,9 @@ TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pum
     CHECK(renderedDuring == 0);
     CHECK(engine.pumpsDroppedBySwap() - droppedBefore == 8);
 
-    const uint32_t before = engine.processor().processCount.load(std::memory_order_acquire);
+    const uint32_t before = engine.processor().processCount.value.load(std::memory_order_acquire);
     engine.pumpAudioBlock();
-    CHECK(engine.processor().processCount.load(std::memory_order_acquire) == before + 1);
+    CHECK(engine.processor().processCount.value.load(std::memory_order_acquire) == before + 1);
 }
 
 TEST_CASE("An engine booted again in the same process carries the generation on from the last",

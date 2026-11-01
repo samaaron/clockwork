@@ -94,7 +94,7 @@ struct AttachServer {
         std::string err;
         REQUIRE(server.start(endpoint, fx.engine().shmReaderHandle(), fx.engine().shmSegmentSize(),
                              fx.engine().shmCommandHandle(), fx.engine().shmCommandSize(),
-                             testSecret(), &err));
+                             fx.engine().shmCommandWakeEvent(), testSecret(), &err));
     }
 };
 

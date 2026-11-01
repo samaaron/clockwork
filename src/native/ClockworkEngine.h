@@ -31,6 +31,7 @@
 #include "clockwork_sys.h"
 #include "IngressCallCtx.h"
 #include "shm_peer_plane.h"
+#include "lanes/lanes.h"        // ClockworkControlWaker
 #include "lanes/ring_marks.h"
 #include "EngineControl.h"
 #ifdef CLOCKWORK_MIDI
@@ -306,6 +307,13 @@ public:
     size_t shmCommandSize() const {
         return mCommandCreator ? mCommandCreator->segment_size() : 0;
     }
+    // Windows: the event the peer signals to wake the control pass, for the
+    // attach endpoint to duplicate into it. Null elsewhere and without one.
+    clockwork::WaitEvent shmCommandWakeEvent() const {
+        return mCommandCreator ? mCommandCreator->wake_event() : nullptr;
+    }
+    // Passes the control pass has run, by its thread or by controlPass().
+    uint64_t controlPasses() const { return mNrtGateway.passes(); }
 
     void sendOSC(const uint8_t* data, uint32_t size);
 
@@ -1073,7 +1081,9 @@ private:
     std::atomic<int32_t>      mNrtLock{0};
 
     // The control pass: its registry of drains and tasks, and — unless the
-    // host drives control — the gateway thread that runs it every audio block.
+    // host drives control — the gateway thread that runs it whenever it is
+    // woken: at the end of every audio block, and by every write to a ring it
+    // drains.
     // The NRT_OUT_RING SHM region carries ALL NRT-thread outgoing OSC —
     // command replies, Link/device notifications, off-thread debug — written
     // multi-producer through the lanes producer (clockwork_egress_nrt_write, which
@@ -1081,13 +1091,17 @@ private:
     // is the sole transport caller, so no engine thread ever touches a
     // socket. (Web has no NRT thread.)
     RingReader                mNrtGateway{"clockwork-NrtGateway"};
+    // What a write to the control ring or the NRT egress ring calls
+    // (clockwork_control_waker), registered while the gateway thread runs.
+    const ClockworkControlWaker mControlWaker{
+        [](void* r) { static_cast<RingReader*>(r)->wake(); }, &mNrtGateway};
     // Whether controlPass() may run: set from the point init() would start
     // the gateway thread until shutdown() clears it, which then waits for a
     // pass in flight — the host-driven equivalent of the thread join.
     std::atomic<bool>         mControlOpen{false};
-    std::atomic<uint32_t>     mControlPassesInFlight{0};
+    ClockworkWaitWord         mControlPassesInFlight;   // a count; shutdown waits for 0
     // Held by the one thread inside the pass; a second is refused.
-    std::atomic<bool>         mControlPassBusy{false};
+    ClockworkWaitWord         mControlPassBusy;         // 0 or 1; a park waits for 0
     // Set while a cold swap rebuilds the arena the pass drains: a host's
     // controlPass() runs nothing meanwhile. The thread inside a pass, so a
     // swap run from within one does not wait for itself.

@@ -178,6 +178,13 @@ TEST_CASE("restarts, engine: restarting names the generation closing, setup the 
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("setup"), setup, 5000));
     REQUIRE(setup.parsed().argCount() == 3);
     const int32_t opened = setup.parsed().argInt(2);
+    // The first block after the swap refuses the ping, and the pass that block
+    // wakes delivers the refusal: it can come after setup, so wait for it.
+    REQUIRE(fix.pollUntil([&] {
+        for (const auto& r : fix.allReplies())
+            if (r.address == CLOCKWORK_SYS("error") && r.parsed().argString(0) == "/dummy/ping") return true;
+        return false;
+    }, 5000));
 
     // Restarting with the generation that was closing, the refusal stamped
     // with it, setup with the one that opened.

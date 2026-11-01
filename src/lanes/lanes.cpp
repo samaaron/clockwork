@@ -106,11 +106,14 @@ InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uin
     const uint32_t flags = cursors->status_flags.load(std::memory_order_acquire);
     if ((flags & STATUS_CONTROL_SERVED) && clockwork_sys_control_takes(osc, len)) {
         auto* ctl = reinterpret_cast<ControlRingCursors*>(shared_memory + CONTROL_RING_START);
-        return RingBufferWriter::write(
-            shared_memory + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
-            CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
-            &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
-            osc, len, source_id) ? InRingWrite::Written : InRingWrite::Full;
+        if (!RingBufferWriter::write(
+                shared_memory + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
+                CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
+                &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
+                osc, len, source_id))
+            return InRingWrite::Full;
+        clockwork_control_wake();
+        return InRingWrite::Written;
     }
     // No guest instance to take it: refused at the boundary (in_ring_door.h),
     // with the word on the NRT egress for the source that sent it, as the
@@ -228,6 +231,7 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     // Refused for want of room: counted, since the line logging it would
     // ride this same full ring (PerformanceMetrics::egress_frames_refused).
     if (!written && metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+    if (written) clockwork_control_wake();
     return written;
 }
 
@@ -446,6 +450,18 @@ void clockwork_control_serve(int on) {
 
 int clockwork_control_served(void) {
     return cursors && (cursors->status_flags.load(std::memory_order_acquire) & STATUS_CONTROL_SERVED) ? 1 : 0;
+}
+
+// One pointer, so a writer always calls a function with its own context.
+static std::atomic<const ClockworkControlWaker*> g_control_waker{nullptr};
+
+void clockwork_control_waker(const ClockworkControlWaker* waker) {
+    g_control_waker.store(waker, std::memory_order_release);
+}
+
+void clockwork_control_wake(void) {
+    if (const ClockworkControlWaker* w = g_control_waker.load(std::memory_order_acquire))
+        w->wake(w->ctx);
 }
 
 }  // extern "C"

@@ -351,9 +351,9 @@ with it (2026-10-15: Spider waited 30 s for `notify.reply` while the
 device was mid-reconfiguration). Now a control verb has a ring of its own
 in the arena (`CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING`, its cursors at
 its front), of lifetime `arena`: a restart neither resets it nor has
-anything to carry out of it. The control pass drains it directly, and its
-wait is bounded to a millisecond rather than tied to the audio thread's
-word, so a verb written while no block renders is answered within one.
+anything to carry out of it. The control pass drains it directly, and
+whoever writes the ring wakes the pass, so a verb written while no block
+renders is answered at once.
 
 The engine SERVES the ring: once its control pass drains it, it says so in
 the cursors region (`STATUS_CONTROL_SERVED`), and every boundary — the

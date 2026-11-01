@@ -91,6 +91,32 @@ TEST_CASE("Clockwork's own control verbs are answered while no audio block rende
     CHECK(answeredWithoutAudio(fix, CLOCKWORK_SYS("pong"), 2000));
 }
 
+// The control pass runs when something wakes it: a block, a write, a peer.
+// Nothing wakes it on a timer, so an engine with no audio and no traffic runs
+// no pass, and one block is one wake.
+TEST_CASE("control pass: an idle engine runs no pass, and a block wakes it",
+          "[control][control-ring][wake]") {
+    auto cfg = EngineFixture::defaultConfig();
+    if (!cfg.manualAudioPump || cfg.hostDrivesControl)
+        SKIP("needs the engine's own control pass and no audio thread");
+    EngineFixture fix(cfg);
+    auto& engine = fix.engine();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const uint64_t idle = engine.controlPasses();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(engine.controlPasses() == idle);   // a 1 ms timer would run a hundred
+
+    engine.pumpAudioBlock();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (engine.controlPasses() == idle && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(engine.controlPasses() > idle);
+    const uint64_t woken = engine.controlPasses();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(engine.controlPasses() == woken);
+}
+
 // The device list is available on request: only the unsolicited probe is
 // absent, not the feature.
 TEST_CASE("Device report is still delivered when asked for", "[control][notify]") {

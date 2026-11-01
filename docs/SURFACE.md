@@ -99,7 +99,8 @@ hosts; a guest that sets the flag never learns which host it is on.
 Both halves are answered off the audio thread by one control pass: the
 control-ring drain, the peer command plane, the MIDI clock producer, the
 egress drain. Whose thread runs it is the host's choice. By default the
-engine's own gateway thread runs it every audio block; a host that owns the
+engine's own gateway thread runs it after every audio block and whenever a
+ring it drains is written, and sleeps otherwise; a host that owns the
 process sets `Config::hostDrivesControl` and calls
 `ClockworkEngine::controlPass()` from a thread of its own, and the engine
 starts no thread for it — the same way `Config::hostDrainsEgress` makes the

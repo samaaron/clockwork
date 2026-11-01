@@ -88,9 +88,12 @@ TEST_CASE("metrics-shm: increments via engine writes are visible through client"
 
     constexpr int N = 5;
     for (int i = 0; i < N; ++i) fx.send(osc_test::message("/dummy/ping"));
-    fx.send(osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 1));
+    // The barrier is a verb the audio thread answers, behind the pings in the
+    // same ring: its answer comes after they are counted. A control verb's
+    // would not, as the control pass can answer it before the next block.
+    fx.send(osc_test::message(CLOCKWORK_SYS("ping")));
     OscReply r;
-    REQUIRE(fx.waitForReply(CLOCKWORK_SYS("clock/tempo.reply"), r));
+    REQUIRE(fx.waitForReply(CLOCKWORK_SYS("pong"), r));
 
     uint32_t after = externalMetrics->messages_processed.load();
     CHECK(after - before >= static_cast<uint32_t>(N));

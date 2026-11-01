@@ -189,8 +189,7 @@ void HeadlessDriver::processBlock(double& samplePos, HeadlessPacer& pacer) {
                      time);
     samplePos += mBlockSize;
 
-    mCallback->processCount.fetch_add(1, std::memory_order_release);
-    mCallback->processCount.notify_all();
+    mCallback->blockDone();
 }
 
 int64_t HeadlessDriver::cappedNextWake(int64_t nextWakeNs, int64_t nowNs) {

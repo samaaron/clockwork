@@ -47,6 +47,7 @@ add_executable(clockwork_tests
     test_ring_buffer_write.cpp
     test_ring_exhaustive.cpp
     test_ring_reader.cpp
+    test_wait_word.cpp
     test_ring_concurrency.cpp
     test_lanes.cpp
     test_arena.cpp
@@ -497,7 +498,8 @@ endif()
 # An out-of-process peer for the shm command plane: test_shm_peer_crash.cpp
 # forks it and SIGKILLs it mid-write. Built with clockwork's compile profile so
 # the segment's layout guard accepts it at attach.
-add_executable(clockwork_test_shm_peer peer_shm/main.cpp)
+add_executable(clockwork_test_shm_peer peer_shm/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/workers/wait_word.cpp)
 target_include_directories(clockwork_test_shm_peer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 set_target_properties(clockwork_test_shm_peer PROPERTIES
@@ -507,6 +509,8 @@ find_package(Threads REQUIRED)
 target_link_libraries(clockwork_test_shm_peer PRIVATE Threads::Threads)
 if(UNIX AND NOT APPLE)
     target_link_libraries(clockwork_test_shm_peer PRIVATE rt)
+elseif(WIN32)
+    target_link_libraries(clockwork_test_shm_peer PRIVATE Synchronization)
 endif()
 target_compile_definitions(clockwork_engine_tests PRIVATE
     CLOCKWORK_TEST_SHM_PEER_BINARY="$<TARGET_FILE:clockwork_test_shm_peer>")

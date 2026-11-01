@@ -54,12 +54,9 @@ int dropInChild(void (*body)()) {
     return -1;
 }
 
-std::atomic<uint32_t> g_wake{0};
-
 // The reader parked on its wake word, dropped without stop().
 void dropParkedReader() {
     RingReader reader("dropped-while-parked");
-    reader.setWake(&g_wake);
     reader.start();
     std::this_thread::sleep_for(std::chrono::milliseconds(30));   // asleep in the wait by now
 }
@@ -67,7 +64,6 @@ void dropParkedReader() {
 // The reader parked by pause(), dropped without resume() or stop().
 void dropPausedReader() {
     RingReader reader("dropped-while-paused");
-    reader.setWake(&g_wake);
     reader.start();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     (void)reader.pause();

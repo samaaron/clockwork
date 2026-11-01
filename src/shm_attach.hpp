@@ -99,10 +99,14 @@ struct hello {
                         // POSIX: 0, the descriptor travels as ancillary data
     uint32_t role;      // the role granted, as asked
     uint32_t status;    // STATUS_*
+    uint64_t wake_event;  // a peer on Windows: the event that wakes the engine's
+                          // control pass, duplicated into the receiver (it may
+                          // only signal it); 0 elsewhere, where the wake word in
+                          // the command segment is woken directly
 };
 static constexpr uint32_t MAGIC   = 0x43574154;  // "CWAT"
-static constexpr uint32_t VERSION = 3;           // the hello's layout; a client built for another refuses it
-static_assert(sizeof(hello) == 32, "hello is a wire format");
+static constexpr uint32_t VERSION = 4;           // the hello's layout; a client built for another refuses it
+static_assert(sizeof(hello) == 40, "hello is a wire format");
 
 // How long the server waits for a client's auth frame and role.
 static constexpr std::chrono::seconds AUTH_DEADLINE { 2 };
@@ -254,12 +258,15 @@ public:
     // presents `secret` (copied; the caller's may go), the published segment
     // `reader` (its READ-ONLY handle, `reader_size` bytes) to readers and,
     // when `command` is valid, the command segment (`command_size` bytes) to
-    // one peer at a time. Neither handle is owned; both must outlive the
-    // server. False, with `err` filled, when there is no published segment,
-    // no secret, or the endpoint cannot be bound.
+    // one peer at a time, with `command_wake_event` (Windows: the event that
+    // wakes the engine's control pass, duplicated into the peer; null
+    // elsewhere). No handle is owned; all must outlive the server. False,
+    // with `err` filled, when there is no published segment, no secret, or
+    // the endpoint cannot be bound.
     bool start(const std::string& endpoint,
                shm_native_handle reader, uint64_t reader_size,
                shm_native_handle command, uint64_t command_size,
+               clockwork::WaitEvent command_wake_event,
                const ClockworkCommsSecret* secret, std::string* err) {
         stop();
         if (!shm_handle_valid(reader)) { if (err) *err = "no published segment to serve"; return false; }
@@ -270,6 +277,7 @@ public:
         mReaderSize  = reader_size;
         mCommand     = command;
         mCommandSize = shm_handle_valid(command) ? command_size : 0;
+        mCommandWakeEvent = command_wake_event;
         mHolding.store(false, std::memory_order_relaxed);
 #ifdef _WIN32
         mPipeName = pipe_path(endpoint);
@@ -385,7 +393,7 @@ private:
     // The hello for a request: which segment (if any) goes with it, and
     // whether the connection is kept as the lease. Counts what it declines.
     hello answer(uint32_t role, shm_native_handle* segment, after* then) {
-        hello h { MAGIC, VERSION, 0, 0, role, STATUS_OK };
+        hello h { MAGIC, VERSION, 0, 0, role, STATUS_OK, 0 };
         *segment = shm_invalid_handle;
         *then    = after::close;
         switch (role) {
@@ -500,6 +508,13 @@ private:
                     if (DuplicateHandle(GetCurrentProcess(), segment, proc, &dup, 0, FALSE,
                                         DUPLICATE_SAME_ACCESS))
                         h.handle = reinterpret_cast<uint64_t>(dup);
+                    // The peer wakes the control pass through this; it may
+                    // signal it and nothing more.
+                    HANDLE wake = nullptr;
+                    if (then == after::keep_as_lease && mCommandWakeEvent
+                        && DuplicateHandle(GetCurrentProcess(), static_cast<HANDLE>(mCommandWakeEvent),
+                                           proc, &wake, EVENT_MODIFY_STATE, FALSE, 0))
+                        h.wake_event = reinterpret_cast<uint64_t>(wake);
                     CloseHandle(proc);
                 }
             }
@@ -651,6 +666,7 @@ private:
     uint64_t               mReaderSize = 0;
     shm_native_handle      mCommand = shm_invalid_handle;
     uint64_t               mCommandSize = 0;
+    clockwork::WaitEvent   mCommandWakeEvent = nullptr;
     ClockworkCommsSecret*  mSecret = nullptr;
     std::atomic<uint64_t>  mRefused { 0 };
     std::atomic<uint64_t>  mDeclined { 0 };
@@ -666,6 +682,9 @@ private:
 // release, as is the process's death.
 struct command_lease {
     shm_native_handle handle = shm_invalid_handle;
+    // Windows: the event that wakes the engine's control pass (the caller's to
+    // own — hand it to shm_command_client with the handle). Null elsewhere.
+    clockwork::WaitEvent wake_event = nullptr;
 #ifdef _WIN32
     HANDLE connection = INVALID_HANDLE_VALUE;
 #else
@@ -679,8 +698,10 @@ struct command_lease {
         if (this != &o) {
             release();
             handle = o.handle;
+            wake_event = o.wake_event;
             connection = o.connection;
             o.handle = shm_invalid_handle;
+            o.wake_event = nullptr;
 #ifdef _WIN32
             o.connection = INVALID_HANDLE_VALUE;
 #else
@@ -711,6 +732,10 @@ struct command_lease {
 #endif
         detail_shm_segment::shm_close_native(handle);
         handle = shm_invalid_handle;
+#ifdef _WIN32
+        if (wake_event) CloseHandle(static_cast<HANDLE>(wake_event));
+#endif
+        wake_event = nullptr;
     }
 };
 
@@ -724,8 +749,10 @@ namespace detail {
 // hand-off was malformed.
 #ifdef _WIN32
 inline shm_native_handle attach(const std::string& endpoint, const uint8_t* secret32, uint32_t role,
-                                std::string* err, uint64_t* size_out, HANDLE* connection) {
+                                std::string* err, uint64_t* size_out, HANDLE* connection,
+                                clockwork::WaitEvent* wake_event) {
     *connection = INVALID_HANDLE_VALUE;
+    *wake_event = nullptr;
     if (!secret32) { if (err) *err = "no secret to present"; return shm_invalid_handle; }
     const auto req = request(secret32, role);
     const std::wstring name = pipe_path(endpoint);
@@ -770,14 +797,20 @@ inline shm_native_handle attach(const std::string& endpoint, const uint8_t* secr
         return shm_invalid_handle;
     }
     if (size_out) *size_out = h.size;
-    if (role == ROLE_PEER) *connection = pipe;   // the lease
-    else CloseHandle(pipe);
+    if (role == ROLE_PEER) {
+        *connection = pipe;   // the lease
+        *wake_event = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(h.wake_event));
+    } else {
+        CloseHandle(pipe);
+    }
     return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(h.handle));
 }
 #else
 inline shm_native_handle attach(const std::string& endpoint, const uint8_t* secret32, uint32_t role,
-                                std::string* err, uint64_t* size_out, int* connection) {
+                                std::string* err, uint64_t* size_out, int* connection,
+                                clockwork::WaitEvent* wake_event) {
     *connection = -1;
+    *wake_event = nullptr;   // the wake word in the command segment is woken directly
     if (!secret32) { if (err) *err = "no secret to present"; return shm_invalid_handle; }
     const auto req = request(secret32, role);
     sockaddr_un addr {};
@@ -882,7 +915,8 @@ inline shm_native_handle receive(const std::string& endpoint, const uint8_t* sec
 #else
     int conn = -1;
 #endif
-    return detail::attach(endpoint, secret32, ROLE_READER, err, size_out, &conn);
+    clockwork::WaitEvent none = nullptr;
+    return detail::attach(endpoint, secret32, ROLE_READER, err, size_out, &conn, &none);
 }
 
 // A peer: the command segment's read-write descriptor and the lease that
@@ -892,7 +926,7 @@ inline shm_native_handle receive(const std::string& endpoint, const uint8_t* sec
 inline command_lease receive_command_plane(const std::string& endpoint, const uint8_t* secret32,
                                            std::string* err, uint64_t* size_out = nullptr) {
     command_lease lease;
-    lease.handle = detail::attach(endpoint, secret32, ROLE_PEER, err, size_out, &lease.connection);
+    lease.handle = detail::attach(endpoint, secret32, ROLE_PEER, err, size_out, &lease.connection, &lease.wake_event);
     return lease;
 }
 

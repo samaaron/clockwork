@@ -180,13 +180,14 @@ ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* 
 ClockworkClient* clockwork_client_open_shm_peer(const char* endpoint, const uint8_t* secret,
                                                 ClockworkStatus* out_status);
 
-/* The peer, through handles already received: the published segment's and the
- * command segment's (shm_attach::receive_command_plane, or duplicates within
- * the engine's process). Both owned by the client from here, whether or not
+/* The peer, through handles already received: the published segment's, the
+ * command segment's, and on Windows the event that wakes the engine's control
+ * pass (0 elsewhere) — shm_attach::receive_command_plane, or duplicates within
+ * the engine's process. All owned by the client from here, whether or not
  * the open succeeds. No lease is held: the caller's hand-off is the caller's
  * to account for. */
 ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t reader_handle, intptr_t command_handle,
-                                                        ClockworkStatus* out_status);
+                                                        intptr_t wake_event, ClockworkStatus* out_status);
 
 /* The endpoint an engine on `port` serves at unless told otherwise: under
  * XDG_RUNTIME_DIR or TMPDIR on POSIX, \\.\pipe\clockwork-shm-<port> on

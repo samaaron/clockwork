@@ -56,7 +56,7 @@ struct Paced {
         return cfg;
     }
 
-    uint32_t blocks() { return fix.engine().processor().processCount.load(std::memory_order_acquire); }
+    uint32_t blocks() { return fix.engine().processor().processCount.value.load(std::memory_order_acquire); }
 
     // The engine's clock as a client reads it, against the pacer's wall.
     double clockBehindWall() {

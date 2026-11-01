@@ -70,7 +70,7 @@ std::string endpointFor(unsigned port) {
 // published one and, when the engine has it, the command segment.
 bool serve(shm_attach::server& srv, const std::string& ep, ClockworkEngine& e, std::string* err) {
     return srv.start(ep, e.shmReaderHandle(), e.shmSegmentSize(),
-                     e.shmCommandHandle(), e.shmCommandSize(), testSecret(), err);
+                     e.shmCommandHandle(), e.shmCommandSize(), e.shmCommandWakeEvent(), testSecret(), err);
 }
 
 #if !defined(_WIN32)
@@ -231,7 +231,7 @@ TEST_CASE("attach: the command segment is handed to one peer at a time, and only
 }
 
 #if !defined(_WIN32)
-TEST_CASE("attach: the hello is 32 bytes, version 3, and names the role and the status",
+TEST_CASE("attach: the hello names the role, the status and the layout it is",
           "[shm][attach]") {
     constexpr unsigned kPort = 57337;
     EngineFixture fx(attachConfig(kPort, false));
@@ -240,8 +240,8 @@ TEST_CASE("attach: the hello is 32 bytes, version 3, and names the role and the 
     std::string err;
     REQUIRE(serve(srv, ep, fx.engine(), &err));
 
-    static_assert(sizeof(shm_attach::hello) == 32, "hello is a wire format");
-    CHECK(shm_attach::VERSION == 3);
+    static_assert(sizeof(shm_attach::hello) == 40, "hello is a wire format");
+    CHECK(shm_attach::VERSION == 4);
 
     const auto decode = [](const std::vector<uint8_t>& bytes) {
         shm_attach::hello h {};
@@ -253,7 +253,7 @@ TEST_CASE("attach: the hello is 32 bytes, version 3, and names the role and the 
     // A reader: ok, the role echoed, the size the engine's.
     auto h = decode(raw(ep, authThenRole(shm_attach::ROLE_READER)));
     CHECK(h.magic == shm_attach::MAGIC);
-    CHECK(h.version == 3);
+    CHECK(h.version == 4);
     CHECK(h.role == shm_attach::ROLE_READER);
     CHECK(h.status == shm_attach::STATUS_OK);
     CHECK(h.size == fx.engine().shmSegmentSize());
@@ -448,10 +448,13 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
     // peer leave through a ShmTransport bound to its plane slot.
     ShmTransport    transport;
     ClockworkEngine engine;
+    engine_test::HostControlThread hostControl;   // the host's pass, when the config says the host runs it
     engine.onDebug = [](const std::string&) {};
     engine.onReply = [](const uint8_t*, uint32_t) {};
     engine.setTransport(&transport);
-    engine.init(attachConfig(kPort, true));
+    const auto cfg = attachConfig(kPort, true);
+    if (cfg.hostDrivesControl) hostControl.start(engine);
+    engine.init(cfg);
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
     const std::string ep = endpointFor(kPort);
@@ -507,6 +510,64 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
     clockwork_client_close(peer);
     REQUIRE(until([&] { return !srv.holding(); }, 3000));
     srv.stop();
+    hostControl.stop();   // a host stops its thread first
+    engine.shutdown();
+}
+
+// A peer wakes the engine's control pass through the word in the command
+// segment, so its command is answered with no audio block rendered, and an
+// engine nobody writes to runs no pass at all.
+TEST_CASE("attach: a peer's command wakes the engine's control pass, with no audio block and no timer",
+          "[shm][attach][peer][wake]") {
+    constexpr unsigned kPort = 57339;
+    auto cfg = attachConfig(kPort, true);
+    if (!cfg.manualAudioPump || cfg.hostDrivesControl)
+        SKIP("needs the engine's own control pass and no audio thread");
+    ShmTransport    transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    engine.init(cfg);
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+    const std::string ep = endpointFor(kPort);
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, ep, engine, &err));
+    // Wall clock only: nothing here renders a block.
+    const auto within = [](const std::function<bool()>& f, int ms) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return f();
+    };
+
+    ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
+    ClockworkClient* peer = clockwork_client_open_shm_peer(ep.c_str(), testSecretBytes().data(), &st);
+    REQUIRE(peer != nullptr);
+
+    const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{4344});
+    REQUIRE(clockwork_client_send(peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
+    ClockworkClientMessage msgs[8];
+    CHECK(within([&] {
+        const uint32_t n = clockwork_client_poll(peer, msgs, 8);
+        for (uint32_t i = 0; i < n; ++i)
+            if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0)
+                return true;
+        return false;
+    }, 3000));
+
+    // Quiet: no write, no block, no pass. A 1 ms timer would run a hundred.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const uint64_t settled = engine.controlPasses();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(engine.controlPasses() == settled);
+
+    clockwork_client_close(peer);
+    srv.stop();
     engine.shutdown();
 }
 
@@ -514,7 +575,7 @@ TEST_CASE("attach: the server refuses to serve without a published segment or a 
     shm_attach::server srv;
     std::string err;
     CHECK_FALSE(srv.start(endpointFor(57333), detail_shm_segment::shm_invalid_handle, 0,
-                          detail_shm_segment::shm_invalid_handle, 0, testSecret(), &err));
+                          detail_shm_segment::shm_invalid_handle, 0, nullptr, testSecret(), &err));
     CHECK_FALSE(err.empty());
     CHECK_FALSE(srv.running());
 
@@ -522,7 +583,7 @@ TEST_CASE("attach: the server refuses to serve without a published segment or a 
     EngineFixture fx(attachConfig(kPort));
     err.clear();
     CHECK_FALSE(srv.start(endpointFor(kPort), fx.engine().shmReaderHandle(), fx.engine().shmSegmentSize(),
-                          detail_shm_segment::shm_invalid_handle, 0, nullptr, &err));
+                          detail_shm_segment::shm_invalid_handle, 0, nullptr, nullptr, &err));
     CHECK(err.find("secret") != std::string::npos);
     CHECK_FALSE(srv.running());
 }

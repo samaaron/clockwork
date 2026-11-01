@@ -14,13 +14,15 @@
  * sole non-RT consumer of all of them.
  *
  * Whose thread that is, is the caller's choice. start() spawns one that
- * blocks on *wakeWord (a C++20 atomic wait — the audio callback bumps
- * `processCount` every block, so a reader that drains a ring the audio thread
- * fills passes that and drains each block). Or the caller never starts one
- * and calls pass() itself, from a thread of its own, whenever it likes: a host
- * that owns the process runs the engine's control plane on its own thread
- * this way (ClockworkEngine::controlPass). Either way the pass is timed, so
- * the blocking observability below reads the same whoever ran it.
+ * blocks on its wake word (src/workers/wait_word.h) and runs a pass each time
+ * the word changes: the audio thread wakes it every block, a writer of a ring
+ * it drains after the write, a peer in another process through a shared word
+ * (setWake). Nothing wakes it on a timer, so an idle reader costs nothing.
+ * Or the caller never starts one and calls pass() itself, from a thread of
+ * its own, whenever it likes: a host that owns the process runs the engine's
+ * control plane on its own thread this way (ClockworkEngine::controlPass).
+ * Either way the pass is timed, so the blocking observability below reads
+ * the same whoever ran it.
  *
  * JUCE-free — only the destination leaves touch JUCE; the ring transport does
  * not. Metrics: each counter is optional; pass nullptr to skip it.
@@ -36,6 +38,7 @@
 #include <stop_token>
 #include <vector>
 #include "lanes/ring_drain.h"
+#include "wait_word.h"
 
 class RingReader {
 public:
@@ -59,8 +62,21 @@ public:
     RingReader(const RingReader&) = delete;
     RingReader& operator=(const RingReader&) = delete;
 
-    // Set the wake word the thread blocks on. Call before start().
-    void setWake(std::atomic<uint32_t>* wakeWord) { mWake = wakeWord; }
+    // Run a pass. Any thread, the audio thread included; never blocks, and
+    // while the reader is busy in a pass it is two atomic operations and no
+    // system call (a wake that lands mid-pass is another pass, not a lost one).
+    void wake() noexcept { clockwork::bump(*mWake, mWakeScope, mWakeEvent); }
+
+    // The word the thread blocks on: its own, unless this moves it into shared
+    // memory, where a peer in another process wakes it with
+    // clockwork::bump(word, WaitScope::Shared, its event). Call before start().
+    void setWake(ClockworkWaitWord* word, clockwork::WaitScope scope, clockwork::WaitEvent event = nullptr) {
+        mWake = word; mWakeScope = scope; mWakeEvent = event;
+    }
+    ClockworkWaitWord* wakeWord() { return mWake; }
+
+    // Passes run so far, by the thread or by pass().
+    uint64_t passes() const { return mPasses.load(std::memory_order_relaxed); }
 
     // Register a ring to drain on each wake. Call all of these before start()
     // (the drain list is fixed once the thread runs).
@@ -82,7 +98,9 @@ public:
     // egress drains (clockwork_egress_rt_drain / clockwork_egress_nrt_drain) own theirs.
     void addTask(std::function<void()> task);
 
-    // Spawn the thread (after setWake + all addDrain/addTask). Idempotent.
+    // Spawn the thread (after any setWake and every addDrain/addTask). Idempotent.
+    // Every wake from the moment start() is called runs a pass, even one that
+    // lands before the new thread first runs.
     void start();
     // Signal exit, wake the loop (and release any park), join. Idempotent.
     void stop();
@@ -145,7 +163,7 @@ public:
     void setClock(std::function<uint64_t()> clock) { mClock = std::move(clock); }
 
 private:
-    void run(const std::stop_token& stop);
+    void run(const std::stop_token& stop, uint32_t seen);
     void wakeForStop();   // the stop_callback: break the wait word, release a park
     uint64_t nowUs() const;
     std::function<uint64_t()> mClock;
@@ -164,14 +182,20 @@ private:
     void drainOne(Drain& d);
 
     const char*            mName;
-    std::atomic<uint32_t>* mWake     = nullptr;
-    uint32_t               mLastWake = 0;
+    ClockworkWaitWord      mOwnWake;
+    ClockworkWaitWord*     mWake      = &mOwnWake;
+    clockwork::WaitScope   mWakeScope = clockwork::WaitScope::Process;
+    clockwork::WaitEvent   mWakeEvent = nullptr;
     std::vector<Drain>     mDrains;
+    std::atomic<uint64_t>  mPasses{0};
 
-    // pause()/resume() handshake. mPauseRequest is the caller's ask; mParked
-    // acknowledges that the run loop is outside any drain pass.
-    std::atomic<uint32_t>  mPauseRequest{0};
-    std::atomic<uint32_t>  mParked{0};
+    // pause()/resume() handshake. mPauseRequests counts every pause() and
+    // resume(), so an odd value is "pause asked" and every ask is a value of
+    // its own; mParkedAt is the ask the run loop last parked for. Both only
+    // grow, so a pause, a resume and a pause again in quick succession cannot
+    // be mistaken for the first pause still standing.
+    ClockworkWaitWord      mPauseRequests;
+    ClockworkWaitWord      mParkedAt;
 
     // Pass timing. mPassStartUs is a steady-clock stamp while a pass runs and 0
     // between passes, so a reader can tell "blocked now" from "was slow once".

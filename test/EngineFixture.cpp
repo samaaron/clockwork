@@ -222,10 +222,10 @@ uint32_t EngineFixture::blocksOfAudio(int ms) const {
 
 bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {
     const uint32_t start =
-        mEngine.processor().processCount.load(std::memory_order_acquire);
+        mEngine.processor().processCount.value.load(std::memory_order_acquire);
     // Unsigned wrap is fine: (now - start) counts blocks since the snapshot.
     auto rendered = [&] {
-        return mEngine.processor().processCount.load(std::memory_order_acquire) - start;
+        return mEngine.processor().processCount.value.load(std::memory_order_acquire) - start;
     };
     // Manual pump: the case is the clock. The blocks are rendered here, so
     // there is no deadline to miss however busy the machine is.

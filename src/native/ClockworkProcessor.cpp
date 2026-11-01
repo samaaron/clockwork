@@ -371,8 +371,7 @@ void ClockworkProcessor::process(
             if (outputChannelData[ch])
                 std::memset(outputChannelData[ch], 0,
                             static_cast<size_t>(numSamples) * sizeof(float));
-        processCount.fetch_add(1, std::memory_order_release);
-        processCount.notify_all();
+        blockDone();
         return;
     }
 
@@ -404,8 +403,7 @@ void ClockworkProcessor::process(
         if (mFadeOutRequested.load(std::memory_order_acquire))
             mPaused.store(true, std::memory_order_release);
         mCallbackCount++;
-        processCount.fetch_add(1, std::memory_order_release);
-        processCount.notify_all();
+        blockDone();
         return;
     }
 
@@ -618,7 +616,6 @@ void ClockworkProcessor::process(
                                mOverrunCount);
     }
 
-    // ── 5. Notify worker threads (one tick per device callback) ─────────────────
-    processCount.fetch_add(1, std::memory_order_release);
-    processCount.notify_all();
+    // ── 5. The block is done: count it and wake its waiters ────────────────────
+    blockDone();
 }
