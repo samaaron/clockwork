@@ -19,6 +19,7 @@
 #include "shm_attach.hpp"
 #include "ShmTransport.h"
 #include "clockwork_client.h"
+#include "ThreadWakes.h"
 
 #include <chrono>
 #include <cstring>
@@ -621,5 +622,178 @@ TEST_CASE("attach: the server refuses to serve without a published segment or a 
     CHECK_FALSE(srv.start(endpointFor(kPort), fx.engine().shmReaderHandle(), fx.engine().shmSegmentSize(),
                           detail_shm_segment::shm_invalid_handle, 0, nullptr, nullptr, &err));
     CHECK(err.find("secret") != std::string::npos);
+    CHECK_FALSE(srv.running());
+}
+
+// ── The server's waits ───────────────────────────────────────────────────────
+//
+// The server's thread blocks only on a client, a stop or the lease, and on a
+// client's request until its deadline. It waits with a pipe and poll on POSIX
+// and with overlapped I/O and events on Windows; these cases reach the same
+// paths on both.
+
+namespace {
+
+// A whole request: the secret's frame, then a role.
+std::vector<uint8_t> requestFor(uint32_t role) {
+    const auto frame = shm_attach::auth_frame(testSecretBytes().data());
+    std::vector<uint8_t> bytes(frame.begin(), frame.end());
+    for (int shift : { 24, 16, 8, 0 }) bytes.push_back(static_cast<uint8_t>(role >> shift));
+    return bytes;
+}
+
+// A hand-made client of the endpoint: it connects, sends what a case gives
+// it in the pieces the case chooses, and reads what comes back.
+struct RawClient {
+#if defined(_WIN32)
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    explicit RawClient(const std::string& ep) {
+        const std::wstring name = shm_attach::pipe_path(ep);
+        for (int attempt = 0; attempt < 3 && pipe == INVALID_HANDLE_VALUE; ++attempt) {
+            pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (pipe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW(name.c_str(), 5000);
+        }
+        REQUIRE(pipe != INVALID_HANDLE_VALUE);
+    }
+    ~RawClient() { if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe); }
+    void send(const uint8_t* bytes, size_t n) {
+        DWORD wrote = 0;
+        REQUIRE(WriteFile(pipe, bytes, static_cast<DWORD>(n), &wrote, nullptr));
+        REQUIRE(wrote == n);
+    }
+    // Returns what the server sent before it closed; empty if it sent nothing.
+    std::vector<uint8_t> receive() {
+        std::vector<uint8_t> got(64);
+        DWORD n = 0;
+        if (!ReadFile(pipe, got.data(), static_cast<DWORD>(got.size()), &n, nullptr)) n = 0;
+        got.resize(n);
+        return got;
+    }
+#else
+    int fd = -1;
+    explicit RawClient(const std::string& ep) {
+        sockaddr_un addr {};
+        REQUIRE(shm_attach::fill_sockaddr(ep, &addr));
+        fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        REQUIRE(fd >= 0);
+        REQUIRE(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
+    }
+    ~RawClient() { if (fd >= 0) ::close(fd); }
+    void send(const uint8_t* bytes, size_t n) {
+        REQUIRE(::send(fd, bytes, n, 0) == static_cast<ssize_t>(n));
+    }
+    std::vector<uint8_t> receive() {
+        timeval tv { 30, 0 };   // only a server that never answers or closes reaches it
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        std::vector<uint8_t> got(64);
+        const ssize_t n = ::recv(fd, got.data(), got.size(), 0);
+        got.resize(n > 0 ? static_cast<size_t>(n) : 0);
+        return got;
+    }
+#endif
+};
+
+shm_attach::hello helloOf(const std::vector<uint8_t>& bytes) {
+    shm_attach::hello h {};
+    REQUIRE(bytes.size() == sizeof h);
+    std::memcpy(&h, bytes.data(), sizeof h);
+    return h;
+}
+
+} // namespace
+
+TEST_CASE("attach: a request that arrives a few bytes at a time is answered", "[shm][attach]") {
+    constexpr unsigned kPort = 57341;
+    EngineFixture fx(attachConfig(kPort));
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
+
+    RawClient c(endpointFor(kPort));
+    const auto request = requestFor(shm_attach::ROLE_READER);
+    for (size_t at = 0; at < request.size(); at += 7) {
+        c.send(request.data() + at, std::min<size_t>(7, request.size() - at));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));   // each piece a read of its own
+    }
+    const auto h = helloOf(c.receive());
+    CHECK(h.magic == shm_attach::MAGIC);
+    CHECK(h.status == shm_attach::STATUS_OK);
+    CHECK(h.role == shm_attach::ROLE_READER);
+    CHECK(h.size == fx.engine().shmSegmentSize());
+    CHECK(srv.refused() == 0);
+}
+
+TEST_CASE("attach: a client that says nothing is refused at the deadline, and the server serves on",
+          "[shm][attach]") {
+    constexpr unsigned kPort = 57342;
+    EngineFixture fx(attachConfig(kPort));
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
+
+    {
+        RawClient silent(endpointFor(kPort));
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK(silent.receive().empty());   // closed with no hello
+        CHECK(std::chrono::steady_clock::now() - t0 >= shm_attach::AUTH_DEADLINE - std::chrono::milliseconds(100));
+    }
+    CHECK(within([&] { return srv.refused() == 1; }, 5000));
+    CHECK(shm_handle_valid(shm_attach::receive(endpointFor(kPort), testSecretBytes().data(), &err)));
+    INFO(err);
+}
+
+TEST_CASE("attach: a stop while a client says nothing ends at once, not at the auth deadline",
+          "[shm][attach]") {
+    constexpr unsigned kPort = 57343;
+    EngineFixture fx(attachConfig(kPort));
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
+
+    RawClient silent(endpointFor(kPort));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the server is waiting on its request
+    const auto t0 = std::chrono::steady_clock::now();
+    srv.stop();
+    CHECK(std::chrono::steady_clock::now() - t0 < shm_attach::AUTH_DEADLINE / 2);
+    CHECK_FALSE(srv.running());
+}
+
+TEST_CASE("attach: the server's thread does not wake while nobody connects", "[shm][attach][wakes]") {
+    if (!thread_wakes::countable()) SKIP("per-thread wake counts are read from Linux's /proc");
+    constexpr unsigned kPort = 57344;
+    EngineFixture fx(attachConfig(kPort));
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
+    // A loop that checked for its stop every 200 ms would wake five times here.
+    const auto woke = thread_wakes::over("cw-attach", std::chrono::seconds(1));
+    REQUIRE(woke);
+    CHECK(*woke <= 1);
+}
+
+TEST_CASE("attach: a client that never reads its hello holds the server no longer than the deadline",
+          "[shm][attach]") {
+    constexpr unsigned kPort = 57345;
+    EngineFixture fx(attachConfig(kPort));
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
+
+    // On Windows a disconnect discards an unread hello, so the server waits
+    // for the client to close, but only until the deadline or a stop.
+    const auto request = requestFor(shm_attach::ROLE_READER);
+    RawClient deaf(endpointFor(kPort));
+    deaf.send(request.data(), request.size());
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(shm_handle_valid(shm_attach::receive(endpointFor(kPort), testSecretBytes().data(), &err)));
+    INFO(err);
+    CHECK(std::chrono::steady_clock::now() - t0 < 3 * shm_attach::AUTH_DEADLINE);
+
+    RawClient deafToo(endpointFor(kPort));
+    deafToo.send(request.data(), request.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));   // its hello written, unread
+    const auto t1 = std::chrono::steady_clock::now();
+    srv.stop();
+    CHECK(std::chrono::steady_clock::now() - t1 < shm_attach::AUTH_DEADLINE / 2);
     CHECK_FALSE(srv.running());
 }

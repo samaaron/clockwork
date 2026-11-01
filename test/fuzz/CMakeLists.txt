@@ -49,6 +49,10 @@ clockwork_fuzz_target(fuzz_osc_received fuzz_osc_received.cpp
 
 clockwork_fuzz_target(fuzz_osc_reader fuzz_osc_reader.cpp)
 
+# The attach endpoint's readings of a request and of a hello
+# (src/shm_attach.hpp): bytes any process of the user's may send.
+clockwork_fuzz_target(fuzz_attach fuzz_attach.cpp)
+
 # The audio writer: a WAV header and its patched sizes, and the FLAC encoder
 # of flac_encoder.cpp. Its decoder-facing calls are stubbed (audio_decode_stubs.cpp)
 # so the Rust workspace stays out of this build.

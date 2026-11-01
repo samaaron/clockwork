@@ -57,8 +57,10 @@
 #include <string>
 #include <system_error>
 #include <array>
+#include <optional>
 
 #include "process_env.h"
+#include "workers/thread_name.h"
 #include <thread>
 #include <stop_token>
 
@@ -139,6 +141,25 @@ inline std::array<uint8_t, REQUEST_LEN> request(const uint8_t* secret32, uint32_
     r[AUTH_FRAME_LEN + 2] = static_cast<uint8_t>(role >> 8);
     r[AUTH_FRAME_LEN + 3] = static_cast<uint8_t>(role);
     return r;
+}
+
+// Reads a request, which any process of the user's may have sent. Returns
+// the role it asks for if its frame has an auth packet's length and carries
+// `secret`, or nothing. Fuzzed by test/fuzz/fuzz_attach.cpp.
+inline std::optional<uint32_t> admitted_role(const std::array<uint8_t, REQUEST_LEN>& req,
+                                             const ClockworkCommsSecret* secret) {
+    const uint32_t len = (uint32_t(req[0]) << 24) | (uint32_t(req[1]) << 16)
+                       | (uint32_t(req[2]) << 8) | uint32_t(req[3]);
+    if (len != AUTH_PACKET_LEN || clockwork_comms_secret_admits(secret, req.data() + 4, AUTH_PACKET_LEN) != 1)
+        return std::nullopt;
+    return (uint32_t(req[AUTH_FRAME_LEN]) << 24) | (uint32_t(req[AUTH_FRAME_LEN + 1]) << 16)
+         | (uint32_t(req[AUTH_FRAME_LEN + 2]) << 8) | uint32_t(req[AUTH_FRAME_LEN + 3]);
+}
+
+// The client's check of a hello: true if it is a hand-off this build
+// understands, for the role it asked. Fuzzed with admitted_role.
+inline bool hello_matches(const hello& h, uint32_t role) {
+    return h.magic == MAGIC && h.version == VERSION && h.role == role;
 }
 
 // errno's text, from the standard library's thread-safe table: strerror's is not.
@@ -283,12 +304,15 @@ public:
         mPipeName = pipe_path(endpoint);
         mSd = owner_only_sd();
         if (!mSd) { if (err) *err = "could not build the pipe's security descriptor"; return false; }
+        mStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        mIo   = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         // Claim the name now, so a taken name fails here and not on the thread.
-        HANDLE first = make_instance(true);
+        HANDLE first = mStop && mIo ? make_instance(true) : INVALID_HANDLE_VALUE;
         if (first == INVALID_HANDLE_VALUE) {
             if (err) *err = "CreateNamedPipe " + endpoint + ": " +
                             clockwork_path::last_error_text(GetLastError());
             LocalFree(mSd); mSd = nullptr;
+            close_events();
             return false;
         }
         mThread = std::jthread([this, first](const std::stop_token& stop) { serve_loop(first, stop); });
@@ -337,6 +361,14 @@ public:
             ::unlink(endpoint.c_str());
             return false;
         }
+        if (::pipe(mWake) != 0) {
+            if (err) *err = "pipe: " + errnoText();
+            ::close(fd);
+            ::unlink(endpoint.c_str());
+            return false;
+        }
+        for (const int w : mWake) ::fcntl(w, F_SETFD, FD_CLOEXEC);
+        ::fcntl(mWake[1], F_SETFL, O_NONBLOCK);   // a full pipe is already a wake
         mListen = fd;
         mThread = std::jthread([this](const std::stop_token& stop) { serve_loop(stop); });
 #endif
@@ -346,18 +378,20 @@ public:
     void stop() {
         if (!mThread.joinable()) return;
         // request_stop() wakes the loop through its own stop_callback (on
-        // Windows a connect to the pipe; on POSIX the poll's timeout), so the
+        // Windows the stop event; on POSIX the wake pipe), so the
         // destructor's join needs nothing more than this.
         mThread.request_stop();
 #ifdef _WIN32
         mThread.join();
         release_lease();
         if (mSd) { LocalFree(mSd); mSd = nullptr; }
+        close_events();
 #else
         mThread.join();
         release_lease();
         ::close(mListen);
         mListen = -1;
+        for (int& w : mWake) { ::close(w); w = -1; }
         ::unlink(mEndpoint.c_str());
 #endif
         clockwork_comms_secret_free(mSecret);
@@ -377,18 +411,6 @@ public:
 private:
     // What serve_one decided about the connection after the hello.
     enum class after { close, keep_as_lease };
-
-    // The role word, big-endian, after the auth frame.
-    static uint32_t role_of(const std::array<uint8_t, REQUEST_LEN>& req) {
-        return (uint32_t(req[AUTH_FRAME_LEN]) << 24) | (uint32_t(req[AUTH_FRAME_LEN + 1]) << 16)
-             | (uint32_t(req[AUTH_FRAME_LEN + 2]) << 8) | uint32_t(req[AUTH_FRAME_LEN + 3]);
-    }
-    bool admits(const std::array<uint8_t, REQUEST_LEN>& req) const {
-        const uint32_t len = (uint32_t(req[0]) << 24) | (uint32_t(req[1]) << 16)
-                           | (uint32_t(req[2]) << 8) | uint32_t(req[3]);
-        return len == AUTH_PACKET_LEN
-            && clockwork_comms_secret_admits(mSecret, req.data() + 4, AUTH_PACKET_LEN) == 1;
-    }
 
     // The hello for a request: which segment (if any) goes with it, and
     // whether the connection is kept as the lease. Counts what it declines.
@@ -422,43 +444,70 @@ private:
     }
 
 #ifdef _WIN32
+    // Instances are overlapped, so every wait on one (for a client, its
+    // request, the hello going out) also waits on the stop's event, with a
+    // deadline wherever the client could stall it.
     HANDLE make_instance(bool first) {
         SECURITY_ATTRIBUTES sa { sizeof(SECURITY_ATTRIBUTES), mSd, FALSE };
         return CreateNamedPipeW(
             mPipeName.c_str(),
-            PIPE_ACCESS_DUPLEX | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES, sizeof(hello), REQUEST_LEN, 0, &sa);
     }
 
+    // Finishes an overlapped operation just started on `pipe` (`started` is
+    // what the call returned): waits for it to complete, the stop, or
+    // `timeoutMs`. Returns true, with `*n` set, if it completed well.
+    // Otherwise cancels it and waits for the cancel, so `ov` is free again.
+    bool finish_io(HANDLE pipe, OVERLAPPED& ov, BOOL started, DWORD timeoutMs, DWORD* n) {
+        if (!started && GetLastError() != ERROR_IO_PENDING) return false;
+        HANDLE waits[2] = { ov.hEvent, mStop };
+        if (WaitForMultipleObjects(2, waits, FALSE, timeoutMs) == WAIT_OBJECT_0)
+            return GetOverlappedResult(pipe, &ov, n, FALSE) != 0;
+        CancelIoEx(pipe, &ov);
+        GetOverlappedResult(pipe, &ov, n, TRUE);
+        return false;
+    }
+
+    // Waits until a client connects to `instance`, or the stop. Returns true
+    // if one connected.
+    bool await_client(HANDLE instance) {
+        OVERLAPPED ov {};
+        ov.hEvent = mIo;
+        const BOOL started = ConnectNamedPipe(instance, &ov);
+        if (!started && GetLastError() == ERROR_PIPE_CONNECTED) return true;   // came before the call
+        DWORD n = 0;
+        return finish_io(instance, ov, started, INFINITE, &n);
+    }
+
+    static DWORD ms_until(std::chrono::steady_clock::time_point deadline) {
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        return left.count() > 0 ? static_cast<DWORD>(left.count()) : 0;
+    }
+
     void serve_loop(HANDLE instance, const std::stop_token& stop) {
-        // A stop wakes a blocked ConnectNamedPipe by connecting to it; a
-        // failed connect is fine: the thread was between instances, and
-        // reads the token before it blocks on the next one.
-        const std::stop_callback wake(stop, [this] {
-            HANDLE h = CreateFileW(mPipeName.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        });
-        while (true) {
+        clockwork::name_this_thread("cw-attach");
+        const std::stop_callback wake(stop, [this] { SetEvent(mStop); });
+        while (!stop.stop_requested()) {
             if (instance == INVALID_HANDLE_VALUE) {
                 instance = make_instance(false);
-                if (instance == INVALID_HANDLE_VALUE) { Sleep(50); if (stop.stop_requested()) break; continue; }
+                // Out of instances or memory: try again shortly, unless stopped.
+                if (instance == INVALID_HANDLE_VALUE) { WaitForSingleObject(mStop, 50); continue; }
             }
-            // The stop's connect finds no instance while we are between one
-            // and the next. Read the token once the instance exists: a stop
-            // after this connects to it.
-            if (stop.stop_requested()) { CloseHandle(instance); break; }
-            const BOOL connected = ConnectNamedPipe(instance, nullptr)
-                                   || GetLastError() == ERROR_PIPE_CONNECTED;
-            if (stop.stop_requested()) { CloseHandle(instance); break; }
+            if (!await_client(instance)) {   // stopped, or a client gone before it was served
+                DisconnectNamedPipe(instance);
+                CloseHandle(instance);
+                instance = INVALID_HANDLE_VALUE;
+                continue;
+            }
             // The next instance BEFORE this one is served, so the name always
             // has an instance behind it. A second reader connecting meanwhile
             // finds the next instance, or for the moment before this one is
             // closed a busy one, which it waits on; with no instance it would
             // be told the pipe does not exist, which a client takes as final.
-            HANDLE next = connected ? make_instance(false) : INVALID_HANDLE_VALUE;
-            const after then = connected ? serve_one(instance) : after::close;
-            if (then == after::keep_as_lease) {
+            HANDLE next = make_instance(false);
+            if (serve_one(instance) == after::keep_as_lease) {
                 // The peer's connection is the lease: watched until it goes.
                 hold_lease(instance);
             } else {
@@ -467,33 +516,35 @@ private:
             }
             instance = next;
         }
+        if (instance != INVALID_HANDLE_VALUE) CloseHandle(instance);
     }
 
-    // The client's request, within AUTH_DEADLINE, or false. ReadFile on a
-    // synchronous pipe would block for ever on a silent client, so the bytes
-    // are waited for with PeekNamedPipe first.
+    // Reads the client's request, however many reads it arrives in. Returns
+    // false if it is not all there within AUTH_DEADLINE, or on the stop.
     bool read_request(HANDLE instance, std::array<uint8_t, REQUEST_LEN>* req) {
         const auto deadline = std::chrono::steady_clock::now() + AUTH_DEADLINE;
-        DWORD avail = 0;
-        while (true) {
-            if (!PeekNamedPipe(instance, nullptr, 0, nullptr, &avail, nullptr)) return false;
-            if (avail >= REQUEST_LEN) break;
-            if (std::chrono::steady_clock::now() >= deadline) return false;
-            Sleep(10);
-        }
         DWORD got = 0;
-        return ReadFile(instance, req->data(), REQUEST_LEN, &got, nullptr) && got == REQUEST_LEN;
+        while (got < REQUEST_LEN) {
+            OVERLAPPED ov {};
+            ov.hEvent = mIo;
+            DWORD n = 0;
+            const BOOL started = ReadFile(instance, req->data() + got, REQUEST_LEN - got, nullptr, &ov);
+            if (!finish_io(instance, ov, started, ms_until(deadline), &n) || n == 0) return false;
+            got += n;
+        }
+        return true;
     }
 
     after serve_one(HANDLE instance) {
         std::array<uint8_t, REQUEST_LEN> req {};
-        if (!read_request(instance, &req) || !admits(req)) {
+        std::optional<uint32_t> role;
+        if (!read_request(instance, &req) || !(role = admitted_role(req, mSecret))) {
             mRefused.fetch_add(1, std::memory_order_relaxed);
             return after::close;
         }
         shm_native_handle segment = shm_invalid_handle;
         after then = after::close;
-        hello h = answer(role_of(req), &segment, &then);
+        hello h = answer(*role, &segment, &then);
         // Claimed before the hello goes, as on POSIX; given back below if
         // nothing is handed over.
         if (then == after::keep_as_lease) mHolding.store(true, std::memory_order_release);
@@ -523,19 +574,41 @@ private:
                 mHolding.store(false, std::memory_order_release);
             }
         }
+        const auto deadline = std::chrono::steady_clock::now() + AUTH_DEADLINE;
+        OVERLAPPED ov {};
+        ov.hEvent = mIo;
         DWORD written = 0;
-        const BOOL wrote = WriteFile(instance, &h, sizeof h, &written, nullptr);
-        FlushFileBuffers(instance);
-        if ((!wrote || written != sizeof h) && then == after::keep_as_lease) {   // the peer went: no lease
+        const BOOL started = WriteFile(instance, &h, sizeof h, nullptr, &ov);
+        const bool wrote = finish_io(instance, ov, started, ms_until(deadline), &written) && written == sizeof h;
+        if (!wrote && then == after::keep_as_lease) {   // the peer went: no lease
             mHolding.store(false, std::memory_order_release);
             return after::close;
         }
+        if (wrote && then == after::close) await_close(instance, deadline);
         return then;
     }
 
+    // DisconnectNamedPipe discards data the client has not read. So after
+    // the hello on an instance that is not the lease, wait until the client
+    // closes its end (it does once it has read the hello), the deadline
+    // passes, or the server stops.
+    void await_close(HANDLE instance, std::chrono::steady_clock::time_point deadline) {
+        uint8_t byte = 0;
+        for (;;) {
+            OVERLAPPED ov {};
+            ov.hEvent = mIo;
+            DWORD n = 0;
+            // The client's close ends the read with an error; a byte it sends
+            // is ignored.
+            const BOOL started = ReadFile(instance, &byte, 1, nullptr, &ov);
+            if (!finish_io(instance, ov, started, ms_until(deadline), &n) || n == 0) return;
+        }
+    }
+
     // Keep the peer's pipe instance as the lease, and watch it from a thread
-    // of its own: a synchronous ReadFile returns when the peer closes or dies.
-    // The hold itself was claimed before the hello went.
+    // of its own: its read ends when the peer closes or dies, or when
+    // release_lease disconnects it. The hold itself was claimed before the
+    // hello went.
     void hold_lease(HANDLE instance) {
         if (mLease != INVALID_HANDLE_VALUE) {
             if (mLeaseWatch.joinable()) mLeaseWatch.join();
@@ -543,9 +616,13 @@ private:
         }
         mLease = instance;
         mLeaseWatch = std::jthread([this, instance] {
+            OVERLAPPED ov {};
+            ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // without one, the instance is waited on
             uint8_t byte = 0;
             DWORD got = 0;
-            while (ReadFile(instance, &byte, 1, &got, nullptr) && got > 0) {}   // the peer sends nothing; anything is ignored
+            while ((ReadFile(instance, &byte, 1, nullptr, &ov) || GetLastError() == ERROR_IO_PENDING)
+                   && GetOverlappedResult(instance, &ov, &got, TRUE) && got > 0) {}   // the peer sends nothing; anything is ignored
+            if (ov.hEvent) CloseHandle(ov.hEvent);
             mHolding.store(false, std::memory_order_release);
         });
     }
@@ -559,23 +636,39 @@ private:
         mHolding.store(false, std::memory_order_release);
     }
 
+    void close_events() {
+        for (HANDLE* e : { &mStop, &mIo }) {
+            if (*e) CloseHandle(*e);
+            *e = nullptr;
+        }
+    }
+
     std::wstring         mPipeName;
     PSECURITY_DESCRIPTOR mSd = nullptr;
     HANDLE               mLease = INVALID_HANDLE_VALUE;
     std::jthread         mLeaseWatch;
+    HANDLE               mStop = nullptr;   // manual reset: set by the stop
+    HANDLE               mIo = nullptr;     // the serve thread's overlapped operations
 #else
     void serve_loop(const std::stop_token& stop) {
-        while (!stop.stop_requested()) {   // the poll's 200 ms timeout is the wake
-            pollfd fds[2] = { { mListen, POLLIN, 0 }, { mLease, POLLIN, 0 } };
-            const nfds_t n = mLease >= 0 ? 2 : 1;
-            if (::poll(fds, n, 200) <= 0) continue;
-            if (n == 2 && fds[1].revents != 0) {
+        clockwork::name_this_thread("cw-attach");
+        // The stop writes a byte to the wake pipe, which the poll watches
+        // beside the listening socket and the lease.
+        const std::stop_callback wake(stop, [this] {
+            const uint8_t byte = 1;
+            while (::write(mWake[1], &byte, 1) < 0 && errno == EINTR) {}
+        });
+        while (!stop.stop_requested()) {
+            pollfd fds[3] = { { mListen, POLLIN, 0 }, { mWake[0], POLLIN, 0 }, { mLease, POLLIN, 0 } };
+            const nfds_t n = mLease >= 0 ? 3 : 2;
+            if (::poll(fds, n, -1) <= 0) continue;
+            if (n == 3 && fds[2].revents != 0) {
                 // The lease: the peer sends nothing, so anything readable is
                 // either its end (the release) or bytes to ignore.
                 uint8_t byte = 0;
                 const ssize_t got = ::recv(mLease, &byte, 1, MSG_DONTWAIT);
                 if (got == 0 || (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-                    || (fds[1].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0)
+                    || (fds[2].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0)
                     release_lease();
             }
             if ((fds[0].revents & POLLIN) == 0) continue;
@@ -597,14 +690,27 @@ private:
         }
     }
 
-    // The client's request, within AUTH_DEADLINE, or false.
+    // Reads the client's request, however many reads it arrives in. Returns
+    // false if it is not all there within AUTH_DEADLINE, or on the stop.
     bool read_request(int conn, std::array<uint8_t, REQUEST_LEN>* req) {
-        timeval tv { static_cast<time_t>(AUTH_DEADLINE.count()), 0 };
-        ::setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        const auto deadline = std::chrono::steady_clock::now() + AUTH_DEADLINE;
         size_t got = 0;
         while (got < req->size()) {
-            const ssize_t n = ::recv(conn, req->data() + got, req->size() - got, 0);
-            if (n <= 0) return false;   // closed, or the deadline
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+            if (left.count() <= 0) return false;
+            pollfd fds[2] = { { conn, POLLIN, 0 }, { mWake[0], POLLIN, 0 } };
+            if (::poll(fds, 2, static_cast<int>(left.count())) < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            if (fds[1].revents != 0) return false;   // stopping
+            if (fds[0].revents == 0) continue;
+            const ssize_t n = ::recv(conn, req->data() + got, req->size() - got, MSG_DONTWAIT);
+            if (n == 0) return false;   // closed
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+                return false;
+            }
             got += static_cast<size_t>(n);
         }
         return true;
@@ -614,13 +720,14 @@ private:
         uid_t uid = static_cast<uid_t>(-1);
         if (!peer_uid(conn, &uid) || uid != ::geteuid()) return after::close;   // not ours: nothing
         std::array<uint8_t, REQUEST_LEN> req {};
-        if (!read_request(conn, &req) || !admits(req)) {
+        std::optional<uint32_t> role;
+        if (!read_request(conn, &req) || !(role = admitted_role(req, mSecret))) {
             mRefused.fetch_add(1, std::memory_order_relaxed);
             return after::close;
         }
         shm_native_handle segment = shm_invalid_handle;
         after then = after::close;
-        const hello h = answer(role_of(req), &segment, &then);
+        const hello h = answer(*role, &segment, &then);
         // The hold is claimed BEFORE the hello goes: a peer that has its
         // segment must already be the holder, or a second peer could be let
         // in between the hand-off and the claim.
@@ -660,6 +767,7 @@ private:
 
     int mListen = -1;
     int mLease  = -1;
+    int mWake[2] = { -1, -1 };   // the stop's wake: a byte in [1] wakes the poll on [0]
 #endif
     std::string            mEndpoint;
     shm_native_handle      mReader  = shm_invalid_handle;
@@ -781,7 +889,7 @@ inline shm_native_handle attach(const std::string& endpoint, const uint8_t* secr
         CloseHandle(pipe);
         return shm_invalid_handle;
     }
-    if (got != sizeof h || h.magic != MAGIC || h.version != VERSION || h.role != role) {
+    if (got != sizeof h || !hello_matches(h, role)) {
         if (err) *err = "malformed hand-off from " + endpoint;
         CloseHandle(pipe);
         return shm_invalid_handle;
@@ -876,7 +984,7 @@ inline shm_native_handle attach(const std::string& endpoint, const uint8_t* secr
         return -1;
     }
     if (got != static_cast<ssize_t>(sizeof h) || (static_cast<unsigned>(msg.msg_flags) & static_cast<unsigned>(MSG_CTRUNC)) != 0u
-        || h.magic != MAGIC || h.version != VERSION || h.role != role) {
+        || !hello_matches(h, role)) {
         if (received >= 0) ::close(received);
         if (err) *err = "malformed hand-off from " + endpoint;
         ::close(fd);
