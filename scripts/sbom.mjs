@@ -35,7 +35,12 @@
  *       build/sbom). Each is the default build of that target: CMake's option
  *       defaults, read from CMakeLists.txt, decide the cargo features and
  *       which vendored entries are compiled in. A build with other options is
- *       a different product and gets its own document.
+ *       a different product and gets its own document: `--option NAME=ON|OFF`
+ *       (repeatable) overrides a default, and `--variant <label>` names the
+ *       document <outdir>/<project>-<target>-<label>.cdx.json, so Debian's
+ *       package (-DCLOCKWORK_PLUGINS=OFF) has one beside the default build's.
+ *       The pins are written with the same overrides, as one configure builds
+ *       them.
  *
  *       The documents are reproducible from a commit: the list, the lockfiles
  *       and this script are all in the tree, so a project that pins clockwork
@@ -395,7 +400,7 @@ function pinnedComponent(pinProj, commit, doc, file) {
   };
 }
 
-function targetDocument(proj, name, version, options, members, pinned = []) {
+function targetDocument(proj, name, version, options, members, pinned = [], overrides = []) {
   const target = TARGETS[name];
   if (!target) throw new Error(`unknown target ${name}; one of ${Object.keys(TARGETS).join(", ")}`);
   const features = proj.cargo ? cargoFeatures(options, target.windows) : [];
@@ -430,7 +435,10 @@ function targetDocument(proj, name, version, options, members, pinned = []) {
         { name: "clockwork:target", value: name },
         { name: "clockwork:triple", value: target.triple },
         ...(proj.cargo ? [{ name: "clockwork:cargo-features", value: features.join(",") }] : []),
-        { name: "clockwork:build-options", value: "CMakeLists.txt defaults" },
+        { name: "clockwork:build-options",
+          value: overrides.length
+            ? "CMakeLists.txt defaults, " + overrides.map(([k, v]) => k + "=" + (v ? "ON" : "OFF")).join(", ")
+            : "CMakeLists.txt defaults" },
       ],
     },
     components,
@@ -444,8 +452,34 @@ function targetDocument(proj, name, version, options, members, pinned = []) {
 // clockwork too) is written once; reached at two commits, the run stops,
 // since both would be written to the same file. Returns each target's
 // document and the file it was written to.
-function target(proj, which, outdir, version, done = new Map()) {
-  const options = cmakeOptions(proj);
+// A build with other options (`--option NAME=ON|OFF`) is a different product
+// and gets its own document, named by `--variant`: clockwork-linux-x64-deb for
+// Debian's package, which turns the plugin hosts off. One configure builds a
+// project and its pins, so an override applies to every project in the chain
+// that defines the option (SuperSonic's -DCLOCKWORK_PLUGINS=OFF is
+// clockwork's option); one that none of them defines is a mistake.
+function withOverrides(options, overrides) {
+  const out = new Map(options);
+  for (const [k, v] of overrides) if (out.has(k)) out.set(k, v);
+  return out;
+}
+
+// Every CMake option the project and its pins define.
+function definedOptions(proj, out = new Set()) {
+  for (const k of cmakeOptions(proj).keys()) out.add(k);
+  for (const path of proj.pins) definedOptions(project(join(proj.root, path)), out);
+  return out;
+}
+
+// `pinned` is true for a project reached through a pin.
+function target(proj, which, outdir, version, overrides = [], variant = "", done = new Map(), pinned = false) {
+  if (!pinned) {
+    const known = definedOptions(proj);
+    for (const [k] of overrides) {
+      if (!known.has(k)) throw new Error(`--option ${k} names an option neither ${proj.name} nor its pins define`);
+    }
+  }
+  const options = withOverrides(cmakeOptions(proj), overrides);
   const members = workspaceMembers(proj);
   const names = which === "all" ? Object.keys(TARGETS) : [which];
   const pins = proj.pins.map((path) => {
@@ -456,7 +490,7 @@ function target(proj, which, outdir, version, done = new Map()) {
     if (seen && seen.commit !== commit) {
       throw new Error(`${pin.name} is pinned at ${seen.commit.slice(0, 7)} and at ${commit.slice(0, 7)} (${path})`);
     }
-    const docs = seen ? seen.docs : target(pin, which, outdir, commit.slice(0, 7), done);
+    const docs = seen ? seen.docs : target(pin, which, outdir, commit.slice(0, 7), overrides, variant, done, true);
     done.set(pin.name, { commit, docs });
     return { pin, commit, docs };
   });
@@ -464,8 +498,8 @@ function target(proj, which, outdir, version, done = new Map()) {
   const written = {};
   for (const name of names) {
     const pinned = pins.map(({ pin, commit, docs }) => pinnedComponent(pin, commit, docs[name].doc, docs[name].file));
-    const doc = targetDocument(proj, name, version, options, members, pinned);
-    const out = join(outdir, `${proj.name}-${name}.cdx.json`);
+    const doc = targetDocument(proj, name, version, options, members, pinned, overrides);
+    const out = join(outdir, `${proj.name}-${name}${variant ? `-${variant}` : ""}.cdx.json`);
     writeFileSync(out, JSON.stringify(doc, null, 2) + "\n");
     written[name] = { doc, file: out };
     const kinds = { cargo: 0, npm: 0, vendored: 0 };
@@ -609,16 +643,33 @@ async function main() {
   const at = argv.indexOf("--root");
   const proj = project(at >= 0 ? resolve(argv[at + 1]) : ROOT);
   if (at >= 0) argv.splice(at, 2);
+  // `--option NAME=ON|OFF`, repeatable, and `--variant <label>`: a build with
+  // other options than the defaults, written as its own document.
+  const overrides = [];
+  let variant = "";
+  for (let i = argv.indexOf("--option"); i >= 0; i = argv.indexOf("--option")) {
+    const m = /^([A-Z0-9_]+)=(ON|OFF)$/.exec(argv[i + 1] ?? "");
+    if (!m) throw new Error(`--option takes NAME=ON or NAME=OFF, not "${argv[i + 1] ?? ""}"`);
+    overrides.push([m[1], m[2] === "ON"]);
+    argv.splice(i, 2);
+  }
+  const vi = argv.indexOf("--variant");
+  if (vi >= 0) {
+    variant = argv[vi + 1] ?? "";
+    if (!/^[a-z0-9-]+$/.test(variant)) throw new Error("--variant takes a label of lower-case letters, digits and dashes");
+    argv.splice(vi, 2);
+  }
+  if (overrides.length && !variant) throw new Error("--option needs --variant: a build with other options is a different document");
   const [cmd, ...args] = argv;
   if (cmd === "check") check(proj);
-  else if (cmd === "target" && args.length >= 1) target(proj, args[0], args[1] ? resolve(args[1]) : join(proj.root, "build", "sbom"), args[2]);
+  else if (cmd === "target" && args.length >= 1) target(proj, args[0], args[1] ? resolve(args[1]) : join(proj.root, "build", "sbom"), args[2], overrides, variant);
   else if (cmd === "scan" && args.length >= 1) {
     const { lines, problems } = await scan(args.map((a) => resolve(a)), { vex: readVex(proj), root: proj.root });
     for (const l of lines) console.log(l);
     for (const p of problems) console.error(`sbom: ${p}`);
     process.exit(problems.length ? 1 : 0);
   } else {
-    console.error("usage: sbom.mjs [--root <dir>] check | target <name>|all [outdir] [version] | scan <document>...");
+    console.error("usage: sbom.mjs [--root <dir>] check | target <name>|all [outdir] [version] [--option NAME=ON|OFF]... [--variant <label>] | scan <document>...");
     process.exit(2);
   }
 }

@@ -388,3 +388,26 @@ test("the VEX statements of every project in the chain apply, each tree once", (
   const clockworks = JSON.parse(readFileSync(join(root, "docs", "vex.cdx.json"), "utf8")).vulnerabilities.map((v) => v.id);
   assert.deepEqual(ids, ["TOP-1", "MID-1", ...clockworks]);
 });
+
+// A build with other options is a different product and gets its own
+// document: Debian's package turns the plugin hosts off (-DCLOCKWORK_PLUGINS=OFF),
+// so its SBOM must not list CLAP or VST3, and must say which options it was
+// built with. `--option NAME=ON|OFF` overrides a default; `--variant` names the
+// document so it sits beside the default one.
+test("a target built with other options gets a document of its own, listing only what that build compiles in", () => {
+  execFileSync("node", [script, "target", "linux-x64", out, "test", "--option", "CLOCKWORK_PLUGINS=OFF", "--variant", "deb"],
+               { encoding: "utf8", cwd: root });
+  const deb = JSON.parse(readFileSync(join(out, "clockwork-linux-x64-deb.cdx.json"), "utf8"));
+  const n = new Set(deb.components.map((c) => c.name.split(" ")[0]));
+  for (const off of ["CLAP", "VST"]) assert.ok(!n.has(off), `the deb document lists ${off}`);
+  assert.ok(n.has("oscpack"));
+  assert.equal(deb.metadata.properties.find((p) => p.name === "clockwork:target").value, "linux-x64");
+  assert.match(deb.metadata.properties.find((p) => p.name === "clockwork:build-options").value, /CLOCKWORK_PLUGINS=OFF/);
+  // The default document is untouched by the variant.
+  const dflt = JSON.parse(readFileSync(join(out, "clockwork-linux-x64.cdx.json"), "utf8"));
+  assert.ok(new Set(dflt.components.map((c) => c.name.split(" ")[0])).has("CLAP"));
+  // An option CMakeLists.txt does not define is a mistake, not a silent no-op.
+  assert.throws(() => execFileSync("node", [script, "target", "linux-x64", out, "test", "--option", "CLOCKWORK_NOPE=OFF", "--variant", "x"],
+                                   { encoding: "utf8", cwd: root, stdio: "pipe" }),
+                /CLOCKWORK_NOPE/);
+});
