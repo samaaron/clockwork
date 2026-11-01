@@ -11,16 +11,17 @@
     scheduler core and fire loop (clockwork_fire_due) the engine runs, with the host's
     osc/midi backends in place of the DSP default. Decoupled from sockets so it
     is unit-testable: ingest() may be called from a recv thread (it only locks
-    the assets area), tick() is called from the single scheduler thread that owns the
-    core.
+    the assets area and wakes the scheduler thread), tick() is called from the
+    single scheduler thread that owns the core, which sleeps between ticks
+    until nextDue() or an arrival.
 */
 
 #pragma once
 
 // The standalone scheduler host exists to hold timed messages; with no store
-// there is nothing for it to be. No CMake target compiles src/host at all, so
-// this guard is what an accidental include from a CLOCKWORK_SCHEDULER=0
-// build hits: a clear error rather than a wall of them.
+// there is nothing for it to be. Its CMake target is only defined with the
+// store, so this guard is what an accidental include from a
+// CLOCKWORK_SCHEDULER=0 build hits: a clear error rather than a wall of them.
 #if !CLOCKWORK_SCHEDULER
 #error "host_scheduler.h requires CLOCKWORK_SCHEDULER=1 (the standalone scheduler host is the timed queue)"
 #endif
@@ -36,6 +37,12 @@
 #include "scheduler/schedule_parse.h"
 #include "scheduler/fire_due.h"
 #include "OscIngress.h"
+#include "workers/wait_word.h"
+#include "clock.h"
+
+#include <algorithm>
+#include <chrono>
+#include <stop_token>
 
 namespace clockwork_host {
 
@@ -93,6 +100,39 @@ public:
             });
     }
 
+    // Returns the timetag of the earliest held event as of the last tick(),
+    // or INT64_MAX when nothing is held. Tick thread only.
+    int64_t nextDue() const { return mCore.nextTime(); }
+
+    // ingest() bumps this for every message it queues. The tick thread waits
+    // on it between ticks, with nextDue() as the deadline.
+    ClockworkWaitWord& arrivals() { return mArrivals; }
+
+    // The longest the tick thread sleeps while it holds an event. Timetags
+    // use the wall clock, which a user or a first NTP sync can set, but the
+    // sleep uses the steady clock. This bound is how soon the thread notices
+    // a wall clock set forward.
+    static constexpr std::chrono::seconds kWallClockFollow{1};
+
+    // Runs the tick thread until `stop`: tick at the wall clock's time
+    // (`wall` returns the current timetag), then sleep until the next event
+    // is due or a message arrives (run_worker).
+    template <class Wall = int64_t (*)()>
+    void run(const std::stop_token& stop, Wall wall = &osc_now) {
+        clockwork::run_worker(mArrivals, stop, [this, &wall] {
+            // Read both clocks together, before the tick, so the sleep is
+            // measured from the moment `now` names, not from after the sends.
+            const auto steady = std::chrono::steady_clock::now();
+            const int64_t now = wall();
+            tick(now);
+            const int64_t next = nextDue();
+            if (next == INT64_MAX) return clockwork::NextPass::woken();
+            const std::chrono::microseconds until =
+                std::min<std::chrono::microseconds>(osc_interval(next - now), kWallClockFollow);
+            return clockwork::NextPass::until(steady + until);
+        });
+    }
+
     int pending() const { return mCore.size(); }
 
 private:
@@ -108,14 +148,18 @@ private:
     };
 
     void push(Command&& c) {
-        std::lock_guard<std::mutex> lk(mMx);
-        mAssets.push_back(std::move(c));
+        {
+            std::lock_guard<std::mutex> lk(mMx);
+            mAssets.push_back(std::move(c));
+        }
+        clockwork::bump(mArrivals);
     }
 
     Core                 mCore;
     ClockworkSysRoutes&        mRoutes;
     std::mutex           mMx;
     std::vector<Command> mAssets;
+    ClockworkWaitWord    mArrivals;
 };
 
 }  // namespace clockwork_host

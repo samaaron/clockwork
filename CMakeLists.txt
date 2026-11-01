@@ -1328,9 +1328,8 @@ endif()
 
 # ─── The standalone SCHEDULER host ───────────────────────────────────────────
 # A different program from the one above: an OSC/MIDI event scheduler with no
-# synthesis engine, driving the timed store off the wall clock. lanes.h points
-# at this shape as what a minimal host looks like. Built with the standalone
-# tree so it keeps compiling against the boundary.
+# synthesis engine, driving the timed store off the wall clock. Built with the
+# standalone tree so it keeps compiling against the boundary.
 #
 # Needs the timed store, because scheduling is the entire program: with
 # CLOCKWORK_SCHEDULER=OFF there is nothing for it to be.

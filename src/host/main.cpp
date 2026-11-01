@@ -39,17 +39,36 @@
 #include "clockwork_midi.h"
 #endif
 
-#include <atomic>
-#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stop_token>
 #include <thread>
+#if !defined(_WIN32)
+#  include <pthread.h>
+#endif
 
 namespace {
-std::atomic<bool> g_running{true};
-void on_signal(int) { g_running.store(false); }
+// Requesting this stop wakes and ends the scheduler thread (run_worker).
+std::stop_source g_stopping;
+
+#if defined(_WIN32)
+// Windows runs a console's Ctrl-C handler on a thread of its own, which may
+// stop the scheduler thread as any thread can.
+void on_signal(int) { g_stopping.request_stop(); }
+#else
+// main blocks SIGINT and SIGTERM in every thread before any thread starts,
+// and one thread takes them with sigwait. A signal handler cannot safely
+// wake a thread; that thread can.
+sigset_t stop_signals() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    return set;
+}
+#endif
 
 void on_packet(void* ctx, uint32_t /*conn*/, const uint8_t* osc, uint32_t len) {
     static_cast<clockwork_host::HostScheduler*>(ctx)->ingest(osc, len);
@@ -99,6 +118,17 @@ extern "C" int clockwork_tap_geometry(size_t*, size_t*, size_t*, size_t*, unsign
 int main(int argc, char** argv) {
     int control_port = argc > 1 ? std::atoi(argv[1]) : 4560;
     int loopback     = argc > 2 ? std::atoi(argv[2]) : 1;
+
+#if !defined(_WIN32)
+    // Done before any thread exists, so every thread inherits the mask. The
+    // handlers go back to the default first: a shell that starts this in the
+    // background may pass on SIG_IGN, which discards the signal before
+    // sigwait can take it.
+    const sigset_t stopSignals = stop_signals();
+    std::signal(SIGINT, SIG_DFL);
+    std::signal(SIGTERM, SIG_DFL);
+    pthread_sigmask(SIG_BLOCK, &stopSignals, nullptr);
+#endif
 
     ClockworkOsc* osc = clockwork_osc_create(nullptr, osc_emit_noop, osc_dropped_noop);
     if (!osc) {
@@ -160,8 +190,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+#if defined(_WIN32)
     std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+#else
+    std::jthread signals([&stopSignals](const std::stop_token& stop) {
+        const pthread_t self = pthread_self();
+        const std::stop_callback wake(stop, [self] { pthread_kill(self, SIGTERM); });
+        int sig = 0;
+        sigwait(&stopSignals, &sig);
+        g_stopping.request_stop();
+    });
+#endif
 #ifdef CLOCKWORK_WITH_MIDI
     const char* caps = "scheduler + osc + midi";
 #else
@@ -170,12 +209,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "clockwork-scheduler: %s on control port %d (%s)\n",
                  caps, control_port, loopback ? "loopback" : "all interfaces");
 
-    // Drive the scheduler at ~1 ms granularity off the wall clock; tick()
-    // dispatches whatever just came due through the route table inline.
-    while (g_running.load()) {
-        sched.tick(clockwork_host::osc_now());
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // tick() dispatches whatever has come due through the route table inline,
+    // and between ticks this thread sleeps until the next event is due or a
+    // message arrives.
+    sched.run(g_stopping.get_token());
 
     clockwork_osc_stream_stop(server);
 #ifdef CLOCKWORK_WITH_MIDI
