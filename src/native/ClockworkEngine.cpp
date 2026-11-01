@@ -53,6 +53,10 @@ extern "C" {
     // scope, taps) at this address — the public POSIX segment — instead of the
     // process-local arena_storage. Everything is observable for free.
     extern uint8_t* g_external_segment;
+    // Where the guest build writes the lanes into the arena's table: the
+    // command segment's offsets, or (CLOCKWORK_SPACE_UNKNOWN) this process's
+    // own addresses.
+    void clockwork_place_lanes(uint32_t space, uint64_t assets_at, uint64_t returns_at);
 
     // Real-pointer arena base (== init_memory's `shared_memory`). Use for any
     // engine region so native glue stays consistent with the unified arena.
@@ -822,16 +826,21 @@ void ClockworkEngine::initEngine(const Config& cfg) {
 
     // -- Create shared memory (owned by engine, survives cold swaps) --------
     // Anonymous: nothing is named, nothing is cleaned up. Readers get it from
-    // the host's attach endpoint (shm_attach.hpp) via shmNativeHandle().
+    // the host's attach endpoint (shm_attach.hpp) via shmReaderHandle(); the
+    // command segment, with the peer plane and the lanes, only when the host
+    // asked for the plane (docs/SEGMENTS.md).
     if (cfg.shmSegment) {
         try {
-            mShmemCreator = std::make_unique<shm_segment_creator>(cfg.assetsBytes, cfg.returnsBytes);
-            // Point the engine's whole shared_memory.h arena at the public
-            // segment: rings, control, metrics, node-tree, scope and
-            // scope all live there, observable cross-process for free.
+            mShmemCreator = std::make_unique<shm_segment_creator>();
+            // Point the engine's whole shared_memory.h arena at the published
+            // segment: rings, control, metrics, node-tree, scope and taps all
+            // live there, observable cross-process for free.
             g_external_segment = mShmemCreator->get_base();
+            if (cfg.shmCommands)
+                mCommandCreator = std::make_unique<shm_command_segment_creator>(cfg.assetsBytes, cfg.returnsBytes);
         } catch (const std::exception& e) {
             clockwork_log("[engine] shared memory creation failed: %s", e.what());
+            mCommandCreator.reset();
             mShmemCreator.reset();
             g_external_segment = nullptr;
         }
@@ -896,29 +905,39 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // reads what the guest publishes through the returns area.
     // Sized by the host's config, like the segment's lanes; untouched here,
     // so the pages cost nothing until a client writes them.
+    // The lanes live in the command segment when there is one — the peer
+    // writes the assets area in place — and in this process otherwise.
     const auto laneGeom = detail_shm_segment::shm_lane_geometry::of(mCurrentConfig.assetsBytes, mCurrentConfig.returnsBytes);
-    if (!mShmemCreator
+    if (!mCommandCreator
         && (!mGuestLanes || mGuestLanesAssetsBytes != laneGeom.assets_size
                          || mGuestLanesReturnsBytes != laneGeom.returns_size)) {
         mGuestLanes.reset(new (std::nothrow) uint8_t[laneGeom.assets_size + laneGeom.returns_size]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr; make_unique cannot be nothrow
         mGuestLanesAssetsBytes  = mGuestLanes ? laneGeom.assets_size  : 0;
         mGuestLanesReturnsBytes = mGuestLanes ? laneGeom.returns_size : 0;
     }
-    uint8_t* guestAssets      = mShmemCreator ? mShmemCreator->get_assets()
-                                             : mGuestLanes.get();
-    uint32_t guestAssetsBytes = mShmemCreator
-        ? static_cast<uint32_t>(mShmemCreator->get_assets_size())
+    uint8_t* guestAssets      = mCommandCreator ? mCommandCreator->get_assets()
+                                                : mGuestLanes.get();
+    uint32_t guestAssetsBytes = mCommandCreator
+        ? static_cast<uint32_t>(mCommandCreator->get_assets_size())
         : static_cast<uint32_t>(mGuestLanesAssetsBytes);
     mGuestAssets      = guestAssets;
     mGuestAssetsBytes = guestAssetsBytes;
-    uint8_t* guestReturns      = mShmemCreator ? mShmemCreator->get_returns()
-                                              : (mGuestLanes ? mGuestLanes.get() + mGuestLanesAssetsBytes
-                                                             : nullptr);
-    uint32_t guestReturnsBytes = mShmemCreator
-        ? static_cast<uint32_t>(mShmemCreator->get_returns_size())
+    uint8_t* guestReturns      = mCommandCreator ? mCommandCreator->get_returns()
+                                                 : (mGuestLanes ? mGuestLanes.get() + mGuestLanesAssetsBytes
+                                                                : nullptr);
+    uint32_t guestReturnsBytes = mCommandCreator
+        ? static_cast<uint32_t>(mCommandCreator->get_returns_size())
         : static_cast<uint32_t>(mGuestLanesReturnsBytes);
     mGuestReturns      = guestReturns;
     mGuestReturnsBytes = guestReturnsBytes;
+    // Where the arena's table says the lanes are: the command segment's
+    // offsets, which every reader of the arena can see and only the peer
+    // can reach; else this process's addresses (the guest build writes them).
+    if (mCommandCreator)
+        clockwork_place_lanes(CLOCKWORK_SPACE_COMMAND_SEGMENT,
+                              mCommandCreator->assets_offset(), mCommandCreator->returns_offset());
+    else
+        clockwork_place_lanes(CLOCKWORK_SPACE_UNKNOWN, 0, 0);
 
     // The guest's memory is sized by the engine itself, every build, from
     // what the guest declares (dsp_memory_bytes, dsp_memory_bulk_bytes) and
@@ -985,8 +1004,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // drains its command ring and ShmTransport sends through this slot.
     // Disabled (or no segment) ⇒ the slot stays null and both sides are inert.
     if (cfg.shmCommands) {
-        if (mShmemCreator) {
-            mPeerPlane.store(mShmemCreator->get_peer_plane(), std::memory_order_release);
+        if (mCommandCreator) {
+            mPeerPlane.store(mCommandCreator->get_peer_plane(), std::memory_order_release);
         } else {
             clockwork_log("[engine] WARNING: shmCommands requested but there is "
                             "no SHM segment (!shmSegment) — command plane disabled");
@@ -1580,6 +1599,7 @@ void ClockworkEngine::shutdown() {
     // The clock's state lives in this arena; point it back at its own copy
     // before the arena goes, or a second shutdown() reads freed memory.
     mClockworkClock.unbindStateFromShm();
+    mCommandCreator.reset();
     mShmemCreator.reset();
 }
 

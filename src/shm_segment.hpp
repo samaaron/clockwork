@@ -2,14 +2,25 @@
 // Copyright (c) 2025 Sam Aaron
 //  Shared memory IPC interface to clockwork.
 //
-//  A fixed-layout segment other processes map. It is ANONYMOUS: the engine
-//  creates it with no name (memfd on Linux, an unlinked POSIX object on macOS,
-//  an unnamed file mapping on Windows) and hands a duplicate of the handle to
-//  each reader over the attach endpoint (shm_attach.hpp). Nothing is looked
-//  up by name, so there is no namespace to collide in, nothing another user
-//  can plant, and nothing left behind when the engine dies — the memory goes
-//  with its last mapping. It holds a clock view, ring views, a node-tree
-//  mirror, native stats and the peer plane.
+//  Two fixed-layout segments other processes map (docs/SEGMENTS.md):
+//
+//    the PUBLISHED segment — a small header and the arena blob: clock,
+//    metrics, scopes, taps, the node tree, the engine's rings. The engine
+//    writes it; every reader maps it READ-ONLY, from a read-only descriptor
+//    the engine makes for the purpose, so a reader cannot write it however
+//    it tries.
+//
+//    the COMMAND segment — the peer plane (shm_peer_plane.h) and the two
+//    bulk lanes (the assets area a client fills, the returns area the guest
+//    fills). It exists only when the host asked for the shared-memory
+//    command plane, and one peer at a time maps it read-write.
+//
+//  Both are ANONYMOUS: the engine creates them with no name (memfd on Linux,
+//  an unlinked POSIX object on macOS, an unnamed file mapping on Windows)
+//  and hands a duplicate of the handle to each reader over the attach
+//  endpoint (shm_attach.hpp). Nothing is looked up by name, so there is no
+//  namespace to collide in, nothing another user can plant, and nothing left
+//  behind when the engine dies — the memory goes with its last mapping.
 //
 //  The named create/open pair below still exists for the plugin bridge
 //  (plugin_bridge.h), whose segment is pid-named and shared with a child the
@@ -72,44 +83,43 @@ using ::read_sample_clock;
 using std::string;
 
 
-// The public segment is a small handshake header followed by the unified
-// shared_memory.h arena blob — the SAME layout the engine uses in
-// arena_storage (native) / the WASM SAB. One layout, one source of
-// truth; no separate native layout to drift. The peer command plane
-// (shm_peer_plane.h) sits after the blob: it is native-segment-only (its
-// consumers are the native host and an external peer), so the arena layout —
-// and with it the web SAB and embedded profiles — is untouched by it.
-// Headroom, not a snug fit: every field added to the header is a region a
-// reader needs to find without compile-time knowledge, and the static_assert
-// below fails the build if the header outgrows this.
+// ──── The published segment's layout ────────────────────────────────────
+//
+// A small handshake header followed by the unified shared_memory.h arena
+// blob — the SAME layout the engine uses in arena_storage (native) / the
+// WASM SAB. One layout, one source of truth; no separate native layout to
+// drift. Headroom, not a snug fit: every field added to the header is a
+// region a reader needs to find without compile-time knowledge, and the
+// static_assert below fails the build if the header outgrows this.
 static constexpr size_t SHM_BLOB_OFFSET = 256;  // aligned, >= sizeof(shm_segment_header)
-// Rounded up to 8: the arena total is only guaranteed 4-aligned, and the peer
-// plane header is alignas(8).
-static constexpr size_t SHM_PEER_OFFSET = (SHM_BLOB_OFFSET + ARENA_SIZE + 7u) & ~size_t{7};
-// The guest's two bulk regions, last because they are by far the largest and
-// because nothing before them should move when a size changes. Each is
-// 16-aligned so a guest can place anything it likes at a base without
-// re-aligning first.
+static constexpr size_t SEGMENT_SIZE    = SHM_BLOB_OFFSET + ARENA_SIZE;
+
+// ──── The command segment's layout ──────────────────────────────────────
 //
-// ONE WRITER EACH: the assets area is written only by the client, the returns area only by
-// the guest. Keeping them apart is what makes that enforceable rather than
-// merely agreed.
+// Its own header, then the peer plane, then the guest's two bulk regions,
+// last because they are by far the largest and because nothing before them
+// should move when a size changes. Each lane is 16-aligned so a guest can
+// place anything it likes at a base without re-aligning first.
 //
-// The guest's arena is not among them: no client maps it, so it is the
-// engine's own allocation rather than a region of this segment.
+// ONE WRITER EACH: the plane's command ring and the assets area are written
+// only by the peer, its reply ring and the returns area only by the engine
+// and the guest. Keeping them apart is what makes that enforceable rather
+// than merely agreed. The guest's arena is not here: no client maps it, so
+// it is the engine's own allocation rather than a region of a segment.
+static constexpr size_t SHM_COMMAND_HEADER_BYTES = 256;   // aligned, >= sizeof(shm_command_header)
+static constexpr size_t SHM_PEER_OFFSET          = SHM_COMMAND_HEADER_BYTES;   // alignas(8) holds: 256 % 8 == 0
 static constexpr size_t SHM_ASSETS_OFFSET =
     (SHM_PEER_OFFSET + SHM_PEER_PLANE_TOTAL_SIZE + 15u) & ~size_t{15};
 static constexpr size_t SHM_ASSETS_SIZE   = static_cast<size_t>(CLOCKWORK_ASSETS_BYTES);
-
 static constexpr size_t SHM_RETURNS_OFFSET =
     (SHM_ASSETS_OFFSET + SHM_ASSETS_SIZE + 15u) & ~size_t{15};
 static constexpr size_t SHM_RETURNS_SIZE   = static_cast<size_t>(CLOCKWORK_RETURNS_BYTES);
-
-static constexpr size_t SEGMENT_SIZE = SHM_RETURNS_OFFSET + SHM_RETURNS_SIZE;
+static constexpr size_t COMMAND_SEGMENT_SIZE = SHM_RETURNS_OFFSET + SHM_RETURNS_SIZE;
 
 // The lanes are sized by the host at launch (ClockworkEngine::Config), the
-// constants above being the defaults; the segment grows to fit, and a reader
-// takes the geometry from the header. Everything before the assets area is fixed.
+// constants above being the defaults; the command segment grows to fit, and
+// a peer takes the geometry from the header. Everything before the assets
+// area is fixed.
 struct shm_lane_geometry {
     size_t assets_offset, assets_size, returns_offset, returns_size, segment_size;
     static constexpr size_t align16(size_t v) { return (v + 15u) & ~size_t{15}; }
@@ -120,23 +130,11 @@ struct shm_lane_geometry {
         return { SHM_ASSETS_OFFSET, in, out_off, out, out_off + out };
     }
 };
-static_assert(shm_lane_geometry::of(SHM_ASSETS_SIZE, SHM_RETURNS_SIZE).segment_size == SEGMENT_SIZE,
+static_assert(shm_lane_geometry::of(SHM_ASSETS_SIZE, SHM_RETURNS_SIZE).segment_size == COMMAND_SEGMENT_SIZE,
               "the default geometry is the constant one");
 
 // ──── Platform shared memory primitives ─────────────────────────────────
 
-struct shm_handle {
-    void*  ptr  = nullptr;
-    size_t size = 0;
-#ifdef _WIN32
-    HANDLE mapping = nullptr;
-#else
-    int    fd  = -1;
-#endif
-};
-
-// The OS object behind a mapping, as it travels between processes: a file
-// descriptor over a Unix socket, a HANDLE duplicated into the receiver.
 #ifdef _WIN32
 using shm_native_handle = HANDLE;
 static const shm_native_handle shm_invalid_handle = nullptr;
@@ -147,6 +145,28 @@ static const shm_native_handle shm_invalid_handle = -1;
 inline bool shm_handle_valid(shm_native_handle h) { return h >= 0; }
 #endif
 
+struct shm_handle {
+    void*  ptr  = nullptr;
+    size_t size = 0;
+#ifdef _WIN32
+    HANDLE mapping = nullptr;
+#else
+    int    fd  = -1;
+#endif
+    // A read-only handle onto the same object, when the creator asked for
+    // one (shm_create_anonymous): what the published segment is handed out
+    // as. Invalid otherwise.
+    shm_native_handle read_only = shm_invalid_handle;
+
+    shm_native_handle native() const {
+#ifdef _WIN32
+        return mapping;
+#else
+        return fd;
+#endif
+    }
+};
+
 // Close a bare native handle that is not (or no longer) mapped.
 inline void shm_close_native(shm_native_handle h) {
 #ifdef _WIN32
@@ -156,9 +176,9 @@ inline void shm_close_native(shm_native_handle h) {
 #endif
 }
 
-// A second reference to the same object, for a reader in this process (a
-// test, an in-process GUI) that wants a mapping of its own. Owned by the
-// caller; shm_segment_client takes it.
+// A second reference to the same object, with the same access, for a reader
+// in this process (a test, an in-process GUI) that wants a mapping of its
+// own. Owned by the caller; the client classes take it.
 inline shm_native_handle shm_dup_handle(shm_native_handle h) {
 #ifdef _WIN32
     HANDLE out = nullptr;
@@ -182,6 +202,13 @@ inline intptr_t shm_handle_to_intptr(shm_native_handle h) {
     return reinterpret_cast<intptr_t>(h);
 #else
     return static_cast<intptr_t>(h);
+#endif
+}
+inline shm_native_handle shm_handle_from_intptr(intptr_t v) {
+#ifdef _WIN32
+    return reinterpret_cast<shm_native_handle>(v);
+#else
+    return static_cast<shm_native_handle>(v);
 #endif
 }
 
@@ -254,15 +281,22 @@ inline shm_handle shm_create(const string& name, size_t size) {
     return h;
 }
 
-// Create a segment with no name at all.
+// Create a segment with no name at all, mapped read-write for its creator.
+// With `with_read_only`, also a READ-ONLY handle onto the same object
+// (shm_handle::read_only): the one a published segment is handed out as, so
+// a reader's mapping can only ever be PROT_READ / FILE_MAP_READ — the kernel
+// refuses anything else.
 //
-// Linux: memfd_create, the object that exists for exactly this purpose. Other
-// POSIX systems (macOS has no memfd): a POSIX object under a throwaway random
-// name, unlinked the moment it is open — the descriptor keeps it alive and
-// nothing can ever open it by name again. Windows: an unnamed file mapping.
-// Every handle is close-on-exec: the plugin bridge and any other child gets
-// its memory by an explicit hand-off, never by inheritance.
-inline shm_handle shm_create_anonymous(size_t size) {
+// Linux: memfd_create, the object that exists for exactly this purpose; the
+// read-only handle is the memfd opened again through /proc/self/fd. Other
+// POSIX systems (macOS has no memfd): a POSIX object under a throwaway
+// random name, opened a second time O_RDONLY and unlinked the moment both
+// are open — the descriptors keep it alive and nothing can ever open it by
+// name again. Windows: an unnamed file mapping, its read-only handle a
+// duplicate with FILE_MAP_READ as its whole access. Every handle is
+// close-on-exec: the plugin bridge and any other child gets its memory by an
+// explicit hand-off, never by inheritance.
+inline shm_handle shm_create_anonymous(size_t size, bool with_read_only = false) {
     shm_handle h;
     h.size = size;
 #ifdef _WIN32
@@ -280,6 +314,18 @@ inline shm_handle shm_create_anonymous(size_t size) {
         h.mapping = nullptr;
         throw std::runtime_error("MapViewOfFile (anonymous) failed: " + why);
     }
+    if (with_read_only) {
+        HANDLE ro = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), h.mapping, GetCurrentProcess(), &ro,
+                             FILE_MAP_READ, FALSE, 0)) {
+            const std::string why = clockwork_path::last_error_text(GetLastError());
+            UnmapViewOfFile(h.ptr);
+            CloseHandle(h.mapping);
+            h.mapping = nullptr;
+            throw std::runtime_error("DuplicateHandle (read-only) failed: " + why);
+        }
+        h.read_only = ro;
+    }
 #else
     h.fd = -1;
 #  if defined(__linux__)
@@ -293,6 +339,15 @@ inline shm_handle shm_create_anonymous(size_t size) {
         ::close(h.fd);
         throw std::runtime_error("fchmod(0600) failed for the anonymous segment");
     }
+    if (h.fd >= 0 && with_read_only) {
+        std::array<char, 64> path{};
+        std::snprintf(path.data(), path.size(), "/proc/self/fd/%d", h.fd);
+        h.read_only = ::open(path.data(), O_RDONLY | O_CLOEXEC);
+        if (h.read_only < 0) {
+            ::close(h.fd);
+            throw std::runtime_error("open (read-only) failed for the anonymous segment");
+        }
+    }
 #  endif
     if (h.fd < 0) {
         // A name nobody can guess, alive for the few instructions between
@@ -305,8 +360,20 @@ inline shm_handle shm_create_anonymous(size_t size) {
                           static_cast<int>(::getpid()),
                           static_cast<unsigned>(r >> 32u), static_cast<unsigned>(r));
             h.fd = ::shm_open(name.data(), O_CREAT | O_EXCL | O_RDWR, 0600);
-            if (h.fd >= 0) ::shm_unlink(name.data());
-            else if (errno != EEXIST) break;
+            if (h.fd < 0) {
+                if (errno != EEXIST) break;
+                continue;
+            }
+            if (with_read_only) {
+                h.read_only = ::shm_open(name.data(), O_RDONLY, 0);
+                if (h.read_only < 0) {
+                    ::close(h.fd);
+                    ::shm_unlink(name.data());
+                    throw std::runtime_error("shm_open (read-only) failed for the anonymous segment");
+                }
+                ::fcntl(h.read_only, F_SETFD, FD_CLOEXEC);
+            }
+            ::shm_unlink(name.data());
         }
         if (h.fd < 0)
             throw std::runtime_error("anonymous shm_open failed");
@@ -314,26 +381,30 @@ inline shm_handle shm_create_anonymous(size_t size) {
     }
     if (ftruncate(h.fd, static_cast<off_t>(size)) < 0) {
         ::close(h.fd);
+        shm_close_native(h.read_only);
         throw std::runtime_error("ftruncate (anonymous segment) failed");
     }
     h.ptr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, h.fd, 0);
     if (h.ptr == MAP_FAILED) {
         ::close(h.fd);
+        shm_close_native(h.read_only);
         throw std::runtime_error("mmap (anonymous segment) failed");
     }
 #endif
     return h;
 }
 
-// Map a segment from a handle received from its creator. Takes ownership of
-// the handle on every path, including failure.
-inline shm_handle shm_map_handle(shm_native_handle native) {
+// Map a segment from a handle received from its creator, writable or not.
+// A read-only handle maps only read-only; asking for more is the kernel's
+// refusal, reported here. Takes ownership of the handle on every path,
+// including failure.
+inline shm_handle shm_map_handle(shm_native_handle native, bool writable) {
     shm_handle h;
     if (!shm_handle_valid(native))
         throw std::runtime_error("shm_map_handle: no handle");
 #ifdef _WIN32
     h.mapping = native;
-    h.ptr = MapViewOfFile(h.mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    h.ptr = MapViewOfFile(h.mapping, writable ? FILE_MAP_ALL_ACCESS : FILE_MAP_READ, 0, 0, 0);
     if (!h.ptr) {
         const std::string why = clockwork_path::last_error_text(GetLastError());
         CloseHandle(h.mapping);
@@ -353,7 +424,7 @@ inline shm_handle shm_map_handle(shm_native_handle native) {
         throw std::runtime_error("fstat (received handle) failed");
     }
     h.size = static_cast<size_t>(st.st_size);
-    h.ptr = ::mmap(nullptr, h.size, PROT_READ | PROT_WRITE, MAP_SHARED, h.fd, 0);
+    h.ptr = ::mmap(nullptr, h.size, PROT_READ | (writable ? PROT_WRITE : 0), MAP_SHARED, h.fd, 0);
     if (h.ptr == MAP_FAILED) {
         ::close(h.fd);
         throw std::runtime_error("mmap (received handle) failed");
@@ -406,10 +477,14 @@ inline void shm_close(shm_handle& h) {
 #ifdef _WIN32
     if (h.ptr)     UnmapViewOfFile(h.ptr);
     if (h.mapping) CloseHandle(h.mapping);
+    h.mapping = nullptr;
 #else
     if (h.ptr && h.ptr != MAP_FAILED) ::munmap(h.ptr, h.size);
     if (h.fd >= 0)                    ::close(h.fd);
+    h.fd = -1;
 #endif
+    shm_close_native(h.read_only);
+    h.read_only = shm_invalid_handle;
     h.ptr = nullptr;
 }
 
@@ -425,12 +500,9 @@ inline void shm_remove(const string& name) {
 #endif
 }
 
-// ──── Segment handshake header ──────────────────────────────────────────
+// ──── The published segment's header ────────────────────────────────────
 //
-// Segment layout (unified, MAGIC 0x5C09E00B):
-//
-//   shm_segment_header        (MAGIC + the self-describing geometry below;
-//                              184 B today, inside the 256 B reserved)
+//   shm_segment_header        (MAGIC + where the blob is)
 //   <pad to SHM_BLOB_OFFSET>
 //   shared_memory.h arena blob (ARENA_SIZE) — the *same* layout the
 //   engine uses in arena_storage / the WASM SAB. The engine points its
@@ -441,8 +513,7 @@ inline void shm_remove(const string& name) {
 // MAGIC changes with the layout; a reader accepts the current value only. The
 // blob's regions are described by the arena's own header (clockwork_arena.h),
 // which every reader (in-process, segment, worklet) takes the same way; this
-// header keeps only what is segment-relative. The segment is anonymous: no
-// name, handed over by shm_attach.hpp.
+// header keeps only what is segment-relative.
 //
 // Publication: the creator zeroes the whole segment and writes the header
 // geometry, but defers the MAGIC store. The engine then populates the arena
@@ -452,76 +523,66 @@ inline void shm_remove(const string& name) {
 // both the geometry AND a fully-populated arena — never a half-zeroed one where
 // e.g. node entries read id == 0 (aliasing the real root group) instead of the
 // id == -1 empty marker. MAGIC visible ⇒ segment ready.
-
-// Self-describing handshake: the creator publishes every region's offset and
-// geometry, so a reader needs no compile-time knowledge of the
-// arena layout — it locates metrics, rings, node-tree, scope and taps
-// purely from these fields. This makes the consumer drift-proof: layout/size
-// changes propagate through the header rather than requiring a hand-synced copy.
-// All offsets are relative to the arena blob base (segment + blob_offset).
 struct shm_segment_header {
-    // The arena describes itself. Every region INSIDE the blob is in the
-    // arena's own header (clockwork_arena.h, at blob_offset), read by every
-    // kind of reader the same way; this header names only what is
-    // segment-relative — where the blob is, and the regions that sit after it.
-    static constexpr uint32_t MAGIC = 0x5C09E00C;
+    static constexpr uint32_t MAGIC = 0x5C09E00D;
     uint32_t magic;
     uint32_t blob_offset;          // segment base → arena blob (its header is at offset 0 of it)
     uint32_t blob_size;            // == the arena's arena_bytes
-    // Peer command plane (shm_peer_plane.h). SEGMENT-relative: the plane sits
-    // after the arena blob.
+};
+static_assert(sizeof(shm_segment_header) <= SHM_BLOB_OFFSET,
+              "shm_segment_header must fit within SHM_BLOB_OFFSET");
+
+// ──── The command segment's header ──────────────────────────────────────
+//
+//   shm_command_header        (MAGIC + where everything in it is)
+//   <pad to SHM_COMMAND_HEADER_BYTES>
+//   ShmPeerPlaneHeader, command ring, reply ring   (shm_peer_plane.h)
+//   assets area                                    (the peer writes)
+//   returns area                                   (the guest writes)
+//
+// EVERYTHING INSIDE IT IS ADDRESSED RELATIVE TO ITS BASE, and that is not a
+// stylistic choice. A peer mmaps this segment at whatever address the
+// kernel gives it, which is not the address the engine sees, so a raw
+// pointer in a message would be meaningless across the boundary — and
+// meaningless in a way that reads as valid.
+//
+// Published at creation: there is no populate step, the plane and the lanes
+// start zeroed and the plane's geometry is the only thing written.
+struct shm_command_header {
+    static constexpr uint32_t MAGIC = 0x5C09C00D;
+    uint32_t magic;
     uint32_t peer_offset;
     uint32_t peer_header_bytes;    // sizeof(ShmPeerPlaneHeader)
     uint32_t peer_cmd_ring_bytes;  // SHM_PEER_CMD_RING_SIZE
     uint32_t peer_rep_ring_bytes;  // SHM_PEER_REP_RING_SIZE
-    // The guest's two bulk regions, one direction each: a client writes a
-    // sample into the assets area and sends a short message saying where; a guest
-    // writes a rendered blob into the returns area and does the same. Nothing large
-    // goes through a ring, and nothing is written from both ends. The guest's
-    // arena is not in this segment — see SHM_ASSETS_OFFSET.
-    //
-    // SEGMENT-relative, like peer_offset and for the same reason.
-    //
-    // EVERYTHING INSIDE IT IS ADDRESSED RELATIVE TO ITS BASE, and that is not
-    // a stylistic choice. A reader mmaps this segment at whatever address the
-    // kernel gives it, which is not the address the engine sees, so a raw
-    // pointer in a message would be meaningless across the boundary — and
-    // meaningless in a way that reads as valid.
     uint32_t assets_offset;
     uint32_t assets_size;
     uint32_t returns_offset;
     uint32_t returns_size;
 };
-
-static_assert(sizeof(shm_segment_header) <= SHM_BLOB_OFFSET,
-              "shm_segment_header must fit within SHM_BLOB_OFFSET");
+static_assert(sizeof(shm_command_header) <= SHM_COMMAND_HEADER_BYTES,
+              "shm_command_header must fit within SHM_COMMAND_HEADER_BYTES");
 static_assert(SHM_PEER_OFFSET % 8 == 0,
               "peer plane must be 8-byte aligned (ShmPeerPlaneHeader is alignas(8))");
 
 // ──── shm_segment ──────────────────────────────────────────────
 //
-// Process-local view: holds the arena blob base and exposes the observable
-// regions by their shared_memory.h offsets. NOT itself in shared memory.
+// Process-local view of the published segment: holds the arena blob base and
+// exposes the observable regions by their shared_memory.h offsets. NOT itself
+// in shared memory. A reader's mapping is read-only; the pointers here are
+// its addresses and nothing a reader writes through.
 
 class shm_segment {
 public:
-    shm_segment(void* segment_base, bool init,
-                shm_lane_geometry lanes = shm_lane_geometry::of(SHM_ASSETS_SIZE, SHM_RETURNS_SIZE)) {
+    shm_segment(void* segment_base, bool init) {
         char* seg = static_cast<char*>(segment_base);
         auto* base8 = reinterpret_cast<uint8_t*>(seg);
         header_ = reinterpret_cast<shm_segment_header*>(seg);
         if (init) {
             // The creator lays the segment out from this build's constants
-            // (and the lane sizes its caller chose) and publishes that layout
-            // in the header.
+            // and publishes that layout in the header.
             L_    = ShmReaderLayout::from_constants();
             blob_ = base8 + SHM_BLOB_OFFSET;
-            peer_ = reinterpret_cast<ShmPeerPlaneHeader*>(seg + SHM_PEER_OFFSET);
-            assets_       = base8 + lanes.assets_offset;
-            assets_size_  = lanes.assets_size;
-            returns_      = base8 + lanes.returns_offset;
-            returns_size_ = lanes.returns_size;
-
             header_->blob_offset = static_cast<uint32_t>(SHM_BLOB_OFFSET);
             header_->blob_size   = static_cast<uint32_t>(ARENA_SIZE);
             // The arena's own table, at the front of the blob. init_memory
@@ -529,31 +590,10 @@ public:
             // writing it here too means a segment is complete without one,
             // which is what a reader opened against a bare creator sees.
             writeArenaHeader(blob_);
-            // The assets and the returns, as offsets from the segment's base:
-            // what any process that maps the segment can resolve.
-            arenaSetArea(blob_, CLOCKWORK_AREA_ASSETS,  CLOCKWORK_SPACE_SEGMENT, lanes.assets_offset,  lanes.assets_size);
-            arenaSetArea(blob_, CLOCKWORK_AREA_RETURNS, CLOCKWORK_SPACE_SEGMENT, lanes.returns_offset, lanes.returns_size);
-
-            header_->peer_offset         = static_cast<uint32_t>(SHM_PEER_OFFSET);
-            header_->peer_header_bytes   = static_cast<uint32_t>(sizeof(ShmPeerPlaneHeader));
-            header_->peer_cmd_ring_bytes = SHM_PEER_CMD_RING_SIZE;
-            header_->peer_rep_ring_bytes = SHM_PEER_REP_RING_SIZE;
-            shm_peer_plane_init(peer_);
-
-            header_->assets_offset  = static_cast<uint32_t>(lanes.assets_offset);
-            header_->assets_size    = static_cast<uint32_t>(lanes.assets_size);
-            header_->returns_offset = static_cast<uint32_t>(lanes.returns_offset);
-            header_->returns_size   = static_cast<uint32_t>(lanes.returns_size);
-
-            // NOTE: MAGIC is deliberately NOT stored here. The geometry fields
-            // above are written now (before init_memory()), but the arena blob
-            // is still zeroed — and zero is NOT a safe default for every region
-            // (the node-tree empty-slot marker is id == -1, i.e. 0xFF, not 0).
-            // Publishing MAGIC now would expose a window where a reader observes
-            // MAGIC but sees an unpopulated arena (e.g. node entries with id == 0
-            // aliasing the real root group). The creator publishes MAGIC via
-            // publish() only after the engine's init_memory() has populated the
-            // arena, so "MAGIC visible ⇒ fully-populated segment" holds.
+            // MAGIC is deliberately NOT stored here: the arena blob is still
+            // zeroed, and zero is not a safe default for every region. The
+            // creator publishes it via publish() once the engine's
+            // init_memory() has populated the arena.
         } else {
             // A reader takes EVERYTHING from the arena's table — its own
             // build may size the arena differently, and the table is the
@@ -563,11 +603,6 @@ public:
             const char* why = "";
             if (!ShmReaderLayout::from_arena(blob_, header_->blob_size, L_, &why))
                 L_ = ShmReaderLayout{};
-            peer_ = reinterpret_cast<ShmPeerPlaneHeader*>(seg + header_->peer_offset);
-            assets_       = base8 + header_->assets_offset;
-            assets_size_  = header_->assets_size;
-            returns_      = base8 + header_->returns_offset;
-            returns_size_ = header_->returns_size;
         }
     }
 
@@ -588,19 +623,19 @@ public:
     // the engine's published values on the reader side).
     const ShmReaderLayout& layout() const { return L_; }
 
-    PerformanceMetrics* get_metrics() {
+    PerformanceMetrics* get_metrics() const {
         return reinterpret_cast<PerformanceMetrics*>(blob_ + L_.metrics_offset);
     }
     // The guest's publish window, as bytes. What it contains is the guest's
     // and a reader that knows the shape casts it there.
-    uint8_t* get_window()      { return blob_ + L_.window_offset; }
-    size_t   get_window_size() { return L_.window_bytes; }
-    shm_audio_buffer* get_audio_buffers() {
+    uint8_t* get_window() const      { return blob_ + L_.window_offset; }
+    size_t   get_window_size() const { return L_.window_bytes; }
+    shm_audio_buffer* get_audio_buffers() const {
         return reinterpret_cast<shm_audio_buffer*>(blob_ + L_.audio_offset);
     }
     // Slot `index`, at the engine's stride — not sizeof(shm_audio_buffer),
     // which is THIS build's slot and may be another size.
-    shm_audio_buffer* get_audio_buffer(unsigned int index) {
+    shm_audio_buffer* get_audio_buffer(unsigned int index) const {
         if (index < L_.audio_slot_count)
             return reinterpret_cast<shm_audio_buffer*>(
                 blob_ + L_.audio_offset + static_cast<size_t>(index) * L_.audio_slot_bytes);
@@ -609,28 +644,12 @@ public:
 
     // Base of a tap-stream slot, or nullptr if out of range.
     // The guest's slots, then the engine's track taps, as one index space.
-    uint8_t* get_tap_slot(unsigned int index) { return L_.tapSlotAt(blob_, index); }
-
-    // Peer command plane (after the arena blob; see shm_peer_plane.h).
-    ShmPeerPlaneHeader* get_peer_plane() { return peer_; }
-
-    // The guest's three regions, one writer each. Callers address INTO them by
-    // offset from a base — never by a pointer taken from a message, which would
-    // belong to the engine's mapping and not to theirs.
-    uint8_t* get_assets()       { return assets_; }        // client writes
-    size_t   get_assets_size()  { return assets_size_; }
-    uint8_t* get_returns()      { return returns_; }       // guest writes
-    size_t   get_returns_size() { return returns_size_; }
+    uint8_t* get_tap_slot(unsigned int index) const { return L_.tapSlotAt(blob_, index); }
 
 private:
     shm_segment_header* header_;
     ShmReaderLayout     L_;
     uint8_t*            blob_;
-    ShmPeerPlaneHeader* peer_;
-    uint8_t*            assets_       = nullptr;
-    size_t              assets_size_  = 0;
-    uint8_t*            returns_      = nullptr;
-    size_t              returns_size_ = 0;
 };
 
 // ──── Sample-clock view ─────────────────────────────────────────────────
@@ -644,20 +663,20 @@ private:
 // ──── Observer views (GUI / passive reader side) ────────────────────────
 //
 // Byte-level views onto observable regions, for consumers that render them
-// generically (e.g. a GUI's panels). The observer tails rings with
-// its own local cursor — head/tail here are the engine's, for reference.
+// generically (e.g. a GUI's panels). Read-only: the rings and their cursors
+// are the engine's, and a reader's mapping could not take a write anyway.
 
 struct ring_view {
-    uint8_t* base = nullptr;
+    const uint8_t* base = nullptr;
     uint32_t size = 0;
-    std::atomic<int32_t>* head = nullptr;
-    std::atomic<int32_t>* tail = nullptr;
+    const std::atomic<int32_t>* head = nullptr;
+    const std::atomic<int32_t>* tail = nullptr;
 };
 
 // The guest's publish window as bytes and a length. A reader that knows what
 // the guest put there casts it; clockwork hands over the extent and no more.
 struct window_view {
-    uint8_t* bytes = nullptr;
+    const uint8_t* bytes = nullptr;
     uint32_t size  = 0;
 };
 
@@ -671,24 +690,15 @@ struct native_stats {
     uint32_t nrt_recent_worst_us = 0;  // worst pass in the trailing ~60 s window
 };
 
-// ──── Creator (audio engine side) ───────────────────────────────────────
+// ──── Creator of the published segment (audio engine side) ──────────────
 
 class shm_segment_creator {
 public:
-    // The lanes are the caller's to size (a host's launch config); the
-    // segment is as large as they need. NOT cleared here: fresh anonymous
-    // memory is zero on every platform, and clearing it would commit every
-    // page of a lane whose whole point is to cost nothing until written.
-    explicit shm_segment_creator(size_t assets_bytes = SHM_ASSETS_SIZE,
-                                 size_t returns_bytes = SHM_RETURNS_SIZE):
-        lanes_(shm_lane_geometry::of(assets_bytes, returns_bytes)),
-        handle(shm_create_anonymous(lanes_.segment_size))
+    // NOT cleared here: fresh anonymous memory is zero on every platform.
+    shm_segment_creator():
+        handle(shm_create_anonymous(SEGMENT_SIZE, /*with_read_only=*/true))
     {
-        if (lanes_.assets_size > 0xFFFFFFFFull || lanes_.segment_size > 0xFFFFFFFFull) {
-            shm_close(handle);
-            throw std::runtime_error("shared memory lanes exceed what the header can address (4 GB)");
-        }
-        shm = std::make_unique<shm_segment>(handle.ptr, true, lanes_);
+        shm = std::make_unique<shm_segment>(handle.ptr, true);
     }
     // The segment's one creator: its handle and mapping are not things to copy.
     shm_segment_creator(const shm_segment_creator&) = delete;
@@ -706,27 +716,17 @@ public:
         shm.reset();
     }
 
-    // The object itself, for the attach endpoint to duplicate into readers
-    // and for an in-process reader to shm_dup_handle. Not owned by the caller.
-    shm_native_handle native_handle() const {
-#ifdef _WIN32
-        return handle.mapping;
-#else
-        return handle.fd;
-#endif
-    }
-    size_t segment_size() const { return lanes_.segment_size; }
+    // The engine's own, read-write handle. Not owned by the caller, and not
+    // what a reader is given.
+    shm_native_handle native_handle() const { return handle.native(); }
+    // The READ-ONLY handle onto the same object: what the attach endpoint
+    // duplicates into readers and an in-process reader shm_dup_handles. A
+    // mapping made from it can only be read. Not owned by the caller.
+    shm_native_handle reader_handle() const { return handle.read_only; }
+    size_t segment_size() const { return SEGMENT_SIZE; }
 
     // Arena blob base — the engine points `shared_memory` here.
     uint8_t* get_base() { return shm ? shm->get_base() : nullptr; }
-
-    // The guest's regions, handed to the DSP as DspConfig::arena / ::assets /
-    // ::returns. Bulk travels through the last two, one direction each, so
-    // nothing large has to travel as a message.
-    uint8_t* get_assets()       { return shm ? shm->get_assets() : nullptr; }
-    size_t   get_assets_size()  { return shm ? shm->get_assets_size() : 0; }
-    uint8_t* get_returns()      { return shm ? shm->get_returns() : nullptr; }
-    size_t   get_returns_size() { return shm ? shm->get_returns_size() : 0; }
 
     // Store MAGIC, making the segment visible to readers. Call once the engine
     // has populated the arena (after init_memory()) so observers never see a
@@ -737,7 +737,6 @@ public:
     uint8_t*            get_window()            { return shm ? shm->get_window()            : nullptr; }
     size_t              get_window_size()       { return shm ? shm->get_window_size()       : 0; }
     shm_audio_buffer*   get_audio_buffers()     { return shm ? shm->get_audio_buffers()     : nullptr; }
-    ShmPeerPlaneHeader* get_peer_plane()        { return shm ? shm->get_peer_plane()        : nullptr; }
 
     shm_audio_buffer* get_audio_buffer(unsigned int index) {
         return shm ? shm->get_audio_buffer(index) : nullptr;
@@ -748,22 +747,99 @@ public:
     }
 
 private:
-    shm_lane_geometry lanes_;   // declared before handle: it sizes the mapping
-    shm_handle            handle;
+    shm_handle                   handle;
     std::unique_ptr<shm_segment> shm;
 };
 
+// ──── Creator of the command segment (audio engine side) ────────────────
+//
+// Only with Config::shmCommands: the peer plane and the lanes, for the one
+// peer the attach endpoint lets hold it. Read-write for both sides.
 
-// ──── Client (GUI / reader side) ────────────────────────────────────────
+class shm_command_segment_creator {
+public:
+    // The lanes are the caller's to size (a host's launch config); the
+    // segment is as large as they need. NOT cleared: fresh anonymous memory
+    // is zero, and clearing it would commit every page of a lane whose whole
+    // point is to cost nothing until written.
+    explicit shm_command_segment_creator(size_t assets_bytes = SHM_ASSETS_SIZE,
+                                         size_t returns_bytes = SHM_RETURNS_SIZE):
+        lanes_(shm_lane_geometry::of(assets_bytes, returns_bytes)),
+        handle(shm_create_anonymous(lanes_.segment_size))
+    {
+        if (lanes_.assets_size > 0xFFFFFFFFull || lanes_.segment_size > 0xFFFFFFFFull) {
+            shm_close(handle);
+            throw std::runtime_error("shared memory lanes exceed what the header can address (4 GB)");
+        }
+        auto* base = static_cast<uint8_t*>(handle.ptr);
+        header_ = reinterpret_cast<shm_command_header*>(base);
+        peer_   = reinterpret_cast<ShmPeerPlaneHeader*>(base + SHM_PEER_OFFSET);
+        header_->peer_offset         = static_cast<uint32_t>(SHM_PEER_OFFSET);
+        header_->peer_header_bytes   = static_cast<uint32_t>(sizeof(ShmPeerPlaneHeader));
+        header_->peer_cmd_ring_bytes = SHM_PEER_CMD_RING_SIZE;
+        header_->peer_rep_ring_bytes = SHM_PEER_REP_RING_SIZE;
+        header_->assets_offset  = static_cast<uint32_t>(lanes_.assets_offset);
+        header_->assets_size    = static_cast<uint32_t>(lanes_.assets_size);
+        header_->returns_offset = static_cast<uint32_t>(lanes_.returns_offset);
+        header_->returns_size   = static_cast<uint32_t>(lanes_.returns_size);
+        shm_peer_plane_init(peer_);
+        std::atomic_thread_fence(std::memory_order_release);
+        header_->magic = shm_command_header::MAGIC;
+    }
+    shm_command_segment_creator(const shm_command_segment_creator&) = delete;
+    shm_command_segment_creator& operator=(const shm_command_segment_creator&) = delete;
+    ~shm_command_segment_creator() { shm_close(handle); }
+
+    // The read-write handle the attach endpoint duplicates into the one peer.
+    // Not owned by the caller.
+    shm_native_handle native_handle() const { return handle.native(); }
+    size_t segment_size() const { return lanes_.segment_size; }
+    uint8_t* get_base() const { return static_cast<uint8_t*>(handle.ptr); }
+
+    ShmPeerPlaneHeader* get_peer_plane() const { return peer_; }
+
+    // The guest's two lanes, handed to the DSP as DspConfig::assets /
+    // ::returns. Bulk travels through them, one direction each, so nothing
+    // large has to travel as a message.
+    uint8_t* get_assets()       const { return get_base() + lanes_.assets_offset; }
+    size_t   get_assets_size()  const { return lanes_.assets_size; }
+    uint8_t* get_returns()      const { return get_base() + lanes_.returns_offset; }
+    size_t   get_returns_size() const { return lanes_.returns_size; }
+    size_t   assets_offset()    const { return lanes_.assets_offset; }
+    size_t   returns_offset()   const { return lanes_.returns_offset; }
+
+    // Tell an arena where the lanes are: offsets from this segment's base,
+    // in the command segment's space (clockwork_arena.h), which every reader
+    // of that arena can see and only the peer can reach.
+    void describe_in(uint8_t* arena_blob) const {
+        arenaSetArea(arena_blob, CLOCKWORK_AREA_ASSETS,  CLOCKWORK_SPACE_COMMAND_SEGMENT,
+                     lanes_.assets_offset,  lanes_.assets_size);
+        arenaSetArea(arena_blob, CLOCKWORK_AREA_RETURNS, CLOCKWORK_SPACE_COMMAND_SEGMENT,
+                     lanes_.returns_offset, lanes_.returns_size);
+    }
+
+private:
+    shm_lane_geometry   lanes_;   // declared before handle: it sizes the mapping
+    shm_handle          handle;
+    shm_command_header* header_ = nullptr;
+    ShmPeerPlaneHeader* peer_   = nullptr;
+};
+
+
+// ──── Reader of the published segment (GUI / observer side) ─────────────
+//
+// Maps READ-ONLY and hands out only const views. The handle it is given is
+// the read-only one, so the kernel refuses a writable mapping; the class
+// asks for none.
 
 class shm_segment_client {
 public:
     // From a handle the engine handed over: shm_attach::receive() across
-    // processes, shm_dup_handle() within one. Owned here from this point,
-    // including when the constructor throws.
+    // processes, shm_dup_handle(reader_handle()) within one. Owned here from
+    // this point, including when the constructor throws.
     explicit shm_segment_client(shm_native_handle received)
     {
-        shm_handle handle = shm_map_handle(received);
+        shm_handle handle = shm_map_handle(received, /*writable=*/false);
         // The mapping is owned by a shared_ptr so readers minted from this
         // client can pin it beyond the client's own lifetime (a GUI destroys
         // and re-opens its client on engine cold swap while reader copies
@@ -782,10 +858,10 @@ public:
             throw std::runtime_error(
                 "Shared memory segment smaller than its header — stale or foreign segment?");
 
-        auto* header = static_cast<shm_segment_header*>(handle.ptr);
+        const auto* header = static_cast<const shm_segment_header*>(handle.ptr);
         if (header->magic != shm_segment_header::MAGIC)
             throw std::runtime_error(
-                "Invalid shared memory magic — is the audio engine running?");
+                "Invalid shared memory magic — is the audio engine running, and is this its published segment?");
 
         // Acquire pairs with the creator's release before the MAGIC store, so
         // observing MAGIC implies a fully-published header.
@@ -804,14 +880,6 @@ public:
         if (!within(header->blob_offset, header->blob_size))
             throw std::runtime_error(
                 "Shared memory segment smaller than its header claims — truncated or foreign segment?");
-        if (!within(header->peer_offset,
-                    uint64_t(header->peer_header_bytes) + header->peer_cmd_ring_bytes
-                        + header->peer_rep_ring_bytes)
-            || header->peer_header_bytes < sizeof(ShmPeerPlaneHeader))
-            throw std::runtime_error("Shared memory peer plane outside the segment");
-        if (!within(header->assets_offset, header->assets_size)
-            || !within(header->returns_offset, header->returns_size))
-            throw std::runtime_error("Shared memory guest regions outside the segment");
         const char* why = "";
         ShmReaderLayout L;
         if (!ShmReaderLayout::from_arena(static_cast<const uint8_t*>(handle.ptr) + header->blob_offset,
@@ -826,50 +894,10 @@ public:
     template <typename T>
     explicit shm_segment_client(T) = delete;
 
-    uint8_t*            get_base() { return shm->get_base(); }
-    PerformanceMetrics* get_metrics() { return shm->get_metrics(); }
-    uint8_t*            get_window()            { return shm->get_window(); }
-    size_t              get_window_size()       { return shm->get_window_size(); }
-    ShmPeerPlaneHeader* get_peer_plane()        { return shm->get_peer_plane(); }
-
-    /*
-     * The guest's region — where bulk lives, in both directions.
-     *
-     * This is the inverse of loading a sample and it is deliberately the SAME
-     * region: a client writes bytes here and sends a short message saying
-     * where they are; a guest writes bytes here and sends a short message
-     * saying where they are. Neither direction puts a large payload in a ring,
-     * and neither asks the audio thread to copy one.
-     *
-     * ADDRESS BY OFFSET FROM THIS BASE. The engine's mapping and this one are
-     * at different addresses, so a pointer that arrived in a message belongs to
-     * the other process and means nothing here — and would not fault, it would
-     * simply read the wrong bytes. Every message about this region carries an
-     * offset, and the bounds check below is why a corrupt or hostile one
-     * yields nullptr rather than a read outside the mapping.
-     */
-    uint8_t* get_assets()       { return shm->get_assets(); }
-    size_t   get_assets_size()  { return shm->get_assets_size(); }
-    const uint8_t* get_returns()      { return shm->get_returns(); }
-    size_t         get_returns_size() { return shm->get_returns_size(); }
-
-    // Bounds-checked views of [offset, offset + len) inside a region. nullptr
-    // when it does not lie wholly within — including on overflow, which is why
-    // the comparison is written as a subtraction rather than as
-    // offset + len > size.
-    static uint8_t* region_at(uint8_t* base, size_t size,
-                              uint32_t offset, uint32_t len) {
-        if (!base || offset > size || len > size - offset) return nullptr;
-        return base + offset;
-    }
-    uint8_t* assets_at(uint32_t offset, uint32_t len) {
-        return region_at(shm->get_assets(), shm->get_assets_size(), offset, len);
-    }
-    // Const on this side: the guest writes the returns area, a client only reads it,
-    // which is the mirror of DspConfig::assets being const to the guest.
-    const uint8_t* returns_at(uint32_t offset, uint32_t len) {
-        return region_at(shm->get_returns(), shm->get_returns_size(), offset, len);
-    }
+    const uint8_t*            get_base() const        { return shm->get_base(); }
+    const PerformanceMetrics* get_metrics() const     { return shm->get_metrics(); }
+    const uint8_t*            get_window() const      { return shm->get_window(); }
+    size_t                    get_window_size() const { return shm->get_window_size(); }
 
     // Flat atomic u32 view of PerformanceMetrics, for observers that render
     // the fields generically.
@@ -877,7 +905,7 @@ public:
     // layout, never through this build's constants — see ShmReaderLayout.
     const ShmReaderLayout& layout() const { return shm->layout(); }
 
-    const std::atomic<uint32_t>* get_metrics_flat() {
+    const std::atomic<uint32_t>* get_metrics_flat() const {
         return reinterpret_cast<const std::atomic<uint32_t>*>(
             shm->get_base() + layout().metrics_offset);
     }
@@ -885,32 +913,35 @@ public:
     // reader's PerformanceMetrics names, and a generic renderer shows them all.
     uint32_t metrics_field_count() const { return layout().metrics_bytes / 4; }
 
-    ring_view get_in_ring() {
+    // The engine's rings: where they are and how full they are. Nothing a
+    // reader writes — the in ring is the engine process's, and taking from
+    // an egress ring is a peer's (clockwork_client.h).
+    ring_view get_in_ring() const {
         const auto& L = layout();
         return { shm->get_base() + L.in_ring_offset, L.in_ring_size,
                  &control()->in_head, &control()->in_tail };
     }
-    ring_view get_out_ring() {
+    ring_view get_out_ring() const {
         const auto& L = layout();
         return { shm->get_base() + L.out_ring_offset, L.out_ring_size,
                  &control()->out_head, &control()->out_tail };
     }
-    ring_view get_nrt_out_ring() {
+    ring_view get_nrt_out_ring() const {
         const auto& L = layout();
         return { shm->get_base() + L.nrt_out_ring_offset, L.nrt_out_ring_size,
                  &control()->nrt_out_head, &control()->nrt_out_tail };
     }
 
-    window_view get_window_view() {
+    window_view get_window_view() const {
         return { shm->get_base() + layout().window_offset, layout().window_bytes };
     }
 
-    const ClockworkClockState* get_clock_state() {
+    const ClockworkClockState* get_clock_state() const {
         return reinterpret_cast<const ClockworkClockState*>(
             shm->get_base() + layout().clock_state_offset);
     }
 
-    native_stats get_native_stats() {
+    native_stats get_native_stats() const {
         auto field = [this](uint32_t off) {
             return reinterpret_cast<const std::atomic<uint32_t>*>(
                 shm->get_base() + layout().native_stats_offset + off)
@@ -926,24 +957,24 @@ public:
     // shm client at all. Kept for observer-API symmetry.
     bool has_native_stats() const { return true; }
 
+    // The stream readers take a slot pointer and only ever read through it
+    // (loads of the slot's atomics, copies of its frames); the mapping behind
+    // it is read-only, so the pointer's type gives them nothing to use.
+    //
     // The reader clamps a slot's self-declared capacity to the ENGINE's ring
     // size, not this build's, which is what keeps a corrupt slot inside the
     // engine's actual allocation.
-    shm_tap_stream_reader get_tap_stream_reader(unsigned int index) {
+    shm_tap_stream_reader get_tap_stream_reader(unsigned int index) const {
         return shm_tap_stream_reader(
             reinterpret_cast<shm_tap_stream*>(shm->get_tap_slot(index)), map_,
             layout().tap_ring_frames);
     }
 
-    sample_clock_view get_sample_clock() {
+    sample_clock_view get_sample_clock() const {
         return read_sample_clock(shm->get_base() + layout().sample_clock_offset);
     }
 
-    shm_audio_buffer* get_audio_buffer(unsigned int index) {
-        return shm->get_audio_buffer(index);
-    }
-
-    shm_audio_buffer_reader get_audio_buffer_reader(unsigned int index) {
+    shm_audio_buffer_reader get_audio_buffer_reader(unsigned int index) const {
         return shm_audio_buffer_reader(shm->get_audio_buffer(index), map_,
                                        layout().audio_frames);
     }
@@ -957,18 +988,120 @@ private:
         shm_handle handle;
     };
 
-    RingCursors* control() {
-        return reinterpret_cast<RingCursors*>(shm->get_base() + layout().control_offset);
+    const RingCursors* control() const {
+        return reinterpret_cast<const RingCursors*>(shm->get_base() + layout().control_offset);
     }
 
-    std::shared_ptr<mapping>              map_;
+    std::shared_ptr<mapping>     map_;
     std::unique_ptr<shm_segment> shm;
+};
+
+// ──── The peer's mapping of the command segment ─────────────────────────
+//
+// Read-write: the one peer writes the plane's command ring and the assets
+// area, and reads the reply ring and the returns area.
+
+class shm_command_client {
+public:
+    // From a handle the engine handed over: shm_attach::receive_command_plane()
+    // across processes, shm_dup_handle() within one. Owned here from this
+    // point, including when the constructor throws.
+    explicit shm_command_client(shm_native_handle received)
+        : handle_(shm_map_handle(received, /*writable=*/true))
+    {
+        try {
+            if (handle_.size < sizeof(shm_command_header))
+                throw std::runtime_error(
+                    "Shared memory command segment smaller than its header — stale or foreign segment?");
+            const auto* header = static_cast<const shm_command_header*>(handle_.ptr);
+            if (header->magic != shm_command_header::MAGIC)
+                throw std::runtime_error(
+                    "Invalid shared memory magic — is this the engine's command segment?");
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint64_t size = handle_.size;
+            const auto within = [size](uint64_t off, uint64_t len) {
+                return off <= size && len <= size - off;
+            };
+            if (!within(header->peer_offset,
+                        uint64_t(header->peer_header_bytes) + header->peer_cmd_ring_bytes
+                            + header->peer_rep_ring_bytes)
+                || header->peer_header_bytes < sizeof(ShmPeerPlaneHeader)
+                || header->peer_offset % alignof(ShmPeerPlaneHeader) != 0)
+                throw std::runtime_error("Shared memory peer plane outside the segment or not one this build knows");
+            if (!within(header->assets_offset, header->assets_size)
+                || !within(header->returns_offset, header->returns_size))
+                throw std::runtime_error("Shared memory lanes outside the segment");
+            auto* base = static_cast<uint8_t*>(handle_.ptr);
+            peer_         = reinterpret_cast<ShmPeerPlaneHeader*>(base + header->peer_offset);
+            assets_       = base + header->assets_offset;
+            assets_size_  = header->assets_size;
+            returns_      = base + header->returns_offset;
+            returns_size_ = header->returns_size;
+        } catch (...) {
+            shm_close(handle_);
+            throw;
+        }
+    }
+    template <typename T>
+    explicit shm_command_client(T) = delete;
+    shm_command_client(const shm_command_client&) = delete;
+    shm_command_client& operator=(const shm_command_client&) = delete;
+    ~shm_command_client() { shm_close(handle_); }
+
+    ShmPeerPlaneHeader* get_peer_plane() const { return peer_; }
+
+    /*
+     * The lanes — where bulk lives, in both directions.
+     *
+     * This is the inverse of loading a sample and it is deliberately the SAME
+     * mechanism: the peer writes bytes into the assets area and sends a short
+     * message saying where; the guest writes bytes into the returns area and
+     * does the same. Neither direction puts a large payload in a ring, and
+     * neither asks the audio thread to copy one.
+     *
+     * ADDRESS BY OFFSET FROM A BASE. The engine's mapping and this one are
+     * at different addresses, so a pointer that arrived in a message belongs to
+     * the other process and means nothing here — and would not fault, it would
+     * simply read the wrong bytes. Every message about a lane carries an
+     * offset, and the bounds check below is why a corrupt or hostile one
+     * yields nullptr rather than a read outside the mapping.
+     */
+    uint8_t*       get_assets()       const { return assets_; }        // the peer writes
+    size_t         get_assets_size()  const { return assets_size_; }
+    const uint8_t* get_returns()      const { return returns_; }       // the guest writes
+    size_t         get_returns_size() const { return returns_size_; }
+
+    // Bounds-checked views of [offset, offset + len) inside a lane. nullptr
+    // when it does not lie wholly within — including on overflow, which is why
+    // the comparison is written as a subtraction rather than as
+    // offset + len > size.
+    static uint8_t* region_at(uint8_t* base, size_t size,
+                              uint32_t offset, uint32_t len) {
+        if (!base || offset > size || len > size - offset) return nullptr;
+        return base + offset;
+    }
+    uint8_t* assets_at(uint32_t offset, uint32_t len) const {
+        return region_at(assets_, assets_size_, offset, len);
+    }
+    const uint8_t* returns_at(uint32_t offset, uint32_t len) const {
+        return region_at(returns_, returns_size_, offset, len);
+    }
+
+private:
+    shm_handle          handle_;
+    ShmPeerPlaneHeader* peer_         = nullptr;
+    uint8_t*            assets_       = nullptr;
+    size_t              assets_size_  = 0;
+    uint8_t*            returns_      = nullptr;
+    size_t              returns_size_ = 0;
 };
 
 } /* namespace detail_shm_segment */
 
 using detail_shm_segment::shm_segment_client;
 using detail_shm_segment::shm_segment_creator;
+using detail_shm_segment::shm_command_client;
+using detail_shm_segment::shm_command_segment_creator;
 using detail_shm_segment::ring_view;
 using detail_shm_segment::window_view;
 using detail_shm_segment::native_stats;

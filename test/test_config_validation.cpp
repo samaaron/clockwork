@@ -210,7 +210,7 @@ TEST_CASE("shmSegment=false boots without a segment", "[config]") {
 
     // Running, with a process-local arena and nothing to hand another process.
     CHECK(engine.isRunning());
-    CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmNativeHandle()));
+    CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmReaderHandle()));
 
     engine.shutdown();
     CHECK_FALSE(engine.isRunning());

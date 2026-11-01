@@ -39,7 +39,8 @@ callback, the worklet, the DAW's process thread, or an embedded task.
 | **guest bulk memory** `memory_bulk` | cold guest state | guest only | NULL | NULL | NULL | 2 MiB from PSRAM, always |
 | **assets** | client → guest bulk: **the sample pool** | client writes; guest reads in place; **and writes** (1.4) | 4 MiB at boot, grows in 32 MiB steps to 768 MiB (96 MiB on a phone); the top of wasm memory | 512 MiB of address space, launch-sized (clockwork's default is 8 MiB); in the segment, or `new[]` without one | **none**; an asset commit is refused | none unless the host passes one |
 | **returns** | guest → client bulk | guest writes; client reads | 4 MiB, **unused** | 8 MiB; `/b_write` staging only | none | none |
-| **segment header + peer plane** | where the blob is; two OSC rings for one trusted peer | creator; peer ↔ NRT thread | — | 256 B + 393 KB, only with `shmSegment` | — | — |
+| **published segment header** | where the arena blob is (docs/SEGMENTS.md); the segment is handed out read-only | creator | — | 256 B, with `shmSegment` | — | — |
+| **command segment: header + peer plane** | where the plane and the lanes are; two OSC rings for one trusted peer | creator; peer ↔ NRT thread | — | 256 B + 393 KB, only with `shmCommands`; the lanes follow it | — | — |
 | **plugin-track bridge segment** | send/return audio rings, three message rings, a 4 MB JSON mirror | engine ↔ the bridge child process | — | 5.3 MB, one named segment per engine pid | present but silent (no lanes reserved) | — |
 | **asset table** | id → committing client | engine thread | 48 KB static | 48 KB | 48 KB | 48 KB |
 | **system malloc** | Rust sink queues and port rings, `ClockworkProcessor` buffers, the C client handle, **scsynth's synthdefs** (`new` on the engine thread) — *as surveyed; step 6 in Part 4 moved the queues to the rust heap and the synthdefs to the clockwork heap* | various | yes | yes | yes | yes, **not tier-routed** |

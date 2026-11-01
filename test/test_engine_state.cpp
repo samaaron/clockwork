@@ -366,17 +366,17 @@ TEST_CASE("SharedMemory: engine creates an anonymous segment on boot", "[EngineS
 
     // The segment exists and is what a reader would be handed: a duplicate of
     // the handle maps to a published, layout-checked segment.
-    REQUIRE(shm_handle_valid(engine.shmNativeHandle()));
+    REQUIRE(shm_handle_valid(engine.shmReaderHandle()));
     {
         detail_shm_segment::shm_segment_client client(
-            detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+            detail_shm_segment::shm_dup_handle(engine.shmReaderHandle()));
         CHECK(client.get_metrics() != nullptr);
     }
 
     // After shutdown there is nothing to hand out. The pages themselves go
     // with the last mapping; there is no name left behind to check for.
     engine.shutdown();
-    CHECK_FALSE(shm_handle_valid(engine.shmNativeHandle()));
+    CHECK_FALSE(shm_handle_valid(engine.shmReaderHandle()));
 }
 
 TEST_CASE("SharedMemory: segment survives a cold swap",
@@ -387,7 +387,7 @@ TEST_CASE("SharedMemory: segment survives a cold swap",
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
     cfg.shmSegment  = true;
     engine.init(cfg);
-    const auto handle = engine.shmNativeHandle();
+    const auto handle = engine.shmReaderHandle();
     REQUIRE(detail_shm_segment::shm_handle_valid(handle));
 
     // The guest teardown must not remove the segment: the engine owns it.
@@ -396,10 +396,10 @@ TEST_CASE("SharedMemory: segment survives a cold swap",
 
     // Same object, not a re-created one: a reader that attached before the
     // swap is still looking at live memory.
-    CHECK(engine.shmNativeHandle() == handle);
+    CHECK(engine.shmReaderHandle() == handle);
 
     engine.shutdown();
-    CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmNativeHandle()));
+    CHECK_FALSE(detail_shm_segment::shm_handle_valid(engine.shmReaderHandle()));
 }
 
 TEST_CASE("EngineState: the transport stamp is a real time from boot, not the 1900 epoch",

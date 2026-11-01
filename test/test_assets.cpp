@@ -273,7 +273,8 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     }
 
     cfg.assetsBytes = want;
-    cfg.shmSegment    = segment;
+    cfg.shmSegment  = segment;
+    cfg.shmCommands = segment;   // the lanes are the command segment's
     const uint64_t before = residentBytes();
     EngineFixture fx(cfg);
     REQUIRE(fx.engine().guestAssetsBytes() == want);
@@ -321,11 +322,13 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
     if (segment) {
         // A reader takes the lane's size from the header, not from a constant
         // of its own build: this client sees the whole of it.
-        CHECK(fx.engine().shmSegmentSize() > want);
+        CHECK(fx.engine().shmCommandSize() > want);
         ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
-        ClockworkClient* c = clockwork_client_open_shm_handle(
+        ClockworkClient* c = clockwork_client_open_shm_peer_handles(
             detail_shm_segment::shm_handle_to_intptr(
-                detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle())), &st);
+                detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle())),
+            detail_shm_segment::shm_handle_to_intptr(
+                detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), &st);
         REQUIRE(c != nullptr);
         ClockworkRegion region {};
         REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &region) == CLOCKWORK_OK);
@@ -337,13 +340,16 @@ TEST_CASE("asset: the lane is the size the host asks for, and costs nothing unti
 
 TEST_CASE("asset: a client over the segment sees the same assets", "[asset][shm]") {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
-    cfg.shmSegment = true;   // non-zero: the engine carves the lanes from a public segment
+    cfg.shmSegment  = true;
+    cfg.shmCommands = true;   // the lanes are the command segment's, the peer's to write
     EngineFixture fx(cfg);
 
     ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
-    ClockworkClient* c = clockwork_client_open_shm_handle(
+    ClockworkClient* c = clockwork_client_open_shm_peer_handles(
         detail_shm_segment::shm_handle_to_intptr(
-            detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle())), &st);
+            detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle())),
+        detail_shm_segment::shm_handle_to_intptr(
+            detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle())), &st);
     REQUIRE(c != nullptr);
 
     ClockworkRegion assets {};

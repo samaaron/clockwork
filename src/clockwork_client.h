@@ -133,12 +133,14 @@ typedef enum ClockworkStatus {
     CLOCKWORK_E_TOO_BIG,    /* the message cannot fit in the ring at any moment */
     CLOCKWORK_E_CLOSED,     /* the engine went away under us */
     CLOCKWORK_E_NOMEM,
-    CLOCKWORK_E_NO_INSTANCE /* the engine has no guest instance to take this:
+    CLOCKWORK_E_NO_INSTANCE, /* the engine has no guest instance to take this:
                              * it is between instances (a cold restart) or its
                              * build failed. The message was not written. A
                              * message under /clockwork/ is never refused for
                              * this. Wait for /clockwork/setup, then send again
                              * (docs/RESTARTS.md). */
+    CLOCKWORK_E_BUSY        /* another peer holds the engine's command plane;
+                             * try again once it has let go (docs/SEGMENTS.md) */
 } ClockworkStatus;
 
 /* A phrase for a status, for logs and for bindings that want to raise. Static
@@ -149,21 +151,42 @@ const char* clockwork_client_status_text(ClockworkStatus s);
 
 typedef struct ClockworkClient ClockworkClient;
 
-/* Attach to an engine in another process on this machine.
+/* Attach to an engine in another process on this machine, as a READER.
  *
  * `endpoint` is the engine's attach endpoint: the Unix socket (macOS/Linux) or
- * named pipe (Windows) it serves its segment from — what it was started with
+ * named pipe (Windows) it serves its segments from — what it was started with
  * as --shm-endpoint, or clockwork_client_default_endpoint(port) when it was
- * not. The segment itself has no name; the engine hands over a duplicate of
- * its handle on connect, and only to a client running as the same user. An
- * engine started with -u 0 has no segment and no endpoint; that, an engine
- * that is not there, and one whose layout this build does not recognise are
- * all CLOCKWORK_E_NOT_FOUND. `secret` is the engine's per-boot secret, 32
- * bytes (clockwork_comms_secret.h): the endpoint hands the segment only to a
- * reader that presents it. Null is CLOCKWORK_E_ARG; refused is
- * CLOCKWORK_E_PERM. */
+ * not. A segment has no name; the engine hands over a duplicate of its handle
+ * on connect, and only to a client running as the same user. An engine
+ * started with -u 0 has no segment and no endpoint; that, an engine that is
+ * not there, and one whose layout this build does not recognise are all
+ * CLOCKWORK_E_NOT_FOUND. `secret` is the engine's per-boot secret, 32 bytes
+ * (clockwork_comms_secret.h): the endpoint hands a segment only to a client
+ * that presents it. Null is CLOCKWORK_E_ARG; refused is CLOCKWORK_E_PERM.
+ *
+ * A reader has the PUBLISHED segment, read-only (docs/SEGMENTS.md): the
+ * metrics, the clock, the taps, the scope, the window — everything the engine
+ * writes for others to see. It cannot send, take replies or reach the bulk
+ * lanes: those calls return CLOCKWORK_E_PERM. */
 ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* secret,
                                            ClockworkStatus* out_status);
+
+/* Attach as the PEER: a reader's view AND the engine's command plane — the
+ * command ring clockwork_client_send writes, the reply ring
+ * clockwork_client_poll takes from, and the bulk lanes. One peer at a time:
+ * while another holds the plane this is CLOCKWORK_E_BUSY, and an engine whose
+ * host did not enable the plane (--shm-commands) is CLOCKWORK_E_ABSENT. The
+ * hold lasts until clockwork_client_close, or until this process dies. */
+ClockworkClient* clockwork_client_open_shm_peer(const char* endpoint, const uint8_t* secret,
+                                                ClockworkStatus* out_status);
+
+/* The peer, through handles already received: the published segment's and the
+ * command segment's (shm_attach::receive_command_plane, or duplicates within
+ * the engine's process). Both owned by the client from here, whether or not
+ * the open succeeds. No lease is held: the caller's hand-off is the caller's
+ * to account for. */
+ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t reader_handle, intptr_t command_handle,
+                                                        ClockworkStatus* out_status);
 
 /* The endpoint an engine on `port` serves at unless told otherwise: under
  * XDG_RUNTIME_DIR or TMPDIR on POSIX, \\.\pipe\clockwork-shm-<port> on
@@ -172,9 +195,10 @@ ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* 
  * written. */
 uint32_t clockwork_client_default_endpoint(uint32_t port, char* buf, uint32_t cap);
 
-/* Attach through a handle already received — an fd from a Unix socket, a
- * HANDLE duplicated into this process — for a host that does the hand-off
- * itself. Owned by the client from here, whether or not the open succeeds. */
+/* A reader through a handle already received — the published segment's
+ * read-only descriptor, from a Unix socket or duplicated into this process —
+ * for a host that does the hand-off itself. Owned by the client from here,
+ * whether or not the open succeeds. */
 ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
                                                   ClockworkStatus* out_status);
 
@@ -220,8 +244,10 @@ ClockworkStatus clockwork_client_info(ClockworkClient* c, ClockworkClientInfo* o
 
 /* ── Sending ─────────────────────────────────────────────────────────────────
  *
- * One OSC message or bundle, copied into the ingress ring. Returns as soon as
- * it is queued: the engine reads it on its next block.
+ * One OSC message or bundle, copied into the ring the engine reads: the
+ * arena's ingress ring for an in-process handle, the command plane's ring for
+ * the peer. A reader has no such ring and gets CLOCKWORK_E_PERM. Returns as
+ * soon as it is queued: the engine reads it on its next block.
  *
  * `origin` is the client's own token, echoed back on any reply so a client
  * with several conversations in flight can tell them apart. Zero is legal and
@@ -312,6 +338,11 @@ typedef struct ClockworkClientMessage {
  * batch occupies is not given back to the engine when this returns but at the
  * start of the next poll. A writer that fills the ring in between is refused,
  * as any full ring refuses it, rather than let on to bytes still being read.
+ *
+ * WHICH RINGS: an in-process handle takes from the arena's two egress rings;
+ * the peer takes from its command plane's reply ring, where every frame is a
+ * reply or a notification for it (route is CLOCKWORK_ROUTE_REPLY, origin the
+ * plane's token). A reader has no ring to take from and gets 0.
  *
  * SINGLE CONSUMER, AND THE RING HAS ONE. Polling TAKES: it advances the
  * egress ring's own read cursor, which lives in the engine's ring cursors and
@@ -414,11 +445,16 @@ typedef enum ClockworkRegionId {
                                    * it is talking to. The first uint32 is a
                                    * version stamp the guest bumps — that much
                                    * is contract, and it is all of it. */
-    CLOCKWORK_REGION_ASSETS,       /* bulk in: the client writes, the guest reads */
-    CLOCKWORK_REGION_RETURNS,      /* bulk out: the guest writes, the client reads */
+    CLOCKWORK_REGION_ASSETS,       /* bulk in: the peer writes, the guest reads. The
+                                   * peer's (docs/SEGMENTS.md): a reader is refused
+                                   * (CLOCKWORK_E_PERM), an in-process handle has
+                                   * no view of it (CLOCKWORK_E_ABSENT) */
+    CLOCKWORK_REGION_RETURNS,      /* bulk out: the guest writes, the peer reads; the same rule */
     CLOCKWORK_REGION_TAPS,
     CLOCKWORK_REGION_SCOPE,
-    CLOCKWORK_REGION_INGRESS,     /* the ring clients write and the engine reads */
+    CLOCKWORK_REGION_INGRESS,     /* the arena's ring the engine process writes and
+                                   * reads; an in-process handle's only, a segment
+                                   * handle is refused (CLOCKWORK_E_PERM) */
     CLOCKWORK_REGION_EGRESS,      /* the ring the engine writes and clients read */
     CLOCKWORK_REGION_NATIVE_STATS /* the device layer's own account of its callback:
                                    * DSP load average and peak (centi-percent of the

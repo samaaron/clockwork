@@ -23,9 +23,18 @@
 #include "workers/RingBufferWriter.h"
 #include "shm_tap_stream.hpp"
 
+#include <array>
 #include <cstring>
 #include <memory>
 #include <new>
+#include <vector>
+#if !defined(__EMSCRIPTEN__)
+#  ifdef _WIN32
+#    include <process.h>
+#  else
+#    include <unistd.h>
+#  endif
+#endif
 
 #if !defined(__EMSCRIPTEN__)
 #  include "shm_segment.hpp"
@@ -58,7 +67,29 @@ struct ClientImpl {
     RingBufferWriter::Reservation pending{};
 
 #if !defined(__EMSCRIPTEN__)
-    std::unique_ptr<detail_shm_segment::shm_segment_client> mapping;   // the segment, when this handle mapped it
+    // The published segment, when this handle mapped it: read-only, so
+    // nothing below writes through `base` on such a handle.
+    std::unique_ptr<detail_shm_segment::shm_segment_client> mapping;
+    // The command segment, when this handle is the peer (docs/SEGMENTS.md):
+    // its plane is where send writes and poll takes from. `lease` holds the
+    // plane for as long as the handle lives, when the hand-off was ours.
+    std::unique_ptr<detail_shm_segment::shm_command_client> commands;
+    shm_attach::command_lease lease;
+    ClockworkDrainState  peerDrain{};      // the plane's reply ring
+    std::vector<uint8_t> peerBatch;        // the last poll's frames, copied out of the ring
+#endif
+
+    // A reader: a segment handle without the command plane. It reads, and
+    // nothing else; every call that would write says so.
+    bool reader() const {
+#if !defined(__EMSCRIPTEN__)
+        return mapping && !commands;
+#else
+        return false;
+#endif
+    }
+#if !defined(__EMSCRIPTEN__)
+    ShmPeerPlaneHeader* plane() const { return commands ? commands->get_peer_plane() : nullptr; }
 #endif
 
     RingCursors* control() const {
@@ -70,6 +101,17 @@ ClockworkStatus fail(ClockworkStatus* out, ClockworkStatus s) {
     if (out) *out = s;
     return s;
 }
+
+#if !defined(__EMSCRIPTEN__)
+// This process, for the plane's owner stamp (shm_peer_attach).
+long clockwork_client_pid() {
+#  ifdef _WIN32
+    return static_cast<long>(_getpid());
+#  else
+    return static_cast<long>(::getpid());
+#  endif
+}
+#endif
 
 // The arena's table, and which status a refusal is. Memory too small to
 // hold a header, or a table whose regions do not fit, is the caller's
@@ -103,6 +145,7 @@ const char* clockwork_client_status_text(ClockworkStatus s) {
         case CLOCKWORK_E_CLOSED:     return "engine closed";
         case CLOCKWORK_E_NOMEM:      return "out of memory";
         case CLOCKWORK_E_NO_INSTANCE: return "no instance: the engine is between guests; wait for setup";
+        case CLOCKWORK_E_BUSY:       return "another peer holds the command plane";
     }
     return "unknown status";
 }
@@ -149,7 +192,11 @@ ClockworkClient* clockwork_client_open_shm_handle(intptr_t native_handle,
         fail(out_status, CLOCKWORK_E_NOT_FOUND);
         return nullptr;
     }
-    c->base         = c->mapping->get_base();
+    // The mapping is read-only and this handle never writes through `base`
+    // on a segment handle: every writing call asks reader() first and the
+    // peer's writes go to its own command segment. The cast is for the one
+    // pointer type the handle keeps for every way of opening.
+    c->base         = const_cast<uint8_t*>(c->mapping->get_base());
     c->L            = c->mapping->layout();   // the ENGINE's layout, not this build's
     c->bytes        = c->L.blob_size;
     fail(out_status, CLOCKWORK_OK);
@@ -176,6 +223,64 @@ ClockworkClient* clockwork_client_open_shm(const char* endpoint, const uint8_t* 
     return clockwork_client_open_shm_handle(raw, out_status);
 }
 
+ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t reader_handle, intptr_t command_handle,
+                                                        ClockworkStatus* out_status) {
+    const auto command = detail_shm_segment::shm_handle_from_intptr(command_handle);
+    ClockworkClient* handle = clockwork_client_open_shm_handle(reader_handle, out_status);
+    if (!handle) {
+        detail_shm_segment::shm_close_native(command);
+        return nullptr;
+    }
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    try {
+        // Takes the handle on every path, so nothing leaks on a refusal.
+        c->commands = std::make_unique<detail_shm_segment::shm_command_client>(command);
+    } catch (const std::exception&) {
+        clockwork_client_close(handle);
+        fail(out_status, CLOCKWORK_E_NOT_FOUND);
+        return nullptr;
+    }
+    // Claim the plane as its peer: the pid stamp, the generation, a stale
+    // writer lock reset, replies to a dead predecessor skipped.
+    shm_peer_attach(c->plane(), static_cast<uint32_t>(clockwork_client_pid()));
+    fail(out_status, CLOCKWORK_OK);
+    return handle;
+}
+
+ClockworkClient* clockwork_client_open_shm_peer(const char* endpoint, const uint8_t* secret,
+                                                ClockworkStatus* out_status) {
+    if (!endpoint || !*endpoint) { fail(out_status, CLOCKWORK_E_NOT_FOUND); return nullptr; }
+    if (!secret) { fail(out_status, CLOCKWORK_E_ARG); return nullptr; }
+    std::string err;
+    const auto reader = shm_attach::receive(endpoint, secret, &err);
+    if (!detail_shm_segment::shm_handle_valid(reader)) {
+        fail(out_status, err.rfind("refused by", 0) == 0 ? CLOCKWORK_E_PERM : CLOCKWORK_E_NOT_FOUND);
+        return nullptr;
+    }
+    shm_attach::command_lease lease = shm_attach::receive_command_plane(endpoint, secret, &err);
+    if (!lease.valid()) {
+        detail_shm_segment::shm_close_native(reader);
+        // The hello says which: no plane on this host, held by another peer,
+        // or the secret refused.
+        ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
+        if (err.rfind("no shared-memory command plane", 0) == 0) st = CLOCKWORK_E_ABSENT;
+        else if (err.rfind("another peer holds", 0) == 0)       st = CLOCKWORK_E_BUSY;
+        else if (err.rfind("refused by", 0) == 0)               st = CLOCKWORK_E_PERM;
+        fail(out_status, st);
+        return nullptr;
+    }
+    // The segment handle goes to the client; the lease stays here, held for
+    // the handle's life.
+    const auto command = lease.handle;
+    lease.handle = detail_shm_segment::shm_invalid_handle;
+    ClockworkClient* handle = clockwork_client_open_shm_peer_handles(
+        detail_shm_segment::shm_handle_to_intptr(reader),
+        detail_shm_segment::shm_handle_to_intptr(command), out_status);
+    if (!handle) return nullptr;   // the lease releases as it goes out of scope
+    reinterpret_cast<ClientImpl*>(handle)->lease = std::move(lease);
+    return handle;
+}
+
 uint32_t clockwork_client_default_endpoint(uint32_t port, char* buf, uint32_t cap) {
     const std::string ep = shm_attach::default_endpoint(port);
     const auto need = static_cast<uint32_t>(ep.size());
@@ -184,6 +289,14 @@ uint32_t clockwork_client_default_endpoint(uint32_t port, char* buf, uint32_t ca
     return need;
 }
 #else
+ClockworkClient* clockwork_client_open_shm_peer(const char*, const uint8_t*, ClockworkStatus* out_status) {
+    fail(out_status, CLOCKWORK_E_NOT_FOUND);
+    return nullptr;
+}
+ClockworkClient* clockwork_client_open_shm_peer_handles(intptr_t, intptr_t, ClockworkStatus* out_status) {
+    fail(out_status, CLOCKWORK_E_NOT_FOUND);
+    return nullptr;
+}
 ClockworkClient* clockwork_client_open_shm(const char*, const uint8_t*, ClockworkStatus* out_status) {
     // No segment in a browser: the engine's arena IS this heap, so a client
     // there opens it by address.
@@ -240,6 +353,20 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
                                       uint32_t origin) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !osc || bytes == 0) return CLOCKWORK_E_ARG;
+    if (c->reader()) return CLOCKWORK_E_PERM;
+#if !defined(__EMSCRIPTEN__)
+    // The peer's road: the plane's command ring, which the engine's control
+    // pass drains into the same door every other sender meets. A frame that
+    // cannot fit an empty ring will never fit.
+    if (ShmPeerPlaneHeader* plane = c->plane()) {
+        if (bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return CLOCKWORK_E_TOO_BIG;
+        return RingBufferWriter::write(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
+                                       &plane->cmd_head, &plane->cmd_tail,
+                                       &plane->cmd_sequence, &plane->cmd_write_lock,
+                                       osc, bytes, origin)
+                   ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
+    }
+#endif
 
     // A frame that cannot fit an empty ring will never fit: say so once rather
     // than let a caller retry forever.
@@ -287,6 +414,19 @@ uint8_t* clockwork_client_send_begin(ClockworkClient* handle, uint32_t max_bytes
     // A second begin would take the lock a second time from the thread that
     // already holds it, which is a hang rather than an error message. Refuse.
     if (c->pending.valid()) return fail(CLOCKWORK_E_ARG);
+    if (c->reader()) return fail(CLOCKWORK_E_PERM);
+
+#if !defined(__EMSCRIPTEN__)
+    if (ShmPeerPlaneHeader* plane = c->plane()) {
+        if (max_bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return fail(CLOCKWORK_E_TOO_BIG);
+        c->pending = RingBufferWriter::reserve(
+            shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
+            &plane->cmd_head, &plane->cmd_tail, &plane->cmd_write_lock, max_bytes);
+        if (!c->pending.valid()) return fail(CLOCKWORK_E_FULL);
+        if (out_status) *out_status = CLOCKWORK_OK;
+        return c->pending.payload;
+    }
+#endif
 
     if (max_bytes + sizeof(Message) > c->L.in_ring_size)
         return fail(CLOCKWORK_E_TOO_BIG);
@@ -306,6 +446,23 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c) return CLOCKWORK_E_ARG;
     if (!c->pending.valid()) return CLOCKWORK_E_ARG;
+
+#if !defined(__EMSCRIPTEN__)
+    // The peer's reservation is in the plane's ring; the door's question is
+    // the engine's to ask when its pass takes the frame.
+    if (ShmPeerPlaneHeader* plane = c->plane()) {
+        if (bytes > c->pending.max) {
+            RingBufferWriter::abort(&plane->cmd_write_lock);
+            c->pending = {};
+            return CLOCKWORK_E_ARG;
+        }
+        RingBufferWriter::commit(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
+                                 &plane->cmd_head, &plane->cmd_sequence,
+                                 &plane->cmd_write_lock, c->pending, bytes, origin);
+        c->pending = {};
+        return CLOCKWORK_OK;
+    }
+#endif
 
     // More than was reserved would run past the room the fit test allowed, so
     // the reservation is given back rather than published — a wrong length is
@@ -335,6 +492,13 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
 void clockwork_client_send_abort(ClockworkClient* handle) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !c->pending.valid()) return;
+#if !defined(__EMSCRIPTEN__)
+    if (ShmPeerPlaneHeader* plane = c->plane()) {
+        RingBufferWriter::abort(&plane->cmd_write_lock);
+        c->pending = {};
+        return;
+    }
+#endif
     RingBufferWriter::abort(&c->control()->in_write_lock);
     c->pending = {};
 }
@@ -343,6 +507,38 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
                                ClockworkClientMessage* out, uint32_t max) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out || max == 0) return 0;
+    if (c->reader()) return 0;   // nothing to take from: a reader's segment has no egress for it
+
+#if !defined(__EMSCRIPTEN__)
+    // The peer takes from its plane's reply ring. The frames are copied out
+    // before the ring's tail moves: the plane has one tail and no separate
+    // read cursor, so handing out pointers into the ring would let the
+    // engine write over bytes the caller is still reading. The copies live
+    // until the next poll, as the contract says. The metrics are the
+    // engine's and this mapping of them is read-only, so nothing is counted
+    // here; the engine counts its own side.
+    if (ShmPeerPlaneHeader* plane = c->plane()) {
+        c->peerBatch.clear();
+        std::vector<std::array<uint32_t, 4>> heads;   // offset, length, origin, sequence
+        clockwork_drain_ring(
+            shm_peer_rep_ring(plane), SHM_PEER_REP_RING_SIZE,
+            &plane->rep_head, &plane->rep_tail,
+            c->peerDrain, ClockworkDrainMetrics{}, max,
+            [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
+                heads.push_back({ static_cast<uint32_t>(c->peerBatch.size()), len, sourceId, seq });
+                c->peerBatch.insert(c->peerBatch.end(), payload, payload + len);
+                return ClockworkDrainVerdict::Consume;
+            });
+        for (size_t i = 0; i < heads.size(); ++i) {
+            out[i].bytes    = c->peerBatch.data() + heads[i][0];
+            out[i].length   = heads[i][1];
+            out[i].origin   = heads[i][2];
+            out[i].route    = CLOCKWORK_ROUTE_REPLY;
+            out[i].sequence = heads[i][3];
+        }
+        return static_cast<uint32_t>(heads.size());
+    }
+#endif
 
     // The same counters the engine's own drain keeps: reply and notification
     // volume, and ring health. They live in the segment so an observer outside
@@ -402,6 +598,9 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
 void clockwork_client_count_undelivered(ClockworkClient* handle, uint32_t n) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || n == 0) return;
+#if !defined(__EMSCRIPTEN__)
+    if (c->mapping) return;   // a segment's metrics are the engine's: this mapping is read-only
+#endif
     auto* pm = reinterpret_cast<PerformanceMetrics*>(c->base + c->L.metrics_offset);
     pm->egress_frames_undelivered.fetch_add(n, std::memory_order_relaxed);
 }
@@ -427,35 +626,43 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
                      c->L.audio_slot_count * c->L.audio_slot_bytes, 0 };
             return CLOCKWORK_OK;
 
-        // The bulk lanes live outside the blob. A handle over the segment
-        // sees them — the segment carries both, at offsets its header names —
-        // and the assets area is the one region a client WRITES: it is the client's
-        // lane, and clockwork_asset_pool.h is how a client carves it. An
+        // The bulk lanes live in the command segment (docs/SEGMENTS.md). The
+        // peer sees them — its segment carries both, at offsets its header
+        // names — and the assets area is the one region a client WRITES: it
+        // is the peer's lane, and clockwork_asset_pool.h is how it carves it.
+        // A reader's segment has no lanes and a reader may not have them. An
         // in-process handle over bare memory cannot see where the engine put
         // them; that host reaches them through the engine it owns, and absent
-        // is the honest answer here.
+        // is the honest answer there.
         case CLOCKWORK_REGION_ASSETS:
 #if !defined(__EMSCRIPTEN__)
-            if (c->mapping) {
-                *out = { c->mapping->get_assets(),
-                         static_cast<uint32_t>(c->mapping->get_assets_size()), 1 };
+            if (c->commands) {
+                *out = { c->commands->get_assets(),
+                         static_cast<uint32_t>(c->commands->get_assets_size()), 1 };
                 return CLOCKWORK_OK;
             }
+            if (c->mapping) return CLOCKWORK_E_PERM;
 #endif
             return CLOCKWORK_E_ABSENT;
         case CLOCKWORK_REGION_RETURNS:
 #if !defined(__EMSCRIPTEN__)
-            if (c->mapping) {
-                *out = { const_cast<uint8_t*>(c->mapping->get_returns()),
-                         static_cast<uint32_t>(c->mapping->get_returns_size()), 0 };
+            if (c->commands) {
+                *out = { const_cast<uint8_t*>(c->commands->get_returns()),
+                         static_cast<uint32_t>(c->commands->get_returns_size()), 0 };
                 return CLOCKWORK_OK;
             }
+            if (c->mapping) return CLOCKWORK_E_PERM;
 #endif
             return CLOCKWORK_E_ABSENT;
 
-        // The rings. Writable names who may put bytes in: a client writes the
-        // ingress ring through clockwork_client_send, and reads the egress one.
+        // The rings. Writable names who may put bytes in: an in-process
+        // client writes the ingress ring through clockwork_client_send, and
+        // reads the egress one. The ingress ring is the engine process's: a
+        // segment handle, reader or peer, is refused it.
         case CLOCKWORK_REGION_INGRESS:
+#if !defined(__EMSCRIPTEN__)
+            if (c->mapping) return CLOCKWORK_E_PERM;
+#endif
             *out = { c->base + c->L.in_ring_offset, c->L.in_ring_size, 1 };
             return CLOCKWORK_OK;
         case CLOCKWORK_REGION_EGRESS:

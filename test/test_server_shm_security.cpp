@@ -33,7 +33,7 @@ TEST_CASE("shm-security: tap readers pin the client mapping (no dangling reads)"
     // cold swap by destroying its client. The reader must keep the old mapping
     // alive, or a widget's poll timer does an atomic load through the
     // munmapped slot pointer.
-    auto client = std::make_unique<shm_segment_client>(shm_dup_handle(creator.native_handle()));
+    auto client = std::make_unique<shm_segment_client>(shm_dup_handle(creator.reader_handle()));
     auto reader = client->get_tap_stream_reader(0);
     client.reset();
 
@@ -48,7 +48,7 @@ TEST_CASE("shm-security: tap reader clamps corrupt slot geometry",
           "[shm][security]") {
     shm_segment_creator creator;
     creator.publish();
-    shm_segment_client client(shm_dup_handle(creator.native_handle()));
+    shm_segment_client client(shm_dup_handle(creator.reader_handle()));
     auto reader = client.get_tap_stream_reader(0);
 
     // channels/capacity_frames are re-read from shared memory on every

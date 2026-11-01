@@ -140,7 +140,7 @@ enum ClockworkArenaArea {
 enum ClockworkArenaSpace {
     CLOCKWORK_SPACE_UNKNOWN = 0,   /* not stated: the engine has not placed it, or this build has none */
     CLOCKWORK_SPACE_ARENA   = 1,   /* an offset from the arena base */
-    CLOCKWORK_SPACE_SEGMENT = 2,   /* an offset from the shared segment's base */
+    CLOCKWORK_SPACE_COMMAND_SEGMENT = 2,   /* an offset from the command segment's base (docs/SEGMENTS.md) */
     CLOCKWORK_SPACE_PROCESS = 3,   /* an address in the engine's process (on the web, in wasm memory) */
 };
 

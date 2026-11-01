@@ -67,8 +67,8 @@ TEST_CASE("metrics-shm: external client sees the same metrics struct",
     // engine's handle, mapped again. A second mapping gets a fresh virtual
     // address even within one process, so the client pointer differs from the
     // engine pointer numerically — they refer to the same physical pages.
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
-    PerformanceMetrics* externalMetrics = client.get_metrics();
+    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle()));
+    const PerformanceMetrics* externalMetrics = client.get_metrics();
     REQUIRE(externalMetrics != nullptr);
 
     // The client must observe the activity that just happened.
@@ -80,8 +80,8 @@ TEST_CASE("metrics-shm: increments via engine writes are visible through client"
           "[metrics][shm]") {
     constexpr unsigned kPort = 57213;
     EngineFixture fx(metricsShmConfig(kPort));
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
-    PerformanceMetrics* externalMetrics = client.get_metrics();
+    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmReaderHandle()));
+    const PerformanceMetrics* externalMetrics = client.get_metrics();
     REQUIRE(externalMetrics != nullptr);
 
     uint32_t before = externalMetrics->messages_processed.load();

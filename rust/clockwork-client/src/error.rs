@@ -38,6 +38,9 @@ pub enum Error {
     /// now: wait for `/clockwork/setup`, then send again
     /// ([`Error::is_wait_for_setup`]).
     NoInstance,
+    /// Another peer holds the engine's command plane (docs/SEGMENTS.md):
+    /// try again once it has let go.
+    Busy,
     /// A status this build of the crate does not name. Receiving one is not
     /// undefined behaviour, which is why the ABI's status is a newtype and
     /// this variant exists.
@@ -62,6 +65,7 @@ impl Error {
             ClockworkStatus::E_CLOSED => Error::Closed,
             ClockworkStatus::E_NOMEM => Error::NoMem,
             ClockworkStatus::E_NO_INSTANCE => Error::NoInstance,
+            ClockworkStatus::E_BUSY => Error::Busy,
             other => Error::Unknown(other.0),
         })
     }
@@ -79,6 +83,7 @@ impl Error {
             Error::Closed => ClockworkStatus::E_CLOSED,
             Error::NoMem => ClockworkStatus::E_NOMEM,
             Error::NoInstance => ClockworkStatus::E_NO_INSTANCE,
+            Error::Busy => ClockworkStatus::E_BUSY,
             Error::Unknown(v) => ClockworkStatus(v),
         }
     }

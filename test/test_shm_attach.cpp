@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Sam Aaron
 /*
  * test_shm_attach.cpp — the attach endpoint (shm_attach.hpp): the only way a
- * process other than the engine reaches the anonymous segment.
+ * process other than the engine reaches the anonymous segments, and the
+ * protocol docs/SEGMENTS.md states: the secret first, then a role; a reader
+ * is handed the published segment read-only, a peer the command segment
+ * read-write and one at a time, its connection the lease.
  *
  * The engine here is in-process, but the hand-off is the real one: a socket
  * (or pipe) round trip, a duplicated handle, a fresh mapping. The
@@ -11,12 +14,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "OscTestUtils.h"
 #include "TestSecret.h"
 #include "shm_attach.hpp"
+#include "ShmTransport.h"
 #include "clockwork_client.h"
 
 #include <chrono>
+#include <cstring>
+#include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #include <process.h>   // _getpid
@@ -25,6 +33,8 @@
 #endif
 
 #if !defined(_WIN32)
+#  include <cerrno>
+#  include <sys/mman.h>
 #  include <sys/socket.h>
 #  include <sys/stat.h>
 #  include <sys/un.h>
@@ -33,12 +43,14 @@
 
 using detail_shm_segment::shm_handle_valid;
 using detail_shm_segment::shm_segment_client;
+using detail_shm_segment::shm_command_client;
 
 namespace {
 
-ClockworkEngine::Config attachConfig(unsigned port) {
+ClockworkEngine::Config attachConfig(unsigned port, bool commands = false) {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
-    cfg.shmSegment = true;   // non-zero is what creates the segment
+    cfg.shmSegment  = true;      // non-zero is what creates the published segment
+    cfg.shmCommands = commands;  // and this the command segment
     return cfg;
 }
 
@@ -54,9 +66,54 @@ std::string endpointFor(unsigned port) {
     return shm_attach::default_endpoint(port) + "." + std::to_string(pid);
 }
 
+// Serve an engine's two segments, as a host does: the reader handle of the
+// published one and, when the engine has it, the command segment.
+bool serve(shm_attach::server& srv, const std::string& ep, ClockworkEngine& e, std::string* err) {
+    return srv.start(ep, e.shmReaderHandle(), e.shmSegmentSize(),
+                     e.shmCommandHandle(), e.shmCommandSize(), testSecret(), err);
+}
+
+#if !defined(_WIN32)
+// Whether a writable mapping of `fd` is possible.
+bool mapsWritable(int fd, size_t bytes) {
+    void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) return false;
+    ::munmap(p, bytes);
+    return true;
+}
+
+// A raw client: connect, send `first` (nothing when empty), read what comes
+// back within 5 s. Returns the bytes read; 0 means closed without a hello.
+std::vector<uint8_t> raw(const std::string& ep, const std::vector<uint8_t>& first) {
+    sockaddr_un addr {};
+    REQUIRE(shm_attach::fill_sockaddr(ep, &addr));
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(fd >= 0);
+    REQUIRE(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
+    if (!first.empty()) REQUIRE(::send(fd, first.data(), first.size(), 0) == static_cast<ssize_t>(first.size()));
+    timeval tv { 5, 0 };
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    std::vector<uint8_t> got(64);
+    const ssize_t n = ::recv(fd, got.data(), got.size(), 0);
+    ::close(fd);
+    got.resize(n > 0 ? static_cast<size_t>(n) : 0);
+    return got;
+}
+
+std::vector<uint8_t> authThenRole(uint32_t role) {
+    const auto frame = shm_attach::auth_frame(testSecretBytes().data());
+    std::vector<uint8_t> bytes(frame.begin(), frame.end());
+    bytes.push_back(static_cast<uint8_t>(role >> 24));
+    bytes.push_back(static_cast<uint8_t>(role >> 16));
+    bytes.push_back(static_cast<uint8_t>(role >> 8));
+    bytes.push_back(static_cast<uint8_t>(role));
+    return bytes;
+}
+#endif
+
 } // namespace
 
-TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
+TEST_CASE("attach: a reader receives the published segment over the endpoint, read-only",
           "[shm][attach]") {
     constexpr unsigned kPort = 57330;
     EngineFixture fx(attachConfig(kPort));
@@ -64,8 +121,7 @@ TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
 
     shm_attach::server srv;
     std::string err;
-    REQUIRE(srv.start(ep, fx.engine().shmNativeHandle(),
-                      fx.engine().shmSegmentSize(), testSecret(), &err));
+    REQUIRE(serve(srv, ep, fx.engine(), &err));
     INFO(err);
 
     // The hand-off: a handle of our own, and the size the engine declared.
@@ -74,6 +130,11 @@ TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
     INFO(err);
     REQUIRE(shm_handle_valid(h));
     CHECK(size == fx.engine().shmSegmentSize());
+#if !defined(_WIN32)
+    // Read-only, and the kernel is what says so.
+    CHECK_FALSE(mapsWritable(h, size));
+    CHECK((errno == EACCES || errno == EPERM));   // POSIX, and XNU's POSIX shm
+#endif
 
     // Mapped from it, the segment is the engine's: published, layout-checked,
     // and live — a metric the engine writes is visible through it.
@@ -84,15 +145,16 @@ TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
     REQUIRE(fx.waitForReply("/dummy/pong", r));
     CHECK(client.get_metrics()->messages_processed.load() > 0);
 
-    // The server keeps serving: a second reader gets its own handle.
+    // The server keeps serving: a second reader gets its own handle onto the
+    // same pages.
     const auto h2 = shm_attach::receive(ep, testSecretBytes().data(), &err);
     INFO(err);   // this receive's reason, not the first's: INFO keeps the string as it was when it ran
     REQUIRE(shm_handle_valid(h2));
     CHECK(h2 != h);
     shm_segment_client second(h2);
     CHECK(second.get_base() != client.get_base());   // two mappings, same pages
-    client.get_base()[0] = 0x77;
-    CHECK(second.get_base()[0] == 0x77);
+    CHECK(second.get_metrics()->messages_processed.load()
+          == client.get_metrics()->messages_processed.load());
 
     // Stopped, the endpoint is gone: nothing to connect to, and on POSIX no
     // socket file left behind.
@@ -105,15 +167,119 @@ TEST_CASE("attach: a reader receives the engine's segment over the endpoint",
 #endif
 }
 
+TEST_CASE("attach: the command segment is handed to one peer at a time, and only where it exists",
+          "[shm][attach][peer]") {
+    constexpr unsigned kPort = 57336;
+    std::string err;
+
+    SECTION("a server without the command plane declines a peer, with the reason") {
+        EngineFixture fx(attachConfig(kPort, false));
+        const std::string ep = endpointFor(kPort);
+        shm_attach::server srv;
+        REQUIRE(serve(srv, ep, fx.engine(), &err));
+        CHECK_FALSE(shm_handle_valid(fx.engine().shmCommandHandle()));
+
+        auto lease = shm_attach::receive_command_plane(ep, testSecretBytes().data(), &err);
+        CHECK_FALSE(lease.valid());
+        CHECK(err.find("no shared-memory command plane") != std::string::npos);
+        CHECK(srv.declined() == 1);
+        CHECK(srv.refused() == 0);   // the secret was right: this is not a refusal
+        // And a reader is still served.
+        CHECK(shm_handle_valid(shm_attach::receive(ep, testSecretBytes().data(), &err)));
+    }
+
+    SECTION("with the plane: one holder, the connection is the lease") {
+        EngineFixture fx(attachConfig(kPort, true));
+        const std::string ep = endpointFor(kPort);
+        shm_attach::server srv;
+        REQUIRE(serve(srv, ep, fx.engine(), &err));
+        REQUIRE(shm_handle_valid(fx.engine().shmCommandHandle()));
+
+        uint64_t size = 0;
+        auto first = shm_attach::receive_command_plane(ep, testSecretBytes().data(), &err, &size);
+        INFO(err);
+        REQUIRE(first.valid());
+        CHECK(size == fx.engine().shmCommandSize());
+        CHECK(srv.holding());
 #if !defined(_WIN32)
+        CHECK(mapsWritable(first.handle, size));   // the peer writes it
+#endif
+        // The plane is the engine's: the geometry the creator wrote.
+        {
+            shm_command_client peer(detail_shm_segment::shm_dup_handle(first.handle));
+            CHECK(peer.get_peer_plane()->cmd_ring_size == SHM_PEER_CMD_RING_SIZE);
+        }
+
+        // Held: a second peer is declined, and told why.
+        auto second = shm_attach::receive_command_plane(ep, testSecretBytes().data(), &err);
+        CHECK_FALSE(second.valid());
+        CHECK(err.find("another peer holds") != std::string::npos);
+        CHECK(srv.declined() == 1);
+        // Readers are not affected by the hold.
+        CHECK(shm_handle_valid(shm_attach::receive(ep, testSecretBytes().data(), &err)));
+
+        // Released: closing the lease is the release, and the next peer is served.
+        first.release();
+        CHECK_FALSE(first.valid());
+        REQUIRE(fx.pollUntil([&] { return !srv.holding(); }, 3000));
+        auto third = shm_attach::receive_command_plane(ep, testSecretBytes().data(), &err);
+        INFO(err);
+        CHECK(third.valid());
+        CHECK(srv.holding());
+        // Going out of scope releases too.
+    }
+}
+
+#if !defined(_WIN32)
+TEST_CASE("attach: the hello is 32 bytes, version 3, and names the role and the status",
+          "[shm][attach]") {
+    constexpr unsigned kPort = 57337;
+    EngineFixture fx(attachConfig(kPort, false));
+    const std::string ep = endpointFor(kPort);
+    shm_attach::server srv;
+    std::string err;
+    REQUIRE(serve(srv, ep, fx.engine(), &err));
+
+    static_assert(sizeof(shm_attach::hello) == 32, "hello is a wire format");
+    CHECK(shm_attach::VERSION == 3);
+
+    const auto decode = [](const std::vector<uint8_t>& bytes) {
+        shm_attach::hello h {};
+        REQUIRE(bytes.size() == sizeof h);
+        std::memcpy(&h, bytes.data(), sizeof h);
+        return h;
+    };
+
+    // A reader: ok, the role echoed, the size the engine's.
+    auto h = decode(raw(ep, authThenRole(shm_attach::ROLE_READER)));
+    CHECK(h.magic == shm_attach::MAGIC);
+    CHECK(h.version == 3);
+    CHECK(h.role == shm_attach::ROLE_READER);
+    CHECK(h.status == shm_attach::STATUS_OK);
+    CHECK(h.size == fx.engine().shmSegmentSize());
+
+    // A peer where there is no plane: a hello that says so, no size, no
+    // descriptor.
+    h = decode(raw(ep, authThenRole(shm_attach::ROLE_PEER)));
+    CHECK(h.role == shm_attach::ROLE_PEER);
+    CHECK(h.status == shm_attach::STATUS_NO_COMMAND_SEGMENT);
+    CHECK(h.size == 0);
+
+    // A role the server does not know.
+    h = decode(raw(ep, authThenRole(77)));
+    CHECK(h.status == shm_attach::STATUS_UNKNOWN_ROLE);
+    CHECK(h.size == 0);
+    CHECK(srv.declined() == 2);
+    CHECK(srv.refused() == 0);
+}
+
 TEST_CASE("attach: the endpoint is a socket only its owner can open", "[shm][attach][security]") {
     constexpr unsigned kPort = 57331;
     EngineFixture fx(attachConfig(kPort));
     const std::string ep = endpointFor(kPort);
     shm_attach::server srv;
     std::string err;
-    REQUIRE(srv.start(ep, fx.engine().shmNativeHandle(),
-                      fx.engine().shmSegmentSize(), testSecret(), &err));
+    REQUIRE(serve(srv, ep, fx.engine(), &err));
 
     struct stat st {};
     REQUIRE(::stat(ep.c_str(), &st) == 0);
@@ -124,8 +290,7 @@ TEST_CASE("attach: the endpoint is a socket only its owner can open", "[shm][att
     // owner's socket and quietly take its readers (two engines on one port,
     // which a non-fatal UDP bind failure allows).
     shm_attach::server intruder;
-    CHECK_FALSE(intruder.start(ep, fx.engine().shmNativeHandle(),
-                               fx.engine().shmSegmentSize(), testSecret(), &err));
+    CHECK_FALSE(serve(intruder, ep, fx.engine(), &err));
     CHECK(err.find("already serving") != std::string::npos);
     CHECK(shm_handle_valid(shm_attach::receive(ep, testSecretBytes().data(), &err)));   // the owner still answers
 
@@ -144,53 +309,42 @@ TEST_CASE("attach: the endpoint is a socket only its owner can open", "[shm][att
         REQUIRE(::stat(ep.c_str(), &st) == 0);
     }
     shm_attach::server again;
-    REQUIRE(again.start(ep, fx.engine().shmNativeHandle(),
-                        fx.engine().shmSegmentSize(), testSecret(), &err));
+    REQUIRE(serve(again, ep, fx.engine(), &err));
     CHECK(shm_handle_valid(shm_attach::receive(ep, testSecretBytes().data(), &err)));
 }
 
-// The segment holds the command ring, so the endpoint asks for the secret: a
-// reader that sends a command instead, another secret, or nothing within the
-// deadline is closed without a hello and counted, and the reader with the
-// secret is still served.
-TEST_CASE("attach: a reader without the secret gets no segment", "[shm][attach][security]") {
+// The endpoint asks for the secret before anything else: a client that sends
+// a command instead, another secret, or nothing within the deadline is closed
+// without a hello and counted as refused — it learns nothing, not even that
+// there are roles — and the reader with the secret is still served.
+TEST_CASE("attach: a client without the secret gets nothing, not even a hello", "[shm][attach][security]") {
     constexpr unsigned kPort = 57334;
-    EngineFixture fx(attachConfig(kPort));
+    EngineFixture fx(attachConfig(kPort, true));
     const std::string ep = endpointFor(kPort);
     shm_attach::server srv;
     std::string err;
-    REQUIRE(srv.start(ep, fx.engine().shmNativeHandle(),
-                      fx.engine().shmSegmentSize(), testSecret(), &err));
+    REQUIRE(serve(srv, ep, fx.engine(), &err));
 
     auto other = testSecretBytes();
     other[5] ^= 1;
     CHECK_FALSE(shm_handle_valid(shm_attach::receive(ep, other.data(), &err)));
     CHECK(err.find("refused") != std::string::npos);
+    CHECK_FALSE(shm_attach::receive_command_plane(ep, other.data(), &err).valid());
+    CHECK(err.find("refused") != std::string::npos);
 
-    // A raw client: a command as the first frame, then one that says nothing.
-    auto raw = [&](const std::vector<uint8_t>& first) {
-        sockaddr_un addr {};
-        REQUIRE(shm_attach::fill_sockaddr(ep, &addr));
-        const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        REQUIRE(fd >= 0);
-        REQUIRE(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
-        if (!first.empty()) REQUIRE(::send(fd, first.data(), first.size(), 0) == static_cast<ssize_t>(first.size()));
-        timeval tv { 5, 0 };
-        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        char byte = 0;
-        const ssize_t n = ::recv(fd, &byte, 1, 0);
-        ::close(fd);
-        return n;   // 0: closed without a hello
-    };
     std::vector<uint8_t> command = { 0, 0, 0, 12, '/', 's', 't', 'a', 't', 'u', 's', 0, ',', 0, 0, 0 };
-    CHECK(raw(command) == 0);
+    CHECK(raw(ep, command).empty());
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(raw({}) == 0);
+    CHECK(raw(ep, {}).empty());
     CHECK(std::chrono::steady_clock::now() - t0 >= shm_attach::AUTH_DEADLINE);
-    CHECK(srv.refused() == 3);
+    // The secret right but no role within the deadline: nothing either.
+    const auto frame = shm_attach::auth_frame(testSecretBytes().data());
+    CHECK(raw(ep, std::vector<uint8_t>(frame.begin(), frame.end())).empty());
+    CHECK(srv.refused() == 5);
+    CHECK(srv.declined() == 0);
 
     CHECK(shm_handle_valid(shm_attach::receive(ep, testSecretBytes().data(), &err)));
-    CHECK(srv.refused() == 3);
+    CHECK(srv.refused() == 5);
 }
 #endif
 
@@ -217,6 +371,8 @@ TEST_CASE("attach: nothing at the endpoint is a clean failure, not a hang",
 #endif
     CHECK_FALSE(shm_handle_valid(shm_attach::receive(nowhere, testSecretBytes().data(), &err)));
     CHECK_FALSE(err.empty());
+    CHECK_FALSE(shm_attach::receive_command_plane(nowhere, testSecretBytes().data(), &err).valid());
+    CHECK_FALSE(err.empty());
 
     ClockworkStatus st = CLOCKWORK_OK;
     CHECK(clockwork_client_open_shm(nowhere.c_str(), testSecretBytes().data(), &st) == nullptr);
@@ -225,11 +381,14 @@ TEST_CASE("attach: nothing at the endpoint is a clean failure, not a hang",
     CHECK(st == CLOCKWORK_E_NOT_FOUND);
     CHECK(clockwork_client_open_shm(nowhere.c_str(), nullptr, &st) == nullptr);
     CHECK(st == CLOCKWORK_E_ARG);
+    CHECK(clockwork_client_open_shm_peer(nowhere.c_str(), testSecretBytes().data(), &st) == nullptr);
+    CHECK(st == CLOCKWORK_E_NOT_FOUND);
 }
 
-TEST_CASE("attach: the C client API opens by endpoint", "[shm][attach]") {
+TEST_CASE("attach: the C client API opens a reader by endpoint, and a reader cannot send or take",
+          "[shm][attach]") {
     constexpr unsigned kPort = 57332;
-    EngineFixture fx(attachConfig(kPort));
+    EngineFixture fx(attachConfig(kPort, true));
 
     // The derived endpoint, as a C caller would obtain it.
     char buf[512];
@@ -245,13 +404,34 @@ TEST_CASE("attach: the C client API opens by endpoint", "[shm][attach]") {
 
     shm_attach::server srv;
     std::string err;
-    REQUIRE(srv.start(buf, fx.engine().shmNativeHandle(),
-                      fx.engine().shmSegmentSize(), testSecret(), &err));
+    REQUIRE(serve(srv, buf, fx.engine(), &err));
 
     ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
     ClockworkClient* c = clockwork_client_open_shm(buf, testSecretBytes().data(), &st);
     REQUIRE(c != nullptr);
     CHECK(st == CLOCKWORK_OK);
+
+    // A reader reads: the metrics, the clock.
+    uint32_t words[8];
+    CHECK(clockwork_client_metrics(c, words, 8) > 0);
+    ClockworkClientClock clock {};
+    clock.struct_bytes = sizeof clock;
+    CHECK(clockwork_client_clock(c, &clock) == CLOCKWORK_OK);
+
+    // And cannot send, take replies, or reach the lanes or the in ring: its
+    // segment has none of them, and saying so is the honest answer.
+    const auto ping = osc_test::message("/dummy/ping");
+    CHECK(clockwork_client_send(c, ping.ptr(), ping.size(), 0xC11E) == CLOCKWORK_E_PERM);
+    CHECK(clockwork_client_send_begin(c, 64, &st) == nullptr);
+    CHECK(st == CLOCKWORK_E_PERM);
+    ClockworkClientMessage msgs[4];
+    CHECK(clockwork_client_poll(c, msgs, 4) == 0);
+    ClockworkRegion region {};
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &region) == CLOCKWORK_E_PERM);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_RETURNS, &region) == CLOCKWORK_E_PERM);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_INGRESS, &region) == CLOCKWORK_E_PERM);
+    CHECK(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &region) == CLOCKWORK_OK);
+    CHECK(region.writable == 0);
     clockwork_client_close(c);
 
     // Another secret is refused, and says so.
@@ -261,18 +441,88 @@ TEST_CASE("attach: the C client API opens by endpoint", "[shm][attach]") {
     CHECK(st == CLOCKWORK_E_PERM);
 }
 
-TEST_CASE("attach: the server refuses to serve without a segment or a secret", "[shm][attach]") {
+TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and takes through the plane",
+          "[shm][attach][peer]") {
+    constexpr unsigned kPort = 57338;
+    // Wired the way a host wires --shm-commands: the engine's replies to the
+    // peer leave through a ShmTransport bound to its plane slot.
+    ShmTransport    transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    engine.init(attachConfig(kPort, true));
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+    const std::string ep = endpointFor(kPort);
     shm_attach::server srv;
     std::string err;
-    CHECK_FALSE(srv.start(endpointFor(57333), detail_shm_segment::shm_invalid_handle, 0, testSecret(), &err));
+    REQUIRE(serve(srv, ep, engine, &err));
+    // Pumped: the engine's pass drains the plane as the audio thread ticks.
+    const auto until = [&](const std::function<bool()>& f, int ms) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            engine.pumpAudioBlock();
+            if (f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
+    ClockworkClient* peer = clockwork_client_open_shm_peer(ep.c_str(), testSecretBytes().data(), &st);
+    REQUIRE(peer != nullptr);
+    CHECK(st == CLOCKWORK_OK);
+    CHECK(srv.holding());
+
+    // A reader's view too: the peer attached to both segments.
+    uint32_t words[8];
+    CHECK(clockwork_client_metrics(peer, words, 8) > 0);
+    ClockworkRegion assets {};
+    REQUIRE(clockwork_client_region(peer, CLOCKWORK_REGION_ASSETS, &assets) == CLOCKWORK_OK);
+    CHECK(assets.writable == 1);
+    CHECK(assets.bytes == engine.guestAssetsBytes());
+    CHECK(clockwork_client_region(peer, CLOCKWORK_REGION_INGRESS, &assets) == CLOCKWORK_E_PERM);
+
+    // A command through the plane, and the reply back through it.
+    const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{4343});
+    REQUIRE(clockwork_client_send(peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
+    bool heard = false;
+    ClockworkClientMessage msgs[8];
+    REQUIRE(until([&] {
+        const uint32_t n = clockwork_client_poll(peer, msgs, 8);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0) {
+                heard = true;
+                CHECK(msgs[i].origin == SHM_PEER_ORIGIN_TOKEN);
+                CHECK(msgs[i].route == CLOCKWORK_ROUTE_REPLY);
+            }
+        }
+        return heard;
+    }, 3000));
+
+    // A second peer is declined while this one holds the plane.
+    CHECK(clockwork_client_open_shm_peer(ep.c_str(), testSecretBytes().data(), &st) == nullptr);
+    CHECK(st == CLOCKWORK_E_BUSY);
+    clockwork_client_close(peer);
+    REQUIRE(until([&] { return !srv.holding(); }, 3000));
+    srv.stop();
+    engine.shutdown();
+}
+
+TEST_CASE("attach: the server refuses to serve without a published segment or a secret", "[shm][attach]") {
+    shm_attach::server srv;
+    std::string err;
+    CHECK_FALSE(srv.start(endpointFor(57333), detail_shm_segment::shm_invalid_handle, 0,
+                          detail_shm_segment::shm_invalid_handle, 0, testSecret(), &err));
     CHECK_FALSE(err.empty());
     CHECK_FALSE(srv.running());
 
     constexpr unsigned kPort = 57335;
     EngineFixture fx(attachConfig(kPort));
     err.clear();
-    CHECK_FALSE(srv.start(endpointFor(kPort), fx.engine().shmNativeHandle(),
-                          fx.engine().shmSegmentSize(), nullptr, &err));
+    CHECK_FALSE(srv.start(endpointFor(kPort), fx.engine().shmReaderHandle(), fx.engine().shmSegmentSize(),
+                          detail_shm_segment::shm_invalid_handle, 0, nullptr, &err));
     CHECK(err.find("secret") != std::string::npos);
     CHECK_FALSE(srv.running());
 }

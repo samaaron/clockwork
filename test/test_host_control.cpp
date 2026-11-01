@@ -239,7 +239,7 @@ TEST_CASE("host control: the peer command plane rides the host's pass",
     EngineFixture fx(cfg);
     CHECK_FALSE(fx.engine().hasControlThread());
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);

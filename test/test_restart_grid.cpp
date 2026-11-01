@@ -313,8 +313,8 @@ private:
     void attachPeer() {
         mTransport->peer.bindPlaneSlot(engine().peerPlaneSlot());
         REQUIRE(mTransport->peer.ready());
-        mSegment = std::make_unique<shm_segment_client>(
-            detail_shm_segment::shm_dup_handle(engine().shmNativeHandle()));
+        mSegment = std::make_unique<shm_command_client>(
+            detail_shm_segment::shm_dup_handle(engine().shmCommandHandle()));
         mPlane = mSegment->get_peer_plane();
         REQUIRE(mPlane != nullptr);
         shm_peer_attach(mPlane, 1);
@@ -338,7 +338,7 @@ private:
     std::shared_ptr<FakeSystem>         mSys;
     std::unique_ptr<PeerBeside>         mTransport;   // outlives the engine that sends through it
     std::unique_ptr<EngineFixture>      mFix;
-    std::unique_ptr<shm_segment_client> mSegment;
+    std::unique_ptr<shm_command_client> mSegment;
     ShmPeerPlaneHeader*                 mPlane = nullptr;
     ClockworkDrainState                 mRepState;
     ClockworkClientTap*                 mTap = nullptr;

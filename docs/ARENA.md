@@ -65,8 +65,8 @@ block the guest's spans are carved from (on the web it holds the arena at
 its start too; natively the arena is static or a segment, and the router's
 block is the process's, so neither is in it).
 An area inside the arena is an offset from the arena base; one
-outside it is placed in a *space* — the segment, or the engine's process —
-and a reader that is not in that space cannot reach it and says so.
+outside it is placed in a *space* — the command segment, or the engine's
+process — and a reader that is not in that space cannot reach it and says so.
 
 The line between the halves is the fence. The guest is in-process, on the
 audio thread, and a SharedArrayBuffer has no page protection, so ownership
@@ -185,9 +185,10 @@ Two things are written after publication, each with its own release, and
 a reader that took the table earlier sees zeros that mean "not yet" and
 asks again: the guest window's identity, when the guest binds
 (`arenaSetGuestWindowIdentity`), and the outside areas, when the
-engine knows where they are (`arenaSetArea`). A segment's creator places
-the assets and the returns as segment offsets, which every process that
-maps the segment can resolve; an arena in plain memory, the web's
+engine knows where they are (`arenaSetArea`). The engine places the
+assets and the returns as offsets in the command segment when there is one
+(docs/SEGMENTS.md), which its one peer can resolve and every reader of the
+arena can see; an arena whose lanes are the engine's own memory, the web's
 included, gets their addresses in the engine's process at `init_memory`;
 the guest's spans and the rust heap are placed once they are carved,
 before `dsp_new`.

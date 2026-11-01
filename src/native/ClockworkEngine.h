@@ -283,17 +283,28 @@ public:
     // current segment.
     std::atomic<ShmPeerPlaneHeader*>* peerPlaneSlot() { return &mPeerPlane; }
 
-    // The public segment's OS handle, for the attach endpoint to duplicate
-    // into readers (shm_attach::server) and for an in-process reader to
-    // shm_dup_handle. Invalid when there is no segment (!shmSegment, or
-    // creation failed) and after shutdown(). Owned by the engine.
-    detail_shm_segment::shm_native_handle shmNativeHandle() const {
-        return mShmemCreator ? mShmemCreator->native_handle()
+    // The published segment's READ-ONLY handle (docs/SEGMENTS.md), for the
+    // attach endpoint to duplicate into readers (shm_attach::server) and for
+    // an in-process reader to shm_dup_handle. Invalid when there is no
+    // segment (!shmSegment, or creation failed) and after shutdown(). Owned
+    // by the engine.
+    detail_shm_segment::shm_native_handle shmReaderHandle() const {
+        return mShmemCreator ? mShmemCreator->reader_handle()
                              : detail_shm_segment::shm_invalid_handle;
     }
-    // The segment's size — the lanes' sizes decide it — or 0 without one.
     size_t shmSegmentSize() const {
         return mShmemCreator ? mShmemCreator->segment_size() : 0;
+    }
+    // The command segment's read-write handle: the peer plane and the lanes,
+    // for the attach endpoint to hand to one peer at a time. Invalid unless
+    // Config::shmCommands made one. Owned by the engine.
+    detail_shm_segment::shm_native_handle shmCommandHandle() const {
+        return mCommandCreator ? mCommandCreator->native_handle()
+                               : detail_shm_segment::shm_invalid_handle;
+    }
+    // Its size — the lanes' sizes decide it — or 0 without one.
+    size_t shmCommandSize() const {
+        return mCommandCreator ? mCommandCreator->segment_size() : 0;
     }
 
     void sendOSC(const uint8_t* data, uint32_t size);
@@ -1408,8 +1419,11 @@ private:
     mutable std::mutex                                mUngatableInputPairsMutex;
     std::set<std::pair<std::string, std::string>>    mUngatableInputPairs;
 
-    // Shared memory — owned by the engine, survives across cold swaps.
-    std::unique_ptr<shm_segment_creator> mShmemCreator;
+    // Shared memory — owned by the engine, survives across cold swaps: the
+    // published segment, and with Config::shmCommands the command segment
+    // (docs/SEGMENTS.md).
+    std::unique_ptr<shm_segment_creator>         mShmemCreator;
+    std::unique_ptr<shm_command_segment_creator> mCommandCreator;
 
     // The engine's own handle onto the client boundary. Every message that
     // reaches ingest() — a stream peer, a shared-memory peer, an in-process call —

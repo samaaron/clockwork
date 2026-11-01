@@ -92,8 +92,9 @@ struct AttachServer {
         // serve each other's peers.
         : endpoint(shm_attach::default_endpoint(port) + "." + std::to_string(getpid())) {
         std::string err;
-        REQUIRE(server.start(endpoint, fx.engine().shmNativeHandle(),
-                             fx.engine().shmSegmentSize(), testSecret(), &err));
+        REQUIRE(server.start(endpoint, fx.engine().shmReaderHandle(), fx.engine().shmSegmentSize(),
+                             fx.engine().shmCommandHandle(), fx.engine().shmCommandSize(),
+                             testSecret(), &err));
     }
 };
 
@@ -261,14 +262,18 @@ TEST_CASE("shm-peer crash: a corpse holding the writer lock stalls nobody; reatt
     AttachServer  at(fx, kPort);
     const PerformanceMetrics& m = fx.engine().getMetrics();
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
 
     // A peer dies holding cmd_write_lock.
     pid_t holder = spawnPeer("hold-lock", at.endpoint);
+    REQUIRE(at.server.holding());
     killPeer(holder);
     REQUIRE(plane->cmd_write_lock.load(std::memory_order_relaxed) == 1);
+    // Its lease went with it: the kernel closed the connection, and the next
+    // peer may attach.
+    REQUIRE(fx.pollUntil([&] { return !at.server.holding(); }, kEngineWaitMs));
 
     // The host never takes that lock: the engine stays fully responsive.
     OscReply reply;

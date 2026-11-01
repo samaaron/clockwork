@@ -86,10 +86,12 @@ to exist before a packet can be written to it.
 
 ## --shm-commands
 
-Not a socket: a command ring inside the shared-memory segment, for one trusted
-co-located peer. It needs `-u > 0` — not to bind anything, but because a
-non-zero port is what makes the engine create the segment. The peer reaches
-the segment the way every reader does, through the attach endpoint below.
+Not a socket: a command ring in the engine's shared-memory COMMAND segment
+(docs/SEGMENTS.md), for one trusted co-located peer. It needs `-u > 0` — not
+to bind anything, but because a non-zero port is what makes the engine
+create its segments — and the command segment exists only with this flag.
+The peer reaches it through the attach endpoint below, as a peer; one holds
+it at a time.
 
 It is also the one transport with no receive wiring in the host: the engine's
 control pass drains the plane's command ring — on the engine's gateway thread,
@@ -98,14 +100,20 @@ calling in.
 
 ## The shared-memory attach endpoint
 
-The segment itself has no name. The engine creates it anonymously (`memfd` on
-Linux, an unlinked POSIX object on macOS, an unnamed file mapping on Windows),
-so nothing can open it by guessing, nothing another user can plant stands in
-its way, and nothing is left behind when the engine dies — the pages go with
-the last mapping. A reader is *given* the segment instead: it connects to the
-attach endpoint and receives a duplicate of the engine's handle, as `SCM_RIGHTS`
-ancillary data over a Unix socket, or, on Windows, duplicated straight into
-the client process over a named pipe (`shm_attach.hpp`).
+The engine has two segments (docs/SEGMENTS.md): the PUBLISHED one — the
+arena: clock, metrics, scopes, taps, the node tree — which any number of
+readers map read-only, and, with `--shm-commands`, the COMMAND one — the
+peer plane and the bulk lanes — which one peer maps read-write. Neither has
+a name. The engine creates them anonymously (`memfd` on Linux, an unlinked
+POSIX object on macOS, an unnamed file mapping on Windows), so nothing can
+open them by guessing, nothing another user can plant stands in their way,
+and nothing is left behind when the engine dies — the pages go with the
+last mapping. A client is *given* a segment instead: it connects to the
+attach endpoint and receives a duplicate of the engine's handle, as
+`SCM_RIGHTS` ancillary data over a Unix socket, or, on Windows, duplicated
+straight into the client process over a named pipe (`shm_attach.hpp`). A
+reader's duplicate is a READ-ONLY handle: the kernel refuses it a writable
+mapping.
 
 That is a separate endpoint from the command transport because only a local
 socket or pipe can carry an OS handle. A host that talks TCP to its engine
@@ -115,14 +123,18 @@ connected.
 
 `--shm-endpoint <path|pipe>` names it. Unset, it is derived from the port:
 `$XDG_RUNTIME_DIR/clockwork-shm-<port>.sock`, else `$TMPDIR/…`, else a
-uid-tagged path under `/tmp`; on Windows `\\.\pipe\clockwork-shm-<port>`. The
-segment holds the command ring, so attaching is a command path and asks for
-the per-boot secret: a reader's first frame on the endpoint is the same auth
-frame the stream transports take, and a reader that sends anything else, or
-nothing within 2 s, gets no hand-off and is counted. Both sides also check
-the peer's uid (owner-only DACL on Windows), so a reader that only knows the
-port still meets its own engine and nobody else's. The C client API does the
-whole hand-off: `clockwork_client_open_shm(endpoint, secret)`, with
+uid-tagged path under `/tmp`; on Windows `\\.\pipe\clockwork-shm-<port>`. Attaching
+asks for the per-boot secret: a client's first frame on the endpoint is the
+same auth frame the stream transports take, then a 4-byte role word (1 a
+reader, 2 a peer). A client that sends anything else, or nothing within 2 s,
+gets no hand-off and is counted. A peer where there is no command segment,
+or while another peer holds it, gets a hello that says so and no segment;
+a peer that is served keeps its connection open as the lease, and closing
+it (or dying) releases the segment. Both sides also check the peer's uid
+(owner-only DACL on Windows), so a client that only knows the port still
+meets its own engine and nobody else's. The C client API does the whole
+hand-off: `clockwork_client_open_shm(endpoint, secret)` for a reader,
+`clockwork_client_open_shm_peer(endpoint, secret)` for the peer, with
 `clockwork_client_default_endpoint(port)` for the derived name.
 
 ## Origins

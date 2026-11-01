@@ -13,6 +13,7 @@ use clockwork_abi::client::{
     clockwork_client_ntp_at_frame, clockwork_client_sample_clock,
     clockwork_client_close, clockwork_client_default_endpoint, clockwork_client_info,
     clockwork_client_open_memory, clockwork_client_open_shm, clockwork_client_open_shm_handle,
+    clockwork_client_open_shm_peer,
     clockwork_client_poll, clockwork_client_region, clockwork_client_send,
     clockwork_client_send_abort, clockwork_client_send_begin, clockwork_client_send_commit,
     clockwork_client_tap_close, clockwork_client_tap_missed, clockwork_client_tap_open,
@@ -87,14 +88,18 @@ impl Client {
         }
     }
 
-    /// Attach to an engine in another process on this machine, through the
-    /// endpoint it serves its segment from ([`Client::default_endpoint`], or
-    /// what it was started with as `--shm-endpoint`). `NotFound` for no
-    /// engine there, an engine started with `-u 0`, or a layout this build
-    /// does not recognise.
-    /// `secret` is the engine's per-boot secret: the endpoint hands the
-    /// segment only to a reader that presents it, and refuses with
-    /// [`Error::Perm`] otherwise.
+    /// Attach to an engine in another process on this machine as a READER,
+    /// through the endpoint it serves its segments from
+    /// ([`Client::default_endpoint`], or what it was started with as
+    /// `--shm-endpoint`). `NotFound` for no engine there, an engine started
+    /// with `-u 0`, or a layout this build does not recognise.
+    /// `secret` is the engine's per-boot secret: the endpoint hands a segment
+    /// only to a client that presents it, and refuses with [`Error::Perm`]
+    /// otherwise.
+    ///
+    /// A reader has the published segment, read-only: metrics, clock, taps,
+    /// scope, window. [`Client::send`], [`Client::poll`] and the lanes are
+    /// the peer's ([`Client::open_shm_peer`]) and answer [`Error::Perm`].
     pub fn open_shm(endpoint: &str, secret: &[u8; 32]) -> Result<Client> {
         let endpoint = CString::new(endpoint).map_err(|_| Error::Arg)?;
         let mut st = ClockworkStatus::OK;
@@ -112,6 +117,21 @@ impl Client {
         // SAFETY: a live out-pointer; the handle's validity is the caller's
         // claim and the library's to check.
         let raw = unsafe { clockwork_client_open_shm_handle(native_handle, &mut st) };
+        Self::opened(raw, st, true)
+    }
+
+    /// Attach as the PEER: a reader's view and the engine's command plane —
+    /// the ring [`Client::send`] writes, the ring [`Client::poll`] takes
+    /// from, and the bulk lanes. One peer at a time: [`Error::Busy`] while
+    /// another holds it, [`Error::Absent`] when the host did not enable the
+    /// plane. The hold lasts until the client is dropped, or this process
+    /// dies.
+    pub fn open_shm_peer(endpoint: &str, secret: &[u8; 32]) -> Result<Client> {
+        let endpoint = CString::new(endpoint).map_err(|_| Error::Arg)?;
+        let mut st = ClockworkStatus::OK;
+        // SAFETY: a NUL-terminated string and a 32-byte array that outlive the
+        // call, and a live out-pointer.
+        let raw = unsafe { clockwork_client_open_shm_peer(endpoint.as_ptr(), secret.as_ptr(), &mut st) };
         Self::opened(raw, st, true)
     }
 

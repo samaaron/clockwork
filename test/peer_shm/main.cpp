@@ -97,13 +97,17 @@ int main(int argc, char* argv[]) {
             if (std::sscanf(line + 2 * i, "%2x", &v) != 1) { std::fprintf(stderr, "peer_shm: bad secret\n"); return 3; }
             secret[i] = static_cast<uint8_t>(v);
         }
+        // A peer: the command segment, read-write, held for the life of this
+        // process — the attach connection is the lease, and the kernel
+        // closes it when we die, which is what the crash test relies on.
         std::string err;
-        const auto handle = shm_attach::receive(endpoint, secret, &err);
-        if (!detail_shm_segment::shm_handle_valid(handle)) {
+        static shm_attach::command_lease lease =
+            shm_attach::receive_command_plane(endpoint, secret, &err);
+        if (!lease.valid()) {
             std::fprintf(stderr, "peer_shm: attach at %s failed: %s\n", endpoint.c_str(), err.c_str());
             return 3;
         }
-        static shm_segment_client client(handle);
+        static shm_command_client client(detail_shm_segment::shm_dup_handle(lease.handle));
         plane = client.get_peer_plane();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "peer_shm: cannot map the segment from %s: %s\n", endpoint.c_str(), e.what());

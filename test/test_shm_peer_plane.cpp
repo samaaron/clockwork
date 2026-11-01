@@ -78,7 +78,7 @@ TEST_CASE("shm-peer: segment publishes plane geometry and attach claims it",
     constexpr unsigned kPort = 57221;
     EngineFixture fx(planeConfig(kPort));
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
 
@@ -107,7 +107,7 @@ TEST_CASE("shm-peer: command ring commands reach the engine and reply",
     constexpr unsigned kPort = 57222;
     EngineFixture fx(planeConfig(kPort));
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(fx.engine().shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -136,7 +136,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -190,7 +190,7 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -256,7 +256,7 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
@@ -310,7 +310,7 @@ TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, 
     transport.bindPlaneSlot(engine.peerPlaneSlot());
     REQUIRE(transport.ready());
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(engine.shmNativeHandle()));
+    shm_command_client client(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()));
     ShmPeerPlaneHeader* plane = client.get_peer_plane();
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);

@@ -227,7 +227,7 @@ TEST_CASE("tap-stream: headless engine publishes an advancing sample clock",
     REQUIRE(fix.waitForReply("/dummy/pong", reply));
     REQUIRE(fix.waitForBlocks(20, 3000));
 
-    shm_segment_client client(detail_shm_segment::shm_dup_handle(fix.engine().shmNativeHandle()));
+    shm_segment_client client(detail_shm_segment::shm_dup_handle(fix.engine().shmReaderHandle()));
     const sample_clock_view a = client.get_sample_clock();
     REQUIRE(a.valid);
     CHECK(a.sample_rate == 48000);

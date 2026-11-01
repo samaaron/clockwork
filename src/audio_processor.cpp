@@ -472,6 +472,18 @@ extern "C" {
     // cross-process.
     uint8_t* g_external_segment = nullptr;
 
+    // Where the lanes are for the arena's table, when they are not this
+    // process's own memory: the command segment's offsets (ClockworkEngine,
+    // docs/SEGMENTS.md). Read by every guest build.
+    static uint32_t g_lane_space      = CLOCKWORK_SPACE_UNKNOWN;
+    static uint64_t g_lane_assets_at  = 0;
+    static uint64_t g_lane_returns_at = 0;
+    void clockwork_place_lanes(uint32_t space, uint64_t assets_at, uint64_t returns_at) {
+        g_lane_space      = space;
+        g_lane_assets_at  = assets_at;
+        g_lane_returns_at = returns_at;
+    }
+
     uint8_t* shared_memory = nullptr;
     RingCursors* cursors = nullptr;
     PerformanceMetrics* metrics = nullptr;
@@ -2450,11 +2462,15 @@ extern "C" {
         config.assets_bytes  = g_clockwork_config.assets_bytes;
         config.returns       = g_clockwork_config.returns;
         config.returns_bytes = g_clockwork_config.returns_bytes;
-        // Where the assets and the returns are, into the table: a segment's
-        // creator already wrote them as segment offsets, which every reader
-        // of the segment can use; an arena in plain memory gets the
-        // addresses in this process (on the web, in wasm memory).
-        if (!g_external_segment) {
+        // Where the assets and the returns are, into the table: offsets in
+        // the command segment when the lanes are there (clockwork_place_lanes;
+        // every reader of the arena can see them and only the peer can reach
+        // them), else the addresses in this process (on the web, in wasm
+        // memory).
+        if (g_lane_space == CLOCKWORK_SPACE_COMMAND_SEGMENT) {
+            arenaSetArea(shared_memory, CLOCKWORK_AREA_ASSETS,  g_lane_space, g_lane_assets_at,  config.assets_bytes);
+            arenaSetArea(shared_memory, CLOCKWORK_AREA_RETURNS, g_lane_space, g_lane_returns_at, config.returns_bytes);
+        } else {
             arenaSetArea(shared_memory, CLOCKWORK_AREA_ASSETS,
                          config.assets ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
                          (uintptr_t)config.assets, config.assets_bytes);
