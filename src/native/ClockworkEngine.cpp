@@ -285,7 +285,7 @@ std::vector<double> ClockworkEngine::probeDeviceSampleRates(
     // Serialise session access against swaps/recovery — the scan below
     // changes each driver's lists, which listDevices() readers iterate. Same
     // gate discipline as listDevices().
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     if (name.empty() || !mDevices) return {};
     for (const auto& driver : mDevices->drivers()) {
         mDevices->scan(driver);
@@ -1556,6 +1556,7 @@ void ClockworkEngine::shutdown() {
     // opened, as its last work, and stops: nothing after this touches the
     // device session or the egress it reports through.
     mDebounceSwitchStop.store(true);
+    clockwork::bump(mDebounceSwitchWake);
     if (mDevices) runOnDeviceLane([this] { closeDevices(); });
     mDeviceTaskStop.store(true);   // no more work accepted
     mDeviceTaskThread.request_stop();   // the lane wakes through the loop's stop_callback
@@ -2010,18 +2011,24 @@ void ClockworkEngine::executePendingSwitch() {
     for (;;) {
         PendingSwitch pick;
         for (;;) {
-            if (!mDebounceSwitchStop.load())
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            std::lock_guard<std::mutex> lock(mPendingSwitchMutex);
-            if (mDebounceSwitchStop.load() || !mPendingSwitch.active) {
-                mDebounceSwitchRunning = false;
-                return;
+            // A later pick only moves the deadline on, so the wait ends at the
+            // deadline it was given or at shutdown, and looks again.
+            const uint32_t seen = mDebounceSwitchWake.value.load(std::memory_order_seq_cst);
+            std::chrono::steady_clock::time_point due;
+            {
+                std::lock_guard<std::mutex> lock(mPendingSwitchMutex);
+                if (mDebounceSwitchStop.load() || !mPendingSwitch.active) {
+                    mDebounceSwitchRunning = false;
+                    return;
+                }
+                due = mPendingSwitch.timestamp + kDebounce;
+                if (std::chrono::steady_clock::now() >= due) {
+                    pick = mPendingSwitch;
+                    mPendingSwitch.active = false;
+                    break;
+                }
             }
-            if (std::chrono::steady_clock::now() - mPendingSwitch.timestamp >= kDebounce) {
-                pick = mPendingSwitch;
-                mPendingSwitch.active = false;
-                break;
-            }
+            clockwork::wait_until(mDebounceSwitchWake, seen, due);
         }
 
         clockwork_log("[device-setup] debounced switch: out='%s' in='%s' sr=%.0f buf=%d",
@@ -2032,21 +2039,20 @@ void ClockworkEngine::executePendingSwitch() {
         if (!pick.devName.empty())
             forceDeviceMode(pick.devName);
 
-        // Retry if a swap is already in progress (e.g. cascade from a
-        // device-change notification). Give it up to ~3 seconds.
+        // A swap already in progress (a cascade from a device-change
+        // notification) is waited for, up to 3 seconds. The gate is
+        // recursive, so switchDevice takes it again under this hold.
         SwapResult result;
-        int attempts = 0;
-        for (int attempt = 0; attempt < 30; ++attempt) {
-            attempts = attempt + 1;
-            result = switchDevice(pick.devName, pick.sampleRate, pick.bufferSize, false,
-                                  pick.inputDevName);
-            if (result.success || result.error != "swap already in progress") break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        {
+            std::unique_lock<std::recursive_timed_mutex> gate;
+            if (tryAcquireSwapGate(gate, std::chrono::seconds(3)))
+                result = switchDevice(pick.devName, pick.sampleRate, pick.bufferSize, false,
+                                      pick.inputDevName);
+            else
+                result.error = "swap already in progress";
         }
-        if (!result.success) {
-            clockwork_log("[device-setup] debounced switch failed after %d attempts: %s",
-                    attempts, result.error.c_str());
-        }
+        if (!result.success)
+            clockwork_log("[device-setup] debounced switch failed: %s", result.error.c_str());
         // No sendDeviceReport() here — switchDevice's printDeviceList already
         // broadcasts. A second call can race with the driver's post-switch
         // device-list rescan and report an empty snapshot. Push the truthful outcome instead.
@@ -2054,14 +2060,10 @@ void ClockworkEngine::executePendingSwitch() {
     }
 }
 
-bool ClockworkEngine::tryAcquireSwapGate(std::unique_lock<std::recursive_mutex>& lk,
-                                          int attempts, int sleepMs) {
-    lk = std::unique_lock<std::recursive_mutex>(mSwapMutex, std::defer_lock);
-    for (int i = 0; i < attempts; ++i) {
-        if (lk.try_lock()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
-    }
-    return false;
+bool ClockworkEngine::tryAcquireSwapGate(std::unique_lock<std::recursive_timed_mutex>& lk,
+                                          std::chrono::milliseconds wait) {
+    lk = std::unique_lock<std::recursive_timed_mutex>(mSwapMutex, std::defer_lock);
+    return wait.count() > 0 ? lk.try_lock_for(wait) : lk.try_lock();
 }
 
 ClockworkEngine::TestSwapHold ClockworkEngine::testHoldSwapGate() {
@@ -2094,15 +2096,9 @@ int64_t ClockworkEngine::watchdogNowMs() const {
 }
 
 void ClockworkEngine::watchdogLoop(const std::stop_token& stop) {
-    const int pollMs = mWatchdog->pollMs;
-    while (!stop.stop_requested()) {
-        // Sleep in small slices so shutdown joins quickly.
-        for (int slept = 0; slept < pollMs && !stop.stop_requested(); slept += 20)
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(std::min(20, pollMs - slept)));
-        if (stop.stop_requested()) return;
+    const auto poll = std::chrono::milliseconds(mWatchdog->pollMs);
+    while (!clockwork::sleep_until(stop, std::chrono::steady_clock::now() + poll))
         watchdogPoll();
-    }
 }
 
 void ClockworkEngine::watchdogPoll() {
@@ -2159,8 +2155,8 @@ void ClockworkEngine::watchdogPoll() {
         // thread died/wedged, restart it under the swap gate; otherwise it's
         // ticking fine and there's no real device to recover.
         if (ph == clockwork::audio::LivenessPhase::Stalled) {
-            std::unique_lock<std::recursive_mutex> lk;
-            if (tryAcquireSwapGate(lk, 1, 0)
+            std::unique_lock<std::recursive_timed_mutex> lk;
+            if (tryAcquireSwapGate(lk, std::chrono::milliseconds(0))
                 && mActiveSource.load() == AudioSource::Headless) {
                 mWatchdogRecoveries.fetch_add(1, std::memory_order_release);
                 clockwork_log("[watchdog] headless driver stalled — restarting");
@@ -2347,11 +2343,11 @@ void ClockworkEngine::recoverAudio(RecoveryIntent intent) {
     bool restored = false;
     SwapResult swap;   // device name/rate/buffer from the cold swap — reused below
     {
-        std::unique_lock<std::recursive_mutex> lk;
-        const bool gateFree = tryAcquireSwapGate(lk, 1, 0);
+        std::unique_lock<std::recursive_timed_mutex> lk;
+        const bool gateFree = tryAcquireSwapGate(lk, std::chrono::milliseconds(0));
         if (!gateFree)
             clockwork_log("[recover] a device change is in flight — waiting for it");
-        if (!gateFree && !tryAcquireSwapGate(lk, 20, 50)) {
+        if (!gateFree && !tryAcquireSwapGate(lk, std::chrono::seconds(1))) {
             // Another thread genuinely holds the gate (a swap in flight) — it will
             // re-establish audio. Tell any /reopen caller it didn't run (so it
             // isn't left waiting), but DON'T stamp the cooldown: no recovery
@@ -2509,7 +2505,7 @@ void ClockworkEngine::sendDeviceReport() {
     if (!mEgress.hasSubscribers()) return;
     // Serialise session access against device mutations / recovery's
     // recreate. Recursive: the mutation paths call this while holding the gate.
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
 
     // Skip rescan — sendDeviceReport() is usually called right after a
     // device switch, when rescanning would disrupt the freshly-opened device.
@@ -2871,7 +2867,7 @@ std::vector<DeviceInfo> ClockworkEngine::listDevices(bool rescan) const {
     // Serialise session access against device mutations / recovery's
     // recreate (see mSwapMutex). Recursive: mutation paths call this under the
     // gate. Lock order is always gate-then-mListDevicesMutex.
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     std::vector<DeviceInfo> result;
     if (!mDevices) return result;
 
@@ -3050,7 +3046,7 @@ bool ClockworkEngine::isSyntheticDefaultPick(const std::string& name) const {
 CurrentDeviceInfo ClockworkEngine::currentDevice() const {
     // Serialise session access against device mutations / recovery's
     // recreate (see mSwapMutex). Recursive: mutation paths call this under gate.
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     CurrentDeviceInfo info;
     if (!mDevices) return info;
     const auto dev = mDevices->current();
@@ -3570,8 +3566,8 @@ SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
 
     // Acquire the swap gate (non-blocking) — tryAcquireSwapGate is the
     // single way any code takes it.
-    std::unique_lock<std::recursive_mutex> guard;
-    if (!tryAcquireSwapGate(guard, 1, 0)) {
+    std::unique_lock<std::recursive_timed_mutex> guard;
+    if (!tryAcquireSwapGate(guard, std::chrono::milliseconds(0))) {
         result.error = "swap already in progress";
         clockwork_log("[switchDevice] refused: %s", result.error.c_str());
         return result;
@@ -4420,7 +4416,7 @@ std::vector<std::string> ClockworkEngine::listDrivers() const {
     // Serialise session access against device mutations / recovery's
     // recreate (see mSwapMutex). Recursive: mutation paths call this under the
     // gate. Lock order is always gate-then-mListDriversMutex.
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     if (!mDevices) return {};
 
     // Cache hit — skip the rescan. sendDeviceReport() is called many
@@ -4479,7 +4475,7 @@ std::vector<std::string> ClockworkEngine::listDrivers() const {
 std::string ClockworkEngine::currentDriver() const {
     // Serialise session access against device mutations / recovery's
     // recreate (see mSwapMutex). Recursive: mutation paths call this under gate.
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     // The open device's driver; with none open the session's, so the GUI's
     // driver dropdown stays on the right entry instead of going blank (after
     // an open that failed, it is the driver the open was on).
@@ -4601,8 +4597,8 @@ void ClockworkEngine::reconcileDevices() {
     // rather than racing a reader for it. Readers hold it only briefly; a
     // mutation outside the lane holding it for 3 s is a fault, and this
     // change must not be lost to it — look again once the lane comes round.
-    std::unique_lock<std::recursive_mutex> gate;
-    if (!tryAcquireSwapGate(gate, 30, 100)) {
+    std::unique_lock<std::recursive_timed_mutex> gate;
+    if (!tryAcquireSwapGate(gate, std::chrono::seconds(3))) {
         clockwork_log("[devices] changed, gate busy for 3 s — looking again");
         devicesChanged(changes);
         return;
@@ -4796,7 +4792,7 @@ ClockworkEngine::SystemDefaultOutput ClockworkEngine::systemDefaultOutput() {
     // default first, a driver with no default (ASIO) names none. Under the
     // gate, as every session read is: recovery's recreate replaces it.
     SystemDefaultOutput out;
-    std::lock_guard<std::recursive_mutex> gate(mSwapMutex);
+    std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);
     if (!mDevices) return out;
     const std::string driver = mDevices->driver();
     const std::string name = mDevices->defaultDevice(driver, false);
@@ -4841,8 +4837,8 @@ std::string ClockworkEngine::openDriverDefault() {
     // The init and what follows it are one mutation: under the gate
     // throughout, so no other swap drives the session in between (two at
     // once can wedge DirectSound's callback thread in its cursor poll).
-    std::unique_lock<std::recursive_mutex> swapGate;
-    if (!tryAcquireSwapGate(swapGate, 30, 100)) {
+    std::unique_lock<std::recursive_timed_mutex> swapGate;
+    if (!tryAcquireSwapGate(swapGate, std::chrono::seconds(3))) {
         clockwork_log("[device-setup] system mode init refused: "
                 "swap already in progress");
         return "swap already in progress";

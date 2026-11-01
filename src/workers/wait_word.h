@@ -36,6 +36,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <stop_token>
 
 // The word, and the count of threads blocked on it. Plain 32-bit atomics, so
 // it may sit in shared memory and be read by another build.
@@ -102,6 +103,16 @@ void wait_for_condition(ClockworkWaitWord& w, Done&& done,
         if (done()) return;
         wait(w, seen, scope, event);
     }
+}
+
+// Block until `deadline`, or until `stop` is requested. True if stop was
+// requested. For work that is due at a time, such as a sampling interval, on
+// a thread that must still leave the moment it is asked to.
+inline bool sleep_until(const std::stop_token& stop, WaitClock::time_point deadline) {
+    ClockworkWaitWord w;
+    const std::stop_callback wake(stop, [&w] { bump(w); });
+    while (!stop.stop_requested() && WaitClock::now() < deadline) wait_until(w, 0, deadline);
+    return stop.stop_requested();
 }
 
 }  // namespace clockwork

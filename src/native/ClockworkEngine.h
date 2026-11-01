@@ -667,15 +667,14 @@ public:
     // device lane that has not started, when devicePhase() still reads Idle.
     bool recoveryInFlight() const { return mReopenInProgress.load(); }
 
-    // Bounded acquisition of the swap gate: up to `attempts` try_locks,
-    // `sleepMs` apart, mirroring executePendingSwitch's retry discipline.
-    // Used by setDeviceMode's system-default reinit so it cannot interleave
-    // with an in-flight switchDevice — two threads driving the device
-    // session concurrently can wedge the device's callback thread
-    // (DirectSound's, in a cursor-poll spin). Public so tests can exercise
-    // the gate without a device.
-    bool tryAcquireSwapGate(std::unique_lock<std::recursive_mutex>& lk,
-                            int attempts, int sleepMs);
+    // Bounded acquisition of the swap gate: blocks up to `wait` for its
+    // holder to let go (0 = a single try). Used by setDeviceMode's
+    // system-default reinit so it cannot interleave with an in-flight
+    // switchDevice — two threads driving the device session concurrently can
+    // wedge the device's callback thread (DirectSound's, in a cursor-poll
+    // spin). Public so tests can exercise the gate without a device.
+    bool tryAcquireSwapGate(std::unique_lock<std::recursive_timed_mutex>& lk,
+                            std::chrono::milliseconds wait);
 
     // Test-only: hold the swap gate AND present the Swapping phase —
     // together they are what "a swap is in flight" means to the rest of
@@ -683,7 +682,7 @@ public:
     // handlers try the gate).
     class TestSwapHold {
     public:
-        TestSwapHold(std::recursive_mutex& m, std::atomic<DevicePhase>& p)
+        TestSwapHold(std::recursive_timed_mutex& m, std::atomic<DevicePhase>& p)
             : mLock(m), mPhase(&p) { p.store(DevicePhase::Swapping); }
         TestSwapHold(TestSwapHold&& o) noexcept
             : mLock(std::move(o.mLock)), mPhase(o.mPhase) {
@@ -698,7 +697,7 @@ public:
             if (mLock.owns_lock()) mLock.unlock();
         }
     private:
-        std::unique_lock<std::recursive_mutex> mLock;
+        std::unique_lock<std::recursive_timed_mutex> mLock;
         std::atomic<DevicePhase>* mPhase = nullptr;
     };
     TestSwapHold testHoldSwapGate();
@@ -1201,6 +1200,7 @@ private:
     PendingSwitch              mPendingSwitch;                 // guarded by mPendingSwitchMutex
     bool                       mDebounceSwitchRunning = false; // guarded by mPendingSwitchMutex
     std::atomic<bool>          mDebounceSwitchStop{false};
+    ClockworkWaitWord          mDebounceSwitchWake;            // bumped when the stop is set
     void executePendingSwitch();   // runs on the device task lane
 
     // THE device lane. The devices a device boot opens are opened, started,
@@ -1368,8 +1368,9 @@ private:
     // listDrivers/sendDeviceReport) can take it to serialise against device
     // mutations without deadlocking the mutation paths that call those readers
     // while already holding it, and so a recovery can hold it across
-    // reopenCurrentDevice (which re-takes it). mutable for the const readers.
-    mutable std::recursive_mutex mSwapMutex;
+    // reopenCurrentDevice (which re-takes it). Timed, so a mutation that must
+    // wait for another blocks on it with a bound. mutable for the const readers.
+    mutable std::recursive_timed_mutex mSwapMutex;
 
     // listDrivers() cache — avoids re-scanning every AudioIODeviceType
     // on every /clockwork/info push. Re-scanning is expensive (each

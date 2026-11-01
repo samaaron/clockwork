@@ -137,6 +137,29 @@ TEST_CASE("wait word: a condition over other state is waited for through the wor
     CHECK_FALSE(clockwork::wait_for_condition(w, [] { return false; }, steady_clock::now() + milliseconds(20)));
 }
 
+TEST_CASE("wait word: a stoppable sleep lasts to its deadline, and ends when stop is requested", "[wait_word]") {
+    std::stop_source running;
+    const auto t0 = steady_clock::now();
+    CHECK_FALSE(clockwork::sleep_until(running.get_token(), t0 + milliseconds(50)));
+    CHECK(steady_clock::now() - t0 >= milliseconds(50));
+
+    // A stop requested before or during the sleep ends it; only a sleep that
+    // ignored the stop reaches a minute.
+    std::atomic<bool> stopped{false};
+    std::jthread sleeper([&](const std::stop_token& stop) {
+        stopped.store(clockwork::sleep_until(stop, steady_clock::now() + seconds(60)));
+    });
+    const auto t1 = steady_clock::now();
+    sleeper.request_stop();
+    sleeper.join();
+    CHECK(stopped.load());
+    CHECK(steady_clock::now() - t1 < seconds(30));
+
+    std::stop_source done;
+    done.request_stop();
+    CHECK(clockwork::sleep_until(done.get_token(), steady_clock::now() + seconds(60)));
+}
+
 #if !defined(_WIN32)
 TEST_CASE("wait word: a shared word wakes a waiter in another process", "[wait_word][shared]") {
     void* mem = ::mmap(nullptr, sizeof(ClockworkWaitWord), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);

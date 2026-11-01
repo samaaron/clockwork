@@ -262,13 +262,44 @@ TEST_CASE("SwapGate: bounded acquisition fails while held, succeeds after releas
     });
     { std::unique_lock<std::mutex> g(m); cv.wait(g, [&] { return holding; }); }
 
-    std::unique_lock<std::recursive_mutex> lk;
-    REQUIRE_FALSE(fix.engine().tryAcquireSwapGate(lk, 3, 10));   // held by holder thread
+    std::unique_lock<std::recursive_timed_mutex> lk;
+    REQUIRE_FALSE(fix.engine().tryAcquireSwapGate(lk, std::chrono::milliseconds(0)));   // held by holder thread
+    REQUIRE_FALSE(lk.owns_lock());
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE_FALSE(fix.engine().tryAcquireSwapGate(lk, std::chrono::milliseconds(30)));  // waited out the bound
+    CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(30));
     REQUIRE_FALSE(lk.owns_lock());
 
     { std::lock_guard<std::mutex> g(m); release = true; } cv.notify_all();
     holder.join();
 
-    REQUIRE(fix.engine().tryAcquireSwapGate(lk, 3, 10));         // now free
+    REQUIRE(fix.engine().tryAcquireSwapGate(lk, std::chrono::milliseconds(0)));         // now free
     REQUIRE(lk.owns_lock());
+}
+
+TEST_CASE("SwapGate: a bounded acquisition is handed the gate when its holder lets go",
+          "[Watchdog][SwapGate]") {
+    EngineFixture fix;  // watchdog off
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool holding = false, release = false;
+    std::thread holder([&] {
+        auto held = fix.engine().testHoldSwapGate();
+        { std::lock_guard<std::mutex> g(m); holding = true; } cv.notify_all();
+        std::unique_lock<std::mutex> g(m);
+        cv.wait(g, [&] { return release; });
+    });
+    { std::unique_lock<std::mutex> g(m); cv.wait(g, [&] { return holding; }); }
+
+    // Let go from a third thread while this one waits: the wait ends with the
+    // gate, well inside a bound only a wait that missed the release reaches.
+    std::thread letGo([&] { { std::lock_guard<std::mutex> g(m); release = true; } cv.notify_all(); });
+    std::unique_lock<std::recursive_timed_mutex> lk;
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(fix.engine().tryAcquireSwapGate(lk, std::chrono::seconds(60)));
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(30));
+    CHECK(lk.owns_lock());
+    letGo.join();
+    holder.join();
 }

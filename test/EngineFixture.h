@@ -229,9 +229,9 @@ struct OscReply {
 // (see EngineClock.cpp): the id a request carried, back on its reply.
 // switchDevice() is non-blocking by design: while anything else holds the
 // swap gate — a swap's tail, the device lane's own work — it answers "swap
-// already in progress", and the engine's own callers retry (the debounced
-// switch, for ~3 s). So does a case, until the gate is free: within a bound
-// only a gate that is never released reaches.
+// already in progress", and the engine's own callers wait for the gate (the
+// debounced switch, up to 3 s). So does a case, until the gate is free:
+// within a bound only a gate that is never released reaches.
 template <typename Attempt>
 SwapResult whenSwapGateFree(Attempt&& attempt) {
     SwapResult r;
