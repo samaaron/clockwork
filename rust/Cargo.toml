@@ -19,6 +19,10 @@
 # * `clockwork-taps`   — tap slot claim/release over the shared-memory plane.
 # * `clockwork-clock`  — a beat grid as a value (the Timeline snapshot) and the
 #                          MIDI-clock follower registry that produces them.
+# * `clockwork-wait`    — the wait word (src/workers/wait_word.h) in Rust, on
+#                          the operating system's address wait, and ReadyWait,
+#                          which sleeps a socket or device thread until a
+#                          descriptor is ready or the thread is stopped.
 # * `clockwork-slots`   — the stable-slot table: a generation-tagged handle,
 #                          one atomic word per slot, and closing without a lock
 #                          on the read path. Shared by the ports and the event
@@ -64,6 +68,7 @@ resolver = "2"
 members = [
     "clockwork-abi",
     "clockwork-osc",
+    "clockwork-wait",
     "clockwork-slots",
     "clockwork-ports",
     "clockwork-sinks",
@@ -97,7 +102,7 @@ lto = true
 unsafe_op_in_unsafe_fn = "warn"
 # The corpus replay is built with `--cfg fuzzing`, as the fuzzer builds
 # (clockwork-corpus, and the replay job in .github/workflows/security.yml).
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(loom)"] }
 
 [workspace.lints.clippy]
 # The MSRV is 1.85, Debian trixie's rustc (the distro build compiles these

@@ -37,21 +37,9 @@ const HDR_PEER_CMD_BYTES: usize = 3 * 4;
 const HDR_PEER_REP_BYTES: usize = 4 * 4;
 const HDR_WAKE_OFFSET: usize = 9 * 4;
 
-// ClockworkWaitWord (src/workers/wait_word.h): the value, then the count of
-// threads asleep on it. The engine's control pass sleeps on this word; a
-// write to the command ring is followed by a bump and, if anyone sleeps, a
-// wake of the operating system.
-const WAKE_VALUE: usize = 0;
-const WAKE_WAITERS: usize = 4;
-
-// Apple's cross-process address wake (os/os_sync_wait_on_address.h, macOS 14.4,
-// iOS 17.4), in libSystem.
-#[cfg(target_vendor = "apple")]
-const OS_SYNC_WAKE_BY_ADDRESS_SHARED: u32 = 1;
-#[cfg(target_vendor = "apple")]
-extern "C" {
-    fn os_sync_wake_by_address_all(addr: *mut libc::c_void, size: usize, flags: u32) -> i32;
-}
+// The engine's control pass sleeps on a ClockworkWaitWord in the segment; a
+// write to the command ring is followed by a bump of it (wake_engine).
+use clockwork_wait::{Scope, WaitWord};
 
 // ShmPeerPlaneHeader field byte offsets (64-byte header; shm_peer_plane.h).
 const P_OWNER_PID: usize = 0;
@@ -525,27 +513,14 @@ impl ShmPeer {
     /// asleep on it, one wake of the operating system (wait_word.h). Never
     /// blocks.
     pub fn wake_engine(&self) {
-        self.seg.atomic_u32(self.wake + WAKE_VALUE).fetch_add(1, Ordering::SeqCst);
-        if self.seg.atomic_u32(self.wake + WAKE_WAITERS).load(Ordering::SeqCst) == 0 {
-            return;
-        }
-        let addr = self.seg.atomic_u32(self.wake + WAKE_VALUE) as *const AtomicU32;
-        // SAFETY: `addr` is a 4-aligned word inside the mapping (checked in
-        // `open`), shared with the engine; each call wakes waiters on it and
-        // touches nothing else.
-        unsafe {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            libc::syscall(libc::SYS_futex, addr, libc::FUTEX_WAKE, i32::MAX, std::ptr::null::<libc::timespec>(), std::ptr::null::<u32>(), 0);
-            #[cfg(target_vendor = "apple")]
-            os_sync_wake_by_address_all(addr as *mut libc::c_void, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-            #[cfg(windows)]
-            {
-                let _ = addr;
-                if !self.seg.wake_event.is_null() {
-                    windows_sys::Win32::System::Threading::SetEvent(self.seg.wake_event);
-                }
-            }
-        }
+        #[cfg(windows)]
+        let event = self.seg.wake_event;
+        #[cfg(not(windows))]
+        let event = std::ptr::null_mut();
+        // SAFETY: two u32 atomics, 4-aligned, inside the mapping (checked in
+        // `open`): a ClockworkWaitWord the engine waits on.
+        let word = unsafe { &*self.seg.base.add(self.wake).cast::<WaitWord>() };
+        word.bump_scoped(Scope::Shared(event));
     }
 
     /// Claim the plane (shm_peer_attach): stamp pid, reset the writer lock, skip

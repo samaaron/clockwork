@@ -17,8 +17,10 @@ socket2 = "0.6.4"
 clockwork-osc = { path = "../clockwork-osc" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }
 clockwork-log = { path = "../clockwork-log" }
+clockwork-wait = { path = "../clockwork-wait" }
 
 [dev-dependencies]
+clockwork-wait = { path = "../clockwork-wait", features = ["testing"] }
 clockwork-corpus = { path = "../clockwork-corpus" }
 
 [target.'cfg(unix)'.dependencies]

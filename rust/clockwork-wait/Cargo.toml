@@ -1,0 +1,28 @@
+[package]
+name = "clockwork-wait"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+rust-version = "1.85"
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "The wait word (src/workers/wait_word.h) in Rust, on the operating system's address wait, with the same layout and protocol so Rust and C++ threads can wait on and wake one word; and ReadyWait, which sleeps a socket or device thread until a descriptor is ready or the thread is stopped."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# A count of a named thread's wakes, for tests that pin a thread as quiet.
+testing = []
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Threading"] }
