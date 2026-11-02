@@ -181,13 +181,14 @@ pub fn close_all() {
     crate::service::DRAIN.ring();
 }
 
-/// Drain one sink at `now`. Returns the earliest timetag still held.
+/// Drain one sink at `now`. Returns when it must next be pumped
+/// ([`Sink::pump`]).
 pub fn pump(handle: u32, now: u64) -> Option<u64> {
     acquire(handle)?.pump(now)
 }
 
-/// Drain every sink the service is responsible for. Returns the earliest
-/// timetag held by any of them.
+/// Drain every sink the service is responsible for. Returns the soonest any
+/// of them must next be pumped.
 pub fn pump_service(now: u64) -> Option<u64> {
     let mut handles = [0u32; MAX_SINKS];
     let n = SINKS.list(&mut handles).min(MAX_SINKS as u32) as usize;

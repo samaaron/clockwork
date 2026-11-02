@@ -417,3 +417,51 @@ fn opening_the_same_target_twice_gives_two_independent_sinks() {
 
     clockwork_sink_close(second);
 }
+
+/// An endpoint whose delivery of "/slow" takes a second, recording when each
+/// message went out on the wall clock, in the timetag's units.
+#[derive(Default)]
+struct SlowEndpoint {
+    out: Mutex<Vec<(u64, u64)>>,   // (when, delivered at)
+}
+
+impl clockwork_sinks::Endpoint for SlowEndpoint {
+    fn deliver(&self, bytes: &[u8], when: i64) -> clockwork_sinks::Delivery {
+        if bytes.starts_with(b"/slow") {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        self.out.lock().unwrap().push((when as u64, clockwork_sinks::time::now()));
+        clockwork_sinks::Delivery::Sent
+    }
+}
+
+#[test]
+fn a_slow_delivery_does_not_make_the_drain_late_for_the_next_held_message() {
+    let _g = serialise();
+    registry::close_all();
+
+    let ep = Arc::new(SlowEndpoint::default());
+    let h = registry::open_with_layout(KIND_OSC, "slow:0",
+                                       &SinkLayout::single(DEFAULT_CELL_BYTES as u32, 8),
+                                       ep.clone(), Drive::Service);
+    assert_ne!(h, 0);
+
+    // The drain spends a second delivering the first message, then sleeps
+    // towards the second, due two seconds from now. It must measure that
+    // sleep from the clock after the delivery, not before it.
+    let when = clockwork_sinks::time::now() + (2u64 << 32);
+    assert!(send(h, b"/slow", 1));
+    assert!(send(h, b"/timed", when as i64));
+
+    let until = Instant::now() + Duration::from_secs(30);
+    while ep.out.lock().unwrap().len() < 2 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let out = ep.out.lock().unwrap().clone();
+    assert_eq!(out.len(), 2, "both delivered");
+    let (w, at) = out[1];
+    assert_eq!(w, when);
+    let late = Duration::from_secs_f64((at.saturating_sub(w)) as f64 / (1u64 << 32) as f64);
+    assert!(late < Duration::from_millis(500), "delivered {late:?} after its time");
+    clockwork_sink_close(h);
+}

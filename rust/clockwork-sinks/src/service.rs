@@ -19,7 +19,7 @@
 //!
 //! The drain thread sleeps on [`DRAIN`], a `clockwork_wait::Doorbell`, until a
 //! send queues a message, the last sink closes, or the earliest held message
-//! is due. `clockwork_sink_send` rings the doorbell after it queues. While the
+//! is due, and for at most [`WALL_CLOCK_FOLLOW`] while it holds one. `clockwork_sink_send` rings the doorbell after it queues. While the
 //! drain is awake a ring costs the audio thread a fence and a load. The first
 //! ring after the drain goes to sleep makes one wake call, which does not
 //! block. An "immediately" message goes out as soon as the OS schedules the
@@ -40,6 +40,13 @@ pub static DRAIN: Doorbell = Doorbell::new();
 /// The shortest sleep. A held message due in 20 µs is not worth a wake per
 /// 20 µs; the drain lands on it a hair early or a hair late either way.
 const MIN_SLEEP: std::time::Duration = std::time::Duration::from_micros(100);
+
+/// The longest the drain sleeps while it holds a message. A timetag is on the
+/// wall clock, which a user or an NTP sync can set, and which moves on while a
+/// laptop sleeps, but the drain sleeps on the steady clock. This is how soon
+/// it sees the wall clock move. The scheduler host has the same bound
+/// (`kWallClockFollow`, src/host/host_scheduler.h).
+const WALL_CLOCK_FOLLOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The lifecycle, under a lock rather than a flag.
 ///
@@ -81,8 +88,36 @@ fn run() {
         }
 
         // Sleep until a send queues a message, the last sink closes, or the
-        // earliest held message is due.
-        let deadline = next.map(|w| Instant::now() + time::until(w, now).unwrap_or_default().max(MIN_SLEEP));
+        // earliest held message is due. Measured from the clock after the
+        // pump, which may have spent a while delivering.
+        let deadline = sleep_for(next, time::now()).map(|d| Instant::now() + d);
         DRAIN.sleep(|| registry::any_queued() || registry::open_count() == 0, deadline);
+    }
+}
+
+/// How long the drain sleeps towards `next`, when it must next pump, as seen
+/// at `now`.
+fn sleep_for(next: Option<u64>, now: u64) -> Option<std::time::Duration> {
+    next.map(|w| time::until(w, now).unwrap_or_default().clamp(MIN_SLEEP, WALL_CLOCK_FOLLOW))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_drain_holding_a_message_sleeps_a_second_at_most_so_it_sees_the_wall_clock_move() {
+        // The sleep runs on the steady clock and the timetag is on the wall
+        // clock, which can be set, or move on while a laptop sleeps.
+        let now = time::now();
+        let an_hour_on = now + (3600u64 << 32);
+        assert_eq!(sleep_for(Some(an_hour_on), now), Some(Duration::from_secs(1)));
+
+        let soon = now + (1u64 << 32) / 10;   // 100 ms
+        let d = sleep_for(Some(soon), now).unwrap();
+        assert!(d > Duration::from_millis(99) && d <= Duration::from_millis(100), "{d:?}");
+        assert_eq!(sleep_for(Some(now), now), Some(MIN_SLEEP));   // due: the shortest sleep
+        assert_eq!(sleep_for(None, now), None);                   // nothing held: until a send
     }
 }

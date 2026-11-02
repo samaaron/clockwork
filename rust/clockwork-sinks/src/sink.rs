@@ -71,7 +71,7 @@ use std::sync::{Arc, Mutex};
 use crate::endpoint::{Delivery, Endpoint};
 use crate::profile::Layout;
 use crate::queue::MsgQueue;
-use crate::time::{is_due, is_past, is_within_lookahead};
+use crate::time::{is_due, is_past, is_within_lookahead, LOOKAHEAD_UNITS};
 
 /// Kinds, matching `ClockworkSinkKind` in `src/clockwork_event_sink.h`.
 pub const KIND_MIDI: u32 = 1;
@@ -227,9 +227,11 @@ impl Sink {
         }
     }
 
-    /// True if a send has queued a message the drain has not taken yet.
+    /// True if a send has queued a message the drain has not taken yet. A
+    /// message still being written does not count: its send rings the drain
+    /// once it is written.
     pub fn has_queued(&self) -> bool {
-        self.classes.iter().any(|q| !q.is_empty())
+        self.classes.iter().any(|q| q.has_ready())
     }
 
     /// Messages accepted but not yet delivered — in the queue or held for
@@ -241,9 +243,10 @@ impl Sink {
 
     /// Drain: take everything queued, deliver what is due, hold the rest.
     ///
-    /// Returns the timetag of the earliest message still being held, so a
-    /// caller can sleep until then rather than poll. `None` means nothing is
-    /// waiting on a clock.
+    /// Returns when it must next be pumped, as a timetag, so a caller can
+    /// sleep until then rather than poll: the earliest held message's time,
+    /// or, for an endpoint that schedules, the moment that message enters the
+    /// look-ahead. `None` means nothing is waiting on a clock.
     ///
     /// NOT the audio thread's. It allocates (one `Vec` per held message), it
     /// takes the pending lock, and the endpoint underneath it may do IO.
@@ -281,6 +284,7 @@ impl Sink {
                 Some(Reverse(top))
                     if is_due(top.key.0, now)
                         || (schedules && is_within_lookahead(top.key.0, now)) => {}
+                Some(Reverse(top)) if schedules => return Some(top.key.0.saturating_sub(LOOKAHEAD_UNITS)),
                 Some(Reverse(top)) => return Some(top.key.0),
                 None => return None,
             }
@@ -396,6 +400,29 @@ mod tests {
             assert_eq!(*b.last().unwrap(), 0xEE, "the last byte made it too");
         }
         assert_eq!(sink.stats().dropped, 0);
+    }
+
+    #[test]
+    fn a_message_held_for_an_endpoint_that_schedules_is_due_back_when_it_enters_the_look_ahead() {
+        // The platform does the fine timing only if it has the message before
+        // its time. So the drain comes back when the look-ahead opens, not
+        // when the message is due.
+        let (sink, ep) = capture_sink(8);
+        ep.set_schedules(true);
+        let now = time::now();
+        let when = now + (1u64 << 32);   // a second ahead
+        assert!(sink.send(b"/later", when as i64));
+        let back = when - time::LOOKAHEAD_UNITS;
+        assert_eq!(sink.pump(now), Some(back));
+        assert_eq!(ep.count(), 0);
+        assert_eq!(sink.pump(back), None);
+        assert_eq!(ep.count(), 1, "handed over as the look-ahead opened");
+
+        // An endpoint that does not schedule is due back at the message's time.
+        let (sink, ep) = capture_sink(8);
+        assert!(sink.send(b"/later", when as i64));
+        assert_eq!(sink.pump(now), Some(when));
+        assert_eq!(ep.count(), 0);
     }
 
     #[test]
@@ -538,8 +565,8 @@ mod tests {
         // And beyond it, the sink keeps hold.
         let distant = base + time::LOOKAHEAD_UNITS * 100;
         assert!(sink.send(b"later", distant as i64));
-        assert_eq!(sink.pump(base), Some(distant),
-                   "past the look-ahead it stays here, and stays cancellable");
+        assert_eq!(sink.pump(base), Some(distant - time::LOOKAHEAD_UNITS),
+                   "past the look-ahead it stays here, stays cancellable, and is due back as the window opens");
         assert_eq!(ep.count(), 1, "not handed over");
     }
 

@@ -172,6 +172,14 @@ impl MsgQueue {
 
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
+    /// True if [`pop_with`](Self::pop_with) would take a message now: the
+    /// head cell is published. Unlike [`len`](Self::len), a cell a producer
+    /// has claimed but not yet written does not count. The consumer's call.
+    pub fn has_ready(&self) -> bool {
+        let pos = self.head.0.load(Ordering::Relaxed);
+        self.cells[pos & self.mask].seq.load(Ordering::Acquire) == pos.wrapping_add(1)
+    }
+
     /// Put one message in, stamped `stamp` for the drain's tiebreak. Returns
     /// false if the queue is full or the message is wider than a cell — either
     /// way it was not taken, and the caller decides what that means.
@@ -255,6 +263,25 @@ impl MsgQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_claimed_but_not_yet_written_is_not_ready() {
+        // A producer between its claim and its publish. The drain must not
+        // see a message there, or it pumps, finds nothing, and spins until
+        // the producer finishes.
+        let q = MsgQueue::new(8, DEFAULT_CELL_BYTES);
+        assert!(!q.has_ready());
+        q.tail.0.fetch_add(1, Ordering::Relaxed);   // claimed, not published
+        assert_eq!(q.len(), 1);
+        assert!(q.pop_with(|_, _, _| ()).is_none());
+        assert!(!q.has_ready(), "a claimed cell is not a message");
+
+        let q = MsgQueue::new(8, DEFAULT_CELL_BYTES);
+        assert!(q.push(&[7], 1, 0));
+        assert!(q.has_ready());
+        assert!(q.pop_with(|_, _, b| b[0]) == Some(7));
+        assert!(!q.has_ready());
+    }
 
     #[test]
     fn a_full_queue_refuses_rather_than_overwriting() {
