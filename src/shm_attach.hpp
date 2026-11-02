@@ -458,13 +458,25 @@ private:
 
     // Finishes an overlapped operation just started on `pipe` (`started` is
     // what the call returned): waits for it to complete, the stop, or
-    // `timeoutMs`. Returns true, with `*n` set, if it completed well.
-    // Otherwise cancels it and waits for the cancel, so `ov` is free again.
-    bool finish_io(HANDLE pipe, OVERLAPPED& ov, BOOL started, DWORD timeoutMs, DWORD* n) {
+    // `deadline` (none: no deadline). Returns true, with `*n` set, if it
+    // completed well. Otherwise cancels it and waits for the cancel, so `ov`
+    // is free again.
+    //
+    // A timeout is believed only once steady_clock agrees. Windows' timed
+    // waits run on the scheduler's tick and can come back a little before
+    // the deadline they were given, which closed a silent client a fraction
+    // of a millisecond inside AUTH_DEADLINE; the POSIX server re-reads the
+    // clock the same way.
+    bool finish_io(HANDLE pipe, OVERLAPPED& ov, BOOL started,
+                   std::optional<std::chrono::steady_clock::time_point> deadline, DWORD* n) {
         if (!started && GetLastError() != ERROR_IO_PENDING) return false;
         HANDLE waits[2] = { ov.hEvent, mStop };
-        if (WaitForMultipleObjects(2, waits, FALSE, timeoutMs) == WAIT_OBJECT_0)
-            return GetOverlappedResult(pipe, &ov, n, FALSE) != 0;
+        for (;;) {
+            const DWORD r = WaitForMultipleObjects(2, waits, FALSE, deadline ? ms_until(*deadline) : INFINITE);
+            if (r == WAIT_OBJECT_0) return GetOverlappedResult(pipe, &ov, n, FALSE) != 0;
+            if (r == WAIT_TIMEOUT && deadline && std::chrono::steady_clock::now() < *deadline) continue;
+            break;
+        }
         CancelIoEx(pipe, &ov);
         GetOverlappedResult(pipe, &ov, n, TRUE);
         return false;
@@ -478,7 +490,7 @@ private:
         const BOOL started = ConnectNamedPipe(instance, &ov);
         if (!started && GetLastError() == ERROR_PIPE_CONNECTED) return true;   // came before the call
         DWORD n = 0;
-        return finish_io(instance, ov, started, INFINITE, &n);
+        return finish_io(instance, ov, started, std::nullopt, &n);
     }
 
     static DWORD ms_until(std::chrono::steady_clock::time_point deadline) {
@@ -529,7 +541,7 @@ private:
             ov.hEvent = mIo;
             DWORD n = 0;
             const BOOL started = ReadFile(instance, req->data() + got, REQUEST_LEN - got, nullptr, &ov);
-            if (!finish_io(instance, ov, started, ms_until(deadline), &n) || n == 0) return false;
+            if (!finish_io(instance, ov, started, deadline, &n) || n == 0) return false;
             got += n;
         }
         return true;
@@ -579,7 +591,7 @@ private:
         ov.hEvent = mIo;
         DWORD written = 0;
         const BOOL started = WriteFile(instance, &h, sizeof h, nullptr, &ov);
-        const bool wrote = finish_io(instance, ov, started, ms_until(deadline), &written) && written == sizeof h;
+        const bool wrote = finish_io(instance, ov, started, deadline, &written) && written == sizeof h;
         if (!wrote && then == after::keep_as_lease) {   // the peer went: no lease
             mHolding.store(false, std::memory_order_release);
             return after::close;
@@ -601,7 +613,7 @@ private:
             // The client's close ends the read with an error; a byte it sends
             // is ignored.
             const BOOL started = ReadFile(instance, &byte, 1, nullptr, &ov);
-            if (!finish_io(instance, ov, started, ms_until(deadline), &n) || n == 0) return;
+            if (!finish_io(instance, ov, started, deadline, &n) || n == 0) return;
         }
     }
 
