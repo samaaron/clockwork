@@ -356,7 +356,7 @@ impl Client {
     }
 
     /// The newest `frames` of the device's scope slot `slot` —
-    /// [`clockwork_abi::client::CLOCKWORK_TAP_OUT`], what left for the
+    /// [`clockwork_abi::arena::CLOCKWORK_TAP_OUT`], what left for the
     /// device, or `CLOCKWORK_TAP_IN`, what arrived — interleaved into `out`
     /// at the slot's channel count. Real frames come back as `frames`;
     /// 0 for a slot that is not live, with `out` untouched.
