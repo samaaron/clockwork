@@ -20,6 +20,7 @@
 //! consumes aux output from a sink port, and touches nothing in the substrate.
 
 pub mod ffi;
+pub mod pace;
 pub mod sink;
 pub mod source;
 pub mod wav;

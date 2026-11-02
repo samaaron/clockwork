@@ -23,3 +23,5 @@ portable-atomic = { version = "1", features = ["fallback"] }
 # The dependency runs this way and only this way. The substrate must not know
 # what a file is; this crate is what knows.
 clockwork-ports = { path = "../clockwork-ports" }
+# The workers' stop, which ends their timed sleep at once (src/pace.rs).
+clockwork-wait = { path = "../clockwork-wait" }

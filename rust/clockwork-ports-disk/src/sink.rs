@@ -14,30 +14,37 @@
 //! a number you can look at — as against the alternative, where the audio
 //! thread waits on a filesystem and the whole session glitches.
 //!
+//! The worker wakes every quarter of the ring's duration at the session rate
+//! and writes all that has arrived ([`crate::pace`]), so a recording reaches
+//! the file within a quarter ring.
+//!
 //! The final drain matters: on close the worker keeps consuming until the ring
 //! is empty before it patches the header, so the last partial buffer is in the
 //! file rather than lost to the stop flag.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use portable_atomic::AtomicU64;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use clockwork_ports::registry as ports;
 
+use crate::pace::{self, Stop};
 use crate::wav::WavWriter;
 
 const CHUNK_FRAMES: usize = 4096;
 
 pub struct DiskSink {
-    port: u32,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     written: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl DiskSink {
+    /// `sample_rate` is the file's and the session's: the audio thread writes
+    /// the port at it, which paces the worker.
     pub fn open(path: &Path, port: u32, sample_rate: u32, channels: u16)
         -> std::io::Result<DiskSink>
     {
@@ -48,12 +55,18 @@ impl DiskSink {
                 "port is not open".to_string(),
             ));
         }
+        if sample_rate == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a sample rate of 0".to_string(),
+            ));
+        }
         // The file is written with the channel count the caller asked for; the
         // port's count is what actually arrives. Mismatches are handled the
         // same way everywhere else here does.
         let writer = WavWriter::create(path, sample_rate, channels)?;
 
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(Stop::default());
         let written = Arc::new(AtomicU64::new(0));
         let worker = {
             let stop = Arc::clone(&stop);
@@ -61,11 +74,11 @@ impl DiskSink {
             std::thread::Builder::new()
                 .name("cw-disk-sink".into())
                 .spawn(move || {
-                    run(writer, port, port_channels as usize, channels as usize,
-                        stop, written)
+                    run(writer, port, port_channels as usize, channels as usize, sample_rate,
+                        &stop, &written)
                 })?
         };
-        Ok(DiskSink { port, stop, written, worker: Some(worker) })
+        Ok(DiskSink { stop, written, worker: Some(worker) })
     }
 
     pub fn frames_written(&self) -> u64 { self.written.load(Ordering::Relaxed) }
@@ -73,63 +86,57 @@ impl DiskSink {
 
 impl Drop for DiskSink {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        ports::wake(self.port);
+        self.stop.set();
         if let Some(w) = self.worker.take() { let _ = w.join(); }
     }
 }
 
 fn run(
     mut writer: WavWriter, port: u32, port_channels: usize, file_channels: usize,
-    stop: Arc<AtomicBool>, written: Arc<AtomicU64>,
+    sample_rate: u32, stop: &Stop, written: &AtomicU64,
 ) {
     let mut from_port = vec![0.0f32; CHUNK_FRAMES * port_channels];
     let mut to_file = vec![0.0f32; CHUNK_FRAMES * file_channels];
+    let tick = pace::quarter_ring(ports::capacity(port), sample_rate);
 
-    loop {
-        let avail = ports::readable(port) as usize;
-        if avail == 0 {
-            // Stop only once the ring is empty, so the tail of the recording
-            // reaches the file. `avail` was read BEFORE this load, so a write
-            // that landed in between is still waiting; seeing the stop flag
-            // means the writer is done, so one more look settles it. Breaking
-            // on the stale zero truncates the file by whatever that write
-            // carried.
-            if stop.load(Ordering::Acquire) {
-                if ports::readable(port) == 0 { break; }
-                continue;
-            }
-            // Sleep until a chunk is there to write. False means the stop, or
-            // the port has gone, and nothing more can arrive.
-            if !ports::wait_readable(port, CHUNK_FRAMES as u32, &stop) && !stop.load(Ordering::Acquire) {
-                break;
-            }
-            continue;
-        }
-        let want = core::cmp::min(avail, CHUNK_FRAMES);
-        let got = ports::consume(port, &mut from_port[..want * port_channels]) as usize;
-        if got == 0 { continue; }
+    'worker: loop {
+        // Read the stop BEFORE the drain. The audio thread's last write came
+        // before the close that set it, so a drain that starts after seeing
+        // the stop takes the tail of the recording too.
+        let stopping = stop.is_set();
 
-        let data: &[f32] = if file_channels == port_channels {
-            &from_port[..got * port_channels]
-        } else {
-            for f in 0..got {
-                for c in 0..file_channels {
-                    to_file[f * file_channels + c] = if c < port_channels {
-                        from_port[f * port_channels + c]
-                    } else {
-                        0.0
-                    };
+        // Write all that has arrived.
+        loop {
+            let avail = ports::readable(port) as usize;
+            if avail == 0 { break; }
+            let want = core::cmp::min(avail, CHUNK_FRAMES);
+            let got = ports::consume(port, &mut from_port[..want * port_channels]) as usize;
+            if got == 0 { break; }
+
+            let data: &[f32] = if file_channels == port_channels {
+                &from_port[..got * port_channels]
+            } else {
+                for f in 0..got {
+                    for c in 0..file_channels {
+                        to_file[f * file_channels + c] = if c < port_channels {
+                            from_port[f * port_channels + c]
+                        } else {
+                            0.0
+                        };
+                    }
                 }
+                &to_file[..got * file_channels]
+            };
+            if writer.write_frames(data, got).is_err() {
+                // The disk is gone. Stop writing; the port keeps counting
+                // overruns, which is what a caller will look at.
+                break 'worker;
             }
-            &to_file[..got * file_channels]
-        };
-        if writer.write_frames(data, got).is_err() {
-            // The disk is gone. Stop writing; the port keeps counting
-            // overruns, which is what a caller will look at.
-            break;
+            written.store(writer.frames(), Ordering::Relaxed);
         }
-        written.store(writer.frames(), Ordering::Relaxed);
+
+        if stopping || ports::channels(port) == 0 { break; }
+        stop.sleep_until(Some(Instant::now() + tick));
     }
     let _ = writer.finish();
     written.store(writer.frames(), Ordering::Relaxed);

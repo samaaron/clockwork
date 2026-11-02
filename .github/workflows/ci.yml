@@ -597,12 +597,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Loom
         # Explore every interleaving of the lock-free handshakes (the wait word
-        # and the slots and ports built on it), with up to three forced thread
-        # switches per run.
+        # and the slots built on it), with up to three forced thread switches
+        # per run.
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: "3"
-        run: cargo test --release --manifest-path rust/Cargo.toml --lib -p clockwork-wait -p clockwork-slots -p clockwork-ports
+        run: cargo test --release --manifest-path rust/Cargo.toml --lib -p clockwork-wait -p clockwork-slots
 
   rust-licences:
     name: rust licences

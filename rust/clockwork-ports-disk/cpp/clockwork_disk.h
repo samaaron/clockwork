@@ -51,8 +51,13 @@ typedef struct ClockworkDiskSink   ClockworkDiskSink;
  *
  * The file's channel count need not match the port's: missing channels are
  * silence, extra ones are discarded.
+ *
+ * `session_rate` is the rate the audio thread reads the port at. The worker
+ * refills every quarter of the ring's duration at that rate. It converts
+ * nothing: see NO RATE CONVERSION above. NULL if it is 0.
  */
-ClockworkDiskSource* clockwork_disk_source_open(const char* path, ClockworkPort port);
+ClockworkDiskSource* clockwork_disk_source_open(const char* path, ClockworkPort port,
+                                                uint32_t session_rate);
 
 /* Stop the worker and free the handle. The PORT is not closed: a port outlives
    its endpoint, which is what lets one be swapped under a running stream. */
@@ -69,6 +74,8 @@ int      clockwork_disk_source_eof(const ClockworkDiskSource* source);
  * Drain `port` (an open SINK) into a new 32-bit float WAV at `path`.
  * `channels` is what the FILE gets; the port's count is what arrives, and a
  * mismatch is handled the same way everywhere else here handles one.
+ * `sample_rate` is the file's and the session's: the worker writes what has
+ * arrived every quarter of the ring's duration at it. NULL if it is 0.
  */
 ClockworkDiskSink* clockwork_disk_sink_open(const char* path, ClockworkPort port,
                                 uint32_t sample_rate, uint32_t channels);

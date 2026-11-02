@@ -16,10 +16,10 @@
 //! and the ring depth chosen at `clockwork_port_open` is exactly how much slowness
 //! the stream can absorb before it is audible.
 //!
-//! It sleeps only when the ring is full or the file is done, and wakes when
-//! something changes: the audio thread's transfer makes room for a chunk
-//! (`clockwork_ports::wake`), the stop comes, or the port closes. While the
-//! reader is not asking, this costs the audio thread a fence and a load.
+//! The worker wakes every quarter of the ring's duration at the session rate
+//! and fills all the room there is ([`crate::pace`]), so the audio thread has
+//! at least three quarters of the ring in hand while the disk keeps up. At the
+//! end of the file it sleeps until it is stopped.
 //!
 //! # Channel and rate mismatch
 //!
@@ -34,9 +34,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::AtomicU64;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use clockwork_ports::registry as ports;
 
+use crate::pace::{self, Stop};
 use crate::wav::WavReader;
 
 /// Frames per disk read. Big enough that the syscall is not the cost, small
@@ -44,8 +46,7 @@ use crate::wav::WavReader;
 const CHUNK_FRAMES: usize = 4096;
 
 pub struct DiskSource {
-    port: u32,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     eof: Arc<AtomicBool>,
     produced: Arc<AtomicU64>,
     total_frames: u64,
@@ -55,12 +56,20 @@ pub struct DiskSource {
 }
 
 impl DiskSource {
-    pub fn open(path: &Path, port: u32) -> std::io::Result<DiskSource> {
+    /// `session_rate` is the rate the audio thread reads the port at, which
+    /// paces the worker. It converts nothing.
+    pub fn open(path: &Path, port: u32, session_rate: u32) -> std::io::Result<DiskSource> {
         let port_channels = ports::channels(port);
         if port_channels == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "port is not open".to_string(),
+            ));
+        }
+        if session_rate == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a session rate of 0".to_string(),
             ));
         }
         // Opened here, on the calling (control) thread, so a missing or
@@ -71,7 +80,7 @@ impl DiskSource {
         let sample_rate = reader.sample_rate;
         let file_channels = reader.channels;
 
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(Stop::default());
         let eof = Arc::new(AtomicBool::new(false));
         let produced = Arc::new(AtomicU64::new(0));
 
@@ -81,11 +90,11 @@ impl DiskSource {
             let produced = Arc::clone(&produced);
             std::thread::Builder::new()
                 .name("cw-disk-source".into())
-                .spawn(move || run(reader, port, port_channels as usize, stop, eof, produced))?
+                .spawn(move || run(reader, port, port_channels as usize, session_rate, &stop, &eof, &produced))?
         };
 
         Ok(DiskSource {
-            port, stop, eof, produced, total_frames, sample_rate, file_channels,
+            stop, eof, produced, total_frames, sample_rate, file_channels,
             worker: Some(worker),
         })
     }
@@ -101,74 +110,67 @@ impl DiskSource {
 
 impl Drop for DiskSource {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        ports::wake(self.port);
+        self.stop.set();
         if let Some(w) = self.worker.take() { let _ = w.join(); }
     }
 }
 
 fn run(
-    mut reader: WavReader, port: u32, port_channels: usize,
-    stop: Arc<AtomicBool>, eof: Arc<AtomicBool>, produced: Arc<AtomicU64>,
+    mut reader: WavReader, port: u32, port_channels: usize, session_rate: u32,
+    stop: &Stop, eof: &AtomicBool, produced: &AtomicU64,
 ) {
     let file_channels = reader.channels as usize;
     let mut from_file = vec![0.0f32; CHUNK_FRAMES * file_channels];
     let mut to_port = vec![0.0f32; CHUNK_FRAMES * port_channels];
+    let tick = pace::quarter_ring(ports::capacity(port), session_rate);
 
-    while !stop.load(Ordering::Acquire) {
-        if eof.load(Ordering::Acquire) {
-            // The whole file is in the port: nothing to do until the stop.
-            ports::park(port, &stop);
-            break;
-        }
+    loop {
+        // Fill all the room there is.
+        loop {
+            if stop.is_set() { return; }
+            let room = ports::writable(port) as usize;
+            if room == 0 { break; }
+            let want = core::cmp::min(room, CHUNK_FRAMES);
 
-        let room = ports::writable(port) as usize;
-        if room == 0 {
-            // Sleep until there is room for a chunk. False means the stop, or
-            // the port has gone.
-            if !ports::wait_writable(port, CHUNK_FRAMES as u32, &stop) { break; }
-            continue;
-        }
-        let want = core::cmp::min(room, CHUNK_FRAMES);
-
-        let got = match reader.read_frames(&mut from_file, want) {
-            Ok(n) => n,
             // A read error ends the stream the same way EOF does: silence,
             // counted as underruns by the port. Nothing here can usefully
             // recover, and stalling the worker would look identical.
-            Err(_) => { eof.store(true, Ordering::Release); continue; }
-        };
-        if got == 0 { eof.store(true, Ordering::Release); continue; }
+            let got = reader.read_frames(&mut from_file, want).unwrap_or(0);
+            if got == 0 {
+                eof.store(true, Ordering::Release);
+                break;
+            }
 
-        // File layout to port layout. Same rule as the substrate's, one layer
-        // up: missing channels are silence, extra ones are discarded.
-        if file_channels == port_channels {
-            to_port[..got * port_channels].copy_from_slice(&from_file[..got * file_channels]);
-        } else {
-            for f in 0..got {
-                for c in 0..port_channels {
-                    to_port[f * port_channels + c] = if c < file_channels {
-                        from_file[f * file_channels + c]
-                    } else {
-                        0.0
-                    };
+            // File layout to port layout. Same rule as the substrate's, one
+            // layer up: missing channels are silence, extra ones are discarded.
+            if file_channels == port_channels {
+                to_port[..got * port_channels].copy_from_slice(&from_file[..got * file_channels]);
+            } else {
+                for f in 0..got {
+                    for c in 0..port_channels {
+                        to_port[f * port_channels + c] = if c < file_channels {
+                            from_file[f * file_channels + c]
+                        } else {
+                            0.0
+                        };
+                    }
                 }
             }
+
+            // This worker is the ring's only writer and the audio thread only
+            // empties it, so the room it saw is still there. Less taken means
+            // the port has gone.
+            let took = ports::produce(port, &to_port[..got * port_channels]) as usize;
+            produced.fetch_add(took as u64, Ordering::Relaxed);
+            if took < got { return; }
         }
 
-        // Keep the remainder and try again, exactly as clockwork_ports.h says: a
-        // full ring means the audio thread has not got here yet, and dropping
-        // would lose part of the file for no reason.
-        let mut done = 0usize;
-        while done < got {
-            if stop.load(Ordering::Acquire) { return; }
-            let took = ports::produce(port, &to_port[done * port_channels..got * port_channels]) as usize;
-            if took == 0 {
-                if !ports::wait_writable(port, (got - done) as u32, &stop) { return; }
-                continue;
-            }
-            done += took;
-            produced.fetch_add(took as u64, Ordering::Relaxed);
+        if eof.load(Ordering::Acquire) {
+            // The whole file is in the port: nothing to do until the stop.
+            stop.sleep_until(None);
+            return;
         }
+        if ports::channels(port) == 0 { return; }   // the port has gone
+        if stop.sleep_until(Some(Instant::now() + tick)) { return; }
     }
 }

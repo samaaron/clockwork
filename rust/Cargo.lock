@@ -246,8 +246,6 @@ version = "0.1.0"
 dependencies = [
  "clockwork-heap",
  "clockwork-slots",
- "clockwork-wait",
- "loom",
  "portable-atomic",
 ]
 
@@ -256,6 +254,7 @@ name = "clockwork-ports-disk"
 version = "0.1.0"
 dependencies = [
  "clockwork-ports",
+ "clockwork-wait",
  "portable-atomic",
 ]
 

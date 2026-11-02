@@ -42,19 +42,19 @@ unsafe fn path_of(p: *const c_char) -> Option<PathBuf> {
     }
 }
 
-/// Start streaming `path` into `port`, which must be an open SOURCE.
-/// NULL if the file cannot be opened, is not a WAV this reader understands, or
-/// the port is not open.
+/// Start streaming `path` into `port`, which must be an open SOURCE, read by
+/// the audio thread at `session_rate`. NULL if the file cannot be opened, is
+/// not a WAV this reader understands, the port is not open, or the rate is 0.
 ///
 /// # Safety
 /// `path` is a NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_open(
-    path: *const c_char, port: c_uint,
+    path: *const c_char, port: c_uint, session_rate: c_uint,
 ) -> *mut ClockworkDiskSource {
     // SAFETY: the contract above is `path_of`'s.
     let Some(p) = (unsafe { path_of(path) }) else { return core::ptr::null_mut() };
-    match DiskSource::open(&p, port) {
+    match DiskSource::open(&p, port, session_rate) {
         Ok(s) => Box::into_raw(Box::new(ClockworkDiskSource(s))),
         Err(_) => core::ptr::null_mut(),
     }
@@ -119,7 +119,8 @@ pub unsafe extern "C" fn clockwork_disk_source_eof(h: *const ClockworkDiskSource
     unsafe { (*h).0.at_eof() as c_int }
 }
 
-/// Start draining `port` (an open SINK) into a new 32-bit float WAV at `path`.
+/// Start draining `port` (an open SINK) into a new 32-bit float WAV at `path`,
+/// written by the audio thread at `sample_rate`. NULL if the rate is 0.
 ///
 /// # Safety
 /// `path` is a NUL-terminated C string.

@@ -503,7 +503,7 @@ TEST_CASE("ports: the disk sink and the disk source round trip a signal",
     {
         const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, kCh, 8192);
         REQUIRE(source != CLOCKWORK_PORT_NONE);
-        ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source);
+        ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
         REQUIRE(r != nullptr);
         REQUIRE(clockwork_disk_source_frames(r) == kFrames);
         REQUIRE(clockwork_disk_source_sample_rate(r) == 48000);
@@ -598,7 +598,7 @@ TEST_CASE("ports: the disk source reads 16-bit PCM written by another encoder",
 
     const ClockworkPort source = clockwork_port_open("pcm16", kClockworkPortSource, kCh, 2048);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source);
+    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
     REQUIRE(r != nullptr);
     REQUIRE(clockwork_disk_source_frames(r) == kFrames);
     REQUIRE(clockwork_disk_source_sample_rate(r) == 22050);
@@ -627,18 +627,18 @@ TEST_CASE("ports: a disk endpoint refuses at open rather than going silent",
     REQUIRE(source != CLOCKWORK_PORT_NONE);
 
     // No such file. A silence to be diagnosed later is the wrong answer.
-    REQUIRE(clockwork_disk_source_open((dir / "absent.wav").string().c_str(), source)
+    REQUIRE(clockwork_disk_source_open((dir / "absent.wav").string().c_str(), source, 48000)
             == nullptr);
 
     // A file that is not a WAV.
     const auto junk = (dir / "junk.wav").string();
     { std::vector<char> j(64, 'x'); FILE* fp = std::fopen(junk.c_str(), "wb");
       REQUIRE(fp != nullptr); std::fwrite(j.data(), 1, j.size(), fp); std::fclose(fp); }
-    REQUIRE(clockwork_disk_source_open(junk.c_str(), source) == nullptr);
+    REQUIRE(clockwork_disk_source_open(junk.c_str(), source, 48000) == nullptr);
 
     // A closed port.
     clockwork_port_close(source);
-    REQUIRE(clockwork_disk_source_open(junk.c_str(), source) == nullptr);
+    REQUIRE(clockwork_disk_source_open(junk.c_str(), source, 48000) == nullptr);
     REQUIRE(clockwork_disk_sink_open((dir / "out.wav").string().c_str(), source, 48000, 2)
             == nullptr);
 
@@ -647,6 +647,16 @@ TEST_CASE("ports: a disk endpoint refuses at open rather than going silent",
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
     REQUIRE(clockwork_disk_sink_open((dir / "nope" / "out.wav").string().c_str(),
                                sink, 48000, 2) == nullptr);
+
+    // A rate of 0, which gives a worker no pace to keep.
+    REQUIRE(clockwork_disk_sink_open((dir / "zero.wav").string().c_str(), sink, 0, 2) == nullptr);
+    const auto good = (dir / "good.wav").string();
+    ClockworkDiskSink* w = clockwork_disk_sink_open(good.c_str(), sink, 48000, 2);
+    REQUIRE(w != nullptr);
+    clockwork_disk_sink_close(w);
+    const ClockworkPort in = clockwork_port_open("refuse-in", kClockworkPortSource, 2, 64);
+    REQUIRE(in != CLOCKWORK_PORT_NONE);
+    REQUIRE(clockwork_disk_source_open(good.c_str(), in, 0) == nullptr);
     std::filesystem::remove_all(dir);
 }
 
@@ -779,12 +789,15 @@ TEST_CASE("ports: a binding survives its neighbours coming and going",
     for (uint32_t i = 0; i < bl; ++i) REQUIRE(got[i] == block2[1 * bl + i]);
 }
 
-// ── The disk workers' waits ──────────────────────────────────────────────────
+// ── The disk workers' pace ───────────────────────────────────────────────────
 //
-// A disk worker sleeps until the audio thread's transfer brings what it asked
-// for (a chunk to write, or room for a chunk) or it is stopped, and does not
-// wake in between. These cases check the behaviour everywhere and count wakes
-// on Linux.
+// A disk worker wakes every quarter of its ring's duration at the session
+// rate, and on its stop. On each wake it moves everything there is to move: a
+// sink writes all that has arrived, a source fills all the room there is. So
+// the audio thread always has at least three quarters of a source's ring in
+// hand, and a recording reaches the file within a quarter ring. Nothing runs
+// on the audio thread for the worker's sake. These cases check the behaviour
+// everywhere and count wakes on Linux.
 
 namespace {
 
@@ -810,75 +823,104 @@ bool within(const std::function<bool()>& done, int ms) {
     return done();
 }
 
+// A WAV of `frames` of the test signal, written through a disk sink.
+void writeWav(const std::string& path, uint32_t frames) {
+    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 32768);
+    REQUIRE(sink != CLOCKWORK_PORT_NONE);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(path.c_str(), sink, 48000, 2);
+    REQUIRE(w != nullptr);
+    writeFrames(sink, 2, frames);
+    clockwork_disk_sink_close(w);
+    clockwork_port_close(sink);
+}
+
 } // namespace
 
-TEST_CASE("ports: the disk sink's worker sleeps until a chunk arrives, then writes it", "[ports][disk]") {
+TEST_CASE("ports: the disk sink writes what arrives within a quarter ring, however little",
+          "[ports][disk]") {
     Ports guard;
-    const auto dir = tempDir("sink_wakes");
+    const auto dir = tempDir("sink_pace");
     const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
     ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
 
     if (thread_wakes::countable()) {
-        // Nothing written: a worker that looked every 2 ms would wake 250 times.
+        // A quarter of 16384 frames at 48 kHz is 85 ms: six wakes in 500 ms.
         const auto woke = thread_wakes::over("cw-disk-sink", std::chrono::milliseconds(500));
         REQUIRE(woke);
-        CHECK(*woke <= 1);
+        CHECK(*woke <= 10);
+    } else {
+        // So the worker is asleep when the frames arrive.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    // Less than a chunk waits; a whole chunk is written.
-    writeFrames(sink, 2, 4096);
-    CHECK(within([&] { return clockwork_disk_sink_frames(w) == 4096; }, 10000));
-
-    // At the stop, what is left short of a chunk is written too.
     writeFrames(sink, 2, 100);
+    CHECK(within([&] { return clockwork_disk_sink_frames(w) == 100; }, 10000));
     clockwork_disk_sink_close(w);
     clockwork_port_close(sink);
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("ports: the disk source's worker sleeps while the ring is full and once the file is done",
+TEST_CASE("ports: the disk source fills any room on its next wake, not at a threshold",
           "[ports][disk]") {
     Ports guard;
-    const auto dir  = tempDir("source_wakes");
+    const auto dir  = tempDir("source_room");
     const auto path = (dir / "r.wav").string();
-    constexpr uint32_t kFrames = 20000;
-    {
-        const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 32768);
-        ClockworkDiskSink* w = clockwork_disk_sink_open(path.c_str(), sink, 48000, 2);
-        REQUIRE(w != nullptr);
-        writeFrames(sink, 2, kFrames);
-        clockwork_disk_sink_close(w);
-        clockwork_port_close(sink);
-    }
+    writeWav(path, 20000);
 
     const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 4096);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source);
+    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
+    REQUIRE(r != nullptr);
+    REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full
+
+    // One block out leaves room for one block, which the next wake fills.
+    Block b(2, 128);
+    REQUIRE(clockwork_port_read(source, b.out.data(), 2, 128) == 128);
+    CHECK(within([&] { return clockwork_port_writable(source) == 0; }, 10000));
+    clockwork_disk_source_close(r);
+    clockwork_port_close(source);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("ports: the disk source keeps up with its reader and sleeps once the file is done",
+          "[ports][disk]") {
+    Ports guard;
+    const auto dir  = tempDir("source_pace");
+    const auto path = (dir / "r.wav").string();
+    constexpr uint32_t kFrames = 20000;
+    writeWav(path, kFrames);
+
+    const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 4096);
+    REQUIRE(source != CLOCKWORK_PORT_NONE);
+    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
     REQUIRE(r != nullptr);
     REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full
 
     if (thread_wakes::countable()) {
+        // Full and unread: a quarter of 4096 frames at 48 kHz is 21 ms, about
+        // 23 wakes in 500 ms.
         const auto woke = thread_wakes::over("cw-disk-source", std::chrono::milliseconds(500));
         REQUIRE(woke);
-        CHECK(*woke <= 1);
+        CHECK(*woke <= 30);
     }
 
     // Read as the audio thread does: the worker keeps the ring filled to the
-    // end of the file, waking for room, and then has nothing to do.
+    // end of the file.
     Block b(2, 128);
     uint32_t out = 0;
-    for (int spins = 0; out < kFrames && spins < 400000; ++spins) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (out < kFrames && std::chrono::steady_clock::now() < until) {
         const uint32_t got = clockwork_port_read(source, b.out.data(), 2, 128);
         out += got;
-        if (got == 0) std::this_thread::yield();
+        if (got == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     CHECK(out == kFrames);
     CHECK(within([&] { return clockwork_disk_source_eof(r) == 1; }, 10000));
 
     if (thread_wakes::countable()) {
-        // A worker that looked every 2 ms after the end would wake 250 times.
+        // At the end of the file the worker sleeps until it is stopped.
         const auto woke = thread_wakes::over("cw-disk-source", std::chrono::milliseconds(500));
         REQUIRE(woke);
         CHECK(*woke <= 1);
@@ -888,16 +930,65 @@ TEST_CASE("ports: the disk source's worker sleeps while the ring is full and onc
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("ports: closing a port a disk worker waits on ends the worker's wait", "[ports][disk]") {
+TEST_CASE("ports: closing a disk endpoint stops its worker at once, however long its wake",
+          "[ports][disk]") {
     Ports guard;
-    const auto dir = tempDir("close_wakes");
+    const auto dir  = tempDir("endpoint_stop");
+    const auto path = (dir / "r.wav").string();
+    writeWav(path, 20000);
+
+    // At 100 Hz a quarter of 16384 frames is 41 s, so only the stop ends
+    // these waits in time.
+    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
+    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 100, 2);
+    REQUIRE(w != nullptr);
+    const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 16384);
+    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 100);
+    REQUIRE(r != nullptr);
+    REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full, asleep
+
+    const auto t0 = std::chrono::steady_clock::now();
+    clockwork_disk_sink_close(w);
+    clockwork_disk_source_close(r);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
+    clockwork_port_close(sink);
+    clockwork_port_close(source);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("ports: closing a port under a disk worker ends the worker", "[ports][disk]") {
+    Ports guard;
+    const auto dir = tempDir("close_under");
     const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
     ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
-    writeFrames(sink, 2, 100);   // short of a chunk: the worker sleeps
+    writeFrames(sink, 2, 100);
     clockwork_port_close(sink);
     const auto t0 = std::chrono::steady_clock::now();
-    clockwork_disk_sink_close(w);   // joins a worker that has nothing left to wait for
+    clockwork_disk_sink_close(w);   // joins a worker whose port has gone
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("ports: a port reopened in a closed port's slot serves its own disk worker",
+          "[ports][disk]") {
+    // The old worker outlives its port. Nothing it does after the close may
+    // reach the new port in the same slot or the worker serving it.
+    Ports guard;
+    const auto dir = tempDir("slot_reuse");
+    const ClockworkPort first = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
+    ClockworkDiskSink* old = clockwork_disk_sink_open((dir / "old.wav").string().c_str(), first, 48000, 2);
+    REQUIRE(old != nullptr);
+    clockwork_port_close(first);
+
+    const ClockworkPort second = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
+    REQUIRE(second != CLOCKWORK_PORT_NONE);
+    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "new.wav").string().c_str(), second, 48000, 2);
+    REQUIRE(w != nullptr);
+    writeFrames(second, 2, 100);
+    CHECK(within([&] { return clockwork_disk_sink_frames(w) == 100; }, 10000));
+    clockwork_disk_sink_close(old);
+    clockwork_disk_sink_close(w);
+    clockwork_port_close(second);
     std::filesystem::remove_all(dir);
 }

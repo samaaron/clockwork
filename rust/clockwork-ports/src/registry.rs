@@ -22,13 +22,12 @@
 //! what a port may not be.
 
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use portable_atomic::AtomicU64 as Counter;
 
 use clockwork_slots::SlotTable;
 
 use crate::ring::{round_capacity, FrameRing, MAX_CHANNELS};
-use crate::wake::EndpointWake;
 
 /// The transfer signal's shape, matching `ClockworkPortSignal` in `src/clockwork_ports.h`.
 pub type Signal = unsafe extern "C" fn(port: u32, ctx: *mut core::ffi::c_void);
@@ -83,58 +82,8 @@ pub type Held = clockwork_slots::Held<'static, Port>;
 // nothing to boot. The table exists before main and outlives it.
 static PORTS: SlotTable<Port, MAX_PORTS> = SlotTable::new();
 
-// Each slot's endpoint wake, kept beside the table rather than in it, so an
-// endpoint can sleep on it without holding the port (a close would wait for
-// that hold).
-static WAKES: [EndpointWake; MAX_PORTS] = [const { EndpointWake::new() }; MAX_PORTS];
-
-fn wake_of(handle: u32) -> Option<&'static EndpointWake> {
-    PORTS.slot_index(handle).map(|i| &WAKES[i])
-}
-
-/// The endpoint of a sink blocks until it has `frames` to consume, the port
-/// closes, or `stop` is set. Returns true if the frames are there. Whoever
-/// sets `stop` then calls [`wake`]. `frames` is clamped to half the ring
-/// ([`reachable`]).
-pub fn wait_readable(port: u32, frames: u32, stop: &AtomicBool) -> bool {
-    let Some(w) = wake_of(port) else { return false };
-    let need = reachable(port, frames);
-    w.wait_for(need, || acquire(port).map(|h| h.get().ring.readable() as u32), || stop.load(Ordering::Acquire))
-}
-
-/// The endpoint of a source blocks until there is room for `frames`, as
-/// [`wait_readable`] does for frames.
-pub fn wait_writable(port: u32, frames: u32, stop: &AtomicBool) -> bool {
-    let Some(w) = wake_of(port) else { return false };
-    let need = reachable(port, frames);
-    w.wait_for(need, || acquire(port).map(|h| h.get().ring.writable() as u32), || stop.load(Ordering::Acquire))
-}
-
-/// The level an endpoint asking for `frames` waits for: at most half the
-/// ring, so the audio thread still has the other half when the endpoint
-/// wakes. Waiting for the whole ring would wake a sink's endpoint only once
-/// the ring was full, and a source's only once it was empty.
-fn reachable(port: u32, frames: u32) -> u32 {
-    frames.min(capacity(port) / 2).max(1)
-}
-
-/// Wakes the port's endpoint, whatever it waits for. Call after setting a
-/// stop.
-pub fn wake(port: u32) {
-    if let Some(w) = wake_of(port) { w.wake(); }
-}
-
-/// For an endpoint with nothing to do: blocks until `stop` is set or the port
-/// closes.
-pub fn park(port: u32, stop: &AtomicBool) {
-    if let Some(w) = wake_of(port) {
-        // Ask for frames no transfer ever brings, so only the stop or the
-        // close wakes it.
-        w.wait_for(u32::MAX, || acquire(port).map(|_| 0), || stop.load(Ordering::Acquire));
-    }
-}
-
-fn capacity(port: u32) -> u32 {
+/// The port's ring, in frames. 0 if the port is not open.
+pub fn capacity(port: u32) -> u32 {
     acquire(port).map_or(0, |h| h.get().ring.capacity_frames() as u32)
 }
 
@@ -227,12 +176,10 @@ pub fn set_signal(handle: u32, f: Option<Signal>, ctx: *mut core::ffi::c_void) -
 }
 
 /// Close a port. It goes silent at once, and the call returns once nobody is
-/// inside it, including the audio thread's transfer and its signal. Its
-/// endpoint is woken and finds the port gone. Idempotent, and safe against a
-/// stale or never-valid handle.
+/// inside it, including the audio thread's transfer and its signal.
+/// Idempotent, and safe against a stale or never-valid handle.
 pub fn close(handle: u32) {
     PORTS.close(handle);
-    wake(handle);
 }
 
 /// Every open slot's handle, in slot order. Writes at most `cap`, returns how
@@ -285,7 +232,6 @@ pub fn read(port: u32, out: &mut [Option<&mut [f32]>], frames: usize) -> u32 {
         p.underruns.fetch_add(frames as u64 - got as u64, Ordering::Relaxed);
     }
     p.fire_signal(port);
-    if let Some(w) = wake_of(port) { w.answer(p.ring.writable() as u32); }
     got
 }
 
@@ -300,7 +246,6 @@ pub fn write(port: u32, input: &[Option<&[f32]>], frames: usize) -> u32 {
         p.overruns.fetch_add(frames as u64 - took as u64, Ordering::Relaxed);
     }
     p.fire_signal(port);
-    if let Some(w) = wake_of(port) { w.answer(p.ring.readable() as u32); }
     took
 }
 
@@ -318,11 +263,9 @@ pub fn channels(port: u32) -> u32 { acquire(port).map_or(0, |h| h.get().channels
 pub fn writable(port: u32) -> u32 { acquire(port).map_or(0, |h| h.get().ring.writable() as u32) }
 pub fn readable(port: u32) -> u32 { acquire(port).map_or(0, |h| h.get().ring.readable() as u32) }
 
-/// Close every open port and wake every endpoint, which finds its port gone.
-/// For tests and shutdown; not on any hot path.
+/// Close every open port. For tests and for shutdown; not on any hot path.
 pub fn close_all() {
     PORTS.close_all();
-    for w in &WAKES { w.wake(); }
 }
 
 /// The table is one static, and the test harness runs tests in parallel: a
@@ -397,51 +340,6 @@ mod tests {
             assert!(closed.load(Ordering::SeqCst));
             assert_eq!(table().slot_state(h), Some(SlotState::Free));
         });
-    }
-
-    /// An endpoint that asks for more than the ring holds wakes when half the
-    /// ring is ready, not when a sink's ring is full or a source's is empty:
-    /// either would leave the audio thread nothing in hand.
-    #[test]
-    fn an_endpoint_asking_for_more_than_the_ring_is_woken_at_half() {
-        use std::sync::atomic::AtomicBool;
-        use std::time::Duration;
-        let _t = table_lock();
-        close_all();
-
-        // Runs `wait` on a thread. A wait still blocked after the bound is
-        // stopped, and returns false.
-        fn woken(port: u32, wait: fn(u32, u32, &AtomicBool) -> bool) -> bool {
-            let stop = AtomicBool::new(false);
-            std::thread::scope(|s| {
-                let (done, finished) = std::sync::mpsc::channel();
-                let stop = &stop;
-                let waiter = s.spawn(move || {
-                    let r = wait(port, 4096, stop);
-                    let _ = done.send(());
-                    r
-                });
-                if finished.recv_timeout(Duration::from_secs(10)).is_err() {
-                    stop.store(true, Ordering::Release);
-                    wake(port);
-                }
-                waiter.join().unwrap()
-            })
-        }
-
-        let source = open("half-source", DIR_SOURCE, 1, 64);
-        let cap = capacity(source) as usize;
-        assert_eq!(produce(source, &vec![0.5; cap]) as usize, cap);
-        let mut taken = vec![0.0f32; cap / 2];
-        read(source, &mut [Some(&mut taken[..])], cap / 2);
-        assert!(woken(source, wait_writable), "a source half empty did not wake its endpoint");
-
-        let sink = open("half-sink", DIR_SINK, 1, 64);
-        let cap = capacity(sink) as usize;
-        let given = vec![0.5f32; cap / 2];
-        write(sink, &[Some(&given[..])], cap / 2);
-        assert!(woken(sink, wait_readable), "a sink half full did not wake its endpoint");
-        close_all();
     }
 
     /// The argument checks are the port's own, and none of them is in the
