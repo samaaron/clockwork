@@ -32,6 +32,8 @@
 #![no_std]
 
 pub mod dsp_api;
+#[cfg(target_has_atomic = "64")]
+pub mod clock;
 pub mod client;
 pub mod sink;
 pub mod lanes;

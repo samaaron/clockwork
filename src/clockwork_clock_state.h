@@ -16,6 +16,7 @@
 #include "clock/clock_math.h"   // beatAt, bitsToDouble, kDefaultBpm
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -189,6 +190,19 @@ struct alignas(8) ClockworkClockState {
     // A coherent copy: read `src` under its protocol, write here under ours.
     inline void copyFrom(const ClockworkClockState& src);
 };
+
+// The layout readers other than this header rely on: the JavaScript client,
+// and the Rust mirror a Rust guest reads through (rust/clockwork-abi/src/
+// clock.rs), which asserts these same numbers. Pinned here so a field that
+// moves fails both builds rather than being read as its neighbour.
+static_assert(sizeof(ClockworkClockState) == 40, "ClockworkClockState: 40 bytes");
+static_assert(offsetof(ClockworkClockState, bpm) == 0, "ClockworkClockState::bpm");
+static_assert(offsetof(ClockworkClockState, beat_origin_ntp) == 8, "ClockworkClockState::beat_origin_ntp");
+static_assert(offsetof(ClockworkClockState, is_playing_at_ntp) == 16, "ClockworkClockState::is_playing_at_ntp");
+static_assert(offsetof(ClockworkClockState, is_playing) == 24, "ClockworkClockState::is_playing");
+static_assert(offsetof(ClockworkClockState, flags) == 28, "ClockworkClockState::flags");
+static_assert(offsetof(ClockworkClockState, meter) == 32, "ClockworkClockState::meter");
+static_assert(offsetof(ClockworkClockState, generation) == 36, "ClockworkClockState::generation");
 
 // A coherent snapshot of the session clock.
 //

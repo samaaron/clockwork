@@ -16,8 +16,12 @@ pub struct Dsp {
     _opaque: [u8; 0],
 }
 
-/// `ClockworkClockState` (shared_memory.h): read whole with the header's
-/// `readClockworkClock`, never field by field. Opaque here.
+/// `ClockworkClockState` (clockwork_clock_state.h): read whole with
+/// [`crate::clock::read`], never field by field. Where the platform has no
+/// 64-bit atomics it stays opaque, as the guest there has no Rust reader.
+#[cfg(target_has_atomic = "64")]
+pub use crate::clock::ClockworkClockState;
+#[cfg(not(target_has_atomic = "64"))]
 #[repr(C)]
 pub struct ClockworkClockState {
     _opaque: [u8; 0],
