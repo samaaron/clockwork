@@ -229,6 +229,13 @@ int clockwork_egress_nrt_room(uint32_t bytes) {
     return nrt_free() >= bytes;
 }
 
+uint32_t clockwork_egress_nrt_pending(void) {
+    if (!memory_initialized || !shared_memory || !cursors) return 0;
+    const auto head = static_cast<uint32_t>(cursors->nrt_out_head.load(std::memory_order_acquire));
+    const auto read = static_cast<uint32_t>(cursors->nrt_out_read.load(std::memory_order_acquire));
+    return (head - read + NRT_OUT_RING_SIZE) % NRT_OUT_RING_SIZE;
+}
+
 void clockwork_egress_nrt_room_made(void) {
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (g_nrt_room_wanted.load(std::memory_order_relaxed) != 0

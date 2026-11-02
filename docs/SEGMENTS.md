@@ -122,10 +122,13 @@ A peer that writes and does not wake still has its command read, at the
 next audio block, but no sooner.
 
 The engine holds a peer's command back while the reply ring lacks room for
-its answers. Before it does, it sets `rep_room_wanted` in the plane header. A
-peer looks at that word after each read that moves `rep_tail`, and when it is
-set, clears it and wakes the engine as above. A peer that sends more than its
-reply ring holds, then only reads, gets every answer with no audio block.
+its answers. That room counts the answers still in the engine's egress ring,
+which reach the reply ring on the engine's next pass, so the reply ring is
+never written past full. Before it holds back, the engine sets
+`rep_room_wanted` in the plane header. A peer looks at that word after each
+read that moves `rep_tail`, and when it is set, clears it and wakes the engine
+as above. A peer that sends more than its reply ring holds, then only reads,
+gets every answer with no audio block.
 
 ### Clients
 

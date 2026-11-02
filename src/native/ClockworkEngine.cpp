@@ -78,6 +78,18 @@ std::string& publishedAppName() {
 extern "C" const char* clockwork_app_name() { return publishedAppName().c_str(); }
 
 namespace {
+// Whether the peer's reply ring has room for `need` bytes of answers. Answers
+// reach it through the NRT egress ring, and the next pass's egress drain
+// moves them across, so the frames still waiting there take room too. When
+// the room is not there, both readers that can make it are asked to wake the
+// pass: the peer's read (shm_peer_reply_room), and the egress drain taking
+// frames bound elsewhere (clockwork_egress_nrt_want_room).
+bool peerAnswerRoom(ShmPeerPlaneHeader* plane, uint32_t need) {
+    if (shm_peer_reply_room(plane, need + clockwork_egress_nrt_pending())) return true;
+    clockwork_egress_nrt_want_room();
+    return shm_peer_reply_room(plane, need + clockwork_egress_nrt_pending());
+}
+
 using clockwork::device::sameDeviceName;
 
 }
@@ -1078,7 +1090,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 if (const RingMark* mark = mPeerMarks.of(seq);
                     mark && !clockwork_sys_answers_without_guest(d, n)) {
                     // Its refusal waits for room on both rings it passes through.
-                    if (!clockwork_egress_nrt_room(1024) || !shm_peer_reply_room(plane, 1024))
+                    if (!clockwork_egress_nrt_room(1024) || !peerAnswerRoom(plane, 1024))
                         return ClockworkDrainVerdict::Retain;
                     clockwork_sys_refuse(d, n, mark->reason, mark->generation,
                         [](const uint8_t* r, uint32_t rn) {
@@ -1278,14 +1290,16 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         // control ring while either ring lacks room for its answers
         // (ring_drain.h, Retain), and the read that makes the room wakes the
         // pass that handles it: the egress drain (clockwork_egress_nrt_room),
-        // or the peer's (shm_peer_reply_room).
+        // or the peer's (peerAnswerRoom). A peer's room counts the answers
+        // still in the egress ring, which reach its reply ring next pass.
         // The room required for one verb's answers is 16 KB where the ring
         // has it; a smaller ring (a small profile, src/memory_profile.h)
         // requires all it has, so a verb then waits for an empty ring,
         // which every pass drains to.
         constexpr uint32_t kAnswerRoom = std::min<uint32_t>(16 * 1024, NRT_OUT_RING_SIZE - 1);
-        static_assert(kAnswerRoom < SHM_PEER_REP_RING_SIZE,
-                      "a ring smaller than the room would hold every verb forever");
+        static_assert(kAnswerRoom + NRT_OUT_RING_SIZE < SHM_PEER_REP_RING_SIZE,
+                      "a peer's verb waits for its answers' room plus a full egress ring, "
+                      "so a reply ring smaller than that would hold it forever");
         mNrtGateway.addDrain(
             arena + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
@@ -1294,7 +1308,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 if (!clockwork_egress_nrt_room(kAnswerRoom)) return ClockworkDrainVerdict::Retain;
                 if (token == SHM_PEER_ORIGIN_TOKEN)
                     if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
-                        if (!shm_peer_reply_room(plane, kAnswerRoom))
+                        if (!peerAnswerRoom(plane, kAnswerRoom))
                             return ClockworkDrainVerdict::Retain;
                 DrainCallCtx cc{ token, {}, {} };
                 noteInFlightCommand(d, n);

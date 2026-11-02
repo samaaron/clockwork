@@ -113,19 +113,22 @@ std::vector<uint8_t> authThenRole(uint32_t role) {
 #endif
 
 // An engine with the shared-memory command plane served at an endpoint, its
-// own control pass, no audio thread and nothing pumped, and one peer attached
-// through the C client API: what a peer gets while no block renders.
+// own control pass (or, with hostDrives, the test's), no audio thread and
+// nothing pumped, and one peer attached through the C client API: what a peer
+// gets while no block renders.
 struct IdlePeerEngine {
     ShmTransport       transport;
     ClockworkEngine    engine;
     shm_attach::server srv;
     ClockworkClient*   peer = nullptr;
 
-    explicit IdlePeerEngine(unsigned port) {
+    explicit IdlePeerEngine(unsigned port, bool hostDrives = false) {
         engine.onDebug = [](const std::string&) {};
         engine.onReply = [](const uint8_t*, uint32_t) {};
         engine.setTransport(&transport);
-        engine.init(attachConfig(port, true));
+        auto cfg = attachConfig(port, true);
+        cfg.hostDrivesControl = hostDrives;
+        engine.init(cfg);
         transport.bindPlaneSlot(engine.peerPlaneSlot());
         REQUIRE(transport.ready());
         std::string err;
@@ -605,6 +608,63 @@ TEST_CASE("attach: a peer that sends more than its reply ring holds, then only r
 
     int got = 0;
     within([&] { got += takeReplies(e.peer, CLOCKWORK_SYS("clock/tempo.reply")); return got >= sent; }, 5000);
+    CHECK(e.engine.peerPlaneSlot()->load()->rep_dropped.load() == 0);
+    CHECK(got == sent);
+}
+
+// A peer's answers reach its reply ring through the NRT egress ring, so the
+// room a command is held back for counts the answers already queued there:
+// after a short read, a pass takes no more commands than the reply ring has
+// room to answer, and no answer is dropped. The test runs the passes, so
+// each one ends where the test says.
+TEST_CASE("attach: a peer that reads a few answers at a time loses none to a full reply ring",
+          "[shm][attach][peer]") {
+    if (!EngineFixture::defaultConfig().manualAudioPump) SKIP("needs no audio thread");
+    IdlePeerEngine e(57346, true);
+    ShmPeerPlaneHeader* plane = e.engine.peerPlaneSlot()->load();
+    REQUIRE(plane != nullptr);
+
+    // Passes until two in a row move nothing: no command taken, no answer
+    // written to the reply ring or dropped. An answer framed in one pass
+    // reaches the reply ring in the next, so one quiet pass may have framed
+    // answers; two in a row cannot have.
+    const auto passUntilStill = [&] {
+        for (int passes = 0, quiet = 0; passes < 10000; ++passes) {
+            const auto cmd = plane->cmd_tail.load(), rep = plane->rep_head.load();
+            const auto dropped = plane->rep_dropped.load();
+            REQUIRE(e.engine.controlPass());
+            const bool moved = plane->cmd_tail.load() != cmd || plane->rep_head.load() != rep
+                            || plane->rep_dropped.load() != dropped;
+            quiet = moved ? 0 : quiet + 1;
+            if (quiet == 2) return;
+        }
+        FAIL("the passes never settled");
+    };
+    std::vector<ClockworkClientMessage> msgs(16384);
+    const auto read = [&](uint32_t max) {
+        const uint32_t n = clockwork_client_poll(e.peer, msgs.data(), max);
+        int answers = 0;
+        for (uint32_t i = 0; i < n; ++i)
+            if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0)
+                ++answers;
+        return answers;
+    };
+
+    const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{1});
+    int sent = 0;
+    while (sent < 100000 && clockwork_client_send(e.peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK) ++sent;
+    passUntilStill();
+    // Held back for room: the reply ring is nearly full.
+    REQUIRE(plane->rep_room_wanted.load() == 1);
+
+    int got = read(100);
+    REQUIRE(got == 100);
+    passUntilStill();
+    for (int answers; (answers = read(static_cast<uint32_t>(msgs.size()))) > 0;) {
+        got += answers;
+        passUntilStill();
+    }
+    CHECK(plane->rep_dropped.load() == 0);
     CHECK(got == sent);
 }
 

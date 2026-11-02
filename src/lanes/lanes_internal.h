@@ -46,6 +46,11 @@ uint32_t clockwork_egress_nrt_max_frame(void);
    make room wakes the pass (clockwork_egress_nrt_room_made). */
 int clockwork_egress_nrt_room(uint32_t bytes);
 
+/* Bytes in the NRT egress ring that no reader has taken yet (0 before init):
+   frames on their way to a client, which the next egress drain hands to the
+   transport. */
+uint32_t clockwork_egress_nrt_pending(void);
+
 /* Ask to be woken by the next reader to make room, for a producer that holds
    a frame after a refused write: it writes once more after asking, for room
    made in between. */
