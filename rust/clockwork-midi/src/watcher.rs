@@ -25,7 +25,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Called when the OS reports the MIDI device set may have changed. Runs on the
 /// watcher's own thread; the implementation must be thread-safe.
@@ -57,9 +57,9 @@ impl Coalescer {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let handle = thread::Builder::new()
-            .name("ss-midi-hotswap".into())
+            .name("cw-midi-settle".into())
             .spawn(move || coalesce_loop(rx, stop_thread, on_change))
-            .expect("spawn ss-midi-hotswap thread");
+            .expect("spawn cw-midi-settle thread");
         Coalescer { tx, stop, handle: Some(handle) }
     }
 
@@ -81,11 +81,14 @@ impl Drop for Coalescer {
 }
 
 fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange) {
+    let mut burst_waiting = false;
     loop {
-        // Block until the first event of a burst (or the stop poke).
-        if rx.recv().is_err() || stop.load(Ordering::SeqCst) {
+        // Block until the first event of a burst (or the stop poke), unless
+        // an event already arrived during the last settle wait.
+        if !burst_waiting && (rx.recv().is_err() || stop.load(Ordering::SeqCst)) {
             return;
         }
+        burst_waiting = false;
         // Drain the rest of the burst: keep extending until it goes quiet.
         loop {
             match rx.recv_timeout(DEBOUNCE) {
@@ -102,11 +105,18 @@ fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange) {
             return;
         }
         on_change();
-        // Settle pass — diffed downstream, so a no-op unless a port became
-        // enumerable in the gap.
-        thread::sleep(SETTLE);
-        if stop.load(Ordering::SeqCst) {
-            return;
+        // Refresh again SETTLE later, for a port that became enumerable after
+        // the first refresh. Downstream diffs the device lists, so otherwise
+        // this is a no-op. The stop ends this wait at once. An event during the
+        // wait starts a new burst, coalesced after this refresh.
+        let settle_at = Instant::now() + SETTLE;
+        loop {
+            match rx.recv_timeout(settle_at.saturating_duration_since(Instant::now())) {
+                Ok(()) if stop.load(Ordering::SeqCst) => return,
+                Ok(()) => burst_waiting = true,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         }
         on_change();
     }
@@ -235,20 +245,33 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{Coalescer, OnChange};
+    use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
-    use std::time::Duration;
 
-    use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult};
+    use core_foundation::base::{kCFAllocatorDefault, TCFType};
+    use core_foundation::runloop::{
+        kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopGetCurrent, CFRunLoopSource, CFRunLoopSourceContext,
+        CFRunLoopSourceCreate, CFRunLoopSourceSignal, CFRunLoopStop, CFRunLoopWakeUp,
+    };
     use coremidi::{Client, Notification};
 
-    /// Run-loop slice length: long enough that a populated loop isn't re-armed
-    /// in a tight spin, short enough that Drop's stop flag is honoured promptly.
-    const POLL_SLICE: Duration = Duration::from_millis(250);
+    /// The watcher thread's run loop, and a run-loop source whose perform
+    /// callback stops it. A signalled source stays pending until the run loop
+    /// services it, so a stop signalled before the loop starts still stops it.
+    /// A bare CFRunLoopStop sent then would be lost.
+    struct Stopper {
+        run_loop: CFRunLoop,
+        source: CFRunLoopSource,
+    }
+    // SAFETY: CFRunLoopSourceSignal and CFRunLoopWakeUp may be called from
+    // any thread, and they are the only calls the dropping thread makes on these.
+    unsafe impl Send for Stopper {}
 
     pub struct PlatformWatcher {
         stop: Arc<AtomicBool>,
+        stopper: Arc<Mutex<Option<Stopper>>>,
         handle: Option<JoinHandle<()>>,
     }
 
@@ -256,7 +279,8 @@ mod imp {
         pub fn new(on_change: OnChange) -> Self {
             let coalescer = Coalescer::new(on_change);
             let stop = Arc::new(AtomicBool::new(false));
-            let stop_thread = stop.clone();
+            let stopper = Arc::new(Mutex::new(None));
+            let (t_stop, t_stopper) = (stop.clone(), stopper.clone());
             // CoreMIDI delivers MIDIClientCreateWithBlock notifications only on the
             // run loop that was current when the client was created, and only while
             // that loop is running. So the client is both created *and* pumped on
@@ -265,26 +289,39 @@ mod imp {
             // standalone server's main thread does; an embedder's may not). This
             // matches the self-contained Linux/Windows backends.
             let handle = thread::Builder::new()
-                .name("ss-midi-coremidi".into())
-                .spawn(move || notify_loop(stop_thread, coalescer))
+                .name("cw-midi-watch".into())
+                .spawn(move || notify_loop(t_stop, t_stopper, coalescer))
                 .ok();
-            PlatformWatcher { stop, handle }
+            PlatformWatcher { stop, stopper, handle }
         }
     }
 
     impl Drop for PlatformWatcher {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
-            // The pump re-checks `stop` each time a run-loop slice returns (≤ one
-            // POLL_SLICE away), so the join completes promptly without needing a
-            // cross-thread CFRunLoopStop.
+            // The thread checks `stop` and publishes its Stopper under this
+            // lock. So either the thread sees `stop` and never runs its loop,
+            // or the signal below reaches the loop.
+            if let Some(s) = self.stopper.lock().unwrap().as_ref() {
+                // SAFETY: a live source and run loop, both retained by `s`.
+                unsafe {
+                    CFRunLoopSourceSignal(s.source.as_concrete_TypeRef());
+                    CFRunLoopWakeUp(s.run_loop.as_concrete_TypeRef());
+                }
+            }
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
         }
     }
 
-    fn notify_loop(stop: Arc<AtomicBool>, coalescer: Coalescer) {
+    // The stop source's perform callback: stops the run loop it fired on.
+    extern "C" fn stop_this_run_loop(_: *const c_void) {
+        // SAFETY: the current thread's run loop, which is the one running.
+        unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
+    }
+
+    fn notify_loop(stop: Arc<AtomicBool>, stopper: Arc<Mutex<Option<Stopper>>>, coalescer: Coalescer) {
         let poke = coalescer.poker();
         // Bind the notification block to *this* thread's run loop. Any setup
         // change (object added/removed, property changed) coalesces into a single
@@ -301,17 +338,39 @@ mod imp {
             Err(_) => return,
         };
 
-        while !stop.load(Ordering::SeqCst) {
-            // returnAfterSourceHandled = false: run the whole slice, servicing
-            // every device notification, then loop to re-check `stop`.
-            let result =
-                // SAFETY: a CoreFoundation constant, immutable for the process.
-            CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, POLL_SLICE, false);
-            // An empty run loop returns immediately; guard against a hot spin in
-            // the brief window before the client's notification source attaches.
-            if matches!(result, CFRunLoopRunResult::Finished) {
-                thread::sleep(POLL_SLICE);
+        let mut context = CFRunLoopSourceContext {
+            version: 0,
+            info: std::ptr::null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: stop_this_run_loop,
+        };
+        // SAFETY: a version-0 context with no info and a plain perform
+        // function, copied by the call; the result is owned under the create
+        // rule.
+        let source = unsafe {
+            CFRunLoopSource::wrap_under_create_rule(CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &mut context))
+        };
+        let run_loop = CFRunLoop::get_current();
+        // SAFETY: a CoreFoundation constant, immutable for the process.
+        run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
+        {
+            let mut published = stopper.lock().unwrap();
+            if stop.load(Ordering::SeqCst) {
+                return;
             }
+            *published = Some(Stopper { run_loop, source });
+        }
+
+        // Run until stopped. The loop services device notifications as they
+        // arrive, and nothing else wakes the thread.
+        while !stop.load(Ordering::SeqCst) {
+            CFRunLoop::run_current();
         }
         // `_client` drops here, removing the CoreMIDI notification source; then
         // `coalescer` drops, joining its worker thread.
@@ -325,9 +384,10 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread::{self, JoinHandle};
-    use std::time::Duration;
 
+    use alsa::poll::Descriptors;
     use alsa::seq::{Addr, EventType, PortCap, PortSubscribe, PortType, Seq};
+    use clockwork_wait::ready::{ReadyWait, MAX_SOCKS};
 
     /// The well-known ALSA sequencer System:announce source (client 0, port 1):
     /// it emits PortStart/PortExit/ClientStart/ClientExit as devices come and go.
@@ -336,6 +396,9 @@ mod imp {
 
     pub struct PlatformWatcher {
         stop: Arc<AtomicBool>,
+        // The thread blocks on this and the sequencer's descriptors; Drop
+        // wakes it.
+        wait: Option<Arc<ReadyWait>>,
         handle: Option<JoinHandle<()>>,
     }
 
@@ -343,27 +406,33 @@ mod imp {
         pub fn new(on_change: OnChange) -> Self {
             let coalescer = Coalescer::new(on_change);
             let stop = Arc::new(AtomicBool::new(false));
-            let stop_thread = stop.clone();
-            // The blocking-read loop owns the Seq and the coalescer so both live
-            // exactly as long as the thread; stopping is cooperative via `stop`.
+            let Ok(wait) = ReadyWait::new().map(Arc::new) else {
+                return PlatformWatcher { stop, wait: None, handle: None };
+            };
+            let (t_stop, t_wait) = (stop.clone(), wait.clone());
+            // The loop owns the Seq and the coalescer so both live exactly as
+            // long as the thread.
             let handle = thread::Builder::new()
-                .name("ss-midi-announce".into())
-                .spawn(move || announce_loop(stop_thread, coalescer))
+                .name("cw-midi-watch".into())
+                .spawn(move || announce_loop(t_stop, t_wait, coalescer))
                 .ok();
-            PlatformWatcher { stop, handle }
+            PlatformWatcher { stop, wait: Some(wait), handle }
         }
     }
 
     impl Drop for PlatformWatcher {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
+            if let Some(w) = &self.wait {
+                w.wake();
+            }
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
         }
     }
 
-    fn announce_loop(stop: Arc<AtomicBool>, coalescer: Coalescer) {
+    fn announce_loop(stop: Arc<AtomicBool>, wait: Arc<ReadyWait>, coalescer: Coalescer) {
         // No sequencer (a CI runner, a container): nothing to watch, and
         // asking ALSA prints "open /dev/snd/seq failed" on stderr for every
         // engine booted.
@@ -402,16 +471,26 @@ mod imp {
             return;
         }
 
+        // The thread blocks on the sequencer's descriptors, which become
+        // readable when an announcement arrives, and on the stop.
+        let Ok(fds) = (&seq, Some(alsa::Direction::Capture)).get() else { return };
+        let fds: Vec<i32> = fds.iter().map(|f| f.fd).collect();
+        if fds.len() > MAX_SOCKS {
+            return;
+        }
+
         let poke = coalescer.poker();
         let mut input = seq.input();
         loop {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            // Poll with a timeout so the stop flag is honoured promptly.
             match input.event_input_pending(true) {
                 Ok(0) => {
-                    thread::sleep(Duration::from_millis(100));
+                    // Block until an announcement arrives or the watcher stops.
+                    if wait.wait(&fds, None).is_err() {
+                        return;
+                    }
                     continue;
                 }
                 Err(_) => return,
@@ -446,5 +525,54 @@ mod imp {
         pub fn new(on_change: OnChange) -> Self {
             PlatformWatcher { _coalescer: Coalescer::new(on_change) }
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    fn counting() -> (Coalescer, Arc<AtomicU32>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let on_change: OnChange = {
+            let calls = calls.clone();
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        (Coalescer::new(on_change), calls)
+    }
+
+    fn until(calls: &AtomicU32, n: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while calls.load(Ordering::SeqCst) < n && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        calls.load(Ordering::SeqCst) >= n
+    }
+
+    #[test]
+    fn a_stop_during_the_settle_wait_ends_it_at_once() {
+        let (c, calls) = counting();
+        c.poker().send(()).unwrap();
+        // The burst has gone quiet and the first refresh has run, so the
+        // settle wait has begun.
+        assert!(until(&calls, 1));
+        let t0 = Instant::now();
+        drop(c);
+        assert!(t0.elapsed() < SETTLE / 2, "drop waited out the settle");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a refresh ran after the stop");
+    }
+
+    #[test]
+    fn an_event_during_the_settle_wait_starts_a_new_burst_after_it() {
+        let (c, calls) = counting();
+        c.poker().send(()).unwrap();
+        assert!(until(&calls, 1));
+        c.poker().send(()).unwrap();   // during the settle
+        // The settle refresh, then the new burst's refresh and its settle
+        // refresh.
+        assert!(until(&calls, 4));
     }
 }
