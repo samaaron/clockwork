@@ -1296,7 +1296,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                     if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
                         if (!shm_peer_reply_room(plane, kAnswerRoom))
                             return ClockworkDrainVerdict::Retain;
-                DrainCallCtx cc{ token, 0, 0 };
+                DrainCallCtx cc{ token, {}, {} };
                 noteInFlightCommand(d, n);
                 mControlRoutes.ingest(d, n, &cc);
                 mInFlightCommand[0] = '\0';
@@ -1898,7 +1898,7 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
         // producer (see the header), so filling it before the locked write
         // races nothing.
         uint8_t* frame = self->mNrtFrame->data();
-        NrtEnvelope env{ cc ? cc->when : 0, cc ? cc->blockTime : 0 };
+        NrtEnvelope env{ cc ? cc->when : clockwork::Timetag(), cc ? cc->blockTime : clockwork::Timetag() };
         std::memcpy(frame, &env, sizeof env);
         std::memcpy(frame + sizeof env, data, len);
         ok = RingBufferWriter::write(
@@ -2860,8 +2860,7 @@ void ClockworkEngine::purge(const char* reason) {
 // --- Variadic send helpers ---
 
 void ClockworkEngine::sendBundle(double ntpTimeSec, std::initializer_list<OscPacket> messages) {
-    const uint64_t tag =
-        static_cast<uint64_t>(clockwork::ntpToOscTimetag(ntpTimeSec));
+    const uint64_t tag = clockwork::Timetag::fromNtpSeconds(ntpTimeSec).ntp();
     auto pkt = OscBuilder::bundle(tag, messages);
     sendOSC(pkt.ptr(), pkt.size());
 }

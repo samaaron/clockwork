@@ -30,6 +30,7 @@
 #include "ForwardedBundle.h"
 #include "OscTestUtils.h"
 #include "lanes/lanes.h"
+#include "clock/timetag.h"
 #include "clock/clock_math.h"
 #include "clockwork_event_sink.h"
 #include "clockwork_prefix.h"
@@ -62,7 +63,7 @@ constexpr double kLeadSec = 0.3;   // how far ahead every case schedules
 osc_test::Packet scheduled(double whenNtp, const osc_test::Packet& inner) {
     osc_test::Builder b;
     b.begin(CLOCKWORK_SYS("schedule"))
-        << static_cast<osc::int64>(clockwork::ntpToOscTimetag(whenNtp))
+        << static_cast<osc::int64>(clockwork::Timetag::fromNtpSeconds(whenNtp).ntp())
         << osc::Blob(inner.ptr(), static_cast<osc::osc_bundle_element_size_t>(inner.size()));
     return b.end();
 }
@@ -218,7 +219,7 @@ TEST_CASE("scheduled MIDI reaches its sink carrying its time, with the host as t
         << port << static_cast<int32_t>(1) << static_cast<int32_t>(60) << static_cast<int32_t>(0);
     const auto noteOff = b.end();
     const double   when    = wallClockNTP() + kLeadSec;
-    const uint64_t whenTag = clockwork::ntpToOscTimetag(when);
+    const uint64_t whenTag = clockwork::Timetag::fromNtpSeconds(when).ntp();
     const auto     pkt     = scheduled(when, noteOff);
     e.engine.ingest(pkt.ptr(), pkt.size(), 0);
     e.pump(kLeadSec + 0.1);

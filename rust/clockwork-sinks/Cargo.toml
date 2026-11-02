@@ -30,6 +30,8 @@ clockwork-slots = { path = "../clockwork-slots" }
 clockwork-wait = { path = "../clockwork-wait" }
 # The drain thread's one log line, through clockwork_log like everything else.
 clockwork-log = { path = "../clockwork-log" }
+# The timetag type, and the clock a sink reads it against.
+clockwork-osc = { path = "../clockwork-osc" }
 # The two endpoints. Optional and off by default for the same reason the
 # umbrella makes them optional: a build with no MIDI subsystem must not drag
 # midir in through the sinks, and a sink of a kind this build cannot reach

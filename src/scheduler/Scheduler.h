@@ -44,9 +44,11 @@
 #include <array>
 #include <cstdint>
 #include <new>
+#include <optional>
 #include <type_traits>
 
 #include "clockwork_schedule.h"
+#include "clock/timetag.h"
 
 // Stable 32-bit hash of a tag string (FNV-1a). Shared by producers and the
 // flush side so the same string keys the same events. Never returns 0 — 0 is
@@ -78,7 +80,7 @@ class Scheduler {
 public:
     // A due event handed to the caller. Valid until release() is called for it.
     struct Event {
-        int64_t        when = 0;
+        clockwork::Timetag when;
         uint32_t       tag  = 0;
         const Meta*    meta = nullptr;
         const uint8_t* data = nullptr;
@@ -132,7 +134,7 @@ public:
      *
      * clockwork_sched_new_in_place returns null when the arena is too small for the
      * shape, and every call on a null handle then answers the empty thing —
-     * add refuses, next_time says i64::MAX. That is indistinguishable from a
+     * add refuses, next_time says there is nothing. That is indistinguishable from a
      * queue that is merely full, which is a legitimate overload state, so a
      * scheduler that was never built reports itself as a busy one. Anything
      * that counts a refusal should say which of the two it is.
@@ -148,9 +150,9 @@ public:
                                       static_cast<uint32_t>(alignof(Meta)));
     }
 
-    bool add(int64_t when, uint32_t tag, const Meta& meta,
+    bool add(clockwork::Timetag when, uint32_t tag, const Meta& meta,
              const uint8_t* data, uint32_t size) {
-        void* slot = clockwork_sched_add(mStore, when, tag, data, size);
+        void* slot = clockwork_sched_add(mStore, when.abi(), tag, data, size);
         if (!slot) return false;
         // Construct the caller's record in the storage the store reserved.
         // Placement new, so this allocates nothing and the object handed back
@@ -159,16 +161,20 @@ public:
         return true;
     }
 
-    // Timetag of the earliest live event, or INT64_MAX if none.
-    int64_t nextTime() const { return clockwork_sched_next_time(mStore); }
+    // Timetag of the earliest live event, if there is one.
+    std::optional<clockwork::Timetag> nextTime() const {
+        ClockworkTimetag t;
+        if (!clockwork_sched_next_time(mStore, &t)) return std::nullopt;
+        return clockwork::Timetag::fromAbi(t);
+    }
 
     // Pop the earliest event if it is due at/through `now`. The returned Event
     // borrows the data pool; call release(event) once the caller is done with it.
     // An invalid Event (valid() == false) means nothing is due.
-    Event popDue(int64_t now) {
+    Event popDue(clockwork::Timetag now) {
         ClockworkSchedEvent e;
-        if (!clockwork_sched_pop_due(mStore, now, &e)) return Event{};
-        return Event{ e.when, e.tag, static_cast<const Meta*>(e.meta),
+        if (!clockwork_sched_pop_due(mStore, now.abi(), &e)) return Event{};
+        return Event{ clockwork::Timetag::fromAbi(e.when), e.tag, static_cast<const Meta*>(e.meta),
                       e.data, e.size, static_cast<int>(e.slot) };
     }
 

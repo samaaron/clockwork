@@ -41,6 +41,7 @@
 #include "ThreadWakes.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include "clock/timetag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -193,7 +194,7 @@ TEST_CASE("sinks: a closed or invented handle refuses rather than faulting",
         REQUIRE(clockwork_sink_is_open(bad) == 0);
         REQUIRE(clockwork_sink_kind(bad) == 0);
         REQUIRE(clockwork_sink_target(bad) == nullptr);
-        REQUIRE(clockwork_sink_send(bad, body, 3, 1) == 0);
+        REQUIRE(clockwork_sink_send(bad, body, 3, clockwork_timetag_immediately()) == 0);
 
         // A refused stats call leaves the caller's struct alone: a caller that
         // ignored the return would otherwise read zeros as facts.
@@ -237,7 +238,7 @@ TEST_CASE("sinks: every message is either sent or dropped, and none is lost",
     const uint8_t body[3] = { 0x90, 60, 100 };
     uint64_t accepted = 0;
     for (uint64_t i = 0; i < kSends; ++i) {
-        if (clockwork_sink_send(sink, body, 3, 1) != 0) ++accepted;
+        if (clockwork_sink_send(sink, body, 3, clockwork_timetag_immediately()) != 0) ++accepted;
     }
 
     // Nothing waited: the sink is genuinely shallower than the offer, and the
@@ -300,8 +301,8 @@ TEST_CASE("sinks: a message wider than the base cell rides a wider class",
     // is the endpoint's limit, and a message the socket refuses is a drop.
     const uint32_t wireWidest = std::min(sh.widest(), CLOCKWORK_MAX_DATAGRAM_BYTES);
     std::vector<uint8_t> mid(sh.baseWidth() + 1, 0xAB), big(wireWidest, 0xCD);
-    REQUIRE(clockwork_sink_send(sink, mid.data(), static_cast<uint32_t>(mid.size()), 1) != 0);
-    REQUIRE(clockwork_sink_send(sink, big.data(), static_cast<uint32_t>(big.size()), 1) != 0);
+    REQUIRE(clockwork_sink_send(sink, mid.data(), static_cast<uint32_t>(mid.size()), clockwork_timetag_immediately()) != 0);
+    REQUIRE(clockwork_sink_send(sink, big.data(), static_cast<uint32_t>(big.size()), clockwork_timetag_immediately()) != 0);
 
     ClockworkSinkStats st{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);   // wedge-only
@@ -321,13 +322,13 @@ TEST_CASE("sinks: a message wider than the widest class is refused whole and cou
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     const uint32_t widest = clockwork_sink_max_message_bytes(sink);
     std::vector<uint8_t> over(widest + 1, 0xEE);
-    CHECK(clockwork_sink_send(sink, over.data(), static_cast<uint32_t>(over.size()), 1) == 0);
+    CHECK(clockwork_sink_send(sink, over.data(), static_cast<uint32_t>(over.size()), clockwork_timetag_immediately()) == 0);
     ClockworkSinkStats st{};
     REQUIRE(clockwork_sink_stats(sink, &st) != 0);
     CHECK(st.dropped == 1);
     CHECK(st.sent == 0);
     // Exactly the widest cell fits.
-    CHECK(clockwork_sink_send(sink, over.data(), widest, 1) != 0);
+    CHECK(clockwork_sink_send(sink, over.data(), widest, clockwork_timetag_immediately()) != 0);
     clockwork_sink_close(sink);
 }
 
@@ -449,7 +450,7 @@ TEST_CASE("sinks: freeing the DSP closes the sinks it opened",
     REQUIRE(g_dsp != nullptr);
     // A fresh instance holds no sinks, and the old handle cannot reach one.
     const uint8_t body[1] = { 0x00 };
-    REQUIRE(clockwork_sink_send(sink, body, 1, 1) == 0);
+    REQUIRE(clockwork_sink_send(sink, body, 1, clockwork_timetag_immediately()) == 0);
     REQUIRE(clockwork_sink_list(list, 8) == 0);
 
     // And the new instance can open its own, on a slot the closed one left.
@@ -461,10 +462,9 @@ TEST_CASE("sinks: freeing the DSP closes the sinks it opened",
 // ── Cancelling ───────────────────────────────────────────────────────────────
 
 namespace {
-// Now, as an OSC 32.32 timetag — the same domain clockwork_sink_send's `when` is in.
-// clock_math.h is where that conversion is spelled for the whole tree.
-int64_t sink_now() {
-    return clockwork::ntpToOscTimetag(wallClockNTP());   // global by design; see clock_math.h
+// Now, as an OSC timetag — the same domain clockwork_sink_send's `when` is in.
+clockwork::Timetag sink_now() {
+    return clockwork::Timetag::fromNtpSeconds(wallClockNTP());   // global by design
 }
 }  // namespace
 //
@@ -479,10 +479,10 @@ TEST_CASE("sinks: a flush cancels what is pending and says how many",
 
     // Far enough out that no look-ahead reaches them, so they are all still
     // the sink's to cancel.
-    const int64_t distant = sink_now() + (int64_t)(1ull << 32) * 60;
+    const clockwork::Timetag distant = sink_now() + (int64_t)(1ull << 32) * 60;
     const uint8_t msg[4] = {'/','x',0,0};
     for (int i = 0; i < 5; ++i)
-        REQUIRE(clockwork_sink_send(s, msg, sizeof msg, distant + i) != 0);
+        REQUIRE(clockwork_sink_send(s, msg, sizeof msg, (distant + i).abi()) != 0);
 
     CHECK(clockwork_sink_flush(s) == 5);
 
@@ -508,11 +508,11 @@ TEST_CASE("sinks: flush_all reaches every sink, whoever queued them",
     REQUIRE(a != CLOCKWORK_SINK_NONE);
     REQUIRE(b != CLOCKWORK_SINK_NONE);
 
-    const int64_t distant = sink_now() + (int64_t)(1ull << 32) * 60;
+    const clockwork::Timetag distant = sink_now() + (int64_t)(1ull << 32) * 60;
     const uint8_t msg[4] = {'/','y',0,0};
-    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, distant) != 0);
-    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, distant + 1) != 0);
-    REQUIRE(clockwork_sink_send(b, msg, sizeof msg, distant) != 0);
+    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, distant.abi()) != 0);
+    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, (distant + 1).abi()) != 0);
+    REQUIRE(clockwork_sink_send(b, msg, sizeof msg, distant.abi()) != 0);
 
     CHECK(clockwork_sink_flush_all() == 3);
 
@@ -545,21 +545,21 @@ TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out 
 
     // Nothing is queued, so the drain is asleep and only the send can wake it.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), 1) != 0);   // immediately
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), clockwork_timetag_immediately()) != 0);   // immediately
     CHECK(settled(sink, 1));
 
     // A message timed 300 ms ahead is held, then sent at its time. The count
     // is read before the clock, so a second message counted means it went at
     // or before that reading: never before its time, however late this thread
-    // wakes. Timetags compare unsigned.
-    const int64_t at = clockwork::ntpToOscTimetag(wallClockNTP() + 0.3);
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at) != 0);
+    // wakes.
+    const auto at = clockwork::Timetag::fromNtpSeconds(wallClockNTP() + 0.3);
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at.abi()) != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto sentBy = statsOf(sink).sent;
-    const auto clock = static_cast<uint64_t>(clockwork::ntpToOscTimetag(wallClockNTP()));
-    CHECK((sentBy == 1 || clock >= static_cast<uint64_t>(at)));
+    const auto clock = clockwork::Timetag::fromNtpSeconds(wallClockNTP());
+    CHECK((sentBy == 1 || clock >= at));
     CHECK(settled(sink, 2));
-    CHECK(static_cast<uint64_t>(clockwork::ntpToOscTimetag(wallClockNTP())) >= static_cast<uint64_t>(at));
+    CHECK(clockwork::Timetag::fromNtpSeconds(wallClockNTP()) >= at);
 }
 
 TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is sent", "[sinks][drain][wakes]") {
@@ -574,8 +574,8 @@ TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is se
 
     // A message timed a minute ahead must not wake the drain before then.
     const auto ping = osc_test::message("/ping");
-    const int64_t at = clockwork::ntpToOscTimetag(wallClockNTP() + 60.0);
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at) != 0);
+    const auto at = clockwork::Timetag::fromNtpSeconds(wallClockNTP() + 60.0);
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at.abi()) != 0);
     woke = thread_wakes::over("cw-sink-drain", std::chrono::milliseconds(500));
     REQUIRE(woke);
     CHECK(*woke <= 2);

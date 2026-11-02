@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "osc_reader.h"
@@ -74,7 +75,7 @@ public:
             uint32_t tag = 0;  // empty/missing tag = flush all
             const char* t;
             if (r.peekType() == 's' && r.readString(t) && *t) tag = sched_tag_hash(t, std::strlen(t));
-            push(Command{Command::Flush, 0, tag, {}});
+            push(Command{Command::Flush, {}, tag, {}});
         }
     }
 
@@ -83,7 +84,7 @@ public:
     // (clockwork_fire_due),
     // with the host's osc/midi backends in place of the DSP default. Single
     // thread only (the core is not shared). No reply path → no call ctx.
-    void tick(int64_t now) {
+    void tick(clockwork::Timetag now) {
         std::vector<Command> batch;
         { std::lock_guard<std::mutex> lk(mMx); batch.swap(mAssets); }
         for (auto& c : batch) {
@@ -94,15 +95,15 @@ public:
                           c.bytes.data(), static_cast<uint32_t>(c.bytes.size()));
             }
         }
-        clockwork_fire_due(mCore, now, /*blockTime*/ 0,
-            [this](const uint8_t* d, uint32_t n, uint32_t, int64_t, int64_t) {
+        clockwork_fire_due(mCore, now, /*blockTime*/ clockwork::Timetag(),
+            [this](const uint8_t* d, uint32_t n, uint32_t, clockwork::Timetag, clockwork::Timetag) {
                 mRoutes.ingest(d, n, /*callCtx*/ nullptr);
             });
     }
 
-    // Returns the timetag of the earliest held event as of the last tick(),
-    // or INT64_MAX when nothing is held. Tick thread only.
-    int64_t nextDue() const { return mCore.nextTime(); }
+    // Returns the timetag of the earliest held event as of the last tick(), if
+    // one is held. Tick thread only.
+    std::optional<clockwork::Timetag> nextDue() const { return mCore.nextTime(); }
 
     // ingest() bumps this for every message it queues. The tick thread waits
     // on it between ticks, with nextDue() as the deadline.
@@ -117,18 +118,18 @@ public:
     // Runs the tick thread until `stop`: tick at the wall clock's time
     // (`wall` returns the current timetag), then sleep until the next event
     // is due or a message arrives (run_worker).
-    template <class Wall = int64_t (*)()>
+    template <class Wall = clockwork::Timetag (*)()>
     void run(const std::stop_token& stop, Wall wall = &osc_now) {
         clockwork::run_worker(mArrivals, stop, [this, &wall] {
             // Read both clocks together, before the tick, so the sleep is
             // measured from the moment `now` names, not from after the sends.
             const auto steady = std::chrono::steady_clock::now();
-            const int64_t now = wall();
+            const clockwork::Timetag now = wall();
             tick(now);
-            const int64_t next = nextDue();
-            if (next == INT64_MAX) return clockwork::NextPass::woken();
+            const auto next = nextDue();
+            if (!next) return clockwork::NextPass::woken();
             const std::chrono::microseconds until =
-                std::min<std::chrono::microseconds>(osc_interval(next - now), kWallClockFollow);
+                std::min<std::chrono::microseconds>(osc_interval(*next - now), kWallClockFollow);
             return clockwork::NextPass::until(steady + until);
         });
     }
@@ -142,7 +143,7 @@ private:
 
     struct Command {
         enum Kind { Schedule, Flush } kind;
-        int64_t              when;
+        clockwork::Timetag   when;
         uint32_t             tag;
         std::vector<uint8_t> bytes;
     };

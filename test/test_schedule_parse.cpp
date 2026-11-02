@@ -103,16 +103,16 @@ const std::vector<uint8_t> kFiller = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 
 
 TEST_CASE("schedule_parse - clockwork_ntp_to_timetag packs NTP seconds as 32.32",
           "[schedule_parse][timetag]") {
-    CHECK(clockwork_ntp_to_timetag(0.0) == 0);
-    CHECK(clockwork_ntp_to_timetag(1.0) == (int64_t{1} << 32));
-    CHECK(clockwork_ntp_to_timetag(1.5) == ((int64_t{1} << 32) | int64_t{0x80000000}));
-    CHECK(clockwork_ntp_to_timetag(2.25) == ((int64_t{2} << 32) | int64_t{0x40000000}));
+    CHECK(clockwork_ntp_to_timetag(0.0).ntp() == 0);
+    CHECK(clockwork_ntp_to_timetag(1.0).ntp() == (uint64_t{1} << 32));
+    CHECK(clockwork_ntp_to_timetag(1.5).ntp() == ((uint64_t{1} << 32) | uint64_t{0x80000000}));
+    CHECK(clockwork_ntp_to_timetag(2.25).ntp() == ((uint64_t{2} << 32) | uint64_t{0x40000000}));
 
     // Whole seconds land in the high word, so ordering is monotonic there.
-    CHECK((clockwork_ntp_to_timetag(3600.0) >> 32) == 3600);
+    CHECK((clockwork_ntp_to_timetag(3600.0).ntp() >> 32) == 3600);
 
     // It is exactly the shared clock formula — one definition, not two.
-    CHECK(clockwork_ntp_to_timetag(1234.75) == clockwork::ntpToOscTimetag(1234.75));
+    CHECK(clockwork_ntp_to_timetag(1234.75) == clockwork::Timetag::fromNtpSeconds(1234.75));
 }
 
 // ── clockwork_is_bundle / clockwork_bundle_timetag ─────────────────────────────────────────
@@ -146,14 +146,14 @@ TEST_CASE("schedule_parse - clockwork_bundle_timetag reads offset 8 big-endian",
     b.insert(b.end(), tt.begin(), tt.end());
 
     REQUIRE(clockwork_is_bundle(b.data(), static_cast<uint32_t>(b.size())));
-    CHECK(clockwork_bundle_timetag(b.data()) == when);
+    CHECK(clockwork_bundle_timetag(b.data()).ntp() == when);
 
     // The immediate ("now") timetag, 1, is the common special case.
     std::vector<uint8_t> now;
     putPaddedString(now, "#bundle");
     const std::vector<uint8_t> one = beBytes(1u, 8);
     now.insert(now.end(), one.begin(), one.end());
-    CHECK(clockwork_bundle_timetag(now.data()) == 1u);
+    CHECK(clockwork_bundle_timetag(now.data()).ntp() == 1u);
 }
 
 TEST_CASE("schedule_parse - a flat schedule message is not a bundle",
@@ -166,12 +166,12 @@ TEST_CASE("schedule_parse - a flat schedule message is not a bundle",
 
 TEST_CASE("schedule_parse - 'h' carries the OSC int64 timetag verbatim",
           "[schedule_parse]") {
-    const int64_t when = (int64_t{0x00000123} << 32) | int64_t{0x456789ABu};
-    const auto m = scheduleMsg(",hb", beBytes(static_cast<uint64_t>(when), 8), kFiller);
+    const uint64_t when = (uint64_t{0x00000123} << 32) | uint64_t{0x456789ABu};
+    const auto m = scheduleMsg(",hb", beBytes(when, 8), kFiller);
 
     const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
     REQUIRE(r.ok);
-    CHECK(r.when == when);              // no conversion — the fraction survives
+    CHECK(r.when.ntp() == when);              // no conversion — the fraction survives
     REQUIRE(r.blobLen == kFiller.size());
     CHECK(std::memcmp(r.blob, kFiller.data(), kFiller.size()) == 0);
     // The blob is borrowed from the caller's buffer, not copied.
@@ -183,12 +183,12 @@ TEST_CASE("schedule_parse - 't' carries the OSC timetag verbatim, as 'h' does",
           "[schedule_parse]") {
     // OSC's own type for a time: the same eight bytes as 'h', so a client
     // whose library writes a time as a time is understood.
-    const int64_t when = (int64_t{0x00000123} << 32) | int64_t{0x456789ABu};
-    const auto m = scheduleMsg(",tb", beBytes(static_cast<uint64_t>(when), 8), kFiller);
+    const uint64_t when = (uint64_t{0x00000123} << 32) | uint64_t{0x456789ABu};
+    const auto m = scheduleMsg(",tb", beBytes(when, 8), kFiller);
 
     const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
     REQUIRE(r.ok);
-    CHECK(r.when == when);
+    CHECK(r.when.ntp() == when);
     REQUIRE(r.blobLen == kFiller.size());
     CHECK(std::memcmp(r.blob, kFiller.data(), kFiller.size()) == 0);
 }
@@ -201,7 +201,7 @@ TEST_CASE("schedule_parse - 'd' converts double NTP seconds to a timetag",
     const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
     REQUIRE(r.ok);
     CHECK(r.when == clockwork_ntp_to_timetag(ntp));
-    CHECK(r.when == ((int64_t{3600} << 32) | int64_t{0x80000000}));
+    CHECK(r.when.ntp() == ((uint64_t{3600} << 32) | uint64_t{0x80000000}));
     CHECK(r.blobLen == kFiller.size());
 }
 
@@ -213,7 +213,7 @@ TEST_CASE("schedule_parse - 'f' converts float NTP seconds to a timetag",
     const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
     REQUIRE(r.ok);
     CHECK(r.when == clockwork_ntp_to_timetag(static_cast<double>(ntp)));
-    CHECK(r.when == ((int64_t{2} << 32) | int64_t{0x40000000}));
+    CHECK(r.when.ntp() == ((uint64_t{2} << 32) | uint64_t{0x40000000}));
     CHECK(r.blobLen == kFiller.size());
 
     // The float form takes 4 argument bytes, not 8 — the blob still lands.
@@ -225,7 +225,7 @@ TEST_CASE("schedule_parse - an empty blob parses as an empty blob, not a failure
     const auto m = scheduleMsg(",hb", beBytes(42u, 8), {});
     const auto r = clockwork_parse_schedule(m.data(), static_cast<uint32_t>(m.size()));
     REQUIRE(r.ok);
-    CHECK(r.when == 42);
+    CHECK(r.when.ntp() == 42);
     CHECK(r.blobLen == 0u);
     CHECK(r.blob != nullptr);
 }
@@ -235,7 +235,7 @@ TEST_CASE("schedule_parse - an empty blob parses as an empty blob, not a failure
 // and the arguments are an int64 timetag plus an opaque blob.
 TEST_CASE("schedule_parse - accepts a message from a real OSC encoder",
           "[schedule_parse]") {
-    const int64_t when = (int64_t{4242} << 32) | int64_t{0x00001000};
+    const uint64_t when = (uint64_t{4242} << 32) | uint64_t{0x00001000};
     osc_test::Builder b;
     auto& s = b.begin(CLOCKWORK_SYS("schedule"));
     s << static_cast<osc::int64>(when)
@@ -245,7 +245,7 @@ TEST_CASE("schedule_parse - accepts a message from a real OSC encoder",
 
     const auto r = clockwork_parse_schedule(pkt.ptr(), pkt.size());
     REQUIRE(r.ok);
-    CHECK(r.when == when);
+    CHECK(r.when.ntp() == when);
     REQUIRE(r.blobLen == kFiller.size());
     CHECK(std::memcmp(r.blob, kFiller.data(), kFiller.size()) == 0);
 }
@@ -332,7 +332,7 @@ TEST_CASE("schedule_parse - a failed parse yields a wholly inert result",
     const uint8_t junk[24] = {0};
     const auto r = clockwork_parse_schedule(junk, sizeof junk);
     CHECK_FALSE(r.ok);
-    CHECK(r.when == 0);
+    CHECK(r.when.ntp() == 0);
     CHECK(r.blob == nullptr);
     CHECK(r.blobLen == 0u);
 }

@@ -30,6 +30,7 @@
 #include "dsp_api.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include "clock/timetag.h"
 
 #include <atomic>
 #include <cstdint>
@@ -687,9 +688,9 @@ TEST_CASE("restarts: what was scheduled for the old instance is cleared, not del
     settle();
     // Forty blocks out: held in the store, not performed at once.
     const uint64_t dueFrame = lanes_test::position() + 40ull * lanes_test::kBufLength;
-    const int64_t  due = clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(dueFrame));
+    const uint64_t due = clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(dueFrame)).ntp();
     const auto inner = osc_test::message("/dummy/when");
-    const auto pkt   = osc_test::bundle(static_cast<uint64_t>(due), { inner });
+    const auto pkt   = osc_test::bundle(due, { inner });
     REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
     lanes_test::tickUntil(2, nullptr);   // into the store
 
@@ -775,8 +776,8 @@ TEST_CASE("restarts: audio coming back with nothing changed keeps what was sched
           "[restarts][resume][scheduler]") {
     settle();
     const uint64_t dueFrame = lanes_test::position() + 40ull * lanes_test::kBufLength;
-    const int64_t  due = clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(dueFrame));
-    const auto pkt = osc_test::bundle(static_cast<uint64_t>(due), { osc_test::message("/dummy/when") });
+    const uint64_t due = clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(dueFrame)).ntp();
+    const auto pkt = osc_test::bundle(due, { osc_test::message("/dummy/when") });
     REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
     lanes_test::tickUntil(2, nullptr);   // into the store
 

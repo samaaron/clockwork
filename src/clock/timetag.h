@@ -7,7 +7,8 @@
  * rules: immediately comes first, and real times order by serial-number
  * arithmetic (RFC 1982), so the order holds across the NTP era rollover in
  * 2036. It converts to and from an integer only by name (fromNtp, ntp), so
- * `when <= 1` and `when - blockTime` do not compile.
+ * `when <= 1` does not compile. As with std::chrono, a time plus an offset is
+ * a time and a time minus a time is a signed offset, in 32.32 seconds.
  */
 #pragma once
 
@@ -54,6 +55,13 @@ public:
     }
     // This moved by `offset` 32.32 seconds.
     constexpr Timetag plus(int64_t offset) const { return fromNtp(mNtp + static_cast<uint64_t>(offset)); }
+
+    friend constexpr Timetag operator+(Timetag t, int64_t offset) { return t.plus(offset); }
+    friend constexpr Timetag operator-(Timetag t, int64_t offset) {
+        return t.plus(static_cast<int64_t>(0ull - static_cast<uint64_t>(offset)));
+    }
+    // The signed offset from `from` to `t`: offsetFrom.
+    friend constexpr int64_t operator-(Timetag t, Timetag from) { return t.offsetFrom(from); }
 
     // Weak, not strong: 0 and 1 are both immediately, and equal.
     friend constexpr std::weak_ordering operator<=>(Timetag a, Timetag b) {

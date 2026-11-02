@@ -126,7 +126,7 @@ pub struct ClockworkMidi {
 /// A time already past sends immediately rather than being dropped: late is
 /// better than silent, and the sink's `late` counter is where that is recorded.
 fn send_at_or_now(io: &mut crate::device::MidiIo, port: &str, bytes: &[u8], when: u64) {
-    match clockwork_osc::osc::delay_until(when) {
+    match clockwork_osc::osc::delay_until(clockwork_osc::Timetag::from_ntp(when)) {
         Some(delay) if io.schedules() => { io.send_at(port, bytes, delay); }
         _ => io.send(port, bytes),
     }
@@ -343,7 +343,7 @@ pub type EncodeOutFn = extern "C" fn(
     ctx: *mut c_void,
     port: *const u8, port_len: u32,
     bytes: *const u8, len: u32,
-    when: u64,
+    when: clockwork_osc::Timetag,
 );
 
 /// Decode one `/clockwork/midi/out/*` send verb into the bytes it puts on the
@@ -374,7 +374,8 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
     let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
     no_unwind(0, || {
         let emit = |port: &str, wire: &[u8], when: u64| {
-            cb(ctx, port.as_ptr(), port.len() as u32, wire.as_ptr(), wire.len() as u32, when);
+            cb(ctx, port.as_ptr(), port.len() as u32, wire.as_ptr(), wire.len() as u32,
+               clockwork_osc::Timetag::from_ntp(when));
         };
         match decode_out(bytes) {
             Ok(OutCommand::Send { port, msg, when }) => {

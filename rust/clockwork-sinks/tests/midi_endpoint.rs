@@ -105,12 +105,12 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     // time order, at a real port, through the drain thread — nothing here
     // pumps anything.
     let base = clockwork_sinks::time::now();
-    let ms = |n: u64| base + ((1u64 << 32) / 1000) * n;
-    let sends: [([u8; 3], i64); 4] = [
-        ([0x90, 64, 100], ms(60) as i64),
-        ([0x90, 62, 100], ms(40) as i64),
-        ([0x80, 60, 0],   ms(20) as i64),
-        ([0x90, 60, 100], 1),
+    let ms = |n: i64| base + ((1i64 << 32) / 1000) * n;
+    let sends: [([u8; 3], clockwork_osc::Timetag); 4] = [
+        ([0x90, 64, 100], ms(60)),
+        ([0x90, 62, 100], ms(40)),
+        ([0x80, 60, 0],   ms(20)),
+        ([0x90, 60, 100], clockwork_osc::Timetag::IMMEDIATELY),
     ];
     for (body, when) in sends {
         // SAFETY: `body` is 3 live bytes.

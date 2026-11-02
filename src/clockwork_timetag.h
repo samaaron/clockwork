@@ -23,9 +23,11 @@
  * same way. It names no moment: it comes before every real time and has no
  * offset from one.
  *
- * Passed and returned by value. A struct of one 64-bit field travels in a
- * register on every ABI Clockwork targets, wasm32 included, as a uint64_t
- * would.
+ * Passed and returned by value. On 64-bit targets and wasm32 a struct of one
+ * 64-bit field is passed and returned in a register, as a uint64_t is; on
+ * 32-bit x86 Linux one is returned through memory. A binding in another
+ * language declares it as a C struct (Rust: #[repr(C)]), not as a bare
+ * integer.
  */
 #ifndef CLOCKWORK_TIMETAG_H
 #define CLOCKWORK_TIMETAG_H

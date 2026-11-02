@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include "clock/timetag.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -15,10 +17,10 @@ struct DrainCallCtx {
                                        // reply can be routed back to the sender. It is
                                        // also what dsp_osc() carries and DspHost::emit_osc
                                        // hands back, so no reply TYPE crosses the boundary.
-    int64_t       when     = 0;        // OSC timetag of this message; 0/1 = immediate.
+    clockwork::Timetag when;           // OSC timetag of this message; immediately unless set.
                                        // Passed to the DSP, which derives its own
                                        // sub-block placement from it; other handlers ignore.
-    int64_t       blockTime = 0;       // this block's start in OSC time. Clockwork uses it
+    clockwork::Timetag blockTime;      // this block's start in OSC time. Clockwork uses it
                                        // for lateness accounting; the DSP gets the same value
                                        // as dsp_process's block_time.
 };

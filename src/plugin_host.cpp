@@ -153,18 +153,18 @@ static inline uint64_t now_ns() {
 void plugin_process(struct HostedPlugin* p,
                     const float* const* in, uint32_t n_in,
                     float* const* out, uint32_t n_out,
-                    uint32_t frames, int64_t block_time) {
+                    uint32_t frames, ClockworkTimetag block_time) {
     if (!p) return;
     const uint64_t t0 = now_ns();
 #if CLOCKWORK_PLUGIN_CLAP
     if (p->format == kPluginFormatClap)
         clockwork_plugin_clap::process(static_cast<clockwork_plugin_clap::Instance*>(p->impl),
-                                 in, n_in, out, n_out, frames, block_time);
+                                 in, n_in, out, n_out, frames, clockwork::Timetag::fromAbi(block_time));
 #endif
 #if CLOCKWORK_PLUGIN_VST3
     if (p->format == kPluginFormatVst3)
         clockwork_plugin_vst3::process(static_cast<clockwork_plugin_vst3::Instance*>(p->impl),
-                                 in, n_in, out, n_out, frames, block_time);
+                                 in, n_in, out, n_out, frames, clockwork::Timetag::fromAbi(block_time));
 #endif
     (void)in; (void)n_in; (void)out; (void)n_out; (void)block_time;
 

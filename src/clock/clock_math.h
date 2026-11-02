@@ -3,15 +3,13 @@
 /*
  * clock_math.h — the shared clock arithmetic, once.
  *
- * The tempo-grid formula (beat = (t − origin) · bpm / 60), the NTP epoch
- * constant, and the NTP → OSC-timetag packing all appear in several unrelated
- * TUs (ClockworkClock NTP math, the session-of-one mirror, timeline free-run,
- * metrics, the standalone host, the scheduler ingest). One definition here so
- * they can't drift apart.
+ * The tempo-grid formula (beat = (t − origin) · bpm / 60) and the NTP epoch
+ * constant appear in several unrelated TUs (ClockworkClock NTP math, the
+ * session-of-one mirror, timeline free-run, metrics, the standalone host).
+ * One definition here so they can't drift apart. The NTP → OSC-timetag
+ * packing is Timetag's (clock/timetag.h).
  */
 #pragma once
-
-#include "clock/timetag.h"
 
 #include <chrono>
 #include <cmath>
@@ -132,17 +130,5 @@ inline double wrapPhase(double beat, double quantum) {
     return p;
 }
 
-// NTP seconds (since 1900) → OSC 64-bit 32.32 fixed-point timetag, packed by
-// Timetag (clock/timetag.h).
-inline int64_t ntpToOscTimetag(double ntpSeconds) {
-    return static_cast<int64_t>(Timetag::fromNtpSeconds(ntpSeconds).ntp());
-}
-
-// The inverse: an OSC timetag → NTP seconds. Not a round trip to the bit —
-// the fraction is 32 bits, a double's mantissa 53 — but exact for the
-// block times the hosts stamp, which come from this pair.
-inline double oscTimetagToNtp(int64_t timetag) {
-    return Timetag::fromNtp(static_cast<uint64_t>(timetag)).ntpSeconds();
-}
 
 }  // namespace clockwork

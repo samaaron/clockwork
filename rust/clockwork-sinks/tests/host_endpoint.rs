@@ -18,14 +18,15 @@ use clockwork_sinks::ffi::{
     clockwork_sink_close, clockwork_sink_flush, clockwork_sink_open, clockwork_sink_send,
     clockwork_sink_set_host_emit, clockwork_sink_stats,
 };
+use clockwork_osc::Timetag;
 use clockwork_sinks::{Stats, KIND_MIDI, KIND_OSC};
 
 /// One emitted event: kind, target, bytes, when.
-type Taken = (u32, String, Vec<u8>, i64);
+type Taken = (u32, String, Vec<u8>, Timetag);
 static TAKEN: Mutex<Vec<Taken>> = Mutex::new(Vec::new());
 static REFUSE: Mutex<bool> = Mutex::new(false);
 
-unsafe extern "C" fn emit(kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: i64) -> i32 {
+unsafe extern "C" fn emit(kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: Timetag) -> i32 {
     if *REFUSE.lock().unwrap() { return 0; }
     // SAFETY: the sink's own NUL-terminated target, and a slice it holds.
     let (t, b) = unsafe {
@@ -43,7 +44,7 @@ fn stats(sink: u32) -> Stats {
     s
 }
 
-fn send(sink: u32, bytes: &[u8], when: i64) -> i32 {
+fn send(sink: u32, bytes: &[u8], when: Timetag) -> i32 {
     // SAFETY: a slice's pointer and length.
     unsafe { clockwork_sink_send(sink, bytes.as_ptr(), bytes.len() as u32, when) }
 }
@@ -63,15 +64,15 @@ fn a_midi_sink_opens_onto_the_host_and_a_send_is_the_delivery() {
     let sink = unsafe { clockwork_sink_open(KIND_MIDI as i32, target.as_ptr(), 0) };
     assert_ne!(sink, 0, "no host sink opened");
 
-    let when = -0x1234_5678_9abc_def0_i64;   // a real timetag: negative as i64
+    let when = Timetag::from_ntp(0xEDCB_A987_6543_2110);   // a real timetag, 2026
     assert_eq!(send(sink, &[0x90, 60, 100], when), 1);
-    assert_eq!(send(sink, &[0x80, 60, 0], 1), 1);
+    assert_eq!(send(sink, &[0x80, 60, 0], Timetag::IMMEDIATELY), 1);
 
     // Delivered on this thread, at once, with kind, target and time intact.
     let taken = TAKEN.lock().unwrap().clone();
     assert_eq!(taken, vec![
         (KIND_MIDI, "Fake Synth".to_string(), vec![0x90, 60, 100], when),
-        (KIND_MIDI, "Fake Synth".to_string(), vec![0x80, 60, 0], 1),
+        (KIND_MIDI, "Fake Synth".to_string(), vec![0x80, 60, 0], Timetag::IMMEDIATELY),
     ]);
     let s = stats(sink);
     assert_eq!((s.sent, s.scheduled, s.dropped, s.late, s.cancelled), (2, 2, 0, 0, 0));
@@ -80,7 +81,7 @@ fn a_midi_sink_opens_onto_the_host_and_a_send_is_the_delivery() {
     assert_eq!(clockwork_sink_flush(sink), 0);
 
     // An empty message is refused and not a drop, as everywhere.
-    assert_eq!(send(sink, &[], 1), 0);
+    assert_eq!(send(sink, &[], Timetag::IMMEDIATELY), 0);
     assert_eq!(stats(sink).dropped, 0);
 
     clockwork_sink_close(sink);
@@ -98,7 +99,7 @@ fn a_host_that_refuses_is_a_drop() {
     assert_ne!(sink, 0);
 
     *REFUSE.lock().unwrap() = true;
-    assert_eq!(send(sink, &[0xf8], 1), 0);
+    assert_eq!(send(sink, &[0xf8], Timetag::IMMEDIATELY), 0);
     *REFUSE.lock().unwrap() = false;
     let s = stats(sink);
     assert_eq!((s.sent, s.dropped), (0, 1));
@@ -119,7 +120,7 @@ fn the_host_takes_midi_only_and_only_while_installed() {
     let sink = unsafe { clockwork_sink_open(KIND_OSC as i32, osc.as_ptr(), 0) };
     if sink != 0 {
         TAKEN.lock().unwrap().clear();
-        send(sink, &[1, 2, 3], 1);
+        send(sink, &[1, 2, 3], Timetag::IMMEDIATELY);
         assert!(TAKEN.lock().unwrap().is_empty(), "an OSC send reached the host emitter");
         clockwork_sink_close(sink);
     }

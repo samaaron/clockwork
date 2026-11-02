@@ -7,6 +7,7 @@
 
 #include "clockwork_product.h"
 #include "clockwork_client.h"   // ClockworkStatus
+#include "clock/timetag.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1061,8 +1062,8 @@ private:
     // What the audio thread prefixes each control frame with, so the call's
     // time survives the hop (the ring header carries only the origin token).
     struct NrtEnvelope {
-        int64_t when      = 0;   // the message's OSC timetag; 0/1 = immediate
-        int64_t blockTime = 0;   // the block it was fired in
+        clockwork::Timetag when;        // the message's OSC timetag, or immediately
+        clockwork::Timetag blockTime;   // the block it was fired in
     };
     // The widest command the hop carries: a datagram (65507) and the verb
     // that wraps it, rounded up. The frame the envelope is prefixed in is the

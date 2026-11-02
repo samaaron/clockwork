@@ -766,11 +766,9 @@ mod uuid_wire_tests {
 /// make the other depend on it, and clockwork-sinks already depends on clockwork-midi for
 /// its endpoint, so that edge cannot run the other way.
 ///
-/// The SAME formula as `clockwork::ntpToOscTimetag(wallClockNTP())` in
-/// src/clock/clock_math.h and `clockwork_sinks::time::now()`. It is spelled more than once
-/// because a C++ header, a no_std-capable crate and a std crate cannot share
-/// one definition; the tests assert the spellings agree, which is the same
-/// arrangement schedule_parse.h documents for its own copy.
+/// The SAME formula as `clockwork::Timetag::fromNtpSeconds(wallClockNTP())`
+/// in C++; the sinks read the clock through this one. The tests assert the
+/// two languages agree.
 #[cfg(feature = "std")]
 pub fn now_timetag() -> u64 {
     timetag_of(std::time::SystemTime::now())
@@ -789,23 +787,15 @@ pub fn timetag_of(t: std::time::SystemTime) -> u64 {
     (secs << 32) | frac
 }
 
-/// How long from now until `when`, or `None` if it is already due.
-///
-/// Timetags are compared as UNSIGNED. A present-day timetag has its top bit
-/// set, so as an i64 it is negative and every signed comparison gets the answer
-/// exactly backwards.
+/// How long from now until `when`, or `None` if it is already due or is
+/// immediately.
 #[cfg(feature = "std")]
-pub fn delay_until(when: u64) -> Option<std::time::Duration> {
-    // 0 and 1 are the OSC "immediately" sentinels: not a moment, so nothing to
-    // wait for.
-    if when <= 1 {
+pub fn delay_until(when: crate::Timetag) -> Option<std::time::Duration> {
+    let now = crate::Timetag::from_ntp(now_timetag());
+    if when.is_immediate() || when <= now {
         return None;
     }
-    let now = now_timetag();
-    if when <= now {
-        return None;
-    }
-    let diff = when - now;
+    let diff = (when - now) as u64;   // positive: checked above
     let secs = diff >> 32;
     let nanos = (((diff & 0xFFFF_FFFF) * 1_000_000_000) >> 32) as u32;
     Some(std::time::Duration::new(secs, nanos))
@@ -825,17 +815,14 @@ mod timetag_tests {
 
     #[test]
     fn an_immediate_sentinel_is_never_a_delay() {
-        assert!(delay_until(0).is_none());
-        assert!(delay_until(1).is_none());
+        assert!(delay_until(crate::Timetag::from_ntp(0)).is_none());
+        assert!(delay_until(crate::Timetag::IMMEDIATELY).is_none());
     }
 
     #[test]
     fn a_past_timetag_is_due_not_negative() {
-        // The signed-comparison trap: a real timetag is negative as an i64, so
-        // a signed `when <= now` answers the opposite of the truth.
-        let now = now_timetag();
-        assert!(now > (i64::MAX as u64), "a present-day timetag has its top bit set");
-        assert!(delay_until(now - (1u64 << 32)).is_none(), "a second ago is due");
+        let now = crate::Timetag::from_ntp(now_timetag());
+        assert!(delay_until(now - (1i64 << 32)).is_none(), "a second ago is due");
     }
 
     #[test]
@@ -844,8 +831,8 @@ mod timetag_tests {
         // here: the delay is a second less however long that took — measured,
         // so a machine that pauses moves the allowance with it.
         let before = std::time::Instant::now();
-        let now = now_timetag();
-        let d = delay_until(now + (1u64 << 32)).expect("a second out is a delay");
+        let now = crate::Timetag::from_ntp(now_timetag());
+        let d = delay_until(now + (1i64 << 32)).expect("a second out is a delay");
         let took = before.elapsed();
         let ms = d.as_millis();
         let slack = 2 + took.as_millis();   // + the timetag's own rounding

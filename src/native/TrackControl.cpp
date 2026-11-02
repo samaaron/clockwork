@@ -316,7 +316,7 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
     auto* self = static_cast<TrackControl*>(ctx);
     Header* h = self->mHeader;
     if (!h) return;
-    h->block_time.store(clockwork_block_time(), std::memory_order_relaxed);
+    h->block_time.store(clockwork_block_time().ntp, std::memory_order_relaxed);
     mirror_clock(h, self->mClock);
     // The follower timelines, from their lock-free published copies. A slot
     // nothing holds mirrors as the placeholder; a writer caught mid-way
@@ -670,9 +670,7 @@ bool TrackControl::audioSink(void* ctx, const void* callCtx, const uint8_t* data
     // [frame offset][osc], joined on the stack: a track event is small.
     std::array<uint8_t, 2048> frame{};
     if (sizeof(Prefixed) + len > frame.size()) return true;
-    const uint32_t off = trackFrameOffset(clockwork::Timetag::fromNtp(static_cast<uint64_t>(meta.when)),
-                                          clockwork::Timetag::fromNtp(static_cast<uint64_t>(meta.blockTime)),
-                                          clockwork_sample_rate(), clockwork_block_size());
+    const uint32_t off = trackFrameOffset(meta.when, meta.blockTime, clockwork_sample_rate(), clockwork_block_size());
     std::memcpy(frame.data(), &off, sizeof off);
     std::memcpy(frame.data() + sizeof(Prefixed), data, len);
     MsgRing& r = h->rt;

@@ -16,10 +16,10 @@
  */
 #pragma once
 
-#include <cstdint>
+#include "clock/timetag.h"
 
 template <class Scheduler, class DispatchFn>
-inline void clockwork_fire_due(Scheduler& sched, int64_t nextTime, int64_t blockTime,
+inline void clockwork_fire_due(Scheduler& sched, clockwork::Timetag nextTime, clockwork::Timetag blockTime,
                         DispatchFn&& dispatch) {
     for (;;) {
         auto ev = sched.popDue(nextTime);

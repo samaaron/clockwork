@@ -45,15 +45,12 @@
 //! path. That is `clockwork-slots`, and it is shared as code rather than as a
 //! second implementation of the same argument.
 //!
-//! # Time is a `u64`, whatever the header's signature says
+//! # Time is a `Timetag`
 //!
-//! `clockwork_sink_send` takes `int64_t when`, matching `dsp_process`'s
-//! `block_time`. An OSC timetag is 32.32 fixed point NTP seconds since 1900,
-//! and 2026 is past 2^31 seconds from 1900 — so the top bit of a REAL timetag
-//! is already set, and every current timetag is NEGATIVE as an `int64_t`.
-//! Comparing two of them signed would put next Tuesday before "immediately".
-//! So every comparison here converts to `u64` first, and 1 (the OSC value for
-//! "immediately") is then the smallest thing there is, which is exactly right.
+//! `clockwork_sink_send` takes a `ClockworkTimetag`, the same type as
+//! `dsp_process`'s `block_time`, and this crate holds it as
+//! `clockwork_osc::Timetag`: immediately comes before every real time, and
+//! real times order across the NTP rollover in 2036. See `crate::time`.
 
 pub mod endpoint;
 pub mod ffi;

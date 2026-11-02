@@ -194,7 +194,7 @@ const ClockworkTimeline* track_timeline(const SnapTrack& st, ClockworkTimeline& 
     return &out;
 }
 
-void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, int64_t block_time) {
+void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, ClockworkTimetag block_time) {
     std::array<const float*, kChans> ins {};
     std::array<float*, kChans>       gen { g_gen.data(), g_gen.data() + kMaxBlock };
 
@@ -232,7 +232,7 @@ void run_chain(const SnapTrack& st, float* const* work, uint32_t frames, int64_t
 }
 
 void track_process_at(float* const* in, uint32_t n_in, float* const* out, uint32_t n_out,
-                      uint32_t frames, int64_t block_time, uint32_t base) {
+                      uint32_t frames, ClockworkTimetag block_time, uint32_t base) {
     // Published before the walk, so a control thread that swaps mid-block can
     // tell that this block has begun and must be waited out.
     g_epoch.fetch_add(1, std::memory_order_acq_rel);
@@ -1373,7 +1373,7 @@ int clockwork_track_set_timeline(ClockworkTrackId id, int32_t timeline_id, const
 }
 
 void clockwork_track_process(float* const* in, uint32_t n_in, float* const* out, uint32_t n_out,
-                       uint32_t frames, int64_t block_time, uint32_t lane_base) {
+                       uint32_t frames, ClockworkTimetag block_time, uint32_t lane_base) {
     track_process_at(in, n_in, out, n_out, frames, block_time, lane_base);
 }
 

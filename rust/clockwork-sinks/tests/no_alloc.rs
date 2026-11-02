@@ -30,6 +30,7 @@ use clockwork_sinks::profile::Layout as SinkLayout;
 use clockwork_sinks::queue::DEFAULT_CELL_BYTES;
 use clockwork_sinks::sink::{Stats, KIND_OSC};
 use clockwork_sinks::CaptureEndpoint;
+use clockwork_osc::Timetag;
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -113,7 +114,7 @@ fn the_audio_thread_path_allocates_nothing() {
     let (full, _fe) = manual(8);
     for i in 0..8u8 {
         // SAFETY: one live byte.
-        assert_ne!(unsafe { clockwork_sink_send(full, [i].as_ptr(), 1, 1) }, 0);
+        assert_ne!(unsafe { clockwork_sink_send(full, [i].as_ptr(), 1, Timetag::IMMEDIATELY) }, 0);
     }
 
     // Everything the calls will touch, built before the arm: the point is
@@ -124,26 +125,26 @@ fn the_audio_thread_path_allocates_nothing() {
     let mut slots = [0u32; 8];
     let mut stats = Stats::default();
     let now = clockwork_sinks::time::now();
-    let future = (now + (1u64 << 32)) as i64;
+    let future = now + (1i64 << 32);
 
     arm();
     for _ in 0..256 {
         // The accepted path, immediate and scheduled.
         // SAFETY: `note` is 3 live bytes.
-        unsafe { clockwork_sink_send(roomy, note.as_ptr(), 3, 1) };
+        unsafe { clockwork_sink_send(roomy, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // SAFETY: `note` is 3 live bytes.
         unsafe { clockwork_sink_send(roomy, note.as_ptr(), 3, future) };
         // A long message: still a memcpy into a cell taken at open.
         // SAFETY: `sysex` is that many live bytes.
-        unsafe { clockwork_sink_send(roomy, sysex.as_ptr(), sysex.len() as u32, 1) };
+        unsafe { clockwork_sink_send(roomy, sysex.as_ptr(), sysex.len() as u32, Timetag::IMMEDIATELY) };
         // The two refusal paths — queue full, and longer than a cell.
         // SAFETY: `note` is 3 live bytes.
-        unsafe { clockwork_sink_send(full, note.as_ptr(), 3, 1) };
+        unsafe { clockwork_sink_send(full, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // SAFETY: `oversize` is that many live bytes; the refusal is the point.
-        unsafe { clockwork_sink_send(roomy, oversize.as_ptr(), oversize.len() as u32, 1) };
+        unsafe { clockwork_sink_send(roomy, oversize.as_ptr(), oversize.len() as u32, Timetag::IMMEDIATELY) };
         // A handle that is closed / never existed takes the same path.
         // SAFETY: 3 live bytes; the bogus handle is refused by the registry.
-        unsafe { clockwork_sink_send(0xdead_beef, note.as_ptr(), 3, 1) };
+        unsafe { clockwork_sink_send(0xdead_beef, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // The query surface, which a metrics tick calls at the same rate.
         clockwork_sink_is_open(roomy);
         clockwork_sink_kind(roomy);

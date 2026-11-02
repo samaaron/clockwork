@@ -119,7 +119,7 @@
  * A send is QUEUED by dsp_osc and emitted at the top of the next
  * dsp_process, and that is the whole point of the exercise rather than an
  * implementation detail: `when` is computed from THAT BLOCK'S block_time
- * (block_time + delay_ms, or 1 when the delay is zero; a negative delay
+ * (block_time + delay_ms, or immediately when the delay is zero; a negative delay
  * dates it before the block, already past due), which is the exact
  * arithmetic a real scheduling DSP does, against the block the send is
  * actually emitted in. Sending from dsp_osc instead would prove nothing about
@@ -889,7 +889,7 @@ void dsp_process(struct Dsp* dsp,
                  const float* const* in, uint32_t n_in,
                  float* const* out, uint32_t n_out,
                  uint32_t frames,
-                 int64_t block_time) {
+                 ClockworkTimetag block_time) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
     if (!d || !out) return;
     // `in` is read in Echo mode and ignored by the generators.
@@ -899,14 +899,14 @@ void dsp_process(struct Dsp* dsp,
 
     // Anything /dummy/sink/send queued, dated by THIS block's start. An OSC
     // timetag is 32.32 fixed point, so a millisecond is 2^32/1000 units; a
-    // zero delay becomes 1, OSC's "immediately", rather than a timetag that
-    // happens to be now; a negative delay dates the send before the block.
+    // zero delay becomes "immediately" rather than a timetag that happens to
+    // be now; a negative delay dates the send before the block.
     for (uint32_t i = 0; i < d->n_pending; ++i) {
         const PendingSend& p = d->pending[i];
         if (!d->host.send_sink || p.sink == CLOCKWORK_SINK_NONE) continue;
-        const int64_t when = p.delay_ms == 0
-            ? 1
-            : block_time + (static_cast<int64_t>(p.delay_ms) * 4294967296ll) / 1000ll;
+        const ClockworkTimetag when = p.delay_ms == 0
+            ? clockwork_timetag_immediately()
+            : clockwork_timetag_add(block_time, (static_cast<int64_t>(p.delay_ms) * 4294967296ll) / 1000ll);
         d->host.send_sink(d->host.ctx, p.sink, p.bytes, p.len, when);
     }
     d->n_pending = 0;
@@ -952,10 +952,10 @@ void dsp_process(struct Dsp* dsp,
 // through dsp_osc, which unwraps a bundle exactly as it unwrapped this one,
 // and every element inherits the same `when`.
 void dsp_osc(struct Dsp* dsp, const uint8_t* bytes, uint32_t len,
-             int64_t when, uint32_t origin, int64_t block_time);
+             ClockworkTimetag when, uint32_t origin, ClockworkTimetag block_time);
 
 void dispatchBundle(struct Dsp* dsp, const uint8_t* b, uint32_t len,
-                    int64_t when, uint32_t origin, int64_t block_time) {
+                    ClockworkTimetag when, uint32_t origin, ClockworkTimetag block_time) {
     uint32_t off = 16;                       // "#bundle\0" + the 8-byte timetag
     while (off + 4 <= len) {
         const uint32_t n = (uint32_t(b[off]) << 24) | (uint32_t(b[off + 1]) << 16)
@@ -970,9 +970,9 @@ void dispatchBundle(struct Dsp* dsp, const uint8_t* b, uint32_t len,
 void dsp_osc(struct Dsp* dsp,
              const uint8_t* bytes,
              uint32_t len,
-             int64_t when,
+             ClockworkTimetag when,
              uint32_t origin,
-             int64_t block_time) {
+             ClockworkTimetag block_time) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
     if (!d || !bytes || len == 0) return;
     if (len >= 16 && std::memcmp(bytes, "#bundle", 8) == 0) {
@@ -1087,7 +1087,7 @@ void dsp_osc(struct Dsp* dsp,
         if (d->host.emit_osc) {
             uint8_t reply[48];
             const uint32_t n = writeReplyInt64(reply, sizeof reply,
-                                               "/dummy/when-was", when);
+                                               "/dummy/when-was", static_cast<int64_t>(when.ntp));
             if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
         }
         return;

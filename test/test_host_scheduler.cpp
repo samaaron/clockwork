@@ -12,19 +12,27 @@
  * one thread that owns the store; between them the generic Scheduler, and on
  * fire the host's own route table: osc/send to the OSC leaf, midi/ to the
  * MIDI leaf, anything else reported and dropped. No socket and no wall clock:
- * the timetags are plain int64 and tick() is handed the "now" to compare
- * them with, so "due" is exact.
+ * the times are offsets from a fixed moment (at()) and tick() is handed the
+ * "now" to compare them with, so "due" is exact.
  */
 #include "clockwork_prefix.h"
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 #include "OscTestUtils.h"
 #include "clockwork_sys.h"
 #include "host/clock.h"
 #include "host/host_scheduler.h"
+
+namespace {
+// A time `offset` timetag units after 1 January 2026.
+clockwork::Timetag at(int64_t offset) {
+    return clockwork::Timetag::fromNtp(uint64_t{3976214400} << 32) + offset;
+}
+}  // namespace
 #include "host/host_outbound.h"
 #include "host/osc_reader.h"
 #include "workers/thread_name.h"
@@ -49,7 +57,7 @@ struct OscSend {
 // store runs on a thread of its own.
 struct Rig {
     std::mutex                        mx;
-    std::vector<int64_t>              firedAt;
+    std::vector<clockwork::Timetag>   firedAt;
     std::vector<OscSend>              oscSends;
     std::vector<std::vector<uint8_t>> midiSends;
     clockwork_host::HostSenders       senders;
@@ -88,15 +96,15 @@ osc_test::Packet oscSend(const char* host, int port, const std::vector<uint8_t>&
 }
 
 // "/clockwork/schedule <when:h> <inner:b>" — the control verb the host queues.
-osc_test::Packet schedule(int64_t when, const osc_test::Packet& inner) {
+osc_test::Packet schedule(clockwork::Timetag when, const osc_test::Packet& inner) {
     osc_test::Builder b;
     b.begin(CLOCKWORK_SYS("schedule"))
-        << static_cast<osc::int64>(when)
+        << static_cast<osc::int64>(when.ntp())
         << osc::Blob(inner.ptr(), static_cast<osc::osc_bundle_element_size_t>(inner.size()));
     return b.end();
 }
 
-osc_test::Packet oscAt(int64_t when, const char* host, int port, const std::vector<uint8_t>& inner) {
+osc_test::Packet oscAt(clockwork::Timetag when, const char* host, int port, const std::vector<uint8_t>& inner) {
     return schedule(when, oscSend(host, port, inner));
 }
 
@@ -159,13 +167,13 @@ TEST_CASE("host scheduler: a scheduled osc/send fires only when due, whole",
           "[host_scheduler]") {
     Rig rig;
     const std::vector<uint8_t> inner = {1, 2, 3, 4};
-    rig.ingest(oscAt(1000, "10.0.0.5", 9000, inner));
+    rig.ingest(oscAt(at(1000), "10.0.0.5", 9000, inner));
 
-    rig.sched.tick(999);
+    rig.sched.tick(at(999));
     CHECK(rig.oscSends.empty());           // not yet due
     CHECK(rig.sched.pending() == 1);
 
-    rig.sched.tick(1000);                  // due now
+    rig.sched.tick(at(1000));                  // due now
     REQUIRE(rig.oscSends.size() == 1);
     CHECK(rig.oscSends[0].host == "10.0.0.5");
     CHECK(rig.oscSends[0].port == 9000);
@@ -175,10 +183,10 @@ TEST_CASE("host scheduler: a scheduled osc/send fires only when due, whole",
 
 TEST_CASE("host scheduler: time order wins over arrival order", "[host_scheduler]") {
     Rig rig;
-    rig.ingest(oscAt(3000, "h", 1, {0xAA}));   // later, queued first
-    rig.ingest(oscAt(2000, "h", 2, {0xBB}));   // earlier, queued second
+    rig.ingest(oscAt(at(3000), "h", 1, {0xAA}));   // later, queued first
+    rig.ingest(oscAt(at(2000), "h", 2, {0xBB}));   // earlier, queued second
 
-    rig.sched.tick(5000);
+    rig.sched.tick(at(5000));
     REQUIRE(rig.oscSends.size() == 2);
     CHECK(rig.oscSends[0].port == 2);          // t=2000 first
     CHECK(rig.oscSends[1].port == 1);          // t=3000 second
@@ -187,10 +195,10 @@ TEST_CASE("host scheduler: time order wins over arrival order", "[host_scheduler
 TEST_CASE("host scheduler: sched/flush \"default\" cancels what has not fired",
           "[host_scheduler]") {
     Rig rig;
-    rig.ingest(oscAt(4000, "h", 7, {0x09}));
+    rig.ingest(oscAt(at(4000), "h", 7, {0x09}));
     rig.ingest(schedFlush("default"));
 
-    rig.sched.tick(9000);
+    rig.sched.tick(at(9000));
     CHECK(rig.oscSends.empty());
     CHECK(rig.sched.pending() == 0);
 }
@@ -199,9 +207,9 @@ TEST_CASE("host scheduler: a scheduled midi message reaches the MIDI leaf when d
           "[host_scheduler]") {
     Rig rig;
     const auto note = midiMsg({0x90, 0x40, 0x7f});
-    rig.ingest(schedule(6000, note));
+    rig.ingest(schedule(at(6000), note));
 
-    rig.sched.tick(7000);
+    rig.sched.tick(at(7000));
     REQUIRE(rig.midiSends.size() == 1);
     CHECK(same(rig.midiSends[0], note));
 }
@@ -209,10 +217,10 @@ TEST_CASE("host scheduler: a scheduled midi message reaches the MIDI leaf when d
 TEST_CASE("host scheduler: an out-of-range port is refused, not wrapped",
           "[host_scheduler]") {
     Rig rig;
-    rig.ingest(oscAt(1000, "h", 70000, {0x01}));   // > 65535
-    rig.ingest(oscAt(1000, "h", 4560,  {0x02}));
+    rig.ingest(oscAt(at(1000), "h", 70000, {0x01}));   // > 65535
+    rig.ingest(oscAt(at(1000), "h", 4560,  {0x02}));
 
-    rig.sched.tick(2000);
+    rig.sched.tick(at(2000));
     REQUIRE(rig.oscSends.size() == 1);             // only the valid port went out
     CHECK(rig.oscSends[0].port == 4560);
 }
@@ -221,9 +229,9 @@ TEST_CASE("host scheduler: midi/ routes by prefix, never to the OSC leaf",
           "[host_scheduler]") {
     Rig rig;
     const auto midi = midiMsg({0x40, 0x7f, 0x10});
-    rig.ingest(schedule(8000, midi));
+    rig.ingest(schedule(at(8000), midi));
 
-    rig.sched.tick(9000);
+    rig.sched.tick(at(9000));
     CHECK(rig.oscSends.empty());
     REQUIRE(rig.midiSends.size() == 1);
     CHECK(same(rig.midiSends[0], midi));
@@ -236,9 +244,9 @@ TEST_CASE("host scheduler: a verb with no leaf here is dropped, not misrouted",
     Rig rig;
     osc_test::Builder b;
     b.begin("/s_new") << "beep" << 1;
-    rig.ingest(schedule(8000, b.end()));
+    rig.ingest(schedule(at(8000), b.end()));
 
-    rig.sched.tick(9000);
+    rig.sched.tick(at(9000));
     CHECK(rig.oscSends.empty());
     CHECK(rig.midiSends.empty());
     CHECK(rig.sched.pending() == 0);
@@ -253,7 +261,7 @@ TEST_CASE("host scheduler: every message ingested wakes the thread that runs the
           "[host_scheduler]") {
     Rig rig;
     const uint32_t before = rig.sched.arrivals().value.load();
-    rig.ingest(oscAt(1000, "h", 1, {0x01}));
+    rig.ingest(oscAt(at(1000), "h", 1, {0x01}));
     CHECK(rig.sched.arrivals().value.load() == before + 1);
     rig.ingest(schedFlush("default"));
     CHECK(rig.sched.arrivals().value.load() == before + 2);
@@ -267,18 +275,18 @@ TEST_CASE("host scheduler: every message ingested wakes the thread that runs the
 TEST_CASE("host scheduler: the next wake is when the earliest held event is due, and none with nothing held",
           "[host_scheduler]") {
     Rig rig;
-    rig.sched.tick(0);
-    CHECK(rig.sched.nextDue() == INT64_MAX);
+    rig.sched.tick(at(0));
+    CHECK(rig.sched.nextDue() == std::nullopt);
 
-    rig.ingest(oscAt(3000, "h", 1, {0xAA}));
-    rig.ingest(oscAt(2000, "h", 2, {0xBB}));
-    rig.sched.tick(1000);                  // takes both in, fires neither
-    CHECK(rig.sched.nextDue() == 2000);
+    rig.ingest(oscAt(at(3000), "h", 1, {0xAA}));
+    rig.ingest(oscAt(at(2000), "h", 2, {0xBB}));
+    rig.sched.tick(at(1000));                  // takes both in, fires neither
+    CHECK(rig.sched.nextDue() == at(2000));
 
-    rig.sched.tick(2000);
-    CHECK(rig.sched.nextDue() == 3000);
-    rig.sched.tick(3000);
-    CHECK(rig.sched.nextDue() == INT64_MAX);
+    rig.sched.tick(at(2000));
+    CHECK(rig.sched.nextDue() == at(3000));
+    rig.sched.tick(at(3000));
+    CHECK(rig.sched.nextDue() == std::nullopt);
 }
 
 TEST_CASE("host scheduler: the wait to a timetag is rounded up to a whole microsecond, and none for one already past",
@@ -322,7 +330,7 @@ TEST_CASE("host scheduler: the store's thread fires each event at its time, take
 
     // An event a tenth of a second ahead fires then: not before, and not a
     // second late.
-    const int64_t due = clockwork_host::osc_now() + kTimetagSecond / 10;
+    const clockwork::Timetag due = clockwork_host::osc_now() + kTimetagSecond / 10;
     rig.ingest(oscAt(due, "h", 1, {0x01}));
     REQUIRE(firesReach(rig, 1));
     {

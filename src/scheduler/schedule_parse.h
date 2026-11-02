@@ -26,17 +26,18 @@
 
 // Nothing below spells either, but this header's includers reach the reserved
 // prefix and the shared clock arithmetic through it (test_schedule_parse.cpp
-// asserts clockwork_ntp_to_timetag against clockwork::ntpToOscTimetag);
+// asserts clockwork_ntp_to_timetag against clockwork::Timetag::fromNtpSeconds);
 // dropping them is a change to the header's contract.
 #include "clockwork_prefix.h"
 #include "../clock/clock_math.h"
+#include "../clock/timetag.h"
 
-// NTP-seconds (double) → OSC int64 timetag (seconds<<32 | fraction).
-// The same formula as clockwork::ntpToOscTimetag in clock_math.h, which
-// test_schedule_parse.cpp checks by comparing the two results directly — so
-// that assertion also compares this side of the ABI with the other.
-inline int64_t clockwork_ntp_to_timetag(double ntp) {
-    return clockwork_sched_ntp_to_timetag(ntp);
+// NTP-seconds (double) → OSC timetag, packed by the Rust side. The same
+// formula as clockwork::Timetag::fromNtpSeconds, which test_schedule_parse.cpp
+// checks by comparing the two results directly — so that assertion also
+// compares this side of the ABI with the other.
+inline clockwork::Timetag clockwork_ntp_to_timetag(double ntp) {
+    return clockwork::Timetag::fromAbi(clockwork_sched_ntp_to_timetag(ntp));
 }
 
 // A timestamped OSC bundle: "#bundle" + an 8-byte timetag.
@@ -45,13 +46,13 @@ inline bool clockwork_is_bundle(const uint8_t* data, uint32_t size) {
 }
 
 // The 8-byte NTP timetag at offset 8 of a bundle.
-inline uint64_t clockwork_bundle_timetag(const uint8_t* bundle) {
-    return clockwork_sched_bundle_timetag(bundle);
+inline clockwork::Timetag clockwork_bundle_timetag(const uint8_t* bundle) {
+    return clockwork::Timetag::fromAbi(clockwork_sched_bundle_timetag(bundle));
 }
 
 struct SchedulePacket {
     bool           ok      = false;
-    int64_t        when    = 0;        // OSC timetag
+    clockwork::Timetag when;           // OSC timetag
     const uint8_t* blob    = nullptr;  // inner OSC to re-dispatch on time
     uint32_t       blobLen = 0;
 };
@@ -64,7 +65,7 @@ inline SchedulePacket clockwork_parse_schedule(const uint8_t* msg, uint32_t size
     SchedulePacket r;
     if (!p.ok) return r;   // a failed parse is wholly inert, not partly filled
     r.ok      = true;
-    r.when    = p.when;
+    r.when    = clockwork::Timetag::fromAbi(p.when);
     r.blob    = p.blob;
     r.blobLen = p.blob_len;
     return r;

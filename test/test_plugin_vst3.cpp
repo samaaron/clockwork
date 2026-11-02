@@ -32,7 +32,7 @@
 #include "DsoTestUtils.h"
 #include "plugin_host.h"
 #include "rt_alloc.h"
-#include "clock/clock_math.h"   // ntpToOscTimetag: a block time the clock case can place
+#include "clock/timetag.h"   // a block time the clock case can place
 #include "shared_memory.h"      // ClockworkClockState: the clock the musical-time case hands in
 
 #include <catch2/catch_test_macros.hpp>
@@ -194,7 +194,7 @@ TEST_CASE("vst3: processing applies the gain exactly", "[plugin][vst3]") {
         in.ch[1][i] = -static_cast<float>(i);
     }
 
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
 
     // Default gain 0.5, exactly — this is float multiply by 0.5, so equality
     // is the right assertion and an approximate one would hide a wrong value.
@@ -214,7 +214,7 @@ TEST_CASE("vst3: outputs clockwork has no input for come back silent",
     for (uint32_t i = 0; i < kFrames; ++i) in.ch[0][i] = 1.0f;
     for (uint32_t i = 0; i < kFrames; ++i) out.ch[1][i] = 99.0f;  // must be overwritten
 
-    plugin_process(o.p, in.cp(), 1, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 1, out.p(), 2, kFrames, ClockworkTimetag{});
 
     for (uint32_t i = 0; i < kFrames; ++i) {
         CHECK(out.ch[0][i] == 0.5f);
@@ -234,7 +234,7 @@ TEST_CASE("vst3: setting the parameter moves the output by the DENORMALISED amou
     // 1.5 in PLAIN units. VST3 will carry 0.75; if that leaked the output
     // would be 0.75, which is exactly the failure this asserts against.
     plugin_param_set(o.p, 0, 1.5, 0);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kFrames; ++i) CHECK(out.ch[0][i] == 1.5f);
 
     PluginParam pp {};
@@ -244,11 +244,11 @@ TEST_CASE("vst3: setting the parameter moves the output by the DENORMALISED amou
     // The extremes of the range, both of which are ordinary normalised values
     // in disguise (1.0 -> 0.5, 2.0 -> 1.0).
     plugin_param_set(o.p, 0, 1.0, 0);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kFrames; ++i) CHECK(out.ch[0][i] == 1.0f);
 
     plugin_param_set(o.p, 0, 2.0, 0);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kFrames; ++i) CHECK(out.ch[0][i] == 2.0f);
 }
 
@@ -263,13 +263,13 @@ TEST_CASE("vst3: a parameter change lands on its exact frame and not before",
     for (uint32_t i = 0; i < kFrames; ++i) { in.ch[0][i] = 1.0f; in.ch[1][i] = 1.0f; }
 
     plugin_param_set(o.p, 0, 2.0, kAt);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
 
     for (uint32_t i = 0; i < kAt; ++i)      CHECK(out.ch[0][i] == 0.5f);  // old gain
     for (uint32_t i = kAt; i < kFrames; ++i) CHECK(out.ch[0][i] == 2.0f); // from kAt on
 
     // The change persists into the next block without being re-sent.
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kFrames; ++i) CHECK(out.ch[0][i] == 2.0f);
 }
 
@@ -284,7 +284,7 @@ TEST_CASE("vst3: two changes in one block each land on their own frame",
 
     plugin_param_set(o.p, 0, 1.0, 16);
     plugin_param_set(o.p, 0, 2.0, 48);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
 
     for (uint32_t i = 0;  i < 16; ++i) CHECK(out.ch[0][i] == 0.5f);
     for (uint32_t i = 16; i < 48; ++i) CHECK(out.ch[0][i] == 1.0f);
@@ -303,7 +303,7 @@ TEST_CASE("vst3: state saves, changes, and reloads", "[plugin][vst3]") {
     constexpr uint32_t kFrames = 32;
     Block in(2, kFrames), out(2, kFrames);
     for (uint32_t i = 0; i < kFrames; ++i) { in.ch[0][i] = 1.0f; in.ch[1][i] = 1.0f; }
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);   // the change reaches the processor
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});   // the change reaches the processor
     CHECK(out.ch[0][0] == 1.25f);
 
     const std::vector<uint8_t> changed = saveState(o.p);
@@ -315,7 +315,7 @@ TEST_CASE("vst3: state saves, changes, and reloads", "[plugin][vst3]") {
     PluginParam pp {};
     REQUIRE(plugin_param_info(o.p, 0, &pp) == 1);
     CHECK(pp.value == 0.5);                      // the controller was primed too
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kFrames; ++i) CHECK(out.ch[0][i] == 0.5f);
 }
 
@@ -376,7 +376,7 @@ TEST_CASE("vst3: a plugin with no editor loads and runs", "[plugin][vst3]") {
     constexpr uint32_t kFrames = 16;
     Block in(2, kFrames), out(2, kFrames);
     for (uint32_t i = 0; i < kFrames; ++i) { in.ch[0][i] = 1.0f; in.ch[1][i] = 1.0f; }
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     CHECK(out.ch[0][kFrames - 1] == 0.5f);
 }
 
@@ -413,7 +413,7 @@ TEST_CASE("vst3: an edit made in the plugin's own editor reaches the processor",
     constexpr uint32_t kFrames = 32;
     Block in(2, kFrames), out(2, kFrames);
     for (uint32_t i = 0; i < kFrames; ++i) { in.ch[0][i] = 1.0f; in.ch[1][i] = 1.0f; }
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     CHECK(out.ch[0][0] == 2.0f);
     CHECK(out.ch[0][kFrames - 1] == 2.0f);
     CHECK(out.ch[1][kFrames - 1] == 2.0f);
@@ -448,7 +448,7 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
 
     // No clock: no musical time, and a transport that is said to roll, as
     // for any plugin with no host tempo.
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK((state & ProcessContext::kTempoValid) == 0);
     CHECK((state & ProcessContext::kTimeSigValid) == 0);
@@ -462,7 +462,7 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
     clock.setMeter(7, 8);
     clock.setTransport(true, 1000.0);
     plugin_set_clock(o.p, &clock);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::ntpToOscTimetag(1010.0));
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::Timetag::fromNtpSeconds(1010.0).abi());
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK((state & ProcessContext::kTempoValid) != 0);
     CHECK((state & ProcessContext::kProjectTimeMusicValid) != 0);
@@ -477,7 +477,7 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
 
     // The transport stops; the grid does not. Beat 22 is bar 6, from 21.
     clock.setTransport(false, 1011.0);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::ntpToOscTimetag(1011.0));
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::Timetag::fromNtpSeconds(1011.0).abi());
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK((state & ProcessContext::kPlaying) == 0);
     CHECK(beat == Catch::Approx(22.0));
@@ -485,7 +485,7 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
 
     // The meter can change under a running plugin: same beat, new bars.
     clock.setMeter(3, 4);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::ntpToOscTimetag(1011.0));
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, clockwork::Timetag::fromNtpSeconds(1011.0).abi());
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK(num == 3);
     CHECK(den == 4);
@@ -493,14 +493,14 @@ TEST_CASE("vst3: the session clock's tempo, meter and bar reach the process cont
     CHECK(barStart == Catch::Approx(21.0));   // bars of 3: 21 is a bar line here too
 
     // A block with no time is placed at the anchor, beat 0.
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK(beat == 0.0);
     CHECK(barStart == 0.0);
 
     // Taking the clock away takes the musical time with it.
     plugin_set_clock(o.p, nullptr);
-    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+    plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     REQUIRE(last(&tempo, &beat, &barStart, &num, &den, &state));
     CHECK((state & ProcessContext::kTempoValid) == 0);
     dlclose(h);
@@ -518,7 +518,7 @@ TEST_CASE("vst3: the RT guard is suspended for the plugin and restored after",
     rt_alloc::Guard guard;              // as the block driver sets it
     rt_alloc::reset();
     for (int b = 0; b < 8; ++b)
-        plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, 0);
+        plugin_process(o.p, in.cp(), 2, out.p(), 2, kFrames, ClockworkTimetag{});
     plugin_latency(o.p);
 
     // The window is exactly the call into plugin code; it must close again, or

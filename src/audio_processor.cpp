@@ -25,7 +25,7 @@ namespace {
 // matters — a lane's index is published to clients as the channel they route to,
 // and a base that moved with every device switch would invalidate every route
 // across a cold swap.
-std::atomic<int64_t> g_block_osc_time{0};   // this block's start, in OSC time
+std::atomic<uint64_t> g_block_osc_time{0};  // this block's start, as Timetag::ntp()
 
 uint32_t g_reserved_lanes = 0;    // set before boot; read at every init_memory
 uint32_t g_lane_base      = 0;    // published after init_memory; 0 = none
@@ -114,8 +114,8 @@ static std::atomic<bool> g_host_forward{
 // with the forward switch, because they are one fact: the host is the far
 // end. Defined below with the forward route.
 static int clockwork_sink_host_emit(uint32_t kind, const char* target,
-                                    const uint8_t* bytes, uint32_t len, int64_t when);
-static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element, uint32_t len);
+                                    const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
+static void forward_to_host(uint32_t token, clockwork::Timetag when, const uint8_t* element, uint32_t len);
 
 void clockwork_host_forward(int on) {
     g_host_forward.store(on != 0, std::memory_order_release);
@@ -677,7 +677,7 @@ extern "C" {
     // them so that a new engine can start them over (below).
     std::atomic<uint32_t> no_backend_log_count{0};
     std::atomic<uint32_t> oversize_forward_log_count{0};
-    std::atomic<int64_t>  last_late_log_osc{0};
+    std::atomic<uint64_t> last_late_log_osc{0};   // Timetag::ntp()
     // Blocks between metrics flushes (~30 Hz), derived from the rate and block
     // size init_memory publishes; 0 until derived. Zeroed at every
     // init_memory, because a rebuild may be at another rate.
@@ -792,10 +792,6 @@ extern "C" {
         clockwork_log("Time offset set from JavaScript: %.6f", offset);
     }
 
-    inline int64_t ntp_to_osc_timetag(double ntp) {
-        return clockwork::ntpToOscTimetag(ntp);
-    }
-
     // ── The one way out ────────────────────────────────────────────────────
     //
     // Every reply and notification clockwork emits leaves here: the answers to
@@ -903,7 +899,7 @@ extern "C" {
     }
 
     static int dsp_host_send_sink(void* /*ctx*/, ClockworkSink sink,
-                                  const uint8_t* bytes, uint32_t len, int64_t when) {
+                                  const uint8_t* bytes, uint32_t len, ClockworkTimetag when) {
         HostCallScope host;
         return clockwork_sink_send(sink, bytes, len, when);
     }
@@ -1303,12 +1299,11 @@ extern "C" {
     }
 
     // A bundle whose time is not yet come at `blockTime`, this block's start
-    // in OSC time: it plays on time whatever it waited through. Timetags are
-    // compared unsigned (ingest_frame: a present-day one has its top bit set).
-    static bool bundle_for_later(const uint8_t* payload, uint32_t payload_size, int64_t blockTime) {
+    // in OSC time: it plays on time whatever it waited through.
+    static bool bundle_for_later(const uint8_t* payload, uint32_t payload_size, clockwork::Timetag blockTime) {
         if (!clockwork_is_bundle(payload, payload_size)) return false;
-        const uint64_t tt = clockwork_bundle_timetag(payload);
-        return tt > 1u && tt >= static_cast<uint64_t>(blockTime);
+        const clockwork::Timetag tt = clockwork_bundle_timetag(payload);
+        return !tt.isImmediate() && tt >= blockTime;
     }
 
     // THE AUDIO WAS AWAY: the one rule, on every target. The gap is the time
@@ -1401,14 +1396,14 @@ extern "C" {
     // Once OSC bytes leave the IN ring, everything funnels through these. ─────────
 
     // Route an OSC message to its handler NOW (the DSP, or a clockwork route).
-    // `when` is the message's intended OSC timetag (0 = immediate) and
+    // `when` is the message's intended OSC timetag (or immediately) and
     // `blockTime` this block's start in OSC time. Both are passed through to
     // the DSP, which is the only side that can place an event within a block
     // (dsp_api.h); every clockwork route ignores them. `token` is the
     // sender/origin, threaded through for reply routing. Threaded explicitly
     // rather than held in a global, so a handler's inputs are all in the ctx.
     void dispatch(const uint8_t* osc, uint32_t len, uint32_t token,
-                  int64_t when, int64_t blockTime) {
+                  clockwork::Timetag when, clockwork::Timetag blockTime) {
         const DrainCallCtx cc{ token, when, blockTime };
         OscSplit* boundary = g_active_split.load(std::memory_order_acquire);
         if (boundary && boundary->ingest(osc, len, &cc)) return;
@@ -1428,16 +1423,10 @@ extern "C" {
     // the event was is clockwork's, and goes into the metrics.
     //
     // Returns true when the event is dropped as later than the host allows, and must not be delivered.
-    //
-    // The immediacy check is `== 0 || == 1`, NOT `<= 1`: a present-day OSC
-    // timetag is huge and, taken as int64, has its sign bit set — i.e. it is
-    // NEGATIVE. `<= 1` would misclassify every real scheduled event as
-    // immediate and skip its accounting entirely.
-    static bool note_lateness(int64_t when, int64_t blockTime) {
-        if (when == 0 || when == 1) return false;   // OSC "immediate" sentinels
+    static bool note_lateness(clockwork::Timetag when, clockwork::Timetag blockTime) {
+        if (when.isImmediate()) return false;
 
-        const double time_diff_ms =
-            (static_cast<double>(when - blockTime) / 4294967296.0) * 1000.0;
+        const double time_diff_ms = when.secondsFrom(blockTime) * 1000.0;
 
         // Later than the host allows (clockwork_set_timed_event_late_limit_ms):
         // dropped, as the host asked; 0 allows any lateness.
@@ -1475,10 +1464,10 @@ extern "C" {
         // log trace. Keep the count milestones but also emit at most one line
         // per second of block time.
         const bool second_elapsed =
-            (blockTime - last_late_log_osc.load(std::memory_order_relaxed))
-                >= static_cast<int64_t>(4294967296LL);
+            blockTime - clockwork::Timetag::fromNtp(last_late_log_osc.load(std::memory_order_relaxed))
+                >= static_cast<int64_t>(clockwork::Timetag::kUnitsPerSecond);
         if (late_now == 1 || late_now % 100 == 0 || second_elapsed) {
-            last_late_log_osc.store(blockTime, std::memory_order_relaxed);
+            last_late_log_osc.store(blockTime.ntp(), std::memory_order_relaxed);
             clockwork_log("LATE: %.1fms (count=%d)", -time_diff_ms, late_now);
         }
         return false;
@@ -1505,24 +1494,19 @@ extern "C" {
     // Anything due now goes to dispatch(), which is also where a fired event
     // lands — one delivery path, whether a message waited or not.
     static void ingest_frame(const uint8_t* data, uint32_t len, uint32_t origin,
-                             int64_t blockTime) {
+                             clockwork::Timetag blockTime) {
         if (!data || len == 0) return;
 
         const uint8_t* body    = data;
         uint32_t       bodyLen = len;
-        int64_t        when    = 1;                    // OSC "immediately"
+        clockwork::Timetag when = clockwork::Timetag::immediately();
 #if CLOCKWORK_SCHEDULER
         uint32_t       tag     = SCHED_TAG_SYNTH;      // a DSP-bound bundle
         bool           clockworkHolds = !g_dsp_holds_schedule;
 #endif
 
         if (clockwork_is_bundle(data, len)) {
-            // UNSIGNED comparison, and it matters: a present-day OSC timetag has its top bit
-            // set, so as an int64 it is NEGATIVE and a signed `tt > 1` is false for every
-            // real time — classifying every timestamped bundle as immediate, so clockwork
-            // would hold none.
-            const uint64_t tt = clockwork_bundle_timetag(data);
-            if (tt > 1u) when = static_cast<int64_t>(tt);
+            when = clockwork_bundle_timetag(data);
         } else if (len >= CLOCKWORK_SYS_PADDED("schedule") &&
                    std::memcmp(data, CLOCKWORK_SYS("schedule"), CLOCKWORK_SYS_LEN("schedule")) == 0 &&
                    data[CLOCKWORK_SYS_LEN("schedule")] == '\0') {
@@ -1551,10 +1535,7 @@ extern "C" {
         }
 
 #if CLOCKWORK_SCHEDULER
-        // `== 0 || == 1`, NOT `<= 1`, for the reason note_lateness spells out:
-        // a real timetag is negative as an int64, so `<= 1` would send every
-        // scheduled message straight through instead of parking it.
-        if (when == 0 || when == 1 || !clockworkHolds) {
+        if (when.isImmediate() || !clockworkHolds) {
             // Immediate, or a DSP that holds its own schedule: straight
             // through, carrying whatever time it was given.
             dispatch(body, bodyLen, origin, when, blockTime);
@@ -1567,11 +1548,11 @@ extern "C" {
                 // Rate-limited, because an overloaded queue refuses in bursts.
                 // The numbers are here because "add refused" alone cannot tell
                 // a full pool from a queue that was never built.
-                clockwork_log("SCHED REFUSED (%s): when=%lld len=%u slots=%d pool=%d next=%lld",
+                clockwork_log("SCHED REFUSED (%s): when=%llu len=%u slots=%d pool=%d next=%llu",
                         clockwork_engine_schedule().ready() ? "queue full" : "NO QUEUE — it never built",
-                        (long long)when, (unsigned)bodyLen,
+                        (unsigned long long)when.ntp(), (unsigned)bodyLen,
                         (int)SCHEDULER_SLOT_COUNT, (int)SCHEDULER_DATA_POOL_SIZE,
-                        (long long)clockwork_engine_schedule().nextTime());
+                        (unsigned long long)clockwork_engine_schedule().nextTime().value_or(clockwork::Timetag()).ntp());
         }
 #else
         // With no store, holds_schedule is moot: nothing to hold with and nothing to
@@ -2966,7 +2947,7 @@ extern "C" {
     // into whatever build comes next. Nothing is rendered.
     static void drain_without_guest() {
         constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
-        const int64_t blockTime = g_block_osc_time.load(std::memory_order_relaxed);
+        const auto blockTime = clockwork::Timetag::fromNtp(g_block_osc_time.load(std::memory_order_relaxed));
         ClockworkDrainStop stop = ClockworkDrainStop::Empty;
         clockwork_drain_ring(
             shared_memory + IN_RING_START, IN_RING_SIZE,
@@ -2979,7 +2960,7 @@ extern "C" {
                         uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                 const RingMark* mark = g_in_marks.of(seq);
                 if (clockwork_sys_answers_without_guest(payload, payload_size)) {
-                    dispatch(payload, payload_size, sourceId, 1, blockTime);
+                    dispatch(payload, payload_size, sourceId, clockwork::Timetag::immediately(), blockTime);
                     return ClockworkDrainVerdict::Consume;
                 }
                 const bool refused = mark
@@ -3213,9 +3194,9 @@ extern "C" {
             // hands every message this block's start alongside its own timetag — and that
             // pair is what makes sample-accurate placement the DSP's arithmetic rather than
             // clockwork's.
-            const int64_t currentOscTime = ntp_to_osc_timetag(current_ntp);
-            const int64_t nextOscTime    = currentOscTime + g_osc_increment;
-            g_block_osc_time.store(currentOscTime, std::memory_order_relaxed);
+            const auto currentOscTime = clockwork::Timetag::fromNtpSeconds(current_ntp);
+            const auto nextOscTime    = currentOscTime + g_osc_increment;
+            g_block_osc_time.store(currentOscTime.ntp(), std::memory_order_relaxed);
 
             ClockworkDrainStop stop = ClockworkDrainStop::Empty;
             clockwork_drain_ring(
@@ -3300,7 +3281,7 @@ extern "C" {
             // sample accuracy.
             clockwork_fire_due(clockwork_engine_schedule(), nextOscTime, currentOscTime,
                 [](const uint8_t* d, uint32_t n, uint32_t origin,
-                   int64_t when, int64_t blockTime) {
+                   clockwork::Timetag when, clockwork::Timetag blockTime) {
                     if (note_lateness(when, blockTime)) return;   // shed: too late to play
                     dispatch(d, n, origin, when, blockTime);
                 });
@@ -3362,7 +3343,7 @@ extern "C" {
                                 g_in_channels ? g_in_ptrs : nullptr, g_in_channels,
                                 g_out_ptrs, g_out_channels,
                                 QUANTUM_SIZE,
-                                currentOscTime);
+                                currentOscTime.abi());
                 }
 
                 // Sinks after: what a sink records is what the DSP actually
@@ -3608,11 +3589,11 @@ extern "C" {
     }
 
     EMSCRIPTEN_KEEPALIVE
-    int64_t get_audio_block_time() {
+    ClockworkTimetag get_audio_block_time() {
         // The OSC time of the block being processed: what a port's transfer
         // signal, which runs inside the block but is handed no metadata,
         // stamps on what it hands to another process.
-        return g_block_osc_time.load(std::memory_order_relaxed);
+        return ClockworkTimetag{g_block_osc_time.load(std::memory_order_relaxed)};
     }
 
     EMSCRIPTEN_KEEPALIVE
@@ -3895,7 +3876,7 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
         case ClockworkSysRt::UnknownVerb: break;
     }
 
-    forward_to_host(token, cc ? cc->when : 1, data, static_cast<uint32_t>(len));
+    forward_to_host(token, cc ? cc->when : clockwork::Timetag::immediately(), data, static_cast<uint32_t>(len));
     return true;   // claimed whole: the host answers or refuses it from here
 }
 
@@ -3904,7 +3885,7 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
 // oscpack's stream cannot take an already-encoded element. The buffer is the
 // audio thread's — the only caller — and is sized for the widest verb the IN
 // ring carries, which is not something to put on a stack.
-static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element, uint32_t len) {
+static void forward_to_host(uint32_t token, clockwork::Timetag when, const uint8_t* element, uint32_t len) {
     using namespace engine;
     static constexpr uint32_t kHeader = 8 + 8 + 4;
     static std::array<uint8_t, kHeader + 66560> frame;
@@ -3914,8 +3895,8 @@ static void forward_to_host(uint32_t token, int64_t when, const uint8_t* element
                           reinterpret_cast<const char*>(element), static_cast<unsigned>(len));
         return;
     }
-    if (when == 0) when = 1;   // both spell "immediately"; the wire form is 1
-    const uint64_t tt = static_cast<uint64_t>(when);
+    // The wire form of immediately is 1.
+    const uint64_t tt = when.isImmediate() ? 1u : when.ntp();
     std::memcpy(frame.data(), "#bundle", 8);
     for (unsigned i = 0; i < 8; ++i) frame[8 + i]  = static_cast<uint8_t>(tt >> (56u - 8u * i));
     for (unsigned i = 0; i < 4; ++i) frame[16 + i] = static_cast<uint8_t>(len >> (24u - 8u * i));
@@ -3950,7 +3931,7 @@ bool clockwork_event_route(void* /*routeCtx*/, const void* callCtx,
 // front opens the port on demand — opening a sink onto a port opens the port,
 // as it does natively — and hands the browser the bytes with the time.
 static int clockwork_sink_host_emit(uint32_t kind, const char* target,
-                                    const uint8_t* bytes, uint32_t len, int64_t when) {
+                                    const uint8_t* bytes, uint32_t len, ClockworkTimetag when) {
     if (kind != kClockworkSinkMidi || !target || !bytes || len == 0) return 0;
     static std::array<char, 64 + 256 + 66560> element;
     try {
@@ -3959,7 +3940,7 @@ static int clockwork_sink_host_emit(uint32_t kind, const char* target,
            << target
            << osc::Blob(bytes, static_cast<osc::osc_bundle_element_size_t>(len))
            << osc::EndMessage;
-        forward_to_host(0, when, reinterpret_cast<const uint8_t*>(ps.Data()),
+        forward_to_host(0, clockwork::Timetag::fromAbi(when), reinterpret_cast<const uint8_t*>(ps.Data()),
                         static_cast<uint32_t>(ps.Size()));
         return 1;
     } catch (...) {
@@ -4085,8 +4066,8 @@ bool clockwork_dsp_default_route(void* /*routeCtx*/, const void* callCtx,
     // for.
     GuestCallScope guest(GuestCall::Processing);
     dsp_osc(g_dsp, data, static_cast<uint32_t>(len),
-            cc ? cc->when : 1, cc ? cc->sourceId : 0,
-            cc ? cc->blockTime : 0);
+            cc ? cc->when.abi() : clockwork_timetag_immediately(), cc ? cc->sourceId : 0,
+            cc ? cc->blockTime.abi() : ClockworkTimetag{0});
     return true;
 }
 #endif // CLOCKWORK_SYNTH

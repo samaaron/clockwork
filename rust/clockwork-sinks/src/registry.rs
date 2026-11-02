@@ -30,6 +30,7 @@ use clockwork_slots::SlotTable;
 use crate::endpoint::Endpoint;
 use crate::profile::{self, Layout};
 use crate::sink::{Sink, KIND_MIDI, KIND_OSC};
+use clockwork_osc::Timetag;
 
 /// Slots in the table. Matches `clockwork-ports`'s ceiling, for no better
 /// reason than that neither has ever wanted more and a reader should not have
@@ -183,21 +184,21 @@ pub fn close_all() {
 
 /// Drain one sink at `now`. Returns when it must next be pumped
 /// ([`Sink::pump`]).
-pub fn pump(handle: u32, now: u64) -> Option<u64> {
+pub fn pump(handle: u32, now: Timetag) -> Option<Timetag> {
     acquire(handle)?.pump(now)
 }
 
 /// Drain every sink the service is responsible for. Returns the soonest any
 /// of them must next be pumped.
-pub fn pump_service(now: u64) -> Option<u64> {
+pub fn pump_service(now: Timetag) -> Option<Timetag> {
     let mut handles = [0u32; MAX_SINKS];
     let n = SINKS.list(&mut handles).min(MAX_SINKS as u32) as usize;
-    let mut soonest: Option<u64> = None;
+    let mut soonest: Option<Timetag> = None;
     for &h in &handles[..n] {
         let Some(sink) = acquire(h) else { continue };   // closed under us
         if sink.drive != Drive::Service { continue; }
         if let Some(w) = sink.pump(now) {
-            soonest = Some(soonest.map_or(w, |s: u64| s.min(w)));
+            soonest = Some(soonest.map_or(w, |s| s.min(w)));
         }
     }
     soonest

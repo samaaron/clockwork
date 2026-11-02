@@ -84,6 +84,8 @@
 
 #include <stdint.h>
 
+#include "clockwork_timetag.h"
+
 struct ClockworkClockState;
 struct ClockworkTimelineMirrorSlot;
 
@@ -394,7 +396,7 @@ void clockwork_track_set_timelines(const struct ClockworkTimelineMirrorSlot* slo
  */
 void clockwork_track_process(float* const* in, uint32_t n_in,
                        float* const* out, uint32_t n_out,
-                       uint32_t frames, int64_t block_time, uint32_t lane_base);
+                       uint32_t frames, ClockworkTimetag block_time, uint32_t lane_base);
 
 #ifdef __cplusplus
 }

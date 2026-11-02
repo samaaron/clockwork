@@ -18,7 +18,7 @@
 //! them; nothing here needs editing, and nothing here may be replaced by a
 //! number.
 
-use clockwork_osc::clockwork_sys;
+use clockwork_osc::{clockwork_sys, Timetag};
 
 /// The flat form's address, built from the reserved prefix.
 pub const SCHEDULE_ADDR: &str = clockwork_sys!("schedule");
@@ -28,20 +28,13 @@ const ADDR_LEN: usize = SCHEDULE_ADDR.len();
 /// Bytes the address occupies on the wire: NUL included, padded to 4.
 const ADDR_PAD: usize = (ADDR_LEN + 4) & !3;
 
-/// One second in NTP units — a 64-bit fixed-point timestamp is 32 bits of
-/// seconds over 32 bits of fraction (RFC 5905 §6), so a second is 2^32. The
-/// same constant as `clockwork::kNtpUnitsPerSecond` in `src/clock/clock_math.h`,
-/// and `test_schedule_parse.cpp` checks the two formulas agree by comparing
-/// their results directly.
-const NTP_UNITS_PER_SECOND: f64 = 4294967296.0;
-
 /// The result of parsing the flat form. The blob is named by its offset into
 /// the message it was parsed from, so the result carries no pointer and no
 /// lifetime; [`Packet::blob`] hands it back as a slice of that message.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Packet {
     pub ok: bool,
-    pub when: i64,
+    pub when: Timetag,
     pub blob_off: usize,
     pub blob_len: u32,
 }
@@ -55,19 +48,6 @@ impl Packet {
     }
 }
 
-/// NTP seconds (since 1900) into an OSC 32.32 fixed-point timetag.
-///
-/// Rust's float-to-integer casts saturate where C++'s are undefined, so an NTP
-/// value outside the 32-bit range clamps here rather than producing whatever
-/// the target's conversion instruction happened to leave behind. For every
-/// value in range the two are bit-identical.
-#[inline]
-pub fn ntp_to_timetag(ntp: f64) -> i64 {
-    let s = ntp as u32;
-    let f = ((ntp - s as f64) * NTP_UNITS_PER_SECOND) as u32;
-    (((s as u64) << 32) | f as u64) as i64
-}
-
 /// A timestamped OSC bundle: the marker AND a whole timetag. The size check is
 /// first — a truncated bundle is not a bundle even with the marker intact.
 ///
@@ -76,12 +56,12 @@ pub fn is_bundle(data: &[u8]) -> bool {
     data.len() >= 16 && &data[..7] == b"#bundle"
 }
 
-/// The 8-byte big-endian NTP timetag at offset 8 of a bundle; 0 for anything
-/// too short to hold one — call [`is_bundle`] first.
+/// The 8-byte big-endian NTP timetag at offset 8 of a bundle; immediately for
+/// anything too short to hold one — call [`is_bundle`] first.
 #[inline]
-pub fn bundle_timetag(bundle: &[u8]) -> u64 {
-    if bundle.len() < 16 { return 0; }
-    be_u64(&bundle[8..16])
+pub fn bundle_timetag(bundle: &[u8]) -> Timetag {
+    if bundle.len() < 16 { return Timetag::default(); }
+    Timetag::from_ntp(be_u64(&bundle[8..16]))
 }
 
 /// Parse `"/clockwork/schedule <timetag> <blob>"`.
@@ -115,7 +95,7 @@ pub fn parse(s: &[u8]) -> Packet {
             }
             let v = be_u64(&s[p..p + 8]);
             p += 8;
-            v as i64
+            Timetag::from_ntp(v)
         }
         b'd' => {
             if p + 8 > end {
@@ -123,7 +103,7 @@ pub fn parse(s: &[u8]) -> Packet {
             }
             let v = f64::from_bits(be_u64(&s[p..p + 8]));
             p += 8;
-            ntp_to_timetag(v)
+            Timetag::from_ntp_seconds(v)
         }
         b'f' => {
             if p + 4 > end {
@@ -131,7 +111,7 @@ pub fn parse(s: &[u8]) -> Packet {
             }
             let v = f32::from_bits(be_u32(&s[p..p + 4]));
             p += 4;
-            ntp_to_timetag(v as f64)
+            Timetag::from_ntp_seconds(v as f64)
         }
         _ => return miss,
     };
@@ -206,15 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn ntp_packs_as_32_32() {
-        assert_eq!(ntp_to_timetag(0.0), 0);
-        assert_eq!(ntp_to_timetag(1.0), 1i64 << 32);
-        assert_eq!(ntp_to_timetag(1.5), (1i64 << 32) | 0x8000_0000);
-        assert_eq!(ntp_to_timetag(2.25), (2i64 << 32) | 0x4000_0000);
-        assert_eq!(ntp_to_timetag(3600.0) >> 32, 3600);
-    }
-
-    #[test]
     fn bundles_need_marker_and_whole_timetag() {
         let mut b = Vec::new();
         padded(&mut b, "#bundle");
@@ -222,8 +193,8 @@ mod tests {
         assert_eq!(b.len(), 16);
         assert!(is_bundle(&b));
         assert!(!is_bundle(&b[..15]));
-        assert_eq!(bundle_timetag(&b), (7u64 << 32) | 0x8000_0000);
-        assert_eq!(bundle_timetag(&b[..15]), 0, "too short to hold one");
+        assert_eq!(bundle_timetag(&b).ntp(), (7u64 << 32) | 0x8000_0000);
+        assert!(bundle_timetag(&b[..15]).is_immediate(), "too short to hold one");
         let mut wrong = b.clone();
         wrong[6] = b'X';
         assert!(!is_bundle(&wrong));
@@ -232,26 +203,26 @@ mod tests {
 
     #[test]
     fn the_four_timetag_spellings() {
-        let when = (0x123i64 << 32) | 0x4567_89AB;
-        let r = run(&sched_msg(",hb", &(when as u64).to_be_bytes(), &FILLER));
+        let when = (0x123u64 << 32) | 0x4567_89AB;
+        let r = run(&sched_msg(",hb", &when.to_be_bytes(), &FILLER));
         assert!(r.ok);
-        assert_eq!(r.when, when);
+        assert_eq!(r.when.ntp(), when);
         assert_eq!(r.blob_len, 8);
 
         // OSC's own timetag type: the same eight bytes as `h`, so a client
         // whose library writes a time as a time is understood.
-        let r = run(&sched_msg(",tb", &(when as u64).to_be_bytes(), &FILLER));
+        let r = run(&sched_msg(",tb", &when.to_be_bytes(), &FILLER));
         assert!(r.ok);
-        assert_eq!(r.when, when);
+        assert_eq!(r.when.ntp(), when);
         assert_eq!(r.blob_len, 8);
 
         let r = run(&sched_msg(",db", &3600.5f64.to_bits().to_be_bytes(), &FILLER));
         assert!(r.ok);
-        assert_eq!(r.when, (3600i64 << 32) | 0x8000_0000);
+        assert_eq!(r.when.ntp(), (3600u64 << 32) | 0x8000_0000);
 
         let r = run(&sched_msg(",fb", &2.25f32.to_bits().to_be_bytes(), &FILLER));
         assert!(r.ok);
-        assert_eq!(r.when, (2i64 << 32) | 0x4000_0000);
+        assert_eq!(r.when.ntp(), (2u64 << 32) | 0x4000_0000);
     }
 
     #[test]
@@ -259,7 +230,7 @@ mod tests {
         let m = sched_msg(",hb", &42u64.to_be_bytes(), &[]);
         let r = run(&m);
         assert!(r.ok);
-        assert_eq!(r.when, 42);
+        assert_eq!(r.when.ntp(), 42);
         assert_eq!(r.blob_len, 0);
         assert!(r.blob(&m).is_empty(), "an empty blob is an empty slice, and a parse that worked");
     }
@@ -332,7 +303,7 @@ mod tests {
         let junk = [0u8; 24];
         let r = run(&junk);
         assert!(!r.ok);
-        assert_eq!(r.when, 0);
+        assert_eq!(r.when.ntp(), 0);
         assert!(r.blob(&junk).is_empty());
         assert_eq!(r.blob_len, 0);
         assert!(!parse(&[]).ok);

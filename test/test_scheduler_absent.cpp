@@ -37,7 +37,7 @@
 
 #include "lanes/lanes.h"
 #include "dsp_api.h"
-#include "clock/clock_math.h"
+#include "clock/timetag.h"
 #include "clockwork_prefix.h"
 #include "shared_memory.h"
 
@@ -140,8 +140,10 @@ TEST_CASE("no scheduler: a timed bundle arrives at once, with its timetag intact
 
     constexpr int kBlocksAhead = 40;
     const uint64_t dueFrame = now + static_cast<uint64_t>(kBlocksAhead) * bl;
-    const int64_t  due = clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(dueFrame));
-    REQUIRE(due < 0);   // a present-day timetag really is negative as an int64
+    // The bits as the ,h reply carries them: a present-day timetag is negative
+    // as an int64.
+    const int64_t  due = static_cast<int64_t>(clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(dueFrame)).ntp());
+    REQUIRE(due < 0);
 
     const auto inner = osc_test::message("/dummy/when");
     const auto pkt   = osc_test::bundle(static_cast<uint64_t>(due), { inner });
@@ -195,8 +197,8 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
     const auto inner = osc_test::message("/dummy/ping");
     osc_test::Builder b;
     auto& s = b.begin(CLOCKWORK_SYS("schedule"));
-    s << static_cast<osc::int64>(clockwork::ntpToOscTimetag(
-             lanes_test::ntpAtFrame(lanes_test::tick() + 4800)))
+    s << static_cast<osc::int64>(clockwork::Timetag::fromNtpSeconds(
+             lanes_test::ntpAtFrame(lanes_test::tick() + 4800)).ntp())
       << osc::Blob(inner.ptr(),
                    static_cast<osc::osc_bundle_element_size_t>(inner.size()));
     const auto pkt = b.end();

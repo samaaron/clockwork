@@ -61,6 +61,8 @@
 
 #include <stdint.h>
 
+#include "clockwork_timetag.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -117,7 +119,7 @@ void    clockwork_sink_close(ClockworkSink sink);
  * keep the endpoint they have.
  */
 typedef int (*ClockworkSinkHostEmit)(uint32_t kind, const char* target,
-                                     const uint8_t* bytes, uint32_t len, int64_t when);
+                                     const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
 void clockwork_sink_set_host_emit(ClockworkSinkHostEmit emit);
 
 /*
@@ -154,7 +156,7 @@ const char* clockwork_sink_target(ClockworkSink sink);
 
 /*
  * Send one message, to be delivered at `when` — an OSC timetag in the same
- * domain as dsp_process's block_time, with 1 meaning immediately. The same
+ * domain as dsp_process's block_time, or clockwork_timetag_immediately(). The same
  * time domain across the whole boundary; conversion to a platform's own clock
  * happens once, in the endpoint.
  *
@@ -163,14 +165,6 @@ const char* clockwork_sink_target(ClockworkSink sink);
  * that misses a note and says so.
  *
  * Callable from the audio thread. Never allocates, never locks, never blocks.
- *
- * `when` IS SIGNED HERE AND UNSIGNED IN MEANING. An OSC
- * timetag is 32.32 fixed point NTP seconds since 1900, and 2026 is more than
- * 2^31 seconds after 1900 — so the top bit of every REAL timetag is already
- * set, and every real timetag is a NEGATIVE int64_t. Compare two of them
- * signed and "immediately" (1, a small positive) sorts after next Tuesday.
- * The type matches dsp_process's block_time and stays as it is; every
- * comparison of one is done as uint64_t.
  *
  * A MESSAGE WIDER THAN THE WIDEST CLASS IS REFUSED AND COUNTED AS A DROP. A
  * sink's memory is taken at open — that is what makes this call
@@ -181,7 +175,7 @@ const char* clockwork_sink_target(ClockworkSink sink);
  * A message that fits a class whose cells are all taken tries the next wider
  * class before it is refused.
  */
-int clockwork_sink_send(ClockworkSink sink, const uint8_t* bytes, uint32_t len, int64_t when);
+int clockwork_sink_send(ClockworkSink sink, const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
 

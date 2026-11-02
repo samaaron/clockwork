@@ -29,6 +29,8 @@ use std::os::raw::{c_int, c_uint, c_void};
 
 #[cfg(feature = "parse")]
 use crate::parse;
+
+use clockwork_osc::Timetag;
 #[cfg(feature = "store")]
 use crate::store::Store;
 #[cfg(feature = "store")]
@@ -137,7 +139,7 @@ pub unsafe extern "C" fn clockwork_sched_free(h: *mut ClockworkSched) {
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_add(
     h: *mut ClockworkSched,
-    when: i64,
+    when: Timetag,
     tag: c_uint,
     data: *const u8,
     size: c_uint,
@@ -156,23 +158,27 @@ pub unsafe extern "C" fn clockwork_sched_add(
     }
 }
 
-/// Timetag of the earliest live event, or `INT64_MAX` if none.
+/// The earliest live event's timetag into `out`: 1, or 0 with `out` untouched
+/// when there is none.
 ///
 /// # Safety
-/// `h` is a live handle or null.
+/// `h` is a live handle or null; `out` is writable or null.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_sched_next_time(h: *const ClockworkSched) -> i64 {
+pub unsafe extern "C" fn clockwork_sched_next_time(h: *const ClockworkSched, out: *mut Timetag) -> c_int {
     // SAFETY: a live handle or null, per the contract.
-    match unsafe { h.as_ref() } {
-        Some(s) => s.0.next_time(),
-        None => i64::MAX,
+    let Some(next) = (unsafe { h.as_ref() }).and_then(|s| s.0.next_time()) else { return 0 };
+    if out.is_null() {
+        return 0;
     }
+    // SAFETY: `out` is writable, per the contract.
+    unsafe { *out = next };
+    1
 }
 
 /// A due event, as C sees it. Mirrors `ClockworkSchedEvent` in the header.
 #[repr(C)]
 pub struct ClockworkSchedEvent {
-    pub when: i64,
+    pub when: Timetag,
     pub tag: c_uint,
     pub size: c_uint,
     pub meta: *const c_void,
@@ -189,7 +195,7 @@ pub struct ClockworkSchedEvent {
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_pop_due(
     h: *mut ClockworkSched,
-    now: i64,
+    now: Timetag,
     out: *mut ClockworkSchedEvent,
 ) -> c_int {
     // SAFETY: a live handle or null, per the contract.
@@ -347,7 +353,7 @@ pub unsafe extern "C" fn clockwork_sched_tag_hash(s: *const u8, n: usize) -> c_u
 #[repr(C)]
 pub struct ClockworkSchedulePacket {
     pub ok: c_int,
-    pub when: i64,
+    pub when: Timetag,
     pub blob: *const u8,
     pub blob_len: c_uint,
 }
@@ -355,8 +361,8 @@ pub struct ClockworkSchedulePacket {
 /// NTP seconds into an OSC 32.32 timetag.
 #[cfg(feature = "parse")]
 #[no_mangle]
-pub extern "C" fn clockwork_sched_ntp_to_timetag(ntp: f64) -> i64 {
-    parse::ntp_to_timetag(ntp)
+pub extern "C" fn clockwork_sched_ntp_to_timetag(ntp: f64) -> Timetag {
+    Timetag::from_ntp_seconds(ntp)
 }
 
 /// # Safety
@@ -373,9 +379,9 @@ pub unsafe extern "C" fn clockwork_sched_is_bundle(data: *const u8, size: c_uint
 /// `bundle` is readable for at least 16 bytes.
 #[cfg(feature = "parse")]
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_sched_bundle_timetag(bundle: *const u8) -> u64 {
+pub unsafe extern "C" fn clockwork_sched_bundle_timetag(bundle: *const u8) -> Timetag {
     if bundle.is_null() {
-        return 0;
+        return Timetag::default();
     }
     // SAFETY: readable for at least 16 bytes per the contract.
     parse::bundle_timetag(unsafe { core::slice::from_raw_parts(bundle, 16) })
@@ -389,7 +395,7 @@ pub unsafe extern "C" fn clockwork_sched_bundle_timetag(bundle: *const u8) -> u6
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_parse(msg: *const u8, size: c_uint) -> ClockworkSchedulePacket {
     if msg.is_null() {
-        return ClockworkSchedulePacket { ok: 0, when: 0, blob: core::ptr::null(), blob_len: 0 };
+        return ClockworkSchedulePacket { ok: 0, when: Timetag::default(), blob: core::ptr::null(), blob_len: 0 };
     }
     // SAFETY: readable for `size` bytes per the contract.
     let bytes = unsafe { core::slice::from_raw_parts(msg, size as usize) };

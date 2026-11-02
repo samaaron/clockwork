@@ -294,7 +294,7 @@ double clockwork_sample_rate(void) {
     return get_audio_sample_rate();
 }
 
-int64_t clockwork_block_time(void) {
+ClockworkTimetag clockwork_block_time(void) {
     return get_audio_block_time();
 }
 

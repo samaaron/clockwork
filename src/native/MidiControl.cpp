@@ -108,16 +108,15 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
 // release it at the block it fired in — up to a block early, plus whatever
 // this thread's wake cost. The Rust side still owns the encoding.
 bool MidiControl::handleOutVerb(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
-    struct Ctx { int64_t when; uint32_t dropped; } ctx{ meta.when, 0 };
+    struct Ctx { clockwork::Timetag when; uint32_t dropped; } ctx{ meta.when, 0 };
     const auto onMessage = [](void* c, const uint8_t* port, uint32_t portLen,
-                              const uint8_t* bytes, uint32_t len, uint64_t verbWhen) {
+                              const uint8_t* bytes, uint32_t len, ClockworkTimetag verbWhen) {
         auto* self = static_cast<Ctx*>(c);
         const std::string name(reinterpret_cast<const char*>(port), portLen);
         const ClockworkSink sink = midi_sink_for_port(name.empty() ? "*" : name);
-        // 0 and 1 both mean now to the sink; a verb's own time wins over the
-        // call's, as it does when the verb is handled by the Rust side.
-        const int64_t when = verbWhen ? static_cast<int64_t>(verbWhen)
-                                      : (self->when ? self->when : 1);
+        // A verb's own time (immediately: none) wins over the call's, as it
+        // does when the verb is handled by the Rust side.
+        const ClockworkTimetag when = clockwork_timetag_is_immediate(verbWhen) ? self->when.abi() : verbWhen;
         if (sink == CLOCKWORK_SINK_NONE || !clockwork_sink_send(sink, bytes, len, when))
             ++self->dropped;
     };

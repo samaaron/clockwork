@@ -7,6 +7,8 @@
 
 use core::ffi::{c_char, c_int};
 
+use crate::timetag::ClockworkTimetag;
+
 /// A slot, stable for the life of the sink. 0 is never valid.
 pub type ClockworkSink = u32;
 pub const CLOCKWORK_SINK_NONE: ClockworkSink = 0;
@@ -24,7 +26,7 @@ impl ClockworkSinkKind {
 /// The host's emitter (`clockwork_sink_set_host_emit`): every MIDI sink opened
 /// while one is installed hands each message to it with its time.
 pub type ClockworkSinkHostEmit =
-    Option<unsafe extern "C" fn(kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: i64) -> c_int>;
+    Option<unsafe extern "C" fn(kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: ClockworkTimetag) -> c_int>;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,7 +48,7 @@ extern "C" {
     pub fn clockwork_sink_is_open(sink: ClockworkSink) -> c_int;
     pub fn clockwork_sink_kind(sink: ClockworkSink) -> ClockworkSinkKind;
     pub fn clockwork_sink_target(sink: ClockworkSink) -> *const c_char;
-    pub fn clockwork_sink_send(sink: ClockworkSink, bytes: *const u8, len: u32, when: i64) -> c_int;
+    pub fn clockwork_sink_send(sink: ClockworkSink, bytes: *const u8, len: u32, when: ClockworkTimetag) -> c_int;
     pub fn clockwork_sink_stats(sink: ClockworkSink, out: *mut ClockworkSinkStats) -> c_int;
     pub fn clockwork_sink_flush(sink: ClockworkSink) -> u32;
     pub fn clockwork_sink_flush_all() -> u32;

@@ -33,6 +33,7 @@ use clockwork_wait::Doorbell;
 
 use crate::registry;
 use crate::time;
+use clockwork_osc::Timetag;
 
 /// Sends and closes ring this, and the drain thread sleeps on it.
 pub static DRAIN: Doorbell = Doorbell::new();
@@ -97,7 +98,7 @@ fn run() {
 
 /// How long the drain sleeps towards `next`, when it must next pump, as seen
 /// at `now`.
-fn sleep_for(next: Option<u64>, now: u64) -> Option<std::time::Duration> {
+fn sleep_for(next: Option<Timetag>, now: Timetag) -> Option<std::time::Duration> {
     next.map(|w| time::until(w, now).unwrap_or_default().clamp(MIN_SLEEP, WALL_CLOCK_FOLLOW))
 }
 
@@ -111,10 +112,10 @@ mod tests {
         // The sleep runs on the steady clock and the timetag is on the wall
         // clock, which can be set, or move on while a laptop sleeps.
         let now = time::now();
-        let an_hour_on = now + (3600u64 << 32);
+        let an_hour_on = now.plus(3600i64 << 32);
         assert_eq!(sleep_for(Some(an_hour_on), now), Some(Duration::from_secs(1)));
 
-        let soon = now + (1u64 << 32) / 10;   // 100 ms
+        let soon = now.plus((1i64 << 32) / 10);   // 100 ms
         let d = sleep_for(Some(soon), now).unwrap();
         assert!(d > Duration::from_millis(99) && d <= Duration::from_millis(100), "{d:?}");
         assert_eq!(sleep_for(Some(now), now), Some(MIN_SLEEP));   // due: the shortest sleep

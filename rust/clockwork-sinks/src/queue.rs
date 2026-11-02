@@ -62,6 +62,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use clockwork_osc::Timetag;
+
 /// The cell width a queue gets when nobody chose one: enough for any OSC
 /// message clockwork itself sends. The profiles in [`crate::profile`] choose
 /// per kind, and add wider classes beside it.
@@ -89,7 +91,7 @@ struct Padded(AtomicUsize);
 
 struct Cell {
     seq: AtomicUsize,
-    when: UnsafeCell<i64>,
+    when: UnsafeCell<Timetag>,
     len: UnsafeCell<u32>,
     stamp: UnsafeCell<u64>,
 }
@@ -126,7 +128,7 @@ impl MsgQueue {
         for i in 0..cap {
             cells.push(Cell {
                 seq: AtomicUsize::new(i),
-                when: UnsafeCell::new(0),
+                when: UnsafeCell::new(Timetag::default()),
                 len: UnsafeCell::new(0),
                 stamp: UnsafeCell::new(0),
             });
@@ -187,7 +189,7 @@ impl MsgQueue {
     /// Callable from the audio thread: no allocation, no lock, no wait. The
     /// CAS loop only ever retries because another producer moved `tail`, which
     /// means progress was made by somebody.
-    pub fn push(&self, bytes: &[u8], when: i64, stamp: u64) -> bool {
+    pub fn push(&self, bytes: &[u8], when: Timetag, stamp: u64) -> bool {
         if bytes.len() > self.cell_bytes { return false; }
 
         let mut pos = self.tail.0.load(Ordering::Relaxed);
@@ -233,7 +235,7 @@ impl MsgQueue {
     /// The callback shape is deliberate: the bytes stay in the cell, so a
     /// caller that only wants to look copies nothing, and one that wants to
     /// keep the message copies exactly its length rather than a whole cell.
-    pub fn pop_with<R>(&self, f: impl FnOnce(i64, u64, &[u8]) -> R) -> Option<R> {
+    pub fn pop_with<R>(&self, f: impl FnOnce(Timetag, u64, &[u8]) -> R) -> Option<R> {
         let pos = self.head.0.load(Ordering::Relaxed);
         let cell = &self.cells[pos & self.mask];
         let seq = cell.seq.load(Ordering::Acquire);
@@ -277,7 +279,7 @@ mod tests {
         assert!(!q.has_ready(), "a claimed cell is not a message");
 
         let q = MsgQueue::new(8, DEFAULT_CELL_BYTES);
-        assert!(q.push(&[7], 1, 0));
+        assert!(q.push(&[7], Timetag::IMMEDIATELY, 0));
         assert!(q.has_ready());
         assert!(q.pop_with(|_, _, b| b[0]) == Some(7));
         assert!(!q.has_ready());
@@ -286,8 +288,8 @@ mod tests {
     #[test]
     fn a_full_queue_refuses_rather_than_overwriting() {
         let q = MsgQueue::new(8, DEFAULT_CELL_BYTES);
-        for i in 0..8u8 { assert!(q.push(&[i], 1, i as u64), "{i} should fit"); }
-        assert!(!q.push(&[99], 1, 99), "the ninth must be refused, not swallowed");
+        for i in 0..8u8 { assert!(q.push(&[i], Timetag::IMMEDIATELY, i as u64), "{i} should fit"); }
+        assert!(!q.push(&[99], Timetag::IMMEDIATELY, 99), "the ninth must be refused, not swallowed");
         // And the eight that were taken are all still there, in order — an
         // overwriting queue would have lost the first.
         for i in 0..8u8 {
@@ -301,11 +303,11 @@ mod tests {
     fn a_message_too_long_for_a_cell_is_refused_whole() {
         let q = MsgQueue::new(8, DEFAULT_CELL_BYTES);
         let big = vec![0u8; DEFAULT_CELL_BYTES + 1];
-        assert!(!q.push(&big, 1, 0));
+        assert!(!q.push(&big, Timetag::IMMEDIATELY, 0));
         // Never truncated: a short MIDI message is a different message, and a
         // reader cannot tell a truncated one from a genuine one.
         assert!(q.is_empty());
-        assert!(q.push(&big[..DEFAULT_CELL_BYTES], 1, 0), "exactly full must fit");
+        assert!(q.push(&big[..DEFAULT_CELL_BYTES], Timetag::IMMEDIATELY, 0), "exactly full must fit");
     }
 
     #[test]
@@ -315,8 +317,8 @@ mod tests {
         let small = MsgQueue::new(8, 16);
         assert_eq!(small.cell_bytes(), 16);
         assert_eq!(small.bytes_reserved(), 8 * 16);
-        assert!(small.push(&[0u8; 16], 1, 0), "exactly a cell fits");
-        assert!(!small.push(&[0u8; 17], 1, 1), "one byte over does not");
+        assert!(small.push(&[0u8; 16], Timetag::IMMEDIATELY, 0), "exactly a cell fits");
+        assert!(!small.push(&[0u8; 17], Timetag::IMMEDIATELY, 1), "one byte over does not");
         let got = small.pop_with(|_, _, b| b.len()).expect("one was taken");
         assert_eq!(got, 16);
 
@@ -325,9 +327,9 @@ mod tests {
         // second push would claim the cell out from under the first.
         let wide = MsgQueue::new(2, 65536);
         assert_eq!(wide.capacity(), 2);
-        assert!(wide.push(&vec![7u8; 65536], 1, 0));
-        assert!(wide.push(&vec![8u8; 65536], 1, 1));
-        assert!(!wide.push(&[1], 1, 2), "two cells, both taken");
+        assert!(wide.push(&vec![7u8; 65536], Timetag::IMMEDIATELY, 0));
+        assert!(wide.push(&vec![8u8; 65536], Timetag::IMMEDIATELY, 1));
+        assert!(!wide.push(&[1], Timetag::IMMEDIATELY, 2), "two cells, both taken");
         let got = wide.pop_with(|_, _, b| (b.len(), b[65535])).expect("taken");
         assert_eq!(got, (65536, 7));
     }
@@ -337,13 +339,13 @@ mod tests {
         let q = MsgQueue::new(16, DEFAULT_CELL_BYTES);
         for i in 0..16u64 {
             let body = vec![i as u8; (i as usize) + 1];
-            assert!(q.push(&body, -(i as i64), 1000 + i));
+            assert!(q.push(&body, Timetag::from_ntp(2 + i), 1000 + i));
         }
         for i in 0..16u64 {
             let (when, stamp, len, first) = q
                 .pop_with(|w, s, b| (w, s, b.len(), b[0]))
                 .expect("all sixteen were accepted");
-            assert_eq!(when, -(i as i64), "the timetag rides with the message");
+            assert_eq!(when.ntp(), 2 + i, "the timetag rides with the message");
             assert_eq!(stamp, 1000 + i, "the stamp rides with it too");
             assert_eq!(len, i as usize + 1);
             assert_eq!(first, i as u8);
@@ -368,7 +370,7 @@ mod tests {
                     // torn write shows up as a byte that disagrees with the
                     // rest rather than as a silent mixture.
                     let body = vec![p as u8; 1 + (i % 64)];
-                    while !q.push(&body, 1, i as u64) { std::thread::yield_now(); }
+                    while !q.push(&body, Timetag::IMMEDIATELY, i as u64) { std::thread::yield_now(); }
                     sent += 1;
                 }
                 sent

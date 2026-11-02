@@ -17,6 +17,7 @@
 #define CLOCKWORK_PLUGIN_VST3_H
 
 #include "plugin_host.h"
+#include "clock/timetag.h"
 
 struct ClockworkClockState;
 struct ClockworkTimeline;
@@ -35,7 +36,7 @@ void      close(Instance* p);
 
 void      process(Instance* p, const float* const* in, uint32_t n_in,
                   float* const* out, uint32_t n_out,
-                  uint32_t frames, int64_t block_time);
+                  uint32_t frames, clockwork::Timetag block_time);
 
 uint32_t  latency(const Instance* p);
 

@@ -194,7 +194,7 @@ extern "C" {
     EMSCRIPTEN_KEEPALIVE uintptr_t get_audio_input_bus();
     EMSCRIPTEN_KEEPALIVE int get_audio_buffer_samples();
     EMSCRIPTEN_KEEPALIVE double get_audio_sample_rate();
-    EMSCRIPTEN_KEEPALIVE int64_t get_audio_block_time();
+    EMSCRIPTEN_KEEPALIVE ClockworkTimetag get_audio_block_time();
     EMSCRIPTEN_KEEPALIVE double get_time_offset();
 }
 

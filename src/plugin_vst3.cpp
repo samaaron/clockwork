@@ -965,9 +965,9 @@ namespace {
 // An OSC timetag → nanoseconds since the Unix epoch, which is what
 // ProcessContext::systemTime means. The epoch conversion is clock_math.h's,
 // the same one the musical-time fields go through.
-int64_t oscTimetagToSystemNs(int64_t tt) {
-    if (tt == 0) return 0;
-    const double unixSeconds = clockwork::oscTimetagToNtp(tt) - clockwork::kNtpEpochOffset;
+int64_t oscTimetagToSystemNs(clockwork::Timetag tt) {
+    if (tt.isImmediate()) return 0;
+    const double unixSeconds = tt.ntpSeconds() - clockwork::kNtpEpochOffset;
     return static_cast<int64_t>(unixSeconds * 1e9);
 }
 
@@ -1419,7 +1419,7 @@ void close(gsl::owner<Instance*> p) {   // the caller's, given back here
 // ── Audio ────────────────────────────────────────────────────────────────────
 void process(Instance* p, const float* const* in, uint32_t n_in,
              float* const* out, uint32_t n_out, uint32_t frames,
-             int64_t block_time) {
+             clockwork::Timetag block_time) {
     if (!p || !p->processor || frames == 0) return;
     if (frames > p->maxBlock) frames = p->maxBlock;   // setupProcessing's promise
 
@@ -1492,7 +1492,7 @@ void process(Instance* p, const float* const* in, uint32_t n_in,
     ctx.projectTimeSamples = p->framesSeen;
     ctx.continousTimeSamples = p->framesSeen;
     ctx.state |= ProcessContext::kContTimeValid;
-    if (block_time != 0) {
+    if (!block_time.isImmediate()) {
         ctx.systemTime = oscTimetagToSystemNs(block_time);
         ctx.state |= ProcessContext::kSystemTimeValid;
     }

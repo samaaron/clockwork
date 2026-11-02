@@ -677,7 +677,7 @@ clap_sectime to_sectime(double seconds) {
    Seconds are the beats at the tempo — the position on a constant-tempo
    grid, which is the only grid a timeline snapshot describes. No loop, no
    pre-roll: clockwork has neither. */
-bool pr_transport(Instance* p, int64_t block_time) {
+bool pr_transport(Instance* p, clockwork::Timetag block_time) {
     clockwork::Timeline grid;
     if (!clockwork_plugin::blockTimeline(p->has_timeline ? &p->timeline : nullptr, p->clock, grid))
         return false;
@@ -721,7 +721,7 @@ void set_timeline(Instance* p, const ClockworkTimeline* timeline) {
 void process(Instance* p,
              const float* const* in, uint32_t n_in,
              float* const* out, uint32_t n_out,
-             uint32_t frames, int64_t block_time) {
+             uint32_t frames, clockwork::Timetag block_time) {
     if (!p || !p->plugin || !p->processing) {
         for (uint32_t c = 0; c < n_out; ++c)
             if (out && out[c]) std::memset(out[c], 0, frames * sizeof(float));

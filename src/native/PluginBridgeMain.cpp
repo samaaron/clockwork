@@ -253,7 +253,7 @@ void renderOne(Bridge& b, uint32_t frames, bool applyEvents) {
                 return ClockworkDrainVerdict::Consume;
             });
     }
-    const int64_t when = b.h->block_time.load(std::memory_order_relaxed);
+    const ClockworkTimetag when{b.h->block_time.load(std::memory_order_relaxed)};
     clockwork_track_process(b.retPtrs.data(), LANES, b.sendPtrs.data(), LANES, frames, when, 0);
     clockwork_port_write(b.ret, b.retPtrs.data(), LANES, frames);
     // Which of those lanes carried a track: what the engine taps for scopes.

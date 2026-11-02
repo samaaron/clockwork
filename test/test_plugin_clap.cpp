@@ -26,7 +26,7 @@
 #include "DsoTestUtils.h"
 #include "plugin_clap.h"
 #include "rt_alloc.h"
-#include "clock/clock_math.h"   // ntpToOscTimetag: a block time the clock case can place
+#include "clock/timetag.h"   // a block time the clock case can place
 #include "shared_memory.h"      // ClockworkClockState: the clock the transport case hands in
 
 #if CLOCKWORK_CLAP_TEST_HOST_API
@@ -184,7 +184,7 @@ TEST_CASE("clap: processing applies the default gain exactly", "[plugin][clap]")
 
     constexpr uint32_t kFrames = 128;
     Buffers b(kFrames);
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
 
     for (uint32_t i = 0; i < kFrames; ++i) {
         REQUIRE(b.out_l[i] == b.in_l[i] * 0.5f);
@@ -201,13 +201,13 @@ TEST_CASE("clap: setting the parameter changes the output", "[plugin][clap]") {
     clap_host::param_set(o.p, 0, 2.0, 0);
 
     Buffers b(kFrames);
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     for (uint32_t i = 0; i < kFrames; ++i)
         REQUIRE(b.out_l[i] == b.in_l[i] * 2.0f);
 
     // And it persists into the next block without being set again.
     Buffers b2(kFrames);
-    clap_host::process(o.p, b2.in_ptrs.data(), 2, b2.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b2.in_ptrs.data(), 2, b2.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     for (uint32_t i = 0; i < kFrames; ++i)
         REQUIRE(b2.out_l[i] == b2.in_l[i] * 2.0f);
 
@@ -230,7 +230,7 @@ TEST_CASE("clap: a parameter change lands on its exact frame", "[plugin][clap]")
     clap_host::param_set(o.p, 0, 2.0, kAt);
 
     Buffers b(kFrames);
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
 
     for (uint32_t i = 0; i < kAt; ++i) {
         REQUIRE(b.out_l[i] == b.in_l[i] * 0.5f);
@@ -259,7 +259,7 @@ TEST_CASE("clap: several changes in one block each land on their own frame",
     clap_host::param_set(o.p, 0, 2.0,  32);
 
     Buffers b(kFrames);
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
 
     for (uint32_t i = 0; i < 32; ++i)  REQUIRE(b.out_l[i] == b.in_l[i] * 0.5f);
     for (uint32_t i = 32; i < 64; ++i) REQUIRE(b.out_l[i] == b.in_l[i] * 2.0f);
@@ -274,7 +274,7 @@ TEST_CASE("clap: outputs the plugin has no input for are silent", "[plugin][clap
     constexpr uint32_t kFrames = 32;
     Buffers b(kFrames);
     // One input channel supplied, two asked for on the way out.
-    clap_host::process(o.p, b.in_ptrs.data(), 1, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 1, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
 
     for (uint32_t i = 0; i < kFrames; ++i) {
         REQUIRE(b.out_l[i] == b.in_l[i] * 0.5f);
@@ -293,7 +293,7 @@ TEST_CASE("clap: state saves, and restores a gain that has since changed",
 
     // Take the gain to 2.0 and let a block carry the event into the plugin.
     clap_host::param_set(o.p, 0, 2.0, 0);
-    clap_host::process(o.p, warm.in_ptrs.data(), 2, warm.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, warm.in_ptrs.data(), 2, warm.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
 
     // Size query first: the header allows out == NULL to mean "how big?".
     const uint32_t need = clap_host::state_save(o.p, nullptr, 0);
@@ -306,7 +306,7 @@ TEST_CASE("clap: state saves, and restores a gain that has since changed",
     // Move it somewhere else and prove it moved.
     clap_host::param_set(o.p, 0, 0.25, 0);
     Buffers moved(kFrames);
-    clap_host::process(o.p, moved.in_ptrs.data(), 2, moved.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, moved.in_ptrs.data(), 2, moved.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     REQUIRE(moved.out_l[kFrames - 1] == moved.in_l[kFrames - 1] * 0.25f);
 
     // Reload and prove it came back, in the parameter and in the audio.
@@ -317,7 +317,7 @@ TEST_CASE("clap: state saves, and restores a gain that has since changed",
     CHECK(pp.value == 2.0);
 
     Buffers back(kFrames);
-    clap_host::process(o.p, back.in_ptrs.data(), 2, back.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, back.in_ptrs.data(), 2, back.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     for (uint32_t i = 0; i < kFrames; ++i)
         REQUIRE(back.out_l[i] == back.in_l[i] * 2.0f);
 }
@@ -363,7 +363,7 @@ TEST_CASE("clap: the session clock arrives as the block's transport", "[plugin][
     int bar = 0, num = 0, den = 0, playing = 0;
 
     // No clock: free running, which CLAP spells as no transport at all.
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     CHECK_FALSE(last(&tempo, &beat, &barStart, &bar, &num, &den, &playing));
 
     // 120 BPM from beat 0 at NTP 1000, in 7/8, playing. The block at 1010 is
@@ -375,7 +375,7 @@ TEST_CASE("clap: the session clock arrives as the block's transport", "[plugin][
     clock.setTransport(true, 1000.0);
     clap_host::set_clock(o.p, &clock);
     clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames,
-                       clockwork::ntpToOscTimetag(1010.0));
+                       clockwork::Timetag::fromNtpSeconds(1010.0));
     REQUIRE(last(&tempo, &beat, &barStart, &bar, &num, &den, &playing));
     CHECK(tempo == 120.0);
     CHECK(beat == 20.0);         // exact in CLAP's 32-bit fixed point
@@ -389,7 +389,7 @@ TEST_CASE("clap: the session clock arrives as the block's transport", "[plugin][
 
     clock.setTransport(false, 1011.0);
     clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames,
-                       clockwork::ntpToOscTimetag(1011.0));
+                       clockwork::Timetag::fromNtpSeconds(1011.0));
     REQUIRE(last(&tempo, &beat, &barStart, &bar, &num, &den, &playing));
     CHECK(playing == 0);
     CHECK(beat == 22.0);
@@ -397,7 +397,7 @@ TEST_CASE("clap: the session clock arrives as the block's transport", "[plugin][
     CHECK(barStart == 21.0);
 
     clap_host::set_clock(o.p, nullptr);
-    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
     CHECK_FALSE(last(&tempo, &beat, &barStart, &bar, &num, &den, &playing));
     dlclose(h);
 }
@@ -417,7 +417,7 @@ TEST_CASE("clap: the rt-alloc guard is suspended across the plugin and restored 
     {
         rt_alloc::Guard guard;
         REQUIRE(rt_alloc::g_in_rt == true);
-        clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+        clap_host::process(o.p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, clockwork::Timetag());
         CHECK(rt_alloc::g_in_rt == true);
     }
     CHECK(rt_alloc::g_in_rt == false);
@@ -447,7 +447,7 @@ TEST_CASE("clap: reachable through plugin_host.h with the right format tag",
     constexpr uint32_t kAt     = 16;
     Buffers b(kFrames);
     plugin_param_set(p, 0, 2.0, kAt);
-    plugin_process(p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, 0);
+    plugin_process(p, b.in_ptrs.data(), 2, b.out_ptrs.data(), 2, kFrames, ClockworkTimetag{});
     for (uint32_t i = 0; i < kAt; ++i)       REQUIRE(b.out_l[i] == b.in_l[i] * 0.5f);
     for (uint32_t i = kAt; i < kFrames; ++i) REQUIRE(b.out_l[i] == b.in_l[i] * 2.0f);
 

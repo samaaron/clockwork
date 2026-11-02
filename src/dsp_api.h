@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "clockwork_event_sink.h"   /* ClockworkSink: where a DSP's own output goes */
+#include "clockwork_timetag.h"      /* ClockworkTimetag: every time across this boundary */
 
 struct ClockworkClockState;
 
@@ -318,15 +319,16 @@ typedef struct DspHost {
                          uint32_t capacity);
 
     /* Send one message to a sink, delivered at `when` — an OSC timetag in the
-     * same domain as dsp_process's block_time, 1 meaning immediately. A DSP
-     * that knows a note is due 20 ms into the block says block_time + 20 ms and
-     * stops thinking about it.
+     * same domain as dsp_process's block_time, or
+     * clockwork_timetag_immediately(). A DSP that knows a note is due 20 ms
+     * into the block says clockwork_timetag_add(block_time, 20 ms) and stops
+     * thinking about it.
      *
      * Returns non-zero if accepted; a full sink DROPS and counts.
      *
      * CALLABLE FROM dsp_process. Never allocates, locks or blocks. */
     int (*send_sink)(void* ctx, ClockworkSink sink, const uint8_t* bytes,
-                     uint32_t len, int64_t when);
+                     uint32_t len, ClockworkTimetag when);
 
     /* Give back bytes taken through alloc_bytes. Callable from any thread,
        the audio thread included: freeing is lock-free and a foreign thread's
@@ -540,10 +542,10 @@ int         dsp_reconfigure(struct Dsp* dsp, double sample_rate,
  * DSP somebody else's audio on a channel it was already processing. Slots above
  * the live count are not written and must not be read.
  *
- * `block_time` is the OSC timetag of the block's FIRST frame (NTP 32.32). A
- * message due at T lands at frame (T - block_time) * sample_rate / 2^32, and
- * the DSP does that arithmetic because only the DSP knows what it means to act
- * at a frame.
+ * `block_time` is the OSC timetag of the block's FIRST frame. A message due at
+ * T lands at frame clockwork_timetag_offset(block_time, T) * sample_rate / 2^32,
+ * and the DSP does that arithmetic because only the DSP knows what it means to
+ * act at a frame.
  *
  * Called on the audio thread. No allocation, no locks, no IO.
  */
@@ -551,7 +553,7 @@ void dsp_process(struct Dsp* dsp,
                  const float* const* in, uint32_t n_in,
                  float* const* out, uint32_t n_out,
                  uint32_t frames,
-                 int64_t block_time);
+                 ClockworkTimetag block_time);
 
 /* ── Messages ───────────────────────────────────────────────────────────── */
 
@@ -562,8 +564,8 @@ void dsp_process(struct Dsp* dsp,
  * "now". A DSP that declared holds_schedule receives messages as they arrive
  * and decides when to act; one that did not receives each during the block in
  * which it comes due. Either way the exact time survives, which is what makes
- * sub-block placement possible. OSC's own value 1 means "immediately" and is
- * kept.
+ * sub-block placement possible. OSC's "immediately" is kept, and
+ * clockwork_timetag_is_immediate says so.
  *
  * `origin` identifies the sender; pass it to DspHost::emit_osc unchanged.
  *
@@ -593,9 +595,9 @@ void dsp_process(struct Dsp* dsp,
 void dsp_osc(struct Dsp* dsp,
              const uint8_t* bytes,
              uint32_t len,
-             int64_t when,
+             ClockworkTimetag when,
              uint32_t origin,
-             int64_t block_time);
+             ClockworkTimetag block_time);
 
 
 /* ── Assets: bulk that enters through the assets area lane ─────────────────────── */

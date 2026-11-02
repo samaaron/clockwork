@@ -198,7 +198,7 @@ struct alignas(64) Header {
 
     // The time of the block the engine just handed over, so the bridge can
     // render against the same clock the graph did.
-    std::atomic<int64_t>  block_time;
+    std::atomic<uint64_t> block_time;   // Timetag::ntp()
 
     MsgRing ctl;   // engine -> bridge, control
     MsgRing rt;    // engine -> bridge, realtime

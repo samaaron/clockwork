@@ -8,6 +8,7 @@
 #include "clock/ClockworkClock.h"
 #include "clock/Timeline.h"
 #include "clock/clock_math.h"
+#include "clock/timetag.h"
 #include "clockwork_clock.h"
 
 #include <array>
@@ -195,7 +196,7 @@ void MidiClockOut::generate(double nowNtp) {
 
         // The tick carries its own time all the way to the endpoint, which
         // honours it as close to the wire as its platform allows.
-        const int64_t when = clockwork::ntpToOscTimetag(slot.atNtp);
+        const ClockworkTimetag when = clockwork::Timetag::fromNtpSeconds(slot.atNtp).abi();
         const uint8_t byte = slot.byte;
 
         if (slot.sink != CLOCKWORK_SINK_NONE) {

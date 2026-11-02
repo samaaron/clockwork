@@ -57,6 +57,8 @@
 //!
 use std::sync::Mutex;
 
+use clockwork_osc::Timetag;
+
 /// What became of one message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -74,7 +76,7 @@ pub enum Delivery {
 pub trait Endpoint: Send + Sync {
     /// Deliver one message. `when` is the timetag it was meant for, passed
     /// through unchanged so an endpoint that can honour it may.
-    fn deliver(&self, bytes: &[u8], when: i64) -> Delivery;
+    fn deliver(&self, bytes: &[u8], when: Timetag) -> Delivery;
 
     /// Can this endpoint honour a future `when` itself? See the module note:
     /// this single bit is the whole of the platform branch.
@@ -94,7 +96,7 @@ pub trait Endpoint: Send + Sync {
 #[derive(Default)]
 pub struct CaptureEndpoint {
     /// `(when, bytes)`, in delivery order.
-    got: Mutex<Vec<(i64, Vec<u8>)>>,
+    got: Mutex<Vec<(Timetag, Vec<u8>)>>,
     /// Set to make every delivery fail, for testing the endpoint-refused path.
     fail: std::sync::atomic::AtomicBool,
     /// Set to answer `schedules()` true, for testing the platform-schedules
@@ -106,7 +108,7 @@ impl CaptureEndpoint {
     pub fn new() -> CaptureEndpoint { CaptureEndpoint::default() }
 
     /// Everything delivered so far, in the order it was delivered.
-    pub fn taken(&self) -> Vec<(i64, Vec<u8>)> {
+    pub fn taken(&self) -> Vec<(Timetag, Vec<u8>)> {
         self.got.lock().unwrap().clone()
     }
 
@@ -122,7 +124,7 @@ impl CaptureEndpoint {
 }
 
 impl Endpoint for CaptureEndpoint {
-    fn deliver(&self, bytes: &[u8], when: i64) -> Delivery {
+    fn deliver(&self, bytes: &[u8], when: Timetag) -> Delivery {
         if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
             return Delivery::Failed;
         }
@@ -142,7 +144,7 @@ impl Endpoint for CaptureEndpoint {
 /// as SCHEDULED.
 pub type HostEmit = unsafe extern "C" fn(
     kind: u32, target: *const std::os::raw::c_char,
-    bytes: *const u8, len: u32, when: i64,
+    bytes: *const u8, len: u32, when: Timetag,
 ) -> i32;
 
 static HOST_EMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -193,7 +195,7 @@ impl HostEndpoint {
 }
 
 impl Endpoint for HostEndpoint {
-    fn deliver(&self, bytes: &[u8], when: i64) -> Delivery {
+    fn deliver(&self, bytes: &[u8], when: Timetag) -> Delivery {
         let Some(emit) = host_emit() else { return Delivery::Failed };
         // SAFETY: a NUL-terminated target and a slice's pointer and length,
         // which is the emitter's contract.
@@ -247,7 +249,7 @@ impl MidiEndpoint {
 
 #[cfg(all(feature = "midi", not(target_arch = "wasm32")))]
 impl Endpoint for MidiEndpoint {
-    fn deliver(&self, bytes: &[u8], when: i64) -> Delivery {
+    fn deliver(&self, bytes: &[u8], when: Timetag) -> Delivery {
         // Off the audio thread — this is the drain — so a lock is allowed
         // here and nowhere else in the path.
         match self.io.lock() {
@@ -256,7 +258,7 @@ impl Endpoint for MidiEndpoint {
                 // and let the kernel or the MIDI server do the waiting. Our own
                 // waiting is a thread wakeup, and its jitter lands on the wire.
                 if io.schedules() {
-                    if let Some(delay) = crate::time::until(when as u64, crate::time::now()) {
+                    if let Some(delay) = crate::time::until(when, crate::time::now()) {
                         if io.send_at(&self.port, bytes, delay) {
                             return Delivery::Scheduled;
                         }
@@ -323,7 +325,7 @@ impl OscEndpoint {
 
 #[cfg(all(feature = "osc", not(target_arch = "wasm32")))]
 impl Endpoint for OscEndpoint {
-    fn deliver(&self, bytes: &[u8], _when: i64) -> Delivery {
+    fn deliver(&self, bytes: &[u8], _when: Timetag) -> Delivery {
         if self.sender.send(&self.host, self.port, bytes) {
             Delivery::Sent
         } else {

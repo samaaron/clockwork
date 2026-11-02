@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "clockwork_timetag.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,7 +34,7 @@ typedef struct ClockworkSched ClockworkSched;
 /* A due event. `meta` and `data` borrow the store's pools and stay valid until
  * clockwork_sched_release is called for `slot`. */
 typedef struct ClockworkSchedEvent {
-    int64_t     when;
+    ClockworkTimetag when;
     uint32_t    tag;
     uint32_t    size;
     const void* meta;   /* the caller's record for this event, meta_size bytes */
@@ -78,15 +80,16 @@ void      clockwork_sched_free(ClockworkSched* h);
 /* Store `size` bytes to fire at `when` under `tag`. Returns this event's
  * metadata slot — the caller constructs its record there — or NULL if the slot
  * pool or the data pool is full, with no state changed. */
-void*     clockwork_sched_add(ClockworkSched* h, int64_t when, uint32_t tag,
+void*     clockwork_sched_add(ClockworkSched* h, ClockworkTimetag when, uint32_t tag,
                         const uint8_t* data, uint32_t size);
 
-/* Timetag of the earliest live event, or INT64_MAX if none. */
-int64_t   clockwork_sched_next_time(const ClockworkSched* h);
+/* The earliest live event's timetag into `*out`: 1, or 0 with `*out` untouched
+ * when there is none. */
+int32_t   clockwork_sched_next_time(const ClockworkSched* h, ClockworkTimetag* out);
 
 /* Pop the earliest event if it is due at/through `now`. 1 and `*out` filled,
  * or 0 and `*out` untouched. */
-int32_t   clockwork_sched_pop_due(ClockworkSched* h, int64_t now, ClockworkSchedEvent* out);
+int32_t   clockwork_sched_pop_due(ClockworkSched* h, ClockworkTimetag now, ClockworkSchedEvent* out);
 
 /* Return a popped event's slot. Negative, out-of-range and already-free slots
  * are no-ops. */
@@ -120,18 +123,18 @@ uint32_t  clockwork_sched_tag_hash(const uint8_t* s, size_t n);
  * compiler lays one out. `blob` borrows the caller's buffer. */
 typedef struct ClockworkSchedulePacket {
     int32_t        ok;
-    int64_t        when;
+    ClockworkTimetag when;
     const uint8_t* blob;
     uint32_t       blob_len;
 } ClockworkSchedulePacket;
 
 /* NTP seconds (since 1900) -> OSC 32.32 fixed-point timetag. */
-int64_t   clockwork_sched_ntp_to_timetag(double ntp);
+ClockworkTimetag clockwork_sched_ntp_to_timetag(double ntp);
 
 /* A timestamped OSC bundle: the "#bundle" marker AND a whole 8-byte timetag. */
 int32_t   clockwork_sched_is_bundle(const uint8_t* data, uint32_t size);
 /* That timetag, big-endian, from offset 8. Call clockwork_sched_is_bundle first. */
-uint64_t  clockwork_sched_bundle_timetag(const uint8_t* bundle);
+ClockworkTimetag clockwork_sched_bundle_timetag(const uint8_t* bundle);
 
 /* Parse "/clockwork/schedule <timetag> <blob>". The timetag is an OSC timetag,
  * as 't' or the int64 'h', or a 'd'/'f' NTP-seconds convenience. Every byte offset the parser uses

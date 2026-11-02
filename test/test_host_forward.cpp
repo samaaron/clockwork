@@ -34,6 +34,7 @@
 #include "lanes/lanes.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include "clock/timetag.h"
 
 #include <cstdint>
 #include <cstring>
@@ -174,7 +175,7 @@ TEST_CASE("host forward: a verb the scheduler fired carries the moment it was sc
     const uint64_t now      = lanes_test::tick();          // a known frame
     const uint64_t dueFrame = now + 4 * block + block / 2; // mid-block, on purpose
     const double   dueNtp   = lanes_test::ntpAtFrame(dueFrame);
-    const uint64_t dueTag   = clockwork::ntpToOscTimetag(dueNtp);
+    const uint64_t dueTag   = clockwork::Timetag::fromNtpSeconds(dueNtp).ntp();
 
     const auto inner = noteOn(64, 90);
     osc_test::Builder b;
@@ -250,10 +251,9 @@ TEST_CASE("host forward: on, a MIDI sink opens onto the host and a send goes out
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     CHECK(clockwork_sink_kind(sink) == kClockworkSinkMidi);
 
-    const int64_t when = static_cast<int64_t>(
-        clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(480000)));
+    const auto when = clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(480000));
     const uint8_t note[3] = { 0x90, 60, 100 };
-    REQUIRE(clockwork_sink_send(sink, note, 3, when) != 0);
+    REQUIRE(clockwork_sink_send(sink, note, 3, when.abi()) != 0);
 
     // DIRECT: the frame is on the egress before any block is rendered.
     const auto frames = lanes_test::drainRt();
@@ -261,7 +261,7 @@ TEST_CASE("host forward: on, a MIDI sink opens onto the host and a send goes out
     REQUIRE(fwd != nullptr);
     CHECK(fwd->sourceId == 0);                       // a sink has no caller
     const Forwarded f = unwrap(*fwd);
-    CHECK(f.timetag == static_cast<uint64_t>(when));
+    CHECK(f.timetag == when.ntp());
     CHECK(f.address == CLOCKWORK_SYS("midi/sink/send"));
     const SinkSend s = unwrapSinkSend(f);
     CHECK(s.port == "Fake Synth");
@@ -324,7 +324,7 @@ TEST_CASE("host forward: what the guest sends itself reaches the host with the m
 
     // Dated by that block's start plus 250 ms, to within one block.
     const double blockNtp = lanes_test::ntpAtFrame(frame);
-    const double gotNtp   = clockwork::oscTimetagToNtp(static_cast<int64_t>(f.timetag));
+    const double gotNtp   = clockwork::Timetag::fromNtp(f.timetag).ntpSeconds();
     INFO("sent for " << (gotNtp - blockNtp) * 1000.0 << " ms after the block");
     CHECK(gotNtp >= blockNtp + 0.250 - 0.001);
     CHECK(gotNtp <= blockNtp + 0.250 + static_cast<double>(block) / lanes_test::kSampleRate + 0.001);

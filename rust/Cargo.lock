@@ -273,6 +273,7 @@ dependencies = [
  "clockwork-heap",
  "clockwork-log",
  "clockwork-midi",
+ "clockwork-osc",
  "clockwork-osc-net",
  "clockwork-slots",
  "clockwork-wait",

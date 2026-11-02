@@ -19,7 +19,9 @@
 //!   constructs whatever it likes there. That is what keeps the store generic
 //!   over a C++ type it cannot name.
 //!
-//! Ordering is a binary min-heap of `(when, stability)`. `stability` is a
+//! Ordering is a binary min-heap of `(when, stability)`, `when` in
+//! [`Timetag`] order: immediately first, then real times in serial-number
+//! order, which holds across the NTP rollover in 2036. `stability` is a
 //! monotonic counter stamped at `add` and never reset, so no two live entries
 //! can compare equal: the pop order is a total order fixed entirely by the
 //! call sequence, not by the heap's internal arrangement, so any
@@ -34,6 +36,7 @@
 //! only ever hold in-range values, and the two size computations that could
 //! overflow a `u32` are done in `u64`.
 
+use clockwork_osc::Timetag;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
@@ -55,7 +58,7 @@ fn align_up(v: usize, align: usize) -> usize {
 
 #[derive(Clone, Copy)]
 struct Slot {
-    when: i64,
+    when: Timetag,
     stability: i64,
     tag: u32,
     offset: u32,
@@ -75,7 +78,7 @@ struct Slot {
 /// fire in the order they were added (FIFO).
 #[derive(Clone, Copy)]
 struct Entry {
-    when: i64,
+    when: Timetag,
     stability: i64,
     slot: i32,
 }
@@ -105,7 +108,7 @@ struct Live {
 /// [`Store::release`] is called for `slot`, and a Rust caller copies what it
 /// keeps before releasing.
 pub struct Event<'a> {
-    pub when: i64,
+    pub when: Timetag,
     pub tag: u32,
     pub meta: &'a [u8],
     pub data: &'a [u8],
@@ -227,7 +230,7 @@ impl Store {
         let mut s = Store {
             slots: ManuallyDrop::new(vec![
                 Slot {
-                    when: 0,
+                    when: Timetag::default(),
                     stability: 0,
                     tag: 0,
                     offset: 0,
@@ -240,7 +243,7 @@ impl Store {
             ]
             .into_boxed_slice()),
             queue: ManuallyDrop::new(
-                vec![Entry { when: 0, stability: 0, slot: -1 }; n].into_boxed_slice()),
+                vec![Entry { when: Timetag::default(), stability: 0, slot: -1 }; n].into_boxed_slice()),
             scratch: ManuallyDrop::new(
                 vec![Live { off: 0, size: 0, slot: -1 }; n].into_boxed_slice()),
             data: ManuallyDrop::new(vec![0u8; data_pool_size as usize].into_boxed_slice()),
@@ -394,7 +397,7 @@ impl Store {
     /// Returns the caller's metadata record for this event — the caller
     /// writes its record there — or `None` if the slot pool or the data pool
     /// is full, with no state changed either way.
-    pub fn add(&mut self, when: i64, tag: u32, data: &[u8]) -> Option<&mut [u8]> {
+    pub fn add(&mut self, when: Timetag, tag: u32, data: &[u8]) -> Option<&mut [u8]> {
         if self.queue_size >= self.slots.len() {
             return None;
         }
@@ -434,19 +437,15 @@ impl Store {
         Some(self.meta.slot_mut(slot))
     }
 
-    /// Timetag of the earliest live event, or `i64::MAX` if none.
+    /// Timetag of the earliest live event, if there is one.
     #[inline]
-    pub fn next_time(&self) -> i64 {
-        if self.queue_size > 0 {
-            self.queue[0].when
-        } else {
-            i64::MAX
-        }
+    pub fn next_time(&self) -> Option<Timetag> {
+        (self.queue_size > 0).then(|| self.queue[0].when)
     }
 
     /// Take the earliest event if it is due at or before `now`. The returned
     /// slices borrow the pools; release the slot once they are done with.
-    pub fn pop_due(&mut self, now: i64) -> Option<Event<'_>> {
+    pub fn pop_due(&mut self, now: Timetag) -> Option<Event<'_>> {
         if self.queue_size == 0 || self.queue[0].when > now {
             return None;
         }
@@ -699,6 +698,15 @@ impl Store {
 mod tests {
     use super::*;
 
+    // Times in the cases are offsets from 1 January 2026, in timetag units.
+    // FAR is later than every one of them, and well within the half of the
+    // 64-bit circle serial order compares across.
+    const BASE: Timetag = Timetag::from_ntp(3_976_214_400 << 32);
+    const FAR: i64 = 1 << 50;
+    fn t(offset: i64) -> Timetag {
+        BASE.plus(offset)
+    }
+
     /// The store's metadata is opaque bytes it never reads, so the tests give
     /// it a `u32` — exactly what clockwork's own `EngineMeta` is — and read
     /// it back through the pointer `add` hands out.
@@ -709,16 +717,16 @@ mod tests {
             S(Store::new(slots, pool, 4, 4).expect("store"))
         }
         fn add(&mut self, when: i64, tag: u32, meta: u32, payload: &[u8]) -> bool {
-            let Some(m) = self.0.add(when, tag, payload) else { return false };
+            let Some(m) = self.0.add(t(when), tag, payload) else { return false };
             m[..4].copy_from_slice(&meta.to_ne_bytes());
             true
         }
         /// Pop one due event and return `(when, tag, meta, payload)`, releasing
         /// its slot — the popDue/release pair the fire loop performs.
         fn pop(&mut self, now: i64) -> Option<(i64, u32, u32, Vec<u8>)> {
-            let e = self.0.pop_due(now)?;
+            let e = self.0.pop_due(t(now))?;
             let meta = u32::from_ne_bytes(e.meta[..4].try_into().unwrap());
-            let (when, tag, slot, bytes) = (e.when, e.tag, e.slot, e.data.to_vec());
+            let (when, tag, slot, bytes) = (e.when.offset_from(BASE), e.tag, e.slot, e.data.to_vec());
             self.0.release(slot);
             Some((when, tag, meta, bytes))
         }
@@ -743,7 +751,7 @@ mod tests {
         assert!(s.add(100, KEEP, 1, D));
         assert!(s.add(100, KEEP, 2, D)); // same time as 1, added later
         assert!(s.add(200, KEEP, 4, D));
-        let order: Vec<u32> = s.drain(i64::MAX).iter().map(|e| e.2).collect();
+        let order: Vec<u32> = s.drain(FAR).iter().map(|e| e.2).collect();
         assert_eq!(order, vec![1, 2, 4, 3]);
     }
 
@@ -761,16 +769,16 @@ mod tests {
             expect.push((when, i));
         }
         expect.sort_by_key(|&(w, i)| (w, i)); // stable order == insertion order
-        let got: Vec<(i64, u32)> = s.drain(i64::MAX).iter().map(|e| (e.0, e.2)).collect();
+        let got: Vec<(i64, u32)> = s.drain(FAR).iter().map(|e| (e.0, e.2)).collect();
         assert_eq!(got, expect);
     }
 
     #[test]
     fn an_event_exactly_at_now_is_due_and_one_tick_later_is_not() {
         let mut s = S::new(16, 8192);
-        assert_eq!(s.0.next_time(), i64::MAX);
+        assert_eq!(s.0.next_time(), None);
         assert!(s.add(500, KEEP, 7, D));
-        assert_eq!(s.0.next_time(), 500);
+        assert_eq!(s.0.next_time(), Some(t(500)));
 
         assert!(s.pop(499).is_none(), "not yet due");
         assert_eq!(s.0.size(), 1, "and still live");
@@ -778,17 +786,33 @@ mod tests {
         let (when, tag, meta, _) = s.pop(500).expect("due AT its timetag");
         assert_eq!((when, tag, meta), (500, KEEP, 7));
         assert_eq!(s.0.size(), 0);
-        assert_eq!(s.0.next_time(), i64::MAX);
+        assert_eq!(s.0.next_time(), None);
     }
 
     #[test]
-    fn now_at_the_extremes_is_still_a_boundary_not_a_special_case() {
+    fn events_either_side_of_the_2036_rollover_pop_in_time_order() {
+        // Half a second either side of the moment NTP's 32-bit seconds wrap
+        // to 0: the later one is the smaller number.
+        let before = Timetag::from_ntp(0xFFFF_FFFF_8000_0000);
+        let after = before.plus(1 << 32);
         let mut s = S::new(16, 8192);
-        assert!(s.add(i64::MIN, KEEP, 1, D));
-        assert!(s.add(i64::MAX, KEEP, 2, D));
-        assert!(s.pop(i64::MIN).is_some());
-        assert!(s.pop(i64::MAX - 1).is_none());
-        assert!(s.pop(i64::MAX).is_some());
+        assert!(s.0.add(after, KEEP, D).is_some());
+        assert!(s.0.add(before, KEEP, D).is_some());
+        assert_eq!(s.0.next_time(), Some(before));
+        assert!(s.0.pop_due(before.plus(-1)).is_none(), "neither is due yet");
+        let first = s.0.pop_due(after).expect("due");
+        assert_eq!(first.when, before);
+        let slot = first.slot;
+        s.0.release(slot);
+        assert_eq!(s.0.pop_due(after).expect("due").when, after);
+    }
+
+    #[test]
+    fn immediately_pops_before_every_real_time() {
+        let mut s = S::new(16, 8192);
+        assert!(s.add(100, KEEP, 1, D));
+        assert!(s.0.add(Timetag::IMMEDIATELY, KEEP, D).is_some());
+        assert_eq!(s.0.pop_due(t(100)).expect("due").when, Timetag::IMMEDIATELY);
     }
 
     #[test]
@@ -801,14 +825,14 @@ mod tests {
 
         s.0.flush(FLUSHME);
         assert_eq!(s.0.size(), 2);
-        assert_eq!(s.0.next_time(), 100);
-        assert_eq!(s.drain(i64::MAX).len(), 2, "the flushed event never surfaces");
+        assert_eq!(s.0.next_time(), Some(t(100)));
+        assert_eq!(s.drain(FAR).len(), 2, "the flushed event never surfaces");
 
         assert!(s.add(100, KEEP, 0, D));
         assert!(s.add(200, FLUSHME, 0, D));
         s.0.flush(0);
         assert_eq!(s.0.size(), 0);
-        assert_eq!(s.0.next_time(), i64::MAX);
+        assert_eq!(s.0.next_time(), None);
         assert_eq!(s.0.data_used(), 0);
     }
 
@@ -824,7 +848,7 @@ mod tests {
         assert!(s.add(300, TAG_SYNTH, 0, D));
         s.0.flush(TAG_DEFAULT);
         assert_eq!(s.0.size(), 2);
-        assert_eq!(s.0.next_time(), 200, "the caller-tagged event survives");
+        assert_eq!(s.0.next_time(), Some(t(200)), "the caller-tagged event survives");
         s.0.flush(0);
         assert_eq!(s.0.size(), 0);
     }
@@ -856,7 +880,7 @@ mod tests {
             assert!(s.add(1000 - i, tag, i as u32, D));
         }
         s.0.flush(FLUSHME);
-        let whens: Vec<i64> = s.drain(i64::MAX).iter().map(|e| e.0).collect();
+        let whens: Vec<i64> = s.drain(FAR).iter().map(|e| e.0).collect();
         let mut sorted = whens.clone();
         sorted.sort_unstable();
         assert_eq!(whens, sorted);
@@ -875,7 +899,7 @@ mod tests {
         assert_eq!(s.0.size(), 2, "the request alone changes nothing");
         assert!(s.0.drain_pending_clear());
         assert_eq!(s.0.size(), 0);
-        assert_eq!(s.0.next_time(), i64::MAX);
+        assert_eq!(s.0.next_time(), None);
         assert_eq!(s.0.data_used(), 0);
         assert!(!s.0.drain_pending_clear(), "the flag is consumed, not sticky");
     }
@@ -891,7 +915,7 @@ mod tests {
         assert!(!s.add(200, KEEP, 0, &[0]));
         assert_eq!(s.0.size(), 4, "a refused add changes nothing");
 
-        assert!(s.pop(i64::MAX).is_some());
+        assert!(s.pop(FAR).is_some());
         assert!(!s.0.full());
         assert!(s.add(200, KEEP, 0, &[0]));
         assert!(!s.add(201, KEEP, 0, &[0]), "exactly one");
@@ -925,10 +949,10 @@ mod tests {
         // One event pinned at the far end means the pool never drains, so the
         // ONLY way churn can continue is in-place compaction.
         let mut s = S::new(512, 524288);
-        assert!(s.add(i64::MAX, KEEP, 0, &[0u8; 64]));
+        assert!(s.add(FAR, KEEP, 0, &[0u8; 64]));
         for i in 0..10_000i64 {
             assert!(s.add(i, KEEP, 0, &[0xABu8; 152]), "exhausted at {i}");
-            assert!(s.pop(i64::MAX).is_some());
+            assert!(s.pop(FAR).is_some());
         }
         assert_eq!(s.0.size(), 1);
     }
@@ -936,12 +960,12 @@ mod tests {
     #[test]
     fn compaction_moves_bytes_without_corrupting_them() {
         let mut s = S::new(16, 8192);
-        assert!(s.add(i64::MAX, KEEP, 0, &[0u8; 32]));
+        assert!(s.add(FAR, KEEP, 0, &[0u8; 32]));
         for i in 0..100u32 {
             let marker: Vec<u8> =
                 (0..64u32).map(|b| ((i * 7 + b) & 0xFF) as u8).collect();
             assert!(s.add(i as i64, KEEP, i, &marker));
-            let (_, _, meta, bytes) = s.pop(i64::MAX).expect("due");
+            let (_, _, meta, bytes) = s.pop(FAR).expect("due");
             assert_eq!(meta, i);
             assert_eq!(bytes, marker, "payload survived the churn");
         }
@@ -958,7 +982,7 @@ mod tests {
         }
         s.0.flush(FLUSHME); // four holes, interleaved with four survivors
         assert!(s.add(2000, KEEP, 99, &body(99)), "compaction makes room");
-        for (_, _, meta, bytes) in s.drain(i64::MAX) {
+        for (_, _, meta, bytes) in s.drain(FAR) {
             assert_eq!(bytes, body(meta as u8), "chunk {meta} intact after the slide");
         }
     }
@@ -970,7 +994,7 @@ mod tests {
             assert!(s.add(i, KEEP, 0, &[1u8; 8]));
         }
         assert!(s.0.data_used() > 0);
-        s.drain(i64::MAX);
+        s.drain(FAR);
         assert_eq!(s.0.data_used(), 0);
     }
 
@@ -989,7 +1013,7 @@ mod tests {
     fn releasing_the_same_slot_twice_or_a_nonsense_slot_is_a_no_op() {
         let mut s = S::new(4, 8192);
         assert!(s.add(1, KEEP, 0, D));
-        let slot = s.0.pop_due(i64::MAX).expect("due").slot;
+        let slot = s.0.pop_due(t(FAR)).expect("due").slot;
         s.0.release(slot);
         assert_eq!(s.0.size(), 0);
         s.0.release(slot); // again
@@ -1003,7 +1027,7 @@ mod tests {
     fn a_zero_length_payload_is_stored_and_returned() {
         let mut s = S::new(4, 64);
         assert!(s.add(5, KEEP, 42, &[]));
-        let (when, _, meta, bytes) = s.pop(i64::MAX).expect("due");
+        let (when, _, meta, bytes) = s.pop(FAR).expect("due");
         assert_eq!((when, meta), (5, 42));
         assert!(bytes.is_empty());
     }
@@ -1016,7 +1040,7 @@ mod tests {
         s.0.clear();
         assert!(s.add(7, KEEP, 2, D));
         assert!(s.add(7, KEEP, 3, D));
-        let order: Vec<u32> = s.drain(i64::MAX).iter().map(|e| e.2).collect();
+        let order: Vec<u32> = s.drain(FAR).iter().map(|e| e.2).collect();
         assert_eq!(order, vec![2, 3]);
     }
 }

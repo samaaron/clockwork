@@ -16,21 +16,15 @@
  *   - the tempo grid: beatAt / timeAtBeat / originFor are mutual inverses,
  *     and originFor places a chosen beat at a chosen time;
  *   - wrapPhase's non-negative wrap and its quantum <= 0 guard;
- *   - ntpToOscTimetag's 32.32 packing: seconds in the high word, fraction in
- *     the low word, truncating (never rounding up into the next second),
- *     exact at zero and across the whole 32-bit second range — including the
- *     range where the packed int64 is negative but the bit pattern is right;
+ *   - Timetag::fromNtpSeconds's 32.32 packing (clock/timetag.h): seconds in
+ *     the high word, fraction in the low word, truncating (never rounding up
+ *     into the next second), exact at zero and across the whole 32-bit
+ *     second range;
  *   - round-tripping NTP seconds -> timetag -> NTP seconds;
  *   - the double <-> uint64 bit-cast pair (clockwork::doubleToBits /
  *     bitsToDouble) that the clock state and the test wall clock ride on.
  *
- * NOTE ON DIRECTION: clock_math.h declares only the NTP -> timetag direction.
- * There is no oscTimetagToNtp in the header, so the unpack side is spelled out
- * locally below (unpackTimetag) and the round-trip is pinned against it. If an
- * unpack helper is ever added to the header, this test should switch to it and
- * the local copy should go.
- *
- * NOTE ON SIGN: ntpToOscTimetag casts through uint32_t, so a negative
+ * NOTE ON SIGN: fromNtpSeconds casts through uint32_t, so a negative
  * ntpSeconds is outside its domain (the cast would be undefined). Negative
  * inputs are therefore deliberately NOT pinned here — only zero and the
  * positive range are contract.
@@ -39,6 +33,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "clock/clock_math.h"
+#include "clock/timetag.h"
 #include "shared_memory.h"   // clockwork::doubleToBits / bitsToDouble
 
 #include <chrono>
@@ -50,20 +45,16 @@ using Catch::Approx;
 
 namespace {
 
-// The inverse of clockwork::ntpToOscTimetag. Local because the header only
-// declares the forward direction — see NOTE ON DIRECTION above.
-double unpackTimetag(int64_t tag) {
-    const uint64_t u = static_cast<uint64_t>(tag);
-    return static_cast<double>(u >> 32)
-         + static_cast<double>(u & 0xFFFFFFFFull) / clockwork::kNtpUnitsPerSecond;
+uint64_t pack(double ntp) { return clockwork::Timetag::fromNtpSeconds(ntp).ntp(); }
+
+double unpackTimetag(uint64_t tag) { return clockwork::Timetag::fromNtp(tag).ntpSeconds(); }
+
+uint32_t timetagSeconds(uint64_t tag) {
+    return static_cast<uint32_t>(tag >> 32);
 }
 
-uint32_t timetagSeconds(int64_t tag) {
-    return static_cast<uint32_t>(static_cast<uint64_t>(tag) >> 32);
-}
-
-uint32_t timetagFraction(int64_t tag) {
-    return static_cast<uint32_t>(static_cast<uint64_t>(tag) & 0xFFFFFFFFull);
+uint32_t timetagFraction(uint64_t tag) {
+    return static_cast<uint32_t>(tag & 0xFFFFFFFFull);
 }
 
 // One NTP fraction unit: the finest step a 32.32 timetag can express.
@@ -180,79 +171,79 @@ TEST_CASE("wrapPhase: a non-positive quantum yields zero, not a division trap",
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ntpToOscTimetag — NTP seconds -> 32.32 fixed point
+// Timetag::fromNtpSeconds — NTP seconds -> 32.32 fixed point
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("ntpToOscTimetag: zero packs to zero", "[clock_math][timetag]") {
-    REQUIRE(clockwork::ntpToOscTimetag(0.0) == 0);
+TEST_CASE("Timetag::fromNtpSeconds: zero packs to zero", "[clock_math][timetag]") {
+    REQUIRE(pack(0.0) == 0);
 }
 
-TEST_CASE("ntpToOscTimetag: whole seconds land in the high word with a zero "
+TEST_CASE("Timetag::fromNtpSeconds: whole seconds land in the high word with a zero "
           "fraction", "[clock_math][timetag]") {
-    const int64_t tag = clockwork::ntpToOscTimetag(1.0);
+    const uint64_t tag = pack(1.0);
     REQUIRE(timetagSeconds(tag)  == 1u);
     REQUIRE(timetagFraction(tag) == 0u);
-    REQUIRE(tag == (static_cast<int64_t>(1) << 32));
+    REQUIRE(tag == (uint64_t{1} << 32));
 
-    const int64_t epoch = clockwork::ntpToOscTimetag(clockwork::kNtpEpochOffset);
+    const uint64_t epoch = pack(clockwork::kNtpEpochOffset);
     REQUIRE(timetagSeconds(epoch)  == 2208988800u);
     REQUIRE(timetagFraction(epoch) == 0u);
 }
 
-TEST_CASE("ntpToOscTimetag: the fraction is a binary fraction of 2^32",
+TEST_CASE("Timetag::fromNtpSeconds: the fraction is a binary fraction of 2^32",
           "[clock_math][timetag]") {
-    REQUIRE(timetagFraction(clockwork::ntpToOscTimetag(3.5))    == 0x80000000u);
-    REQUIRE(timetagFraction(clockwork::ntpToOscTimetag(3.25))   == 0x40000000u);
-    REQUIRE(timetagFraction(clockwork::ntpToOscTimetag(3.75))   == 0xC0000000u);
-    REQUIRE(timetagFraction(clockwork::ntpToOscTimetag(3.0625)) == 0x10000000u);
+    REQUIRE(timetagFraction(pack(3.5))    == 0x80000000u);
+    REQUIRE(timetagFraction(pack(3.25))   == 0x40000000u);
+    REQUIRE(timetagFraction(pack(3.75))   == 0xC0000000u);
+    REQUIRE(timetagFraction(pack(3.0625)) == 0x10000000u);
     // The seconds word is untouched by the fraction.
-    REQUIRE(timetagSeconds(clockwork::ntpToOscTimetag(3.75)) == 3u);
+    REQUIRE(timetagSeconds(pack(3.75)) == 3u);
 }
 
-TEST_CASE("ntpToOscTimetag: fractions truncate, never rounding into the next "
+TEST_CASE("Timetag::fromNtpSeconds: fractions truncate, never rounding into the next "
           "second", "[clock_math][timetag]") {
     // A value a hair under a whole second must keep the LOWER second. Rounding
     // up here would schedule a full unit early, once per second, forever.
     const double justUnder = 5.0 - kOneFractionUnit / 4.0;
-    const int64_t tag = clockwork::ntpToOscTimetag(justUnder);
+    const uint64_t tag = pack(justUnder);
     REQUIRE(timetagSeconds(tag) == 4u);
     REQUIRE(timetagFraction(tag) == 0xFFFFFFFFu);
 }
 
-TEST_CASE("ntpToOscTimetag: sub-unit fractions floor to zero",
+TEST_CASE("Timetag::fromNtpSeconds: sub-unit fractions floor to zero",
           "[clock_math][timetag]") {
     // Finer than 2^-32 s (~233 ps) is below the representable step.
-    const int64_t tag = clockwork::ntpToOscTimetag(7.0 + kOneFractionUnit / 8.0);
+    const uint64_t tag = pack(7.0 + kOneFractionUnit / 8.0);
     REQUIRE(timetagSeconds(tag)  == 7u);
     REQUIRE(timetagFraction(tag) == 0u);
 }
 
-TEST_CASE("ntpToOscTimetag: one fraction unit is representable",
+TEST_CASE("Timetag::fromNtpSeconds: one fraction unit is representable",
           "[clock_math][timetag]") {
-    const int64_t tag = clockwork::ntpToOscTimetag(7.0 + kOneFractionUnit);
+    const uint64_t tag = pack(7.0 + kOneFractionUnit);
     REQUIRE(timetagSeconds(tag)  == 7u);
     REQUIRE(timetagFraction(tag) == 1u);
 }
 
-TEST_CASE("ntpToOscTimetag: is monotonic over the second, as an unsigned "
+TEST_CASE("Timetag::fromNtpSeconds: is monotonic over the second, as an unsigned "
           "quantity", "[clock_math][timetag]") {
     uint64_t prev = 0;
     for (int i = 0; i < 64; ++i) {
         const double ntp = 3900000000.0 + i * (1.0 / 64.0);
-        const uint64_t u = static_cast<uint64_t>(clockwork::ntpToOscTimetag(ntp));
+        const uint64_t u = pack(ntp);
         if (i > 0) REQUIRE(u > prev);
         prev = u;
     }
 }
 
-TEST_CASE("ntpToOscTimetag: large seconds set the int64 sign bit but keep the "
+TEST_CASE("Timetag::fromNtpSeconds: large seconds set the int64 sign bit but keep the "
           "bit pattern", "[clock_math][timetag]") {
     // NTP era 0 runs to 2^32 s (2036). Seconds >= 2^31 set the top bit of the
-    // packed word, so the int64 reads negative while the 32.32 bit pattern is
-    // still correct. Anything comparing timetags must do it unsigned.
+    // packed word, so read as an int64_t it is negative while the 32.32 bit
+    // pattern is still correct: why a timetag is a type, never an integer.
     const double late = 4294967295.5;   // the last whole second of era 0
-    const int64_t tag = clockwork::ntpToOscTimetag(late);
-    REQUIRE(tag < 0);
+    const uint64_t tag = pack(late);
+    REQUIRE(static_cast<int64_t>(tag) < 0);
     REQUIRE(timetagSeconds(tag)  == 4294967295u);
     REQUIRE(timetagFraction(tag) == 0x80000000u);
     REQUIRE(unpackTimetag(tag) == Approx(late).margin(kOneFractionUnit));
@@ -261,11 +252,11 @@ TEST_CASE("ntpToOscTimetag: large seconds set the int64 sign bit but keep the "
     // positive. 3900000000 is NOT such a value — it is past 2^31 and reads
     // negative like every NTP time after 2038, which is the whole point of the
     // case above.
-    REQUIRE(clockwork::ntpToOscTimetag(2000000000.0) > 0);
-    REQUIRE(clockwork::ntpToOscTimetag(3900000000.0) < 0);
+    REQUIRE(static_cast<int64_t>(pack(2000000000.0)) > 0);
+    REQUIRE(static_cast<int64_t>(pack(3900000000.0)) < 0);
 }
 
-TEST_CASE("ntpToOscTimetag: round-trips NTP seconds through the timetag",
+TEST_CASE("Timetag::fromNtpSeconds: round-trips NTP seconds through the timetag",
           "[clock_math][timetag]") {
     const double values[] = {
         0.0, 0.5, 1.0, 3.75,
@@ -275,7 +266,7 @@ TEST_CASE("ntpToOscTimetag: round-trips NTP seconds through the timetag",
         4294967295.0, 4294967295.75,
     };
     for (double v : values) {
-        const int64_t tag = clockwork::ntpToOscTimetag(v);
+        const uint64_t tag = pack(v);
         // Truncating, so the round-trip is never above the input and never
         // more than one fraction unit below it.
         const double back = unpackTimetag(tag);
@@ -284,9 +275,9 @@ TEST_CASE("ntpToOscTimetag: round-trips NTP seconds through the timetag",
     }
 }
 
-TEST_CASE("ntpToOscTimetag: a whole timetag equals seconds<<32 | fraction",
+TEST_CASE("Timetag::fromNtpSeconds: a whole timetag equals seconds<<32 | fraction",
           "[clock_math][timetag]") {
-    const int64_t tag = clockwork::ntpToOscTimetag(3900000000.5);
+    const uint64_t tag = pack(3900000000.5);
     const uint64_t expect = (static_cast<uint64_t>(3900000000u) << 32)
                           |  static_cast<uint64_t>(0x80000000u);
     REQUIRE(static_cast<uint64_t>(tag) == expect);

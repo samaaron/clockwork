@@ -9,14 +9,18 @@
 //! arithmetic (RFC 1982): `a` comes before `b` when `a - b`, wrapped to 64 bits
 //! and read as signed, is negative, which holds across the NTP era rollover in
 //! 2036. It converts to and from an integer only by name, so it is never
-//! compared or subtracted as one.
+//! compared with one. As with `std::time::Instant`, a time plus an offset is
+//! a time, and a time minus a time is a signed offset, in 32.32 seconds.
 
 use core::cmp::Ordering;
+use core::ops::{Add, Sub};
 
 /// One second, in timetag units.
 pub const SECOND: u64 = 1 << 32;
 
-#[repr(transparent)]
+/// `#[repr(C)]`, so it is `ClockworkTimetag` at the C boundary, passed and
+/// returned as C passes and returns that struct.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Timetag(u64);
 
@@ -30,6 +34,22 @@ impl Timetag {
 
     pub const fn ntp(self) -> u64 {
         self.0
+    }
+
+    /// NTP seconds since 1900, packed as whole seconds over a 32-bit
+    /// fraction. Rust's float-to-integer casts saturate, so a value outside
+    /// the 32-bit range clamps; for every value in range this is
+    /// bit-identical to `clockwork::Timetag::fromNtpSeconds`.
+    pub fn from_ntp_seconds(ntp: f64) -> Timetag {
+        let s = ntp as u32;
+        let f = ((ntp - s as f64) * SECOND as f64) as u32;
+        Timetag(((s as u64) << 32) | f as u64)
+    }
+
+    /// NTP seconds since 1900. Not a round trip to the bit: the fraction is
+    /// 32 bits and an f64's mantissa 53.
+    pub fn ntp_seconds(self) -> f64 {
+        (self.0 >> 32) as f64 + (self.0 & 0xFFFF_FFFF) as f64 / SECOND as f64
     }
 
     pub const fn is_immediate(self) -> bool {
@@ -49,6 +69,28 @@ impl Timetag {
     /// This moved by `offset` 32.32 seconds.
     pub const fn plus(self, offset: i64) -> Timetag {
         Timetag(self.0.wrapping_add(offset as u64))
+    }
+}
+
+impl Add<i64> for Timetag {
+    type Output = Timetag;
+    fn add(self, offset: i64) -> Timetag {
+        self.plus(offset)
+    }
+}
+
+impl Sub<i64> for Timetag {
+    type Output = Timetag;
+    fn sub(self, offset: i64) -> Timetag {
+        self.plus(offset.wrapping_neg())
+    }
+}
+
+/// The signed offset from `from` to `self`: [`Timetag::offset_from`].
+impl Sub for Timetag {
+    type Output = i64;
+    fn sub(self, from: Timetag) -> i64 {
+        self.offset_from(from)
     }
 }
 
@@ -95,10 +137,25 @@ mod tests {
     }
 
     #[test]
+    fn ntp_seconds_pack_as_whole_seconds_over_a_32_bit_fraction() {
+        assert_eq!(Timetag::from_ntp_seconds(0.0).ntp(), 0);
+        assert_eq!(Timetag::from_ntp_seconds(1.0).ntp(), 1 << 32);
+        assert_eq!(Timetag::from_ntp_seconds(1.5).ntp(), (1 << 32) | 0x8000_0000);
+        assert_eq!(Timetag::from_ntp_seconds(2.25).ntp(), (2 << 32) | 0x4000_0000);
+        assert_eq!(Timetag::from_ntp_seconds(3_976_214_400.0), T2026);
+        assert_eq!(Timetag::from_ntp((2 << 32) | 0x4000_0000).ntp_seconds(), 2.25);
+        // Out of range clamps rather than wrapping.
+        assert_eq!(Timetag::from_ntp_seconds(-1.0).ntp(), 0);
+    }
+
+    #[test]
     fn an_offset_is_signed_and_moving_by_one_gives_it_back() {
         let ms = (SECOND / 1000) as i64;
         let earlier = T2026.plus(-20 * ms);
         assert_eq!(earlier.offset_from(T2026), -20 * ms);
+        assert_eq!(earlier - T2026, -20 * ms);
+        assert_eq!(T2026 - 20 * ms, earlier);
+        assert_eq!(T2026 + 20 * ms - T2026, 20 * ms);
         assert_eq!(T2026.plus(20 * ms).offset_from(T2026), 20 * ms);
         assert!(earlier < T2026);
         assert!((earlier.seconds_from(T2026) + 0.020).abs() < 1e-6);

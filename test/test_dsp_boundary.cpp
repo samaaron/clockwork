@@ -34,6 +34,7 @@
 #include "clock/clock_math.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include "clock/timetag.h"
 
 #include <cstdint>
 #include <string>
@@ -191,8 +192,7 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
 
     const auto inner = osc_test::message("/dummy/pulse", 5, 100);
     const auto pkt   = osc_test::bundle(
-        static_cast<uint64_t>(clockwork::ntpToOscTimetag(
-            lanes_test::ntpAtFrame(dueFrame))),
+        clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(dueFrame)).ntp(),
         { inner });
     REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
 
@@ -256,7 +256,7 @@ TEST_CASE("dsp boundary: sched/flush drops what /clockwork/schedule holds, as na
         const auto inner = osc_test::message("/dummy/ping");
         osc_test::Builder b;
         b.begin("/clockwork/schedule")
-            << static_cast<osc::int64>(clockwork::ntpToOscTimetag(lanes_test::ntpAtFrame(due)))
+            << static_cast<osc::int64>(clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(due)).ntp())
             << osc::Blob(inner.ptr(), static_cast<osc::osc_bundle_element_size_t>(inner.size()));
         const auto pkt = b.end();
         REQUIRE(lanes_test::ingress(pkt.ptr(), pkt.size(), kClient));
@@ -398,12 +398,12 @@ TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
 
     // Echo mode, so what comes out names the input slot it came from.
     const auto echo = osc_test::message("/dummy/echo");
-    // when=1 (immediately), origin=0, block_time=0 — the same block time the
+    // Immediately, origin 0, no block time — the same block time the
     // dsp_process calls below render at.
-    dsp_osc(d.dsp, echo.ptr(), echo.size(), 1, 0, 0);
+    dsp_osc(d.dsp, echo.ptr(), echo.size(), clockwork_timetag_immediately(), 0, ClockworkTimetag{});
 
     SECTION("a slot keeps its identity when the count shrinks") {
-        dsp_process(d.dsp, in_ptrs, 4, out_ptrs, 4, kFrames, 0);
+        dsp_process(d.dsp, in_ptrs, 4, out_ptrs, 4, kFrames, ClockworkTimetag{});
         for (uint32_t c = 0; c < 4; ++c) {
             REQUIRE(out_store[c][0] == Approx(static_cast<float>(c + 1)));
         }
@@ -411,7 +411,7 @@ TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
         // Two streams end. The survivors must NOT be renumbered: slot 0 is
         // still input 0, not whatever slid down into it.
         for (auto& o : out_store) std::fill(o.begin(), o.end(), -99.0f);
-        dsp_process(d.dsp, in_ptrs, 2, out_ptrs, 2, kFrames, 0);
+        dsp_process(d.dsp, in_ptrs, 2, out_ptrs, 2, kFrames, ClockworkTimetag{});
         REQUIRE(out_store[0][0] == Approx(1.0f));
         REQUIRE(out_store[1][0] == Approx(2.0f));
 
@@ -421,12 +421,12 @@ TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
     }
 
     SECTION("growing back is not a rebuild") {
-        dsp_process(d.dsp, in_ptrs, 1, out_ptrs, 1, kFrames, 0);
+        dsp_process(d.dsp, in_ptrs, 1, out_ptrs, 1, kFrames, ClockworkTimetag{});
         REQUIRE(out_store[0][0] == Approx(1.0f));
 
         // A peer arrives mid-session. No dsp_new, no dropout: the next block
         // simply carries more channels.
-        dsp_process(d.dsp, in_ptrs, 4, out_ptrs, 4, kFrames, 0);
+        dsp_process(d.dsp, in_ptrs, 4, out_ptrs, 4, kFrames, ClockworkTimetag{});
         for (uint32_t c = 0; c < 4; ++c) {
             REQUIRE(out_store[c][0] == Approx(static_cast<float>(c + 1)));
         }
@@ -435,14 +435,14 @@ TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
     SECTION("an output with no matching input is silent, not stale") {
         // Three outputs, one input: the two unmatched outputs must be written
         // silent rather than left holding whatever was in the buffer.
-        dsp_process(d.dsp, in_ptrs, 1, out_ptrs, 3, kFrames, 0);
+        dsp_process(d.dsp, in_ptrs, 1, out_ptrs, 3, kFrames, ClockworkTimetag{});
         REQUIRE(out_store[0][0] == Approx(1.0f));
         REQUIRE(out_store[1][0] == Approx(0.0f));
         REQUIRE(out_store[2][0] == Approx(0.0f));
     }
 
     SECTION("no input at all is silence, not a crash") {
-        dsp_process(d.dsp, nullptr, 0, out_ptrs, 2, kFrames, 0);
+        dsp_process(d.dsp, nullptr, 0, out_ptrs, 2, kFrames, ClockworkTimetag{});
         REQUIRE(out_store[0][0] == Approx(0.0f));
         REQUIRE(out_store[1][0] == Approx(0.0f));
     }

@@ -17,7 +17,7 @@
 #include "DsoTestUtils.h"
 #include "plugin_host.h"
 #include "plugin_track.h"
-#include "clock/clock_math.h"        // ntpToOscTimetag: a block time the timeline case can place
+#include "clock/timetag.h"          // a block time the timeline case can place
 #include "clock/timeline_mirror.h"   // the engine's mirror of the follower timelines
 #include "lanes/lanes.h"
 #include "shared_memory.h"           // ClockworkClockState: the session clock the tracks are handed
@@ -87,7 +87,7 @@ struct Staging {
         std::fill(in[kBase + 2 * slot].begin(),     in[kBase + 2 * slot].end(),     v);
         std::fill(in[kBase + 2 * slot + 1].begin(), in[kBase + 2 * slot + 1].end(), v);
     }
-    void run(int64_t when = 0) {
+    void run(ClockworkTimetag when = ClockworkTimetag{}) {
         clockwork_track_process(inp.data(), kWidth, outp.data(), kWidth, kFrames, when, kBase);
     }
     const float* ret(uint32_t slot, uint32_t ch = 0) const { return in[kBase + 2 * slot + ch].data(); }
@@ -405,7 +405,7 @@ TEST_CASE("a lane base of zero is a base like any other", "[plugin][track][audio
     std::fill(s.in[0].begin(), s.in[0].end(), 0.7f);
     std::fill(s.out[0].begin(), s.out[0].end(), 0.3f);
     std::fill(s.out[1].begin(), s.out[1].end(), 0.3f);
-    clockwork_track_process(s.inp.data(), kWidth, s.outp.data(), kWidth, kFrames, 0, 0);
+    clockwork_track_process(s.inp.data(), kWidth, s.outp.data(), kWidth, kFrames, ClockworkTimetag{}, 0);
     REQUIRE(s.in[0][0] == 0.3f);
     REQUIRE(s.in[1][0] == 0.3f);
 }
@@ -693,7 +693,7 @@ TEST_CASE("a bound track's plugins render against the mirrored timeline, the res
     clockwork_track_set_timelines(mirror, 2);
 
     Staging s;
-    const int64_t at = clockwork::ntpToOscTimetag(1010.0);   // 10 s in
+    const ClockworkTimetag at = clockwork::Timetag::fromNtpSeconds(1010.0).abi();   // 10 s in
     double tempo = 0, beat = 0, barStart = 0;
     int num = 0, den = 0;
     unsigned state = 0;

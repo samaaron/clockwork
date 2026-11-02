@@ -72,6 +72,7 @@ use crate::endpoint::{Delivery, Endpoint};
 use crate::profile::Layout;
 use crate::queue::MsgQueue;
 use crate::time::{is_due, is_past, is_within_lookahead, LOOKAHEAD_UNITS};
+use clockwork_osc::Timetag;
 
 /// Kinds, matching `ClockworkSinkKind` in `src/clockwork_event_sink.h`.
 pub const KIND_MIDI: u32 = 1;
@@ -96,10 +97,9 @@ pub struct Stats {
 /// One message waiting for its moment, on the drain thread's own heap.
 struct Queued {
     /// The timetag as sent, passed to the endpoint unchanged.
-    when: i64,
-    /// `(when as u64, arrival)`. Unsigned because a real timetag is negative
-    /// as an `i64` — see `crate::time`.
-    key: (u64, u64),
+    when: Timetag,
+    /// `(when, arrival)`: time order, then arrival order.
+    key: (Timetag, u64),
     /// Already past due when the drain first saw it.
     late: bool,
     bytes: Vec<u8>,
@@ -177,7 +177,7 @@ impl Sink {
     /// Wider than the widest, or every class it fits full, and it is refused
     /// whole and counted.
     #[inline]
-    pub fn send(&self, bytes: &[u8], when: i64) -> bool {
+    pub fn send(&self, bytes: &[u8], when: Timetag) -> bool {
         // Nothing to carry is refused and not a drop: the same answer the C
         // ABI gives, so the two surfaces agree.
         if bytes.is_empty() { return false; }
@@ -250,17 +250,16 @@ impl Sink {
     ///
     /// NOT the audio thread's. It allocates (one `Vec` per held message), it
     /// takes the pending lock, and the endpoint underneath it may do IO.
-    pub fn pump(&self, now: u64) -> Option<u64> {
+    pub fn pump(&self, now: Timetag) -> Option<Timetag> {
         let Ok(mut pending) = self.pending.lock() else { return None };
 
         // 1. Everything the producers left, from every class, into time order.
         for q in &self.classes {
             while q.pop_with(|when, stamp, bytes| {
-                let w = when as u64;
                 pending.push(Reverse(Queued {
                     when,
-                    key: (w, stamp),
-                    late: is_past(w, now),
+                    key: (when, stamp),
+                    late: is_past(when, now),
                     bytes: bytes.to_vec(),
                 }));
             }).is_some() {}
@@ -284,7 +283,7 @@ impl Sink {
                 Some(Reverse(top))
                     if is_due(top.key.0, now)
                         || (schedules && is_within_lookahead(top.key.0, now)) => {}
-                Some(Reverse(top)) if schedules => return Some(top.key.0.saturating_sub(LOOKAHEAD_UNITS)),
+                Some(Reverse(top)) if schedules => return Some(top.key.0.plus(-LOOKAHEAD_UNITS)),
                 Some(Reverse(top)) => return Some(top.key.0),
                 None => return None,
             }
@@ -388,7 +387,7 @@ mod tests {
         for (i, w) in widths.iter().enumerate() {
             let mut body = vec![i as u8; *w];
             body[*w - 1] = 0xEE;
-            assert!(sink.send(&body, 1), "{w} bytes must be carried");
+            assert!(sink.send(&body, Timetag::IMMEDIATELY), "{w} bytes must be carried");
         }
         assert_eq!(sink.max_message_bytes(), 65536);
         sink.pump(time::now());
@@ -410,8 +409,8 @@ mod tests {
         let (sink, ep) = capture_sink(8);
         ep.set_schedules(true);
         let now = time::now();
-        let when = now + (1u64 << 32);   // a second ahead
-        assert!(sink.send(b"/later", when as i64));
+        let when = now + (1i64 << 32);   // a second ahead
+        assert!(sink.send(b"/later", when));
         let back = when - time::LOOKAHEAD_UNITS;
         assert_eq!(sink.pump(now), Some(back));
         assert_eq!(ep.count(), 0);
@@ -420,7 +419,7 @@ mod tests {
 
         // An endpoint that does not schedule is due back at the message's time.
         let (sink, ep) = capture_sink(8);
-        assert!(sink.send(b"/later", when as i64));
+        assert!(sink.send(b"/later", when));
         assert_eq!(sink.pump(now), Some(when));
         assert_eq!(ep.count(), 0);
     }
@@ -428,7 +427,7 @@ mod tests {
     #[test]
     fn an_empty_message_is_refused_and_not_counted_as_a_drop() {
         let (sink, ep) = capture_sink(8);
-        assert!(!sink.send(&[], 1));
+        assert!(!sink.send(&[], Timetag::IMMEDIATELY));
         sink.pump(time::now());
         assert_eq!(ep.count(), 0);
         assert_eq!(sink.stats(), Stats::default(), "nothing was lost, so nothing is counted lost");
@@ -438,7 +437,7 @@ mod tests {
     fn wider_than_the_widest_class_is_refused_whole_and_counted() {
         let layout = crate::profile::default_for(KIND_OSC);
         let (sink, ep) = classed_sink(&layout);
-        assert!(!sink.send(&vec![0u8; 65537], 1));
+        assert!(!sink.send(&vec![0u8; 65537], Timetag::IMMEDIATELY));
         assert_eq!(sink.stats().dropped, 1);
         sink.pump(time::now());
         assert_eq!(ep.count(), 0, "nothing partial went out");
@@ -453,8 +452,8 @@ mod tests {
             crate::profile::Class { cell_bytes: 64, cells: 2 },
         ]).unwrap();
         let (sink, ep) = classed_sink(&layout);
-        for i in 0..4u8 { assert!(sink.send(&[i], 1), "{i}: four cells in all"); }
-        assert!(!sink.send(&[9], 1), "the fifth has nowhere to go");
+        for i in 0..4u8 { assert!(sink.send(&[i], Timetag::IMMEDIATELY), "{i}: four cells in all"); }
+        assert!(!sink.send(&[9], Timetag::IMMEDIATELY), "the fifth has nowhere to go");
         assert_eq!(sink.stats().dropped, 1);
         sink.pump(time::now());
         let got: Vec<u8> = ep.taken().iter().map(|(_, b)| b[0]).collect();
@@ -468,7 +467,7 @@ mod tests {
         // which came first.
         let layout = crate::profile::default_for(KIND_OSC);
         let (sink, ep) = classed_sink(&layout);
-        let when = (time::now() + 1000) as i64;
+        let when = time::now() + 1000;
         for i in 0..8u8 {
             let width = if i % 2 == 0 { 8 } else { 4000 };   // base cell vs 8 KB class
             let mut body = vec![0u8; width];
@@ -493,10 +492,10 @@ mod tests {
         let (sink, ep) = capture_sink(64);
         let base = time::now();
         // Sent backwards, plus one "immediately" in the middle, which must
-        // come out first of all: 1 is the smallest timetag there is.
+        // come out first of all: immediately comes before every real time.
         let order = [5i64, 3, 4, 1, 2];
         for (i, step) in order.iter().enumerate() {
-            let when = if *step == 1 { 1 } else { (base + (*step as u64) * 1000) as i64 };
+            let when = if *step == 1 { Timetag::IMMEDIATELY } else { base + *step * 1000 };
             assert!(sink.send(&[i as u8], when));
         }
         // A `now` far past every one of them, so all are due at one pump.
@@ -512,7 +511,7 @@ mod tests {
         // any order, and a note-off would be free to overtake its note-on.
         let (sink, ep) = capture_sink(64);
         let base = time::now();
-        let when = (base + 1000) as i64;
+        let when = base + 1000;
         for i in 0..16u8 { assert!(sink.send(&[i], when)); }
         sink.pump(base + 1_000_000);
         let got: Vec<u8> = ep.taken().iter().map(|(_, b)| b[0]).collect();
@@ -523,8 +522,8 @@ mod tests {
     fn a_message_not_yet_due_is_held_and_not_sent_early() {
         let (sink, ep) = capture_sink(64);
         let base = time::now();
-        let due = base + (1u64 << 32);      // one second out
-        assert!(sink.send(b"later", due as i64));
+        let due = base + (1i64 << 32);      // one second out
+        assert!(sink.send(b"later", due));
         let next = sink.pump(base);
         assert_eq!(ep.count(), 0, "sending early is the one thing that is wrong");
         assert_eq!(next, Some(due), "the drain must say when to come back");
@@ -540,8 +539,8 @@ mod tests {
     fn a_message_already_past_due_when_it_is_first_seen_counts_late() {
         let (sink, ep) = capture_sink(64);
         let base = time::now();
-        assert!(sink.send(b"overdue", (base - 5000) as i64));
-        assert!(sink.send(b"now", 1), "an immediate message can never be late");
+        assert!(sink.send(b"overdue", base - 5000));
+        assert!(sink.send(b"now", Timetag::IMMEDIATELY), "an immediate message can never be late");
         sink.pump(base);
         assert_eq!(ep.count(), 2);
         assert_eq!(sink.stats(), Stats { sent: 2, dropped: 0, late: 1, scheduled: 0, cancelled: 0 });
@@ -556,15 +555,15 @@ mod tests {
         ep.set_schedules(true);
         let base = time::now();
         let due = base + time::LOOKAHEAD_UNITS / 2;
-        assert!(sink.send(b"web", due as i64));
+        assert!(sink.send(b"web", due));
         assert_eq!(sink.pump(base), None, "inside the window, the platform takes it");
         assert_eq!(ep.count(), 1);
-        assert_eq!(ep.taken()[0].0, due as i64, "the time goes with the message");
+        assert_eq!(ep.taken()[0].0, due, "the time goes with the message");
         assert_eq!(sink.stats(), Stats { sent: 1, dropped: 0, late: 0, scheduled: 1, cancelled: 0 });
 
         // And beyond it, the sink keeps hold.
         let distant = base + time::LOOKAHEAD_UNITS * 100;
-        assert!(sink.send(b"later", distant as i64));
+        assert!(sink.send(b"later", distant));
         assert_eq!(sink.pump(base), Some(distant - time::LOOKAHEAD_UNITS),
                    "past the look-ahead it stays here, stays cancellable, and is due back as the window opens");
         assert_eq!(ep.count(), 1, "not handed over");
@@ -573,9 +572,9 @@ mod tests {
     #[test]
     fn a_full_sink_drops_and_counts_and_the_earlier_messages_survive() {
         let (sink, ep) = capture_sink(8);
-        for i in 0..8u8 { assert!(sink.send(&[i], 1), "{i}"); }
+        for i in 0..8u8 { assert!(sink.send(&[i], Timetag::IMMEDIATELY), "{i}"); }
         for i in 0..100u8 {
-            assert!(!sink.send(&[i], 1), "a full sink must refuse, not grow");
+            assert!(!sink.send(&[i], Timetag::IMMEDIATELY), "a full sink must refuse, not grow");
         }
         assert_eq!(sink.stats().dropped, 100);
         sink.pump(time::now());
@@ -589,7 +588,7 @@ mod tests {
     fn a_refused_delivery_is_a_drop_because_it_did_not_go_out() {
         let (sink, ep) = capture_sink(8);
         ep.set_failing(true);
-        assert!(sink.send(b"x", 1));
+        assert!(sink.send(b"x", Timetag::IMMEDIATELY));
         sink.pump(time::now());
         assert_eq!(sink.stats(), Stats { sent: 0, dropped: 1, late: 0, scheduled: 0, cancelled: 0 });
     }
@@ -612,7 +611,7 @@ mod flush_tests {
     }
 
     /// Far enough out that no look-ahead reaches it.
-    fn far(now: u64) -> i64 { (now + time::LOOKAHEAD_UNITS * 100) as i64 }
+    fn far(now: Timetag) -> Timetag { now + time::LOOKAHEAD_UNITS * 100 }
 
     #[test]
     fn a_flush_cancels_what_is_held_and_counts_it() {
@@ -628,7 +627,7 @@ mod flush_tests {
         assert_eq!(sink.stats().cancelled, 4);
 
         // And they are really gone: time passing does not resurrect them.
-        sink.pump(u64::MAX);
+        sink.pump(now + (1i64 << 40));
         assert_eq!(ep.taken().len(), 0, "a cancelled message must not arrive later");
         assert_eq!(sink.stats().sent, 0);
     }
@@ -664,7 +663,7 @@ mod flush_tests {
         ep.set_schedules(true);
         let now = time::now();
 
-        let near = (now + time::LOOKAHEAD_UNITS / 2) as i64;   // inside
+        let near = now + time::LOOKAHEAD_UNITS / 2;   // inside
         let distant = far(now);                                // outside
         assert!(sink.send(b"near", near));
         assert!(sink.send(b"far", distant));
@@ -687,7 +686,7 @@ mod flush_tests {
         let (sink, ep) = capture_sink(16);
         ep.set_schedules(true);
         let now = time::now();
-        assert!(sink.send(b"gone", (now + time::LOOKAHEAD_UNITS / 2) as i64));
+        assert!(sink.send(b"gone", now + time::LOOKAHEAD_UNITS / 2));
 
         sink.pump(now);
         assert_eq!(ep.taken().len(), 1, "handed over");
@@ -701,8 +700,8 @@ mod flush_tests {
     fn an_immediate_message_is_always_within_the_window() {
         // when <= 1 means now; there is nothing to hold it for.
         let now = time::now();
-        assert!(time::is_within_lookahead(0, now));
-        assert!(time::is_within_lookahead(time::IMMEDIATE, now));
+        assert!(time::is_within_lookahead(Timetag::default(), now));
+        assert!(time::is_within_lookahead(Timetag::IMMEDIATELY, now));
         assert!(!time::is_within_lookahead(now + time::LOOKAHEAD_UNITS * 10, now));
     }
 }

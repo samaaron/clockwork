@@ -40,6 +40,8 @@
 
 #include <stdint.h>
 
+#include "clockwork_timetag.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -145,7 +147,7 @@ PluginFormat plugin_format(const struct HostedPlugin* p);
 void plugin_process(struct HostedPlugin* p,
                     const float* const* in, uint32_t n_in,
                     float* const* out, uint32_t n_out,
-                    uint32_t frames, int64_t block_time);
+                    uint32_t frames, ClockworkTimetag block_time);
 
 /*
  * Frames of latency the plugin introduces, for delay compensation. Both

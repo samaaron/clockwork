@@ -53,12 +53,13 @@ struct BlockTransport {
 };
 
 // Where `block_time` — the block's OSC timetag — falls on `t`. A caller with
-// no block time (a test, a host with no clock of its own) passes 0 and the
+// no block time (a test, a host with no clock of its own) passes immediately
+// (Timetag()) and the
 // block is placed at the timeline's anchor, which for the session clock is
 // beat 0: the beat is then the anchor's rather than "now", so a plugin
 // placing an event inside the block still lands it where the host intended.
-inline BlockTransport blockTransport(const clockwork::Timeline& t, int64_t block_time) {
-    const double ntp = block_time != 0 ? clockwork::oscTimetagToNtp(block_time) : t.anchor_ntp;
+inline BlockTransport blockTransport(const clockwork::Timeline& t, clockwork::Timetag block_time) {
+    const double ntp = block_time.isImmediate() ? t.anchor_ntp : block_time.ntpSeconds();
     BlockTransport b {};
     b.bpm          = t.bpm;
     b.playing      = t.playing != 0;

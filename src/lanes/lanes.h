@@ -56,6 +56,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "clockwork_arena.h"
+#include "clockwork_timetag.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -208,7 +209,7 @@ const float* clockwork_audio_out(void);   /* rendered block, channel-major     *
 float*       clockwork_audio_in(void);    /* input bus region, fill before tick */
 uint32_t     clockwork_block_size(void);  /* frames per block (web: 128)        */
 double       clockwork_sample_rate(void); /* the DSP's rate; 0 before init      */
-int64_t      clockwork_block_time(void);  /* the block in flight, in OSC time   */
+ClockworkTimetag clockwork_block_time(void);  /* the block in flight, in OSC time */
 
 /* ── Init ──────────────────────────────────────────────────────────────────
  * Bring the engine up: lay out the arena (rings, control, metrics, node-tree,

@@ -8,6 +8,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::sink::{ClockworkSink, ClockworkSinkKind};
+use crate::timetag::ClockworkTimetag;
 
 /// The guest's instance: opaque to the host, `struct Dsp` in C.
 #[repr(C)]
@@ -106,14 +107,15 @@ pub struct DspHost {
             capacity: u32,
         ) -> ClockworkSink,
     >,
-    /// Audio thread callable. `when` is an OSC timetag; 1 means now.
+    /// Audio thread callable. `when` is an OSC timetag, or
+    /// [`ClockworkTimetag::IMMEDIATELY`].
     pub send_sink: Option<
         unsafe extern "C" fn(
             ctx: *mut c_void,
             sink: ClockworkSink,
             bytes: *const u8,
             len: u32,
-            when: i64,
+            when: ClockworkTimetag,
         ) -> c_int,
     >,
     /// Give back bytes taken through `alloc_bytes`. Any thread.
@@ -226,15 +228,15 @@ pub type DspProcessFn = unsafe extern "C" fn(
     outputs: *const *mut f32,
     n_out: u32,
     frames: u32,
-    block_time: i64,
+    block_time: ClockworkTimetag,
 );
 pub type DspOscFn = unsafe extern "C" fn(
     dsp: *mut Dsp,
     bytes: *const u8,
     len: u32,
-    when: i64,
+    when: ClockworkTimetag,
     origin: u32,
-    block_time: i64,
+    block_time: ClockworkTimetag,
 );
 /// Return 0 to take the asset, non-zero to refuse it.
 pub type DspAssetFn = unsafe extern "C" fn(dsp: *mut Dsp, asset: *const ClockworkAsset) -> c_int;

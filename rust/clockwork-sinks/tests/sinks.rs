@@ -24,6 +24,7 @@ use clockwork_sinks::profile::Layout as SinkLayout;
 use clockwork_sinks::queue::DEFAULT_CELL_BYTES;
 use clockwork_sinks::sink::{Stats, KIND_MIDI, KIND_OSC};
 use clockwork_sinks::CaptureEndpoint;
+use clockwork_osc::Timetag;
 
 /// One case at a time. See the module note.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -55,7 +56,7 @@ fn stats_of(h: u32) -> Stats {
 /// slice. The C edge — null bytes, a null out-pointer, a C string target —
 /// is covered by the ABI cases in this file, which are the ones that keep
 /// their `unsafe`.
-fn send(h: u32, bytes: &[u8], when: i64) -> bool {
+fn send(h: u32, bytes: &[u8], when: Timetag) -> bool {
     registry::acquire(h).is_some_and(|s| s.send(bytes, when))
 }
 
@@ -135,10 +136,10 @@ fn a_kind_this_build_cannot_reach_refuses_rather_than_swallowing() {
 fn a_message_sent_is_a_message_delivered() {
     let _g = serialise();
     let (h, ep) = manual(64);
-    assert!(send(h, &[0x90, 60, 100], 1));
+    assert!(send(h, &[0x90, 60, 100], Timetag::IMMEDIATELY));
     assert_eq!(ep.count(), 0, "nothing goes out before a drain");
     registry::pump(h, clockwork_sinks::time::now());
-    assert_eq!(ep.taken(), vec![(1i64, vec![0x90, 60, 100])]);
+    assert_eq!(ep.taken(), vec![(Timetag::IMMEDIATELY, vec![0x90, 60, 100])]);
     assert_eq!(stats_of(h), Stats { sent: 1, dropped: 0, late: 0, scheduled: 0, cancelled: 0 });
     clockwork_sink_close(h);
 }
@@ -148,8 +149,8 @@ fn an_empty_message_is_refused_and_is_not_a_drop() {
     let _g = serialise();
     let (h, ep) = manual(64);
     // SAFETY: a null pointer with length 0 is the ABI's "no bytes"; nothing is read.
-    assert_eq!(unsafe { clockwork_sink_send(h, core::ptr::null(), 0, 1) }, 0);
-    assert!(!send(h, &[], 1));
+    assert_eq!(unsafe { clockwork_sink_send(h, core::ptr::null(), 0, Timetag::IMMEDIATELY) }, 0);
+    assert!(!send(h, &[], Timetag::IMMEDIATELY));
     registry::pump(h, clockwork_sinks::time::now());
     assert_eq!(ep.count(), 0);
     // Nothing was lost, so nothing is counted lost.
@@ -165,13 +166,13 @@ fn messages_leave_in_time_order_however_they_were_sent() {
     // "immediately" in the middle, which is the earliest time there is.
     let (h, ep) = manual(64);
     let base = clockwork_sinks::time::now();
-    let sends: [(u8, i64); 6] = [
-        (0, (base + 5000) as i64),
-        (1, (base + 3000) as i64),
-        (2, (base + 4000) as i64),
-        (3, 1),
-        (4, (base + 1000) as i64),
-        (5, (base + 2000) as i64),
+    let sends: [(u8, Timetag); 6] = [
+        (0, base + 5000),
+        (1, base + 3000),
+        (2, base + 4000),
+        (3, Timetag::IMMEDIATELY),
+        (4, base + 1000),
+        (5, base + 2000),
     ];
     for (tag, when) in sends {
         assert!(send(h, &[tag], when));
@@ -181,10 +182,10 @@ fn messages_leave_in_time_order_however_they_were_sent() {
     assert_eq!(got, vec![3, 4, 5, 1, 2, 0]);
     // And each carried its own time to the endpoint unchanged: the header is
     // explicit that the endpoint, not the substrate, honours `when`.
-    let whens: Vec<i64> = ep.taken().iter().map(|(w, _)| *w).collect();
-    assert_eq!(whens, vec![1, (base + 1000) as i64, (base + 2000) as i64,
-                           (base + 3000) as i64, (base + 4000) as i64,
-                           (base + 5000) as i64]);
+    let whens: Vec<Timetag> = ep.taken().iter().map(|(w, _)| *w).collect();
+    assert_eq!(whens, vec![Timetag::IMMEDIATELY, base + 1000, base + 2000,
+                           base + 3000, base + 4000,
+                           base + 5000]);
     clockwork_sink_close(h);
 }
 
@@ -195,9 +196,9 @@ fn a_message_drained_after_its_time_is_counted_late() {
     let base = clockwork_sinks::time::now();
     // One already overdue, one due later, one immediate. Only the first was
     // ever un-honourable: the sink never had the chance.
-    assert!(send(h, b"overdue", (base - 100_000) as i64));
-    assert!(send(h, b"soon", (base + 1000) as i64));
-    assert!(send(h, b"now", 1));
+    assert!(send(h, b"overdue", base - 100_000));
+    assert!(send(h, b"soon", base + 1000));
+    assert!(send(h, b"now", Timetag::IMMEDIATELY));
 
     registry::pump(h, base);
     assert_eq!(ep.count(), 2, "the one due later is held, not sent early");
@@ -222,7 +223,7 @@ fn a_full_sink_drops_and_counts_and_does_not_block() {
     let (h, ep) = manual(CAPACITY);
 
     for i in 0..CAPACITY {
-        assert!(send(h, &[i as u8], 1), "{i}");
+        assert!(send(h, &[i as u8], Timetag::IMMEDIATELY), "{i}");
     }
 
     // "Does not block", stated so no machine can make it untrue: nothing ever
@@ -230,7 +231,7 @@ fn a_full_sink_drops_and_counts_and_does_not_block() {
     // all. Every one returns, refused, and is counted.
     let body = [0x90u8, 60, 100];
     for _ in 0..OVERFLOW {
-        assert!(!send(h, &body, 1), "a full sink must refuse");
+        assert!(!send(h, &body, Timetag::IMMEDIATELY), "a full sink must refuse");
     }
     assert_eq!(stats_of(h).dropped, OVERFLOW as u64, "every refusal is counted");
 
@@ -247,7 +248,7 @@ fn a_full_sink_drops_and_counts_and_does_not_block() {
 fn a_closed_or_stale_or_invented_handle_refuses_safely() {
     let _g = serialise();
     let (h, ep) = manual(64);
-    assert!(send(h, b"before", 1));
+    assert!(send(h, b"before", Timetag::IMMEDIATELY));
     clockwork_sink_close(h);
     clockwork_sink_close(h);          // twice is safe
 
@@ -255,7 +256,7 @@ fn a_closed_or_stale_or_invented_handle_refuses_safely() {
         assert_eq!(clockwork_sink_is_open(bad), 0, "{bad:#x}");
         assert_eq!(clockwork_sink_kind(bad), 0, "{bad:#x}");
         assert!(clockwork_sink_target(bad).is_null(), "{bad:#x}");
-        assert!(!send(bad, b"x", 1), "{bad:#x}");
+        assert!(!send(bad, b"x", Timetag::IMMEDIATELY), "{bad:#x}");
         let mut s = Stats { sent: 7, dropped: 7, late: 7, scheduled: 7, cancelled: 0 };
         // SAFETY: a live out-pointer; the handle is meant to be bogus.
         assert_eq!(unsafe { clockwork_sink_stats(bad, &mut s) }, 0, "{bad:#x}");
@@ -289,11 +290,11 @@ fn a_handle_that_outlives_its_sink_cannot_reach_the_next_occupant() {
     assert_ne!(second, 0, "the freed slot never came back");
     assert_ne!(second, first, "a reopened slot must not reissue the old handle");
 
-    assert!(send(second, b"mine", 1));
-    assert!(!send(first, b"yours", 1),
+    assert!(send(second, b"mine", Timetag::IMMEDIATELY));
+    assert!(!send(first, b"yours", Timetag::IMMEDIATELY),
                "a stale handle reached a live sink");
     registry::pump(second, clockwork_sinks::time::now());
-    assert_eq!(second_ep.unwrap().taken(), vec![(1i64, b"mine".to_vec())]);
+    assert_eq!(second_ep.unwrap().taken(), vec![(Timetag::IMMEDIATELY, b"mine".to_vec())]);
     assert_eq!(first_ep.count(), 0);
     registry::close_all();
 }
@@ -318,7 +319,7 @@ fn an_osc_sink_puts_bytes_on_a_real_socket_without_being_pumped() {
     assert_ne!(h, 0, "a resolvable loopback destination must open");
 
     let body = b"/hello\0\0,i\0\0\0\0\0\x2a";
-    assert!(send(h, body, 1));
+    assert!(send(h, body, Timetag::IMMEDIATELY));
 
     let mut buf = [0u8; 256];
     let n = listener.recv(&mut buf).expect("the drain thread delivered nothing");
@@ -354,8 +355,8 @@ fn an_osc_sink_honours_a_future_time_by_holding_it() {
     // 2 s out, in 32.32 fixed point: far enough that the sink sees it before
     // it is due (`late == 0` below) however long the machine takes to get it
     // there — the lead is a margin only a wedged hand-off uses up.
-    let due = clockwork_sinks::time::now() + 2 * (1u64 << 32);
-    assert!(send(h, b"late-bound", due as i64));
+    let due = clockwork_sinks::time::now() + 2 * (1i64 << 32);
+    assert!(send(h, b"late-bound", due));
 
     let mut buf = [0u8; 64];
     let n = listener.recv(&mut buf).expect("held forever");
@@ -363,8 +364,8 @@ fn an_osc_sink_honours_a_future_time_by_holding_it() {
     // make this later, so "not early" holds on any machine.
     let arrived = clockwork_sinks::time::now();
     assert_eq!(&buf[..n], b"late-bound");
-    let early_ms = (due as i128 - arrived as i128) * 1000 / (1i128 << 32);
-    assert!(arrived + (1u64 << 32) / 1000 >= due,
+    let early_ms = (due - arrived) * 1000 / (1i64 << 32);
+    assert!(arrived + (1i64 << 32) / 1000 >= due,
             "delivered {early_ms} ms before its time — early, which is the one \
              thing a sink must never be");
     assert_eq!(stats_of(h).late, 0, "released at its time is not late");
@@ -412,7 +413,7 @@ fn opening_the_same_target_twice_gives_two_independent_sinks() {
     assert_eq!(clockwork_sink_is_open(first), 0);
     assert_ne!(clockwork_sink_is_open(second), 0,
                "closing one sink must not close another on the same target");
-    assert!(send(second, b"still here", 1),
+    assert!(send(second, b"still here", Timetag::IMMEDIATELY),
                "the surviving sink still accepts");
 
     clockwork_sink_close(second);
@@ -422,15 +423,15 @@ fn opening_the_same_target_twice_gives_two_independent_sinks() {
 /// message went out on the wall clock, in the timetag's units.
 #[derive(Default)]
 struct SlowEndpoint {
-    out: Mutex<Vec<(u64, u64)>>,   // (when, delivered at)
+    out: Mutex<Vec<(Timetag, Timetag)>>,   // (when, delivered at)
 }
 
 impl clockwork_sinks::Endpoint for SlowEndpoint {
-    fn deliver(&self, bytes: &[u8], when: i64) -> clockwork_sinks::Delivery {
+    fn deliver(&self, bytes: &[u8], when: Timetag) -> clockwork_sinks::Delivery {
         if bytes.starts_with(b"/slow") {
             std::thread::sleep(Duration::from_secs(1));
         }
-        self.out.lock().unwrap().push((when as u64, clockwork_sinks::time::now()));
+        self.out.lock().unwrap().push((when, clockwork_sinks::time::now()));
         clockwork_sinks::Delivery::Sent
     }
 }
@@ -449,9 +450,9 @@ fn a_slow_delivery_does_not_make_the_drain_late_for_the_next_held_message() {
     // The drain spends a second delivering the first message, then sleeps
     // towards the second, due two seconds from now. It must measure that
     // sleep from the clock after the delivery, not before it.
-    let when = clockwork_sinks::time::now() + (2u64 << 32);
-    assert!(send(h, b"/slow", 1));
-    assert!(send(h, b"/timed", when as i64));
+    let when = clockwork_sinks::time::now() + (2i64 << 32);
+    assert!(send(h, b"/slow", Timetag::IMMEDIATELY));
+    assert!(send(h, b"/timed", when));
 
     let until = Instant::now() + Duration::from_secs(30);
     while ep.out.lock().unwrap().len() < 2 && Instant::now() < until {
@@ -461,7 +462,7 @@ fn a_slow_delivery_does_not_make_the_drain_late_for_the_next_held_message() {
     assert_eq!(out.len(), 2, "both delivered");
     let (w, at) = out[1];
     assert_eq!(w, when);
-    let late = Duration::from_secs_f64((at.saturating_sub(w)) as f64 / (1u64 << 32) as f64);
+    let late = Duration::from_secs_f64(at.seconds_from(w).max(0.0));
     assert!(late < Duration::from_millis(500), "delivered {late:?} after its time");
     clockwork_sink_close(h);
 }

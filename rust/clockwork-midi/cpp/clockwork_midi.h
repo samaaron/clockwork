@@ -16,6 +16,8 @@
 
 #include <stdint.h>
 
+#include "clockwork_timetag.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -76,12 +78,13 @@ void clockwork_midi_destroy(ClockworkMidi* handle);
 const char* clockwork_midi_handle_osc(ClockworkMidi* handle, const uint8_t* data, uint32_t len);
 
 /* One wire message from clockwork_midi_encode_out: the port ("*" = every open
- * output), the bytes, and the time the verb named with a trailing timetag (0 =
- * none). Strings are not NUL-terminated; pointers are valid during the call. */
+ * output), the bytes, and the time the verb named with a trailing timetag
+ * (immediately when it named none). Strings are not NUL-terminated; pointers
+ * are valid during the call. */
 typedef void (*clockwork_midi_encode_out_fn)(void* ctx,
                                        const uint8_t* port, uint32_t port_len,
                                        const uint8_t* bytes, uint32_t len,
-                                       uint64_t when);
+                                       ClockworkTimetag when);
 
 /* Decode one "/clockwork/midi/out/" send verb into its wire bytes without
  * sending them — one callback per message (channel 0 fans out to sixteen).

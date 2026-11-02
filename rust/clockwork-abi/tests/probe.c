@@ -71,6 +71,7 @@ int main(void) {
     F(ClockworkAudioTapReader, struct_bytes); F(ClockworkAudioTapReader, slot);
     F(ClockworkAudioTapReader, _internal); F(ClockworkAudioTapReader, _ring_frames);
 
+    S(ClockworkTimetag); F(ClockworkTimetag, ntp);
     S(ClockworkSinkStats);
     F(ClockworkSinkStats, sent); F(ClockworkSinkStats, dropped); F(ClockworkSinkStats, late);
     F(ClockworkSinkStats, scheduled); F(ClockworkSinkStats, cancelled);

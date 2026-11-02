@@ -20,6 +20,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use clockwork_schedule::ffi::*;
+use clockwork_osc::Timetag;
+
+// A time `offset` units after 1 January 2026.
+fn at(offset: i64) -> Timetag {
+    Timetag::from_ntp(3_976_214_400 << 32).plus(offset)
+}
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -97,18 +103,18 @@ fn construction_allocates_and_the_fire_path_does_not() {
     unsafe {
         // Pin one event at the far end so the pool never drains to zero: the
         // only way the churn below can keep succeeding is in-place compaction.
-        let pin = clockwork_sched_add(h, i64::MAX, 1, payload.as_ptr(), 64);
+        let pin = clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64);
         assert!(!pin.is_null());
 
         arm();
         let mut fired = 0usize;
         for i in 0..5_000i64 {
-            let m = clockwork_sched_add(h, i, 1, payload.as_ptr(), payload.len() as u32);
+            let m = clockwork_sched_add(h, at(i), 1, payload.as_ptr(), payload.len() as u32);
             assert!(!m.is_null(), "add refused at {i} — the pool stopped recycling");
             std::ptr::write(m.cast::<u32>(), meta);
 
             let mut ev = std::mem::MaybeUninit::<ClockworkSchedEvent>::uninit();
-            while clockwork_sched_pop_due(h, i, ev.as_mut_ptr()) == 1 {
+            while clockwork_sched_pop_due(h, at(i), ev.as_mut_ptr()) == 1 {
                 let e = ev.assume_init_ref();
                 assert_eq!(std::ptr::read(e.meta.cast::<u32>()), meta);
                 clockwork_sched_release(h, e.slot);
@@ -121,9 +127,10 @@ fn construction_allocates_and_the_fire_path_does_not() {
                 clockwork_sched_request_clear(h);
                 assert_eq!(clockwork_sched_drain_pending_clear(h), 1);
                 // The clear took the pin too; put it back.
-                assert!(!clockwork_sched_add(h, i64::MAX, 1, payload.as_ptr(), 64).is_null());
+                assert!(!clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64).is_null());
             }
-            let _ = clockwork_sched_next_time(h);
+            let mut next = Timetag::default();
+            let _ = clockwork_sched_next_time(h, &mut next);
             let _ = clockwork_sched_size(h);
             let _ = clockwork_sched_data_used(h);
         }
@@ -160,11 +167,11 @@ fn parsing_a_wire_message_allocates_nothing() {
         for _ in 0..1000 {
             let p = clockwork_sched_parse(m.as_ptr(), m.len() as u32);
             assert_eq!(p.ok, 1);
-            assert_eq!(p.when, 42);
+            assert_eq!(p.when.ntp(), 42);
             assert_eq!(p.blob_len, 8);
             assert_eq!(clockwork_sched_is_bundle(bundle.as_ptr(), bundle.len() as u32), 1);
-            assert_eq!(clockwork_sched_bundle_timetag(bundle.as_ptr()), 1);
-            assert_eq!(clockwork_sched_ntp_to_timetag(3600.5), (3600i64 << 32) | 0x8000_0000);
+            assert_eq!(clockwork_sched_bundle_timetag(bundle.as_ptr()).ntp(), 1);
+            assert_eq!(clockwork_sched_ntp_to_timetag(3600.5).ntp(), (3600u64 << 32) | 0x8000_0000);
         }
     }
     let n = disarm();
@@ -204,10 +211,10 @@ fn in_place_construction_allocates_nothing_and_still_schedules() {
     // And the fire path still works, still without allocating.
     let msg = [1u8, 2, 3, 4, 5, 6, 7, 8];
     for i in 0..16 {
-        assert!(s.add(1_000 + i as i64, 7, &msg).is_some(), "add {i} refused");
+        assert!(s.add(at(1_000 + i as i64), 7, &msg).is_some(), "add {i} refused");
     }
     let mut fired = 0;
-    while s.pop_due(2_000).is_some() {
+    while s.pop_due(at(2_000)).is_some() {
         fired += 1;
     }
     let allocs = disarm();

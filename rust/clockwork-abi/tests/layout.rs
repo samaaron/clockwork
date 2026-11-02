@@ -20,6 +20,7 @@ use clockwork_abi::sink::*;
 use clockwork_abi::lanes;
 use clockwork_abi::arena::*;
 use clockwork_abi::embed::*;
+use clockwork_abi::timetag::*;
 
 macro_rules! expect {
     ($m:ident, $T:ty { $($f:ident),* $(,)? }) => {{
@@ -77,6 +78,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         struct_bytes, sample_rate, engine_frames, dac_ntp, output_latency_frames,
     });
     expect!(mine, ClockworkAudioTapReader { struct_bytes, slot, _internal, _ring_frames });
+    expect!(mine, ClockworkTimetag { ntp });
     expect!(mine, ClockworkSinkStats { sent, dropped, late, scheduled, cancelled });
     expect!(mine, ClockworkStatus {});
     expect!(mine, ClockworkRegionId {});

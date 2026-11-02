@@ -24,6 +24,7 @@ use std::slice;
 use crate::profile::{self, Class};
 use crate::registry;
 use crate::sink::Stats;
+use clockwork_osc::Timetag;
 
 // ── Opening and closing ─────────────────────────────────────────────────────
 
@@ -134,7 +135,7 @@ pub extern "C" fn clockwork_sink_target(sink: c_uint) -> *const c_char {
 /// `bytes` is valid for `len` reads, or NULL when `len` is 0.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sink_send(
-    sink: c_uint, bytes: *const u8, len: c_uint, when: i64,
+    sink: c_uint, bytes: *const u8, len: c_uint, when: Timetag,
 ) -> c_int {
     let Some(s) = registry::acquire(sink) else { return 0 };
     if bytes.is_null() || len == 0 {

@@ -13,26 +13,24 @@
 #pragma once
 
 #include "clock/clock_math.h"
+#include "clock/timetag.h"
 
 #include <chrono>
 #include <cstdint>
 
 namespace clockwork_host {
 
-inline int64_t ntp_to_osc_timetag(double ntp_seconds) {
-    return clockwork::ntpToOscTimetag(ntp_seconds);
-}
-
 // Current time as an OSC timetag from the system clock.
-inline int64_t osc_now() {
+inline clockwork::Timetag osc_now() {
     using namespace std::chrono;
     auto now = system_clock::now().time_since_epoch();
     int64_t us = duration_cast<microseconds>(now).count();
     double unix_seconds = static_cast<double>(us) / 1'000'000.0;
-    return ntp_to_osc_timetag(unix_seconds + clockwork::kNtpEpochOffset);
+    return clockwork::Timetag::fromNtpSeconds(unix_seconds + clockwork::kNtpEpochOffset);
 }
 
-// Converts the difference between two timetags (`ticks`, in units of
+// Converts the difference between two timetags (`ticks`, a time minus a
+// time, in units of
 // 1/2^32 s) to microseconds, rounded up so a wait for it ends at or after the
 // later timetag. Returns 0 for a difference that is not positive.
 inline std::chrono::microseconds osc_interval(int64_t ticks) {

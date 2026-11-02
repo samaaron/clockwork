@@ -22,7 +22,7 @@
  */
 #include "DsoTestUtils.h"
 #include "plugin_host.h"
-#include "clock/clock_math.h"   // ntpToOscTimetag: a block time both formats are placed at
+#include "clock/timetag.h"   // Timetag: a block time both formats are placed at
 #include "shared_memory.h"      // ClockworkClockState: the one clock both are handed
 
 #include <catch2/catch_test_macros.hpp>
@@ -68,7 +68,7 @@ std::vector<std::vector<float>> rampIn(uint32_t channels, uint32_t frames) {
 // Run one block at `block_time` and return the output, channel-major.
 std::vector<std::vector<float>> runBlockAt(struct HostedPlugin* p,
                                            const std::vector<std::vector<float>>& in,
-                                           uint32_t frames, int64_t block_time) {
+                                           uint32_t frames, ClockworkTimetag block_time) {
     const uint32_t ch = static_cast<uint32_t>(in.size());
     std::vector<std::vector<float>> out(ch, std::vector<float>(frames, -99.0f));
     std::vector<const float*> inp(ch);
@@ -81,7 +81,7 @@ std::vector<std::vector<float>> runBlockAt(struct HostedPlugin* p,
 std::vector<std::vector<float>> runBlock(struct HostedPlugin* p,
                                          const std::vector<std::vector<float>>& in,
                                          uint32_t frames) {
-    return runBlockAt(p, in, frames, 0);
+    return runBlockAt(p, in, frames, ClockworkTimetag{});
 }
 
 } // namespace
@@ -295,7 +295,7 @@ TEST_CASE("plugin parity: both formats are told the same musical time", "[plugin
     plugin_set_clock(vst3.p, &clock);
 
     const auto in = rampIn(2, kBlock);
-    const int64_t at = clockwork::ntpToOscTimetag(2017.25);
+    const ClockworkTimetag at = clockwork::Timetag::fromNtpSeconds(2017.25).abi();
     runBlockAt(clap.p, in, kBlock, at);
     runBlockAt(vst3.p, in, kBlock, at);
 
