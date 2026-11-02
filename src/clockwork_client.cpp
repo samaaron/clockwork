@@ -854,6 +854,38 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* handle, const Clockwor
     return rd.copy_window(end, frames, out, out_channels);
 }
 
+uint32_t clockwork_client_scope_read(ClockworkClient* handle, uint32_t slot, uint32_t frames,
+                                     float* out, uint32_t out_floats, uint32_t* out_channels) {
+    if (out_channels) *out_channels = 0;
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || frames == 0 || slot >= c->L.audio_slot_count) return 0;
+    auto* buf = reinterpret_cast<shm_audio_buffer*>(
+        c->base + c->L.audio_offset + static_cast<size_t>(slot) * c->L.audio_slot_bytes);
+    if (buf->enabled.load(std::memory_order_acquire) == 0) return 0;
+    // The slot's header is the writer's, possibly another process's: clamp
+    // what it says to the ring the engine published, so a torn or corrupt
+    // header cannot index past it.
+    const uint32_t channels = buf->channels;
+    uint32_t cap = buf->capacity_frames;
+    if (channels == 0 || channels > c->L.audio_channels) return 0;
+    if (cap == 0 || cap > c->L.audio_frames) cap = c->L.audio_frames;
+    const uint64_t writer = buf->write_position.load(std::memory_order_acquire);
+    uint64_t n = frames;
+    if (n > out_floats / channels) n = out_floats / channels;
+    if (n > cap) n = cap;
+    if (n > writer) n = writer;
+    if (n == 0) return 0;
+    const float* ring = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(buf) + c->L.audio_header_bytes);
+    const uint32_t at = static_cast<uint32_t>((writer - n) % cap);
+    const uint32_t first = static_cast<uint32_t>(n < cap - at ? n : cap - at);
+    std::memcpy(out, ring + static_cast<size_t>(at) * channels, static_cast<size_t>(first) * channels * sizeof(float));
+    if (first < n)
+        std::memcpy(out + static_cast<size_t>(first) * channels, ring,
+                    static_cast<size_t>(n - first) * channels * sizeof(float));
+    if (out_channels) *out_channels = channels;
+    return static_cast<uint32_t>(n);
+}
+
 double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_seconds) {
     if (!clock) return 0.0;
     return clockwork::beatAt(ntp_seconds, clock->beat_origin_ntp, clock->bpm);

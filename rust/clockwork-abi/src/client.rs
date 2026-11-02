@@ -207,4 +207,18 @@ extern "C" {
         out: *mut f32,
         out_channels: *mut u32,
     ) -> u32;
+    /// The device's scope slots: `CLOCKWORK_TAP_OUT` / `CLOCKWORK_TAP_IN`.
+    pub fn clockwork_client_scope_read(
+        c: *mut ClockworkClient,
+        slot: u32,
+        frames: u32,
+        out: *mut f32,
+        out_floats: u32,
+        out_channels: *mut u32,
+    ) -> u32;
 }
+
+/// The scope slot holding what left for the device (`CLOCKWORK_TAP_OUT`).
+pub const CLOCKWORK_TAP_OUT: u32 = 0;
+/// The scope slot holding what arrived from the device (`CLOCKWORK_TAP_IN`).
+pub const CLOCKWORK_TAP_IN: u32 = 1;

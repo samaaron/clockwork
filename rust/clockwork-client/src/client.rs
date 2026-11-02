@@ -14,7 +14,7 @@ use clockwork_abi::client::{
     clockwork_client_close, clockwork_client_default_endpoint, clockwork_client_info,
     clockwork_client_open_memory, clockwork_client_open_shm, clockwork_client_open_shm_handle,
     clockwork_client_open_shm_peer,
-    clockwork_client_poll, clockwork_client_region, clockwork_client_send,
+    clockwork_client_poll, clockwork_client_region, clockwork_client_scope_read, clockwork_client_send,
     clockwork_client_send_abort, clockwork_client_send_begin, clockwork_client_send_commit,
     clockwork_client_tap_close, clockwork_client_tap_missed, clockwork_client_tap_open,
     clockwork_client_tap_poll, ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
@@ -27,7 +27,7 @@ use clockwork_abi::client::{
 
 use crate::error::{check, refused, Error, Result};
 use crate::metrics::{Metrics, NativeStats};
-use crate::audio_tap::AudioTap;
+use crate::audio_tap::{AudioTap, AudioTapRead};
 
 /// How many messages one [`Client::poll`] takes at most, unless
 /// [`Client::set_poll_batch`] says otherwise.
@@ -353,6 +353,23 @@ impl Client {
     /// no such slot.
     pub fn audio_tap(&self, slot: u32) -> Result<AudioTap<'_>> {
         AudioTap::open(self, slot)
+    }
+
+    /// The newest `frames` of the device's scope slot `slot` —
+    /// [`clockwork_abi::client::CLOCKWORK_TAP_OUT`], what left for the
+    /// device, or `CLOCKWORK_TAP_IN`, what arrived — interleaved into `out`
+    /// at the slot's channel count. Real frames come back as `frames`;
+    /// 0 for a slot that is not live, with `out` untouched.
+    pub fn scope(&self, slot: u32, frames: usize, out: &mut [f32]) -> AudioTapRead {
+        let mut channels = 0u32;
+        let floats = u32::try_from(out.len()).unwrap_or(u32::MAX);
+        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+        // SAFETY: a live handle; `out` holds `floats` floats and the call
+        // writes no more than that.
+        let got = unsafe {
+            clockwork_client_scope_read(self.as_ptr(), slot, frames, out.as_mut_ptr(), floats, &mut channels)
+        };
+        AudioTapRead { frames: got as usize, channels: channels as usize }
     }
 }
 

@@ -622,6 +622,23 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* c, const ClockworkAudi
                                      uint64_t end, uint32_t frames,
                                      float* out, uint32_t* out_channels);
 
+/* ── The scope ───────────────────────────────────────────────────────────────
+ *
+ * The device's own two rings: what left for it (CLOCKWORK_TAP_OUT) and what
+ * arrived from it (CLOCKWORK_TAP_IN), clockwork_arena.h. Clockwork writes
+ * both inside every tick, on every host, whatever the guest does — the
+ * audio taps above are the guest's and the tracks'; these are the device's,
+ * and they are how a client draws or meters the master mix.
+ *
+ * Copy the newest `frames` frames of `slot` into `out`, interleaved at the
+ * slot's channel count, which comes back through `out_channels`. `out`
+ * holds `out_floats` floats, and no more than out_floats / channels frames
+ * are copied. Returns the frames copied: fewer than asked when the ring has
+ * not yet been written that far, 0 (with `out` untouched) for a slot that
+ * is not live or does not exist. */
+uint32_t clockwork_client_scope_read(ClockworkClient* c, uint32_t slot, uint32_t frames,
+                                     float* out, uint32_t out_floats, uint32_t* out_channels);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
