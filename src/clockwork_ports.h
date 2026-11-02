@@ -82,10 +82,13 @@ ClockworkPort clockwork_port_open(const char* name, ClockworkPortDirection dir,
                       uint32_t channels, uint32_t capacity_frames);
 
 /*
- * Close a port. The slot goes silent immediately and is NOT reused until
- * every reader has been told — reads answer silence and writes are discarded
- * in the meantime. Safe to call while the audio thread is running; safe to
- * call twice.
+ * Close a port. The slot goes silent immediately: reads answer silence and
+ * writes are discarded. It returns once the audio thread is out of the port
+ * and out of its transfer signal, so whatever the signal uses, and the memory
+ * a shared port lives in, may be freed after it. That wait is one transfer at
+ * most, never a block. Safe to call while the audio thread is running; safe
+ * to call twice; never from inside the port's own signal, which it would
+ * wait on.
  */
 void clockwork_port_close(ClockworkPort port);
 

@@ -27,3 +27,7 @@ portable-atomic = { version = "1", features = ["fallback"] }
 # and closing without a lock on the read path. Shared with the event sinks,
 # which want the identical rule for a different payload.
 clockwork-slots = { path = "../clockwork-slots" }
+clockwork-wait = { path = "../clockwork-wait" }
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"

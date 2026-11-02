@@ -16,11 +16,10 @@
 //! and the ring depth chosen at `clockwork_port_open` is exactly how much slowness
 //! the stream can absorb before it is audible.
 //!
-//! The worker polls rather than waiting on a condition variable, because being
-//! signalled would mean the audio thread signalling it — a syscall on the
-//! audio thread to save a millisecond of latency on a path whose latency is
-//! already a ring's depth. It sleeps only when the ring is full or the file is
-//! done.
+//! It sleeps only when the ring is full or the file is done, and wakes when
+//! something changes: the audio thread's transfer makes room for a chunk
+//! (`clockwork_ports::wake`), the stop comes, or the port closes. While the
+//! reader is not asking, this costs the audio thread a fence and a load.
 //!
 //! # Channel and rate mismatch
 //!
@@ -43,10 +42,9 @@ use crate::wav::WavReader;
 /// Frames per disk read. Big enough that the syscall is not the cost, small
 /// enough that one read cannot monopolise a shallow ring.
 const CHUNK_FRAMES: usize = 4096;
-/// How long to wait when there is nothing useful to do.
-const IDLE: std::time::Duration = std::time::Duration::from_millis(2);
 
 pub struct DiskSource {
+    port: u32,
     stop: Arc<AtomicBool>,
     eof: Arc<AtomicBool>,
     produced: Arc<AtomicU64>,
@@ -82,12 +80,12 @@ impl DiskSource {
             let eof = Arc::clone(&eof);
             let produced = Arc::clone(&produced);
             std::thread::Builder::new()
-                .name("clockwork-disk-source".into())
+                .name("cw-disk-source".into())
                 .spawn(move || run(reader, port, port_channels as usize, stop, eof, produced))?
         };
 
         Ok(DiskSource {
-            stop, eof, produced, total_frames, sample_rate, file_channels,
+            port, stop, eof, produced, total_frames, sample_rate, file_channels,
             worker: Some(worker),
         })
     }
@@ -104,6 +102,7 @@ impl DiskSource {
 impl Drop for DiskSource {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        ports::wake(self.port);
         if let Some(w) = self.worker.take() { let _ = w.join(); }
     }
 }
@@ -117,10 +116,19 @@ fn run(
     let mut to_port = vec![0.0f32; CHUNK_FRAMES * port_channels];
 
     while !stop.load(Ordering::Acquire) {
-        if eof.load(Ordering::Acquire) { std::thread::sleep(IDLE); continue; }
+        if eof.load(Ordering::Acquire) {
+            // The whole file is in the port: nothing to do until the stop.
+            ports::park(port, &stop);
+            break;
+        }
 
         let room = ports::writable(port) as usize;
-        if room == 0 { std::thread::sleep(IDLE); continue; }
+        if room == 0 {
+            // Sleep until there is room for a chunk. False means the stop, or
+            // the port has gone.
+            if !ports::wait_writable(port, CHUNK_FRAMES as u32, &stop) { break; }
+            continue;
+        }
         let want = core::cmp::min(room, CHUNK_FRAMES);
 
         let got = match reader.read_frames(&mut from_file, want) {
@@ -155,7 +163,10 @@ fn run(
         while done < got {
             if stop.load(Ordering::Acquire) { return; }
             let took = ports::produce(port, &to_port[done * port_channels..got * port_channels]) as usize;
-            if took == 0 { std::thread::sleep(IDLE); continue; }
+            if took == 0 {
+                if !ports::wait_writable(port, (got - done) as u32, &stop) { return; }
+                continue;
+            }
             done += took;
             produced.fetch_add(took as u64, Ordering::Relaxed);
         }

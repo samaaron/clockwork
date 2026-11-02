@@ -29,9 +29,9 @@ use clockwork_ports::registry as ports;
 use crate::wav::WavWriter;
 
 const CHUNK_FRAMES: usize = 4096;
-const IDLE: std::time::Duration = std::time::Duration::from_millis(2);
 
 pub struct DiskSink {
+    port: u32,
     stop: Arc<AtomicBool>,
     written: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
@@ -59,13 +59,13 @@ impl DiskSink {
             let stop = Arc::clone(&stop);
             let written = Arc::clone(&written);
             std::thread::Builder::new()
-                .name("clockwork-disk-sink".into())
+                .name("cw-disk-sink".into())
                 .spawn(move || {
                     run(writer, port, port_channels as usize, channels as usize,
                         stop, written)
                 })?
         };
-        Ok(DiskSink { stop, written, worker: Some(worker) })
+        Ok(DiskSink { port, stop, written, worker: Some(worker) })
     }
 
     pub fn frames_written(&self) -> u64 { self.written.load(Ordering::Relaxed) }
@@ -74,6 +74,7 @@ impl DiskSink {
 impl Drop for DiskSink {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        ports::wake(self.port);
         if let Some(w) = self.worker.take() { let _ = w.join(); }
     }
 }
@@ -98,7 +99,11 @@ fn run(
                 if ports::readable(port) == 0 { break; }
                 continue;
             }
-            std::thread::sleep(IDLE);
+            // Sleep until a chunk is there to write. False means the stop, or
+            // the port has gone, and nothing more can arrive.
+            if !ports::wait_readable(port, CHUNK_FRAMES as u32, &stop) && !stop.load(Ordering::Acquire) {
+                break;
+            }
             continue;
         }
         let want = core::cmp::min(avail, CHUNK_FRAMES);

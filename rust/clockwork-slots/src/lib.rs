@@ -61,11 +61,22 @@
 //!   publishes `FREE`. That is the whole of it — no lock, no epoch list, no
 //!   hazard pointer, and no deferred-free thread.
 //!
-//! Reclaim is attempted by `close` (the common case: the audio thread is not
-//! inside, so it frees immediately) and again by every `open` as it sweeps for
-//! a slot. An entry closed while a reader happened to be inside stays
-//! `CLOSED`, costing its memory, until the next `open` sweeps past it. Bounded
-//! by the table size, and never a correctness problem.
+//! # A close returns once nobody is inside
+//!
+//! `close` reclaims before it returns. In the common case nobody is inside and
+//! it frees at once. Otherwise it blocks on the slot's `drained` word until
+//! the reader inside leaves (one transfer, microseconds); the last reader to
+//! leave a closed slot bumps that word. Leaving costs a reader nothing more:
+//! `fetch_sub` returns the old word, and only a reader that finds the slot
+//! `CLOSED` with itself as the last one in does anything else.
+//!
+//! So once `close` returns, nothing a reader reaches through the occupant
+//! (memory the caller owns, a callback and its context) is in use, and the
+//! caller may free it. A thread must not close a slot it is inside: that
+//! close would wait on itself.
+//!
+//! Every `open` still sweeps for closed slots, so a slot left `CLOSED` by any
+//! other path does not hold its memory for ever.
 //!
 //! # The generation is not decoration
 //!
@@ -78,11 +89,19 @@
 //! first of those could alias; nothing here opens at that rate, and the
 //! alternative is a 64-bit handle neither header has.
 
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicPtr, Ordering};
 // 64-bit atomics from portable-atomic: native where the ISA has them, a
 // critical section on Xtensa — where the table is only ever touched from one
 // thread anyway.
+#[cfg(not(loom))]
 use portable_atomic::AtomicU64;
+// Under loom the same code runs on loom's atomics, which the loom tests at
+// the end explore interleaving by interleaving.
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+
+use clockwork_wait::WaitWord;
 
 /// 0 is never a valid handle in either discipline, so it doubles as "none".
 pub const HANDLE_NONE: u32 = 0;
@@ -123,11 +142,19 @@ pub enum SlotState {
 struct Slot<T> {
     word: AtomicU64,
     occupant: AtomicPtr<T>,
+    /// What a close waits on: the last reader to leave a closed slot bumps it.
+    drained: WaitWord,
 }
 
 impl<T> Slot<T> {
+    #[cfg(not(loom))]
     const fn new() -> Slot<T> {
-        Slot { word: AtomicU64::new(0), occupant: AtomicPtr::new(core::ptr::null_mut()) }
+        Slot { word: AtomicU64::new(0), occupant: AtomicPtr::new(core::ptr::null_mut()), drained: WaitWord::new() }
+    }
+
+    #[cfg(loom)]
+    fn new() -> Slot<T> {
+        Slot { word: AtomicU64::new(0), occupant: AtomicPtr::new(core::ptr::null_mut()), drained: WaitWord::new() }
     }
 }
 
@@ -163,7 +190,11 @@ impl<T> core::ops::Deref for Held<'_, T> {
 impl<T> Drop for Held<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        self.slot.word.fetch_sub(1, Ordering::Release);
+        let was = self.slot.word.fetch_sub(1, Ordering::Release);
+        // The last reader out of a closed slot wakes the close waiting on it.
+        if state(was) == STATE_CLOSED && refs(was) == 1 {
+            self.slot.drained.bump();
+        }
     }
 }
 
@@ -173,11 +204,20 @@ impl<T, const N: usize> Default for SlotTable<T, N> {
 
 impl<T, const N: usize> SlotTable<T, N> {
     /// A table of empty slots, buildable in a `static`.
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
         // N must fit the handle's 16-bit index field. A const assert rather
         // than a runtime one: a table too large is a compile-time mistake.
         assert!(N > 0 && N <= 0xffff);
         SlotTable { slots: [const { Slot::new() }; N] }
+    }
+
+    /// Under loom, whose atomics are made at run time, so the table cannot be
+    /// const.
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        assert!(N > 0 && N <= 0xffff);
+        SlotTable { slots: core::array::from_fn(|_| Slot::new()) }
     }
 
     /// How many slots there are, occupied or not.
@@ -300,8 +340,9 @@ impl<T, const N: usize> SlotTable<T, N> {
         HANDLE_NONE
     }
 
-    /// Close a slot: shut to new readers immediately, freed as soon as nobody
-    /// is inside. Idempotent, and safe against a stale or never-valid handle.
+    /// Close a slot: shut to new readers immediately, then wait for any reader
+    /// inside to leave, and free it. Idempotent, and safe against a stale or
+    /// never-valid handle. Never from a thread inside the slot.
     pub fn close(&self, handle: u32) {
         let Some((idx, gen)) = self.decode(handle) else { return };
         let slot = &self.slots[idx];
@@ -318,7 +359,12 @@ impl<T, const N: usize> SlotTable<T, N> {
             }
             // Lost to an enter or a leave changing the refcount; retry.
         }
-        // The common case: nothing was inside, so the memory goes back now.
+        // Nobody enters now. In the common case nobody is inside either;
+        // otherwise the last reader out bumps `drained`.
+        slot.drained.wait_for(|| {
+            let w = slot.word.load(Ordering::Acquire);
+            generation(w) != gen || state(w) != STATE_CLOSED || refs(w) == 0
+        }, None);
         self.try_reclaim(idx);
     }
 
@@ -391,7 +437,7 @@ unsafe impl<T: Send + Sync, const N: usize> Sync for SlotTable<T, N> {}
 // permits.
 unsafe impl<T: Send, const N: usize> Send for SlotTable<T, N> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
@@ -419,7 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_slot_stays_reserved_while_a_reader_is_inside_it() {
+    fn a_close_waits_for_the_reader_inside_and_the_slot_stays_reserved_meanwhile() {
+        use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
         let _g = LOCK.lock().unwrap();
         TABLE.close_all();
         // The property the whole one-word slot design exists for, tested
@@ -432,28 +479,40 @@ mod tests {
         assert_ne!(h, HANDLE_NONE);
         let held = TABLE.acquire(h).expect("an open slot must be enterable");
         assert_eq!(TABLE.slot_refs(h), Some(1));
+        let idx = TABLE.slot_index(h).unwrap();
 
-        TABLE.close(h);
-        // Closed to new readers immediately — that is "goes silent at once".
-        assert!(TABLE.acquire(h).is_none(), "a closed slot must not admit a reader");
-        // But NOT free: the reader inside is still walking it, and reclaiming
-        // here is a use-after-free on the audio thread.
-        assert_eq!(TABLE.slot_state(h), Some(SlotState::Closed));
-        assert_eq!(TABLE.slot_refs(h), Some(1));
-        assert_eq!(held.tag, 2, "the occupant behind the guard is intact");
+        let closed = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let closer = s.spawn(|| {
+                TABLE.close(h);
+                closed.store(true, SeqCst);
+            });
+            // The close has shut the slot and waits for the reader to leave.
+            while TABLE.slots[idx].drained.waiters.load(SeqCst) == 0 {
+                std::thread::yield_now();
+            }
+            assert!(!closed.load(SeqCst), "the close returned with a reader inside");
+            // Closed to new readers immediately — that is "goes silent at once".
+            assert!(TABLE.acquire(h).is_none(), "a closed slot must not admit a reader");
+            // But NOT free: the reader inside is still walking it, and
+            // reclaiming here is a use-after-free on the audio thread.
+            assert_eq!(TABLE.slot_state(h), Some(SlotState::Closed));
+            assert_eq!(TABLE.slot_refs(h), Some(1));
+            assert_eq!(held.tag, 2, "the occupant behind the guard is intact");
 
-        // A slot in that state must not be handed to anyone else either.
-        let other = TABLE.open(|| Thing { tag: 3 });
-        assert_ne!(other, HANDLE_NONE);
-        assert_ne!(TABLE.slot_index(other), TABLE.slot_index(h),
-                   "a slot with a reader inside was reused");
+            // A slot in that state must not be handed to anyone else either.
+            let other = TABLE.open(|| Thing { tag: 3 });
+            assert_ne!(other, HANDLE_NONE);
+            assert_ne!(TABLE.slot_index(other), Some(idx), "a slot with a reader inside was reused");
 
-        drop(held);
-        assert_eq!(TABLE.slot_refs(h), Some(0));
-        // Now, and only now, is it genuinely free — swept by the next open.
-        assert!(TABLE.try_reclaim(TABLE.slot_index(h).unwrap()));
-        assert_eq!(TABLE.slot_state(h), Some(SlotState::Free));
-        TABLE.close(other);
+            // The reader leaves: the close returns, and the slot is free by
+            // then, its occupant dropped on the closer's thread.
+            drop(held);
+            closer.join().unwrap();
+            assert!(closed.load(SeqCst));
+            assert_eq!(TABLE.slot_state(h), Some(SlotState::Free));
+            TABLE.close(other);
+        });
     }
 
     #[test]
@@ -495,5 +554,49 @@ mod tests {
         }
         assert_eq!(TABLE.open(|| Thing { tag: 7 }), HANDLE_NONE);
         for h in hs { TABLE.close(h); }
+    }
+}
+
+// Explores every interleaving of a reader leaving and a close waiting for it,
+// on loom's atomics. A close that frees under a reader fails the reader's
+// check, and a close that is never woken deadlocks, which loom reports. Run
+// with: RUSTFLAGS="--cfg loom" cargo test --release --lib -p clockwork-slots.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::sync::atomic::AtomicBool;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    // An occupant that says when it has been dropped.
+    struct Probe(Arc<AtomicBool>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_close_frees_only_after_the_reader_inside_has_left_and_is_never_left_waiting() {
+        loom::model(|| {
+            let table = Arc::new(SlotTable::<Probe, 2>::new());
+            let freed = Arc::new(AtomicBool::new(false));
+            let h = {
+                let freed = freed.clone();
+                table.open(move || Probe(freed))
+            };
+            let reader = {
+                let (table, freed) = (table.clone(), freed.clone());
+                thread::spawn(move || {
+                    if let Some(held) = table.acquire(h) {
+                        assert!(!freed.load(Ordering::SeqCst), "freed under a reader");
+                        drop(held);
+                    }
+                })
+            };
+            table.close(h);
+            assert!(freed.load(Ordering::SeqCst), "the close returned before freeing");
+            reader.join().unwrap();
+        });
     }
 }

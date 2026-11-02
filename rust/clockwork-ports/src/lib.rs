@@ -15,6 +15,8 @@
 //!   `src/clockwork_event_sink.h` wants the same rule for a different payload and
 //!   two copies of a lock-free lifetime discipline is one too many.
 //! * [`ffi`] — the `#[no_mangle] extern "C"` surface clockwork calls.
+//! * [`wake`] — how an endpoint waits on the audio thread: it asks for
+//!   frames, and the transfer that brings them wakes it.
 //!
 //! # What is deliberately absent
 //!
@@ -32,8 +34,15 @@
 //! on the realtime thread, where a use-after-free is a crash in the audio
 //! callback and memory safety is worth the most.
 
+// Under loom only the endpoint's handshake is built: the table is a static,
+// and loom's atomics are made at run time, so they cannot live in one.
+#[cfg(not(loom))]
 pub mod ffi;
+#[cfg(not(loom))]
 pub mod registry;
+#[cfg(not(loom))]
 pub mod ring;
+pub mod wake;
 
+#[cfg(not(loom))]
 pub use registry::{DIR_SINK, DIR_SOURCE, MAX_PORTS};

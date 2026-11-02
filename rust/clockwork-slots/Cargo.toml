@@ -20,3 +20,7 @@ crate-type = ["rlib"]
 # (Xtensa): real atomics where the ISA has them, a critical section where it
 # does not — which is only ever the device, where these counters are idle.
 portable-atomic = { version = "1", features = ["fallback"] }
+clockwork-wait = { path = "../clockwork-wait" }
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
