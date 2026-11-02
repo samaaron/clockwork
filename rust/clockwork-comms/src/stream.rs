@@ -425,6 +425,10 @@ type Writer = Arc<Mutex<Box<dyn ConnWriter>>>;
 struct Conn {
     writer: Writer,
     open: bool,
+    /// What the connection's reader sleeps on beside its socket. Waking it
+    /// ends the reader's sleep on every platform: a local shutdown does not
+    /// end a WSAPoll on Windows.
+    wake: Arc<ReadyWait>,
 }
 
 /// Whether a connection that just presented the secret may open: under the
@@ -448,8 +452,8 @@ struct Shared {
     readers: Mutex<Vec<JoinHandle<()>>>,
     secret: ClockworkCommsSecret,
     refused: AtomicU64,
-    /// The accept thread blocks on this until a connection arrives, and each
-    /// reader until its client sends. Stopping the server wakes them all.
+    /// The accept thread blocks on this until a connection arrives. Stopping
+    /// the server wakes it; each reader has its own ([`Conn::wake`]).
     wait: ReadyWait,
 }
 
@@ -472,14 +476,15 @@ impl StreamServerImpl for SocketServer {
         };
         // The frame did not make it and retrying is pointless: the peer is gone,
         // or a refusal outlasted the budget mid-frame and this connection's
-        // framing is now suspect. Evict and shut it down; the reader sees the
-        // connection end and fires on_closed, pruning the client from every
-        // audience. The logged error kind says which: WouldBlock/TimedOut is a
-        // client that went WRITE_TIMEOUT without reading, anything else failed
-        // outright.
+        // framing is now suspect. Evict it, shut it down, and wake its reader,
+        // which finds the connection gone and fires on_closed, pruning the
+        // client from every audience. The logged error kind says which:
+        // WouldBlock/TimedOut is a client that went WRITE_TIMEOUT without
+        // reading, anything else failed outright.
         clockwork_log::log!("[osc] stream conn {conn_id} dropped — reply write failed: {err}");
         if let Some(c) = self.shared.conns.lock().unwrap().remove(&conn_id) {
             c.writer.lock().unwrap().shutdown_both();
+            c.wake.wake();
         }
         false
     }
@@ -498,9 +503,10 @@ impl Drop for SocketServer {
         if let Some(j) = self.accept_join.take() {
             let _ = j.join();
         }
-        // The accept thread has exited and every reader has been woken. Shut
-        // each connection down so its client sees the disconnect at once.
+        // The accept thread has exited. Wake every reader, and shut each
+        // connection down so its client sees the disconnect at once.
         for c in self.shared.conns.lock().unwrap().values() {
+            c.wake.wake();
             c.writer.lock().unwrap().shutdown_both();
         }
         for j in self.shared.readers.lock().unwrap().drain(..) {
@@ -514,9 +520,10 @@ impl Drop for SocketServer {
 
 // The reader blocks until its client sends or disconnects, or the server
 // stops. Until the client presents the secret, it also wakes at
-// AUTH_DEADLINE. Stopping the server wakes the wait directly on every
-// platform, so the reader does not rely on a shutdown to end a blocked read.
-fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Host) {
+// AUTH_DEADLINE. Stopping the server, or dropping this client after a failed
+// send, wakes the reader's own `wake` directly on every platform, so the
+// reader does not rely on a shutdown to end a blocked read.
+fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Host, wake: Arc<ReadyWait>) {
     let mut acc: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 8192];
     // Why this connection ended, when it wasn't the peer's own doing. A clean
@@ -527,13 +534,20 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
     let mut gate = Gate::Waiting;
     while !shared.stop.load(Ordering::Acquire) {
         let waiting = gate == Gate::Waiting;
-        match conn.ready(&shared.wait, waiting.then_some(deadline)) {
+        match conn.ready(&wake, waiting.then_some(deadline)) {
             Ok(true) => {}
             Ok(false) if waiting && Instant::now() >= deadline => {
                 gate = Gate::Refused;
                 break;
             }
-            Ok(false) => continue, // woken by the stop, which the loop condition sees
+            // Woken: by the stop, which the loop condition sees, or because a
+            // failed send dropped this client, which logged why.
+            Ok(false) => {
+                if !shared.conns.lock().unwrap().contains_key(&id) {
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 why = Some(format!("wait failed: {e}"));
                 break;
@@ -630,11 +644,14 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
                     }
                     Err(_) => continue,
                 };
-                shared.conns.lock().unwrap().insert(id, Conn { writer, open: false });
+                // Without a wake nothing could end the reader's sleep, so the
+                // connection is not served.
+                let Ok(wake) = ReadyWait::new().map(Arc::new) else { continue };
+                shared.conns.lock().unwrap().insert(id, Conn { writer, open: false, wake: wake.clone() });
                 let (t_shared, t_host) = (shared.clone(), host);
                 if let Ok(j) = std::thread::Builder::new()
                     .name("cw-osc-stream".into())
-                    .spawn(move || run_reader(conn, id, t_shared, t_host))
+                    .spawn(move || run_reader(conn, id, t_shared, t_host, wake))
                 {
                     shared.readers.lock().unwrap().push(j);
                 } else {
@@ -1390,35 +1407,65 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn stopping_the_server_ends_a_reader_that_no_shutdown_would_wake() {
-        let cap = Cap::new();
-        let host = Host {
-            ctx: &*cap as *const Cap as *mut c_void,
-            on_packet,
-            on_closed,
-        };
+    // A connection served by hand, as the accept thread serves one: a real
+    // socket the reader sleeps on, `writer` for replies and the shutdown, and
+    // a server that owns the reader's thread. The client has presented the
+    // secret and sent one message, which has arrived. `ended` fires when the
+    // reader returns.
+    fn hand_served(cap: &Cap, writer: Box<dyn ConnWriter>)
+        -> (SocketServer, TcpStream, std::sync::mpsc::Receiver<()>, u32)
+    {
+        let host = Host { ctx: cap as *const Cap as *mut c_void, on_packet, on_closed };
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_side, _) = listener.accept().unwrap();
         client.write_all(&frame(&test_secret().auth_packet())).unwrap();
         client.write_all(&frame(&encode("/hello", &[]))).unwrap();
 
+        let id = 7;
         let shared = empty_shared();
+        let wake = Arc::new(ReadyWait::new().unwrap());
+        shared.conns.lock().unwrap().insert(id, Conn {
+            writer: Arc::new(Mutex::new(writer)),
+            open: false,
+            wake: wake.clone(),
+        });
         let (done, ended) = std::sync::mpsc::channel();
         let t_shared = shared.clone();
-        std::thread::spawn(move || {
-            run_reader(NoShutdown(server_side), 7, t_shared, host);
+        let reader = std::thread::spawn(move || {
+            run_reader(NoShutdown(server_side), id, t_shared, host, wake);
             let _ = done.send(());
         });
-        // The client has authenticated and its message arrived, so the reader
-        // now waits with no deadline.
-        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
+        shared.readers.lock().unwrap().push(reader);
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1), "the client is in");
+        (SocketServer { shared, accept_join: None, port: 0, path: None }, client, ended, id)
+    }
 
-        shared.stop.store(true, Ordering::Release);
-        shared.wait.wake();
+    #[test]
+    fn stopping_the_server_ends_a_reader_that_no_shutdown_would_wake() {
+        let cap = Cap::new();
+        let (server, _client, ended, _) = hand_served(&cap, Box::new(NullWriter));
+        // Dropped as its owner drops it: the stop, the wakes, the shutdowns
+        // (no-ops here), then the join.
+        std::thread::spawn(move || drop(server));
         assert!(ended.recv_timeout(Duration::from_secs(30)).is_ok(),
                 "stopping the server did not end a reader blocked on its connection");
+    }
+
+    #[test]
+    fn dropping_a_client_after_a_failed_send_ends_its_reader_where_no_shutdown_would() {
+        let cap = Cap::new();
+        let failing = ScriptedWriter {
+            steps: VecDeque::from(vec![os_err(ErrorKind::BrokenPipe)]),
+            wrote: Arc::new(Mutex::new(Vec::new())),
+            shutdowns: Arc::new(AtomicU32::new(0)),
+        };
+        let (server, _client, ended, id) = hand_served(&cap, Box::new(failing));
+        assert!(!server.send(id, &encode("/reply", &[])), "the send fails and drops the client");
+        assert!(ended.recv_timeout(Duration::from_secs(30)).is_ok(),
+                "dropping the client did not end its reader");
+        assert!(cap.closed.lock().unwrap().contains(&id), "the host heard the close");
+        drop(server);
     }
 
     fn empty_shared() -> Arc<Shared> {
@@ -1482,6 +1529,7 @@ pub(crate) mod tests {
             shared.conns.lock().unwrap().insert(1, Conn {
                 writer: Arc::new(Mutex::new(Box::new(w) as Box<dyn ConnWriter>)),
                 open: true,
+                wake: Arc::new(ReadyWait::new().unwrap()),
             });
             let server = SocketServer {
                 shared,
@@ -1613,7 +1661,7 @@ pub(crate) mod tests {
             Ok(frame(&encode("/after-eintr", &[]))),
         ]));
 
-        run_reader(conn, 7, empty_shared(), host); // returns at the script's EOF
+        run_reader(conn, 7, empty_shared(), host, Arc::new(ReadyWait::new().unwrap())); // returns at the script's EOF
 
         let packets = cap.packets.lock().unwrap();
         assert_eq!(packets.len(), 1,
