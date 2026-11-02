@@ -35,7 +35,7 @@ mod imp {
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
-        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -161,33 +161,45 @@ mod imp {
     // SAFETY: as above.
     unsafe impl Sync for Event {}
 
+    /// What became of an overlapped operation.
+    enum Io {
+        Done(u32),   // the bytes it moved
+        TimedOut,
+        Stopped,
+        Failed,
+    }
+
     /// Waits for an overlapped operation on `h` that was just started.
-    /// `started` is the starting call's return value. Returns the bytes moved
-    /// if the operation completes, and None if it fails, `timeout_ms` passes or
-    /// `stop` is set. On a timeout or stop it cancels the operation and waits
-    /// for the cancel, so `ov` and its buffer are free to reuse.
+    /// `started` is the starting call's return value. On a timeout or stop it
+    /// cancels the operation and waits for the cancel, so `ov` and its buffer
+    /// are free to reuse.
     ///
     /// # Safety
     /// `h` is open, and `ov` is the OVERLAPPED the operation was started with,
     /// with its hEvent set.
-    unsafe fn finish(h: HANDLE, ov: &mut OVERLAPPED, started: i32, stop: HANDLE, timeout_ms: u32) -> Option<u32> {
+    unsafe fn finish(h: HANDLE, ov: &mut OVERLAPPED, started: i32, stop: HANDLE, timeout_ms: u32) -> Io {
         // SAFETY: no arguments; thread-local state.
         if started == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
-            return None;
+            return Io::Failed;
         }
         let waits = [ov.hEvent, stop];
         let mut n: u32 = 0;
         // SAFETY: two live event handles.
-        if unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, timeout_ms) } == WAIT_OBJECT_0 {
+        let woke = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, timeout_ms) };
+        if woke == WAIT_OBJECT_0 {
             // SAFETY: the operation `ov` started on `h`, complete now.
-            return (unsafe { GetOverlappedResult(h, ov, &mut n, 0) } != 0).then_some(n);
+            return if unsafe { GetOverlappedResult(h, ov, &mut n, 0) } != 0 { Io::Done(n) } else { Io::Failed };
         }
         // SAFETY: as above; the second call waits for the cancel to land.
         unsafe {
             CancelIoEx(h, ov);
             GetOverlappedResult(h, ov, &mut n, 1);
         }
-        None
+        match woke {
+            WAIT_TIMEOUT => Io::TimedOut,
+            w if w == WAIT_OBJECT_0 + 1 => Io::Stopped,
+            _ => Io::Failed,
+        }
     }
 
     fn overlapped(event: &Event) -> OVERLAPPED {
@@ -204,6 +216,7 @@ mod imp {
     struct PipeConn {
         state: Mutex<(HANDLE, bool)>, // (handle, closed)
         open: AtomicBool,             // presented the secret: counts against the cap
+        evicted: AtomicBool,          // cut off after a failed send
         write_done: Event,            // signalled when a send's write completes
         stop: HANDLE,                 // the server's stop event
     }
@@ -230,8 +243,23 @@ mod imp {
             unsafe {
                 let started = WriteFile(handle, framed.as_ptr(), framed.len() as u32,
                                         std::ptr::null_mut(), &mut ov);
-                finish(handle, &mut ov, started, self.stop, WRITE_TIMEOUT_MS) == Some(framed.len() as u32)
+                matches!(finish(handle, &mut ov, started, self.stop, WRITE_TIMEOUT_MS),
+                         Io::Done(n) if n == framed.len() as u32)
             }
+        }
+        /// Cuts the client off after a failed send, as the stream servers do:
+        /// the frame may have gone out in part, so the framing is suspect.
+        /// The owner's pending read then fails, and the owner closes the
+        /// handle and reports the close. True the first time only.
+        fn evict(&self) -> bool {
+            let guard = self.state.lock().unwrap();
+            let (handle, closed) = *guard;
+            if closed || self.evicted.swap(true, Ordering::AcqRel) {
+                return false;
+            }
+            // SAFETY: an open handle, under the lock the owner's close takes.
+            unsafe { DisconnectNamedPipe(handle) };
+            true
         }
         /// Disconnects and closes the handle, under the lock sends take. Only
         /// the instance's thread calls this.
@@ -281,7 +309,18 @@ mod imp {
         fn send(&self, conn_id: u32, data: &[u8]) -> bool {
             let conn = self.shared.conns.lock().unwrap().get(&conn_id).cloned();
             let Some(conn) = conn else { return false };
-            conn.send(&frame_packet(data))
+            if conn.send(&frame_packet(data)) {
+                return true;
+            }
+            // The frame did not make it, or went out in part to a client that
+            // read nothing for WRITE_TIMEOUT_MS. Drop the client, as the
+            // stream servers do; its instance thread sees the read fail and
+            // reports the close.
+            self.shared.conns.lock().unwrap().remove(&conn_id);
+            if conn.evict() {
+                clockwork_log::log!("[osc] pipe conn {conn_id} dropped — reply write failed or timed out");
+            }
+            false
         }
         fn refused(&self) -> u64 {
             self.shared.refused.load(Ordering::Relaxed)
@@ -321,7 +360,7 @@ mod imp {
                     gate = Gate::Refused;
                     break;
                 }
-                u32::try_from(left.as_millis().max(1)).unwrap_or(INFINITE - 1)
+                u32::try_from(left.as_micros().div_ceil(1000)).unwrap_or(INFINITE - 1)
             } else {
                 INFINITE
             };
@@ -341,13 +380,14 @@ mod imp {
                 let started = ReadFile(handle, tmp.as_mut_ptr(), tmp.len() as u32, std::ptr::null_mut(), &mut ov);
                 finish(handle, &mut ov, started, shared.stop_event.0, timeout_ms)
             };
-            let Some(got) = got else {
-                // AUTH_DEADLINE passed, the server stopped, or the client
-                // disconnected (a broken pipe).
-                if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
-                    gate = Gate::Refused;
-                }
-                break;
+            let got = match got {
+                Io::Done(n) => n,
+                // Waiting for the secret: the top of the loop works out the
+                // time left, and refuses the client once there is none.
+                Io::TimedOut if gate == Gate::Waiting => continue,
+                // The server stopped, or the client disconnected (a broken
+                // pipe).
+                _ => break,
             };
             if got == 0 {
                 continue;
@@ -425,7 +465,7 @@ mod imp {
             let connected = unsafe {
                 let started = ConnectNamedPipe(handle, &mut ov);
                 (started == 0 && GetLastError() == ERROR_PIPE_CONNECTED)
-                    || finish(handle, &mut ov, started, shared.stop_event.0, INFINITE).is_some()
+                    || matches!(finish(handle, &mut ov, started, shared.stop_event.0, INFINITE), Io::Done(_))
             };
             if !connected || shared.stop.load(Ordering::Acquire) {
                 // SAFETY: the handle is this thread's and is not used again.
@@ -442,6 +482,7 @@ mod imp {
             let conn = Arc::new(PipeConn {
                 state: Mutex::new((handle, false)),
                 open: AtomicBool::new(false),
+                evicted: AtomicBool::new(false),
                 write_done,
                 stop: shared.stop_event.0,
             });
@@ -598,7 +639,7 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use crate::stream::tests::{frame, on_closed, on_packet, refused, stop, test_secret, wait_until, Cap};
+    use crate::stream::tests::{frame, on_closed, on_packet, refused, send, stop, test_secret, wait_until, Cap};
     use std::ffi::c_void;
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -671,6 +712,50 @@ mod tests {
         });
         assert!(hostile > 0, "no corpus under rust/clockwork-comms/corpus");
         assert!(refused(h) > 0, "the corpus holds no frame that is the secret");
+        stop(h);
+    }
+
+    // A client that says nothing is refused and counted when AUTH_DEADLINE
+    // passes, every time, however the wait's timer rounds.
+    #[test]
+    fn a_silent_client_is_refused_and_counted_at_the_deadline() {
+        let cap = Cap::new();
+        let name = format!("clockwork-pipe-silent-{}", std::process::id());
+        let h = start(&cap, &name);
+        for i in 1..=3u64 {
+            let c = connect(&name);
+            assert!(wait_until(|| refused(h) == i), "silent client {i} refused and counted");
+            drop(c);
+        }
+        a_real_client_is_served(&cap, &name, 0);
+        stop(h);
+    }
+
+    // A client that stops reading is dropped once a reply has waited
+    // WRITE_TIMEOUT_MS for it, as the stream servers drop one: the frame may
+    // have gone out in part, so the connection's framing is suspect.
+    #[test]
+    fn a_client_that_stops_reading_is_dropped_when_a_reply_times_out() {
+        let cap = Cap::new();
+        let name = format!("clockwork-pipe-deaf-{}", std::process::id());
+        let h = start(&cap, &name);
+        let mut c = connect(&name);
+        c.write_all(&frame(&test_secret().auth_packet())).unwrap();
+        c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "the client is in");
+        let id = cap.packets.lock().unwrap()[0].0;
+
+        // Replies until one fails: the pipe's buffer fills, and the next
+        // write waits WRITE_TIMEOUT_MS for a reader that never comes.
+        let reply = encode("/big", &[clockwork_osc::OscArg::Str("x".repeat(16 * 1024))]);
+        let mut sent = 0;
+        while send(h, id, &reply) != 0 {
+            sent += 1;
+            assert!(sent < 1000, "a client that never reads must make a send fail");
+        }
+        assert!(wait_until(|| cap.closed.lock().unwrap().contains(&id)), "the host heard the client dropped");
+        assert_eq!(send(h, id, &reply), 0, "a dropped client takes no more replies");
+        drop(c);
         stop(h);
     }
 }

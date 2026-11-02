@@ -949,7 +949,7 @@ pub(crate) mod tests {
     }
     // The C ABI, with the test's contract stated once: `h` is a live handle
     // from a start function, stopped exactly once at the end.
-    fn send(h: *mut ClockworkOscStream, conn: u32, data: &[u8]) -> i32 {
+    pub(crate) fn send(h: *mut ClockworkOscStream, conn: u32, data: &[u8]) -> i32 {
         // SAFETY: see above; `data` is a live slice.
         unsafe { clockwork_osc_stream_send(h, conn, data.as_ptr(), data.len() as u32) }
     }
