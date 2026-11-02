@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 /*
- * MicPermission.h — macOS microphone permission check
+ * MicPermission.h — Apple microphone permission check (macOS and iOS)
  */
 #pragma once
 

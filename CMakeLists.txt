@@ -657,9 +657,12 @@ if(CLOCKWORK_DEVICE)
 endif()
 if(APPLE)
     list(APPEND CLOCKWORK_NATIVE_SOURCES ${NATIVE_SRC}/MicPermission.mm)
+endif()
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # Dispatches AppKit input to any window this process owns. Belongs to
     # clockwork rather than to the plugin library: it is about this process
-    # having windows at all, not about what is drawn in them.
+    # having windows at all, not about what is drawn in them. macOS only:
+    # iOS has no AppKit, and a UIKit app's events are UIApplicationMain's.
     list(APPEND CLOCKWORK_NATIVE_SOURCES ${NATIVE_SRC}/CocoaEventPump.mm)
 endif()
 
@@ -847,6 +850,11 @@ endif()
 if(WIN32)
     # Synchronization: WaitOnAddress, the address wait under wait_word.cpp.
     target_link_libraries(clockwork PUBLIC Ws2_32 winmm ole32 Synchronization)
+elseif(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # iOS's AudioUnit.framework is headers only: the calls are AudioToolbox's.
+    target_link_libraries(clockwork PUBLIC
+        "-framework CoreAudio" "-framework AudioToolbox" "-framework Foundation"
+        "-framework CoreFoundation" "-framework AVFoundation")
 elseif(APPLE)
     target_link_libraries(clockwork PUBLIC
         "-framework CoreAudio" "-framework AudioUnit" "-framework Foundation"
@@ -916,6 +924,44 @@ if(CLOCKWORK_RUST AND EMSCRIPTEN)
             "  rustup toolchain install ${CLOCKWORK_RUST_NIGHTLY} --component rust-src\n"
             "  rustup target add wasm32-unknown-emscripten --toolchain ${CLOCKWORK_RUST_NIGHTLY}")
     endif()
+    target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
+elseif(CLOCKWORK_RUST AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # iOS is a cross build: rustc needs the target's std, which only a rustup
+    # toolchain carries (a Homebrew rust has the host's alone and is often
+    # first on PATH). So the toolchain is rustup's, named, and its rustc is
+    # pinned through RUSTC below: a toolchain's cargo run by path, not through
+    # the rustup proxy, would otherwise take whichever rustc PATH finds first.
+    # The device and the simulator are different targets to rustc — the same
+    # arm64, a different platform in every object's load commands.
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+            set(CLOCKWORK_RUST_TRIPLE x86_64-apple-ios)
+        else()
+            set(CLOCKWORK_RUST_TRIPLE aarch64-apple-ios-sim)
+        endif()
+    else()
+        set(CLOCKWORK_RUST_TRIPLE aarch64-apple-ios)
+    endif()
+    if(CMAKE_OSX_ARCHITECTURES MATCHES ";")
+        message(FATAL_ERROR "iOS: one architecture per build (CMAKE_OSX_ARCHITECTURES is ${CMAKE_OSX_ARCHITECTURES}); "
+                            "a universal simulator archive is lipo's job, after")
+    endif()
+    set(CLOCKWORK_RUST_IOS_TOOLCHAIN "stable" CACHE STRING
+        "The rustup toolchain that builds the Rust subsystems for iOS")
+    find_program(RUSTUP_EXECUTABLE rustup REQUIRED)
+    execute_process(COMMAND ${RUSTUP_EXECUTABLE} which --toolchain ${CLOCKWORK_RUST_IOS_TOOLCHAIN} rustc
+                    OUTPUT_VARIABLE _rustc OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc ERROR_QUIET)
+    if(_rc EQUAL 0)
+        get_filename_component(_rust_bin "${_rustc}" DIRECTORY)
+    endif()
+    if(NOT _rc EQUAL 0 OR NOT EXISTS "${_rust_bin}/../lib/rustlib/${CLOCKWORK_RUST_TRIPLE}")
+        message(FATAL_ERROR
+            "iOS needs the ${CLOCKWORK_RUST_TRIPLE} std in the rustup toolchain '${CLOCKWORK_RUST_IOS_TOOLCHAIN}':\n"
+            "  rustup target add ${CLOCKWORK_RUST_TRIPLE} --toolchain ${CLOCKWORK_RUST_IOS_TOOLCHAIN}")
+    endif()
+    set(CARGO_EXECUTABLE "${_rust_bin}/cargo")
+    set(CLOCKWORK_RUSTC_EXECUTABLE "${_rustc}")
+    message(STATUS "rust: ${CLOCKWORK_RUST_IOS_TOOLCHAIN} for ${CLOCKWORK_RUST_TRIPLE}")
     target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
 elseif(CLOCKWORK_RUST)
     find_program(CARGO_EXECUTABLE cargo REQUIRED)
@@ -1006,6 +1052,14 @@ if(EMSCRIPTEN)
         "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals"
         "RUSTC=${CLOCKWORK_RUSTC_EXECUTABLE}")
     list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --target wasm32-unknown-emscripten -Z build-std=std,panic_abort)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_TRIPLE}/${CLOCKWORK_RUST_PROFILE})
+    # The floor, for the same reason as macOS's below; iOS reads its own
+    # variable.
+    set(CLOCKWORK_RUST_CARGO_ENV ${CMAKE_COMMAND} -E env
+        "RUSTC=${CLOCKWORK_RUSTC_EXECUTABLE}"
+        "IPHONEOS_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --target ${CLOCKWORK_RUST_TRIPLE})
 else()
     set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE})
     set(CLOCKWORK_RUST_CARGO_ENV)

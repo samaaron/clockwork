@@ -195,8 +195,13 @@ fn main() {
             // CMakeLists.txt: the device path's frameworks on clockwork,
             // CoreMIDI for MIDI, GameController + objc for the gamepad;
             // smoothie/CMakeLists.txt: the vendored modules' framework
-            // lists. Then the C++ runtime, which a Rust link does not add.
-            sys.frameworks(["CoreAudio", "AudioUnit", "Foundation", "CoreFoundation", "AVFoundation"]);
+            // lists, which differ by platform — iOS has no Cocoa, and its
+            // session is AVFoundation's and its app UIKit's. Then the C++
+            // runtime, which a Rust link does not add.
+            // iOS's AudioUnit.framework is headers only: the calls are
+            // AudioToolbox's there.
+            let units = if os == "ios" { "AudioToolbox" } else { "AudioUnit" };
+            sys.frameworks(["CoreAudio", units, "Foundation", "CoreFoundation", "AVFoundation"]);
             if midi {
                 sys.frameworks(["CoreMIDI"]);
             }
@@ -204,7 +209,9 @@ fn main() {
                 sys.frameworks(["GameController"]);
                 sys.dylibs(["objc"]);
             }
-            if device {
+            if device && os == "ios" {
+                sys.frameworks(["Foundation", "UIKit", "AVFoundation", "Accelerate", "CoreAudio", "AudioToolbox"]);
+            } else if device {
                 sys.frameworks([
                     "Cocoa",
                     "Foundation",
@@ -295,6 +302,24 @@ fn configure(source: &Path, build: &Path, config: &str, msvc: bool) {
         cmd.args(["-A", platform]);
     }
     cmd.arg(format!("-DCMAKE_BUILD_TYPE={config}"));
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        // A cross build: the C++ for the platform rustc is building for, not
+        // the host's. The simulator is its own platform (target_env "sim"),
+        // and the floor is the one rustc read (IPHONEOS_DEPLOYMENT_TARGET),
+        // so both halves of the link agree; clockwork's own floor otherwise.
+        println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+        let sim = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("sim");
+        let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default().as_str() {
+            "aarch64" => "arm64",
+            "x86_64" => "x86_64",
+            other => panic!("no iOS architecture for target arch {other}"),
+        };
+        let floor = env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "17.4".into());
+        cmd.arg("-DCMAKE_SYSTEM_NAME=iOS")
+            .arg(format!("-DCMAKE_OSX_SYSROOT={}", if sim { "iphonesimulator" } else { "iphoneos" }))
+            .arg(format!("-DCMAKE_OSX_ARCHITECTURES={arch}"))
+            .arg(format!("-DCMAKE_OSX_DEPLOYMENT_TARGET={floor}"));
+    }
     // The engine as a library and nothing around it. CLOCKWORK_RUST=OFF is
     // the point (the Rust half is this binary's own crates); the rest are
     // the targets that would need the umbrella, which the tree refuses to
