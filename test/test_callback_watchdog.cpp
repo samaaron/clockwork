@@ -28,11 +28,13 @@
 #include "clockwork_client.h"
 #include "clockwork_prefix.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -303,6 +305,39 @@ TEST_CASE("SwapGate: a bounded acquisition is handed the gate when its holder le
     CHECK(lk.owns_lock());
     letGo.join();
     holder.join();
+}
+
+TEST_CASE("SwapGate: its holder takes it again every time while other threads try for it",
+          "[Watchdog][SwapGate]") {
+    // reconcileDevices, openDriverDefault and the debounced switch hold the
+    // gate and call switchDevice, which takes it again with no wait. That
+    // re-entry must not fail because another thread (a device list, the
+    // watchdog) is trying for the gate at the same moment.
+    EngineFixture fix;  // watchdog off
+
+    std::unique_lock<std::recursive_timed_mutex> held;
+    REQUIRE(fix.engine().tryAcquireSwapGate(held, std::chrono::milliseconds(0)));
+
+    std::atomic<bool> done{false};
+    std::atomic<int> taken{0};   // by another thread while held: never
+    std::vector<std::thread> others;
+    for (int i = 0; i < 3; ++i) {
+        others.emplace_back([&] {
+            while (!done.load(std::memory_order_relaxed)) {
+                std::unique_lock<std::recursive_timed_mutex> lk;
+                if (fix.engine().tryAcquireSwapGate(lk, std::chrono::milliseconds(0))) taken.fetch_add(1);
+            }
+        });
+    }
+    int refused = 0;
+    for (int i = 0; i < 200000; ++i) {
+        std::unique_lock<std::recursive_timed_mutex> again;
+        if (!fix.engine().tryAcquireSwapGate(again, std::chrono::milliseconds(0))) ++refused;
+    }
+    done.store(true);
+    for (auto& t : others) t.join();
+    CHECK(refused == 0);
+    CHECK(taken.load() == 0);
 }
 
 TEST_CASE("Watchdog: its thread wakes for its samples and for nothing else",

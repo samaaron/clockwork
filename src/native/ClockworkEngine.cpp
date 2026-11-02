@@ -2064,7 +2064,10 @@ void ClockworkEngine::executePendingSwitch() {
 bool ClockworkEngine::tryAcquireSwapGate(std::unique_lock<std::recursive_timed_mutex>& lk,
                                           std::chrono::milliseconds wait) {
     lk = std::unique_lock<std::recursive_timed_mutex>(mSwapMutex, std::defer_lock);
-    return wait.count() > 0 ? lk.try_lock_for(wait) : lk.try_lock();
+    // try_lock_for even for a zero wait. libc++'s try_lock fails whenever
+    // another thread is inside the mutex's internal lock, even for the thread
+    // that already holds the gate, and every switch path re-takes it.
+    return lk.try_lock_for(wait);
 }
 
 ClockworkEngine::TestSwapHold ClockworkEngine::testHoldSwapGate() {

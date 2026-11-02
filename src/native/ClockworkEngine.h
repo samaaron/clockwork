@@ -668,7 +668,8 @@ public:
     bool recoveryInFlight() const { return mReopenInProgress.load(); }
 
     // Bounded acquisition of the swap gate: blocks up to `wait` for its
-    // holder to let go (0 = a single try). Used by setDeviceMode's
+    // holder to let go (0 = no wait). The thread that holds the gate always
+    // gets it again. Used by setDeviceMode's
     // system-default reinit so it cannot interleave with an in-flight
     // switchDevice — two threads driving the device session concurrently can
     // wedge the device's callback thread (DirectSound's, in a cursor-poll
