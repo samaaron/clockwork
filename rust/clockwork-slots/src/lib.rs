@@ -102,6 +102,7 @@ use portable_atomic::AtomicU64;
 use loom::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use clockwork_wait::WaitWord;
+use core::ptr::NonNull;
 
 /// 0 is never a valid handle in either discipline, so it doubles as "none".
 pub const HANDLE_NONE: u32 = 0;
@@ -183,18 +184,27 @@ pub struct SlotTable<T, const N: usize> {
 /// `T` behind it cannot be freed.
 pub struct Held<'a, T> {
     slot: &'a Slot<T>,
-    occupant: &'a T,
+    // A pointer, not a reference. A close frees the occupant as soon as the
+    // last guard leaves, which can be while a function this guard was passed
+    // to is still running, and a reference in that function's arguments must
+    // stay valid until it returns. A `&T` exists only while borrowed from the
+    // guard.
+    occupant: NonNull<T>,
 }
 
 impl<T> Held<'_, T> {
     #[inline]
-    pub fn get(&self) -> &T { self.occupant }
+    pub fn get(&self) -> &T {
+        // SAFETY: this guard holds a refcount on the slot, and the occupant is
+        // not freed while one is held; the `&T` cannot outlive `&self`.
+        unsafe { self.occupant.as_ref() }
+    }
 }
 
 impl<T> core::ops::Deref for Held<'_, T> {
     type Target = T;
     #[inline]
-    fn deref(&self) -> &T { self.occupant }
+    fn deref(&self) -> &T { self.get() }
 }
 
 impl<T> Drop for Held<'_, T> {
@@ -262,16 +272,15 @@ impl<T, const N: usize> SlotTable<T, N> {
                 Err(_) => continue,
             }
         }
-        let p = slot.occupant.load(Ordering::Acquire);
-        if p.is_null() {
+        // The occupant is published before OPEN and never dropped while a
+        // refcount is held, and this slot's count was just taken.
+        let Some(occupant) = NonNull::new(slot.occupant.load(Ordering::Acquire)) else {
             // Cannot happen — OPEN is published after the pointer — but a null
             // deref on the audio thread is not the place to find out.
             slot.leave();
             return None;
-        }
-        // SAFETY: the occupant is published before OPEN and never dropped
-        // while a refcount is held, and this slot's count was just taken.
-        Some(Held { slot, occupant: unsafe { &*p } })
+        };
+        Some(Held { slot, occupant })
     }
 
     /// If the slot is closed and nobody is inside, take it, drop its occupant,
