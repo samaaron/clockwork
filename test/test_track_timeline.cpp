@@ -19,9 +19,29 @@
 #include "native/TrackControl.h"
 #include "clockwork_sys.h"
 
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
+
+TEST_CASE("track: a timed event lands on the frame its timetag names", "[tracks]") {
+    using clockwork::Timetag;
+    constexpr double kSr = 48000.0;
+    const Timetag block = Timetag::fromNtpSeconds(3976214400.0);   // 1 January 2026
+    const auto framesOn = [&](double frames) {
+        return block.plus(static_cast<int64_t>(std::ceil(frames / kSr * Timetag::kUnitsPerSecond)));
+    };
+
+    CHECK(trackFrameOffset(framesOn(72), block, kSr, 128) == 72);
+    CHECK(trackFrameOffset(framesOn(1), block, kSr, 128) == 1);
+    CHECK(trackFrameOffset(framesOn(127), block, kSr, 128) == 127);
+    // Immediately, a time before the block, and no block time: the first
+    // frame. A time past the block: the last.
+    CHECK(trackFrameOffset(Timetag::immediately(), block, kSr, 128) == 0);
+    CHECK(trackFrameOffset(framesOn(-5), block, kSr, 128) == 0);
+    CHECK(trackFrameOffset(framesOn(72), Timetag(), kSr, 128) == 0);
+    CHECK(trackFrameOffset(framesOn(500), block, kSr, 128) == 127);
+}
 
 TEST_CASE("timeline mirror: a snapshot crosses whole, and a writer mid-way is not read",
           "[plugin][track][clock][mirror]") {

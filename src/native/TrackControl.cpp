@@ -86,22 +86,6 @@ int32_t ownPid() {
 #endif
 }
 
-// Where in this block a timetag lands. 0/1 is "now"; anything else is placed
-// relative to the block start, clamped into the block — a message the timed
-// store fired is due in this block by construction, and one that arrived
-// late is played at the block's first frame rather than dropped.
-uint32_t frameOffset(const DrainCallCtx& meta) {
-    if (meta.when <= 1 || meta.blockTime == 0) return 0;
-    const double sr = clockwork_sample_rate();
-    if (!(sr > 0.0)) return 0;
-    const double delta = static_cast<double>(meta.when - meta.blockTime) / 4294967296.0;
-    if (delta <= 0.0) return 0;
-    const uint32_t frames = clockwork_block_size();
-    double off = delta * sr;
-    if (frames > 0 && off > static_cast<double>(frames - 1)) off = static_cast<double>(frames - 1);
-    return static_cast<uint32_t>(off);
-}
-
 // How many follower timelines the segment is shown: every slot the registry
 // has, up to the room the header made.
 constexpr uint32_t kMirroredTimelines =
@@ -116,6 +100,17 @@ std::array<float*, LANES> g_trimPtrs = []() noexcept {
 }();
 
 }  // namespace
+
+// A message the timed store fired is due in this block by construction, and
+// one that arrived late plays at the block's first frame rather than being
+// dropped.
+uint32_t trackFrameOffset(clockwork::Timetag when, clockwork::Timetag blockStart,
+                          double sampleRate, uint32_t frames) {
+    if (when.isImmediate() || blockStart.isImmediate() || !(sampleRate > 0.0) || frames == 0) return 0;
+    const double off = when.secondsFrom(blockStart) * sampleRate;
+    if (!(off > 0.0)) return 0;
+    return off >= static_cast<double>(frames - 1) ? frames - 1 : static_cast<uint32_t>(off);
+}
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
@@ -675,7 +670,9 @@ bool TrackControl::audioSink(void* ctx, const void* callCtx, const uint8_t* data
     // [frame offset][osc], joined on the stack: a track event is small.
     std::array<uint8_t, 2048> frame{};
     if (sizeof(Prefixed) + len > frame.size()) return true;
-    const uint32_t off = frameOffset(meta);
+    const uint32_t off = trackFrameOffset(clockwork::Timetag::fromNtp(static_cast<uint64_t>(meta.when)),
+                                          clockwork::Timetag::fromNtp(static_cast<uint64_t>(meta.blockTime)),
+                                          clockwork_sample_rate(), clockwork_block_size());
     std::memcpy(frame.data(), &off, sizeof off);
     std::memcpy(frame.data() + sizeof(Prefixed), data, len);
     MsgRing& r = h->rt;

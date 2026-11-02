@@ -64,6 +64,7 @@
  */
 #pragma once
 
+#include "clock/timetag.h"
 #include "plugin_bridge.h"
 #include "lanes/ring_drain.h"
 #include "shm_tap_stream.hpp"
@@ -85,6 +86,13 @@ class OscEgress;
 class ClockworkClock;
 class ClockworkEngine;
 struct DrainCallCtx;
+
+// The frame of a block of `frames` at `sampleRate`, starting at `blockStart`,
+// that an event due at `when` lands on. Immediately, a time before the block,
+// and an event with no block time land on its first frame; a time past the
+// block lands on its last.
+uint32_t trackFrameOffset(clockwork::Timetag when, clockwork::Timetag blockStart,
+                          double sampleRate, uint32_t frames);
 
 class TrackControl {
 public:
