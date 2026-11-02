@@ -31,7 +31,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -40,6 +40,7 @@ use clockwork_osc::{decode, decode_packet, encode, OscArg, OscMessage, OscPacket
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST};
 
 use crate::limit::Limiter;
+use clockwork_wait::ready::{AsRawSock, ReadyWait};
 
 /// The rate limit a new instance starts with: cues per second for the port
 /// and for each sender. 0 is no limit.
@@ -88,17 +89,19 @@ impl Host {
     }
 }
 
-/// A running cue server: one recv thread per bound socket (IPv4 + IPv6) sharing a
-/// stop flag. Dropping it stops the threads (≤ the read timeout) and closes the
-/// sockets.
+/// A running cue server: one recv thread per bound socket (IPv4 + IPv6), each
+/// blocked until a datagram arrives or the server stops. Dropping it wakes and
+/// joins the threads at once, and closes the sockets.
 struct CueServer {
     stop: Arc<AtomicBool>,
+    wait: Arc<ReadyWait>,
     joins: Vec<JoinHandle<()>>,
 }
 
 impl Drop for CueServer {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
+        self.wait.wake();
         for j in self.joins.drain(..) {
             let _ = j.join();
         }
@@ -197,14 +200,18 @@ pub fn exercise(data: &[u8]) {
 fn run_cue_server(
     socket: UdpSocket,
     stop: Arc<AtomicBool>,
+    wait: Arc<ReadyWait>,
     cues_on: Arc<AtomicBool>,
     host: Host,
     limit: Arc<Mutex<Limiter>>,
 ) {
-    // Timed read so the loop wakes to check `stop`; ~0% idle CPU.
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+    // The socket is non-blocking. When it is empty, the thread blocks on
+    // `wait` until a datagram arrives or the server stops.
+    if socket.set_nonblocking(true).is_err() {
+        return;
+    }
     let mut buf = vec![0u8; 65536];
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.load(Ordering::Acquire) {
         match socket.recv_from(&mut buf) {
             Ok((n, src)) => {
                 // Drain regardless, but only forward when cue reception is on.
@@ -247,6 +254,12 @@ fn run_cue_server(
                             clockwork_log::log!("[osc] dropped malformed inbound OSC from {ip} ({n} bytes)");
                         }
                     }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Err(e) = wait.wait(&[socket.raw_sock()], None) {
+                    clockwork_log::log!("[osc] cue server stopped: its wait failed: {e}");
+                    break;
                 }
             }
             Err(e) if crate::recv_retryable(&e) => {}
@@ -295,20 +308,28 @@ impl ClockworkOsc {
         }
         note_binds("cue server", socks.iter().map(|(_, s)| s), CUES_EXPOSED);
 
+        let wait = match ReadyWait::new() {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                clockwork_log::log!("[osc] cue server on port {port} not started: its wait could not be created: {e}");
+                return;
+            }
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let mut joins = Vec::new();
         for (fam, sock) in socks {
-            let (t_stop, t_on, t_host, t_limit) =
-                (stop.clone(), self.cues_on.clone(), self.host, self.limit.clone());
+            let (t_stop, t_wait, t_on, t_host, t_limit) =
+                (stop.clone(), wait.clone(), self.cues_on.clone(), self.host, self.limit.clone());
+            let name = if fam == "IPv4" { "cw-osc-cue4" } else { "cw-osc-cue6" };
             if let Ok(j) = std::thread::Builder::new()
-                .name("ss-osc-cue".into())
-                .spawn(move || run_cue_server(sock, t_stop, t_on, t_host, t_limit))
+                .name(name.into())
+                .spawn(move || run_cue_server(sock, t_stop, t_wait, t_on, t_host, t_limit))
             {
                 joins.push(j);
                 clockwork_log::log!("[osc] cue server listening on port {port} {fam} ({scope})");
             }
         }
-        cs.server = Some(CueServer { stop, joins });
+        cs.server = Some(CueServer { stop, wait, joins });
         cs.port = port;
         cs.loopback = loopback;
     }

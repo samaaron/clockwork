@@ -273,6 +273,8 @@ use std::time::{Duration, Instant};
 
 use clockwork_osc::ffi::no_unwind;
 
+use clockwork_wait::ready::{AsRawSock, ReadyWait};
+
 /// Bound on a single blocking send. A client that hasn't drained its socket
 /// within this long is treated as stuck: the write fails and the connection
 /// is dropped, so one non-reading client can't wedge the gateway thread (the
@@ -289,7 +291,8 @@ const WRITE_RETRIES: usize = 3;
 /// inside WRITE_TIMEOUT.
 const WRITE_RETRY_PAUSE: Duration = Duration::from_millis(1);
 
-/// A connection's write half: raw writes + a shutdown to unblock its reader.
+/// A connection's write half: raw writes, and a shutdown that tells the client
+/// the server has hung up.
 /// Byte-level rather than write-all so the retry policy can tell "nothing went
 /// out" from "half a frame went out", which decides whether framing survived.
 trait ConnWriter: Send {
@@ -357,14 +360,17 @@ fn write_frame(w: &mut dyn ConnWriter, frame: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A connection's read half, abstracted over TCP/UDS.
+/// A connection's read half, abstracted over TCP/UDS. `ready` blocks on `wait`
+/// until the connection has bytes or has closed, `deadline` passes, or the
+/// server stops. It returns true if the connection is ready, and a read then
+/// does not block.
 trait ConnReader: Read + Send + 'static {
-    fn set_timeout(&self, d: Duration);
+    fn ready(&self, wait: &ReadyWait, deadline: Option<Instant>) -> std::io::Result<bool>;
     fn clone_writer(&self) -> std::io::Result<Box<dyn ConnWriter>>;
 }
 impl ConnReader for TcpStream {
-    fn set_timeout(&self, d: Duration) {
-        let _ = self.set_read_timeout(Some(d));
+    fn ready(&self, wait: &ReadyWait, deadline: Option<Instant>) -> std::io::Result<bool> {
+        wait.wait(&[self.raw_sock()], deadline)
     }
     fn clone_writer(&self) -> std::io::Result<Box<dyn ConnWriter>> {
         Ok(Box::new(self.try_clone()?))
@@ -372,8 +378,8 @@ impl ConnReader for TcpStream {
 }
 #[cfg(unix)]
 impl ConnReader for UnixStream {
-    fn set_timeout(&self, d: Duration) {
-        let _ = self.set_read_timeout(Some(d));
+    fn ready(&self, wait: &ReadyWait, deadline: Option<Instant>) -> std::io::Result<bool> {
+        wait.wait(&[self.raw_sock()], deadline)
     }
     fn clone_writer(&self) -> std::io::Result<Box<dyn ConnWriter>> {
         Ok(Box::new(self.try_clone()?))
@@ -381,7 +387,7 @@ impl ConnReader for UnixStream {
 }
 
 /// A nonblocking listener, abstracted over TCP/UDS.
-trait Acceptor: Send + 'static {
+trait Acceptor: Send + 'static + AsRawSock {
     type Conn: ConnReader;
     fn accept_one(&self) -> std::io::Result<Self::Conn>;
 }
@@ -389,9 +395,9 @@ impl Acceptor for TcpListener {
     type Conn = TcpStream;
     fn accept_one(&self) -> std::io::Result<TcpStream> {
         // BSD/Windows accepted sockets inherit the listener's non-blocking
-        // flag (Linux's don't). A non-blocking conn ignores SO_RCVTIMEO, so
-        // the reader's 100ms-timeout read becomes an EAGAIN hot spin — one
-        // full core per connection. Force blocking before handing it over.
+        // flag (Linux's don't). Writes rely on SO_SNDTIMEO for their bound,
+        // and a non-blocking socket ignores it and fails at once on a full
+        // buffer. Force blocking before handing it over.
         self.accept().map(|(s, _)| {
             let _ = s.set_nonblocking(false);
             // Replies are small frames on loopback: never let Nagle hold one
@@ -442,6 +448,9 @@ struct Shared {
     readers: Mutex<Vec<JoinHandle<()>>>,
     secret: ClockworkCommsSecret,
     refused: AtomicU64,
+    /// The accept thread blocks on this until a connection arrives, and each
+    /// reader until its client sends. Stopping the server wakes them all.
+    wait: ReadyWait,
 }
 
 struct SocketServer {
@@ -463,8 +472,8 @@ impl StreamServerImpl for SocketServer {
         };
         // The frame did not make it and retrying is pointless: the peer is gone,
         // or a refusal outlasted the budget mid-frame and this connection's
-        // framing is now suspect. Evict and shut it down; the reader wakes on
-        // the shutdown and fires on_closed, pruning the client from every
+        // framing is now suspect. Evict and shut it down; the reader sees the
+        // connection end and fires on_closed, pruning the client from every
         // audience. The logged error kind says which: WouldBlock/TimedOut is a
         // client that went WRITE_TIMEOUT without reading, anything else failed
         // outright.
@@ -484,14 +493,15 @@ impl StreamServerImpl for SocketServer {
 
 impl Drop for SocketServer {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
-        // Shut every connection down so blocked readers return immediately
-        // rather than waiting out their read timeout.
-        for c in self.shared.conns.lock().unwrap().values() {
-            c.writer.lock().unwrap().shutdown_both();
-        }
+        self.shared.stop.store(true, Ordering::Release);
+        self.shared.wait.wake();
         if let Some(j) = self.accept_join.take() {
             let _ = j.join();
+        }
+        // The accept thread has exited and every reader has been woken. Shut
+        // each connection down so its client sees the disconnect at once.
+        for c in self.shared.conns.lock().unwrap().values() {
+            c.writer.lock().unwrap().shutdown_both();
         }
         for j in self.shared.readers.lock().unwrap().drain(..) {
             let _ = j.join();
@@ -502,22 +512,32 @@ impl Drop for SocketServer {
     }
 }
 
+// The reader blocks until its client sends or disconnects, or the server
+// stops. Until the client presents the secret, it also wakes at
+// AUTH_DEADLINE. Stopping the server wakes the wait directly on every
+// platform, so the reader does not rely on a shutdown to end a blocked read.
 fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Host) {
-    conn.set_timeout(Duration::from_millis(100));
     let mut acc: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 8192];
     // Why this connection ended, when it wasn't the peer's own doing. A clean
     // EOF is the client's decision and stays quiet; anything else is the
     // server hanging up on a live client, so say so.
     let mut why: Option<String> = None;
-    let opened = Instant::now();
+    let deadline = Instant::now() + AUTH_DEADLINE;
     let mut gate = Gate::Waiting;
-    while !shared.stop.load(Ordering::Relaxed) {
-        if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
-            gate = Gate::Refused;
-        }
-        if gate == Gate::Refused || gate == Gate::OverCap {
-            break;
+    while !shared.stop.load(Ordering::Acquire) {
+        let waiting = gate == Gate::Waiting;
+        match conn.ready(&shared.wait, waiting.then_some(deadline)) {
+            Ok(true) => {}
+            Ok(false) if waiting && Instant::now() >= deadline => {
+                gate = Gate::Refused;
+                break;
+            }
+            Ok(false) => continue, // woken by the stop, which the loop condition sees
+            Err(e) => {
+                why = Some(format!("wait failed: {e}"));
+                break;
+            }
         }
         match conn.read(&mut tmp) {
             Ok(0) => break, // EOF — peer gone
@@ -528,8 +548,10 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
                     if gate == Gate::Open && !admit(&shared.conns, id) {
                         gate = Gate::OverCap;
                     }
-                    if gate != Gate::Open {
-                        continue;
+                    match gate {
+                        Gate::Open => {}
+                        Gate::Waiting => continue,
+                        Gate::Refused | Gate::OverCap => break,
                     }
                 }
                 if !drain_frames(&mut acc, |osc| host.packet(id, osc)) {
@@ -587,7 +609,7 @@ fn reap_finished_readers(shared: &Shared) {
 }
 
 fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
-    while !shared.stop.load(Ordering::Relaxed) {
+    while !shared.stop.load(Ordering::Acquire) {
         reap_finished_readers(&shared);
         match listener.accept_one() {
             Ok(conn) => {
@@ -611,7 +633,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
                 shared.conns.lock().unwrap().insert(id, Conn { writer, open: false });
                 let (t_shared, t_host) = (shared.clone(), host);
                 if let Ok(j) = std::thread::Builder::new()
-                    .name("ss-osc-stream".into())
+                    .name("cw-osc-stream".into())
                     .spawn(move || run_reader(conn, id, t_shared, t_host))
                 {
                     shared.readers.lock().unwrap().push(j);
@@ -619,10 +641,23 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
                     shared.conns.lock().unwrap().remove(&id);
                 }
             }
+            // Block until a connection is waiting or the server stops.
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
+                if let Err(e) = shared.wait.wait(&[listener.raw_sock()], None) {
+                    clockwork_log::log!("[osc] stream server stopped accepting: its wait failed: {e}");
+                    return;
+                }
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            // A failed accept (out of descriptors, say) leaves the listener
+            // readable, so waiting on it would spin. Pause 20 ms instead,
+            // unless the server stops.
+            Err(_) => {
+                if let Err(e) = shared.wait.pause(Duration::from_millis(20)) {
+                    clockwork_log::log!("[osc] stream server stopped accepting: its wait failed: {e}");
+                    return;
+                }
+            }
         }
     }
 }
@@ -641,10 +676,11 @@ fn start_socket_server<A: Acceptor>(
         readers: Mutex::new(Vec::new()),
         secret,
         refused: AtomicU64::new(0),
+        wait: ReadyWait::new().ok()?,
     });
     let t_shared = shared.clone();
     let accept_join = std::thread::Builder::new()
-        .name("ss-osc-accept".into())
+        .name("cw-osc-accept".into())
         .spawn(move || run_accept(listener, t_shared, host))
         .ok()?;
     Some(ClockworkOscStream(Box::new(SocketServer {
@@ -1302,10 +1338,60 @@ pub(crate) mod tests {
         fn shutdown_both(&self) {}
     }
     impl ConnReader for ScriptedReader {
-        fn set_timeout(&self, _: Duration) {}
+        fn ready(&self, _: &ReadyWait, _: Option<Instant>) -> std::io::Result<bool> {
+            Ok(true)
+        }
         fn clone_writer(&self) -> std::io::Result<Box<dyn ConnWriter>> {
             Ok(Box::new(NullWriter))
         }
+    }
+
+    // A real connection whose shutdown does nothing, as on a platform where
+    // shutting a socket down does not end a read blocked on it.
+    struct NoShutdown(TcpStream);
+    impl Read for NoShutdown {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl ConnReader for NoShutdown {
+        fn ready(&self, wait: &ReadyWait, deadline: Option<Instant>) -> std::io::Result<bool> {
+            self.0.ready(wait, deadline)
+        }
+        fn clone_writer(&self) -> std::io::Result<Box<dyn ConnWriter>> {
+            Ok(Box::new(NullWriter))
+        }
+    }
+
+    #[test]
+    fn stopping_the_server_ends_a_reader_that_no_shutdown_would_wake() {
+        let cap = Cap::new();
+        let host = Host {
+            ctx: &*cap as *const Cap as *mut c_void,
+            on_packet,
+            on_closed,
+        };
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        client.write_all(&frame(&test_secret().auth_packet())).unwrap();
+        client.write_all(&frame(&encode("/hello", &[]))).unwrap();
+
+        let shared = empty_shared();
+        let (done, ended) = std::sync::mpsc::channel();
+        let t_shared = shared.clone();
+        std::thread::spawn(move || {
+            run_reader(NoShutdown(server_side), 7, t_shared, host);
+            let _ = done.send(());
+        });
+        // The client has authenticated and its message arrived, so the reader
+        // now waits with no deadline.
+        assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
+
+        shared.stop.store(true, Ordering::Release);
+        shared.wait.wake();
+        assert!(ended.recv_timeout(Duration::from_secs(30)).is_ok(),
+                "stopping the server did not end a reader blocked on its connection");
     }
 
     fn empty_shared() -> Arc<Shared> {
@@ -1316,6 +1402,7 @@ pub(crate) mod tests {
             readers: Mutex::new(Vec::new()),
             secret: test_secret().clone(),
             refused: AtomicU64::new(0),
+            wait: ReadyWait::new().unwrap(),
         })
     }
 

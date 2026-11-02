@@ -22,6 +22,10 @@ socket2 = "0.6.4"
 clockwork-osc = { path = "../clockwork-osc" }
 # Every line this crate logs goes through clockwork_log (see that crate).
 clockwork-log = { path = "../clockwork-log" }
+# ReadyWait: the cue threads block on it until a datagram arrives or the
+# server stops.
+clockwork-wait = { path = "../clockwork-wait" }
 
 [dev-dependencies]
+clockwork-wait = { path = "../clockwork-wait", features = ["testing"] }
 clockwork-corpus = { path = "../clockwork-corpus" }

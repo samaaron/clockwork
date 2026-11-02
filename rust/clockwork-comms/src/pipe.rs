@@ -31,11 +31,11 @@ mod imp {
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED,
-        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -45,14 +45,16 @@ mod imp {
         GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX,
+        ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe,
-        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, OpenProcessToken, SetEvent, WaitForMultipleObjects, INFINITE,
+    };
 
     use crate::secret::ClockworkCommsSecret;
     use crate::stream::{
@@ -60,6 +62,9 @@ mod imp {
     };
 
     const PIPE_BUF_BYTES: u32 = 65536;
+    // How long a send waits for the client to read before it gives up. The
+    // same as the stream servers' WRITE_TIMEOUT.
+    const WRITE_TIMEOUT_MS: u32 = 2000;
 
     /// UTF-16, NUL-terminated.
     fn wide(s: &str) -> Vec<u16> {
@@ -136,41 +141,100 @@ mod imp {
         }
     }
 
+    /// A manual-reset event, closed on drop.
+    struct Event(HANDLE);
+    impl Event {
+        fn new() -> Option<Event> {
+            // SAFETY: default security, manual reset, not signalled, unnamed.
+            let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            (!h.is_null()).then_some(Event(h))
+        }
+    }
+    impl Drop for Event {
+        fn drop(&mut self) {
+            // SAFETY: an event this owns, closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    // SAFETY: an event handle may be waited on and signalled from any thread.
+    unsafe impl Send for Event {}
+    // SAFETY: as above.
+    unsafe impl Sync for Event {}
+
+    /// Waits for an overlapped operation on `h` that was just started.
+    /// `started` is the starting call's return value. Returns the bytes moved
+    /// if the operation completes, and None if it fails, `timeout_ms` passes or
+    /// `stop` is set. On a timeout or stop it cancels the operation and waits
+    /// for the cancel, so `ov` and its buffer are free to reuse.
+    ///
+    /// # Safety
+    /// `h` is open, and `ov` is the OVERLAPPED the operation was started with,
+    /// with its hEvent set.
+    unsafe fn finish(h: HANDLE, ov: &mut OVERLAPPED, started: i32, stop: HANDLE, timeout_ms: u32) -> Option<u32> {
+        // SAFETY: no arguments; thread-local state.
+        if started == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
+            return None;
+        }
+        let waits = [ov.hEvent, stop];
+        let mut n: u32 = 0;
+        // SAFETY: two live event handles.
+        if unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, timeout_ms) } == WAIT_OBJECT_0 {
+            // SAFETY: the operation `ov` started on `h`, complete now.
+            return (unsafe { GetOverlappedResult(h, ov, &mut n, 0) } != 0).then_some(n);
+        }
+        // SAFETY: as above; the second call waits for the cancel to land.
+        unsafe {
+            CancelIoEx(h, ov);
+            GetOverlappedResult(h, ov, &mut n, 1);
+        }
+        None
+    }
+
+    fn overlapped(event: &Event) -> OVERLAPPED {
+        // SAFETY: OVERLAPPED is plain data, all-zero is its documented start.
+        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+        ov.hEvent = event.0;
+        ov
+    }
+
     /// One live client connection: the instance handle plus a closed flag,
-    /// both guarded by one mutex so a send can never race the reader's
-    /// CloseHandle (no write-after-close, no handle-reuse ABA).
+    /// both guarded by one mutex so a send can never race the owner's
+    /// CloseHandle (no write-after-close, no handle-reuse ABA). Only the
+    /// instance's thread closes it, after its read has finished.
     struct PipeConn {
         state: Mutex<(HANDLE, bool)>, // (handle, closed)
         open: AtomicBool,             // presented the secret: counts against the cap
+        write_done: Event,            // signalled when a send's write completes
+        stop: HANDLE,                 // the server's stop event
     }
     // SAFETY: the handle is only ever used under the mutex, which is what
-    // makes a send and the reader's close unable to overlap.
+    // makes a send and the owner's close unable to overlap; the events may be
+    // used from any thread.
     unsafe impl Send for PipeConn {}
     // SAFETY: as above.
     unsafe impl Sync for PipeConn {}
 
     impl PipeConn {
+        /// Writes one frame to the client. Gives up after WRITE_TIMEOUT_MS, so
+        /// a client that stops reading cannot block the sender.
         fn send(&self, framed: &[u8]) -> bool {
             let guard = self.state.lock().unwrap();
             let (handle, closed) = *guard;
             if closed {
                 return false;
             }
-            let mut written: u32 = 0;
+            let mut ov = overlapped(&self.write_done);
             // SAFETY: an open handle (the lock is held and `closed` is false),
-            // a live slice, and a live out-pointer.
+            // a live slice, and an OVERLAPPED that lives until `finish` has
+            // waited the write out.
             unsafe {
-                WriteFile(
-                    handle,
-                    framed.as_ptr(),
-                    framed.len() as u32,
-                    &mut written,
-                    std::ptr::null_mut(),
-                ) != 0
-                    && written == framed.len() as u32
+                let started = WriteFile(handle, framed.as_ptr(), framed.len() as u32,
+                                        std::ptr::null_mut(), &mut ov);
+                finish(handle, &mut ov, started, self.stop, WRITE_TIMEOUT_MS) == Some(framed.len() as u32)
             }
         }
-        /// Disconnect + close under the same lock sends take.
+        /// Disconnects and closes the handle, under the lock sends take. Only
+        /// the instance's thread calls this.
         fn close(&self) {
             let mut guard = self.state.lock().unwrap();
             let (handle, closed) = *guard;
@@ -188,6 +252,7 @@ mod imp {
 
     struct Shared {
         stop: AtomicBool,
+        stop_event: Event, // set once on stop; ends every connect, read and write wait
         conns: Mutex<HashMap<u32, Arc<PipeConn>>>,
         next_id: AtomicU32, // conn ids from 1, never reused (0 = in-process)
         secret: ClockworkCommsSecret,
@@ -210,7 +275,6 @@ mod imp {
     pub(super) struct PipeServer {
         shared: Arc<Shared>,
         threads: Vec<JoinHandle<()>>,
-        name_w: Vec<u16>, // for the stop-wake connects
     }
 
     impl StreamServerImpl for PipeServer {
@@ -226,104 +290,66 @@ mod imp {
 
     impl Drop for PipeServer {
         fn drop(&mut self) {
-            // SeqCst pairs with the accept loop's check after it creates an
-            // instance: either it sees the flag, or the connects below see it.
-            self.shared.stop.store(true, Ordering::SeqCst);
-            // Close live connections (their readers wake within one poll tick)…
-            for c in self.shared.conns.lock().unwrap().values() {
-                c.close();
-            }
-            // …and wake every instance blocked in ConnectNamedPipe by briefly
-            // connecting to the pipe ourselves.
-            for _ in 0..self.threads.len() {
-                // SAFETY: a NUL-terminated wide name and default arguments;
-                // the handle, if any, is closed straight away.
-                unsafe {
-                    let h = CreateFileW(
-                        self.name_w.as_ptr(),
-                        GENERIC_READ | GENERIC_WRITE,
-                        0,
-                        std::ptr::null(),
-                        OPEN_EXISTING,
-                        0,
-                        std::ptr::null_mut(),
-                    );
-                    if h != INVALID_HANDLE_VALUE {
-                        CloseHandle(h);
-                    }
-                }
-            }
+            // The flag stops the loops between waits. The event ends any
+            // connect, read or write wait in progress.
+            self.shared.stop.store(true, Ordering::Release);
+            // SAFETY: a live event.
+            unsafe { SetEvent(self.shared.stop_event.0) };
             for j in self.threads.drain(..) {
                 let _ = j.join();
             }
         }
     }
 
-    /// Serve one connected client until EOF/violation/stop, and say where it
-    /// got with the secret. The cap counts clients that presented it; the
-    /// instances beyond it hold the ones still to. Peek + read run under the connection's state lock,
-    /// so they can never race a concurrent close() (drop path) or send(); the
-    /// idle sleep is outside the lock.
-    fn serve_client(conn: &PipeConn, id: u32, shared: &Shared, host: &Host) -> Gate {
+    /// Serves one connected client until EOF, a protocol violation or the
+    /// stop, and returns its Gate. The connection cap counts only clients that
+    /// presented the secret. Each read blocks until the client sends,
+    /// disconnects or the server stops, and before the secret also ends at
+    /// AUTH_DEADLINE.
+    fn serve_client(conn: &PipeConn, id: u32, shared: &Shared, host: &Host, read_done: &Event) -> Gate {
         let mut acc: Vec<u8> = Vec::new();
         let mut tmp = [0u8; 8192];
         let opened = Instant::now();
         let mut gate = Gate::Waiting;
         loop {
-            if shared.stop.load(Ordering::Relaxed) {
+            if shared.stop.load(Ordering::Acquire) {
                 break;
             }
-            if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
-                gate = Gate::Refused;
-            }
-            if gate == Gate::Refused || gate == Gate::OverCap {
-                break;
-            }
-            let got: u32 = {
+            let timeout_ms = if gate == Gate::Waiting {
+                let left = AUTH_DEADLINE.saturating_sub(opened.elapsed());
+                if left.is_zero() {
+                    gate = Gate::Refused;
+                    break;
+                }
+                u32::try_from(left.as_millis().max(1)).unwrap_or(INFINITE - 1)
+            } else {
+                INFINITE
+            };
+            let handle = {
                 let guard = conn.state.lock().unwrap();
                 let (handle, closed) = *guard;
                 if closed {
                     break;
                 }
-                // Peek-gated read: never block in ReadFile, so the loop stays
-                // responsive to stop and to close() from the drop path.
-                let mut avail: u32 = 0;
-                // SAFETY: an open handle (under the lock, `closed` is false)
-                // and a live out-pointer; the null buffer with length 0 is
-                // the documented "just count" form.
-                let peek_ok = unsafe {
-                    PeekNamedPipe(
-                        handle,
-                        std::ptr::null_mut(),
-                        0,
-                        std::ptr::null_mut(),
-                        &mut avail,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if peek_ok == 0 {
-                    break; // broken pipe — client gone
+                handle
+            };
+            let mut ov = overlapped(read_done);
+            // SAFETY: the handle stays open while this thread, its owner,
+            // serves it; `tmp` and `ov` live until `finish` has waited the
+            // read out.
+            let got = unsafe {
+                let started = ReadFile(handle, tmp.as_mut_ptr(), tmp.len() as u32, std::ptr::null_mut(), &mut ov);
+                finish(handle, &mut ov, started, shared.stop_event.0, timeout_ms)
+            };
+            let Some(got) = got else {
+                // AUTH_DEADLINE passed, the server stopped, or the client
+                // disconnected (a broken pipe).
+                if gate == Gate::Waiting && opened.elapsed() >= AUTH_DEADLINE {
+                    gate = Gate::Refused;
                 }
-                if avail == 0 {
-                    0
-                } else {
-                    let want = (avail as usize).min(tmp.len()) as u32;
-                    let mut n: u32 = 0;
-                    // SAFETY: as the peek; `want` is at most `tmp.len()`.
-                    let read_ok = unsafe {
-                        ReadFile(handle, tmp.as_mut_ptr(), want, &mut n, std::ptr::null_mut())
-                    };
-                    // Byte-mode pipes shouldn't produce ERROR_MORE_DATA, but
-                    // treat it as a successful partial read if they do.
-                    // SAFETY: no arguments; thread-local state.
-                    if read_ok == 0 && unsafe { GetLastError() } != ERROR_MORE_DATA {
-                        break;
-                    }
-                    n
-                }
+                break;
             };
             if got == 0 {
-                std::thread::sleep(Duration::from_millis(30));
                 continue;
             }
             acc.extend_from_slice(&tmp[..got as usize]);
@@ -332,8 +358,11 @@ mod imp {
                 if gate == Gate::Open && !admit(shared, id) {
                     gate = Gate::OverCap;
                 }
-                if gate != Gate::Open {
+                if gate == Gate::Waiting {
                     continue;
+                }
+                if gate != Gate::Open {
+                    break;
                 }
             }
             if !drain_frames(&mut acc, |osc| host.packet(id, osc)) {
@@ -355,7 +384,10 @@ mod imp {
         shared: Arc<Shared>,
         host: Host,
     ) {
-        while !shared.stop.load(Ordering::Relaxed) {
+        // Signalled when this instance's connect or read completes. They
+        // never overlap, so one event serves both.
+        let Some(io_done) = Event::new() else { return };
+        while !shared.stop.load(Ordering::Acquire) {
             let handle = match pre.take() {
                 Some(h) => h as HANDLE,
                 None => {
@@ -369,7 +401,7 @@ mod imp {
                     let h = unsafe {
                         CreateNamedPipeW(
                             name_w.as_ptr(),
-                            PIPE_ACCESS_DUPLEX,
+                            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT
                                 | PIPE_REJECT_REMOTE_CLIENTS,
                             instances,
@@ -386,32 +418,33 @@ mod imp {
                 }
             };
 
-            // Drop wakes us by connecting to an instance, but finds none while
-            // this one was being created. Look at the flag once it exists: a
-            // stop after this finds the instance and connects.
-            if shared.stop.load(Ordering::SeqCst) {
-                // SAFETY: the handle is this thread's and is not used again.
-                unsafe { CloseHandle(handle) };
-                return;
-            }
-
-            // SAFETY: an instance handle this thread owns; synchronous, so no
-            // OVERLAPPED is needed.
+            // Wait for a client to connect, or for the stop.
+            let mut ov = overlapped(&io_done);
+            // SAFETY: an instance handle this thread owns; `ov` lives until
+            // the connect is complete or waited out.
             let connected = unsafe {
-                ConnectNamedPipe(handle, std::ptr::null_mut()) != 0
-                    || GetLastError() == ERROR_PIPE_CONNECTED
+                let started = ConnectNamedPipe(handle, &mut ov);
+                (started == 0 && GetLastError() == ERROR_PIPE_CONNECTED)
+                    || finish(handle, &mut ov, started, shared.stop_event.0, INFINITE).is_some()
             };
-            if !connected || shared.stop.load(Ordering::Relaxed) {
+            if !connected || shared.stop.load(Ordering::Acquire) {
                 // SAFETY: the handle is this thread's and is not used again.
                 unsafe { CloseHandle(handle) };
-                if shared.stop.load(Ordering::Relaxed) {
-                    return;
-                }
                 continue;
             }
 
             let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-            let conn = Arc::new(PipeConn { state: Mutex::new((handle, false)), open: AtomicBool::new(false) });
+            let Some(write_done) = Event::new() else {
+                // SAFETY: as above.
+                unsafe { CloseHandle(handle) };
+                continue;
+            };
+            let conn = Arc::new(PipeConn {
+                state: Mutex::new((handle, false)),
+                open: AtomicBool::new(false),
+                write_done,
+                stop: shared.stop_event.0,
+            });
             {
                 // One instance is the client's and one is for a connection
                 // still to present the secret; the OS refuses a third. Nothing
@@ -419,7 +452,7 @@ mod imp {
                 shared.conns.lock().unwrap().insert(id, conn.clone());
             }
 
-            let gate = serve_client(&conn, id, &shared, &host);
+            let gate = serve_client(&conn, id, &shared, &host, &io_done);
 
             shared.conns.lock().unwrap().remove(&id);
             conn.close();
@@ -427,7 +460,7 @@ mod imp {
                 refuse(&shared.refused, id);
             } else if gate == Gate::OverCap {
                 clockwork_log::log!("[osc] pipe conn {id} closed — over the connection cap");
-            } else if gate == Gate::Open && !shared.stop.load(Ordering::Relaxed) {
+            } else if gate == Gate::Open && !shared.stop.load(Ordering::Acquire) {
                 host.closed(id);
             }
         }
@@ -462,7 +495,7 @@ mod imp {
         let first = unsafe {
             CreateNamedPipeW(
                 name_w.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 instances,
                 PIPE_BUF_BYTES,
@@ -476,8 +509,14 @@ mod imp {
             return None;
         }
 
+        let Some(stop_event) = Event::new() else {
+            // SAFETY: nobody took `first`, so it is closed here, once.
+            unsafe { CloseHandle(first) };
+            return None;
+        };
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
+            stop_event,
             conns: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
             secret,
@@ -488,7 +527,7 @@ mod imp {
             let pre = if i == 0 { Some(first as usize) } else { None };
             let (t_name, t_sd, t_shared) = (name_w.clone(), sd.clone(), shared.clone());
             if let Ok(j) = std::thread::Builder::new()
-                .name("ss-osc-pipe".into())
+                .name("cw-osc-pipe".into())
                 .spawn(move || run_instance(pre, t_name, t_sd, instances, t_shared, host))
             {
                 threads.push(j);
@@ -499,7 +538,7 @@ mod imp {
             unsafe { CloseHandle(first) };
             return None;
         }
-        Some(super::ClockworkOscStream(Box::new(PipeServer { shared, threads, name_w })))
+        Some(super::ClockworkOscStream(Box::new(PipeServer { shared, threads })))
     }
 }
 
