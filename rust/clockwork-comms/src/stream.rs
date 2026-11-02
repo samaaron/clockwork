@@ -1270,6 +1270,33 @@ pub(crate) mod tests {
         stop(h);
     }
 
+    // A client that stops reading is dropped once a reply has waited
+    // WRITE_TIMEOUT for it, and its reader ends, so the host hears the close.
+    // Real sockets on every platform: on Windows the reader is asleep in
+    // WSAPoll when the eviction shuts its socket down.
+    #[test]
+    fn a_client_that_stops_reading_is_dropped_and_the_host_hears_it() {
+        let cap = Cap::new();
+        let (h, port) = start_tcp(&cap);
+        let mut c = connect(port);
+        c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
+        let conn = cap.packets.lock().unwrap()[0].0;
+
+        // Replies until one fails: the socket buffers fill, and the next
+        // write waits WRITE_TIMEOUT for a reader that never comes.
+        let reply = encode("/big", &[OscArg::Str("x".repeat(60 * 1024))]);
+        let mut sent = 0;
+        while send(h, conn, &reply) != 0 {
+            sent += 1;
+            assert!(sent < 100_000, "a client that never reads must make a send fail");
+        }
+        assert!(wait_until(|| cap.closed.lock().unwrap().contains(&conn)),
+                "the dropped client's reader ended and the host heard the close");
+        drop(c);
+        stop(h);
+    }
+
     // A frame length beyond MAX_FRAME is a protocol violation: the connection
     // is closed and on_closed fires.
     #[test]
