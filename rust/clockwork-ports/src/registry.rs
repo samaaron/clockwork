@@ -88,7 +88,7 @@ pub fn capacity(port: u32) -> u32 {
 }
 
 /// The table itself, for a caller that needs the slot diagnostics
-/// (`slot_state`, `slot_refs`, `try_reclaim`) rather than a port.
+/// (`slot_state`, `slot_refs`) rather than a port.
 pub fn table() -> &'static SlotTable<Port, MAX_PORTS> { &PORTS }
 
 /// Take a reference on `handle`'s port, or `None` if the handle is stale, the

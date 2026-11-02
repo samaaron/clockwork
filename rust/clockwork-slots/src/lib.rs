@@ -156,6 +156,16 @@ impl<T> Slot<T> {
     fn new() -> Slot<T> {
         Slot { word: AtomicU64::new(0), occupant: AtomicPtr::new(core::ptr::null_mut()), drained: WaitWord::new() }
     }
+
+    /// A reader leaves. The last one out of a closed slot wakes the close
+    /// waiting on it. Every reader's exit goes through here.
+    #[inline]
+    fn leave(&self) {
+        let was = self.word.fetch_sub(1, Ordering::Release);
+        if state(was) == STATE_CLOSED && refs(was) == 1 {
+            self.drained.bump();
+        }
+    }
 }
 
 /// A fixed table of `N` slots holding `T`.
@@ -190,11 +200,7 @@ impl<T> core::ops::Deref for Held<'_, T> {
 impl<T> Drop for Held<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        let was = self.slot.word.fetch_sub(1, Ordering::Release);
-        // The last reader out of a closed slot wakes the close waiting on it.
-        if state(was) == STATE_CLOSED && refs(was) == 1 {
-            self.slot.drained.bump();
-        }
+        self.slot.leave();
     }
 }
 
@@ -260,7 +266,7 @@ impl<T, const N: usize> SlotTable<T, N> {
         if p.is_null() {
             // Cannot happen — OPEN is published after the pointer — but a null
             // deref on the audio thread is not the place to find out.
-            slot.word.fetch_sub(1, Ordering::Release);
+            slot.leave();
             return None;
         }
         // SAFETY: the occupant is published before OPEN and never dropped
@@ -269,12 +275,9 @@ impl<T, const N: usize> SlotTable<T, N> {
     }
 
     /// If the slot is closed and nobody is inside, take it, drop its occupant,
-    /// and mark it free. Returns true if it did.
-    ///
-    /// Public because both `close` and `open` drive it, and because a test
-    /// that means to assert "now, and only now, is it genuinely free" has to
-    /// be able to ask.
-    pub fn try_reclaim(&self, idx: usize) -> bool {
+    /// and mark it free. Returns true if it did; false if another close got
+    /// there first.
+    fn try_reclaim(&self, idx: usize) -> bool {
         if idx >= N { return false; }
         let slot = &self.slots[idx];
         let w = slot.word.load(Ordering::Acquire);
@@ -302,16 +305,14 @@ impl<T, const N: usize> SlotTable<T, N> {
     /// Put something in a free slot and return its handle, or [`HANDLE_NONE`]
     /// if the table is full.
     ///
-    /// `make` runs BEFORE the sweep, so whatever allocation the occupant needs
-    /// happens outside the window where a slot is BUSY — and is simply dropped
-    /// on the caller's thread if there was no room. Control thread only.
+    /// `make` runs BEFORE the search for a free slot, so whatever allocation
+    /// the occupant needs happens outside the window where a slot is BUSY —
+    /// and is simply dropped on the caller's thread if there was no room.
+    /// Control thread only.
     pub fn open(&self, make: impl FnOnce() -> T) -> u32 {
         let mut boxed = Some(Box::new(make()));
 
         for idx in 0..N {
-            // Sweep: a slot closed while a reader was inside becomes free here.
-            self.try_reclaim(idx);
-
             let slot = &self.slots[idx];
             let w = slot.word.load(Ordering::Acquire);
             if state(w) != STATE_FREE || refs(w) != 0 { continue; }
@@ -341,15 +342,22 @@ impl<T, const N: usize> SlotTable<T, N> {
     }
 
     /// Close a slot: shut to new readers immediately, then wait for any reader
-    /// inside to leave, and free it. Idempotent, and safe against a stale or
-    /// never-valid handle. Never from a thread inside the slot.
+    /// inside to leave, and free it. Every close of the slot waits, including
+    /// one that finds it already closed by another. Idempotent, and safe
+    /// against a stale or never-valid handle. Never from a thread inside the
+    /// slot.
     pub fn close(&self, handle: u32) {
         let Some((idx, gen)) = self.decode(handle) else { return };
         let slot = &self.slots[idx];
         loop {
             let w = slot.word.load(Ordering::Acquire);
-            if generation(w) != gen || state(w) != STATE_OPEN {
-                return;     // already closed, reclaimed, or never ours
+            if generation(w) != gen {
+                return;     // reclaimed and reopened, or never ours
+            }
+            match state(w) {
+                STATE_OPEN => {}
+                STATE_CLOSED => break,   // another close shut it: wait with it
+                _ => return,             // reclaimed, or being reclaimed
             }
             if slot.word.compare_exchange_weak(
                 w, pack(gen, STATE_CLOSED, refs(w)),
@@ -397,12 +405,13 @@ impl<T, const N: usize> SlotTable<T, N> {
         unsafe { self.list_raw(out.as_mut_ptr(), out.len() as u32) }
     }
 
-    /// Close every open slot. For shutdown and for tests, so one case cannot
-    /// leak slots into the next.
+    /// Close every open slot, and wait for any that another close has shut.
+    /// For shutdown and for tests, so one case cannot leak slots into the
+    /// next.
     pub fn close_all(&self) {
         for (idx, slot) in self.slots.iter().enumerate() {
             let w = slot.word.load(Ordering::Acquire);
-            if state(w) == STATE_OPEN {
+            if state(w) == STATE_OPEN || state(w) == STATE_CLOSED {
                 let h = ((generation(w) as u32) << 16) | ((idx + 1) as u32);
                 self.close(h);
             }
@@ -516,6 +525,38 @@ mod tests {
     }
 
     #[test]
+    fn a_second_close_while_a_reader_is_inside_also_waits_for_it() {
+        // Two closers at once, such as a close_all racing a close: the one
+        // that finds the slot already closed must wait for the reader too,
+        // or its caller frees what the reader is still using.
+        use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let _g = LOCK.lock().unwrap();
+        TABLE.close_all();
+        let h = TABLE.open(|| Thing { tag: 4 });
+        assert_ne!(h, HANDLE_NONE);
+        let held = TABLE.acquire(h).expect("an open slot must be enterable");
+        let idx = TABLE.slot_index(h).unwrap();
+        let waiters = || TABLE.slots[idx].drained.waiters.load(SeqCst);
+
+        let (first, second) = (AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let a = s.spawn(|| { TABLE.close(h); first.store(true, SeqCst); });
+            while waiters() == 0 { std::thread::yield_now(); }
+            let b = s.spawn(|| { TABLE.close(h); second.store(true, SeqCst); });
+            // The second close either joins the wait or returns.
+            while waiters() < 2 && !second.load(SeqCst) { std::thread::yield_now(); }
+            assert!(!second.load(SeqCst), "the second close returned with a reader inside");
+            assert!(!first.load(SeqCst));
+
+            drop(held);
+            a.join().unwrap();
+            b.join().unwrap();
+            assert!(first.load(SeqCst) && second.load(SeqCst));
+            assert_eq!(TABLE.slot_state(h), Some(SlotState::Free));
+        });
+    }
+
+    #[test]
     fn a_stale_handle_cannot_enter_the_slot_it_used_to_name() {
         let _g = LOCK.lock().unwrap();
         TABLE.close_all();
@@ -597,6 +638,41 @@ mod loom_tests {
             table.close(h);
             assert!(freed.load(Ordering::SeqCst), "the close returned before freeing");
             reader.join().unwrap();
+        });
+    }
+
+    // Two closes at once, such as a close_all racing a close: each returns
+    // only once the reader has left, and the reader's one wake releases both.
+    #[test]
+    fn two_closes_both_wait_for_the_reader_and_neither_is_left_waiting() {
+        loom::model(|| {
+            let table = Arc::new(SlotTable::<Probe, 2>::new());
+            let freed = Arc::new(AtomicBool::new(false));
+            let h = {
+                let freed = freed.clone();
+                table.open(move || Probe(freed))
+            };
+            let reader = {
+                let (table, freed) = (table.clone(), freed.clone());
+                thread::spawn(move || {
+                    if let Some(held) = table.acquire(h) {
+                        assert!(!freed.load(Ordering::SeqCst), "freed under a reader");
+                        drop(held);
+                    }
+                })
+            };
+            let closer = {
+                let table = table.clone();
+                thread::spawn(move || {
+                    table.close(h);
+                    assert_eq!(table.slot_refs(h), Some(0), "a close returned with the reader inside");
+                })
+            };
+            table.close(h);
+            assert_eq!(table.slot_refs(h), Some(0), "a close returned with the reader inside");
+            closer.join().unwrap();
+            reader.join().unwrap();
+            assert!(freed.load(Ordering::SeqCst));
         });
     }
 }

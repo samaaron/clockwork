@@ -239,7 +239,7 @@ fn a_port_closed_under_a_live_reader_keeps_reads_whole() {
     // and the one opened a microsecond later come out of the same allocator
     // block and read alike. The rule itself is pinned deterministically in
     // `clockwork-slots`'s own tests
-    // (`a_closed_slot_stays_reserved_while_a_reader_is_inside_it`). What this
+    // (`a_close_waits_for_the_reader_inside_and_the_slot_stays_reserved_meanwhile`). What this
     // case is worth is the churn: four thousand opens, fills and closes
     // against a reader that never stops.
     const ROUNDS: u32 = 4_000;
