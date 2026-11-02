@@ -11,7 +11,9 @@
 //! the wait still ends it, and one wake ends every waiter.
 //!
 //! `wait` retries EINTR with the time left to the deadline, so a signal
-//! neither ends the caller's thread nor makes it spin.
+//! neither ends the caller's thread nor makes it spin. A timeout that ends
+//! before the deadline (Windows' timer ticks can) waits out the rest, so a
+//! wait with a deadline never returns before it.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -51,6 +53,11 @@ fn timeout_ms(deadline: Option<Instant>) -> i32 {
         let ms = left.as_micros().div_ceil(1000);
         i32::try_from(ms).unwrap_or(i32::MAX)
     })
+}
+
+/// True while `deadline` is still ahead.
+fn before(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() < d)
 }
 
 #[cfg(unix)]
@@ -97,6 +104,9 @@ impl ReadyWait {
         loop {
             // SAFETY: `n` pollfds in a live array.
             let rc = unsafe { libc::poll(fds.as_mut_ptr(), n as libc::nfds_t, timeout_ms(deadline)) };
+            if rc == 0 && before(deadline) {
+                continue;
+            }
             if rc >= 0 {
                 return Ok(fds[1..n].iter().any(|f| f.revents != 0));
             }
@@ -148,6 +158,9 @@ impl ReadyWait {
         loop {
             // SAFETY: `n` WSAPOLLFDs in a live array.
             let rc = unsafe { WSAPoll(fds.as_mut_ptr(), n as u32, timeout_ms(deadline)) };
+            if rc == 0 && before(deadline) {
+                continue;
+            }
             if rc != SOCKET_ERROR {
                 return Ok(fds[1..n].iter().any(|f| f.revents != 0));
             }
