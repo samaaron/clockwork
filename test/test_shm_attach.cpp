@@ -732,10 +732,12 @@ TEST_CASE("attach: a client that says nothing is refused at the deadline, and th
     REQUIRE(serve(srv, endpointFor(kPort), fx.engine(), &err));
 
     {
-        RawClient silent(endpointFor(kPort));
+        // Timed from before the connect: the server's deadline starts after
+        // it, so the close can come no sooner than AUTH_DEADLINE after this.
         const auto t0 = std::chrono::steady_clock::now();
+        RawClient silent(endpointFor(kPort));
         CHECK(silent.receive().empty());   // closed with no hello
-        CHECK(std::chrono::steady_clock::now() - t0 >= shm_attach::AUTH_DEADLINE - std::chrono::milliseconds(100));
+        CHECK(std::chrono::steady_clock::now() - t0 >= shm_attach::AUTH_DEADLINE);
     }
     CHECK(within([&] { return srv.refused() == 1; }, 5000));
     CHECK(shm_handle_valid(shm_attach::receive(endpointFor(kPort), testSecretBytes().data(), &err)));

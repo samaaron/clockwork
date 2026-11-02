@@ -548,13 +548,18 @@ TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out 
     REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), 1) != 0);   // immediately
     CHECK(settled(sink, 1));
 
-    // A message timed 300 ms ahead is held, then sent at its time.
+    // A message timed 300 ms ahead is held, then sent at its time. The count
+    // is read before the clock, so a second message counted means it went at
+    // or before that reading: never before its time, however late this thread
+    // wakes. Timetags compare unsigned.
     const int64_t at = clockwork::ntpToOscTimetag(wallClockNTP() + 0.3);
     REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at) != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    CHECK(statsOf(sink).sent == 1);
+    const auto sentBy = statsOf(sink).sent;
+    const auto clock = static_cast<uint64_t>(clockwork::ntpToOscTimetag(wallClockNTP()));
+    CHECK((sentBy == 1 || clock >= static_cast<uint64_t>(at)));
     CHECK(settled(sink, 2));
-    CHECK(clockwork::ntpToOscTimetag(wallClockNTP()) >= at);
+    CHECK(static_cast<uint64_t>(clockwork::ntpToOscTimetag(wallClockNTP())) >= static_cast<uint64_t>(at));
 }
 
 TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is sent", "[sinks][drain][wakes]") {
