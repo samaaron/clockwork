@@ -49,6 +49,7 @@ add_executable(clockwork_tests
     test_ring_reader.cpp
     test_wait_word.cpp
     test_endpoint_requests.cpp
+    test_timetag.cpp
     test_ring_concurrency.cpp
     test_lanes.cpp
     test_arena.cpp

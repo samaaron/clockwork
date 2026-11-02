@@ -11,6 +11,8 @@
  */
 #pragma once
 
+#include "clock/timetag.h"
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -130,20 +132,17 @@ inline double wrapPhase(double beat, double quantum) {
     return p;
 }
 
-// NTP seconds (since 1900) → OSC 64-bit 32.32 fixed-point timetag.
+// NTP seconds (since 1900) → OSC 64-bit 32.32 fixed-point timetag, packed by
+// Timetag (clock/timetag.h).
 inline int64_t ntpToOscTimetag(double ntpSeconds) {
-    const uint32_t s = static_cast<uint32_t>(ntpSeconds);
-    const uint32_t f = static_cast<uint32_t>((ntpSeconds - s) * kNtpUnitsPerSecond);
-    return static_cast<int64_t>((static_cast<uint64_t>(s) << 32u) | f);
+    return static_cast<int64_t>(Timetag::fromNtpSeconds(ntpSeconds).ntp());
 }
 
 // The inverse: an OSC timetag → NTP seconds. Not a round trip to the bit —
 // the fraction is 32 bits, a double's mantissa 53 — but exact for the
 // block times the hosts stamp, which come from this pair.
 inline double oscTimetagToNtp(int64_t timetag) {
-    const uint64_t u = static_cast<uint64_t>(timetag);
-    return static_cast<double>(u >> 32u)
-         + static_cast<double>(u & 0xFFFFFFFFu) / kNtpUnitsPerSecond;
+    return Timetag::fromNtp(static_cast<uint64_t>(timetag)).ntpSeconds();
 }
 
 }  // namespace clockwork

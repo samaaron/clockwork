@@ -42,9 +42,11 @@ use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec
 pub mod ffi;
 pub mod normalize;
 pub mod osc;
+pub mod timetag;
 
 pub use normalize::{assign_handle, normalize_ports, safe_osc_name, PortInfo};
 pub use osc::{decode, decode_packet, encode, encode_packet, OscArg, OscBundle, OscMessage, OscPacket};
+pub use timetag::Timetag;
 
 /// Why a subsystem refused one of its verbs. The engine answers it with
 /// `/clockwork/error <address> <reason> <generation>`, in the words the
