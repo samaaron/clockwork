@@ -200,7 +200,7 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
         mAccumPerChanCap = perChanNeeded;
     size_t neededSize = static_cast<size_t>(mAccumPerChanCap) * chans;
     if (mInputAccum.size() < neededSize) {
-        clockwork_log("[juce] resizing input accum: %zu -> %zu floats "
+        clockwork_log("[smoothie] resizing input accum: %zu -> %zu floats "
                 "(perChanCap=%d chans=%d hwBuf=%d activeIn=%d mNumIn=%d)",
                 mInputAccum.size(), neededSize, mAccumPerChanCap, chans,
                 hwBufSize, activeIn, mNumInputChannels);
@@ -230,13 +230,13 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     // the wrong thing" / aggregate-ordering issues in user bug reports.
     // One per device start, so the volume is bounded.
     {
-        clockwork_log("[juce] output channels (%d total):", static_cast<int>(device.outputs.size()));
+        clockwork_log("[smoothie] output channels (%d total):", static_cast<int>(device.outputs.size()));
         for (size_t i = 0; i < device.outputs.size(); ++i) {
-            clockwork_log("[juce]   [%d] %s%s", static_cast<int>(i),
+            clockwork_log("[smoothie]   [%d] %s%s", static_cast<int>(i),
                     device.outputs[i].name.c_str(), device.outputs[i].active ? " (active)" : "");
         }
     }
-    clockwork_log("[juce] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
+    clockwork_log("[smoothie] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
             device.name.c_str(),
             device.driver.c_str(),
             mSampleRate,
@@ -250,7 +250,7 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
 }
 
 void ClockworkProcessor::deviceStopped() {
-    clockwork_log("[juce] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
+    clockwork_log("[smoothie] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
 }
@@ -344,7 +344,7 @@ void ClockworkProcessor::process(
     // thread to surface. Warmup-phase only, so the log never lands on a
     // steady-state block.
     if (!mFirstCallbackLogged.exchange(true, std::memory_order_relaxed)) {
-        clockwork_log("[juce] first audio callback: numSamples=%d out=%d in=%d",
+        clockwork_log("[smoothie] first audio callback: numSamples=%d out=%d in=%d",
                 numSamples, numOutputChannels, numInputChannels);
     }
 
@@ -354,7 +354,7 @@ void ClockworkProcessor::process(
     // permission) leaves the thread unchanged; see RealtimeThread.h.
     if (!mRealtimeElevated.exchange(true, std::memory_order_relaxed)) {
         const auto rt = clockwork::elevateCurrentThreadToRealtime();
-        clockwork_log("[juce] audio thread realtime: status=%d policy=%d prio=%d err=%d",
+        clockwork_log("[smoothie] audio thread realtime: status=%d policy=%d prio=%d err=%d",
                static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
     }
 

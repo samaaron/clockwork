@@ -3134,7 +3134,7 @@ bool ClockworkEngine::startAudioSource() {
         // window is only localisable if the log shows exactly how far the
         // attach got — nothing after
         // "attaching" = died inside the driver's start path; "attached" but no
-        // "[juce] first audio callback" = died before the device's IO thread
+        // "[smoothie] first audio callback" = died before the device's IO thread
         // reached our callback. The gateway thread drains the ring on its own,
         // so the lines reach the host even when this thread never returns.
         {
