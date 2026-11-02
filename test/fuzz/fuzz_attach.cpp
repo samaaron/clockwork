@@ -35,8 +35,12 @@ extern "C" int32_t clockwork_comms_secret_admits(const ClockworkCommsSecret*, co
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // The request: the first REQUEST_LEN bytes, as the server reads exactly
     // that many before it looks.
+    // An empty input may arrive with no buffer at all (the replay hands over
+    // an empty vector's data(), null), and memcpy from null is undefined even
+    // for zero bytes — glibc declares it nonnull, which UBSan holds it to. The
+    // empty request is still read: as all zeros.
     std::array<uint8_t, shm_attach::REQUEST_LEN> req {};
-    std::memcpy(req.data(), data, std::min(size, req.size()));
+    if (size > 0) std::memcpy(req.data(), data, std::min(size, req.size()));
     if (const auto role = shm_attach::admitted_role(req, nullptr)) gSink += *role;
 
     // The hello: what follows, as the client reads exactly a hello's size.
