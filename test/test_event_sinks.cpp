@@ -38,6 +38,7 @@
 #include "LanesFixture.h"
 #include "OscTestUtils.h"
 #include "lanes/lanes.h"
+#include "ThreadWakes.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -527,4 +528,50 @@ TEST_CASE("sinks: flushing a closed or invented handle answers 0",
           "[sinks][flush]") {
     CHECK(clockwork_sink_flush(CLOCKWORK_SINK_NONE) == 0);
     CHECK(clockwork_sink_flush(999999u) == 0);
+}
+
+// ── The drain's waits ────────────────────────────────────────────────────────
+//
+// The drain thread sleeps until a send queues a message or a held message is
+// due, and does not wake in between. The delivery cases run on every
+// platform; the wake counts are read on Linux only.
+
+TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out at its time and not before",
+          "[sinks][drain]") {
+    Sinks guard;
+    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    REQUIRE(sink != CLOCKWORK_SINK_NONE);
+    const auto ping = osc_test::message("/ping");
+
+    // Nothing is queued, so the drain is asleep and only the send can wake it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), 1) != 0);   // immediately
+    CHECK(settled(sink, 1));
+
+    // A message timed 300 ms ahead is held, then sent at its time.
+    const int64_t at = clockwork::ntpToOscTimetag(wallClockNTP() + 0.3);
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at) != 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(statsOf(sink).sent == 1);
+    CHECK(settled(sink, 2));
+    CHECK(clockwork::ntpToOscTimetag(wallClockNTP()) >= at);
+}
+
+TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is sent", "[sinks][drain][wakes]") {
+    if (!thread_wakes::countable()) SKIP("per-thread wake counts are read from Linux's /proc");
+    Sinks guard;
+    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    REQUIRE(sink != CLOCKWORK_SINK_NONE);
+    // Polling every 500 us would wake about 1000 times in these 500 ms.
+    auto woke = thread_wakes::over("cw-sink-drain", std::chrono::milliseconds(500));
+    REQUIRE(woke);
+    CHECK(*woke <= 1);
+
+    // A message timed a minute ahead must not wake the drain before then.
+    const auto ping = osc_test::message("/ping");
+    const int64_t at = clockwork::ntpToOscTimetag(wallClockNTP() + 60.0);
+    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at) != 0);
+    woke = thread_wakes::over("cw-sink-drain", std::chrono::milliseconds(500));
+    REQUIRE(woke);
+    CHECK(*woke <= 2);
 }

@@ -125,10 +125,12 @@ pub fn open_with_layout(kind: u32, target: &str, layout: &Layout,
     handle
 }
 
-/// Close a sink. Silent to new sends immediately; freed as soon as nobody is
-/// inside. Idempotent and safe against a stale handle.
+/// Close a sink. New sends are refused at once, and the call returns once no
+/// send or delivery is still using the sink. Rings the drain so it stops when
+/// the last sink has gone. Idempotent and safe with a stale handle.
 pub fn close(handle: u32) {
     SINKS.close(handle);
+    crate::service::DRAIN.ring();
 }
 
 /// Every open sink's handle, in slot order.
@@ -147,8 +149,6 @@ pub fn open_count() -> u32 {
     unsafe { SINKS.list_raw(core::ptr::null_mut(), 0) }
 }
 
-/// Close every sink. For shutdown, and so one test case cannot leak slots into
-/// the next.
 /// Cancel everything the sink is holding. 0 if the handle is not live.
 pub fn flush(handle: u32) -> u32 {
     acquire(handle).map(|s| s.flush()).unwrap_or(0)
@@ -174,8 +174,11 @@ pub fn flush_all() -> u32 {
     n
 }
 
+/// Close every sink. For shutdown, and so one test case cannot leak slots into
+/// the next.
 pub fn close_all() {
     SINKS.close_all();
+    crate::service::DRAIN.ring();
 }
 
 /// Drain one sink at `now`. Returns the earliest timetag still held.
@@ -197,4 +200,13 @@ pub fn pump_service(now: u64) -> Option<u64> {
         }
     }
     soonest
+}
+
+/// True if any service-driven sink has queued messages the drain has not
+/// taken. The drain checks this after it arms the doorbell and before it
+/// sleeps, so a send that lands in between still wakes it.
+pub fn any_queued() -> bool {
+    let mut handles = [0u32; MAX_SINKS];
+    let n = SINKS.list(&mut handles).min(MAX_SINKS as u32) as usize;
+    handles[..n].iter().any(|&h| acquire(h).is_some_and(|s| s.drive == Drive::Service && s.has_queued()))
 }

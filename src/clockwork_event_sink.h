@@ -93,6 +93,12 @@ typedef enum ClockworkSinkKind {
  * Control thread only: this allocates and may touch the device.
  */
 ClockworkSink clockwork_sink_open(ClockworkSinkKind kind, const char* target, uint32_t capacity);
+
+/* Close a sink. Sends are refused from the moment of the call, and the call
+   returns once no send or delivery is still using the sink. Control thread
+   only. Do not call it while holding a lock a delivery takes (such as the
+   host emitter's lock), or from inside a delivery: the close waits for the
+   delivery to finish, so either deadlocks. */
 void    clockwork_sink_close(ClockworkSink sink);
 
 /*

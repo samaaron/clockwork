@@ -15,35 +15,30 @@
 //! It starts on the first sink opened and stops when the last one closes.
 //! Nothing runs in a process that opened no sink.
 //!
-//! # Why it polls, and what that costs
+//! # How it sleeps
 //!
-//! It cannot be woken by a send. `clockwork_sink_send` is the audio thread's, and
-//! signalling a condition variable or unparking a thread is a syscall — the
-//! header forbids exactly that. So the drain looks on a short cycle instead,
-//! and the cost is honest: an "immediately" message waits up to [`TICK`]
-//! before it goes out.
-//!
-//! A DSP that says WHEN IT MEANS pays none of this: the message is picked up
-//! on some earlier tick, held, and released at its time — the poll interval
-//! becomes scheduling slack instead of latency. The 500 µs is only ever paid
-//! by a producer that decided at the last possible moment, and that producer
-//! had already decided to be late.
-//!
-//! When a message IS being held, the sleep shortens to land on it rather than
-//! waiting out the tick, so the release is limited by the OS timer's own
-//! resolution rather than by this loop.
+//! The drain thread sleeps on [`DRAIN`], a `clockwork_wait::Doorbell`, until a
+//! send queues a message, the last sink closes, or the earliest held message
+//! is due. `clockwork_sink_send` rings the doorbell after it queues. While the
+//! drain is awake a ring costs the audio thread a fence and a load. The first
+//! ring after the drain goes to sleep makes one wake call, which does not
+//! block. An "immediately" message goes out as soon as the OS schedules the
+//! drain thread, and a timed message goes out at its time, to the resolution
+//! of the OS timer.
 
 use std::sync::Mutex;
+use std::time::Instant;
+
+use clockwork_wait::Doorbell;
 
 use crate::registry;
 use crate::time;
 
-/// The longest the drain sleeps while any sink is open. See the module note:
-/// this is the latency of "immediately", and nothing else.
-pub const TICK: std::time::Duration = std::time::Duration::from_micros(500);
+/// Sends and closes ring this, and the drain thread sleeps on it.
+pub static DRAIN: Doorbell = Doorbell::new();
 
-/// The shortest. A held message due in 20 µs is not worth a wake per 20 µs;
-/// the drain lands on it a hair early or a hair late either way.
+/// The shortest sleep. A held message due in 20 µs is not worth a wake per
+/// 20 µs; the drain lands on it a hair early or a hair late either way.
 const MIN_SLEEP: std::time::Duration = std::time::Duration::from_micros(100);
 
 /// The lifecycle, under a lock rather than a flag.
@@ -51,7 +46,7 @@ const MIN_SLEEP: std::time::Duration = std::time::Duration::from_micros(100);
 /// A flag plus a compare-exchange has a window where the thread has decided to
 /// stop and an `open` has decided it is already running, and the result is a
 /// sink nobody drains. This is not a hot path — it is touched on open and on
-/// the tick where the last sink went away — so the lock costs nothing and the
+/// the pass where the last sink went away — so the lock costs nothing and the
 /// window does not exist.
 static RUNNING: Mutex<bool> = Mutex::new(false);
 
@@ -60,7 +55,7 @@ static RUNNING: Mutex<bool> = Mutex::new(false);
 pub fn ensure_running() {
     let Ok(mut running) = RUNNING.lock() else { return };
     if *running { return; }
-    match std::thread::Builder::new().name("clockwork-sink-drain".into()).spawn(run) {
+    match std::thread::Builder::new().name("cw-sink-drain".into()).spawn(run) {
         Ok(_) => *running = true,
         // No thread. Sinks still accept and count; nothing is delivered, and
         // the numbers say so rather than the process pretending.
@@ -85,10 +80,9 @@ fn run() {
             }
         }
 
-        let sleep = next
-            .and_then(|w| time::until(w, now))
-            .unwrap_or(TICK)
-            .clamp(MIN_SLEEP, TICK);
-        std::thread::sleep(sleep);
+        // Sleep until a send queues a message, the last sink closes, or the
+        // earliest held message is due.
+        let deadline = next.map(|w| Instant::now() + time::until(w, now).unwrap_or_default().max(MIN_SLEEP));
+        DRAIN.sleep(|| registry::any_queued() || registry::open_count() == 0, deadline);
     }
 }

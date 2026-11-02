@@ -199,6 +199,7 @@ impl Sink {
         let stamp = self.arrival.fetch_add(1, Ordering::Relaxed);
         for q in &self.classes {
             if bytes.len() <= q.cell_bytes() && q.push(bytes, when, stamp) {
+                crate::service::DRAIN.ring();
                 return true;
             }
         }
@@ -224,6 +225,11 @@ impl Sink {
             scheduled: self.scheduled.load(Ordering::Relaxed),
             cancelled: self.cancelled.load(Ordering::Relaxed),
         }
+    }
+
+    /// True if a send has queued a message the drain has not taken yet.
+    pub fn has_queued(&self) -> bool {
+        self.classes.iter().any(|q| !q.is_empty())
     }
 
     /// Messages accepted but not yet delivered — in the queue or held for
