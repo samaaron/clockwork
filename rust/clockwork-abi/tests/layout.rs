@@ -99,8 +99,10 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_bytes, area_count, area_bytes, entry_count, entry_bytes, state, generation, reserved,
         areas, entries,
     });
-    let consts: [(&str, i64); 34] = [
+    let consts: [(&str, i64); 36] = [
         ("CLOCKWORK_E_NO_INSTANCE", ClockworkStatus::E_NO_INSTANCE.0 as i64),
+        ("CLOCKWORK_E_TIMEOUT", ClockworkStatus::E_TIMEOUT.0 as i64),
+        ("CLOCKWORK_WAIT_FOREVER", CLOCKWORK_WAIT_FOREVER as i64),
         ("CLOCKWORK_AUDIENCE_PUBLIC", ClockworkArenaAudience::PUBLIC.0 as i64),
         ("CLOCKWORK_AUDIENCE_TRANSPORT", ClockworkArenaAudience::TRANSPORT.0 as i64),
         ("CLOCKWORK_AREA_GUEST_PRIVATE", ClockworkArenaArea::GUEST_PRIVATE.0 as i64),

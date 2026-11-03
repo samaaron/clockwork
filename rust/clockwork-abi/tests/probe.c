@@ -81,6 +81,8 @@ int main(void) {
     /* The enumerators, so a renumbering is caught as well as a reshaping. */
     printf("const CLOCKWORK_E_NOMEM %d\n", (int)CLOCKWORK_E_NOMEM);
     printf("const CLOCKWORK_E_NO_INSTANCE %d\n", (int)CLOCKWORK_E_NO_INSTANCE);
+    printf("const CLOCKWORK_E_TIMEOUT %d\n", (int)CLOCKWORK_E_TIMEOUT);
+    printf("const CLOCKWORK_WAIT_FOREVER %lld\n", (long long)CLOCKWORK_WAIT_FOREVER);
     printf("const CLOCKWORK_AUDIENCE_PUBLIC %d\n", (int)CLOCKWORK_AUDIENCE_PUBLIC);
     printf("const CLOCKWORK_AUDIENCE_TRANSPORT %d\n", (int)CLOCKWORK_AUDIENCE_TRANSPORT);
     printf("const CLOCKWORK_GEOM_WINDOW_VERSION %d\n", (int)CLOCKWORK_GEOM_WINDOW_VERSION);

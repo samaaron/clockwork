@@ -80,7 +80,9 @@
  * talk to the engine open two handles; that is cheap and it is what the
  * ingress ring's multi-producer lock is for. The exception is deliberate and stated at
  * clockwork_client_poll: draining is single-consumer, so exactly one thread
- * may poll a given handle's egress.
+ * may poll a given handle's egress. And one call is any thread's:
+ * clockwork_client_wait, so a thread can sleep until there is something to
+ * poll while another thread polls.
  *
  *
  * ── MEMORY ──────────────────────────────────────────────────────────────────
@@ -139,8 +141,10 @@ typedef enum ClockworkStatus {
                              * message under /clockwork/ is never refused for
                              * this. Wait for /clockwork/setup, then send again
                              * (docs/RESTARTS.md). */
-    CLOCKWORK_E_BUSY        /* another peer holds the engine's command plane;
+    CLOCKWORK_E_BUSY,       /* another peer holds the engine's command plane;
                              * try again once it has let go (docs/SEGMENTS.md) */
+    CLOCKWORK_E_TIMEOUT     /* a wait's time passed with nothing new: an
+                             * answer, not a fault (clockwork_client_wait) */
 } ClockworkStatus;
 
 /* A phrase for a status, for logs and for bindings that want to raise. Static
@@ -373,6 +377,48 @@ uint32_t clockwork_client_poll(ClockworkClient* c,
  * one, whichever of the two delivered it. clockwork_route_egress (EgressRouter.h)
  * returns the number for a message it routes. */
 void clockwork_client_count_undelivered(ClockworkClient* c, uint32_t n);
+
+/* ── Waiting ─────────────────────────────────────────────────────────────────
+ *
+ * A client with nothing to do sleeps until the engine says something, rather
+ * than polling on a timer. The engine keeps a count of the times it has
+ * spoken — once per audio block that wrote a reply, a notification or a debug
+ * line, and once per message one of its own threads writes — and a wait
+ * returns when the count is no longer the one the caller last saw.
+ *
+ * `seen` is the caller's: the count it last saw, 0 to begin with, and on
+ * return the count now. CLOCKWORK_OK: the engine has said something since,
+ * so poll. CLOCKWORK_E_TIMEOUT: `timeout_ms` passed first; 0 is a look, and
+ * CLOCKWORK_WAIT_FOREVER has no deadline. The first wait returns at once if
+ * the engine has said anything since it started, so a caller that waits
+ * before it first polls misses nothing.
+ *
+ * OK IS A REASON TO POLL, NOT A PROMISE OF A MESSAGE: a wake (below), or a
+ * poll that already took what was said, leaves nothing to take. A caller
+ * polls, then waits again.
+ *
+ * ANY THREAD MAY WAIT, while another polls the same handle; nothing here
+ * touches what poll keeps, and the count is the caller's rather than the
+ * handle's for that reason. That is what a host needs whose screen runs on
+ * a loop it does not own — a phone's main run loop, a window system's
+ * event loop: it parks one thread here and has that thread tell the loop,
+ * and a still screen costs nothing while the engine is quiet.
+ *
+ * An in-process handle waits (an embedder's: clockwork_embed_client). The
+ * peer's replies come through a ring in another process that no word here
+ * yet covers, and a browser's threads wait in JavaScript (js/lib/ring.js);
+ * both get CLOCKWORK_E_ABSENT, as a build with one thread does. A reader
+ * takes no replies and gets CLOCKWORK_E_PERM.
+ */
+#define CLOCKWORK_WAIT_FOREVER 0xFFFFFFFFu
+
+ClockworkStatus clockwork_client_wait(ClockworkClient* c, uint32_t* seen, uint32_t timeout_ms);
+
+/* End every wait on this engine now, from any thread: each returns
+ * CLOCKWORK_OK as if the engine had spoken, and polls nothing. For a host
+ * stopping the thread it parked in clockwork_client_wait: it sets its own
+ * stop, then wakes. */
+void clockwork_client_wake(ClockworkClient* c);
 
 /* ── Watching a ring ─────────────────────────────────────────────────────────
  *

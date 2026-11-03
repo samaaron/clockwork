@@ -14,7 +14,9 @@
 //!   another process's segment ([`Client::open_shm`]), this address space,
 //!   or the engine an [`Embed`] owns. Send OSC bytes in ([`Client::send`],
 //!   or build them in the ring with [`Client::send_with`]); take replies out
-//!   ([`Client::poll`], [`Client::drain`], [`Client::poll_until`]); watch a
+//!   ([`Client::poll`], [`Client::drain`], [`Client::poll_until`]); sleep until
+//!   there are some ([`Client::wait`], or [`Client::on_egress`] for a host whose
+//!   screen runs on a loop it does not own); watch a
 //!   ring without taking ([`Tap`]); reach a [`Region`]; read the counters as
 //!   a block ([`Metrics`], [`NativeStats`]) and ask for them by name
 //!   ([`Metric`], [`NativeStat`], generated from the schema); take one

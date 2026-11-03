@@ -61,6 +61,17 @@ void clockwork_egress_nrt_want_room(void);
    room in the ring (clockwork_control_wake). */
 void clockwork_egress_nrt_room_made(void);
 
+/* Block until the engine has said something since `*seen` — a block that
+   wrote the RT egress ring, an NRT egress write, or clockwork_egress_wake —
+   or `timeout_ms` passes (UINT32_MAX: no deadline). `*seen` becomes the
+   count now. 1 when it moved, 0 when the time passed first. Any thread but
+   the audio thread; what clockwork_client_wait is in the engine's process. */
+int clockwork_egress_wait(uint32_t* seen, uint32_t timeout_ms);
+
+/* Move the count and wake every waiter, as if the engine had said something:
+   for a host ending a wait it parked (clockwork_client_wake). Any thread. */
+void clockwork_egress_wake(void);
+
 /* Count `n` deliveries the transport could not make for a frame that left an
    egress ring (PerformanceMetrics::egress_frames_undelivered): whoever hands
    egress to a transport, after each frame. */

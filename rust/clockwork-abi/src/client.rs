@@ -28,6 +28,7 @@ impl ClockworkStatus {
     pub const E_NOMEM: ClockworkStatus = ClockworkStatus(9);
     pub const E_NO_INSTANCE: ClockworkStatus = ClockworkStatus(10);
     pub const E_BUSY: ClockworkStatus = ClockworkStatus(11);
+    pub const E_TIMEOUT: ClockworkStatus = ClockworkStatus(12);
 
     pub fn is_ok(self) -> bool { self == Self::OK }
 }
@@ -63,6 +64,9 @@ pub const CLOCKWORK_FEATURE_SCOPE: u32 = 1 << 1;
 pub const CLOCKWORK_FEATURE_BULK: u32 = 1 << 2;
 pub const CLOCKWORK_FEATURE_WINDOW: u32 = 1 << 3;
 pub const CLOCKWORK_FEATURE_SCHEDULER: u32 = 1 << 4;
+
+/// `clockwork_client_wait` with no deadline.
+pub const CLOCKWORK_WAIT_FOREVER: u32 = 0xFFFF_FFFF;
 
 /// One frame off the egress, as `clockwork_client_poll` hands it over. The
 /// bytes are the ring's and are valid until the next poll.
@@ -174,6 +178,8 @@ extern "C" {
     pub fn clockwork_client_send_abort(c: *mut ClockworkClient);
     pub fn clockwork_client_poll(c: *mut ClockworkClient, out: *mut ClockworkClientMessage, max: u32) -> u32;
     pub fn clockwork_client_count_undelivered(c: *mut ClockworkClient, n: u32);
+    pub fn clockwork_client_wait(c: *mut ClockworkClient, seen: *mut u32, timeout_ms: u32) -> ClockworkStatus;
+    pub fn clockwork_client_wake(c: *mut ClockworkClient);
 
     pub fn clockwork_client_tap_sizeof() -> usize;
     pub fn clockwork_client_tap_open(c: *mut ClockworkClient, ring: u32, out_status: *mut ClockworkStatus) -> *mut ClockworkClientTap;

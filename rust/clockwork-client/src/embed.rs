@@ -305,7 +305,9 @@ impl DerefMut for Embed {
 impl Drop for Embed {
     fn drop(&mut self) {
         // The client is the handle's and closes with it; its own Drop runs
-        // after this and, being unowned, does nothing.
+        // after this and, being unowned, closes nothing. Its listener, if it
+        // has one, waits through the handle, so it ends first.
+        self.client.stop_listening();
         // SAFETY: ours to close, closed once.
         unsafe { clockwork_embed_close(self.raw.as_ptr()) }
     }

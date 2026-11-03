@@ -6,6 +6,9 @@ use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clockwork_abi::client::{
@@ -17,12 +20,13 @@ use clockwork_abi::client::{
     clockwork_client_poll, clockwork_client_region, clockwork_client_scope_read, clockwork_client_send,
     clockwork_client_send_abort, clockwork_client_send_begin, clockwork_client_send_commit,
     clockwork_client_tap_close, clockwork_client_tap_missed, clockwork_client_tap_open,
-    clockwork_client_tap_poll, ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
+    clockwork_client_tap_poll, clockwork_client_wait, clockwork_client_wake,
+    ClockworkClient, ClockworkClientClock, ClockworkClientInfo,
     ClockworkClientSampleClock,
     ClockworkClientMessage, ClockworkClientTap, ClockworkRegion, ClockworkRegionId,
     ClockworkStatus, CLOCKWORK_FEATURE_SCOPE, CLOCKWORK_FEATURE_BULK,
     CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_TAPS, CLOCKWORK_FEATURE_WINDOW,
-    CLOCKWORK_ROUTE_NOTIFY, CLOCKWORK_ROUTE_REPLY,
+    CLOCKWORK_ROUTE_NOTIFY, CLOCKWORK_ROUTE_REPLY, CLOCKWORK_WAIT_FOREVER,
 };
 
 use crate::error::{check, refused, Error, Result};
@@ -54,6 +58,32 @@ pub struct Client {
     /// handle's, closed with it.
     owned: bool,
     assets: Vec<ClockworkClientMessage>,
+    /// The engine's egress count when this handle's last [`Client::wait`]
+    /// returned.
+    seen: u32,
+    /// The thread [`Client::on_egress`] parked, if any.
+    listener: Option<Listener>,
+}
+
+/// A thread parked in `clockwork_client_wait` for [`Client::on_egress`].
+struct Listener {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+/// The handle as the listener holds it.
+struct Waiting(NonNull<ClockworkClient>);
+
+// SAFETY: the listener calls only clockwork_client_wait through it, which
+// any thread may call while another uses the handle (clockwork_client.h,
+// "Waiting"); the handle outlives the thread, which is joined before close.
+unsafe impl Send for Waiting {}
+
+impl Waiting {
+    fn wait(&self, seen: &mut u32) -> ClockworkStatus {
+        // SAFETY: as above, and a live out-pointer.
+        unsafe { clockwork_client_wait(self.0.as_ptr(), seen, CLOCKWORK_WAIT_FOREVER) }
+    }
 }
 
 // SAFETY: nothing in a handle is pinned to the thread that opened it — the
@@ -151,7 +181,7 @@ impl Client {
 
     pub(crate) fn opened(raw: *mut ClockworkClient, st: ClockworkStatus, owned: bool) -> Result<Client> {
         match NonNull::new(raw) {
-            Some(raw) => Ok(Client { raw, owned, assets: vec![EMPTY_SLOT; POLL_BATCH] }),
+            Some(raw) => Ok(Client { raw, owned, assets: vec![EMPTY_SLOT; POLL_BATCH], seen: 0, listener: None }),
             None => Err(refused(st)),
         }
     }
@@ -265,10 +295,10 @@ impl Client {
         }
     }
 
-    /// Poll until `pick` answers, or `timeout` passes. The engine acts on a
-    /// message on its next block, so the wait is by time: a poll, a
-    /// millisecond's sleep, again. Messages `pick` declines are taken and
-    /// gone, as with any poll.
+    /// Poll until `pick` answers, or `timeout` passes. Between polls it
+    /// sleeps until the engine says something ([`Client::wait`]); where
+    /// nothing can wait (the peer), a millisecond's nap stands in. Messages
+    /// `pick` declines are taken and gone, as with any poll.
     pub fn poll_until<T, F>(&mut self, timeout: Duration, mut pick: F) -> Option<T>
     where
         F: FnMut(&Message<'_>) -> Option<T>,
@@ -280,10 +310,87 @@ impl Client {
                     return Some(t);
                 }
             }
-            if Instant::now() >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return None;
             }
-            std::thread::sleep(Duration::from_millis(1));
+            if self.wait(Some(left)).is_err() {
+                std::thread::sleep(left.min(Duration::from_millis(1)));
+            }
+        }
+    }
+
+    /// Sleep until the engine says something — a reply, a notification, a
+    /// debug line — or `timeout` passes (`None`: no deadline). `Ok(true)`:
+    /// it has spoken since this handle last waited, so poll; `Ok(false)`:
+    /// the time passed first. The first wait is over at once if the engine
+    /// has said anything since it started, so waiting before the first poll
+    /// misses nothing. True is a reason to poll, not a promise of a message.
+    ///
+    /// For the thread that polls. A host whose screen runs on a loop it does
+    /// not own has a thread wait for it instead: [`Client::on_egress`].
+    /// [`Error::Absent`] where nothing can wait — the peer, a browser, a
+    /// build with one thread — and [`Error::Perm`] for a reader.
+    pub fn wait(&mut self, timeout: Option<Duration>) -> Result<bool> {
+        let ms = match timeout {
+            None => CLOCKWORK_WAIT_FOREVER,
+            // Rounded up, so a wait never ends before it was asked to.
+            Some(t) => t.as_nanos().div_ceil(1_000_000).min(u128::from(CLOCKWORK_WAIT_FOREVER - 1)) as u32,
+        };
+        // SAFETY: a live handle and a live out-pointer.
+        match unsafe { clockwork_client_wait(self.raw.as_ptr(), &mut self.seen, ms) } {
+            ClockworkStatus::E_TIMEOUT => Ok(false),
+            s => check(s).map(|()| true),
+        }
+    }
+
+    /// Call `told` on a thread of this handle's each time the engine says
+    /// something, until the handle closes: for a host whose screen runs on
+    /// a loop it does not own (a phone's main run loop, a window system's
+    /// event loop), which then sleeps until there is news rather than poll
+    /// on a timer. `told` tells that loop — an event-loop proxy, a run-loop
+    /// source — and the loop polls; it runs once at the start, for whatever
+    /// the engine said before. It may run when there is nothing new to
+    /// take, as [`Client::wait`] may return.
+    ///
+    /// Replaces any earlier `told`. [`Error::Absent`] where nothing can wait
+    /// (see [`Client::wait`]).
+    pub fn on_egress<F>(&mut self, mut told: F) -> Result<()>
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.stop_listening();
+        // Whether a wait is possible here, asked before a thread is spent on it.
+        let mut look = 0;
+        // SAFETY: a live handle and a live out-pointer.
+        match unsafe { clockwork_client_wait(self.raw.as_ptr(), &mut look, 0) } {
+            ClockworkStatus::OK | ClockworkStatus::E_TIMEOUT => {}
+            s => return check(s),
+        }
+        let handle = Waiting(self.raw);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("clockwork-egress".into())
+            .spawn(move || {
+                let mut seen = 0;
+                while handle.wait(&mut seen).is_ok() && !stopped.load(Ordering::Acquire) {
+                    told();
+                }
+            })
+            .map_err(|_| Error::NoMem)?;
+        self.listener = Some(Listener { stop, thread });
+        Ok(())
+    }
+
+    /// End [`Client::on_egress`]'s thread, and wait for it to end. Closing
+    /// the handle does this too.
+    pub fn stop_listening(&mut self) {
+        if let Some(l) = self.listener.take() {
+            l.stop.store(true, Ordering::Release);
+            // SAFETY: a live handle; any thread may wake.
+            unsafe { clockwork_client_wake(self.raw.as_ptr()) };
+            let _ = l.thread.join();
         }
     }
 
@@ -375,6 +482,7 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        self.stop_listening();
         if self.owned {
             // SAFETY: ours to close, closed once: this is the only place,
             // and `owned` is false for a handle the engine closes itself.

@@ -242,6 +242,49 @@ fn drain_takes_everything_and_sequences_are_monotonic() {
 }
 
 #[test]
+fn a_wait_is_over_when_a_block_says_something_and_not_before() {
+    let mut g = engine();
+    let e = g.as_mut().unwrap();
+    settle(e);
+    // Caught up with whatever was said before.
+    while e.wait(Some(Duration::ZERO)).unwrap() {}
+    assert!(!e.wait(Some(Duration::from_millis(20))).unwrap(), "nothing rendered, nothing said");
+    render_blocks(e, 1);
+    assert!(!e.wait(Some(Duration::ZERO)).unwrap(), "a block that said nothing");
+    e.send(&ping(), ORIGIN).unwrap();
+    render_blocks(e, 1);
+    assert!(e.wait(Some(Duration::ZERO)).unwrap(), "the block that answered");
+    assert!(e.poll().any(|m| m.address() == "/dummy/pong"));
+}
+
+#[test]
+fn on_egress_tells_another_thread_each_time_and_stops_when_told() {
+    let mut g = engine();
+    let e = g.as_mut().unwrap();
+    settle(e);
+    // The engine has said something, so the listener is told once at the
+    // start, for it.
+    e.send(&ping(), ORIGIN).unwrap();
+    render_blocks(e, 1);
+    e.drain();
+    let (tx, rx) = std::sync::mpsc::channel();
+    e.on_egress(move || {
+        let _ = tx.send(());
+    })
+    .unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).expect("told at the start");
+    // Then for the block that answers a ping: the pong is there to take.
+    e.send(&ping(), ORIGIN).unwrap();
+    render_blocks(e, 1);
+    rx.recv_timeout(Duration::from_secs(5)).expect("told when the block answered");
+    assert!(e.poll().any(|m| m.address() == "/dummy/pong"));
+    // Stopped, its thread has ended: what told the channel is gone with it.
+    e.stop_listening();
+    while rx.try_recv().is_ok() {}
+    assert_eq!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+}
+
+#[test]
 fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
     let mut g = engine();
     let e = g.as_mut().unwrap();

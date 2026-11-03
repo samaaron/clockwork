@@ -41,6 +41,9 @@ pub enum Error {
     /// Another peer holds the engine's command plane (docs/SEGMENTS.md):
     /// try again once it has let go.
     Busy,
+    /// A wait's time passed with nothing new. An answer, not a fault:
+    /// [`crate::Client::wait`] says it as `Ok(false)`.
+    Timeout,
     /// A status this build of the crate does not name. Receiving one is not
     /// undefined behaviour, which is why the ABI's status is a newtype and
     /// this variant exists.
@@ -66,6 +69,7 @@ impl Error {
             ClockworkStatus::E_NOMEM => Error::NoMem,
             ClockworkStatus::E_NO_INSTANCE => Error::NoInstance,
             ClockworkStatus::E_BUSY => Error::Busy,
+            ClockworkStatus::E_TIMEOUT => Error::Timeout,
             other => Error::Unknown(other.0),
         })
     }
@@ -84,6 +88,7 @@ impl Error {
             Error::NoMem => ClockworkStatus::E_NOMEM,
             Error::NoInstance => ClockworkStatus::E_NO_INSTANCE,
             Error::Busy => ClockworkStatus::E_BUSY,
+            Error::Timeout => ClockworkStatus::E_TIMEOUT,
             Error::Unknown(v) => ClockworkStatus(v),
         }
     }
@@ -153,6 +158,8 @@ mod tests {
             Error::Closed,
             Error::NoMem,
             Error::NoInstance,
+            Error::Busy,
+            Error::Timeout,
             Error::Unknown(99),
         ] {
             assert_eq!(Error::from_status(e.status()), Some(e));

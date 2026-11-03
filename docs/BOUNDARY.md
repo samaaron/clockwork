@@ -341,6 +341,7 @@ CLI, a browser tab running the same code compiled to WebAssembly.
 | `clockwork_client_send`                    | put one OSC message on the ingress ring          |
 | `clockwork_client_send_begin` / `_commit`  | build the message IN the ring, for an encoder that has no buffer of its own |
 | `clockwork_client_poll`                    | take replies from the egress ring                |
+| `clockwork_client_wait` / `_wake`          | sleep, on any thread, until the engine says something; end such a sleep |
 | `clockwork_client_count_undelivered`       | count what the client could not deliver of what it took |
 | `clockwork_client_tap_*`                   | watch a ring without taking from it              |
 | `clockwork_client_region`                  | address metrics, the guest's window, the rings   |

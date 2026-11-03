@@ -23,8 +23,19 @@
 #include "../shared_memory.h"            // layout, RingCursors, EgressRoute
 #include "../in_ring_door.h"              // the in ring's boundary
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
+#include "../workers/wait_word.h"        // what a client waits on for egress
 
 // ── internal state ──────────────────────────────────────────────────────────
+
+// What a client thread sleeps on until the engine says something
+// (clockwork_client_wait): bumped once per block that wrote the RT egress
+// ring, and once per NRT egress write. Process wide, as the rings' consumer
+// is: one engine per process, and every in-process handle polls its rings.
+static ClockworkWaitWord g_egress_said;
+
+// The RT egress ring's sequence when the last block's bump covered it. The
+// audio thread's alone; zeroed with the ring.
+static int32_t g_rt_out_said = 0;
 
 // NRT egress producer lock. Producers on control threads serialise their
 // [route][osc] framing through here; this is the process-wide lock for the
@@ -75,6 +86,7 @@ void clockwork_lanes_reset_rt_out_ring(void) {
     cursors->out_read.store(0, std::memory_order_relaxed);
     cursors->out_sequence.store(0, std::memory_order_relaxed);
     g_rt_drain_state.lastSeq = -1;
+    g_rt_out_said = 0;
 }
 
 void clockwork_lanes_reset_nrt_out_ring(void) {
@@ -267,8 +279,30 @@ bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
     // Refused for want of room: counted, since the line logging it would
     // ride this same full ring (PerformanceMetrics::egress_frames_refused).
     if (!written && metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
-    if (written) clockwork_control_wake();
+    if (written) {
+        clockwork_control_wake();
+        clockwork::bump(g_egress_said);
+    }
     return written;
+}
+
+// ── Waiting for egress (lanes_internal.h) ───────────────────────────────────
+
+int clockwork_egress_wait(uint32_t* seen, uint32_t timeout_ms) {
+    const uint32_t was = *seen;
+    const auto moved = [was] { return g_egress_said.value.load(std::memory_order_seq_cst) != was; };
+    if (timeout_ms == UINT32_MAX) {
+        clockwork::wait_for_condition(g_egress_said, moved);
+    } else {
+        clockwork::wait_for_condition(g_egress_said, moved,
+            clockwork::WaitClock::now() + std::chrono::milliseconds(timeout_ms));
+    }
+    *seen = g_egress_said.value.load(std::memory_order_seq_cst);
+    return *seen != was;
+}
+
+void clockwork_egress_wake(void) {
+    clockwork::bump(g_egress_said);
 }
 
 void clockwork_egress_count_undelivered(uint32_t n) {
@@ -282,7 +316,19 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels) {
     if (!time || time->struct_bytes < sizeof(ClockworkBlockTime)) return false;
-    return process_audio(*time, out_channels, in_channels);
+    const bool ok = process_audio(*time, out_channels, in_channels);
+    // Once a block, and only for a block that said something: whoever waits
+    // for egress (clockwork_client_wait) wakes when the block has ended, with
+    // all of it in the ring. Two atomic operations and a fence when nobody
+    // waits, as the control pass's own wake is.
+    if (cursors) {
+        const int32_t seq = cursors->out_sequence.load(std::memory_order_relaxed);
+        if (seq != g_rt_out_said) {
+            g_rt_out_said = seq;
+            clockwork::bump(g_egress_said);
+        }
+    }
+    return ok;
 }
 
 const float* clockwork_audio_out(void) {

@@ -14,6 +14,7 @@
 #include "clockwork_client.h"
 #include "clockwork_prefix.h"   // clockwork_sys_claims: whose message this is
 #include "owner.h"
+#include "platform.h"           // CLOCKWORK_LEAN_TARGET: one thread, nothing to wait for
 
 #include "shared_memory.h"
 #include "metrics_history.h"
@@ -160,6 +161,7 @@ const char* clockwork_client_status_text(ClockworkStatus s) {
         case CLOCKWORK_E_NOMEM:      return "out of memory";
         case CLOCKWORK_E_NO_INSTANCE: return "no instance: the engine is between guests; wait for setup";
         case CLOCKWORK_E_BUSY:       return "another peer holds the command plane";
+        case CLOCKWORK_E_TIMEOUT:    return "the wait's time passed with nothing new";
     }
     return "unknown status";
 }
@@ -621,6 +623,27 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
             &ctl->nrt_out_head, &ctl->nrt_out_read,
             c->nrtDrain, dm, max - taken(), take);
     return taken();
+}
+
+ClockworkStatus clockwork_client_wait(ClockworkClient* handle, uint32_t* seen, uint32_t timeout_ms) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !seen) return CLOCKWORK_E_ARG;
+    if (c->reader()) return CLOCKWORK_E_PERM;
+#if defined(__EMSCRIPTEN__) || defined(CLOCKWORK_LEAN_TARGET)
+    // A browser's threads wait in JavaScript, on the ring's own head; a build
+    // with one thread has nobody to wait for. Either would spin here.
+    (void)timeout_ms;
+    return CLOCKWORK_E_ABSENT;
+#else
+    if (c->commands) return CLOCKWORK_E_ABSENT;   // the peer's replies: not this process's word
+    // Nothing of the handle's past this point: any thread may be here while
+    // another polls, and the count is the caller's.
+    return clockwork_egress_wait(seen, timeout_ms) ? CLOCKWORK_OK : CLOCKWORK_E_TIMEOUT;
+#endif
+}
+
+void clockwork_client_wake(ClockworkClient* handle) {
+    if (handle) clockwork_egress_wake();
 }
 
 void clockwork_client_count_undelivered(ClockworkClient* handle, uint32_t n) {

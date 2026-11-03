@@ -198,6 +198,78 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     clockwork_client_close(c);
 }
 
+// A host whose screen runs on a loop it does not own parks a thread in
+// clockwork_client_wait and has it tell the loop, rather than poll on a timer.
+// The waits below have deadlines only so that a wake that never comes fails
+// the case rather than hanging it.
+TEST_CASE("client egress: a thread waits until the engine says something, then polls what it said",
+          "[client][egress][wait]") {
+    ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
+    cfg.hostDrainsEgress = true;
+    EngineFixture fx(cfg);
+    ClockworkClient* c = fx.engine().egressClient();
+    REQUIRE(c != nullptr);
+
+    // Boot has spoken, so the first wait is over at once: a host that waits
+    // before it first polls misses nothing.
+    uint32_t seen = 0;
+    REQUIRE(clockwork_client_wait(c, &seen, 0) == CLOCKWORK_OK);
+    CHECK(seen != 0);
+    takeAll(c);
+
+    // Nothing new since: a look says so.
+    uint32_t still = seen;
+    CHECK(clockwork_client_wait(c, &still, 0) == CLOCKWORK_E_TIMEOUT);
+    CHECK(still == seen);
+
+    // A thread parks; the reply to a ping wakes it, and is there to take.
+    std::atomic<bool> parked{false};
+    bool timedOut = false, answered = false;
+    std::thread waiter([&] {
+        uint32_t mine = seen;
+        parked = true;
+        while (!answered && !timedOut) {
+            if (clockwork_client_wait(c, &mine, 3000) == CLOCKWORK_E_TIMEOUT) timedOut = true;
+            for (const Frame& f : takeAll(c)) if (f.address == "/dummy/pong") answered = true;
+        }
+    });
+    while (!parked) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));   // asleep, not merely started
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(fx.engine().ingest(ping.ptr(), ping.size(), 7) == CLOCKWORK_OK);
+    fx.pumpBlock();
+    waiter.join();
+    CHECK(answered);
+    CHECK_FALSE(timedOut);
+}
+
+TEST_CASE("client egress: a wake ends a wait with no deadline, from another thread", "[client][egress][wait]") {
+    ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
+    cfg.hostDrainsEgress = true;
+    EngineFixture fx(cfg);
+    ClockworkClient* c = fx.engine().egressClient();
+    uint32_t seen = 0;
+    clockwork_client_wait(c, &seen, 0);
+
+    std::atomic<ClockworkStatus> got{CLOCKWORK_E_ARG};
+    const auto start = std::chrono::steady_clock::now();
+    std::thread waiter([&] {
+        uint32_t mine = seen;
+        // Long enough that only a wake (or the engine speaking) ends it in time.
+        got = clockwork_client_wait(c, &mine, 10000);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    clockwork_client_wake(c);
+    waiter.join();
+    CHECK(got.load() == CLOCKWORK_OK);
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+
+    // And what a wait refuses.
+    CHECK(clockwork_client_wait(nullptr, &seen, 0) == CLOCKWORK_E_ARG);
+    CHECK(clockwork_client_wait(c, nullptr, 0) == CLOCKWORK_E_ARG);
+    CHECK(std::string(clockwork_client_status_text(CLOCKWORK_E_TIMEOUT)) != "unknown status");
+}
+
 // The control pass holds a verb back while the egress ring lacks room for its
 // answers. A host that drains egress itself makes that room, and the engine
 // answers the rest: the host's read wakes it, with no further write and no
