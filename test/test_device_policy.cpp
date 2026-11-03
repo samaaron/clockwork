@@ -63,9 +63,10 @@ static HD decide(const std::string& prefOut,
                  const std::string& prefIn,
                  const std::string& currentOut,
                  int inChan,
-                 std::vector<std::string> visible) {
+                 std::vector<std::string> outputs,
+                 std::vector<std::string> inputs = {}) {
     return clockwork::device::decideHotplugAction(
-        prefOut, prefIn, currentOut, inChan, visible);
+        prefOut, prefIn, currentOut, inChan, outputs, inputs);
 }
 
 TEST_CASE("Hotplug: the output being played on is listed under its "
@@ -73,6 +74,46 @@ TEST_CASE("Hotplug: the output being played on is listed under its "
     auto d = decide("", "", "MOTU UltraLite", 0,
                     {"MacBook Pro Speakers", "MOTU UltraLite (2)"});
     REQUIRE_FALSE(d.reopen);
+}
+
+TEST_CASE("Hotplug: a preferred output that returns as an output is switched to",
+          "[Hotplug]") {
+    auto d = decide("MOTU UltraLite", "MOTU UltraLite", "MacBook Pro Speakers", 0,
+                    {"MacBook Pro Speakers", "MOTU UltraLite"},
+                    {"MacBook Pro Microphone", "MOTU UltraLite"});
+    REQUIRE(d.switchOutput);
+    REQUIRE(d.outputName == "MOTU UltraLite");
+    REQUIRE(d.inputName == "MOTU UltraLite");
+}
+
+TEST_CASE("Hotplug: a preferred output that is there only as an input is not "
+          "here — the device playing is left alone", "[Hotplug]") {
+    // Sonic Pi handed its saved INPUT over as -H's one name, which is the
+    // output: the microphone became the preferred output. Every change to
+    // the device list then stopped Loopback Audio to open the microphone
+    // as an output, failed, and reopened Loopback — a dropout each time.
+    auto d = decide("MacBook Pro Microphone", "", "Loopback Audio", 0,
+                    {"Loopback Audio", "MacBook Pro Speakers"},
+                    {"MacBook Pro Microphone", "Loopback Audio"});
+    REQUIRE_FALSE(d.switchOutput);
+    REQUIRE_FALSE(d.reopen);
+    REQUIRE_FALSE(d.switchInput);
+}
+
+TEST_CASE("Hotplug: a preferred input that is there only as an output is not "
+          "re-paired", "[Hotplug]") {
+    auto d = decide("", "MacBook Pro Speakers", "Loopback Audio", 0,
+                    {"Loopback Audio", "MacBook Pro Speakers"},
+                    {"MacBook Pro Microphone"});
+    REQUIRE_FALSE(d.switchInput);
+}
+
+TEST_CASE("Hotplug: the output being played on, still listed but only as an "
+          "input, has gone", "[Hotplug]") {
+    auto d = decide("", "", "USB Interface", 0,
+                    {"MacBook Pro Speakers"},
+                    {"USB Interface"});
+    REQUIRE(d.reopen);
 }
 
 // =============================================================================

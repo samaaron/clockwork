@@ -97,8 +97,15 @@ bool deviceNameVisible(const std::string& name,
 
 // Hot-plug decision. Given the user's preferred output/input device
 // names, the currently-active output, the currently-active input
-// channel count, and the list of devices now visible, returns what (if
-// anything) the engine should do in response to a device-list change.
+// channel count, and the devices now visible — those that can play and
+// those that can record, apart — returns what (if anything) the engine
+// should do in response to a device-list change.
+//
+// A preferred output is looked for among the outputs only, and a preferred
+// input among the inputs. A name that is there only as the other kind (a
+// microphone named as the output) is not "here": switching to it would stop
+// the device that is playing to open one that cannot, and it would be
+// tried again at every change to the list.
 struct HotplugDecision {
     bool        reopen       = false;  // the current output has gone
     bool        switchOutput = false;  // full swap to preferred output
@@ -112,7 +119,8 @@ HotplugDecision decideHotplugAction(
     const std::string& preferredInput,
     const std::string& currentOutput,
     int  currentActiveInputChannels,
-    const std::vector<std::string>& visibleDevices);
+    const std::vector<std::string>& visibleOutputs,
+    const std::vector<std::string>& visibleInputs);
 
 // Translate a CoreAudio-raw device name into the driver's disambiguated form.
 //

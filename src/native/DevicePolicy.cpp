@@ -458,30 +458,32 @@ HotplugDecision decideHotplugAction(
         const std::string& preferredInput,
         const std::string& currentOutput,
         int currentActiveInputChannels,
-        const std::vector<std::string>& visibleDevices) {
+        const std::vector<std::string>& visibleOutputs,
+        const std::vector<std::string>& visibleInputs) {
     HotplugDecision d;
 
-    auto visible = [&](const std::string& name) {
+    auto among = [](const std::vector<std::string>& names, const std::string& name) {
         if (name.empty()) return false;
-        for (auto& v : visibleDevices)
+        for (auto& v : names)
             if (sameDeviceName(v, name)) return true;
         return false;
     };
 
-    // Preferred output just appeared (or returned) and we're not on it.
+    // Preferred output just appeared (or returned) as an output, and we're
+    // not on it.
     if (!preferredOutput.empty()
         && !sameDeviceName(currentOutput, preferredOutput)
-        && visible(preferredOutput)) {
+        && among(visibleOutputs, preferredOutput)) {
         d.switchOutput = true;
         d.outputName   = preferredOutput;
-        d.inputName    = visible(preferredInput) ? preferredInput : std::string();
+        d.inputName    = among(visibleInputs, preferredInput) ? preferredInput : std::string();
         return d;
     }
 
     // The output being played on has gone (unplugged, switched off, out of
     // range). Nothing else matters while it is silent: reopen, which lands
     // on the default.
-    if (!currentOutput.empty() && !visible(currentOutput)) {
+    if (!currentOutput.empty() && !among(visibleOutputs, currentOutput)) {
         d.reopen = true;
         return d;
     }
@@ -490,7 +492,7 @@ HotplugDecision decideHotplugAction(
     // currently running with no inputs — re-pair without touching
     // the output.
     if (!preferredInput.empty()
-        && visible(preferredInput)
+        && among(visibleInputs, preferredInput)
         && currentActiveInputChannels == 0) {
         d.switchInput = true;
         d.inputName   = preferredInput;

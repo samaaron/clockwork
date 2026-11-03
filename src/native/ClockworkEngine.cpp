@@ -4634,9 +4634,13 @@ void ClockworkEngine::reconcileDevices() {
 
     const std::string currentOutput = dev ? dev->name : std::string();
     const int currentActiveIn = dev ? dev->activeInputs : 0;
-    std::vector<std::string> visibleNames;
-    visibleNames.reserve(devices.size());
-    for (auto& d : devices) visibleNames.push_back(d.name);
+    // What can play and what can record, apart: a preferred output is
+    // looked for among the outputs only (decideHotplugAction).
+    std::vector<std::string> outputNames, inputNames;
+    for (auto& d : devices) {
+        if (d.maxOutputChannels > 0) outputNames.push_back(d.name);
+        if (d.maxInputChannels > 0)  inputNames.push_back(d.name);
+    }
 
     // -H's words that have not found a device yet: matched as -H matches them,
     // against the outputs there now. A device they find is the preferred one
@@ -4656,7 +4660,7 @@ void ClockworkEngine::reconcileDevices() {
 
     const auto decision = clockwork::device::decideHotplugAction(
         mPreferredOutputDevice, mPreferredInputDevice,
-        currentOutput, currentActiveIn, visibleNames);
+        currentOutput, currentActiveIn, outputNames, inputNames);
 
     // The list as last reported, so a change that leaves it as it was isn't
     // re-sent. The field/record separators are control chars that can't
