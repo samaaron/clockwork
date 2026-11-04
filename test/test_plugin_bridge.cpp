@@ -52,6 +52,13 @@ using namespace clockwork_bridge;
 
 namespace {
 
+// The engine's side of the bridge, which these cases stand in for, has its
+// ports in a table of its own here: there is no core.
+const ClockworkPorts* testPorts() {
+    static const ClockworkPorts* const table = clockwork_ports_new();
+    return table;
+}
+
 constexpr uint32_t kBlock = 128;
 constexpr double   kRate  = 48000.0;
 constexpr uint32_t kSlack = 2;
@@ -100,15 +107,17 @@ struct Engine {
     std::vector<float> sendBuf, retBuf;
     std::vector<float*> sendPtrs, retPtrs;
 
-    // The slack the header is made with and the return is primed to.
+    // The slack the header is made with and the return is primed to, and the
+    // core the engine is: with the pid, the segment's and doorbell's names.
     uint32_t slack = kSlack;
-    explicit Engine(uint32_t slack_ = kSlack) : slack(slack_) {
-        const std::string name = segment_name(ownPid());
+    uint32_t core  = 1;
+    explicit Engine(uint32_t slack_ = kSlack, uint32_t core_ = 1) : slack(slack_), core(core_) {
+        const std::string name = segment_name(ownPid(), core);
         detail_shm_segment::shm_remove(name);
         seg = detail_shm_segment::shm_create(name, SEGMENT_SIZE);
         h = header(seg.ptr);
         init_header(h, kRate, kBlock, 0, ownPid(), slack);
-        REQUIRE(bell.create(doorbell_name(ownPid())));
+        REQUIRE(bell.create(doorbell_name(ownPid(), core)));
         openPorts(true);
         sendBuf.assign(size_t(LANES) * MAX_BLOCK, 0.0f);
         retBuf.assign(size_t(LANES) * MAX_BLOCK, 0.0f);
@@ -122,24 +131,24 @@ struct Engine {
         closePorts();
         bell.close();
         detail_shm_segment::shm_close(seg);
-        detail_shm_segment::shm_remove(segment_name(ownPid()));
+        detail_shm_segment::shm_remove(segment_name(ownPid(), core));
     }
 
     void openPorts(bool reset) {
         closePorts();
-        send = clockwork_port_open_shared("test/send", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
+        send = clockwork_port_open_shared(testPorts(), "test/send", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
                                     send_ring(seg.ptr), AUDIO_RING_BYTES, reset ? 1 : 0);
-        ret = clockwork_port_open_shared("test/return", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
+        ret = clockwork_port_open_shared(testPorts(), "test/return", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
                                    return_ring(seg.ptr), AUDIO_RING_BYTES, reset ? 1 : 0);
         REQUIRE(send != CLOCKWORK_PORT_NONE);
         REQUIRE(ret != CLOCKWORK_PORT_NONE);
         // slack blocks of silence, as the engine primes it
         std::vector<float> zeros(size_t(kBlock) * LANES, 0.0f);
-        for (uint32_t i = 0; i < slack; ++i) clockwork_port_produce(ret, zeros.data(), kBlock);
+        for (uint32_t i = 0; i < slack; ++i) clockwork_port_produce(testPorts(), ret, zeros.data(), kBlock);
     }
     void closePorts() {
-        if (send != CLOCKWORK_PORT_NONE) { clockwork_port_close(send); send = CLOCKWORK_PORT_NONE; }
-        if (ret != CLOCKWORK_PORT_NONE)  { clockwork_port_close(ret);  ret = CLOCKWORK_PORT_NONE; }
+        if (send != CLOCKWORK_PORT_NONE) { clockwork_port_close(testPorts(), send); send = CLOCKWORK_PORT_NONE; }
+        if (ret != CLOCKWORK_PORT_NONE)  { clockwork_port_close(testPorts(), ret);  ret = CLOCKWORK_PORT_NONE; }
     }
 
     // Spawn, and wait for the join.
@@ -149,7 +158,7 @@ struct Engine {
         h->quit.store(0, std::memory_order_release);
         h->restore.store(restore ? 1 : 0, std::memory_order_release);
         h->generation.fetch_add(1, std::memory_order_acq_rel);
-        if (!proc.spawn(CLOCKWORK_PLUGIN_BRIDGE_EXE, {std::to_string(ownPid())})) return false;
+        if (!proc.spawn(CLOCKWORK_PLUGIN_BRIDGE_EXE, {std::to_string(ownPid()), std::to_string(core)})) return false;
         return waitFor([&] { return h->bridge_ready.load(std::memory_order_acquire) != 0; }, 15000);
     }
     void stop() {
@@ -226,7 +235,7 @@ struct Engine {
     void pushBlock(float v) {
         for (uint32_t l = 0; l < LANES; ++l)
             std::fill(sendPtrs[l], sendPtrs[l] + kBlock, v);
-        clockwork_port_write(send, sendPtrs.data(), LANES, kBlock);
+        clockwork_port_write(testPorts(), send, sendPtrs.data(), LANES, kBlock);
         h->block_time.store(h->block_time.load(std::memory_order_relaxed) + kBlock,
                             std::memory_order_relaxed);
         h->engine_blocks.fetch_add(1, std::memory_order_relaxed);
@@ -237,7 +246,7 @@ struct Engine {
         return waitFor([&] { return h->bridge_heartbeat.load(std::memory_order_acquire) >= upTo; }, ms);
     }
     void pullBlock() {
-        clockwork_port_read(ret, retPtrs.data(), LANES, kBlock);
+        clockwork_port_read(testPorts(), ret, retPtrs.data(), LANES, kBlock);
     }
     float returned(uint32_t lane, uint32_t frame = 0) const { return retPtrs[lane][frame]; }
     // What TrackControl does after every pull: keep the return at slack - 1
@@ -246,10 +255,10 @@ struct Engine {
     uint32_t perCallback = 1;
     void trimReturn() {
         const uint32_t keep = (slack - 1 + perCallback - 1) * kBlock;
-        uint32_t readable = clockwork_port_readable(ret);
+        uint32_t readable = clockwork_port_readable(testPorts(), ret);
         while (readable > keep) {
             const uint32_t n = std::min<uint32_t>(readable - keep, kBlock);
-            clockwork_port_read(ret, retPtrs.data(), LANES, n);
+            clockwork_port_read(testPorts(), ret, retPtrs.data(), LANES, n);
             readable -= n;
         }
     }
@@ -516,6 +525,28 @@ TEST_CASE("a bridge killed outright comes back with its tracks", "[plugin][bridg
     REQUIRE(e.returned(0) == Catch::Approx(0.5f).margin(1e-5));
 }
 #endif
+
+// Suspect 8 (docs/ENGINES.md): the names were the process's alone, so a
+// second engine with tracks unlinked the first's segment, and the first's
+// bridge, coming back, joined the second's. Each engine's are its own now.
+TEST_CASE("two engines' bridges in one process each join their own engine's segment, again too", "[plugin][bridge]") {
+    Engine a(kSlack, 1);
+    REQUIRE(a.spawn(false));
+    Engine b(kSlack, 2);
+    REQUIRE(b.spawn(false));
+    // Engine a's bridge goes and comes back: it must find a's segment, not b's.
+    a.stop();
+    a.openPorts(true);
+    REQUIRE(a.spawn(false));
+    REQUIRE(a.h->bridge_pid.load() == a.proc.pid());
+    REQUIRE(b.h->bridge_pid.load() == b.proc.pid());
+    for (Engine* e : {&a, &b}) {
+        const uint64_t before = e->h->bridge_heartbeat.load();
+        e->pushBlock(1.0f);
+        CHECK(e->rendered(before + 1));
+        e->pullBlock();
+    }
+}
 
 TEST_CASE("a bridge from another generation does not stay", "[plugin][bridge]") {
     Engine e;

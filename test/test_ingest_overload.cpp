@@ -171,7 +171,7 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     REQUIRE(clockwork_client_metrics_history(engine.egressClient(), 0, 60, 2, &drops) == CLOCKWORK_OK);   // messages_dropped
     CHECK(ring.covered >= 1);
     CHECK(ring.high > 0);
-    CHECK(ring.high <= static_cast<int64_t>(IN_RING_SIZE));
+    CHECK(ring.high <= static_cast<int64_t>(clockwork::kDefaultLayout.profile.in_ring_bytes));
     CHECK(drops.delta == static_cast<int64_t>(now.dropped - before.dropped));
 
     engine.shutdown();

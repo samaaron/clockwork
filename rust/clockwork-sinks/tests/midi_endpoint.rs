@@ -31,7 +31,8 @@
 
 use std::ffi::CString;
 
-use clockwork_sinks::ffi::*;
+mod common;
+use common::t;
 use clockwork_sinks::sink::KIND_MIDI;
 
 #[test]
@@ -42,11 +43,11 @@ fn a_midi_sink_refuses_when_there_is_no_midi_subsystem() {
             "this case is about the absence; something else opened a subsystem");
     let any = CString::new("whatever").unwrap();
     // SAFETY: a NUL-terminated CString.
-    assert_eq!(unsafe { clockwork_sink_open(KIND_MIDI as i32, any.as_ptr(), 64) }, 0);
+    assert_eq!(unsafe { t().open(KIND_MIDI as i32, any.as_ptr(), 64) }, 0);
     // Including the wildcard: "every open output" of nothing is still nothing.
     let star = CString::new("*").unwrap();
     // SAFETY: a NUL-terminated CString.
-    assert_eq!(unsafe { clockwork_sink_open(KIND_MIDI as i32, star.as_ptr(), 64) }, 0);
+    assert_eq!(unsafe { t().open(KIND_MIDI as i32, star.as_ptr(), 64) }, 0);
 }
 
 // ── The real path, when the machine has a sequencer ─────────────────────────
@@ -83,7 +84,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     let app = CString::new("clockwork-sink-test").unwrap();
     // SAFETY: `app` is a NUL-terminated string that outlives the call.
     let midi = unsafe { clockwork_midi::ffi::clockwork_midi_create(
-        core::ptr::null_mut(), emit, clock, transport, app.as_ptr()) };
+        std::ptr::null_mut(), core::ptr::null_mut(), emit, clock, transport, app.as_ptr()) };
     assert!(!midi.is_null(), "the MIDI subsystem must start");
 
     // The handle is the normalised, dedup'd form of the OS port name, so it is
@@ -98,7 +99,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
 
     let target = CString::new(norm).unwrap();
     // SAFETY: a NUL-terminated CString.
-    let h = unsafe { clockwork_sink_open(KIND_MIDI as i32, target.as_ptr(), 64) };
+    let h = unsafe { t().open(KIND_MIDI as i32, target.as_ptr(), 64) };
     assert_ne!(h, 0, "opening a sink onto a real port must enable it");
 
     // Sent backwards in time and one "immediately": what arrives must be in
@@ -114,7 +115,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     ];
     for (body, when) in sends {
         // SAFETY: `body` is 3 live bytes.
-        assert_ne!(unsafe { clockwork_sink_send(h, body.as_ptr(), 3, when) }, 0);
+        assert_ne!(unsafe { t().send(h, body.as_ptr(), 3, when) }, 0);
     }
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -130,7 +131,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
 
     let mut stats = clockwork_sinks::sink::Stats::default();
     // SAFETY: a live out-pointer.
-    unsafe { clockwork_sink_stats(h, &mut stats) };
+    unsafe { t().stats(h, &mut stats) };
     assert_eq!(stats.sent, 4);
     assert_eq!(stats.dropped, 0);
     assert_eq!(stats.late, 0, "held and released on time is not late");
@@ -144,7 +145,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     assert_eq!(stats.scheduled, 3,
                "the future-dated messages should go to the platform's own queue");
 
-    clockwork_sink_close(h);
+    t().close(h);
     // SAFETY: from `clockwork_midi_create` above, destroyed once.
     unsafe { clockwork_midi::ffi::clockwork_midi_destroy(midi) };
 }

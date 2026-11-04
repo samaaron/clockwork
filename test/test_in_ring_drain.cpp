@@ -16,7 +16,7 @@
  *   - counts the drop.
  *
  * Manual-pump + shmSegment false: this thread is the sole process_audio() caller and
- * the arena is the in-process arena_storage, so writing raw frames into
+ * the arena is the core's own, in this process, so writing raw frames into
  * it races nothing.
  */
 #include <catch2/catch_test_macros.hpp>
@@ -24,12 +24,11 @@
 #include "lanes/lanes.h"
 #include "lanes/ring_drain.h"
 #include "shared_memory.h"
+#include "core_state.h"
 
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-
-extern "C" uint8_t arena_storage[];
 
 namespace {
 
@@ -39,40 +38,43 @@ ClockworkEngine::Config drainConfig() {
     return cfg;
 }
 
-RingCursors* control() {
-    return reinterpret_cast<RingCursors*>(arena_storage + RING_CURSORS_START);
+uint8_t* arena(EngineFixture& fx) {
+    return clockwork::arena_base(fx.engine().core());
+}
+
+RingCursors* control(EngineFixture& fx) {
+    return reinterpret_cast<RingCursors*>(arena(fx) + clockwork::kDefaultLayout.ring_cursors_start);
 }
 
 // Tick one block on the test thread (channel counts match the fixture's
 // 2-in/2-out world) with this thread's frame count and its own time as the
 // wall clock (an arbitrary NTP time advanced by the audio rendered), so the
 // engine never sees a gap. Returning at all is itself the liveness check.
-void pump() {
+void pump(EngineFixture& fx) {
     static uint64_t frames = 0;
     ClockworkBlockTime time {};
     time.struct_bytes = sizeof time;
     time.audio_frames = frames;
     time.wall_ntp     = 4'000'000'000.0 + static_cast<double>(frames) / 48000.0;
-    clockwork_tick(&time, 2, 2);
+    clockwork_tick(fx.engine().core(), &time, 2, 2);
     frames += 128;
 }
 
 // Drain whatever boot traffic is queued, then park both cursors at 0 so the
 // injected frame sits at a known, non-wrapping offset.
 void quiesceAndReset(EngineFixture& fx) {
-    for (int i = 0; i < 8; ++i) pump();
-    control()->in_head.store(0, std::memory_order_release);
-    control()->in_tail.store(0, std::memory_order_release);
-    (void)fx;
+    for (int i = 0; i < 8; ++i) pump(fx);
+    control(fx)->in_head.store(0, std::memory_order_release);
+    control(fx)->in_tail.store(0, std::memory_order_release);
 }
 
 // Write a 16-byte frame header at IN offset 0 and publish head one header past
 // it, so the drain sees exactly one frame available.
-void injectHeader(uint32_t magic, uint32_t length) {
+void injectHeader(EngineFixture& fx, uint32_t magic, uint32_t length) {
     uint32_t hdr[4] = { magic, length, /*sequence*/ 0, /*sourceId*/ 0 };
-    std::memcpy(arena_storage + IN_RING_START, hdr, sizeof(hdr));
-    control()->in_tail.store(0, std::memory_order_release);
-    control()->in_head.store(static_cast<int32_t>(sizeof(Message)),
+    std::memcpy(arena(fx) + clockwork::kDefaultLayout.in_ring_start, hdr, sizeof(hdr));
+    control(fx)->in_tail.store(0, std::memory_order_release);
+    control(fx)->in_head.store(static_cast<int32_t>(sizeof(Message)),
                              std::memory_order_release);
 }
 
@@ -84,15 +86,15 @@ TEST_CASE("in-ring-drain: zero-length frame does not hang and is dropped",
     quiesceAndReset(fx);
 
     const uint32_t droppedBefore =
-        control() ? fx.engine().getMetrics().messages_dropped.load() : 0;
+        control(fx) ? fx.engine().getMetrics().messages_dropped.load() : 0;
 
     // length == 0 < sizeof(Message): without the lower-bound guard the
     // payload-size computation underflows and the drop path advances the
     // tail by length (0), spinning forever. If pump() returns, the guard fired.
-    injectHeader(MESSAGE_MAGIC, 0);
-    pump();
+    injectHeader(fx, MESSAGE_MAGIC, 0);
+    pump(fx);
 
-    auto* ctrl = control();
+    auto* ctrl = control(fx);
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());  // resynced, not stuck
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
@@ -105,10 +107,10 @@ TEST_CASE("in-ring-drain: over-long frame is dropped and resynced",
     const uint32_t droppedBefore = fx.engine().getMetrics().messages_dropped.load();
 
     // length beyond the buffer: must be rejected, not used to index the ring.
-    injectHeader(MESSAGE_MAGIC, IN_RING_SIZE + 64);
-    pump();
+    injectHeader(fx, MESSAGE_MAGIC, clockwork::kDefaultLayout.profile.in_ring_bytes + 64);
+    pump(fx);
 
-    auto* ctrl = control();
+    auto* ctrl = control(fx);
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
@@ -123,10 +125,10 @@ TEST_CASE("in-ring-drain: a length whose footprint rounding overflows is dropped
     // (0xFFFFFFFF + 3) & ~3 is 0 in 32 bits: a footprint of nothing passes
     // every fit check, and the payload the header claims is 4 GB from a
     // pointer inside the ring.
-    injectHeader(MESSAGE_MAGIC, 0xFFFFFFFFu);
-    pump();
+    injectHeader(fx, MESSAGE_MAGIC, 0xFFFFFFFFu);
+    pump(fx);
 
-    auto* ctrl = control();
+    auto* ctrl = control(fx);
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
@@ -143,13 +145,13 @@ TEST_CASE("in-ring-drain: a padding marker the writer did not wrap for is corrup
     // back to 0 would deliver the same frame for ever, every pass.
     const uint32_t frame[4] = { MESSAGE_MAGIC, sizeof(Message), 0, 0 };
     const uint32_t pad[4]   = { PADDING_MAGIC, 0, 0, 0 };
-    std::memcpy(arena_storage + IN_RING_START, frame, sizeof frame);
-    std::memcpy(arena_storage + IN_RING_START + sizeof frame, pad, sizeof pad);
-    control()->in_tail.store(0, std::memory_order_release);
-    control()->in_head.store(static_cast<int32_t>(2 * sizeof(Message)), std::memory_order_release);
-    pump();
+    std::memcpy(arena(fx) + clockwork::kDefaultLayout.in_ring_start, frame, sizeof frame);
+    std::memcpy(arena(fx) + clockwork::kDefaultLayout.in_ring_start + sizeof frame, pad, sizeof pad);
+    control(fx)->in_tail.store(0, std::memory_order_release);
+    control(fx)->in_head.store(static_cast<int32_t>(2 * sizeof(Message)), std::memory_order_release);
+    pump(fx);
 
-    auto* ctrl = control();
+    auto* ctrl = control(fx);
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
@@ -187,12 +189,12 @@ TEST_CASE("in-ring-drain: bad magic resyncs to head instead of byte-walking",
     // A garbage header followed by valid bytes up to head: the drain must jump
     // the tail straight to head (the whole region after corruption is suspect),
     // not advance one byte per iteration scanning for the next magic.
-    injectHeader(0xABADCAFE, 64);
-    control()->in_head.store(static_cast<int32_t>(IN_RING_SIZE / 2),
+    injectHeader(fx, 0xABADCAFE, 64);
+    control(fx)->in_head.store(static_cast<int32_t>(clockwork::kDefaultLayout.profile.in_ring_bytes / 2),
                              std::memory_order_release);
-    pump();
+    pump(fx);
 
-    auto* ctrl = control();
+    auto* ctrl = control(fx);
     CHECK(ctrl->in_tail.load() == ctrl->in_head.load());
     CHECK(fx.engine().getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
@@ -202,11 +204,11 @@ TEST_CASE("in-ring-drain: out-of-range cursor is clamped, drain skipped safely",
     EngineFixture fx(drainConfig());
     quiesceAndReset(fx);
 
-    // A tail outside [0, IN_RING_SIZE) would index outside the IN region.
+    // A tail outside [0, clockwork::kDefaultLayout.profile.in_ring_bytes) would index outside the IN region.
     // The drain must repair it (resync tail to head) and not dereference it.
-    control()->in_head.store(0, std::memory_order_release);
-    control()->in_tail.store(0x7FFFFFFF, std::memory_order_release);
-    pump();  // must return without an OOB read
+    control(fx)->in_head.store(0, std::memory_order_release);
+    control(fx)->in_tail.store(0x7FFFFFFF, std::memory_order_release);
+    pump(fx);  // must return without an OOB read
 
-    CHECK(static_cast<uint32_t>(control()->in_tail.load()) < IN_RING_SIZE);
+    CHECK(static_cast<uint32_t>(control(fx)->in_tail.load()) < clockwork::kDefaultLayout.profile.in_ring_bytes);
 }

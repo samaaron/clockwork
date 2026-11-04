@@ -54,6 +54,10 @@ public:
     void initialiseUds(const std::string& path);   // unix only
     void initialisePipe(const std::string& name);  // Windows only
 
+    // The engine's core, from bindCore: start() before it is told logs the
+    // server's lines to the console.
+    void bindCore(ClockworkCore* core) override { mCore = core; }
+
     bool start();   // listen + accept; false on failure / unsupported platform
     void stop();
 
@@ -94,6 +98,7 @@ private:
     void removeConn(std::vector<uint32_t>& list, uint32_t token);
 
     Kind         mKind = Kind::None;
+    ClockworkCore* mCore = nullptr;
     const ClockworkCommsSecret* mSecret = nullptr;
     int          mPort = 0;             // Tcp
     std::string  mBindAddress;          // Tcp

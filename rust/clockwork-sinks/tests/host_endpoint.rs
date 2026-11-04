@@ -14,19 +14,17 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-use clockwork_sinks::ffi::{
-    clockwork_sink_close, clockwork_sink_flush, clockwork_sink_open, clockwork_sink_send,
-    clockwork_sink_set_host_emit, clockwork_sink_stats,
-};
+mod common;
+use common::t;
 use clockwork_osc::Timetag;
-use clockwork_sinks::{Stats, KIND_MIDI, KIND_OSC};
+use clockwork_sinks::{HostEmitter, Stats, KIND_MIDI, KIND_OSC};
 
 /// One emitted event: kind, target, bytes, when.
 type Taken = (u32, String, Vec<u8>, Timetag);
 static TAKEN: Mutex<Vec<Taken>> = Mutex::new(Vec::new());
 static REFUSE: Mutex<bool> = Mutex::new(false);
 
-unsafe extern "C" fn emit(kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: Timetag) -> i32 {
+unsafe extern "C" fn emit(_ctx: *mut std::ffi::c_void, kind: u32, target: *const c_char, bytes: *const u8, len: u32, when: Timetag) -> i32 {
     if *REFUSE.lock().unwrap() { return 0; }
     // SAFETY: the sink's own NUL-terminated target, and a slice it holds.
     let (t, b) = unsafe {
@@ -40,28 +38,41 @@ unsafe extern "C" fn emit(kind: u32, target: *const c_char, bytes: *const u8, le
 fn stats(sink: u32) -> Stats {
     let mut s = Stats::default();
     // SAFETY: a writable Stats.
-    assert_eq!(unsafe { clockwork_sink_stats(sink, &mut s) }, 1);
+    assert_eq!(unsafe { t().stats(sink, &mut s) }, 1);
     s
 }
 
 fn send(sink: u32, bytes: &[u8], when: Timetag) -> i32 {
     // SAFETY: a slice's pointer and length.
-    unsafe { clockwork_sink_send(sink, bytes.as_ptr(), bytes.len() as u32, when) }
+    unsafe { t().send(sink, bytes.as_ptr(), bytes.len() as u32, when) }
 }
 
 // One process, one emitter slot: the cases share it under a lock so they
 // cannot interleave installs.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// The emitter, installed for as long as a case runs.
+static EMITTER: HostEmitter = HostEmitter { emit, ctx: std::ptr::null_mut() };
+
+fn install() {
+    // SAFETY: a record that lives for the process.
+    unsafe { t().set_host_emitter(&EMITTER) };
+}
+
+fn uninstall() {
+    // SAFETY: null removes the emitter.
+    unsafe { t().set_host_emitter(std::ptr::null()) };
+}
+
 #[test]
 fn a_midi_sink_opens_onto_the_host_and_a_send_is_the_delivery() {
     let _g = SERIAL.lock().unwrap();
     TAKEN.lock().unwrap().clear();
-    clockwork_sink_set_host_emit(Some(emit));
+    install();
 
     let target = CString::new("Fake Synth").unwrap();
     // SAFETY: a NUL-terminated target.
-    let sink = unsafe { clockwork_sink_open(KIND_MIDI as i32, target.as_ptr(), 0) };
+    let sink = unsafe { t().open(KIND_MIDI as i32, target.as_ptr(), 0) };
     assert_ne!(sink, 0, "no host sink opened");
 
     let when = Timetag::from_ntp(0xEDCB_A987_6543_2110);   // a real timetag, 2026
@@ -78,24 +89,24 @@ fn a_midi_sink_opens_onto_the_host_and_a_send_is_the_delivery() {
     assert_eq!((s.sent, s.scheduled, s.dropped, s.late, s.cancelled), (2, 2, 0, 0, 0));
 
     // Nothing is held, so nothing can be cancelled: the host has them.
-    assert_eq!(clockwork_sink_flush(sink), 0);
+    assert_eq!(t().flush(sink), 0);
 
     // An empty message is refused and not a drop, as everywhere.
     assert_eq!(send(sink, &[], Timetag::IMMEDIATELY), 0);
     assert_eq!(stats(sink).dropped, 0);
 
-    clockwork_sink_close(sink);
-    clockwork_sink_set_host_emit(None);
+    t().close(sink);
+    uninstall();
 }
 
 #[test]
 fn a_host_that_refuses_is_a_drop() {
     let _g = SERIAL.lock().unwrap();
     TAKEN.lock().unwrap().clear();
-    clockwork_sink_set_host_emit(Some(emit));
+    install();
     let target = CString::new("Fake Synth").unwrap();
     // SAFETY: a NUL-terminated target.
-    let sink = unsafe { clockwork_sink_open(KIND_MIDI as i32, target.as_ptr(), 0) };
+    let sink = unsafe { t().open(KIND_MIDI as i32, target.as_ptr(), 0) };
     assert_ne!(sink, 0);
 
     *REFUSE.lock().unwrap() = true;
@@ -105,31 +116,31 @@ fn a_host_that_refuses_is_a_drop() {
     assert_eq!((s.sent, s.dropped), (0, 1));
     assert!(TAKEN.lock().unwrap().is_empty());
 
-    clockwork_sink_close(sink);
-    clockwork_sink_set_host_emit(None);
+    t().close(sink);
+    uninstall();
 }
 
 #[test]
 fn the_host_takes_midi_only_and_only_while_installed() {
     let _g = SERIAL.lock().unwrap();
-    clockwork_sink_set_host_emit(Some(emit));
+    install();
     // OSC is not the host's: it opens the way it always did (a destination
     // that resolves) or refuses.
     let osc = CString::new("127.0.0.1:9").unwrap();
     // SAFETY: NUL-terminated targets.
-    let sink = unsafe { clockwork_sink_open(KIND_OSC as i32, osc.as_ptr(), 0) };
+    let sink = unsafe { t().open(KIND_OSC as i32, osc.as_ptr(), 0) };
     if sink != 0 {
         TAKEN.lock().unwrap().clear();
         send(sink, &[1, 2, 3], Timetag::IMMEDIATELY);
         assert!(TAKEN.lock().unwrap().is_empty(), "an OSC send reached the host emitter");
-        clockwork_sink_close(sink);
+        t().close(sink);
     }
 
     // Uninstalled: a MIDI port that does not exist is refused at open, as
     // without a host.
-    clockwork_sink_set_host_emit(None);
+    uninstall();
     let target = CString::new("No Such Port, Surely").unwrap();
     // SAFETY: a NUL-terminated target.
-    let none = unsafe { clockwork_sink_open(KIND_MIDI as i32, target.as_ptr(), 0) };
+    let none = unsafe { t().open(KIND_MIDI as i32, target.as_ptr(), 0) };
     assert_eq!(none, 0);
 }

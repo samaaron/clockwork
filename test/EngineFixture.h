@@ -172,8 +172,7 @@ struct Engine {
     ~Engine() {
         checkNoEgressLost(engine);
         hostControl.stop();              // a host stops its thread first
-        engine.shutdown();
-        clockwork_sink_close_all();
+        engine.shutdown();   // its core's sinks close with it
     }
 
     // Render `seconds` of audio as fast as the dummy DSP allows.

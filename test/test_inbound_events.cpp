@@ -131,7 +131,7 @@ TEST_CASE("inbound events: a verb under an event's name is still a verb", "[even
     // bare host they are refused as unknown (the host's end of the chain),
     // never broadcast as events, and never handed to the guest.
     lanes_test::boot();
-    clockwork_host_forward(0);
+    clockwork_host_forward(lanes_test::core(), 0);
     const Heard before = askGuest();
     lanes_test::drainRt();
 

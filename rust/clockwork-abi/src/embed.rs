@@ -6,6 +6,7 @@
 use core::ffi::c_char;
 
 use crate::client::{ClockworkClient, ClockworkStatus};
+use crate::profile::ClockworkProfile;
 
 /// The handle. Opaque; one per engine.
 #[repr(C)]
@@ -31,8 +32,9 @@ pub struct ClockworkEmbedConfig {
     pub app_name: *const c_char,
     /// boot: a device to open by name; null = the default.
     pub device: *const c_char,
-    /// 0. Reserved for a process with more than one engine.
-    pub instance_id: u32,
+    /// The arena's sizes; null = the target's own. One no arena can hold is
+    /// refused with `E_ARG` (`clockwork_profile_check` says why).
+    pub profile: *const ClockworkProfile,
     /// [`CLOCKWORK_EMBED_NO_INPUT`], or 0.
     pub flags: u32,
     /// boot: the driver (device type) to open on, by the name the platform
@@ -122,7 +124,7 @@ impl ClockworkEmbedConfig {
             max_render_frames: 0,
             app_name: core::ptr::null(),
             device: core::ptr::null(),
-            instance_id: 0,
+            profile: core::ptr::null(),
             flags: 0,
             driver: core::ptr::null(),
         }
@@ -136,6 +138,7 @@ impl Default for ClockworkEmbedConfig {
 unsafe extern "C" {
     pub fn clockwork_embed_boot(config: *const ClockworkEmbedConfig, status: *mut ClockworkStatus) -> *mut ClockworkEmbed;
     pub fn clockwork_embed_attach(config: *const ClockworkEmbedConfig, status: *mut ClockworkStatus) -> *mut ClockworkEmbed;
+    pub fn clockwork_embed_reconfigure(h: *mut ClockworkEmbed, config: *const ClockworkEmbedConfig) -> ClockworkStatus;
     pub fn clockwork_embed_client(h: *mut ClockworkEmbed) -> *mut ClockworkClient;
     pub fn clockwork_embed_sample_rate(h: *const ClockworkEmbed) -> f64;
     pub fn clockwork_embed_block_size(h: *const ClockworkEmbed) -> u32;

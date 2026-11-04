@@ -188,6 +188,7 @@ fn tcp_load() {
     // SAFETY: `bind` is a live str.
     let handle = unsafe {
         clockwork_osc_tcp_start(
+            std::ptr::null_mut(),
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,
@@ -218,6 +219,7 @@ fn uds_stream_load() {
     // SAFETY: `ps` is a live str.
     let handle = unsafe {
         clockwork_osc_uds_stream_start(
+            std::ptr::null_mut(),
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,

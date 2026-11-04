@@ -104,7 +104,7 @@ void midi_transport_noop(void*, const uint8_t*, uint32_t, const uint8_t*, uint32
 // the archive's shared support code (buffers, taps) still names the engine's
 // logging and shm boundaries. The host has neither an engine log ring nor a tap
 // shm segment, so these are honest stand-ins: log to stderr, publish no shm.
-extern "C" int clockwork_log(const char* fmt, ...) {
+extern "C" int clockwork_log(struct ClockworkCore*, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     int n = vfprintf(stderr, fmt, args);
@@ -130,14 +130,14 @@ int main(int argc, char** argv) {
     pthread_sigmask(SIG_BLOCK, &stopSignals, nullptr);
 #endif
 
-    ClockworkOsc* osc = clockwork_osc_create(nullptr, osc_emit_noop, osc_dropped_noop);
+    ClockworkOsc* osc = clockwork_osc_create(nullptr, nullptr, osc_emit_noop, osc_dropped_noop);
     if (!osc) {
         std::fprintf(stderr, "clockwork-scheduler: failed to create OSC subsystem\n");
         return 1;
     }
 
 #ifdef CLOCKWORK_WITH_MIDI
-    ClockworkMidi* midi = clockwork_midi_create(nullptr, midi_emit_noop, midi_clock_noop, midi_transport_noop, nullptr);
+    ClockworkMidi* midi = clockwork_midi_create(nullptr, nullptr, midi_emit_noop, midi_clock_noop, midi_transport_noop, nullptr);
 #endif
 
     clockwork_host::SendOsc sendOsc =
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
     }
     const char* bind = loopback ? "127.0.0.1" : "0.0.0.0";
     ClockworkOscStream* server = clockwork_osc_tcp_start(
-        &sched, on_packet, on_closed, secret, control_port,
+        nullptr, &sched, on_packet, on_closed, secret, control_port,
         reinterpret_cast<const uint8_t*>(bind), static_cast<uint32_t>(std::strlen(bind)));
     clockwork_comms_secret_free(secret);
     if (!server) {

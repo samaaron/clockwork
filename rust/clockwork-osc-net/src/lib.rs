@@ -36,9 +36,9 @@ pub mod limit;
 /// binds anything else asked for it by name. Say so once, where it bound, and
 /// what that exposes: `exposes` finishes the sentence.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn note_bind(what: &str, local: std::net::SocketAddr, exposes: &str) {
+pub fn note_bind(core: *mut clockwork_log::ClockworkCore, what: &str, local: std::net::SocketAddr, exposes: &str) {
     if !local.ip().is_loopback() {
-        clockwork_log::log!("[osc] {what} bound to {local}: {exposes}");
+        clockwork_log::log!(core, "[osc] {what} bound to {local}: {exposes}");
     }
 }
 

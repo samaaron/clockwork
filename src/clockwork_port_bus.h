@@ -47,6 +47,7 @@
 #define CLOCKWORK_PORT_BUS_H
 
 #include "clockwork_ports.h"
+#include "clockwork_core.h"   /* ClockworkCore */
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,24 +58,24 @@ extern "C" {
 #define CLOCKWORK_PORT_BUS_MAX 16
 
 /*
- * Bind an open port to a DSP channel range beginning at `first_channel`.
- * Returns 1 on success, 0 if the port is not open, the table is full, or the
- * port is already attached. Channels the session does not have are simply not
+ * Bind an open port to a DSP channel range of `core`'s beginning at
+ * `first_channel`. Returns 1 on success, 0 if `core` has no state yet, the
+ * port is not open, the table is full, or the port is already attached. Channels the session does not have are simply not
  * transferred — the substrate's own mismatch rule, not a refusal.
  *
  * Control thread. Takes effect on the next block.
  */
-int clockwork_port_bus_attach(ClockworkPort port, uint32_t first_channel);
+int clockwork_port_bus_attach(ClockworkCore* core, ClockworkPort port, uint32_t first_channel);
 
 /* Detach a port. The entry is cleared, and no other binding moves. Safe to
    call for a port that is not attached, and safe while audio is running. */
-void clockwork_port_bus_detach(ClockworkPort port);
+void clockwork_port_bus_detach(ClockworkCore* core, ClockworkPort port);
 
 /* Detach everything. For shutdown and for tests. */
-void clockwork_port_bus_detach_all(void);
+void clockwork_port_bus_detach_all(ClockworkCore* core);
 
 /* How many bindings are live. Diagnostics. */
-uint32_t clockwork_port_bus_attached(void);
+uint32_t clockwork_port_bus_attached(ClockworkCore* core);
 
 #ifdef __cplusplus
 }

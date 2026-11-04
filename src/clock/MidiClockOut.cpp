@@ -19,29 +19,28 @@
 // one for sysex. 0 at open takes it. A full sink drops and counts.
 static constexpr uint32_t kSinkCapacity = 0;
 
-std::atomic<MidiClockOut*> g_active_midi_clock_out{nullptr};
 
-ClockworkSink midi_clock_sink_for_port(const std::string& port) {
+ClockworkSink midi_clock_sink_for_port(const ClockworkSinks* sinks, const std::string& port) {
     // "*" and "" mean every port, which cannot be one sink. Resolved at send
     // time instead, where listing the open sinks allocates nothing.
     if (port.empty() || port == "*") return CLOCKWORK_SINK_NONE;
-    return midi_sink_for_port(port);
+    return midi_sink_for_port(sinks, port);
 }
 
-ClockworkSink midi_sink_for_port(const std::string& port) {
+ClockworkSink midi_sink_for_port(const ClockworkSinks* sinks, const std::string& port) {
     // Reuse the sink already open on this port. Opening a second one would
     // double every tick on the wire.
     std::array<ClockworkSink, MidiClockOut::kMaxFanout> open{};
-    const uint32_t n = clockwork_sink_list(open.data(), MidiClockOut::kMaxFanout);
+    const uint32_t n = clockwork_sink_list(sinks, open.data(), MidiClockOut::kMaxFanout);
     for (uint32_t i = 0; i < n && i < MidiClockOut::kMaxFanout; ++i) {
-        if (clockwork_sink_kind(open[i]) != kClockworkSinkMidi) continue;
-        const char* target = clockwork_sink_target(open[i]);
+        if (clockwork_sink_kind(sinks, open[i]) != kClockworkSinkMidi) continue;
+        const char* target = clockwork_sink_target(sinks, open[i]);
         if (target && port == target) return open[i];
     }
     // CLOCKWORK_SINK_NONE if this build has no MIDI endpoint — the caller records
     // the ticks anyway and they are counted as dropped, so a build without
     // MIDI reports the loss rather than quietly reshaping the burst.
-    return clockwork_sink_open(kClockworkSinkMidi, port.c_str(), kSinkCapacity);
+    return clockwork_sink_open(sinks, kClockworkSinkMidi, port.c_str(), kSinkCapacity);
 }
 
 void MidiClockOut::reset() {
@@ -70,7 +69,7 @@ void MidiClockOut::onBeat(ClockworkClock& clock, const std::string& port,
     const double now = clock.now();
     // Resolved HERE, on the command thread, because opening a sink allocates
     // and may touch the device. The render thread only ever sends.
-    const ClockworkSink sink = midi_clock_sink_for_port(port);
+    const ClockworkSink sink = midi_clock_sink_for_port(sinks(), port);
 
     for (int64_t i = 0; i < kPulsesPerBeat; ++i)
         push(now + durationSeconds * static_cast<double>(i)
@@ -179,6 +178,7 @@ void MidiClockOut::tick(ClockworkClock& clock, double nowNtp) {
 // ── Render thread ────────────────────────────────────────────────────────────
 
 void MidiClockOut::generate(double nowNtp) {
+    const ClockworkSinks* const sinks = mSinks.load(std::memory_order_acquire);
     if (mResetPending.exchange(false, std::memory_order_acq_rel)) {
         // Consume-side clear: everything recorded so far is abandoned.
         mTail.store(mHead.load(std::memory_order_acquire), std::memory_order_release);
@@ -200,7 +200,7 @@ void MidiClockOut::generate(double nowNtp) {
         const uint8_t byte = slot.byte;
 
         if (slot.sink != CLOCKWORK_SINK_NONE) {
-            if (clockwork_sink_send(slot.sink, &byte, 1, when))
+            if (clockwork_sink_send(sinks, slot.sink, &byte, 1, when))
                 mSent.fetch_add(1, std::memory_order_relaxed);
             else
                 mDropped.fetch_add(1, std::memory_order_relaxed);
@@ -208,12 +208,12 @@ void MidiClockOut::generate(double nowNtp) {
             // Every open MIDI sink. Listing writes into this stack array and
             // allocates nothing, which is what makes the fan-out RT-safe.
             std::array<ClockworkSink, kMaxFanout> open{};
-            const uint32_t n = clockwork_sink_list(open.data(), kMaxFanout);
+            const uint32_t n = clockwork_sink_list(sinks, open.data(), kMaxFanout);
             uint32_t matched = 0;
             for (uint32_t i = 0; i < n && i < kMaxFanout; ++i) {
-                if (clockwork_sink_kind(open[i]) != kClockworkSinkMidi) continue;
+                if (clockwork_sink_kind(sinks, open[i]) != kClockworkSinkMidi) continue;
                 ++matched;
-                if (clockwork_sink_send(open[i], &byte, 1, when))
+                if (clockwork_sink_send(sinks, open[i], &byte, 1, when))
                     mSent.fetch_add(1, std::memory_order_relaxed);
                 else
                     mDropped.fetch_add(1, std::memory_order_relaxed);

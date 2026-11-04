@@ -30,21 +30,16 @@
 // Memory layout constants for shared ring buffer.
 // NOTE: These are RELATIVE OFFSETS from the ring buffer base address.
 // Actual addresses are calculated as: base_address + offset
-// On WASM the base is the linker's static buffer (data segment), retrieved via
-// get_arena_base() at runtime; every other runtime takes it from
-// get_shared_memory_base() — the local arena, or an external segment when one
-// was supplied.
+// The base is a core's arena (clockwork_lanes_base(core)): the host's segment
+// when it gave the core one, else the process-local arena
+// (clockwork_local_arena) — on the web, the start of the engine's memory
+// (get_arena_base).
 //
-// TO MODIFY BUFFER SIZES: Change the SIZE constants below.
-// All offsets are calculated automatically using constexpr.
+// The fixed shapes are constants here. The sizes a profile chooses — the
+// rings, the scope, the taps, the guest's window and persistent bytes — are
+// a core's (clockwork::Profile, clockwork::Layout, below).
 // ============================================================================
 
-// User-configurable buffer sizes.
-// Balanced to prevent message drops in the audioworklet; sized per device via
-// memory_profile.h (defaults: IN 768KB, OUT 128KB, NRT-out 64KB).
-constexpr uint32_t IN_RING_SIZE     = CLOCKWORK_IN_RING_SIZE;    // OSC messages from host to the engine (large for bulk payloads)
-constexpr uint32_t RT_OUT_RING_SIZE    = CLOCKWORK_RT_OUT_RING_SIZE;   // OSC replies from the engine to host (prevent drops)
-constexpr uint32_t NRT_OUT_RING_SIZE  = CLOCKWORK_NRT_OUT_RING_SIZE; // NRT-thread egress ring (replies, notifications, debug)
 constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers & flags (13 fields × 4 bytes + 4 padding for 8-byte alignment)
 // Clockwork's own control verbs, written at the boundary and drained by the
 // control pass with no audio block in the loop (docs/RESTARTS.md, "The
@@ -57,19 +52,14 @@ constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
-// Node tree mirror configuration (for observing synth/group hierarchy via polling)
-// A window of shared memory the guest may publish through, reached as
-// DspConfig::shm_window. Clockwork reserves it, hands over base and length,
+// The guest's window: shared memory the guest may publish through, reached
+// as DspConfig::shm_window. Clockwork reserves it, hands over base and length,
 // and never reads a byte: what goes in it, and in what shape, is the guest's.
-//
-// Sized per device via memory_profile.h. A guest that publishes nothing simply
-// leaves it alone.
-constexpr uint32_t GUEST_WINDOW_SIZE = CLOCKWORK_WINDOW_BYTES;
+// A guest that publishes nothing leaves it alone.
 
 // The scope: two shm_audio_buffer slots, out and in, written by
 // clockwork at the device edge inside every tick on every host
-// (shm_audio_buffer.hpp). Per-slot ring duration is CLOCKWORK_SCOPE_SECONDS
-// (1s in production, larger in test builds so captures don't wrap).
+// (shm_audio_buffer.hpp).
 
 // Where each region sits is decided in one place — "The arena map" below —
 // once every size is known.
@@ -93,22 +83,17 @@ constexpr uint32_t GUEST_CONFIG_SIZE  = 1024;  // bytes: room for a page of name
 // shm_tap_stream.hpp; rationale in docs/PORTS.md.
 // The stream's producer appends every block; readers combine a slot's cursor with the
 // sample-clock region (below) and their own wall clock to display exactly what
-// the listener is hearing. TAPS_SLOTS / TAP_RING_FRAMES sized
-// per device via memory_profile.h: 32 slots for the guest, then the track-tap
-// slots the ENGINE writes natively (TrackControl.cpp), one region and one
-// index space (tapSlotAt below).
+// the listener is hearing. One region and one index space (tapSlotAt below):
+// the guest's slots, then the track-tap slots the ENGINE writes natively
+// (TrackControl.cpp), every slot the same shape, as many of each and as long
+// as the core's layout says. The table carries the geometry
+// (CLOCKWORK_GEOM_TAP_*).
 constexpr uint32_t TAP_CHANNELS = TAP_STREAM_CHANNELS;
 constexpr uint32_t TAPS_HEADER_SIZE = 32;  // Global header (16-aligned)
 constexpr uint32_t TAP_SLOT_HEADER_SIZE = TAP_STREAM_HEADER_SIZE;
-constexpr uint32_t TAP_SLOT_SIZE = TAP_STREAM_SLOT_SIZE;
-// One tap region: the header, the guest's TAPS_SLOTS slots, then the engine's
-// TAP_TRACK_SLOTS track slots (memory_profile.h), every slot the same shape,
-// one index space numbered from 0 with the guest's first. The table carries
-// the geometry (CLOCKWORK_GEOM_TAP_*); no reader needs these constants.
-constexpr uint32_t TAPS_SIZE = TAPS_HEADER_SIZE + ((TAPS_SLOTS + TAP_TRACK_SLOTS) * TAP_SLOT_SIZE);
 
 
-// Tap header layout (at TAPS_START):
+// Tap header layout (at the layout's taps_start):
 //   [0..3]   u32  maxTaps
 //   [4..7]   u32  activeCount
 //   [8..11]  u32  ringFrames (per-slot capacity)
@@ -156,7 +141,7 @@ constexpr uint32_t NATIVE_STAT_NRT_RECENT_WORST_US = 20;
 // its monotonic clock where it has one (LAST_MONO: native, an embedded host;
 // a worklet has none) — the one record that the audio was away: a stall, a
 // page's context suspended, a worklet gone. It survives a new worklet over
-// the same memory or an embedded host attaching again, so the first block
+// the same memory or an embedded host reconfiguring, so the first block
 // back on any target sees how long it was (clockwork_audio_back): by the
 // monotonic clock where there is one, which a system clock set by hand
 // cannot fool, else by the wall.
@@ -207,11 +192,9 @@ constexpr uint32_t SAMPLE_CLOCK_LAST_MONO      = 40;  // f64 the host's monotoni
 // survive me" gives one region two lifetimes and two tearing rules. This one is
 // the guest's alone; nothing outside it may read or write these bytes.
 //
-// Sized modestly and overridable with -DGUEST_PERSIST_BYTES=N: an ESP32-S3 has
-// 512 KiB of SRAM and should not spend 64 of it on a region it may not use.
-#ifndef GUEST_PERSIST_BYTES
-#define GUEST_PERSIST_BYTES (64u * 1024u)
-#endif
+// Sized by the core's profile (GUEST_PERSIST_BYTES, memory_profile.h, by
+// default): an ESP32-S3 has 512 KiB of SRAM and should not spend 64 of it on
+// a region it may not use.
 // ── The sample clock, and the window end every tap consumer wants ─────────
 //
 // Here rather than with the segment because it is pure arithmetic over the
@@ -332,8 +315,6 @@ inline void write_sample_clock(uint8_t* tl, uint64_t engine_frames, uint32_t sam
     seq->store(s + 2, std::memory_order_release);
 }
 
-constexpr uint32_t GUEST_PERSIST_SIZE  = GUEST_PERSIST_BYTES;
-
 // ── The channel map ─────────────────────────────────────────────────────────
 //
 // EVERY CHANNEL HAS AN IDENTITY, ALWAYS. Without this a DSP is handed an
@@ -441,52 +422,170 @@ constexpr uint32_t CLOCK_STATE_START     = alignArena8(CLOCK_ANCHORS_START + CLO
 constexpr uint32_t SAMPLE_CLOCK_START    = alignArena16(CLOCK_STATE_START + CLOCK_STATE_SIZE);
 constexpr uint32_t CHANNEL_MAP_START     = alignArena16(SAMPLE_CLOCK_START + SAMPLE_CLOCK_SIZE);
 constexpr uint32_t CLOCKWORK_STATE_END   = alignArena16(CHANNEL_MAP_START + CHANNEL_MAP_SIZE);
-//   clockwork-audio: audio streams any client reads
+//   clockwork-audio: audio streams any client reads. Where they start is
+//   fixed; from there on everything lies where the core's layout puts it.
 constexpr uint32_t CLOCKWORK_AUDIO_START = CLOCKWORK_STATE_END;
 constexpr uint32_t SCOPE_START           = CLOCKWORK_AUDIO_START;
-constexpr uint32_t TAPS_START            = alignArena16(SCOPE_START + SCOPE_SIZE);
-constexpr uint32_t CLOCKWORK_AUDIO_END   = alignArena16(TAPS_START + TAPS_SIZE);
-//   clockwork-transport: messages, through the client code only
-constexpr uint32_t CLOCKWORK_TRANSPORT_START = CLOCKWORK_AUDIO_END;
-constexpr uint32_t RING_CURSORS_START    = CLOCKWORK_TRANSPORT_START;
-constexpr uint32_t NODE_ID_COUNTER_START = RING_CURSORS_START + RING_CURSORS_SIZE;
-constexpr uint32_t IN_RING_START         = alignArena16(NODE_ID_COUNTER_START + NODE_ID_COUNTER_SIZE);
-constexpr uint32_t RT_OUT_RING_START     = IN_RING_START + IN_RING_SIZE;
-constexpr uint32_t NRT_OUT_RING_START    = RT_OUT_RING_START + RT_OUT_RING_SIZE;
-constexpr uint32_t CONTROL_RING_START    = alignArena16(NRT_OUT_RING_START + NRT_OUT_RING_SIZE);
-constexpr uint32_t CLOCKWORK_TRANSPORT_END = alignArena16(CONTROL_RING_START + CONTROL_RING_SIZE);
-constexpr uint32_t CLOCKWORK_HALF_SIZE   = CLOCKWORK_TRANSPORT_END;
-
-// ── the guest's half ──
-//   guest-public: the guest's window, in the guest's format
-constexpr uint32_t GUEST_HALF_START      = CLOCKWORK_HALF_SIZE;
-constexpr uint32_t GUEST_PUBLIC_START    = GUEST_HALF_START;
-constexpr uint32_t GUEST_WINDOW_START    = GUEST_PUBLIC_START;
-constexpr uint32_t GUEST_PUBLIC_END      = alignArena16(GUEST_WINDOW_START + GUEST_WINDOW_SIZE);
-//   guest-private: the guest's config and persistent store
-constexpr uint32_t GUEST_PRIVATE_START   = GUEST_PUBLIC_END;
-constexpr uint32_t GUEST_CONFIG_START    = GUEST_PRIVATE_START;
-constexpr uint32_t GUEST_PERSIST_START   = alignArena16(GUEST_CONFIG_START + GUEST_CONFIG_SIZE);
-constexpr uint32_t GUEST_PRIVATE_END     = alignArena16(GUEST_PERSIST_START + GUEST_PERSIST_SIZE);
-constexpr uint32_t ARENA_SIZE            = GUEST_PRIVATE_END;
-constexpr uint32_t GUEST_HALF_SIZE       = ARENA_SIZE - GUEST_HALF_START;
 
 static_assert(sizeof(ClockworkArenaHeader) <= ARENA_HEADER_SIZE, "the arena header outgrew its reservation");
-static_assert(RING_CURSORS_START % 16 == 0, "the ring cursors must be 16-byte aligned");
 static_assert(CLOCK_STATE_START % 8 == 0,   "ClockworkClockState holds 64-bit atomics");
 static_assert(SAMPLE_CLOCK_START % 16 == 0, "the sample clock is read as 64-bit words");
 static_assert(CHANNEL_MAP_START % 16 == 0,  "ClockworkChannelMapState is alignas(16)");
-static_assert(IN_RING_START % 16 == 0,      "rings start 16-aligned");
 static_assert(SCOPE_START % 16 == 0,        "shm_audio_buffer is alignas(16)");
-static_assert(TAPS_START % 16 == 0,         "shm_tap_stream is alignas(16)");
-static_assert(GUEST_HALF_START % 16 == 0,   "the guest's half starts 16-aligned");
-static_assert(CLOCKWORK_STATE_END <= CLOCKWORK_AUDIO_START && CLOCKWORK_AUDIO_END <= CLOCKWORK_TRANSPORT_START
-              && CLOCKWORK_TRANSPORT_END == GUEST_PUBLIC_START && GUEST_PUBLIC_END <= GUEST_PRIVATE_START
-              && GUEST_PRIVATE_END == ARENA_SIZE, "the five areas lie end to end and cover the arena");
-static_assert(GUEST_WINDOW_START % 16 == 0,   "the guest window starts 16-aligned");
-static_assert((TAPS_START + TAPS_HEADER_SIZE) % 16 == 0,
+
+namespace clockwork {
+
+// ── A core's sizes (docs/ENGINES.md) ───────────────────────────────
+// The regions whose size is a choice: a target's, or a host's for one core.
+// Every other region is a fixed shape. The target's default is
+// memory_profile.h's.
+struct Profile {
+    uint32_t in_ring_bytes;        // messages to the engine (bulk payloads ride it)
+    uint32_t rt_out_ring_bytes;    // the audio thread's replies
+    uint32_t nrt_out_ring_bytes;   // every other thread's replies, notifications, log
+    uint32_t scope_frames;         // per scope slot, out and in
+    uint32_t scope_channels;       // the widest a scope slot carries
+    uint32_t tap_slots;            // the guest's tap streams
+    uint32_t track_tap_slots;      // the engine's, numbered after the guest's
+    uint32_t tap_ring_frames;      // per tap stream
+    uint32_t window_bytes;         // the guest's window
+    uint32_t persist_bytes;        // the guest's persistent bytes
+
+    constexpr bool operator==(const Profile&) const = default;
+};
+
+inline constexpr Profile kDefaultProfile {
+    CLOCKWORK_IN_RING_SIZE, CLOCKWORK_RT_OUT_RING_SIZE, CLOCKWORK_NRT_OUT_RING_SIZE,
+    CLOCKWORK_SCOPE_FRAMES, CLOCKWORK_TAP_CHANNELS,
+    TAPS_SLOTS, TAP_TRACK_SLOTS, TAP_RING_FRAMES,
+    CLOCKWORK_WINDOW_BYTES, GUEST_PERSIST_BYTES,
+};
+
+// The least a ring may be: the smallest any target takes.
+inline constexpr uint32_t kMinRingBytes = 4096;
+
+// The room a control verb's answers wait for in the NRT ring: 16 KB, or all
+// a smaller ring has (the native engine's control pass).
+constexpr uint32_t answerRoom(uint32_t nrt_ring_bytes) {
+    return nrt_ring_bytes - 1 < 16u * 1024u ? nrt_ring_bytes - 1 : 16u * 1024u;
+}
+// The most an NRT ring may be: a peer's reply ring holds a verb's answers
+// and a full NRT ring (ClockworkEngine.cpp checks it against the peer's).
+inline constexpr uint32_t kMaxNrtRingBytes = 96u * 1024u;
+
+// Where everything lies in one core's arena, laid out from its profile. The
+// order is the arena map's (above): the audio streams, the transport, then
+// the guest's half, its window first.
+struct Layout {
+    Profile  profile;
+    uint32_t scope_slot_bytes, scope_bytes;
+    uint32_t taps_start, tap_slot_bytes, taps_bytes;
+    uint32_t audio_end;                 // where the transport starts
+    uint32_t ring_cursors_start, node_id_counter_start;
+    uint32_t in_ring_start, rt_out_ring_start, nrt_out_ring_start, control_ring_start;
+    uint32_t transport_end;             // the clockwork half's size: where the guest's starts
+    uint32_t guest_window_start, guest_public_end;
+    uint32_t guest_config_start, guest_persist_start;
+    uint32_t arena_bytes;               // where the guest's half ends
+    uint32_t max_message_bytes;         // what a frame on the in ring may claim
+    const char* refused;                // why the profile cannot be laid out; null when it can
+
+    uint32_t tapSlots() const { return profile.tap_slots + profile.track_tap_slots; }
+    uint32_t guestHalfBytes() const { return arena_bytes - transport_end; }
+};
+
+// Lay a core's arena out from `p`: every region's place, or, in `refused`,
+// the first thing about `p` no arena can hold. The same function serves the
+// target's default at compile time and a host's profile at a core's boot.
+constexpr Layout layOut(const Profile& p) {
+    Layout L {};
+    L.profile = p;
+    const auto refuse = [&](const char* why) { L.refused = why; return L; };
+    const auto ring = [](uint32_t bytes) { return bytes >= kMinRingBytes && bytes % 16u == 0 && bytes < (1u << 31); };
+    if (!ring(p.in_ring_bytes) || !ring(p.rt_out_ring_bytes) || !ring(p.nrt_out_ring_bytes))
+        return refuse("a ring is smaller than 4 KB, not a multiple of 16 bytes, or 2 GB or more");
+    if (p.nrt_out_ring_bytes > kMaxNrtRingBytes)
+        return refuse("the NRT ring is larger than a peer's reply ring can follow (96 KB)");
+    if (p.scope_channels == 0 || p.scope_channels > CLOCKWORK_MAX_CHANNELS)
+        return refuse("the scope carries no channels, or more than the engine has");
+    // A writer wraps once per block, so a ring holds at least the largest.
+    if (p.scope_frames < CLOCKWORK_MAX_BLOCK_SIZE)
+        return refuse("the scope holds less than the largest block");
+    if (uint64_t(p.tap_slots) + p.track_tap_slots > CLOCKWORK_TAP_SLOTS_MAX)
+        return refuse("more tap slots than an arena holds (64, the guest's and the tracks' together)");
+    if (p.tap_slots + p.track_tap_slots > 0 && p.tap_ring_frames < CLOCKWORK_MAX_BLOCK_SIZE)
+        return refuse("a tap stream holds less than the largest block");
+    const auto a16 = [](uint64_t v) { return (v + 15u) & ~uint64_t(15u); };
+    const uint64_t scope_slot = scope_slot_bytes(p.scope_frames, p.scope_channels);
+    const uint64_t scope      = SCOPE_SLOTS * scope_slot;
+    const uint64_t taps_start = a16(SCOPE_START + scope);
+    const uint64_t tap_slot   = tap_slot_bytes(p.tap_ring_frames);
+    const uint64_t taps       = TAPS_HEADER_SIZE + (uint64_t(p.tap_slots) + p.track_tap_slots) * tap_slot;
+    const uint64_t audio_end  = a16(taps_start + taps);
+    const uint64_t node_id    = audio_end + RING_CURSORS_SIZE;
+    const uint64_t in_ring    = a16(node_id + NODE_ID_COUNTER_SIZE);
+    const uint64_t rt_out     = in_ring + p.in_ring_bytes;
+    const uint64_t nrt_out    = rt_out + p.rt_out_ring_bytes;
+    const uint64_t control    = a16(nrt_out + p.nrt_out_ring_bytes);
+    const uint64_t transport  = a16(control + CONTROL_RING_SIZE);
+    const uint64_t public_end = a16(transport + p.window_bytes);
+    const uint64_t persist    = a16(public_end + GUEST_CONFIG_SIZE);
+    const uint64_t arena      = a16(persist + p.persist_bytes);
+    if (arena > UINT32_MAX) return refuse("the arena would be 4 GB or more");
+    L.scope_slot_bytes = uint32_t(scope_slot);   L.scope_bytes = uint32_t(scope);
+    L.taps_start = uint32_t(taps_start);         L.tap_slot_bytes = uint32_t(tap_slot);   L.taps_bytes = uint32_t(taps);
+    L.audio_end = uint32_t(audio_end);
+    L.ring_cursors_start = uint32_t(audio_end);  L.node_id_counter_start = uint32_t(node_id);
+    L.in_ring_start = uint32_t(in_ring);         L.rt_out_ring_start = uint32_t(rt_out);
+    L.nrt_out_ring_start = uint32_t(nrt_out);    L.control_ring_start = uint32_t(control);
+    L.transport_end = uint32_t(transport);
+    L.guest_window_start = uint32_t(transport);  L.guest_public_end = uint32_t(public_end);
+    L.guest_config_start = uint32_t(public_end); L.guest_persist_start = uint32_t(persist);
+    L.arena_bytes = uint32_t(arena);
+    L.max_message_bytes = p.in_ring_bytes - uint32_t(sizeof(Message));
+    return L;
+}
+
+// The target's own, laid out and checked when Clockwork is compiled.
+inline constexpr Layout kDefaultLayout = layOut(kDefaultProfile);
+
+// A plugin's: a host that opens an engine per track, many to a process.
+// Small rings; a stereo scope of 4096 frames; four guest taps of 16384
+// frames (enough for a plugin's own scopes); no track taps, as a plugin
+// hosts no tracks; the guest's window and persistent bytes as the target's,
+// which are the guest's to need.
+inline constexpr Profile kPluginProfile {
+    64u * 1024u, 32u * 1024u, 16u * 1024u,
+    4096u, 2u,
+    4u, 0u, 16384u,
+    kDefaultProfile.window_bytes, kDefaultProfile.persist_bytes,
+};
+
+// A scope slot (SCOPE_OUT_SLOT, SCOPE_IN_SLOT) in an arena laid out as `L`:
+// slots lie a layout's slot apart, not a header's.
+inline shm_audio_buffer* scopeSlot(uint8_t* base, const Layout& L, uint32_t slot) {
+    return reinterpret_cast<shm_audio_buffer*>(base + SCOPE_START + size_t(slot) * L.scope_slot_bytes);
+}
+// Tap slot `index` in one index space, the guest's then the track taps, in
+// an arena laid out as `L`; null past the end of both.
+inline shm_tap_stream* tapSlot(uint8_t* base, const Layout& L, uint32_t index) {
+    if (index >= L.tapSlots()) return nullptr;
+    return reinterpret_cast<shm_tap_stream*>(base + L.taps_start + TAPS_HEADER_SIZE + size_t(index) * L.tap_slot_bytes);
+}
+
+} // namespace clockwork
+
+static_assert(clockwork::kDefaultLayout.refused == nullptr, "the target's own profile cannot be laid out");
+static_assert(clockwork::layOut(clockwork::kPluginProfile).refused == nullptr, "the plugin profile cannot be laid out");
+static_assert(clockwork::kDefaultLayout.taps_start % 16 == 0
+              && (clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE) % 16 == 0,
               "tap slots must be 16-byte aligned for shm_tap_stream");
-static_assert(GUEST_PERSIST_START % 16 == 0, "the guest's persistent bytes start 16-aligned");
+static_assert(clockwork::kDefaultLayout.ring_cursors_start % 16 == 0, "the ring cursors must be 16-byte aligned");
+static_assert(clockwork::kDefaultLayout.in_ring_start % 16 == 0
+              && clockwork::kDefaultLayout.rt_out_ring_start % 16 == 0
+              && clockwork::kDefaultLayout.nrt_out_ring_start % 16 == 0, "rings start 16-aligned");
+static_assert(clockwork::kDefaultLayout.guest_window_start % 16 == 0
+              && clockwork::kDefaultLayout.guest_persist_start % 16 == 0, "the guest's regions start 16-aligned");
 
 // Message frame (magic/length/sequence/sourceId) is defined in ring/ring.h.
 
@@ -731,7 +830,7 @@ enum StatusFlags : uint32_t {
 };
 
 // The control ring's own cursors, at the front of its region
-// (CONTROL_RING_START): the ring follows at CONTROL_RING_HEADER_SIZE. Its
+// (the layout's control_ring_start): the ring follows at CONTROL_RING_HEADER_SIZE. Its
 // own and not RingCursors', so the region is one piece of lifetime arena —
 // a rebuild resets the in ring's epoch and leaves this alone, which is why
 // nothing of clockwork's control needs carrying across one.
@@ -745,22 +844,20 @@ struct alignas(16) ControlRingCursors {
 static_assert(sizeof(ControlRingCursors) == CONTROL_RING_HEADER_SIZE,
               "ControlRingCursors is the control ring's header line");
 
-// Constants
-// MAX_MESSAGE_SIZE bounds what a frame header on the INGRESS ring may CLAIM.
-// It is not a bound for the egress rings and must not be used as one: it is
-// derived from IN_RING_SIZE, which is six times RT_OUT_RING_SIZE and twelve
-// times NRT_OUT_RING_SIZE by default, so a reader validating an egress frame
-// against this would accept a length several rings long. The C++ readers do
-// not — ring_drain.h bounds every frame by the size of the ring it was handed,
-// which is the only correct source — and this is exported in BufferLayout for
-// JavaScript, where nothing currently reads it.
+// Layout::max_message_bytes bounds what a frame header on the INGRESS ring
+// may CLAIM. It is not a bound for the egress rings and must not be used as
+// one: it is derived from the in ring's size, several times either egress
+// ring's by default, so a reader validating an egress frame against it would
+// accept a length several rings long. The C++ readers do not — ring_drain.h
+// bounds every frame by the size of the ring it was handed, which is the only
+// correct source.
 //
 // It is not what is guaranteed WRITABLE either: frames never wrap the ring
 // boundary, so the largest frame guaranteed to fit depends on where the idle
 // cursors sit — worst case roughly half the ring. Senders learn the real
 // answer per-write from the writer's fit check (canWriteMessage / the writers'
 // false return), and a guest learns it from DspHost::emit_osc's return.
-constexpr uint32_t MAX_MESSAGE_SIZE = IN_RING_SIZE - sizeof(Message);
+//
 // MESSAGE_MAGIC / PADDING_MAGIC are defined in ring/ring.h.
 constexpr uint8_t RING_PADDING_MARKER = 0xFF;  // Byte marking ring-buffer padding (skip to position 0 on wrap)
 
@@ -774,10 +871,10 @@ constexpr uint8_t RING_PADDING_MARKER = 0xFF;  // Byte marking ring-buffer paddi
 // ── What a reader needs to know, as data ────────────────────────────────────
 //
 // The arena header (clockwork_arena.h) carries these values, and a reader
-// takes them from there rather than from the constants above, so a reader
-// built from another memory profile — or from no engine tree at all, through
-// clockwork_client.h — still finds every region where THIS engine put it.
-// The engine fills the header from its constants (writeArenaHeader); a reader
+// takes them from there, so a reader built from another memory profile — or
+// from no engine tree at all, through clockwork_client.h — still finds every
+// region where THIS core put it. The engine fills the header from the core's
+// layout (writeArenaHeader); a reader
 // fills this from the header (from_arena) and runs check() against it before
 // trusting an offset.
 //
@@ -809,34 +906,34 @@ struct ShmReaderLayout {
     uint32_t sample_clock_offset = 0, sample_clock_bytes = 0;
     uint32_t channel_map_offset = 0,  channel_map_bytes = 0;
 
-    // The engine's own table: what writeArenaHeader publishes.
-    static ShmReaderLayout from_constants() {
+    // A core's own table: what writeArenaHeader publishes for `c`.
+    static ShmReaderLayout from_layout(const clockwork::Layout& c) {
         ShmReaderLayout L;
-        L.blob_size           = ARENA_SIZE;
-        L.in_ring_offset      = IN_RING_START;      L.in_ring_size      = IN_RING_SIZE;
-        L.out_ring_offset     = RT_OUT_RING_START;     L.out_ring_size     = RT_OUT_RING_SIZE;
-        L.nrt_out_ring_offset = NRT_OUT_RING_START; L.nrt_out_ring_size = NRT_OUT_RING_SIZE;
-        L.control_ring_offset = CONTROL_RING_START; L.control_ring_size = CONTROL_RING_SIZE;
-        L.control_offset      = RING_CURSORS_START;        L.control_bytes     = RING_CURSORS_SIZE;
+        L.blob_size           = c.arena_bytes;
+        L.in_ring_offset      = c.in_ring_start;       L.in_ring_size      = c.profile.in_ring_bytes;
+        L.out_ring_offset     = c.rt_out_ring_start;   L.out_ring_size     = c.profile.rt_out_ring_bytes;
+        L.nrt_out_ring_offset = c.nrt_out_ring_start;  L.nrt_out_ring_size = c.profile.nrt_out_ring_bytes;
+        L.control_ring_offset = c.control_ring_start;  L.control_ring_size = CONTROL_RING_SIZE;
+        L.control_offset      = c.ring_cursors_start;  L.control_bytes     = RING_CURSORS_SIZE;
         L.metrics_offset      = METRICS_START;        L.metrics_bytes     = METRICS_SIZE;
         L.metrics_history_offset = METRICS_HISTORY_START; L.metrics_history_bytes = METRICS_HISTORY_SIZE;
-        L.window_offset       = GUEST_WINDOW_START;     L.window_bytes      = GUEST_WINDOW_SIZE;
+        L.window_offset       = c.guest_window_start;  L.window_bytes      = c.profile.window_bytes;
         L.clock_state_offset  = CLOCK_STATE_START;    L.clock_state_bytes = CLOCK_STATE_SIZE;
         L.audio_offset        = SCOPE_START;
         L.audio_slot_count    = SCOPE_SLOTS;
-        L.audio_slot_bytes    = SCOPE_SLOT_SIZE;
+        L.audio_slot_bytes    = c.scope_slot_bytes;
         L.audio_header_bytes  = SCOPE_HEADER_SIZE;
-        L.audio_frames        = SCOPE_FRAMES;
-        L.audio_channels      = SCOPE_CHANNELS;
+        L.audio_frames        = c.profile.scope_frames;
+        L.audio_channels      = c.profile.scope_channels;
         L.audio_sample_rate   = SCOPE_SAMPLE_RATE;
-        L.tap_offset        = TAPS_START;
-        L.tap_max           = TAPS_SLOTS;
+        L.tap_offset        = c.taps_start;
+        L.tap_max           = c.profile.tap_slots;
         L.tap_header_bytes  = TAPS_HEADER_SIZE;
-        L.tap_slot_bytes    = TAP_SLOT_SIZE;
+        L.tap_slot_bytes    = c.tap_slot_bytes;
         L.tap_slot_header   = TAP_SLOT_HEADER_SIZE;
-        L.tap_ring_frames   = TAP_RING_FRAMES;
+        L.tap_ring_frames   = c.profile.tap_ring_frames;
         L.tap_channels      = TAP_CHANNELS;
-        L.tap_track_slots   = TAP_TRACK_SLOTS;
+        L.tap_track_slots   = c.profile.track_tap_slots;
         L.native_stats_offset = NATIVE_STATS_START;   L.native_stats_bytes = NATIVE_STATS_SIZE;
         L.sample_clock_offset = SAMPLE_CLOCK_START;   L.sample_clock_bytes = SAMPLE_CLOCK_SIZE;
         L.channel_map_offset  = CHANNEL_MAP_START;    L.channel_map_bytes  = CHANNEL_MAP_SIZE;
@@ -942,7 +1039,7 @@ struct ShmReaderLayout {
         if (!inside(window_offset, window_bytes)) return fail("window outside the blob");
         if (clock_state_bytes < sizeof(ClockworkClockState) || !inside(clock_state_offset, clock_state_bytes)) return fail("clock state too small or outside the blob");
         if (audio_header_bytes != SCOPE_HEADER_SIZE) return fail("scope slot shape differs from this reader's");
-        if (audio_channels > SCOPE_CHANNELS) return fail("scope wider than this reader can interleave");
+        if (audio_channels > CLOCKWORK_MAX_CHANNELS) return fail("scope wider than this reader can interleave");
         if (audio_slot_count < SCOPE_SLOTS) return fail("arena has fewer scope slots than out and in");
         if (audio_slot_bytes < uint64_t(SCOPE_HEADER_SIZE) + uint64_t(audio_frames) * audio_channels * sizeof(float)) return fail("scope slot smaller than its declared ring");
         if (!inside(audio_offset, uint64_t(audio_slot_count) * audio_slot_bytes)) return fail("scope outside the blob");
@@ -958,12 +1055,12 @@ struct ShmReaderLayout {
 
 // ── Writing the table ───────────────────────────────────────────────────────
 //
-// Whoever creates an arena writes its header from these constants before
+// Whoever creates an arena writes its header from the core's layout before
 // anything else is placed in it: init_memory for the engine's own arena, the
 // segment creator for a mapped one (both write it; the bytes are the same).
 // `state` is stored last, behind a release fence, so a reader that sees it
 // published and acquires sees the whole table.
-inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
+inline void writeArenaHeader(uint8_t* base, const clockwork::Layout& c, uint32_t instance_id = 0) {
     auto* h = reinterpret_cast<ClockworkArenaHeader*>(base);
     std::memset(static_cast<void*>(h), 0, sizeof *h);
     h->magic           = CLOCKWORK_ARENA_MAGIC;
@@ -971,10 +1068,10 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     h->header_bytes    = ARENA_HEADER_SIZE;
     h->instance_id     = instance_id;
     h->generation      = 1;   // no instance yet, and no generation opened (docs/RESTARTS.md)
-    h->arena_bytes     = ARENA_SIZE;
-    h->clockwork_bytes = CLOCKWORK_HALF_SIZE;
-    h->guest_offset    = GUEST_HALF_START;
-    h->guest_bytes     = GUEST_HALF_SIZE;
+    h->arena_bytes     = c.arena_bytes;
+    h->clockwork_bytes = c.transport_end;
+    h->guest_offset    = c.transport_end;
+    h->guest_bytes     = c.guestHalfBytes();
     h->area_bytes      = sizeof(ClockworkArenaAreaEntry);
     h->entry_bytes     = sizeof(ClockworkArenaEntry);
     // The areas: the five in the arena by offset; the nine outside it with
@@ -987,10 +1084,10 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
         a.bytes_lo = uint32_t(bytes); a.bytes_hi = uint32_t(bytes >> 32);
     };
     area(CLOCKWORK_AREA_CLOCKWORK_STATE,     CLOCKWORK_SPACE_ARENA, CLOCKWORK_STATE_START,     CLOCKWORK_STATE_END - CLOCKWORK_STATE_START);
-    area(CLOCKWORK_AREA_CLOCKWORK_AUDIO,     CLOCKWORK_SPACE_ARENA, CLOCKWORK_AUDIO_START,     CLOCKWORK_AUDIO_END - CLOCKWORK_AUDIO_START);
-    area(CLOCKWORK_AREA_CLOCKWORK_TRANSPORT, CLOCKWORK_SPACE_ARENA, CLOCKWORK_TRANSPORT_START, CLOCKWORK_TRANSPORT_END - CLOCKWORK_TRANSPORT_START);
-    area(CLOCKWORK_AREA_GUEST_PUBLIC,        CLOCKWORK_SPACE_ARENA, GUEST_PUBLIC_START,        GUEST_PUBLIC_END - GUEST_PUBLIC_START);
-    area(CLOCKWORK_AREA_GUEST_PRIVATE,       CLOCKWORK_SPACE_ARENA, GUEST_PRIVATE_START,       GUEST_PRIVATE_END - GUEST_PRIVATE_START);
+    area(CLOCKWORK_AREA_CLOCKWORK_AUDIO,     CLOCKWORK_SPACE_ARENA, CLOCKWORK_AUDIO_START, c.audio_end - CLOCKWORK_AUDIO_START);
+    area(CLOCKWORK_AREA_CLOCKWORK_TRANSPORT, CLOCKWORK_SPACE_ARENA, c.audio_end,           c.transport_end - c.audio_end);
+    area(CLOCKWORK_AREA_GUEST_PUBLIC,        CLOCKWORK_SPACE_ARENA, c.guest_window_start,  c.guest_public_end - c.guest_window_start);
+    area(CLOCKWORK_AREA_GUEST_PRIVATE,       CLOCKWORK_SPACE_ARENA, c.guest_config_start,  c.arena_bytes - c.guest_config_start);
     area(CLOCKWORK_AREA_ASSETS,  CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     area(CLOCKWORK_AREA_RETURNS, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
     area(CLOCKWORK_AREA_GUEST_MEMORY_BULK, CLOCKWORK_SPACE_UNKNOWN, 0, 0);
@@ -1045,50 +1142,51 @@ inline void writeArenaHeader(uint8_t* base, uint32_t instance_id = 0) {
     put(CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK,
         kPublic | CLOCKWORK_AUDIENCE_GUEST, kChange, kFast, kColdBoot);
     // clockwork-audio
-    put(CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           SCOPE_SIZE,           CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+    put(CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           c.scope_bytes,        CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild,
-        { SCOPE_SLOTS, SCOPE_SLOT_SIZE, SCOPE_HEADER_SIZE, SCOPE_FRAMES, SCOPE_CHANNELS, SCOPE_SAMPLE_RATE });
-    put(CLOCKWORK_ARENA_CLOCKWORK_TAPS,            TAPS_START,            TAPS_SIZE,            CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        { SCOPE_SLOTS, c.scope_slot_bytes, SCOPE_HEADER_SIZE, c.profile.scope_frames, c.profile.scope_channels,
+          SCOPE_SAMPLE_RATE });
+    put(CLOCKWORK_ARENA_CLOCKWORK_TAPS,            c.taps_start,          c.taps_bytes,         CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kBulk, kRebuild,
-        { TAPS_SLOTS, TAPS_HEADER_SIZE, TAP_SLOT_SIZE, TAP_SLOT_HEADER_SIZE, TAP_RING_FRAMES, TAP_CHANNELS,
-          TAP_TRACK_SLOTS, TAP_TRACK_SLOT_BASE });
+        { c.profile.tap_slots, TAPS_HEADER_SIZE, c.tap_slot_bytes, TAP_SLOT_HEADER_SIZE, c.profile.tap_ring_frames,
+          TAP_CHANNELS, c.profile.track_tap_slots, c.profile.tap_slots });
     // clockwork-transport
-    put(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    RING_CURSORS_START,    RING_CURSORS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    c.ring_cursors_start,  RING_CURSORS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
         kBlock, kFast, kRebuild);
-    put(CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, c.node_id_counter_start, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    kTransport,
         kChange, kFast, kColdBoot);
     // Cold boot, not rebuild: messages queued for a torn-down instance stay in
     // the ring and the next drain refuses them, below the teardown's mark
     // (docs/RESTARTS.md).
-    put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         c.in_ring_start,       c.profile.in_ring_bytes, CLOCKWORK_OWNER_CLIENT, kTransport,
         kBlock, kFast, kColdBoot,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+        { c.max_message_bytes, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     // Cold boot, not rebuild: what an instance said stays for its readers
     // across the rebuild, and the next instance's setup follows it
     // (docs/RESTARTS.md). Their cursors live in the ring cursors' region and
     // are reset with them.
-    put(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     RT_OUT_RING_START,     RT_OUT_RING_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     c.rt_out_ring_start,   c.profile.rt_out_ring_bytes, CLOCKWORK_OWNER_CLOCKWORK, kTransport,
         kBlock, kFast, kColdBoot,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
-    put(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kTransport,
+        { c.max_message_bytes, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+    put(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    c.nrt_out_ring_start,  c.profile.nrt_out_ring_bytes, CLOCKWORK_OWNER_CLOCKWORK, kTransport,
         kChange, kFast, kColdBoot,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
+        { c.max_message_bytes, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)) });
     // Clockwork's own control verbs (ControlRingCursors above): lifetime
     // arena, so a rebuild neither resets it nor has anything to carry. The
     // sixth geometry word is where the ring starts within the region.
-    put(CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    CONTROL_RING_START,    CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
+    put(CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    c.control_ring_start,  CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    kTransport,
         kChange, kFast, kArena,
-        { MAX_MESSAGE_SIZE, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)),
+        { c.max_message_bytes, MESSAGE_MAGIC, PADDING_MAGIC, RING_PADDING_MARKER, static_cast<uint32_t>(sizeof(Message)),
           CONTROL_RING_HEADER_SIZE });
     // guest-public. The window's identity (magic, version) is the guest's to
     // declare and is written when it binds — arenaSetGuestWindowIdentity — so
     // it is 0 here.
-    put(CLOCKWORK_ARENA_GUEST_WINDOW,              GUEST_WINDOW_START,    GUEST_WINDOW_SIZE,    CLOCKWORK_OWNER_GUEST,     kPublic,
+    put(CLOCKWORK_ARENA_GUEST_WINDOW,              c.guest_window_start,  c.profile.window_bytes, CLOCKWORK_OWNER_GUEST,   kPublic,
         kChange, kBulk, kRebuild);
     // guest-private
-    put(CLOCKWORK_ARENA_GUEST_CONFIG,              GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
+    put(CLOCKWORK_ARENA_GUEST_CONFIG,              c.guest_config_start,  GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,
         CLOCKWORK_AUDIENCE_GUEST | CLOCKWORK_AUDIENCE_HOST, kBoot, kBulk, kColdBoot);
-    put(CLOCKWORK_ARENA_GUEST_PERSIST,             GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,
+    put(CLOCKWORK_ARENA_GUEST_PERSIST,             c.guest_persist_start, c.profile.persist_bytes,   CLOCKWORK_OWNER_GUEST,
         CLOCKWORK_AUDIENCE_GUEST, kChange, kBulk, kColdBoot);
     h->entry_count = n;
     std::atomic_thread_fence(std::memory_order_release);

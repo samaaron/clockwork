@@ -159,8 +159,7 @@ EngineFixture::~EngineFixture() {
     if (mAudioCanary) checkAudioKeptUp(mEngine, mEngine.egressClient(), mExpectedLoss);
     if (mLateHostStart.joinable()) mLateHostStart.join();
     mHostControl.stop();   // a host stops its thread before the engine
-    mEngine.shutdown();
-    clockwork_sink_close_all();
+    mEngine.shutdown();   // its core's sinks close with it
 }
 
 void EngineFixture::send(const osc_test::Packet& pkt) { send(pkt.ptr(), pkt.size()); }
@@ -217,7 +216,7 @@ bool EngineFixture::waitForReply(const std::string& addr, OscReply& out, int tim
 
 uint32_t EngineFixture::blocksOfAudio(int ms) const {
     const double frames = double(ms) * double(mSampleRate) / 1000.0;
-    return static_cast<uint32_t>(std::ceil(frames / double(get_audio_buffer_samples())));
+    return static_cast<uint32_t>(std::ceil(frames / double(clockwork_block_size(mEngine.core()))));
 }
 
 bool EngineFixture::waitForBlocks(uint32_t n, int timeoutMs) {

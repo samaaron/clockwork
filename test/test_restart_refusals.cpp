@@ -159,7 +159,7 @@ TEST_CASE("restarts, engine: restarting names the generation closing, setup the 
 
     // The engine has no counter of its own: what it says is what the arena
     // holds, and a reader of the arena in another process reads the same.
-    const auto* h = clockwork_arena_header();
+    const auto* h = clockwork_arena_header(fix.engine().core());
     REQUIRE(h != nullptr);
     REQUIRE(clockwork_arena_has_instance(h));
     const uint32_t gen = clockwork_arena_generation(h);
@@ -331,7 +331,7 @@ TEST_CASE("restarts, engine: a new instance whose ring has no room for its setup
 
     // The host stops reading, and the old instance answers until its ring takes nothing more.
     const auto* cursors = reinterpret_cast<const RingCursors*>(
-        static_cast<uint8_t*>(clockwork_lanes_base()) + RING_CURSORS_START);
+        static_cast<uint8_t*>(clockwork_lanes_base(fix.engine().core())) + clockwork::kDefaultLayout.ring_cursors_start);
     const auto ping = osc_test::message("/dummy/ping");
     bool full = false;
     for (int i = 0; i < 100000 && !full; ++i) {

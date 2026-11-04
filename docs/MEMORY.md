@@ -20,7 +20,7 @@ Sizes are hand-computed from the constants, not measured.
 |---|---|---|---|
 | **web** | one wasm linear memory in an AudioWorklet, shared with the page and workers as a SharedArrayBuffer (or private to the worklet in postMessage mode) | one tier; only the top of memory can grow | shipping (Sonic Pi Web) |
 | **native** | the engine's process; other processes map a shared segment when a UDP port is set | one tier; virtual memory | shipping (Sonic Pi) |
-| **plugin** (clockwork inside a DAW, `clockwork_embed_attach`) | the host's process; one engine per process | one tier | API and tests only; no product wraps it |
+| **plugin** (clockwork inside a DAW, `clockwork_embed_attach`) | the host's process; one engine per instance, as many as the host opens (docs/ENGINES.md) | one tier | API and tests only; no product wraps it |
 | **embedded** (ESP32-S3, Teensy 4.1) | one process, no OS segment | **two tiers** on the ESP32 (512 KiB internal SRAM, 8 MiB PSRAM); Teensy has fast DTCM and slower OCRAM, which clockwork treats as one tier | profiles and allocator exist; **no embedded build of clockwork exists in the tree**. The out-of-tree ESP32 and Teensy hosts run the old SuperSonic engine. Nothing below is proven on a device. |
 
 ### 1.2 Every area, on every platform
@@ -213,7 +213,7 @@ memory map shows and the code uses; the old names are in brackets.
 | **guest-memory-fast** [`DspConfig::memory`] | the guest's fast memory: its hot per-block state, laid out by hand at `dsp_new` | guest → guest | fast | no |
 | **guest-memory-bulk** [`DspConfig::memory_bulk`] | the guest's bulk memory: everything it allocates as it runs, through clockwork's allocator (a Rust guest's Box and Vec by themselves) | guest, through the pool → guest | bulk | once, by the spare |
 | **static-data**, **stack**, **malloc** | the program's own: its statics (natively the arena inside), its stack, what `malloc`/`new` took (on the web the engine's memory inside); placed by the web, unknown natively until taught | the program | — | malloc: by sbrk |
-| **rust-heap** | one block the RT router serves: what clockwork's Rust subsystems allocate inside an engine entry point (a sink's or a port's queues); taken once at boot, for the life of the process | clockwork | fast | no |
+| **rust-heap** | the core's own pool: what clockwork's Rust subsystems allocate inside a door (a sink's or a port's queues); taken at the core's first init, given back when the core goes | clockwork | fast | no |
 | **engine-memory** | on the web, the one block the arena and all of the above are carved from | clockwork | — | no |
 
 The first five are the arena today, and stay one span with one table.
@@ -350,12 +350,12 @@ recommended, with one change at step 5, noted there.
    map of a Sonic Pi Web boot showed scsynth's synthdefs and the Rust sink
    and port queues in plain `malloc`, outside every area). The RT router
    (`rust/clockwork-heap/src/router.rs`, written for this and never
-   installed) is now `clockwork-native`'s `#[global_allocator]`; the host
-   arms it at heap init on one block from the fast tier
-   (`CLOCKWORK_ROUTER_BYTES`: 1 MB on desktop and the web, 64 KB on the
+   installed) is now `clockwork-native`'s `#[global_allocator]`. Each core
+   takes one block from the fast tier for its own pool
+   (`CLOCKWORK_OWN_POOL_BYTES`: 1 MB on desktop and the web, 64 KB on the
    ESP32-S3, none on the Teensy), listed as the **rust-heap** area; the sink
-   and port FFI entry points enter engine scope, so their queues come from
-   it. scsynth's synth definitions (`SC_GraphDef.cpp`: every array, the param
+   and port FFI calls open a door, so their queues come from
+   it (`src/clockwork_heap.h`). scsynth's synth definitions (`SC_GraphDef.cpp`: every array, the param
    spec table and its storage) and the piano wavetable come from the guest's
    heap (`supersonic_guest_alloc_bytes`) instead of `new`. The program's own
    three areas — **static-data**, **stack** (on the web the audio worklet's:
@@ -472,7 +472,7 @@ recommended, with one change at step 5, noted there.
     guest gets exactly two spans from clockwork (`dsp_api.h`): `memory`,
     fast, which it lays out by hand (its hot per-block state), and
     `memory_bulk`, bulk, which clockwork runs its allocator over
-    (`src/clockwork_pool.h`, the pool crate the heap was) and from which
+    (`src/clockwork_heap.h`, the core's heap) and from which
     everything the guest allocates as it runs comes. Both are given on every
     host — a single-RAM host hands two slices of one block, so a guest is
     written once and only the sizes change per target — and each is sized
@@ -490,11 +490,11 @@ recommended, with one change at step 5, noted there.
     mean the guest's own span. A Rust guest needs no door: clockwork's Rust
     global allocator (the RT router, `rust/clockwork-heap/src/router.rs`)
     serves every allocation made while a guest entry point is open from the
-    guest's pool, through hooks the pool installs at boot and a guest scope
-    `guest_malloc.h`'s call scope opens, so a Rust guest's `Box` and `Vec`
+    pool of the core the thread's entry names (`guest_malloc.h`'s call scope
+    makes the entry), so a Rust guest's `Box` and `Vec`
     land in its own memory by writing ordinary Rust; an allocation the pool
-    cannot meet falls back to the system and is counted
-    (`clockwork_router_guest_fallback_allocs`). Areas 8 and 14 are
+    cannot meet falls back to the system and is counted (the pool's
+    census, `clockwork_heap_census`). Areas 8 and 14 are
     **`GUEST_MEMORY_BULK`** and **`GUEST_SPARE`**, 9 is
     **`GUEST_MEMORY_FAST`**; metrics 53–54 are the guest's pool's census
     (`guestPoolUsedBytes`, `guestPoolPeakBytes`). The
@@ -628,7 +628,7 @@ recommended, with one change at step 5, noted there.
     the lock rather than passing silently, as it had under the old heap.
     Hunting it: the pool refuses and counts a double free (none here);
     then a walk of the whole pool after every engine-thread operation
-    (`CLOCKWORK_POOL_CHECK=1`, `clockwork_heap_pool_check`) stopped at the
+    (`CLOCKWORK_POOL_CHECK=1`, now `clockwork_heap_guest_check`) stopped at the
     first broken header and named the allocation before it — scsynth's
     audio bus, 64 channels by the embedded test's option, under a host
     handing it 80 in and 80 out (lanes a previous test had reserved, which

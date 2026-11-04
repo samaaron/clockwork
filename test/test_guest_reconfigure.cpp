@@ -82,7 +82,7 @@ TEST_CASE("guest reconfigure: a channel-count change the instance survives is a 
     CHECK_FALSE(heard(fix, CLOCKWORK_SYS("error")));
     // Clockwork's own picture of the device followed it: the channel map's
     // device words, which a client and the guest both read.
-    CHECK(clockwork_channel_map()->device_out.load() == static_cast<uint32_t>(told.outputs));   // as at boot: the width rendered
+    CHECK(clockwork_channel_map(fix.engine().core())->device_out.load() == static_cast<uint32_t>(told.outputs));   // as at boot: the width rendered
 }
 
 TEST_CASE("guest reconfigure: a change the instance refuses becomes the cold restart it would have been",
@@ -112,5 +112,5 @@ TEST_CASE("guest reconfigure: a change the instance refuses becomes the cold res
     CHECK(told.times == 0);
     CHECK(told.outputs >= 64);
     CHECK(fix.engine().generation() == gen + 1);
-    CHECK(clockwork_channel_map()->device_out.load() == static_cast<uint32_t>(told.outputs));
+    CHECK(clockwork_channel_map(fix.engine().core())->device_out.load() == static_cast<uint32_t>(told.outputs));
 }

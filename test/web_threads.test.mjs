@@ -14,6 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { ringWrite, RingTap, EgressReader } from "../js/lib/ring.js";
+import { ENGINE_MESSAGES_PROCESSED } from "../js/lib/metrics_offsets.js";
 import { bootEngine, block, haveWasm, testIf } from "./engine_boot.mjs";
 
 const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
@@ -42,19 +43,28 @@ function oscInt(address, value) {
   return out;
 }
 
+// How many messages the engine has processed: its metric, read where every
+// client reads it (js/lib/metrics_reader.js).
+function processed({ memory, arenaBase, constants }) {
+  return new Uint32Array(memory.buffer, arenaBase + constants.METRICS_START,
+                         constants.METRICS_SIZE / 4)[ENGINE_MESSAGES_PROCESSED];
+}
+
 maybe("a sender outside the worklet reaches the engine", async () => {
-  const { x, rings } = await bootEngine();
-  const before = x.get_messages_processed();
+  const engine = await bootEngine();
+  const { x, rings } = engine;
+  const before = processed(engine);
   for (let i = 0; i < 5; i++)
     assert.equal(ringWrite(rings.ingress, oscMessage("/test/ping"), 0xC0FFEE), true, `send ${i}`);
 
   block(x);
-  assert.equal(x.get_messages_processed() - before, 5, "every message written reached the engine");
+  assert.equal(processed(engine) - before, 5, "every message written reached the engine");
 });
 
 maybe("many sends in a row all arrive, and an impossible one is refused", async () => {
-  const { x, rings, constants } = await bootEngine();
-  const before = x.get_messages_processed();
+  const engine = await bootEngine();
+  const { x, rings, constants } = engine;
+  const before = processed(engine);
   const msg = oscMessage("/test/ping");
   const rounds = 200;
   for (let i = 0; i < rounds; i++)
@@ -62,8 +72,8 @@ maybe("many sends in a row all arrive, and an impossible one is refused", async 
 
   // The engine takes a bounded number of messages per block, so this drains
   // over several rather than expecting one to swallow the lot.
-  for (let n = 0; n < 40 && x.get_messages_processed() - before < rounds; n++) block(x);
-  assert.equal(x.get_messages_processed() - before, rounds, "every message that was accepted arrived");
+  for (let n = 0; n < 40 && processed(engine) - before < rounds; n++) block(x);
+  assert.equal(processed(engine) - before, rounds, "every message that was accepted arrived");
 
   // A message larger than the ring can ever hold is refused, and the ring
   // still works afterwards: the refusal did not leave the lock held.
@@ -95,10 +105,11 @@ maybe("the reply pump's reader hears the engine answer", async () => {
 });
 
 maybe("a tap watches ingress without taking it from the engine", async () => {
-  const { x, rings } = await bootEngine();
+  const engine = await bootEngine();
+  const { x, rings } = engine;
   const tap = new RingTap(rings.ingress);
 
-  const before = x.get_messages_processed();
+  const before = processed(engine);
   for (let i = 0; i < 3; i++) ringWrite(rings.ingress, oscMessage("/test/ping"), 42);
 
   const seen = [];
@@ -111,5 +122,5 @@ maybe("a tap watches ingress without taking it from the engine", async () => {
 
   // Watching took nothing: the engine still gets all three.
   block(x);
-  assert.equal(x.get_messages_processed() - before, 3, "the engine received what the tap watched");
+  assert.equal(processed(engine) - before, 3, "the engine received what the tap watched");
 });

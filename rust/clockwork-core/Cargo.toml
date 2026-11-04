@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+[package]
+name = "clockwork-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+rust-version = "1.85"
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+description = "One engine's core: made and closed here, and the registry of which cores are live (docs/ENGINES.md)"
+
+[lints]
+workspace = true
+
+[dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
+clockwork-abi = { path = "../clockwork-abi" }
+# The thread's entry, which the global allocator reads (clockwork_heap::entry).
+clockwork-heap = { path = "../clockwork-heap" }
+# The core's tap slots (clockwork_taps::Taps) and its ports
+# (clockwork_ports::registry::Ports).
+clockwork-taps = { path = "../clockwork-taps" }
+clockwork-ports = { path = "../clockwork-ports" }
+# And its event sinks (clockwork_sinks::registry::Sinks); which endpoints
+# they reach is the umbrella's say (clockwork-native's features).
+clockwork-sinks = { path = "../clockwork-sinks", default-features = false }
+clockwork-wait = { path = "../clockwork-wait" }

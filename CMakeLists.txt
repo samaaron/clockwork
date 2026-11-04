@@ -122,6 +122,7 @@ set(CLOCKWORK_PRODUCT_VERSION "" CACHE STRING
     "Version stamped into OS-visible metadata and the boot banner")
 
 option(BUILD_TESTS "Build the native Catch2 test suite" OFF)
+option(CLOCKWORK_PLUGIN_MODULES "Build Clockwork for plugin binaries (position-independent, so a plugin's shared module can take it in) and the test that loads two in one process" ${BUILD_TESTS})
 
 # The scheduler host and clockwork's own test suite exist to prove clockwork
 # works on its own. A project that EMBEDS clockwork wants the library and not
@@ -377,7 +378,7 @@ endif()
 # POSITION_INDEPENDENT_CODE as the target is created, so setting it after
 # add_library(clockwork) reaches nothing already defined. macOS's relocation
 # model is indifferent, so only a Linux nif build fails without it.
-if(CLOCKWORK_NIF)
+if(CLOCKWORK_NIF OR CLOCKWORK_PLUGIN_MODULES)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -601,21 +602,19 @@ set(CLOCKWORK_CORE_SOURCES
     # here; the device boot is in the device layer below.
     ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp
     ${CLOCKWORK_SRC}/lanes/lanes.cpp
+    # A core's C++ state (src/core_state.h): what one engine holds.
+    ${CLOCKWORK_SRC}/core_state.cpp
     # A word a thread blocks on until it changes, with a deadline: every wait
     # for another thread's work (src/workers/wait_word.h).
     ${WORKERS_SRC}/wait_word.cpp
     # A name for each long-lived thread, as debuggers and profilers show it.
     ${WORKERS_SRC}/thread_name.cpp
-    # The guest's pool (src/clockwork_pool.h): clockwork's allocator over the
-    # guest's bulk memory, and the RT router's block.
-    ${CLOCKWORK_SRC}/clockwork_pool.cpp
     # What the guest takes from malloc, counted (src/guest_malloc.h). The
     # wrappers inside it link only where the link can wrap (the web).
     ${CLOCKWORK_SRC}/guest_malloc.cpp
     # The arena the guest may not touch, poisoned while it runs: AddressSanitizer
     # builds, armed by a single-threaded harness (src/guest_fence.h).
     ${CLOCKWORK_SRC}/guest_fence.cpp
-    ${CLOCKWORK_SRC}/tap_streams.cpp
     ${CLOCKWORK_SRC}/mem_region.cpp
     ${CLOCKWORK_SRC}/engine_support.cpp
     # MIDI clock out is ClockworkClock's: 24 ticks a beat, each carrying its own
@@ -628,7 +627,10 @@ set(CLOCKWORK_CORE_SOURCES
 # the ring reader. Neither mentions JUCE or ClockworkEngine.
 set(CLOCKWORK_NATIVE_SOURCES
     ${NATIVE_SRC}/OscEgress.cpp
-    ${WORKERS_SRC}/RingReader.cpp)
+    ${WORKERS_SRC}/RingReader.cpp
+    # A core's memory straight from the system, zeroed by giving pages back
+    # (src/os_pages.h).
+    ${CLOCKWORK_SRC}/os_pages.cpp)
 if(EMSCRIPTEN)
     # A worklet has no egress thread and no ring reader of its own: the
     # JavaScript workers are those. The lanes' asset pool and the embed API
@@ -1143,6 +1145,7 @@ endif()
 # ships with the crate that implements it, the way every other Rust subsystem's
 # does.
 target_include_directories(clockwork PUBLIC ${CLOCKWORK_RUST_DIR}/clockwork-ports-disk/cpp)
+target_include_directories(clockwork PUBLIC ${CLOCKWORK_RUST_DIR}/clockwork-taps/cpp)
 target_include_directories(clockwork PRIVATE ${CLOCKWORK_RUST_DIR}/clockwork-audio-decode/cpp)
 
 # The timed-event store has no option and no boundary file either, for the same
@@ -1198,28 +1201,32 @@ message(STATUS "DSP: ${CLOCKWORK_DSP}")
 # Clockwork and the DSP call each other in both directions by construction —
 # clockwork runs blocks and hands over OSC, the DSP answers through
 # DspHost::emit_osc and DspHost::log. Link them as a group so a single pass is
-# not asked to resolve a cycle.
-if(APPLE OR MSVC OR EMSCRIPTEN)
-    set(CLOCKWORK_LIB_GROUP clockwork ${CLOCKWORK_DSP} ${CLOCKWORK_RUST_LIB})
-else()
-    # $<TARGET_FILE:clockwork>, not the target NAME: CMake reorders a named
-    # target by its own dependency rules and can hoist it out of the group,
-    # leaving the Rust staticlib inside unable to reach back for the C++
-    # symbols it calls (clockwork_shm_base, clockwork_tap_geometry). A file
-    # path stays where it is put.
-    # BOTH forms of clockwork, deliberately. The target carries the usage
-    # requirements — include directories and compile definitions — which a
-    # bare file path does not; $<TARGET_FILE:> pins the archive INSIDE the
-    # group, which a target name does not. Without the file, the Rust
-    # staticlib cannot reach back for the C++ symbols it calls; without the
-    # target, nothing that links this can find a header. The archive
-    # appearing twice on the line costs nothing.
-    set(CLOCKWORK_LIB_GROUP
-        clockwork
-        -Wl,--start-group
-        $<TARGET_FILE:clockwork> $<TARGET_FILE:${CLOCKWORK_DSP}> ${CLOCKWORK_RUST_LIB}
-        -Wl,--end-group)
-endif()
+# not asked to resolve a cycle. `out`: the link line for clockwork with the
+# DSP target `dsp`.
+function(clockwork_lib_group out dsp)
+    if(APPLE OR MSVC OR EMSCRIPTEN)
+        set(${out} clockwork ${dsp} ${CLOCKWORK_RUST_LIB} PARENT_SCOPE)
+    else()
+        # $<TARGET_FILE:clockwork>, not the target NAME: CMake reorders a
+        # named target by its own dependency rules and can hoist it out of
+        # the group, leaving the DSP inside unable to reach back for the
+        # clockwork symbols it calls. A file path stays where it is put.
+        # BOTH forms of clockwork, deliberately. The target carries the
+        # usage requirements — include directories and compile definitions —
+        # which a bare file path does not; $<TARGET_FILE:> pins the archive
+        # INSIDE the group, which a target name does not. Without the file,
+        # the DSP cannot reach back for the symbols it calls; without the
+        # target, nothing that links this can find a header. The archive
+        # appearing twice on the line costs nothing.
+        set(${out}
+            clockwork
+            -Wl,--start-group
+            $<TARGET_FILE:clockwork> $<TARGET_FILE:${dsp}> ${CLOCKWORK_RUST_LIB}
+            -Wl,--end-group
+            PARENT_SCOPE)
+    endif()
+endfunction()
+clockwork_lib_group(CLOCKWORK_LIB_GROUP ${CLOCKWORK_DSP})
 
 # What an EMBEDDER links. CLOCKWORK_LIB_GROUP above is a plain variable in
 # this directory's scope, so it is empty in a parent project: a consumer
@@ -1243,6 +1250,48 @@ add_dependencies(clockwork_bundle ${CLOCKWORK_DSP})
 if(CLOCKWORK_RUST)
     add_dependencies(clockwork_bundle clockwork_rust)
 endif()
+
+# A plugin binary built on Clockwork (src/clockwork_plugin.h, docs/ENGINES.md
+# 3.7): a shared module a host loads, perhaps beside another plugin with a
+# Clockwork of its own, so it exports the entry points named and nothing
+# else: no host's dynamic linker can then bind another module's calls to
+# this module's Clockwork, or this module's to another's. The entry points
+# are marked CLOCKWORK_PLUGIN_ENTRY; everything else is hidden by the
+# compiler and, for what the static libraries bring, by the linker.
+#
+#   clockwork_plugin_module(my_plugin ENTRY clap_entry)
+function(clockwork_plugin_module target)
+    cmake_parse_arguments(PM "" "" "ENTRY" ${ARGN})
+    if(NOT PM_ENTRY)
+        message(FATAL_ERROR "clockwork_plugin_module(${target}) names no ENTRY")
+    endif()
+    set_target_properties(${target} PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(${target} PRIVATE clockwork_bundle)
+    target_include_directories(${target} PRIVATE ${CLOCKWORK_INCLUDE_DIRS})
+    set(_list ${CMAKE_CURRENT_BINARY_DIR}/${target}-exports)
+    if(APPLE)
+        # Mach-O names carry a leading underscore.
+        list(TRANSFORM PM_ENTRY PREPEND "_" OUTPUT_VARIABLE _names)
+        string(JOIN "\n" _text ${_names})
+        file(WRITE ${_list}.txt "${_text}\n")
+        target_link_options(${target} PRIVATE "LINKER:-exported_symbols_list,${_list}.txt")
+    elseif(WIN32)
+        # A DLL exports what is marked for export; the .def names exactly
+        # the entry points.
+        string(JOIN "\n    " _text ${PM_ENTRY})
+        file(WRITE ${_list}.def "EXPORTS\n    ${_text}\n")
+        target_sources(${target} PRIVATE ${_list}.def)
+    else()
+        string(JOIN "; " _text ${PM_ENTRY})
+        file(WRITE ${_list}.map "{\n  global: ${_text};\n  local: *;\n};\n")
+        target_link_options(${target} PRIVATE
+            "LINKER:--version-script=${_list}.map"
+            "LINKER:--exclude-libs,ALL")
+    endif()
+endfunction()
 
 # ─── The web module ──────────────────────────────────────────────────────────
 # One STANDALONE_WASM module with imported shared memory — the worklet
@@ -1273,12 +1322,9 @@ if(EMSCRIPTEN)
     # worklet fails at run time, not at build time — so this list has to be
     # right, and it is clockwork's to keep: the worklet is clockwork's.
     set(CLOCKWORK_WEB_EXPORTS
-        ___wasm_call_ctors _clockwork_memory_claim _clockwork_init _clockwork_boot_error _clockwork_malloc_mark_boot _get_arena_base _clockwork_product_version
-        _clockwork_tick _get_audio_output_bus _get_audio_input_bus
-        _get_audio_num_output_buses _get_audio_num_input_buses _get_audio_buffer_samples
-        _set_time_offset _get_time_offset
+        ___wasm_call_ctors _clockwork_memory_claim _clockwork_core_new _clockwork_core_held _clockwork_init _clockwork_boot_error _clockwork_malloc_mark_boot _get_arena_base _clockwork_product_version
+        _clockwork_tick _clockwork_audio_out _clockwork_audio_in _clockwork_block_size
         _clockwork_log _clockwork_log_va _clockwork_log_raw
-        _get_process_count _get_messages_processed _get_messages_dropped _get_status_flags
         _clear_scheduler _clockwork_host_forward _clockwork_host_forwards
         _clockwork_ingress_mark_stale _clockwork_audio_back _clockwork_audio_starts _clockwork_set_timed_event_late_limit_ms _clockwork_carry_generation _clockwork_close
         _clockwork_worklet_alloc _clockwork_worklet_free

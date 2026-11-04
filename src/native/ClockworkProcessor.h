@@ -16,6 +16,7 @@
 #include "workers/RingReader.h"
 #include "workers/wait_word.h"
 #include "clock/clock_math.h"
+#include "log_limit.h"
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -25,16 +26,6 @@ class ClockworkClock;
 class LinkAudioHost;
 struct PerformanceMetrics;
 
-extern "C" {
-    void set_time_offset(double offset);
-    uintptr_t get_audio_output_bus();
-    uintptr_t get_audio_input_bus();
-    int get_audio_buffer_samples();
-
-    int get_audio_num_output_buses();
-    int get_audio_num_input_buses();
-}
-
 // The input width a Link peer subscription is validated against.
 //
 // NOT the device's width. A peer lands in a reserved lane
@@ -42,14 +33,14 @@ extern "C" {
 // device supplies, so validating against the device refuses every subscription
 // a client can actually ask for. What matters is the width the DSP allocated:
 // device inputs plus the reserved lanes above them, which is what
-// get_audio_num_input_buses() answers and what pull_port_sources bounds against.
+// clockwork_in_channels answers and what pull_port_sources bounds against.
 //
 // Falls back to the device width before the DSP exists, when the accessor
 // answers 0 and there is nothing allocated to talk about yet.
-inline uint32_t clockworkLinkInputWidth(int deviceInputChannels) {
-    const int allocated = get_audio_num_input_buses();
-    const int width = allocated > deviceInputChannels ? allocated : deviceInputChannels;
-    return width > 0 ? static_cast<uint32_t>(width) : 0u;
+inline uint32_t clockworkLinkInputWidth(ClockworkCore* core, int deviceInputChannels) {
+    const uint32_t allocated = clockwork_in_channels(core);
+    const uint32_t device = deviceInputChannels > 0 ? static_cast<uint32_t>(deviceInputChannels) : 0u;
+    return allocated > device ? allocated : device;
 }
 
 // Shared per-block render, used by both HeadlessDriver and the engine's manual
@@ -58,7 +49,7 @@ inline uint32_t clockworkLinkInputWidth(int deviceInputChannels) {
 // derivation, the samplePos advance and the processCount tick — only the block
 // body lives here so the two drivers can't drift apart.
 //
-// The main sink is published here; it reads clockwork_audio_out(), clockwork's
+// The main sink is published here; it reads clockwork_audio_out(core), clockwork's
 // own staging buffer. Peer inputs are not, and do not need to be — they arrive
 // as ordinary input channels through source ports, which pull_port_sources
 // reads before dsp_process.
@@ -72,7 +63,11 @@ inline uint32_t clockworkLinkInputWidth(int deviceInputChannels) {
 // below numOutputChannels while a hot swap onto a wider device leaves the
 // DSP rendering fewer than the staging buffer holds; the others render what
 // they allocated. 0 means numOutputChannels.
-void renderAudioBlock(LinkAudioHost& linkAudio,
+//
+// Returns the tick's answer: only CLOCKWORK_TICK_RENDERED leaves a block in
+// clockwork_audio_out for the caller to read (lanes.h).
+ClockworkTick renderAudioBlock(ClockworkCore* core,
+                      LinkAudioHost& linkAudio,
                       uint32_t blockSize,
                       uint32_t numOutputChannels,
                       uint32_t numInputChannels,
@@ -115,6 +110,9 @@ public:
     // Wire the engine-owned Link Audio host: the block stamp in Link's domain,
     // the main-sink publish and the stream-health metrics come from it.
     void setLinkAudio(LinkAudioHost* la) { mLinkAudio = la; }
+    // Wire the engine's core: what initialiseDsp boots and every block ticks.
+    // Must be called before initialiseDsp.
+    void setCore(ClockworkCore* core) { mCore = core; }
     // Wire the engine's dashboard block (its segment-resident
     // PerformanceMetrics), which each block's clock readouts are mirrored
     // into. Null is skipped, so a callback before the engine has an arena
@@ -190,14 +188,15 @@ private:
     // The DSP's audio block size — the number of samples it
     // processes per tick. Matches the hardware callback size when set at
     // init so the process loop is 1:1 (no accumulator / prefetch dance).
-    // Capped at clockwork::kMaxBlockSize because static_audio_bus in
-    // audio_processor.cpp is sized at that max. Initialised in
+    // Capped at clockwork::kMaxBlockSize, the profile's largest block.
+    // Initialised in
     // initialiseDsp from the caller's chosen value (typically HW buffer
     // size) and honoured thereafter.
     int mBufLen = 128;
 
     ClockworkClock*   mClockworkClock   = nullptr;
     LinkAudioHost* mLinkAudio = nullptr;
+    ClockworkCore*    mCore = nullptr;
     PerformanceMetrics* mMetrics = nullptr;
     uint8_t*   mRingBufferStorage  = nullptr;
     int        mSampleRate         = 48000;
@@ -261,7 +260,7 @@ private:
     // logs the moment the device's IO thread first reaches our callback.
     // Boot-diagnostic: a process death between "audio callback attached"
     // and this line means the driver/HAL never delivered a callback.
-    std::atomic<bool> mFirstCallbackLogged{false};
+    clockwork::LogLimit mFirstCallbackLog = clockwork::LogLimit::first(1);
 
     // Audio thread timing stats (accessed only from audio thread, no atomics needed)
     uint32_t mCallbackCount = 0;

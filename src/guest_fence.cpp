@@ -18,13 +18,15 @@
 
 #if CLOCKWORK_FENCE_ASAN
 #include <sanitizer/asan_interface.h>
+#include "core_state.h"   // the entered core's arena
 
 namespace {
 
-// Engine thread only, like the guest call it follows.
-bool           g_armed  = false;
-const uint8_t* g_base   = nullptr;
-bool           g_closed = false;   // poison is up
+// The harness's, for the process: whether to fence at all.
+bool g_armed = false;
+// Each thread's: the arena whose regions it has poisoned, while the guest
+// call it is inside is open.
+thread_local const uint8_t* t_poisoned = nullptr;
 
 // What the guest may touch: a region it owns, one it is in the audience of,
 // and the IN ring, because the message a guest is handed (dsp_osc) is read
@@ -34,59 +36,55 @@ bool guestMayTouch(const ClockworkArenaEntry& e) {
         || e.id == CLOCKWORK_ARENA_CLOCKWORK_IN_RING;
 }
 
-void setPoison(bool on) {
-    const auto* h = reinterpret_cast<const ClockworkArenaHeader*>(g_base);
+void setPoison(const uint8_t* base, bool on) {
+    const auto* h = reinterpret_cast<const ClockworkArenaHeader*>(base);
     if (!h || h->magic != CLOCKWORK_ARENA_MAGIC || h->state != CLOCKWORK_ARENA_PUBLISHED) return;
     for (uint32_t i = 0; i < h->entry_count && i < CLOCKWORK_ARENA_MAX_ENTRIES; ++i) {
         const ClockworkArenaEntry& e = h->entries[i];
         if (e.id == 0 || e.bytes == 0 || guestMayTouch(e)) continue;
         if (e.offset > h->arena_bytes || e.bytes > h->arena_bytes - e.offset) continue;
-        if (on) __asan_poison_memory_region(g_base + e.offset, e.bytes);
-        else    __asan_unpoison_memory_region(g_base + e.offset, e.bytes);
+        if (on) __asan_poison_memory_region(base + e.offset, e.bytes);
+        else    __asan_unpoison_memory_region(base + e.offset, e.bytes);
     }
 }
 
 }  // namespace
 
 void clockwork_guest_fence_arm(bool armed) {
-    if (!armed && g_closed) { setPoison(false); g_closed = false; }
+    if (!armed && t_poisoned) { setPoison(t_poisoned, false); t_poisoned = nullptr; }
     g_armed = armed;
 }
 
-void clockwork_guest_fence_arena(const uint8_t* base) {
-    if (g_closed) { setPoison(false); g_closed = false; }
-    g_base = base;
-}
-
 void clockwork_guest_fence_close() {
-    if (!g_armed || !g_base || g_closed) return;
-    setPoison(true);
-    g_closed = true;
+    if (!g_armed || t_poisoned) return;
+    const uint8_t* base = clockwork::laid_out_base(clockwork_core_entry().core);
+    if (!base) return;
+    setPoison(base, true);
+    t_poisoned = base;
 }
 
 void clockwork_guest_fence_open() {
-    if (!g_closed) return;
-    setPoison(false);
-    g_closed = false;
+    if (!t_poisoned) return;
+    setPoison(t_poisoned, false);
+    t_poisoned = nullptr;
 }
 
 HostCallScope::HostCallScope() {
-    if (!g_closed) return;
-    setPoison(false);
-    g_closed = false;
-    mLifted = true;
+    if (!t_poisoned) return;
+    setPoison(t_poisoned, false);
+    mLifted = t_poisoned;
+    t_poisoned = nullptr;
 }
 
 HostCallScope::~HostCallScope() {
-    if (!mLifted || !g_armed || !g_base) return;
-    setPoison(true);
-    g_closed = true;
+    if (!mLifted || !g_armed) return;
+    setPoison(mLifted, true);
+    t_poisoned = mLifted;
 }
 
 #else  // not an AddressSanitizer build: nothing to fence with
 
 void clockwork_guest_fence_arm(bool) {}
-void clockwork_guest_fence_arena(const uint8_t*) {}
 void clockwork_guest_fence_close() {}
 void clockwork_guest_fence_open() {}
 HostCallScope::HostCallScope() {}

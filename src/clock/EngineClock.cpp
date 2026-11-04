@@ -413,7 +413,7 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
     return false;  // a /clock verb this handler doesn't own (native Link-session)
 }
 
-void replyClockUnsupported(const uint8_t* data, uint32_t size,
+void replyClockUnsupported(ClockworkCore* core, const uint8_t* data, uint32_t size,
                            const ClockReply& reply) {
     try {
         osc::ReceivedPacket pkt(reinterpret_cast<const char*>(data),
@@ -437,10 +437,10 @@ void replyClockUnsupported(const uint8_t* data, uint32_t size,
               static_cast<uint32_t>(s.Size()));
     } catch (const std::exception& e) {
         // Unparseable: nothing truthful to answer with, so it is said here.
-        clockwork_log("[clock] no clock/unsupported reply for a malformed message "
+        clockwork_log(core, "[clock] no clock/unsupported reply for a malformed message "
                       "(%u bytes): %s", size, e.what());
     } catch (...) {
-        clockwork_log("[clock] no clock/unsupported reply for a malformed message (%u bytes)",
+        clockwork_log(core, "[clock] no clock/unsupported reply for a malformed message (%u bytes)",
                       size);
     }
 }

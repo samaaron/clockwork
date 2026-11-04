@@ -39,10 +39,11 @@ send   = output channels  base + 2*slot, +1     the graph writes here
 return = input  channels  base + 2*slot, +1     the graph reads here
 ```
 
-`TrackControl::reserveLanes()` reserves `CLOCKWORK_TRACK_MAX * 2` lanes (32) with
-`clockwork_reserve_lanes` *before the engine boots*; `init_memory` widens the DSP's
+A host with tracks reserves `TrackControl::kLanes`, `CLOCKWORK_TRACK_MAX * 2` lanes
+(32), in `ClockworkEngine::Config::reservedLanes`, which the engine passes to
+`clockwork_reserve_lanes` *before it boots*; `init_memory` widens the DSP's
 input and output staging to `base + lanes` and publishes `base` through
-`clockwork_lane_base()`. `base` is 32 for any device up to 32 channels wide, and
+`clockwork_lane_base(core)`. `base` is 32 for any device up to 32 channels wide, and
 the next multiple of 8 above a wider one. A device so wide that the lanes
 would not fit under `kMaxChannels` (128) gets no lanes, and `base` stays 0.
 

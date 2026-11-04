@@ -47,6 +47,9 @@
 // uncontended-or-microseconds, even while a start/stop is in flight.
 static std::mutex g_engine_mutex;
 static std::unique_ptr<ClockworkEngine> g_engine;
+// The last generation an engine this NIF ran opened: its next engine goes on
+// from it, as the BEAM processes that heard the last outlive it.
+static uint32_t g_last_generation = 0;
 // The product's front, when it has one (clockwork_nif_front.h): published and
 // unpublished with g_engine, under the same lock.
 static std::unique_ptr<OscFront> g_front;
@@ -456,7 +459,9 @@ static void worker_do_start(const LifecycleCmd& cmd) {
         engine->onDebug = on_debug;
         g_fronted.attach(&g_transport, nullptr);
         engine->setTransport(&g_fronted);
-        engine->init(cmd.cfg);  // SLOW — no lock held
+        ClockworkEngine::Config cfg = cmd.cfg;
+        cfg.carriedGeneration = g_last_generation;
+        engine->init(cfg);  // SLOW — no lock held
         // The front is built on a client handle, which there is once the
         // engine has an arena; the replies that flowed meanwhile passed
         // straight through.
@@ -509,7 +514,10 @@ static void take_down_engine() {
         engine = std::move(g_engine);
         front = std::move(g_front);
     }
-    if (engine) engine->shutdown();
+    if (engine) {
+        g_last_generation = std::max(g_last_generation, engine->generation());
+        engine->shutdown();
+    }
     g_fronted.detachFront();
     front.reset();
 }

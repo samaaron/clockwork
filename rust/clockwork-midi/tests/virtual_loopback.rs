@@ -33,6 +33,7 @@ fn input_loopback_via_virtual_port() {
     let got: Captured = Arc::new(Mutex::new(Vec::new()));
     let sink = got.clone();
     let mut io = MidiIo::new(
+        std::ptr::null_mut(),
         "clockwork-test",
         Arc::new(move |port: &str, _raw: &str, _ts, when, bytes: &[u8]| {
             sink.lock().unwrap().push((port.to_string(), bytes.to_vec(), when));
@@ -79,7 +80,7 @@ fn output_loopback_via_virtual_port() {
         )
         .unwrap();
 
-    let mut io = MidiIo::new("clockwork-test", Arc::new(|_, _, _, _, _: &[u8]| {}));
+    let mut io = MidiIo::new(std::ptr::null_mut(), "clockwork-test", Arc::new(|_, _, _, _, _: &[u8]| {}));
     io.refresh();
     let (_, outs) = io.port_lists();
     let norm = outs

@@ -21,11 +21,11 @@
 namespace {
 shm_audio_buffer* tap(uint32_t slot) {
     lanes_test::boot();
-    const auto* h = clockwork_arena_header();
+    const auto* h = clockwork_arena_header(lanes_test::core());
     const auto* e = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_SCOPE);
     REQUIRE(e != nullptr);
     REQUIRE(slot < e->geom[CLOCKWORK_GEOM_SCOPE_SLOTS]);
-    auto* base = static_cast<uint8_t*>(clockwork_lanes_base());
+    auto* base = static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core()));
     return reinterpret_cast<shm_audio_buffer*>(base + e->offset + slot * e->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES]);
 }
 }
@@ -39,19 +39,19 @@ TEST_CASE("scope: both are formatted at boot at the device's channel count, and 
     CHECK(out->channels == lanes_test::kOutChannels);
     CHECK(in->channels == lanes_test::kInChannels);
     CHECK(out->sample_rate == static_cast<uint32_t>(lanes_test::kSampleRate));
-    CHECK(out->capacity_frames == SCOPE_FRAMES);
+    CHECK(out->capacity_frames == clockwork::kDefaultLayout.profile.scope_frames);
 
     const uint64_t before = out->write_position.load();
     lanes_test::tick();
-    CHECK(out->write_position.load() == before + clockwork_block_size());
-    CHECK(in->write_position.load() >= clockwork_block_size());
+    CHECK(out->write_position.load() == before + clockwork_block_size(lanes_test::core()));
+    CHECK(in->write_position.load() >= clockwork_block_size(lanes_test::core()));
 }
 
 TEST_CASE("scope: the IN slot carries what the host put on the input bus, channel for channel",
           "[lanes][tap]") {
     auto* in = tap(CLOCKWORK_TAP_IN);
-    const uint32_t bl = clockwork_block_size();
-    float* bus = clockwork_audio_in();
+    const uint32_t bl = clockwork_block_size(lanes_test::core());
+    float* bus = clockwork_audio_in(lanes_test::core());
     REQUIRE(bus != nullptr);
     // A ramp on channel 0, its negative on channel 1: distinguishable and
     // channel-ordered.
@@ -59,7 +59,7 @@ TEST_CASE("scope: the IN slot carries what the host put on the input bus, channe
         bus[f]      =  static_cast<float>(f + 1) / static_cast<float>(bl);
         bus[bl + f] = -static_cast<float>(f + 1) / static_cast<float>(bl);
     }
-    shm_audio_buffer_reader r(in);
+    shm_audio_buffer_reader r(in, clockwork::kDefaultLayout.profile.scope_frames, clockwork::kDefaultLayout.profile.scope_channels);
     r.seek_to_live();
     lanes_test::tick();
     std::vector<float> got(bl * lanes_test::kInChannels, 0.0f);
@@ -77,17 +77,17 @@ TEST_CASE("scope: the IN slot carries what the host put on the input bus, channe
 TEST_CASE("scope: the OUT slot carries what the guest rendered for the device, block for block",
           "[lanes][tap]") {
     auto* out = tap(CLOCKWORK_TAP_OUT);
-    const uint32_t bl = clockwork_block_size();
+    const uint32_t bl = clockwork_block_size(lanes_test::core());
     // The dummy guest's pulse: a known non-silent signal (test_audio_path).
     const auto pulse = osc_test::message("/dummy/pulse", int32_t{2}, int32_t{10});
     REQUIRE(lanes_test::ingress(pulse.ptr(), pulse.size(), 1));
-    shm_audio_buffer_reader r(out);
+    shm_audio_buffer_reader r(out, clockwork::kDefaultLayout.profile.scope_frames, clockwork::kDefaultLayout.profile.scope_channels);
     r.seek_to_live();
     float peak = 0.0f;
     std::vector<float> got(bl * lanes_test::kOutChannels, 0.0f);
     for (int b = 0; b < 64; ++b) {
         lanes_test::tick();
-        const float* rendered = clockwork_audio_out();
+        const float* rendered = clockwork_audio_out(lanes_test::core());
         REQUIRE(r.pull(got.data(), bl, nullptr) == bl);
         // The tap is the rendered block, interleaved: nothing more, nothing less.
         for (uint32_t f = 0; f < bl; ++f)

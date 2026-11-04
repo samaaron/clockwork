@@ -89,7 +89,7 @@ public:
     // change.
     // `allocatedInputChannels` is the width the DSP allocated (device inputs
     // plus reserved lanes), NOT the device's width — see channelPairFits.
-    void setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels);
+    void setAudioFormat(ClockworkCore* core, uint32_t sampleRate, uint32_t allocatedInputChannels);
 
     // The block stamp, and the only place Link's own clock is spoken: Link
     // Audio aligns peers' streams on Link's per-boot micros, not NTP. By the

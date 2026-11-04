@@ -13,8 +13,10 @@
  * Emscripten. Hosts own their audio loop, their wakeups, and their
  * lifecycle; the engine owns everything behind this header.
  *
- * The engine is process-singleton: there is no engine handle, matching the
- * engine's global arena/ClockworkClock/ingress state.
+ * Each engine is a core (clockwork_core.h): a host makes one, and every call
+ * here takes it. Nothing here acts on a core it was not handed, and a process
+ * holds as many as its hosts make (docs/ENGINES.md). The rest of this header
+ * core (docs/ENGINES.md).
  *
  * Wire format (ring/ring.h): every ring frame is a 16-byte Message
  * header {magic, length, sequence, sourceId} followed by the payload.
@@ -23,13 +25,15 @@
  *
  * ── Minimal host ───────────────────────────────────────────────────────────
  * A self-driven host (browser worklet, embedded, the test suite's fixture)
- * drives the engine through just: clockwork_init() once, then per block
- * clockwork_ingress_write() → clockwork_tick() → read clockwork_audio_out() → clockwork_egress_rt_drain().
+ * drives the engine through just: clockwork_core_new() and clockwork_init()
+ * once, then per block clockwork_ingress_write() → clockwork_tick() → read
+ * clockwork_audio_out(core) when it rendered → clockwork_egress_rt_drain().
  * That is the whole contract for OSC as well as audio: clockwork_init publishes an
  * ingress root of its own — "/clockwork/" answered by clockwork, everything
  * else handed to the DSP — so a minimal host's messages reach the DSP with no
  * registration on its part. A full host that wants control planes of its
- * own publishes g_active_split after boot and overrides it.
+ * own wires its routes after boot (clockwork_wire_own_routes) and the
+ * engine's split dispatches to them.
  *
  * A host defines no link-time globals for this: the region a DSP may publish
  * through is DspConfig::shm_window, filled in by clockwork at dsp_new().
@@ -43,8 +47,8 @@
  *     is registered, so link EngineClock.cpp too. Leave it undefined when the
  *     host has a wall clock the engine can read before the first block (the
  *     native/JUCE host). The LinkSession header is an inline
- *     no-ops without CLOCKWORK_LINK, so no extra TU. Leave
- *     g_active_clockwork_clock null and the engine's clock/MIDI paths stay inert.
+ *     no-ops without CLOCKWORK_LINK, so no extra TU. A host with no clock of
+ *     its own publishes none, and the core makes its own (CoreClock).
  * No freestanding reference host is built here, but the test suite drives
  * exactly this sequence: test/LanesFixture.cpp boots clockwork and ticks it
  * a block at a time through these calls alone, and test/test_audio_path.cpp
@@ -55,6 +59,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "clockwork_core.h"
+#include "clockwork_profile.h"
 #include "clockwork_arena.h"
 #include "clockwork_timetag.h"
 
@@ -90,7 +96,7 @@ extern "C" {
  * component running in the host's audio callback can emit OSC pre-tick and
  * have it performed in the same block.
  */
-bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id);
+bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id);
 
 /* ── Egress ────────────────────────────────────────────────────────────────
  * Two single-consumer rings out of the engine:
@@ -118,8 +124,8 @@ bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_i
 typedef void (*ClockworkEgressFn)(void* ctx, uint32_t source_id, uint32_t route,
                            const uint8_t* osc, uint32_t len, uint32_t seq);
 
-uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
-uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
+uint32_t clockwork_egress_rt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
+uint32_t clockwork_egress_nrt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
 
 /* The NRT egress *producer* (clockwork_egress_nrt_write) is engine-internal, not part
  * of this host boundary — hosts only drain egress. See lanes_internal.h. */
@@ -153,12 +159,25 @@ uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t ma
  * never sees a gap. The engine detects gaps from these inputs once per block
  * (clockwork_audio_back).
  *
- * Input audio: write into clockwork_audio_in() before the call. Output audio:
- * read clockwork_audio_out() after it — clockwork_block_size() frames per channel,
- * channel-major, float. Sample-format conversion is host code.
+ * Input audio: write into clockwork_audio_in(core) before the call. Output audio:
+ * read clockwork_audio_out(core) after a block was rendered —
+ * clockwork_block_size(core) frames per channel, channel-major, float, for
+ * clockwork_in_channels(core) and clockwork_out_channels(core) channels and
+ * no more: the buffers are sized for the build. Sample-format conversion is
+ * host code.
  *
- * Returns false only on fatal engine error (host should stop calling).
+ * What came of the call (ClockworkTick). BUSY: another call holds the core
+ * (its gate: an init, a rebuild, a teardown, a close), so no block was
+ * rendered; the host plays silence, does not read the buffers, which that
+ * call may be laying out again, and ticks again at the next block. The tick
+ * never waits for the gate. NONE: there is no core to tick (not a live core
+ * with its state, or a ClockworkBlockTime too short): the host stops.
  */
+typedef enum ClockworkTick {
+    CLOCKWORK_TICK_NONE     = 0,   /* no core to tick: stop */
+    CLOCKWORK_TICK_RENDERED = 1,   /* the block is in clockwork_audio_out */
+    CLOCKWORK_TICK_BUSY     = 2    /* no block: play silence, leave the buffers alone, tick again */
+} ClockworkTick;
 typedef struct ClockworkBlockTime {
     uint32_t struct_bytes;          /* sizeof(ClockworkBlockTime): the struct may grow, a host says which it built */
     uint32_t output_latency_frames; /* in: what the device plays a rendered frame after; 0 with no device */
@@ -169,14 +188,14 @@ typedef struct ClockworkBlockTime {
     double   block_ntp;             /* out: the engine's time for the block's first frame, NTP seconds */
     uint64_t block_host_micros;     /* out: the block's stamp in Link's clock (0 without Link) */
 } ClockworkBlockTime;
-bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels);
+ClockworkTick clockwork_tick(ClockworkCore* core, ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels);
 
 /* THE AUDIO WAS AWAY? The one rule on every target. The gap is the time that
  * passed since the last block less the audio rendered in it, by the host's
  * monotonic clock where it has one (a system clock set by hand is not a gap)
  * and by its wall clock otherwise, against the record of the last block in
- * the arena (so a worklet made again over the same memory, or an embedded
- * host attaching again, sees it). A host asks once a block as it hands its
+ * the arena (so a worklet made again over the same memory sees it). A host
+ * asks once a block as it hands its
  * time over, BEFORE its clock moves, with its own count of the audio rendered
  * (audio_secs, seconds from any origin): true when the gap is over
  * kClockStepSeconds, and the tick re-anchors the clock at this block
@@ -187,8 +206,8 @@ bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in
  * a device opened, an embedded host attached, a worklet made — judged by time
  * alone, as nothing was rendered meanwhile; its first block after is never a
  * gap, as its count of the audio starts over with it. */
-bool clockwork_audio_back(double wall_ntp, double monotonic_secs, double audio_secs);
-bool clockwork_audio_starts(double wall_ntp, double monotonic_secs);
+bool clockwork_audio_back(ClockworkCore* core, double wall_ntp, double monotonic_secs, double audio_secs);
+bool clockwork_audio_starts(ClockworkCore* core, double wall_ntp, double monotonic_secs);
 
 /* The latest a timed event held by clockwork's scheduler may play: one that
  * comes due more than `ms` after its time is dropped instead, counted
@@ -197,7 +216,7 @@ bool clockwork_audio_starts(double wall_ntp, double monotonic_secs);
  * (scheduler_lates). A host's policy for an engine that can be flooded
  * (an interactive page) — never clockwork's own. Set as the engine comes
  * up; read on the audio thread. */
-void clockwork_set_timed_event_late_limit_ms(uint32_t ms);
+void clockwork_set_timed_event_late_limit_ms(ClockworkCore* core, uint32_t ms);
 
 /* Sample-clock publication (sample position ↔ DAC time, consumed by scope
  * streams and any audible-time reader) lives on the clock subsystem:
@@ -205,11 +224,13 @@ void clockwork_set_timed_event_late_limit_ms(uint32_t ms);
  * advanceEngineFrames per rendered block. See
  * docs/PORTS.md. */
 
-const float* clockwork_audio_out(void);   /* rendered block, channel-major     */
-float*       clockwork_audio_in(void);    /* input bus region, fill before tick */
-uint32_t     clockwork_block_size(void);  /* frames per block (web: 128)        */
-double       clockwork_sample_rate(void); /* the DSP's rate; 0 before init      */
-ClockworkTimetag clockwork_block_time(void);  /* the block in flight, in OSC time */
+const float* clockwork_audio_out(ClockworkCore* core);     /* rendered block, channel-major     */
+float*       clockwork_audio_in(ClockworkCore* core);      /* input bus region, fill before tick */
+uint32_t     clockwork_out_channels(ClockworkCore* core);  /* channels rendered; 0 with no guest */
+uint32_t     clockwork_in_channels(ClockworkCore* core);   /* channels read; 0 with no guest     */
+uint32_t     clockwork_block_size(ClockworkCore* core);    /* frames per block (web: 128)        */
+double       clockwork_sample_rate(ClockworkCore* core);   /* the DSP's rate; 0 before init      */
+ClockworkTimetag clockwork_block_time(ClockworkCore* core);  /* the block in flight, in OSC time */
 
 /* ── Init ──────────────────────────────────────────────────────────────────
  * Bring the engine up: lay out the arena (rings, control, metrics, node-tree,
@@ -260,7 +281,8 @@ ClockworkTimetag clockwork_block_time(void);  /* the block in flight, in OSC tim
  *
  * NRT/self-driven is implied — real-time off, memory-locking off.
  */
-void clockwork_init(double   sample_rate,
+void clockwork_init(ClockworkCore* core,
+              double   sample_rate,
               uint32_t block_size,
               uint32_t input_channels,
               uint32_t output_channels,
@@ -280,70 +302,16 @@ void clockwork_init(double   sample_rate,
  * reserved in its own layout. The guest's real-time pool is taken from it, so
  * it has to be at least as large as the pool that guest will ask for. */
 
-/* ── More than one host in a process ─────────────────────────────────────────
+/* ── A core's geometry is its own host's ──────────────────────────────────────
  *
- * clockwork_init() is the SOLE-HOST call. It boots the engine, or brings back
- * the one running in the arena that is up — and that is routine, not
- * exceptional: a page reloaded over its memory, a host attaching again, a
- * device that decides another rate or block. It does the least that gets the
- * engine back where it was (docs/RESTARTS.md): the instance carries on, is
- * told what changed, or is built again.
- *
- * Which is exactly why a SECOND host must not use it. The engine is a process
- * singleton, and a plugin instantiated twice in one DAW, or two embedders in
- * one process, share the loaded library and therefore the engine. A second
- * clockwork_init() would quietly reconfigure the first host's engine
- * underneath it — not a crash, a takeover, and audible only as the first
- * host's settings changing for no reason.
- *
- * clockwork_attach() is the call for that case:
- *
- *   BOOTED  — nobody was attached; the engine now has the geometry you asked
- *             for, and you own it.
- *   JOINED  — an engine was already running and can serve you. YOUR ARGUMENTS
- *             WERE NOT APPLIED. Read what you actually got from
- *             clockwork_sample_rate() and clockwork_block_size().
- *   REFUSED — an engine is running that cannot serve you (a different rate or
- *             block, or fewer channels than you need). Nothing changed, and
- *             you are not attached.
- *
- * Geometry that can serve a joiner: the same sample rate, the same block size
- * (or 0, meaning "whatever is running"), and at least as many channels in each
- * direction as the joiner asked for. Rate and block are exact because they are
- * not negotiable per-caller — every host in the process renders the same
- * blocks at the same rate.
- *
- * clockwork_init() REFUSES while more than one host is attached, because at
- * that point there is no such thing as "the" host's geometry.
- *
- * Detach when done. The count is the whole protocol: there are no per-host
- * handles, because there is nothing per-host to hold. */
-#define CLOCKWORK_ATTACH_REFUSED 0
-#define CLOCKWORK_ATTACH_BOOTED  1
-#define CLOCKWORK_ATTACH_JOINED  2
-
-int clockwork_attach(double   sample_rate,
-                uint32_t block_size,
-                uint32_t input_channels,
-                uint32_t output_channels,
-                uint32_t verbosity,
-                void*    guest_memory,
-                uint32_t guest_memory_bytes,
-                const void* guest_config,
-                uint32_t    guest_config_bytes,
-                uint32_t    arena_bytes,
-                const void* assets        CLOCKWORK_ARG_DEFAULT(nullptr),
-                uint32_t    assets_bytes  CLOCKWORK_ARG_DEFAULT(0),
-                void*       returns       CLOCKWORK_ARG_DEFAULT(nullptr),
-                uint32_t    returns_bytes CLOCKWORK_ARG_DEFAULT(0));
-
-/* Release one attachment. Harmless when nobody is attached. Does NOT tear the
- * engine down: clockwork has no shutdown, and a host that attaches again gets
- * the engine it left. */
-void     clockwork_detach(void);
-
-/* How many hosts are attached. 1 for every ordinary single-host build. */
-uint32_t clockwork_attached(void);
+ * clockwork_init boots the core, or brings back the engine running in the
+ * arena that is up: a page reloaded over its memory, a device that decides
+ * another rate or block. That is routine. It does the
+ * least that gets the engine back where it was (docs/RESTARTS.md): the
+ * instance carries on, is told what changed, or is built again. A second
+ * host makes a core of its own (clockwork_core.h); it never reconfigures
+ * another's. The setup calls below each say something of one core, before
+ * its first clockwork_init or before the build they should apply to. */
 
 /* Re-aim the DSP's channel ceilings for the NEXT rebuild.
  *
@@ -352,7 +320,7 @@ uint32_t clockwork_attached(void);
  * count did not cover lands on an internal bus instead of on hardware. Takes
  * effect at the next dsp_new, not on the running instance.
  */
-void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_channels);
+void clockwork_set_channel_ceilings(ClockworkCore* core, uint32_t input_channels, uint32_t output_channels);
 
 /* Declare the floating-point environment of the thread that will call
  * clockwork_tick / run the audio callback, for the NEXT build of the DSP.
@@ -369,7 +337,7 @@ void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_cha
  * DENORMALS_HONOURED. The web build ignores the declaration: a worklet cannot
  * arm a flush, so it is always DENORMALS_HONOURED there. Takes effect at the
  * next dsp_new, like clockwork_set_channel_ceilings. */
-void clockwork_declare_fp_env(uint32_t env);
+void clockwork_declare_fp_env(ClockworkCore* core, uint32_t env);
 
 /* A floor under the guest's bulk memory (DspConfig::memory_bulk, the span
  * its allocations come from) for the NEXT build.
@@ -384,14 +352,34 @@ void clockwork_declare_fp_env(uint32_t env);
  * arena-bound host (web, embedded) the figure is a ceiling: the span is
  * still clamped to the memory that tier has, and only the guest's own want
  * is refused rather than clamped. */
-void clockwork_set_guest_bulk_bytes(size_t bytes);
+void clockwork_set_guest_bulk_bytes(ClockworkCore* core, size_t bytes);
+
+/* Lay `core`'s arena out from `profile` (clockwork_profile.h) at its first
+ * clockwork_init, rather than from the target's own sizes. NULL when taken;
+ * else why not, as text for a person: clockwork_profile_check's reason, that
+ * the core is laid out already, or that this target lays its one core's
+ * arena out before the core exists (the web, a device) and takes only its
+ * own sizes. The core's control thread, before its first clockwork_init. */
+const char* clockwork_set_profile(ClockworkCore* core, const ClockworkProfile* profile);
+
+/* Pin the guest's random numbers for an offline render, so two runs of one
+ * score agree (DspConfig::deterministic_seed), for the NEXT build. 0, the
+ * default, lets the guest seed as it likes. */
+void clockwork_set_deterministic_seed(ClockworkCore* core, int32_t seed);
+
+/* A generation an engine in memory now gone opened, which this core's next
+ * new arena goes on from, so none is named twice to a client that outlived
+ * that engine (docs/RESTARTS.md, "The generation"): a page reloading into new
+ * memory hands over the one it closed. Only ever raises what the core
+ * carries. */
+void clockwork_carry_generation(ClockworkCore* core, uint32_t generation);
 
 /* Why the last build has no guest, or NULL when it has one: the first thing
  * that stopped the build, or the guest's own reason when dsp_new refused. Text
  * for a person, stable until the next build. A host reports it to its clients
  * (the native engine enters its error state with it as the reason) rather than
  * running on as though the guest were there. */
-const char* clockwork_boot_error(void);
+const char* clockwork_boot_error(ClockworkCore* core);
 
 /* ── The host as the end of clockwork's chain ──────────────────────────────
  * A /clockwork/ verb the audio thread does not answer itself is, on a host
@@ -406,12 +394,12 @@ const char* clockwork_boot_error(void);
  * on the audio thread either way. Takes effect at once.
  *
  * The same switch makes the host the MIDI endpoint of every sink a guest
- * opens from then on (clockwork_event_sink.h, clockwork_sink_set_host_emit):
+ * opens from then on (clockwork_event_sink.h, clockwork_sink_set_host_emitter):
  * a guest's send goes out the same way, "/clockwork/midi/sink/send ,sb
  * <port> <bytes>" in a bundle carrying the send's time, for the host to put
  * on the port with that time. */
-void clockwork_host_forward(int on);
-int  clockwork_host_forwards(void);
+void clockwork_host_forward(ClockworkCore* core, int on);
+int  clockwork_host_forwards(ClockworkCore* core);
 
 /* ── Reserved lanes ────────────────────────────────────────────────────────
  * Channels clockwork keeps ABOVE the device for its own routing — a hosted
@@ -426,9 +414,9 @@ int  clockwork_host_forwards(void);
  * the lanes did not fit under kMaxChannels, which is logged.
  */
 #define CLOCKWORK_RESERVED_LANES_MAX 64
-void     clockwork_reserve_lanes(uint32_t lanes);
-uint32_t clockwork_reserved_lanes(void);
-uint32_t clockwork_lane_base(void);
+void     clockwork_reserve_lanes(ClockworkCore* core, uint32_t lanes);
+uint32_t clockwork_reserved_lanes(ClockworkCore* core);
+uint32_t clockwork_lane_base(ClockworkCore* core);
 
 /* Link Audio's lanes, directly above the host's, reserved the same way. A
  * peer's channel arrives on a pair of them, and the engine hands out the pairs
@@ -436,9 +424,9 @@ uint32_t clockwork_lane_base(void);
  * not know where they are, and they move up when a wider device arrives. The
  * host's lanes keep the base. Both are 0 when none were reserved or they did
  * not fit. */
-void     clockwork_reserve_link_audio_lanes(uint32_t lanes);
-uint32_t clockwork_link_audio_lanes(void);
-uint32_t clockwork_link_audio_lane_base(void);
+void     clockwork_reserve_link_audio_lanes(ClockworkCore* core, uint32_t lanes);
+uint32_t clockwork_link_audio_lanes(ClockworkCore* core);
+uint32_t clockwork_link_audio_lane_base(ClockworkCore* core);
 
 /* ── Layout ────────────────────────────────────────────────────────────────
  * The arena base pointer, for hosts that address the rings directly. The
@@ -447,8 +435,8 @@ uint32_t clockwork_link_audio_lane_base(void);
  * web runtime reads it at boot the same way. Hosts using the functions
  * above never need either.
  */
-const ClockworkArenaHeader* clockwork_arena_header(void);
-void*                       clockwork_lanes_base(void);
+const ClockworkArenaHeader* clockwork_arena_header(ClockworkCore* core);
+void*                       clockwork_lanes_base(ClockworkCore* core);
 
 /* Whether the lanes have a reset for a region of the table: every region but
  * the ones that live as long as the arena has one, run at the event its
@@ -462,7 +450,7 @@ int clockwork_region_has_reset(uint32_t region_id);
  * Clockwork's own CONTROL verbs — notify, devices, the session tempo, a
  * subsystem's verbs: everything of clockwork's the audio thread does not
  * perform inside its block (clockwork_sys_is_audio_verb) — have a ring of
- * their own in the arena (CONTROL_RING_START, lifetime arena), so that the
+ * their own in the arena (the layout's control_ring_start, lifetime arena), so that the
  * pass answering them has no audio block between it and the verb: a stopped
  * device, a stalled callback or a reopen blocked inside a driver cannot
  * block the engine's control replies (docs/RESTARTS.md, "The control ring").
@@ -474,8 +462,8 @@ int clockwork_region_has_reset(uint32_t region_id);
  * Until it is said, and in a build with no control pass, every verb rides
  * the in ring and the audio thread forwards control along its chain.
  * Lowered at shutdown. */
-void clockwork_control_serve(int on);
-int  clockwork_control_served(void);
+void clockwork_control_serve(ClockworkCore* core, int on);
+int  clockwork_control_served(ClockworkCore* core);
 
 /* What wakes the pass that drains the control ring and the NRT egress ring:
  * called after every write to either from a thread in this process (the
@@ -489,13 +477,13 @@ typedef struct ClockworkControlWaker {
     void (*wake)(void* ctx);
     void* ctx;
 } ClockworkControlWaker;
-void clockwork_control_waker(const ClockworkControlWaker* waker);
-void clockwork_control_wake(void);
+void clockwork_control_waker(ClockworkCore* core, const ClockworkControlWaker* waker);
+void clockwork_control_wake(ClockworkCore* core);
 
 /* ── What the guest instance survives (dsp_api.h, DspInfo::survives) ──────
- * The kinds of device change the linked guest takes live, read once at boot
- * from dsp_describe; 0 for a guest that survives nothing, and before a
- * guest is described. The engine plans a swap by it (DevicePolicy). */
+ * The kinds of device change the linked guest takes live, read once from
+ * dsp_describe; 0 for a guest that survives nothing. The engine plans a swap
+ * by it (DevicePolicy). */
 uint32_t clockwork_guest_survives(void);
 
 /* Tell the instance a device change it declared it survives: the new rate
@@ -505,13 +493,13 @@ uint32_t clockwork_guest_survives(void);
  * the instance keeps everything it holds. 1 if the instance took it; 0 if
  * it refused, or there is no instance, on which the caller does what it
  * would have done otherwise: a cold restart. */
-int clockwork_guest_reconfigure(double sample_rate, uint32_t input_channels,
+int clockwork_guest_reconfigure(ClockworkCore* core, double sample_rate, uint32_t input_channels,
                                 uint32_t output_channels);
 
 /* Which channel is which (ClockworkChannelMapState, shared_memory.h), for a host
    or an in-process client. A guest reads the same bytes through
    DspConfig::channel_map. NULL before clockwork_init. */
-const struct ClockworkChannelMapState* clockwork_channel_map(void);
+const struct ClockworkChannelMapState* clockwork_channel_map(ClockworkCore* core);
 
 #ifdef __cplusplus
 }

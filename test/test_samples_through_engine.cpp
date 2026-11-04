@@ -62,7 +62,7 @@ namespace fs = std::filesystem;
 constexpr float kLossyTolerance = 1e-5f;
 
 struct Ports {
-    ~Ports() { clockwork_port_bus_detach_all(); clockwork_port_close_all(); }
+    ~Ports() { clockwork_port_bus_detach_all(lanes_test::core()); clockwork_port_close_all(clockwork_core_ports(lanes_test::core())); }
 };
 
 struct Decoded {
@@ -164,12 +164,12 @@ std::vector<float> throughTheEngine(const std::vector<float>& in, uint32_t chann
     lanes_test::drainRt();
 
     const uint32_t capacity = 8192;
-    const ClockworkPort src  = clockwork_port_open("samples-in",  kClockworkPortSource, channels, capacity);
-    const ClockworkPort sink = clockwork_port_open("samples-out", kClockworkPortSink,   channels, capacity);
+    const ClockworkPort src  = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "samples-in",  kClockworkPortSource, channels, capacity);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "samples-out", kClockworkPortSink,   channels, capacity);
     REQUIRE(src != CLOCKWORK_PORT_NONE);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(src, 0) == 1);
-    REQUIRE(clockwork_port_bus_attach(sink, 0) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), src, 0) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), sink, 0) == 1);
 
     const uint64_t frames = in.size() / channels;
     // Padded to whole blocks, so the source never runs dry: every block the
@@ -181,31 +181,31 @@ std::vector<float> throughTheEngine(const std::vector<float>& in, uint32_t chann
     std::vector<float> block(static_cast<size_t>(bl) * channels);
     uint64_t produced = 0;
     while (out.size() < static_cast<size_t>(padded) * channels) {
-        while (produced < padded && clockwork_port_writable(src) >= bl) {
+        while (produced < padded && clockwork_port_writable(clockwork_core_ports(lanes_test::core()), src) >= bl) {
             const uint64_t left = frames > produced ? frames - produced : 0;
             const uint32_t real = static_cast<uint32_t>(std::min<uint64_t>(bl, left));
             if (real == bl) {
-                REQUIRE(clockwork_port_produce(src, in.data() + produced * channels, bl) == bl);
+                REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), src, in.data() + produced * channels, bl) == bl);
             } else {
                 std::copy(zeros.begin(), zeros.end(), block.begin());
                 if (real > 0) std::copy_n(in.data() + produced * channels, static_cast<size_t>(real) * channels, block.begin());
-                REQUIRE(clockwork_port_produce(src, block.data(), bl) == bl);
+                REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), src, block.data(), bl) == bl);
             }
             produced += bl;
         }
         lanes_test::tick();
-        while (clockwork_port_readable(sink) >= bl) {
-            REQUIRE(clockwork_port_consume(sink, block.data(), bl) == bl);
+        while (clockwork_port_readable(clockwork_core_ports(lanes_test::core()), sink) >= bl) {
+            REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), sink, block.data(), bl) == bl);
             out.insert(out.end(), block.begin(), block.end());
         }
     }
-    CHECK(clockwork_port_underruns(src) == 0);
-    CHECK(clockwork_port_overruns(sink) == 0);
+    CHECK(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), src) == 0);
+    CHECK(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), sink) == 0);
 
-    clockwork_port_bus_detach(src);
-    clockwork_port_bus_detach(sink);
-    clockwork_port_close(src);
-    clockwork_port_close(sink);
+    clockwork_port_bus_detach(lanes_test::core(), src);
+    clockwork_port_bus_detach(lanes_test::core(), sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), src);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
     const auto restore = osc_test::message("/dummy/pulse", 10, 500);
     REQUIRE(lanes_test::ingress(restore.ptr(), restore.size(), 0));
     lanes_test::tick();

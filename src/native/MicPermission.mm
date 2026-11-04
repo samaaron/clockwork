@@ -37,7 +37,7 @@ std::string status() {
     }
 }
 
-void logDiagnostics() {
+void logDiagnostics(ClockworkCore* core) {
     pid_t self = getpid();
 
     NSBundle* main = [NSBundle mainBundle];
@@ -55,17 +55,17 @@ void logDiagnostics() {
     char respPath[PROC_PIDPATHINFO_MAXSIZE] = {0};
     if (respPid > 0) proc_pidpath(respPid, respPath, sizeof(respPath));
 
-    clockwork_log("[tcc-diag] self.pid=%d self.path=%s", self, selfPath);
+    clockwork_log(core, "[tcc-diag] self.pid=%d self.path=%s", self, selfPath);
 #else
-    clockwork_log("[tcc-diag] self.pid=%d", self);
+    clockwork_log(core, "[tcc-diag] self.pid=%d", self);
 #endif
-    clockwork_log("[tcc-diag] self.bundleID=%s self.bundlePath=%s",
+    clockwork_log(core, "[tcc-diag] self.bundleID=%s self.bundlePath=%s",
             bundleID ? bundleID : "(nil)", bundlePath ? bundlePath : "(nil)");
 #if TARGET_OS_OSX
-    clockwork_log("[tcc-diag] responsible.pid=%d responsible.path=%s",
+    clockwork_log(core, "[tcc-diag] responsible.pid=%d responsible.path=%s",
             respPid, respPath[0] ? respPath : "(unknown)");
 #endif
-    clockwork_log("[tcc-diag] mic.status=%s", status().c_str());
+    clockwork_log(core, "[tcc-diag] mic.status=%s", status().c_str());
 }
 
 } // namespace MicPermission

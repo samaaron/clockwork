@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "lanes/lanes.h"
 #include <functional>
 #include "OscTestUtils.h"
 #include "clockwork_client.h"
@@ -30,7 +31,10 @@
 // The engine's arena, as audio_processor.cpp publishes it, and the OUT ring's
 // writer: the audio thread's, driven by hand below so the ring fills exactly
 // when the case says so.
-extern "C" { extern uint8_t* shared_memory; }
+namespace {
+// The engine's arena (clockwork_lanes_base).
+uint8_t* arenaBase(const engine_test::Engine& e) { return static_cast<uint8_t*>(clockwork_lanes_base(e.engine.core())); }
+}
 extern bool ring_buffer_write(
     uint8_t* buffer_start, uint32_t buffer_size,
     std::atomic<int32_t>* head, std::atomic<int32_t>* tail, std::atomic<int32_t>* sequence,
@@ -134,22 +138,22 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     // The window is microseconds wide, so the ring is filled by hand here.
     engine_test::Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrainsEgress = true; });
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, &st);
     REQUIRE(st == CLOCKWORK_OK);
     takeAll(c);   // boot's broadcasts
 
     // Put the reply half-way round the ring, where the writer will wrap on to
     // it: at the ring's start the front has no room for a frame and the
     // writer refuses before it ever reaches the held bytes.
-    auto* ctl = reinterpret_cast<RingCursors*>(shared_memory + RING_CURSORS_START);
+    auto* ctl = reinterpret_cast<RingCursors*>(arenaBase(e) + clockwork::kDefaultLayout.ring_cursors_start);
     const auto fill = [&](const std::vector<uint8_t>& payload) {
-        return ring_buffer_write(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+        return ring_buffer_write(arenaBase(e) + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
                                  &ctl->out_head, &ctl->out_tail, &ctl->out_sequence,
                                  EGRESS_REPLY, 7, payload.data(), static_cast<uint32_t>(payload.size()),
                                  nullptr, nullptr);
     };
     const std::vector<uint8_t> coarse(200, 0xEE);
-    while (static_cast<uint32_t>(ctl->out_head.load()) < RT_OUT_RING_SIZE / 2) REQUIRE(fill(coarse));
+    while (static_cast<uint32_t>(ctl->out_head.load()) < clockwork::kDefaultLayout.profile.rt_out_ring_bytes / 2) REQUIRE(fill(coarse));
     takeAll(c);
 
     // One reply on the OUT ring, taken and held. Written by hand, and long,

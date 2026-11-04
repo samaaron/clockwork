@@ -157,12 +157,12 @@ TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
 // Is an OSC sink open to this "host:port"? /clockwork/osc/send opens one on
 // first use, so this says whether a send was ever made, whether or not its
 // datagram has arrived yet.
-static bool oscSinkOpenTo(const std::string& target) {
+static bool oscSinkOpenTo(const ClockworkSinks* sinks, const std::string& target) {
     std::array<ClockworkSink, 64> open{};
-    const uint32_t n = clockwork_sink_list(open.data(), static_cast<uint32_t>(open.size()));
+    const uint32_t n = clockwork_sink_list(sinks, open.data(), static_cast<uint32_t>(open.size()));
     for (uint32_t i = 0; i < n && i < open.size(); ++i) {
-        const char* t = clockwork_sink_target(open[i]);
-        if (clockwork_sink_kind(open[i]) == kClockworkSinkOsc && t && target == t) return true;
+        const char* t = clockwork_sink_target(sinks, open[i]);
+        if (clockwork_sink_kind(sinks, open[i]) == kClockworkSinkOsc && t && target == t) return true;
     }
     return false;
 }
@@ -204,7 +204,7 @@ TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs
     fx.waitForBlocks(5);   // as long as the command path takes to send it
     char buf[1024];
     CHECK(listener.recv(buf, sizeof(buf), 200) <= 0);
-    CHECK_FALSE(oscSinkOpenTo(target));
+    CHECK_FALSE(oscSinkOpenTo(clockwork_core_sinks(fx.engine().core()), target));
 
     fx.send(command);
     fx.waitForBlocks(5);
@@ -212,7 +212,7 @@ TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs
     REQUIRE(n > 0);
     CHECK(osc_test::parseReply(reinterpret_cast<const uint8_t*>(buf),
                                static_cast<uint32_t>(n)).address == "/world");
-    CHECK(oscSinkOpenTo(target));
+    CHECK(oscSinkOpenTo(clockwork_core_sinks(fx.engine().core()), target));
 }
 
 // The cue port's rate limit: a flood from one sender is cut to the limit,

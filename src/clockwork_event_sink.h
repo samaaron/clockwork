@@ -78,6 +78,18 @@ typedef enum ClockworkSinkKind {
 
 /* ── Opening ────────────────────────────────────────────────────────────── */
 
+/* ── The table ──────────────────────────────────────────────────────────────
+ *
+ * A sink is a slot in a TABLE, and its handle names it in that table and in
+ * no other. Every call below names the table: an engine's core has one
+ * (clockwork_core_sinks, clockwork_core.h), with the shapes installed for
+ * its kinds and its host's emitter, and a host with sinks and no core — a
+ * test — makes one. NULL names none, and every call answers as for a sink
+ * that is not open. One thread drains every table's sinks. */
+typedef struct ClockworkSinks ClockworkSinks;
+const ClockworkSinks* clockwork_sinks_new(struct ClockworkCore* core);
+void                  clockwork_sinks_free(const ClockworkSinks* sinks);
+
 /*
  * Open a sink onto a destination. `target` names it in the endpoint's own
  * terms — a MIDI port name, or "host:port" for OSC.
@@ -94,14 +106,20 @@ typedef enum ClockworkSinkKind {
  *
  * Control thread only: this allocates and may touch the device.
  */
-ClockworkSink clockwork_sink_open(ClockworkSinkKind kind, const char* target, uint32_t capacity);
+ClockworkSink clockwork_sink_open(const ClockworkSinks* sinks, ClockworkSinkKind kind, const char* target, uint32_t capacity);
+
+/* The same, for the guest (DspHost::open_sink): a guest's sinks last exactly
+   as long as its instance, and clockwork_sink_close_guests closes them as
+   the instance is freed. Control thread only. */
+ClockworkSink clockwork_sink_open_guest(const ClockworkSinks* sinks, ClockworkSinkKind kind, const char* target, uint32_t capacity);
+void          clockwork_sink_close_guests(const ClockworkSinks* sinks);
 
 /* Close a sink. Sends are refused from the moment of the call, and the call
    returns once no send or delivery is still using the sink. Control thread
    only. Do not call it while holding a lock a delivery takes (such as the
    host emitter's lock), or from inside a delivery: the close waits for the
    delivery to finish, so either deadlocks. */
-void    clockwork_sink_close(ClockworkSink sink);
+void    clockwork_sink_close(const ClockworkSinks* sinks, ClockworkSink sink);
 
 /*
  * The HOST as the MIDI endpoint. On a target with no MIDI port and no thread
@@ -118,9 +136,15 @@ void    clockwork_sink_close(ClockworkSink sink);
  * clockwork_host_forward in lanes.h. NULL uninstalls. Sinks already open
  * keep the endpoint they have.
  */
-typedef int (*ClockworkSinkHostEmit)(uint32_t kind, const char* target,
+typedef int (*ClockworkSinkHostEmit)(void* ctx, uint32_t kind, const char* target,
                                      const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
-void clockwork_sink_set_host_emit(ClockworkSinkHostEmit emit);
+/* The emitter and the context it is handed back, installed together. The
+ * record stays valid until the next install. */
+typedef struct ClockworkSinkHostEmitter {
+    ClockworkSinkHostEmit emit;
+    void*                 ctx;
+} ClockworkSinkHostEmitter;
+void clockwork_sink_set_host_emitter(const ClockworkSinks* sinks, const ClockworkSinkHostEmitter* emitter);
 
 /*
  * Install the size classes every sink of `kind` opened from now on is made
@@ -132,13 +156,13 @@ void clockwork_sink_set_host_emit(ClockworkSinkHostEmit emit);
  *
  * The host's, at boot, from memory_profile.h. A DSP does not call this.
  */
-int clockwork_sink_profile(ClockworkSinkKind kind, uint32_t n,
+int clockwork_sink_profile(const ClockworkSinks* sinks, ClockworkSinkKind kind, uint32_t n,
                            const uint32_t* cell_bytes, const uint32_t* cells);
 
 /* The widest message a sink can carry, and the payload bytes it reserved at
  * open. 0 for a handle that is not live. */
-uint32_t clockwork_sink_max_message_bytes(ClockworkSink sink);
-uint64_t clockwork_sink_bytes_reserved(ClockworkSink sink);
+uint32_t clockwork_sink_max_message_bytes(const ClockworkSinks* sinks, ClockworkSink sink);
+uint64_t clockwork_sink_bytes_reserved(const ClockworkSinks* sinks, ClockworkSink sink);
 
 /*
  * A handle that is closed, stale, or was never valid answers the empty thing
@@ -148,9 +172,9 @@ uint64_t clockwork_sink_bytes_reserved(ClockworkSink sink);
  * `clockwork_sink_target` hands out the sink's own copy of the string, so it is
  * valid exactly as long as the sink is. Diagnostics, not something to hold.
  */
-int         clockwork_sink_is_open(ClockworkSink sink);
-ClockworkSinkKind clockwork_sink_kind(ClockworkSink sink);
-const char* clockwork_sink_target(ClockworkSink sink);
+int         clockwork_sink_is_open(const ClockworkSinks* sinks, ClockworkSink sink);
+ClockworkSinkKind clockwork_sink_kind(const ClockworkSinks* sinks, ClockworkSink sink);
+const char* clockwork_sink_target(const ClockworkSinks* sinks, ClockworkSink sink);
 
 /* ── Sending ────────────────────────────────────────────────────────────── */
 
@@ -175,7 +199,7 @@ const char* clockwork_sink_target(ClockworkSink sink);
  * A message that fits a class whose cells are all taken tries the next wider
  * class before it is refused.
  */
-int clockwork_sink_send(ClockworkSink sink, const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
+int clockwork_sink_send(const ClockworkSinks* sinks, ClockworkSink sink, const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
 
@@ -222,7 +246,7 @@ typedef struct ClockworkSinkStats {
  * honour it. A sink that is working reports zero, which is what makes the
  * number worth watching at all.
  */
-int clockwork_sink_stats(ClockworkSink sink, ClockworkSinkStats* out);
+int clockwork_sink_stats(const ClockworkSinks* sinks, ClockworkSink sink, ClockworkSinkStats* out);
 
 /* ── Cancelling ─────────────────────────────────────────────────────────── */
 
@@ -247,11 +271,11 @@ int clockwork_sink_stats(ClockworkSink sink, ClockworkSinkStats* out);
  * as a client that sent verbs. That is the point of putting cancellation on
  * the sink rather than on whichever queue a message happened to pass through.
  */
-uint32_t clockwork_sink_flush(ClockworkSink sink);
-uint32_t clockwork_sink_flush_all(void);
+uint32_t clockwork_sink_flush(const ClockworkSinks* sinks, ClockworkSink sink);
+uint32_t clockwork_sink_flush_all(const ClockworkSinks* sinks);
 
 /* Every open sink, for metrics and for a debug log a user submits. */
-uint32_t clockwork_sink_list(ClockworkSink* out, uint32_t cap);
+uint32_t clockwork_sink_list(const ClockworkSinks* sinks, ClockworkSink* out, uint32_t cap);
 
 /*
  * Close every open sink: shutdown wants one call rather than a list-and-loop,
@@ -265,7 +289,7 @@ uint32_t clockwork_sink_list(ClockworkSink* out, uint32_t cap);
  * of a close does not go out, so a producer that closes a sink with notes in
  * flight should send its own all-notes-off first.
  */
-void clockwork_sink_close_all(void);
+void clockwork_sink_close_all(const ClockworkSinks* sinks);
 
 #ifdef __cplusplus
 }

@@ -246,10 +246,10 @@ public:
     void betweenInstances(std::function<void()> act) {
         REQUIRE(mEvent == Event::RateChange);
         auto fired = std::make_shared<bool>(false);
-        mSys->at("Fake Speakers").onOpen = [act, fired] {
+        mSys->at("Fake Speakers").onOpen = [act, fired, core = engine().core()] {
             if (*fired) return;   // the first open: the rebuild's
             *fired = true;
-            REQUIRE_FALSE(clockwork_arena_has_instance(clockwork_arena_header()));
+            REQUIRE_FALSE(clockwork_arena_has_instance(clockwork_arena_header(core)));
             act();
         };
     }
@@ -385,7 +385,7 @@ void checkCell(Reader reader, Event event, When when, unsigned port) {
     INFO(cell.fix().debugMessagesDump());
     const bool seesRefusals = reader != Reader::Tap;   // they go on clockwork's ring
     const auto replaced = [&] {
-        CHECK(clockwork_arena_has_instance(clockwork_arena_header()));
+        CHECK(clockwork_arena_has_instance(clockwork_arena_header(cell.engine().core())));
         restart_model::checkReplaced(cell.heard(), readerName(reader), seesRefusals, run.before, run.after,
                                      when == When::Before ? CLOCKWORK_REFUSED_REBUILDING
                                                           : CLOCKWORK_REFUSED_NO_INSTANCE);
@@ -516,14 +516,14 @@ TEST_CASE("restart grid: a peer writing while no instance comes up is refused on
     // A guest that builds now and not after the rebuild: its pool asks for
     // more than the bulk memory the rebuild hands it (test_cold_swap_recovery.cpp).
     const size_t pool = size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u;
-    clockwork_set_guest_bulk_bytes(pool + (8u << 20));
     Cell cell(Reader::ShmPeer, Event::RateChange, 57254, [pool](ClockworkEngine::Config& cfg) {
         cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\ndeclareBulk=0\n";
+        cfg.guestBulkBytes = pool + (8u << 20);
     });
-    clockwork_set_guest_bulk_bytes(0);
+    clockwork_set_guest_bulk_bytes(cell.engine().core(), 0);
     cell.happen();
     REQUIRE(cell.engine().engineState() == EngineState::Error);
-    REQUIRE_FALSE(clockwork_arena_has_instance(clockwork_arena_header()));
+    REQUIRE_FALSE(clockwork_arena_has_instance(clockwork_arena_header(cell.engine().core())));
     cell.read();   // what the failed rebuild said
 
     constexpr int kAsks = 3;

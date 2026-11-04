@@ -3,8 +3,9 @@
 //! Native C ABI for the gamepad subsystem — the boundary the C++ engine links
 //! against (via the `clockwork-native` umbrella staticlib).
 //!
-//! The engine creates one instance, supplying one host callback, and feeds it
-//! decoded-from-the-wire `/clockwork/gamepad/*` OSC via [`clockwork_gamepad_handle_osc`].
+//! Each core's engine creates a registration, supplying one host callback, and
+//! feeds it decoded-from-the-wire `/clockwork/gamepad/*` OSC via
+//! [`clockwork_gamepad_handle_osc`].
 //! Translated `/clockwork/gamepad/in/*` events and `/clockwork/gamepad/devices` pushes flow back
 //! through the `emit` callback, which may fire on the poll thread — the
 //! engine's implementation must be thread-safe (it is: the egress ring).
@@ -14,9 +15,11 @@
 //! of the process. gilrs is built as a per-process singleton — its Linux
 //! backend spawns a hotplug thread with no shutdown path, so tearing down and
 //! recreating the context leaks a thread + fds each time. Instances are
-//! host registrations: create installs the engine's callback, destroy removes
-//! it (the poll thread then parks, keeping the device registry warm for the
-//! next instance). Destroy synchronises on the host lock, so no callback
+//! host registrations, one per core (docs/ENGINES.md): create adds the
+//! core's callback, destroy removes it (with none left the poll thread parks,
+//! keeping the device registry warm for the next). What the pads say reaches
+//! every core registered; which pads are enabled is the process's, as the
+//! pads are. Destroy synchronises on the registrations' lock, so no callback
 //! fires after it returns.
 //!
 //! Replies (`/clockwork/gamepad/devices.reply`) are emitted synchronously inside
@@ -31,7 +34,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::GamepadIo;
-use crate::io::Registry;
+use crate::io::{Out, Registry};
 use crate::schema::{
     decode_out, encode_devices, encode_devices_reply, OutCommand,
 };
@@ -61,11 +64,14 @@ impl Host {
     }
 }
 
+/// Every core's registration. None: parked, events discarded.
+type Cores = Mutex<Vec<Arc<Host>>>;
+
 /// The process-global subsystem: poll thread, device registry, rumble channel
-/// and the currently-registered host (None = parked, events discarded).
+/// and the cores registered.
 struct Global {
     registry: Arc<Mutex<Registry>>,
-    active: Arc<Mutex<Option<Host>>>,
+    cores: Arc<Cores>,
     tx: Sender<OutCommand>,
 }
 
@@ -74,28 +80,47 @@ static GLOBAL: OnceLock<Global> = OnceLock::new();
 fn global() -> &'static Global {
     GLOBAL.get_or_init(|| {
         let registry = Arc::new(Mutex::new(Registry::default()));
-        let active: Arc<Mutex<Option<Host>>> = Arc::new(Mutex::new(None));
+        let cores: Arc<Cores> = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = channel();
 
         let thread_registry = registry.clone();
-        let thread_active = active.clone();
+        let thread_cores = cores.clone();
         // The poll thread runs for the life of the process (matching the
         // device backends' own lifetime expectations). Errors are best-effort:
         // if the backend can't start, the registry simply stays empty.
         let _ = std::thread::Builder::new().name("clockwork-gamepad".into()).spawn(move || {
             // The loop body must never unwind into the OS thread shim.
-            no_unwind((), || poll_loop(thread_active, thread_registry, rx));
+            no_unwind((), || poll_loop(thread_cores, thread_registry, rx));
         });
 
-        Global { registry, active, tx }
+        Global { registry, cores, tx }
     })
 }
 
-/// The opaque handle the C++ side owns: a registration against the global
-/// subsystem carrying the engine's callback (also used directly for the
-/// synchronous replies).
+/// Every core's, under the registrations' lock: a core that leaves waits for
+/// it.
+fn emit_all(cores: &Cores, kind: i32, osc: &[u8]) {
+    for host in cores.lock().unwrap().iter() {
+        host.emit(kind, osc);
+    }
+}
+
+/// One thing the pads said, to every core.
+fn deliver(cores: &Cores, registry: &Mutex<Registry>, out: &Out) {
+    match out.encode() {
+        Some(event) => emit_all(cores, EMIT_BROADCAST, &event),
+        None => {
+            let rows = registry.lock().unwrap().snapshot();
+            emit_all(cores, EMIT_BROADCAST, &encode_devices(&rows));
+        }
+    }
+}
+
+/// The opaque handle the C++ side owns: a core's registration against the
+/// global subsystem carrying the engine's callback (also used directly for
+/// the synchronous replies).
 pub struct ClockworkGamepad {
-    host: Host,
+    host: Arc<Host>,
 }
 
 impl ClockworkGamepad {
@@ -129,20 +154,22 @@ impl ClockworkGamepad {
         self.host.emit(EMIT_REPLY, &encode_devices_reply(&rows));
     }
 
+    // The pads are the process's, so every core is told.
     fn push_devices(&self) {
         let rows = global().registry.lock().unwrap().snapshot();
-        self.host.emit(EMIT_BROADCAST, &encode_devices(&rows));
+        emit_all(&global().cores, EMIT_BROADCAST, &encode_devices(&rows));
     }
 }
 
-/// The poll-thread body: drain backend events → emit to the registered host,
-/// run rumble commands, expire rumble deadlines. The ~4 ms poll pace keeps
-/// worst-case added input latency well under an audio buffer; with no host
-/// registered the thread parks at a lazy tick, keeping the registry warm.
-/// Emission holds the host lock, so `clockwork_gamepad_destroy`'s host removal
-/// strictly orders against any in-flight callback.
+/// The poll-thread body: drain backend events → emit to every registered
+/// core, run rumble commands, expire rumble deadlines. The ~4 ms poll pace
+/// keeps worst-case added input latency well under an audio buffer; with no
+/// core registered the thread parks at a lazy tick, keeping the registry
+/// warm. Emission holds the registrations' lock, so
+/// `clockwork_gamepad_destroy`'s removal strictly orders against any
+/// in-flight callback.
 fn poll_loop(
-    active: Arc<Mutex<Option<Host>>>,
+    cores: Arc<Cores>,
     registry: Arc<Mutex<Registry>>,
     rx: std::sync::mpsc::Receiver<OutCommand>,
 ) {
@@ -151,18 +178,10 @@ fn poll_loop(
         Err(_) => return, // no backend (rare): devices list stays empty
     };
     loop {
-        let parked = active.lock().unwrap().is_none();
+        let parked = cores.lock().unwrap().is_empty();
         let pace = if parked { Duration::from_millis(250) } else { Duration::from_millis(4) };
         for out in io.poll(pace) {
-            let guard = active.lock().unwrap();
-            let Some(host) = *guard else { continue }; // parked: discard
-            match out.encode() {
-                Some(event) => host.emit(EMIT_BROADCAST, &event),
-                None => {
-                    let rows = registry.lock().unwrap().snapshot();
-                    host.emit(EMIT_BROADCAST, &encode_devices(&rows));
-                }
-            }
+            deliver(&cores, &registry, &out);
         }
         for cmd in rx.try_iter() {
             match cmd {
@@ -179,45 +198,45 @@ fn poll_loop(
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
-/// Create a gamepad-subsystem registration: installs `emit` as the active
-/// host (starting the process-global device IO on first use). Returns an
-/// owning pointer (null on failure); free with [`clockwork_gamepad_destroy`]. `ctx`
-/// and the callback must remain valid until then. One registration at a time:
-/// a second create supersedes the first (the engine is single-per-process).
+/// Register a core with the gamepad subsystem: adds `emit` to the cores told
+/// what the pads say (starting the process-global device IO on first use).
+/// Returns an owning pointer (null on failure); free with
+/// [`clockwork_gamepad_destroy`]. `ctx` and the callback must remain valid
+/// until then.
 #[no_mangle]
 pub extern "C" fn clockwork_gamepad_create(ctx: *mut c_void, emit: EmitFn) -> *mut ClockworkGamepad {
     no_unwind(std::ptr::null_mut(), || {
-        let host = Host { ctx, emit };
-        *global().active.lock().unwrap() = Some(host);
+        let host = Arc::new(Host { ctx, emit });
+        global().cores.lock().unwrap().push(host.clone());
         Box::into_raw(Box::new(ClockworkGamepad { host }))
     })
 }
 
-/// Remove the registration and stop all rumble. The poll thread and device
-/// context persist (parked) for the life of the process; once this returns no
-/// further callbacks fire (host removal synchronises on the emission lock).
+/// Remove the core's registration; the last core's also stops all rumble. The
+/// poll thread and device context persist (parked) for the life of the
+/// process; once this returns no further callbacks reach the core (removal
+/// synchronises on the emission lock).
 ///
 /// # Safety
 /// `handle` is null or from `clockwork_gamepad_create`, not yet destroyed,
 /// and nothing uses it afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_gamepad_destroy(handle: *mut ClockworkGamepad) {
-    if handle.is_null() {
-        return;
-    }
     no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
         // SAFETY: the box `clockwork_gamepad_create` leaked, freed once.
         let me = unsafe { Box::from_raw(handle) };
         let g = global();
-        let mut active = g.active.lock().unwrap();
-        // Only deregister if we are still the active host (a newer instance
-        // may have superseded this one).
-        if active.map(|h| h.ctx) == Some(me.host.ctx) {
-            *active = None;
+        let mut cores = g.cores.lock().unwrap();
+        cores.retain(|h| !Arc::ptr_eq(h, &me.host));
+        let last = cores.is_empty();
+        drop(cores);
+        if last {
+            let _ = g.tx.send(OutCommand::RumbleStop { pad: "*".into() });
         }
-        drop(active);
-        let _ = g.tx.send(OutCommand::RumbleStop { pad: "*".into() });
-    });
+    })
 }
 
 /// Feed one decoded `/clockwork/gamepad/*` OSC packet (the C++ boundary forwards these off
@@ -230,18 +249,20 @@ pub unsafe extern "C" fn clockwork_gamepad_destroy(handle: *mut ClockworkGamepad
 /// bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_gamepad_handle_osc(handle: *mut ClockworkGamepad, data: *const u8, len: u32) -> *const c_char {
-    if handle.is_null() || data.is_null() {
-        return Refusal::Malformed.reason().as_ptr();
-    }
-    // SAFETY: a live handle and a readable byte string, per the contract;
-    // nulls were refused above.
-    let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
-    no_unwind(ptr::null(), || match decode_out(bytes) {
-        Ok(cmd) => {
-            me.handle(cmd);
-            ptr::null()
+    no_unwind(ptr::null(), || {
+        if handle.is_null() || data.is_null() {
+            return Refusal::Malformed.reason().as_ptr();
         }
-        Err(refusal) => refusal.reason().as_ptr(),
+        // SAFETY: a live handle and a readable byte string, per the contract;
+        // nulls were refused above.
+        let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
+        match decode_out(bytes) {
+            Ok(cmd) => {
+                me.handle(cmd);
+                ptr::null()
+            }
+            Err(refusal) => refusal.reason().as_ptr(),
+        }
     })
 }
 
@@ -252,10 +273,85 @@ pub unsafe extern "C" fn clockwork_gamepad_handle_osc(handle: *mut ClockworkGame
 /// `handle` is null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_gamepad_emit_devices(handle: *mut ClockworkGamepad) {
-    if handle.is_null() {
-        return;
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let me = unsafe { &*handle };
+        me.reply_devices()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clockwork_osc::clockwork_sys;
+    use clockwork_osc::osc;
+
+    // What each core's registration was told, by core.
+    static HEARD: Mutex<Vec<(usize, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    extern "C" fn heard_by(ctx: *mut c_void, _: i32, osc: *const u8, len: u32) {
+        // SAFETY: the bytes Host::emit hands over, for this call.
+        let bytes = unsafe { slice::from_raw_parts(osc, len as usize) };
+        HEARD.lock().unwrap().push((ctx as usize, bytes.to_vec()));
     }
-    // SAFETY: a live handle, per the contract.
-    let me = unsafe { &*handle };
-    no_unwind((), || me.reply_devices());
+
+    fn heard(core: usize, addr: &str) -> usize {
+        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && osc::decode(b).is_some_and(|m| m.addr == addr)).count()
+    }
+
+    // Two cores' counts, read while no delivery is under way: the poll thread
+    // tells every core at once, and may (a pad plugged in) at any time.
+    fn counts(one: usize, two: usize, addr: &str) -> (usize, usize) {
+        let _quiet = global().cores.lock().unwrap();
+        (heard(one, addr), heard(two, addr))
+    }
+
+    fn refresh(from: *mut ClockworkGamepad) {
+        let verb = osc::encode(clockwork_sys!("gamepad/refresh"), &[]);
+        // SAFETY: a live handle and a readable packet.
+        assert!(unsafe { clockwork_gamepad_handle_osc(from, verb.as_ptr(), verb.len() as u32) }.is_null());
+    }
+
+    // The process's gamepads are every core's (docs/ENGINES.md, suspect
+    // 9): what they say reaches every core registered, and a core leaving
+    // leaves the others registered.
+    #[test]
+    fn every_core_hears_the_process_gamepads_and_one_leaving_leaves_the_others() {
+        HEARD.lock().unwrap().clear();
+        let (a, b) = (clockwork_gamepad_create(ptr::without_provenance_mut(1), heard_by), clockwork_gamepad_create(ptr::without_provenance_mut(2), heard_by));
+        assert!(!a.is_null() && !b.is_null());
+        let devices = clockwork_sys!("gamepad/devices");
+
+        refresh(a);
+        let (one, two) = counts(1, 2, devices);
+        assert!(one >= 1 && one == two, "the devices are told to every core: {one}, {two}");
+
+        // SAFETY: destroyed once, and not used after.
+        unsafe { clockwork_gamepad_destroy(b) };
+        let (one, gone) = counts(1, 2, devices);
+        refresh(a);
+        assert_eq!(counts(1, 2, devices).1, gone, "the core that left hears nothing more");
+        assert!(counts(1, 2, devices).0 > one, "the core still registered still hears");
+        // SAFETY: as above.
+        unsafe { clockwork_gamepad_destroy(a) };
+    }
+
+    // What the poll thread hears from a pad, through the same delivery.
+    #[test]
+    fn a_pad_is_heard_by_every_core_registered() {
+        let cores: Cores = Mutex::new(Vec::new());
+        let registry = Mutex::new(Registry::default());
+        let (a, b) = (Arc::new(Host { ctx: ptr::without_provenance_mut(11), emit: heard_by }), Arc::new(Host { ctx: ptr::without_provenance_mut(12), emit: heard_by }));
+        cores.lock().unwrap().extend([a.clone(), b]);
+        let press = Out::from_pad_event("pad", crate::PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, 0);
+        let button = clockwork_sys!("gamepad/in/button");
+        deliver(&cores, &registry, &press);
+        assert_eq!((heard(11, button), heard(12, button)), (1, 1));
+        cores.lock().unwrap().retain(|h| Arc::ptr_eq(h, &a));
+        deliver(&cores, &registry, &press);
+        assert_eq!((heard(11, button), heard(12, button)), (2, 1));
+    }
 }

@@ -53,16 +53,11 @@ int linesSaying(EngineFixture& fix, const char* text) {
     return n;
 }
 
-// The limit is the process's: back to the default whatever a case did.
-struct LimitGuard { ~LimitGuard() { clockwork_set_timed_event_late_limit_ms(0); } };
-
 }  // namespace
 
 TEST_CASE("late events: a timed event that comes due late plays, late, and is counted late; nothing is dropped "
           "for lateness by default", "[scheduler][late][engine]") {
-    LimitGuard guard;
-    clockwork_set_timed_event_late_limit_ms(0);
-    EngineFixture fix(pumped());
+    EngineFixture fix(pumped());   // its core's late limit is the default, 0: any lateness
     const Counts before = counts(fix);
 
     // Two seconds late already as it is sent.
@@ -77,9 +72,8 @@ TEST_CASE("late events: a timed event that comes due late plays, late, and is co
 
 TEST_CASE("late events: with the latest a timed event may play set by the host, a later one is dropped, counted "
           "as such, and said", "[scheduler][late][engine]") {
-    LimitGuard guard;
     EngineFixture fix(pumped());
-    clockwork_set_timed_event_late_limit_ms(500);
+    clockwork_set_timed_event_late_limit_ms(fix.engine().core(), 500);
     const Counts before = counts(fix);
     OscReply r;
 
@@ -96,7 +90,7 @@ TEST_CASE("late events: with the latest a timed event may play set by the host, 
     CHECK(linesSaying(fix, "was dropped: the host allows 500 ms") == 1);
 
     // Back to any lateness: plays again.
-    clockwork_set_timed_event_late_limit_ms(0);
+    clockwork_set_timed_event_late_limit_ms(fix.engine().core(), 0);
     fix.send(osc_test::bundle(timetag(clockNtp(fix) - 2.0), { osc_test::message("/dummy/events/get") }));
     REQUIRE(fix.waitForReply("/dummy/events", r));
 }

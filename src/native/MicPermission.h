@@ -9,6 +9,8 @@
 
 #include <string>
 
+struct ClockworkCore;
+
 namespace MicPermission {
 
 // Returns the current mic authorization status:
@@ -19,10 +21,10 @@ namespace MicPermission {
 //   "unknown"       — unexpected status
 std::string status();
 
-// Dump TCC-relevant diagnostics to stderr: our PID, bundle ID (if any),
+// Log TCC-relevant diagnostics on `core`: our PID, bundle ID (if any),
 // responsible PID, responsible process path, and current mic status.
 // Used to observe how macOS attributes our process for TCC lookups.
-void logDiagnostics();
+void logDiagnostics(ClockworkCore* core);
 
 } // namespace MicPermission
 

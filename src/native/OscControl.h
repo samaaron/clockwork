@@ -19,13 +19,16 @@
 
 struct ClockworkOsc;       // rust/clockwork-osc-net/cpp/clockwork_osc.h
 class OscEgress;
+struct ClockworkCore;
 struct DrainCallCtx;
 struct PerformanceMetrics;
 
 class OscControl {
 public:
-    void init(OscEgress* egress, PerformanceMetrics* metrics);
+    void init(OscEgress* egress, PerformanceMetrics* metrics, const ClockworkSinks* sinks);
     void shutdown();
+    // The engine's core, whose log this control's lines are; null before init.
+    ClockworkCore* core() const;
 
     // Handle one "/clockwork/osc/" control command off the audio thread (the control pass):
     //   /clockwork/osc/send <host:s> <port:i> <inner:b>  — send inner to host:port. Reached
@@ -66,6 +69,8 @@ private:
 
     OscEgress* mEgress = nullptr;
     PerformanceMetrics* mMetrics = nullptr;
+    // The engine's core's sinks, which a send goes out through.
+    const ClockworkSinks* mSinks = nullptr;
     ClockworkOsc*     mOsc      = nullptr;
     int        mPort     = 0;      // cue port (0 = unbound)
     bool       mLoopback = true;   // loopback-only by default

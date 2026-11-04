@@ -22,6 +22,7 @@
 //! reaching an `extern "C"` frame aborts rather than unwinding into C++, so a
 //! bug here is a crash with a message and not UB.
 
+use clockwork_fence::no_unwind;
 use std::os::raw::{c_char, c_void};
 use std::sync::atomic::{fence, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -35,7 +36,9 @@ use crate::timeline::{is_valid_meter, Timeline};
 /// A never-seen timeline, for a name nothing has claimed.
 #[no_mangle]
 pub extern "C" fn clockwork_timeline_placeholder(id: i32) -> Timeline {
-    Timeline::placeholder(id)
+    no_unwind(Timeline::placeholder(id), || {
+        Timeline::placeholder(id)
+    })
 }
 
 /// The beat at NTP time `ntp`. 0 for a null timeline.
@@ -45,11 +48,13 @@ pub extern "C" fn clockwork_timeline_placeholder(id: i32) -> Timeline {
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_beat_at(t: *const Timeline, ntp: f64) -> f64 {
-    // SAFETY: the caller passes a valid pointer or null; null is checked.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.beat_at(ntp),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: the caller passes a valid pointer or null; null is checked.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.beat_at(ntp),
+            None => 0.0,
+        }
+    })
 }
 
 /// The NTP time of `beat`. 0 for a null timeline.
@@ -59,11 +64,13 @@ pub unsafe extern "C" fn clockwork_timeline_beat_at(t: *const Timeline, ntp: f64
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_time_at_beat(t: *const Timeline, beat: f64) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.time_at_beat(beat),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.time_at_beat(beat),
+            None => 0.0,
+        }
+    })
 }
 
 /// The phase within `quantum` beats at NTP time `ntp`. 0 for a null timeline
@@ -74,11 +81,13 @@ pub unsafe extern "C" fn clockwork_timeline_time_at_beat(t: *const Timeline, bea
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_phase_at(t: *const Timeline, ntp: f64, quantum: f64) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.phase_at(ntp, quantum),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.phase_at(ntp, quantum),
+            None => 0.0,
+        }
+    })
 }
 
 /// Quarter-note beats per bar of the timeline's meter. 0 for a null timeline.
@@ -88,11 +97,13 @@ pub unsafe extern "C" fn clockwork_timeline_phase_at(t: *const Timeline, ntp: f6
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_beats_per_bar(t: *const Timeline) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.beats_per_bar(),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.beats_per_bar(),
+            None => 0.0,
+        }
+    })
 }
 
 // ── MIDI clock out ──────────────────────────────────────────────────────────
@@ -115,19 +126,21 @@ pub unsafe extern "C" fn clockwork_midi_clock_out_due(
     max: u32,
     count: *mut u32,
 ) -> i64 {
-    // SAFETY: the caller passes valid pointers or null; null is checked.
-    let d = match unsafe { t.as_ref() } {
-        Some(t) => midi_clock_out::due(t, next, floor, now, horizon, max),
-        None => midi_clock_out::Due {
-            first: next,
-            count: 0,
-        },
-    };
-    // SAFETY: as above.
-    if let Some(c) = unsafe { count.as_mut() } {
-        *c = d.count;
-    }
-    d.first
+    no_unwind(next, || {
+        // SAFETY: the caller passes valid pointers or null; null is checked.
+        let d = match unsafe { t.as_ref() } {
+            Some(t) => midi_clock_out::due(t, next, floor, now, horizon, max),
+            None => midi_clock_out::Due {
+                first: next,
+                count: 0,
+            },
+        };
+        // SAFETY: as above.
+        if let Some(c) = unsafe { count.as_mut() } {
+            *c = d.count;
+        }
+        d.first
+    })
 }
 
 /// The NTP time pulse `index` of a follower of `t` is due. 0 for null.
@@ -136,11 +149,13 @@ pub unsafe extern "C" fn clockwork_midi_clock_out_due(
 /// Pointers are null or valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_clock_out_pulse_ntp(t: *const Timeline, index: i64) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => midi_clock_out::pulse_ntp(t, index),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => midi_clock_out::pulse_ntp(t, index),
+            None => 0.0,
+        }
+    })
 }
 
 /// The bar at NTP time `ntp`, 0-based from beat 0. 0 for a null timeline.
@@ -150,11 +165,13 @@ pub unsafe extern "C" fn clockwork_midi_clock_out_pulse_ntp(t: *const Timeline, 
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_bar_at(t: *const Timeline, ntp: f64) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.bar_at(ntp),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.bar_at(ntp),
+            None => 0.0,
+        }
+    })
 }
 
 /// Quarter-note beats into the bar at NTP time `ntp`. 0 for a null timeline.
@@ -164,17 +181,21 @@ pub unsafe extern "C" fn clockwork_timeline_bar_at(t: *const Timeline, ntp: f64)
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_beat_in_bar_at(t: *const Timeline, ntp: f64) -> f64 {
-    // SAFETY: as above.
-    match unsafe { t.as_ref() } {
-        Some(t) => t.beat_in_bar_at(ntp),
-        None => 0.0,
-    }
+    no_unwind(0.0, || {
+        // SAFETY: as above.
+        match unsafe { t.as_ref() } {
+            Some(t) => t.beat_in_bar_at(ntp),
+            None => 0.0,
+        }
+    })
 }
 
 /// 1 if `num`/`den` is a meter a bar can be built from.
 #[no_mangle]
 pub extern "C" fn clockwork_timeline_meter_valid(num: i32, den: i32) -> i32 {
-    is_valid_meter(num, den) as i32
+    no_unwind(0, || {
+        is_valid_meter(num, den) as i32
+    })
 }
 
 /// 1 if the (pointer, length) segment names a timeline ("link", "midi",
@@ -185,8 +206,10 @@ pub extern "C" fn clockwork_timeline_meter_valid(num: i32, den: i32) -> i32 {
 /// `name` is null or points to `name_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_timeline_is_name(name: *const c_char, name_len: u32) -> i32 {
-    // SAFETY: (pointer, length) per the header's contract; null reads as "".
-    is_timeline_name(unsafe { text(name, name_len) }) as i32
+    no_unwind(0, || {
+        // SAFETY: (pointer, length) per the header's contract; null reads as "".
+        is_timeline_name(unsafe { text(name, name_len) }) as i32
+    })
 }
 
 // ── The registry ────────────────────────────────────────────────────────────
@@ -369,7 +392,9 @@ unsafe fn text<'a>(p: *const c_char, len: u32) -> &'a str {
 /// A registry of `max_slots` follower timelines. Null if allocation failed.
 #[no_mangle]
 pub extern "C" fn clockwork_midi_timelines_new(max_slots: u32) -> *mut ClockworkMidiTimelines {
-    Box::into_raw(Box::new(ClockworkMidiTimelines::new(max_slots as usize)))
+    no_unwind(core::ptr::null_mut(), || {
+        Box::into_raw(Box::new(ClockworkMidiTimelines::new(max_slots as usize)))
+    })
 }
 
 /// Free a registry. Null is a no-op.
@@ -379,10 +404,12 @@ pub extern "C" fn clockwork_midi_timelines_new(max_slots: u32) -> *mut Clockwork
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_timelines_free(h: *mut ClockworkMidiTimelines) {
-    if !h.is_null() {
-        // SAFETY: from clockwork_midi_timelines_new, freed once.
-        drop(unsafe { Box::from_raw(h) });
-    }
+    no_unwind((), || {
+        if !h.is_null() {
+            // SAFETY: from clockwork_midi_timelines_new, freed once.
+            drop(unsafe { Box::from_raw(h) });
+        }
+    })
 }
 
 /// Find or allocate the slot for a port: 1..K, or -1 if every slot holds a
@@ -401,14 +428,16 @@ pub unsafe extern "C" fn clockwork_midi_timelines_claim(
     now: f64,
     changed: *mut i32,
 ) -> i32 {
-    // SAFETY: (pointer, length) pairs per the header's contract.
-    let (norm, raw) = unsafe { (text(normalized, normalized_len), text(raw, raw_len)) };
-    let (id, ch) = ClockworkMidiTimelines::with_mut(h, |r| r.claim(norm, raw, now), (-1, false));
-    // SAFETY: a valid out-pointer or null, per the contract.
-    if let Some(c) = unsafe { changed.as_mut() } {
-        *c = ch as i32;
-    }
-    id
+    no_unwind(-1, || {
+        // SAFETY: (pointer, length) pairs per the header's contract.
+        let (norm, raw) = unsafe { (text(normalized, normalized_len), text(raw, raw_len)) };
+        let (id, ch) = ClockworkMidiTimelines::with_mut(h, |r| r.claim(norm, raw, now), (-1, false));
+        // SAFETY: a valid out-pointer or null, per the contract.
+        if let Some(c) = unsafe { changed.as_mut() } {
+            *c = ch as i32;
+        }
+        id
+    })
 }
 
 /// Release a slot. 1 if it was held (the listing changed).
@@ -418,7 +447,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_claim(
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_timelines_release(h: *mut ClockworkMidiTimelines, id: i32) -> i32 {
-    ClockworkMidiTimelines::with_mut(h, |r| r.free(id), false) as i32
+    no_unwind(0, || {
+        ClockworkMidiTimelines::with_mut(h, |r| r.free(id), false) as i32
+    })
 }
 
 /// A `/clockwork/clock/<tl>/` name to an id. Never claims.
@@ -432,9 +463,11 @@ pub unsafe extern "C" fn clockwork_midi_timelines_resolve(
     name: *const c_char,
     name_len: u32,
 ) -> i32 {
-    // SAFETY: as above.
-    let name = unsafe { text(name, name_len) };
-    ClockworkMidiTimelines::with(h, |r| r.resolve(name), -1)
+    no_unwind(-1, || {
+        // SAFETY: as above.
+        let name = unsafe { text(name, name_len) };
+        ClockworkMidiTimelines::with(h, |r| r.resolve(name), -1)
+    })
 }
 
 /// The write-path resolver: a "midi:<port>" name claims its slot if unseen.
@@ -450,14 +483,16 @@ pub unsafe extern "C" fn clockwork_midi_timelines_resolve_or_claim(
     now: f64,
     changed: *mut i32,
 ) -> i32 {
-    // SAFETY: as above.
-    let name = unsafe { text(name, name_len) };
-    let (id, ch) = ClockworkMidiTimelines::with_mut(h, |r| r.resolve_or_claim(name, now), (-1, false));
-    // SAFETY: a valid out-pointer or null, per the contract.
-    if let Some(c) = unsafe { changed.as_mut() } {
-        *c = ch as i32;
-    }
-    id
+    no_unwind(-1, || {
+        // SAFETY: as above.
+        let name = unsafe { text(name, name_len) };
+        let (id, ch) = ClockworkMidiTimelines::with_mut(h, |r| r.resolve_or_claim(name, now), (-1, false));
+        // SAFETY: a valid out-pointer or null, per the contract.
+        if let Some(c) = unsafe { changed.as_mut() } {
+            *c = ch as i32;
+        }
+        id
+    })
 }
 
 /// One 0xF8 at OS time `ts_us`, received at NTP `now`. 1 if the listing changed.
@@ -472,7 +507,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_pulse(
     ts_us: u64,
     now: f64,
 ) -> i32 {
-    ClockworkMidiTimelines::with_mut(h, |r| r.pulse(id, ts_us, now), false) as i32
+    no_unwind(0, || {
+        ClockworkMidiTimelines::with_mut(h, |r| r.pulse(id, ts_us, now), false) as i32
+    })
 }
 
 /// Manual tempo. 1 if the listing changed.
@@ -487,7 +524,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_set_tempo(
     bpm: f64,
     now: f64,
 ) -> i32 {
-    ClockworkMidiTimelines::with_mut(h, |r| r.set_tempo(id, bpm, now), false) as i32
+    no_unwind(0, || {
+        ClockworkMidiTimelines::with_mut(h, |r| r.set_tempo(id, bpm, now), false) as i32
+    })
 }
 
 /// The meter of slot `id`. 1 if it was set; 0 for a meter
@@ -504,7 +543,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_set_meter(
     num: i32,
     den: i32,
 ) -> i32 {
-    ClockworkMidiTimelines::with_mut(h, |r| r.set_meter(id, num, den), false) as i32
+    no_unwind(0, || {
+        ClockworkMidiTimelines::with_mut(h, |r| r.set_meter(id, num, den), false) as i32
+    })
 }
 
 /// A transport message: kind 0 Start, 1 Continue, 2 Stop, 3 Song Position (at
@@ -521,10 +562,12 @@ pub unsafe extern "C" fn clockwork_midi_timelines_transport(
     beat: f64,
     now: f64,
 ) -> i32 {
-    let Some(kind) = Transport::from_i32(kind) else {
-        return 0;
-    };
-    ClockworkMidiTimelines::with_mut(h, |r| r.transport(id, kind, beat, now), false) as i32
+    no_unwind(0, || {
+        let Some(kind) = Transport::from_i32(kind) else {
+            return 0;
+        };
+        ClockworkMidiTimelines::with_mut(h, |r| r.transport(id, kind, beat, now), false) as i32
+    })
 }
 
 /// The staleness sweep. 1 if the listing changed.
@@ -534,7 +577,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_transport(
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_timelines_tick_stale(h: *mut ClockworkMidiTimelines, now: f64) -> i32 {
-    ClockworkMidiTimelines::with_mut(h, |r| r.tick_stale(now), false) as i32
+    no_unwind(0, || {
+        ClockworkMidiTimelines::with_mut(h, |r| r.tick_stale(now), false) as i32
+    })
 }
 
 /// The primary slot (bare "midi"), or -1.
@@ -544,7 +589,9 @@ pub unsafe extern "C" fn clockwork_midi_timelines_tick_stale(h: *mut ClockworkMi
 /// `clockwork_midi_timelines_new` and has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_timelines_primary(h: *const ClockworkMidiTimelines) -> i32 {
-    ClockworkMidiTimelines::with(h, |r| r.primary(), -1)
+    no_unwind(-1, || {
+        ClockworkMidiTimelines::with(h, |r| r.primary(), -1)
+    })
 }
 
 /// The snapshot of slot `id` into `*out`. 1 if the slot is held; 0 (and
@@ -559,17 +606,19 @@ pub unsafe extern "C" fn clockwork_midi_timelines_timeline(
     id: i32,
     out: *mut Timeline,
 ) -> i32 {
-    // SAFETY: the caller passes a valid out-pointer or null; null is checked.
-    let Some(out) = (unsafe { out.as_mut() }) else {
-        return 0;
-    };
-    match ClockworkMidiTimelines::with(h, |r| r.timeline(id), None) {
-        Some(t) => {
-            *out = t;
-            1
+    no_unwind(0, || {
+        // SAFETY: the caller passes a valid out-pointer or null; null is checked.
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return 0;
+        };
+        match ClockworkMidiTimelines::with(h, |r| r.timeline(id), None) {
+            Some(t) => {
+                *out = t;
+                1
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// The published snapshot of slot `id` into `*out`, without taking the
@@ -588,21 +637,23 @@ pub unsafe extern "C" fn clockwork_midi_timelines_timeline_rt(
     id: i32,
     out: *mut Timeline,
 ) -> i32 {
-    // SAFETY: the caller passes a valid handle and out-pointer or null; both
-    // are checked.
-    let (Some(h), Some(out)) = (unsafe { h.as_ref() }, unsafe { out.as_mut() }) else {
-        return 0;
-    };
-    if id < 1 {
-        return 0;
-    }
-    match h.published.get(id as usize - 1).and_then(Published::read) {
-        Some(t) => {
-            *out = t;
-            1
+    no_unwind(0, || {
+        // SAFETY: the caller passes a valid handle and out-pointer or null; both
+        // are checked.
+        let (Some(h), Some(out)) = (unsafe { h.as_ref() }, unsafe { out.as_mut() }) else {
+            return 0;
+        };
+        if id < 1 {
+            return 0;
         }
-        None => 0,
-    }
+        match h.published.get(id as usize - 1).and_then(Published::read) {
+            Some(t) => {
+                *out = t;
+                1
+            }
+            None => 0,
+        }
+    })
 }
 
 /// Hand every held slot's listing row to `cb`, in slot order, under the
@@ -617,27 +668,29 @@ pub unsafe extern "C" fn clockwork_midi_timelines_each(
     ctx: *mut c_void,
     cb: Option<ClockworkTimelineInfoFn>,
 ) {
-    let Some(cb) = cb else { return };
-    ClockworkMidiTimelines::with(
-        h,
-        |r| {
-            for i in r.info() {
-                let row = ClockworkTimelineInfo {
-                    id: i.id,
-                    name: i.name.as_ptr().cast::<c_char>(),
-                    name_len: i.name.len() as u32,
-                    raw: i.raw.as_ptr().cast::<c_char>(),
-                    raw_len: i.raw.len() as u32,
-                    bpm: i.bpm,
-                    clocking: i.clocking as i32,
-                    stale: i.stale as i32,
-                    primary: i.primary as i32,
-                };
-                cb(ctx, &row);
-            }
-        },
-        (),
-    );
+    no_unwind((), || {
+        let Some(cb) = cb else { return };
+        ClockworkMidiTimelines::with(
+            h,
+            |r| {
+                for i in r.info() {
+                    let row = ClockworkTimelineInfo {
+                        id: i.id,
+                        name: i.name.as_ptr().cast::<c_char>(),
+                        name_len: i.name.len() as u32,
+                        raw: i.raw.as_ptr().cast::<c_char>(),
+                        raw_len: i.raw.len() as u32,
+                        bpm: i.bpm,
+                        clocking: i.clocking as i32,
+                        stale: i.stale as i32,
+                        primary: i.primary as i32,
+                    };
+                    cb(ctx, &row);
+                }
+            },
+            (),
+        );
+    })
 }
 
 #[cfg(test)]

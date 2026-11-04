@@ -101,6 +101,7 @@ fn one_client_per_side_regardless_of_port_count() {
     let got: Received = Arc::new(Mutex::new(Vec::new()));
     let sink = got.clone();
     let mut io = MidiIo::new(
+        std::ptr::null_mut(),
         client_name,
         Arc::new(move |port: &str, _raw: &str, _ts, _when, bytes: &[u8]| {
             sink.lock().unwrap().push((port.to_string(), bytes.to_vec()));
@@ -166,6 +167,7 @@ fn input_from_multiple_ports_routes_with_correct_labels() {
     let got: Received = Arc::new(Mutex::new(Vec::new()));
     let sink = got.clone();
     let mut io = MidiIo::new(
+        std::ptr::null_mut(),
         client_name,
         Arc::new(move |port: &str, _raw: &str, _ts, _when, bytes: &[u8]| {
             sink.lock().unwrap().push((port.to_string(), bytes.to_vec()));

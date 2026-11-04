@@ -101,6 +101,7 @@ extern "C" {
 #define CLOCKWORK_ARENA_HEADER_BYTES 4096u         /* reserved at the front; the first region starts here */
 #define CLOCKWORK_ARENA_MAX_AREAS    16u
 #define CLOCKWORK_ARENA_MAX_ENTRIES  48u
+#define CLOCKWORK_TAP_SLOTS_MAX      64u           /* the guest's and the track taps together */
 #define CLOCKWORK_ARENA_GEOM_WORDS   8u
 
 /* `state` */
@@ -125,8 +126,8 @@ enum ClockworkArenaArea {
     CLOCKWORK_AREA_STACK               = 11,  /* the engine thread's call stack: on the web, the audio worklet's */
     CLOCKWORK_AREA_MALLOC              = 12,  /* what the program's code has taken with malloc and new, to the
                                                  frontier at boot; on the web the engine's memory lies inside it */
-    CLOCKWORK_AREA_RUST_HEAP           = 13,  /* outside the arena: what clockwork's Rust code allocates inside an
-                                                 engine entry point (a sink's or a port's queues); one block, for
+    CLOCKWORK_AREA_RUST_HEAP           = 13,  /* outside the arena: what clockwork's Rust code allocates inside a
+                                                 door (a sink's or a port's queues); one block, for
                                                  the life of the process, that the RT router serves */
     CLOCKWORK_AREA_ENGINE_MEMORY       = 14,  /* the engine's memory: one block that the guest's two spans are
                                                  carved from. On the web it holds the arena at its start and the
@@ -295,7 +296,7 @@ typedef struct ClockworkArenaHeader {
     uint32_t magic;             /* CLOCKWORK_ARENA_MAGIC */
     uint32_t version;           /* CLOCKWORK_ARENA_VERSION */
     uint32_t header_bytes;      /* CLOCKWORK_ARENA_HEADER_BYTES: the first region starts here */
-    uint32_t instance_id;       /* which engine, when a process holds more than one; 0 today */
+    uint32_t instance_id;       /* which engine: its core's id (clockwork_core_id), 1 upwards */
     uint32_t arena_bytes;       /* the whole arena */
     uint32_t clockwork_bytes;   /* clockwork's half: [0, clockwork_bytes) */
     uint32_t guest_offset;      /* the guest's half: [guest_offset, guest_offset + guest_bytes) */

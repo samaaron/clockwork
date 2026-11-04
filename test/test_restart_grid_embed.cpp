@@ -4,17 +4,17 @@
  * test_restart_grid_embed.cpp — the restart grid's embedded host.
  *
  * A host that renders (clockwork_embed_attach) and reads the rings through
- * the handle's client closes its handle and attaches again: a plugin
- * reloaded, a host that changed its rate. With no other host holding the
- * engine, the attach is audio coming back to the arena that is up
- * (docs/RESTARTS.md, "One event, every route"), and it does the least that
- * gets the engine back where it was: at the rate it had, the instance
- * carries on; at another, which the placeholder cannot take, it is replaced.
- * RestartModel.h says what the host must hear either way.
+ * the handle's client reconfigures it: a plugin deactivated and activated
+ * again, a host that changed its rate. That is audio coming back to the
+ * engine that is up (docs/RESTARTS.md, "One event, every route"), and it
+ * does the least that gets the engine back where it was: at the rate it
+ * had, the instance carries on; at another, which the placeholder cannot
+ * take, it is replaced. RestartModel.h says what the host must hear either
+ * way. Closing the handle instead ends the engine.
  *
- * Here, in clockwork_attach_tests, because the event needs an attach count
- * that is back at zero, which only this binary walks. Each case leaves it
- * there.
+ * Here, in clockwork_attach_tests, because each case's handle makes the
+ * process's one core (clockwork_core.h), which only this binary arranges.
+ * Each case leaves none.
  */
 #include "RestartModel.h"
 #include "clockwork_arena.h"
@@ -42,7 +42,7 @@ public:
     explicit Host(double rate) { attach(rate); }
     ~Host() { clockwork_embed_close(mH); }
 
-    void attach(double rate) {
+    static ClockworkEmbedConfig config(double rate) {
         ClockworkEmbedConfig cfg {};
         cfg.struct_bytes      = sizeof cfg;
         cfg.sample_rate       = rate;
@@ -50,6 +50,10 @@ public:
         cfg.input_channels    = 0;
         cfg.output_channels   = 2;
         cfg.max_render_frames = kBlock;
+        return cfg;
+    }
+    void attach(double rate) {
+        const ClockworkEmbedConfig cfg = config(rate);
         ClockworkStatus st = CLOCKWORK_OK;
         mH = clockwork_embed_attach(&cfg, &st);
         REQUIRE(mH != nullptr);
@@ -57,7 +61,20 @@ public:
         REQUIRE(mC != nullptr);
         noteClock();
     }
+    // A plugin host's deactivate and activate again: the same handle, with
+    // what it renders at now.
+    void reconfigure(double rate) {
+        const ClockworkEmbedConfig cfg = config(rate);
+        REQUIRE(clockwork_embed_reconfigure(mH, &cfg) == CLOCKWORK_OK);
+        noteClock();
+    }
     void close() { clockwork_embed_close(mH); mH = nullptr; mC = nullptr; }
+    // The arena's generation, from the core whose memory the client reads.
+    uint32_t generation() const {
+        ClockworkRegion r {};
+        REQUIRE(clockwork_client_region(mC, CLOCKWORK_REGION_METRICS, &r) == CLOCKWORK_OK);
+        return clockwork_arena_generation(clockwork_arena_header(clockwork_core_of_memory(r.base)));
+    }
 
     void render(uint32_t blocks) {
         float* outs[2] = { mL.data(), mR.data() };
@@ -111,10 +128,7 @@ private:
     double             mLastClock = 0, mClockBack = 0;   // noteClock()
 };
 
-uint32_t generation() { return clockwork_arena_generation(clockwork_arena_header()); }
-
-void attachingAgain(double rate) {
-    REQUIRE(clockwork_attached() == 0);
+void reconfiguring(double rate) {
     Host host(48000.0);
     host.render(8);
     host.read();   // what the attach said
@@ -125,10 +139,9 @@ void attachingAgain(double rate) {
     host.stageAsset();
     for (const auto& ask : restart_model::waitingAsks()) host.send(ask);
 
-    const uint32_t before = generation();
-    host.close();
-    host.attach(rate);
-    const uint32_t after = generation();
+    const uint32_t before = host.generation();
+    host.reconfigure(rate);
+    const uint32_t after = host.generation();
 
     host.send(restart_model::newAsk());
     host.render(8);
@@ -142,33 +155,50 @@ void attachingAgain(double rate) {
 
 } // namespace
 
-TEST_CASE("restart grid: an embedded host attaching again", "[restarts][grid][embed]") {
-    attachingAgain(48000.0);
+TEST_CASE("restart grid: an embedded host reconfiguring", "[restarts][grid][embed]") {
+    reconfiguring(48000.0);
 }
 
-TEST_CASE("restart grid: an embedded host attaching again at another rate", "[restarts][grid][embed]") {
-    attachingAgain(44100.0);
+TEST_CASE("restart grid: an embedded host reconfiguring at another rate", "[restarts][grid][embed]") {
+    reconfiguring(44100.0);
 }
 
-TEST_CASE("restart grid: an embedded host attaching again after the audio was away hears what waited answered, late",
+TEST_CASE("restart grid: an embedded host that closes and attaches again gets an engine of its own",
           "[restarts][grid][embed]") {
-    // The same attach, with the audio away for over two seconds between the
-    // close and the attach: the instance carries on, and what waited for it
-    // through the gap is delivered when it is back — the engine drops nothing
-    // for a gap, on any target; what is sent after is answered. And the clock
-    // never went back.
-    REQUIRE(clockwork_attached() == 0);
+    // Closing a handle ends its engine (docs/ENGINES.md): what waited
+    // for it goes with it, and the next attach is a fresh engine on fresh
+    // memory, which numbers its own generations from the first
+    // (docs/RESTARTS.md, "The generation"): no client of the old one is left
+    // to hear a number twice, its client having closed with its handle.
+    Host host(48000.0);
+    host.render(8);
+    host.read();
+    for (const auto& ask : restart_model::waitingAsks()) host.send(ask);
+    host.close();
+    host.attach(48000.0);
+    CHECK(host.generation() == 1);
+    host.render(8);
+    const restart_model::Heard heard = host.read();
+    INFO(restart_model::dump(heard));
+    for (const auto& m : heard) CHECK(m.address != "/dummy/events");
+}
+
+TEST_CASE("restart grid: an embedded host reconfiguring after the audio was away hears what waited answered, late",
+          "[restarts][grid][embed]") {
+    // The same reconfigure, with the audio away for over two seconds before
+    // it: the instance carries on, and what waited for it through the gap is
+    // delivered when it is back — the engine drops nothing for a gap, on any
+    // target; what is sent after is answered. And the clock never went back.
     Host host(48000.0);
     host.render(8);
     host.read();
 
     for (const auto& ask : restart_model::waitingAsks()) host.send(ask);
-    const uint32_t before   = generation();
+    const uint32_t before   = host.generation();
     const uint32_t anchored = host.anchors();
-    host.close();
     std::this_thread::sleep_for(std::chrono::milliseconds(2300));
-    host.attach(48000.0);
-    CHECK(generation() == before);
+    host.reconfigure(48000.0);
+    CHECK(host.generation() == before);
 
     // A block first: what is in the ring as the first block back begins is
     // what waited, and is taken; so is what a host sends once it is

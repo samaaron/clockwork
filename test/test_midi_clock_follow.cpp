@@ -44,7 +44,7 @@ void step(Engine& e) {
 void pumpInStep(Engine& e, double seconds) {
     // The DSP's block, which is what one pump renders.
     const int blocks = static_cast<int>(seconds * engine_test::kSampleRate
-                                        / get_audio_buffer_samples());
+                                        / clockwork_block_size(e.engine.core()));
     for (int i = 0; i < blocks; ++i) step(e);
 }
 

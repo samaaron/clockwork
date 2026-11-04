@@ -56,8 +56,8 @@ typedef struct ClockworkDiskSink   ClockworkDiskSink;
  * refills every quarter of the ring's duration at that rate. It converts
  * nothing: see NO RATE CONVERSION above. NULL if it is 0.
  */
-ClockworkDiskSource* clockwork_disk_source_open(const char* path, ClockworkPort port,
-                                                uint32_t session_rate);
+ClockworkDiskSource* clockwork_disk_source_open(const ClockworkPorts* ports, const char* path,
+                                                ClockworkPort port, uint32_t session_rate);
 
 /* Stop the worker and free the handle. The PORT is not closed: a port outlives
    its endpoint, which is what lets one be swapped under a running stream. */
@@ -77,8 +77,9 @@ int      clockwork_disk_source_eof(const ClockworkDiskSource* source);
  * `sample_rate` is the file's and the session's: the worker writes what has
  * arrived every quarter of the ring's duration at it. NULL if it is 0.
  */
-ClockworkDiskSink* clockwork_disk_sink_open(const char* path, ClockworkPort port,
-                                uint32_t sample_rate, uint32_t channels);
+ClockworkDiskSink* clockwork_disk_sink_open(const ClockworkPorts* ports, const char* path,
+                                            ClockworkPort port, uint32_t sample_rate,
+                                            uint32_t channels);
 
 /* Drain what is left, patch the header with the real length, join the worker,
    free the handle. The FILE IS ONLY COMPLETE AFTER THIS RETURNS. */

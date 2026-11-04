@@ -87,13 +87,14 @@ using std::string;
 // ──── The published segment's layout ────────────────────────────────────
 //
 // A small handshake header followed by the unified shared_memory.h arena
-// blob — the SAME layout the engine uses in arena_storage (native) / the
-// WASM SAB. One layout, one source of truth; no separate native layout to
+// blob — the SAME layout the engine uses in a core's own arena (native) /
+// the WASM SAB. One layout, one source of truth; no separate native layout to
 // drift. Headroom, not a snug fit: every field added to the header is a
 // region a reader needs to find without compile-time knowledge, and the
 // static_assert below fails the build if the header outgrows this.
 static constexpr size_t SHM_BLOB_OFFSET = 256;  // aligned, >= sizeof(shm_segment_header)
-static constexpr size_t SEGMENT_SIZE    = SHM_BLOB_OFFSET + ARENA_SIZE;
+// A segment for a core laid out as `L`: the header, then its arena.
+inline size_t segment_bytes(const clockwork::Layout& L) { return SHM_BLOB_OFFSET + L.arena_bytes; }
 
 // ──── The command segment's layout ──────────────────────────────────────
 //
@@ -505,8 +506,8 @@ inline void shm_remove(const string& name) {
 //
 //   shm_segment_header        (MAGIC + where the blob is)
 //   <pad to SHM_BLOB_OFFSET>
-//   shared_memory.h arena blob (ARENA_SIZE) — the *same* layout the
-//   engine uses in arena_storage / the WASM SAB. The engine points its
+//   shared_memory.h arena blob (the core's layout) — the *same* layout the
+//   engine uses in a core's own arena / the WASM SAB. The engine points its
 //   `shared_memory` base at this blob, so rings, control pointers, metrics,
 //   node-tree, scope and tap streams are all addressed by their
 //   shared_memory.h offsets and observable cross-process for free.
@@ -587,36 +588,34 @@ static_assert(SHM_PEER_OFFSET % 8 == 0,
 
 class shm_segment {
 public:
-    shm_segment(void* segment_base, bool init) {
-        char* seg = static_cast<char*>(segment_base);
-        auto* base8 = reinterpret_cast<uint8_t*>(seg);
-        header_ = reinterpret_cast<shm_segment_header*>(seg);
-        if (init) {
-            // The creator lays the segment out from this build's constants
-            // and publishes that layout in the header.
-            L_    = ShmReaderLayout::from_constants();
-            blob_ = base8 + SHM_BLOB_OFFSET;
-            header_->blob_offset = static_cast<uint32_t>(SHM_BLOB_OFFSET);
-            header_->blob_size   = static_cast<uint32_t>(ARENA_SIZE);
-            // The arena's own table, at the front of the blob. init_memory
-            // writes the same bytes again when the engine takes the arena;
-            // writing it here too means a segment is complete without one,
-            // which is what a reader opened against a bare creator sees.
-            writeArenaHeader(blob_);
-            // MAGIC is deliberately NOT stored here: the arena blob is still
-            // zeroed, and zero is not a safe default for every region. The
-            // creator publishes it via publish() once the engine's
-            // init_memory() has populated the arena.
-        } else {
-            // A reader takes EVERYTHING from the arena's table — its own
-            // build may size the arena differently, and the table is the
-            // cross-build contract. shm_segment_client has checked it against
-            // the mapping before this runs, so this cannot fail here.
-            blob_ = base8 + header_->blob_offset;
-            const char* why = "";
-            if (!ShmReaderLayout::from_arena(blob_, header_->blob_size, L_, &why))
-                L_ = ShmReaderLayout{};
-        }
+    // The creator's: lays the segment out as its core's `layout` says and
+    // publishes that layout in the header.
+    shm_segment(void* segment_base, const clockwork::Layout& layout)
+        : header_(static_cast<shm_segment_header*>(segment_base)),
+          blob_(static_cast<uint8_t*>(segment_base) + SHM_BLOB_OFFSET),
+          L_(ShmReaderLayout::from_layout(layout)) {
+        header_->blob_offset = static_cast<uint32_t>(SHM_BLOB_OFFSET);
+        header_->blob_size   = layout.arena_bytes;
+        // The arena's own table, at the front of the blob. init_memory
+        // writes the same bytes again when the engine takes the arena;
+        // writing it here too means a segment is complete without one,
+        // which is what a reader opened against a bare creator sees.
+        writeArenaHeader(blob_, layout);
+        // MAGIC is deliberately NOT stored here: the arena blob is still
+        // zeroed, and zero is not a safe default for every region. The
+        // creator publishes it via publish() once the engine's
+        // init_memory() has populated the arena.
+    }
+    // A reader's: takes EVERYTHING from the arena's table — the engine may
+    // size the arena differently from this build's default, and the table
+    // is the cross-build contract. shm_segment_client has checked it
+    // against the mapping before this runs, so this cannot fail here.
+    explicit shm_segment(void* segment_base)
+        : header_(static_cast<shm_segment_header*>(segment_base)),
+          blob_(static_cast<uint8_t*>(segment_base) + header_->blob_offset) {
+        const char* why = "";
+        if (!ShmReaderLayout::from_arena(blob_, header_->blob_size, L_, &why))
+            L_ = ShmReaderLayout{};
     }
 
     // Publish the segment: release-fence, then store MAGIC last. Called once the
@@ -632,8 +631,8 @@ public:
     // address every region by the layout's offset from this pointer.
     uint8_t* get_base() const { return blob_; }
 
-    // Where everything is, as the header says (the creator's constants, or
-    // the engine's published values on the reader side).
+    // Where everything is, as the header says (the creator's layout, or the
+    // engine's published values on the reader side).
     const ShmReaderLayout& layout() const { return L_; }
 
     PerformanceMetrics* get_metrics() const {
@@ -643,11 +642,7 @@ public:
     // and a reader that knows the shape casts it there.
     uint8_t* get_window() const      { return blob_ + L_.window_offset; }
     size_t   get_window_size() const { return L_.window_bytes; }
-    shm_audio_buffer* get_audio_buffers() const {
-        return reinterpret_cast<shm_audio_buffer*>(blob_ + L_.audio_offset);
-    }
-    // Slot `index`, at the engine's stride — not sizeof(shm_audio_buffer),
-    // which is THIS build's slot and may be another size.
+    // Slot `index`, at the engine's stride.
     shm_audio_buffer* get_audio_buffer(unsigned int index) const {
         if (index < L_.audio_slot_count)
             return reinterpret_cast<shm_audio_buffer*>(
@@ -661,8 +656,8 @@ public:
 
 private:
     shm_segment_header* header_;
-    ShmReaderLayout     L_;
     uint8_t*            blob_;
+    ShmReaderLayout     L_;
 };
 
 // ──── Sample-clock view ─────────────────────────────────────────────────
@@ -707,11 +702,13 @@ struct native_stats {
 
 class shm_segment_creator {
 public:
-    // NOT cleared here: fresh anonymous memory is zero on every platform.
-    shm_segment_creator():
-        handle(shm_create_anonymous(SEGMENT_SIZE, /*with_read_only=*/true))
+    // A segment for a core laid out as `layout`. NOT cleared here: fresh
+    // anonymous memory is zero on every platform.
+    explicit shm_segment_creator(const clockwork::Layout& layout):
+        handle(shm_create_anonymous(segment_bytes(layout), /*with_read_only=*/true)),
+        bytes(segment_bytes(layout))
     {
-        shm = std::make_unique<shm_segment>(handle.ptr, true);
+        shm = std::make_unique<shm_segment>(handle.ptr, layout);
     }
     // The segment's one creator: its handle and mapping are not things to copy.
     shm_segment_creator(const shm_segment_creator&) = delete;
@@ -736,7 +733,7 @@ public:
     // duplicates into readers and an in-process reader shm_dup_handles. A
     // mapping made from it can only be read. Not owned by the caller.
     shm_native_handle reader_handle() const { return handle.read_only; }
-    size_t segment_size() const { return SEGMENT_SIZE; }
+    size_t segment_size() const { return bytes; }
 
     // Arena blob base — the engine points `shared_memory` here.
     uint8_t* get_base() { return shm ? shm->get_base() : nullptr; }
@@ -749,18 +746,14 @@ public:
     PerformanceMetrics* get_metrics() { return shm ? shm->get_metrics() : nullptr; }
     uint8_t*            get_window()            { return shm ? shm->get_window()            : nullptr; }
     size_t              get_window_size()       { return shm ? shm->get_window_size()       : 0; }
-    shm_audio_buffer*   get_audio_buffers()     { return shm ? shm->get_audio_buffers()     : nullptr; }
 
     shm_audio_buffer* get_audio_buffer(unsigned int index) {
         return shm ? shm->get_audio_buffer(index) : nullptr;
     }
 
-    shm_audio_buffer_writer get_audio_buffer_writer(unsigned int index) {
-        return shm_audio_buffer_writer(get_audio_buffer(index));
-    }
-
 private:
     shm_handle                   handle;
+    size_t                       bytes;
     std::unique_ptr<shm_segment> shm;
 };
 
@@ -932,7 +925,7 @@ public:
                                          header->blob_size, L, &why))
             throw std::runtime_error(std::string("Shared memory layout unusable by this reader: ") + why);
 
-        shm = std::make_unique<shm_segment>(handle.ptr, false);
+        shm = std::make_unique<shm_segment>(handle.ptr);
     }
     // Only a real handle. Any other integer (a port number, say) would convert
     // silently to an int and fail at fstat rather than at compile time, so
@@ -1012,8 +1005,7 @@ public:
     // engine's actual allocation.
     shm_tap_stream_reader get_tap_stream_reader(unsigned int index) const {
         return shm_tap_stream_reader(
-            reinterpret_cast<shm_tap_stream*>(shm->get_tap_slot(index)), map_,
-            layout().tap_ring_frames);
+            reinterpret_cast<shm_tap_stream*>(shm->get_tap_slot(index)), layout().tap_ring_frames, map_);
     }
 
     sample_clock_view get_sample_clock() const {
@@ -1021,8 +1013,8 @@ public:
     }
 
     shm_audio_buffer_reader get_audio_buffer_reader(unsigned int index) const {
-        return shm_audio_buffer_reader(shm->get_audio_buffer(index), map_,
-                                       layout().audio_frames);
+        return shm_audio_buffer_reader(shm->get_audio_buffer(index), layout().audio_frames,
+                                       layout().audio_channels, map_);
     }
 
 private:

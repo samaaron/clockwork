@@ -13,10 +13,13 @@
 #include "lanes_internal.h"
 #include "ring_drain.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 
-#include "../audio_processor.h"          // arena globals + process_audio + accessors
+#include "../audio_processor.h"          // init_memory, process_audio
+#include "../clockwork_config.h"         // clockwork_rust_log_install
 #include "../audio_config.h"             // block-size and channel caps
 #include "../clockwork_prefix.h"         // clockwork_sys_claims: whose message this is
 #include "../clockwork_sys.h"            // clockwork_sys_refuse, the refusal reasons
@@ -24,36 +27,17 @@
 #include "../in_ring_door.h"              // the in ring's boundary
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
 #include "../workers/wait_word.h"        // what a client waits on for egress
+#include "../core_state.h"               // a core's Egress
 
 // ── internal state ──────────────────────────────────────────────────────────
 
-// What a client thread sleeps on until the engine says something
-// (clockwork_client_wait): bumped once per block that wrote the RT egress
-// ring, and once per NRT egress write. Process wide, as the rings' consumer
-// is: one engine per process, and every in-process handle polls its rings.
-static ClockworkWaitWord g_egress_said;
-
-// The RT egress ring's sequence when the last block's bump covered it. The
-// audio thread's alone; zeroed with the ring.
-static int32_t g_rt_out_said = 0;
-
-// NRT egress producer lock. Producers on control threads serialise their
-// [route][osc] framing through here; this is the process-wide lock for the
-// NRT-out lane (the engine's OscEgress delegates to clockwork_egress_nrt_write).
-static std::atomic<int32_t> g_nrt_egress_lock{0};
-
-// Largest NRT egress frame the producer accepts. Sized for the biggest
-// producer — the device reports, which reach several KB on device-heavy
-// Windows machines — but never more than half the ring so a frame can
-// always drain (small-profile builds have a 4 KB NRT-out ring).
-static constexpr uint32_t kNrtEgressMax =
-    NRT_OUT_RING_SIZE / 2 < 8192 ? NRT_OUT_RING_SIZE / 2 : 8192;
-
-// Per-lane consumer state (single consumer per lane, by contract). Process
-// lifetime; reset with its ring's sequence counter when the ring begins a
-// fresh epoch (clockwork_lanes_reset_rt_out_ring / _nrt_out_ring).
-static ClockworkDrainState g_rt_drain_state;
-static ClockworkDrainState g_nrt_drain_state;
+// Largest NRT egress frame the producer accepts for a core laid out as `L`.
+// Sized for the biggest producer — the device reports, which reach several
+// KB on device-heavy Windows machines — but never more than half the ring so
+// a frame can always drain (small profiles have a 4 KB NRT-out ring).
+static uint32_t nrt_egress_max(const clockwork::Layout& L) {
+    return std::min(L.profile.nrt_out_ring_bytes / 2, 8192u);
+}
 
 extern "C" {
 
@@ -68,63 +52,74 @@ extern "C" {
 // under a holder.
 static void spin_acquire(std::atomic<int32_t>& lock) { RingBufferWriter::lock(&lock); }
 
-void clockwork_lanes_reset_in_ring(void) {
-    if (!shared_memory || !cursors) return;
+void clockwork_lanes_reset_in_ring(ClockworkCore* core) {
+    clockwork::Ingress* in = clockwork::ingress(core);
+    RingCursors* const cursors = clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core));
+    if (!in || !cursors) return;
     spin_acquire(cursors->in_write_lock);
     cursors->in_head.store(0, std::memory_order_relaxed);
     cursors->in_tail.store(0, std::memory_order_relaxed);
     cursors->in_sequence.store(0, std::memory_order_relaxed);
     cursors->in_write_lock.store(0, std::memory_order_release);
+    in->drain.lastSeq = -1;
+    in->marks.clear();
 }
 
 // The RT-out ring's one writer is stopped by the caller: a new arena has no
 // audio thread yet.
-void clockwork_lanes_reset_rt_out_ring(void) {
-    if (!shared_memory || !cursors) return;
+void clockwork_lanes_reset_rt_out_ring(ClockworkCore* core) {
+    clockwork::Egress* e = clockwork::egress(core);
+    RingCursors* const cursors = clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core));
+    if (!e || !cursors) return;
     cursors->out_head.store(0, std::memory_order_relaxed);
     cursors->out_tail.store(0, std::memory_order_relaxed);
     cursors->out_read.store(0, std::memory_order_relaxed);
     cursors->out_sequence.store(0, std::memory_order_relaxed);
-    g_rt_drain_state.lastSeq = -1;
-    g_rt_out_said = 0;
+    e->rt_drain.lastSeq = -1;
+    e->rt_out_said = 0;
 }
 
-void clockwork_lanes_reset_nrt_out_ring(void) {
-    if (!shared_memory || !cursors) return;
-    spin_acquire(g_nrt_egress_lock);
+void clockwork_lanes_reset_nrt_out_ring(ClockworkCore* core) {
+    clockwork::Egress* e = clockwork::egress(core);
+    RingCursors* const cursors = clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core));
+    if (!e || !cursors) return;
+    spin_acquire(e->nrt_write_lock);
     cursors->nrt_out_head.store(0, std::memory_order_relaxed);
     cursors->nrt_out_tail.store(0, std::memory_order_relaxed);
     cursors->nrt_out_read.store(0, std::memory_order_relaxed);
     cursors->nrt_out_sequence.store(0, std::memory_order_relaxed);
-    g_nrt_egress_lock.store(0, std::memory_order_release);
-    g_nrt_drain_state.lastSeq = -1;
+    e->nrt_write_lock.store(0, std::memory_order_release);
+    e->nrt_drain.lastSeq = -1;
 }
 
 // ── Ingress ─────────────────────────────────────────────────────────────────
 
-bool clockwork_ingress_write(const uint8_t* osc, uint32_t len, uint32_t source_id) {
-    return clockwork_ingress_write_status(osc, len, source_id) == InRingWrite::Written;
+bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id) {
+    return clockwork_ingress_write_status(core, osc, len, source_id) == InRingWrite::Written;
 }
 
 } // extern "C"
 
-InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uint32_t source_id) {
-    if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
+InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id) {
+    uint8_t* const base = clockwork::laid_out_base(core);
+    if (!clockwork::ingress(core) || !base || !osc || len == 0)
         return InRingWrite::Full;
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
     // A control verb of clockwork's, while the engine serves the control ring
     // (lanes.h, clockwork_control_serve): written there, where no audio
     // block is between it and its answer. The same rule clockwork_client_send
     // reads from the same bytes, so a client in any process does the same.
     const uint32_t flags = cursors->status_flags.load(std::memory_order_acquire);
     if ((flags & STATUS_CONTROL_SERVED) && clockwork_sys_control_takes(osc, len)) {
-        auto* ctl = reinterpret_cast<ControlRingCursors*>(shared_memory + CONTROL_RING_START);
+        const uint32_t control = clockwork::layout_of(core).control_ring_start;
+        auto* ctl = reinterpret_cast<ControlRingCursors*>(base + control);
         if (!RingBufferWriter::write(
-                shared_memory + CONTROL_RING_START + CONTROL_RING_HEADER_SIZE,
+                base + control + CONTROL_RING_HEADER_SIZE,
                 CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
                 &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
                 osc, len, source_id))
             return InRingWrite::Full;
-        clockwork_control_wake();
+        clockwork_control_wake(core);
         return InRingWrite::Written;
     }
     // No guest instance to take it: refused at the boundary (in_ring_door.h),
@@ -132,15 +127,57 @@ InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uin
     // client ABI's status says the same to its caller (docs/RESTARTS.md).
     // Clockwork's own verbs go through and wait in the ring for the engine,
     // instance or none.
-    const InRingWrite wrote = in_ring_write(shared_memory, shared_memory + IN_RING_START, IN_RING_SIZE,
+    const clockwork::Layout& L = clockwork::layout_of(core);
+    const InRingWrite wrote = in_ring_write(base, base + L.in_ring_start, L.profile.in_ring_bytes,
                                             cursors, osc, len, source_id);
     if (wrote == InRingWrite::NoInstance)
         clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
-            arenaInstanceGeneration(shared_memory),
-            [source_id](const uint8_t* d, uint32_t n) {
-                clockwork_egress_nrt_write(EGRESS_REPLY, source_id, d, n);
+            arenaInstanceGeneration(base),
+            [core, source_id](const uint8_t* d, uint32_t n) {
+                clockwork_egress_nrt_write(core, EGRESS_REPLY, source_id, d, n);
             });
     return wrote;
+}
+
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t route, uint32_t token,
+                                      const RingPart* parts, uint32_t n_parts) {
+    static constexpr uint32_t kMaxParts = 8;
+    clockwork::Egress* e = clockwork::egress(core);
+    uint8_t* const base = clockwork::laid_out_base(core);
+    if (!e || !base || n_parts == 0 || n_parts > kMaxParts - 1)
+        return false;
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
+    PerformanceMetrics* const metrics = clockwork::metrics_in(base);
+    // More than a frame carries is refused and counted, as a full ring's
+    // refusal is: the frame reaches no one either way. Summed so that no
+    // part near UINT32_MAX can wrap past the bound.
+    const clockwork::Layout& L = clockwork::layout_of(core);
+    const uint32_t most = nrt_egress_max(L);
+    uint32_t len = 0;
+    for (uint32_t i = 0; i < n_parts; ++i) {
+        if (parts[i].size > most - EGRESS_ROUTE_SIZE - len) {
+            metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        len += parts[i].size;
+    }
+    if (len == 0) return false;
+    std::array<RingPart, kMaxParts> frame{};
+    frame[0] = RingPart{ &route, static_cast<uint32_t>(sizeof route) };
+    for (uint32_t i = 0; i < n_parts; ++i) frame[1 + i] = parts[i];
+    const bool written = RingBufferWriter::write(
+        base + L.nrt_out_ring_start, L.profile.nrt_out_ring_bytes,
+        &cursors->nrt_out_head, &cursors->nrt_out_tail,
+        &cursors->nrt_out_sequence, &e->nrt_write_lock,
+        frame.data(), n_parts + 1, token);
+    // Refused for want of room: counted, since the line logging it would
+    // ride this same full ring (PerformanceMetrics::egress_frames_refused).
+    if (!written) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+    if (written) {
+        clockwork_control_wake(core);
+        clockwork_core_said_bump(core);
+    }
+    return written;
 }
 
 extern "C" {
@@ -174,138 +211,116 @@ static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
     return delivered;
 }
 
-uint32_t clockwork_egress_rt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
-    if (!memory_initialized || !shared_memory || !cursors || !fn) return 0;
+uint32_t clockwork_egress_rt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
+    clockwork::Egress* e = clockwork::egress(core);
+    uint8_t* const base = clockwork::laid_out_base(core);
+    if (!e || !base || !fn) return 0;
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
+    PerformanceMetrics* const metrics = clockwork::metrics_in(base);
     // RT egress traffic counts into the segment-resident metrics so external
     // observers see reply/notification volume and ring health.
     ClockworkDrainMetrics m;
-    if (metrics) {
-        m.received  = &metrics->osc_in_messages_received;
-        m.bytes     = &metrics->osc_in_bytes_received;
-        m.corrupted = &metrics->osc_in_corrupted;
-        m.seqGaps   = &metrics->messages_sequence_gaps;
-    }
-    return drain_egress_ring(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+    m.received  = &metrics->osc_in_messages_received;
+    m.bytes     = &metrics->osc_in_bytes_received;
+    m.corrupted = &metrics->osc_in_corrupted;
+    m.seqGaps   = &metrics->messages_sequence_gaps;
+    const clockwork::Layout& L = clockwork::layout_of(core);
+    return drain_egress_ring(base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                              &cursors->out_head, &cursors->out_tail, &cursors->out_read,
-                             g_rt_drain_state, m, fn, ctx, max_frames);
+                             e->rt_drain, m, fn, ctx, max_frames);
 }
 
-uint32_t clockwork_egress_nrt_drain(ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
-    if (!memory_initialized || !shared_memory || !cursors || !fn) return 0;
+uint32_t clockwork_egress_nrt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames) {
+    clockwork::Egress* e = clockwork::egress(core);
+    uint8_t* const base = clockwork::laid_out_base(core);
+    if (!e || !base || !fn) return 0;
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
+    PerformanceMetrics* const metrics = clockwork::metrics_in(base);
     // The same reply counters as the RT ring: which ring a reply rode is an
     // implementation detail (a guest's off-thread stage answers here, its
     // audio-thread stage there), and a client's "replies received" is the
     // sum. Sequence gaps stay per ring — this ring numbers its own frames.
     ClockworkDrainMetrics m;
-    if (metrics) {
-        m.received  = &metrics->osc_in_messages_received;
-        m.bytes     = &metrics->osc_in_bytes_received;
-        m.corrupted = &metrics->osc_in_corrupted;
-    }
+    m.received  = &metrics->osc_in_messages_received;
+    m.bytes     = &metrics->osc_in_bytes_received;
+    m.corrupted = &metrics->osc_in_corrupted;
+    const clockwork::Layout& L = clockwork::layout_of(core);
     const uint32_t delivered =
-        drain_egress_ring(shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
+        drain_egress_ring(base + L.nrt_out_ring_start, L.profile.nrt_out_ring_bytes,
                           &cursors->nrt_out_head, &cursors->nrt_out_tail, &cursors->nrt_out_read,
-                          g_nrt_drain_state, m, fn, ctx, max_frames);
-    clockwork_egress_nrt_room_made();
+                          e->nrt_drain, m, fn, ctx, max_frames);
+    clockwork_egress_nrt_room_made(core);
     return delivered;
 }
 
-uint32_t clockwork_egress_nrt_max_frame(void) {
-    return kNrtEgressMax - EGRESS_ROUTE_SIZE;
+uint32_t clockwork_egress_nrt_max_frame(const ClockworkCore* core) {
+    return nrt_egress_max(clockwork::layout_of(core)) - EGRESS_ROUTE_SIZE;
 }
 
-// Raised by the control pass while it holds work for room in the NRT egress
-// ring; lowered by the reader that makes room, which wakes the pass. Process
-// wide: every reader of this ring is in the engine's process.
-static std::atomic<uint32_t> g_nrt_room_wanted{0};
-
-static uint32_t nrt_free(void) {
+static uint32_t nrt_free(const RingCursors* cursors, const clockwork::Layout& L) {
     return ring_free_bytes(
         static_cast<uint32_t>(cursors->nrt_out_head.load(std::memory_order_acquire)),
         static_cast<uint32_t>(cursors->nrt_out_tail.load(std::memory_order_acquire)),
-        NRT_OUT_RING_SIZE);
+        L.profile.nrt_out_ring_bytes);
 }
 
 // The flag goes up before the second look, and a reader looks at it after it
 // gives room back, so either the second look sees the room or the reader sees
 // the flag.
-void clockwork_egress_nrt_want_room(void) {
-    g_nrt_room_wanted.store(1, std::memory_order_relaxed);
+void clockwork_egress_nrt_want_room(ClockworkCore* core) {
+    clockwork::Egress* e = clockwork::egress(core);
+    if (!e) return;
+    e->nrt_room_wanted.store(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
-int clockwork_egress_nrt_room(uint32_t bytes) {
-    if (!memory_initialized || !shared_memory || !cursors) return 0;
-    if (nrt_free() >= bytes) return 1;
-    clockwork_egress_nrt_want_room();
-    return nrt_free() >= bytes;
+int clockwork_egress_nrt_room(ClockworkCore* core, uint32_t bytes) {
+    const RingCursors* cursors = clockwork::cursors_in(clockwork::laid_out_base(core), clockwork::layout_of(core));
+    if (!clockwork::egress(core) || !cursors) return 0;
+    const clockwork::Layout& L = clockwork::layout_of(core);
+    if (nrt_free(cursors, L) >= bytes) return 1;
+    clockwork_egress_nrt_want_room(core);
+    return nrt_free(cursors, L) >= bytes;
 }
 
-uint32_t clockwork_egress_nrt_pending(void) {
-    if (!memory_initialized || !shared_memory || !cursors) return 0;
+uint32_t clockwork_egress_nrt_pending(ClockworkCore* core) {
+    const RingCursors* cursors = clockwork::cursors_in(clockwork::laid_out_base(core), clockwork::layout_of(core));
+    if (!clockwork::egress(core) || !cursors) return 0;
     const auto head = static_cast<uint32_t>(cursors->nrt_out_head.load(std::memory_order_acquire));
     const auto read = static_cast<uint32_t>(cursors->nrt_out_read.load(std::memory_order_acquire));
-    return (head - read + NRT_OUT_RING_SIZE) % NRT_OUT_RING_SIZE;
+    return ring_used_bytes(head, read, clockwork::layout_of(core).profile.nrt_out_ring_bytes);
 }
 
-void clockwork_egress_nrt_room_made(void) {
+void clockwork_egress_nrt_room_made(ClockworkCore* core) {
+    clockwork::Egress* e = clockwork::egress(core);
+    if (!e) return;
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (g_nrt_room_wanted.load(std::memory_order_relaxed) != 0
-        && g_nrt_room_wanted.exchange(0, std::memory_order_relaxed) != 0)
-        clockwork_control_wake();
+    if (e->nrt_room_wanted.load(std::memory_order_relaxed) != 0
+        && e->nrt_room_wanted.exchange(0, std::memory_order_relaxed) != 0)
+        clockwork_control_wake(core);
 }
 
-bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len) {
-    if (!memory_initialized || !shared_memory || !cursors || !osc || len == 0)
-        return false;
-    // Subtraction form: len + EGRESS_ROUTE_SIZE would wrap for len near
-    // UINT32_MAX and slip past the bound into the stack memcpy below. Too big
-    // ever to carry is refused and counted, as a full ring's refusal is: the
-    // frame reaches no one either way.
-    if (len > kNrtEgressMax - EGRESS_ROUTE_SIZE) {
-        if (metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-
-    uint8_t buf[kNrtEgressMax];
-    std::memcpy(buf, &route, sizeof(route));
-    std::memcpy(buf + sizeof(route), osc, len);
-    const bool written = RingBufferWriter::write(
-        shared_memory + NRT_OUT_RING_START, NRT_OUT_RING_SIZE,
-        &cursors->nrt_out_head, &cursors->nrt_out_tail,
-        &cursors->nrt_out_sequence, &g_nrt_egress_lock,
-        buf, len + EGRESS_ROUTE_SIZE, token);
-    // Refused for want of room: counted, since the line logging it would
-    // ride this same full ring (PerformanceMetrics::egress_frames_refused).
-    if (!written && metrics) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
-    if (written) {
-        clockwork_control_wake();
-        clockwork::bump(g_egress_said);
-    }
-    return written;
+    if (!osc || len == 0) return false;
+    const RingPart part{ osc, len };
+    return clockwork_egress_nrt_write_parts(core, route, token, &part, 1);
 }
 
 // ── Waiting for egress (lanes_internal.h) ───────────────────────────────────
 
-int clockwork_egress_wait(uint32_t* seen, uint32_t timeout_ms) {
-    const uint32_t was = *seen;
-    const auto moved = [was] { return g_egress_said.value.load(std::memory_order_seq_cst) != was; };
-    if (timeout_ms == UINT32_MAX) {
-        clockwork::wait_for_condition(g_egress_said, moved);
-    } else {
-        clockwork::wait_for_condition(g_egress_said, moved,
-            clockwork::WaitClock::now() + std::chrono::milliseconds(timeout_ms));
-    }
-    *seen = g_egress_said.value.load(std::memory_order_seq_cst);
-    return *seen != was;
+int clockwork_egress_wait(ClockworkCore* core, uint32_t* seen, uint32_t timeout_ms) {
+    const int moved = clockwork_core_said_wait(core, *seen, timeout_ms);
+    if (moved >= 0) *seen = clockwork_core_said_value(core);
+    return moved;
 }
 
-void clockwork_egress_wake(void) {
-    clockwork::bump(g_egress_said);
+void clockwork_egress_wake(ClockworkCore* core) {
+    clockwork_core_said_bump(core);
 }
 
-void clockwork_egress_count_undelivered(uint32_t n) {
+void clockwork_egress_count_undelivered(ClockworkCore* core, uint32_t n) {
+    PerformanceMetrics* const metrics = clockwork::metrics_in(clockwork::laid_out_base(core));
     if (n && metrics) metrics->egress_frames_undelivered.fetch_add(n, std::memory_order_relaxed);
 }
 
@@ -314,115 +329,38 @@ void clockwork_egress_count_undelivered(uint32_t n) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-bool clockwork_tick(ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels) {
-    if (!time || time->struct_bytes < sizeof(ClockworkBlockTime)) return false;
-    const bool ok = process_audio(*time, out_channels, in_channels);
+ClockworkTick clockwork_tick(ClockworkCore* core, ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels) {
+    if (!time || time->struct_bytes < sizeof(ClockworkBlockTime)) return CLOCKWORK_TICK_NONE;
+    // The block takes the core's gate and never waits for it: a control call
+    // holding it means no block (lanes.h, CLOCKWORK_TICK_BUSY). The gate
+    // first, the state under it: a core closing or closed has no block, and
+    // one clockwork_init has not given its state has none yet.
+    const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_RENDER, clockwork::GateHold::Take::Try);
+    if (gate.closed()) return CLOCKWORK_TICK_NONE;
+    if (!gate.held()) return CLOCKWORK_TICK_BUSY;
+    if (!clockwork::state(core)) return CLOCKWORK_TICK_NONE;
+    process_audio(core, *time, out_channels, in_channels);
     // Once a block, and only for a block that said something: whoever waits
     // for egress (clockwork_client_wait) wakes when the block has ended, with
     // all of it in the ring. Two atomic operations and a fence when nobody
     // waits, as the control pass's own wake is.
-    if (cursors) {
+    clockwork::Egress* e = clockwork::egress(core);
+    const RingCursors* cursors = clockwork::cursors_in(clockwork::laid_out_base(core), clockwork::layout_of(core));
+    if (e && cursors) {
         const int32_t seq = cursors->out_sequence.load(std::memory_order_relaxed);
-        if (seq != g_rt_out_said) {
-            g_rt_out_said = seq;
-            clockwork::bump(g_egress_said);
+        if (seq != e->rt_out_said) {
+            e->rt_out_said = seq;
+            clockwork_core_said_bump(core);
         }
     }
-    return ok;
-}
-
-const float* clockwork_audio_out(void) {
-    return reinterpret_cast<const float*>(get_audio_output_bus());
-}
-
-float* clockwork_audio_in(void) {
-    return reinterpret_cast<float*>(get_audio_input_bus());
-}
-
-uint32_t clockwork_block_size(void) {
-    return static_cast<uint32_t>(get_audio_buffer_samples());
-}
-
-double clockwork_sample_rate(void) {
-    return get_audio_sample_rate();
-}
-
-ClockworkTimetag clockwork_block_time(void) {
-    return get_audio_block_time();
+    return CLOCKWORK_TICK_RENDERED;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-// The arena override init_memory() consults (set by the native backend when a
-// public POSIX segment exists; null otherwise). Declared here so clockwork_init
-// copies the guest's config block into the SAME arena init_memory will read:
-// reading from arena_storage while the host wrote to a segment would see
-// zeros.
-extern uint8_t* g_external_segment;
 
-// How many hosts hold the engine. Not atomic: attach and detach are control
-// calls, made from a host's setup path, never from the audio thread, like
-// clockwork_init.
-static uint32_t g_attached = 0;
-
-// Can the running engine serve a host that asked for this?
-//
-// Rate and block are exact: every host in the process renders the same blocks
-// at the same rate, so they are not negotiable per-caller. A block of 0 means
-// "whatever is running". Channels only have to be ENOUGH — a joiner that needs
-// two of an engine that opened eight is served.
-static bool geometry_serves(double sample_rate, uint32_t block_size,
-                            uint32_t input_channels, uint32_t output_channels) {
-    if (sample_rate != g_clockwork_config.sample_rate)              return false;
-    if (block_size != 0 && block_size != g_clockwork_config.block_size) return false;
-    if (input_channels  > g_clockwork_config.input_channels)        return false;
-    if (output_channels > g_clockwork_config.output_channels)       return false;
-    return true;
-}
-
-int clockwork_attach(double   sample_rate,
-                uint32_t block_size,
-                uint32_t input_channels,
-                uint32_t output_channels,
-                uint32_t verbosity,
-                void*    guest_memory,
-                uint32_t guest_memory_bytes,
-                const void* guest_config,
-                uint32_t    guest_config_bytes,
-                uint32_t    arena_bytes,
-                const void* assets,
-                uint32_t    assets_bytes,
-                void*       returns,
-                uint32_t    returns_bytes) {
-    if (g_attached == 0) {
-        clockwork_init(sample_rate, block_size, input_channels, output_channels,
-                  verbosity, guest_memory, guest_memory_bytes,
-                  guest_config, guest_config_bytes, arena_bytes,
-                  assets, assets_bytes, returns, returns_bytes);
-        g_attached = 1;
-        return CLOCKWORK_ATTACH_BOOTED;
-    }
-
-    if (!geometry_serves(sample_rate, block_size, input_channels, output_channels)) {
-        clockwork_log("[attach] refused: running at %.0f Hz, %u frames, %u in / %u out; "
-                "asked for %.0f Hz, %u frames, %u in / %u out",
-                g_clockwork_config.sample_rate, g_clockwork_config.block_size,
-                g_clockwork_config.input_channels, g_clockwork_config.output_channels,
-                sample_rate, block_size, input_channels, output_channels);
-        return CLOCKWORK_ATTACH_REFUSED;
-    }
-
-    // Joined. Deliberately nothing else: the arguments are not applied, the
-    // guest config is not copied over the running one, and the arena is not
-    // re-pointed. A joiner takes what is there.
-    ++g_attached;
-    return CLOCKWORK_ATTACH_JOINED;
-}
-
-void     clockwork_detach(void)   { if (g_attached) --g_attached; }
-uint32_t clockwork_attached(void) { return g_attached; }
-
-void clockwork_init(double   sample_rate,
+void clockwork_init(ClockworkCore* core,
+              double   sample_rate,
               uint32_t block_size,
               uint32_t input_channels,
               uint32_t output_channels,
@@ -436,30 +374,50 @@ void clockwork_init(double   sample_rate,
               uint32_t    assets_bytes,
               void*       returns,
               uint32_t    returns_bytes) {
-    // THE SOLE-HOST CALL. Reconfiguring is routine — a device switch arrives
-    // here — but once a second host has attached there is no longer any such
-    // thing as "the" host's geometry, and applying one host's would silently
-    // reconfigure the other's engine. Refused rather than obeyed. See
-    // clockwork_attach in lanes.h.
-    if (g_attached > 1) {
-        clockwork_log("[init] refused: %u hosts are attached, so there is no "
-                "single host whose geometry to apply. Use clockwork_attach.",
-                g_attached);
+    if (!clockwork_core_live(core)) {
+        clockwork_log(core, "[init] refused: not a live core (clockwork_core_new)");
         return;
     }
-    // However this host arrived, it is now the one attached.
-    if (g_attached == 0) g_attached = 1;
+    // The core's own state, made at its first init.
+    if (!clockwork::make_state(core)) {
+        clockwork_log(core, "[init] refused: the core's state could not be made");
+        return;
+    }
+#if CLOCKWORK_RUST_LOG && !defined(__EMSCRIPTEN__)
+    // The Rust subsystems' lines go onto the ring of the core each names
+    // (rust/clockwork-log). One stateless sink serves every core, so
+    // installing it again is a no-op.
+    clockwork_rust_log_install([](ClockworkCore* c, const char* line, uint32_t len) {
+        clockwork_log_raw(c, line, len);
+    });
+#endif
+    // No block renders while the core is built or comes back: one in flight
+    // ends first, and the tick answers busy until this returns.
+    const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_CONTROL, clockwork::GateHold::Take::Wait);
+    clockwork_wire_own_routes(core);
 
-    uint8_t* const arena = g_external_segment ? g_external_segment : clockwork_local_arena();
+    // The guest's config block goes into the arena init_memory will read: the
+    // host's segment when it gave the core one.
+    const ClockworkConfig& cfg = *clockwork::config_of(core);
+    uint8_t* const arena = cfg.segment ? cfg.segment : clockwork_local_arena(core);
+#ifndef __EMSCRIPTEN__
+    // Natively the arena is made here or not at all; on the web a host that
+    // has not claimed the engine's memory yet gets it in init_memory.
+    if (!arena) {
+        clockwork_log(core, "[init] refused: no memory for the engine's arena (%u bytes)",
+                      clockwork::layout_of(core).arena_bytes);
+        return;
+    }
+#endif
 #if CLOCKWORK_SYNTH
     // AN ARENA ALREADY UP IS AUDIO COMING BACK to the instance in it, as a
     // device returning is (docs/RESTARTS.md, "One event, every route"): a
     // page whose worklet the browser took away, reloaded over the same
-    // memory; a host attaching again; a host's own device change. It does the
+    // memory; a host's own device change. It does the
     // least that gets the engine back where it was (come_back, below, once
     // the host's bytes are in place). With no block rendering, which is this
     // call's contract anyway.
-    const bool coming_back = memory_initialized && get_shared_memory_base() == arena;
+    const bool coming_back = arena && clockwork::laid_out_base(core) == arena;
 #endif
 
     // Copy the guest's bytes into the region reserved for them, without
@@ -473,76 +431,132 @@ void clockwork_init(double   sample_rate,
         // (writeGuestConfigToMemory); this is the backstop for a host that
         // calls clockwork_init itself.
         if (guest_config_bytes > GUEST_CONFIG_SIZE) {
-            clockwork_log("[init] refused: guest config is %u bytes but the region "
+            clockwork_log(core, "[init] refused: guest config is %u bytes but the region "
                     "holds %u — raise GUEST_CONFIG_SIZE (shared_memory.h) or send less",
                     guest_config_bytes, (uint32_t)GUEST_CONFIG_SIZE);
             return;
         }
-        std::memcpy(arena + GUEST_CONFIG_START, guest_config, guest_config_bytes);
+        std::memcpy(arena + clockwork::layout_of(core).guest_config_start, guest_config, guest_config_bytes);
     }
 
-    clockwork_set_engine_config(sample_rate, block_size, input_channels,
+    clockwork_set_engine_config(core, sample_rate, block_size, input_channels,
                            output_channels, verbosity,
                            guest_memory, guest_memory_bytes, arena_bytes,
                            assets, assets_bytes, returns, returns_bytes);
 #if CLOCKWORK_SYNTH
-    if (coming_back) {
-        come_back();
-        return;
-    }
+    if (coming_back)
+        come_back(core);
+    else
 #endif
-    init_memory();
+        init_memory(core);
+    // Where the core's arena is, so a client opened over it finds its core.
+    if (uint8_t* base = clockwork::arena_base(core))
+        clockwork_core_set_memory(core, base, arenaHeader(base)->arena_bytes);
 }
 
-void clockwork_set_channel_ceilings(uint32_t input_channels, uint32_t output_channels) {
-    g_clockwork_config.input_channels  = input_channels;
-    g_clockwork_config.output_channels = output_channels;
+// ── Setup ─────────────────────────────────────────────────────────────────────
+
+namespace {
+// What a host says of a core before it boots goes into the core's config,
+// made with its state if this is the first thing said; null for a core that
+// is not live.
+ClockworkConfig* setup_of(ClockworkCore* core) {
+    return clockwork::make_state(core) ? clockwork::config_of(core) : nullptr;
+}
 }
 
-void clockwork_declare_fp_env(uint32_t env) {
-    g_clockwork_config.fp_env = env;
+void clockwork_set_channel_ceilings(ClockworkCore* core, uint32_t input_channels, uint32_t output_channels) {
+    if (ClockworkConfig* c = setup_of(core)) {
+        c->input_channels  = input_channels;
+        c->output_channels = output_channels;
+    }
 }
 
-void clockwork_set_guest_bulk_bytes(size_t bytes) {
-    g_clockwork_config.guest_bulk_bytes = bytes;
+void clockwork_declare_fp_env(ClockworkCore* core, uint32_t env) {
+    if (ClockworkConfig* c = setup_of(core)) c->fp_env = env;
 }
 
-const char* clockwork_boot_error(void) {
-    return clockwork_last_boot_error();
+void clockwork_set_guest_bulk_bytes(ClockworkCore* core, size_t bytes) {
+    if (ClockworkConfig* c = setup_of(core)) c->guest_bulk_bytes = bytes;
+}
+
+void clockwork_set_deterministic_seed(ClockworkCore* core, int32_t seed) {
+    if (ClockworkConfig* c = setup_of(core)) c->deterministic_seed = seed;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void clockwork_carry_generation(ClockworkCore* core, uint32_t generation) {
+    if (ClockworkConfig* c = setup_of(core)) c->carried_generation = std::max(c->carried_generation, generation);
+}
+
+void clockwork_reserve_lanes(ClockworkCore* core, uint32_t lanes) {
+    if (ClockworkConfig* c = setup_of(core))
+        c->reserved_lanes = lanes < CLOCKWORK_RESERVED_LANES_MAX ? lanes : CLOCKWORK_RESERVED_LANES_MAX;
+}
+
+uint32_t clockwork_reserved_lanes(ClockworkCore* core) {
+    const ClockworkConfig* c = clockwork::config_of(core);
+    return c ? c->reserved_lanes : 0;
+}
+
+uint32_t clockwork_lane_base(ClockworkCore* core) {
+    const clockwork::Build* b = clockwork::build(core);
+    return b ? b->lane_base : 0;
+}
+
+void clockwork_reserve_link_audio_lanes(ClockworkCore* core, uint32_t lanes) {
+    if (ClockworkConfig* c = setup_of(core))
+        c->link_audio_lanes = lanes < CLOCKWORK_RESERVED_LANES_MAX ? lanes : CLOCKWORK_RESERVED_LANES_MAX;
+}
+
+uint32_t clockwork_link_audio_lane_base(ClockworkCore* core) {
+    const clockwork::Build* b = clockwork::build(core);
+    return b ? b->link_audio_lane_base : 0;
+}
+
+uint32_t clockwork_link_audio_lanes(ClockworkCore* core) {
+    const ClockworkConfig* c = clockwork::config_of(core);
+    return c && clockwork_link_audio_lane_base(core) ? c->link_audio_lanes : 0;
 }
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
-const ClockworkArenaHeader* clockwork_arena_header(void) {
-    return arenaHeader(get_shared_memory_base());
+const ClockworkArenaHeader* clockwork_arena_header(ClockworkCore* core) {
+    uint8_t* const base = clockwork::arena_base(core);
+    return base ? arenaHeader(base) : nullptr;
 }
 
-void* clockwork_lanes_base(void) {
-    return get_shared_memory_base();
+void* clockwork_lanes_base(ClockworkCore* core) {
+    return clockwork::arena_base(core);
 }
 
 // ── The control ring (lanes.h) ──────────────────────────────────────────────
 
-void clockwork_control_serve(int on) {
-    if (!cursors) return;
+void clockwork_control_serve(ClockworkCore* core, int on) {
+    RingCursors* const cursors = clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core));
+    if (!clockwork::ingress(core) || !cursors) return;
     if (on) cursors->status_flags.fetch_or(STATUS_CONTROL_SERVED, std::memory_order_release);
     else    cursors->status_flags.fetch_and(~static_cast<uint32_t>(STATUS_CONTROL_SERVED),
                                            std::memory_order_release);
 }
 
-int clockwork_control_served(void) {
-    return cursors && (cursors->status_flags.load(std::memory_order_acquire) & STATUS_CONTROL_SERVED) ? 1 : 0;
+int clockwork_control_served(ClockworkCore* core) {
+    const RingCursors* cursors = clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core));
+    return clockwork::ingress(core) && cursors && (cursors->status_flags.load(std::memory_order_acquire) & STATUS_CONTROL_SERVED) ? 1 : 0;
 }
 
 // One pointer, so a writer always calls a function with its own context.
-static std::atomic<const ClockworkControlWaker*> g_control_waker{nullptr};
-
-void clockwork_control_waker(const ClockworkControlWaker* waker) {
-    g_control_waker.store(waker, std::memory_order_release);
+void clockwork_control_waker(ClockworkCore* core, const ClockworkControlWaker* waker) {
+    if (clockwork::Ingress* in = clockwork::ingress(core))
+        in->control_waker.store(waker, std::memory_order_release);
 }
 
-void clockwork_control_wake(void) {
-    if (const ClockworkControlWaker* w = g_control_waker.load(std::memory_order_acquire))
+void clockwork_control_wake(ClockworkCore* core) {
+    clockwork::Ingress* in = clockwork::ingress(core);
+    if (!in) return;
+    if (const ClockworkControlWaker* w = in->control_waker.load(std::memory_order_acquire))
         w->wake(w->ctx);
 }
 

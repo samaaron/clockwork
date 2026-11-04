@@ -244,7 +244,7 @@ export class HostFront {
         return;
       case "sink/send": {
         // A GUEST'S send: the engine's sink endpoint on the web is this
-        // host (clockwork_event_sink.h, clockwork_sink_set_host_emit). The
+        // host (clockwork_event_sink.h, clockwork_sink_set_host_emitter). The
         // bytes go to the port with the send's time, and the port is opened
         // on demand — opening a sink onto a port opens the port, as natively.
         const raw = args[1];

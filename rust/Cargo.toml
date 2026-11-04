@@ -60,6 +60,13 @@
 #                          an engine in this process). Built on clockwork-abi;
 #                          tested against a headless engine linked through
 #                          clockwork-sys with the dummy DSP.
+# * `clockwork-core`    — one engine's core: made and closed, and which cores are
+#                          live (docs/ENGINES.md). The handle every lanes.h
+#                          entry point takes.
+# * `clockwork-guards`  — checks that read what the compiler built: every
+#                          mutable variable with static storage, held to
+#                          scripts/globals.list. A development tool; never in
+#                          the staticlib.
 #
 # The midi/gamepad crates each also compile to a wasm-bindgen module (loaded by
 # the main-thread JS, where the Web MIDI / Gamepad APIs live).
@@ -88,6 +95,9 @@ members = [
     "clockwork-sys",
     "clockwork-client",
     "clockwork-log",
+    "clockwork-guards",
+    "clockwork-core",
+    "clockwork-fence",
 ]
 
 [profile.release]

@@ -37,45 +37,48 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include "clockwork_core.h"   // ClockworkEntry
 
-// Which guest entry point is open, if any.
+// Which guest entry point a call opens.
 enum class GuestCall : uint8_t {
-    None       = 0,
-    Boot       = 1,   // dsp_describe, dsp_memory_bytes, dsp_memory_bulk_bytes, dsp_new, dsp_free
-    Processing = 2,   // dsp_process, dsp_osc, dsp_asset
+    Boot,         // dsp_describe, dsp_memory_bytes, dsp_memory_bulk_bytes, dsp_new, dsp_free
+    Processing,   // dsp_process, dsp_osc, dsp_asset
 };
 
-// Open and close a guest call. Not nested: the guest is called from one
-// thread, one entry point at a time.
-void clockwork_guest_call_begin(GuestCall kind);
-void clockwork_guest_call_end();
-
-// A guest call for the length of a scope.
+// A guest call for the length of a scope: the thread's entry says so (the
+// same core, clockwork_core_enter) and the guest fence closes. Not nested:
+// the guest is called from one thread, one entry point at a time.
 struct GuestCallScope {
-    explicit GuestCallScope(GuestCall kind) { clockwork_guest_call_begin(kind); }
-    ~GuestCallScope() { clockwork_guest_call_end(); }
+    explicit GuestCallScope(GuestCall kind);
+    ~GuestCallScope();
     GuestCallScope(const GuestCallScope&) = delete;
     GuestCallScope& operator=(const GuestCallScope&) = delete;
+
+private:
+    const ClockworkEntry previous_;
 };
 
 // The census. Bytes held is what the allocator says it gave; the counts are
-// calls to malloc, calloc or realloc.
-size_t   clockwork_guest_malloc_bytes();          // held now
-uint32_t clockwork_guest_mallocs_boot();          // calls inside the boot entry points
-uint32_t clockwork_guest_mallocs_processing();    // calls inside the processing entry points
-uint32_t clockwork_guest_frees();                 // free calls inside any entry point
+// calls to malloc, calloc or realloc. Each core's (clockwork::GuestMallocs):
+// a call is charged to the core whose guest call the thread is inside.
+namespace clockwork { struct CoreState; }
+size_t   clockwork_guest_malloc_bytes(const clockwork::CoreState& st);         // held now
+uint32_t clockwork_guest_mallocs_boot(const clockwork::CoreState& st);         // calls inside the boot entry points
+uint32_t clockwork_guest_mallocs_processing(const clockwork::CoreState& st);   // calls inside the processing entry points
+uint32_t clockwork_guest_frees(const clockwork::CoreState& st);                // free calls inside any entry point
 
 // Forget the call counts: a cold swap builds a new instance, and its calls
 // start from nothing. The bytes held are not forgotten: what the old
 // instance took and never freed is still the guest's, and still counted.
-void clockwork_guest_malloc_reset();
+void clockwork_guest_malloc_reset(clockwork::CoreState& st);
 
 // THE WHOLE PROGRAM'S MALLOCS AFTER BOOT, any scope: what reaches the
 // system allocator once the engine is up, which the memory model says
-// should be nothing (clockwork's own allocations have the rust heap, the
-// guest's its bulk memory). The mark is taken when the engine is ready;
-// the two readings count from it. Same wrap as the guest's census: 0 by
-// absence where the link cannot wrap.
+// should be nothing (clockwork's own allocations have the core's own pool,
+// the guest's its bulk memory). The process's, not a core's: only the web
+// counts, and a wasm instance holds one core. The mark is taken when the
+// engine is ready; the two readings count from it. Same wrap as the guest's
+// census: 0 by absence where the link cannot wrap.
 #ifdef __cplusplus
 extern "C"
 #endif

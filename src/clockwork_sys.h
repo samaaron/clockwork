@@ -60,7 +60,6 @@
 #include "OscIngress.h"
 #include "shared_memory.h"   // ClockworkClockState, readClockworkClock
 #include "clockwork_prefix.h"
-#include "shared_memory.h"   // ClockworkClockState, readClockworkClock
 #include "osc/OscOutboundPacketStream.h"
 #include "osc/OscReceivedElements.h"
 
@@ -72,12 +71,6 @@
 // caller knows where the arena is, this does not, and so stays pure. Split
 // out of the handler because on a host with an NRT thread the refusal is
 // decided at the END of clockwork's own chain, not at its front.
-// Refusals that could not be encoded (clockwork_sys_refuse): a count, for the metrics.
-inline std::atomic<uint32_t>& clockwork_sys_refusals_dropped() {
-    static std::atomic<uint32_t> count{0};
-    return count;
-}
-
 template <class Emit>
 void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
                           uint32_t generation, Emit&& emit) {
@@ -90,21 +83,20 @@ void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
     size_t n = 0;
     while (n < limit && data[n] != '\0') ++n;
     std::memcpy(addr.data(), data, n);
-    std::array<char, 512> buf{};
-    try {
-        osc::OutboundPacketStream ps(buf.data(), buf.size());
-        ps << osc::BeginMessage(CLOCKWORK_SYS("error"))
-           << addr.data() << reason
-           << static_cast<osc::int32>(generation) << osc::EndMessage;
-        emit(reinterpret_cast<const uint8_t*>(ps.Data()),
-             static_cast<uint32_t>(ps.Size()));
-    } catch (...) {
-        // A refusal that will not encode (an address longer than the buffer)
-        // is dropped: there is nothing truthful left to say, and this runs on
-        // the audio thread. Counted, so a client that sends such things can
-        // be seen doing it.
-        clockwork_sys_refusals_dropped().fetch_add(1, std::memory_order_relaxed);
-    }
+    // The reason is bounded the same way, so every refusal fits the frame
+    // below and none is ever dropped: the address and the reason padded to
+    // four, the message's own address and type tag, and the generation.
+    std::array<char, 200> why{};
+    for (size_t i = 0; reason && reason[i] != '\0' && i < why.size() - 1; ++i) why[i] = reason[i];
+    constexpr size_t kFrame = 256 + 4 + 200 + 4 + 24 + 8 + 4;
+    std::array<char, kFrame> buf{};
+    static_assert(kFrame <= 512, "a refusal rides the audio thread's stack");
+    osc::OutboundPacketStream ps(buf.data(), buf.size());
+    ps << osc::BeginMessage(CLOCKWORK_SYS("error"))
+       << addr.data() << why.data()
+       << static_cast<osc::int32>(generation) << osc::EndMessage;
+    emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+         static_cast<uint32_t>(ps.Size()));
 }
 
 // == The client half of the verb surface ========================================
@@ -432,10 +424,3 @@ private:
     static constexpr size_t kMaxAddr = 64;
     OscIngress mRoutes;
 };
-
-// The boundary the audio-thread drain classifies through, published by the engine
-// at init (native: ClockworkEngine::mSplit; worklet/lanes hosts: a file-static
-// in audio_processor.cpp). Mirrors g_active_clockwork_clock -- single publisher, the
-// audio thread loads it `acquire` and null-checks. Defined in
-// audio_processor.cpp (compiled by both targets).
-extern std::atomic<OscSplit*> g_active_split;

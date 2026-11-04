@@ -26,7 +26,8 @@ that needs more than that is not one of these rules.
 A restart does the least that gets the engine back where it was. Audio
 stops and comes back — a device switched, or lost and found; a laptop's
 lid; a page whose worklet the browser took away, reloaded over the memory
-it ran in; an embedded host attaching again — and what comes back is the
+it ran in; an embedded host reconfiguring, as a plugin host deactivates an
+instance and activates it again — and what comes back is the
 same instance, holding everything it held, unless what it was built for
 has changed in a way it cannot take. One rule decides, for every host
 (src/restart_plan.h, which the native engine's device switch and a host
@@ -38,7 +39,7 @@ it is replaced. Only then is there a new instance.
 A guest instance is one conversation, and its generation is its name.
 Replacing it ends one conversation and starts the next. However it is
 replaced — a device change the instance cannot take, a reload into new
-memory or at a rate it cannot take, an embedded host attaching again at
+memory or at a rate it cannot take, an embedded host reconfiguring to
 one — it is the same event, told the same way:
 
 1. **The old generation closes.** The generation word goes odd, and
@@ -72,8 +73,8 @@ the test that shows it.
 
 | event | the guest instance | the arena | said to clients |
 |---|---|---|---|
-| **hot restart** (a device change the instance takes; a browser reload over the same memory, or an embedded host attaching again, with nothing changed it cannot take) | survives | untouched, every region | statechange; and when a fact `setup` named has changed (the rate, the device's callback), `/clockwork/setup/changed ,iii rate buffer generation` naming the same generation, on the instance's ring as audio resumes |
-| **cold restart** (a rebuild: a device change the instance cannot take, and the same at a browser reload over the same memory or an embedded host attaching again) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
+| **hot restart** (a device change the instance takes; a browser reload over the same memory, or an embedded host reconfiguring, with nothing changed it cannot take) | survives | untouched, every region | statechange; and when a fact `setup` named has changed (the rate, the device's callback), `/clockwork/setup/changed ,iii rate buffer generation` naming the same generation, on the instance's ring as audio resumes |
+| **cold restart** (a rebuild: a device change the instance cannot take, and the same at a browser reload over the same memory or an embedded host reconfiguring) | destroyed and built again | regions of lifetime `rebuild` reset; the rest kept | statechange `restarting` with the generation closing, `setup` with the one opened, as the new instance's first word, and statechange `running` as the swap ends |
 | **cold boot** (a new arena) | built | every region reset, including lifetime `cold boot` | statechange `booting`, then `running` |
 
 A hot restart is a device change the instance can take without being
@@ -106,8 +107,15 @@ its clients: the old generation closes (in the browser, the old worklet
 refuses what waited for it before its memory goes, `clockwork_close`), the
 new arena carries the generation on, and its instance says `setup`.
 
+Closing an engine's core ends the engine: its instance, its memory and its
+arena go, and the next `clockwork_init` is a cold boot (docs/ENGINES.md,
+3.1). An embedded host that closes its handle and attaches again gets a
+new engine; one that wants its engine back keeps the handle and
+reconfigures it.
+
 `clockwork_init` on an arena that is already up is audio coming back,
-whoever calls it: an embedded host attaching again, a page reloaded over
+whoever calls it: an embedded host reconfiguring
+(`clockwork_embed_reconfigure`), a page reloaded over
 the same memory (whose new module finds the old one's state where it left
 it, the instance included), a host's own device change. It does the least
 that gets the engine back where it was (`come_back` in
@@ -124,9 +132,11 @@ block (`g_block_open`), with whatever that block was changing half changed.
 
 Every guest instance has a generation. It starts at 1 and moves on at every
 cold restart, and never goes back: a new arena carries it on from the last
-generation its process opened, or from one its host hands over from memory
-that has gone (`clockwork_carry_generation`: the page's reload into new
-memory). It is the key to everything below: a region of lifetime
+generation its core opened, from the one the memory itself still holds from
+an engine that used it before (a segment its clients still map), or from one
+its host hands over from memory that has gone (`clockwork_carry_generation`:
+the page's reload into new memory). A core's, not the process's: cores side
+by side number their own, and a new core on new memory starts at 1. It is the key to everything below: a region of lifetime
 `rebuild` belongs to one generation, a refusal names the generation that
 refused, and a client rebuilds against the generation `setup` named, with
 nothing from an earlier one taken for the current one.
@@ -267,8 +277,9 @@ waiting on, so these are the rules a client may rely on:
    | `OscChannel.send` (the browser) | `/clockwork/error` through the client's inbound path, from the main thread's channel; `onRefused` and `lastRefusal` on any channel | `false` |
 
    A refusal at a door that finds no room on clockwork's ring is lost, and
-   counted as an egress frame refused; one too long to encode is counted
-   (`clockwork_sys_refusals_dropped`). The metrics live as long as the
+   counted as an egress frame refused; none is ever too long to encode,
+   since the address and the reason it carries are both cut to a bound the
+   frame holds (`clockwork_sys_refuse`). The metrics live as long as the
    arena, so a count made at a teardown is still there after the rebuild.
 2. **Clockwork's own verbs keep working.** Device, state, notify and the
    rest of the `/clockwork/` namespace are answered throughout a restart;

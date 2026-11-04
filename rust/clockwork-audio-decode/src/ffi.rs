@@ -11,6 +11,7 @@
 //! A panic anywhere below is a refused file, not a crash: the decoder is
 //! handed hostile bytes by design, and the boundary catches what escapes.
 
+use clockwork_fence::no_unwind;
 use std::os::raw::{c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -72,23 +73,25 @@ pub unsafe extern "C" fn clockwork_audio_decode_probe(
     len: usize,
     info: *mut ClockworkAudioDecodeInfo,
 ) -> c_int {
-    // SAFETY: the contract above.
-    let Some(bytes) = (unsafe { bytes_of(data, len) }) else {
-        return E_ARG;
-    };
-    if info.is_null() {
-        return E_ARG;
-    }
-    let result = catch_unwind(AssertUnwindSafe(|| probe(bytes)));
-    match result {
-        Ok(Ok(i)) => {
-            // SAFETY: writable, per the contract.
-            unsafe { *info = i.into() };
-            0
+    no_unwind(0, || {
+        // SAFETY: the contract above.
+        let Some(bytes) = (unsafe { bytes_of(data, len) }) else {
+            return E_ARG;
+        };
+        if info.is_null() {
+            return E_ARG;
         }
-        Ok(Err(r)) => r.status(),
-        Err(_) => E_ARG,
-    }
+        let result = catch_unwind(AssertUnwindSafe(|| probe(bytes)));
+        match result {
+            Ok(Ok(i)) => {
+                // SAFETY: writable, per the contract.
+                unsafe { *info = i.into() };
+                0
+            }
+            Ok(Err(r)) => r.status(),
+            Err(_) => E_ARG,
+        }
+    })
 }
 
 /// The caller's buffer, grown through its own function.
@@ -146,47 +149,49 @@ pub unsafe extern "C" fn clockwork_audio_decode_run(
     info: *mut ClockworkAudioDecodeInfo,
     out: *mut *mut f32,
 ) -> c_int {
-    if out.is_null() || info.is_null() {
-        return E_ARG;
-    }
-    // SAFETY: writable, per the contract.
-    unsafe { *out = std::ptr::null_mut() };
-    // SAFETY: the contract above.
-    let Some(bytes) = (unsafe { bytes_of(data, len) }) else {
-        return E_ARG;
-    };
-    let Some(grow) = grow else { return E_ARG };
+    no_unwind(0, || {
+        if out.is_null() || info.is_null() {
+            return E_ARG;
+        }
+        // SAFETY: writable, per the contract.
+        unsafe { *out = std::ptr::null_mut() };
+        // SAFETY: the contract above.
+        let Some(bytes) = (unsafe { bytes_of(data, len) }) else {
+            return E_ARG;
+        };
+        let Some(grow) = grow else { return E_ARG };
 
-    let mut buffer = Grown {
-        grow,
-        block: std::ptr::null_mut(),
-        capacity: 0,
-        len: 0,
-    };
-    let result = catch_unwind(AssertUnwindSafe(|| decode(bytes, max_bytes, &mut buffer)));
+        let mut buffer = Grown {
+            grow,
+            block: std::ptr::null_mut(),
+            capacity: 0,
+            len: 0,
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| decode(bytes, max_bytes, &mut buffer)));
 
-    // The block is the caller's whatever happened: on success it is the
-    // answer, on failure it is theirs to free.
-    // SAFETY: writable, per the contract.
-    unsafe { *out = buffer.block };
-    match result {
-        Ok(Ok(i)) => {
-            if buffer.block.is_null() {
-                // A file of no frames still hands back a block to free, as
-                // every success does: one sample's worth.
-                // SAFETY: grow is realloc-shaped.
-                let block = unsafe { grow(std::ptr::null_mut(), std::mem::size_of::<f32>()) };
-                if block.is_null() {
-                    return Refusal::NoMemory.status();
+        // The block is the caller's whatever happened: on success it is the
+        // answer, on failure it is theirs to free.
+        // SAFETY: writable, per the contract.
+        unsafe { *out = buffer.block };
+        match result {
+            Ok(Ok(i)) => {
+                if buffer.block.is_null() {
+                    // A file of no frames still hands back a block to free, as
+                    // every success does: one sample's worth.
+                    // SAFETY: grow is realloc-shaped.
+                    let block = unsafe { grow(std::ptr::null_mut(), std::mem::size_of::<f32>()) };
+                    if block.is_null() {
+                        return Refusal::NoMemory.status();
+                    }
+                    // SAFETY: writable, per the contract.
+                    unsafe { *out = block.cast() };
                 }
                 // SAFETY: writable, per the contract.
-                unsafe { *out = block.cast() };
+                unsafe { *info = i.into() };
+                0
             }
-            // SAFETY: writable, per the contract.
-            unsafe { *info = i.into() };
-            0
+            Ok(Err(r)) => r.status(),
+            Err(_) => E_ARG,
         }
-        Ok(Err(r)) => r.status(),
-        Err(_) => E_ARG,
-    }
+    })
 }

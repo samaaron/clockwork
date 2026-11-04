@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
-//! The boot door: an engine on the audio device, ticking itself. Its own
-//! test binary, because one engine per process and engine.rs attaches.
+//! The boot door: an engine on the audio device, ticking itself. Run only
+//! when asked for, since it opens the machine's own device.
 //!
 //! A machine with no audio device (a CI runner) still boots — the device
 //! layer opens what it can — so what is asserted about the device is
@@ -33,9 +33,11 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
         }
         Err(e) => panic!("boot refused: {e}"),
     };
-    // One engine per process.
-    assert_eq!(Embed::boot(&cfg).err(), Some(Error::Perm));
-    assert_eq!(Embed::attach(&EmbedConfig::new().sample_rate(48_000.0).output_channels(2)).err(), Some(Error::Perm));
+    // An attach beside it is an engine of its own, and closing it leaves
+    // this one.
+    let beside = Embed::attach(&EmbedConfig::new().sample_rate(48_000.0).output_channels(2))
+        .expect("an engine beside the booted one");
+    drop(beside);
 
     // A booted engine renders itself: a host's render is answered with 0.
     let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);

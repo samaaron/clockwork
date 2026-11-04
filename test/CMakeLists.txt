@@ -48,13 +48,16 @@ add_executable(clockwork_tests
     test_ring_exhaustive.cpp
     test_ring_reader.cpp
     test_wait_word.cpp
+    test_os_pages.cpp
     test_endpoint_requests.cpp
     test_timetag.cpp
     test_ring_concurrency.cpp
     test_lanes.cpp
     test_arena.cpp
     test_scope.cpp
-    test_embed.cpp
+
+    # How often one kind of log line is said.
+    test_log_limit.cpp
 
     # OSC: the codec, the ingress router, and the one prefix clockwork keeps.
     test_osc_codec.cpp
@@ -345,13 +348,35 @@ function(clockwork_discover_tests target)
 endfunction()
 clockwork_discover_tests(clockwork_tests)
 
-# ─── Attaching ───────────────────────────────────────────────────────────────
-# More than one host in one process. Its own executable because it walks the
-# process-wide attach count from zero, which no other binary can still be at.
+# ─── Plugin binaries ─────────────────────────────────────────────────────────
+# A plugin binary built on Clockwork (clockwork_plugin_module,
+# src/clockwork_plugin.h), and a host that loads two copies of it into one
+# process (docs/ENGINES.md). The host links no Clockwork of its own, and
+# so takes Catch2's own main rather than test_main.cpp, which does.
+if(CLOCKWORK_PLUGIN_MODULES)
+    add_library(clockwork_test_plugin MODULE plugin_module.cpp)
+    clockwork_plugin_module(clockwork_test_plugin ENTRY clockwork_test_plugin_entry)
+    add_executable(clockwork_plugin_module_tests test_plugin_module.cpp)
+    target_link_libraries(clockwork_plugin_module_tests PRIVATE Catch2::Catch2WithMain ${CMAKE_DL_LIBS})
+    target_compile_definitions(clockwork_plugin_module_tests PRIVATE
+        CLOCKWORK_TEST_PLUGIN="$<TARGET_FILE:clockwork_test_plugin>")
+    add_dependencies(clockwork_plugin_module_tests clockwork_test_plugin)
+    catch_discover_tests(clockwork_plugin_module_tests)
+endif()
+
+# ─── Hosts that make the core ────────────────────────────────────────────────
+# Cases whose host makes the engine's core and closes it: the lanes ABI's
+# lifecycle, the embed door, a core's close under other threads. Their own
+# executable, so the cores they make and close are all the process holds:
+# clockwork_tests' fixture holds one for the whole binary.
 add_executable(clockwork_attach_tests
     test_main.cpp
     OscTestUtils.cpp
     test_attach.cpp
+    test_core_close.cpp
+    test_core_gate.cpp
+    test_core_profile.cpp
+    test_embed.cpp
     test_restart_grid_embed.cpp
 )
 target_include_directories(clockwork_attach_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -361,6 +386,55 @@ target_compile_definitions(clockwork_attach_tests PRIVATE
     JUCE_APPLICATION_NAME_STRING="clockwork-attach-tests"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
 clockwork_discover_tests(clockwork_attach_tests)
+
+# ─── A guest that leaves its instance count unset ───────────────────────────
+# The dummy built to leave DspInfo::instances unset, as a zeroed DspInfo
+# does: a guest a process holds once. Its own executable, because a process
+# links one guest.
+add_library(clockwork_dummy_unset STATIC ${PROJECT_SOURCE_DIR}/dsp/dummy/dummy_dsp.cpp)
+target_link_libraries(clockwork_dummy_unset PRIVATE clockwork)
+target_compile_definitions(clockwork_dummy_unset PRIVATE DUMMY_DSP_INSTANCES=0)
+clockwork_lib_group(CLOCKWORK_UNSET_GROUP clockwork_dummy_unset)
+add_executable(clockwork_guest_once_tests
+    test_main.cpp
+    test_guest_once.cpp
+)
+target_include_directories(clockwork_guest_once_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_dependencies(clockwork_guest_once_tests clockwork_dummy_unset)
+target_link_libraries(clockwork_guest_once_tests PRIVATE ${CLOCKWORK_UNSET_GROUP} Catch2::Catch2)
+target_compile_definitions(clockwork_guest_once_tests PRIVATE
+    JUCE_APPLICATION_NAME_STRING="clockwork-guest-once-tests"
+    JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
+clockwork_discover_tests(clockwork_guest_once_tests)
+
+# ─── Reference runs and independence ─────────────────────────────────────────
+# What one engine does, recorded: each case a scenario whose trace must equal
+# test/reference/<platform>/ (docs/ENGINES.md.1). Its own executable
+# because each case needs an engine of its own, so ctest runs each in a
+# process of its own. And the same scenarios beside each other, every core
+# held to its trace alone (Part 4.2): each of those runs a whole engine per
+# scenario at once, so it runs with no other case beside it.
+string(TOLOWER "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}" CLOCKWORK_REFERENCE_PLATFORM)
+add_executable(clockwork_reference_tests
+    test_main.cpp
+    OscTestUtils.cpp
+    LanesFixture.cpp
+    test_reference.cpp
+)
+target_include_directories(clockwork_reference_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_dependencies(clockwork_reference_tests ${CLOCKWORK_DSP})
+target_link_libraries(clockwork_reference_tests PRIVATE ${CLOCKWORK_LIB_GROUP} Catch2::Catch2)
+target_compile_definitions(clockwork_reference_tests PRIVATE
+    CLOCKWORK_REFERENCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/reference"
+    CLOCKWORK_REFERENCE_PLATFORM="${CLOCKWORK_REFERENCE_PLATFORM}"
+    JUCE_APPLICATION_NAME_STRING="clockwork-reference-tests"
+    JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
+if(MSVC)
+    target_compile_options(clockwork_reference_tests PRIVATE /W1 /wd4244 /wd4267 /wd4305 /permissive-)
+endif()
+catch_discover_tests(clockwork_reference_tests TEST_SPEC "~[independence]" PROPERTIES SKIP_RETURN_CODE 4)
+catch_discover_tests(clockwork_reference_tests TEST_SPEC "[independence]"
+                     PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 4)
 
 # ─── Reserved lanes ──────────────────────────────────────────────────────────
 # The channels above the device, where a Link peer's audio lands.
@@ -532,6 +606,11 @@ target_compile_definitions(clockwork_engine_tests PRIVATE
 if(WIN32)
     target_link_libraries(clockwork_engine_tests PRIVATE ws2_32)
 endif()
+# A live track's tap, claimed in the engine's arena: the engine's half of
+# the tracks (TrackControl), which exists only with the plugin host.
+if(CLOCKWORK_PLUGINS)
+    target_sources(clockwork_engine_tests PRIVATE test_track_tap.cpp)
+endif()
 clockwork_discover_tests(clockwork_engine_tests)
 if(APPLE)
     # The MIDI case receives on a CoreMIDI virtual destination of its own.
@@ -541,7 +620,7 @@ endif()
 
 # The tests are ours too: with CLOCKWORK_WERROR (the top-level CMakeLists.txt) a warning in one fails the build.
 if(CLOCKWORK_WERROR AND NOT MSVC)
-    foreach(_t clockwork_tests clockwork_attach_tests clockwork_lanes_reserved_tests clockwork_engine_tests clockwork_test_shm_peer)
+    foreach(_t clockwork_tests clockwork_attach_tests clockwork_reference_tests clockwork_lanes_reserved_tests clockwork_engine_tests clockwork_test_shm_peer)
         if(TARGET ${_t})
             target_compile_options(${_t} PRIVATE -Werror)
         endif()

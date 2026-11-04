@@ -30,7 +30,8 @@ use std::time::{Duration, Instant};
 /// however starved of the CPU either thread is.
 const NO_PROGRESS: Duration = Duration::from_secs(30);
 
-use clockwork_ports::ffi::*;
+mod common;
+use common::t;
 
 const SOURCE: i32 = 1;
 const SINK: i32 = 2;
@@ -42,7 +43,7 @@ fn sample(f: u64, c: usize) -> f32 { (f * 4 + c as u64) as f32 }
 fn open(name: &str, dir: i32, channels: u32, cap: u32) -> u32 {
     let n = CString::new(name).unwrap();
     // SAFETY: `n` is a NUL-terminated CString.
-    let p = unsafe { clockwork_port_open(n.as_ptr(), dir, channels, cap) };
+    let p = unsafe { t().open(n.as_ptr(), dir, channels, cap) };
     assert_ne!(p, 0, "port table full");
     p
 }
@@ -74,7 +75,7 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
             while done < n {
                 // SAFETY: `buf[done * CH..]` holds at least `(n - done) * CH` floats.
                 let took = unsafe {
-                    clockwork_port_produce(port, buf[done * CH..].as_ptr(), (n - done) as u32)
+                    t().produce(port, buf[done * CH..].as_ptr(), (n - done) as u32)
                 } as usize;
                 if took == 0 { std::thread::yield_now(); }
                 done += took;
@@ -95,7 +96,7 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
         let ptrs: Vec<*mut f32> = chans.iter_mut().map(|v| v.as_mut_ptr()).collect();
         // SAFETY: `CH` channel pointers, each to `BLOCK` writable frames.
         let got = unsafe {
-            clockwork_port_read(port, ptrs.as_ptr(), CH as u32, BLOCK as u32)
+            t().read(port, ptrs.as_ptr(), CH as u32, BLOCK as u32)
         } as u64;
         requested += BLOCK as u64;
         for (c, chan) in chans.iter().enumerate() {
@@ -124,11 +125,11 @@ fn a_source_hammered_for_a_sustained_run_loses_nothing() {
     // Frames in == frames out. Nothing was dropped: a source counts only what
     // the audio thread asked for and did not get, and that is exactly the
     // silence it emitted.
-    let under = clockwork_port_underruns(port);
+    let under = t().underruns(port);
     assert_eq!(under, requested - next_out,
                "underrun count must equal the silence actually emitted");
-    assert_eq!(clockwork_port_overruns(port), 0, "a source never overruns");
-    clockwork_port_close(port);
+    assert_eq!(t().overruns(port), 0, "a source never overruns");
+    t().close(port);
 }
 
 #[test]
@@ -151,13 +152,13 @@ fn a_sink_that_overruns_accounts_for_every_frame_it_dropped() {
             let mut count: u64 = 0;
             let mut last: Option<u64> = None;
             let waiting_since = Instant::now();
-            while clockwork_port_overruns(port) == 0 && !stop.load(Ordering::Acquire) {
+            while t().overruns(port) == 0 && !stop.load(Ordering::Acquire) {
                 assert!(waiting_since.elapsed() < NO_PROGRESS, "the producer never filled the ring");
                 std::thread::yield_now();
             }
             loop {
                 // SAFETY: `buf` holds 96 frames of `CH` channels.
-                let got = unsafe { clockwork_port_consume(port, buf.as_mut_ptr(), 96) } as usize;
+                let got = unsafe { t().consume(port, buf.as_mut_ptr(), 96) } as usize;
                 for f in 0..got {
                     // Channel 0 names the frame; every other channel must
                     // agree, or the frame was assembled from two writes.
@@ -192,7 +193,7 @@ fn a_sink_that_overruns_accounts_for_every_frame_it_dropped() {
         let ptrs: Vec<*const f32> = chans.iter().map(|v| v.as_ptr()).collect();
         // SAFETY: `CH` channel pointers, each to `BLOCK` live frames.
         let took = unsafe {
-            clockwork_port_write(port, ptrs.as_ptr(), CH as u32, BLOCK as u32)
+            t().write(port, ptrs.as_ptr(), CH as u32, BLOCK as u32)
         } as u64;
         offered += BLOCK as u64;
         accepted += took;
@@ -202,18 +203,18 @@ fn a_sink_that_overruns_accounts_for_every_frame_it_dropped() {
     }
 
     // Let the consumer catch up, then tell it to stop.
-    while clockwork_port_readable(port) > 0 { std::thread::yield_now(); }
+    while t().readable(port) > 0 { std::thread::yield_now(); }
     stop.store(true, Ordering::Release);
     let out = consumed.join().unwrap();
 
-    let dropped = clockwork_port_overruns(port);
+    let dropped = t().overruns(port);
     assert_eq!(offered, TOTAL);
     assert_eq!(accepted + dropped, offered,
                "every frame is either accepted or counted as dropped");
     assert_eq!(out, accepted, "everything accepted came out exactly once");
     assert!(dropped > 0, "the sink never actually filled — the test proved nothing");
-    assert_eq!(clockwork_port_underruns(port), 0, "a sink never underruns");
-    clockwork_port_close(port);
+    assert_eq!(t().underruns(port), 0, "a sink never underruns");
+    t().close(port);
 }
 
 #[test]
@@ -259,7 +260,7 @@ fn a_port_closed_under_a_live_reader_keeps_reads_whole() {
                 let h = handle.load(Ordering::Acquire);
                 let ptrs: [*mut f32; 1] = [buf.as_mut_ptr()];
                 // SAFETY: one channel pointer to `BLOCK` writable frames; a closed handle is refused by the registry, which is the point.
-                unsafe { clockwork_port_read(h, ptrs.as_ptr(), 1, BLOCK as u32) };
+                unsafe { t().read(h, ptrs.as_ptr(), 1, BLOCK as u32) };
                 let first = buf[0];
                 let plausible = first == 0.0
                     || (first >= 1.0 && first <= ROUNDS as f32 && first.fract() == 0.0);
@@ -275,12 +276,12 @@ fn a_port_closed_under_a_live_reader_keeps_reads_whole() {
         let fill = vec![tag as f32; BLOCK];
         assert_eq!(
             // SAFETY: `fill` holds `BLOCK` frames of 1 channel.
-            unsafe { clockwork_port_produce(p, fill.as_ptr(), BLOCK as u32) },
+            unsafe { t().produce(p, fill.as_ptr(), BLOCK as u32) },
             BLOCK as u32
         );
         handle.store(p, Ordering::Release);
         // Close it while the reader is very likely to be inside it.
-        clockwork_port_close(p);
+        t().close(p);
         assert_eq!(bad.load(Ordering::Relaxed), 0,
                    "a read spanned two ports at round {}", tag);
     }

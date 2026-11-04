@@ -26,5 +26,5 @@ clockwork-abi = { path = "../clockwork-abi" }
 # /dummy/pong and renders a pulse), the subsystems the engine calls back into
 # from clockwork-native as an rlib, and the OSC codec to speak to it.
 clockwork-sys = { path = "../clockwork-sys" }
-clockwork-native = { path = "../clockwork-native", features = ["host"] }
+clockwork-native = { path = "../clockwork-native" }
 clockwork-osc = { path = "../clockwork-osc" }

@@ -28,8 +28,8 @@
 use std::ffi::c_void;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::slice;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -40,6 +40,7 @@ use clockwork_osc::{decode, decode_packet, encode, OscArg, OscMessage, OscPacket
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST};
 
 use crate::limit::Limiter;
+use clockwork_log::{ClockworkCore, CoreRef, LogLimit};
 use clockwork_wait::ready::{AsRawSock, ReadyWait};
 
 /// The rate limit a new instance starts with: cues per second for the port
@@ -50,15 +51,8 @@ pub const DEFAULT_CUES_PER_SENDER: u32 = 1000;
 /// Counts cues the rate limit dropped: `n` more, on a cue recv thread.
 pub type DroppedFn = extern "C" fn(ctx: *mut c_void, n: u32);
 
-// Process-wide cap on "dropped malformed inbound OSC" log lines, so a junk
-// flood can't spam the log.
-static MALFORMED_LOGGED: AtomicU32 = AtomicU32::new(0);
-// The same cap on "over the limit" lines.
-static LIMITED_LOGGED: AtomicU32 = AtomicU32::new(0);
-
 /// The host callbacks + opaque context, made Send/Sync so the cue recv
-/// threads can hold a copy.
-#[derive(Clone, Copy)]
+/// threads can reach them.
 struct Host {
     ctx: *mut c_void,
     emit: EmitFn,
@@ -71,18 +65,38 @@ unsafe impl Send for Host {}
 // SAFETY: as above.
 unsafe impl Sync for Host {}
 
-impl Host {
+/// What an instance shares with its cue threads.
+struct Cues {
+    /// The core whose cue port this is: what its lines name.
+    core: CoreRef,
+    host: Host,
+    /// Whether a cue goes on to the engine; the threads drain their sockets
+    /// either way.
+    on: AtomicBool,
+    /// The rate limit.
+    limit: Mutex<Limiter>,
+    /// Junk, and cues over the limit: said the first few times.
+    malformed_log: LogLimit,
+    limited_log: LogLimit,
+}
+
+impl Cues {
     fn emit(&self, osc: &[u8]) {
-        (self.emit)(self.ctx, EMIT_BROADCAST, osc.as_ptr(), osc.len() as u32);
+        (self.host.emit)(self.host.ctx, EMIT_BROADCAST, osc.as_ptr(), osc.len() as u32);
+    }
+
+    fn limit(&self) -> MutexGuard<'_, Limiter> {
+        self.limit.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     // `n` cues from `ip` dropped by the limit: counted, and said in the log
     // the first few times.
-    fn dropped(&self, ip: IpAddr, n: u32, limit: &Mutex<Limiter>) {
-        (self.dropped)(self.ctx, n);
-        if LIMITED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-            let (port, sender) = limit.lock().unwrap_or_else(PoisonError::into_inner).rates();
+    fn dropped(&self, ip: IpAddr, n: u32) {
+        (self.host.dropped)(self.host.ctx, n);
+        if self.limited_log.say() {
+            let (port, sender) = self.limit().rates();
             clockwork_log::log!(
+                self.core.ptr(),
                 "[osc] cue port: dropping cues from {ip}: over the limit ({port}/s for the port, {sender}/s a sender)"
             );
         }
@@ -116,17 +130,14 @@ struct CueState {
 
 /// The opaque handle the C++ side owns.
 pub struct ClockworkOsc {
-    host: Host,
     // Outbound sockets (ephemeral source ports), one per family, bound once at
     // create. Separate from the cue sockets so outbound works regardless of cue
     // state and a socket never sends to its own bound port. In `out` rather
     // than inline because the event sinks send to a host:port too and share
     // the family choice.
     out: Option<crate::out::OscSender>,
-    cues_on: Arc<AtomicBool>,
     cue: Mutex<CueState>,
-    // The rate limit, shared with the recv threads.
-    limit: Arc<Mutex<Limiter>>,
+    cues: Arc<Cues>,
 }
 
 // A dual-stack-safe IPv6 UDP bind: only_v6(true) so it coexists with the IPv4
@@ -141,10 +152,10 @@ fn bind_v6(addr: Ipv6Addr, port: u16) -> std::io::Result<UdpSocket> {
 }
 
 // Say once per socket where an open bind landed: see `crate::note_bind`.
-fn note_binds<'a>(what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>, exposes: &str) {
+fn note_binds<'a>(core: CoreRef, what: &str, socks: impl IntoIterator<Item = &'a UdpSocket>, exposes: &str) {
     for s in socks {
         if let Ok(local) = s.local_addr() {
-            crate::note_bind(what, local, exposes);
+            crate::note_bind(core.ptr(), what, local, exposes);
         }
     }
 }
@@ -197,14 +208,7 @@ pub fn exercise(data: &[u8]) {
     }
 }
 
-fn run_cue_server(
-    socket: UdpSocket,
-    stop: Arc<AtomicBool>,
-    wait: Arc<ReadyWait>,
-    cues_on: Arc<AtomicBool>,
-    host: Host,
-    limit: Arc<Mutex<Limiter>>,
-) {
+fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, wait: Arc<ReadyWait>, cues: Arc<Cues>) {
     // The socket is non-blocking. When it is empty, the thread blocks on
     // `wait` until a datagram arrives or the server stops.
     if socket.set_nonblocking(true).is_err() {
@@ -215,14 +219,14 @@ fn run_cue_server(
         match socket.recv_from(&mut buf) {
             Ok((n, src)) => {
                 // Drain regardless, but only forward when cue reception is on.
-                if !cues_on.load(Ordering::Relaxed) {
+                if !cues.on.load(Ordering::Relaxed) {
                     continue;
                 }
                 // A datagram costs one cue before it is decoded: a flood over
                 // the limit is dropped without the decoding.
                 let (ip, now) = (src.ip(), Instant::now());
-                if limit.lock().unwrap_or_else(PoisonError::into_inner).take(ip, now, 1) == 0 {
-                    host.dropped(ip, 1, &limit);
+                if cues.limit().take(ip, now, 1) == 0 {
+                    cues.dropped(ip, 1);
                     continue;
                 }
                 match decode_packet(&buf[..n]) {
@@ -236,29 +240,29 @@ fn run_cue_server(
                         let total = u32::try_from(messages.len()).unwrap_or(u32::MAX);
                         let mut granted = total.min(1);
                         if total > 1 {
-                            granted += limit.lock().unwrap_or_else(PoisonError::into_inner).take(ip, now, total - 1);
+                            granted += cues.limit().take(ip, now, total - 1);
                         }
                         let (ip_text, port) = (ip.to_string(), i32::from(src.port()));
                         for m in &messages[..granted as usize] {
-                            host.emit(&reframe(&ip_text, port, m));
+                            cues.emit(&reframe(&ip_text, port, m));
                         }
                         if granted < total {
-                            host.dropped(ip, total - granted, &limit);
+                            cues.dropped(ip, total - granted);
                         }
                     }),
                     // Don't silently swallow junk — surface the first few so a
                     // misbehaving external sender is debuggable (cap to avoid a
                     // flood).
                     None => {
-                        if MALFORMED_LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-                            clockwork_log::log!("[osc] dropped malformed inbound OSC from {ip} ({n} bytes)");
+                        if cues.malformed_log.say() {
+                            clockwork_log::log!(cues.core.ptr(), "[osc] dropped malformed inbound OSC from {ip} ({n} bytes)");
                         }
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if let Err(e) = wait.wait(&[socket.raw_sock()], None) {
-                    clockwork_log::log!("[osc] cue server stopped: its wait failed: {e}");
+                    clockwork_log::log!(cues.core.ptr(), "[osc] cue server stopped: its wait failed: {e}");
                     break;
                 }
             }
@@ -270,7 +274,7 @@ fn run_cue_server(
 
 impl ClockworkOsc {
     fn configure(&self, port: i32, loopback: bool, cues_on: bool) {
-        self.cues_on.store(cues_on, Ordering::Relaxed);
+        self.cues.on.store(cues_on, Ordering::Relaxed);
 
         let mut cs = self.cue.lock().unwrap();
         if port <= 0 {
@@ -297,36 +301,35 @@ impl ClockworkOsc {
         let mut socks: Vec<(&str, UdpSocket)> = Vec::new();
         match UdpSocket::bind((v4ip, port)) {
             Ok(s) => socks.push(("IPv4", s)),
-            Err(e) => clockwork_log::log!("[osc] cue server IPv4 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!(self.cues.core.ptr(), "[osc] cue server IPv4 bind on port {port} failed: {e}"),
         }
         match bind_v6(v6ip, port) {
             Ok(s) => socks.push(("IPv6", s)),
-            Err(e) => clockwork_log::log!("[osc] cue server IPv6 bind on port {port} failed: {e}"),
+            Err(e) => clockwork_log::log!(self.cues.core.ptr(), "[osc] cue server IPv6 bind on port {port} failed: {e}"),
         }
         if socks.is_empty() {
             return;
         }
-        note_binds("cue server", socks.iter().map(|(_, s)| s), CUES_EXPOSED);
+        note_binds(self.cues.core, "cue server", socks.iter().map(|(_, s)| s), CUES_EXPOSED);
 
         let wait = match ReadyWait::new() {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                clockwork_log::log!("[osc] cue server on port {port} not started: its wait could not be created: {e}");
+                clockwork_log::log!(self.cues.core.ptr(), "[osc] cue server on port {port} not started: its wait could not be created: {e}");
                 return;
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
         let mut joins = Vec::new();
         for (fam, sock) in socks {
-            let (t_stop, t_wait, t_on, t_host, t_limit) =
-                (stop.clone(), wait.clone(), self.cues_on.clone(), self.host, self.limit.clone());
+            let (t_stop, t_wait, t_cues) = (stop.clone(), wait.clone(), self.cues.clone());
             let name = if fam == "IPv4" { "cw-osc-cue4" } else { "cw-osc-cue6" };
             if let Ok(j) = std::thread::Builder::new()
                 .name(name.into())
-                .spawn(move || run_cue_server(sock, t_stop, t_wait, t_on, t_host, t_limit))
+                .spawn(move || run_cue_server(sock, t_stop, t_wait, t_cues))
             {
                 joins.push(j);
-                clockwork_log::log!("[osc] cue server listening on port {port} {fam} ({scope})");
+                clockwork_log::log!(self.cues.core.ptr(), "[osc] cue server listening on port {port} {fam} ({scope})");
             }
         }
         cs.server = Some(CueServer { stop, wait, joins });
@@ -340,8 +343,8 @@ impl ClockworkOsc {
     }
 
     fn set_limit(&self, per_second: u32, per_sender: u32) {
-        self.limit.lock().unwrap_or_else(PoisonError::into_inner).set(per_second, per_sender, Instant::now());
-        clockwork_log::log!("[osc] cue port limit: {per_second}/s for the port, {per_sender}/s a sender (0 = none)");
+        self.cues.limit().set(per_second, per_sender, Instant::now());
+        clockwork_log::log!(self.cues.core.ptr(), "[osc] cue port limit: {per_second}/s for the port, {per_sender}/s a sender (0 = none)");
     }
 }
 
@@ -351,22 +354,24 @@ impl ClockworkOsc {
 /// with [`clockwork_osc_destroy`]. `ctx`, `emit` and `dropped` must stay
 /// valid until then.
 #[no_mangle]
-pub extern "C" fn clockwork_osc_create(ctx: *mut c_void, emit: EmitFn, dropped: DroppedFn) -> *mut ClockworkOsc {
+pub extern "C" fn clockwork_osc_create(core: *mut ClockworkCore, ctx: *mut c_void, emit: EmitFn, dropped: DroppedFn) -> *mut ClockworkOsc {
     no_unwind(std::ptr::null_mut(), || {
+        let core = CoreRef::new(core);
         let out = crate::out::OscSender::new();
         if out.is_none() {
-            clockwork_log::log!("[osc] failed to open any outbound socket");
+            clockwork_log::log!(core.ptr(), "[osc] failed to open any outbound socket");
         }
         Box::into_raw(Box::new(ClockworkOsc {
-            host: Host { ctx, emit, dropped },
             out,
-            cues_on: Arc::new(AtomicBool::new(false)),
             cue: Mutex::new(CueState { server: None, port: 0, loopback: true }),
-            limit: Arc::new(Mutex::new(Limiter::new(
-                DEFAULT_CUES_PER_SECOND,
-                DEFAULT_CUES_PER_SENDER,
-                Instant::now(),
-            ))),
+            cues: Arc::new(Cues {
+                core,
+                host: Host { ctx, emit, dropped },
+                on: AtomicBool::new(false),
+                limit: Mutex::new(Limiter::new(DEFAULT_CUES_PER_SECOND, DEFAULT_CUES_PER_SENDER, Instant::now())),
+                malformed_log: LogLimit::first(5),
+                limited_log: LogLimit::first(5),
+            }),
         }))
     })
 }
@@ -378,14 +383,14 @@ pub extern "C" fn clockwork_osc_create(ctx: *mut c_void, emit: EmitFn, dropped: 
 /// `handle` is null or a live handle from [`clockwork_osc_create`].
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_set_limit(handle: *mut ClockworkOsc, per_second: i32, per_sender: i32) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: a live handle, per the contract.
-    let me = unsafe { &*handle };
     no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let me = unsafe { &*handle };
         me.set_limit(u32::try_from(per_second).unwrap_or(0), u32::try_from(per_sender).unwrap_or(0));
-    });
+    })
 }
 
 /// Destroy the subsystem: stops the cue recv threads and closes the sockets.
@@ -395,11 +400,13 @@ pub unsafe extern "C" fn clockwork_osc_set_limit(handle: *mut ClockworkOsc, per_
 /// nothing uses it afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_destroy(handle: *mut ClockworkOsc) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: the box `clockwork_osc_create` leaked, freed once, here.
-    no_unwind((), || drop(unsafe { Box::from_raw(handle) }));
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the box `clockwork_osc_create` leaked, freed once, here.
+        drop(unsafe { Box::from_raw(handle) })
+    })
 }
 
 /// (Re)configure the cue server: bind `port` (0 = unbind) on loopback only
@@ -410,12 +417,14 @@ pub unsafe extern "C" fn clockwork_osc_destroy(handle: *mut ClockworkOsc) {
 /// `handle` is null or a live handle from [`clockwork_osc_create`].
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_configure(handle: *mut ClockworkOsc, port: i32, loopback: i32, cues_on: i32) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: a live handle, per the contract.
-    let me = unsafe { &*handle };
-    no_unwind((), || me.configure(port, loopback != 0, cues_on != 0));
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let me = unsafe { &*handle };
+        me.configure(port, loopback != 0, cues_on != 0)
+    })
 }
 
 /// Send one OSC packet (`data`/`len`) to `host`:`port`. `host` is a byte string
@@ -435,21 +444,23 @@ pub unsafe extern "C" fn clockwork_osc_send(
     data: *const u8,
     len: u32,
 ) -> i32 {
-    if handle.is_null() || host.is_null() || data.is_null() || port <= 0 || port > 65535 {
-        return 0;
-    }
-    // SAFETY: a live handle and two (pointer, length) byte strings, per the
-    // contract; nulls were refused above.
-    let (me, host_bytes, data) = unsafe {
-        (
-            &*handle,
-            slice::from_raw_parts(host, host_len as usize),
-            slice::from_raw_parts(data, len as usize),
-        )
-    };
-    no_unwind(0, || match std::str::from_utf8(host_bytes) {
-        Ok(h) => me.send(h, port as u16, data) as i32,
-        Err(_) => 0,
+    no_unwind(0, || {
+        if handle.is_null() || host.is_null() || data.is_null() || port <= 0 || port > 65535 {
+            return 0;
+        }
+        // SAFETY: a live handle and two (pointer, length) byte strings, per the
+        // contract; nulls were refused above.
+        let (me, host_bytes, data) = unsafe {
+            (
+                &*handle,
+                slice::from_raw_parts(host, host_len as usize),
+                slice::from_raw_parts(data, len as usize),
+            )
+        };
+        match std::str::from_utf8(host_bytes) {
+            Ok(h) => me.send(h, port as u16, data) as i32,
+            Err(_) => 0,
+        }
     })
 }
 
@@ -462,18 +473,21 @@ pub unsafe extern "C" fn clockwork_osc_send(
 /// `data` is null or readable for `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_decodes(data: *const u8, len: u32) -> i32 {
-    if data.is_null() {
-        return 0;
-    }
-    // SAFETY: a (pointer, length) byte string, per the contract; null was refused above.
-    let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
-    no_unwind(0, || i32::from(decode_packet(bytes).is_some()))
+    no_unwind(0, || {
+        if data.is_null() {
+            return 0;
+        }
+        // SAFETY: a (pointer, length) byte string, per the contract; null was refused above.
+        let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
+        i32::from(decode_packet(bytes).is_some())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::UdpSocket;
+    use std::sync::atomic::AtomicU32;
     use std::time::{Duration, Instant};
     use clockwork_osc::{decode, encode, OscArg, OscMessage};
 
@@ -503,7 +517,7 @@ mod tests {
     // from `clockwork_osc_create`, destroyed exactly once at the end.
     fn create(c: &Collector) -> *mut ClockworkOsc {
         let ctx = c as *const Collector as *mut c_void;
-        clockwork_osc_create(ctx, collect, count_dropped)
+        clockwork_osc_create(std::ptr::null_mut(), ctx, collect, count_dropped)
     }
     fn set_limit(h: *mut ClockworkOsc, per_second: i32, per_sender: i32) {
         // SAFETY: see above.

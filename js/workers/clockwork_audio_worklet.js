@@ -28,6 +28,11 @@ import {
 const RESUME_FADE_SECONDS = 0.02;
 const RESUME_GAP_MS = 200;
 
+// What came of a tick (ClockworkTick, lanes.h): no core to tick, so stop; a block in clockwork_audio_out; or, for
+// anything else, no block (a control call holds the core), so silence and tick again.
+const TICK_NONE = 0;
+const TICK_RENDERED = 1;
+
 // postMessage mode: the engine's time goes down each channel's port this often, in blocks (OscChannel#now; about 20ms
 // at 48kHz). A channel counts on from the last by the wall clock, so it needs only a word now and then.
 const CLOCK_POST_BLOCKS = 8;
@@ -198,7 +203,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
     bootError() {
         const read = this.wasmInstance.exports.clockwork_boot_error;
         if (!read) return 'the module does not export clockwork_boot_error: rebuild it with this worklet';
-        return this.cString(read());
+        return this.cString(read(this.core));
     }
 
     // The arena's table of contents (js/lib/arena.js, src/clockwork_arena.h):
@@ -785,7 +790,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 // dropped without a word (docs/RESTARTS.md, rule 1).
                 // handleMessage and process() both run on the audio thread,
                 // where the marks are set.
-                if (this.wasmExports) this.wasmExports.clockwork_ingress_mark_stale();
+                if (this.wasmExports) this.wasmExports.clockwork_ingress_mark_stale(this.core);
 
                 // Set flag to clear the WASM scheduler on next process() call.
                 // The scheduler may contain bundles already dequeued from the ring
@@ -808,7 +813,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 // carries on.
                 const ex = this.wasmExports;
                 if (ex) {
-                    for (let i = 0; i < 4096 && ex.clockwork_close() > 0; i++) this.readOscReplies();
+                    for (let i = 0; i < 4096 && ex.clockwork_close(this.core) > 0; i++) this.readOscReplies();
                     this.readOscReplies();
                 }
                 this.port.postMessage({
@@ -1083,11 +1088,17 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                         // anything else.
                         if (this.wasmInstance.exports.clockwork_init) {
                             console.log(`[clockwork] transport: ${this.mode === 'sab' ? 'SAB' : 'PM'}`);
+                            // This memory's core: made at the first boot; a
+                            // worklet made again over the same memory comes
+                            // back to the one it holds (docs/ENGINES.md).
+                            const ex = this.wasmInstance.exports;
+                            this.core = ex.clockwork_core_held() || ex.clockwork_core_new(0);
                             // The generation the engine this memory replaces
-                            // closed: carried on, never named twice.
+                            // closed: carried on by its core, never named twice.
                             if (data.carriedGeneration)
-                                this.wasmInstance.exports.clockwork_carry_generation(data.carriedGeneration);
+                                ex.clockwork_carry_generation(this.core, data.carriedGeneration);
                             this.wasmInstance.exports.clockwork_init(
+                                this.core,
                                 this.sampleRate,
                                 0,
                                 this.inputChannels,
@@ -1102,8 +1113,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             // This worklet's audio starts now: its clock is anchored afresh at its first block,
                             // and what waited through a gap before it plays, late by the gap (the page's purge()
                             // is for a host that wants it gone).
-                            this.wasmInstance.exports.clockwork_audio_starts((Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
-                            this.wasmInstance.exports.clockwork_set_timed_event_late_limit_ms(this.schedulerLateLimitMs || 0);
+                            this.wasmInstance.exports.clockwork_audio_starts(this.core, (Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
+                            this.wasmInstance.exports.clockwork_set_timed_event_late_limit_ms(this.core, this.schedulerLateLimitMs || 0);
                             // ClockworkBlockTime (lanes.h), 64 bytes, passed to every clockwork_tick:
                             //   +0  u32 struct_bytes        +4  u32 output_latency_frames (0: unknown in a worklet)
                             //   +8  u64 audio_frames        +16 f64 wall_ntp
@@ -1186,23 +1197,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 }
                 this.port.postMessage({ type: 'exportCalled', callId: data.callId, result, error });
                 return;
-            }
-
-            if (data.type === 'getTimeOffset') {
-                // Return time offset (NTP seconds when AudioContext was at 0)
-                if (this.wasmInstance && this.wasmInstance.exports.get_time_offset) {
-                    const offset = this.wasmInstance.exports.get_time_offset();
-                    this.port.postMessage({
-                        type: 'timeOffset',
-                        offset: offset
-                    });
-                } else {
-                    console.error('[AudioWorklet] get_time_offset not available! wasmInstance:', !!this.wasmInstance);
-                    this.port.postMessage({
-                        type: 'error',
-                        error: 'get_time_offset function not available in WASM exports'
-                    });
-                }
             }
 
             if (data.type === 'setClockOffset') {
@@ -1409,7 +1403,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 if (this.pendingClearSched) {
                     this.pendingClearSched = false;
                     if (this.wasmInstance.exports.clear_scheduler) {
-                        this.wasmInstance.exports.clear_scheduler();
+                        this.wasmInstance.exports.clear_scheduler(this.core);
                     }
                 }
 
@@ -1421,10 +1415,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 const inputChannels = inputs[0]?.length || 0;
                 const outputChannels = outputs[0]?.length || 0;
 
-                if (inputChannels > 0 && this.wasmInstance?.exports?.get_audio_input_bus) {
+                if (inputChannels > 0 && this.wasmInstance?.exports?.clockwork_audio_in) {
                     try {
-                        const inputBusPtr = this.wasmInstance.exports.get_audio_input_bus();
-                        const numSamples = this.wasmInstance.exports.get_audio_buffer_samples();
+                        const inputBusPtr = this.wasmInstance.exports.clockwork_audio_in(this.core);
+                        const numSamples = this.wasmInstance.exports.clockwork_block_size(this.core);
 
                         if (inputBusPtr && inputBusPtr > 0) {
                             const memBuffer = this.sharedBuffer || this.wasmMemory?.buffer;
@@ -1466,7 +1460,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 const blockTime = new Float64Array(this.wasmMemory.buffer, this.blockTimePtr + 16, 2);
                 blockTime[0] = (wall + 0.5) / 1000 + NTP_EPOCH_OFFSET;
                 blockTime[1] = 0;
-                const keepAlive = this.wasmInstance.exports.clockwork_tick(this.blockTimePtr, outputChannels, inputChannels);
+                const tick = this.wasmInstance.exports.clockwork_tick(this.core, this.blockTimePtr, outputChannels, inputChannels);
 
                 // postMessage mode: the engine's time to each channel's port, for a worker that cannot read the arena
                 if (this.oscPorts.length && this.processCallCount % CLOCK_POST_BLOCKS === 0 && this.arenaBase != null && this.bufferConstants) {
@@ -1512,10 +1506,10 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 }
 
                 // Copy DSP audio output to AudioWorklet outputs
-                if (this.wasmInstance.exports.get_audio_output_bus && outputs[0] && outputs[0].length >= 1) {
+                if (tick === TICK_RENDERED && this.wasmInstance.exports.clockwork_audio_out && outputs[0] && outputs[0].length >= 1) {
                     try {
-                        const audioBufferPtr = this.wasmInstance.exports.get_audio_output_bus();
-                        const numSamples = this.wasmInstance.exports.get_audio_buffer_samples();
+                        const audioBufferPtr = this.wasmInstance.exports.clockwork_audio_out(this.core);
+                        const numSamples = this.wasmInstance.exports.clockwork_block_size(this.core);
 
                         if (audioBufferPtr && audioBufferPtr > 0) {
                             const wasmMemory = this.wasmInstance.exports.memory || this.wasmMemory;
@@ -1607,7 +1601,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                     this.checkStatus();
                 }
 
-                return keepAlive !== 0;
+                return tick !== TICK_NONE;
             }
         } catch (error) {
             console.error('[AudioWorklet] process() error:', error);

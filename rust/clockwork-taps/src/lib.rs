@@ -19,21 +19,23 @@
 //! writer: readers gate on the state, so the scope would grey out while audio
 //! kept playing. Only the slot's current owner may free it.
 
+use clockwork_fence::no_unwind;
 use std::os::raw::{c_int, c_void};
+use clockwork_abi::arena::{geom, ClockworkArenaHeader, ClockworkArenaRegion, CLOCKWORK_ARENA_MAGIC};
 use portable_atomic::AtomicU64;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-/// The most slots any build has. The real count comes from the host and is
-/// never larger than this; it bounds the owner table, which cannot be sized at
-/// run time without allocating on a path that must not allocate.
-const MAX_SLOTS: usize = 64;
+/// The most slots any arena has (a core's layout refuses more). The real
+/// count comes from the arena's table; this bounds the owner table, which
+/// cannot be sized at run time without allocating on a path that must not
+/// allocate.
+const MAX_SLOTS: usize = clockwork_abi::arena::CLOCKWORK_TAP_SLOTS_MAX as usize;
 
 /// Where the tap region is and how it is carved up.
 ///
-/// Read from the host rather than restated here: the numbers are build-time
-/// constants that change with the memory profile — an embedded build shrinks
-/// the ring — and JavaScript reads the same layout. Three copies of a constant
-/// is two too many.
+/// Read from the arena's own table (`clockwork_arena.h`) rather than restated
+/// here: the numbers change with the memory profile — an embedded build
+/// shrinks the ring — and every reader of the arena reads the same table.
 #[derive(Clone, Copy, Default)]
 struct Geometry {
     /// Offset of the tap region from the base of shared memory.
@@ -60,76 +62,56 @@ impl Geometry {
     }
 }
 
-extern "C" {
-    /// The base of shared memory, or null before it exists. Asked for on every
-    /// call rather than cached: the segment is created and destroyed with the
-    /// engine, and a stale base is a wild pointer.
-    fn clockwork_shm_base() -> *mut c_void;
-    /// The tap region's geometry, filled by the host. Returns zero if the
-    /// build has no tap region.
-    fn clockwork_tap_geometry(
-        start: *mut usize,
-        header_size: *mut usize,
-        slot_size: *mut usize,
-        guest_slots: *mut usize,
-        track_slots: *mut usize,
-        ring_frames: *mut u32,
-        channels: *mut u32,
-    ) -> c_int;
-}
-
-/// The geometry, fetched once. Zero means "not yet asked".
-static GEOMETRY_CACHE: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
-static GEOMETRY_KNOWN: AtomicU32 = AtomicU32::new(0);
-
-fn geometry() -> Option<Geometry> {
-    if GEOMETRY_KNOWN.load(Ordering::Acquire) == 0 {
-        let (mut start, mut header_size, mut slot_size, mut max_taps, mut track_slots) = (0usize, 0, 0, 0, 0);
-        let (mut ring_frames, mut channels) = (0u32, 0u32);
-        // SAFETY: seven live out-pointers, which is all the host's function
-        // asks for.
-        let ok = unsafe {
-            clockwork_tap_geometry(
-                &mut start,
-                &mut header_size,
-                &mut slot_size,
-                &mut max_taps,
-                &mut track_slots,
-                &mut ring_frames,
-                &mut channels,
-            )
-        };
-        if ok == 0 || slot_size == 0 || max_taps == 0 {
-            return None;
-        }
-        GEOMETRY_CACHE[0].store(start, Ordering::Relaxed);
-        GEOMETRY_CACHE[1].store(header_size, Ordering::Relaxed);
-        GEOMETRY_CACHE[2].store(slot_size, Ordering::Relaxed);
-        GEOMETRY_CACHE[3].store(max_taps.min(MAX_SLOTS), Ordering::Relaxed);
-        GEOMETRY_CACHE[4].store(ring_frames as usize, Ordering::Relaxed);
-        GEOMETRY_CACHE[5].store(channels as usize, Ordering::Relaxed);
-        // Both kinds together must fit the owner table.
-        GEOMETRY_CACHE[6].store(track_slots.min(MAX_SLOTS - max_taps.min(MAX_SLOTS)), Ordering::Relaxed);
-        GEOMETRY_KNOWN.store(1, Ordering::Release);
+/// The tap region's geometry, from the table at the front of the arena at
+/// `base`: `None` for null, for memory that is not an arena, and for a table
+/// with no tap region or one its own size cannot hold.
+///
+/// # Safety
+/// `base` is null or the mapped base of an arena, at least as long as its
+/// header.
+unsafe fn geometry(base: *mut u8) -> Option<Geometry> {
+    if base.is_null() {
+        return None;
     }
-    Some(Geometry {
-        start: GEOMETRY_CACHE[0].load(Ordering::Relaxed),
-        header_size: GEOMETRY_CACHE[1].load(Ordering::Relaxed),
-        slot_size: GEOMETRY_CACHE[2].load(Ordering::Relaxed),
-        max_taps: GEOMETRY_CACHE[3].load(Ordering::Relaxed),
-        ring_frames: GEOMETRY_CACHE[4].load(Ordering::Relaxed) as u32,
-        channels: GEOMETRY_CACHE[5].load(Ordering::Relaxed) as u32,
-        track_slots: GEOMETRY_CACHE[6].load(Ordering::Relaxed),
-    })
+    // SAFETY: an arena's header is at its base, per the contract; read only.
+    let header = unsafe { &*base.cast::<ClockworkArenaHeader>() };
+    if header.magic != CLOCKWORK_ARENA_MAGIC {
+        return None;
+    }
+    let e = header.find(ClockworkArenaRegion::CLOCKWORK_TAPS)?;
+    let max_taps = (e.geom[geom::TAP_SLOTS] as usize).min(MAX_SLOTS);
+    let g = Geometry {
+        start: e.offset as usize,
+        header_size: e.geom[geom::TAP_HEADER_BYTES] as usize,
+        slot_size: e.geom[geom::TAP_SLOT_BYTES] as usize,
+        max_taps,
+        ring_frames: e.geom[geom::TAP_RING_FRAMES],
+        channels: e.geom[geom::TAP_CHANNELS],
+        // Both kinds together must fit the owner table.
+        track_slots: (e.geom[geom::TAP_TRACK_SLOTS] as usize).min(MAX_SLOTS - max_taps),
+    };
+    let laid_out = g.header_size.checked_add(g.slots().checked_mul(g.slot_size)?)?;
+    // Taps when the region holds any slot: a profile may give the guest none
+    // and keep the track taps.
+    (g.slot_size > 0 && g.slots() > 0 && laid_out <= e.bytes as usize).then_some(g)
 }
 
-/// Which handle currently owns each slot. Only the owner may free it.
+/// A core's tap slots: which handle owns each. Only the owner may free a
+/// slot. The core holds one (clockwork-core), and hands it to the tap calls
+/// with the arena they are in.
 ///
 /// Written from the audio thread alone — slots are claimed and released in
 /// unit constructors and destructors, which the engine runs there — but atomic
-/// rather than plain, because a cross-process reader may look at the same
-/// memory and because a race here is silent rather than loud.
-static SLOT_OWNERS: [AtomicUsize; MAX_SLOTS] = [const { AtomicUsize::new(0) }; MAX_SLOTS];
+/// rather than plain, because a race here is silent rather than loud.
+pub struct Taps {
+    owners: [AtomicUsize; MAX_SLOTS],
+}
+
+impl Default for Taps {
+    fn default() -> Self {
+        Taps { owners: [const { AtomicUsize::new(0) }; MAX_SLOTS] }
+    }
+}
 
 /// The header field offsets, from the tap region's start.
 const HDR_ACTIVE_COUNT: usize = 4;
@@ -184,8 +166,7 @@ const _: () = assert!(std::mem::offset_of!(SlotHeader, activations) == 12);
 /// inside it.
 unsafe fn claim_slot(base: *mut u8, g: &Geometry, index: usize, channels: u32) -> *mut SlotHeader {
     let channels = if channels > 0 && channels <= g.channels { channels } else { g.channels };
-    // SAFETY: per the contract; the region is mapped for the life of the
-    // process.
+    // SAFETY: per the contract.
     unsafe {
         let slot = slot_ptr(base, g, index);
         (*slot).channels = channels;
@@ -202,14 +183,14 @@ unsafe fn claim_slot(base: *mut u8, g: &Geometry, index: usize, channels: u32) -
     }
 }
 
-/// A counter in the tap region's global header.
+/// A counter in the tap region's global header, for the caller's call.
 ///
 /// # Safety
-/// `base` must be the mapped shared memory the geometry describes.
-unsafe fn header_field(base: *mut u8, g: &Geometry, offset: usize) -> &'static AtomicU32 {
+/// `base` must be the mapped arena the geometry describes, mapped while the
+/// reference is used.
+unsafe fn header_field<'a>(base: *mut u8, g: &Geometry, offset: usize) -> &'a AtomicU32 {
     // SAFETY: the header is at the region's start and the field offsets are
-    // its layout; the region is mapped for the life of the process, so the
-    // reference cannot outlive it.
+    // its layout; the caller keeps the arena mapped while it uses this.
     unsafe { &*base.add(g.start + offset).cast::<AtomicU32>() }
 }
 
@@ -235,115 +216,120 @@ fn slot_index_of(base: *mut u8, g: &Geometry, slot: *const SlotHeader) -> Option
     None
 }
 
-/// Claim a slot for a unit.
+/// Claim a slot for a unit, in its core's arena and owner table.
 ///
 /// `max_frames` is ignored: a stream's capacity is fixed by the build, and the
 /// argument survives only because the interface table's signature does.
 ///
 /// # Safety
-/// `hnd` must point at a live handle.
+/// `hnd` must point at a live handle; `taps` is null or a core's; `arena` is
+/// null or that core's mapped arena.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_tap_get(
-    _ctx: *mut c_void,
+    taps: *const Taps,
+    arena: *mut c_void,
     index: c_int,
     channels: c_int,
     _max_frames: c_int,
     hnd: *mut TapBufferHnd,
 ) -> c_int {
-    if hnd.is_null() {
-        return 0;
-    }
-    // SAFETY: a live handle, per the contract.
-    let h = unsafe { &mut *hnd };
-    h.internalData = std::ptr::null_mut();
+    no_unwind(0, || {
+        if hnd.is_null() {
+            return 0;
+        }
+        // SAFETY: a live handle, per the contract.
+        let h = unsafe { &mut *hnd };
+        h.internalData = std::ptr::null_mut();
 
-    let base = clockwork_shm_base_checked();
-    let Some(g) = geometry() else { return 0 };
-    if base.is_null() || index < 0 || index as usize >= g.slots() {
-        return 0;
-    }
-    let index = index as usize;
+        // SAFETY: a core's, per the contract.
+        let Some(taps) = (unsafe { taps.as_ref() }) else { return 0 };
+        let base = arena.cast::<u8>();
+        // SAFETY: null or the core's arena, per the contract.
+        let Some(g) = (unsafe { geometry(base) }) else { return 0 };
+        if index < 0 || index as usize >= g.slots() {
+            return 0;
+        }
+        let index = index as usize;
 
-    // A negative channel count is as unusable as zero: all of them.
-    let channels = u32::try_from(channels).unwrap_or(0);
-    // SAFETY: the index is inside the geometry the host reported, and the
-    // region it describes is mapped for the life of the process.
-    let slot = unsafe { claim_slot(base, &g, index, channels) };
+        // A negative channel count is as unusable as zero: all of them.
+        let channels = u32::try_from(channels).unwrap_or(0);
+        // SAFETY: the index is inside the geometry the arena's table gives, and
+        // the arena is mapped, per the contract.
+        let slot = unsafe { claim_slot(base, &g, index, channels) };
 
-    // The handle carries the slot's identity so release can check ownership,
-    // and nothing else. `data` stays null: the legacy region-pointer contract
-    // has no stream equivalent, and the ugen appends through its own writer.
-    h.data = std::ptr::null_mut();
-    h.internalData = slot.cast::<c_void>();
-    h.channels = 0;
-    h.maxFrames = 0;
-    SLOT_OWNERS[index].store(hnd as usize, Ordering::Relaxed);
-    1
+        // The handle carries the slot's identity so release can check ownership,
+        // and nothing else. `data` stays null: the legacy region-pointer contract
+        // has no stream equivalent, and the ugen appends through its own writer.
+        h.data = std::ptr::null_mut();
+        h.internalData = slot.cast::<c_void>();
+        h.channels = 0;
+        h.maxFrames = 0;
+        taps.owners[index].store(hnd as usize, Ordering::Relaxed);
+        1
+    })
 }
 
-/// Nothing to do: tap streams publish on every write.
-///
-/// The entry exists because the interface table has the slot, and a ugen built
-/// against an older engine may still call it.
-#[no_mangle]
-pub extern "C" fn clockwork_tap_push(_ctx: *mut c_void, _hnd: *mut TapBufferHnd, _frames: c_int) {}
-
-/// Give a slot back.
+/// Give a slot back, in the core it was claimed in.
 ///
 /// # Safety
-/// `hnd` must point at a live handle.
+/// `hnd` must point at a live handle; `taps` and `arena` as
+/// [`clockwork_tap_get`]'s.
 #[no_mangle]
-pub unsafe extern "C" fn clockwork_tap_release(_ctx: *mut c_void, hnd: *mut TapBufferHnd) {
-    if hnd.is_null() {
-        return;
-    }
-    // SAFETY: a live handle, per the contract.
-    let h = unsafe { &mut *hnd };
-    if h.internalData.is_null() {
-        return;
-    }
-    let slot = h.internalData.cast::<SlotHeader>();
-    let base = clockwork_shm_base_checked();
+pub unsafe extern "C" fn clockwork_tap_release(taps: *const Taps, arena: *mut c_void, hnd: *mut TapBufferHnd) {
+    no_unwind((), || {
+        if hnd.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let h = unsafe { &mut *hnd };
+        if h.internalData.is_null() {
+            return;
+        }
+        let slot = h.internalData.cast::<SlotHeader>();
+        let base = arena.cast::<u8>();
 
-    // Which slot this is, when the region is still there to say. Integer
-    // arithmetic, not pointer arithmetic: a handle can outlive the region it
-    // was claimed in, and the point of the check is to find out whether the
-    // slot is inside the region that exists now.
-    let located = match (base.is_null(), geometry()) {
-        (false, Some(g)) => slot_index_of(base, &g, slot).map(|i| (i, g)),
-        _ => None,
-    };
+        // Which slot this is, when the region is still there to say. Integer
+        // arithmetic, not pointer arithmetic: a handle can outlive the region it
+        // was claimed in, and the point of the check is to find out whether the
+        // slot is inside the region that exists now.
+        // SAFETY: a core's, and null or its arena, per the contract.
+        let (taps, g) = unsafe { (taps.as_ref(), geometry(base)) };
+        let located = match (taps, g) {
+            (Some(taps), Some(g)) => slot_index_of(base, &g, slot).map(|i| (i, g, taps)),
+            _ => None,
+        };
 
-    // A slot outside the current region is not touched at all: the memory
-    // it points into has been unmapped, or belongs to a region this claim
-    // knew nothing about. The handle is nulled below either way.
-    if let Some((i, g)) = located {
-        // Only the current owner may mark it free. A superseded unit's late
-        // destructor — the previous run's scope node tearing down under an
-        // FX kill-delay tail, after a re-run re-claimed the slot — would
-        // otherwise store 0 under the live writer, and readers gate on
-        // state == 1: the scope greys out forever while the audio plays on.
-        let is_owner = SLOT_OWNERS[i].load(Ordering::Relaxed) == hnd as usize;
-        // SAFETY: the slot was just shown to lie inside the mapped region.
-        unsafe {
-            if is_owner {
-                (*slot).state.store(0, Ordering::Relaxed);
-                SLOT_OWNERS[i].store(0, Ordering::Relaxed);
-                header_field(base, &g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
-            }
-            // Every claim incremented the active count, so every release
-            // decrements it — owner or not — to keep the pairing balanced.
-            let active = header_field(base, &g, HDR_ACTIVE_COUNT);
-            if active.load(Ordering::Relaxed) > 0 {
-                active.fetch_sub(1, Ordering::Relaxed);
+        // A slot outside the current region is not touched at all: the memory
+        // it points into has been unmapped, or belongs to a region this claim
+        // knew nothing about. The handle is nulled below either way.
+        if let Some((i, g, taps)) = located {
+            // Only the current owner may mark it free. A superseded unit's late
+            // destructor — the previous run's scope node tearing down under an
+            // FX kill-delay tail, after a re-run re-claimed the slot — would
+            // otherwise store 0 under the live writer, and readers gate on
+            // state == 1: the scope greys out forever while the audio plays on.
+            let is_owner = taps.owners[i].load(Ordering::Relaxed) == hnd as usize;
+            // SAFETY: the slot was just shown to lie inside the mapped region.
+            unsafe {
+                if is_owner {
+                    (*slot).state.store(0, Ordering::Relaxed);
+                    taps.owners[i].store(0, Ordering::Relaxed);
+                    header_field(base, &g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
+                }
+                // Every claim incremented the active count, so every release
+                // decrements it — owner or not — to keep the pairing balanced.
+                let active = header_field(base, &g, HDR_ACTIVE_COUNT);
+                if active.load(Ordering::Relaxed) > 0 {
+                    active.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         }
-    }
 
-    // Null the handle so a stale holder sees null rather than a dangling
-    // pointer: the ugen's defensive checks rely on both being nullable.
-    h.internalData = std::ptr::null_mut();
-    h.data = std::ptr::null_mut();
+        // Null the handle so a stale holder sees null rather than a dangling
+        // pointer: the ugen's defensive checks rely on both being nullable.
+        h.internalData = std::ptr::null_mut();
+        h.data = std::ptr::null_mut();
+    })
 }
 
 // ── A first-party writer ────────────────────────────────────────────────────
@@ -385,14 +371,17 @@ unsafe fn slot_ring(base: *mut u8, g: &Geometry, index: usize) -> (*mut f32, u32
 /// Returns false when there is no shared memory, or no such slot. Claiming an
 /// already-claimed slot re-formats it, which is what a re-used scope number
 /// needs and why the C++ side does the same.
-pub fn stream_activate(index: usize, channels: u32) -> bool {
-    let Some(g) = geometry() else { return false };
-    let base = clockwork_shm_base_checked();
-    if base.is_null() || index >= g.slots() {
+///
+/// # Safety
+/// `base` is null or the base of a mapped arena, mapped for as long as this
+/// call runs.
+pub unsafe fn stream_activate(base: *mut u8, index: usize, channels: u32) -> bool {
+    // SAFETY: null or an arena, per the contract.
+    let Some(g) = (unsafe { geometry(base) }) else { return false };
+    if index >= g.slots() {
         return false;
     }
-    // SAFETY: the index is inside the geometry the host reported, and the
-    // region it describes is mapped for the life of the process.
+    // SAFETY: the index is inside the geometry the arena's table gives.
     unsafe { claim_slot(base, &g, index, channels) };
     true
 }
@@ -403,13 +392,16 @@ pub fn stream_activate(index: usize, channels: u32) -> bool {
 /// first write it anchors the stream; later it heals a discontinuity, so a
 /// paused loop resumes at the right place on the display rather than drawing
 /// its gap as audio.
-pub fn stream_write(index: usize, interleaved: &[f32], frames: usize, engine_frames: u64) {
+///
+/// # Safety
+/// As [`stream_activate`].
+pub unsafe fn stream_write(base: *mut u8, index: usize, interleaved: &[f32], frames: usize, engine_frames: u64) {
     if frames == 0 {
         return;
     }
-    let Some(g) = geometry() else { return };
-    let base = clockwork_shm_base_checked();
-    if base.is_null() || index >= g.slots() {
+    // SAFETY: null or an arena, per the contract.
+    let Some(g) = (unsafe { geometry(base) }) else { return };
+    if index >= g.slots() {
         return;
     }
     // SAFETY: as `stream_activate`; every index below is taken modulo the
@@ -451,10 +443,13 @@ pub fn stream_write(index: usize, interleaved: &[f32], frames: usize, engine_fra
 }
 
 /// Give slot `index` back, so a reader stops drawing it.
-pub fn stream_release(index: usize) {
-    let Some(g) = geometry() else { return };
-    let base = clockwork_shm_base_checked();
-    if base.is_null() || index >= g.slots() {
+///
+/// # Safety
+/// As [`stream_activate`].
+pub unsafe fn stream_release(base: *mut u8, index: usize) {
+    // SAFETY: null or an arena, per the contract.
+    let Some(g) = (unsafe { geometry(base) }) else { return };
+    if index >= g.slots() {
         return;
     }
     // SAFETY: as `stream_activate`.
@@ -464,49 +459,5 @@ pub fn stream_release(index: usize) {
             header_field(base, &g, HDR_ACTIVE_COUNT).fetch_sub(1, Ordering::Relaxed);
             header_field(base, &g, HDR_VERSION).fetch_add(1, Ordering::Relaxed);
         }
-    }
-}
-
-/// The shared-memory base, as a byte pointer.
-fn clockwork_shm_base_checked() -> *mut u8 {
-    // SAFETY: the host defines this; it returns null before the region exists,
-    // which every caller above checks for.
-    unsafe { clockwork_shm_base().cast::<u8>() }
-}
-
-/// The host services, for this crate's own unit-test binary.
-///
-/// That binary references both symbols and, on its own, defines neither:
-/// the hostless archive build.rs makes answers when the `host` feature is
-/// off, and when it is on the real definitions are expected from an engine
-/// on the link line — which a unit test of this crate never has. Cargo
-/// unifies features across one invocation, so `cargo test --workspace`
-/// beside a crate that asks for `host` (clockwork-client's tests do,
-/// through clockwork-native) builds this binary with `host` on and nothing
-/// to resolve the calls: LNK2019 on Windows. These definitions are always
-/// in the binary, so it links either way; when the archive is present too
-/// the linker takes these first and never opens it.
-#[cfg(test)]
-mod hostless {
-    use core::ffi::{c_int, c_void};
-
-    #[no_mangle]
-    pub extern "C" fn clockwork_shm_base() -> *mut c_void {
-        core::ptr::null_mut()
-    }
-
-    /// # Safety
-    /// Nothing is written: the out-pointers are not touched, and 0 says so.
-    #[no_mangle]
-    pub unsafe extern "C" fn clockwork_tap_geometry(
-        _start: *mut usize,
-        _header_size: *mut usize,
-        _slot_size: *mut usize,
-        _guest_slots: *mut usize,
-        _track_slots: *mut usize,
-        _ring_frames: *mut u32,
-        _channels: *mut u32,
-    ) -> c_int {
-        0
     }
 }

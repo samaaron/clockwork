@@ -70,17 +70,23 @@ pub struct MidiIo {
     // Offer Windows' built-in software synth as an output. Off by default:
     // see `is_software_synth`.
     want_software_synths: bool,
+    // The callback the OS calls, kept so a test can be a port.
+    #[cfg(test)]
+    heard: InputCallback,
 }
 
 /// A port list as `(normalized_name, is_open)` pairs.
 pub type PortList = Vec<(String, bool)>;
 
 impl MidiIo {
-    pub fn new(client_name: impl Into<String>, on_input: InputCallback) -> Self {
+    /// `core`: the one that starts the process's MIDI, told what it finds.
+    pub fn new(core: *mut clockwork_log::ClockworkCore, client_name: impl Into<String>, on_input: InputCallback) -> Self {
         let client_name = client_name.into();
         if !sequencer_present() {
-            clockwork_log::log!("[midi] no ALSA sequencer (/dev/snd/seq): no MIDI ports on this machine");
+            clockwork_log::log!(core, "[midi] no ALSA sequencer (/dev/snd/seq): no MIDI ports on this machine");
         }
+        #[cfg(test)]
+        let heard = on_input.clone();
         let mut io = Self {
             inputs: Inputs::new(&client_name, on_input),
             outputs: Outputs::new(&client_name),
@@ -90,9 +96,17 @@ impl MidiIo {
             want_all_in: false,
             want_all_out: false,
             want_software_synths: false,
+            #[cfg(test)]
+            heard,
         };
         io.refresh();
         io
+    }
+
+    /// A message as if a port had sent it, through the callback the OS calls.
+    #[cfg(test)]
+    pub(crate) fn hear(&self, norm: &str, raw: &str, ts_us: u64, when: u64, bytes: &[u8]) {
+        (self.heard)(norm, raw, ts_us, when, bytes)
     }
 
     /// Offer, or hide, the software synths the OS advertises — see
@@ -246,20 +260,21 @@ impl MidiIo {
 // to prevent. Elsewhere it would merely mean the same device appearing twice
 // in the OS registry under our own name.
 //
-// So there is one `MidiIo` per process, created by `clockwork_midi_create`, and this
-// is how another subsystem finds it. `clockwork-sinks` uses it: an event sink
+// So there is one `MidiIo` per process, the process's MIDI that every core's
+// handle shares (ffi.rs, `ProcessMidi`), and this is how another subsystem
+// finds it. `clockwork-sinks` uses it: an event sink
 // onto a MIDI port sends through the same connections `/clockwork/midi/out/*`
 // does, and enabling the port means the same thing to both.
 //
-// A `Weak`, deliberately. The subsystem's lifetime is the C++ side's — it is
-// destroyed by `clockwork_midi_destroy` — and a strong reference here would keep
-// midir connections open past it. A holder that finds `None` has its answer:
+// A `Weak`, deliberately. The subsystem's lifetime is the cores' — it goes
+// with the last core's `clockwork_midi_destroy` — and a strong reference here
+// would keep midir connections open past it. A holder that finds `None` has its answer:
 // there is no MIDI subsystem in this build or at this moment, and a sink onto
 // a MIDI port must refuse rather than pretend.
 static SHARED: std::sync::Mutex<Option<std::sync::Weak<std::sync::Mutex<MidiIo>>>> =
     std::sync::Mutex::new(None);
 
-/// Publish this process's MIDI IO. Called once, by `clockwork_midi_create`.
+/// Publish this process's MIDI IO. Called when the process's MIDI starts.
 pub fn publish_shared(io: &Arc<std::sync::Mutex<MidiIo>>) {
     if let Ok(mut g) = SHARED.lock() {
         *g = Some(Arc::downgrade(io));

@@ -140,6 +140,11 @@ void HeadlessDriver::setLinkAudio(LinkAudioHost* la) {
     mLinkAudio = la;
 }
 
+void HeadlessDriver::setCore(ClockworkCore* core) {
+    const std::lock_guard<std::mutex> lock(mLifecycle);
+    mCore = core;
+}
+
 void HeadlessDriver::setMetrics(PerformanceMetrics* m) {
     const std::lock_guard<std::mutex> lock(mLifecycle);
     mMetrics = m;
@@ -181,7 +186,7 @@ void HeadlessDriver::processBlock(double& samplePos, HeadlessPacer& pacer) {
     time.audio_frames   = static_cast<uint64_t>(samplePos);
     time.wall_ntp       = pacer.wallNtp();
     time.monotonic_secs = pacer.monotonicSeconds();
-    renderAudioBlock(*mLinkAudio,
+    renderAudioBlock(mCore, *mLinkAudio,
                      static_cast<uint32_t>(mBlockSize),
                      static_cast<uint32_t>(mNumOutputChannels),
                      static_cast<uint32_t>(mNumInputChannels),
@@ -204,7 +209,7 @@ void HeadlessDriver::run(const std::stop_token& stop) {
     const int64_t blockNs = 1'000'000'000LL * mBlockSize / mSampleRate;
     int64_t nextWake = pacer.nowNs();
     double samplePos = 0.0;
-    clockwork_audio_starts(pacer.wallNtp(), pacer.monotonicSeconds());   // this driver's audio starts now
+    clockwork_audio_starts(mCore, pacer.wallNtp(), pacer.monotonicSeconds());   // this driver's audio starts now
 
     while (!stop.stop_requested()) {
         processBlock(samplePos, pacer);

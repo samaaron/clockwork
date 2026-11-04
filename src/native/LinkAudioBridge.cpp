@@ -103,7 +103,7 @@ std::vector<link_audio::Channel> LinkAudioBridge::listChannels() const {
     return out;
 }
 
-void LinkAudioBridge::reserveLanes() { clockwork_reserve_link_audio_lanes(kLanes); }
+void LinkAudioBridge::reserveLanes(ClockworkCore* core) { clockwork_reserve_link_audio_lanes(core, kLanes); }
 
 // ─── Input subscriptions ──────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
             return c.peerName == peerName && c.name == channelName;
         });
     if (match == channels.end()) {
-        clockwork_log("[link-audio] no channel '%s' published by peer '%s'",
+        clockwork_log(core(), "[link-audio] no channel '%s' published by peer '%s'",
                 channelName, peerName);
         return std::nullopt;
     }
@@ -143,10 +143,10 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
                                    : link_audio::firstFreePair(mLaneBase, mLanes, held);
         if (!pair) {
             if (mLanes == 0)
-                clockwork_log("[link-audio] no Link Audio lanes reserved, so %s/%s has "
+                clockwork_log(core(), "[link-audio] no Link Audio lanes reserved, so %s/%s has "
                         "nowhere to arrive", peerName, channelName);
             else
-                clockwork_log("[link-audio] no channel pair free for %s/%s: the %u Link "
+                clockwork_log(core(), "[link-audio] no channel pair free for %s/%s: the %u Link "
                         "Audio lanes are all in use", peerName, channelName, mLanes);
             return std::nullopt;
         }
@@ -158,7 +158,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     // the exact shape of failure a refusal exists to prevent.
     const uint32_t inChannels = mInputChannels.load(std::memory_order_relaxed);
     if (!link_audio::channelPairFits(busIdx, inChannels)) {
-        clockwork_log("[link-audio] channel pair %u/%u does not fit %u allocated "
+        clockwork_log(core(), "[link-audio] channel pair %u/%u does not fit %u allocated "
                 "input channels", busIdx, busIdx + 1, inChannels);
         return std::nullopt;
     }
@@ -179,18 +179,18 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     // consistent shape whatever the peer publishes. Named for the peer and
     // channel so a port listing says whose audio it is.
     const std::string portName = std::string("link:") + peerName + "/" + channelName;
-    sub.port = clockwork_port_open(portName.c_str(), kClockworkPortSource, 2,
+    sub.port = clockwork_port_open(ports(), portName.c_str(), kClockworkPortSource, 2,
                              kInputPortCapacityFrames);
     // An unbound port is NOT an acceptable subscription: it would fill, stall,
     // and read to a client exactly like one that works.
     if (sub.port == CLOCKWORK_PORT_NONE) {
-        clockwork_log("[link-audio] no port available for %s/%s", peerName, channelName);
+        clockwork_log(core(), "[link-audio] no port available for %s/%s", peerName, channelName);
         return std::nullopt;
     }
-    if (!clockwork_port_bus_attach(sub.port, busIdx)) {
-        clockwork_log("[link-audio] could not bind %s/%s to channel %u",
+    if (!clockwork_port_bus_attach(mCore.load(std::memory_order_acquire), sub.port, busIdx)) {
+        clockwork_log(core(), "[link-audio] could not bind %s/%s to channel %u",
                 peerName, channelName, busIdx);
-        clockwork_port_close(sub.port);
+        clockwork_port_close(ports(), sub.port);
         sub.port = CLOCKWORK_PORT_NONE;
         return std::nullopt;
     }
@@ -201,7 +201,7 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     for (auto& s : mInputSubs) {
         if (s.peerName == peerName && s.channelName == channelName) replaceSlot = &s;
         else if (s.busIdx == busIdx) {
-            clockwork_log("[link-audio] channel pair %u/%u was taken while %s/%s subscribed",
+            clockwork_log(core(), "[link-audio] channel pair %u/%u was taken while %s/%s subscribed",
                     busIdx, busIdx + 1, peerName, channelName);
             endInput(sub);
             return std::nullopt;
@@ -230,8 +230,8 @@ void LinkAudioBridge::endInput(InputSubscription& sub) {
     mRetiredUnderruns += underrunsSinceStart(sub);
     if (sub.port == CLOCKWORK_PORT_NONE) return;
     forgetReadDates(sub.port);
-    clockwork_port_bus_detach(sub.port);
-    clockwork_port_close(sub.port);
+    clockwork_port_bus_detach(mCore.load(std::memory_order_acquire), sub.port);
+    clockwork_port_close(ports(), sub.port);
     sub.port = CLOCKWORK_PORT_NONE;
 }
 
@@ -276,7 +276,7 @@ bool LinkAudioBridge::setInputLatencySeconds(const char* peerName,
 
 uint64_t LinkAudioBridge::underrunsSinceStart(const InputSubscription& sub) const {
     if (!sub.underrunsAtStart || sub.port == CLOCKWORK_PORT_NONE) return 0;
-    return clockwork_port_underruns(sub.port) - *sub.underrunsAtStart;
+    return clockwork_port_underruns(ports(), sub.port) - *sub.underrunsAtStart;
 }
 
 uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {
@@ -296,7 +296,7 @@ uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {
 float LinkAudioBridge::bufferedSecondsOf(const InputSubscription& sub) const {
     const uint32_t rate = mSampleRate.load(std::memory_order_relaxed);
     const double portSeconds = (sub.port != CLOCKWORK_PORT_NONE && rate != 0)
-        ? double(clockwork_port_readable(sub.port)) / double(rate)
+        ? double(clockwork_port_readable(ports(), sub.port)) / double(rate)
         : 0.0;
     return sub.renderer->bufferedSeconds() + static_cast<float>(portSeconds);
 }
@@ -423,10 +423,11 @@ void LinkAudioBridge::publishAuxSinks(const float* busPool, uint32_t blockSize,
     }
 }
 
-void LinkAudioBridge::setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels) {
+void LinkAudioBridge::setAudioFormat(ClockworkCore* core, uint32_t sampleRate, uint32_t allocatedInputChannels) {
     mSampleRate.store(sampleRate, std::memory_order_relaxed);
     mInputChannels.store(allocatedInputChannels, std::memory_order_relaxed);
-    moveToLanes(clockwork_link_audio_lane_base(), clockwork_link_audio_lanes());
+    mCore.store(core, std::memory_order_release);
+    moveToLanes(clockwork_link_audio_lane_base(core), clockwork_link_audio_lanes(core));
     if (sampleRate != 0 && mInputSubCount.load(std::memory_order_relaxed) != 0)
         startEndpoint();
     clockwork::bump(mEndpointWake);
@@ -447,10 +448,11 @@ void LinkAudioBridge::moveToLanes(uint32_t base, uint32_t lanes) {
         const uint32_t offset = s.busIdx - from;
         const uint32_t to     = base + offset;
         if (offset + 2 <= lanes && s.port != CLOCKWORK_PORT_NONE) {
-            clockwork_port_bus_detach(s.port);
-            if (clockwork_port_bus_attach(s.port, to)) { s.busIdx = to; continue; }
+            ClockworkCore* const core = mCore.load(std::memory_order_acquire);
+            clockwork_port_bus_detach(core, s.port);
+            if (clockwork_port_bus_attach(core, s.port, to)) { s.busIdx = to; continue; }
         }
-        clockwork_log("[link-audio] %s/%s dropped: the Link Audio lanes moved and "
+        clockwork_log(core(), "[link-audio] %s/%s dropped: the Link Audio lanes moved and "
                 "have no room for it", s.peerName.c_str(), s.channelName.c_str());
         endInput(s);
     }
@@ -486,7 +488,7 @@ void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
         const uint32_t generation = d.generation.load(std::memory_order_acquire);
         const ClockworkPort port  = d.port.load(std::memory_order_relaxed);
         if (port == CLOCKWORK_PORT_NONE) continue;
-        const uint32_t read = clockwork_port_read_position(port);
+        const uint32_t read = clockwork_port_read_position(ports(), port);
         const uint32_t seq  = d.seq.load(std::memory_order_relaxed);
         d.seq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -501,7 +503,7 @@ void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
     if (mEndpointRequests.answer([this](uint32_t pair) {
             if (pair >= mReadDates.size()) return false;
             const ClockworkPort port = mReadDates[pair].port.load(std::memory_order_relaxed);
-            return port != CLOCKWORK_PORT_NONE && clockwork_port_writable(port) >= kEndpointChunkFrames;
+            return port != CLOCKWORK_PORT_NONE && clockwork_port_writable(ports(), port) >= kEndpointChunkFrames;
         }))
         clockwork::bump(mEndpointWake);
 }
@@ -524,7 +526,7 @@ LinkAudioBridge::nextWriteReadAt(const InputSubscription& sub, uint32_t sampleRa
             if (dated != generation || host == 0) return std::nullopt;
             // Frames between the dated read and the next write, wrapping as
             // the positions do.
-            const uint32_t ahead = clockwork_port_write_position(sub.port) - read;
+            const uint32_t ahead = clockwork_port_write_position(ports(), sub.port) - read;
             return std::chrono::microseconds(static_cast<int64_t>(host))
                  + std::chrono::microseconds(static_cast<int64_t>(
                        std::llround(1e6 * double(ahead) / double(sampleRate))));
@@ -575,7 +577,7 @@ void LinkAudioBridge::endpointLoop(const std::stop_token& stop) {
         const uint32_t sr = mSampleRate.load(std::memory_order_relaxed);
         const clockwork::RealtimeResult rt = clockwork::elevateCurrentThreadToRealtime(
             sr != 0 ? double(kEndpointChunkFrames) / double(sr) : 0.0);
-        clockwork_log("[link-audio] endpoint worker realtime: status=%d policy=%d prio=%d err=%d",
+        clockwork_log(core(), "[link-audio] endpoint worker realtime: status=%d policy=%d prio=%d err=%d",
                       static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
         mEndpointRealtime.store(static_cast<int>(rt.status), std::memory_order_release);
     }
@@ -609,7 +611,7 @@ clockwork::NextPass LinkAudioBridge::endpointPass() {
                     sub.troubleAt   = std::chrono::steady_clock::now();
                 }
 
-                uint32_t room = clockwork_port_writable(sub.port);
+                uint32_t room = clockwork_port_writable(ports(), sub.port);
                 if (room == 0) {
                     sub.renderer->withdrawArrival();
                     wants |= clockwork::EndpointRequests::kRoom;
@@ -642,10 +644,10 @@ clockwork::NextPass LinkAudioBridge::endpointPass() {
                     mScratchInterleaved[2 * i]     = static_cast<float>(mScratchL[i]);
                     mScratchInterleaved[2 * i + 1] = static_cast<float>(mScratchR[i]);
                 }
-                clockwork_port_produce(sub.port, mScratchInterleaved,
+                clockwork_port_produce(ports(), sub.port, mScratchInterleaved,
                                  static_cast<uint32_t>(filled));
                 if (!sub.underrunsAtStart)
-                    sub.underrunsAtStart = clockwork_port_underruns(sub.port);
+                    sub.underrunsAtStart = clockwork_port_underruns(ports(), sub.port);
                 produced = true;
             }
         }

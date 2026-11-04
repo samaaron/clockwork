@@ -3,11 +3,14 @@
 /*
  * clockwork_midi.h — C ABI for the clockwork MIDI subsystem (Rust / midir).
  *
- * The C++ engine boundary (src/native/MidiControl) creates one instance, supplying
- * three thread-safe host callbacks, and forwards decoded "/clockwork/midi/" OSC into it via
- * clockwork_midi_handle_osc(). The subsystem owns its midir device IO (and midir's input
- * thread) and never touches the audio thread; results return through the
- * callbacks, which may fire on the midir input thread.
+ * The C++ engine boundary (src/native/MidiControl) creates one instance per core,
+ * supplying three thread-safe host callbacks, and forwards decoded "/clockwork/midi/"
+ * OSC into it via clockwork_midi_handle_osc(). The instances share the process's
+ * MIDI: one midir device IO (and midir's input thread), started by the first
+ * core and closed by the last, which never touches the audio thread. What a
+ * port sends and what changes in the ports reach every core; which ports are
+ * open is the process's. Results return through the callbacks, which may fire
+ * on the midir input thread.
  *
  * Must match rust/clockwork-midi/src/ffi.rs.
  */
@@ -58,17 +61,19 @@ typedef void (*clockwork_midi_transport_fn)(void* ctx,
                                      const uint8_t* raw, uint32_t raw_len,
                                      int32_t kind, double beat);
 
-/* Create the subsystem. `ctx` and the callbacks must outlive it. `app_name`
- * is the client name published to the OS MIDI registry (what other MIDI apps
- * see, e.g. in ALSA/CoreMIDI port lists); NULL or "" falls back to
- * "clockwork". Copied — need not outlive the call. */
-ClockworkMidi* clockwork_midi_create(void* ctx,
+/* A core's place in the process's MIDI, starting it when no core holds it.
+ * `ctx` and the callbacks must outlive the instance. `app_name` is the client
+ * name published to the OS MIDI registry (what other MIDI apps see, e.g. in
+ * ALSA/CoreMIDI port lists) by the core that starts it; NULL or "" falls back
+ * to "clockwork". Copied — need not outlive the call. */
+ClockworkMidi* clockwork_midi_create(struct ClockworkCore* core, void* ctx,
                        clockwork_midi_emit_fn emit,
                        clockwork_midi_clock_fn clock,
                        clockwork_midi_transport_fn transport,
                        const char* app_name);
 
-/* Stop the clock thread, close all ports, free the instance. */
+/* Leave the process's MIDI and free the instance; no callback reaches the
+ * core after this returns. The last core's closes every port. */
 void clockwork_midi_destroy(ClockworkMidi* handle);
 
 /* Feed one decoded "/clockwork/midi/" OSC packet (off the audio thread).

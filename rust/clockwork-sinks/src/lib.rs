@@ -61,6 +61,6 @@ pub mod service;
 pub mod sink;
 pub mod time;
 
-pub use endpoint::{CaptureEndpoint, Delivery, Endpoint, HostEmit, HostEndpoint};
+pub use endpoint::{CaptureEndpoint, Delivery, Endpoint, HostEmit, HostEmitter, HostEndpoint};
 pub use registry::{Drive, MAX_SINKS};
 pub use sink::{Stats, KIND_MIDI, KIND_OSC};

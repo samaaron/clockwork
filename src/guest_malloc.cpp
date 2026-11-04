@@ -13,27 +13,13 @@
 
 #include "guest_malloc.h"
 #include "guest_fence.h"
+#include "core_state.h"   // clockwork::GuestMallocs
 
 #include <atomic>
 
-// The Rust router's guest scope (rust/clockwork-heap/src/router.rs): while a
-// guest entry point is open, a Rust guest's allocations go to the guest's
-// pool. Present wherever the audio path is, which is wherever a guest is.
-#if CLOCKWORK_SYNTH
-extern "C" void clockwork_router_guest_enter(void);
-extern "C" void clockwork_router_guest_exit(void);
-#else
-static inline void clockwork_router_guest_enter() {}
-static inline void clockwork_router_guest_exit() {}
-#endif
-
 namespace {
-GuestCall g_open = GuestCall::None;                  // engine thread only
-std::atomic<int64_t>  g_held{0};                      // bytes the guest holds from malloc; signed so a free of something taken outside a guest call cannot wrap
-std::atomic<uint32_t> g_mallocs_boot{0};
-std::atomic<uint32_t> g_mallocs_processing{0};
-std::atomic<uint32_t> g_frees{0};
-// Every call, any scope, and the net bytes they hold (guest_malloc.h).
+// Every call, any scope, and the net bytes they hold (guest_malloc.h): the
+// process's.
 std::atomic<uint32_t> g_all_calls{0};
 std::atomic<int64_t>  g_all_held{0};
 uint32_t g_mark_calls = 0;
@@ -41,32 +27,45 @@ int64_t  g_mark_held  = 0;
 bool     g_host_scratch = false;   // engine thread only: inside clockwork_worklet_alloc/free
 
 #if CLOCKWORK_COUNT_GUEST_MALLOC
-// Only the wrappers below call this, and they exist only where the link wraps.
-inline void count_call() {
-    if (g_open == GuestCall::Boot)            g_mallocs_boot.fetch_add(1, std::memory_order_relaxed);
-    else if (g_open == GuestCall::Processing) g_mallocs_processing.fetch_add(1, std::memory_order_relaxed);
+// Only the wrappers below call these, and they exist only where the link
+// wraps. A call is the guest's when this thread is inside a guest call, and
+// it is charged to that call's core.
+inline clockwork::GuestMallocs* guest_call(ClockworkEntryKind& kind) {
+    const ClockworkEntry here = clockwork_core_entry();
+    kind = here.kind;
+    if (kind != CLOCKWORK_ENTRY_GUEST_BOOT && kind != CLOCKWORK_ENTRY_GUEST_PROCESSING) return nullptr;
+    clockwork::CoreState* st = clockwork::state(here.core);
+    return st ? &st->guest_mallocs : nullptr;
+}
+inline void count_call(clockwork::GuestMallocs& g, ClockworkEntryKind kind) {
+    if (kind == CLOCKWORK_ENTRY_GUEST_BOOT) g.boot.fetch_add(1, std::memory_order_relaxed);
+    else                                    g.processing.fetch_add(1, std::memory_order_relaxed);
 }
 #endif
 }  // namespace
 
-void clockwork_guest_call_begin(GuestCall kind) {
-    g_open = kind;
-    clockwork_router_guest_enter();
-    clockwork_guest_fence_close();   // from here the arena is the guest's regions only (guest_fence.h)
-}
-void clockwork_guest_call_end() {
-    clockwork_guest_fence_open();
-    clockwork_router_guest_exit();
-    g_open = GuestCall::None;
+// A call within the one this thread is in: the same core and gate.
+static ClockworkEntry guest_call_entry(GuestCall kind) {
+    ClockworkEntry e = clockwork_core_entry();
+    e.kind = kind == GuestCall::Boot ? CLOCKWORK_ENTRY_GUEST_BOOT : CLOCKWORK_ENTRY_GUEST_PROCESSING;
+    return e;
 }
 
-size_t clockwork_guest_malloc_bytes() {
-    const int64_t held = g_held.load(std::memory_order_relaxed);
+GuestCallScope::GuestCallScope(GuestCall kind) : previous_(clockwork_core_enter(guest_call_entry(kind))) {
+    clockwork_guest_fence_close();   // from here the arena is the guest's regions only (guest_fence.h)
+}
+GuestCallScope::~GuestCallScope() {
+    clockwork_guest_fence_open();
+    clockwork_core_leave(previous_);
+}
+
+size_t clockwork_guest_malloc_bytes(const clockwork::CoreState& st) {
+    const int64_t held = st.guest_mallocs.held.load(std::memory_order_relaxed);
     return held > 0 ? (size_t)held : 0;
 }
-uint32_t clockwork_guest_mallocs_boot()       { return g_mallocs_boot.load(std::memory_order_relaxed); }
-uint32_t clockwork_guest_mallocs_processing() { return g_mallocs_processing.load(std::memory_order_relaxed); }
-uint32_t clockwork_guest_frees()              { return g_frees.load(std::memory_order_relaxed); }
+uint32_t clockwork_guest_mallocs_boot(const clockwork::CoreState& st)       { return st.guest_mallocs.boot.load(std::memory_order_relaxed); }
+uint32_t clockwork_guest_mallocs_processing(const clockwork::CoreState& st) { return st.guest_mallocs.processing.load(std::memory_order_relaxed); }
+uint32_t clockwork_guest_frees(const clockwork::CoreState& st)              { return st.guest_mallocs.frees.load(std::memory_order_relaxed); }
 
 void clockwork_malloc_host_scratch_begin() { g_host_scratch = true; }
 void clockwork_malloc_host_scratch_end()   { g_host_scratch = false; }
@@ -81,11 +80,11 @@ size_t clockwork_malloc_bytes_after_boot() {
     return d > 0 ? (size_t)d : 0;
 }
 
-void clockwork_guest_malloc_reset() {
-    // g_held stays: the bytes are still taken, whichever instance took them
-    g_mallocs_boot.store(0, std::memory_order_relaxed);
-    g_mallocs_processing.store(0, std::memory_order_relaxed);
-    g_frees.store(0, std::memory_order_relaxed);
+void clockwork_guest_malloc_reset(clockwork::CoreState& st) {
+    // held stays: the bytes are still taken, whichever instance took them
+    st.guest_mallocs.boot.store(0, std::memory_order_relaxed);
+    st.guest_mallocs.processing.store(0, std::memory_order_relaxed);
+    st.guest_mallocs.frees.store(0, std::memory_order_relaxed);
 }
 
 #if CLOCKWORK_COUNT_GUEST_MALLOC
@@ -106,9 +105,10 @@ void* __wrap_malloc(size_t n) {
         g_all_calls.fetch_add(1, std::memory_order_relaxed);
         if (p) g_all_held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
     }
-    if (g_open != GuestCall::None) {
-        count_call();
-        if (p) g_held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
+    ClockworkEntryKind kind;
+    if (clockwork::GuestMallocs* g = guest_call(kind)) {
+        count_call(*g, kind);
+        if (p) g->held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
     }
     return p;
 }
@@ -119,15 +119,17 @@ void* __wrap_calloc(size_t count, size_t size) {
         g_all_calls.fetch_add(1, std::memory_order_relaxed);
         if (p) g_all_held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
     }
-    if (g_open != GuestCall::None) {
-        count_call();
-        if (p) g_held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
+    ClockworkEntryKind kind;
+    if (clockwork::GuestMallocs* g = guest_call(kind)) {
+        count_call(*g, kind);
+        if (p) g->held.fetch_add((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
     }
     return p;
 }
 
 void* __wrap_realloc(void* p, size_t n) {
-    const bool open = g_open != GuestCall::None;
+    ClockworkEntryKind kind;
+    clockwork::GuestMallocs* const g = guest_call(kind);
     const int64_t before = p ? (int64_t)malloc_usable_size(p) : 0;
     void* q = __real_realloc(p, n);
     if (!g_host_scratch) {
@@ -135,20 +137,22 @@ void* __wrap_realloc(void* p, size_t n) {
         if (q || n == 0) g_all_held.fetch_sub(before, std::memory_order_relaxed);
         if (q) g_all_held.fetch_add((int64_t)malloc_usable_size(q), std::memory_order_relaxed);
     }
-    if (open) {
-        count_call();
+    if (g) {
+        count_call(*g, kind);
         // realloc frees p when it succeeds, and when asked for 0; on failure p is untouched
-        if (q || n == 0) g_held.fetch_sub(before, std::memory_order_relaxed);
-        if (q) g_held.fetch_add((int64_t)malloc_usable_size(q), std::memory_order_relaxed);
+        if (q || n == 0) g->held.fetch_sub(before, std::memory_order_relaxed);
+        if (q) g->held.fetch_add((int64_t)malloc_usable_size(q), std::memory_order_relaxed);
     }
     return q;
 }
 
 void __wrap_free(void* p) {
     if (p && !g_host_scratch) g_all_held.fetch_sub((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
-    if (p && g_open != GuestCall::None) {
-        g_frees.fetch_add(1, std::memory_order_relaxed);
-        g_held.fetch_sub((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
+    ClockworkEntryKind kind;
+    clockwork::GuestMallocs* const g = p ? guest_call(kind) : nullptr;
+    if (g) {
+        g->frees.fetch_add(1, std::memory_order_relaxed);
+        g->held.fetch_sub((int64_t)malloc_usable_size(p), std::memory_order_relaxed);
     }
     __real_free(p);
 }

@@ -133,7 +133,7 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
 
         uint32_t ut           = static_cast<uint32_t>(tail);
         uint32_t uh           = static_cast<uint32_t>(head);
-        uint32_t avail        = (uh - ut + size) % size;
+        uint32_t avail        = ring_used_bytes(uh, ut, size);
         uint32_t space_to_end = size - ut;
 
         // Frame offsets are 4-aligned by construction; a tail with less than

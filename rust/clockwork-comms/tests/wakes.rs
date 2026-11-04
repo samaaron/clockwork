@@ -42,7 +42,7 @@ fn the_accept_thread_and_a_quiet_reader_sleep_and_stopping_ends_both_at_once() {
     // SAFETY: the secret and the address are live for the call; the callbacks
     // are plain functions that outlive the server.
     let h = unsafe {
-        clockwork_osc_tcp_start(std::ptr::null_mut(), on_packet, on_closed, &secret, 0,
+        clockwork_osc_tcp_start(std::ptr::null_mut(), std::ptr::null_mut(), on_packet, on_closed, &secret, 0,
                                 bind.as_ptr(), bind.len() as u32)
     };
     assert!(!h.is_null());

@@ -38,6 +38,48 @@ jobs:
         run: scripts/check-logging.sh
       - name: Forbid std::thread and detach() in engine-side native code
         run: scripts/check-threads.sh
+      - name: Forbid reaching a core's regions through the default layout
+        run: scripts/check-layout.sh
+
+  # --------------------------------------------------------- globals guard --
+  # Every mutable variable with static storage in Clockwork's own code is on
+  # scripts/globals.list, which says what it is (docs/ENGINES.md, Part 4.3).
+  # The check reads an unoptimised build's objects, and its canary proves it
+  # read them, on macOS and Linux: each adds its own files (CoreAudio; ALSA,
+  # JACK, PipeWire), and the list names a platform's own with `only=`. The
+  # scan reads COFF too; Windows joins once the runner has a demangler
+  # (scripts/check-globals.sh needs c++filt or CXXFILT).
+  globals-guard:
+    name: globals guard (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libasound2-dev libudev-dev libjack-jackd2-dev \
+            libpipewire-0.3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-globals-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Every mutable variable is on the list
+        run: scripts/check-globals.sh
 
   # ------------------------------------------------------------------ tidy --
   # clang-tidy over Clockwork's own sources (.clang-tidy: the crash classes
@@ -440,7 +482,11 @@ jobs:
           build/test/clockwork_tests
           build/test/clockwork_lanes_reserved_tests
           build/test/clockwork_attach_tests
+          build/test/clockwork_guest_once_tests
           build/test/clockwork_engine_tests
+          # Two cores rendering at once, under the sanitizer: the only
+          # concurrent two-core renders in the tree (docs/ENGINES.md, 4.2).
+          build/test/clockwork_reference_tests "[independence]"
 
   # -------------------------------------------------------------------- nif --
   # The Erlang NIF build. Build-only: clockwork vendors the erl_nif headers,
@@ -533,6 +579,13 @@ jobs:
       # build script's consumers); the packages above are what it needs.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --manifest-path rust/Cargo.toml -- -D warnings
+      # Every extern "C" function is the panic fence alone, so no panic
+      # reaches a host (docs/ENGINES.md, 3.7). Read from the sources, which
+      # are the same on every runner: once is enough.
+      - name: Forbid a panic into the host
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-ffi.sh
       - name: Test
         run: cargo test --release --manifest-path rust/Cargo.toml
 
@@ -596,13 +649,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Loom
-        # Explore every interleaving of the lock-free handshakes (the wait word
-        # and the slots built on it), with up to three forced thread switches
-        # per run.
+        # Explore every interleaving of the lock-free handshakes (the wait word,
+        # the slots built on it, and the address map a free finds its core's
+        # heap through), with up to three forced thread switches per run.
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: "3"
-        run: cargo test --release --manifest-path rust/Cargo.toml --lib -p clockwork-wait -p clockwork-slots
+        run: cargo test --release --manifest-path rust/Cargo.toml --lib -p clockwork-wait -p clockwork-slots -p clockwork-heap
 
   rust-licences:
     name: rust licences

@@ -35,7 +35,7 @@ int main(void) {
     S(DspInfo);
     F(DspInfo, name); F(DspInfo, version); F(DspInfo, holds_schedule);
     F(DspInfo, memory_bytes_wanted); F(DspInfo, memory_bulk_bytes_wanted); F(DspInfo, wants_events);
-    F(DspInfo, window_magic); F(DspInfo, window_version); F(DspInfo, survives);
+    F(DspInfo, window_magic); F(DspInfo, window_version); F(DspInfo, survives); F(DspInfo, instances);
 
     S(ClockworkAsset);
     F(ClockworkAsset, struct_bytes); F(ClockworkAsset, id); F(ClockworkAsset, kind);
@@ -55,6 +55,9 @@ int main(void) {
 
     S(ClockworkRegion);
     F(ClockworkRegion, base); F(ClockworkRegion, bytes); F(ClockworkRegion, writable);
+    S(ClockworkScopeShape);
+    F(ClockworkScopeShape, struct_bytes); F(ClockworkScopeShape, slots); F(ClockworkScopeShape, slot_bytes);
+    F(ClockworkScopeShape, header_bytes); F(ClockworkScopeShape, frames); F(ClockworkScopeShape, channels);
 
     S(ClockworkClientClock);
     F(ClockworkClientClock, struct_bytes); F(ClockworkClientClock, bpm);
@@ -94,9 +97,6 @@ int main(void) {
     printf("const CLOCKWORK_ASSET_AUDIO_F32 %d\n", (int)CLOCKWORK_ASSET_AUDIO_F32);
     printf("const DSP_FP_ENV_FLUSH_TO_ZERO %d\n", (int)DSP_FP_ENV_FLUSH_TO_ZERO);
     printf("const CLOCKWORK_CLIENT_ABI_VERSION %d\n", (int)CLOCKWORK_CLIENT_ABI_VERSION);
-    printf("const CLOCKWORK_ATTACH_REFUSED %d\n", (int)CLOCKWORK_ATTACH_REFUSED);
-    printf("const CLOCKWORK_ATTACH_BOOTED %d\n", (int)CLOCKWORK_ATTACH_BOOTED);
-    printf("const CLOCKWORK_ATTACH_JOINED %d\n", (int)CLOCKWORK_ATTACH_JOINED);
     printf("const CLOCKWORK_RESERVED_LANES_MAX %d\n", (int)CLOCKWORK_RESERVED_LANES_MAX);
     S(ClockworkArenaEntry);
     F(ClockworkArenaEntry, id); F(ClockworkArenaEntry, offset); F(ClockworkArenaEntry, bytes);
@@ -109,7 +109,12 @@ int main(void) {
     F(ClockworkEmbedConfig, struct_bytes); F(ClockworkEmbedConfig, sample_rate); F(ClockworkEmbedConfig, block_size);
     F(ClockworkEmbedConfig, input_channels); F(ClockworkEmbedConfig, output_channels);
     F(ClockworkEmbedConfig, max_render_frames); F(ClockworkEmbedConfig, app_name); F(ClockworkEmbedConfig, device);
-    F(ClockworkEmbedConfig, instance_id); F(ClockworkEmbedConfig, flags); F(ClockworkEmbedConfig, driver);
+    F(ClockworkEmbedConfig, profile); F(ClockworkEmbedConfig, flags); F(ClockworkEmbedConfig, driver);
+    S(ClockworkProfile);
+    F(ClockworkProfile, struct_bytes); F(ClockworkProfile, in_ring_bytes); F(ClockworkProfile, rt_out_ring_bytes);
+    F(ClockworkProfile, nrt_out_ring_bytes); F(ClockworkProfile, scope_frames); F(ClockworkProfile, scope_channels);
+    F(ClockworkProfile, tap_slots); F(ClockworkProfile, track_tap_slots); F(ClockworkProfile, tap_ring_frames);
+    F(ClockworkProfile, window_bytes); F(ClockworkProfile, persist_bytes);
     S(ClockworkEmbedDevice);
     F(ClockworkEmbedDevice, struct_bytes); F(ClockworkEmbedDevice, driver); F(ClockworkEmbedDevice, device);
     F(ClockworkEmbedDevice, sample_rate); F(ClockworkEmbedDevice, buffer_frames); F(ClockworkEmbedDevice, block_frames);
@@ -126,6 +131,7 @@ int main(void) {
     printf("const CLOCKWORK_ARENA_VERSION %d\n", (int)CLOCKWORK_ARENA_VERSION);
     printf("const CLOCKWORK_ARENA_HEADER_BYTES %d\n", (int)CLOCKWORK_ARENA_HEADER_BYTES);
     printf("const CLOCKWORK_ARENA_MAX_ENTRIES %d\n", (int)CLOCKWORK_ARENA_MAX_ENTRIES);
+    printf("const CLOCKWORK_TAP_SLOTS_MAX %d\n", (int)CLOCKWORK_TAP_SLOTS_MAX);
     printf("const CLOCKWORK_ARENA_CLOCKWORK_TAPS %d\n", (int)CLOCKWORK_ARENA_CLOCKWORK_TAPS);
     printf("const CLOCKWORK_OWNER_HOST %d\n", (int)CLOCKWORK_OWNER_HOST);
     printf("const CLOCKWORK_ARENA_GUEST_PERSIST %d\n", (int)CLOCKWORK_ARENA_GUEST_PERSIST);

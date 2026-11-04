@@ -17,6 +17,7 @@
  * reimplementation for another platform, has to satisfy the same table.
  */
 #include "EngineFixture.h"
+#include "lanes/lanes.h"
 #include "clockwork_client.h"
 #include "shared_memory.h"
 
@@ -26,14 +27,17 @@
 #include <string>
 #include <vector>
 
-extern "C" { extern uint8_t* shared_memory; }
+namespace {
+// The engine's arena (clockwork_lanes_base).
+uint8_t* arenaBase(const engine_test::Engine& e) { return static_cast<uint8_t*>(clockwork_lanes_base(e.engine.core())); }
+}
 
 using engine_test::Engine;
 
 namespace {
 
-ClockworkClient* openClient(ClockworkStatus* st) {
-    return clockwork_client_open_memory(shared_memory, ARENA_SIZE, st);
+ClockworkClient* openClient(const Engine& e, ClockworkStatus* st) {
+    return clockwork_client_open_memory(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, st);
 }
 
 // A message of a chosen payload size, so a test can fill a ring in a known
@@ -54,7 +58,7 @@ TEST_CASE("client rings: a ring that is never drained refuses, and says which re
           "[client][rings]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     // No blocks are pumped, so nothing drains: the ring fills and stays full.
@@ -83,7 +87,7 @@ TEST_CASE("client rings: a refusal leaves the ring usable, not wedged",
           "[client][rings]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto msg = sized(4096);
@@ -108,7 +112,7 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
           "[client][rings]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     // Enough traffic to take the write head past the end of the ring several
@@ -116,7 +120,7 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
     // reader rather than an idle one.
     const uint32_t payload = 8192;
     const auto msg = sized(payload);
-    const uint32_t rounds = (IN_RING_SIZE / payload) * 3;
+    const uint32_t rounds = (clockwork::kDefaultLayout.profile.in_ring_bytes / payload) * 3;
 
     uint32_t sent = 0;
     for (uint32_t i = 0; i < rounds; ++i) {
@@ -130,7 +134,7 @@ TEST_CASE("client rings: wrapping keeps every frame whole and in order",
     e.pump(0.5);
 
     CHECK(sent == rounds);
-    CHECK(sent * payload > IN_RING_SIZE);   // it really did wrap
+    CHECK(sent * payload > clockwork::kDefaultLayout.profile.in_ring_bytes);   // it really did wrap
 
     // The guest answers every blob with its length and a hash, so a frame that
     // was torn by a wrap, or spliced with its neighbour, is a reply that never
@@ -154,9 +158,9 @@ TEST_CASE("client rings: a second handle polling takes from the first",
     // would hold however the cursors were wired.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* a = openClient(&st);
+    ClockworkClient* a = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
-    ClockworkClient* b = openClient(&st);
+    ClockworkClient* b = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     // Both handles address one cursor, so advancing it through `a` is visible
@@ -165,7 +169,7 @@ TEST_CASE("client rings: a second handle polling takes from the first",
     REQUIRE(clockwork_client_region(a, CLOCKWORK_REGION_EGRESS, &ra) == CLOCKWORK_OK);
     REQUIRE(clockwork_client_region(b, CLOCKWORK_REGION_EGRESS, &rb) == CLOCKWORK_OK);
     CHECK(ra.base == rb.base);
-    CHECK(ra.bytes == RT_OUT_RING_SIZE);
+    CHECK(ra.bytes == clockwork::kDefaultLayout.profile.rt_out_ring_bytes);
     CHECK(ra.writable == 0);          // the engine's to write
 
     clockwork_client_close(a);
@@ -181,7 +185,7 @@ TEST_CASE("client tap: a watcher sees traffic the consumer already took",
     // overwrites it.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientTap* tap =
@@ -223,7 +227,7 @@ TEST_CASE("client tap: the ingress ring can be watched but not drained",
     // shows what was sent, which is the whole reason the shape exists.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientTap* tap =
@@ -254,7 +258,7 @@ TEST_CASE("client tap: two taps do not shorten each other's view",
     // the other.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientTap* t1 = clockwork_client_tap_open(c, CLOCKWORK_REGION_INGRESS, &st);
@@ -288,7 +292,7 @@ TEST_CASE("client tap: being lapped is counted, not fatal",
     // skipped would be worse than one that reported a gap.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientTap* tap = clockwork_client_tap_open(c, CLOCKWORK_REGION_INGRESS, &st);
@@ -310,7 +314,7 @@ TEST_CASE("client tap: being lapped is counted, not fatal",
     // keeps getting room and runs right over the tap.
     const uint32_t payload = 8192;
     const auto msg = sized(payload);
-    const uint32_t rounds = (IN_RING_SIZE / payload) * 3;
+    const uint32_t rounds = (clockwork::kDefaultLayout.profile.in_ring_bytes / payload) * 3;
     for (uint32_t i = 0; i < rounds; ++i) {
         while (clockwork_client_send(c, msg.data(),
                                      static_cast<uint32_t>(msg.size()), 1) == CLOCKWORK_E_FULL)
@@ -349,7 +353,7 @@ TEST_CASE("client tap: a tap can be placed in the caller's own storage",
     // into that allocator.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openClient(&st);
+    ClockworkClient* c = openClient(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     std::vector<uint8_t> storage(clockwork_client_tap_sizeof() + 8, 0xEE);

@@ -24,8 +24,9 @@ use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::Arc;
 
-use clockwork_sinks::ffi::*;
-use clockwork_sinks::registry::{self, Drive};
+mod common;
+use common::t;
+use clockwork_sinks::registry::Drive;
 use clockwork_sinks::profile::Layout as SinkLayout;
 use clockwork_sinks::queue::DEFAULT_CELL_BYTES;
 use clockwork_sinks::sink::{Stats, KIND_OSC};
@@ -85,9 +86,9 @@ fn disarm() -> usize { ARMED.with(|a| a.set(false)); COUNT.with(|c| c.get()) }
 // "wider than a cell" below mean.
 fn manual(capacity: u32) -> (u32, Arc<CaptureEndpoint>) {
     let ep = Arc::new(CaptureEndpoint::new());
-    let h = registry::open_with_layout(KIND_OSC, "capture:0",
+    let h = t().sinks().open_with_layout(KIND_OSC, "capture:0",
                                        &SinkLayout::single(DEFAULT_CELL_BYTES as u32, capacity),
-                                       ep.clone(), Drive::Manual);
+                                       ep.clone(), Drive::Manual, false);
     assert_ne!(h, 0);
     (h, ep)
 }
@@ -97,12 +98,12 @@ fn opening_a_sink_allocates_and_that_is_allowed() {
     let target = CString::new("capture:0").unwrap();   // the caller's, not ours
     let ep: Arc<CaptureEndpoint> = Arc::new(CaptureEndpoint::new());
     arm();
-    let h = registry::open_with(KIND_OSC, target.to_str().unwrap(), 1024,
-                                ep, Drive::Manual);
+    let h = t().sinks().open_with(KIND_OSC, target.to_str().unwrap(), 1024,
+                                ep, Drive::Manual, false);
     let n = disarm();
     assert_ne!(h, 0);
     assert!(n > 0, "a thousand message cells have to come from somewhere");
-    clockwork_sink_close(h);
+    t().close(h);
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn the_audio_thread_path_allocates_nothing() {
     let (full, _fe) = manual(8);
     for i in 0..8u8 {
         // SAFETY: one live byte.
-        assert_ne!(unsafe { clockwork_sink_send(full, [i].as_ptr(), 1, Timetag::IMMEDIATELY) }, 0);
+        assert_ne!(unsafe { t().send(full, [i].as_ptr(), 1, Timetag::IMMEDIATELY) }, 0);
     }
 
     // Everything the calls will touch, built before the arm: the point is
@@ -131,28 +132,28 @@ fn the_audio_thread_path_allocates_nothing() {
     for _ in 0..256 {
         // The accepted path, immediate and scheduled.
         // SAFETY: `note` is 3 live bytes.
-        unsafe { clockwork_sink_send(roomy, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
+        unsafe { t().send(roomy, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // SAFETY: `note` is 3 live bytes.
-        unsafe { clockwork_sink_send(roomy, note.as_ptr(), 3, future) };
+        unsafe { t().send(roomy, note.as_ptr(), 3, future) };
         // A long message: still a memcpy into a cell taken at open.
         // SAFETY: `sysex` is that many live bytes.
-        unsafe { clockwork_sink_send(roomy, sysex.as_ptr(), sysex.len() as u32, Timetag::IMMEDIATELY) };
+        unsafe { t().send(roomy, sysex.as_ptr(), sysex.len() as u32, Timetag::IMMEDIATELY) };
         // The two refusal paths — queue full, and longer than a cell.
         // SAFETY: `note` is 3 live bytes.
-        unsafe { clockwork_sink_send(full, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
+        unsafe { t().send(full, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // SAFETY: `oversize` is that many live bytes; the refusal is the point.
-        unsafe { clockwork_sink_send(roomy, oversize.as_ptr(), oversize.len() as u32, Timetag::IMMEDIATELY) };
+        unsafe { t().send(roomy, oversize.as_ptr(), oversize.len() as u32, Timetag::IMMEDIATELY) };
         // A handle that is closed / never existed takes the same path.
         // SAFETY: 3 live bytes; the bogus handle is refused by the registry.
-        unsafe { clockwork_sink_send(0xdead_beef, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
+        unsafe { t().send(0xdead_beef, note.as_ptr(), 3, Timetag::IMMEDIATELY) };
         // The query surface, which a metrics tick calls at the same rate.
-        clockwork_sink_is_open(roomy);
-        clockwork_sink_kind(roomy);
-        clockwork_sink_target(roomy);
+        t().is_open(roomy);
+        t().kind(roomy);
+        t().target(roomy);
         // SAFETY: a live out-pointer.
-        unsafe { clockwork_sink_stats(roomy, &mut stats) };
+        unsafe { t().stats(roomy, &mut stats) };
         // SAFETY: `slots` has that many writable entries.
-        unsafe { clockwork_sink_list(slots.as_mut_ptr(), slots.len() as u32) };
+        unsafe { t().list(slots.as_mut_ptr(), slots.len() as u32) };
     }
     let n = disarm();
     assert_eq!(n, 0, "the audio-thread path allocated {n} time(s)");
@@ -161,13 +162,13 @@ fn the_audio_thread_path_allocates_nothing() {
     // take the branches it meant to rather than bailing out early.
     let full_stats = { let mut s = Stats::default();
                        // SAFETY: a live out-pointer.
-                       unsafe { clockwork_sink_stats(full, &mut s) }; s };
+                       unsafe { t().stats(full, &mut s) }; s };
     assert_eq!(full_stats.dropped, 256, "the full sink refused every send");
     let roomy_stats = { let mut s = Stats::default();
                         // SAFETY: a live out-pointer.
-                        unsafe { clockwork_sink_stats(roomy, &mut s) }; s };
+                        unsafe { t().stats(roomy, &mut s) }; s };
     assert_eq!(roomy_stats.dropped, 256, "each oversize message was refused");
 
-    clockwork_sink_close(roomy);
-    clockwork_sink_close(full);
+    t().close(roomy);
+    t().close(full);
 }

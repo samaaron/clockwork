@@ -11,12 +11,13 @@
 #include "ClockworkEngine.h"
 #include "clock/ClockworkClock.h"
 #include "clock/Timeline.h"
-#include "audio_processor.h"   // get_audio_input_bus: where a return block lands
+#include "core_state.h"            // the engine core's clock
 #include "lanes/lanes.h"
 #include "lanes/lanes_internal.h"   // clockwork_egress_nrt_write: the bridge's answers re-join the lane
 #include "lanes/ring_drain.h"
 #include "shared_memory.h"
 #include "shm_segment.hpp"
+#include "clockwork_taps.h"
 #include "clockwork_port_bus.h"
 #include "clockwork_config.h"
 #include "clockwork_product.h"
@@ -51,15 +52,6 @@ using detail_shm_segment::shm_create;
 using detail_shm_segment::shm_close;
 using detail_shm_segment::shm_remove;
 
-// The tap slot claim and release (rust/clockwork-taps). Declared here rather
-// than through dsp/scsynth/scsynth_scope.h, whose declaration names scsynth's
-// World and TapBufferHnd: the Rust side takes an opaque context it never
-// reads and a handle of the four-field shape TrackTap::Claim spells out.
-extern "C" {
-int  clockwork_tap_get(void* ctx, int index, int channels, int max_frames, void* hnd);
-void clockwork_tap_release(void* ctx, void* hnd);
-}
-
 namespace {
 
 // Blocks posted with no heartbeat before the bridge is called hung: about a
@@ -91,14 +83,6 @@ int32_t ownPid() {
 constexpr uint32_t kMirroredTimelines =
     CLOCKWORK_MAX_TIMELINES < TIMELINE_SLOTS ? CLOCKWORK_MAX_TIMELINES : TIMELINE_SLOTS;
 
-// Scratch the audio thread reads a surplus return block into, to discard it.
-std::array<std::array<float, MAX_BLOCK>, LANES> g_trim{};
-std::array<float*, LANES> g_trimPtrs = []() noexcept {
-    std::array<float*, LANES> ptrs{};
-    for (uint32_t c = 0; c < LANES; ++c) ptrs[c] = g_trim[c].data();
-    return ptrs;
-}();
-
 }  // namespace
 
 // A message the timed store fired is due in this block by construction, and
@@ -114,17 +98,20 @@ uint32_t trackFrameOffset(clockwork::Timetag when, clockwork::Timetag blockStart
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
-void TrackControl::reserveLanes() { clockwork_reserve_lanes(LANES); }
+ClockworkCore* TrackControl::core() const { return mEngine ? mEngine->core() : nullptr; }
+const ClockworkPorts* TrackControl::ports() const { return clockwork_core_ports(core()); }
+std::string TrackControl::segmentName() const  { return segment_name(ownPid(), clockwork_core_id(core())); }
+std::string TrackControl::doorbellName() const { return doorbell_name(ownPid(), clockwork_core_id(core())); }
 
 void TrackControl::init(ClockworkEngine* engine, OscEgress* egress, ClockworkClock* clock) {
     mEngine = engine;
     mEgress = egress;
     mClockworkClock = clock;
-    if (auto* arena = static_cast<uint8_t*>(clockwork_lanes_base()))
+    if (auto* arena = static_cast<uint8_t*>(clockwork_lanes_base(core())))
         mClock = reinterpret_cast<const ClockworkClockState*>(arena + CLOCK_STATE_START);
     if (!createSegment()) return;
-    if (!mBell.create(doorbell_name(ownPid()))) {
-        clockwork_log("[tracks] cannot create the doorbell %s", doorbell_name(ownPid()).c_str());
+    if (!mBell.create(doorbellName())) {
+        clockwork_log(core(), "[tracks] cannot create the doorbell %s", doorbellName().c_str());
         return;
     }
     if (!openPorts(true)) return;
@@ -143,7 +130,7 @@ void TrackControl::shutdown() {
         releaseTaps();
         mHeader = nullptr;
         shm_close(mSeg);
-        shm_remove(segment_name(ownPid()));
+        shm_remove(segmentName());
     }
     mEngine = nullptr;
     mEgress = nullptr;
@@ -151,18 +138,18 @@ void TrackControl::shutdown() {
 }
 
 bool TrackControl::createSegment() {
-    const std::string name = segment_name(ownPid());
+    const std::string name = segmentName();
     shm_remove(name);   // a leftover from a previous life with this pid
     try {
         mSeg = shm_create(name, SEGMENT_SIZE);
     } catch (const std::exception& e) {
-        clockwork_log("[tracks] cannot create the bridge segment: %s", e.what());
+        clockwork_log(core(), "[tracks] cannot create the bridge segment: %s", e.what());
         return false;
     }
-    double sr = clockwork_sample_rate();
+    double sr = clockwork_sample_rate(core());
     if (!(sr > 0.0) && mEngine) sr = mEngine->processor().nominalSampleRate();
     if (!(sr > 0.0)) sr = 48000.0;
-    uint32_t block = clockwork_block_size();
+    uint32_t block = clockwork_block_size(core());
     if (block == 0 || block > MAX_BLOCK) block = std::min<uint32_t>(block ? block : 128, MAX_BLOCK);
     // The device is usually not open yet when the segment is made (the
     // bridge is spawned at boot, the device some seconds later), so this is
@@ -171,7 +158,7 @@ bool TrackControl::createSegment() {
     mDeviceBufferFrames = mEngine ? static_cast<uint32_t>(std::max(0, mEngine->processor().deviceBufferSize())) : 0;
     const uint32_t slack = slackFor(mDeviceBufferFrames, block);
     mHeader = header(mSeg.ptr);
-    init_header(mHeader, sr, block, clockwork_lane_base(), ownPid(), slack);
+    init_header(mHeader, sr, block, clockwork_lane_base(core()), ownPid(), slack);
     return true;
 }
 
@@ -197,7 +184,7 @@ void TrackControl::refreshSlack() {
     const uint32_t slack = slackFor(frames, block);
     const uint32_t was = mHeader->slack_blocks.exchange(slack, std::memory_order_acq_rel);
     if (slack != was)
-        clockwork_log("[tracks] bridge slack %u -> %u blocks (device buffer %u frames = %u blocks of %u)",
+        clockwork_log(core(), "[tracks] bridge slack %u -> %u blocks (device buffer %u frames = %u blocks of %u)",
                       was, slack, frames, (frames + block - 1) / block, block);
 }
 
@@ -205,20 +192,20 @@ void TrackControl::refreshSlack() {
 
 bool TrackControl::openPorts(bool reset) {
     closePorts();
-    mSend = clockwork_port_open_shared("tracks/send", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
+    mSend = clockwork_port_open_shared(ports(), "tracks/send", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
                                  send_ring(mSeg.ptr), AUDIO_RING_BYTES, reset ? 1 : 0);
-    mReturn = clockwork_port_open_shared("tracks/return", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
+    mReturn = clockwork_port_open_shared(ports(), "tracks/return", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
                                    return_ring(mSeg.ptr), AUDIO_RING_BYTES, reset ? 1 : 0);
     if (mSend == CLOCKWORK_PORT_NONE || mReturn == CLOCKWORK_PORT_NONE) {
-        clockwork_log("[tracks] cannot open the bridge's audio ports");
+        clockwork_log(core(), "[tracks] cannot open the bridge's audio ports");
         closePorts();
         return false;
     }
-    const uint32_t base = clockwork_lane_base();
+    const uint32_t base = clockwork_lane_base(core());
     if (base == 0) {
-        clockwork_log("[tracks] no lanes were reserved; tracks will be silent");
-    } else if (!clockwork_port_bus_attach(mSend, base) || !clockwork_port_bus_attach(mReturn, base)) {
-        clockwork_log("[tracks] cannot bind the bridge's ports at lane %u", base);
+        clockwork_log(core(), "[tracks] no lanes were reserved; tracks will be silent");
+    } else if (!clockwork_port_bus_attach(core(), mSend, base) || !clockwork_port_bus_attach(core(), mReturn, base)) {
+        clockwork_log(core(), "[tracks] cannot bind the bridge's ports at lane %u", base);
         closePorts();
         return false;
     } else {
@@ -228,22 +215,22 @@ bool TrackControl::openPorts(bool reset) {
     primeReturn();
     // Last: from here the audio thread posts the doorbell every block, and
     // taps every return block for the scopes.
-    clockwork_port_set_signal(mSend, &TrackControl::onSendTransfer, this);
-    clockwork_port_set_signal(mReturn, &TrackControl::onReturnTransfer, this);
+    clockwork_port_set_signal(ports(), mSend, &TrackControl::onSendTransfer, this);
+    clockwork_port_set_signal(ports(), mReturn, &TrackControl::onReturnTransfer, this);
     return true;
 }
 
 void TrackControl::closePorts() {
     if (mSend != CLOCKWORK_PORT_NONE) {
-        clockwork_port_set_signal(mSend, nullptr, nullptr);
-        clockwork_port_bus_detach(mSend);
-        clockwork_port_close(mSend);
+        clockwork_port_set_signal(ports(), mSend, nullptr, nullptr);
+        clockwork_port_bus_detach(core(), mSend);
+        clockwork_port_close(ports(), mSend);
         mSend = CLOCKWORK_PORT_NONE;
     }
     if (mReturn != CLOCKWORK_PORT_NONE) {
-        clockwork_port_set_signal(mReturn, nullptr, nullptr);
-        clockwork_port_bus_detach(mReturn);
-        clockwork_port_close(mReturn);
+        clockwork_port_set_signal(ports(), mReturn, nullptr, nullptr);
+        clockwork_port_bus_detach(core(), mReturn);
+        clockwork_port_close(ports(), mReturn);
         mReturn = CLOCKWORK_PORT_NONE;
     }
     mBoundBase = 0;
@@ -263,22 +250,26 @@ void TrackControl::tapReturns() {
     // track. A lane pair with no track reads as silence, and a tap stream
     // of silence would show a track that is not there.
     const uint32_t live = h->slots_live.load(std::memory_order_relaxed);
-    const float* bus = reinterpret_cast<const float*>(get_audio_input_bus());
-    const uint32_t frames = clockwork_block_size();
-    const uint64_t at = g_engine_frames.load(std::memory_order_relaxed);
-    // Only the slots this build carved: a profile with none has nothing to
-    // claim, and its tracks simply have no tap.
-    constexpr uint32_t slots = std::min<uint32_t>(LANES / 2, TAP_TRACK_SLOTS);
+    const float* bus = clockwork_audio_in(core());
+    const uint32_t frames = clockwork_block_size(core());
+    const ClockworkClock* clock = clockwork::clock_of(core());
+    const uint64_t at = clock ? clock->engineFrames() : 0;
+    // Only the slots the core's layout carved: a profile with none has
+    // nothing to claim, and its tracks simply have no tap.
+    const clockwork::Layout& L = clockwork::layout_of(core());
+    const uint32_t slots = std::min<uint32_t>(LANES / 2, L.profile.track_tap_slots);
     for (uint32_t slot = 0; slot < slots; ++slot) {
         TrackTap& tap = mTaps[slot];
         const bool want = (live >> slot) & 1u;
         if (want && !tap.writer.valid()) {
-            if (clockwork_tap_get(nullptr, static_cast<int>(TAP_TRACK_SLOT_BASE + slot),
+            // The track taps are numbered after the guest's.
+            if (clockwork_tap_get(clockwork_core_taps(core()), clockwork::arena_base(core()),
+                                   static_cast<int>(L.profile.tap_slots + slot),
                                    static_cast<int>(TAP_STREAM_CHANNELS), 0, &tap.claim))
                 tap.writer = shm_tap_stream_writer(
-                    static_cast<shm_tap_stream*>(tap.claim.internalData));
+                    static_cast<shm_tap_stream*>(tap.claim.slot), L.profile.tap_ring_frames);
         } else if (!want && tap.writer.valid()) {
-            clockwork_tap_release(nullptr, &tap.claim);
+            clockwork_tap_release(clockwork_core_taps(core()), clockwork::arena_base(core()), &tap.claim);
             tap.writer = shm_tap_stream_writer();
         }
         if (!tap.writer.valid() || !bus || frames == 0) continue;
@@ -296,7 +287,7 @@ void TrackControl::tapReturns() {
 void TrackControl::releaseTaps() {
     for (TrackTap& tap : mTaps) {
         if (!tap.writer.valid()) continue;
-        clockwork_tap_release(nullptr, &tap.claim);
+        clockwork_tap_release(clockwork_core_taps(core()), clockwork::arena_base(core()), &tap.claim);
         tap.writer = shm_tap_stream_writer();
     }
 }
@@ -307,7 +298,7 @@ void TrackControl::primeReturn() {
     const uint32_t block = std::min<uint32_t>(mHeader->block_size.load(std::memory_order_relaxed), MAX_BLOCK);
     const uint32_t slack = std::max<uint32_t>(1, mHeader->slack_blocks.load(std::memory_order_relaxed));
     std::vector<float> zeros(size_t(block) * LANES, 0.0f);
-    for (uint32_t i = 0; i < slack; ++i) clockwork_port_produce(mReturn, zeros.data(), block);
+    for (uint32_t i = 0; i < slack; ++i) clockwork_port_produce(ports(), mReturn, zeros.data(), block);
 }
 
 // Audio thread, after the send block is in the ring. What the bridge needs
@@ -316,7 +307,7 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
     auto* self = static_cast<TrackControl*>(ctx);
     Header* h = self->mHeader;
     if (!h) return;
-    h->block_time.store(clockwork_block_time().ntp, std::memory_order_relaxed);
+    h->block_time.store(clockwork_block_time(self->mEngine->core()).ntp, std::memory_order_relaxed);
     mirror_clock(h, self->mClock);
     // The follower timelines, from their lock-free published copies. A slot
     // nothing holds mirrors as the placeholder; a writer caught mid-way
@@ -336,16 +327,13 @@ void TrackControl::onSendTransfer(ClockworkPort, void* ctx) {
     // another core, may already be answering the first of them — so up to
     // B-1 blocks beyond slack-1 are the bridge being on time, not late, and
     // trimming those skips a real block whenever the bridge is quick.
-    const uint32_t block = clockwork_block_size();
+    const uint32_t block = clockwork_block_size(self->core());
     const uint32_t slack = std::max<uint32_t>(1, h->slack_blocks.load(std::memory_order_relaxed));
     const uint32_t perCallback = std::max<uint32_t>(1, (self->mDeviceBufferFrames + block - 1) / std::max<uint32_t>(1, block));
     const uint32_t keep = (slack - 1 + perCallback - 1) * block;
-    uint32_t readable = clockwork_port_readable(self->mReturn);
-    while (readable > keep) {
-        const uint32_t n = std::min<uint32_t>(readable - keep, MAX_BLOCK);
-        clockwork_port_read(self->mReturn, g_trimPtrs.data(), LANES, n);
-        readable -= n;
-    }
+    const uint32_t readable = clockwork_port_readable(self->ports(), self->mReturn);
+    if (readable > keep)
+        clockwork_port_read(self->ports(), self->mReturn, nullptr, LANES, readable - keep);   // read and dropped
 
     h->engine_blocks.fetch_add(1, std::memory_order_release);
     if (h->bridge_ready.load(std::memory_order_acquire)) self->mBell.post();
@@ -362,15 +350,15 @@ static bool isFile(const std::filesystem::path& p) {
 std::string TrackControl::findBridge() const {
     const char* env = std::getenv("CLOCKWORK_PLUGIN_BRIDGE");   // NOLINT(concurrency-mt-unsafe): nothing in the process calls setenv
     const auto self = clockwork_path::current_executable();
-    return resolveBridge(mConfiguredExe, env ? env : "", clockwork_path::to_utf8(self.parent_path()));
+    return resolveBridge(core(), mConfiguredExe, env ? env : "", clockwork_path::to_utf8(self.parent_path()));
 }
 
-std::string TrackControl::resolveBridge(const std::string& configured, const std::string& envOverride,
+std::string TrackControl::resolveBridge(ClockworkCore* core, const std::string& configured, const std::string& envOverride,
                                         const std::string& exeDir) {
     // the host's word first: a path it was given is one it put the bridge at
     if (!configured.empty()) {
         if (isFile(clockwork_path::from_utf8(configured))) return configured;
-        clockwork_log("[tracks] the configured plugin bridge is not there: %s (looking beside the executable instead)",
+        clockwork_log(core, "[tracks] the configured plugin bridge is not there: %s (looking beside the executable instead)",
                       configured.c_str());
     }
     if (!envOverride.empty() && isFile(clockwork_path::from_utf8(envOverride))) return envOverride;
@@ -418,7 +406,7 @@ bool TrackControl::spawnBridge(bool restore) {
     if (mExe.empty()) {
         if (!mSpawnFailedReported) {
             mSpawnFailedReported = true;
-            clockwork_log("[tracks] no plugin bridge found beside the engine"
+            clockwork_log(core(), "[tracks] no plugin bridge found beside the engine"
 #ifdef CLOCKWORK_PLUGIN_BRIDGE_DIR
                     " or in " CLOCKWORK_PLUGIN_BRIDGE_DIR
 #endif
@@ -434,16 +422,16 @@ bool TrackControl::spawnBridge(bool restore) {
     mHeader->generation.fetch_add(1, std::memory_order_acq_rel);
     mLastHeartbeat = mHeader->bridge_heartbeat.load(std::memory_order_acquire);
     mBlocksAtLastHeartbeat = mHeader->engine_blocks.load(std::memory_order_acquire);
-    if (!mProcess.spawn(mExe, {std::to_string(ownPid())})) {
+    if (!mProcess.spawn(mExe, {std::to_string(ownPid()), std::to_string(clockwork_core_id(core()))})) {
         if (!mSpawnFailedReported) {
             mSpawnFailedReported = true;
-            clockwork_log("[tracks] cannot start the plugin bridge %s", mExe.c_str());
+            clockwork_log(core(), "[tracks] cannot start the plugin bridge %s", mExe.c_str());
             broadcastError("bridge", "the plugin process could not be started");
         }
         return false;
     }
     mSpawnedAt = std::chrono::steady_clock::now();
-    clockwork_log("[tracks] plugin bridge started (pid %d, generation %u%s)", mProcess.pid(),
+    clockwork_log(core(), "[tracks] plugin bridge started (pid %d, generation %u%s)", mProcess.pid(),
             mHeader->generation.load(std::memory_order_relaxed), restore ? ", restoring" : "");
     return true;
 }
@@ -458,7 +446,7 @@ void TrackControl::stopBridge(const char* why) {
     while (mProcess.alive() && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     if (mProcess.alive()) {
-        clockwork_log("[tracks] the plugin bridge did not leave on %s; killing it", why);
+        clockwork_log(core(), "[tracks] the plugin bridge did not leave on %s; killing it", why);
         mProcess.kill();
     }
     mProcess.wait();
@@ -494,7 +482,7 @@ void TrackControl::onBridgeDied(const char* how) {
     } else {
         detail += restore ? "; restarting with the tracks it had" : "; restarting";
     }
-    clockwork_log("[tracks] %s", detail.c_str());
+    clockwork_log(core(), "[tracks] %s", detail.c_str());
     broadcastError("bridge", detail);
     spawnBridge(restore);
 }
@@ -530,20 +518,20 @@ void TrackControl::relayOut() {
     ClockworkDrainStop stop = ClockworkDrainStop::Empty;
     clockwork_drain_ring(out_ring(mSeg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
         256,
-        [](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
+        [core = mEngine->core()](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
             if (len <= sizeof(Prefixed)) return ClockworkDrainVerdict::Consume;
             uint32_t route = 0;
             std::memcpy(&route, payload, sizeof route);
             const uint8_t* osc = payload + sizeof(Prefixed);
             const uint32_t oscLen = len - static_cast<uint32_t>(sizeof(Prefixed));
-            if (clockwork_egress_nrt_write(route, token, osc, oscLen)) return ClockworkDrainVerdict::Consume;
+            if (clockwork_egress_nrt_write(core, route, token, osc, oscLen)) return ClockworkDrainVerdict::Consume;
             // Once more after asking to be woken, for room made in between.
-            clockwork_egress_nrt_want_room();
-            return clockwork_egress_nrt_write(route, token, osc, oscLen)
+            clockwork_egress_nrt_want_room(core);
+            return clockwork_egress_nrt_write(core, route, token, osc, oscLen)
                 ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
         },
         &stop);
-    if (stop == ClockworkDrainStop::MaxFrames) clockwork_control_wake();
+    if (stop == ClockworkDrainStop::MaxFrames) clockwork_control_wake(mEngine->core());
 }
 
 void TrackControl::watchLiveness() {
@@ -580,25 +568,25 @@ void TrackControl::watchLiveness() {
 // What the engine may have changed underneath the bridge: the rate on a
 // device change, the lane base on a cold swap that moved it.
 void TrackControl::watchGeometry() {
-    const double sr = clockwork_sample_rate();
+    const double sr = clockwork_sample_rate(core());
     if (sr > 0.0) {
         const uint64_t bits = clockwork::doubleToBits(sr);
         if (mHeader->sample_rate_bits.load(std::memory_order_relaxed) != bits)
             mHeader->sample_rate_bits.store(bits, std::memory_order_relaxed);
     }
-    const uint32_t block = clockwork_block_size();
+    const uint32_t block = clockwork_block_size(core());
     if (block > 0 && block <= MAX_BLOCK && mHeader->block_size.load(std::memory_order_relaxed) != block)
         mHeader->block_size.store(block, std::memory_order_relaxed);
-    const uint32_t base = clockwork_lane_base();
+    const uint32_t base = clockwork_lane_base(core());
     if (base != 0 && base != mBoundBase && mSend != CLOCKWORK_PORT_NONE) {
-        clockwork_port_bus_detach(mSend);
-        clockwork_port_bus_detach(mReturn);
-        if (clockwork_port_bus_attach(mSend, base) && clockwork_port_bus_attach(mReturn, base)) {
+        clockwork_port_bus_detach(core(), mSend);
+        clockwork_port_bus_detach(core(), mReturn);
+        if (clockwork_port_bus_attach(core(), mSend, base) && clockwork_port_bus_attach(core(), mReturn, base)) {
             mBoundBase = base;
             mHeader->lane_base.store(base, std::memory_order_relaxed);
-            clockwork_log("[tracks] lanes moved to %u", base);
+            clockwork_log(core(), "[tracks] lanes moved to %u", base);
         } else {
-            clockwork_log("[tracks] cannot rebind the bridge's ports at lane %u", base);
+            clockwork_log(core(), "[tracks] cannot rebind the bridge's ports at lane %u", base);
         }
     }
 }
@@ -670,7 +658,7 @@ bool TrackControl::audioSink(void* ctx, const void* callCtx, const uint8_t* data
     // [frame offset][osc], joined on the stack: a track event is small.
     std::array<uint8_t, 2048> frame{};
     if (sizeof(Prefixed) + len > frame.size()) return true;
-    const uint32_t off = trackFrameOffset(meta.when, meta.blockTime, clockwork_sample_rate(), clockwork_block_size());
+    const uint32_t off = trackFrameOffset(meta.when, meta.blockTime, clockwork_sample_rate(self->core()), clockwork_block_size(self->core()));
     std::memcpy(frame.data(), &off, sizeof off);
     std::memcpy(frame.data() + sizeof(Prefixed), data, len);
     MsgRing& r = h->rt;

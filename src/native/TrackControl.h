@@ -19,8 +19,8 @@
  *
  *   THE SCOPES. The source's transfer signal fires once the return block is
  *   on the input bus, and that is where each track's output is tapped into
- *   a tap stream of its own (memory_profile.h TAP_TRACK_SLOT_BASE +
- *   slot), so a panel can draw what a track is putting out without a scope
+ *   a tap stream of its own (the track taps, numbered after the guest's in
+ *   the core's layout), so a panel can draw what a track is putting out without a scope
  *   node in the graph. Which lanes carry a track the bridge says each block
  *   (Header::slots_live); a slot that gains a track claims its stream on the
  *   audio thread and one that loses it gives the stream back — a claim and
@@ -71,6 +71,7 @@
 #include "shm_segment.hpp"
 #include "clockwork_process.h"
 #include "clockwork_ports.h"
+#include "dsp_api.h"
 
 #include <atomic>
 #include <array>
@@ -81,6 +82,8 @@
 #include <functional>
 #include <string>
 #include <vector>
+
+struct ClockworkCore;   // clockwork_core.h
 
 class OscEgress;
 class ClockworkClock;
@@ -96,9 +99,10 @@ uint32_t trackFrameOffset(clockwork::Timetag when, clockwork::Timetag blockStart
 
 class TrackControl {
 public:
-    // Before the engine boots: the lanes the tracks route through are laid
-    // out when memory is.
-    static void reserveLanes();
+    // The lanes the tracks route through, above the device. They are laid
+    // out when memory is, so a host with tracks reserves them before the
+    // engine boots (ClockworkEngine::Config::reservedLanes).
+    static constexpr uint32_t kLanes = clockwork_bridge::LANES;
 
     // After the engine is up. Lays out the segment, opens the ports over it,
     // and spawns the bridge. `clock` is the engine's: the session clock and
@@ -144,7 +148,7 @@ public:
     // when it names a file that exists), `envOverride` (CLOCKWORK_PLUGIN_BRIDGE,
     // when it does), then findBridgeBeside(exeDir). "" when none is found.
     // Pure, so a test can hand it every input.
-    static std::string resolveBridge(const std::string& configured, const std::string& envOverride,
+    static std::string resolveBridge(ClockworkCore* core, const std::string& configured, const std::string& envOverride,
                                      const std::string& exeDir);
     // Where the bridge is, given the directory the engine's executable is in:
     // beside it first, then CLOCKWORK_PLUGIN_BRIDGE_DIR (an installed layout),
@@ -181,6 +185,14 @@ private:
     void broadcastError(const char* verb, const std::string& detail, int handle = 0);
     void debug(const std::string& line);
 
+    // The engine's core, or null before there is an engine.
+    ClockworkCore* core() const;
+    // Its core's ports, which the bridge's two are opened in.
+    const ClockworkPorts* ports() const;
+    // The segment's and doorbell's names: this process's and this core's.
+    std::string segmentName() const;
+    std::string doorbellName() const;
+
     ClockworkEngine* mEngine = nullptr;
     OscEgress* mEgress = nullptr;
     ClockworkClock*  mClockworkClock = nullptr;
@@ -194,13 +206,12 @@ private:
     const ClockworkClockState* mClock = nullptr;
 
     // One tap stream per track slot, held while the slot has a track. The
-    // handle is the slot's claim (rust/clockwork-taps: the same shape scsynth's
-    // ScopeOut2 claims with, so the owner-only release rule holds for these
-    // too); the writer appends the return block. Audio thread only, between
-    // the signal's install and its removal.
+    // claim is the same a guest's tap is (clockwork_taps.h), so the
+    // owner-only release rule holds for these too; the writer appends the
+    // return block. Audio thread only, between the signal's install and its
+    // removal.
     struct TrackTap {
-        struct Claim { void* internalData = nullptr; float* data = nullptr;
-                       uint32_t channels = 0; uint32_t maxFrames = 0; } claim;
+        DspTapHandle claim {};
         shm_tap_stream_writer writer;
     };
     std::array<TrackTap, clockwork_bridge::LANES / 2> mTaps{};

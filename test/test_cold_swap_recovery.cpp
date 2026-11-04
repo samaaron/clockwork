@@ -124,18 +124,19 @@ TEST_CASE("ColdSwapRecovery: state transitions through recovery",
 // A rebuild whose guest does not come up is the same failure as a boot whose
 // guest does not: the engine is in error with the guest's reason, and its own
 // verbs still answer. Here the guest declares nothing and its pool fitted the
-// bulk memory the host gave the first build (clockwork_set_guest_bulk_bytes);
-// the rebuild gets the profile's, which it does not fit.
+// bulk memory the host gave the first build (Config::guestBulkBytes); the
+// rebuild gets the profile's (clockwork_set_guest_bulk_bytes), which it does
+// not fit.
 TEST_CASE("ColdSwapRecovery: a rebuild whose guest does not come up leaves the engine in error",
           "[ColdSwapRecovery][guest-failed]") {
     const size_t pool = size_t(CLOCKWORK_GUEST_MEMORY_BULK_BYTES) + 1024u * 1024u;
     auto cfg = EngineFixture::defaultConfig();
     cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\ndeclareBulk=0\n";
-    clockwork_set_guest_bulk_bytes(pool + (8u << 20));
+    cfg.guestBulkBytes = pool + (8u << 20);
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().engineState() == EngineState::Running);
 
-    clockwork_set_guest_bulk_bytes(0);
+    clockwork_set_guest_bulk_bytes(fix.engine().core(), 0);
     auto result = fix.engine().switchDevice("", 44100);
     CHECK(fix.engine().engineState() == EngineState::Error);
     INFO("swap error: " << result.error);
@@ -161,7 +162,7 @@ TEST_CASE("ColdSwapRecovery: a rebuild that refuses at length tells a listening 
     auto cfg = EngineFixture::defaultConfig();
     cfg.guestConfig = "rtPoolBytes=" + std::to_string(pool) + "\ndeclareBulk=0\n"
                     + "refusalReason=" + reason + "\n";
-    clockwork_set_guest_bulk_bytes(pool + (8u << 20));
+    cfg.guestBulkBytes = pool + (8u << 20);
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().engineState() == EngineState::Running);
 
@@ -170,7 +171,7 @@ TEST_CASE("ColdSwapRecovery: a rebuild that refuses at length tells a listening 
     REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
     fix.clearReplies();
 
-    clockwork_set_guest_bulk_bytes(0);
+    clockwork_set_guest_bulk_bytes(fix.engine().core(), 0);
     osc_test::Builder b;
     b.begin(CLOCKWORK_SYS("devices/switch")) << "" << 44100.0f << static_cast<osc::int32>(0);
     fix.send(b.end());

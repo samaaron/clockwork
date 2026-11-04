@@ -156,6 +156,8 @@ private:
 
 // ── The process ──────────────────────────────────────────────────────────────
 struct Bridge {
+    // The bridge's own table of ports: it has no core.
+    std::unique_ptr<const ClockworkPorts, decltype(&clockwork_ports_free)> ports{clockwork_ports_new(), &clockwork_ports_free};
     shm_handle  seg {};
     Header*     h = nullptr;
     Doorbell    bell;
@@ -163,6 +165,7 @@ struct Bridge {
     ClockworkPort     ret  = 0;    // SINK over the return ring: what the engine reads
     uint32_t    generation = 0;
     int32_t     enginePid = 0;
+    uint32_t    coreId    = 0;   // the engine's core: with the pid, the names
 
     TrackVerbs  verbs;
     std::unique_ptr<RingEmit> emit;   // made once the segment is mapped, which it needs
@@ -238,7 +241,7 @@ void restoreFromMirror(Bridge& b) {
 
 // ── The audio thread ─────────────────────────────────────────────────────────
 void renderOne(Bridge& b, uint32_t frames, bool applyEvents) {
-    clockwork_port_read(b.send, b.sendPtrs.data(), LANES, frames);
+    clockwork_port_read(b.ports.get(), b.send, b.sendPtrs.data(), LANES, frames);
     if (applyEvents) {
         ClockworkDrainState st;
         MsgRing& r = b.h->rt;
@@ -255,7 +258,7 @@ void renderOne(Bridge& b, uint32_t frames, bool applyEvents) {
     }
     const ClockworkTimetag when{b.h->block_time.load(std::memory_order_relaxed)};
     clockwork_track_process(b.retPtrs.data(), LANES, b.sendPtrs.data(), LANES, frames, when, 0);
-    clockwork_port_write(b.ret, b.retPtrs.data(), LANES, frames);
+    clockwork_port_write(b.ports.get(), b.ret, b.retPtrs.data(), LANES, frames);
     // Which of those lanes carried a track: what the engine taps for scopes.
     // Stored before the heartbeat so the block it describes is the one the
     // engine is about to read.
@@ -284,11 +287,11 @@ void audioMain(Bridge& b, const std::stop_token& stop) {
 
         const uint32_t block = std::min(b.h->block_size.load(std::memory_order_relaxed), MAX_BLOCK);
         if (block == 0) continue;
-        uint32_t avail = clockwork_port_readable(b.send);
+        uint32_t avail = clockwork_port_readable(b.ports.get(), b.send);
         // Too far behind: drop the oldest, unrendered.
         const uint32_t catchUp = std::max<uint32_t>(CATCH_UP_BLOCKS, b.h->slack_blocks.load(std::memory_order_relaxed));
         while (avail > catchUp * block) {
-            clockwork_port_read(b.send, b.sendPtrs.data(), LANES, block);
+            clockwork_port_read(b.ports.get(), b.send, b.sendPtrs.data(), LANES, block);
             avail -= block;
         }
         bool first = true;
@@ -336,7 +339,7 @@ void onSignal(int) {
 }
 #endif
 
-int run(int32_t enginePid) {
+int run(int32_t enginePid, uint32_t coreId) {
 #ifdef __APPLE__
     // This process plays nothing macOS can hear (its audio goes to the engine
     // over shared memory) and shows no window, so without saying otherwise it
@@ -349,9 +352,10 @@ int run(int32_t enginePid) {
     const auto bridge = std::make_unique<Bridge>();   // its verbs object is handed to the track layer, so not on this stack
     Bridge& b = *bridge;
     b.enginePid = enginePid;
+    b.coreId    = coreId;
 
     try {
-        b.seg = shm_open_existing(segment_name(enginePid));
+        b.seg = shm_open_existing(segment_name(enginePid, coreId));
     } catch (const std::exception& e) {
         log("cannot map the engine's segment: %s", e.what());
         return 2;
@@ -402,16 +406,16 @@ int run(int32_t enginePid) {
 #endif
 
     // The rings the engine reset when it made them; the bridge only joins.
-    b.send = clockwork_port_open_shared("bridge/send", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
+    b.send = clockwork_port_open_shared(b.ports.get(), "bridge/send", kClockworkPortSource, LANES, AUDIO_RING_FRAMES,
                                   send_ring(b.seg.ptr), AUDIO_RING_BYTES, 0);
-    b.ret  = clockwork_port_open_shared("bridge/return", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
+    b.ret  = clockwork_port_open_shared(b.ports.get(), "bridge/return", kClockworkPortSink, LANES, AUDIO_RING_FRAMES,
                                   return_ring(b.seg.ptr), AUDIO_RING_BYTES, 0);
     if (!b.send || !b.ret) {
         log("cannot open the audio rings");
         return 2;
     }
-    if (!b.bell.open(doorbell_name(enginePid))) {
-        log("cannot open the doorbell %s", doorbell_name(enginePid).c_str());
+    if (!b.bell.open(doorbell_name(enginePid, coreId))) {
+        log("cannot open the doorbell %s", doorbell_name(enginePid, coreId).c_str());
         return 2;
     }
 
@@ -511,8 +515,8 @@ int run(int32_t enginePid) {
     b.verbs.shutdown();
     clockwork_track_set_load_listener(nullptr, nullptr);
     plugin_set_scan_listener(nullptr, nullptr);
-    clockwork_port_close(b.send);
-    clockwork_port_close(b.ret);
+    clockwork_port_close(b.ports.get(), b.send);
+    clockwork_port_close(b.ports.get(), b.ret);
     b.bell.close();
     b.h->bridge_pid.store(0, std::memory_order_release);
     b.emit.reset();
@@ -526,17 +530,19 @@ int run(int32_t enginePid) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <engine-pid>\n"
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: %s <engine-pid> <core-id>\n"
                      "The plugin bridge is started by the engine; it is not run by hand.\n", argv[0]);
         return 1;
     }
     const long pid = std::strtol(argv[1], nullptr, 10);
     if (pid <= 0) { std::fprintf(stderr, "bad engine pid: %s\n", argv[1]); return 1; }
+    const unsigned long core = std::strtoul(argv[2], nullptr, 10);
+    if (core == 0 || core > UINT32_MAX) { std::fprintf(stderr, "bad core id: %s\n", argv[2]); return 1; }
     // Nothing escapes main: an exception out of it is std::terminate with no
     // line in the log, and the engine sees only a host that stopped.
     try {
-        return run(static_cast<int32_t>(pid));
+        return run(static_cast<int32_t>(pid), static_cast<uint32_t>(core));
     } catch (const std::exception& e) {
         log("the plugin host stopped on an exception: %s", e.what());
     } catch (...) {

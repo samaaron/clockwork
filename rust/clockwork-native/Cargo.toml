@@ -54,11 +54,6 @@ schedule = ["clockwork-schedule/store"]
 # Windows backend selector, forwarded to clockwork-midi (the gamepad crate
 # picks XInput on Windows by itself via a target-specific dependency).
 winrt = ["clockwork-midi/winrt"]
-# A RUST host: the engine is in the same binary (clockwork-sys) and defines
-# the host services itself, so the tap crate's hostless defaults are left
-# out of the link, where they would otherwise answer first. CMake's C++ hosts
-# never set this — the staticlib is linked into the engine, not beside it.
-host = ["clockwork-taps/host"]
 
 [dependencies]
 # Always present, not behind a feature: the heap, the tap plane and the node
@@ -66,6 +61,8 @@ host = ["clockwork-taps/host"]
 # reports through them — so a build that turns every subsystem off still needs
 # them.
 clockwork-heap = { path = "../clockwork-heap" }
+# The core: made and closed here, the handle every lanes.h entry point takes.
+clockwork-core = { path = "../clockwork-core" }
 # The port substrate and its disk endpoints. Not optional either: clockwork's
 # audio thread calls clockwork_port_read/clockwork_port_write unconditionally (they cost a
 # table scan over an empty table when nothing is bound), so the symbols must be

@@ -57,10 +57,11 @@ namespace {
 void loseOneUndelivered(EngineFixture& fix) {
     clockwork_client_count_undelivered(fix.engine().egressClient(), 1);   // as a host whose peer had gone
 }
-void loseOneRefused() {
-    std::vector<uint8_t> tooBig(clockwork_egress_nrt_max_frame() + 1, 0);
+void loseOneRefused(EngineFixture& fix) {
+    std::vector<uint8_t> tooBig(clockwork_egress_nrt_max_frame(fix.engine().core()) + 1, 0);
     tooBig[0] = '/';
-    REQUIRE_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, tooBig.data(), static_cast<uint32_t>(tooBig.size())));
+    REQUIRE_FALSE(clockwork_egress_nrt_write(fix.engine().core(), EGRESS_REPLY, 1, tooBig.data(),
+                                             static_cast<uint32_t>(tooBig.size())));
 }
 }  // namespace
 
@@ -73,7 +74,7 @@ TEST_CASE("Fixture: a case that ends with a frame no transport could deliver fai
 TEST_CASE("Fixture: a case that ends with a frame an egress ring refused fails",
           "[Fixture][egress][!shouldfail]") {
     EngineFixture fix;
-    loseOneRefused();
+    loseOneRefused(fix);
 }
 
 // THE TEARDOWN CHECK LOOKS AT THE AUDIO (checkAudioKeptUp): a case whose audio
@@ -103,5 +104,5 @@ TEST_CASE("Fixture: a case that says it loses frames is not failed for them",
     fix.expectEgressUndelivered();
     fix.expectEgressRefusals();
     loseOneUndelivered(fix);
-    loseOneRefused();
+    loseOneRefused(fix);
 }

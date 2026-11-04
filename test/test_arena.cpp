@@ -19,8 +19,8 @@
 
 namespace {
 std::vector<uint8_t> arena() {
-    std::vector<uint8_t> a(ARENA_SIZE, 0);
-    writeArenaHeader(a.data());
+    std::vector<uint8_t> a(clockwork::kDefaultLayout.arena_bytes, 0);
+    writeArenaHeader(a.data(), clockwork::kDefaultLayout);
     return a;
 }
 const ClockworkArenaEntry* entry(const std::vector<uint8_t>& a, uint32_t id) {
@@ -38,18 +38,18 @@ TEST_CASE("arena: the header is the front of the arena and says so", "[arena]") 
     CHECK(h->version == CLOCKWORK_ARENA_VERSION);
     CHECK(h->state == CLOCKWORK_ARENA_PUBLISHED);
     CHECK(h->header_bytes == ARENA_HEADER_SIZE);
-    CHECK(h->arena_bytes == ARENA_SIZE);
+    CHECK(h->arena_bytes == clockwork::kDefaultLayout.arena_bytes);
     CHECK(h->area_bytes == sizeof(ClockworkArenaAreaEntry));
     CHECK(h->entry_bytes == sizeof(ClockworkArenaEntry));
     CHECK(sizeof(ClockworkArenaAreaEntry) == 24);
     CHECK(sizeof(ClockworkArenaEntry) == 64);
     CHECK(sizeof(ClockworkArenaHeader) <= ARENA_HEADER_SIZE);
     // The two halves, edge to edge, covering the whole arena.
-    CHECK(h->clockwork_bytes == CLOCKWORK_HALF_SIZE);
+    CHECK(h->clockwork_bytes == clockwork::kDefaultLayout.transport_end);
     CHECK(h->guest_offset == h->clockwork_bytes);
     CHECK(h->guest_offset + h->guest_bytes == h->arena_bytes);
     const char* why = "";
-    CHECK(clockwork_arena_check(h, ARENA_SIZE, &why));
+    CHECK(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
 
     // A new arena holds no instance yet, and no generation has opened: the
     // word is odd, and the generation it names is 0 (docs/RESTARTS.md).
@@ -84,10 +84,10 @@ namespace {
 struct ExpectArea { uint32_t area, start, end; bool guests; };
 const ExpectArea kAreas[] = {
     { CLOCKWORK_AREA_CLOCKWORK_STATE,     CLOCKWORK_STATE_START,     CLOCKWORK_STATE_END,     false },
-    { CLOCKWORK_AREA_CLOCKWORK_AUDIO,     CLOCKWORK_AUDIO_START,     CLOCKWORK_AUDIO_END,     false },
-    { CLOCKWORK_AREA_CLOCKWORK_TRANSPORT, CLOCKWORK_TRANSPORT_START, CLOCKWORK_TRANSPORT_END, false },
-    { CLOCKWORK_AREA_GUEST_PUBLIC,        GUEST_PUBLIC_START,        GUEST_PUBLIC_END,        true },
-    { CLOCKWORK_AREA_GUEST_PRIVATE,       GUEST_PRIVATE_START,       GUEST_PRIVATE_END,       true },
+    { CLOCKWORK_AREA_CLOCKWORK_AUDIO,     CLOCKWORK_AUDIO_START,     clockwork::kDefaultLayout.audio_end,     false },
+    { CLOCKWORK_AREA_CLOCKWORK_TRANSPORT, clockwork::kDefaultLayout.audio_end, clockwork::kDefaultLayout.transport_end, false },
+    { CLOCKWORK_AREA_GUEST_PUBLIC,        clockwork::kDefaultLayout.guest_window_start,        clockwork::kDefaultLayout.guest_public_end,        true },
+    { CLOCKWORK_AREA_GUEST_PRIVATE,       clockwork::kDefaultLayout.guest_config_start,       clockwork::kDefaultLayout.arena_bytes,       true },
 };
 // Every region: where the constants put it, and its five facts.
 struct Expect { uint32_t id, start, size, owner, audience, cadence, tier, lifetime, area; };
@@ -109,23 +109,23 @@ const Expect kExpect[] = {
     // rewrites the device's own words, as any attach rewrites an entry.
     { CLOCKWORK_ARENA_CLOCKWORK_CHANNEL_MAP,     CHANNEL_MAP_START,     CHANNEL_MAP_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, PUB | GUEST, CHANGE, FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_STATE },
     // clockwork-audio
-    { CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           SCOPE_SIZE,           CLOCKWORK_OWNER_CLOCKWORK, PUB,         BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_AUDIO },
-    { CLOCKWORK_ARENA_CLOCKWORK_TAPS,            TAPS_START,            TAPS_SIZE,            CLOCKWORK_OWNER_CLOCKWORK, PUB,         BLOCK,  BULK, REBUILD, CLOCKWORK_AREA_CLOCKWORK_AUDIO },
+    { CLOCKWORK_ARENA_CLOCKWORK_SCOPE,           SCOPE_START,           clockwork::kDefaultLayout.scope_bytes,           CLOCKWORK_OWNER_CLOCKWORK, PUB,         BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_AUDIO },
+    { CLOCKWORK_ARENA_CLOCKWORK_TAPS,            clockwork::kDefaultLayout.taps_start,            clockwork::kDefaultLayout.taps_bytes,            CLOCKWORK_OWNER_CLOCKWORK, PUB,         BLOCK,  BULK, REBUILD, CLOCKWORK_AREA_CLOCKWORK_AUDIO },
     // clockwork-transport
-    { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    RING_CURSORS_START,    RING_CURSORS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
-    { CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   CHANGE, FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
-    { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         IN_RING_START,         IN_RING_SIZE,         CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   BLOCK,  FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
-    { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     RT_OUT_RING_START,     RT_OUT_RING_SIZE,     CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   BLOCK,  FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
-    { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    NRT_OUT_RING_START,    NRT_OUT_RING_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   CHANGE, FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS,    clockwork::kDefaultLayout.ring_cursors_start,    RING_CURSORS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   BLOCK,  FAST, REBUILD, CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_NODE_ID_COUNTER, clockwork::kDefaultLayout.node_id_counter_start, NODE_ID_COUNTER_SIZE, CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   CHANGE, FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_IN_RING,         clockwork::kDefaultLayout.in_ring_start,         clockwork::kDefaultLayout.profile.in_ring_bytes,         CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   BLOCK,  FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING,     clockwork::kDefaultLayout.rt_out_ring_start,     clockwork::kDefaultLayout.profile.rt_out_ring_bytes,     CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   BLOCK,  FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING,    clockwork::kDefaultLayout.nrt_out_ring_start,    clockwork::kDefaultLayout.profile.nrt_out_ring_bytes,    CLOCKWORK_OWNER_CLOCKWORK, TRANSPORT,   CHANGE, FAST, COLD,    CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
     // Clockwork's own control verbs, written at the boundary and drained by
     // the control pass with no audio block in the loop: lifetime arena, so a
     // rebuild neither resets it nor has anything of clockwork's to carry.
-    { CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    CONTROL_RING_START,    CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   CHANGE, FAST, ARENA,   CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
+    { CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    clockwork::kDefaultLayout.control_ring_start,    CONTROL_RING_SIZE,    CLOCKWORK_OWNER_CLIENT,    TRANSPORT,   CHANGE, FAST, ARENA,   CLOCKWORK_AREA_CLOCKWORK_TRANSPORT },
     // guest-public
-    { CLOCKWORK_ARENA_GUEST_WINDOW,              GUEST_WINDOW_START,    GUEST_WINDOW_SIZE,    CLOCKWORK_OWNER_GUEST,     PUB,         CHANGE, BULK, REBUILD, CLOCKWORK_AREA_GUEST_PUBLIC },
+    { CLOCKWORK_ARENA_GUEST_WINDOW,              clockwork::kDefaultLayout.guest_window_start,    clockwork::kDefaultLayout.profile.window_bytes,    CLOCKWORK_OWNER_GUEST,     PUB,         CHANGE, BULK, REBUILD, CLOCKWORK_AREA_GUEST_PUBLIC },
     // guest-private
-    { CLOCKWORK_ARENA_GUEST_CONFIG,              GUEST_CONFIG_START,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,      GUEST | HOST, BOOT,  BULK, COLD,    CLOCKWORK_AREA_GUEST_PRIVATE },
-    { CLOCKWORK_ARENA_GUEST_PERSIST,             GUEST_PERSIST_START,   GUEST_PERSIST_SIZE,   CLOCKWORK_OWNER_GUEST,     GUEST,       CHANGE, BULK, COLD,    CLOCKWORK_AREA_GUEST_PRIVATE },
+    { CLOCKWORK_ARENA_GUEST_CONFIG,              clockwork::kDefaultLayout.guest_config_start,    GUEST_CONFIG_SIZE,    CLOCKWORK_OWNER_HOST,      GUEST | HOST, BOOT,  BULK, COLD,    CLOCKWORK_AREA_GUEST_PRIVATE },
+    { CLOCKWORK_ARENA_GUEST_PERSIST,             clockwork::kDefaultLayout.guest_persist_start,   clockwork::kDefaultLayout.profile.persist_bytes,   CLOCKWORK_OWNER_GUEST,     GUEST,       CHANGE, BULK, COLD,    CLOCKWORK_AREA_GUEST_PRIVATE },
 };
 } // namespace
 
@@ -199,7 +199,7 @@ TEST_CASE("arena: every region is where the constants put it, with its five fact
 TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     auto a = arena();
     const auto* in = entry(a, CLOCKWORK_ARENA_CLOCKWORK_IN_RING);
-    CHECK(in->geom[CLOCKWORK_GEOM_RING_MAX_MESSAGE]    == MAX_MESSAGE_SIZE);
+    CHECK(in->geom[CLOCKWORK_GEOM_RING_MAX_MESSAGE]    == clockwork::kDefaultLayout.max_message_bytes);
     CHECK(in->geom[CLOCKWORK_GEOM_RING_MESSAGE_MAGIC]  == MESSAGE_MAGIC);
     CHECK(in->geom[CLOCKWORK_GEOM_RING_PADDING_MAGIC]  == PADDING_MAGIC);
     CHECK(in->geom[CLOCKWORK_GEOM_RING_PADDING_MARKER] == RING_PADDING_MARKER);
@@ -207,17 +207,17 @@ TEST_CASE("arena: the geometry a reader walks by is in the table", "[arena]") {
     const auto* scope = entry(a, CLOCKWORK_ARENA_CLOCKWORK_SCOPE);
     CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_SLOTS]      == SCOPE_SLOTS);
     CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_SLOTS]      > CLOCKWORK_TAP_IN);
-    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES] == SCOPE_SLOT_SIZE);
-    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_FRAMES]     == SCOPE_FRAMES);
-    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_CHANNELS]   == SCOPE_CHANNELS);
+    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_SLOT_BYTES] == clockwork::kDefaultLayout.scope_slot_bytes);
+    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_FRAMES]     == clockwork::kDefaultLayout.profile.scope_frames);
+    CHECK(scope->geom[CLOCKWORK_GEOM_SCOPE_CHANNELS]   == clockwork::kDefaultLayout.profile.scope_channels);
     // One tap region: the guest's slots, then the track slots, numbered after them.
     const auto* taps = entry(a, CLOCKWORK_ARENA_CLOCKWORK_TAPS);
     CHECK(taps->geom[CLOCKWORK_GEOM_TAP_SLOTS]        == TAPS_SLOTS);
-    CHECK(taps->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES]   == TAP_SLOT_SIZE);
+    CHECK(taps->geom[CLOCKWORK_GEOM_TAP_SLOT_BYTES]   == clockwork::kDefaultLayout.tap_slot_bytes);
     CHECK(taps->geom[CLOCKWORK_GEOM_TAP_RING_FRAMES]  == TAP_RING_FRAMES);
     CHECK(taps->geom[CLOCKWORK_GEOM_TAP_TRACK_SLOTS]  == TAP_TRACK_SLOTS);
     CHECK(taps->geom[CLOCKWORK_GEOM_TAP_TRACK_FIRST]  == TAPS_SLOTS);
-    CHECK(taps->bytes == TAPS_HEADER_SIZE + (TAPS_SLOTS + TAP_TRACK_SLOTS) * TAP_SLOT_SIZE);
+    CHECK(taps->bytes == TAPS_HEADER_SIZE + (TAPS_SLOTS + TAP_TRACK_SLOTS) * clockwork::kDefaultLayout.tap_slot_bytes);
     const auto* anchors = entry(a, CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS);
     CHECK(anchors->offset + anchors->geom[CLOCKWORK_GEOM_ANCHOR_GLOBAL]    == GLOBAL_OFFSET_START);
 }
@@ -230,21 +230,21 @@ TEST_CASE("arena: one tap slot index space, the guest's slots then the track tap
     CHECK(L.tapSlotCount() == TAPS_SLOTS + TAP_TRACK_SLOTS);
     const uint8_t* first = L.tapSlotAt(a.data(), 0);
     REQUIRE(first != nullptr);
-    CHECK(first - a.data() == TAPS_START + TAPS_HEADER_SIZE);
+    CHECK(first - a.data() == clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
     const uint8_t* lastGuest = L.tapSlotAt(a.data(), TAPS_SLOTS - 1);
     REQUIRE(lastGuest != nullptr);
     if (TAP_TRACK_SLOTS > 0) {
         const uint8_t* firstTrack = L.tapSlotAt(a.data(), TAPS_SLOTS);
         REQUIRE(firstTrack != nullptr);
-        CHECK(firstTrack - lastGuest == TAP_SLOT_SIZE);   // the next slot, no gap
-        CHECK(firstTrack - a.data() + TAP_SLOT_SIZE <= CLOCKWORK_HALF_SIZE);
+        CHECK(firstTrack - lastGuest == clockwork::kDefaultLayout.tap_slot_bytes);   // the next slot, no gap
+        CHECK(firstTrack - a.data() + clockwork::kDefaultLayout.tap_slot_bytes <= clockwork::kDefaultLayout.transport_end);
     }
     CHECK(L.tapSlotAt(a.data(), L.tapSlotCount()) == nullptr);
 }
 
 TEST_CASE("arena: a reader's table round-trips through the header", "[arena]") {
     auto a = arena();
-    const ShmReaderLayout mine = ShmReaderLayout::from_constants();
+    const ShmReaderLayout mine = ShmReaderLayout::from_layout(clockwork::kDefaultLayout);
     ShmReaderLayout theirs;
     const char* why = "";
     REQUIRE(ShmReaderLayout::from_arena(a.data(), a.size(), theirs, &why));
@@ -257,7 +257,7 @@ TEST_CASE("arena: a reader refuses what it cannot use, and says why", "[arena]")
     ShmReaderLayout L;
     const char* why = "";
     SECTION("memory too small for the arena it claims") {
-        CHECK_FALSE(ShmReaderLayout::from_arena(a.data(), ARENA_SIZE - 1, L, &why));
+        CHECK_FALSE(ShmReaderLayout::from_arena(a.data(), clockwork::kDefaultLayout.arena_bytes - 1, L, &why));
         CHECK(std::string(why) == "arena larger than the memory it is in");
     }
     SECTION("a version this reader was not written for") {
@@ -335,37 +335,37 @@ TEST_CASE("arena: the check refuses a table whose areas and facts disagree", "[a
     const char* why = "";
     SECTION("a public region in the transport area") {
         mutable_entry(a, CLOCKWORK_ARENA_CLOCKWORK_IN_RING)->audience = CLOCKWORK_AUDIENCE_PUBLIC;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "a public region outside the public areas");
     }
     SECTION("a non-public region in a public area") {
         mutable_entry(a, CLOCKWORK_ARENA_CLOCKWORK_METRICS)->audience = CLOCKWORK_AUDIENCE_TRANSPORT;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "a non-public region in a public area");
     }
     SECTION("a region that lies in no area") {
         mutable_entry(a, CLOCKWORK_ARENA_CLOCKWORK_SCOPE)->offset = CLOCKWORK_AUDIO_START - 16;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "a region in no area");
     }
     SECTION("an area in the wrong half") {
         const_cast<ClockworkArenaAreaEntry*>(clockwork_arena_area(h, CLOCKWORK_AREA_GUEST_PUBLIC))->base_lo = h->guest_offset - 16;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "an area in the wrong half");
     }
     SECTION("two areas that overlap") {
         const_cast<ClockworkArenaAreaEntry*>(clockwork_arena_area(h, CLOCKWORK_AREA_CLOCKWORK_AUDIO))->base_lo -= 16;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "two areas overlap");
     }
     SECTION("a fact left unsaid") {
         mutable_entry(a, CLOCKWORK_ARENA_CLOCKWORK_METRICS)->lifetime = 0;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "a region with no lifetime");
     }
     SECTION("an area of the arena placed outside it") {
         const_cast<ClockworkArenaAreaEntry*>(clockwork_arena_area(h, CLOCKWORK_AREA_GUEST_PRIVATE))->space = CLOCKWORK_SPACE_PROCESS;
-        CHECK_FALSE(clockwork_arena_check(h, ARENA_SIZE, &why));
+        CHECK_FALSE(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
         CHECK(std::string(why) == "an area of the arena placed outside it");
     }
 }
@@ -383,10 +383,10 @@ TEST_CASE("arena: the three areas outside it are placed when the engine knows wh
     CHECK((uint64_t(assets->bytes_hi) << 32 | assets->bytes_lo) == (8u << 20));
     CHECK(clockwork_arena_area(h, CLOCKWORK_AREA_RETURNS)->space == CLOCKWORK_SPACE_UNKNOWN);
     // Nothing else moved: the table is still the same contract.
-    CHECK(clockwork_arena_check(h, ARENA_SIZE, &why));
+    CHECK(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
     // An area the table does not list is not written.
     arenaSetArea(a.data(), 99, CLOCKWORK_SPACE_PROCESS, 1, 1);
-    CHECK(clockwork_arena_check(h, ARENA_SIZE, &why));
+    CHECK(clockwork_arena_check(h, clockwork::kDefaultLayout.arena_bytes, &why));
 }
 
 TEST_CASE("arena: the guest window's identity is unknown until a guest declares it", "[arena][facts]") {
@@ -400,6 +400,6 @@ TEST_CASE("arena: the guest window's identity is unknown until a guest declares 
     CHECK(w->geom[CLOCKWORK_GEOM_WINDOW_VERSION] == 3u);
     // Nothing else moved: the table is still the same contract.
     const char* why = "";
-    CHECK(clockwork_arena_check(arenaHeader(a.data()), ARENA_SIZE, &why));
+    CHECK(clockwork_arena_check(arenaHeader(a.data()), clockwork::kDefaultLayout.arena_bytes, &why));
     CHECK(w->audience == CLOCKWORK_AUDIENCE_PUBLIC);
 }

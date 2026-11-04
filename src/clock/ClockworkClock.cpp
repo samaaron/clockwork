@@ -12,7 +12,6 @@
 #include "clock/ClockworkClock.h"
 #include "clock/clock_math.h"
 #include "shared_memory.h"
-#include "shm_tap_stream.hpp"  // g_engine_frames (stream anchor)
 
 #include <atomic>
 #include <cmath>
@@ -21,9 +20,6 @@
 
 using clockwork::bitsToDouble;
 
-std::atomic<ClockworkClock*> g_active_clockwork_clock{nullptr};
-std::atomic<LinkAudioHost*>  g_active_link_audio{nullptr};
-
 // ── Sample clock (sample position ↔ wall-clock DAC time) ───────────────
 
 void ClockworkClock::bindSampleClockToShm(uint8_t* region) {
@@ -31,12 +27,11 @@ void ClockworkClock::bindSampleClockToShm(uint8_t* region) {
 }
 
 void ClockworkClock::advanceEngineFrames(double samplePosition) {
-    g_engine_frames.store(static_cast<uint64_t>(samplePosition),
-                          std::memory_order_relaxed);
+    mEngineFrames.store(static_cast<uint64_t>(samplePosition), std::memory_order_relaxed);
 }
 
 uint64_t ClockworkClock::engineFrames() const {
-    return g_engine_frames.load(std::memory_order_relaxed);
+    return mEngineFrames.load(std::memory_order_relaxed);
 }
 
 void ClockworkClock::publishSampleClock(double samplePosition, double sampleRate,
@@ -45,7 +40,7 @@ void ClockworkClock::publishSampleClock(double samplePosition, double sampleRate
     const uint64_t frames = static_cast<uint64_t>(samplePosition);
     // Streams anchor their per-block writes here whether or not a shm
     // region is bound (headless/unit contexts).
-    g_engine_frames.store(frames, std::memory_order_relaxed);
+    mEngineFrames.store(frames, std::memory_order_relaxed);
 
     if (sampleRate <= 0.0) return;
     // The anchor is speaker-time: render NTP plus the device output latency

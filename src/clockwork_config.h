@@ -41,32 +41,36 @@
 extern "C" {
 #endif
 
-// The engine's one logging verb, on every target. Frames a /clockwork/debug
-// OSC message onto the OUT ring; the host surfaces it on its debug channel
-// (a client's log pane, a native host's stderr, a test fixture's capture).
-// printf-compatible signature; no trailing newline.
+struct ClockworkCore;
+
+// The engine's one logging verb, on every target: a line of `core`'s log.
+// Frames a /clockwork/debug OSC message onto the core's OUT ring; the host
+// surfaces it on its debug channel (a client's log pane, a native host's
+// stderr, a test fixture's capture). printf-compatible; no trailing newline.
 //
-// Before the ring exists (init_memory has not run) a line still goes
-// somewhere: to the console on the web; on native it is held while an engine
-// is booting and replayed onto the ring once the ring is up, so a boot's
-// device-setup story reaches the same channel as everything after it, and
-// otherwise (no engine booting, or a boot that never reached the ring) it
-// goes to stderr. Native code never writes to stdio itself — see
-// scripts/check-logging.sh.
-int clockwork_log(const char* fmt, ...);
+// Every line names its core: an engine's log carries its own lines and no
+// other engine's (docs/ENGINES.md). Before the core's ring exists the
+// line is held while the core boots (natively) and put on the ring once it
+// is up, so a boot's story reaches the same channel as everything after it.
+// A line with no core to carry it — `core` null, or a boot that never
+// reached its ring — goes to the process's console (stderr; on the web the
+// browser console), never to another engine. Native code never writes to
+// stdio itself — see scripts/check-logging.sh.
+int clockwork_log(struct ClockworkCore* core, const char* fmt, ...);
 
 #ifndef __EMSCRIPTEN__
-// Native boot bracket around the hold described above. ClockworkEngine::init
-// calls hold() first and release() as soon as the ring is up (and again on
-// every exit, where it is a no-op if already released). Nested holds are
-// refused: the first release drains.
-void clockwork_log_hold(void);
-void clockwork_log_release(void);
+// Native boot bracket around `core`'s hold, described above.
+// ClockworkEngine::init holds first; the build releases as soon as the ring
+// is up, and init again on every way out, where it is a no-op if already
+// released.
+void clockwork_log_hold(struct ClockworkCore* core);
+void clockwork_log_release(struct ClockworkCore* core);
 
-// The Rust subsystems' lines join the same channel: rust/clockwork-log
-// exports this, and the engine installs a sink at boot that forwards to
-// clockwork_log. Present whenever the umbrella is linked (CLOCKWORK_RUST_LOG).
-void clockwork_rust_log_install(void (*sink)(const char* line, uint32_t len));
+// The Rust subsystems' lines join the same channel, each naming its core:
+// rust/clockwork-log exports this, and clockwork_init installs a sink that
+// forwards to clockwork_log. Present whenever the umbrella is linked
+// (CLOCKWORK_RUST_LOG).
+void clockwork_rust_log_install(void (*sink)(struct ClockworkCore* core, const char* line, uint32_t len));
 #endif
 
 

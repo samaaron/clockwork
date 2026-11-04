@@ -42,6 +42,7 @@
  *     never shows it. The count does.
  */
 #include "shm_tap_stream.hpp"
+#include "shared_memory.h"   // clockwork::kDefaultLayout
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -52,12 +53,13 @@
 
 namespace {
 
-// A slot on the heap, as the arena would hold it. Zeroed, because that is what
-// the arena hands over and what activate() has to cope with.
+// A slot on the heap, laid out as the target's default, as the arena would
+// hold it. Zeroed, because that is what the arena hands over and what
+// activate() has to cope with.
+constexpr uint32_t kRing = clockwork::kDefaultLayout.profile.tap_ring_frames;
 struct Slot {
-    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[sizeof(shm_tap_stream)] };
+    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[tap_slot_bytes(kRing)]() };
     shm_tap_stream* get() { return reinterpret_cast<shm_tap_stream*>(bytes.get()); }
-    Slot() { std::memset(bytes.get(), 0, sizeof(shm_tap_stream)); }
 };
 
 // Sample value as a pure function of absolute frame and channel, so any
@@ -84,9 +86,9 @@ void writeBlock(shm_tap_stream_writer& w, uint64_t from, uint32_t frames,
 TEST_CASE("tap stream: a window comes back exactly as it was written",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
     REQUIRE(r.valid());
     REQUIRE(r.channels() == 2);
 
@@ -109,9 +111,9 @@ TEST_CASE("tap stream: a window comes back exactly as it was written",
 TEST_CASE("tap stream: a window straddling the ring wrap is still in order",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // Fill past capacity so the ring has wrapped and the newest frames live at
     // the front of the buffer while the older half of the window is still at
@@ -154,9 +156,9 @@ TEST_CASE("tap stream: a window straddling the ring wrap is still in order",
 TEST_CASE("tap stream: history the ring no longer holds is zero-filled, not short",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // Only 64 frames exist, but ask for 256 ending at 64. The 192 frames
     // before the stream began never existed.
@@ -187,9 +189,9 @@ TEST_CASE("tap stream: history the ring no longer holds is zero-filled, not shor
 TEST_CASE("tap stream: the stream anchors on engine frames",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // The first write anchors: a stream that starts an hour into the session
     // reports that hour as its base, so a client can map an engine sample
@@ -204,9 +206,9 @@ TEST_CASE("tap stream: the stream anchors on engine frames",
 TEST_CASE("tap stream: a gap in the source moves the cursor rather than sliding time",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeBlock(w, 0, 128);
     REQUIRE(r.write_position() == 128);
@@ -223,18 +225,18 @@ TEST_CASE("tap stream: a gap in the source moves the cursor rather than sliding 
 TEST_CASE("tap stream: corrupt geometry is clamped rather than believed",
           "[tap]") {
     Slot slot;
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
     writeBlock(w, 0, 256);
 
     // The slot is in shared memory that another process can write, so these
     // are attacker-influenced from the reader's point of view. Both are used
-    // to index the inline data array.
+    // to index the ring.
     slot.get()->channels        = 9999;
     slot.get()->capacity_frames = 0xFFFFFFFFu;
     REQUIRE(r.channels() <= TAP_STREAM_CHANNELS);
-    REQUIRE(r.capacity_frames() <= TAP_RING_FRAMES);
+    REQUIRE(r.capacity_frames() <= kRing);
 
     slot.get()->channels        = 0;
     slot.get()->capacity_frames = 0;
@@ -255,7 +257,7 @@ TEST_CASE("tap stream: an inactive or absent slot yields silence, not stale memo
     // holding a slot that was never activated, or none at all, must not leave
     // the caller's buffer as it found it — that buffer is the previous frame's
     // audio, and returning it would draw a picture that looks alive.
-    shm_tap_stream_reader none(nullptr);
+    shm_tap_stream_reader none(nullptr, kRing);
     REQUIRE_FALSE(none.valid());
 
     uint32_t used = 0;
@@ -265,7 +267,7 @@ TEST_CASE("tap stream: an inactive or absent slot yields silence, not stale memo
     for (float v : out) REQUIRE(v == 0.0f);
 
     Slot slot;                       // zeroed: state == 0, never activated
-    shm_tap_stream_reader idle(slot.get());
+    shm_tap_stream_reader idle(slot.get(), kRing);
     REQUIRE_FALSE(idle.valid());
 }
 
@@ -274,10 +276,10 @@ TEST_CASE("tap stream: a slot counts the times it went live", "[tap]") {
     // than its poll: a loop that starts and is stopped in between. It notes
     // the count instead, and any change since says the slot went live.
     Slot slot;
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
     REQUIRE(r.activations() == 0);   // the arena hands it over zeroed
 
-    shm_tap_stream_writer w(slot.get());
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
     REQUIRE(r.valid());
     REQUIRE(r.activations() == 1);
@@ -295,5 +297,5 @@ TEST_CASE("tap stream: a slot counts the times it went live", "[tap]") {
     REQUIRE(r.activations() == 2);
 
     // No slot, no count.
-    REQUIRE(shm_tap_stream_reader(nullptr).activations() == 0);
+    REQUIRE(shm_tap_stream_reader(nullptr, kRing).activations() == 0);
 }

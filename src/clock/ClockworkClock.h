@@ -255,6 +255,9 @@ public:
     // the block over. A reset anchors afresh at `wallNtp`, never below
     // `floorNtp` (floorRenderNtp: the clock the arena already carries).
     double updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp);
+    // A drift step the last update found worth saying, in seconds, taken
+    // once (TimeSource::takeDriftReport); 0 when none.
+    double takeDriftReport();
     void   resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
                                 double floorNtp = 0.0);
     bool   audioThreadAnchored() const;
@@ -353,17 +356,10 @@ private:
     // engine-frame counter (headless/unit contexts without a segment). Plain
     // pointer: bound once pre-audio, then single-writer.
     uint8_t* mSampleClockRegion = nullptr;
+    // The engine's frames at the block just rendered: the sample clock's
+    // count, written as each block is published and read by whatever stamps
+    // audio with the engine's position (the taps, the tracks).
+    std::atomic<uint64_t> mEngineFrames{0};
     struct Impl;
     std::unique_ptr<Impl> mImpl;
 };
-
-// Active ClockworkClock pointer for the /clockwork/clock/* query verbs (queryable
-// in both SAB and PM modes). Published at engine boot, single-publisher
-// — multi-engine native is not supported.
-extern std::atomic<ClockworkClock*> g_active_clockwork_clock;
-// The LinkAudioHost that ClockworkEngine publishes alongside its clock
-// (native only; null on the web and in hosts without one). process_audio
-// uses it to stamp each block in Link's clock and to reset its block clock
-// whenever it re-anchors the engine clock.
-class LinkAudioHost;
-extern std::atomic<LinkAudioHost*> g_active_link_audio;

@@ -20,6 +20,7 @@ use clockwork_abi::sink::*;
 use clockwork_abi::lanes;
 use clockwork_abi::arena::*;
 use clockwork_abi::embed::*;
+use clockwork_abi::profile::*;
 use clockwork_abi::timetag::*;
 
 macro_rules! expect {
@@ -60,7 +61,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, DspTapHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
         name, version, holds_schedule, memory_bytes_wanted, memory_bulk_bytes_wanted, wants_events,
-        window_magic, window_version, survives,
+        window_magic, window_version, survives, instances,
     });
     expect!(mine, ClockworkAsset {
         struct_bytes, id, kind, origin, bytes, byte_count, channels, frames, sample_rate,
@@ -71,6 +72,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     });
     expect!(mine, ClockworkClientMessage { bytes, length, origin, route, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });
+    expect!(mine, ClockworkScopeShape { struct_bytes, slots, slot_bytes, header_bytes, frames, channels });
     expect!(mine, ClockworkClientClock {
         struct_bytes, bpm, beat_origin_ntp, is_playing_at_ntp, is_playing, flags, meter_num, meter_den,
     });
@@ -86,7 +88,11 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkSink {});
     expect!(mine, ClockworkEmbedConfig {
         struct_bytes, sample_rate, block_size, input_channels, output_channels, max_render_frames,
-        app_name, device, instance_id, flags, driver,
+        app_name, device, profile, flags, driver,
+    });
+    expect!(mine, ClockworkProfile {
+        struct_bytes, in_ring_bytes, rt_out_ring_bytes, nrt_out_ring_bytes, scope_frames, scope_channels,
+        tap_slots, track_tap_slots, tap_ring_frames, window_bytes, persist_bytes,
     });
     expect!(mine, ClockworkEmbedDevice {
         struct_bytes, driver, device, sample_rate, buffer_frames, block_frames,
@@ -99,7 +105,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_bytes, area_count, area_bytes, entry_count, entry_bytes, state, generation, reserved,
         areas, entries,
     });
-    let consts: [(&str, i64); 36] = [
+    let consts: [(&str, i64); 34] = [
         ("CLOCKWORK_E_NO_INSTANCE", ClockworkStatus::E_NO_INSTANCE.0 as i64),
         ("CLOCKWORK_E_TIMEOUT", ClockworkStatus::E_TIMEOUT.0 as i64),
         ("CLOCKWORK_WAIT_FOREVER", CLOCKWORK_WAIT_FOREVER as i64),
@@ -123,14 +129,12 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         ("CLOCKWORK_ASSET_AUDIO_F32", CLOCKWORK_ASSET_AUDIO_F32 as i64),
         ("DSP_FP_ENV_FLUSH_TO_ZERO", DSP_FP_ENV_FLUSH_TO_ZERO as i64),
         ("CLOCKWORK_CLIENT_ABI_VERSION", CLOCKWORK_CLIENT_ABI_VERSION as i64),
-        ("CLOCKWORK_ATTACH_REFUSED", lanes::CLOCKWORK_ATTACH_REFUSED as i64),
-        ("CLOCKWORK_ATTACH_BOOTED", lanes::CLOCKWORK_ATTACH_BOOTED as i64),
-        ("CLOCKWORK_ATTACH_JOINED", lanes::CLOCKWORK_ATTACH_JOINED as i64),
         ("CLOCKWORK_RESERVED_LANES_MAX", lanes::CLOCKWORK_RESERVED_LANES_MAX as i64),
         ("CLOCKWORK_ARENA_MAGIC", CLOCKWORK_ARENA_MAGIC as i64),
         ("CLOCKWORK_ARENA_VERSION", CLOCKWORK_ARENA_VERSION as i64),
         ("CLOCKWORK_ARENA_HEADER_BYTES", CLOCKWORK_ARENA_HEADER_BYTES as i64),
         ("CLOCKWORK_ARENA_MAX_ENTRIES", CLOCKWORK_ARENA_MAX_ENTRIES as i64),
+        ("CLOCKWORK_TAP_SLOTS_MAX", CLOCKWORK_TAP_SLOTS_MAX as i64),
         ("CLOCKWORK_ARENA_CLOCKWORK_TAPS", ClockworkArenaRegion::CLOCKWORK_TAPS.0 as i64),
         ("CLOCKWORK_OWNER_HOST", ClockworkArenaOwner::HOST.0 as i64),
         ("CLOCKWORK_ARENA_GUEST_PERSIST", ClockworkArenaRegion::GUEST_PERSIST.0 as i64),

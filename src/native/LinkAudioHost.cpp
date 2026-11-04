@@ -78,8 +78,8 @@ std::vector<LinkAudioHost::SinkInfo> LinkAudioHost::listSinks() const {
 
 // ─── Audio thread ───────────────────────────────────────────────────────────
 
-void LinkAudioHost::setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels) {
-    mBridge.setAudioFormat(sampleRate, allocatedInputChannels);
+void LinkAudioHost::setAudioFormat(ClockworkCore* core, uint32_t sampleRate, uint32_t allocatedInputChannels) {
+    mBridge.setAudioFormat(core, sampleRate, allocatedInputChannels);
 }
 
 int64_t LinkAudioHost::blockHostMicros(double samplePosition, double sampleRate) {

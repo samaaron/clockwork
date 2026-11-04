@@ -12,3 +12,5 @@ publish = false
 workspace = true
 
 [dependencies]
+clockwork-abi = { path = "../clockwork-abi" }
+clockwork-fence = { path = "../clockwork-fence" }

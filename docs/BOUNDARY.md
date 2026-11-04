@@ -283,6 +283,31 @@ The bytes may be torn (death mid-write) or stale (a crashed run), so stamp a
 generation and validate it. scsynth uses the region to remember which origins
 asked for `/notify`, which the World does not survive.
 
+### How many in a process
+
+A process may hold many cores, each with its own instance of the guest: a
+DAW opens a plugin once per track. An instance keeps its state in what it
+was handed — its memory, its arena regions, its context pointer — and so
+two instances never meet.
+
+`DspInfo::instances` says how many instances of the guest a process may
+hold. 0, what a zeroed `DspInfo` says, is one: a guest that says nothing is
+taken to keep process-wide mutable state — a static it writes, a library
+that is one per process. clockwork refuses a build past the count with a
+reason a person can read ("only one can run in a process, and one already
+is"), as it refuses a build for anything else. A core rebuilding its own
+instance is never refused.
+
+`DSP_INSTANCES_ANY` is any number, and a promise that the guest keeps
+nothing process-wide. Two checks hold a guest to it, and a guest that says
+any owes both:
+
+- its built objects have no mutable variable with static storage
+  (`scripts/check-guest-globals.sh`, over an unoptimised build of the
+  guest's C and C++);
+- two instances at once, each told something different, render bit for
+  bit what each renders alone (the dummy's is in `test/test_embed.cpp`).
+
 ### Who owns the schedule
 
 Either side. One engine keeps a host-side timed queue and fires per block;

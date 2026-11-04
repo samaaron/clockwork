@@ -178,7 +178,15 @@ pub struct DspInfo {
     /// and keeping what it holds. 0: survives nothing; every such change is
     /// cold (clockwork's docs/RESTARTS.md).
     pub survives: u32,
+    /// How many instances one process may hold, one per core at most; a
+    /// build past the count is refused with the reason. 0, as a zeroed
+    /// `DspInfo` leaves it, is one. [`DSP_INSTANCES_ANY`] is any number, and
+    /// a promise that the guest keeps no process-wide mutable state.
+    pub instances: u32,
 }
+
+/// `DspInfo::instances`: any number in one process.
+pub const DSP_INSTANCES_ANY: u32 = u32::MAX;
 
 /// `DspInfo::survives`: a different sample rate.
 pub const DSP_SURVIVES_RATE_CHANGE: u32 = 1 << 0;
@@ -222,8 +230,10 @@ pub struct ClockworkAsset {
 //     const _: clockwork_abi::dsp_api::DspNewFn = dsp_new;
 
 pub type DspDescribeFn = unsafe extern "C" fn() -> *const DspInfo;
+/// The refusal buffer the host passes `dsp_new` is at least this long.
+pub const DSP_REFUSAL_BYTES: u32 = 512;
 pub type DspNewFn =
-    unsafe extern "C" fn(config: *const DspConfig, host: *const DspHost, err: *mut *const c_char) -> *mut Dsp;
+    unsafe extern "C" fn(config: *const DspConfig, host: *const DspHost, err: *mut c_char, err_bytes: u32) -> *mut Dsp;
 pub type DspFreeFn = unsafe extern "C" fn(dsp: *mut Dsp);
 pub type DspProcessFn = unsafe extern "C" fn(
     dsp: *mut Dsp,

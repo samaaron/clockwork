@@ -16,6 +16,7 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 # Pure Rust, no unsafe of its own, MPL-2.0 (file-scoped, so nothing of
 # clockwork's is touched by it). Only the formats clockwork_audio_file.h
 # promises are compiled in; the metadata readers are what let an ID3 tag in

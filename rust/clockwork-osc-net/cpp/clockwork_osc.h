@@ -42,7 +42,7 @@ typedef void (*clockwork_osc_dropped_fn)(void* ctx, uint32_t n);
 /* Create the subsystem. `ctx`, `emit` and `dropped` must outlive it. Null on
  * failure. The cue port starts with the default rate limit: 2000 cues/s for
  * the port and 1000/s for each sender. */
-ClockworkOsc* clockwork_osc_create(void* ctx, clockwork_osc_emit_fn emit, clockwork_osc_dropped_fn dropped);
+ClockworkOsc* clockwork_osc_create(struct ClockworkCore* core, void* ctx, clockwork_osc_emit_fn emit, clockwork_osc_dropped_fn dropped);
 
 /* Stop the cue recv threads, close the sockets, free the instance. */
 void clockwork_osc_destroy(ClockworkOsc* handle);

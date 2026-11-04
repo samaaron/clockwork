@@ -9,10 +9,11 @@
  * device manager and no threads, which makes it the honest surface for
  * testing what clockwork does with bytes and samples.
  *
- * Clockwork is a process singleton — one arena, one clock, one ingress —
- * so booting is done ONCE for the whole test binary and every test shares it.
- * That is what a host does; a test that re-booted per case would be testing
- * a lifecycle no host performs.
+ * The free functions drive one core, the default lane, booted ONCE for the
+ * whole test binary and shared by every test, as a host's engine is; a test
+ * that re-booted per case would be testing a lifecycle no host performs. A
+ * case that wants cores beside it makes lanes of its own (Lane, below), each
+ * a core with its own memory and timeline (docs/ENGINES.md.2).
  *
  * tick() returns the ABSOLUTE frame index of the block it just rendered, which
  * is what lets a test assert exact sample values against a formula rather than
@@ -20,7 +21,12 @@
  */
 #pragma once
 
+#include "clockwork_core.h"
+#include "clockwork_client.h"
+#include "lanes/lanes.h"
+
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace lanes_test {
@@ -42,8 +48,8 @@ inline constexpr uint32_t kBufLength   = 64;
 // clockwork_lanes_reserved_tests compiles this file with a non-zero value, so
 // the lane path — a source port attached above the device's width, pulled into
 // the DSP's inputs — is exercised for real in a binary of its own rather than
-// perturbing the shared fixture. Clockwork is a process singleton, so a second
-// geometry needs a second process.
+// perturbing the shared fixture: every case in this binary is written against
+// the fixture's one geometry, so a second geometry is a second binary.
 #ifndef LANES_FIXTURE_RESERVED_LANES
 #define LANES_FIXTURE_RESERVED_LANES 0
 #endif
@@ -73,7 +79,7 @@ inline constexpr uint32_t kGuestConfigSlots[4] = {
 // the plumbing is not the point. 4 MB is bulk-sized and small enough that
 // dsp_new can still scan the whole thing to prove it arrived zeroed.
 //
-// It is also comfortably larger than the egress ring (RT_OUT_RING_SIZE, 128 KB),
+// It is also comfortably larger than the egress ring (clockwork::kDefaultLayout.profile.rt_out_ring_bytes, 128 KB),
 // which lets a test ask for a payload the ring cannot carry and watch it be
 // refused there while the region carries it without trouble.
 inline constexpr uint32_t kGuestMemoryBytes = 4 * 1024 * 1024;   // the arena
@@ -117,6 +123,10 @@ double publishedNtp();
 // on. Safe to call from every test case — only the first call does anything.
 uint32_t boot();
 
+// The fixture's core (clockwork_core.h), made at the first boot(): for a
+// case that calls a lanes.h entry point that takes it.
+ClockworkCore* core();
+
 // Render one block. Returns the absolute frame index of its FIRST sample, so
 // out[ch][i] corresponds to stream position (returned + i).
 uint64_t tick();
@@ -157,8 +167,70 @@ struct EgressFrame {
     uint32_t             sourceId = 0;
     uint32_t             route    = 0;
     uint32_t             seq      = 0;
+    bool                 decodes  = true;   // by the parser clients read with (clockwork-osc)
     std::vector<uint8_t> data;
 };
+
+// One core the fixture boots and drives, with its own guest memory, assets
+// and returns, and its own timeline: frame 0 at kEpochNtp, each block on by
+// its frames. The free functions below are the default lane's. A lane
+// asserts nothing as it runs, so any thread may run it, one at a time: each
+// frame it drains says whether it decodes, for the caller to check.
+class Lane {
+public:
+    // `guestBulkBytes`, when not 0, sizes the guest's bulk memory below the
+    // profile's figure (clockwork_set_guest_bulk_bytes): for a case that runs
+    // many lanes at once, as the guest's pool's census does not depend on it.
+    // `profile`: the sizes its arena is laid out from; the target's own
+    // with none.
+    explicit Lane(size_t guestBulkBytes = 0, const ClockworkProfile* profile = nullptr);
+    ~Lane();
+    Lane(const Lane&) = delete;
+    Lane& operator=(const Lane&) = delete;
+
+    ClockworkCore* core() const { return mCore; }
+    uint32_t block() const { return mBlockSize; }
+    uint64_t position() const { return mSamplePos; }
+    double   baseNtp() const { return mBaseNtp; }
+    double   ntpAt(uint64_t frame) const { return mBaseNtp + static_cast<double>(frame) / kSampleRate; }
+    uint64_t dspFrame(uint64_t streamFrame) const { return streamFrame - mDspOrigin; }
+
+    const uint8_t* guestMemory() const;
+    uint8_t*       assets();
+    const uint8_t* returns() const;
+
+    // As the free functions of the same names say, for this lane.
+    uint64_t tick();
+    uint64_t freshDsp();
+    void comeBack(double rate = kSampleRate, uint32_t block = kBufLength,
+                  uint32_t inputs = kInChannels, uint32_t outputs = kOutChannels,
+                  const uint32_t (&config)[4] = kGuestConfigSlots);
+    std::vector<EgressFrame> drainRt();
+    std::vector<EgressFrame> drainNrt();
+    bool ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId = 0);
+    double publishedNtp() const;
+    // One metric word, as a client reads it; false when there is none there.
+    bool metricWord(uint32_t offset, uint32_t& word) const;
+    void ticked(uint64_t frames);
+    void resumeIfTicked();
+
+private:
+    struct Buffers;
+    void init(double rate, uint32_t block, uint32_t inputs, uint32_t outputs, const uint32_t (&config)[4]);
+    ClockworkClient* openClient() const;
+    std::vector<EgressFrame> drain(uint32_t (*from)(ClockworkCore*, ClockworkEgressFn, void*, uint32_t));
+
+    std::unique_ptr<Buffers> mBuffers;
+    ClockworkCore* mCore = nullptr;
+    uint32_t mBlockSize = 0;
+    uint64_t mSamplePos = 0;
+    uint64_t mDspOrigin = 0;   // the position when the instance was last made
+    double   mBaseNtp   = kEpochNtp;
+    bool     mResume    = false;   // another host rendered since this lane last ticked (ticked())
+};
+
+// The default lane: the one the free functions drive, made at the first ask.
+Lane& defaultLane();
 
 // Drain everything currently on the RT egress ring.
 std::vector<EgressFrame> drainRt();

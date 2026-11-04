@@ -312,7 +312,7 @@ TEST_CASE("timeline: a trailing int32 is a correlation token and is echoed; noth
     {
         std::vector<osc_test::ParsedReply> refusals;
         const auto req = osc_test::message("/clockwork/clock/no/such/verb", 99);
-        replyClockUnsupported(req.ptr(), req.size(), [&](const uint8_t* d, uint32_t n) {
+        replyClockUnsupported(nullptr, req.ptr(), req.size(), [&](const uint8_t* d, uint32_t n) {
             refusals.push_back(osc_test::parseReply(d, n));
         });
         REQUIRE(refusals.size() == 1);

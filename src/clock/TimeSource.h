@@ -103,6 +103,10 @@ public:
     // this block, never below the last block's (or the pure sample-derived
     // NTP in freewheel mode).
     double updateAudioThreadNTP(double samplePosition, double sampleRate, double wallNtp);
+    // A drift step the last update found worth saying (DriftLogGate), in
+    // seconds, taken once: the engine logs it on its core. 0 when none.
+    // Audio thread, after updateAudioThreadNTP.
+    double takeDriftReport() { const double d = mDriftToReport; mDriftToReport = 0.0; return d; }
     // Anchor afresh at `wallNtp`, and never below `floorNtp` (0: no floor):
     // the clock the arena already carries, so a new host over memory that is
     // up goes on from it. `renderedFrames`: the frames rendered so far on the
@@ -177,6 +181,7 @@ private:
     // after which a reset goes on from where the rendering ended.
     std::atomic<uint64_t> mFreewheelOriginBits{0};
     std::atomic<bool>     mFreewheelAnchored{false};
-    // Drift-step logging state (audio-thread only).
+    // Drift-step reporting state (audio-thread only).
     clockwork::DriftLogGate mDriftLogGate;
+    double                  mDriftToReport{0.0};
 };

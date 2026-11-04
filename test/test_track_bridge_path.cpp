@@ -39,15 +39,15 @@ struct TempFile {
 TEST_CASE("resolveBridge: the configured path wins when it names a file", "[tracks][bridge]") {
     TempFile configured("configured");
     TempFile env("env");
-    CHECK(TrackControl::resolveBridge(configured.path(), env.path(), "/nowhere") == configured.path());
+    CHECK(TrackControl::resolveBridge(nullptr, configured.path(), env.path(), "/nowhere") == configured.path());
 }
 
 TEST_CASE("resolveBridge: a configured path that is not there falls back to the override", "[tracks][bridge]") {
     TempFile env("env");
-    CHECK(TrackControl::resolveBridge("/no/such/bridge", env.path(), "/nowhere") == env.path());
+    CHECK(TrackControl::resolveBridge(nullptr, "/no/such/bridge", env.path(), "/nowhere") == env.path());
 }
 
 TEST_CASE("resolveBridge: with neither, the search beside the executable decides", "[tracks][bridge]") {
     // nothing beside /nowhere, and no installed layout: empty, as findBridgeBeside says
-    CHECK(TrackControl::resolveBridge("", "", "/nowhere") == TrackControl::findBridgeBeside("/nowhere"));
+    CHECK(TrackControl::resolveBridge(nullptr, "", "", "/nowhere") == TrackControl::findBridgeBeside("/nowhere"));
 }

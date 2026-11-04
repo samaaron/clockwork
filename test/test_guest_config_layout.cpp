@@ -29,7 +29,7 @@ TEST_CASE("BlockSize: the guest block matches a smaller driver buffer",
     cfg.bufferSize = 32;
     cfg.blockSize  = 0;   // no explicit -z: policy decides
     EngineFixture fix(cfg);
-    REQUIRE(get_audio_buffer_samples() == 32);
+    REQUIRE(clockwork_block_size(fix.engine().core()) == 32);
 }
 
 TEST_CASE("BlockSize: larger driver buffer keeps the default block",
@@ -38,7 +38,7 @@ TEST_CASE("BlockSize: larger driver buffer keeps the default block",
     cfg.bufferSize = 512;
     cfg.blockSize  = 0;
     EngineFixture fix(cfg);
-    REQUIRE(get_audio_buffer_samples() == clockwork::kDefaultBlockSize);
+    REQUIRE(clockwork_block_size(fix.engine().core()) == clockwork::kDefaultBlockSize);
 }
 
 TEST_CASE("BlockSize: explicit -z overrides the driver buffer",
@@ -47,7 +47,7 @@ TEST_CASE("BlockSize: explicit -z overrides the driver buffer",
     cfg.bufferSize = 512;
     cfg.blockSize  = 64;
     EngineFixture fix(cfg);
-    REQUIRE(get_audio_buffer_samples() == 64);
+    REQUIRE(clockwork_block_size(fix.engine().core()) == 64);
 }
 
 // ── Cold swap reports correct sample rate ───────────────────────────────────

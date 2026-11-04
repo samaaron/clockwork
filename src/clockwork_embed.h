@@ -32,12 +32,11 @@
  * rendered since. A DAW rendering offline at ten times real time gets a
  * clock that runs at the audio's pace, not the wall's.
  *
- * ── One engine per process ───────────────────────────────────────────────
- * The handle is per engine, and today there is one: a second boot or
- * attach in a process that already has one is refused (CLOCKWORK_E_PERM)
- * unless it asks for the same geometry, in which case attach joins it — a
- * plugin instantiated twice in one DAW gets one engine and one piece. The
- * signatures will not change when engines become plural; the refusal will.
+ * ── Engines side by side ──────────────────────────────────────────────────
+ * Each handle has an engine of its own (a core, clockwork_core.h): its own
+ * memory, client and stream, independent of every other in the process. A
+ * wasm build and an ESP-IDF board hold one engine per process, and refuse a
+ * second (CLOCKWORK_E_PERM).
  *
  * Pure C. Boot needs the device layer (CLOCKWORK_DEVICE); a build without
  * one answers CLOCKWORK_E_ABSENT and attach still works.
@@ -45,6 +44,7 @@
 #pragma once
 #include <stdint.h>
 #include "clockwork_client.h"
+#include "clockwork_profile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,7 +61,9 @@ typedef struct ClockworkEmbedConfig {
     uint32_t    max_render_frames; /* attach: the largest `frames` you will pass to render; 0 = 4096 */
     const char* app_name;          /* boot: the name the OS shows; NULL = the product's */
     const char* device;            /* boot: a device to open by name; NULL = the default */
-    uint32_t    instance_id;       /* 0. Reserved for a process with more than one engine */
+    const ClockworkProfile* profile; /* the arena's sizes (clockwork_profile.h); NULL = the target's
+                                    * own. One no arena can hold is refused with E_ARG: ask
+                                    * clockwork_profile_check why. */
     uint32_t    flags;             /* CLOCKWORK_EMBED_* below, or 0 */
     const char* driver;            /* boot: the driver (device type) to open on — the names the
                                     * platform reports: "Windows Audio", "DirectSound", "ASIO",
@@ -102,18 +104,31 @@ ClockworkStatus clockwork_embed_device(const ClockworkEmbed* h, ClockworkEmbedDe
 
 /* Bring an engine up on the audio device and let it tick itself. NULL with
  * `status` on refusal: E_ABSENT when this build has no device layer, E_PERM
- * when the process already has an engine, E_ARG for a config it cannot
- * read. */
+ * where a process holds one engine and has it, E_ARG for a config it cannot
+ * read, E_NO_INSTANCE when the guest did not start (as for attach, below). */
 ClockworkEmbed* clockwork_embed_boot(const ClockworkEmbedConfig* config, ClockworkStatus* status);
 
-/* Bring an engine up with no device: you render. E_PERM when the process
- * already has an engine at a geometry that cannot serve this one. */
+/* Bring an engine up with no device: you render. NULL with `status` on
+ * refusal: E_PERM where a process holds one engine and has it; E_ARG for a
+ * config or profile it cannot read; E_NO_INSTANCE when the guest did not
+ * start — one instance more than the guest allows a process
+ * (DspInfo::instances), or a guest that refused — with the reason on the
+ * core's log; E_NOMEM when the engine's memory could not be laid out. */
 ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, ClockworkStatus* status);
+
+/* Change an attached engine's rate, block or channels and keep the engine:
+ * what a plugin host does between deactivating an instance and activating
+ * it again. Not while render runs. The engine does the least that gets it
+ * back where it was (docs/RESTARTS.md): at the rate it had, the instance
+ * carries on; at another it takes, it is told; otherwise it is rebuilt.
+ * E_ARG for a booted handle (its device is the engine's own) or a config it
+ * cannot read. Closing the handle instead ends the engine. */
+ClockworkStatus clockwork_embed_reconfigure(ClockworkEmbed* h, const ClockworkEmbedConfig* config);
 
 /* The client over this engine. Owned by the handle: do not close it. */
 ClockworkClient* clockwork_embed_client(ClockworkEmbed* h);
 
-/* The geometry the engine actually runs at (attach may have joined one). */
+/* The geometry the engine actually runs at. */
 double   clockwork_embed_sample_rate(const ClockworkEmbed* h);
 uint32_t clockwork_embed_block_size(const ClockworkEmbed* h);
 

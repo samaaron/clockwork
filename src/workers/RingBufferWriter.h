@@ -40,6 +40,14 @@
 // (emcc -Isrc) include roots.
 #include "ring/ring.h"
 
+// One piece of a frame's payload, for a writer that lays a frame down from
+// pieces it holds apart (a route word, a wrapper, a message) rather than
+// gathering them into a buffer first.
+struct RingPart {
+    const void* data;
+    uint32_t    size;
+};
+
 class RingBufferWriter {
 public:
     // Write one message into a ring buffer.
@@ -209,8 +217,45 @@ public:
         write_lock->store(0, std::memory_order_release);
     }
 
-    // Write one message into a ring buffer, for a caller that already holds
-    // the bytes. Reserve and commit in one step, which is the whole of it.
+    // Write one message whose payload is `parts` laid end to end, for a
+    // caller that already holds the bytes. Reserve and commit in one step,
+    // which is the whole of it. False when the ring has no room, or the
+    // parts together are more than it could ever hold.
+    static bool write(
+        uint8_t*              buffer_start,
+        uint32_t              buffer_size,
+        std::atomic<int32_t>* head,
+        std::atomic<int32_t>* tail,
+        std::atomic<int32_t>* sequence,
+        std::atomic<int32_t>* write_lock,
+        const RingPart*       parts,
+        uint32_t              n_parts,
+        uint32_t              source_id = 0)
+    {
+        uint32_t data_size = 0;
+        for (uint32_t i = 0; i < n_parts; ++i) {
+            if (parts[i].size > buffer_size - data_size) return false;
+            data_size += parts[i].size;
+        }
+        Reservation r = reserve(buffer_start, buffer_size, head, tail,
+                                write_lock, data_size);
+        if (!r.valid())
+            return false;
+
+        // A header-only frame carries nothing to copy, and its caller may
+        // well pass no pointer.
+        uint8_t* at = r.payload;
+        for (uint32_t i = 0; i < n_parts; ++i) {
+            if (parts[i].size == 0) continue;
+            std::memcpy(at, parts[i].data, parts[i].size);
+            at += parts[i].size;
+        }
+        commit(buffer_start, buffer_size, head, sequence, write_lock,
+               r, data_size, source_id);
+        return true;
+    }
+
+    // The same, for a payload in one piece.
     static bool write(
         uint8_t*              buffer_start,
         uint32_t              buffer_size,
@@ -222,15 +267,8 @@ public:
         uint32_t              data_size,
         uint32_t              source_id = 0)
     {
-        Reservation r = reserve(buffer_start, buffer_size, head, tail,
-                                write_lock, data_size);
-        if (!r.valid())
-            return false;
-
-        // a header-only frame carries nothing to copy, and its caller may well pass no pointer
-        if (data_size > 0) std::memcpy(r.payload, data, data_size);
-        commit(buffer_start, buffer_size, head, sequence, write_lock,
-               r, data_size, source_id);
-        return true;
+        const RingPart part{ data, data_size };
+        return write(buffer_start, buffer_size, head, tail, sequence, write_lock,
+                     &part, 1, source_id);
     }
 };

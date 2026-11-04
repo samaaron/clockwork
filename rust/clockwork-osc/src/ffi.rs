@@ -22,19 +22,5 @@ pub type EmitFn = extern "C" fn(ctx: *mut c_void, kind: i32, osc: *const u8, len
 pub const EMIT_BROADCAST: i32 = 0;
 pub const EMIT_REPLY: i32 = 1;
 
-/// Run `f`, catching any panic so it cannot unwind across a C ABI or OS
-/// callback boundary (which aborts the whole engine process). The subsystems
-/// are best-effort peripherals: on a panic the operation is dropped and the
-/// subsystem stays alive (a poisoned mutex then disables it rather than
-/// killing audio).
-#[cfg(feature = "std")]
-pub fn no_unwind<T>(default: T, f: impl FnOnce() -> T) -> T {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(default)
-}
-
-/// no_std targets have no unwinding — panics abort (panic = "abort" is the
-/// embedded profile), so the wrapper is the identity.
-#[cfg(not(feature = "std"))]
-pub fn no_unwind<T>(_default: T, f: impl FnOnce() -> T) -> T {
-    f()
-}
+/// The panic fence every subsystem's C ABI is built on (clockwork-fence).
+pub use clockwork_fence::no_unwind;

@@ -63,6 +63,7 @@
  *
  *   /dummy/region/config          -> ,iiiii <bytes> <slot0..3>
  *   /dummy/region/geometry        -> ,iiii  <rate> <block> <in> <out>
+ *   /dummy/region/seed            -> ,i     <deterministic_seed>
  *   /dummy/region/memory          -> ,iii   <bytes> <was_zero> <read_write_ok>
  *   /dummy/region/clock           -> ,iii   <present> <millibeats> <playing>
  *   /dummy/region/window ,ii <v> <_>        publish v through shm_window
@@ -734,33 +735,41 @@ uint32_t writeReply(uint8_t* buf, uint32_t cap, const char* address) {
 
 extern "C" {
 
-const DspInfo* dsp_describe(void) {
-    static const DspInfo info = {
-        /* name                    */ "dummy",
-        /* version                 */ "0",
-        /* holds_schedule          */ 0,   // let clockwork hold timed messages
-        // Wants that EVERY host in this tree can meet — the smallest arena any
-        // of them reserves is test_attach.cpp's 1 MB — declared so the check
-        // that meets them runs on every boot rather than only in a guest that
-        // is not here. On a single-region host the fast arena must hold both:
-        // 640 KB of that 1 MB.
-        /* memory_bytes_wanted      */ 512u * 1024u,
-        /* memory_bulk_bytes_wanted */ 128u * 1024u,
-        // Hear the host's inbound events (a keyboard, a pad) as they arrive,
-        // so the path a self-directed guest takes them by is exercised here.
-        /* wants_events            */ 1,
-        // What this guest's window is, for a client reading it by hand:
-        // 'DUMY', layout 1. The arena table carries it once the guest binds.
-        /* window_magic            */ 0x44554D59u,
-        /* window_version          */ 1u,
-        // A channel-count change is taken live (dsp_reconfigure): what a
-        // guest that sizes nothing by the device can do, and what the engine
-        // tests drive a hot restart with. A rate change is NOT survived, so
-        // the tests that drive a cold restart with one keep their lever.
-        /* survives                */ DSP_SURVIVES_CHANNEL_CHANGE,
-    };
-    return &info;
-}
+// How many instances a process may hold: any, since this guest keeps
+// nothing process-wide. The tests build a second copy that leaves it unset,
+// as a zeroed DspInfo does (clockwork_guest_once_tests).
+#ifndef DUMMY_DSP_INSTANCES
+#define DUMMY_DSP_INSTANCES DSP_INSTANCES_ANY
+#endif
+
+// What dsp_describe answers.
+static const DspInfo kInfo = {
+    /* name                    */ "dummy",
+    /* version                 */ "0",
+    /* holds_schedule          */ 0,   // let clockwork hold timed messages
+    // Wants that EVERY host in this tree can meet — the smallest arena any
+    // of them reserves is test_attach.cpp's 1 MB — declared so the check
+    // that meets them runs on every boot rather than only in a guest that
+    // is not here. On a single-region host the fast arena must hold both:
+    // 640 KB of that 1 MB.
+    /* memory_bytes_wanted      */ 512u * 1024u,
+    /* memory_bulk_bytes_wanted */ 128u * 1024u,
+    // Hear the host's inbound events (a keyboard, a pad) as they arrive,
+    // so the path a self-directed guest takes them by is exercised here.
+    /* wants_events            */ 1,
+    // What this guest's window is, for a client reading it by hand:
+    // 'DUMY', layout 1. The arena table carries it once the guest binds.
+    /* window_magic            */ 0x44554D59u,
+    /* window_version          */ 1u,
+    // A channel-count change is taken live (dsp_reconfigure): what a
+    // guest that sizes nothing by the device can do, and what the engine
+    // tests drive a hot restart with. A rate change is NOT survived, so
+    // the tests that drive a cold restart with one keep their lever.
+    /* survives                */ DSP_SURVIVES_CHANNEL_CHANGE,
+    /* instances               */ DUMMY_DSP_INSTANCES,
+};
+
+const DspInfo* dsp_describe(void) { return &kInfo; }
 
 // The text set for `name` in the guest config's `name=value` lines, or empty.
 // The block is NUL-terminated text when a host wrote any (GuestConfigText.h).
@@ -785,14 +794,15 @@ static uint64_t configNumber(const DspConfig* config, const char* name) {
     return v.empty() ? 0 : std::strtoull(std::string(v).c_str(), nullptr, 10);
 }
 
-// The words this guest refuses with: refusalReason's, or its own. dsp_api.h
-// has the guest own them; they last until the next refusal.
-static const char* refusal(const DspConfig* config, const char* own) {
-    static std::string reason;
-    const std::string_view asked = configText(config, "refusalReason");
-    if (asked.empty()) return own;
-    reason.assign(asked);
-    return reason.c_str();
+// Why this guest refuses, into the host's buffer (dsp_api.h): refusalReason's
+// words when the config gives some, else its own.
+static void refuse(const DspConfig* config, char* err, uint32_t err_bytes, std::string_view own) {
+    if (!err || err_bytes == 0) return;
+    const std::string_view asked = config ? configText(config, "refusalReason") : std::string_view{};
+    const std::string_view why = asked.empty() ? own : asked;
+    const size_t n = why.size() < err_bytes - 1 ? why.size() : err_bytes - 1;
+    std::memcpy(err, why.data(), n);
+    err[n] = '\0';
 }
 
 // The pool asked for, and room for the allocator's own headers around it.
@@ -810,14 +820,14 @@ uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_b
 // working memory is its static figure (kInfo.memory_bytes_wanted).
 uint64_t dsp_memory_bytes(const void*, uint32_t) { return 0; }
 
-struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err) {
+struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, char* err, uint32_t err_bytes) {
     if (!config || config->block_size == 0 || !(config->sample_rate > 0.0)) {
-        if (err) *err = "dummy dsp: needs a sample rate and a block size";
+        refuse(nullptr, err, err_bytes, "dummy dsp: needs a sample rate and a block size");
         return nullptr;
     }
     auto* d = new (std::nothrow) DummyDsp();
     if (!d) {
-        if (err) *err = "dummy dsp: out of memory";
+        refuse(nullptr, err, err_bytes, "dummy dsp: out of memory");
         return nullptr;
     }
     d->config = *config;
@@ -827,7 +837,7 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** e
         if (d->host.alloc_bytes) d->rt_pool = d->host.alloc_bytes(d->host.ctx, want);
         if (!d->rt_pool) {
             delete d;
-            if (err) *err = refusal(config, "dummy dsp: the bulk memory cannot hold the real-time pool rtPoolBytes asks for");
+            refuse(config, err, err_bytes, "dummy dsp: the bulk memory cannot hold the real-time pool rtPoolBytes asks for");
             return nullptr;
         }
     }
@@ -1399,6 +1409,15 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/geometry-is", v, 4);
+            if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
+        }
+        return;
+    }
+    if (addressIs(bytes, len, "/dummy/region/seed")) {
+        if (d->host.emit_osc) {
+            const uint32_t v[1] = { static_cast<uint32_t>(d->config.deterministic_seed) };
+            uint8_t reply[64];
+            const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/region/seed-is", v, 1);
             if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
         }
         return;

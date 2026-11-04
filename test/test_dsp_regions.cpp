@@ -18,7 +18,7 @@
  * WHY THE ASSERTIONS GO THROUGH THE GUEST
  *
  * A region is by definition not observable from outside the thing that owns
- * it. Reading `shared_memory + GUEST_CONFIG_START` from a test would prove
+ * it. Reading `shared_memory + clockwork::kDefaultLayout.guest_config_start` from a test would prove
  * that clockwork put bytes in the arena — which is not the claim. The claim
  * is that the GUEST is handed those bytes, at the right address, with the
  * right length, in the state promised. So the placeholder DSP reports what it
@@ -43,6 +43,7 @@
 #include "lanes/lanes.h"
 #include "shared_memory.h"
 #include "audio_processor.h"
+#include "core_state.h"
 #include "dsp_api.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -132,7 +133,25 @@ TEST_CASE("regions: clockwork's geometry reaches the guest without a round trip"
     // And the block size the guest was told is the one the host actually
     // renders at, which is a separate claim: clockwork_block_size is what a host
     // sizes its own buffers from.
-    REQUIRE(clockwork_block_size() == lanes_test::kBufLength);
+    REQUIRE(clockwork_block_size(lanes_test::core()) == lanes_test::kBufLength);
+}
+
+TEST_CASE("regions: the seed a host pins reaches the guest at the next build",
+          "[boundary][regions]") {
+    lanes_test::boot();
+    lanes_test::drainRt();
+    // Unpinned, the guest seeds as it likes.
+    REQUIRE(ask("/dummy/region/seed", "/dummy/region/seed-is").argInt(0) == 0);
+
+    // Pinned, as an offline render pins it, for the build after.
+    clockwork_set_deterministic_seed(lanes_test::core(), 1234);
+    lanes_test::freshDsp();
+    lanes_test::drainRt();
+    CHECK(ask("/dummy/region/seed", "/dummy/region/seed-is").argInt(0) == 1234);
+
+    clockwork_set_deterministic_seed(lanes_test::core(), 0);
+    lanes_test::freshDsp();
+    lanes_test::drainRt();
 }
 
 // ── guest_memory: reserved, zeroed, and the guest's alone ───────────────────
@@ -200,7 +219,7 @@ TEST_CASE("regions: the guest's memory wants are declared, checked, and met",
     REQUIRE(info->memory_bytes_wanted > 0);
     REQUIRE(info->memory_bulk_bytes_wanted > 0);
     REQUIRE(info->memory_bytes_wanted <= lanes_test::kGuestMemoryBytes);
-    REQUIRE(g_dsp != nullptr);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
 
     // What the guest was handed: a bulk span at least its want and the
     // profile's default (dsp_api.h), with clockwork's allocator over it, which
@@ -272,9 +291,9 @@ TEST_CASE("regions: what the guest publishes through the window is readable outs
     struct Window { uint32_t magic, seq, value, writes; };
     constexpr uint32_t kWindowMagic = 0x57494e44u;   // 'WIND'
 
-    const auto* base = static_cast<const uint8_t*>(clockwork_lanes_base());
+    const auto* base = static_cast<const uint8_t*>(clockwork_lanes_base(lanes_test::core()));
     REQUIRE(base != nullptr);
-    const auto* w = reinterpret_cast<const Window*>(base + GUEST_WINDOW_START);
+    const auto* w = reinterpret_cast<const Window*>(base + clockwork::kDefaultLayout.guest_window_start);
 
     const uint32_t writesBefore = (w->magic == kWindowMagic) ? w->writes : 0u;
 
@@ -341,7 +360,7 @@ TEST_CASE("regions: a tempo written into the region reaches the guest",
     // What IS under test is the region contract: one writer, N readers, no
     // message carries the value, and the guest sees what the writer left.
     auto* state = reinterpret_cast<ClockworkClockState*>(
-        static_cast<uint8_t*>(clockwork_lanes_base()) + CLOCK_STATE_START);
+        static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core())) + CLOCK_STATE_START);
     const uint64_t saved = state->bpm.load(std::memory_order_acquire);
 
     state->bpm.store(clockwork::doubleToBits(132.0), std::memory_order_release);
@@ -350,7 +369,7 @@ TEST_CASE("regions: a tempo written into the region reaches the guest",
     REQUIRE(after.argInt(1) == 132000);
     REQUIRE(after.argInt(1) != bpmBefore);
 
-    // Put it back: the fixture is a process singleton, and a tempo left at 132
+    // Put it back: the fixture's core is the binary's, and a tempo left at 132
     // is a surprise for whatever runs next.
     state->bpm.store(saved, std::memory_order_release);
     const auto restored = ask("/dummy/region/clock", "/dummy/region/clock-is");
@@ -371,14 +390,14 @@ TEST_CASE("regions: the config block sits clear of every ring",
         return aStart + aSize <= bStart || bStart + bSize <= aStart;
     };
 
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, IN_RING_START,      IN_RING_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, RT_OUT_RING_START,     RT_OUT_RING_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, NRT_OUT_RING_START, NRT_OUT_RING_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, RING_CURSORS_START,        RING_CURSORS_SIZE));
-    CHECK(disjoint(GUEST_CONFIG_START, GUEST_CONFIG_SIZE, METRICS_START,        METRICS_SIZE));
+    CHECK(disjoint(clockwork::kDefaultLayout.guest_config_start, GUEST_CONFIG_SIZE, clockwork::kDefaultLayout.in_ring_start,      clockwork::kDefaultLayout.profile.in_ring_bytes));
+    CHECK(disjoint(clockwork::kDefaultLayout.guest_config_start, GUEST_CONFIG_SIZE, clockwork::kDefaultLayout.rt_out_ring_start,     clockwork::kDefaultLayout.profile.rt_out_ring_bytes));
+    CHECK(disjoint(clockwork::kDefaultLayout.guest_config_start, GUEST_CONFIG_SIZE, clockwork::kDefaultLayout.nrt_out_ring_start, clockwork::kDefaultLayout.profile.nrt_out_ring_bytes));
+    CHECK(disjoint(clockwork::kDefaultLayout.guest_config_start, GUEST_CONFIG_SIZE, clockwork::kDefaultLayout.ring_cursors_start,        RING_CURSORS_SIZE));
+    CHECK(disjoint(clockwork::kDefaultLayout.guest_config_start, GUEST_CONFIG_SIZE, METRICS_START,        METRICS_SIZE));
 
     // And it is inside the arena it is addressed from.
-    CHECK(GUEST_CONFIG_START + GUEST_CONFIG_SIZE <= ARENA_SIZE);
+    CHECK(clockwork::kDefaultLayout.guest_config_start + GUEST_CONFIG_SIZE <= clockwork::kDefaultLayout.arena_bytes);
 }
 
 TEST_CASE("regions: the config block survives traffic and a rebuild",
@@ -413,8 +432,8 @@ TEST_CASE("regions: the config block survives traffic and a rebuild",
     // A device switch rebuilds the guest. The host's block is copied in again,
     // so the new instance is handed the same bytes rather than whatever the
     // previous one left behind.
-    destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
+    destroy_dsp(lanes_test::core());
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
     lanes_test::drainRt();
     CHECK(slots() == before);
 }
@@ -452,16 +471,16 @@ TEST_CASE("regions: persistent survives a rebuild and the guest's memory does no
 
     // The device switch. destroy_dsp + rebuild_dsp is exactly what ClockworkEngine
     // does for a cold swap, and it is the moment both promises are tested.
-    destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    destroy_dsp(lanes_test::core());
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
 
     // PERSISTENT SURVIVED. The new instance found the old one's record, and it
     // validated before believing it — a torn or stale record would report
     // found=0 rather than a plausible wrong number.
     {
         const auto r = ask("/dummy/region/persist-at-birth", "/dummy/region/persist-was");
-        REQUIRE(r.argInt(0) == static_cast<int32_t>(GUEST_PERSIST_SIZE));
+        REQUIRE(r.argInt(0) == static_cast<int32_t>(clockwork::kDefaultLayout.profile.persist_bytes));
         REQUIRE(r.argInt(1) == 1);                             // found
         REQUIRE(r.argInt(2) >= 1);                             // its generation
         REQUIRE(static_cast<uint32_t>(r.argInt(3)) == 0x5150ab1eu);   // its value
@@ -521,9 +540,9 @@ TEST_CASE("regions: a blob clockwork has no verb for survives a rebuild",
     REQUIRE(lanes_test::ingress(put.ptr(), put.size(), kClient));
     lanes_test::tickUntil(4, "/dummy/region/persist-gen");
 
-    destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    destroy_dsp(lanes_test::core());
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
 
     const auto r = ask("/dummy/region/persist-at-birth", "/dummy/region/persist-was");
     REQUIRE(r.argInt(1) == 1);

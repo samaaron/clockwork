@@ -34,16 +34,11 @@
 #include <cstdint>
 #include <vector>
 
-extern "C" {
-    int get_audio_num_input_buses();
-    int get_audio_num_output_buses();
-}
-
 namespace {
 
 // Everything a case opens goes away at its end, pass or fail.
 struct Ports {
-    ~Ports() { clockwork_port_bus_detach_all(); clockwork_port_close_all(); }
+    ~Ports() { clockwork_port_bus_detach_all(lanes_test::core()); clockwork_port_close_all(clockwork_core_ports(lanes_test::core())); }
 };
 
 // Frame f, channel c. Integers below 2^24 are exact in float, so every
@@ -66,8 +61,8 @@ TEST_CASE("reserved lanes: the base sits above every device channel", "[lanes][r
     lanes_test::boot();
     REQUIRE(lanes_test::kReservedLanes > 0);
 
-    const uint32_t base = clockwork_lane_base();
-    REQUIRE(clockwork_reserved_lanes() == lanes_test::kReservedLanes);
+    const uint32_t base = clockwork_lane_base(lanes_test::core());
+    REQUIRE(clockwork_reserved_lanes(lanes_test::core()) == lanes_test::kReservedLanes);
 
     // Above the device, in both directions. This is the property the whole
     // scheme rests on: a lane index can never collide with a device channel.
@@ -75,8 +70,8 @@ TEST_CASE("reserved lanes: the base sits above every device channel", "[lanes][r
     REQUIRE(base >= lanes_test::kOutChannels);
 
     // And the engine allocated for them.
-    const uint32_t allocatedIn  = static_cast<uint32_t>(get_audio_num_input_buses());
-    const uint32_t allocatedOut = static_cast<uint32_t>(get_audio_num_output_buses());
+    const uint32_t allocatedIn  = static_cast<uint32_t>(static_cast<int>(clockwork_in_channels(lanes_test::core())));
+    const uint32_t allocatedOut = static_cast<uint32_t>(static_cast<int>(clockwork_out_channels(lanes_test::core())));
     const uint32_t lanes = lanes_test::kReservedLanes + lanes_test::kLinkAudioLanes;
     REQUIRE(allocatedIn  == base + lanes);
     REQUIRE(allocatedOut == base + lanes);
@@ -93,17 +88,17 @@ TEST_CASE("reserved lanes: the base sits above every device channel", "[lanes][r
 TEST_CASE("reserved lanes: Link Audio's lanes sit above the host's", "[lanes][reserved][link-audio]") {
     lanes_test::boot();
     REQUIRE(lanes_test::kLinkAudioLanes > 0);
-    REQUIRE(clockwork_link_audio_lanes() == lanes_test::kLinkAudioLanes);
-    REQUIRE(clockwork_link_audio_lane_base() == clockwork_lane_base() + lanes_test::kReservedLanes);
-    REQUIRE(clockwork_link_audio_lane_base() + clockwork_link_audio_lanes()
-            == static_cast<uint32_t>(get_audio_num_input_buses()));
+    REQUIRE(clockwork_link_audio_lanes(lanes_test::core()) == lanes_test::kLinkAudioLanes);
+    REQUIRE(clockwork_link_audio_lane_base(lanes_test::core()) == clockwork_lane_base(lanes_test::core()) + lanes_test::kReservedLanes);
+    REQUIRE(clockwork_link_audio_lane_base(lanes_test::core()) + clockwork_link_audio_lanes(lanes_test::core())
+            == static_cast<uint32_t>(static_cast<int>(clockwork_in_channels(lanes_test::core()))));
 }
 
 TEST_CASE("reserved lanes: a subscription is measured against the allocated width",
           "[lanes][reserved][link-audio]") {
     lanes_test::boot();
-    const uint32_t base        = clockwork_lane_base();
-    const uint32_t allocatedIn = static_cast<uint32_t>(get_audio_num_input_buses());
+    const uint32_t base        = clockwork_lane_base(lanes_test::core());
+    const uint32_t allocatedIn = static_cast<uint32_t>(static_cast<int>(clockwork_in_channels(lanes_test::core())));
 
     // A stereo pair at the lane base is exactly what a client subscribes to.
     // Against the allocated width it fits; against the DEVICE width it does
@@ -121,28 +116,28 @@ TEST_CASE("reserved lanes: a subscription is measured against the allocated widt
 TEST_CASE("reserved lanes: a source port on a lane reaches the DSP's inputs",
           "[lanes][reserved]") {
     const uint32_t bl   = lanes_test::boot();
-    const uint32_t base = clockwork_lane_base();
+    const uint32_t base = clockwork_lane_base(lanes_test::core());
     Ports guard;
     setEcho(true);
 
     const ClockworkPort p =
-        clockwork_port_open("peer-audio", kClockworkPortSource, 2, 4096);
+        clockwork_port_open(clockwork_core_ports(lanes_test::core()), "peer-audio", kClockworkPortSource, 2, 4096);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, base) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, base) == 1);
 
     // One block's worth, interleaved, distinguishable per channel and per
     // frame so a half-copy, a channel swap or an offset all show up.
     std::vector<float> interleaved(static_cast<size_t>(bl) * 2);
     for (uint32_t f = 0; f < bl; ++f)
         for (uint32_t c = 0; c < 2; ++c) interleaved[f * 2 + c] = sample(f, c);
-    REQUIRE(clockwork_port_produce(p, interleaved.data(), bl) == bl);
-    REQUIRE(clockwork_port_readable(p) == bl);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, interleaved.data(), bl) == bl);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == bl);
 
     lanes_test::tick();
 
     // Echo puts input channel c on output channel c, so the lane's two
     // channels are readable straight off the staging buffer.
-    const float* out = clockwork_audio_out();
+    const float* out = clockwork_audio_out(lanes_test::core());
     REQUIRE(out != nullptr);
     for (uint32_t f = 0; f < bl; ++f) {
         REQUIRE(out[static_cast<size_t>(base) * bl + f]       == sample(f, 0));
@@ -150,7 +145,7 @@ TEST_CASE("reserved lanes: a source port on a lane reaches the DSP's inputs",
     }
 
     // The port was drained by the pull, not merely read past.
-    REQUIRE(clockwork_port_readable(p) == 0);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 0);
 
     setEcho(false);
 }
@@ -158,7 +153,7 @@ TEST_CASE("reserved lanes: a source port on a lane reaches the DSP's inputs",
 TEST_CASE("reserved lanes: a port attached past the top is silent, not out of bounds",
           "[lanes][reserved]") {
     const uint32_t bl          = lanes_test::boot();
-    const uint32_t allocatedIn = static_cast<uint32_t>(get_audio_num_input_buses());
+    const uint32_t allocatedIn = static_cast<uint32_t>(static_cast<int>(clockwork_in_channels(lanes_test::core())));
     Ports guard;
     setEcho(true);
 
@@ -167,17 +162,17 @@ TEST_CASE("reserved lanes: a port attached past the top is silent, not out of bo
     // the point of this case is that it declines rather than running off the
     // end of the staging buffer.
     const ClockworkPort p =
-        clockwork_port_open("past-the-end", kClockworkPortSource, 2, 4096);
+        clockwork_port_open(clockwork_core_ports(lanes_test::core()), "past-the-end", kClockworkPortSource, 2, 4096);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, allocatedIn + 4) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, allocatedIn + 4) == 1);
 
     std::vector<float> interleaved(static_cast<size_t>(bl) * 2, 0.5f);
-    REQUIRE(clockwork_port_produce(p, interleaved.data(), bl) == bl);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, interleaved.data(), bl) == bl);
 
     lanes_test::tick();
 
     // Nothing was consumed: the binding starts past the end and is skipped.
-    REQUIRE(clockwork_port_readable(p) == bl);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == bl);
 
     setEcho(false);
 }

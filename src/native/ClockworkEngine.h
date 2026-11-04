@@ -8,6 +8,7 @@
 #include "clockwork_product.h"
 #include "clockwork_client.h"   // ClockworkStatus
 #include "clock/timetag.h"
+#include "log_limit.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -60,6 +61,8 @@
 #include "shm_segment.hpp"
 #include <memory>
 
+namespace clockwork { class GateHold; }   // core_state.h
+
 // Forward declarations only: a host that includes this header needs neither
 // definition.
 namespace smoothie {
@@ -73,7 +76,7 @@ struct HeadlessPacer;
 class ClockworkEngine {
     friend class EngineFixture;
 public:
-    // One engine per process half: its threads, device and segment are not things to copy or move.
+    // One engine: its threads, device and segment are not things to copy or move.
     ClockworkEngine(const ClockworkEngine&) = delete;
     ClockworkEngine& operator=(const ClockworkEngine&) = delete;
     ClockworkEngine(ClockworkEngine&&) = delete;
@@ -122,6 +125,20 @@ public:
         // not the smallest. A host exposes them as a launch option.
         size_t assetsBytes               = static_cast<size_t>(CLOCKWORK_ASSETS_BYTES);
         size_t returnsBytes              = static_cast<size_t>(CLOCKWORK_RETURNS_BYTES);
+        // A floor under the guest's bulk memory, the span its allocations
+        // come from (clockwork_set_guest_bulk_bytes): 0 = the memory
+        // profile's default. Changed between builds on the engine's core.
+        size_t guestBulkBytes            = 0;
+        // Lanes the host keeps above the device for its own routing, laid
+        // out at every boot (clockwork_reserve_lanes): a host with plugin
+        // tracks asks for TrackControl::kLanes.
+        uint32_t reservedLanes           = 0;
+        // A core the host made for this engine (clockwork_core_new), which the
+        // engine then owns and closes at shutdown; null, the engine makes its
+        // own. For a host that must hear the core's refusal as a status rather
+        // than catch it (clockwork_embed_boot), or lays the core out from a
+        // profile of its own first (clockwork_set_profile).
+        ClockworkCore* core              = nullptr;
         bool   headless                 = false;   // skip audio device (for tests)
         bool   manualAudioPump          = false;   // skip the audio source entirely
                                                    // (no device, no headless driver):
@@ -214,6 +231,12 @@ public:
                                                    // in the control pass and publish
                                                    // the plane for ShmTransport.
                                                    // Needs shmSegment.
+        // The generation the engine this one follows opened last, for a host
+        // that boots its engine again for clients that outlived the last
+        // (the NIF's stop and start): never named again (docs/RESTARTS.md,
+        // "The generation"). 0 hands nothing over: a new engine numbers its
+        // own from the first.
+        uint32_t carriedGeneration     = 0;
         std::string bindAddress       = "127.0.0.1"; // localhost only; use -B to override
         std::string hardwareDevice;                // -H flag: fuzzy match on "Driver : Device"
         std::string inputDevice;                   // -H input name (first of two, or the
@@ -277,7 +300,10 @@ public:
     // Inject the egress transport (a host that owns sockets injects one from
     // the comms client library). Call before init(); if unset, the engine
     // uses the in-process CallbackTransport (replies via onReply).
-    void setTransport(IOscTransport* transport) { mTransport = transport; }
+    void setTransport(IOscTransport* transport) {
+        mTransport = transport;
+        if (mTransport && mCore) mTransport->bindCore(mCore);
+    }
 
     // The peer command plane slot (Config::shmCommands). Set to the segment's
     // plane by init(), nulled by shutdown(). ShmTransport binds to the SLOT
@@ -332,9 +358,10 @@ public:
     // device buffer of that size does to timing, not only to audio. `frames`
     // 0 renders one block, of the DSP's size.
     void pumpAudioCallback(uint32_t frames, const std::function<void()>& afterEachBlock = {});
-    // Pumped blocks and device callbacks that landed while a swap had the DSP
-    // down, and were dropped rather than rendered against it.
-    uint32_t pumpsDroppedBySwap() const { return mPumpsDroppedBySwap.load(std::memory_order_acquire); }
+    // Blocks that found the core's gate held — a swap had the DSP down — and
+    // were dropped rather than rendered against it: pumped blocks and device
+    // callbacks alike (core_state.h, Gate).
+    uint32_t blocksBusy() const;
     // The next manual pump starts the audio-thread clock afresh, as a device
     // starting does.
     void restartManualPump() { mManualPumpStarted = false; }
@@ -706,6 +733,11 @@ public:
 
     // --- Audio callback access (pause/resume) ---
     ClockworkProcessor& processor() { return mProcessor; }
+    // The engine's core (clockwork_core.h), for a host that ticks it itself.
+    ClockworkCore* core() const { return mCore; }
+    // A line of this engine's log: clockwork_log on its core. Before the
+    // core exists (the constructor) it goes to the console.
+    void log(const char* fmt, ...) const;
 
     // CFRunLoop suppression (macOS). The host's run-loop pump calls
     // isRunLoopSuppressed() each tick and sleeps instead of pumping
@@ -1018,6 +1050,9 @@ private:
 #if CLOCKWORK_HAS_PLUGIN_TRACKS
     TrackControl      mTrackControl;
 #endif
+    // The engine's core (clockwork_core.h): made at the first boot, closed
+    // at shutdown.
+    ClockworkCore*        mCore = nullptr;
     ClockworkClock        mClockworkClock;
     // The audio half of Link, beside the clock: declared after it because it
     // borrows the clock's session and registers as its visibility listener.
@@ -1036,14 +1071,6 @@ private:
     bool   mManualPumpStarted  = false;
     bool   mPumpedDevice       = false;   // pumpDevice started a device
     int    mPumpedBufferFrames = 0;       // its buffer: no callback is larger
-    // A manual pump (pumpAudioCallback, pumpDevice) renders under this gate,
-    // and switchDevice holds it from stopping the audio source until audio
-    // restarts, across the DSP's teardown and rebuild. The pump only tries
-    // the gate: a block that lands mid-swap is dropped and counted, as a
-    // device callback is dropped while its device is stopped — never
-    // rendered against a DSP being freed.
-    std::mutex            mPumpGate;
-    std::atomic<uint32_t> mPumpsDroppedBySwap{0};
 
     // NRT control plane: the audio-thread ingress forwards clockwork verbs it
     // does not answer itself onto this process-local, Message-framed ring. The
@@ -1073,9 +1100,9 @@ private:
     static constexpr uint32_t kNrtMaxCommand = 66560;
     using NrtFrame = std::array<uint8_t, sizeof(NrtEnvelope) + kNrtMaxCommand>;
     const std::unique_ptr<NrtFrame> mNrtFrame = std::make_unique<NrtFrame>();
-    // How many over-wide control messages this engine has said it dropped;
-    // it says so eight times and then keeps count in the metrics alone.
-    std::atomic<uint32_t>     mNrtOversizeLogged{0};
+    // An over-wide control message dropped: said eight times, then counted
+    // in the metrics alone.
+    clockwork::LogLimit       mNrtOversizeLog = clockwork::LogLimit::first(8);
     std::atomic<int32_t>      mNrtHead{0};
     std::atomic<int32_t>      mNrtTail{0};
     std::atomic<int32_t>      mNrtSeq{0};
@@ -1171,7 +1198,13 @@ private:
         bool             mParked  = false;   // the pass did park (it may not, in time)
         bool             mResumed = false;
         Facts            mFactsBefore;
-        std::unique_lock<std::mutex> mPumpGate;
+        // The core's gate, held from the audio source stopping until audio
+        // restarts, across the DSP's teardown and rebuild: a manual pump
+        // (pumpAudioCallback, pumpDevice) only tries it, so a block that
+        // lands mid-swap is dropped and counted, as a device callback is
+        // dropped while its device is stopped — never rendered against a
+        // DSP being freed.
+        std::unique_ptr<clockwork::GateHold> mGate;
     };
 
     // Peer command plane (SHM segment; shm_peer_plane.h). init() publishes the
@@ -1339,6 +1372,8 @@ private:
     // setLinkVisibility(Off) call that follows joins the Link thread
     // and closes the race fully.
     std::atomic<bool>        mLinkCallbacksAlive{true};
+    // A tempo slide changes the tempo every update: a line a second at most.
+    clockwork::LogSpacing    mTempoLog{1'000'000'000};   // steady-clock nanoseconds
     bool                     mHeadless{false};
     Config                   mCurrentConfig;
     int                      mBootInputChannels = 2;  // original -i value, for re-enabling inputs

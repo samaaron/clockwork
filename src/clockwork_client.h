@@ -98,6 +98,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef struct ClockworkCore ClockworkCore;   /* clockwork_core.h */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -246,6 +248,12 @@ typedef struct ClockworkClientInfo {
 #define CLOCKWORK_FEATURE_SCHEDULER  (1u << 4u)   /* timed messages are held */
 
 ClockworkStatus clockwork_client_info(ClockworkClient* c, ClockworkClientInfo* out);
+
+/* The engine's core, when the client was opened over memory a core in this
+ * process holds (clockwork_client_open_memory, an embed handle's client):
+ * what a host names in a log line of that engine's (clockwork_log). NULL
+ * for a client of another process's engine, or of none. */
+ClockworkCore* clockwork_client_core(const ClockworkClient* c);
 
 /* ── Sending ─────────────────────────────────────────────────────────────────
  *
@@ -404,11 +412,14 @@ void clockwork_client_count_undelivered(ClockworkClient* c, uint32_t n);
  * event loop: it parks one thread here and has that thread tell the loop,
  * and a still screen costs nothing while the engine is quiet.
  *
- * An in-process handle waits (an embedder's: clockwork_embed_client). The
- * peer's replies come through a ring in another process that no word here
- * yet covers, and a browser's threads wait in JavaScript (js/lib/ring.js);
- * both get CLOCKWORK_E_ABSENT, as a build with one thread does. A reader
- * takes no replies and gets CLOCKWORK_E_PERM.
+ * A handle over an engine in this process waits on that engine: an
+ * embedder's (clockwork_embed_client), or one opened with
+ * clockwork_client_open_memory over the engine's arena. The peer's replies
+ * come through a ring in another process that no word here yet covers, and
+ * a browser's threads wait in JavaScript (js/lib/ring.js); both get
+ * CLOCKWORK_E_ABSENT, as a build with one thread does, and as a handle over
+ * memory no engine in this process holds does. A reader takes no replies
+ * and gets CLOCKWORK_E_PERM.
  */
 #define CLOCKWORK_WAIT_FOREVER 0xFFFFFFFFu
 
@@ -684,6 +695,24 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* c, const ClockworkAudi
  * is not live or does not exist. */
 uint32_t clockwork_client_scope_read(ClockworkClient* c, uint32_t slot, uint32_t frames,
                                      float* out, uint32_t out_floats, uint32_t* out_channels);
+
+/* The scope's shape, from the engine's table, for a client that reads the
+ * slots in place (shm_audio_buffer.hpp's reader, which takes `frames` and
+ * `channels`): slot `i` lies `slot_bytes * i` from the region's base
+ * (CLOCKWORK_REGION_SCOPE), a header of `header_bytes` and a ring of `frames`
+ * frames of up to `channels` channels. A core's profile chooses `frames` and
+ * `channels`, so a reader built for another engine's are not this one's. */
+typedef struct ClockworkScopeShape {
+    uint32_t struct_bytes;   /* sizeof(ClockworkScopeShape), for later fields */
+    uint32_t slots;
+    uint32_t slot_bytes;
+    uint32_t header_bytes;
+    uint32_t frames;
+    uint32_t channels;
+} ClockworkScopeShape;
+
+/* Fill `out`. E_ARG for a null handle or a struct too small to fill. */
+ClockworkStatus clockwork_client_scope_shape(ClockworkClient* c, ClockworkScopeShape* out);
 
 #ifdef __cplusplus
 }  /* extern "C" */

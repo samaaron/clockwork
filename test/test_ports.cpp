@@ -49,7 +49,7 @@ namespace {
 
 // Everything this file opens goes away at the end of the case, pass or fail.
 struct Ports {
-    ~Ports() { clockwork_port_bus_detach_all(); clockwork_port_close_all(); }
+    ~Ports() { clockwork_port_bus_detach_all(lanes_test::core()); clockwork_port_close_all(clockwork_core_ports(lanes_test::core())); }
 };
 
 // Frame f, channel c. Integers below 2^24 are exact in float, so every
@@ -80,48 +80,48 @@ struct Block {
 
 TEST_CASE("ports: a source round trip is sample for sample", "[ports]") {
     Ports guard;
-    const ClockworkPort p = clockwork_port_open("rt-source", kClockworkPortSource, 2, 1000);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "rt-source", kClockworkPortSource, 2, 1000);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_is_open(p) == 1);
-    REQUIRE(clockwork_port_channels(p) == 2);
-    REQUIRE(clockwork_port_direction(p) == kClockworkPortSource);
-    REQUIRE(std::string(clockwork_port_name(p)) == "rt-source");
+    REQUIRE(clockwork_port_is_open(clockwork_core_ports(lanes_test::core()), p) == 1);
+    REQUIRE(clockwork_port_channels(clockwork_core_ports(lanes_test::core()), p) == 2);
+    REQUIRE(clockwork_port_direction(clockwork_core_ports(lanes_test::core()), p) == kClockworkPortSource);
+    REQUIRE(std::string(clockwork_port_name(clockwork_core_ports(lanes_test::core()), p)) == "rt-source");
     // Capacity is rounded UP to a power of two, so 1000 buys 1024.
-    REQUIRE(clockwork_port_writable(p) == 1024);
-    REQUIRE(clockwork_port_readable(p) == 0);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), p) == 1024);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 0);
 
     std::vector<float> interleaved(64 * 2);
     for (uint32_t f = 0; f < 64; ++f)
         for (uint32_t c = 0; c < 2; ++c) interleaved[f * 2 + c] = sample(f, c);
-    REQUIRE(clockwork_port_produce(p, interleaved.data(), 64) == 64);
-    REQUIRE(clockwork_port_readable(p) == 64);
-    REQUIRE(clockwork_port_writable(p) == 1024 - 64);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, interleaved.data(), 64) == 64);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 64);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), p) == 1024 - 64);
 
     Block b(2, 64, -1.0f);
-    REQUIRE(clockwork_port_read(p, b.out.data(), 2, 64) == 64);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b.out.data(), 2, 64) == 64);
     for (uint32_t f = 0; f < 64; ++f)
         for (uint32_t c = 0; c < 2; ++c) REQUIRE(b.ch[c][f] == sample(f, c));
-    REQUIRE(clockwork_port_underruns(p) == 0);
-    REQUIRE(clockwork_port_overruns(p) == 0);
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);
 }
 
 TEST_CASE("ports: a sink round trip is sample for sample", "[ports]") {
     Ports guard;
-    const ClockworkPort p = clockwork_port_open("rt-sink", kClockworkPortSink, 3, 256);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "rt-sink", kClockworkPortSink, 3, 256);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_direction(p) == kClockworkPortSink);
+    REQUIRE(clockwork_port_direction(clockwork_core_ports(lanes_test::core()), p) == kClockworkPortSink);
 
     Block b(3, 32);
     for (uint32_t f = 0; f < 32; ++f)
         for (uint32_t c = 0; c < 3; ++c) b.ch[c][f] = sample(f, c);
-    REQUIRE(clockwork_port_write(p, b.in.data(), 3, 32) == 32);
-    REQUIRE(clockwork_port_readable(p) == 32);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), p, b.in.data(), 3, 32) == 32);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 32);
 
     std::vector<float> out(32 * 3, -1.0f);
-    REQUIRE(clockwork_port_consume(p, out.data(), 32) == 32);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), p, out.data(), 32) == 32);
     for (uint32_t f = 0; f < 32; ++f)
         for (uint32_t c = 0; c < 3; ++c) REQUIRE(out[f * 3 + c] == sample(f, c));
-    REQUIRE(clockwork_port_overruns(p) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);
 }
 
 // ── The two policies ────────────────────────────────────────────────────────
@@ -129,16 +129,16 @@ TEST_CASE("ports: a sink round trip is sample for sample", "[ports]") {
 TEST_CASE("ports: an empty source reads silence and counts the shortfall",
           "[ports]") {
     Ports guard;
-    const ClockworkPort p = clockwork_port_open("underrun", kClockworkPortSource, 2, 128);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "underrun", kClockworkPortSource, 2, 128);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
 
     // Nothing produced at all: a whole block of silence, and the counter says
     // exactly how much.
     Block b(2, 64, 7.0f);
-    REQUIRE(clockwork_port_read(p, b.out.data(), 2, 64) == 0);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b.out.data(), 2, 64) == 0);
     for (uint32_t c = 0; c < 2; ++c)
         for (uint32_t f = 0; f < 64; ++f) REQUIRE(b.ch[c][f] == 0.0f);
-    REQUIRE(clockwork_port_underruns(p) == 64);
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 64);
 
     // A PARTIAL block: the frames that were there, then silence, and the
     // counter moves by the shortfall — not by a whole block, which would make
@@ -146,55 +146,55 @@ TEST_CASE("ports: an empty source reads silence and counts the shortfall",
     std::vector<float> some(20 * 2);
     for (uint32_t f = 0; f < 20; ++f)
         for (uint32_t c = 0; c < 2; ++c) some[f * 2 + c] = sample(f, c);
-    REQUIRE(clockwork_port_produce(p, some.data(), 20) == 20);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, some.data(), 20) == 20);
 
     Block b2(2, 64, 7.0f);
-    REQUIRE(clockwork_port_read(p, b2.out.data(), 2, 64) == 20);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b2.out.data(), 2, 64) == 20);
     for (uint32_t c = 0; c < 2; ++c) {
         for (uint32_t f = 0; f < 20; ++f) REQUIRE(b2.ch[c][f] == sample(f, c));
         for (uint32_t f = 20; f < 64; ++f) REQUIRE(b2.ch[c][f] == 0.0f);
     }
-    REQUIRE(clockwork_port_underruns(p) == 64 + 44);
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 64 + 44);
 
     // And the audio path keeps running: an underrun is a fact, not a state to
     // recover from. Feed it again and it delivers again.
-    REQUIRE(clockwork_port_produce(p, some.data(), 20) == 20);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, some.data(), 20) == 20);
     Block b3(2, 20, 7.0f);
-    REQUIRE(clockwork_port_read(p, b3.out.data(), 2, 20) == 20);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b3.out.data(), 2, 20) == 20);
     for (uint32_t c = 0; c < 2; ++c)
         for (uint32_t f = 0; f < 20; ++f) REQUIRE(b3.ch[c][f] == sample(f, c));
-    REQUIRE(clockwork_port_underruns(p) == 64 + 44);   // unchanged: nothing was short
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 64 + 44);   // unchanged: nothing was short
 }
 
 TEST_CASE("ports: a full sink drops, counts, and does not block", "[ports]") {
     Ports guard;
     // 16 frames deep — the floor, and the smallest ring that exists.
-    const ClockworkPort p = clockwork_port_open("overrun", kClockworkPortSink, 1, 1);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "overrun", kClockworkPortSink, 1, 1);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_writable(p) == 16);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), p) == 16);
 
     Block b(1, 16);
     for (uint32_t f = 0; f < 16; ++f) b.ch[0][f] = sample(f, 0);
-    REQUIRE(clockwork_port_write(p, b.in.data(), 1, 16) == 16);
-    REQUIRE(clockwork_port_writable(p) == 0);
-    REQUIRE(clockwork_port_overruns(p) == 0);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), p, b.in.data(), 1, 16) == 16);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);
 
     // Full. The next block is dropped WHOLE and counted whole, and the call
     // returns rather than waiting for the endpoint — nothing here ever drains
     // the ring, so a write that waited for room would never return at all.
-    REQUIRE(clockwork_port_write(p, b.in.data(), 1, 16) == 0);
-    REQUIRE(clockwork_port_overruns(p) == 16);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), p, b.in.data(), 1, 16) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 16);
 
     // A PARTIAL drop: make room for 4, offer 16, and 12 are counted.
     std::vector<float> drained(4, -1.0f);
-    REQUIRE(clockwork_port_consume(p, drained.data(), 4) == 4);
-    REQUIRE(clockwork_port_write(p, b.in.data(), 1, 16) == 4);
-    REQUIRE(clockwork_port_overruns(p) == 16 + 12);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), p, drained.data(), 4) == 4);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), p, b.in.data(), 1, 16) == 4);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 16 + 12);
 
     // What survived is still the right samples: dropping does not corrupt what
     // was accepted.
     std::vector<float> rest(16, -1.0f);
-    REQUIRE(clockwork_port_consume(p, rest.data(), 16) == 16);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), p, rest.data(), 16) == 16);
     for (uint32_t f = 0; f < 12; ++f) REQUIRE(rest[f] == sample(f + 4, 0));
     for (uint32_t f = 12; f < 16; ++f) REQUIRE(rest[f] == sample(f - 12, 0));
 }
@@ -205,42 +205,42 @@ TEST_CASE("ports: a channel-count mismatch is handled, not refused", "[ports]") 
     Ports guard;
     // The device can change under a running stream, so neither direction of
     // mismatch may be an error.
-    const ClockworkPort mono = clockwork_port_open("mono-source", kClockworkPortSource, 1, 64);
+    const ClockworkPort mono = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "mono-source", kClockworkPortSource, 1, 64);
     REQUIRE(mono != CLOCKWORK_PORT_NONE);
     std::vector<float> one(8);
     for (uint32_t f = 0; f < 8; ++f) one[f] = sample(f, 0);
-    REQUIRE(clockwork_port_produce(mono, one.data(), 8) == 8);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), mono, one.data(), 8) == 8);
 
     // A caller with MORE channels than the port: the extras are silence.
     Block wide(4, 8, 9.0f);
-    REQUIRE(clockwork_port_read(mono, wide.out.data(), 4, 8) == 8);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), mono, wide.out.data(), 4, 8) == 8);
     for (uint32_t f = 0; f < 8; ++f) {
         REQUIRE(wide.ch[0][f] == sample(f, 0));
         for (uint32_t c = 1; c < 4; ++c) REQUIRE(wide.ch[c][f] == 0.0f);
     }
 
     // A caller with FEWER channels than the port: the extras are discarded.
-    const ClockworkPort quad = clockwork_port_open("quad-source", kClockworkPortSource, 4, 64);
+    const ClockworkPort quad = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "quad-source", kClockworkPortSource, 4, 64);
     REQUIRE(quad != CLOCKWORK_PORT_NONE);
     std::vector<float> four(8 * 4);
     for (uint32_t f = 0; f < 8; ++f)
         for (uint32_t c = 0; c < 4; ++c) four[f * 4 + c] = sample(f, c);
-    REQUIRE(clockwork_port_produce(quad, four.data(), 8) == 8);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), quad, four.data(), 8) == 8);
     Block narrow(2, 8, 9.0f);
-    REQUIRE(clockwork_port_read(quad, narrow.out.data(), 2, 8) == 8);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), quad, narrow.out.data(), 2, 8) == 8);
     for (uint32_t f = 0; f < 8; ++f)
         for (uint32_t c = 0; c < 2; ++c) REQUIRE(narrow.ch[c][f] == sample(f, c));
 
     // The same both ways on a sink: an unoffered port channel is silence in
     // the ring, so a frame the endpoint sees is always whole.
-    const ClockworkPort sink = clockwork_port_open("wide-sink", kClockworkPortSink, 3, 64);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "wide-sink", kClockworkPortSink, 3, 64);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
     Block two(2, 8);
     for (uint32_t f = 0; f < 8; ++f)
         for (uint32_t c = 0; c < 2; ++c) two.ch[c][f] = sample(f, c);
-    REQUIRE(clockwork_port_write(sink, two.in.data(), 2, 8) == 8);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), sink, two.in.data(), 2, 8) == 8);
     std::vector<float> got(8 * 3, -1.0f);
-    REQUIRE(clockwork_port_consume(sink, got.data(), 8) == 8);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), sink, got.data(), 8) == 8);
     for (uint32_t f = 0; f < 8; ++f) {
         REQUIRE(got[f * 3 + 0] == sample(f, 0));
         REQUIRE(got[f * 3 + 1] == sample(f, 1));
@@ -252,11 +252,11 @@ TEST_CASE("ports: a channel-count mismatch is handled, not refused", "[ports]") 
 
 TEST_CASE("ports: closing one does not renumber the others", "[ports]") {
     Ports guard;
-    clockwork_port_close_all();
+    clockwork_port_close_all(clockwork_core_ports(lanes_test::core()));
 
-    const ClockworkPort a = clockwork_port_open("a", kClockworkPortSource, 1, 64);
-    const ClockworkPort b = clockwork_port_open("b", kClockworkPortSource, 1, 64);
-    const ClockworkPort c = clockwork_port_open("c", kClockworkPortSource, 1, 64);
+    const ClockworkPort a = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "a", kClockworkPortSource, 1, 64);
+    const ClockworkPort b = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "b", kClockworkPortSource, 1, 64);
+    const ClockworkPort c = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "c", kClockworkPortSource, 1, 64);
     REQUIRE(a != CLOCKWORK_PORT_NONE);
     REQUIRE(b != CLOCKWORK_PORT_NONE);
     REQUIRE(c != CLOCKWORK_PORT_NONE);
@@ -269,26 +269,26 @@ TEST_CASE("ports: closing one does not renumber the others", "[ports]") {
                              std::pair<ClockworkPort, float>{c, 300.0f}}) {
         std::vector<float> v(8);
         for (uint32_t f = 0; f < 8; ++f) v[f] = tag + static_cast<float>(f);
-        REQUIRE(clockwork_port_produce(port, v.data(), 8) == 8);
+        REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), port, v.data(), 8) == 8);
     }
 
     ClockworkPort listed[8] = {};
-    REQUIRE(clockwork_port_list(listed, 8) == 3);
+    REQUIRE(clockwork_port_list(clockwork_core_ports(lanes_test::core()), listed, 8) == 3);
 
     // Close the MIDDLE one. Renumbering here would hand a reader somebody
     // else's audio on a channel it is already processing.
-    clockwork_port_close(b);
-    REQUIRE(clockwork_port_is_open(b) == 0);
-    REQUIRE(clockwork_port_is_open(a) == 1);
-    REQUIRE(clockwork_port_is_open(c) == 1);
-    REQUIRE(clockwork_port_list(listed, 8) == 2);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), b);
+    REQUIRE(clockwork_port_is_open(clockwork_core_ports(lanes_test::core()), b) == 0);
+    REQUIRE(clockwork_port_is_open(clockwork_core_ports(lanes_test::core()), a) == 1);
+    REQUIRE(clockwork_port_is_open(clockwork_core_ports(lanes_test::core()), c) == 1);
+    REQUIRE(clockwork_port_list(clockwork_core_ports(lanes_test::core()), listed, 8) == 2);
     REQUIRE(listed[0] == a);
     REQUIRE(listed[1] == c);
 
     // The handles are unchanged AND still address their own audio.
     Block ba(1, 8, -1.0f), bc(1, 8, -1.0f);
-    REQUIRE(clockwork_port_read(a, ba.out.data(), 1, 8) == 8);
-    REQUIRE(clockwork_port_read(c, bc.out.data(), 1, 8) == 8);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), a, ba.out.data(), 1, 8) == 8);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), c, bc.out.data(), 1, 8) == 8);
     for (uint32_t f = 0; f < 8; ++f) {
         REQUIRE(ba.ch[0][f] == 100.0f + static_cast<float>(f));
         REQUIRE(bc.ch[0][f] == 300.0f + static_cast<float>(f));
@@ -297,101 +297,101 @@ TEST_CASE("ports: closing one does not renumber the others", "[ports]") {
     // A NEW port may take the freed slot — that is the point of freeing it —
     // but it must never be handed the closed port's handle, or a client still
     // holding `b` would start reading the newcomer's audio.
-    const ClockworkPort d = clockwork_port_open("d", kClockworkPortSource, 1, 64);
+    const ClockworkPort d = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "d", kClockworkPortSource, 1, 64);
     REQUIRE(d != CLOCKWORK_PORT_NONE);
     REQUIRE(d != b);
     REQUIRE(d != a);
     REQUIRE(d != c);
-    REQUIRE(clockwork_port_is_open(b) == 0);
+    REQUIRE(clockwork_port_is_open(clockwork_core_ports(lanes_test::core()), b) == 0);
 
     // And `b` still reads silence rather than d's audio.
     std::vector<float> dv(8, 42.0f);
-    REQUIRE(clockwork_port_produce(d, dv.data(), 8) == 8);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), d, dv.data(), 8) == 8);
     Block bb(1, 8, -1.0f);
-    REQUIRE(clockwork_port_read(b, bb.out.data(), 1, 8) == 0);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), b, bb.out.data(), 1, 8) == 0);
     for (uint32_t f = 0; f < 8; ++f) REQUIRE(bb.ch[0][f] == 0.0f);
 }
 
 TEST_CASE("ports: a closed, stale or nonsense handle reads silence, not a fault",
           "[ports]") {
     Ports guard;
-    const ClockworkPort p = clockwork_port_open("doomed", kClockworkPortSource, 2, 64);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "doomed", kClockworkPortSource, 2, 64);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
     std::vector<float> v(8 * 2, 5.0f);
-    REQUIRE(clockwork_port_produce(p, v.data(), 8) == 8);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, v.data(), 8) == 8);
 
-    clockwork_port_close(p);
-    clockwork_port_close(p);   // twice is safe, says the header
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), p);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), p);   // twice is safe, says the header
 
     Block b(2, 8, 3.0f);
-    REQUIRE(clockwork_port_read(p, b.out.data(), 2, 8) == 0);
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b.out.data(), 2, 8) == 0);
     for (uint32_t c = 0; c < 2; ++c)
         for (uint32_t f = 0; f < 8; ++f) REQUIRE(b.ch[c][f] == 0.0f);
 
     // Writes are discarded, not faults; queries answer emptily.
-    REQUIRE(clockwork_port_write(p, b.in.data(), 2, 8) == 0);
-    REQUIRE(clockwork_port_produce(p, v.data(), 8) == 0);
-    REQUIRE(clockwork_port_consume(p, v.data(), 8) == 0);
-    REQUIRE(clockwork_port_channels(p) == 0);
-    REQUIRE(clockwork_port_direction(p) == 0);
-    REQUIRE(clockwork_port_writable(p) == 0);
-    REQUIRE(clockwork_port_readable(p) == 0);
-    REQUIRE(clockwork_port_underruns(p) == 0);
-    REQUIRE(clockwork_port_overruns(p) == 0);
-    REQUIRE(clockwork_port_name(p) == nullptr);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), p, b.in.data(), 2, 8) == 0);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, v.data(), 8) == 0);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), p, v.data(), 8) == 0);
+    REQUIRE(clockwork_port_channels(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_direction(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_name(clockwork_core_ports(lanes_test::core()), p) == nullptr);
 
     // Handles that were never valid take the same path.
     for (ClockworkPort bogus : {CLOCKWORK_PORT_NONE, ClockworkPort{0xdeadbeef}, ClockworkPort{0xffff}}) {
         Block z(2, 8, 3.0f);
-        REQUIRE(clockwork_port_read(bogus, z.out.data(), 2, 8) == 0);
+        REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), bogus, z.out.data(), 2, 8) == 0);
         for (uint32_t c = 0; c < 2; ++c)
             for (uint32_t f = 0; f < 8; ++f) REQUIRE(z.ch[c][f] == 0.0f);
-        REQUIRE(clockwork_port_write(bogus, z.in.data(), 2, 8) == 0);
-        clockwork_port_close(bogus);
+        REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), bogus, z.in.data(), 2, 8) == 0);
+        clockwork_port_close(clockwork_core_ports(lanes_test::core()), bogus);
     }
 }
 
 TEST_CASE("ports: open refuses only what cannot mean anything", "[ports]") {
     Ports guard;
-    clockwork_port_close_all();
+    clockwork_port_close_all(clockwork_core_ports(lanes_test::core()));
 
-    REQUIRE(clockwork_port_open("bad-dir", static_cast<ClockworkPortDirection>(0), 2, 64)
+    REQUIRE(clockwork_port_open(clockwork_core_ports(lanes_test::core()), "bad-dir", static_cast<ClockworkPortDirection>(0), 2, 64)
             == CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_open("bad-dir", static_cast<ClockworkPortDirection>(7), 2, 64)
+    REQUIRE(clockwork_port_open(clockwork_core_ports(lanes_test::core()), "bad-dir", static_cast<ClockworkPortDirection>(7), 2, 64)
             == CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_open("no-channels", kClockworkPortSource, 0, 64) == CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_open("too-many-channels", kClockworkPortSource, 4096, 64)
+    REQUIRE(clockwork_port_open(clockwork_core_ports(lanes_test::core()), "no-channels", kClockworkPortSource, 0, 64) == CLOCKWORK_PORT_NONE);
+    REQUIRE(clockwork_port_open(clockwork_core_ports(lanes_test::core()), "too-many-channels", kClockworkPortSource, 4096, 64)
             == CLOCKWORK_PORT_NONE);
 
     // A nonsense capacity is CLAMPED, not refused: 0 frames is a request that
     // means nothing, and the smallest useful ring is a better answer than a
     // failure the caller has to handle.
-    const ClockworkPort tiny = clockwork_port_open("tiny", kClockworkPortSource, 1, 0);
+    const ClockworkPort tiny = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "tiny", kClockworkPortSource, 1, 0);
     REQUIRE(tiny != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_writable(tiny) == 16);
-    clockwork_port_close(tiny);
+    REQUIRE(clockwork_port_writable(clockwork_core_ports(lanes_test::core()), tiny) == 16);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), tiny);
 
     // A NULL name is a name, not an error.
-    const ClockworkPort anon = clockwork_port_open(nullptr, kClockworkPortSink, 1, 64);
+    const ClockworkPort anon = clockwork_port_open(clockwork_core_ports(lanes_test::core()), nullptr, kClockworkPortSink, 1, 64);
     REQUIRE(anon != CLOCKWORK_PORT_NONE);
-    REQUIRE(std::string(clockwork_port_name(anon)).empty());
-    clockwork_port_close(anon);
+    REQUIRE(std::string(clockwork_port_name(clockwork_core_ports(lanes_test::core()), anon)).empty());
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), anon);
 
     // The table is finite and says so rather than growing on the audio
     // thread's behalf.
     std::vector<ClockworkPort> all;
     while (true) {
-        const ClockworkPort p = clockwork_port_open("filler", kClockworkPortSource, 1, 16);
+        const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "filler", kClockworkPortSource, 1, 16);
         if (p == CLOCKWORK_PORT_NONE) break;
         all.push_back(p);
         REQUIRE(all.size() <= 4096);
     }
     REQUIRE(all.size() == 64);
-    REQUIRE(clockwork_port_list(nullptr, 0) == 64);
-    for (ClockworkPort p : all) clockwork_port_close(p);
-    REQUIRE(clockwork_port_list(nullptr, 0) == 0);
+    REQUIRE(clockwork_port_list(clockwork_core_ports(lanes_test::core()), nullptr, 0) == 64);
+    for (ClockworkPort p : all) clockwork_port_close(clockwork_core_ports(lanes_test::core()), p);
+    REQUIRE(clockwork_port_list(clockwork_core_ports(lanes_test::core()), nullptr, 0) == 0);
     // Every slot comes back after the last reader leaves.
-    REQUIRE(clockwork_port_open("after", kClockworkPortSource, 1, 16) != CLOCKWORK_PORT_NONE);
+    REQUIRE(clockwork_port_open(clockwork_core_ports(lanes_test::core()), "after", kClockworkPortSource, 1, 16) != CLOCKWORK_PORT_NONE);
 }
 
 // ── The one that earns it ───────────────────────────────────────────────────
@@ -409,7 +409,7 @@ TEST_CASE("ports: a producer thread and an audio loop reconcile exactly",
     constexpr uint32_t kProduce = 100;
     constexpr uint32_t kBlock   = 128;
 
-    const ClockworkPort p = clockwork_port_open("hammered", kClockworkPortSource, kCh, 1024);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "hammered", kClockworkPortSource, kCh, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
 
     // The endpoint. Keeps the remainder when the ring is full, which is what
@@ -428,7 +428,7 @@ TEST_CASE("ports: a producer thread and an audio loop reconcile exactly",
             uint32_t done = 0;
             while (done < n) {
                 const uint32_t took =
-                    clockwork_port_produce(p, buf.data() + done * kCh, n - done);
+                    clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, buf.data() + done * kCh, n - done);
                 if (took == 0) std::this_thread::yield();
                 done += took;
             }
@@ -443,7 +443,7 @@ TEST_CASE("ports: a producer thread and an audio loop reconcile exactly",
     uint64_t out = 0, requested = 0;
     uint64_t torn = 0, wrong = 0;
     while (out < kTotal) {
-        const uint32_t got = clockwork_port_read(p, b.out.data(), kCh, kBlock);
+        const uint32_t got = clockwork_port_read(clockwork_core_ports(lanes_test::core()), p, b.out.data(), kCh, kBlock);
         requested += kBlock;
         for (uint32_t f = 0; f < got; ++f)
             for (uint32_t c = 0; c < kCh; ++c)
@@ -462,8 +462,8 @@ TEST_CASE("ports: a producer thread and an audio loop reconcile exactly",
     REQUIRE(wrong == 0);
     REQUIRE(produced.load() == kTotal);
     REQUIRE(out == kTotal);                      // nothing lost, nothing repeated
-    REQUIRE(clockwork_port_overruns(p) == 0);          // a source never overruns
-    REQUIRE(clockwork_port_underruns(p) == requested - out);   // frames in == out + silence
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);          // a source never overruns
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == requested - out);   // frames in == out + silence
 }
 
 // ── The endpoints ───────────────────────────────────────────────────────────
@@ -477,9 +477,9 @@ TEST_CASE("ports: the disk sink and the disk source round trip a signal",
 
     // Out: the audio thread writes blocks, a worker drains them to disk.
     {
-        const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, kCh, 8192);
+        const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, kCh, 8192);
         REQUIRE(sink != CLOCKWORK_PORT_NONE);
-        ClockworkDiskSink* w = clockwork_disk_sink_open(path.c_str(), sink, 48000, kCh);
+        ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), path.c_str(), sink, 48000, kCh);
         REQUIRE(w != nullptr);
 
         Block b(kCh, kBlock);
@@ -490,20 +490,20 @@ TEST_CASE("ports: the disk sink and the disk source round trip a signal",
                     b.ch[c][i] = sample(f + i, c) / 32768.0f;
             // Wait for room rather than dropping: this is a test of the file,
             // not of the drop policy, which has its own case.
-            while (clockwork_port_writable(sink) < n) std::this_thread::yield();
-            REQUIRE(clockwork_port_write(sink, b.in.data(), kCh, n) == n);
+            while (clockwork_port_writable(clockwork_core_ports(lanes_test::core()), sink) < n) std::this_thread::yield();
+            REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), sink, b.in.data(), kCh, n) == n);
         }
         clockwork_disk_sink_close(w);      // drains, patches the header, joins
-        REQUIRE(clockwork_port_overruns(sink) == 0);
-        clockwork_port_close(sink);
+        REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), sink) == 0);
+        clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
     }
     REQUIRE(std::filesystem::exists(path));
 
     // In: a worker reads the file, the audio thread reads the port.
     {
-        const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, kCh, 8192);
+        const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-in", kClockworkPortSource, kCh, 8192);
         REQUIRE(source != CLOCKWORK_PORT_NONE);
-        ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
+        ClockworkDiskSource* r = clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), path.c_str(), source, 48000);
         REQUIRE(r != nullptr);
         REQUIRE(clockwork_disk_source_frames(r) == kFrames);
         REQUIRE(clockwork_disk_source_sample_rate(r) == 48000);
@@ -511,7 +511,7 @@ TEST_CASE("ports: the disk sink and the disk source round trip a signal",
         Block b(kCh, kBlock, -1.0f);
         uint32_t out = 0, mismatches = 0;
         for (int spins = 0; out < kFrames && spins < 200000; ++spins) {
-            const uint32_t got = clockwork_port_read(source, b.out.data(), kCh, kBlock);
+            const uint32_t got = clockwork_port_read(clockwork_core_ports(lanes_test::core()), source, b.out.data(), kCh, kBlock);
             for (uint32_t i = 0; i < got; ++i)
                 for (uint32_t c = 0; c < kCh; ++c)
                     if (b.ch[c][i] != sample(out + i, c) / 32768.0f) ++mismatches;
@@ -523,7 +523,7 @@ TEST_CASE("ports: the disk sink and the disk source round trip a signal",
         REQUIRE(clockwork_disk_source_eof(r) == 1);
         REQUIRE(clockwork_disk_source_frames_produced(r) == kFrames);
         clockwork_disk_source_close(r);
-        clockwork_port_close(source);
+        clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
     }
     std::filesystem::remove_all(dir);
 }
@@ -540,16 +540,16 @@ TEST_CASE("ports: the WAV the sink writes is the WAV another decoder reads",
     const auto path = (dir / "decoded.wav").string();
     constexpr uint32_t kCh = 2, kFrames = 777;
 
-    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, kCh, 4096);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, kCh, 4096);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSink* w = clockwork_disk_sink_open(path.c_str(), sink, 44100, kCh);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), path.c_str(), sink, 44100, kCh);
     REQUIRE(w != nullptr);
     Block b(kCh, kFrames);
     for (uint32_t f = 0; f < kFrames; ++f)
         for (uint32_t c = 0; c < kCh; ++c) b.ch[c][f] = sample(f, c) / 65536.0f;
-    REQUIRE(clockwork_port_write(sink, b.in.data(), kCh, kFrames) == kFrames);
+    REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), sink, b.in.data(), kCh, kFrames) == kFrames);
     clockwork_disk_sink_close(w);
-    clockwork_port_close(sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
 
     ClockworkAudioInfo info{};
     info.struct_bytes = sizeof(info);
@@ -596,9 +596,9 @@ TEST_CASE("ports: the disk source reads 16-bit PCM written by another encoder",
     REQUIRE(clockwork_audio_writer_write(wr, asFloat.data(), kFrames) == CLOCKWORK_OK);
     REQUIRE(clockwork_audio_writer_close(wr, nullptr, nullptr) == CLOCKWORK_OK);
 
-    const ClockworkPort source = clockwork_port_open("pcm16", kClockworkPortSource, kCh, 2048);
+    const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "pcm16", kClockworkPortSource, kCh, 2048);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
+    ClockworkDiskSource* r = clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), path.c_str(), source, 48000);
     REQUIRE(r != nullptr);
     REQUIRE(clockwork_disk_source_frames(r) == kFrames);
     REQUIRE(clockwork_disk_source_sample_rate(r) == 22050);
@@ -606,7 +606,7 @@ TEST_CASE("ports: the disk source reads 16-bit PCM written by another encoder",
     Block b(kCh, 256, -1.0f);
     uint32_t out = 0, mismatches = 0;
     for (int spins = 0; out < kFrames && spins < 200000; ++spins) {
-        const uint32_t got = clockwork_port_read(source, b.out.data(), kCh, 256);
+        const uint32_t got = clockwork_port_read(clockwork_core_ports(lanes_test::core()), source, b.out.data(), kCh, 256);
         for (uint32_t i = 0; i < got; ++i)
             if (b.ch[0][i] != static_cast<float>(pcm[out + i]) / 32768.0f) ++mismatches;
         out += got;
@@ -615,7 +615,7 @@ TEST_CASE("ports: the disk source reads 16-bit PCM written by another encoder",
     REQUIRE(mismatches == 0);
     REQUIRE(out == kFrames);
     clockwork_disk_source_close(r);
-    clockwork_port_close(source);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
     std::filesystem::remove_all(dir);
 }
 
@@ -623,40 +623,40 @@ TEST_CASE("ports: a disk endpoint refuses at open rather than going silent",
           "[ports][disk]") {
     Ports guard;
     const auto dir = tempDir("wav_refusals");
-    const ClockworkPort source = clockwork_port_open("refuse", kClockworkPortSource, 2, 64);
+    const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "refuse", kClockworkPortSource, 2, 64);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
 
     // No such file. A silence to be diagnosed later is the wrong answer.
-    REQUIRE(clockwork_disk_source_open((dir / "absent.wav").string().c_str(), source, 48000)
+    REQUIRE(clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), (dir / "absent.wav").string().c_str(), source, 48000)
             == nullptr);
 
     // A file that is not a WAV.
     const auto junk = (dir / "junk.wav").string();
     { std::vector<char> j(64, 'x'); FILE* fp = std::fopen(junk.c_str(), "wb");
       REQUIRE(fp != nullptr); std::fwrite(j.data(), 1, j.size(), fp); std::fclose(fp); }
-    REQUIRE(clockwork_disk_source_open(junk.c_str(), source, 48000) == nullptr);
+    REQUIRE(clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), junk.c_str(), source, 48000) == nullptr);
 
     // A closed port.
-    clockwork_port_close(source);
-    REQUIRE(clockwork_disk_source_open(junk.c_str(), source, 48000) == nullptr);
-    REQUIRE(clockwork_disk_sink_open((dir / "out.wav").string().c_str(), source, 48000, 2)
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
+    REQUIRE(clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), junk.c_str(), source, 48000) == nullptr);
+    REQUIRE(clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "out.wav").string().c_str(), source, 48000, 2)
             == nullptr);
 
     // A sink onto a directory that does not exist.
-    const ClockworkPort sink = clockwork_port_open("refuse-sink", kClockworkPortSink, 2, 64);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "refuse-sink", kClockworkPortSink, 2, 64);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_disk_sink_open((dir / "nope" / "out.wav").string().c_str(),
+    REQUIRE(clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "nope" / "out.wav").string().c_str(),
                                sink, 48000, 2) == nullptr);
 
     // A rate of 0, which gives a worker no pace to keep.
-    REQUIRE(clockwork_disk_sink_open((dir / "zero.wav").string().c_str(), sink, 0, 2) == nullptr);
+    REQUIRE(clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "zero.wav").string().c_str(), sink, 0, 2) == nullptr);
     const auto good = (dir / "good.wav").string();
-    ClockworkDiskSink* w = clockwork_disk_sink_open(good.c_str(), sink, 48000, 2);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), good.c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
     clockwork_disk_sink_close(w);
-    const ClockworkPort in = clockwork_port_open("refuse-in", kClockworkPortSource, 2, 64);
+    const ClockworkPort in = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "refuse-in", kClockworkPortSource, 2, 64);
     REQUIRE(in != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_disk_source_open(good.c_str(), in, 0) == nullptr);
+    REQUIRE(clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), good.c_str(), in, 0) == nullptr);
     std::filesystem::remove_all(dir);
 }
 
@@ -679,41 +679,41 @@ TEST_CASE("ports: a source meets the DSP as input channels", "[ports][boundary][
 
     // Whatever the device backend left in the input staging buffer; a bound
     // source OWNS its range and must overwrite it.
-    float* in = clockwork_audio_in();
+    float* in = clockwork_audio_in(lanes_test::core());
     REQUIRE(in != nullptr);
     for (uint32_t ch = 0; ch < lanes_test::kInChannels; ++ch)
         for (uint32_t i = 0; i < bl; ++i) in[ch * bl + i] = -5.0f;
 
-    const ClockworkPort p = clockwork_port_open("boundary-source", kClockworkPortSource, 2, 1024);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "boundary-source", kClockworkPortSource, 2, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
     std::vector<float> v(bl * 2);
     for (uint32_t i = 0; i < bl; ++i)
         for (uint32_t c = 0; c < 2; ++c)
             v[i * 2 + c] = static_cast<float>(c + 1) + static_cast<float>(i) / 1000.0f;
-    REQUIRE(clockwork_port_produce(p, v.data(), bl) == bl);
-    REQUIRE(clockwork_port_bus_attach(p, 0) == 1);
-    REQUIRE(clockwork_port_bus_attached() == 1);
+    REQUIRE(clockwork_port_produce(clockwork_core_ports(lanes_test::core()), p, v.data(), bl) == bl);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, 0) == 1);
+    REQUIRE(clockwork_port_bus_attached(lanes_test::core()) == 1);
     // Attaching twice is refused rather than silently reading the port twice.
-    REQUIRE(clockwork_port_bus_attach(p, 1) == 0);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, 1) == 0);
 
     lanes_test::tick();
-    const float* out = clockwork_audio_out();
+    const float* out = clockwork_audio_out(lanes_test::core());
     REQUIRE(out != nullptr);
     for (uint32_t c = 0; c < 2; ++c)
         for (uint32_t i = 0; i < bl; ++i)
             REQUIRE(out[c * bl + i] ==
                     static_cast<float>(c + 1) + static_cast<float>(i) / 1000.0f);
-    REQUIRE(clockwork_port_readable(p) == 0);
-    REQUIRE(clockwork_port_underruns(p) == 0);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 0);
+    REQUIRE(clockwork_port_underruns(clockwork_core_ports(lanes_test::core()), p) == 0);
 
     // Detach, and the next block is whatever the host put there again — the
     // port stops owning the range the instant it is unbound.
-    clockwork_port_bus_detach(p);
-    REQUIRE(clockwork_port_bus_attached() == 0);
+    clockwork_port_bus_detach(lanes_test::core(), p);
+    REQUIRE(clockwork_port_bus_attached(lanes_test::core()) == 0);
     for (uint32_t ch = 0; ch < lanes_test::kInChannels; ++ch)
         for (uint32_t i = 0; i < bl; ++i) in[ch * bl + i] = -5.0f;
     lanes_test::tick();
-    out = clockwork_audio_out();
+    out = clockwork_audio_out(lanes_test::core());
     for (uint32_t i = 0; i < bl; ++i) REQUIRE(out[i] == -5.0f);
 
     // Put the placeholder back for whatever runs next.
@@ -727,28 +727,28 @@ TEST_CASE("ports: a sink takes the DSP's output", "[ports][boundary][audio]") {
     Ports guard;
     const uint32_t bl = lanes_test::boot();
 
-    const ClockworkPort p = clockwork_port_open("boundary-sink", kClockworkPortSink, 2, 1024);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "boundary-sink", kClockworkPortSink, 2, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, 0) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, 0) == 1);
 
     lanes_test::tick();
-    const float* out = clockwork_audio_out();
+    const float* out = clockwork_audio_out(lanes_test::core());
     REQUIRE(out != nullptr);
     // Copied before the next tick overwrites the block.
     std::vector<float> expected(out, out + bl * lanes_test::kOutChannels);
 
-    clockwork_port_bus_detach(p);
-    REQUIRE(clockwork_port_readable(p) == bl);
+    clockwork_port_bus_detach(lanes_test::core(), p);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == bl);
     std::vector<float> got(bl * 2, -1.0f);
-    REQUIRE(clockwork_port_consume(p, got.data(), bl) == bl);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), p, got.data(), bl) == bl);
     for (uint32_t i = 0; i < bl; ++i)
         for (uint32_t c = 0; c < 2; ++c)
             REQUIRE(got[i * 2 + c] == expected[c * bl + i]);
-    REQUIRE(clockwork_port_overruns(p) == 0);
+    REQUIRE(clockwork_port_overruns(clockwork_core_ports(lanes_test::core()), p) == 0);
 
     // Detached, it receives nothing further.
     lanes_test::tick();
-    REQUIRE(clockwork_port_readable(p) == 0);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), p) == 0);
 }
 
 TEST_CASE("ports: a binding survives its neighbours coming and going",
@@ -760,32 +760,32 @@ TEST_CASE("ports: a binding survives its neighbours coming and going",
     const uint32_t bl = lanes_test::boot();
     REQUIRE(lanes_test::kOutChannels >= 2);
 
-    const ClockworkPort first  = clockwork_port_open("sink-0", kClockworkPortSink, 1, 1024);
-    const ClockworkPort second = clockwork_port_open("sink-1", kClockworkPortSink, 1, 1024);
+    const ClockworkPort first  = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "sink-0", kClockworkPortSink, 1, 1024);
+    const ClockworkPort second = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "sink-1", kClockworkPortSink, 1, 1024);
     REQUIRE(first != CLOCKWORK_PORT_NONE);
     REQUIRE(second != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(first, 0) == 1);
-    REQUIRE(clockwork_port_bus_attach(second, 1) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), first, 0) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), second, 1) == 1);
 
     lanes_test::tick();
-    const float* out = clockwork_audio_out();
+    const float* out = clockwork_audio_out(lanes_test::core());
     std::vector<float> block(out, out + bl * lanes_test::kOutChannels);
 
     // Drop the FIRST one. If channel ranges were derived from order, `second`
     // would silently slide onto channel 0 here.
-    clockwork_port_bus_detach(first);
-    clockwork_port_close(first);
-    REQUIRE(clockwork_port_bus_attached() == 1);
+    clockwork_port_bus_detach(lanes_test::core(), first);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), first);
+    REQUIRE(clockwork_port_bus_attached(lanes_test::core()) == 1);
 
     std::vector<float> got(bl, -1.0f);
-    REQUIRE(clockwork_port_consume(second, got.data(), bl) == bl);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), second, got.data(), bl) == bl);
     for (uint32_t i = 0; i < bl; ++i) REQUIRE(got[i] == block[1 * bl + i]);
 
     lanes_test::tick();
-    const float* out2 = clockwork_audio_out();
+    const float* out2 = clockwork_audio_out(lanes_test::core());
     std::vector<float> block2(out2, out2 + bl * lanes_test::kOutChannels);
-    REQUIRE(clockwork_port_readable(second) == bl);
-    REQUIRE(clockwork_port_consume(second, got.data(), bl) == bl);
+    REQUIRE(clockwork_port_readable(clockwork_core_ports(lanes_test::core()), second) == bl);
+    REQUIRE(clockwork_port_consume(clockwork_core_ports(lanes_test::core()), second, got.data(), bl) == bl);
     for (uint32_t i = 0; i < bl; ++i) REQUIRE(got[i] == block2[1 * bl + i]);
 }
 
@@ -809,8 +809,8 @@ void writeFrames(ClockworkPort sink, uint32_t channels, uint32_t frames) {
         const uint32_t n = std::min<uint32_t>(128, frames - f);
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t c = 0; c < channels; ++c) b.ch[c][i] = sample(f + i, c) / 32768.0f;
-        while (clockwork_port_writable(sink) < n) std::this_thread::yield();
-        REQUIRE(clockwork_port_write(sink, b.in.data(), channels, n) == n);
+        while (clockwork_port_writable(clockwork_core_ports(lanes_test::core()), sink) < n) std::this_thread::yield();
+        REQUIRE(clockwork_port_write(clockwork_core_ports(lanes_test::core()), sink, b.in.data(), channels, n) == n);
     }
 }
 
@@ -825,13 +825,13 @@ bool within(const std::function<bool()>& done, int ms) {
 
 // A WAV of `frames` of the test signal, written through a disk sink.
 void writeWav(const std::string& path, uint32_t frames) {
-    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 32768);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 32768);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSink* w = clockwork_disk_sink_open(path.c_str(), sink, 48000, 2);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), path.c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
     writeFrames(sink, 2, frames);
     clockwork_disk_sink_close(w);
-    clockwork_port_close(sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
 }
 
 } // namespace
@@ -840,9 +840,9 @@ TEST_CASE("ports: the disk sink writes what arrives within a quarter ring, howev
           "[ports][disk]") {
     Ports guard;
     const auto dir = tempDir("sink_pace");
-    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 16384);
     REQUIRE(sink != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 48000, 2);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "w.wav").string().c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
 
     if (thread_wakes::countable()) {
@@ -858,7 +858,7 @@ TEST_CASE("ports: the disk sink writes what arrives within a quarter ring, howev
     writeFrames(sink, 2, 100);
     CHECK(within([&] { return clockwork_disk_sink_frames(w) == 100; }, 10000));
     clockwork_disk_sink_close(w);
-    clockwork_port_close(sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
     std::filesystem::remove_all(dir);
 }
 
@@ -869,18 +869,18 @@ TEST_CASE("ports: the disk source fills any room on its next wake, not at a thre
     const auto path = (dir / "r.wav").string();
     writeWav(path, 20000);
 
-    const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 4096);
+    const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-in", kClockworkPortSource, 2, 4096);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
+    ClockworkDiskSource* r = clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), path.c_str(), source, 48000);
     REQUIRE(r != nullptr);
-    REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full
+    REQUIRE(within([&] { return clockwork_port_writable(clockwork_core_ports(lanes_test::core()), source) == 0; }, 10000));   // full
 
     // One block out leaves room for one block, which the next wake fills.
     Block b(2, 128);
-    REQUIRE(clockwork_port_read(source, b.out.data(), 2, 128) == 128);
-    CHECK(within([&] { return clockwork_port_writable(source) == 0; }, 10000));
+    REQUIRE(clockwork_port_read(clockwork_core_ports(lanes_test::core()), source, b.out.data(), 2, 128) == 128);
+    CHECK(within([&] { return clockwork_port_writable(clockwork_core_ports(lanes_test::core()), source) == 0; }, 10000));
     clockwork_disk_source_close(r);
-    clockwork_port_close(source);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
     std::filesystem::remove_all(dir);
 }
 
@@ -892,11 +892,11 @@ TEST_CASE("ports: the disk source keeps up with its reader and sleeps once the f
     constexpr uint32_t kFrames = 20000;
     writeWav(path, kFrames);
 
-    const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 4096);
+    const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-in", kClockworkPortSource, 2, 4096);
     REQUIRE(source != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 48000);
+    ClockworkDiskSource* r = clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), path.c_str(), source, 48000);
     REQUIRE(r != nullptr);
-    REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full
+    REQUIRE(within([&] { return clockwork_port_writable(clockwork_core_ports(lanes_test::core()), source) == 0; }, 10000));   // full
 
     if (thread_wakes::countable()) {
         // Full and unread: a quarter of 4096 frames at 48 kHz is 21 ms, about
@@ -912,7 +912,7 @@ TEST_CASE("ports: the disk source keeps up with its reader and sleeps once the f
     uint32_t out = 0;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (out < kFrames && std::chrono::steady_clock::now() < until) {
-        const uint32_t got = clockwork_port_read(source, b.out.data(), 2, 128);
+        const uint32_t got = clockwork_port_read(clockwork_core_ports(lanes_test::core()), source, b.out.data(), 2, 128);
         out += got;
         if (got == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -926,7 +926,7 @@ TEST_CASE("ports: the disk source keeps up with its reader and sleeps once the f
         CHECK(*woke <= 1);
     }
     clockwork_disk_source_close(r);
-    clockwork_port_close(source);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
     std::filesystem::remove_all(dir);
 }
 
@@ -939,31 +939,31 @@ TEST_CASE("ports: closing a disk endpoint stops its worker at once, however long
 
     // At 100 Hz a quarter of 16384 frames is 41 s, so only the stop ends
     // these waits in time.
-    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
-    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 100, 2);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 16384);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "w.wav").string().c_str(), sink, 100, 2);
     REQUIRE(w != nullptr);
-    const ClockworkPort source = clockwork_port_open("disk-in", kClockworkPortSource, 2, 16384);
-    ClockworkDiskSource* r = clockwork_disk_source_open(path.c_str(), source, 100);
+    const ClockworkPort source = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-in", kClockworkPortSource, 2, 16384);
+    ClockworkDiskSource* r = clockwork_disk_source_open(clockwork_core_ports(lanes_test::core()), path.c_str(), source, 100);
     REQUIRE(r != nullptr);
-    REQUIRE(within([&] { return clockwork_port_writable(source) == 0; }, 10000));   // full, asleep
+    REQUIRE(within([&] { return clockwork_port_writable(clockwork_core_ports(lanes_test::core()), source) == 0; }, 10000));   // full, asleep
 
     const auto t0 = std::chrono::steady_clock::now();
     clockwork_disk_sink_close(w);
     clockwork_disk_source_close(r);
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
-    clockwork_port_close(sink);
-    clockwork_port_close(source);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), source);
     std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("ports: closing a port under a disk worker ends the worker", "[ports][disk]") {
     Ports guard;
     const auto dir = tempDir("close_under");
-    const ClockworkPort sink = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
-    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "w.wav").string().c_str(), sink, 48000, 2);
+    const ClockworkPort sink = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 16384);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "w.wav").string().c_str(), sink, 48000, 2);
     REQUIRE(w != nullptr);
     writeFrames(sink, 2, 100);
-    clockwork_port_close(sink);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), sink);
     const auto t0 = std::chrono::steady_clock::now();
     clockwork_disk_sink_close(w);   // joins a worker whose port has gone
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
@@ -976,19 +976,19 @@ TEST_CASE("ports: a port reopened in a closed port's slot serves its own disk wo
     // reach the new port in the same slot or the worker serving it.
     Ports guard;
     const auto dir = tempDir("slot_reuse");
-    const ClockworkPort first = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
-    ClockworkDiskSink* old = clockwork_disk_sink_open((dir / "old.wav").string().c_str(), first, 48000, 2);
+    const ClockworkPort first = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 16384);
+    ClockworkDiskSink* old = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "old.wav").string().c_str(), first, 48000, 2);
     REQUIRE(old != nullptr);
-    clockwork_port_close(first);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), first);
 
-    const ClockworkPort second = clockwork_port_open("disk-out", kClockworkPortSink, 2, 16384);
+    const ClockworkPort second = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 16384);
     REQUIRE(second != CLOCKWORK_PORT_NONE);
-    ClockworkDiskSink* w = clockwork_disk_sink_open((dir / "new.wav").string().c_str(), second, 48000, 2);
+    ClockworkDiskSink* w = clockwork_disk_sink_open(clockwork_core_ports(lanes_test::core()), (dir / "new.wav").string().c_str(), second, 48000, 2);
     REQUIRE(w != nullptr);
     writeFrames(second, 2, 100);
     CHECK(within([&] { return clockwork_disk_sink_frames(w) == 100; }, 10000));
     clockwork_disk_sink_close(old);
     clockwork_disk_sink_close(w);
-    clockwork_port_close(second);
+    clockwork_port_close(clockwork_core_ports(lanes_test::core()), second);
     std::filesystem::remove_all(dir);
 }

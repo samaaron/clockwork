@@ -115,7 +115,7 @@ Capture capture(int blocks) {
     for (int b = 0; b < blocks; ++b) {
         const uint64_t at = dspFrame(lanes_test::tick());
         if (b == 0) cap.firstFrame = at;
-        const float* out = clockwork_audio_out();
+        const float* out = clockwork_audio_out(lanes_test::core());
         REQUIRE(out != nullptr);
         for (uint32_t ch = 0; ch < lanes_test::kOutChannels; ++ch)
             cap.channel[ch].insert(cap.channel[ch].end(),
@@ -162,7 +162,7 @@ TEST_CASE("audio path: a rendered block reaches the hardware join intact", "[aud
     const uint64_t period = framesFor(kDefaultPeriodMs);
 
     const uint64_t at  = dspFrame(lanes_test::tick());
-    const float*   out = clockwork_audio_out();
+    const float*   out = clockwork_audio_out(lanes_test::core());
     REQUIRE(out != nullptr);
 
     // Channel-major: channel c occupies [c*bl, (c+1)*bl). Exact equality, not
@@ -187,9 +187,9 @@ TEST_CASE("audio path: blocks are seamless across the boundary", "[audio][lanes]
     // whose phase reset per block would pass a single-block assertion and
     // click audibly every block; this is what catches that.
     const uint64_t a = dspFrame(lanes_test::tick());
-    std::vector<float> first(clockwork_audio_out(), clockwork_audio_out() + bl * lanes_test::kOutChannels);
+    std::vector<float> first(clockwork_audio_out(lanes_test::core()), clockwork_audio_out(lanes_test::core()) + bl * lanes_test::kOutChannels);
     const uint64_t b = dspFrame(lanes_test::tick());
-    const float* second = clockwork_audio_out();
+    const float* second = clockwork_audio_out(lanes_test::core());
 
     REQUIRE(b == a + bl);
     for (uint32_t i = 0; i < bl; ++i) {
@@ -269,7 +269,7 @@ TEST_CASE("audio path: every sample is finite and is one of the two levels",
     const uint32_t bl = freshStream();
     for (int block = 0; block < 8; ++block) {
         lanes_test::tick();
-        const float* out = clockwork_audio_out();
+        const float* out = clockwork_audio_out(lanes_test::core());
         for (uint32_t i = 0; i < bl * lanes_test::kOutChannels; ++i) {
             REQUIRE(std::isfinite(out[i]));
             // Rectangular: exactly on (either polarity) or exactly off. A
@@ -317,11 +317,11 @@ TEST_CASE("audio path: an OSC message reaches the DSP and moves the edges",
     }
 
     // Put the placeholder back the way the rest of the suite expects to find
-    // it, and prove the restore took — the fixture is a process singleton, so
+    // it, and prove the restore took — the fixture's core is the binary's, so
     // leaving it reconfigured would be leaving a trap for whatever runs next.
     setPulse(kDefaultWidthMs, kDefaultPeriodMs);
     const uint64_t at  = dspFrame(lanes_test::tick());
-    const float*   out = clockwork_audio_out();
+    const float*   out = clockwork_audio_out(lanes_test::core());
     for (uint32_t i = 0; i < bl; ++i)
         REQUIRE(out[i] == expectedSample(0, at + i,
                                          framesFor(kDefaultWidthMs),
@@ -330,11 +330,11 @@ TEST_CASE("audio path: an OSC message reaches the DSP and moves the edges",
 
 TEST_CASE("audio path: the block size clockwork reports is the block it renders",
           "[audio][lanes]") {
-    // clockwork_block_size() is what a host uses to size its own buffers, and it is
+    // clockwork_block_size(lanes_test::core()) is what a host uses to size its own buffers, and it is
     // also what clockwork put in DspConfig::block_size and passes to
     // dsp_process as `frames`. A disagreement between them is silent
     // corruption at the join, so pin them together.
     const uint32_t bl = lanes_test::boot();
-    REQUIRE(bl == clockwork_block_size());
+    REQUIRE(bl == clockwork_block_size(lanes_test::core()));
     REQUIRE(bl == lanes_test::kBufLength);
 }

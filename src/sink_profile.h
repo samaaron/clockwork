@@ -55,21 +55,22 @@ static inline uint32_t clockwork_parse_sink_classes(const char* spec,
     }
 }
 
-/* Install one kind's classes from its profile string. Returns non-zero when
- * installed; zero for a string that does not parse or a shape the sink
- * substrate refuses, in which case the built-in shape stands. */
-static inline int clockwork_install_sink_classes(ClockworkSinkKind kind, const char* spec) {
+/* Install one kind's classes from its profile string, in one table of sinks.
+ * Returns non-zero when installed; zero for a string that does not parse or a
+ * shape the sink substrate refuses, in which case the built-in shape stands. */
+static inline int clockwork_install_sink_classes(const ClockworkSinks* sinks, ClockworkSinkKind kind,
+                                                 const char* spec) {
     uint32_t widths[CLOCKWORK_SINK_CLASSES_MAX];   /* NOLINT(modernize-avoid-c-arrays): a C header */
     uint32_t depths[CLOCKWORK_SINK_CLASSES_MAX];   /* NOLINT(modernize-avoid-c-arrays): a C header */
     const uint32_t n = clockwork_parse_sink_classes(spec, widths, depths,
                                                     CLOCKWORK_SINK_CLASSES_MAX);
-    return n != 0 && clockwork_sink_profile(kind, n, widths, depths);
+    return n != 0 && clockwork_sink_profile(sinks, kind, n, widths, depths);
 }
 
-/* Both kinds, from memory_profile.h. What the engine does at init, and what a
- * test that opens a sink with no engine does first. */
-static inline int clockwork_install_sink_profiles(void) {
-    const int osc  = clockwork_install_sink_classes(kClockworkSinkOsc,  CLOCKWORK_OSC_SINK_CLASSES);
-    const int midi = clockwork_install_sink_classes(kClockworkSinkMidi, CLOCKWORK_MIDI_SINK_CLASSES);
+/* Both kinds, from memory_profile.h. What the engine does for its core's
+ * table at init, and what a test with a table of its own does first. */
+static inline int clockwork_install_sink_profiles(const ClockworkSinks* sinks) {
+    const int osc  = clockwork_install_sink_classes(sinks, kClockworkSinkOsc,  CLOCKWORK_OSC_SINK_CLASSES);
+    const int midi = clockwork_install_sink_classes(sinks, kClockworkSinkMidi, CLOCKWORK_MIDI_SINK_CLASSES);
     return osc && midi;
 }

@@ -4,14 +4,16 @@
  * clockwork_gamepad.h — C ABI for the clockwork gamepad subsystem (Rust: gilrs,
  * or Apple's GameController framework on macOS).
  *
- * The C++ engine boundary (src/native/GamepadControl) creates one instance,
- * supplying one thread-safe host callback, and forwards decoded "/clockwork/gamepad/"
- * OSC into it via clockwork_gamepad_handle_osc(). The device IO lives on a
- * process-global poll thread (created on first use, kept for the life of the
- * process — gilrs's hotplug machinery has no shutdown path) and never touches
- * the audio thread; an instance is a host *registration* against it. Results
- * return through the callback, which may fire on the poll thread. Replies
- * ("/clockwork/gamepad/devices.reply") are emitted synchronously on the caller's thread.
+ * The C++ engine boundary (src/native/GamepadControl) creates one instance per
+ * core, supplying one thread-safe host callback, and forwards decoded
+ * "/clockwork/gamepad/" OSC into it via clockwork_gamepad_handle_osc(). The device
+ * IO lives on a process-global poll thread (created on first use, kept for the
+ * life of the process — gilrs's hotplug machinery has no shutdown path) and
+ * never touches the audio thread; an instance is a core's *registration*
+ * against it. What the pads say reaches every core registered, and which pads
+ * are enabled is the process's. Results return through the callback, which
+ * may fire on the poll thread. Replies ("/clockwork/gamepad/devices.reply") are
+ * emitted synchronously on the caller's thread.
  *
  * Must match rust/clockwork-gamepad/src/ffi.rs.
  */
@@ -37,12 +39,13 @@ typedef struct ClockworkGamepad ClockworkGamepad;
  * only valid for the duration of the call. May fire on the poll thread. */
 typedef void (*clockwork_gamepad_emit_fn)(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
 
-/* Register the host callback (starting the process-global device IO on first
+/* Register a core's callback (starting the process-global device IO on first
  * use). `ctx` and the callback must outlive the instance. NULL on failure. */
 ClockworkGamepad* clockwork_gamepad_create(void* ctx, clockwork_gamepad_emit_fn emit);
 
-/* Deregister the host and stop all rumble; no callback fires after this
- * returns. The poll thread parks until the next clockwork_gamepad_create. */
+/* Deregister the core; no callback reaches it after this returns. The last
+ * core's also stops all rumble, and the poll thread parks until the next
+ * clockwork_gamepad_create. */
 void clockwork_gamepad_destroy(ClockworkGamepad* handle);
 
 /* Feed one decoded "/clockwork/gamepad/" OSC packet (off the audio thread).

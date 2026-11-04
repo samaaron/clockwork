@@ -82,8 +82,8 @@
   #ifndef SCHEDULER_DATA_POOL_SIZE
   #define SCHEDULER_DATA_POOL_SIZE 65536           // 64 KB
   #endif
-  #ifndef CLOCKWORK_ROUTER_BYTES
-  #define CLOCKWORK_ROUTER_BYTES 65536            // 64 KB, the least the router arms on: the sink and port queues
+  #ifndef CLOCKWORK_OWN_POOL_BYTES
+  #define CLOCKWORK_OWN_POOL_BYTES 65536          // 64 KB, the least an own pool runs on: the sink and port queues
   #endif
   // The guest's fast working memory when the guest declares no fast want of
   // its own: 80 KB of internal SRAM. Sized to hold a server guest's dsp_new
@@ -192,8 +192,8 @@
                                                     // .bss) must also hold the guest's fast memory
                                                     // and the library's registration mallocs.
   #endif
-  #ifndef CLOCKWORK_ROUTER_BYTES
-  #define CLOCKWORK_ROUTER_BYTES 0                // no router block: OCRAM has no 64 KB to spare, so the Rust
+  #ifndef CLOCKWORK_OWN_POOL_BYTES
+  #define CLOCKWORK_OWN_POOL_BYTES 0              // no own pool: OCRAM has no 64 KB to spare, so the Rust
                                                     // subsystems' queues stay with the library's malloc
   #endif
   #ifndef CLOCKWORK_MAX_BLOCK_SIZE
@@ -244,7 +244,7 @@
 #ifndef CLOCKWORK_GUEST_MEMORY_FAST_BYTES
 #define CLOCKWORK_GUEST_MEMORY_FAST_BYTES 0u
 #endif
-// BULK: the span the guest's pool runs over (clockwork_pool.h) — everything
+// BULK: the span the guest's pool runs over (clockwork_heap.h) — everything
 // it allocates as it runs. 64 MB on the desktop and the NIF. On the web the
 // figure is a ceiling and the span takes what is left of the engine's memory
 // after the fast span and the RT router's block (less CLOCKWORK_FAST_RESERVE,
@@ -308,6 +308,10 @@
 #ifndef CLOCKWORK_WINDOW_BYTES
 #define CLOCKWORK_WINDOW_BYTES 98320
 #endif
+// The guest's persistent bytes (shared_memory.h, "What survives a rebuild").
+#ifndef GUEST_PERSIST_BYTES
+#define GUEST_PERSIST_BYTES (64u * 1024u)
+#endif
 // The tap-stream slots. TAPS_SLOTS are the GUEST's, in the guest
 // region: a client numbers them as it likes and a ScopeOut2 claims one.
 // TAP_TRACK_SLOTS are the ENGINE's, after the guest's slots in the one tap
@@ -315,7 +319,7 @@
 // (plugin_bridge.h LANES / 2), written from the track's return lane
 // (src/native/TrackControl.cpp) so a panel can draw what a track is putting
 // out without a scope node in the graph. A client numbers the two as one
-// index space, the track slots after the guest's (TAP_TRACK_SLOT_BASE).
+// index space, the track slots after the guest's.
 // No track slots on the web, which hosts no plugins and whose arena is
 // budgeted to the byte (js/memory_layout.js), nor on the embedded profiles.
 #ifndef TAPS_SLOTS
@@ -328,7 +332,6 @@
   #define TAP_TRACK_SLOTS 16
   #endif
 #endif
-#define TAP_TRACK_SLOT_BASE TAPS_SLOTS
 // Per-slot tap stream ring, in frames. A consumer draws the window being
 // HEARD, which sits the device's output latency behind the writer, so the
 // ring must hold that latency plus the longest display window (a client's
@@ -374,14 +377,14 @@
   #endif
 #endif
 
-// The RT router's block (rust/clockwork-heap/src/router.rs): what clockwork's
-// Rust subsystems allocate inside an engine entry point — a sink's or a port's
-// queues, opened from the audio thread — comes from this one block, taken from
-// the Fast tier once at boot and kept for the life of the process. The
-// router arms on nothing under 64 KB; 0 leaves it unarmed, and those
-// allocations stay with the system allocator.
-#ifndef CLOCKWORK_ROUTER_BYTES
-#define CLOCKWORK_ROUTER_BYTES (1 * 1024 * 1024)      // 1 MB
+// Each core's own pool (clockwork_heap.h): what clockwork's Rust subsystems
+// allocate inside a door — a sink's or a port's queues, opened from the
+// audio thread — comes from this block, taken from the Fast tier at the
+// core's first init and given back when the core goes. Nothing under 64 KB
+// runs a pool; 0 runs none, and those allocations stay with the system
+// allocator.
+#ifndef CLOCKWORK_OWN_POOL_BYTES
+#define CLOCKWORK_OWN_POOL_BYTES (1 * 1024 * 1024)    // 1 MB
 #endif
 // Fast-tier reserve: what a profile's DEFAULT span leaves of the tier's
 // largest free block. 0 on desktop and the NIF: largest_free() returns

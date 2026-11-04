@@ -43,7 +43,7 @@ static ClockworkStatus deviceInfoOf(void* p, ClockworkEmbedDevice* out) {
     copyField(out->device, sizeof out->device, info.name);
     out->sample_rate           = info.activeSampleRate;
     out->buffer_frames         = info.activeBufferSize > 0 ? static_cast<uint32_t>(info.activeBufferSize) : 0u;
-    out->block_frames          = clockwork_block_size();
+    out->block_frames          = clockwork_block_size(d->engine->core());
     out->input_channels        = info.activeInputChannels  > 0 ? static_cast<uint32_t>(info.activeInputChannels)  : 0u;
     out->output_channels       = info.activeOutputChannels > 0 ? static_cast<uint32_t>(info.activeOutputChannels) : 0u;
     out->output_latency_frames = info.outputLatencySamples > 0 ? static_cast<uint32_t>(info.outputLatencySamples) : 0u;
@@ -54,7 +54,6 @@ static ClockworkStatus deviceInfoOf(void* p, ClockworkEmbedDevice* out) {
 extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbedConfig* config, ClockworkStatus* status) {
     const auto fail = [status](ClockworkStatus s) { if (status) *status = s; return static_cast<ClockworkEmbed*>(nullptr); };
     if (!config || config->struct_bytes < sizeof(ClockworkEmbedConfig)) return fail(CLOCKWORK_E_ARG);
-    if (g_clockwork_embed.load(std::memory_order_acquire)) return fail(CLOCKWORK_E_PERM);
 
     // Owned here until the handle has it: a boot that throws (init) takes
     // the engine down with this, not leaves it.
@@ -64,7 +63,17 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     d->engine->onDebug = [](const std::string&) {};
     d->engine->onReply = [](const uint8_t*, uint32_t) {};
 
+    // The engine's core, made here so a refusal (E_PERM while the process
+    // holds another) is a status, not a throw out of a C call. The engine's
+    // from its init on.
+    ClockworkStatus made = CLOCKWORK_OK;
     ClockworkEngine::Config cfg;
+    cfg.core = clockwork_core_new(&made);
+    if (!cfg.core) return fail(made);
+    if (config->profile && clockwork_set_profile(cfg.core, config->profile)) {
+        clockwork_core_close(cfg.core);
+        return fail(CLOCKWORK_E_ARG);
+    }
     if (config->sample_rate > 0) cfg.sampleRate = static_cast<int>(std::lround(config->sample_rate));
     if (config->block_size)      cfg.bufferSize = static_cast<int>(config->block_size);
     if (config->input_channels)  cfg.numInputChannels  = static_cast<int>(config->input_channels);
@@ -77,6 +86,12 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     cfg.hostDrainsEgress = true;   // the embedder polls the client; the gateway must not also drain
     cfg.callbackWatchdog = true;
     d->engine->init(cfg);          // opens the device; the callback ticks from here
+    // An engine with no guest is no engine for the host: the build's refusal
+    // is the handle's, with the reason on the core's log, as attach refuses.
+    if (clockwork_boot_error(cfg.core)) {
+        closeDevice(d.release());
+        return fail(CLOCKWORK_E_NO_INSTANCE);
+    }
 
     gsl::owner<ClockworkEmbed*> h = new (std::nothrow) ClockworkEmbed();
     if (!h) { closeDevice(d.release()); return fail(CLOCKWORK_E_NOMEM); }
@@ -87,11 +102,10 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     h->deviceInfo  = deviceInfoOf;
     h->client      = dev->engine->egressClient();   // the engine's; closed with it
     h->ownsClient  = false;
-    h->sampleRate  = clockwork_sample_rate();
-    h->block       = clockwork_block_size();
+    h->sampleRate  = clockwork_sample_rate(dev->engine->core());
+    h->block       = clockwork_block_size(dev->engine->core());
     h->inChannels  = (config->flags & CLOCKWORK_EMBED_NO_INPUT) ? 0 : config->input_channels;
     h->outChannels = config->output_channels;
-    g_clockwork_embed.store(h, std::memory_order_release);
     if (status) *status = CLOCKWORK_OK;
     return h;
 }

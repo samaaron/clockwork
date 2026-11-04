@@ -31,7 +31,7 @@ void OscEgress::init(IOscTransport*                                  transport,
 void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t size) {
     // The lanes NRT egress producer (src/lanes/lanes.cpp) owns the NRT-out
     // ring location and the producer lock.
-    if (clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, osc, size)) return;
+    if (clockwork_egress_nrt_write(mCore, static_cast<uint32_t>(route), token, osc, size)) return;
 
     // Never silently. A frame the ring refuses is logged, and one too big for
     // a frame ever to carry is answered with an error in its place, so the
@@ -40,28 +40,28 @@ void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t 
     // next pass has room.) The address is the packet's first string.
     const char* address = reinterpret_cast<const char*>(osc);
     const size_t addressLen = strnlen(address, size);
-    const uint32_t most = clockwork_egress_nrt_max_frame();
+    const uint32_t most = clockwork_egress_nrt_max_frame(core());
     if (size <= most) {
-        clockwork_log("[egress] ring full: %.*s (%u bytes) dropped",
+        clockwork_log(mCore, "[egress] ring full: %.*s (%u bytes) dropped",
                       static_cast<int>(addressLen), address, size);
         return;
     }
-    clockwork_log("[egress] %.*s is %u bytes, more than the %u a frame carries — "
+    clockwork_log(mCore, "[egress] %.*s is %u bytes, more than the %u a frame carries — "
                   "answered with an error instead",
                   static_cast<int>(addressLen), address, size, most);
     if (addressLen == size) return;   // no address to answer to
     clockwork_sys_refuse(osc, size, "the reply is too big for the engine's egress",
         generationNow(),
         [&](const uint8_t* d, uint32_t n) {
-            clockwork_egress_nrt_write(static_cast<uint32_t>(route), token, d, n);
+            clockwork_egress_nrt_write(mCore, static_cast<uint32_t>(route), token, d, n);
         });
 }
 
 // The guest instance's generation now, off the arena (docs/RESTARTS.md): what
 // every refusal, statechange and setup from here carries. The engine keeps no
 // count of its own; a reader of the arena in another process reads the same.
-uint32_t OscEgress::generationNow() {
-    void* base = clockwork_lanes_base();
+uint32_t OscEgress::generationNow() const {
+    void* base = clockwork_lanes_base(mCore);
     return base ? arenaInstanceGeneration(base) : 0u;
 }
 
@@ -117,7 +117,7 @@ void OscEgress::dispatchEgress(uint32_t originToken, uint32_t route,
     const std::function<void(const std::string&)> onDebug =
         [this](const std::string& s) { deliverDebug(s.data(), static_cast<uint32_t>(s.size())); };
     clockwork_egress_count_undelivered(
-        clockwork_route_egress(*mTransport, originToken, route, osc, oscLen, onDebug));
+        mCore, clockwork_route_egress(*mTransport, originToken, route, osc, oscLen, onDebug));
 }
 
 

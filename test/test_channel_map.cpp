@@ -33,11 +33,11 @@ namespace {
 // Everything a case binds goes away at its end, pass or fail — and the map is
 // process-global, so a leftover binding would be another case's mystery.
 struct Bus {
-    Bus()  { clockwork_port_bus_detach_all(); }
-    ~Bus() { clockwork_port_bus_detach_all(); clockwork_port_close_all(); }
+    Bus()  { clockwork_port_bus_detach_all(lanes_test::core()); }
+    ~Bus() { clockwork_port_bus_detach_all(lanes_test::core()); clockwork_port_close_all(clockwork_core_ports(lanes_test::core())); }
 };
 
-const ClockworkChannelMapState* map() { return clockwork_channel_map(); }
+const ClockworkChannelMapState* map() { return clockwork_channel_map(lanes_test::core()); }
 
 uint32_t inWord (uint32_t c) { return map()->in [c].load(std::memory_order_acquire); }
 uint32_t outWord(uint32_t c) { return map()->out[c].load(std::memory_order_acquire); }
@@ -85,9 +85,9 @@ TEST_CASE("channel map: a source claims input channels and names itself",
     const uint32_t first = lanes_test::kInChannels + 2;   // clear of the device
 
     const ClockworkPort p =
-        clockwork_port_open("link:FakeLive/Main", kClockworkPortSource, 2, 1024);
+        clockwork_port_open(clockwork_core_ports(lanes_test::core()), "link:FakeLive/Main", kClockworkPortSource, 2, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, first) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, first) == 1);
 
     // HOT: by the time attach has returned, the channels already describe it.
     // The entry is written before the binding is published, so there is no
@@ -120,9 +120,9 @@ TEST_CASE("channel map: a sink claims output channels, not input",
     Bus guard;
     const uint32_t first = lanes_test::kOutChannels + 2;
 
-    const ClockworkPort p = clockwork_port_open("disk-out", kClockworkPortSink, 2, 1024);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "disk-out", kClockworkPortSink, 2, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, first) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, first) == 1);
 
     REQUIRE(channelKind(outWord(first))     == CLOCKWORK_CH_PORT);
     REQUIRE(channelKind(outWord(first + 1)) == CLOCKWORK_CH_PORT);
@@ -141,16 +141,16 @@ TEST_CASE("channel map: detaching gives the channels back to what they were",
 
     // One above the device, one ON it — the two cases have different answers.
     const uint32_t above = lanes_test::kInChannels + 4;
-    const ClockworkPort hi = clockwork_port_open("above", kClockworkPortSource, 2, 1024);
-    const ClockworkPort lo = clockwork_port_open("onto-device", kClockworkPortSource, 1, 1024);
-    REQUIRE(clockwork_port_bus_attach(hi, above) == 1);
-    REQUIRE(clockwork_port_bus_attach(lo, 0)     == 1);
+    const ClockworkPort hi = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "above", kClockworkPortSource, 2, 1024);
+    const ClockworkPort lo = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "onto-device", kClockworkPortSource, 1, 1024);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), hi, above) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), lo, 0)     == 1);
 
     REQUIRE(channelKind(inWord(above)) == CLOCKWORK_CH_PORT);
     REQUIRE(channelKind(inWord(0))     == CLOCKWORK_CH_PORT);   // overrides the device
 
-    clockwork_port_bus_detach(hi);
-    clockwork_port_bus_detach(lo);
+    clockwork_port_bus_detach(lanes_test::core(), hi);
+    clockwork_port_bus_detach(lanes_test::core(), lo);
 
     // Above the device: nothing there any more, and it says so.
     CHECK(channelKind(inWord(above)) == CLOCKWORK_CH_NONE);
@@ -170,10 +170,10 @@ TEST_CASE("channel map: two streams get distinct slots and do not collide",
     const uint32_t a = lanes_test::kInChannels + 2;
     const uint32_t b = lanes_test::kInChannels + 8;
 
-    const ClockworkPort pa = clockwork_port_open("peer-a", kClockworkPortSource, 2, 1024);
-    const ClockworkPort pb = clockwork_port_open("peer-b", kClockworkPortSource, 2, 1024);
-    REQUIRE(clockwork_port_bus_attach(pa, a) == 1);
-    REQUIRE(clockwork_port_bus_attach(pb, b) == 1);
+    const ClockworkPort pa = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "peer-a", kClockworkPortSource, 2, 1024);
+    const ClockworkPort pb = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "peer-b", kClockworkPortSource, 2, 1024);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), pa, a) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), pb, b) == 1);
 
     REQUIRE(channelSlot(inWord(a)) != channelSlot(inWord(b)));
     CHECK(std::string(streamOf(inWord(a))->name.data()) == "peer-a");
@@ -181,7 +181,7 @@ TEST_CASE("channel map: two streams get distinct slots and do not collide",
 
     // Detaching one leaves the other exactly where it was — the failure this
     // guards is a slot being reused or cleared by its neighbour.
-    clockwork_port_bus_detach(pa);
+    clockwork_port_bus_detach(lanes_test::core(), pa);
     CHECK(channelKind(inWord(a)) == CLOCKWORK_CH_NONE);
     REQUIRE(channelKind(inWord(b)) == CLOCKWORK_CH_PORT);
     CHECK(std::string(streamOf(inWord(b))->name.data()) == "peer-b");
@@ -195,8 +195,8 @@ TEST_CASE("channel map: the generation is even at rest and moves across a change
     const uint32_t before = map()->generation.load(std::memory_order_acquire);
     CHECK((before % 2) == 0);   // even: nobody is mid-write
 
-    const ClockworkPort p = clockwork_port_open("gen-check", kClockworkPortSource, 1, 1024);
-    REQUIRE(clockwork_port_bus_attach(p, lanes_test::kInChannels + 1) == 1);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "gen-check", kClockworkPortSource, 1, 1024);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, lanes_test::kInChannels + 1) == 1);
 
     const uint32_t after = map()->generation.load(std::memory_order_acquire);
     CHECK(after != before);
@@ -210,9 +210,9 @@ TEST_CASE("channel map: a long name is truncated, not overrun",
     const std::string longName(CHANNEL_MAP_NAME_BYTES * 2, 'x');
 
     const ClockworkPort p =
-        clockwork_port_open(longName.c_str(), kClockworkPortSource, 1, 1024);
+        clockwork_port_open(clockwork_core_ports(lanes_test::core()), longName.c_str(), kClockworkPortSource, 1, 1024);
     REQUIRE(p != CLOCKWORK_PORT_NONE);
-    REQUIRE(clockwork_port_bus_attach(p, lanes_test::kInChannels + 1) == 1);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, lanes_test::kInChannels + 1) == 1);
 
     const ClockworkStreamEntry* e = streamOf(inWord(lanes_test::kInChannels + 1));
     REQUIRE(e != nullptr);
@@ -223,10 +223,10 @@ TEST_CASE("channel map: a long name is truncated, not overrun",
 TEST_CASE("channel map: detach_all leaves nothing claimed", "[channel-map]") {
     lanes_test::boot();
     Bus guard;
-    const ClockworkPort p = clockwork_port_open("sweep-me", kClockworkPortSource, 2, 1024);
-    REQUIRE(clockwork_port_bus_attach(p, lanes_test::kInChannels + 2) == 1);
+    const ClockworkPort p = clockwork_port_open(clockwork_core_ports(lanes_test::core()), "sweep-me", kClockworkPortSource, 2, 1024);
+    REQUIRE(clockwork_port_bus_attach(lanes_test::core(), p, lanes_test::kInChannels + 2) == 1);
 
-    clockwork_port_bus_detach_all();
+    clockwork_port_bus_detach_all(lanes_test::core());
 
     for (uint32_t c = 0; c < CLOCKWORK_MAX_CHANNELS; ++c) {
         INFO("channel " << c);
@@ -242,6 +242,6 @@ TEST_CASE("channel map: the arena and the accessor are the same bytes",
     lanes_test::boot();
     // What a client finds by offset is what the guest is handed by pointer.
     const auto* byOffset = reinterpret_cast<const ClockworkChannelMapState*>(
-        static_cast<const uint8_t*>(clockwork_lanes_base()) + CHANNEL_MAP_START);
+        static_cast<const uint8_t*>(clockwork_lanes_base(lanes_test::core())) + CHANNEL_MAP_START);
     REQUIRE(map() == byOffset);
 }

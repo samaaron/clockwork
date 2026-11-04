@@ -431,7 +431,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
         // A /clock verb nothing owns (typo, or a verb from a newer client):
         // refuse explicitly instead of dropping silently, via the same
         // helper as the WASM route. Pair with /clockwork/clock/capabilities/get.
-        replyClockUnsupported(data, size,
+        replyClockUnsupported(mEngine->core(), data, size,
             [this, token](const uint8_t* d, uint32_t n) {
                 mEgress->reply(token, d, n);
             });
@@ -771,11 +771,11 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
     } catch (const std::exception& e) {
         // Malformed: refused below, as an unknown verb is, and said here with
         // the address, which is the packet's first string.
-        clockwork_log("[control] malformed %.*s (%u bytes): %s",
+        clockwork_log(mEngine->core(), "[control] malformed %.*s (%u bytes): %s",
                       static_cast<int>(strnlen(reinterpret_cast<const char*>(data), size)),
                       reinterpret_cast<const char*>(data), size, e.what());
     } catch (...) {
-        clockwork_log("[control] malformed %.*s (%u bytes)",
+        clockwork_log(mEngine->core(), "[control] malformed %.*s (%u bytes)",
                       static_cast<int>(strnlen(reinterpret_cast<const char*>(data), size)),
                       reinterpret_cast<const char*>(data), size);
     }

@@ -50,10 +50,13 @@ bool argBool(osc::ReceivedMessage::const_iterator& it,
 }
 } // namespace
 
-void OscControl::init(OscEgress* egress, PerformanceMetrics* metrics) {
+ClockworkCore* OscControl::core() const { return mEgress ? mEgress->core() : nullptr; }
+
+void OscControl::init(OscEgress* egress, PerformanceMetrics* metrics, const ClockworkSinks* sinks) {
+    mSinks = sinks;
     mEgress = egress;
     mMetrics = metrics;
-    if (!mOsc) mOsc = clockwork_osc_create(this, &OscControl::emitCb, &OscControl::droppedCb);
+    if (!mOsc) mOsc = clockwork_osc_create(core(), this, &OscControl::emitCb, &OscControl::droppedCb);
 }
 
 void OscControl::shutdown() {
@@ -89,13 +92,13 @@ ClockworkSink OscControl::sinkFor(const std::string& host, int port) {
     const std::string target = (host.find(':') != std::string::npos ? "[" + host + "]" : host)
                              + ":" + std::to_string(port);
     std::array<ClockworkSink, kMaxSinks> open{};
-    const uint32_t n = clockwork_sink_list(open.data(), kMaxSinks);
+    const uint32_t n = clockwork_sink_list(mSinks, open.data(), kMaxSinks);
     for (uint32_t i = 0; i < n && i < kMaxSinks; ++i) {
-        if (clockwork_sink_kind(open[i]) != kClockworkSinkOsc) continue;
-        const char* t = clockwork_sink_target(open[i]);
+        if (clockwork_sink_kind(mSinks, open[i]) != kClockworkSinkOsc) continue;
+        const char* t = clockwork_sink_target(mSinks, open[i]);
         if (t && target == t) return open[i];
     }
-    return clockwork_sink_open(kClockworkSinkOsc, target.c_str(), kSinkCapacity);
+    return clockwork_sink_open(mSinks, kClockworkSinkOsc, target.c_str(), kSinkCapacity);
 }
 #endif // CLOCKWORK_CLIENT_VERBS
 
@@ -145,7 +148,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             if (it != end) port = argInt(it, end, 0);
             if (it != end && it->IsBlob()) it->AsBlobUnchecked(inner, innerLen);
             if (!(inner && innerLen > 0 && !host.empty() && port > 0)) {
-                clockwork_log("WARNING: /clockwork/osc/send dropped — bad host/port/blob "
+                clockwork_log(core(), "WARNING: /clockwork/osc/send dropped — bad host/port/blob "
                        "(host='%s' port=%d innerLen=%d)",
                        host.c_str(), port, static_cast<int>(innerLen));
                 if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
@@ -159,14 +162,14 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             const ClockworkSink sink = sinkFor(host, port);
             const ClockworkTimetag when = meta.when.abi();
             if (sink == CLOCKWORK_SINK_NONE ||
-                !clockwork_sink_send(sink, static_cast<const uint8_t*>(inner),
+                !clockwork_sink_send(mSinks, sink, static_cast<const uint8_t*>(inner),
                                static_cast<uint32_t>(innerLen), when)) {
                 // Say why, to the log AND to the caller: a message that never
                 // left is the client's problem to know about, and a debug line
                 // nobody is watching is not telling them.
                 std::array<char, 128> reason{};
                 const uint32_t widest = sink == CLOCKWORK_SINK_NONE
-                                      ? 0 : clockwork_sink_max_message_bytes(sink);
+                                      ? 0 : clockwork_sink_max_message_bytes(mSinks, sink);
                 if (sink == CLOCKWORK_SINK_NONE)
                     std::snprintf(reason.data(), reason.size(), "host does not resolve");
                 else if (static_cast<uint32_t>(innerLen) > widest)
@@ -175,7 +178,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                                   static_cast<unsigned>(innerLen), static_cast<unsigned>(widest));
                 else
                     std::snprintf(reason.data(), reason.size(), "sink full");
-                clockwork_log("WARNING: /clockwork/osc/send to %s:%d dropped — %s",
+                clockwork_log(core(), "WARNING: /clockwork/osc/send to %s:%d dropped — %s",
                        host.c_str(), port, reason.data());
                 if (mEgress) mEgress->refuse(token, data, size, reason.data());
             }
@@ -213,10 +216,10 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
         }
     } catch (const std::exception& e) {
-        clockwork_log("[osc] malformed %s (%u bytes): %s", addr, size, e.what());
+        clockwork_log(core(), "[osc] malformed %s (%u bytes): %s", addr, size, e.what());
         if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
     } catch (...) {
-        clockwork_log("[osc] malformed %s (%u bytes)", addr, size);
+        clockwork_log(core(), "[osc] malformed %s (%u bytes)", addr, size);
         if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
     }
     return true;

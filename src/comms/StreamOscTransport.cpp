@@ -37,15 +37,15 @@ bool StreamOscTransport::start() {
     ClockworkOscStream* server = nullptr;
     switch (mKind) {
     case Kind::Tcp:
-        server = clockwork_osc_tcp_start(this, &onPacket, &onClosed, mSecret, mPort,
+        server = clockwork_osc_tcp_start(mCore, this, &onPacket, &onClosed, mSecret, mPort,
                                          reinterpret_cast<const uint8_t*>(mBindAddress.data()),
                                          static_cast<uint32_t>(mBindAddress.size()));
         break;
     case Kind::Uds:
-        server = clockwork_osc_uds_stream_start(this, &onPacket, &onClosed, mSecret, ep, epLen);
+        server = clockwork_osc_uds_stream_start(mCore, this, &onPacket, &onClosed, mSecret, ep, epLen);
         break;
     case Kind::Pipe:
-        server = clockwork_osc_pipe_start(this, &onPacket, &onClosed, mSecret, ep, epLen);
+        server = clockwork_osc_pipe_start(mCore, this, &onPacket, &onClosed, mSecret, ep, epLen);
         break;
     case Kind::None:
         break;

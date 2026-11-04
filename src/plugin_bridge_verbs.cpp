@@ -327,7 +327,7 @@ void TrackVerbs::scanAndSendPlugins(uint32_t replyToken) {
     //
     // PAGED, like plugin/params, and for the same reason: a page is one
     // frame on the NRT egress lane, and that lane refuses a frame over 8 KB
-    // (kNrtEgressMax). A studio machine can have five hundred plugins and a
+    // (clockwork_egress_nrt_max_frame). A studio machine can have five hundred plugins and a
     // VST3 path under a vendor folder runs to a hundred characters, so a
     // page is bounded by bytes as well as entries — sixty-four entries, or
     // fewer if the strings would take the page past kPageBytes. The one

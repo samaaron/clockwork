@@ -25,7 +25,10 @@
 #include <sstream>
 #include <vector>
 
-extern "C" { extern uint8_t* shared_memory; }
+namespace {
+// The engine's arena (clockwork_lanes_base).
+uint8_t* arenaBase(const engine_test::Engine& e) { return static_cast<uint8_t*>(clockwork_lanes_base(e.engine.core())); }
+}
 
 using engine_test::Engine;
 using engine_test::kSampleRate;
@@ -34,9 +37,9 @@ namespace {
 
 constexpr int kChannels = 2;
 
-ClockworkClientSampleClock sampleClock() {
+ClockworkClientSampleClock sampleClock(const Engine& e) {
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, &st);
     REQUIRE(st == CLOCKWORK_OK);
     ClockworkClientSampleClock sc{};
     sc.struct_bytes = sizeof(sc);
@@ -90,12 +93,12 @@ TEST_CASE("clock: a freewheel clock from an origin goes on through a restart, ne
     constexpr double kOrigin = 3976214400.0;
     Engine e([](ClockworkEngine::Config& cfg) { cfg.freewheelOriginNtp = kOrigin; });
     e.pump(0.1);
-    const auto before = sampleClock();
-    const double endedAt = before.dac_ntp + double(clockwork_block_size()) / kSampleRate;
+    const auto before = sampleClock(e);
+    const double endedAt = before.dac_ntp + double(clockwork_block_size(e.engine.core())) / kSampleRate;
 
     e.engine.restartManualPump();
     e.engine.pumpAudioBlock();
-    const auto after = sampleClock();
+    const auto after = sampleClock(e);
     CHECK(after.engine_frames == 0);
     CHECK(after.dac_ntp == Catch::Approx(endedAt).margin(1e-6));
 }
@@ -108,7 +111,7 @@ TEST_CASE("pumped device: what is fed in comes out of the echo, bit for bit",
           "[pumped]") {
     Engine e = withInputs();
     echo(e);
-    const int block = static_cast<int>(clockwork_block_size());
+    const int block = static_cast<int>(clockwork_block_size(e.engine.core()));
     uint64_t next = 0;
     int matched = 0, firstMatch = -1;
     for (int i = 0; i < 64; ++i) {
@@ -143,7 +146,7 @@ TEST_CASE("pumped device: callbacks of any size give back the stream, nothing lo
     constexpr int kLargest = 384;   // the random sizes' device buffer
     Engine e = withInputs(fixed ? fixed : kLargest);
     echo(e);
-    const int block = static_cast<int>(clockwork_block_size());
+    const int block = static_cast<int>(clockwork_block_size(e.engine.core()));
     // Straight from the engine, whose output the standard fixes: a
     // std::uniform_int_distribution is each library's own, and gives each
     // platform different sizes for the same seed.
@@ -211,10 +214,10 @@ TEST_CASE("pumped device: callbacks of any size give back the stream, nothing lo
 // block pumped beside it would be a second clock and a second sample count.
 TEST_CASE("pumped device: an engine pumped as a device refuses a block pump", "[pumped]") {
     Engine e = withInputs();
-    const int block = static_cast<int>(clockwork_block_size());
+    const int block = static_cast<int>(clockwork_block_size(e.engine.core()));
     uint64_t next = 0;
     for (int i = 0; i < 8; ++i) callback(e, next, block);
-    const auto before = sampleClock();
+    const auto before = sampleClock(e);
     e.engine.pumpAudioBlock();
-    CHECK(sampleClock().engine_frames == before.engine_frames);
+    CHECK(sampleClock(e).engine_frames == before.engine_frames);
 }

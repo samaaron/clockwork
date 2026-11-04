@@ -15,6 +15,8 @@ pub const CLOCKWORK_ARENA_VERSION: u32 = 2;
 pub const CLOCKWORK_ARENA_HEADER_BYTES: u32 = 4096;
 pub const CLOCKWORK_ARENA_MAX_AREAS: u32 = 16;
 pub const CLOCKWORK_ARENA_MAX_ENTRIES: u32 = 48;
+/// The most tap slots an arena holds, the guest's and the track taps together.
+pub const CLOCKWORK_TAP_SLOTS_MAX: u32 = 64;
 pub const CLOCKWORK_ARENA_GEOM_WORDS: usize = 8;
 pub const CLOCKWORK_ARENA_LAYING_OUT: u32 = 0;
 pub const CLOCKWORK_ARENA_PUBLISHED: u32 = 1;
@@ -49,8 +51,8 @@ impl ClockworkArenaArea {
     pub const STACK: Self = Self(11);
     /// What the program's code has taken with malloc and new, to the frontier at boot.
     pub const MALLOC: Self = Self(12);
-    /// Outside the arena: what clockwork's Rust code allocates inside an engine entry point (a sink's or a port's
-    /// queues); one block for the life of the process, which the RT router serves.
+    /// Outside the arena: what clockwork's Rust code allocates inside a door (a sink's or a port's queues); one
+    /// block for the life of the process, which the RT router serves.
     pub const RUST_HEAP: Self = Self(13);
     /// The engine's memory: one block the guest's two spans are carved from. On the web it holds the arena at its
     /// start and the rust heap too, and lies inside what malloc took; natively the arena and the rust heap are

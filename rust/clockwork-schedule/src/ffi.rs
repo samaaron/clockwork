@@ -25,6 +25,7 @@
 
 #![allow(unused_imports)]
 
+use clockwork_fence::no_unwind;
 use std::os::raw::{c_int, c_uint, c_void};
 
 #[cfg(feature = "parse")]
@@ -59,10 +60,12 @@ pub extern "C" fn clockwork_sched_new(
     meta_size: c_uint,
     meta_align: c_uint,
 ) -> *mut ClockworkSched {
-    match Store::new(slot_count, data_pool_size, meta_size, meta_align) {
-        Some(s) => Box::into_raw(Box::new(ClockworkSched(s))),
-        None => core::ptr::null_mut(),
-    }
+    no_unwind(core::ptr::null_mut(), || {
+        match Store::new(slot_count, data_pool_size, meta_size, meta_align) {
+            Some(s) => Box::into_raw(Box::new(ClockworkSched(s))),
+            None => core::ptr::null_mut(),
+        }
+    })
 }
 
 /// Bytes a caller must supply to [`clockwork_sched_new_in_place`] for this shape,
@@ -74,11 +77,13 @@ pub extern "C" fn clockwork_sched_bytes_needed(
     meta_size: c_uint,
     meta_align: c_uint,
 ) -> usize {
-    // The handle itself lives in the caller's buffer too.
-    match Store::bytes_needed(slot_count, data_pool_size, meta_size, meta_align) {
-        Some(n) => n + core::mem::size_of::<ClockworkSched>() + core::mem::align_of::<ClockworkSched>(),
-        None => 0,
-    }
+    no_unwind(0, || {
+        // The handle itself lives in the caller's buffer too.
+        match Store::bytes_needed(slot_count, data_pool_size, meta_size, meta_align) {
+            Some(n) => n + core::mem::size_of::<ClockworkSched>() + core::mem::align_of::<ClockworkSched>(),
+            None => 0,
+        }
+    })
 }
 
 /// Build a scheduler inside memory the caller owns. Allocates nothing, so it
@@ -95,37 +100,41 @@ pub unsafe extern "C" fn clockwork_sched_new_in_place(
     meta_size: c_uint,
     meta_align: c_uint,
 ) -> *mut ClockworkSched {
-    let needed = clockwork_sched_bytes_needed(slot_count, data_pool_size, meta_size, meta_align);
-    if mem.is_null() || needed == 0 || len < needed {
-        return core::ptr::null_mut();
-    }
-    // Put the handle at the front, aligned, and give the store the rest.
-    let align = core::mem::align_of::<ClockworkSched>();
-    let head = ((mem as usize + align - 1) & !(align - 1)) as *mut ClockworkSched;
-    let used = head as usize - mem as usize + core::mem::size_of::<ClockworkSched>();
-    // SAFETY: `used <= needed <= len`, so the rest of the buffer starts
-    // inside it and is `len - used` bytes long, per the contract.
-    let rest = unsafe { mem.add(used) };
-    // SAFETY: `rest` is `len - used` writable bytes that outlive the store,
-    // per the contract.
-    let store = match unsafe { Store::new_in(rest, len - used, slot_count, data_pool_size, meta_size, meta_align) } {
-        Some(s) => s,
-        None => return core::ptr::null_mut(),
-    };
-    // SAFETY: `head` is aligned, inside the buffer, and the store was given
-    // only the bytes after it.
-    unsafe { core::ptr::write(head, ClockworkSched(store)) };
-    head
+    no_unwind(core::ptr::null_mut(), || {
+        let needed = clockwork_sched_bytes_needed(slot_count, data_pool_size, meta_size, meta_align);
+        if mem.is_null() || needed == 0 || len < needed {
+            return core::ptr::null_mut();
+        }
+        // Put the handle at the front, aligned, and give the store the rest.
+        let align = core::mem::align_of::<ClockworkSched>();
+        let head = ((mem as usize + align - 1) & !(align - 1)) as *mut ClockworkSched;
+        let used = head as usize - mem as usize + core::mem::size_of::<ClockworkSched>();
+        // SAFETY: `used <= needed <= len`, so the rest of the buffer starts
+        // inside it and is `len - used` bytes long, per the contract.
+        let rest = unsafe { mem.add(used) };
+        // SAFETY: `rest` is `len - used` writable bytes that outlive the store,
+        // per the contract.
+        let store = match unsafe { Store::new_in(rest, len - used, slot_count, data_pool_size, meta_size, meta_align) } {
+            Some(s) => s,
+            None => return core::ptr::null_mut(),
+        };
+        // SAFETY: `head` is aligned, inside the buffer, and the store was given
+        // only the bytes after it.
+        unsafe { core::ptr::write(head, ClockworkSched(store)) };
+        head
+    })
 }
 
 /// # Safety
 /// `h` is null or a handle from [`clockwork_sched_new`] not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_free(h: *mut ClockworkSched) {
-    if !h.is_null() {
-        // SAFETY: the box `clockwork_sched_new` leaked, freed once, here.
-        unsafe { drop(Box::from_raw(h)) };
-    }
+    no_unwind((), || {
+        if !h.is_null() {
+            // SAFETY: the box `clockwork_sched_new` leaked, freed once, here.
+            unsafe { drop(Box::from_raw(h)) };
+        }
+    })
 }
 
 /// Store `size` bytes of `data` to fire at `when` under `tag`.
@@ -144,18 +153,20 @@ pub unsafe extern "C" fn clockwork_sched_add(
     data: *const u8,
     size: c_uint,
 ) -> *mut c_void {
-    // SAFETY: a live handle or null, per the contract.
-    let Some(s) = (unsafe { h.as_mut() }) else { return core::ptr::null_mut() };
-    let bytes: &[u8] = if data.is_null() || size == 0 {
-        &[]
-    } else {
-        // SAFETY: readable for `size` bytes per the contract.
-        unsafe { core::slice::from_raw_parts(data, size as usize) }
-    };
-    match s.0.add(when, tag, bytes) {
-        Some(meta) => meta.as_mut_ptr().cast::<c_void>(),
-        None => core::ptr::null_mut(),
-    }
+    no_unwind(core::ptr::null_mut(), || {
+        // SAFETY: a live handle or null, per the contract.
+        let Some(s) = (unsafe { h.as_mut() }) else { return core::ptr::null_mut() };
+        let bytes: &[u8] = if data.is_null() || size == 0 {
+            &[]
+        } else {
+            // SAFETY: readable for `size` bytes per the contract.
+            unsafe { core::slice::from_raw_parts(data, size as usize) }
+        };
+        match s.0.add(when, tag, bytes) {
+            Some(meta) => meta.as_mut_ptr().cast::<c_void>(),
+            None => core::ptr::null_mut(),
+        }
+    })
 }
 
 /// The earliest live event's timetag into `out`: 1, or 0 with `out` untouched
@@ -165,14 +176,16 @@ pub unsafe extern "C" fn clockwork_sched_add(
 /// `h` is a live handle or null; `out` is writable or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_next_time(h: *const ClockworkSched, out: *mut Timetag) -> c_int {
-    // SAFETY: a live handle or null, per the contract.
-    let Some(next) = (unsafe { h.as_ref() }).and_then(|s| s.0.next_time()) else { return 0 };
-    if out.is_null() {
-        return 0;
-    }
-    // SAFETY: `out` is writable, per the contract.
-    unsafe { *out = next };
-    1
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        let Some(next) = (unsafe { h.as_ref() }).and_then(|s| s.0.next_time()) else { return 0 };
+        if out.is_null() {
+            return 0;
+        }
+        // SAFETY: `out` is writable, per the contract.
+        unsafe { *out = next };
+        1
+    })
 }
 
 /// A due event, as C sees it. Mirrors `ClockworkSchedEvent` in the header.
@@ -198,28 +211,30 @@ pub unsafe extern "C" fn clockwork_sched_pop_due(
     now: Timetag,
     out: *mut ClockworkSchedEvent,
 ) -> c_int {
-    // SAFETY: a live handle or null, per the contract.
-    let Some(s) = (unsafe { h.as_mut() }) else { return 0 };
-    if out.is_null() {
-        return 0;
-    }
-    match s.0.pop_due(now) {
-        Some(e) => {
-            // The slices become pointers here: the C contract is that they
-            // stay valid until clockwork_sched_release for this slot.
-            // SAFETY: `out` is writable, per the contract.
-            unsafe { *out = ClockworkSchedEvent {
-                when: e.when,
-                tag: e.tag,
-                size: e.data.len() as c_uint,
-                meta: e.meta.as_ptr().cast::<c_void>(),
-                data: e.data.as_ptr(),
-                slot: e.slot,
-            } };
-            1
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        let Some(s) = (unsafe { h.as_mut() }) else { return 0 };
+        if out.is_null() {
+            return 0;
         }
-        None => 0,
-    }
+        match s.0.pop_due(now) {
+            Some(e) => {
+                // The slices become pointers here: the C contract is that they
+                // stay valid until clockwork_sched_release for this slot.
+                // SAFETY: `out` is writable, per the contract.
+                unsafe { *out = ClockworkSchedEvent {
+                    when: e.when,
+                    tag: e.tag,
+                    size: e.data.len() as c_uint,
+                    meta: e.meta.as_ptr().cast::<c_void>(),
+                    data: e.data.as_ptr(),
+                    slot: e.slot,
+                } };
+                1
+            }
+            None => 0,
+        }
+    })
 }
 
 /// Return a popped event's slot. Negative, out-of-range and already-free
@@ -229,10 +244,12 @@ pub unsafe extern "C" fn clockwork_sched_pop_due(
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_release(h: *mut ClockworkSched, slot: c_int) {
-    // SAFETY: a live handle or null, per the contract.
-    if let Some(s) = unsafe { h.as_mut() } {
-        s.0.release(slot);
-    }
+    no_unwind((), || {
+        // SAFETY: a live handle or null, per the contract.
+        if let Some(s) = unsafe { h.as_mut() } {
+            s.0.release(slot);
+        }
+    })
 }
 
 /// Cancel every live event carrying `tag`; tag 0 is the wildcard.
@@ -241,20 +258,24 @@ pub unsafe extern "C" fn clockwork_sched_release(h: *mut ClockworkSched, slot: c
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_flush(h: *mut ClockworkSched, tag: c_uint) {
-    // SAFETY: a live handle or null, per the contract.
-    if let Some(s) = unsafe { h.as_mut() } {
-        s.0.flush(tag);
-    }
+    no_unwind((), || {
+        // SAFETY: a live handle or null, per the contract.
+        if let Some(s) = unsafe { h.as_mut() } {
+            s.0.flush(tag);
+        }
+    })
 }
 
 /// # Safety
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_clear(h: *mut ClockworkSched) {
-    // SAFETY: a live handle or null, per the contract.
-    if let Some(s) = unsafe { h.as_mut() } {
-        s.0.clear();
-    }
+    no_unwind((), || {
+        // SAFETY: a live handle or null, per the contract.
+        if let Some(s) = unsafe { h.as_mut() } {
+            s.0.clear();
+        }
+    })
 }
 
 /// Live event count.
@@ -263,8 +284,10 @@ pub unsafe extern "C" fn clockwork_sched_clear(h: *mut ClockworkSched) {
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_size(h: *const ClockworkSched) -> c_int {
-    // SAFETY: a live handle or null, per the contract.
-    unsafe { h.as_ref() }.map_or(0, |s| s.0.size())
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        unsafe { h.as_ref() }.map_or(0, |s| s.0.size())
+    })
 }
 
 /// 1 when the SLOT pool is full. The data pool can be exhausted while slots
@@ -275,24 +298,30 @@ pub unsafe extern "C" fn clockwork_sched_size(h: *const ClockworkSched) -> c_int
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_full(h: *const ClockworkSched) -> c_int {
-    // SAFETY: a live handle or null, per the contract.
-    unsafe { h.as_ref() }.map_or(1, |s| s.0.full() as c_int)
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        unsafe { h.as_ref() }.map_or(1, |s| s.0.full() as c_int)
+    })
 }
 
 /// # Safety
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_data_used(h: *const ClockworkSched) -> c_uint {
-    // SAFETY: a live handle or null, per the contract.
-    unsafe { h.as_ref() }.map_or(0, |s| s.0.data_used())
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        unsafe { h.as_ref() }.map_or(0, |s| s.0.data_used())
+    })
 }
 
 /// # Safety
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_data_capacity(h: *const ClockworkSched) -> c_uint {
-    // SAFETY: a live handle or null, per the contract.
-    unsafe { h.as_ref() }.map_or(0, |s| s.0.data_capacity())
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        unsafe { h.as_ref() }.map_or(0, |s| s.0.data_capacity())
+    })
 }
 
 /// Ask the owning thread to clear at its next safe point. The one call here
@@ -302,10 +331,12 @@ pub unsafe extern "C" fn clockwork_sched_data_capacity(h: *const ClockworkSched)
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_request_clear(h: *const ClockworkSched) {
-    // SAFETY: a live handle or null, per the contract.
-    if let Some(s) = unsafe { h.as_ref() } {
-        s.0.request_clear();
-    }
+    no_unwind((), || {
+        // SAFETY: a live handle or null, per the contract.
+        if let Some(s) = unsafe { h.as_ref() } {
+            s.0.request_clear();
+        }
+    })
 }
 
 /// Perform a requested clear, if there is one. Returns 1 if it happened.
@@ -314,8 +345,10 @@ pub unsafe extern "C" fn clockwork_sched_request_clear(h: *const ClockworkSched)
 /// `h` is a live handle or null.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_drain_pending_clear(h: *mut ClockworkSched) -> c_int {
-    // SAFETY: a live handle or null, per the contract.
-    unsafe { h.as_mut() }.map_or(0, |s| s.0.drain_pending_clear() as c_int)
+    no_unwind(0, || {
+        // SAFETY: a live handle or null, per the contract.
+        unsafe { h.as_mut() }.map_or(0, |s| s.0.drain_pending_clear() as c_int)
+    })
 }
 
 }
@@ -336,11 +369,13 @@ pub use store_abi::*;
 #[cfg(feature = "store")]
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_tag_hash(s: *const u8, n: usize) -> c_uint {
-    if s.is_null() || n == 0 {
-        return tag::tag_hash(&[]);
-    }
-    // SAFETY: readable for `n` bytes, per the contract.
-    tag::tag_hash(unsafe { core::slice::from_raw_parts(s, n) })
+    no_unwind(tag::tag_hash(&[]), || {
+        if s.is_null() || n == 0 {
+            return tag::tag_hash(&[]);
+        }
+        // SAFETY: readable for `n` bytes, per the contract.
+        tag::tag_hash(unsafe { core::slice::from_raw_parts(s, n) })
+    })
 }
 
 // ── The wire forms ──────────────────────────────────────────────────────────
@@ -362,7 +397,9 @@ pub struct ClockworkSchedulePacket {
 #[cfg(feature = "parse")]
 #[no_mangle]
 pub extern "C" fn clockwork_sched_ntp_to_timetag(ntp: f64) -> Timetag {
-    Timetag::from_ntp_seconds(ntp)
+    no_unwind(Timetag::default(), || {
+        Timetag::from_ntp_seconds(ntp)
+    })
 }
 
 /// # Safety
@@ -370,9 +407,11 @@ pub extern "C" fn clockwork_sched_ntp_to_timetag(ntp: f64) -> Timetag {
 #[cfg(feature = "parse")]
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_is_bundle(data: *const u8, size: c_uint) -> c_int {
-    if data.is_null() { return 0; }
-    // SAFETY: readable for `size` bytes per the contract.
-    parse::is_bundle(unsafe { core::slice::from_raw_parts(data, size as usize) }) as c_int
+    no_unwind(0, || {
+        if data.is_null() { return 0; }
+        // SAFETY: readable for `size` bytes per the contract.
+        parse::is_bundle(unsafe { core::slice::from_raw_parts(data, size as usize) }) as c_int
+    })
 }
 
 /// # Safety
@@ -380,11 +419,13 @@ pub unsafe extern "C" fn clockwork_sched_is_bundle(data: *const u8, size: c_uint
 #[cfg(feature = "parse")]
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_bundle_timetag(bundle: *const u8) -> Timetag {
-    if bundle.is_null() {
-        return Timetag::default();
-    }
-    // SAFETY: readable for at least 16 bytes per the contract.
-    parse::bundle_timetag(unsafe { core::slice::from_raw_parts(bundle, 16) })
+    no_unwind(Timetag::default(), || {
+        if bundle.is_null() {
+            return Timetag::default();
+        }
+        // SAFETY: readable for at least 16 bytes per the contract.
+        parse::bundle_timetag(unsafe { core::slice::from_raw_parts(bundle, 16) })
+    })
 }
 
 /// Parse `"/clockwork/schedule <timetag> <blob>"`. `blob` borrows `msg`.
@@ -394,13 +435,15 @@ pub unsafe extern "C" fn clockwork_sched_bundle_timetag(bundle: *const u8) -> Ti
 #[cfg(feature = "parse")]
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_sched_parse(msg: *const u8, size: c_uint) -> ClockworkSchedulePacket {
-    if msg.is_null() {
-        return ClockworkSchedulePacket { ok: 0, when: Timetag::default(), blob: core::ptr::null(), blob_len: 0 };
-    }
-    // SAFETY: readable for `size` bytes per the contract.
-    let bytes = unsafe { core::slice::from_raw_parts(msg, size as usize) };
-    let p = parse::parse(bytes);
-    // The blob's offset becomes a pointer into the caller's message here.
-    let blob = if p.ok { bytes[p.blob_off..].as_ptr() } else { core::ptr::null() };
-    ClockworkSchedulePacket { ok: p.ok as c_int, when: p.when, blob, blob_len: p.blob_len }
+    no_unwind(ClockworkSchedulePacket { ok: 0, when: Timetag::default(), blob: core::ptr::null(), blob_len: 0 }, || {
+        if msg.is_null() {
+            return ClockworkSchedulePacket { ok: 0, when: Timetag::default(), blob: core::ptr::null(), blob_len: 0 };
+        }
+        // SAFETY: readable for `size` bytes per the contract.
+        let bytes = unsafe { core::slice::from_raw_parts(msg, size as usize) };
+        let p = parse::parse(bytes);
+        // The blob's offset becomes a pointer into the caller's message here.
+        let blob = if p.ok { bytes[p.blob_off..].as_ptr() } else { core::ptr::null() };
+        ClockworkSchedulePacket { ok: p.ok as c_int, when: p.when, blob, blob_len: p.blob_len }
+    })
 }

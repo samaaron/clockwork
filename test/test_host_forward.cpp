@@ -7,7 +7,7 @@
  * answer itself has nowhere to go, and is refused there. A host may instead
  * have a FRONT — a thread of its own that answers the control
  * verbs, which on the web is the client's main thread, the only place Web
- * MIDI and the Gamepad API exist — and with clockwork_host_forward(1) the
+ * MIDI and the Gamepad API exist — and with clockwork_host_forward(lanes_test::core(), 1) the
  * audio thread forwards to it: the verb goes back out over the egress, to
  * the origin that sent it, wrapped in a bundle carrying the call's time.
  *
@@ -77,7 +77,7 @@ const lanes_test::EgressFrame* findBundle(const std::vector<lanes_test::EgressFr
 }
 
 // Forwarding off for the rest of the binary, whatever a case did.
-struct ForwardOff { ~ForwardOff() { clockwork_host_forward(0); } };
+struct ForwardOff { ~ForwardOff() { clockwork_host_forward(lanes_test::core(), 0); } };
 
 } // namespace
 
@@ -85,8 +85,8 @@ TEST_CASE("host forward: off, an unknown verb is refused on the audio thread",
           "[host_forward][lanes]") {
     lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(0);
-    REQUIRE(clockwork_host_forwards() == 0);
+    clockwork_host_forward(lanes_test::core(), 0);
+    REQUIRE(clockwork_host_forwards(lanes_test::core()) == 0);
     lanes_test::drainRt();
 
     const auto verb = noteOn(60, 100);
@@ -104,8 +104,8 @@ TEST_CASE("host forward: on, the verb goes back to its sender whole, inside an i
           "[host_forward][lanes]") {
     lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
-    REQUIRE(clockwork_host_forwards() == 1);
+    clockwork_host_forward(lanes_test::core(), 1);
+    REQUIRE(clockwork_host_forwards(lanes_test::core()) == 1);
     lanes_test::drainRt();
 
     const auto verb = noteOn(60, 100);
@@ -130,7 +130,7 @@ TEST_CASE("host forward: a verb nobody would answer is forwarded too — the hos
     // the native shape too (the refusal at the far end of the control hop).
     lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
+    clockwork_host_forward(lanes_test::core(), 1);
     lanes_test::drainRt();
 
     const auto verb = osc_test::message(CLOCKWORK_SYS("no/such/verb"));
@@ -146,7 +146,7 @@ TEST_CASE("host forward: ping is answered on the audio thread either way",
           "[host_forward][lanes]") {
     lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
+    clockwork_host_forward(lanes_test::core(), 1);
     lanes_test::drainRt();
 
     const auto ping = osc_test::message(CLOCKWORK_SYS("ping"), 77);
@@ -169,7 +169,7 @@ TEST_CASE("host forward: a verb the scheduler fired carries the moment it was sc
     // not the start of whichever block fired it.
     const uint32_t block = lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
+    clockwork_host_forward(lanes_test::core(), 1);
     lanes_test::drainRt();
 
     const uint64_t now      = lanes_test::tick();          // a known frame
@@ -202,8 +202,8 @@ TEST_CASE("host forward: a verb the scheduler fired carries the moment it was sc
 
 TEST_CASE("host forward: off again, the refusal is back", "[host_forward][lanes]") {
     lanes_test::boot();
-    clockwork_host_forward(1);
-    clockwork_host_forward(0);
+    clockwork_host_forward(lanes_test::core(), 1);
+    clockwork_host_forward(lanes_test::core(), 0);
     lanes_test::drainRt();
 
     const auto verb = osc_test::message(CLOCKWORK_SYS("gamepad/devices/list"));
@@ -218,11 +218,26 @@ TEST_CASE("host forward: off again, the refusal is back", "[host_forward][lanes]
 // A self-directed guest never sends through ingress: it opens a sink and
 // sends with its own `when` (clockwork_event_sink.h). On a target with no
 // MIDI port and no thread — the worklet — the host is that sink's endpoint
-// (clockwork_sink_set_host_emit), installed by the same switch: the send
+// (clockwork_sink_set_host_emitter), installed by the same switch: the send
 // goes out as "/clockwork/midi/sink/send ,sb <port> <bytes>" inside a bundle
 // carrying its time, for the host's front to put on the port with that time.
 
 #include "clockwork_event_sink.h"
+#include "shared_memory.h"
+
+// The audio thread's egress writer (audio_processor.cpp), to fill the ring.
+extern bool ring_buffer_write(
+    uint8_t* buffer_start,
+    uint32_t buffer_size,
+    std::atomic<int32_t>* head,
+    std::atomic<int32_t>* tail,
+    std::atomic<int32_t>* sequence,
+    uint32_t route,
+    uint32_t source_id,
+    const void* data,
+    uint32_t data_size,
+    std::atomic<uint32_t>* status_flags,
+    PerformanceMetrics* metrics);
 
 namespace {
 
@@ -244,16 +259,16 @@ TEST_CASE("host forward: on, a MIDI sink opens onto the host and a send goes out
           "[host_forward][lanes][sinks]") {
     lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
+    clockwork_host_forward(lanes_test::core(), 1);
     lanes_test::drainRt();
 
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkMidi, "Fake Synth", 0);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "Fake Synth", 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    CHECK(clockwork_sink_kind(sink) == kClockworkSinkMidi);
+    CHECK(clockwork_sink_kind(clockwork_core_sinks(lanes_test::core()), sink) == kClockworkSinkMidi);
 
     const auto when = clockwork::Timetag::fromNtpSeconds(lanes_test::ntpAtFrame(480000));
     const uint8_t note[3] = { 0x90, 60, 100 };
-    REQUIRE(clockwork_sink_send(sink, note, 3, when.abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, note, 3, when.abi()) != 0);
 
     // DIRECT: the frame is on the egress before any block is rendered.
     const auto frames = lanes_test::drainRt();
@@ -269,18 +284,71 @@ TEST_CASE("host forward: on, a MIDI sink opens onto the host and a send goes out
 
     // Counted as handed to a platform that holds it.
     ClockworkSinkStats st{};
-    REQUIRE(clockwork_sink_stats(sink, &st) != 0);
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &st) != 0);
     CHECK(st.sent == 1);
     CHECK(st.scheduled == 1);
     CHECK(st.dropped == 0);
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
+}
+
+TEST_CASE("host forward: a send whose port and bytes fill their words exactly goes out whole",
+          "[host_forward][lanes][sinks]") {
+    // Four characters and four bytes: the port takes a whole word of NULs
+    // after it, and the blob none.
+    lanes_test::boot();
+    ForwardOff guard;
+    clockwork_host_forward(lanes_test::core(), 1);
+    lanes_test::drainRt();
+
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "Synt", 0);
+    REQUIRE(sink != CLOCKWORK_SINK_NONE);
+    const uint8_t sysex[4] = { 0xF0, 0x7E, 0x00, 0xF7 };
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, sysex, 4, clockwork_timetag_immediately()) != 0);
+
+    const auto frames = lanes_test::drainRt();
+    const auto* fwd = findBundle(frames);
+    REQUIRE(fwd != nullptr);
+    const Forwarded f = unwrap(*fwd);
+    CHECK(f.address == CLOCKWORK_SYS("midi/sink/send"));
+    CHECK(f.element.size() % 4 == 0);
+    const SinkSend s = unwrapSinkSend(f);
+    CHECK(s.port == "Synt");
+    CHECK(s.bytes == std::vector<uint8_t>(sysex, sysex + 4));
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
+}
+
+TEST_CASE("host forward: a send the egress has no room for is counted dropped, not sent",
+          "[host_forward][lanes][sinks]") {
+    lanes_test::boot();
+    ForwardOff guard;
+    clockwork_host_forward(lanes_test::core(), 1);
+    lanes_test::drainRt();
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "Fake Synth", 0);
+    REQUIRE(sink != CLOCKWORK_SINK_NONE);
+
+    // The egress full, as a reader far behind leaves it.
+    auto* const base = static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core()));
+    auto* const cursors = reinterpret_cast<RingCursors*>(base + clockwork::kDefaultLayout.ring_cursors_start);
+    const uint8_t filler[8] = { '/', 'x', 0, 0, ',', 0, 0, 0 };
+    while (ring_buffer_write(base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
+                             &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
+                             EGRESS_REPLY, 1, filler, sizeof filler, nullptr, nullptr)) {}
+
+    const uint8_t note[3] = { 0x90, 60, 100 };
+    clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, note, 3, clockwork_timetag_immediately());
+    ClockworkSinkStats st{};
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &st) != 0);
+    CHECK(st.sent == 0);
+    CHECK(st.dropped == 1);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
+    lanes_test::drainRt();
 }
 
 TEST_CASE("host forward: off, a MIDI port this build cannot reach is refused at open, as before",
           "[host_forward][lanes][sinks]") {
     lanes_test::boot();
-    clockwork_host_forward(0);
-    CHECK(clockwork_sink_open(kClockworkSinkMidi, "No Such Port, Surely", 0) == CLOCKWORK_SINK_NONE);
+    clockwork_host_forward(lanes_test::core(), 0);
+    CHECK(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "No Such Port, Surely", 0) == CLOCKWORK_SINK_NONE);
 }
 
 TEST_CASE("host forward: what the guest sends itself reaches the host with the moment it meant",
@@ -290,7 +358,7 @@ TEST_CASE("host forward: what the guest sends itself reaches the host with the m
     // time — never through ingress, never through a scheduler.
     const uint32_t block = lanes_test::boot();
     ForwardOff guard;
-    clockwork_host_forward(1);
+    clockwork_host_forward(lanes_test::core(), 1);
     lanes_test::drainRt();
 
     osc_test::Builder open;
@@ -329,5 +397,5 @@ TEST_CASE("host forward: what the guest sends itself reaches the host with the m
     CHECK(gotNtp >= blockNtp + 0.250 - 0.001);
     CHECK(gotNtp <= blockNtp + 0.250 + static_cast<double>(block) / lanes_test::kSampleRate + 0.001);
 
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
 }

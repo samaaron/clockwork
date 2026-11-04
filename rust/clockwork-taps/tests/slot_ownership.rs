@@ -10,29 +10,32 @@
 //! nothing would say why. The crate's own header calls this out as the part
 //! that matters; these are the cases that hold it.
 //!
-//! # Standing in for the host
+//! # The arena
 //!
-//! The crate reaches shared memory through two symbols the host defines —
-//! `clockwork_shm_base` and `clockwork_tap_geometry`. A test can define them, which is
-//! why this is testable in Rust at all: the region is a plain buffer here, laid
-//! out exactly as `shared_memory.h` describes, and the crate cannot tell the
-//! difference.
+//! The crate is handed a core's owner table and the arena it works in, and
+//! reads the tap region's geometry from the table at the arena's front. A
+//! test lays out an arena of its own: a table with one region, the taps,
+//! and the region itself, laid out exactly as `shared_memory.h` describes;
+//! the crate cannot tell the difference.
 //!
-//! Single-threaded and serialised on purpose. The crate's slot table is
-//! process-global (`SLOT_OWNERS`), so cases that claimed slots concurrently
-//! would be testing the test harness rather than the rule.
+//! Single-threaded and serialised on purpose: the cases share one arena and
+//! one owner table, so cases that claimed slots concurrently would be
+//! testing the test harness rather than the rule.
 
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use clockwork_abi::arena::{
+    geom, ClockworkArenaHeader, ClockworkArenaRegion, CLOCKWORK_ARENA_HEADER_BYTES, CLOCKWORK_ARENA_MAGIC,
+};
 use clockwork_taps::{
-    clockwork_tap_get, clockwork_tap_release, stream_activate, stream_release, TapBufferHnd,
+    clockwork_tap_get, clockwork_tap_release, stream_activate, stream_release, TapBufferHnd, Taps,
 };
 
-// Geometry the fake host reports. Small, but the same SHAPE as production:
-// a global header, then fixed-size slots each holding a header and a ring.
-const START: usize = 0;
+// The tap region's geometry. Small, but the same SHAPE as production: a
+// global header, then fixed-size slots each holding a header and a ring.
+const START: usize = CLOCKWORK_ARENA_HEADER_BYTES as usize;
 const HEADER_SIZE: usize = 64;
 const RING_FRAMES: u32 = 256;
 const CHANNELS: u32 = 2;
@@ -42,73 +45,70 @@ const MAX_TAPS: usize = 4;
 // The engine's track taps: the same slot shape, after the guest's slots in
 // the same region, one index space.
 const TRACK_SLOTS: usize = 2;
-const REGION: usize = START + HEADER_SIZE + SLOT_SIZE * (MAX_TAPS + TRACK_SLOTS);
 
-fn region() -> &'static Mutex<Vec<u8>> {
-    static R: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(vec![0u8; REGION]))
+// An arena of a core's: its table names the tap region and nothing else.
+// Leaked, so the pointer is valid for every case; 8-aligned, as the table is.
+fn arena() -> *mut u8 {
+    arena_with(MAX_TAPS, TRACK_SLOTS)
 }
 
-// The base pointer the crate asks for. Stable for the process: the buffer is
-// leaked once so the pointer stays valid for every case.
+// The same with `guest` guest slots and `track` track slots, as a core's
+// profile lays them out.
+fn arena_with(guest: usize, track: usize) -> *mut u8 {
+    let taps_bytes = HEADER_SIZE + SLOT_SIZE * (guest + track);
+    let words: &'static mut [u64] = Box::leak(vec![0u64; (START + taps_bytes).div_ceil(8)].into_boxed_slice());
+    let base = words.as_mut_ptr().cast::<u8>();
+    // SAFETY: the buffer holds the table and is 8-aligned; zero is a valid
+    // table of nothing, which the fields below fill in.
+    let h = unsafe { &mut *base.cast::<ClockworkArenaHeader>() };
+    h.magic = CLOCKWORK_ARENA_MAGIC;
+    h.entry_count = 1;
+    let e = &mut h.entries[0];
+    e.id = ClockworkArenaRegion::CLOCKWORK_TAPS.0;
+    e.offset = START as u32;
+    e.bytes = taps_bytes as u32;
+    e.geom[geom::TAP_SLOTS] = guest as u32;
+    e.geom[geom::TAP_HEADER_BYTES] = HEADER_SIZE as u32;
+    e.geom[geom::TAP_SLOT_BYTES] = SLOT_SIZE as u32;
+    e.geom[geom::TAP_SLOT_HEADER] = SLOT_HEADER as u32;
+    e.geom[geom::TAP_RING_FRAMES] = RING_FRAMES;
+    e.geom[geom::TAP_CHANNELS] = CHANNELS;
+    e.geom[geom::TAP_TRACK_SLOTS] = track as u32;
+    e.geom[geom::TAP_TRACK_FIRST] = guest as u32;
+    base
+}
+
+// The core the cases work in: its arena and its owner table.
 fn base_ptr() -> *mut u8 {
     static P: OnceLock<usize> = OnceLock::new();
-    *P.get_or_init(|| {
-        let v: &'static mut Vec<u8> = Box::leak(Box::new(vec![0u8; REGION]));
-        v.as_mut_ptr() as usize
-    }) as *mut u8
+    *P.get_or_init(|| arena() as usize) as *mut u8
+}
+fn taps() -> &'static Taps {
+    static T: OnceLock<Taps> = OnceLock::new();
+    T.get_or_init(Taps::default)
 }
 
-#[no_mangle]
-pub extern "C" fn clockwork_shm_base() -> *mut c_void {
-    base_ptr().cast::<c_void>()
+// The cases share the arena and the table, so they take a lock rather than
+// racing each other through them.
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: Mutex<()> = Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// # Safety
-/// Every out-pointer is valid for one write; this is the host-side symbol the
-/// crate links against, and the crate calls it with its own locals.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_tap_geometry(
-    start: *mut usize,
-    header_size: *mut usize,
-    slot_size: *mut usize,
-    guest_slots: *mut usize,
-    track_slots: *mut usize,
-    ring_frames: *mut u32,
-    channels: *mut u32,
-) -> c_int {
-    // SAFETY: valid for one write each, per the contract above.
-    unsafe {
-        *start = START;
-        *header_size = HEADER_SIZE;
-        *slot_size = SLOT_SIZE;
-        *guest_slots = MAX_TAPS;
-        *track_slots = TRACK_SLOTS;
-        *ring_frames = RING_FRAMES;
-        *channels = CHANNELS;
-    }
-    1
+/// A u32 at `offset` into an arena, read as the crate reads it.
+fn arena_u32(base: *mut u8, offset: usize) -> u32 {
+    // SAFETY: every offset passed is inside a leaked arena, and 4-aligned:
+    // the arena is 8-aligned and the layout constants are multiples of 16.
+    unsafe { (*base.add(offset).cast::<AtomicU32>()).load(Ordering::Acquire) }
 }
+fn region_u32(offset: usize) -> u32 { arena_u32(base_ptr(), offset) }
 
-// The crate's slot table is process-global, so the cases take a lock rather
-// than racing each other through it.
-fn lock() -> std::sync::MutexGuard<'static, Vec<u8>> {
-    region().lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// A u32 at `offset` into the region, read as the crate reads it.
-fn region_u32(offset: usize) -> u32 {
-    // SAFETY: every offset passed is inside the leaked region, and 4-aligned:
-    // the region starts page-aligned and the layout constants are multiples
-    // of 16.
-    unsafe { (*base_ptr().add(offset).cast::<AtomicU32>()).load(Ordering::Acquire) }
-}
-
-fn slot_state(index: usize) -> u32 {
+fn slot_state_in(base: *mut u8, index: usize) -> u32 {
     // `state` is the first u32 of the slot header (shm_tap_stream). One
     // index space: the guest's slots, then the track taps, one stride apart.
-    region_u32(START + HEADER_SIZE + SLOT_SIZE * index)
+    arena_u32(base, START + HEADER_SIZE + SLOT_SIZE * index)
 }
+fn slot_state(index: usize) -> u32 { slot_state_in(base_ptr(), index) }
 
 /// How many times slot `index` has gone live: the u32 after `capacity_frames`
 /// in the slot header.
@@ -121,18 +121,20 @@ fn active_count() -> u32 {
     region_u32(START + 4)
 }
 
-fn claim(index: usize, hnd: &mut TapBufferHnd) -> bool {
-    // SAFETY: `hnd` is a live handle.
+fn claim_in(taps: &Taps, base: *mut u8, index: usize, hnd: &mut TapBufferHnd) -> bool {
+    // SAFETY: `hnd` is a live handle; `base` an arena of the test's.
     unsafe {
-        clockwork_tap_get(std::ptr::null_mut(), index as c_int, CHANNELS as c_int,
-                      RING_FRAMES as c_int, hnd) != 0
+        clockwork_tap_get(taps, base.cast::<c_void>(), index as c_int, CHANNELS as c_int,
+                          RING_FRAMES as c_int, hnd) != 0
     }
 }
+fn claim(index: usize, hnd: &mut TapBufferHnd) -> bool { claim_in(taps(), base_ptr(), index, hnd) }
 
-fn release(hnd: &mut TapBufferHnd) {
-    // SAFETY: `hnd` is a live handle.
-    unsafe { clockwork_tap_release(std::ptr::null_mut(), hnd) }
+fn release_in(taps: &Taps, base: *mut u8, hnd: &mut TapBufferHnd) {
+    // SAFETY: as claim_in.
+    unsafe { clockwork_tap_release(taps, base.cast::<c_void>(), hnd) }
 }
+fn release(hnd: &mut TapBufferHnd) { release_in(taps(), base_ptr(), hnd) }
 
 fn handle() -> TapBufferHnd {
     // Zeroed, as a ugen's would be before its first claim.
@@ -209,7 +211,7 @@ fn an_out_of_range_slot_is_refused_rather_than_indexed() {
     assert!(
         // SAFETY: `neg` is a live handle.
         unsafe {
-            clockwork_tap_get(std::ptr::null_mut(), -1, CHANNELS as c_int,
+            clockwork_tap_get(taps(), base_ptr().cast::<c_void>(), -1, CHANNELS as c_int,
                           RING_FRAMES as c_int, &mut neg) == 0
         },
         "a negative slot index was claimed"
@@ -315,9 +317,44 @@ fn every_claim_counts_once_on_the_slot() {
         assert_eq!(slot_activations(index), before.wrapping_add(2), "a release must not count");
 
         // A Rust writer's claim counts the same.
-        assert!(stream_activate(index, CHANNELS));
+        // SAFETY: the test's arena, laid out with the installed geometry and never freed.
+        assert!(unsafe { stream_activate(base_ptr(), index, CHANNELS) });
         assert_eq!(slot_activations(index), before.wrapping_add(3), "a Rust writer's claim must count");
-        stream_release(index);
+        // SAFETY: as above.
+        unsafe { stream_release(base_ptr(), index) };
         assert_eq!(slot_activations(index), before.wrapping_add(3));
     }
+}
+
+#[test]
+fn each_core_owns_the_slots_in_its_own_arena() {
+    // Two cores, each with its arena and its owner table, each claim slot 0.
+    // One giving its claim back frees its own slot and leaves the other's
+    // live: a table shared between them would have the second claim take
+    // the first's ownership, and the first release would free nothing.
+    let _g = lock();
+    let (other, other_taps) = (arena(), Taps::default());
+    let mut mine = handle();
+    let mut theirs = handle();
+    assert!(claim(0, &mut mine));
+    assert!(claim_in(&other_taps, other, 0, &mut theirs));
+
+    release(&mut mine);
+    assert_eq!(slot_state(0), 0, "my slot is free");
+    assert_eq!(slot_state_in(other, 0), 1, "the other core's slot is still live");
+    release_in(&other_taps, other, &mut theirs);
+    assert_eq!(slot_state_in(other, 0), 0);
+}
+
+// A profile with no guest tap slots still has its track taps
+// (docs/ENGINES.md): the region is taps when it holds any slot.
+#[test]
+fn track_taps_are_there_with_no_guest_slots() {
+    let _l = lock();
+    let base = arena_with(0, TRACK_SLOTS);
+    let taps = Taps::default();
+    let mut hnd = handle();
+    assert!(claim_in(&taps, base, 0, &mut hnd), "the first track tap: slot 0 of the one index space");
+    assert_eq!(slot_state_in(base, 0), 1);
+    release_in(&taps, base, &mut hnd);
 }

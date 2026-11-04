@@ -217,7 +217,7 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
           "[control][control-ring]") {
     // The control pass answers every verb in the control ring in one pass,
     // and a verb's replies go to the engine's egress ring, which is finite
-    // (NRT_OUT_RING_SIZE) and refuses a reply with no room. A ring of verbs
+    // (clockwork::kDefaultLayout.profile.nrt_out_ring_bytes) and refuses a reply with no room. A ring of verbs
     // whose replies are larger than the verbs themselves can overflow it, and
     // the line logging a refusal rides the same full ring. The pass leaves a
     // verb in the control ring while the egress ring lacks room for its
@@ -269,7 +269,7 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     size_t answerBytes = 0;
     { std::lock_guard<std::mutex> lock(mu); if (!replies.empty()) answerBytes = replies.front().size(); }
     const uint64_t footprint = (sizeof(Message) + EGRESS_ROUTE_SIZE + answerBytes + 3u) & ~uint64_t{3};
-    CHECK(static_cast<uint64_t>(sent) * footprint > NRT_OUT_RING_SIZE);
+    CHECK(static_cast<uint64_t>(sent) * footprint > clockwork::kDefaultLayout.profile.nrt_out_ring_bytes);
     checkNoEgressLost(engine);   // the pass waited for room: nothing was refused
     engine.shutdown();
 }

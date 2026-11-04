@@ -28,21 +28,14 @@
 #include "shared_memory.h"          // arena layout + EgressRoute
 #include "lanes/ring_drain.h"       // clockwork_drain_ring — the walker under test
 #include "RingBufferWriter.h"       // inject frames for walker/drain tests
+#include "LanesFixture.h"          // a core for the egress calls
+#include "core_state.h"            // the core's arena
 
 #include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
 
-// Clockwork's arena globals (audio_processor.cpp). Declared directly rather
-// than via audio_processor.h, which pulls in the <emscripten/...> shim that is
-// not on this target's include path.
-extern "C" {
-    extern uint8_t*            shared_memory;
-    extern RingCursors* cursors;
-    extern PerformanceMetrics* metrics;
-    extern bool                memory_initialized;
-}
 
 // The audio-thread OUT-ring writer (audio_processor.cpp, global namespace) —
 // exercised here to pin it to the same wire convention the walker reads.
@@ -61,32 +54,40 @@ extern bool ring_buffer_write(
 
 namespace {
 
-// Point clockwork globals at a zeroed, test-local arena for the duration of
-// a test, then restore them so no other test in the binary is affected.
-// metrics must be redirected too: the RT egress drain counts into it.
+// The fixture's core over a zeroed, test-local arena for the length of a
+// test, then over its own again, so no other test in the binary is
+// affected. The metrics are the scratch arena's too: the RT egress drain
+// counts into them.
 struct LanesArena {
     std::vector<uint8_t> buf;
-    uint8_t*             savedMem;
-    RingCursors*     savedCtrl;
-    PerformanceMetrics*  savedMetrics;
-    bool                 savedInit;
+    clockwork::Arena&    arena;
+    uint8_t* const       savedBase;
+    const bool           savedReady;
+    uint8_t* const       base;
+    RingCursors* const   cursors;
+    PerformanceMetrics* const metrics;
 
-    LanesArena() : buf(ARENA_SIZE, 0) {
-        savedMem  = shared_memory; savedCtrl = cursors;
-        savedMetrics = metrics;    savedInit = memory_initialized;
-        shared_memory      = buf.data();
-        writeArenaHeader(buf.data());   // an arena describes itself, even a test's
-        arenaInstanceUp(buf.data());    // and has an instance up, for the in ring's door to take its messages
-        cursors            = reinterpret_cast<RingCursors*>(buf.data() + RING_CURSORS_START);
-        metrics            = reinterpret_cast<PerformanceMetrics*>(buf.data() + METRICS_START);
-        memory_initialized = true;
+    // The fixture's engine is booted before the swap: booted inside it, the
+    // restore below would undo the boot.
+    LanesArena()
+        : buf(clockwork::kDefaultLayout.arena_bytes, 0),
+          arena(*clockwork::arena_of(lanes_test::core())),
+          savedBase(arena.at()),
+          savedReady(arena.ready.load()),
+          base(buf.data()),
+          cursors(clockwork::cursors_in(base, clockwork::kDefaultLayout)),
+          metrics(clockwork::metrics_in(base)) {
+        writeArenaHeader(base, clockwork::kDefaultLayout);   // an arena describes itself, even a test's
+        arenaInstanceUp(base);    // and has an instance up, for the in ring's door to take its messages
+        arena.base.store(base);
+        arena.ready.store(true);
         // A fresh arena: fresh reply rings, and with them fresh sequence-gap tracking.
-        clockwork_lanes_reset_rt_out_ring();
-        clockwork_lanes_reset_nrt_out_ring();
+        clockwork_lanes_reset_rt_out_ring(lanes_test::core());
+        clockwork_lanes_reset_nrt_out_ring(lanes_test::core());
     }
     ~LanesArena() {
-        shared_memory = savedMem; cursors = savedCtrl;
-        metrics = savedMetrics;   memory_initialized = savedInit;
+        arena.base.store(savedBase);
+        arena.ready.store(savedReady);
     }
 };
 
@@ -114,8 +115,10 @@ bool writeRtFrame(uint32_t sourceId) {
     const uint32_t route = EGRESS_REPLY;
     std::memcpy(framed, &route, sizeof(route));
     std::memcpy(framed + EGRESS_ROUTE_SIZE, kFiller, sizeof(kFiller));
+    uint8_t* const base = clockwork::laid_out_base(lanes_test::core());
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(lanes_test::core()));
     return RingBufferWriter::write(
-        shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+        base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
         &cursors->out_head, &cursors->out_tail, &cursors->out_sequence, &lock,
         framed, sizeof(framed), sourceId);
 }
@@ -431,14 +434,14 @@ TEST_CASE("walker: sequence gaps are counted by missed-frame count", "[lanes][wa
 TEST_CASE("lanes ABI: clockwork_ingress_write frames a message onto the IN ring", "[lanes][abi]") {
     LanesArena arena;
     const uint8_t msg[] = {1, 2, 3, 4, 5, 6, 7, 8};   // arbitrary bytes
-    REQUIRE(clockwork_ingress_write(msg, sizeof(msg), 7));
+    REQUIRE(clockwork_ingress_write(lanes_test::core(), msg, sizeof(msg), 7));
 
     // Drain the IN ring with the shared walker; the frame must round-trip.
     ClockworkDrainState st;
     int frames = 0; uint32_t gotSrc = 0; std::vector<uint8_t> gotPayload;
     uint32_t delivered = clockwork_drain_ring(
-        shared_memory + IN_RING_START, IN_RING_SIZE,
-        &cursors->in_head, &cursors->in_tail, st, ClockworkDrainMetrics{}, 0,
+        arena.base + clockwork::kDefaultLayout.in_ring_start, clockwork::kDefaultLayout.profile.in_ring_bytes,
+        &arena.cursors->in_head, &arena.cursors->in_tail, st, ClockworkDrainMetrics{}, 0,
         [&](uint32_t src, const uint8_t* p, uint32_t n, uint32_t) {
             frames++; gotSrc = src; gotPayload.assign(p, p + n);
             return ClockworkDrainVerdict::Consume;
@@ -452,10 +455,10 @@ TEST_CASE("lanes ABI: clockwork_ingress_write frames a message onto the IN ring"
 TEST_CASE("lanes ABI: NRT egress write -> drain round-trips route, token, payload", "[lanes][abi]") {
     LanesArena arena;
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
-    REQUIRE(clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 42, payload, sizeof(payload)));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), EGRESS_BROADCAST_NOTIFY, 42, payload, sizeof(payload)));
 
     Captured cap;
-    REQUIRE(clockwork_egress_nrt_drain(capture, &cap, 0) == 1);
+    REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &cap, 0) == 1);
     REQUIRE(cap.frames == 1);
     REQUIRE(cap.route == static_cast<uint32_t>(EGRESS_BROADCAST_NOTIFY));
     REQUIRE(cap.sourceId == 42);  // token rides through as the frame sourceId
@@ -467,7 +470,7 @@ TEST_CASE("lanes ABI: RT egress drain delivers a framed OUT frame", "[lanes][abi
     REQUIRE(writeRtFrame(99));
 
     Captured cap;
-    REQUIRE(clockwork_egress_rt_drain(capture, &cap, 0) == 1);
+    REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &cap, 0) == 1);
     REQUIRE(cap.route == static_cast<uint32_t>(EGRESS_REPLY));
     REQUIRE(cap.sourceId == 99);
     REQUIRE(std::string(reinterpret_cast<const char*>(cap.osc.data())) == kFiller);
@@ -482,15 +485,15 @@ TEST_CASE("lanes ABI: RT egress drain delivers a framed OUT frame", "[lanes][abi
 TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing they took", "[lanes][abi]") {
     LanesArena arena;
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(arena.base, clockwork::kDefaultLayout.arena_bytes, &st);
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
     REQUIRE(writeRtFrame(1));
-    REQUIRE(clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
     Captured rt, nrt;
-    REQUIRE(clockwork_egress_rt_drain(capture, &rt, 0) == 1);
-    REQUIRE(clockwork_egress_nrt_drain(capture, &nrt, 0) == 1);
+    REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &rt, 0) == 1);
+    REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &nrt, 0) == 1);
 
     ClockworkClientMessage m[8];
     CHECK(clockwork_client_poll(c, m, 8) == 0);
@@ -507,37 +510,37 @@ TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing the
 TEST_CASE("lanes ABI: the egress drains after a client poll take nothing it took", "[lanes][abi]") {
     LanesArena arena;
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = clockwork_client_open_memory(shared_memory, ARENA_SIZE, &st);
+    ClockworkClient* c = clockwork_client_open_memory(arena.base, clockwork::kDefaultLayout.arena_bytes, &st);
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
     REQUIRE(writeRtFrame(1));
-    REQUIRE(clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), EGRESS_BROADCAST_NOTIFY, 2, payload, sizeof(payload)));
     ClockworkClientMessage m[8];
     REQUIRE(clockwork_client_poll(c, m, 8) == 2);
     clockwork_client_close(c);
 
     Captured again;
-    CHECK(clockwork_egress_rt_drain(capture, &again, 0) == 0);
-    CHECK(clockwork_egress_nrt_drain(capture, &again, 0) == 0);
+    CHECK(clockwork_egress_rt_drain(lanes_test::core(), capture, &again, 0) == 0);
+    CHECK(clockwork_egress_nrt_drain(lanes_test::core(), capture, &again, 0) == 0);
     CHECK(again.frames == 0);
 
     // And what arrives after the handover is the drain's, once.
     REQUIRE(writeRtFrame(3));
     Captured next;
-    REQUIRE(clockwork_egress_rt_drain(capture, &next, 0) == 1);
+    REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &next, 0) == 1);
     CHECK(next.sourceId == 3);
-    CHECK(clockwork_egress_rt_drain(capture, &next, 0) == 0);
+    CHECK(clockwork_egress_rt_drain(lanes_test::core(), capture, &next, 0) == 0);
 }
 
 TEST_CASE("lanes ABI: ingress/egress reject bad input and empty drains", "[lanes][abi]") {
     LanesArena arena;
-    REQUIRE_FALSE(clockwork_ingress_write(nullptr, 4, 0));
-    REQUIRE_FALSE(clockwork_ingress_write(reinterpret_cast<const uint8_t*>("x"), 0, 0));
+    REQUIRE_FALSE(clockwork_ingress_write(lanes_test::core(), nullptr, 4, 0));
+    REQUIRE_FALSE(clockwork_ingress_write(lanes_test::core(), reinterpret_cast<const uint8_t*>("x"), 0, 0));
 
     Captured cap;
-    REQUIRE(clockwork_egress_rt_drain(capture, &cap, 0) == 0);   // nothing queued
-    REQUIRE(clockwork_egress_nrt_drain(capture, &cap, 0) == 0);
+    REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &cap, 0) == 0);   // nothing queued
+    REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &cap, 0) == 0);
     REQUIRE(cap.frames == 0);
 }
 
@@ -546,13 +549,13 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     // of the arena instead of the headers, so it must agree with them entry
     // for entry (clockwork_arena.h).
     LanesArena arena;
-    const ClockworkArenaHeader* h = clockwork_arena_header();
+    const ClockworkArenaHeader* h = clockwork_arena_header(lanes_test::core());
     REQUIRE(h != nullptr);
-    REQUIRE(h == arenaHeader(clockwork_lanes_base()));
+    REQUIRE(h == arenaHeader(clockwork_lanes_base(lanes_test::core())));
     REQUIRE(h->magic == CLOCKWORK_ARENA_MAGIC);
     REQUIRE(h->version == CLOCKWORK_ARENA_VERSION);
     REQUIRE(h->state == CLOCKWORK_ARENA_PUBLISHED);
-    REQUIRE(h->arena_bytes == ARENA_SIZE);
+    REQUIRE(h->arena_bytes == clockwork::kDefaultLayout.arena_bytes);
 
     const auto region = [&](uint32_t id) {
         const ClockworkArenaEntry* e = clockwork_arena_find(h, id);
@@ -562,10 +565,10 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     const auto* in  = region(CLOCKWORK_ARENA_CLOCKWORK_IN_RING);
     const auto* out = region(CLOCKWORK_ARENA_CLOCKWORK_RT_OUT_RING);
     const auto* nrt = region(CLOCKWORK_ARENA_CLOCKWORK_NRT_OUT_RING);
-    REQUIRE(in->offset  == IN_RING_START);      REQUIRE(in->bytes  == IN_RING_SIZE);
-    REQUIRE(out->offset == RT_OUT_RING_START);     REQUIRE(out->bytes == RT_OUT_RING_SIZE);
-    REQUIRE(nrt->offset == NRT_OUT_RING_START); REQUIRE(nrt->bytes == NRT_OUT_RING_SIZE);
-    REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS)->offset == RING_CURSORS_START);
+    REQUIRE(in->offset  == clockwork::kDefaultLayout.in_ring_start);      REQUIRE(in->bytes  == clockwork::kDefaultLayout.profile.in_ring_bytes);
+    REQUIRE(out->offset == clockwork::kDefaultLayout.rt_out_ring_start);     REQUIRE(out->bytes == clockwork::kDefaultLayout.profile.rt_out_ring_bytes);
+    REQUIRE(nrt->offset == clockwork::kDefaultLayout.nrt_out_ring_start); REQUIRE(nrt->bytes == clockwork::kDefaultLayout.profile.nrt_out_ring_bytes);
+    REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_RING_CURSORS)->offset == clockwork::kDefaultLayout.ring_cursors_start);
     REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_METRICS)->offset == METRICS_START);
     REQUIRE(region(CLOCKWORK_ARENA_CLOCKWORK_METRICS)->geom[CLOCKWORK_GEOM_METRICS_FIELDS] == METRICS_SIZE / 4u);
 
@@ -582,7 +585,7 @@ TEST_CASE("lanes ABI: the arena's own table describes the compiled arena", "[lan
     // A host sizes its block buffers from this before it ever ticks, so it
     // must be usable at any point in the process's life. The exact value is a
     // boot-time decision and is pinned in test_audio_path.cpp.
-    REQUIRE(clockwork_block_size() > 0u);
+    REQUIRE(clockwork_block_size(lanes_test::core()) > 0u);
 }
 
 TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or for its size, is counted as refused, and as nothing else",
@@ -595,27 +598,27 @@ TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or fo
 
     // The NRT ring: written until it refuses, then three more.
     int written = 0;
-    while (clockwork_egress_nrt_write(EGRESS_REPLY, 1, payload, sizeof(payload))) ++written;
+    while (clockwork_egress_nrt_write(lanes_test::core(), EGRESS_REPLY, 1, payload, sizeof(payload))) ++written;
     REQUIRE(written > 0);
-    for (int i = 0; i < 3; ++i) REQUIRE_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, payload, sizeof(payload)));
-    CHECK(metrics->egress_frames_refused.load() == 4u);
+    for (int i = 0; i < 3; ++i) REQUIRE_FALSE(clockwork_egress_nrt_write(lanes_test::core(), EGRESS_REPLY, 1, payload, sizeof(payload)));
+    CHECK(arena.metrics->egress_frames_refused.load() == 4u);
 
     // The RT ring, through the writer the audio thread uses.
     std::atomic<uint32_t> status{0};
-    while (ring_buffer_write(shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
-                             &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                             EGRESS_REPLY, 1, payload, sizeof(payload), &status, metrics)) {}
-    CHECK(metrics->egress_frames_refused.load() == 5u);
+    while (ring_buffer_write(arena.base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
+                             &arena.cursors->out_head, &arena.cursors->out_tail, &arena.cursors->out_sequence,
+                             EGRESS_REPLY, 1, payload, sizeof(payload), &status, arena.metrics)) {}
+    CHECK(arena.metrics->egress_frames_refused.load() == 5u);
     CHECK((status.load() & STATUS_BUFFER_FULL) != 0u);
 
     // A frame too big for the NRT ring ever to carry is refused and counted
     // too, as the RT ring counts one: a guest's answer sent from a thread of
     // its own goes no further, and the client gets nothing. (Clockwork's own
     // producer also answers one with an error, OscEgress.)
-    std::vector<uint8_t> huge(clockwork_egress_nrt_max_frame() + 1, 0);
-    CHECK_FALSE(clockwork_egress_nrt_write(EGRESS_REPLY, 1, huge.data(), static_cast<uint32_t>(huge.size())));
-    CHECK(metrics->egress_frames_refused.load() == 6u);
+    std::vector<uint8_t> huge(clockwork_egress_nrt_max_frame(lanes_test::core()) + 1, 0);
+    CHECK_FALSE(clockwork_egress_nrt_write(lanes_test::core(), EGRESS_REPLY, 1, huge.data(), static_cast<uint32_t>(huge.size())));
+    CHECK(arena.metrics->egress_frames_refused.load() == 6u);
 
     // Nothing on the way in was refused.
-    CHECK(metrics->messages_dropped.load() == 0u);
+    CHECK(arena.metrics->messages_dropped.load() == 0u);
 }

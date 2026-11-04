@@ -472,7 +472,18 @@ typedef struct DspInfo {
        rate and one channel count — a server whose world is laid out at
        boot — declares 0 and is not wrong to. */
     uint32_t survives;
+    /* HOW MANY INSTANCES ONE PROCESS MAY HOLD, one per core at most.
+       clockwork refuses a build past the count with the reason, as it
+       refuses a build for anything else; a core rebuilding its own instance
+       is never refused. 0, as a zeroed DspInfo leaves it, is one.
+       DSP_INSTANCES_ANY is any number, and a promise that the guest keeps
+       no process-wide mutable state: no static it writes, no library that
+       is one per process (docs/BOUNDARY.md, "How many in a process"). */
+    uint32_t instances;
 } DspInfo;
+
+/* DspInfo::instances: any number in one process. */
+#define DSP_INSTANCES_ANY 0xFFFFFFFFu
 
 /* DspInfo::survives: the kinds of device change an instance takes live. */
 #define DSP_SURVIVES_RATE_CHANGE     (1u << 0)   /* a different sample rate */
@@ -501,8 +512,12 @@ uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_b
 
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 
-/* Build an instance, or NULL with `err` set to a message the DSP owns. */
-struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, const char** err);
+/* Build an instance, or NULL having written why into `err`: a NUL-terminated
+   message of at most `err_bytes` bytes, cut short if it is longer. The host
+   passes the buffer, of DSP_REFUSAL_BYTES at least, so a guest needs nothing
+   of its own to refuse with, however many instances a process holds. */
+#define DSP_REFUSAL_BYTES 512
+struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, char* err, uint32_t err_bytes);
 
 /* Destroy an instance. WHAT THE GUEST OWES HERE (docs/RESTARTS.md, "What the
    guest owes"): before this returns, every ask the instance accepted and has

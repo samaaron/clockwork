@@ -383,6 +383,10 @@ double ClockworkClock::updateAudioThreadNTP(double samplePosition, double sample
     return mImpl->timeSource.updateAudioThreadNTP(samplePosition, sampleRate, wallNtp);
 }
 
+double ClockworkClock::takeDriftReport() {
+    return mImpl->timeSource.takeDriftReport();
+}
+
 void ClockworkClock::resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
                                           double floorNtp) {
     // The frames rendered so far, on the count being left: where a freewheel

@@ -16,6 +16,7 @@
  * on one without, so these cases do not skip on CI, in a container, or here.
  * The cases that genuinely need a port say so and are guarded.
  */
+#include "LanesFixture.h"
 #include "clock/MidiClockOut.h"
 #include "clock/ClockworkClock.h"
 #include "clockwork_event_sink.h"
@@ -145,10 +146,10 @@ TEST_CASE("midi clock: every generated tick is accounted for", "[midi][clock]") 
     // synth plugged in, so it asserts the invariant that holds either way and
     // only then narrows.
     ClockworkSink open[64];
-    const uint32_t n = clockwork_sink_list(open, 64);
+    const uint32_t n = clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), open, 64);
     uint32_t midiSinks = 0;
     for (uint32_t i = 0; i < n && i < 64; ++i)
-        if (clockwork_sink_kind(open[i]) == kClockworkSinkMidi) ++midiSinks;
+        if (clockwork_sink_kind(clockwork_core_sinks(lanes_test::core()), open[i]) == kClockworkSinkMidi) ++midiSinks;
 
     const double t0 = clock.now();
     m.onBeat(clock, "*", kWideBeat);
@@ -180,8 +181,8 @@ TEST_CASE("midi clock: an unnamed port fans out, a named one does not",
           "[midi][clock]") {
     // Resolution is a command-thread decision and is observable without a
     // device: "*" and "" mean every port and cannot be one sink.
-    CHECK(midi_clock_sink_for_port("*") == CLOCKWORK_SINK_NONE);
-    CHECK(midi_clock_sink_for_port("") == CLOCKWORK_SINK_NONE);
+    CHECK(midi_clock_sink_for_port(clockwork_core_sinks(lanes_test::core()), "*") == CLOCKWORK_SINK_NONE);
+    CHECK(midi_clock_sink_for_port(clockwork_core_sinks(lanes_test::core()), "") == CLOCKWORK_SINK_NONE);
 }
 
 // ── Following a timeline ─────────────────────────────────────────────────────
@@ -450,7 +451,7 @@ TEST_CASE("midi clock: two followers on one ring stay in time order",
 
 TEST_CASE("midi clock: ticks reach an open port, carrying their own time",
           "[midi][clock][device]") {
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkMidi, "clockwork-clock-test", 256);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "clockwork-clock-test", 256);
     if (sink == CLOCKWORK_SINK_NONE) {
         WARN("no MIDI port could be opened — skipping delivery. On Linux: "
              "usermod -aG audio $USER, then log in again.");
@@ -461,20 +462,20 @@ TEST_CASE("midi clock: ticks reach an open port, carrying their own time",
     MidiClockOut m;
 
     ClockworkSinkStats before{};
-    REQUIRE(clockwork_sink_stats(sink, &before));
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &before));
 
     const double t0 = clock.now();
     m.onBeat(clock, "clockwork-clock-test", kWideBeat);
     m.generate(t0 + 100.0);
 
     ClockworkSinkStats after{};
-    REQUIRE(clockwork_sink_stats(sink, &after));
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &after));
 
     // Every pulse reached the sink, and the sink took them all.
     CHECK(m.sent() >= static_cast<uint64_t>(MidiClockOut::kPulsesPerBeat));
     CHECK(after.dropped == before.dropped);
 
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
     clock.stopBackgroundWork();
 }
 
@@ -482,14 +483,14 @@ TEST_CASE("midi clock: naming the same port twice reuses one sink",
           "[midi][clock][device]") {
     // With the host as the sinks' endpoint the port need not exist, so the
     // case runs on a machine with no MIDI.
-    struct ForwardOff { ~ForwardOff() { clockwork_host_forward(0); } } guard;
-    clockwork_host_forward(1);
-    const ClockworkSink a = midi_clock_sink_for_port("clockwork-dedupe-test");
+    struct ForwardOff { ~ForwardOff() { clockwork_host_forward(lanes_test::core(), 0); } } guard;
+    clockwork_host_forward(lanes_test::core(), 1);
+    const ClockworkSink a = midi_clock_sink_for_port(clockwork_core_sinks(lanes_test::core()), "clockwork-dedupe-test");
     REQUIRE(a != CLOCKWORK_SINK_NONE);
     // A second sink on the same port would double every tick on the wire.
-    const ClockworkSink b = midi_clock_sink_for_port("clockwork-dedupe-test");
+    const ClockworkSink b = midi_clock_sink_for_port(clockwork_core_sinks(lanes_test::core()), "clockwork-dedupe-test");
     CHECK(a == b);
-    clockwork_sink_close(a);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), a);
 }
 
 // ── End to end: a tick MidiClockOut generates reaches a real device ──────────
@@ -586,7 +587,7 @@ void sendOsc(ClockworkMidi* h, const char* addr, const char* arg, int32_t on) {
 TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
           "[.midi-hardware][midi][clock][device]") {
     MidiCtx ctx;
-    ClockworkMidi* midi = clockwork_midi_create(&ctx, emit_cb, clock_cb, transport_cb,
+    ClockworkMidi* midi = clockwork_midi_create(nullptr, &ctx, emit_cb, clock_cb, transport_cb,
                                   "clockwork-clock-e2e");
     REQUIRE(midi);
     // Enumerate first: creation does not scan the OS registry, so asking for
@@ -611,7 +612,7 @@ TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
 
     // Opening the sink is what enables the OUTPUT port; MidiClockOut resolves
     // the same way from onBeat.
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkMidi, out.c_str(), 256);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, out.c_str(), 256);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
 
     ClockworkClock clock;
@@ -640,7 +641,7 @@ TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
     // would show here as 48.
     CHECK(got == MidiClockOut::kPulsesPerBeat);
 
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
     clock.stopBackgroundWork();
     clockwork_midi_destroy(midi);
 }

@@ -317,7 +317,7 @@ TEST_CASE("host control: a cold swap waits for the host's pass in flight",
         cv.notify_all();
         cv.wait(lk, [&] { return release; });
     };
-    clockwork_log("[test] a line for the held pass to drain");
+    clockwork_log(fx.engine().core(), "[test] a line for the held pass to drain");
     std::thread hostThread([&] {
         { std::lock_guard<std::mutex> lk(m); host = std::this_thread::get_id(); }
         fx.engine().controlPass();
@@ -361,7 +361,7 @@ TEST_CASE("host control: what the engine said before a cold swap reaches the hos
     // Said, and not yet passed on: no pass has run since. The user's notice
     // before a recovery, a switch's own account of itself — written just
     // before the cold swap they describe.
-    clockwork_log("[test] said before the swap");
+    clockwork_log(fx.engine().core(), "[test] said before the swap");
     const auto r = fx.engine().switchDevice("Fake Interface", 0, 0, /*forceCold*/ true, "__none__");
     INFO(r.error);
     REQUIRE(r.success);

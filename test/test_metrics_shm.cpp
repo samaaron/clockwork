@@ -7,7 +7,7 @@
  * Verifies the redirect added in src/native/ClockworkEngine.cpp:
  *  - When the engine creates a public shm segment for its port, the
  *    metrics struct lives inside that segment instead of in the in-band
- *    slot inside arena_storage.
+ *    slot inside the core's own arena, which is never made.
  *  - An external observer can mmap the segment via shm_segment_client
  *    and read the same metrics struct that engine writers update.
  *
@@ -19,11 +19,11 @@
 #include <vector>
 #include "EngineFixture.h"
 #include "clockwork_prefix.h"
+#include "clockwork_sys.h"
 #include "OscTestUtils.h"
 #include "shm_segment.hpp"
 #include "shared_memory.h"
-
-extern "C" uint8_t arena_storage[];
+#include "core_state.h"
 
 namespace {
 ClockworkEngine::Config metricsShmConfig(unsigned port) {
@@ -44,12 +44,13 @@ TEST_CASE("metrics-shm: engine.getMetrics() points into the public segment when 
 
     const PerformanceMetrics* m = &fx.engine().getMetrics();
     auto* base = reinterpret_cast<const uint8_t*>(m);
-    auto* ring = arena_storage;
+    ClockworkCore* core = fx.engine().core();
 
-    // The metrics pointer must NOT be inside arena_storage now —
-    // it lives in the public shm segment.
-    bool insideRing = (base >= ring) && (base < ring + ARENA_SIZE);
-    CHECK_FALSE(insideRing);
+    // The core's arena is the public segment's: the metrics live there, and
+    // no arena of the core's own was made.
+    const uint8_t* arena = clockwork::arena_base(core);
+    CHECK((base >= arena && base < arena + clockwork::kDefaultLayout.arena_bytes));
+    CHECK(clockwork::state(core)->memory.arena == nullptr);
 }
 
 TEST_CASE("metrics-shm: external client sees the same metrics struct",
@@ -101,11 +102,10 @@ TEST_CASE("metrics-shm: increments via engine writes are visible through client"
 
 TEST_CASE("metrics: a new engine's buffer peaks are its own",
           "[metrics]") {
-    // The peaks are tracked in the process and published by whichever engine
-    // is running. A boot must clear them, not only a purge, or an engine
-    // booted after another publishes that one's peaks as its own from its
-    // first flush. One wide message through the first engine, then a
-    // second engine that is sent nothing wider than a ping.
+    // Each engine's peaks are its own: an engine booted after another must
+    // not publish that one's peaks as its own from its first flush. One wide
+    // message through the first engine, then a second engine that is sent
+    // nothing wider than a ping.
     const std::vector<uint8_t> wide(4000, 0x5a);
     {
         EngineFixture first;
@@ -124,6 +124,23 @@ TEST_CASE("metrics: a new engine's buffer peaks are its own",
     }));
     REQUIRE(second.waitForBlocks(64, 30000));   // a bound only a broken engine reaches
     CHECK(second.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
+}
+
+TEST_CASE("metrics: a purge starts the buffer peaks over",
+          "[metrics][purge]") {
+    // The peaks after a purge are what came after it. One wide message, the
+    // purge, then nothing wider than a ping.
+    const std::vector<uint8_t> wide(4000, 0x5a);
+    EngineFixture fix;
+    fix.send(osc_test::messageWithBlob("/dummy/ping", wide.data(), wide.size()));
+    REQUIRE(fix.pollUntil([&] {
+        return fix.engine().getMetrics().in_buffer_peak_bytes.load() >= wide.size();
+    }));
+
+    fix.engine().purge(CLOCKWORK_REFUSED_REBUILDING);
+    fix.send(osc_test::message("/dummy/ping"));
+    REQUIRE(fix.waitForBlocks(64, 30000));   // several flushes; a bound only a broken engine reaches
+    CHECK(fix.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
 }
 
 TEST_CASE("metrics: the engine publishes how much its scheduler holds",

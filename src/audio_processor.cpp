@@ -25,13 +25,6 @@ namespace {
 // matters — a lane's index is published to clients as the channel they route to,
 // and a base that moved with every device switch would invalidate every route
 // across a cold swap.
-std::atomic<uint64_t> g_block_osc_time{0};  // this block's start, as Timetag::ntp()
-
-uint32_t g_reserved_lanes = 0;    // set before boot; read at every init_memory
-uint32_t g_lane_base      = 0;    // published after init_memory; 0 = none
-uint32_t g_link_audio_lanes     = 0;   // set before boot, as the host's are
-uint32_t g_link_audio_lane_base = 0;   // published after init_memory; 0 = none
-
 uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
     const uint32_t widest = device_in > device_out ? device_in : device_out;
     uint32_t base = 32;
@@ -40,20 +33,6 @@ uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
 }
 } // namespace
 
-extern "C" {
-void clockwork_reserve_lanes(uint32_t lanes) {
-    if (lanes > CLOCKWORK_RESERVED_LANES_MAX) lanes = CLOCKWORK_RESERVED_LANES_MAX;
-    g_reserved_lanes = lanes;
-}
-uint32_t clockwork_reserved_lanes(void) { return g_reserved_lanes; }
-uint32_t clockwork_lane_base(void)      { return g_lane_base; }
-void clockwork_reserve_link_audio_lanes(uint32_t lanes) {
-    if (lanes > CLOCKWORK_RESERVED_LANES_MAX) lanes = CLOCKWORK_RESERVED_LANES_MAX;
-    g_link_audio_lanes = lanes;
-}
-uint32_t clockwork_link_audio_lanes(void)     { return g_link_audio_lane_base ? g_link_audio_lanes : 0; }
-uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
-}
 
 #include "clock/clock_math.h"
 #include "osc_debug.h"
@@ -65,6 +44,7 @@ uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 #include "clockwork_sys.h"        // the /clockwork/ prefix rule: clockwork here, DSP everywhere else
 #include "ReplyChannel.h"
 #include "lanes/lanes_internal.h"   // clockwork_egress_nrt_write — off-thread debug egress
+#include "core_state.h"             // a core's Egress
 // Platform macros (CLOCKWORK_COLD_BSS, tiered-memory attributes). Header-only and
 // free of any DSP dependency, so it is included in both builds — the core still
 // places the ring arena + scheduler pool in bulk RAM on tiered targets.
@@ -77,34 +57,14 @@ uint32_t clockwork_link_audio_lane_base(void) { return g_link_audio_lane_base; }
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
 #include "clockwork_port_bus.h" // ...and which DSP channels they occupy
 #include "clockwork_event_sink.h" // events leaving clockwork, on a stable slot
+#include "os_pages.h"             // a core's memory from the system, natively
 
-extern "C" {
 
-    // The offline-render seed, handed over in DspConfig::deterministic_seed
-    // (engine_support.cpp). A host sets it before boot; nothing reads it after.
-    extern int32_t clockwork_deterministic_seed;
-}
-
-// The boundary the audio-thread drain classifies through (extern in clockwork_sys.h).
-// Defined here — compiled by both native and wasm. Published by the engine at
-// init (native: ClockworkEngine::mSplit; wasm: a file-static, see init_memory).
-std::atomic<OscSplit*> g_active_split{nullptr};
-
-// Whether a claimed verb the audio thread does not answer itself is FORWARDED
-// TO THE HOST rather than refused (clockwork_host_forward_route, below). A
-// host with no NRT thread has two possible ends to clockwork's chain: itself,
-// when it has a front that answers the control verbs on a thread of its own
-// (the web client's main thread, which owns Web MIDI and the Gamepad API), or
-// this audio thread, when it has not. The worklet always has the front, so
-// the web build starts forwarding; a bare lanes host does not, and keeps the
-// refusal until it says otherwise (clockwork_host_forward).
-static std::atomic<bool> g_host_forward{
-#ifdef __EMSCRIPTEN__
-    true
-#else
-    false
-#endif
-};
+// A host with no NRT thread has two possible ends to clockwork's chain:
+// itself, when it has a front that answers the control verbs on a thread of
+// its own (the web client's main thread, which owns Web MIDI and the Gamepad
+// API), or this audio thread, when it has not. Which, is its core's
+// (Routing::host_forward).
 
 // The sinks' host emitter (clockwork_event_sink.h): a guest's MIDI send goes
 // out over the egress the same way a forwarded verb does — a bundle carrying
@@ -113,46 +73,40 @@ static std::atomic<bool> g_host_forward{
 // on the audio thread: a ring write and nothing else. Installed and removed
 // with the forward switch, because they are one fact: the host is the far
 // end. Defined below with the forward route.
-static int clockwork_sink_host_emit(uint32_t kind, const char* target,
+static int clockwork_sink_host_emit(void* ctx, uint32_t kind, const char* target,
                                     const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
-static void forward_to_host(uint32_t token, clockwork::Timetag when, const uint8_t* element, uint32_t len);
+static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork::Timetag when,
+                            const RingPart* element, uint32_t n_parts);
 
-void clockwork_host_forward(int on) {
-    g_host_forward.store(on != 0, std::memory_order_release);
-    clockwork_sink_set_host_emit(on ? &clockwork_sink_host_emit : nullptr);
+// The core's emitter installed, or none.
+static void install_host_emitter(ClockworkCore* core, clockwork::Routing& r, bool on) {
+    r.host_emitter = ClockworkSinkHostEmitter{ &clockwork_sink_host_emit, core };
+    clockwork_sink_set_host_emitter(clockwork_core_sinks(core), on ? &r.host_emitter : nullptr);
+    r.host_emitter_installed = on;
 }
-int clockwork_host_forwards(void) {
-    return g_host_forward.load(std::memory_order_acquire) ? 1 : 0;
+
+void clockwork_host_forward(ClockworkCore* core, int on) {
+    clockwork::Routing* r = clockwork::routing(core);
+    if (!r) return;
+    r->host_forward.store(on != 0, std::memory_order_release);
+    install_host_emitter(core, *r, on != 0);
+}
+int clockwork_host_forwards(ClockworkCore* core) {
+    const clockwork::Routing* r = clockwork::routing(core);
+    return r && r->host_forward.load(std::memory_order_acquire) ? 1 : 0;
 }
 
-// Published true by a backend that drains the NRT-out ring (the native NRT
-// gateway). While true, emit_debug_osc routes OFF-audio-thread debug to the
-// locked NRT-out ring instead of the single-writer RT-out ring, keeping RT-out's
-// sole-writer invariant. Stays false on single-threaded worklet targets (WASM /
-// self-driven device), which have no NRT-out drainer and no second RT-out writer,
-// so those always use RT-out. A capability signal, not an __EMSCRIPTEN__ branch.
-std::atomic<bool> g_nrt_egress_drained{false};
-
-// See audio_processor.h. Set and cleared by process_audio (BlockOpenScope).
-std::atomic<bool> g_block_open{false};
 namespace {
+// A block, open (CoreClock::block_open) until the scope ends.
 struct BlockOpenScope {
-    BlockOpenScope()  { g_block_open.store(true,  std::memory_order_relaxed); }
-    ~BlockOpenScope() { g_block_open.store(false, std::memory_order_release); }
+    explicit BlockOpenScope(clockwork::CoreClock& c) : cc(c) { cc.block_open.store(true, std::memory_order_relaxed); }
+    ~BlockOpenScope() { cc.block_open.store(false, std::memory_order_release); }
     BlockOpenScope(const BlockOpenScope&) = delete;
     BlockOpenScope& operator=(const BlockOpenScope&) = delete;
+    clockwork::CoreClock& cc;
 };
 } // namespace
 
-// Fallback ClockworkClock for hosts that have no object above the engine to
-// own one: the worklet, the self-driven device build, an embedded host and a
-// bare lanes host. clock_enter_service installs it as g_active_clockwork_clock
-// if the host did not publish a clock before boot. ClockworkEngine publishes
-// its own member clock, so the native engine never uses this one.
-static ClockworkClock& clockworkClock() {
-    static ClockworkClock instance;
-    return instance;
-}
 #include <emscripten/webaudio.h>
 extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, for the assets area that grows to it
 #include <algorithm>
@@ -197,12 +151,11 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 #include "lanes/ring_marks.h"       // where a generation's messages end in the in ring
 #include "metrics_history.h"        // what every counter and gauge did over the last hour
 #ifndef __EMSCRIPTEN__
-#include "native/LinkAudioHost.h"   // the block's stamp in Link's clock (g_active_link_audio)
+#include "native/LinkAudioHost.h"   // the block's stamp in Link's clock (CoreClock::link_audio)
 #endif
 #include "workers/RingBufferWriter.h"   // the in ring's writer lock, which a teardown's mark takes
 
 // Pre-allocated heap for RT-safe allocations
-#include "clockwork_pool.h"
 #include "mem_region.h"
 #include "clockwork_event_sink.h"
 #include "sink_profile.h"
@@ -221,26 +174,13 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
  * it any more narrowly and a build with a scheduler but no worklet clock (every
  * NATIVE build) loses the declaration and keeps the call.
  */
-void clockwork_sched_warm();
+void clockwork_sched_warm(ClockworkCore* core);
 #endif
 
 // Thread-local RT guard for allocation detection (read by test binary only)
 #include "rt_alloc.h"
 
-// Definition of the slot-array pointer declared in shm_audio_buffer.hpp.
-// Assigned once at init; the DSP reads it to locate its slots.
-shm_audio_buffer* g_shm_audio_buffers = nullptr;
-
-// Engine sample position of the block being rendered (declared in
-// shm_tap_stream.hpp): anchors tap-stream writes on the sample clock.
-std::atomic<uint64_t> g_engine_frames{0};
-
-// The tap substrate (rust/clockwork-taps): an opaque context it never
-// reads, and a handle of the four-field shape DspTapHandle spells out.
-extern "C" {
-int  clockwork_tap_get(void* ctx, int index, int channels, int max_frames, void* hnd);
-void clockwork_tap_release(void* ctx, void* hnd);
-}
+#include "clockwork_taps.h"
 
 #if CLOCKWORK_WORKLET_CLOCK
 // Audio-thread /clock handler (the wasm ingress route). Handles the cheap
@@ -250,10 +190,11 @@ void clockwork_tap_release(void* ctx, void* hnd);
 // thread.)
 static bool clockCoreRoute(void* routeCtx, const void* callCtx,
                            const uint8_t* data, size_t len) {
-    ClockworkClock* clk = g_active_clockwork_clock.load(std::memory_order_acquire);
+    auto* chan = static_cast<ReplyChannel*>(routeCtx);   // RT egress, bound at registration; its context is the core
+    ClockworkCore* const core = chan ? static_cast<ClockworkCore*>(chan->ctx) : nullptr;
+    ClockworkClock* clk = clockwork::clock_of(core);
     if (!clk) return true;   // clock route owns /clockwork/clock/; drop during startup, don't error
     auto* cc  = static_cast<const DrainCallCtx*>(callCtx);
-    auto* chan = static_cast<ReplyChannel*>(routeCtx);   // RT egress, bound at registration
     uint32_t token = cc ? cc->sourceId : 0;              // reply metadata, threaded in
     const bool handled = handleClockCoreOsc(*clk, data, static_cast<uint32_t>(len),
         [chan, token](const uint8_t* d, uint32_t n) {
@@ -267,19 +208,20 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
         // whole /clockwork/clock/ namespace ahead of it — so without this
         // hand-off the verb was implemented and unreachable, and every web
         // client asking for the snapshot got "unsupported" instead.
-        const auto* clockState = shared_memory
-            ? reinterpret_cast<const ClockworkClockState*>(shared_memory + CLOCK_STATE_START)
+        uint8_t* const base = clockwork::arena_base(core);
+        const auto* clockState = base
+            ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
             : nullptr;
         const auto rt = handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
             [chan, token](const uint8_t* d, uint32_t n) { chan->reply(token, d, n); },
-            clockState, arenaInstanceGeneration(shared_memory));
+            clockState, arenaInstanceGeneration(base));
         if (rt == ClockworkSysRt::Answered) return true;
 
         // A /clock verb this build doesn't answer (native-only Link-session
         // surface, or a typo): refuse explicitly instead of dropping silently,
         // so clients can tell "unsupported here" from "lost datagram". Pair
         // with /clockwork/clock/capabilities/get for feature detection.
-        replyClockUnsupported(data, static_cast<uint32_t>(len),
+        replyClockUnsupported(core, data, static_cast<uint32_t>(len),
             [chan, token](const uint8_t* d, uint32_t n) {
                 chan->reply(token, d, n);
             });
@@ -288,21 +230,30 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
 }
 #endif  // CLOCKWORK_WORKLET_CLOCK
 
-// The engine namespace. Kept declared in both builds so the `using namespace
-// engine;` in the scheduler-bridge functions below resolves either way.
 // Defined with the rest of the channel-map writer, down beside the port bus
 // that mostly drives it. Declared here because init_memory publishes the
 // device's own channels, and that runs first.
-namespace { void channel_map_set_device(uint32_t in_width, uint32_t out_width); }
+namespace { void channel_map_set_device(clockwork::CoreState& st, uint32_t in_width, uint32_t out_width); }
 
-namespace engine {
-}
-
-// Forward declare ring buffer write function (defined after namespace).
-// Dependencies (sequence counter, status-flags word, metrics) are passed in
-// rather than read from engine globals; default-null args here keep callers
-// terse and let the function be unit-tested directly. Defaults live on this
-// declaration only — never repeated on the definition.
+// The RT-out ring's writer (defined after the namespace), for a payload in
+// parts and in one piece. Dependencies (sequence counter, status-flags word,
+// metrics) are passed in rather than read from engine globals; default-null
+// args here keep callers terse and let the function be unit-tested
+// directly. Defaults live on these declarations only — never repeated on
+// the definitions.
+bool ring_buffer_write(
+    uint8_t* buffer_start,
+    uint32_t buffer_size,
+    std::atomic<int32_t>* head,
+    std::atomic<int32_t>* tail,
+    std::atomic<int32_t>* sequence,
+    uint32_t route,
+    uint32_t source_id,
+    const RingPart* parts,
+    uint32_t n_parts,
+    std::atomic<uint32_t>* status_flags = nullptr,
+    PerformanceMetrics* pm = nullptr
+);
 bool ring_buffer_write(
     uint8_t* buffer_start,
     uint32_t buffer_size,
@@ -335,9 +286,8 @@ extern "C" {
 // advertise one answers /version itself. Defined in clockwork_config.h.
 
 extern "C" {
-    // Static ring buffer in the WASM data segment, separate from the engine heap.
-    // ARENA_SIZE is computed in shared_memory.h from the build's sizing flags
-    // — deliberately not restated as a number here.
+    // The arena's size is its layout's (shared_memory.h, clockwork::Layout),
+    // deliberately not restated as a number here.
     //
     // 16-byte aligned for shm_audio_buffer slots at SCOPE_START; JS Float64Array
     // needs only 8. FAST RAM, on a tiered device too: the arena's cursors,
@@ -348,17 +298,99 @@ extern "C" {
     // tiered profiles (memory_profile.h) so the whole span fits beside the
     // heap and the audio task's stack. Not CLOCKWORK_COLD_BSS: that would put
     // all of it in PSRAM.
-#ifndef __EMSCRIPTEN__
-    alignas(16) uint8_t arena_storage[ARENA_SIZE];
+#if !defined(__EMSCRIPTEN__) && CLOCKWORK_HAS_TIERED_MEMORY
+    // On a device the process holds one core, and its arena is static
+    // storage, placed in the fast RAM, laid out by the target's profile.
+    alignas(16) uint8_t arena_storage[clockwork::kDefaultLayout.arena_bytes];   // default-layout-ok: static storage, sized when built
 
-    static_assert(ARENA_SIZE <= sizeof(arena_storage),
-                  "Buffer layout exceeds allocated storage!");
+    uint8_t* clockwork_local_arena(ClockworkCore*) { return arena_storage; }
+#elif !defined(__EMSCRIPTEN__)
+    // Natively each core has its own arena when its host gives it no segment:
+    // zeroed, made at its first ask and freed when the core goes
+    // (clockwork::Memory).
+    uint8_t* clockwork_local_arena(ClockworkCore* core) {
+        if (!clockwork::make_state(core)) return nullptr;
+        clockwork::Memory& m = clockwork::state(core)->memory;
+        if (!m.arena) m.arena = static_cast<uint8_t*>(std::calloc(1, clockwork::state(core)->arena.layout.arena_bytes));   // 16-aligned, as the arena needs
+        return m.arena;
+    }
 
-    uint8_t* clockwork_local_arena() { return arena_storage; }
+    void clockwork_free_local_arena(ClockworkCore* core) {
+        if (clockwork::CoreState* st = clockwork::state(core)) {
+            std::free(st->memory.arena);
+            st->memory.arena = nullptr;
+        }
+    }
+#endif
+
+    // ── A core's own sizes (lanes.h) ──────────────────────────────────────
+    // A target whose one core's arena exists before the core does — static
+    // storage on a device, the engine's memory on the web, whose table the
+    // worklet reads before it boots — takes only its own sizes.
+#if defined(__EMSCRIPTEN__) || CLOCKWORK_HAS_TIERED_MEMORY
+    static constexpr bool kArenaBeforeCore = true;
 #else
+    static constexpr bool kArenaBeforeCore = false;
+#endif
+
+    static void fill_profile(ClockworkProfile* out, const clockwork::Profile& p) {
+        if (!out || out->struct_bytes < sizeof(ClockworkProfile)) return;
+        out->struct_bytes       = sizeof(ClockworkProfile);
+        out->in_ring_bytes      = p.in_ring_bytes;
+        out->rt_out_ring_bytes  = p.rt_out_ring_bytes;
+        out->nrt_out_ring_bytes = p.nrt_out_ring_bytes;
+        out->scope_frames       = p.scope_frames;
+        out->scope_channels     = p.scope_channels;
+        out->tap_slots          = p.tap_slots;
+        out->track_tap_slots    = p.track_tap_slots;
+        out->tap_ring_frames    = p.tap_ring_frames;
+        out->window_bytes       = p.window_bytes;
+        out->persist_bytes      = p.persist_bytes;
+    }
+
+    void clockwork_profile_default(ClockworkProfile* out) {
+        fill_profile(out, clockwork::kDefaultProfile);   // default-layout-ok: what the call is for
+    }
+    void clockwork_profile_plugin(ClockworkProfile* out) { fill_profile(out, clockwork::kPluginProfile); }
+
+    // A host's profile as the layout reads it, or why it is not one.
+    static const char* read_profile(const ClockworkProfile* profile, clockwork::Profile& p) {
+        if (!profile || profile->struct_bytes < sizeof(ClockworkProfile))
+            return "no profile, or one from another version of Clockwork";
+        p = clockwork::Profile{
+            profile->in_ring_bytes, profile->rt_out_ring_bytes, profile->nrt_out_ring_bytes,
+            profile->scope_frames, profile->scope_channels,
+            profile->tap_slots, profile->track_tap_slots, profile->tap_ring_frames,
+            profile->window_bytes, profile->persist_bytes,
+        };
+        return nullptr;
+    }
+
+    const char* clockwork_profile_check(const ClockworkProfile* profile) {
+        clockwork::Profile p {};
+        if (const char* why = read_profile(profile, p)) return why;
+        return clockwork::layOut(p).refused;
+    }
+
+    const char* clockwork_set_profile(ClockworkCore* core, const ClockworkProfile* profile) {
+        clockwork::Profile p {};
+        if (const char* why = read_profile(profile, p)) return why;
+        if (!clockwork::make_state(core)) return "no such core";
+        clockwork::CoreState& st = *clockwork::state(core);
+        if (st.arena.at() || st.memory.arena)
+            return "the core is laid out already: set its profile before its first init";
+        const clockwork::Layout layout = clockwork::layOut(p);
+        if (layout.refused) return layout.refused;
+        if (kArenaBeforeCore && p != st.arena.layout.profile)
+            return "this target lays its one core's arena out before the core exists, and takes only its own sizes";
+        st.arena.layout = layout;
+        return nullptr;
+    }
+
+#ifdef __EMSCRIPTEN__
     // THE ENGINE'S MEMORY, on the web: one block for the life of the process
-    // (CLOCKWORK_AREA_ENGINE_MEMORY). The arena is its first ARENA_SIZE
-    // bytes; the placement arena — the RT router's block, the guest's
+    // (CLOCKWORK_AREA_ENGINE_MEMORY). The arena, laid out by the target's
+    // profile, is its first bytes; the placement arena — the RT router's block, the guest's
     // working memory, the heap — is the rest. Claimed once,
     // through clockwork_memory_claim, before anything else is allocated, so
     // it is the first thing after the linker's heap base and the same on
@@ -369,343 +401,216 @@ extern "C" {
     uint8_t* g_engine_block       = nullptr;
     size_t   g_engine_block_bytes = 0;
 
-    uint8_t* clockwork_local_arena() { return g_engine_block; }
+    uint8_t* clockwork_local_arena(ClockworkCore*) { return g_engine_block; }
 #endif
 
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
-    // THE ENGINE'S MEMORY, NATIVELY: one block the guest's two spans are
-    // carved from, as on the web, so a desktop engine's memory is
-    // one thing to see and one malloc to make. Unlike the web's block it
-    // does not hold the arena: natively the arena is static storage, or a
-    // shared-memory segment other processes map, and the guest's memory
-    // must not be in a segment any process can reach. Nor the RT router's
-    // block, which is the process's for life while this block is an
-    // engine's: a build whose guest wants more than the block holds takes a
-    // new one, and the router's block stays where it was. Everything carved
-    // from the block is given back before it is replaced (the pool and the
-    // spans are all per-build), so replacing it frees nothing live. THE
-    // BLOCK IS CUT IN TWO BY HAND — the fast span, then the bulk span — and
-    // clockwork::mem is not involved: natively it stays the system
-    // allocator. The block is never installed as the placement arena: a
-    // fixture that boots one engine for the whole process would then have
-    // every later test's "system" allocation come out of the engine's block
-    // and be freed as the system's. The block goes with the engine
-    // (teardown_memory). A tiered device has real regions to place into and
-    // no block.
-    uint8_t* g_engine_block       = nullptr;
-    size_t   g_engine_block_bytes = 0;
+    // THE ENGINE'S MEMORY, NATIVELY: one block per core that the guest's two
+    // spans are carved from, as on the web, so a desktop engine's memory is
+    // one thing to see and one allocation to make (clockwork::Memory).
+    // Unlike the web's block it does not hold the arena: natively the arena
+    // is the core's own, or a shared-memory segment other processes map, and
+    // the guest's memory must not be in a segment any process can reach. Nor
+    // the core's own pool, which lives as long as the core while this block
+    // is a build's: a build whose guest wants more than the block holds takes
+    // a new one. Everything carved from the block is given back before it is
+    // replaced (the pool and the spans are all per-build), so replacing it
+    // frees nothing live. THE BLOCK IS CUT IN TWO BY HAND — the fast span,
+    // then the bulk span — and clockwork::mem is not involved: natively it
+    // stays the system allocator. The block is never installed as the
+    // placement arena: a fixture that boots one engine for the whole process
+    // would then have every later test's "system" allocation come out of the
+    // engine's block and be freed as the system's. The block goes with the
+    // engine (teardown_memory). A tiered device has real regions to place
+    // into and no block.
+    //
+    // Natively a process may hold many cores, so the memory a core's pools
+    // run over comes in whole chunks of the address map's on a chunk
+    // (clockwork_heap.h), straight from the system (os_pages.h): no two
+    // cores' memory shares one, and a span zeroed at a build gives its pages
+    // back rather than having them written.
 
     // Have a block that holds `bytes`: the one there is when it does, else a
     // new one with everything carved from the old one forgotten first.
     // False when the system has no such block, with no spans, so the boot
     // refuses with the figures.
-    static bool engine_block_holding(size_t bytes, uint32_t verbosity);
+    static bool engine_block_holding(clockwork::CoreState& st, size_t bytes, uint32_t verbosity);
 #endif
 
-    // Clockwork's own audio staging, sized to the compile-time max so any
-    // runtime block size up to that cap fits without reallocation. (128 * 128
-    // * 4 = 64 KB on web, up to 512 KB on native.) Channel-major: channel c
-    // occupies [c * block, (c+1) * block).
-    //
-    // These are the buffers the DSP is handed. It WRITES the output one —
-    // dsp_process fills channel pointers into this array. Clockwork allocates
-    // the samples and names the channels, and never learns where the DSP keeps
-    // anything.
-    alignas(16) float static_audio_bus[clockwork::kMaxBlockSize * clockwork::kMaxChannels];
-    alignas(16) float static_audio_in[clockwork::kMaxBlockSize * clockwork::kMaxChannels];
-
-    // IN-ring drain state for the shared walker (ring_drain.h): sequence-gap
-    // tracking. Frames are contiguous by wire invariant and parsed in place
-    // from the ring — there is no copy buffer. Audio-thread only.
-    ClockworkDrainState g_in_drain;
-
-    // Sequence-tracking reset requested off-thread (purge → clear_scheduler
-    // runs on a control thread on native); the audio thread applies it before
-    // its next drain so g_in_drain stays single-threaded.
-    std::atomic<bool> g_in_seq_reset{false};
-
-    // The last generation opened in this process, or handed over by a host
-    // whose engine ran in memory now gone (clockwork_carry_generation): a new
-    // arena carries it on, so no generation is named twice to a client that
-    // outlived the engine before (docs/RESTARTS.md, "The generation").
-    // Outlives teardown_memory, as the process does.
-    uint32_t g_carried_generation = 0;
-
-    void clockwork_carry_generation(uint32_t generation) {
-        if (generation > g_carried_generation) g_carried_generation = generation;
-    }
-
-    // THE IN RING'S MARKS (lanes/ring_marks.h): a teardown sets one for the
-    // generation closing (destroy_dsp); a purge of what went stale while the
-    // audio thread was stalled sets one for the generation it has
-    // (clockwork_ingress_mark). The drain refuses each frame for the guest
-    // below one to its sender, as the ring it answers on has room
-    // (refuse_when_room), and takes everything of clockwork's own as it comes
-    // — so whatever replaced the instance in between, what was written for the
-    // old one is answered once, in order, and nothing is dropped without a
-    // word. Set only where the drain is not running — on the audio thread
-    // itself, or with it stopped — so they are the consuming thread's state,
-    // handed over by the audio thread's stop and start.
-    RingMarks g_in_marks;
-
-    void*  g_guest_memory       = nullptr;
-    size_t g_guest_memory_bytes = 0;
-
-    // The guest's arenas when CLOCKWORK reserved them rather than the host: a
-    // host that passed no region (headless native, an embedded board) and a
-    // guest that declared wants (DspInfo::memory_bytes_wanted) meet here, and
-    // on a tiered device the bulk arena is always clockwork's to place, since
-    // only clockwork::mem knows which RAM is which. Taken once from
-    // clockwork::mem at the first build that needs them, reused across
-    // rebuilds exactly as a host-owned span is, and given back at
-    // teardown_memory — never in destroy_dsp, which a rebuild goes through.
-    void*  g_owned_fast        = nullptr;
-    size_t g_owned_fast_bytes  = 0;
-    void*  g_owned_bulk        = nullptr;
-    size_t g_owned_bulk_bytes  = 0;
-
-    // Optional override for the whole shared-memory arena base. When set
-    // (native backend with a public POSIX shm segment), init_memory() points
-    // `shared_memory` here instead of the process-local arena_storage, so
-    // the entire shared_memory.h blob — rings, control, metrics, node-tree,
-    // scope and taps — lives in the segment and is observable
-    // cross-process.
-    uint8_t* g_external_segment = nullptr;
-
-    // Where the lanes are for the arena's table, when they are not this
-    // process's own memory: the command segment's offsets (ClockworkEngine,
-    // docs/SEGMENTS.md). Read by every guest build.
-    static uint32_t g_lane_space      = CLOCKWORK_SPACE_UNKNOWN;
-    static uint64_t g_lane_assets_at  = 0;
-    static uint64_t g_lane_returns_at = 0;
-    void clockwork_place_lanes(uint32_t space, uint64_t assets_at, uint64_t returns_at) {
-        g_lane_space      = space;
-        g_lane_assets_at  = assets_at;
-        g_lane_returns_at = returns_at;
-    }
-
-    uint8_t* shared_memory = nullptr;
-    RingCursors* cursors = nullptr;
-    PerformanceMetrics* metrics = nullptr;
-    static clockwork::metrics_history::Writer g_metrics_history;   // the hour's history of the metrics, the audio thread's to write
-    std::atomic<int32_t>* global_offset = nullptr;
-    bool memory_initialized = false;
+    // The guest's arenas when CLOCKWORK reserved them rather than the host
+    // (clockwork::Memory's fast and bulk): a host that passed no region
+    // (headless native, an embedded board) and a guest that declared wants
+    // (DspInfo::memory_bytes_wanted) meet there, and on a tiered device the
+    // bulk arena is always clockwork's to place, since only clockwork::mem
+    // knows which RAM is which. Taken at the first build that needs them,
+    // reused across rebuilds exactly as a host-owned span is, and given back
+    // at teardown_memory — never in destroy_dsp, which a rebuild goes
+    // through.
 
     // Defined beside clockwork_log; see the note there for why boot failures
     // cannot use it.
-    static void clockwork_boot_fail(const char* fmt, ...);
-    struct Dsp* g_dsp = nullptr;
+    static void clockwork_boot_fail(clockwork::CoreState& st, const char* fmt, ...);
 
-    // WHY THIS BUILD HAS NO GUEST, for the host to report (clockwork_boot_error).
-    // Written on the control thread while the build runs, before the audio
-    // thread is let at it, and read by the host after; g_boot_failed is the
-    // flag the audio thread reads to know the instance is not coming. The first
-    // reason wins: what stopped the build, not what went wrong because of it.
-    // A fixed buffer, so recording a failure allocates nothing.
-    static std::array<char, 512> g_boot_error{};
-    static std::atomic<bool> g_boot_failed{false};
-
-    static void clear_boot_error() {
-        g_boot_error[0] = '\0';
-        g_boot_failed.store(false, std::memory_order_release);
+    // Why this build has no guest (Guest::boot_error). Written on the control
+    // thread while the build runs, before the audio thread is let at it.
+    static void clear_boot_error(clockwork::CoreState& st) {
+        st.guest.boot_error[0] = '\0';
+        st.guest.boot_failed.store(false, std::memory_order_release);
     }
 
-    static void record_boot_error(const char* fmt, ...) {
-        if (g_boot_failed.load(std::memory_order_relaxed)) return;
+    static void record_boot_error(clockwork::CoreState& st, const char* fmt, ...) {
+        clockwork::Guest& g = st.guest;
+        if (g.boot_failed.load(std::memory_order_relaxed)) return;
         va_list args;
         va_start(args, fmt);
-        vsnprintf(g_boot_error.data(), g_boot_error.size(), fmt, args);
+        vsnprintf(g.boot_error.data(), g.boot_error.size(), fmt, args);
         va_end(args);
-        g_boot_failed.store(true, std::memory_order_release);
+        g.boot_failed.store(true, std::memory_order_release);
     }
 
-    const char* clockwork_last_boot_error() {
-        return g_boot_failed.load(std::memory_order_acquire) ? g_boot_error.data() : nullptr;
+    const char* clockwork_boot_error(ClockworkCore* core) {
+        const clockwork::Guest* g = clockwork::guest(core);
+        return g && g->boot_failed.load(std::memory_order_acquire) ? g->boot_error.data() : nullptr;
     }
 
-    // The session's audio geometry. CLOCKWORK CHOOSES THESE and writes them into
-    // DspConfig, so it never asks the DSP what block size or channel count it
-    // settled on.
-    uint32_t g_block_size   = 0;
-    uint32_t g_out_channels = 0;
-    uint32_t g_in_channels  = 0;
-    double   g_dsp_sample_rate = 0.0;
-
-    // The block a build is laid out in, for the block a host asked for. The
-    // staging buffers are fixed-size, so the configuration cannot ask for more
-    // than they hold, and a bad block size falls back to the default rather
-    // than rendering past the end of the arena.
+    // The block a build is laid out in, for the block a host asked for: no
+    // more than the profile's largest (kMaxBlockSize), and a bad size falls
+    // back to the default.
     static uint32_t build_block(uint32_t asked) {
         return (asked == 0 || asked > clockwork::kMaxBlockSize) ? clockwork::kDefaultBlockSize : asked;
     }
 
-    // What the instance in the arena was built from: clockwork's configuration
-    // as it stood, and the guest's config block. Audio coming back carries the
-    // instance on only in the same (come_back); a change it was told of
-    // (clockwork_guest_reconfigure) is what it is built for from then on.
-    static ClockworkConfig g_built_config{};
-    static std::array<uint8_t, GUEST_CONFIG_SIZE> g_built_guest_config{};
-
-    // Channel pointer arrays handed to dsp_process, built once at init so the
-    // audio thread does no arithmetic beyond passing two pointers.
-    float*       g_out_ptrs[clockwork::kMaxChannels] = {};
-    const float* g_in_ptrs[clockwork::kMaxChannels]  = {};
-
-    // ── Ports bound to DSP channels (clockwork_port_bus.h) ────────────────────────
-    //
-    // A fixed table, never compacted: entry i keeps its channel range for as
-    // long as it is attached, and detaching entry 1 leaves 0 and 2 exactly
-    // where they were. That is the same stable-slot rule dsp_api.h states for
-    // channels and clockwork_ports.h states for ports, applied to the one thing
-    // joining them.
-    //
-    // Written by a control thread, read by the audio thread, so `port` is
-    // atomic and is the publication point: the channel count and first channel
-    // are stored BEFORE the port is published and cleared AFTER it is taken
-    // away, so the audio thread never sees a half-built entry. Nothing here
-    // ever blocks, and the audio thread's read is one relaxed load per entry.
-    struct PortBinding {
-        std::atomic<ClockworkPort> port{CLOCKWORK_PORT_NONE};
-        uint32_t first_channel = 0;
-    };
-    PortBinding g_port_bus[CLOCKWORK_PORT_BUS_MAX];
-
-    // Serialises the CONTROL side of the routing table, and nothing else: the
-    // audio thread never touches it, so it can never be made to wait. It buys
-    // one thing the old compare-exchange could not — claiming a table entry,
-    // announcing it and publishing it as a single step, so an announcement is
-    // never queued for a binding that then loses its slot, and a rebuild's
-    // re-announcement can never interleave with an attach and name a port
-    // twice. A spin lock rather than a mutex because the critical section is a
-    // table scan and a memcpy of at most a few hundred bytes, and because this
-    // file compiles for targets where <mutex> is not free. A word, not
-    // std::atomic_flag: the flag is a byte, and CLOCKWORK_HAS_BYTE_ATOMICS is 0 on
-    // Xtensa (platform.h) — there __atomic_test_and_set is an undefined
-    // reference at link, while a 32-bit exchange is native everywhere.
-    std::atomic<uint32_t> g_port_ctl{0};
-    struct PortCtlLock {
-        PortCtlLock()  { while (g_port_ctl.exchange(1, std::memory_order_acquire)) {} }
-        ~PortCtlLock() { g_port_ctl.store(0, std::memory_order_release); }
-        PortCtlLock(const PortCtlLock&) = delete;
-        PortCtlLock& operator=(const PortCtlLock&) = delete;
-    };
-
+    // The core's staging laid out for `block` frames of `out` and `in`
+    // channels, and zeroed: silence for a host that reads before the first
+    // tick, and for an input channel nothing fills. A span that holds it is
+    // kept; one too small is given back and a larger taken, from the fast
+    // tier (a hot buffer in slow RAM distorts the audio). False when there
+    // is none to take, with the staging as it was. With the audio thread
+    // stopped. These are the buffers the DSP is handed: it writes the
+    // output, and Clockwork names the channels and never learns where the
+    // DSP keeps anything.
+    static bool fit_staging(clockwork::Staging& sg, uint32_t block, uint32_t out, uint32_t in) {
+        const size_t channels = static_cast<size_t>(out) + in;
+        const size_t ptr_bytes = (channels * sizeof(float*) + 15u) & ~size_t{15};   // the samples start 16-aligned
+        const size_t bytes = ptr_bytes + channels * block * sizeof(float);
+        if (sg.span_bytes < bytes) {
+            void* const span = clockwork::mem::alloc(clockwork::mem::Tier::Fast, bytes, /*allow_spill=*/false);
+            if (!span) return false;
+            sg.span.reset(span);
+            sg.span_bytes = bytes;
+        }
+        auto* const base = static_cast<uint8_t*>(sg.span.get());
+        auto* const samples = reinterpret_cast<float*>(base + ptr_bytes);
+        std::memset(samples, 0, channels * block * sizeof(float));
+        sg.out_ptrs = reinterpret_cast<float**>(base);
+        sg.in_ptrs  = reinterpret_cast<const float**>(base) + out;
+        sg.out = out ? samples : nullptr;
+        sg.in  = in ? samples + static_cast<size_t>(out) * block : nullptr;
+        for (uint32_t c = 0; c < out; ++c) sg.out_ptrs[c] = sg.out + static_cast<size_t>(c) * block;
+        for (uint32_t c = 0; c < in; ++c)  sg.in_ptrs[c]  = sg.in + static_cast<size_t>(c) * block;
+        return true;
+    }
 
     // Sources into the input bus. Called immediately before dsp_process, after
     // whatever the device backend wrote there: a bound source OWNS its range
     // for the block.
-    static void pull_port_sources(uint32_t frames) {
-        for (auto& b : g_port_bus) {
+    static void pull_port_sources(const clockwork::CoreState& st, uint32_t frames) {
+        const clockwork::Build& build = st.build;
+        for (const auto& b : st.port_bus.bindings) {
             const ClockworkPort p = b.port.load(std::memory_order_acquire);
             if (p == CLOCKWORK_PORT_NONE) continue;
-            if (clockwork_port_direction(p) != kClockworkPortSource) continue;
+            if (clockwork_port_direction(st.ports, p) != kClockworkPortSource) continue;
             const uint32_t first = b.first_channel;
-            if (first >= g_in_channels) continue;
-            uint32_t n = clockwork_port_channels(p);
-            if (n > g_in_channels - first) n = g_in_channels - first;
+            if (first >= build.in_channels) continue;
+            uint32_t n = clockwork_port_channels(st.ports, p);
+            if (n > build.in_channels - first) n = build.in_channels - first;
             if (n == 0) continue;
             std::array<float*, clockwork::kMaxChannels> ch{};
             for (uint32_t c = 0; c < n; ++c)
-                ch[c] = static_audio_in + static_cast<size_t>(first + c) * g_block_size;
+                ch[c] = st.staging.in + static_cast<size_t>(first + c) * build.block;
             // The return value is deliberately ignored: the shortfall is
             // already silence in the buffer and already counted on the port,
             // and there is nothing useful the audio thread could do with it.
-            (void)clockwork_port_read(p, ch.data(), n, frames);
+            (void)clockwork_port_read(st.ports, p, ch.data(), n, frames);
         }
     }
 
     // The DSP's output into sinks. Called immediately after dsp_process, so a
     // sink records what actually left clockwork.
-    static void push_port_sinks(uint32_t frames) {
-        for (auto& b : g_port_bus) {
+    static void push_port_sinks(const clockwork::CoreState& st, uint32_t frames) {
+        const clockwork::Build& build = st.build;
+        for (const auto& b : st.port_bus.bindings) {
             const ClockworkPort p = b.port.load(std::memory_order_acquire);
             if (p == CLOCKWORK_PORT_NONE) continue;
-            if (clockwork_port_direction(p) != kClockworkPortSink) continue;
+            if (clockwork_port_direction(st.ports, p) != kClockworkPortSink) continue;
             const uint32_t first = b.first_channel;
-            if (first >= g_out_channels) continue;
-            uint32_t n = clockwork_port_channels(p);
-            if (n > g_out_channels - first) n = g_out_channels - first;
+            if (first >= build.out_channels) continue;
+            uint32_t n = clockwork_port_channels(st.ports, p);
+            if (n > build.out_channels - first) n = build.out_channels - first;
             if (n == 0) continue;
             std::array<const float*, clockwork::kMaxChannels> ch{};
             for (uint32_t c = 0; c < n; ++c)
-                ch[c] = static_audio_bus + static_cast<size_t>(first + c) * g_block_size;
-            (void)clockwork_port_write(p, ch.data(), n, frames);
+                ch[c] = st.staging.out + static_cast<size_t>(first + c) * build.block;
+            (void)clockwork_port_write(st.ports, p, ch.data(), n, frames);
         }
     }
 
-    // dsp_describe()->holds_schedule, read ONCE at boot. The whole schedule
-    // branch in this file turns on this one bool (see ingest_frame): a DSP
-    // that holds its own schedule receives a timed message the moment it
-    // arrives, carrying its timetag; one that does not has clockwork hold it
-    // until due. Nothing else anywhere consults it.
-    bool g_dsp_holds_schedule = false;
-    // DspInfo::wants_events, read at the same moment: whether an inbound
-    // event (clockwork_event_route) is also the guest's.
-    bool g_dsp_wants_events = false;
-    // DspInfo::survives, read once at boot: the device changes this guest
-    // takes live (lanes.h clockwork_guest_survives).
-    uint32_t g_dsp_survives = 0;
-
-    // True while this thread is the one writer of the instance's ring
-    // (RT-out): the audio thread inside process_audio(), and the restart
-    // thread inside destroy_dsp() and rebuild_dsp(), which run with the audio
-    // thread stopped. What an instance says goes out on that ring, in order
-    // (emit_osc_route), and so do this thread's log lines (emit_debug_osc);
-    // any other thread (watchdog, recovery, boot on native) writes the locked
-    // NRT-out ring, so the instance's ring never has a second concurrent writer.
-    thread_local bool t_writes_instance_ring = false;
-    struct InstanceRingScope {
-        InstanceRingScope()  : prev(t_writes_instance_ring) { t_writes_instance_ring = true; }
-        ~InstanceRingScope() { t_writes_instance_ring = prev; }
-        InstanceRingScope(const InstanceRingScope&) = delete;
-        InstanceRingScope& operator=(const InstanceRingScope&) = delete;
-        const bool prev;
-    };
-
-    // File-scope state shared across threads: written by clear_scheduler()
-    // on the control thread, read/updated by process_audio() on the audio
-    // thread. Relaxed ordering — these are diagnostic counters with no
-    // cross-variable invariants.
-    std::atomic<uint32_t> local_in_peak{0};
-    std::atomic<uint32_t> local_out_peak{0};
-    std::atomic<uint32_t> local_nrt_out_peak{0};
-    std::atomic<uint32_t> corruption_count{0};
-    std::atomic<uint32_t> gap_log_count{0};
-    std::atomic<int> late_count{0};
-    // The "say it a few times, then stop" log limiters, and the late log's
-    // one-a-second stamp. Here rather than static in the functions that use
-    // them so that a new engine can start them over (below).
-    std::atomic<uint32_t> no_backend_log_count{0};
-    std::atomic<uint32_t> oversize_forward_log_count{0};
-    std::atomic<uint64_t> last_late_log_osc{0};   // Timetag::ntp()
-    // Blocks between metrics flushes (~30 Hz), derived from the rate and block
-    // size init_memory publishes; 0 until derived. Zeroed at every
-    // init_memory, because a rebuild may be at another rate.
-    std::atomic<uint32_t> metrics_flush_period{0};
-
-    // A NEW ENGINE STARTS THESE OVER. They are the process's, not an engine's:
-    // without the reset a second engine in one process — a test suite, the NIF,
-    // an embedder that closes and boots again — inherits the first one's,
-    // publishes the last engine's buffer peaks as its own from its first
-    // flush, and a limiter the last engine used up keeps this one's first
-    // error out of the log. (A purge clears the peaks too: clear_scheduler.)
-    static void reset_engine_diagnostics() {
-        local_in_peak.store(0, std::memory_order_relaxed);
-        local_out_peak.store(0, std::memory_order_relaxed);
-        local_nrt_out_peak.store(0, std::memory_order_relaxed);
-        corruption_count.store(0, std::memory_order_relaxed);
-        gap_log_count.store(0, std::memory_order_relaxed);
-        late_count.store(0, std::memory_order_relaxed);
-        no_backend_log_count.store(0, std::memory_order_relaxed);
-        oversize_forward_log_count.store(0, std::memory_order_relaxed);
-        last_late_log_osc.store(0, std::memory_order_relaxed);
+    // What the linked guest declares about itself (DspInfo): dsp_describe is
+    // static, answering before any instance exists, so it is read once, the
+    // first time anything asks. Null for a guest that declares nothing.
+    static const DspInfo* guest_info() {
+        static const DspInfo* const info = [] {
+            GuestCallScope guest(GuestCall::Boot);   // what it takes from malloc is counted as its own
+            return dsp_describe();
+        }();
+        return info;
+    }
+    // Whether the guest holds its own schedule. The whole schedule branch in
+    // this file turns on it (ingest_frame): a guest that does receives a
+    // timed message the moment it arrives, carrying its timetag; one that
+    // does not has clockwork hold it until due.
+    static bool guest_holds_schedule() {
+        const DspInfo* info = guest_info();
+        return info && info->holds_schedule != 0;
+    }
+    // Whether an inbound event (clockwork_event_route) is also the guest's.
+    static bool guest_wants_events() {
+        const DspInfo* info = guest_info();
+        return info && info->wants_events != 0;
     }
 
-    // Block-time constants, in NTP units (see clock_math.h).
-    int64_t g_osc_increment = 0;             // NTP units per buffer
-    double g_osc_to_samples = 0.0;           // NTP units -> samples conversion
-    double g_time_zero_osc = 0.0;            // AudioContext time -> OSC time offset
-    bool g_time_initialized = false;         // Have we set up time conversion?
+    // The core whose instance's ring (RT-out) this thread is the one writer
+    // of, or null: the audio thread inside process_audio(), and the restart
+    // thread inside destroy_dsp() and rebuild_dsp(), which run with the audio
+    // thread stopped. What an instance says goes out on that ring, in order
+    // (emit_osc_parts), and so do this thread's log lines (emit_debug_osc);
+    // any other thread (watchdog, recovery, boot on native), and this one
+    // for any other core, writes the locked NRT-out ring, so no instance's
+    // ring ever has a second concurrent writer.
+    thread_local const clockwork::CoreState* t_instance_ring_of = nullptr;
+    struct InstanceRingScope {
+        explicit InstanceRingScope(const clockwork::CoreState& st) : prev(t_instance_ring_of) { t_instance_ring_of = &st; }
+        ~InstanceRingScope() { t_instance_ring_of = prev; }
+        InstanceRingScope(const InstanceRingScope&) = delete;
+        InstanceRingScope& operator=(const InstanceRingScope&) = delete;
+        const clockwork::CoreState* const prev;
+    };
+
+
+    // A cold boot is a new engine, and starts over what the last one on this
+    // core gathered (a web reload boots cold on the core it holds): its ring
+    // peaks would be published as this one's, and a limit it used up would
+    // keep this one's first error out of the log.
+    static void start_engine_diagnostics_over(clockwork::CoreState& st) {
+        st.metrics.clear_peaks();
+        st.ingress.gap_log.reset();
+        st.ingress.corrupt_log.reset();
+        st.routing.unclaimed_log.reset();
+        st.schedule.refused_log.reset();
+        st.schedule.late_dropped_log.reset();
+        st.schedule.late_log.reset();
+    }
+
 
     // Return the base address of the ring buffer; JS derives every buffer position
     // from it.
@@ -726,10 +631,11 @@ extern "C" {
         if (g_engine_block) return reinterpret_cast<int>(g_engine_block);
         // 0 is the build-time default, as it is for clockwork_init's arena_bytes
         if (placement_bytes == 0) placement_bytes = (uint32_t)CLOCKWORK_MEM_ARENA_SIZE;
-        const size_t bytes = (size_t)ARENA_SIZE + (size_t)placement_bytes;
+        const size_t arena_bytes = clockwork::kDefaultLayout.arena_bytes;   // default-layout-ok: claimed before the core exists
+        const size_t bytes = arena_bytes + (size_t)placement_bytes;
         void* block = std::malloc(bytes);   // 16-aligned, as the arena needs
         if (!block) return 0;
-        std::memset(block, 0, ARENA_SIZE);  // the arena starts zeroed, as static storage did
+        std::memset(block, 0, arena_bytes);  // the arena starts zeroed, as static storage did
         g_engine_block       = static_cast<uint8_t*>(block);
         g_engine_block_bytes = bytes;
         return reinterpret_cast<int>(g_engine_block);
@@ -739,7 +645,7 @@ extern "C" {
     int get_arena_base() {
         if (!g_engine_block && !clockwork_memory_claim((uint32_t)CLOCKWORK_MEM_ARENA_SIZE)) return 0;
         if (arenaHeader(g_engine_block)->magic != CLOCKWORK_ARENA_MAGIC)
-            writeArenaHeader(g_engine_block);
+            writeArenaHeader(g_engine_block, clockwork::kDefaultLayout);   // default-layout-ok: read before the core exists
         return reinterpret_cast<int>(g_engine_block);
     }
 
@@ -775,23 +681,6 @@ extern "C" {
     }
 #endif
 
-    // Real-pointer base of the unified shared-memory arena, valid on every
-    // runtime (the int-returning get_arena_base() above is WASM-only and
-    // would truncate a 64-bit native pointer). Returns the arena base set by
-    // init_memory(): arena_storage locally, or the public segment when an
-    // external arena was supplied. Used by the tap-stream claim path.
-    void* get_shared_memory_base() {
-        return shared_memory;
-    }
-
-    // Set time offset from JavaScript (AudioContext -> NTP conversion).
-    EMSCRIPTEN_KEEPALIVE
-    void set_time_offset(double offset) {
-        g_time_zero_osc = offset;
-        g_time_initialized = true;
-        clockwork_log("Time offset set from JavaScript: %.6f", offset);
-    }
-
     // ── The one way out ────────────────────────────────────────────────────
     //
     // Every reply and notification clockwork emits leaves here: the answers to
@@ -806,26 +695,41 @@ extern "C" {
     // the audio thread owns it; any other thread takes the locked NRT-out ring.
     // Returns whether the frame was QUEUED, not whether anyone got it, so
     // DspHost::emit_osc can pass a refusal on.
-    static bool emit_osc_route(uint32_t route, uint32_t origin, const uint8_t* osc, uint32_t len);
-    static bool emit_osc_out(uint32_t origin, const uint8_t* osc, uint32_t len) {
-        return emit_osc_route(origin ? EGRESS_REPLY : EGRESS_BROADCAST_NOTIFY, origin, osc, len);
-    }
+    static uint32_t reply_route(uint32_t origin) { return origin ? EGRESS_REPLY : EGRESS_BROADCAST_NOTIFY; }
 
-    // The same, to a named audience (EgressRoute): what an inbound event
-    // takes to reach the clients subscribed to its subsystem.
-    static bool emit_osc_route(uint32_t route, uint32_t origin, const uint8_t* osc, uint32_t len) {
-        if (!memory_initialized || !cursors || !shared_memory || !osc || len == 0)
+    // To a named audience (EgressRoute) — what an inbound event takes to
+    // reach the clients subscribed to its subsystem — one OSC payload laid
+    // down from `parts`, with nothing gathered first.
+    static bool emit_osc_parts(clockwork::CoreState& st, uint32_t route, uint32_t origin,
+                               const RingPart* parts, uint32_t n_parts) {
+        uint8_t* const base = st.arena.laid_out();
+        if (!base || n_parts == 0)
             return false;
+        const clockwork::Layout& L = st.arena.layout;
+        RingCursors* const cursors = clockwork::cursors_in(base, L);
         const bool useRtOut =
-            t_writes_instance_ring ||
-            !g_nrt_egress_drained.load(std::memory_order_relaxed);
+            t_instance_ring_of == &st || !st.egress.nrt_drained.load(std::memory_order_relaxed);
         if (useRtOut) {
             return ::ring_buffer_write(
-                shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+                base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                route, origin, osc, len, &cursors->status_flags, metrics);
+                route, origin, parts, n_parts, &cursors->status_flags, clockwork::metrics_in(base));
         }
-        return clockwork_egress_nrt_write(route, origin, osc, len);
+        return clockwork_egress_nrt_write_parts(st.core, route, origin, parts, n_parts);
+    }
+    static bool emit_osc_route(clockwork::CoreState& st, uint32_t route, uint32_t origin,
+                               const uint8_t* osc, uint32_t len) {
+        if (!osc || len == 0) return false;
+        const RingPart part{ osc, len };
+        return emit_osc_parts(st, route, origin, &part, 1);
+    }
+    static bool emit_osc_out(clockwork::CoreState& st, uint32_t origin, const uint8_t* osc, uint32_t len) {
+        return emit_osc_route(st, reply_route(origin), origin, osc, len);
+    }
+
+    // The core's state behind a host callback's context, which is the core.
+    static clockwork::CoreState& state_of(void* ctx) {
+        return *clockwork::state(static_cast<ClockworkCore*>(ctx));
     }
 
     // ── What the DSP may call back into (dsp_api.h, DspHost) ───────────────
@@ -837,78 +741,54 @@ extern "C" {
     // client registry held on its behalf — it answers the origin it was given.
     // Every host callback is the engine's own work inside the guest's call:
     // HostCallScope lifts the guest fence for its body (guest_fence.h).
-    static int dsp_host_emit_osc(void* /*ctx*/, uint32_t origin,
+    static int dsp_host_emit_osc(void* ctx, uint32_t origin,
                            const uint8_t* bytes, uint32_t len) {
         HostCallScope host;
-        return emit_osc_out(origin, bytes, len) ? 1 : 0;
+        return emit_osc_out(state_of(ctx), origin, bytes, len) ? 1 : 0;
     }
 
-    static void dsp_host_log(void* /*ctx*/, int /*level*/, const char* text) {
+    static void log_to(clockwork::CoreState& st, const char* text);
+    static void dsp_host_log(void* ctx, int /*level*/, const char* text) {
         HostCallScope host;
-        if (text) clockwork_log("%s", text);
+        if (text) log_to(state_of(ctx), text);
     }
 
     // ── The DSP's own sinks ────────────────────────────────────────────────
     //
-    // dsp_api.h gives a DSP a handle and a send and no close, because a DSP's
-    // sinks last exactly as long as the DSP. That promise has to be kept by
-    // somebody, and it is kept here: every sink a DSP opens is remembered, and
-    // every one is closed when the instance is freed. Without this a device
-    // switch — which frees and rebuilds the instance — would leak a slot per
-    // sink per switch, and the leak would present as sinks that stop working
-    // after a few switches rather than as anything readable.
-    //
-    // Atomics rather than a lock, and a fixed array rather than a container:
-    // opening is a control-thread call by contract, but destroy_dsp can run
-    // while one is in flight and clockwork has no business allocating here.
-    // memory_profile.h's "<cell bytes>:<cells>,..." per kind, installed with
-    // clockwork_sink_profile (sink_profile.h). A string that does not parse
-    // installs nothing: the crate's default for the kind stands, and the log
-    // says which.
-    static void install_sink_profiles() {
-        if (!clockwork_install_sink_classes(kClockworkSinkOsc, CLOCKWORK_OSC_SINK_CLASSES))
-            clockwork_log("WARNING: OSC sink classes \"%s\" not installed — using the built-in shape",
+    // memory_profile.h's "<cell bytes>:<cells>,..." per kind, installed in the
+    // core's table with clockwork_sink_profile (sink_profile.h). A string
+    // that does not parse installs nothing: the crate's default for the kind
+    // stands, and the log says which.
+    static void install_sink_profiles(const clockwork::CoreState& st) {
+        if (!clockwork_install_sink_classes(st.sinks, kClockworkSinkOsc, CLOCKWORK_OSC_SINK_CLASSES))
+            clockwork_log(st.core, "WARNING: OSC sink classes \"%s\" not installed — using the built-in shape",
                           CLOCKWORK_OSC_SINK_CLASSES);
-        if (!clockwork_install_sink_classes(kClockworkSinkMidi, CLOCKWORK_MIDI_SINK_CLASSES))
-            clockwork_log("WARNING: MIDI sink classes \"%s\" not installed — using the built-in shape",
+        if (!clockwork_install_sink_classes(st.sinks, kClockworkSinkMidi, CLOCKWORK_MIDI_SINK_CLASSES))
+            clockwork_log(st.core, "WARNING: MIDI sink classes \"%s\" not installed — using the built-in shape",
                           CLOCKWORK_MIDI_SINK_CLASSES);
     }
 
-    constexpr uint32_t kMaxDspSinks = 16;
-    std::atomic<ClockworkSink> g_dsp_sinks[kMaxDspSinks];
-
-    static ClockworkSink dsp_host_open_sink(void* /*ctx*/, ClockworkSinkKind kind,
-                                      const char* target, uint32_t capacity) {
+    // dsp_api.h gives a DSP a handle and a send and no close, because a DSP's
+    // sinks last exactly as long as the DSP. The table keeps that promise:
+    // a sink the guest opens is marked the guest's, and every one is closed
+    // when the instance is freed (close_dsp_sinks). Without it a device
+    // switch — which frees and rebuilds the instance — would leak a slot per
+    // sink per switch, and the leak would present as sinks that stop working
+    // after a few switches rather than as anything readable.
+    static ClockworkSink dsp_host_open_sink(void* ctx, ClockworkSinkKind kind,
+                                            const char* target, uint32_t capacity) {
         HostCallScope host;
-        const ClockworkSink sink = clockwork_sink_open(kind, target, capacity);
-        if (sink == CLOCKWORK_SINK_NONE) return CLOCKWORK_SINK_NONE;
-        for (auto& slot : g_dsp_sinks) {
-            ClockworkSink expected = CLOCKWORK_SINK_NONE;
-            if (slot.compare_exchange_strong(expected, sink,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_relaxed)) {
-                return sink;
-            }
-        }
-        // Nowhere to remember it. Handing it back anyway would be handing back
-        // a sink nothing will ever close, so it is closed and refused instead:
-        // the DSP sees the same CLOCKWORK_SINK_NONE it must already handle.
-        clockwork_sink_close(sink);
-        clockwork_log("WARNING: DSP asked for more than %u sinks; refused", kMaxDspSinks);
-        return CLOCKWORK_SINK_NONE;
+        return clockwork_sink_open_guest(state_of(ctx).sinks, kind, target, capacity);
     }
 
-    static int dsp_host_send_sink(void* /*ctx*/, ClockworkSink sink,
+    static int dsp_host_send_sink(void* ctx, ClockworkSink sink,
                                   const uint8_t* bytes, uint32_t len, ClockworkTimetag when) {
         HostCallScope host;
-        return clockwork_sink_send(sink, bytes, len, when);
+        return clockwork_sink_send(state_of(ctx).sinks, sink, bytes, len, when);
     }
 
-    void close_dsp_sinks() {
-        for (auto& slot : g_dsp_sinks) {
-            const ClockworkSink sink = slot.exchange(CLOCKWORK_SINK_NONE, std::memory_order_acq_rel);
-            if (sink != CLOCKWORK_SINK_NONE) clockwork_sink_close(sink);
-        }
+    static void close_dsp_sinks(const clockwork::CoreState& st) {
+        clockwork_sink_close_guests(st.sinks);
     }
 
     // alloc_bytes hands out kGuestBlockAlign-aligned blocks (dsp_api.h); the
@@ -917,9 +797,111 @@ extern "C" {
     // and the pool's pointer is stored in the word just below it.
     static constexpr size_t kGuestBlockAlign = 64;
 
+    // ── The guest's memory (clockwork_heap.h) ───────────────────────────────
+    //
+    // What alloc_bytes hands out: from the core's guest pool on the thread
+    // holding the core's gate, lock-free; on any other thread from the
+    // host's bulk tier, on that thread, and routed back by address when it
+    // is given back. With no pool running there is none to give.
+
+
+    static void free_to_bulk(void* p) { clockwork::mem::free(p); }
+
+    // The core's own pool (clockwork_heap.h): what clockwork's Rust
+    // subsystems make inside a door. Its block is taken once, at the core's
+    // first init, from the fast tier, and given back when the core goes,
+    // empty. The web takes it first in its arena, so a start-over finds it
+    // where it was.
+#if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
+    // Natively in whole chunks, as the core's block is (above).
+    static void* own_pool_block() { return clockwork::pages::map(CLOCKWORK_OWN_POOL_BYTES); }
+    static void own_pool_give_back(void* p) { clockwork::pages::unmap(p, CLOCKWORK_OWN_POOL_BYTES); }
+#else
+    static void* own_pool_block() { return clockwork::mem::alloc(clockwork::mem::Tier::Fast, CLOCKWORK_OWN_POOL_BYTES); }
+    static void own_pool_give_back(void* p) { clockwork::mem::free(p); }
+#endif
+
+    static void own_pool_start(clockwork::CoreState& st) {
+        if (CLOCKWORK_OWN_POOL_BYTES < 65536 || clockwork_heap_running(st.heap, CLOCKWORK_POOL_OWN)) return;
+        void* span = own_pool_block();
+        if (!span) {
+            clockwork_log(st.core, "own pool: no %u bytes for it; clockwork's Rust subsystems use the system allocator",
+                          (unsigned)CLOCKWORK_OWN_POOL_BYTES);
+            return;
+        }
+        if (!clockwork_heap_start(st.heap, CLOCKWORK_POOL_OWN, span, CLOCKWORK_OWN_POOL_BYTES, own_pool_give_back))
+            own_pool_give_back(span);
+    }
+
+#ifdef __EMSCRIPTEN__
+    // After the arena the own pool lives in started over: take its block
+    // again, and say whether it came back where it was. True when it did, or
+    // when there is none.
+    static bool own_pool_reclaim(const clockwork::CoreState& st) {
+        size_t bytes = 0;
+        void* span = clockwork_heap_span(st.heap, CLOCKWORK_POOL_OWN, &bytes);
+        return !span || clockwork::mem::alloc(clockwork::mem::Tier::Fast, bytes) == span;
+    }
+#endif
+
+    // CLOCKWORK_POOL_CHECK=1 in the environment: walk the whole pool after
+    // every allocation and free by the gate's holder and stop at the first
+    // that leaves it broken, naming the operation, the bad block and the
+    // allocation before it (the one that most likely overran). A diagnostic,
+    // not a build setting: the walk is the whole pool, every time.
+    static bool pool_check_wanted() {
+        static const bool wanted = [] {
+            const char* v = std::getenv("CLOCKWORK_POOL_CHECK");
+            return v && *v && *v != '0';
+        }();
+        return wanted;
+    }
+    static void pool_check(const clockwork::CoreState& st, const char* op, const void* ptr, size_t bytes) {
+        if (!pool_check_wanted()) return;
+        const ClockworkPoolCheck c = clockwork_heap_check(st.heap, CLOCKWORK_POOL_GUEST);
+        if (c.code == 0) return;
+        clockwork_log(st.core, "guest memory: BROKEN after %s(0x%08x, %zu): check %d at block 0x%08x; the block before it is payload 0x%08x + %zu",
+                      op, (unsigned)(uintptr_t)ptr, bytes, (int)c.code, (unsigned)c.bad, (unsigned)c.prev_payload, c.prev_size);
+        fprintf(stderr, "guest memory: BROKEN after %s(%p, %zu): check %d at block %p; the block before it is payload %p + %zu\n",   // stdio-ok: a hunt
+                op, ptr, bytes, (int)c.code, (void*)c.bad, (void*)c.prev_payload, c.prev_size);
+        std::abort();
+    }
+
+    static void* guest_take(const clockwork::CoreState& st, size_t bytes) {
+        if (!clockwork_heap_running(st.heap, CLOCKWORK_POOL_GUEST)) return nullptr;
+        if (!clockwork::holds_gate(st.core)) return clockwork::mem::alloc(clockwork::mem::Tier::Bulk, bytes);
+        void* p = clockwork_heap_take(st.heap, CLOCKWORK_POOL_GUEST, bytes);
+        pool_check(st, "alloc", p, bytes);
+        return p;
+    }
+
+    static void guest_give(const clockwork::CoreState& st, void* raw) {
+        const bool gate = clockwork::holds_gate(st.core);
+        const uint32_t refused = gate ? clockwork_heap_census(st.heap, CLOCKWORK_POOL_GUEST).double_frees : 0;
+        if (clockwork_heap_give(st.heap, CLOCKWORK_POOL_GUEST, raw)) {
+            if (!gate) return;
+            pool_check(st, "free", raw, 0);
+            const uint32_t now = clockwork_heap_census(st.heap, CLOCKWORK_POOL_GUEST).double_frees;
+            if (now != refused)
+                clockwork_log(st.core, "guest memory: the guest freed 0x%08x twice (refused; %u so far)",
+                              (unsigned)(uintptr_t)raw, (unsigned)now);
+            return;
+        }
+        // The host's own memory, taken by a thread without the gate. Freed by
+        // the gate's holder it would be a malloc-family call on the audio
+        // thread: parked, for the next call into the core that is not a block.
+        if (gate && clockwork_heap_running(st.heap, CLOCKWORK_POOL_GUEST)) clockwork_heap_park_system(st.heap, raw);
+        else                                               clockwork::mem::free(raw);
+    }
+
+    void clockwork_release_parked_frees(ClockworkCore* core) {
+        if (const clockwork::CoreState* st = clockwork::state(core))
+            clockwork_heap_release_system(st->heap, free_to_bulk);
+    }
+
     // Give back bytes taken through alloc_bytes (dsp_api.h). Only the
     // pointer crosses: what the bytes were is the guest's business.
-    static void dsp_host_free_bytes(void* /*ctx*/, void* ptr) {
+    static void dsp_host_free_bytes(void* ctx, void* ptr) {
         // What arrives here came from alloc_bytes, on every target: a guest
         // whose buffer points into the client's assets (an asset, or a sample
         // the client placed there) does not hand that range to us — the
@@ -927,17 +909,16 @@ extern "C" {
         // So the free is real on the web too; a no-op here leaks every block
         // the guest frees.
         HostCallScope host;
-        if (ptr) clockwork_pool_free(static_cast<void**>(ptr)[-1]);
+        if (ptr) guest_give(state_of(ctx), static_cast<void**>(ptr)[-1]);
     }
 
-    // The pair of the above: the guest's pool, over its bulk memory
-    // (clockwork_pool.h). Lock-free, so this is callable on the audio
-    // thread, where it answers NULL rather than blocking when it cannot meet
-    // a request (dsp_api.h).
-    static void* dsp_host_alloc_bytes(void* /*ctx*/, size_t bytes) {
+    // The pair of the above: the guest's memory, above. Lock-free, so this
+    // is callable on the audio thread, where it answers NULL rather than
+    // blocking when it cannot meet a request (dsp_api.h).
+    static void* dsp_host_alloc_bytes(void* ctx, size_t bytes) {
         HostCallScope host;
         if (bytes == 0 || bytes > SIZE_MAX - kGuestBlockAlign) return nullptr;
-        void* raw = clockwork_pool_alloc(bytes + kGuestBlockAlign);
+        void* raw = guest_take(state_of(ctx), bytes + kGuestBlockAlign);
         if (!raw) return nullptr;
         // raw is 16-aligned, so this lands 16 to 64 bytes above it.
         const uintptr_t aligned = (reinterpret_cast<uintptr_t>(raw) + sizeof(void*) + kGuestBlockAlign - 1)
@@ -951,20 +932,22 @@ extern "C" {
     //
     // A DSP publishes a tap by claiming a slot and appending blocks; the
     // slot's layout (shm_tap_stream) and the anchor every block is stamped
-    // with (g_engine_frames) stay on this side. The handle passes straight
+    // with (the clock's engine frames) stay on this side. The handle passes straight
     // through to the substrate, which owns slots by the handle's address.
-    static int dsp_host_tap_open(void* /*ctx*/, uint32_t index, uint32_t channels,
+    static int dsp_host_tap_open(void* ctx, uint32_t index, uint32_t channels,
                                    DspTapHandle* hnd) {
         HostCallScope host;
         if (!hnd) return 0;
         if (index > (uint32_t)INT32_MAX || channels > (uint32_t)INT32_MAX) return 0;
-        if (!clockwork_tap_get(nullptr, (int)index, (int)channels, 0, hnd)) return 0;
+        auto* const core = static_cast<ClockworkCore*>(ctx);
+        if (!clockwork_tap_get(clockwork_core_taps(core), clockwork::arena_base(core),
+                               (int)index, (int)channels, 0, hnd)) return 0;
         auto* slot = static_cast<shm_tap_stream*>(hnd->slot);
         hnd->channels = slot ? slot->channels : 0;
         return 1;
     }
 
-    static void dsp_host_tap_write(void* /*ctx*/, DspTapHandle* hnd,
+    static void dsp_host_tap_write(void* ctx, DspTapHandle* hnd,
                                      const float* const* channels, uint32_t n_channels,
                                      uint32_t frames) {
         HostCallScope host;
@@ -974,74 +957,34 @@ extern "C" {
         std::array<const float*, TAP_STREAM_CHANNELS> padded{};
         for (uint32_t c = 0; c < TAP_STREAM_CHANNELS; ++c)
             padded[c] = channels[c < n_channels ? c : n_channels - 1];
-        shm_tap_stream_writer writer(static_cast<shm_tap_stream*>(hnd->slot));
-        writer.write(padded.data(), frames, g_engine_frames.load(std::memory_order_relaxed));
+        auto* const core = static_cast<ClockworkCore*>(ctx);
+        shm_tap_stream_writer writer(static_cast<shm_tap_stream*>(hnd->slot),
+                                     clockwork::layout_of(core).profile.tap_ring_frames);
+        const ClockworkClock* clock = clockwork::clock_of(core);
+        writer.write(padded.data(), frames, clock ? clock->engineFrames() : 0);
     }
 
-    static void dsp_host_tap_close(void* /*ctx*/, DspTapHandle* hnd) {
+    static void dsp_host_tap_close(void* ctx, DspTapHandle* hnd) {
         HostCallScope host;
-        if (hnd) clockwork_tap_release(nullptr, hnd);
+        auto* const core = static_cast<ClockworkCore*>(ctx);
+        if (hnd) clockwork_tap_release(clockwork_core_taps(core), clockwork::arena_base(core), hnd);
     }
 
 
     // ── Assets (dsp_api.h, "Assets") ───────────────────────────────────────
     //
     // The audio thread's half of the facility: check a committed range against
-    // the lane, hand the guest a pointer, and keep the committed asset — who
-    // committed it, and what it is — so a release is told to the right client
-    // and an instance built again is handed every asset the last one held
-    // (hand_over_assets). A fixed table, probed by id — no allocation on this
-    // thread, and a full table is a refusal.
-    struct AssetSlot {
-        uint32_t id;
-        uint32_t origin;
-        uint32_t offset;        // into the assets area
-        uint32_t byte_count;
-        uint32_t channels;
-        uint32_t frames;
-        float    sample_rate;
-        uint8_t  kind;
-        bool     used;
-    };
-    constexpr uint32_t kAssetSlots = CLOCKWORK_ASSET_SLOTS;
-    static_assert(kAssetSlots > 0 && (kAssetSlots & (kAssetSlots - 1)) == 0,
-                  "CLOCKWORK_ASSET_SLOTS is a power of two");
-    AssetSlot g_assets[kAssetSlots] = {};
-    // An asset released leaves its slot `used`, under an id no client can
-    // commit, so the probe chains through it stay intact; the next insert on
-    // its chain takes it.
-    constexpr uint32_t kAssetTombstone = 0xFFFFFFFFu;
+    // the lane, hand the guest a pointer, and keep the committed asset in the
+    // core's table (Assets, core_state.h).
+    using Asset = clockwork::Assets::Slot;
 
-    AssetSlot* asset_lookup(uint32_t id) {
-        for (uint32_t i = 0, h = id * 2654435761u; i < kAssetSlots; ++i, ++h) {
-            AssetSlot& s = g_assets[h & (kAssetSlots - 1)];
-            if (s.used && s.id == id) return &s;
-            if (!s.used) return nullptr;
-        }
-        return nullptr;
-    }
-    // A slot for an id asset_lookup did not find: the first on its chain that
-    // is free, or a released asset's.
-    AssetSlot* asset_insert(uint32_t id, uint32_t origin) {
-        for (uint32_t i = 0, h = id * 2654435761u; i < kAssetSlots; ++i, ++h) {
-            AssetSlot& s = g_assets[h & (kAssetSlots - 1)];
-            if (!s.used || s.id == kAssetTombstone) {
-                s = AssetSlot{};
-                s.id = id; s.origin = origin; s.used = true;
-                return &s;
-            }
-        }
-        return nullptr;
-    }
-    void asset_remove(AssetSlot* s) { s->id = kAssetTombstone; s->origin = 0; }
-
-    void asset_emit(uint32_t origin, const char* address, uint32_t id, const char* reason) {
+    void asset_emit(clockwork::CoreState& st, uint32_t origin, const char* address, uint32_t id, const char* reason) {
         char buf[192];
         osc::OutboundPacketStream ps(buf, sizeof buf);
         ps << osc::BeginMessage(address) << static_cast<int32_t>(id);
         if (reason) ps << reason;
         ps << osc::EndMessage;
-        emit_osc_out(origin, reinterpret_cast<const uint8_t*>(ps.Data()),
+        emit_osc_out(st, origin, reinterpret_cast<const uint8_t*>(ps.Data()),
                      static_cast<uint32_t>(ps.Size()));
     }
 
@@ -1056,66 +999,68 @@ extern "C" {
     // ring then — a reader far behind — owed, the instance not running until
     // it has been said (process_audio), so nothing of the instance's goes
     // ahead of it.
-    enum class Owed : uint8_t { Nothing, Setup, Changed };
-    static std::atomic<Owed>     g_owed{Owed::Nothing};
-    static std::atomic<int32_t>  g_setup_rate{0};            // the rate, as setup names it
-    static std::atomic<uint32_t> g_setup_buffer_frames{0};   // the device's callback, as setup names it
+    using Owed = clockwork::SetupNotice::Owed;
 
     // "/clockwork/setup ,iii <rate> <device buffer> <generation>", or the same
     // as /clockwork/setup/changed, on the instance's ring: whichever is owed.
     // True once said, or when nothing is.
-    static bool say_owed() {
-        const Owed owed = g_owed.load(std::memory_order_acquire);
+    static bool say_owed(clockwork::CoreState& st) {
+        clockwork::SetupNotice& sn = st.setup;
+        const Owed owed = sn.owed.load(std::memory_order_acquire);
         if (owed == Owed::Nothing) return true;
         char buf[96];
         osc::OutboundPacketStream ps(buf, sizeof buf);
         ps << osc::BeginMessage(owed == Owed::Setup ? CLOCKWORK_SYS("setup") : CLOCKWORK_SYS("setup/changed"))
-           << g_setup_rate.load(std::memory_order_relaxed)
-           << static_cast<int32_t>(g_setup_buffer_frames.load(std::memory_order_relaxed))
-           << static_cast<int32_t>(arenaInstanceGeneration(shared_memory))
+           << sn.rate.load(std::memory_order_relaxed)
+           << static_cast<int32_t>(sn.buffer_frames.load(std::memory_order_relaxed))
+           << static_cast<int32_t>(arenaInstanceGeneration(st.arena.at()))
            << osc::EndMessage;
-        if (!emit_osc_route(EGRESS_BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
+        if (!emit_osc_route(st, EGRESS_BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
                             static_cast<uint32_t>(ps.Size())))
             return false;
-        g_owed.store(Owed::Nothing, std::memory_order_relaxed);
+        sn.owed.store(Owed::Nothing, std::memory_order_relaxed);
         return true;
     }
 
     // The device's callback as setup names it: for a host with no device, the block.
-    static uint32_t setup_buffer_frames(uint32_t buffer_frames) {
-        return buffer_frames ? buffer_frames : static_cast<uint32_t>(get_audio_buffer_samples());
+    static uint32_t setup_buffer_frames(const clockwork::CoreState& st, uint32_t buffer_frames) {
+        return buffer_frames ? buffer_frames : clockwork_block_size(st.core);
     }
 
     // The new instance announces itself: its setup, naming the device's
     // callback (or, for a host with no device yet, the block), written on its
     // ring as the build's last word, or owed until the ring has room.
-    static void announce_instance(uint32_t buffer_frames) {
-        InstanceRingScope instance_ring;
-        g_setup_rate.store(static_cast<int32_t>(g_dsp_sample_rate), std::memory_order_relaxed);
-        g_setup_buffer_frames.store(setup_buffer_frames(buffer_frames), std::memory_order_relaxed);
-        g_owed.store(Owed::Setup, std::memory_order_release);
-        say_owed();
+    static void announce_instance(clockwork::CoreState& st, uint32_t buffer_frames) {
+        InstanceRingScope instance_ring(st);
+        clockwork::SetupNotice& sn = st.setup;
+        sn.rate.store(static_cast<int32_t>(st.build.sample_rate), std::memory_order_relaxed);
+        sn.buffer_frames.store(setup_buffer_frames(st, buffer_frames), std::memory_order_relaxed);
+        sn.owed.store(Owed::Setup, std::memory_order_release);
+        say_owed(st);
     }
 
-    void clockwork_announce_facts(double sample_rate, uint32_t buffer_frames) {
-        if (!memory_initialized || !g_dsp) return;
-        InstanceRingScope instance_ring;
-        g_setup_rate.store(static_cast<int32_t>(sample_rate), std::memory_order_relaxed);
-        g_setup_buffer_frames.store(setup_buffer_frames(buffer_frames), std::memory_order_relaxed);
+    void clockwork_announce_facts(ClockworkCore* core, double sample_rate, uint32_t buffer_frames) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st || !st->arena.laid_out() || !st->guest.instance) return;
+        InstanceRingScope instance_ring(*st);
+        clockwork::SetupNotice& sn = st->setup;
+        sn.rate.store(static_cast<int32_t>(sample_rate), std::memory_order_relaxed);
+        sn.buffer_frames.store(setup_buffer_frames(*st, buffer_frames), std::memory_order_relaxed);
         // A setup still owed says the new facts itself.
         Owed nothing = Owed::Nothing;
-        g_owed.compare_exchange_strong(nothing, Owed::Changed, std::memory_order_acq_rel);
-        say_owed();
+        sn.owed.compare_exchange_strong(nothing, Owed::Changed, std::memory_order_acq_rel);
+        say_owed(*st);
     }
 
     // DspHost::asset_release — the guest is done; the committing client hears.
-    static int dsp_host_asset_release(void* /*ctx*/, uint32_t id) {
+    static int dsp_host_asset_release(void* ctx, uint32_t id) {
         HostCallScope host;
-        AssetSlot* s = asset_lookup(id);
+        clockwork::CoreState& st = state_of(ctx);
+        Asset* s = st.assets.lookup(id);
         if (!s) return 0;
         const uint32_t origin = s->origin;
-        asset_remove(s);
-        asset_emit(origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
+        clockwork::Assets::remove(*s);
+        asset_emit(st, origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
         return 1;
     }
 
@@ -1123,11 +1068,11 @@ extern "C" {
     // When the engine goes (teardown_memory), and when audio comes back to an
     // assets area that has moved, where no committed asset points at
     // anything any more.
-    void assets_release_all() {
-        for (AssetSlot& s : g_assets) {
-            if (s.used && s.id != kAssetTombstone)
-                asset_emit(s.origin, CLOCKWORK_SYS("asset/released"), s.id, nullptr);
-            s = AssetSlot{};
+    void assets_release_all(clockwork::CoreState& st) {
+        for (Asset& s : st.assets) {
+            if (s.used && s.id != clockwork::Assets::kTombstone)
+                asset_emit(st, s.origin, CLOCKWORK_SYS("asset/released"), s.id, nullptr);
+            s = Asset{};
         }
     }
 
@@ -1137,10 +1082,11 @@ extern "C" {
     // a rebuild and nothing has to be sent again. An asset the new instance
     // will not take is released there, and its committer hears so, as from a
     // guest that let go.
-    static void hand_over_assets() {
-        const auto* assets = static_cast<const uint8_t*>(g_clockwork_config.assets);
-        for (AssetSlot& s : g_assets) {
-            if (!s.used || s.id == kAssetTombstone) continue;
+    static void hand_over_assets(clockwork::CoreState& st) {
+        const ClockworkConfig& cfg = st.config;
+        const auto* assets = static_cast<const uint8_t*>(cfg.assets);
+        for (Asset& s : st.assets) {
+            if (!s.used || s.id == clockwork::Assets::kTombstone) continue;
             ClockworkAsset asset {};
             asset.struct_bytes = sizeof asset;
             asset.id           = s.id;
@@ -1152,30 +1098,35 @@ extern "C" {
             asset.frames       = s.frames;
             asset.sample_rate  = s.sample_rate;
             int rc = 1;
-            if (assets) { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(g_dsp, &asset); }
+            if (assets) { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(st.guest.instance, &asset); }
             if (rc == 0) continue;
             const uint32_t origin = s.origin, id = s.id;
-            asset_remove(&s);
-            asset_emit(origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
+            clockwork::Assets::remove(s);
+            asset_emit(st, origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
         }
     }
 
     // DspHost::flush_schedule — the bundles held for the guest (SCHED_TAG_SYNTH),
     // dropped. Not the default tag: that is clockwork's own schedule verb,
     // and not the guest's to clear.
-    static void dsp_host_flush_schedule(void* /*ctx*/) {
+    static void dsp_host_flush_schedule(void* ctx) {
         HostCallScope host;
 #if CLOCKWORK_SCHEDULER
-        clockwork_engine_schedule().flush(SCHED_TAG_SYNTH);
+        if (EngineScheduler* q = clockwork_engine_schedule(static_cast<ClockworkCore*>(ctx))) q->flush(SCHED_TAG_SYNTH);
+#else
+        (void)ctx;
 #endif
     }
 
-    const DspHost g_dsp_host = { /*ctx*/ nullptr, &dsp_host_emit_osc, &dsp_host_log,
-                                 &dsp_host_open_sink, &dsp_host_send_sink,
-                                 &dsp_host_free_bytes, &dsp_host_asset_release,
-                                 &dsp_host_alloc_bytes,
-                                 &dsp_host_tap_open, &dsp_host_tap_write,
-                                 &dsp_host_tap_close, &dsp_host_flush_schedule };
+    // What the guest is handed: the callbacks, with its core as their context.
+    static DspHost dsp_host_for(ClockworkCore* core) {
+        return DspHost{ core, &dsp_host_emit_osc, &dsp_host_log,
+                        &dsp_host_open_sink, &dsp_host_send_sink,
+                        &dsp_host_free_bytes, &dsp_host_asset_release,
+                        &dsp_host_alloc_bytes,
+                        &dsp_host_tap_open, &dsp_host_tap_write,
+                        &dsp_host_tap_close, &dsp_host_flush_schedule };
+    }
 
 #if CLOCKWORK_WORKLET_CLOCK && CLOCKWORK_SYNTH
     // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
@@ -1183,19 +1134,23 @@ extern "C" {
     // (the /clockwork/clock namespace) reply through the backend contract without
     // any DSP-specific reply type. Shared by every worklet host (WASM + the
     // self-driven device).
-    void rt_reply_emit(void*, uint32_t token, const uint8_t* osc, uint32_t len) {
-        emit_osc_out(token, osc, len);
+    void rt_reply_emit(void* ctx, uint32_t token, const uint8_t* osc, uint32_t len) {
+        emit_osc_out(state_of(ctx), token, osc, len);
     }
-    ReplyChannel g_rt_reply{ &rt_reply_emit, nullptr };
 #endif
 
     // The metrics that are constant for a session: which Clockwork, the rate
     // and block it runs at, and how much its scheduler can hold — events and
-    // bytes, since it is full when it runs out of either.
-    static void publish_session_metrics(double sample_rate, int buf_length) {
+    // bytes, since it is full when it runs out of either. And how often the
+    // rest are written, which follows from the rate and block.
+    static void publish_session_metrics(clockwork::CoreState& st, double sample_rate, int buf_length) {
+        const auto rate  = static_cast<uint32_t>(std::lround(sample_rate));
+        const auto block = static_cast<uint32_t>(buf_length);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(st.arena.at());
         metrics->clockwork_commit.store(CLOCKWORK_COMMIT_WORD, std::memory_order_relaxed);   // which Clockwork (clockwork_config.h)
-        metrics->audio_sample_rate.store(static_cast<uint32_t>(std::lround(sample_rate)), std::memory_order_relaxed);
-        metrics->audio_block_size.store(static_cast<uint32_t>(buf_length), std::memory_order_relaxed);
+        metrics->audio_sample_rate.store(rate, std::memory_order_relaxed);
+        metrics->audio_block_size.store(block, std::memory_order_relaxed);
+        st.metrics.period.store(clockwork::MetricsFlush::period_for(rate, block), std::memory_order_relaxed);
 #if CLOCKWORK_SCHEDULER
         metrics->scheduler_capacity.store(SCHEDULER_SLOT_COUNT, std::memory_order_relaxed);
         metrics->scheduler_pool_bytes.store(SCHEDULER_DATA_POOL_SIZE, std::memory_order_relaxed);
@@ -1205,7 +1160,8 @@ extern "C" {
 #endif
     }
 
-    static inline void update_scheduler_depth_metric(uint32_t depth) {
+    static inline void update_scheduler_depth_metric(clockwork::CoreState& st, uint32_t depth) {
+        PerformanceMetrics* const metrics = clockwork::metrics_in(st.arena.at());
         if (!metrics) {
             return;
         }
@@ -1219,7 +1175,8 @@ extern "C" {
         }
     }
 
-    static inline void increment_scheduler_drop_metric() {
+    static inline void increment_scheduler_drop_metric(clockwork::CoreState& st) {
+        PerformanceMetrics* const metrics = clockwork::metrics_in(st.arena.at());
         if (!metrics) {
             return;
         }
@@ -1237,19 +1194,17 @@ extern "C" {
     // Rate-limited the way the LATE/SHED logs are: a client that schedules in
     // a loop would otherwise fill the debug stream with one identical line per
     // message, which buries the first one — the only one anybody reads.
-    static inline void refuse_schedule_verb(const uint8_t* data, uint32_t len, uint32_t origin) {
-        increment_scheduler_drop_metric();
-        clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT, arenaInstanceGeneration(shared_memory),
-            [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
-        static std::atomic<uint32_t> refusals{0};
-        const uint32_t n = refusals.fetch_add(1, std::memory_order_relaxed);
-        if (n == 0 || n % 100 == 0)
-            clockwork_log("ERROR: " CLOCKWORK_SYS("schedule") " refused — this build has no "
+    static inline void refuse_schedule_verb(clockwork::CoreState& st, const uint8_t* data, uint32_t len, uint32_t origin) {
+        increment_scheduler_drop_metric(st);
+        clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT, arenaInstanceGeneration(st.arena.at()),
+            [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); });
+        if (st.schedule.refused_log.say())
+            clockwork_log(st.core, "ERROR: " CLOCKWORK_SYS("schedule") " refused — this build has no "
                    "timed store (built with CLOCKWORK_SCHEDULER=OFF; that "
                    "also removes " CLOCKWORK_SYS("sched/flush") ", timed MIDI out and "
                    "timed OSC forwarding). Immediate messages are unaffected, "
                    "and a timestamped bundle still reaches the DSP with its "
-                   "timetag. [%u so far]", n + 1);
+                   "timetag.");
     }
 #endif
 
@@ -1257,15 +1212,15 @@ extern "C" {
     // any lateness. A host whose engine can be flooded sets one, because a
     // backlog played seconds late is worse than a backlog not played;
     // clockwork itself never drops for lateness.
-    static std::atomic<uint32_t> g_timed_event_late_limit_ms{0};
-    EMSCRIPTEN_KEEPALIVE void clockwork_set_timed_event_late_limit_ms(uint32_t ms) {
-        g_timed_event_late_limit_ms.store(ms, std::memory_order_relaxed);
+    EMSCRIPTEN_KEEPALIVE void clockwork_set_timed_event_late_limit_ms(ClockworkCore* core, uint32_t ms) {
+        if (clockwork::Schedule* sc = clockwork::schedule(core))
+            sc->late_limit_ms.store(ms, std::memory_order_relaxed);
     }
-    static inline void note_late_dropped(double late_ms, uint32_t limit_ms) {
-        if (metrics) metrics->scheduler_late_dropped.fetch_add(1, std::memory_order_relaxed);
-        static std::atomic<uint32_t> saidLog{0};
-        if (saidLog.fetch_add(1, std::memory_order_relaxed) % 64 == 0)
-            clockwork_log("[schedule] a timed event %.0f ms late was dropped: the host allows %u ms", late_ms, limit_ms);
+    static inline void note_late_dropped(clockwork::CoreState& st, double late_ms, uint32_t limit_ms) {
+        if (PerformanceMetrics* m = clockwork::metrics_in(st.arena.at()))
+            m->scheduler_late_dropped.fetch_add(1, std::memory_order_relaxed);
+        if (st.schedule.late_dropped_log.say())
+            clockwork_log(st.core, "[schedule] a timed event %.0f ms late was dropped: the host allows %u ms", late_ms, limit_ms);
     }
 
     // Mark everything pending in the IN ring as of NOW (the marks, above):
@@ -1280,13 +1235,16 @@ extern "C" {
     // (the wake's purge): a writer mid-write lands on either side, and is
     // answered either way. A teardown wants the mark exact, and takes the
     // lock round it (mark_closing_generation).
-    static void mark_ingress(const char* reason, bool onlyDue) {
-        if (!memory_initialized || !cursors) return;
-        g_in_marks.set(static_cast<uint32_t>(cursors->in_sequence.load(std::memory_order_acquire)),
-                       arenaInstanceGeneration(shared_memory), reason, onlyDue);
+    static void mark_ingress(ClockworkCore* core, const char* reason, bool onlyDue) {
+        clockwork::Ingress* in = clockwork::ingress(core);
+        uint8_t* const base = clockwork::laid_out_base(core);
+        if (!in || !base) return;
+        in->marks.set(static_cast<uint32_t>(clockwork::cursors_in(base, clockwork::layout_of(core))
+                                                ->in_sequence.load(std::memory_order_acquire)),
+                       arenaInstanceGeneration(base), reason, onlyDue);
     }
-    void clockwork_ingress_mark(const char* reason) {
-        mark_ingress(reason ? reason : CLOCKWORK_REFUSED_REBUILDING, false);
+    void clockwork_ingress_mark(ClockworkCore* core, const char* reason) {
+        mark_ingress(core, reason ? reason : CLOCKWORK_REFUSED_REBUILDING, false);
     }
 
     // What is pending as of now waited while the audio was away — a stall, a
@@ -1294,8 +1252,8 @@ extern "C" {
     // each to its sender ("stalled"), by the next drain (the marks, above). A
     // bundle for later is not, and goes through to play at its time. On the
     // audio thread, or with it stopped.
-    void clockwork_ingress_mark_stale() {
-        mark_ingress(CLOCKWORK_REFUSED_STALLED, true);
+    void clockwork_ingress_mark_stale(ClockworkCore* core) {
+        mark_ingress(core, CLOCKWORK_REFUSED_STALLED, true);
     }
 
     // A bundle whose time is not yet come at `blockTime`, this block's start
@@ -1312,7 +1270,7 @@ extern "C" {
     // system clock set by hand is not a gap), by its wall clock otherwise —
     // against the record of the last block rendered in the arena, whichever
     // host rendered it (a worklet made again over the same memory, an
-    // embedded host attaching again, the device thread back from a stall).
+    // the device thread back from a stall).
     // Measured against the audio rendered, a huge device buffer rendering a
     // block every 170 ms is not a gap. Over kClockStepSeconds the clock
     // steps at this block: the host is told so and anchors it afresh (a
@@ -1328,38 +1286,40 @@ extern "C" {
     // a host's audio starts, with audio_secs = -1: the gap is then judged by
     // time alone, and the first block after it is never a gap because the
     // host's frame count starts over.
-    static double g_last_audio_secs = -1.0;   // the host's count at the last block; < 0: its audio just started
-
-    static bool audio_gap(double wall_ntp, double monotonic_secs, double audio_secs) {
-        if (!memory_initialized || !shared_memory) return false;
-        uint8_t* const sample_clock = shared_memory + SAMPLE_CLOCK_START;
+    static bool audio_gap(ClockworkCore* core, double wall_ntp, double monotonic_secs, double audio_secs) {
+        clockwork::CoreClock* c = clockwork::core_clock(core);
+        uint8_t* const base = clockwork::laid_out_base(core);
+        if (!c || !base) return false;
+        uint8_t* const sample_clock = base + SAMPLE_CLOCK_START;
         const double last_wall = read_last_block_wall(sample_clock);
         const double last_mono = read_last_block_mono(sample_clock);
-        const double last_audio = g_last_audio_secs;
+        const double last_audio = c->last_audio_secs;
         write_last_block_time(sample_clock, wall_ntp, monotonic_secs);
-        g_last_audio_secs = audio_secs;
+        c->last_audio_secs = audio_secs;
         const bool byMono = monotonic_secs > 0.0 && last_mono > 0.0;
         const double passed = byMono ? monotonic_secs - last_mono : (last_wall > 0.0 ? wall_ntp - last_wall : 0.0);
         if (audio_secs >= 0.0 && last_audio < 0.0) return false;   // the first block after a start
         const double rendered = (audio_secs >= 0.0 && audio_secs > last_audio) ? audio_secs - last_audio : 0.0;
         const double gap = passed - rendered;
         if (gap <= clockwork::kClockStepSeconds) return false;
-        clockwork_log("[clock] audio resumed after %.3fs", gap);
+        clockwork_log(core, "[clock] audio resumed after %.3fs", gap);
         return true;
     }
 
-    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_back(double wall_ntp, double monotonic_secs, double audio_secs) {
-        return audio_gap(wall_ntp, monotonic_secs, audio_secs);
+    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_back(ClockworkCore* core, double wall_ntp, double monotonic_secs,
+                                                   double audio_secs) {
+        return audio_gap(core, wall_ntp, monotonic_secs, audio_secs);
     }
     // clockwork_audio_starts: the host's audio is starting (a device opened
     // with its sample count at 0, a new worklet over the same memory whose
     // AudioContext time may have restarted, an embedded host attaching). The
     // next block re-anchors the clock, never below the sample clock already
     // in the arena.
-    static bool g_anchor_at_first_block = false;
-    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_starts(double wall_ntp, double monotonic_secs) {
-        g_anchor_at_first_block = true;
-        return audio_gap(wall_ntp, monotonic_secs, -1.0);
+    EMSCRIPTEN_KEEPALIVE bool clockwork_audio_starts(ClockworkCore* core, double wall_ntp, double monotonic_secs) {
+        clockwork::CoreClock* c = clockwork::core_clock(core);
+        if (!c) return false;
+        c->anchor_requested.store(true, std::memory_order_release);
+        return audio_gap(core, wall_ntp, monotonic_secs, -1.0);
     }
 
     // The teardown's mark, exact: taken under the in ring's writer lock once
@@ -1368,27 +1328,27 @@ extern "C" {
     // instance up is below the mark, and refused as the closing generation's
     // by the next drain; one written after reads the word odd and is refused
     // at the door. Called with the audio thread stopped.
-    static void mark_closing_generation() {
-        if (!memory_initialized || !cursors) return;
+    static void mark_closing_generation(clockwork::CoreState& st) {
+        RingCursors* const cursors = clockwork::cursors_in(st.arena.laid_out(), st.arena.layout);
+        if (!cursors) return;
         RingBufferWriter::lock(&cursors->in_write_lock);
-        clockwork_ingress_mark(CLOCKWORK_REFUSED_REBUILDING);
+        clockwork_ingress_mark(st.core, CLOCKWORK_REFUSED_REBUILDING);
         RingBufferWriter::unlock(&cursors->in_write_lock);
     }
 
     EMSCRIPTEN_KEEPALIVE
-    void clear_scheduler() {
-        g_in_seq_reset.store(true, std::memory_order_relaxed);
-        local_in_peak.store(0, std::memory_order_relaxed);
-        local_out_peak.store(0, std::memory_order_relaxed);
-        local_nrt_out_peak.store(0, std::memory_order_relaxed);
-        corruption_count.store(0, std::memory_order_relaxed);
-        gap_log_count.store(0, std::memory_order_relaxed);
-        late_count.store(0, std::memory_order_relaxed);
-        update_scheduler_depth_metric(0);
+    void clear_scheduler(ClockworkCore* core) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st) return;
+        st->ingress.seq_reset.store(true, std::memory_order_relaxed);
+        st->ingress.gap_log.reset();
+        st->ingress.corrupt_log.reset();
+        st->metrics.clear_peaks();
+        update_scheduler_depth_metric(*st, 0);
 #if CLOCKWORK_SCHEDULER
         // Cross-thread handshake: the control thread asks, the audio thread
         // clears at a safe point (process_audio's drainPendingClear below).
-        clockwork_engine_schedule().requestClear();
+        if (EngineScheduler* q = clockwork_engine_schedule(core)) q->requestClear();
 #endif
     }
 
@@ -1402,17 +1362,18 @@ extern "C" {
     // (dsp_api.h); every clockwork route ignores them. `token` is the
     // sender/origin, threaded through for reply routing. Threaded explicitly
     // rather than held in a global, so a handler's inputs are all in the ctx.
-    void dispatch(const uint8_t* osc, uint32_t len, uint32_t token,
+    void dispatch(clockwork::CoreState& st, const uint8_t* osc, uint32_t len, uint32_t token,
                   clockwork::Timetag when, clockwork::Timetag blockTime) {
         const DrainCallCtx cc{ token, when, blockTime };
-        OscSplit* boundary = g_active_split.load(std::memory_order_acquire);
+        clockwork::Routing& r = st.routing;
+        OscSplit* boundary = r.split.load(std::memory_order_acquire);
         if (boundary && boundary->ingest(osc, len, &cc)) return;
         // Nothing claimed it: no matching route and no default registered (e.g.
         // a DSP-bound message in a build with no DSP attached). Drop, and log rate-limited so junk
         // can't flood the audio-thread log.
-        if (no_backend_log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+        if (r.unclaimed_log.say()) {
             uint32_t a = 0; while (a < len && osc[a] != '\0') ++a;
-            clockwork_log("ERROR: no backend for OSC %.*s — dropped",
+            clockwork_log(st.core, "ERROR: no backend for OSC %.*s — dropped",
                    static_cast<int>(a), reinterpret_cast<const char*>(osc));
         }
     }
@@ -1423,34 +1384,36 @@ extern "C" {
     // the event was is clockwork's, and goes into the metrics.
     //
     // Returns true when the event is dropped as later than the host allows, and must not be delivered.
-    static bool note_lateness(clockwork::Timetag when, clockwork::Timetag blockTime) {
+    static bool note_lateness(clockwork::CoreState& st, clockwork::Timetag when, clockwork::Timetag blockTime) {
         if (when.isImmediate()) return false;
 
         const double time_diff_ms = when.secondsFrom(blockTime) * 1000.0;
 
         // Later than the host allows (clockwork_set_timed_event_late_limit_ms):
         // dropped, as the host asked; 0 allows any lateness.
-        const uint32_t limit_ms = g_timed_event_late_limit_ms.load(std::memory_order_relaxed);
+        clockwork::Schedule& sc = st.schedule;
+        const uint32_t limit_ms = sc.late_limit_ms.load(std::memory_order_relaxed);
         if (limit_ms > 0 && time_diff_ms < -static_cast<double>(limit_ms)) {
-            note_late_dropped(-time_diff_ms, limit_ms);
+            note_late_dropped(st, -time_diff_ms, limit_ms);
             return true;
         }
 
-        if (!metrics || !(g_dsp_sample_rate > 0.0) || g_block_size == 0)
+        const clockwork::Build& b = st.build;
+        PerformanceMetrics* const metrics = clockwork::metrics_in(st.arena.at());
+        if (!metrics || !(b.sample_rate > 0.0) || b.block == 0)
             return false;
 
         // Only messages older than a full quantum are genuinely late:
         // sub-quantum arrivals simply do not align with quantum boundaries and
         // are placed at the right sub-block offset by the DSP.
         const double quantum_ms =
-            (1000.0 * static_cast<double>(g_block_size)) / g_dsp_sample_rate;
+            (1000.0 * static_cast<double>(b.block)) / b.sample_rate;
         if (time_diff_ms >= -quantum_ms) return false;
 
         const double raw_late_ms = -time_diff_ms;
         const int32_t late_ms = (raw_late_ms > 10000.0) ? 10000
                                                         : static_cast<int32_t>(raw_late_ms);
-        const int late_now = late_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        metrics->scheduler_lates.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t late_now = metrics->scheduler_lates.fetch_add(1, std::memory_order_relaxed) + 1;
         int32_t current_max = metrics->scheduler_max_late_ms.load(std::memory_order_relaxed);
         while (late_ms > current_max) {
             if (metrics->scheduler_max_late_ms.compare_exchange_weak(
@@ -1460,16 +1423,9 @@ extern "C" {
         metrics->scheduler_last_late_ms.store(late_ms, std::memory_order_relaxed);
         metrics->scheduler_last_late_tick.store(
             metrics->process_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        // Count-based sampling alone hides lates 2..99, so a burst can leave no
-        // log trace. Keep the count milestones but also emit at most one line
-        // per second of block time.
-        const bool second_elapsed =
-            blockTime - clockwork::Timetag::fromNtp(last_late_log_osc.load(std::memory_order_relaxed))
-                >= static_cast<int64_t>(clockwork::Timetag::kUnitsPerSecond);
-        if (late_now == 1 || late_now % 100 == 0 || second_elapsed) {
-            last_late_log_osc.store(blockTime.ntp(), std::memory_order_relaxed);
-            clockwork_log("LATE: %.1fms (count=%d)", -time_diff_ms, late_now);
-        }
+        // A line a second at most, with the count so far: a burst is one line.
+        if (sc.late_log.say(blockTime.ntp()))
+            clockwork_log(st.core, "LATE: %.1fms (count=%u)", -time_diff_ms, late_now);
         return false;
     }
 
@@ -1479,7 +1435,7 @@ extern "C" {
     // a timestamped "#bundle", and "/clockwork/schedule <timetag> <blob>". Everything
     // else is immediate.
     //
-    // The branch on g_dsp_holds_schedule lives HERE and nowhere else. A DSP
+    // The branch on guest_holds_schedule() lives HERE and nowhere else. A DSP
     // that holds its own schedule wants a timed bundle the moment it arrives,
     // carrying its timetag, because a VM parks programs and not merely
     // messages; a DSP that does not gets it when it comes due.
@@ -1493,7 +1449,7 @@ extern "C" {
     //
     // Anything due now goes to dispatch(), which is also where a fired event
     // lands — one delivery path, whether a message waited or not.
-    static void ingest_frame(const uint8_t* data, uint32_t len, uint32_t origin,
+    static void ingest_frame(clockwork::CoreState& st, const uint8_t* data, uint32_t len, uint32_t origin,
                              clockwork::Timetag blockTime) {
         if (!data || len == 0) return;
 
@@ -1502,7 +1458,7 @@ extern "C" {
         clockwork::Timetag when = clockwork::Timetag::immediately();
 #if CLOCKWORK_SCHEDULER
         uint32_t       tag     = SCHED_TAG_SYNTH;      // a DSP-bound bundle
-        bool           clockworkHolds = !g_dsp_holds_schedule;
+        bool           clockworkHolds = !guest_holds_schedule();
 #endif
 
         if (clockwork_is_bundle(data, len)) {
@@ -1513,9 +1469,9 @@ extern "C" {
 #if CLOCKWORK_SCHEDULER
             const SchedulePacket sp = clockwork_parse_schedule(data, len);
             if (!sp.ok) {                       // malformed: counted, and its sender told
-                increment_scheduler_drop_metric();
-                clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, arenaInstanceGeneration(shared_memory),
-                    [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); });
+                increment_scheduler_drop_metric(st);
+                clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, arenaInstanceGeneration(st.arena.at()),
+                    [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); });
                 return;
             }
             body         = sp.blob;
@@ -1529,7 +1485,7 @@ extern "C" {
             // is the ONE thing that must not go quietly: a verb that vanishes
             // without explanation is worse than either holding it or refusing
             // it, so say what happened and name the switch that caused it.
-            refuse_schedule_verb(data, len, origin);
+            refuse_schedule_verb(st, data, len, origin);
             return;
 #endif
         }
@@ -1538,36 +1494,30 @@ extern "C" {
         if (when.isImmediate() || !clockworkHolds) {
             // Immediate, or a DSP that holds its own schedule: straight
             // through, carrying whatever time it was given.
-            dispatch(body, bodyLen, origin, when, blockTime);
+            dispatch(st, body, bodyLen, origin, when, blockTime);
             return;
         }
-        if (!clockwork_engine_schedule().add(when, tag, EngineMeta{origin}, body, bodyLen)) {
-            increment_scheduler_drop_metric();   // pool full / oversize
-            static std::atomic<uint32_t> addFail{0};
-            if (addFail.fetch_add(1, std::memory_order_relaxed) % 32 == 0)
+        EngineScheduler* q = clockwork_engine_schedule(st.core);
+        if (!q || !q->add(when, tag, EngineMeta{origin}, body, bodyLen)) {
+            increment_scheduler_drop_metric(st);   // pool full / oversize
+            if (st.schedule.refused_log.say())
                 // Rate-limited, because an overloaded queue refuses in bursts.
                 // The numbers are here because "add refused" alone cannot tell
                 // a full pool from a queue that was never built.
-                clockwork_log("SCHED REFUSED (%s): when=%llu len=%u slots=%d pool=%d next=%llu",
-                        clockwork_engine_schedule().ready() ? "queue full" : "NO QUEUE — it never built",
+                clockwork_log(st.core, "SCHED REFUSED (%s): when=%llu len=%u slots=%d pool=%d next=%llu",
+                        q && q->ready() ? "queue full" : "NO QUEUE — it never built",
                         (unsigned long long)when.ntp(), (unsigned)bodyLen,
                         (int)SCHEDULER_SLOT_COUNT, (int)SCHEDULER_DATA_POOL_SIZE,
-                        (unsigned long long)clockwork_engine_schedule().nextTime().value_or(clockwork::Timetag()).ntp());
+                        (unsigned long long)(q ? q->nextTime().value_or(clockwork::Timetag()) : clockwork::Timetag()).ntp());
         }
 #else
         // With no store, holds_schedule is moot: nothing to hold with and nothing to
         // hold it in, so every message goes straight through CARRYING ITS ORIGINAL
         // TIMETAG — including for a DSP that asked us to hold it. Flattening `when` to
         // "now" here would destroy the one piece of information it needs to cope.
-        dispatch(body, bodyLen, origin, when, blockTime);
+        dispatch(st, body, bodyLen, origin, when, blockTime);
 #endif
     }
-
-    // Initialize memory pointers. The arena is the public POSIX segment when
-    // the native backend supplied one (g_external_segment), else the in-band
-    // arena_storage (WASM, and headless native with no shm). Either way
-    // every region is addressed by its shared_memory.h offset from this base.
-    ClockworkConfig g_clockwork_config;
 
     int clockwork_memory_meets(uint32_t fast_bytes, uint32_t bulk_bytes, int has_bulk_tier,
                               uint32_t fast_wanted, uint32_t bulk_wanted,
@@ -1588,53 +1538,51 @@ extern "C" {
         return sf == 0 && sb == 0;
     }
 
-    void clockwork_set_engine_config(double sample_rate, uint32_t block_size,
+    void clockwork_set_engine_config(ClockworkCore* core,
+                                double sample_rate, uint32_t block_size,
                                 uint32_t input_channels, uint32_t output_channels,
                                 uint32_t verbosity, void* guest_memory,
                                 uint32_t guest_memory_bytes,
                                 uint32_t arena_bytes,
                                 const void* assets, uint32_t assets_bytes,
                                 void* returns, uint32_t returns_bytes) {
-        g_clockwork_config.sample_rate        = sample_rate;
-        g_clockwork_config.block_size         = block_size;
-        g_clockwork_config.input_channels     = input_channels;
-        g_clockwork_config.output_channels    = output_channels;
-        g_clockwork_config.verbosity          = verbosity;
-        g_clockwork_config.guest_memory        = guest_memory;
-        g_clockwork_config.guest_memory_bytes  = guest_memory_bytes;
-        g_clockwork_config.assets              = assets;
-        g_clockwork_config.assets_bytes        = assets_bytes;
-        g_clockwork_config.returns             = returns;
-        g_clockwork_config.returns_bytes       = returns_bytes;
-        g_clockwork_config.arena_bytes        = arena_bytes;
+        ClockworkConfig& cfg = *clockwork::config_of(core);
+        cfg.sample_rate        = sample_rate;
+        cfg.block_size         = block_size;
+        cfg.input_channels     = input_channels;
+        cfg.output_channels    = output_channels;
+        cfg.verbosity          = verbosity;
+        cfg.guest_memory        = guest_memory;
+        cfg.guest_memory_bytes  = guest_memory_bytes;
+        cfg.assets              = assets;
+        cfg.assets_bytes        = assets_bytes;
+        cfg.returns             = returns;
+        cfg.returns_bytes       = returns_bytes;
+        cfg.arena_bytes        = arena_bytes;
     }
 
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
-    static bool engine_block_holding(size_t bytes, uint32_t verbosity) {
-        if (g_engine_block && g_engine_block_bytes == bytes) return true;
-        if (g_engine_block) {
+    static bool engine_block_holding(clockwork::CoreState& st, size_t bytes, uint32_t verbosity) {
+        clockwork::Memory& m = st.memory;
+        if (m.block && m.block_bytes == bytes) return true;
+        if (m.block) {
             // A build that wants another size: everything carved from the
             // block is a build's (the pool went with the last instance; the
             // spans are cut again below), so forget it all and let it go.
-            clockwork_pool_abandon();
-            g_owned_fast = nullptr; g_owned_fast_bytes = 0;
-            g_owned_bulk = nullptr; g_owned_bulk_bytes = 0;
-            std::free(g_engine_block);
-            g_engine_block = nullptr; g_engine_block_bytes = 0;
+            clockwork_heap_stop(st.heap, CLOCKWORK_POOL_GUEST);
+            clockwork_heap_release_system(st.heap, free_to_bulk);
+            m.fast = nullptr; m.fast_bytes = 0;
+            m.bulk = nullptr; m.bulk_bytes = 0;
+            clockwork::pages::unmap(m.block, m.block_bytes);
+            m.block = nullptr; m.block_bytes = 0;
         }
-        void* block = nullptr;
-        if (bytes != SIZE_MAX && bytes != 0) {
-            // 16-aligned, as the spans need: what malloc gives on every
-            // desktop ABI, and checked rather than assumed.
-            block = std::malloc(bytes);
-            if (block && (reinterpret_cast<uintptr_t>(block) & 15u)) { std::free(block); block = nullptr; }
-        }
+        void* block = bytes != SIZE_MAX && bytes != 0 ? clockwork::pages::map(bytes) : nullptr;
         if (!block) return false;
-        g_engine_block       = static_cast<uint8_t*>(block);
-        g_engine_block_bytes = bytes;
+        m.block       = static_cast<uint8_t*>(block);
+        m.block_bytes = bytes;
         if (verbosity > 0)
-            clockwork_log("ENGINE MEMORY: 0x%016llx + %u MB", (unsigned long long)(uintptr_t)g_engine_block,
-                          (unsigned)(g_engine_block_bytes / (1024 * 1024)));
+            clockwork_log(st.core, "ENGINE MEMORY: 0x%016llx + %u MB", (unsigned long long)(uintptr_t)m.block,
+                          (unsigned)(m.block_bytes / (1024 * 1024)));
         return true;
     }
 #endif
@@ -1655,101 +1603,111 @@ extern "C" {
     // at a new arena only: a rebuild keeps all three, what is in them
     // answered across it (the marks, for the in ring); the cursors' entry
     // resets the status flags alone.
-    static void reset_words(uint32_t start, uint32_t bytes) {
-        auto* w = reinterpret_cast<std::atomic<uint32_t>*>(shared_memory + start);
+    static void reset_words(ClockworkCore* core, uint32_t start, uint32_t bytes) {
+        auto* w = reinterpret_cast<std::atomic<uint32_t>*>(clockwork::arena_base(core) + start);
         for (uint32_t i = 0; i < bytes / 4u; ++i) w[i].store(0, std::memory_order_relaxed);
     }
-    static void reset_metrics()      { reset_words(METRICS_START, METRICS_SIZE); }
-    static void reset_metrics_history() { reset_words(METRICS_HISTORY_START, METRICS_HISTORY_SIZE); }
-    static void reset_native_stats() { reset_words(NATIVE_STATS_START, NATIVE_STATS_SIZE); }
+    static void reset_metrics(ClockworkCore* core) { reset_words(core, METRICS_START, METRICS_SIZE); }
+    static void reset_metrics_history(ClockworkCore* core) { reset_words(core, METRICS_HISTORY_START, METRICS_HISTORY_SIZE); }
+    static void reset_native_stats(ClockworkCore* core) { reset_words(core, NATIVE_STATS_START, NATIVE_STATS_SIZE); }
     // The host's: NTP start is write-once from the host once its audio runs,
     // drift and the global offset are what it measured about this machine's
     // clocks. A new arena, a new measurement.
-    static void reset_clock_anchors() { reset_words(CLOCK_ANCHORS_START, CLOCK_ANCHORS_SIZE); }
+    static void reset_clock_anchors(ClockworkCore* core) { reset_words(core, CLOCK_ANCHORS_START, CLOCK_ANCHORS_SIZE); }
     // Not zeros: a tempo of zero makes a guest asking for the beat divide by
     // it (readClockworkClock answers a NULL with a sane default, an all-zero
     // region with that). The defaults are the session's start.
-    static void reset_clock_state() {
+    static void reset_clock_state(ClockworkCore* core) {
         ClockworkClockState::initDefaults(
-            *reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START));
+            *reinterpret_cast<ClockworkClockState*>(clockwork::arena_base(core) + CLOCK_STATE_START));
     }
     // Rewritten whole every block by the tick (publishSampleClock), from the
     // device it is rebound to; empty between the build and the first block.
-    static void reset_sample_clock() { reset_words(SAMPLE_CLOCK_START, SAMPLE_CLOCK_SIZE); }
+    static void reset_sample_clock(ClockworkCore* core) { reset_words(core, SAMPLE_CLOCK_START, SAMPLE_CLOCK_SIZE); }
     // Empty: no device words, no streams, its seqlock even. The device's own
     // words are written when the instance is built (channel_map_set_device),
     // and a stream's when it attaches.
-    static void reset_channel_map()  { reset_words(CHANNEL_MAP_START, CHANNEL_MAP_SIZE); }
+    static void reset_channel_map(ClockworkCore* core) { reset_words(core, CHANNEL_MAP_START, CHANNEL_MAP_SIZE); }
     // The scope: out and in, formatted at the device's live channel count
     // (up to the slot's ceiling) and written by the tick from then on. A tap
     // for a direction the device has not got is formatted with no channels
     // and left disabled, so a reader sees "nothing arrives" rather than a
     // ring of zeros. A device switch is a new stream, and a reader's cursor
     // starts again with it.
-    static void reset_scope() {
-        shm_audio_buffer* slots = reinterpret_cast<shm_audio_buffer*>(shared_memory + SCOPE_START);
-        memset(shared_memory + SCOPE_START, 0, SCOPE_SIZE);
+    static void reset_scope(ClockworkCore* core) {
+        const ClockworkConfig& cfg = *clockwork::config_of(core);
+        const clockwork::Layout& L = clockwork::layout_of(core);
+        uint8_t* const base = clockwork::arena_base(core);
+        memset(base + SCOPE_START, 0, L.scope_bytes);
         const auto format_tap = [&](uint32_t slot, uint32_t device_channels) {
-            const uint32_t ch = device_channels < SCOPE_CHANNELS ? device_channels : SCOPE_CHANNELS;
+            const uint32_t ch = std::min(device_channels, L.profile.scope_channels);
             if (ch > 0)
-                shm_audio_buffer_writer(&slots[slot]).activate(
-                    ch, static_cast<uint32_t>(g_clockwork_config.sample_rate), SCOPE_FRAMES);
+                shm_audio_buffer_writer(clockwork::scopeSlot(base, L, slot), L.profile.scope_frames,
+                                        L.profile.scope_channels)
+                    .activate(ch, static_cast<uint32_t>(cfg.sample_rate), L.profile.scope_frames);
         };
-        format_tap(SCOPE_OUT_SLOT, g_clockwork_config.output_channels);
-        format_tap(SCOPE_IN_SLOT,  g_clockwork_config.input_channels);
-        g_shm_audio_buffers = slots;
+        format_tap(SCOPE_OUT_SLOT, cfg.output_channels);
+        format_tap(SCOPE_IN_SLOT,  cfg.input_channels);
     }
     // Tap streams: the global header (geometry for cross-process observers)
     // then the slot array, every slot free; the producer claims and
     // activates them on demand (rust/clockwork-taps).
-    static void reset_taps() {
-        uint8_t* tapBase = shared_memory + TAPS_START;
-        memset(tapBase, 0, TAPS_SIZE);
-        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 0)->store(TAPS_SLOTS, std::memory_order_relaxed);       // maxTaps
-        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 4)->store(0, std::memory_order_relaxed);               // activeCount
-        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(TAP_RING_FRAMES, std::memory_order_relaxed); // ringFrames
+    static void reset_taps(ClockworkCore* core) {
+        const clockwork::Layout& L = clockwork::layout_of(core);
+        uint8_t* tapBase = clockwork::arena_base(core) + L.taps_start;
+        memset(tapBase, 0, L.taps_bytes);
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 0)->store(L.profile.tap_slots, std::memory_order_relaxed);       // maxTaps
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 4)->store(0, std::memory_order_relaxed);                        // activeCount
+        reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 8)->store(L.profile.tap_ring_frames, std::memory_order_relaxed); // ringFrames
         reinterpret_cast<std::atomic<uint32_t>*>(tapBase + 12)->store(0, std::memory_order_relaxed);              // version
     }
     // The status flags: a fresh word with every build.
-    static void reset_status_flags() {
-        cursors->status_flags.store(STATUS_OK, std::memory_order_release);
+    static void reset_status_flags(ClockworkCore* core) {
+        clockwork::cursors_in(clockwork::arena_base(core), clockwork::layout_of(core))
+            ->status_flags.store(STATUS_OK, std::memory_order_release);
     }
     // The in ring: a fresh epoch at a new arena only, serialised against its
     // producers (clockwork_lanes_reset_in_ring). A rebuild keeps it: what
     // waited for the old instance is the next drain's to refuse, below the
     // mark the teardown set (destroy_dsp), so its cursors, its sequence, the
     // drain's place in it and the mark go on.
-    static void reset_in_ring() {
-        clockwork_lanes_reset_in_ring();
-        g_in_drain.lastSeq = -1;
-        g_in_marks.clear();
+    static void reset_in_ring(ClockworkCore* core) {
+        clockwork_lanes_reset_in_ring(core);
     }
     // The reply rings outlive an instance: what one said stays for its
     // readers, and the next one's setup follows it (docs/RESTARTS.md). A new
     // arena begins them afresh.
-    static void reset_rt_out_ring()  { clockwork_lanes_reset_rt_out_ring(); }
-    static void reset_nrt_out_ring() { clockwork_lanes_reset_nrt_out_ring(); }
+    static void reset_rt_out_ring(ClockworkCore* core) { clockwork_lanes_reset_rt_out_ring(core); }
+    static void reset_nrt_out_ring(ClockworkCore* core) { clockwork_lanes_reset_nrt_out_ring(core); }
     // The ids are the clients', shared between them: a new arena starts them.
-    static void reset_node_id_counter() { reset_words(NODE_ID_COUNTER_START, NODE_ID_COUNTER_SIZE); }
+    static void reset_node_id_counter(ClockworkCore* core) {
+        reset_words(core, clockwork::layout_of(core).node_id_counter_start, NODE_ID_COUNTER_SIZE);
+    }
     // The guest's publish window: zeroed, and nothing more. What shape the
     // bytes take is the guest's, so it lays the region out itself at
     // dsp_new — clockwork cannot pre-fill a structure it does not know, and
     // a wipe that assumed one would be a guess about its empty value.
-    static void reset_guest_window() { memset(shared_memory + GUEST_WINDOW_START, 0, GUEST_WINDOW_SIZE); }
+    static void reset_guest_window(ClockworkCore* core) {
+        const clockwork::Layout& L = clockwork::layout_of(core);
+        memset(clockwork::arena_base(core) + L.guest_window_start, 0, L.profile.window_bytes);
+    }
     // The host's, copied in by clockwork_init BEFORE the build (the build
     // sizes the guest's pool from it), onto an arena that started empty. A
     // host that hands a config over an old one on a segment it kept is
     // making that copy itself. So the cold boot's reset here is the empty
     // arena's, and this does nothing more.
-    static void reset_guest_config() {}
+    static void reset_guest_config(ClockworkCore*) {}
     // Nobody but the guest can draw it, and the guest cannot tell "restored
     // after a device switch" from "a previous engine in this process left
     // its table behind": an engine that never asked for /notify would
     // inherit a registration and answer a client that had not spoken.
     // Clockwork owns the arena's lifetime, so clockwork decides.
-    static void reset_guest_persist() { memset(shared_memory + GUEST_PERSIST_START, 0, GUEST_PERSIST_SIZE); }
+    static void reset_guest_persist(ClockworkCore* core) {
+        const clockwork::Layout& L = clockwork::layout_of(core);
+        memset(clockwork::arena_base(core) + L.guest_persist_start, 0, L.profile.persist_bytes);
+    }
 
-    struct RegionReset { uint32_t id; void (*reset)(); };
+    struct RegionReset { uint32_t id; void (*reset)(ClockworkCore* core); };
     static constexpr RegionReset kRegionResets[] = {
         { CLOCKWORK_ARENA_CLOCKWORK_METRICS,         &reset_metrics },
         { CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY, &reset_metrics_history },
@@ -1797,18 +1755,18 @@ extern "C" {
     }
     // The walk: every entry of the table, in the order it lies in memory,
     // reset at the event its lifetime names.
-    static void reset_regions(bool cold_boot) {
-        const auto* h = arenaHeader(shared_memory);
+    static void reset_regions(ClockworkCore* core, bool cold_boot) {
+        const auto* h = arenaHeader(clockwork::arena_base(core));
         for (uint32_t i = 0; i < h->entry_count; ++i) {
             const auto& e = h->entries[i];
             if (e.lifetime == CLOCKWORK_LIFETIME_ARENA) continue;
             if (e.lifetime == CLOCKWORK_LIFETIME_COLD_BOOT && !cold_boot) continue;
             const RegionReset* r = region_reset(e.id);
             if (!r || !r->reset) {
-                clockwork_log("BUG: region %u is in the arena table with no reset — not reset", (unsigned)e.id);
+                clockwork_log(core, "BUG: region %u is in the arena table with no reset — not reset", (unsigned)e.id);
                 continue;
             }
-            r->reset();
+            r->reset(core);
         }
     }
     // lanes.h: the test that holds the table and this list to each other.
@@ -1824,20 +1782,22 @@ extern "C" {
     // channel count, so a wider device moves the base up rather than
     // overlapping the lanes. The host's lanes start at the base and Link
     // Audio's sit directly above.
-    static void widen_for_lanes(uint32_t& max_input_channels, uint32_t& max_output_channels) {
-        g_lane_base = 0;
-        g_link_audio_lane_base = 0;
-        const uint32_t lanes = g_reserved_lanes + g_link_audio_lanes;
+    static void widen_for_lanes(clockwork::CoreState& st, uint32_t& max_input_channels, uint32_t& max_output_channels) {
+        clockwork::Build& b = st.build;
+        b.lane_base = 0;
+        b.link_audio_lane_base = 0;
+        const ClockworkConfig& cfg = st.config;
+        const uint32_t lanes = cfg.reserved_lanes + cfg.link_audio_lanes;
         if (lanes == 0) return;
         const uint32_t first = lane_base_for(max_input_channels, max_output_channels);
         const uint32_t top   = first + lanes;
         if (top <= clockwork::kMaxChannels) {
-            g_lane_base = first;
-            if (g_link_audio_lanes > 0) g_link_audio_lane_base = first + g_reserved_lanes;
+            b.lane_base = first;
+            if (cfg.link_audio_lanes > 0) b.link_audio_lane_base = first + cfg.reserved_lanes;
             if (max_output_channels < top) max_output_channels = top;
             if (max_input_channels  < top) max_input_channels  = top;
         } else {
-            clockwork_log("WARNING: %u reserved lanes above channel %u do not fit "
+            clockwork_log(st.core, "WARNING: %u reserved lanes above channel %u do not fit "
                     "kMaxChannels=%d; no lanes reserved",
                     lanes, first, (int)clockwork::kMaxChannels);
         }
@@ -1845,20 +1805,34 @@ extern "C" {
 
     // ── What the guest instance survives (lanes.h) ──────────────────────────
     extern "C" uint32_t clockwork_guest_survives(void) {
-        return g_dsp_survives;
+        const DspInfo* info = guest_info();
+        return info ? info->survives : 0;
     }
 
-    extern "C" int clockwork_guest_reconfigure(double sample_rate, uint32_t input_channels,
+    extern "C" int clockwork_guest_reconfigure(ClockworkCore* core, double sample_rate, uint32_t input_channels,
                                                uint32_t output_channels) {
-        if (!g_dsp || !(sample_rate > 0.0)) return 0;
+        clockwork::CoreState* const st = clockwork::state(core);
+        if (!st) return 0;
+        const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_CONTROL, clockwork::GateHold::Take::Wait);
+        ClockworkConfig& cfg = st->config;
+        Dsp* const instance = st->guest.instance;
+        if (!instance || !(sample_rate > 0.0)) return 0;
         // The ceilings the instance is handed, as dsp_new hands them: the
         // device's counts, clamped, widened for the lanes above the device.
         uint32_t cin  = input_channels  > clockwork::kMaxChannels ? clockwork::kMaxChannels : input_channels;
         uint32_t cout = output_channels > clockwork::kMaxChannels ? clockwork::kMaxChannels : output_channels;
-        widen_for_lanes(cin, cout);
+        widen_for_lanes(*st, cin, cout);
+        // The block's buffers for the new counts first: with none, the
+        // instance is told nothing and the caller rebuilds. Refused, they go
+        // back to the counts it has, which the span holds.
+        clockwork::Build& b = st->build;
+        if (!fit_staging(st->staging, b.block, cout, cin)) return 0;
         {
             GuestCallScope guest(GuestCall::Boot);
-            if (dsp_reconfigure(g_dsp, sample_rate, cin, cout) != 0) return 0;
+            if (dsp_reconfigure(instance, sample_rate, cin, cout) != 0) {
+                fit_staging(st->staging, b.block, b.out_channels, b.in_channels);
+                return 0;
+            }
         }
         // The instance took it: the device's facts are these from now on,
         // and clockwork's own regions that follow the device are laid out
@@ -1866,128 +1840,58 @@ extern "C" {
         // clock for the new rate, the channel map's device words. Nothing of
         // the rings, the metrics or the guest's regions moves: the instance
         // is the same one, and every client's picture of it still holds.
-        g_clockwork_config.sample_rate     = sample_rate;
-        g_clockwork_config.input_channels  = input_channels;
-        g_clockwork_config.output_channels = output_channels;
-        g_built_config.sample_rate     = sample_rate;
-        g_built_config.input_channels  = input_channels;
-        g_built_config.output_channels = output_channels;
-        g_dsp_sample_rate = sample_rate;
-        g_in_channels     = cin;
-        g_out_channels    = cout;
-        metrics_flush_period.store(0, std::memory_order_relaxed);
-        reset_scope();
-        reset_sample_clock();
-        channel_map_set_device(g_in_channels, g_out_channels);
+        cfg.sample_rate     = sample_rate;
+        cfg.input_channels  = input_channels;
+        cfg.output_channels = output_channels;
+        b.config.sample_rate     = sample_rate;
+        b.config.input_channels  = input_channels;
+        b.config.output_channels = output_channels;
+        b.sample_rate  = sample_rate;
+        b.in_channels  = cin;
+        b.out_channels = cout;
+        reset_scope(core);
+        reset_sample_clock(core);
+        channel_map_set_device(*st, b.in_channels, b.out_channels);
         return 1;
     }
 
     // ── The clock enters service ────────────────────────────────────────
     // One order on every target, after the layout and the reset: whoever
-    // owns the clock published it to g_active_clockwork_clock before boot —
-    // the engine its member; a worklet host nothing, so the processor's own
-    // instance stands in — and it is bound here to the clock state (its
+    // owns the clock published it to the core (CoreClock) before boot — the
+    // engine its member; a worklet host nothing, so the core's own clock
+    // stands in — and it is bound here to the clock state (its
     // transport stamp anchored to wall time as it binds, bindStateToShm),
     // to the sample clock, and to the host's global offset. Every build: a
     // rebuild binds the same instance to the same regions again, which is a
     // no-op. After the reset on every host: a reset after the bind wipes the
     // stamp to the 1900 epoch.
-    static void clock_enter_service(bool cold_boot) {
-        ClockworkClock* none = nullptr;
-        g_active_clockwork_clock.compare_exchange_strong(none, &clockworkClock(), std::memory_order_acq_rel);
+    static void clock_enter_service(clockwork::CoreState& st, bool cold_boot) {
+        clockwork::CoreClock* c = &st.clock;
+        if (!c->clock.load(std::memory_order_acquire)) {
+            if (!c->own) c->own = new (std::nothrow) ClockworkClock();
+            ClockworkClock* none = nullptr;
+            c->clock.compare_exchange_strong(none, c->own, std::memory_order_acq_rel);
+        }
         // Every boot re-anchors the clock at the first block that follows,
         // whichever host drives it. A cold boot also resets the clock
         // (unanchor), as it resets the arena; a rebuild keeps the clock's
         // last time as a floor so time never goes backwards.
-        g_anchor_at_first_block = true;
-        if (cold_boot)
-            if (ClockworkClock* c = g_active_clockwork_clock.load(std::memory_order_acquire)) c->unanchorAudioThread();
-        ClockworkClock* clock = g_active_clockwork_clock.load(std::memory_order_acquire);
+        c->anchor_requested.store(true, std::memory_order_release);
+        ClockworkClock* clock = c->clock.load(std::memory_order_acquire);
         if (!clock) return;   // a host with no clock at all
-        clock->bindStateToShm(reinterpret_cast<ClockworkClockState*>(shared_memory + CLOCK_STATE_START));
+        if (cold_boot) clock->unanchorAudioThread();
+        uint8_t* const base = st.arena.at();
+        clock->bindStateToShm(reinterpret_cast<ClockworkClockState*>(base + CLOCK_STATE_START));
         // The sample clock, published by process_audio once per block: how threads without the audio context
         // (a host's worker, OscChannel#now) read the engine's time.
-        clock->bindSampleClockToShm(shared_memory + SAMPLE_CLOCK_START);
-        clock->bindGlobalOffset(global_offset);
+        clock->bindSampleClockToShm(base + SAMPLE_CLOCK_START);
+        clock->bindGlobalOffset(reinterpret_cast<std::atomic<int32_t>*>(base + GLOBAL_OFFSET_START));
     }
 
-    void init_memory() {
-        const double sample_rate = g_clockwork_config.sample_rate;
-        // A build starts with no reason not to have a guest; the first thing
-        // that stops it below records one (clockwork_boot_fail, or dsp_new's).
-        clear_boot_error();
-        // The arena base is fixed for the engine's whole threaded life: native
-        // binds g_external_segment before any engine thread starts (and nulls
-        // it only after they are all joined); the WASM arena is the static
-        // arena_storage. So on a cold-swap rebuild the pointer family
-        // below is already correct — and skipping the re-assignment is what
-        // makes this call safe while unquiesced producers (transport ingress,
-        // clockwork_log from any worker) read the same globals lock-free: pointers
-        // are only ever written here with no reader threads alive (first
-        // boot, or re-boot after teardown_memory).
-#ifdef __EMSCRIPTEN__
-        // A host that boots before reading the arena's base (the test harness
-        // does; the worklet claims first) gets the engine's memory here, sized
-        // to what it asked clockwork_init for.
-        if (!g_engine_block && !clockwork_memory_claim(g_clockwork_config.arena_bytes ? g_clockwork_config.arena_bytes
-                                                                                      : (uint32_t)CLOCKWORK_MEM_ARENA_SIZE)) {
-            clockwork_boot_fail("FATAL: the engine's memory could not be claimed (the arena and %u MB)",
-                                (unsigned)((g_clockwork_config.arena_bytes ? g_clockwork_config.arena_bytes : (uint32_t)CLOCKWORK_MEM_ARENA_SIZE) / (1024 * 1024)));
-            return;
-        }
-#endif
-        uint8_t* base = g_external_segment ? g_external_segment : clockwork_local_arena();
-        // Every build of the engine, a cold swap included: the rate or the
-        // block size may have changed, and the period is derived from both.
-        metrics_flush_period.store(0, std::memory_order_relaxed);
-        // A new arena — the first boot, or one after teardown_memory — is a
-        // cold boot: every region is reset, the ones of lifetime cold boot
-        // included (reset_regions below). A rebuild on the arena that is up
-        // takes the skip path and resets only the regions of lifetime
-        // rebuild.
-        const bool cold_boot = shared_memory != base;
-#if CLOCKWORK_SYNTH
-        // A new arena that carries a generation on replaces a running engine
-        // (docs/RESTARTS.md, "Three events"): its instance announces itself.
-        const bool replacing = cold_boot && g_carried_generation > 0;
-#endif
-        if (cold_boot) {
-            shared_memory = base;
-            clockwork_guest_fence_arena(base);
-            // A new engine, not a rebuild of the one that was running.
-            reset_engine_diagnostics();
-            // The table every reader takes the layout from, first, so nothing
-            // is ever placed in an arena that does not describe itself. A
-            // segment's creator wrote the same bytes already; the wasm arena
-            // and an embedder's memory get theirs here.
-            writeArenaHeader(shared_memory);
-            // The generation goes on from the last this process opened: the
-            // word as the last arena's stood between instances.
-            if (g_carried_generation > 0)
-                arenaGenerationWord(shared_memory).store(2u * g_carried_generation + 1u,
-                                                         std::memory_order_release);
-            cursors = reinterpret_cast<RingCursors*>(shared_memory + RING_CURSORS_START);
-            // Metrics live in the arena at their fixed offset — which is the
-            // public segment when one was supplied, so external observers read
-            // them with no redirect.
-            metrics = reinterpret_cast<PerformanceMetrics*>(shared_memory + METRICS_START);
-            g_metrics_history.bind(shared_memory + METRICS_HISTORY_START);
-
-            global_offset = reinterpret_cast<std::atomic<int32_t>*>(shared_memory + GLOBAL_OFFSET_START);
-
-            // What a cold boot resets beyond the pointers — the guest's
-            // persistent region, the clock's defaults, the host's anchors —
-            // is the table's say, in reset_regions, not this branch's.
-        }
-
-        // Every region, at this event, as the table says (reset_regions):
-        // the transport area's fresh epoch, the metrics, the scope, the taps,
-        // the guest's window on every build; the clock's defaults, the
-        // host's anchors, the guest's persistent region on a cold boot.
-        // Before anything below writes into a region.
-        reset_regions(cold_boot);
-        clock_enter_service(cold_boot);
-
+    // A core's own ingress root, wired once for each core (Routing::own_split):
+    // at its first clockwork_init, whether that boots the arena or comes back
+    // to one that is up.
+    void clockwork_wire_own_routes(ClockworkCore* core) {
 #if CLOCKWORK_SYNTH
         // ── Clockwork's own ingress root ──────────────────────────────────
         //
@@ -2006,67 +1910,149 @@ extern "C" {
         // Published by compare-exchange from null so it never displaces a full
         // host's own root: ClockworkEngine registers control planes this one
         // does not have and publishes mSplit after boot, overwriting this.
-        static OscSplit      default_split;
-        static ClockworkSysRoutes default_audio_routes;
+        // The routes' context is the core.
+        clockwork::Routing* found = clockwork::routing(core);
+        if (!found) return;
+        clockwork::Routing& routing = *found;
+        OscSplit&           default_split        = routing.own_split;
+        ClockworkSysRoutes& default_audio_routes = routing.own_routes;
         if (!default_split.wired()) {
 #if CLOCKWORK_WORKLET_CLOCK
-            default_audio_routes.add("clock/", &clockCoreRoute, &g_rt_reply);
+            routing.rt_reply = ReplyChannel{ &rt_reply_emit, core };
+            default_audio_routes.add("clock/", &clockCoreRoute, &routing.rt_reply);
 #endif
             // The asset hand-off is audio-thread work on every host: the
             // guest is only ever reached from there.
-            default_audio_routes.add("asset/", &clockwork_asset_route, nullptr);
-            default_audio_routes.add("sched/flush", &clockwork_sched_flush_route, nullptr);
+            default_audio_routes.add("asset/", &clockwork_asset_route, core);
+            default_audio_routes.add("sched/flush", &clockwork_sched_flush_route, core);
             // Inbound events likewise: to their audience, and to the guest.
-            default_audio_routes.add("midi/in/",         &clockwork_event_route, nullptr);
-            default_audio_routes.add("midi/ports",       &clockwork_event_route, nullptr);
-            default_audio_routes.add("gamepad/in/",      &clockwork_event_route, nullptr);
-            default_audio_routes.add("gamepad/devices",  &clockwork_event_route, nullptr);
+            default_audio_routes.add("midi/in/",         &clockwork_event_route, core);
+            default_audio_routes.add("midi/ports",       &clockwork_event_route, core);
+            default_audio_routes.add("gamepad/in/",      &clockwork_event_route, core);
+            default_audio_routes.add("gamepad/devices",  &clockwork_event_route, core);
             // The VERBS that live under those names are not events: carved
             // back out to the host's end of the chain (longest match wins).
-            default_audio_routes.add("midi/in/enable",        &clockwork_host_forward_route, nullptr);
-            default_audio_routes.add("midi/ports/list",       &clockwork_host_forward_route, nullptr);
-            default_audio_routes.add("midi/ports/get",        &clockwork_host_forward_route, nullptr);
-            default_audio_routes.add("gamepad/devices/list",  &clockwork_host_forward_route, nullptr);
-            default_audio_routes.add("gamepad/devices/get",   &clockwork_host_forward_route, nullptr);
+            default_audio_routes.add("midi/in/enable",        &clockwork_host_forward_route, core);
+            default_audio_routes.add("midi/ports/list",       &clockwork_host_forward_route, core);
+            default_audio_routes.add("midi/ports/get",        &clockwork_host_forward_route, core);
+            default_audio_routes.add("gamepad/devices/list",  &clockwork_host_forward_route, core);
+            default_audio_routes.add("gamepad/devices/get",   &clockwork_host_forward_route, core);
             // No NRT thread here. The end of clockwork's chain is either this
             // thread — answer the liveness verbs, refuse anything else under
             // the prefix — or the host's front, which the audio thread
-            // forwards to (g_host_forward, above). The route decides per call.
-            default_audio_routes.setFallback(&clockwork_host_forward_route, nullptr);
+            // forwards to (Routing::host_forward). The route decides per call.
+            default_audio_routes.setFallback(&clockwork_host_forward_route, core);
             default_split.setSys(&ClockworkSysRoutes::route, &default_audio_routes);
-            default_split.setDsp(&clockwork_dsp_default_route, nullptr);
+            default_split.setDsp(&clockwork_dsp_default_route, core);
             // A host that is the far end from the start (the web) is the
             // sinks' MIDI endpoint from the start too.
-            if (g_host_forward.load(std::memory_order_acquire))
-                clockwork_sink_set_host_emit(&clockwork_sink_host_emit);
+            if (routing.host_forward.load(std::memory_order_acquire))
+                install_host_emitter(core, routing, true);
         }
         {
             OscSplit* expected = nullptr;
-            g_active_split.compare_exchange_strong(
+            routing.split.compare_exchange_strong(
                 expected, &default_split, std::memory_order_release);
         }
+#else
+        (void)core;
 #endif
+    }
+
+    void init_memory(ClockworkCore* core) {
+        clockwork::CoreState& st = *clockwork::state(core);
+        const ClockworkConfig& cfg = st.config;
+        const double sample_rate = cfg.sample_rate;
+        // A build starts with no reason not to have a guest; the first thing
+        // that stops it below records one (clockwork_boot_fail, or dsp_new's).
+        clear_boot_error(st);
+        // The arena base is fixed for the engine's whole threaded life: native
+        // gives its core the segment before any engine thread starts
+        // (ClockworkConfig::segment) or the core's own arena; the WASM arena
+        // is the engine's memory. So on a cold-swap rebuild the pointer family
+        // below is already correct — and skipping the re-assignment is what
+        // makes this call safe while unquiesced producers (transport ingress,
+        // clockwork_log from any worker) read the same globals lock-free: pointers
+        // are only ever written here with no reader threads alive (first
+        // boot, or re-boot after teardown_memory).
+#ifdef __EMSCRIPTEN__
+        // A host that boots before reading the arena's base (the test harness
+        // does; the worklet claims first) gets the engine's memory here, sized
+        // to what it asked clockwork_init for.
+        if (!g_engine_block && !clockwork_memory_claim(cfg.arena_bytes ? cfg.arena_bytes
+                                                                                      : (uint32_t)CLOCKWORK_MEM_ARENA_SIZE)) {
+            clockwork_boot_fail(st, "FATAL: the engine's memory could not be claimed (the arena and %u MB)",
+                                (unsigned)((cfg.arena_bytes ? cfg.arena_bytes : (uint32_t)CLOCKWORK_MEM_ARENA_SIZE) / (1024 * 1024)));
+            return;
+        }
+#endif
+        uint8_t* base = cfg.segment ? cfg.segment : clockwork_local_arena(st.core);
+        // A new arena — the first boot, or one after teardown_memory — is a
+        // cold boot: every region is reset, the ones of lifetime cold boot
+        // included (reset_regions below). A rebuild on the arena that is up
+        // takes the skip path and resets only the regions of lifetime
+        // rebuild.
+        clockwork::Arena& arena = st.arena;
+        const bool cold_boot = arena.at() != base;
+        // The generation a new arena goes on from, so no generation is named
+        // twice to a client that outlived the engine before (docs/RESTARTS.md,
+        // "The generation"): what this core last opened or its host handed
+        // over, and what the memory itself says an engine opened there before,
+        // for a client that maps it still.
+        uint32_t carried = cfg.carried_generation;
+        if (cold_boot && arenaHeader(base)->magic == CLOCKWORK_ARENA_MAGIC)
+            carried = std::max(carried, arenaInstanceGeneration(base));
+#if CLOCKWORK_SYNTH
+        // A new arena that carries a generation on replaces a running engine
+        // (docs/RESTARTS.md, "Three events"): its instance announces itself.
+        const bool replacing = cold_boot && carried > 0;
+#endif
+        if (cold_boot) {
+            arena.base.store(base, std::memory_order_release);
+            // A new engine, not a rebuild of the one that was running.
+            start_engine_diagnostics_over(st);
+            // The table every reader takes the layout from, first, so nothing
+            // is ever placed in an arena that does not describe itself. A
+            // segment's creator wrote the same bytes already; the wasm arena
+            // and an embedder's memory get theirs here.
+            writeArenaHeader(base, arena.layout, clockwork_core_id(core));
+            // The generation goes on from the one carried: the word as the
+            // last arena's stood between instances.
+            if (carried > 0)
+                arenaGenerationWord(base).store(2u * carried + 1u, std::memory_order_release);
+            // What a cold boot resets beyond the base — the guest's
+            // persistent region, the clock's defaults, the host's anchors —
+            // is the table's say, in reset_regions, not this branch's.
+        }
+        RingCursors* const cursors = clockwork::cursors_in(base, arena.layout);
+
+        // Every region, at this event, as the table says (reset_regions):
+        // the transport area's fresh epoch, the metrics, the scope, the taps,
+        // the guest's window on every build; the clock's defaults, the
+        // host's anchors, the guest's persistent region on a cold boot.
+        // Before anything below writes into a region.
+        reset_regions(core, cold_boot);
+        clock_enter_service(st, cold_boot);
+
         // Event sinks: the size classes each kind is made of, from the memory
         // profile. Installed before any sink can be opened, so the DSP's own
         // opens get the shape too.
-        install_sink_profiles();
+        install_sink_profiles(st);
 
-        // Enable clockwork_log. Write-once per mapping (like the pointer family
-        // above): on a rebuild this is already true and producers read it
-        // concurrently, so don't store over it.
-        if (!memory_initialized)
-            memory_initialized = true;
+        // The regions are laid out: the rings may be written, clockwork_log
+        // among their writers.
+        arena.ready.store(true, std::memory_order_release);
 #ifndef __EMSCRIPTEN__
         // The ring exists: whatever the boot logged before now goes onto it
         // first, so the channel carries the boot in order.
-        clockwork_log_release();
+        clockwork_log_release(core);
 #endif
 
 #if CLOCKWORK_SCOPE_SECONDS != 1
         // Test-profile arena: capture rings are oversized, so every offset
         // after them differs from a production reader's expectations. Loud
         // banner so a test-sized engine staged as production is obvious.
-        clockwork_log("[memory] WARNING: test memory profile "
+        clockwork_log(core, "[memory] WARNING: test memory profile "
                "(CLOCKWORK_SCOPE_SECONDS=%d) — arena layout differs from "
                "production readers; do not ship this binary",
                (int)CLOCKWORK_SCOPE_SECONDS);
@@ -2086,48 +2072,50 @@ extern "C" {
         // and stops there, so the block's layout is a matter between a host
         // and its guest and cannot break clockwork.
 
-        const uint32_t verbosity = g_clockwork_config.verbosity;
+        const uint32_t verbosity = cfg.verbosity;
 
         DspConfig config = {};
         config.sample_rate         = sample_rate;   // the device's rate wins, always
-        config.block_size          = g_clockwork_config.block_size;
-        config.max_input_channels  = g_clockwork_config.input_channels;
-        config.max_output_channels = g_clockwork_config.output_channels;
+        config.block_size          = cfg.block_size;
+        config.max_input_channels  = cfg.input_channels;
+        config.max_output_channels = cfg.output_channels;
 
         // One clock, read by everybody through readClockworkClock(). The arena-resident
         // ClockworkClockState — the same bytes JavaScript polls and the same address
         // ClockworkClock::bindStateToShm binds on native — so the guest reads the session
         // tempo directly and nothing pushes it at one.
         config.clock = reinterpret_cast<const ClockworkClockState*>(
-            shared_memory + CLOCK_STATE_START);
+            base + CLOCK_STATE_START);
 
         // Which channel is which, from the same arena and by the same rule as
         // the clock: the guest reads it directly, and nothing pushes it.
         config.channel_map = reinterpret_cast<const ClockworkChannelMapState*>(
-            shared_memory + CHANNEL_MAP_START);
+            base + CHANNEL_MAP_START);
 
         // The guest's own configuration: whatever the host put there, handed
         // over without a glance. See DspConfig::guest_config.
-        config.guest_config       = shared_memory + GUEST_CONFIG_START;
+        const clockwork::Layout& L = st.arena.layout;
+        config.guest_config       = base + L.guest_config_start;
         config.guest_config_bytes = GUEST_CONFIG_SIZE;
         // What this instance is built from, for audio coming back to it
         // (come_back): it is carried on only in the same.
-        g_built_config = g_clockwork_config;
-        std::memcpy(g_built_guest_config.data(), shared_memory + GUEST_CONFIG_START, GUEST_CONFIG_SIZE);
+        clockwork::Build& built = st.build;
+        built.config = cfg;
+        std::memcpy(built.guest_config.data(), base + L.guest_config_start, GUEST_CONFIG_SIZE);
 
         // The window the DSP may publish through: the node-tree mirror region.
         // Clockwork zeroes it at boot, hands it over, and thereafter only
         // publishes the bytes — which is exactly how a node-tree mirror
         // survives in a harness that does not know what a node tree is.
-        config.shm_window       = shared_memory + GUEST_WINDOW_START;
-        config.shm_window_bytes = GUEST_WINDOW_SIZE;
+        config.shm_window       = base + L.guest_window_start;
+        config.shm_window_bytes = L.profile.window_bytes;
         // Deliberately NOT zeroed here, and that is the entire feature: this
         // region is how a guest survives its own destruction, so a rebuild must
         // find exactly what the last instance left. See DspConfig::persistent.
-        config.persistent       = shared_memory + GUEST_PERSIST_START;
-        config.persistent_bytes = GUEST_PERSIST_SIZE;
+        config.persistent       = base + L.guest_persist_start;
+        config.persistent_bytes = L.profile.persist_bytes;
 
-        config.deterministic_seed = clockwork_deterministic_seed;
+        config.deterministic_seed = cfg.deterministic_seed;
 
         config.block_size = build_block(config.block_size);
         if (config.max_output_channels > clockwork::kMaxChannels)
@@ -2138,7 +2126,7 @@ extern "C" {
         // Reserved lanes, above the device: widened for on every build, and
         // again when a surviving instance is told a new channel count
         // (widen_for_lanes).
-        widen_for_lanes(config.max_input_channels, config.max_output_channels);
+        widen_for_lanes(st, config.max_input_channels, config.max_output_channels);
         // ── The guest's memory region ──────────────────────────────────────
         //
         // Reserved by the host, claimed by nothing else, and zeroed here so a
@@ -2148,14 +2136,14 @@ extern "C" {
         // does not reach into it, so leaving the guest to rediscover the same
         // number was two answers to one question.
         //
-        // ABSOLUTE, not relative to shared_memory. On web the address is a
+        // ABSOLUTE, not relative to base. On web the address is a
         // position in the wasm heap chosen by the JS memory layout
         // (wasmHeapSize + ringBufferReserved), and the client maps it that
-        // way. Adding it to shared_memory — arena_storage, a static
-        // array at whatever address the linker picked — would put the region
-        // exactly arenaBase bytes too high, overrunning into the buffer pool
-        // above it, and that only shows when the static layout moves, because
-        // the size of the overrun IS arena_storage's address.
+        // way. Adding it to base — the arena, at whatever address it was
+        // given — would put the region exactly arenaBase bytes too high,
+        // overrunning into the buffer pool above it, and that only shows when
+        // the layout moves, because the size of the overrun IS the arena's
+        // address.
         //
         /*
          * THE PLACEMENT ARENA, and it goes in before anything allocates —
@@ -2177,12 +2165,13 @@ extern "C" {
             // The placement arena is the rest of the engine's memory after
             // the arena (g_engine_block, claimed before boot by the worklet or
             // by get_arena_base). What the layout asked for has to fit it.
-            const size_t want = g_clockwork_config.arena_bytes
-                              ? (size_t)g_clockwork_config.arena_bytes
+            const size_t want = cfg.arena_bytes
+                              ? (size_t)cfg.arena_bytes
                               : (size_t)CLOCKWORK_MEM_ARENA_SIZE;
-            const size_t have = g_engine_block_bytes > ARENA_SIZE ? g_engine_block_bytes - ARENA_SIZE : 0;
+            const size_t arena_bytes = st.arena.layout.arena_bytes;
+            const size_t have = g_engine_block_bytes > arena_bytes ? g_engine_block_bytes - arena_bytes : 0;
             if (!g_engine_block || have < want) {
-                clockwork_boot_fail("FATAL: the engine's memory holds %u MB after the arena and the layout asks "
+                clockwork_boot_fail(st, "FATAL: the engine's memory holds %u MB after the arena and the layout asks "
                               "for %u MB - claim it with memArenaSize before the arena's base is read "
                               "(clockwork_memory_claim)",
                               (unsigned)(have / (1024 * 1024)), (unsigned)(want / (1024 * 1024)));
@@ -2190,13 +2179,13 @@ extern "C" {
                                                std::memory_order_relaxed);
                 return;
             }
-            void* arena = g_engine_block + ARENA_SIZE;
+            void* arena = g_engine_block + arena_bytes;
             clockwork::mem::set_arena(arena, have);
-            // The RT router's block first, so a later start-over finds it at
+            // The core's own pool first, so a later start-over finds it at
             // the arena's start again (above).
-            clockwork_router_reserve();
+            own_pool_start(st);
             if (verbosity > 0)
-                clockwork_log("MEM ARENA: 0x%08x + %u MB",
+                clockwork_log(core, "MEM ARENA: 0x%08x + %u MB",
                         (unsigned)(uintptr_t)arena,
                         (unsigned)(want / (1024 * 1024)));
         } else {
@@ -2213,35 +2202,39 @@ extern "C" {
              * Nothing of that engine is alive — its thread is gone, and the
              * product re-sends what it held (restoreClientState) — so the arena
              * starts over. Everything holding a pointer into it forgets it
-             * first: the guest's pool (started over by clockwork_pool_boot
+             * first: the guest's pool (started over at the build
              * below) and the dead instance.
              */
-            clockwork_pool_abandon();
-            g_dsp = nullptr;
+            clockwork_heap_stop(st.heap, CLOCKWORK_POOL_GUEST);
+            clockwork_heap_release_system(st.heap, nullptr);   // in the arena, which goes whole
+            st.guest.instance = nullptr;
             // The guest's spans are in the arena too: forgotten, so they are
             // carved again below in the same order as a first boot. Kept
             // while the heap is rebuilt from the arena's start, they would
             // lie under the heap's backing.
-            g_owned_fast = nullptr; g_owned_fast_bytes = 0;
-            g_owned_bulk = nullptr; g_owned_bulk_bytes = 0;
+            st.memory.fast = nullptr; st.memory.fast_bytes = 0;
+            st.memory.bulk = nullptr; st.memory.bulk_bytes = 0;
+            // And the staging, for the same reason.
+            (void)st.staging.span.release();
+            st.staging = clockwork::Staging{};
             clockwork::mem::reset_arena();
-            // The RT router's block is for the life of the process and lives
-            // in this arena: it was the arena's first allocation, so taking it
-            // again first lands it where it was. Anything else is a boot that
-            // cannot be trusted and stops.
-            if (!clockwork_router_reclaim()) {
-                clockwork_boot_fail("FATAL: the RT router's block did not come back where it was after the arena started over");
+            // The core's own pool is the core's for its life and lives in this
+            // arena: it was the arena's first allocation, so taking it again
+            // first lands it where it was. Anything else is a boot that cannot
+            // be trusted and stops.
+            if (!own_pool_reclaim(st)) {
+                clockwork_boot_fail(st, "FATAL: the core's own pool did not come back where it was after the arena started over");
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
             }
             if (verbosity > 0)
-                clockwork_log("MEM ARENA: started over for a new engine (%u MB)",
+                clockwork_log(core, "MEM ARENA: started over for a new engine (%u MB)",
                         (unsigned)(clockwork::mem::arena_size() / (1024 * 1024)));
         }
         // The engine's memory, in the table: the one block, the arena at its
         // start and the placement arena after it. Placed on every boot, a
         // start-over included: it is the same block.
-        arenaSetArea(shared_memory, CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_PROCESS,
+        arenaSetArea(base, CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_PROCESS,
                      (uintptr_t)g_engine_block, g_engine_block_bytes);
 #endif
 
@@ -2279,32 +2272,33 @@ extern "C" {
             }
             // What this configuration adds: only the guest can read its own
             // options, so it is asked, with the config block already in place.
-            const uint64_t configured = dsp_memory_bytes(shared_memory + GUEST_CONFIG_START, GUEST_CONFIG_SIZE);
+            const uint8_t* const guest_config = base + st.arena.layout.guest_config_start;
+            const uint64_t configured = dsp_memory_bytes(guest_config, GUEST_CONFIG_SIZE);
             if (configured > fast_wanted) fast_wanted = configured > UINT32_MAX ? UINT32_MAX : (uint32_t)configured;
-            const uint64_t configured_bulk = dsp_memory_bulk_bytes(shared_memory + GUEST_CONFIG_START, GUEST_CONFIG_SIZE);
+            const uint64_t configured_bulk = dsp_memory_bulk_bytes(guest_config, GUEST_CONFIG_SIZE);
             if (configured_bulk > bulk_wanted) bulk_wanted = configured_bulk > UINT32_MAX ? UINT32_MAX : (uint32_t)configured_bulk;
         }
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
-        // The engine's memory, natively (g_engine_block above): sized to
-        // exactly what this build cuts from it — the fast span, then the
-        // bulk span at its figure — and replaced by a build that wants
-        // another size. The router's block is taken first, from the system,
-        // so it is not in the block (it outlives every block). A host that
+        // The engine's memory, natively (the core's block, above): sized to
+        // what this build cuts from it — the fast span, then the bulk span at
+        // its figure, on a chunk of its own — and replaced by a build that
+        // wants another size. The core's own pool is taken first, apart from the
+        // block: it lives as long as the core, past every block. A host that
         // placed the fast span itself keeps it; the block then holds the
         // bulk span alone.
         {
-            clockwork_router_reserve();
-            const bool host_fast = g_clockwork_config.guest_memory && g_clockwork_config.guest_memory_bytes;
-            const size_t bulk_figure = g_clockwork_config.guest_bulk_bytes ? g_clockwork_config.guest_bulk_bytes
+            own_pool_start(st);
+            const bool host_fast = cfg.guest_memory && cfg.guest_memory_bytes;
+            const size_t bulk_figure = cfg.guest_bulk_bytes ? cfg.guest_bulk_bytes
                                                                            : (size_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES;
             const size_t bulk_span = bulk_figure > bulk_wanted ? bulk_figure : (size_t)bulk_wanted;
             size_t fast_span = host_fast ? 0 : (size_t)fast_wanted;
             if (!host_fast && (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES > fast_span)
                 fast_span = (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES;
-            const size_t fast_cut = (fast_span + 15u) & ~(size_t)15u;   // the bulk span starts 16-aligned
+            const size_t fast_cut = clockwork::pages::whole_chunks(fast_span);   // the bulk span starts on a chunk
             const size_t need = (fast_cut > SIZE_MAX - bulk_span) ? SIZE_MAX : fast_cut + bulk_span;
-            if (!engine_block_holding(need, verbosity)) {
-                clockwork_boot_fail("FATAL: the system could not give the engine %zu bytes for the guest's memory "
+            if (!engine_block_holding(st, need, verbosity)) {
+                clockwork_boot_fail(st, "FATAL: the system could not give the engine %zu bytes for the guest's memory "
                                     "(%zu fast + %zu bulk) - lower the guest's wants or the profile's "
                                     "CLOCKWORK_GUEST_MEMORY_BULK_BYTES",
                                     need, fast_span, bulk_span);
@@ -2313,12 +2307,13 @@ extern "C" {
             }
             // The cut. The spans are the block's, never clockwork::mem's:
             // nothing below frees them one by one, the block goes whole.
-            g_owned_fast       = fast_span ? g_engine_block : nullptr;
-            g_owned_fast_bytes = fast_span;
-            g_owned_bulk       = bulk_span ? g_engine_block + fast_cut : nullptr;
-            g_owned_bulk_bytes = bulk_span;
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_PROCESS,
-                         (uintptr_t)g_engine_block, g_engine_block_bytes);
+            clockwork::Memory& m = st.memory;
+            m.fast       = fast_span ? m.block : nullptr;
+            m.fast_bytes = fast_span;
+            m.bulk       = bulk_span ? m.block + fast_cut : nullptr;
+            m.bulk_bytes = bulk_span;
+            arenaSetArea(base, CLOCKWORK_AREA_ENGINE_MEMORY, CLOCKWORK_SPACE_PROCESS,
+                         (uintptr_t)m.block, m.block_bytes);
         }
 #endif
         // The profile's default for a tier, clamped to what the tier has
@@ -2348,38 +2343,38 @@ extern "C" {
             }
         };
 
-        g_guest_memory       = nullptr;
-        g_guest_memory_bytes = 0;
-        if (g_clockwork_config.guest_memory && g_clockwork_config.guest_memory_bytes) {
-            g_guest_memory       = g_clockwork_config.guest_memory;
-            g_guest_memory_bytes = g_clockwork_config.guest_memory_bytes;
+        void*  guest_memory       = nullptr;
+        size_t guest_memory_bytes = 0;
+        if (cfg.guest_memory && cfg.guest_memory_bytes) {
+            guest_memory       = cfg.guest_memory;
+            guest_memory_bytes = cfg.guest_memory_bytes;
         } else {
 #if defined(__EMSCRIPTEN__) || CLOCKWORK_HAS_TIERED_MEMORY
             size_t need = fast_wanted;
             const size_t floor = tier_default(clockwork::mem::Tier::Fast, (size_t)CLOCKWORK_GUEST_MEMORY_FAST_BYTES);
             if (floor > need) need = floor;
-            take(clockwork::mem::Tier::Fast, g_owned_fast, g_owned_fast_bytes, need);
+            take(clockwork::mem::Tier::Fast, st.memory.fast, st.memory.fast_bytes, need);
 #endif
-            g_guest_memory       = g_owned_fast;
-            g_guest_memory_bytes = g_owned_fast_bytes;
+            guest_memory       = st.memory.fast;
+            guest_memory_bytes = st.memory.fast_bytes;
         }
 
 #if defined(__EMSCRIPTEN__) || CLOCKWORK_HAS_TIERED_MEMORY
         {
             size_t need = bulk_wanted;
-            size_t figure = g_clockwork_config.guest_bulk_bytes ? g_clockwork_config.guest_bulk_bytes
+            size_t figure = cfg.guest_bulk_bytes ? cfg.guest_bulk_bytes
                                                                 : (size_t)CLOCKWORK_GUEST_MEMORY_BULK_BYTES;
             const size_t floor = tier_default(clockwork::mem::Tier::Bulk, figure);
             if (floor > need) need = floor;
-            take(clockwork::mem::Tier::Bulk, g_owned_bulk, g_owned_bulk_bytes, need);
+            take(clockwork::mem::Tier::Bulk, st.memory.bulk, st.memory.bulk_bytes, need);
         }
 #endif
-        void*  bulk_arena       = g_owned_bulk;
-        size_t bulk_arena_bytes = g_owned_bulk_bytes;
+        void*  bulk_arena       = st.memory.bulk;
+        size_t bulk_arena_bytes = st.memory.bulk_bytes;
 
         {
             uint32_t short_fast = 0, short_bulk = 0;
-            if (!clockwork_memory_meets((uint32_t)g_guest_memory_bytes, (uint32_t)bulk_arena_bytes,
+            if (!clockwork_memory_meets((uint32_t)guest_memory_bytes, (uint32_t)bulk_arena_bytes,
                                        /*each want against its own span*/ 1, fast_wanted, bulk_wanted,
                                        &short_fast, &short_bulk)) {
                 // Refused, and loudly: the guest said what it needs and this
@@ -2387,12 +2382,12 @@ extern "C" {
                 // would either fail inside dsp_new with a worse message or, if
                 // the guest fell back to spilling, glitch at the first chord
                 // instead of stopping at boot.
-                clockwork_boot_fail("FATAL: guest wants %u bytes fast + %u bytes bulk; "
+                clockwork_boot_fail(st, "FATAL: guest wants %u bytes fast + %u bytes bulk; "
                         "this host offers %u fast + %u bulk — short by %u fast, %u bulk. "
                         "Give clockwork room for it (the web layout's memArenaSize; a device's "
                         "RAM; a desktop's address space) or lower the guest's wants.",
                         fast_wanted, bulk_wanted,
-                        (unsigned)g_guest_memory_bytes, (unsigned)bulk_arena_bytes,
+                        (unsigned)guest_memory_bytes, (unsigned)bulk_arena_bytes,
                         short_fast, short_bulk);
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
@@ -2402,30 +2397,55 @@ extern "C" {
         // Zeroed at every dsp_new, and untouched by clockwork after that
         // (the bulk span is then the pool's, which the guest reaches through
         // the allocator): a rebuilt guest starts from nothing in each.
-        if (g_guest_memory) {
-            memset(g_guest_memory, 0, g_guest_memory_bytes);
+        // Natively the spans clockwork took are the core's own mapping, and
+        // are zeroed by giving their pages back (os_pages.h), so a span costs
+        // the RAM its guest touches rather than all it reserves; memory the
+        // host placed is the host's, and is written.
+        // False when the span is lost: its pages went and could not come back
+        // (clockwork::pages::Zero::Lost), so nothing may touch it.
+        const auto zero_span = [](void* span, size_t bytes, bool ours) {
+#if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
+            if (ours) {
+                switch (clockwork::pages::zero(span, bytes)) {
+                case clockwork::pages::Zero::Done: return true;
+                case clockwork::pages::Zero::Lost: return false;
+                case clockwork::pages::Zero::Kept: break;
+                }
+            }
+#else
+            (void)ours;
+#endif
+            memset(span, 0, bytes);
+            return true;
+        };
+        const auto span_lost = [&] {
+            clockwork_boot_fail(st, "FATAL: the guest's memory could not be zeroed: the system took its pages and gave none back");
+            cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
+        };
+        if (guest_memory) {
+            if (!zero_span(guest_memory, guest_memory_bytes, guest_memory == st.memory.fast)) return span_lost();
             if (verbosity > 0)
-                clockwork_log("GUEST MEMORY: 0x%08x + %u KB fast",
-                        (unsigned)(uintptr_t)g_guest_memory,
-                        (unsigned)(g_guest_memory_bytes / 1024));
+                clockwork_log(core, "GUEST MEMORY: 0x%08x + %u KB fast",
+                        (unsigned)(uintptr_t)guest_memory,
+                        (unsigned)(guest_memory_bytes / 1024));
         }
         if (bulk_arena) {
-            memset(bulk_arena, 0, bulk_arena_bytes);
+            if (!zero_span(bulk_arena, bulk_arena_bytes, true)) return span_lost();
             if (verbosity > 0)
-                clockwork_log("GUEST MEMORY: 0x%08x + %u KB bulk",
+                clockwork_log(core, "GUEST MEMORY: 0x%08x + %u KB bulk",
                         (unsigned)(uintptr_t)bulk_arena,
                         (unsigned)(bulk_arena_bytes / 1024));
         }
-        config.memory            = g_guest_memory;
-        config.memory_bytes      = (uint32_t)g_guest_memory_bytes;
+        config.memory            = guest_memory;
+        config.memory_bytes      = (uint32_t)guest_memory_bytes;
         config.memory_bulk       = bulk_arena;
         config.memory_bulk_bytes = (uint32_t)bulk_arena_bytes;
         // Where the guest's two spans are, into the table: for a map to
         // draw. No client reads them.
-        arenaSetArea(shared_memory, CLOCKWORK_AREA_GUEST_MEMORY_FAST,
-                     g_guest_memory ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
-                     (uintptr_t)g_guest_memory, g_guest_memory_bytes);
-        arenaSetArea(shared_memory, CLOCKWORK_AREA_GUEST_MEMORY_BULK,
+        arenaSetArea(base, CLOCKWORK_AREA_GUEST_MEMORY_FAST,
+                     guest_memory ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
+                     (uintptr_t)guest_memory, guest_memory_bytes);
+        arenaSetArea(base, CLOCKWORK_AREA_GUEST_MEMORY_BULK,
                      bulk_arena ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
                      (uintptr_t)bulk_arena, bulk_arena_bytes);
 
@@ -2435,36 +2455,37 @@ extern "C" {
 #ifdef __EMSCRIPTEN__
         config.fp_env = DSP_FP_ENV_DENORMALS_HONOURED;
 #else
-        config.fp_env = (int32_t)g_clockwork_config.fp_env;
+        config.fp_env = (int32_t)cfg.fp_env;
 #endif
         // Bulk staging is NOT zeroed: the client owns the assets area and may have
         // written into it before the guest was built.
-        config.assets        = g_clockwork_config.assets;
-        config.assets_bytes  = g_clockwork_config.assets_bytes;
-        config.returns       = g_clockwork_config.returns;
-        config.returns_bytes = g_clockwork_config.returns_bytes;
+        config.assets        = cfg.assets;
+        config.assets_bytes  = cfg.assets_bytes;
+        config.returns       = cfg.returns;
+        config.returns_bytes = cfg.returns_bytes;
         // Where the assets and the returns are, into the table: offsets in
-        // the command segment when the lanes are there (clockwork_place_lanes;
+        // the command segment when the lanes are there (ClockworkConfig::lanes_space;
         // every reader of the arena can see them and only the peer can reach
         // them), else the addresses in this process (on the web, in wasm
         // memory).
-        if (g_lane_space == CLOCKWORK_SPACE_COMMAND_SEGMENT) {
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_ASSETS,  g_lane_space, g_lane_assets_at,  config.assets_bytes);
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_RETURNS, g_lane_space, g_lane_returns_at, config.returns_bytes);
+        if (cfg.lanes_space == CLOCKWORK_SPACE_COMMAND_SEGMENT) {
+            arenaSetArea(base, CLOCKWORK_AREA_ASSETS,  cfg.lanes_space, cfg.assets_at,  config.assets_bytes);
+            arenaSetArea(base, CLOCKWORK_AREA_RETURNS, cfg.lanes_space, cfg.returns_at, config.returns_bytes);
         } else {
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_ASSETS,
+            arenaSetArea(base, CLOCKWORK_AREA_ASSETS,
                          config.assets ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
                          (uintptr_t)config.assets, config.assets_bytes);
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_RETURNS,
+            arenaSetArea(base, CLOCKWORK_AREA_RETURNS,
                          config.returns ? CLOCKWORK_SPACE_PROCESS : CLOCKWORK_SPACE_UNKNOWN,
                          (uintptr_t)config.returns, config.returns_bytes);
         }
 
 
         // The guest's pool: clockwork's allocator over the bulk span, started
-        // over every build; with it the RT router's block (once). The same on
+        // over every build; and the core's own, at its first. The same on
         // every platform.
-        clockwork_pool_boot(bulk_arena, bulk_arena_bytes);
+        own_pool_start(st);
+        clockwork_heap_start(st.heap, CLOCKWORK_POOL_GUEST, bulk_arena, bulk_arena_bytes, nullptr);
 #ifdef __EMSCRIPTEN__
         /*
          * A SPAN THE HOST PLACED ITSELF (the legacy guestMemorySize slice)
@@ -2474,12 +2495,12 @@ extern "C" {
          * anything at all. A span clockwork took itself lies inside the
          * engine's memory, below the frontier, and overlaps nothing.
          */
-        if (g_guest_memory && g_guest_memory == g_clockwork_config.guest_memory) {
-            const uintptr_t guest_base = (uintptr_t)g_guest_memory;
+        if (guest_memory && guest_memory == cfg.guest_memory) {
+            const uintptr_t guest_base = (uintptr_t)guest_memory;
             extern void* sbrk(intptr_t);
             const uintptr_t frontier = (uintptr_t)sbrk(0);
             if (frontier > guest_base) {
-                clockwork_boot_fail("FATAL: WASM heap (sbrk=0x%08x) overlaps the guest "
+                clockwork_boot_fail(st, "FATAL: WASM heap (sbrk=0x%08x) overlaps the guest "
                         "region (start=0x%08x) by %u bytes - reduce heap "
                         "usage or raise wasmHeapSize in js/memory_layout.js",
                         (unsigned)frontier, (unsigned)guest_base,
@@ -2489,9 +2510,9 @@ extern "C" {
                 return;
             }
             if (verbosity > 0)
-                clockwork_log("MEMORY OK: malloc<0x%08x guest=[0x%08x,0x%08x)",
+                clockwork_log(core, "MEMORY OK: malloc<0x%08x guest=[0x%08x,0x%08x)",
                         (unsigned)frontier, (unsigned)guest_base,
-                        (unsigned)(guest_base + g_guest_memory_bytes));
+                        (unsigned)(guest_base + guest_memory_bytes));
         }
 #endif
 #if CLOCKWORK_SYNTH
@@ -2501,19 +2522,19 @@ extern "C" {
         // reported would be its own failure, not the cause. (A no-DSP core
         // has no pool at all — its boot is a stub — so there is nothing to
         // check.)
-        if (bulk_arena && !clockwork_pool_holds(bulk_arena)) {
-            clockwork_boot_fail("FATAL: clockwork could not run the guest's pool over its bulk memory "
+        if (bulk_arena && !clockwork_heap_running(st.heap, CLOCKWORK_POOL_GUEST)) {
+            clockwork_boot_fail(st, "FATAL: clockwork could not run the guest's pool over its bulk memory "
                                 "(%zu bytes) - give the guest more (its bulk want, the profile's "
                                 "CLOCKWORK_GUEST_MEMORY_BULK_BYTES, clockwork_set_guest_bulk_bytes)",
                                 bulk_arena_bytes);
             cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
             return;
         }
-        // The RT router's block, the Rust subsystems' for the life of the
-        // process: placed once; an unarmed router stays UNKNOWN.
-        if (clockwork_router_bytes())
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_RUST_HEAP, CLOCKWORK_SPACE_PROCESS,
-                         clockwork_router_begin(), clockwork_router_bytes());
+        // The core's own pool, the Rust subsystems' for the core's life
+        // (the area keeps its name, the rust heap); none stays UNKNOWN.
+        size_t own_bytes = 0;
+        if (void* own = clockwork_heap_span(st.heap, CLOCKWORK_POOL_OWN, &own_bytes))
+            arenaSetArea(base, CLOCKWORK_AREA_RUST_HEAP, CLOCKWORK_SPACE_PROCESS, (uintptr_t)own, own_bytes);
 #ifdef __EMSCRIPTEN__
         // The program's own three, which a wasm module can say exactly: its
         // static data (from the start of the memory to the linker's
@@ -2530,9 +2551,9 @@ extern "C" {
             extern void* sbrk(intptr_t);
             const uintptr_t data_end = (uintptr_t)&__data_end, heap_base = (uintptr_t)&__heap_base;
             const uintptr_t stack_lo = (uintptr_t)&__stack_low, stack_hi = (uintptr_t)&__stack_high;
-            arenaSetArea(shared_memory, CLOCKWORK_AREA_STATIC_DATA, CLOCKWORK_SPACE_PROCESS, 0, data_end);
+            arenaSetArea(base, CLOCKWORK_AREA_STATIC_DATA, CLOCKWORK_SPACE_PROCESS, 0, data_end);
             if (stack_hi > stack_lo)
-                arenaSetArea(shared_memory, CLOCKWORK_AREA_STACK, CLOCKWORK_SPACE_PROCESS, stack_lo, stack_hi - stack_lo);
+                arenaSetArea(base, CLOCKWORK_AREA_STACK, CLOCKWORK_SPACE_PROCESS, stack_lo, stack_hi - stack_lo);
             // malloc is placed at the end of boot (below), once the guest is built: its frontier then is what boot took
             (void)heap_base;
         }
@@ -2546,31 +2567,21 @@ extern "C" {
         { extern void* sbrk(intptr_t); brk_after_heap = (uintptr_t)sbrk(0); }
 #endif
         #if CLOCKWORK_SCHEDULER
-        // Build the scheduler's pools now, with the guest's memory arranged
-        // and on the control thread. See clockwork_engine_schedule() for why this is not left
-        // to static initialisation.
-        clockwork_sched_warm();
+        // Build the core's store now, with the guest's memory arranged and on
+        // the control thread (clockwork_sched_warm says why not earlier).
+        clockwork_sched_warm(core);
 #endif
 #ifdef __EMSCRIPTEN__
         { extern void* sbrk(intptr_t); brk_after_sched = (uintptr_t)sbrk(0); }
 #endif
 
-        // What this DSP is, and its terms. dsp_describe() is static — it
-        // answers before any instance exists — so the schedule declaration is
-        // read once, here, and the branch it governs is decided nowhere else.
+        // What this DSP is (guest_info).
         const char* dsp_name    = "?";
         const char* dsp_version = "?";
-        // Every call into the guest is marked (guest_malloc.h): what it takes
-        // from malloc while the call is open is counted as its own.
-        const DspInfo* info = nullptr;
-        { GuestCallScope guest(GuestCall::Boot); info = dsp_describe(); }
-        if (info) {
-            g_dsp_holds_schedule = info->holds_schedule != 0;
-            g_dsp_wants_events   = info->wants_events != 0;
-            g_dsp_survives       = info->survives;
+        if (const DspInfo* info = guest_info()) {
             // Which guest, and which window layout: into the table, for the
-            // readers of the window (shared_memory.h arenaSetGuestWindowIdentity).
-            arenaSetGuestWindowIdentity(shared_memory, info->window_magic, info->window_version);
+            // readers of the window (base.h arenaSetGuestWindowIdentity).
+            arenaSetGuestWindowIdentity(base, info->window_magic, info->window_version);
             // Kept, not printed here. Who the guest is belongs with the rest of
             // the identity — the banner, the version, the rate — and that is
             // printed further down, once there is an engine to be identified.
@@ -2578,16 +2589,46 @@ extern "C" {
             dsp_version = info->version ? info->version : "?";
         }
 
+        // The block's buffers, for the geometry the instance is built for.
+        if (!fit_staging(st.staging, config.block_size, config.max_output_channels, config.max_input_channels)) {
+            clockwork_boot_fail(st, "FATAL: the fast memory has no room for the block's buffers "
+                                "(%u frames, %u out and %u in channels)",
+                                config.block_size, config.max_output_channels, config.max_input_channels);
+            cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
+            return;
+        }
+
         // Create the instance (see dsp_api.h). It is handed the config above
-        // and the callbacks in g_dsp_host — emit_osc, log, open_sink,
-        // send_sink, free_bytes — and that is the whole of what it knows about
-        // clockwork.
+        // and the host's callbacks — emit_osc, log, open_sink, send_sink,
+        // free_bytes — with its core as their context, and that is the whole
+        // of what it knows about clockwork.
+        const DspHost host = dsp_host_for(core);
+        static_assert(DSP_REFUSAL_BYTES >= sizeof(clockwork::Guest::boot_error),
+                      "a refusal is cut only by the boot's record of it");
+        // As many instances in the process as the guest says it can hold
+        // (DspInfo::instances, 0 being one): a place is taken before
+        // dsp_new, so two cores building at once cannot both take the last.
+        const uint32_t declared = guest_info() ? guest_info()->instances : 0;
+        const uint32_t allowed  = declared == 0 ? 1 : declared;
+        if (!clockwork_core_guest_take(core, allowed)) {
+            clockwork_log(core, "ERROR: engine bring-up refused: %s runs %u to a process", dsp_name, allowed);
+            if (allowed == 1)
+                record_boot_error(st, "%s did not start: only one can run in a process, and one already is", dsp_name);
+            else
+                record_boot_error(st, "%s did not start: only %u can run in a process, and %u already are",
+                                  dsp_name, allowed, allowed);
+            cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
+            return;
+        }
         try {
-            const char* err = nullptr;
-            { GuestCallScope guest(GuestCall::Boot); g_dsp = dsp_new(&config, &g_dsp_host, &err); }
-            if (!g_dsp) {
-                clockwork_log("ERROR: engine bring-up failed: %s", err ? err : "unknown");
-                record_boot_error("%s did not start: %s", dsp_name, err ? err : "it gave no reason");
+            std::array<char, DSP_REFUSAL_BYTES> why{};
+            clockwork::Guest& g = st.guest;
+            { GuestCallScope guest(GuestCall::Boot); g.instance = dsp_new(&config, &host, why.data(), why.size()); }
+            why.back() = '\0';   // a guest that filled it to the end
+            if (!g.instance) {
+                clockwork_core_guest_give(core);
+                clockwork_log(core, "ERROR: engine bring-up failed: %s", why[0] ? why.data() : "unknown");
+                record_boot_error(st, "%s did not start: %s", dsp_name, why[0] ? why.data() : "it gave no reason");
                 // The generation word stays odd: there is none, and none coming.
                 cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
                 return;
@@ -2595,44 +2636,35 @@ extern "C" {
             // There is an instance: a generation opens — the word goes even,
             // one on from the last, which is the number setup will name —
             // and the boundary takes messages for it again.
-            arenaInstanceUp(shared_memory);
-            clockwork_carry_generation(arenaInstanceGeneration(shared_memory));
+            arenaInstanceUp(base);
+            st.config.carried_generation = std::max(st.config.carried_generation, arenaInstanceGeneration(base));
         } catch (const std::exception& e) {
-            clockwork_log("ERROR: engine bring-up threw exception: %s", e.what());
-            record_boot_error("%s did not start: %s", dsp_name, e.what());
+            clockwork_core_guest_give(core);
+            clockwork_log(core, "ERROR: engine bring-up threw exception: %s", e.what());
+            record_boot_error(st, "%s did not start: %s", dsp_name, e.what());
             cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
             return;
         } catch (...) {
-            clockwork_log("ERROR: engine bring-up threw unknown exception");
-            record_boot_error("%s did not start: it threw", dsp_name);
+            clockwork_core_guest_give(core);
+            clockwork_log(core, "ERROR: engine bring-up threw unknown exception");
+            record_boot_error(st, "%s did not start: it threw", dsp_name);
             cursors->status_flags.fetch_or(STATUS_WASM_ERROR, std::memory_order_relaxed);
             return;
         }
 
-        // Publish the geometry clockwork chose, and build the channel
-        // pointer arrays dsp_process is handed. Done once: the audio thread
-        // passes two pointers per block and does no layout arithmetic at all.
-        g_block_size       = config.block_size;
-        g_out_channels     = config.max_output_channels;
-        g_in_channels      = config.max_input_channels;
+        // Publish the geometry clockwork chose (the staging is laid out for
+        // it, above): the audio thread passes two pointers per block and
+        // does no layout arithmetic at all.
+        built.block        = config.block_size;
+        built.out_channels = config.max_output_channels;
+        built.in_channels  = config.max_input_channels;
 
         // Publish the device's own channels. A cold swap onto a different
         // device lands here again with new widths; ports bound across it keep
         // their entries (channel_map_set_device rewrites only unclaimed
         // channels).
-        channel_map_set_device(g_in_channels, g_out_channels);
-        g_dsp_sample_rate  = config.sample_rate;
-        for (uint32_t c = 0; c < clockwork::kMaxChannels; ++c) {
-            g_out_ptrs[c] = (c < g_out_channels)
-                ? static_audio_bus + static_cast<size_t>(c) * g_block_size : nullptr;
-            g_in_ptrs[c]  = (c < g_in_channels)
-                ? static_audio_in + static_cast<size_t>(c) * g_block_size : nullptr;
-        }
-
-        // Zero both staging buffers: a host reading clockwork_audio_out() before the
-        // first tick, or an input channel nothing fills, must see silence.
-        memset(static_audio_bus, 0, sizeof(static_audio_bus));
-        memset(static_audio_in, 0, sizeof(static_audio_in));
+        channel_map_set_device(st, built.in_channels, built.out_channels);
+        built.sample_rate  = config.sample_rate;
 
         // ── Tell the new instance what is already attached ──────────────────
         //
@@ -2648,42 +2680,42 @@ extern "C" {
         // just been freed, and delivering it as well as the sweep below would
         // announce the same port twice.
 
-        // How far the block clock advances per buffer, and how to turn an NTP
-        // interval back into samples. One second is kNtpUnitsPerSecond units.
-        const int buf_length = static_cast<int>(g_block_size);
-        g_osc_increment = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
-        g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
+        // How far the block clock advances per buffer. One second is
+        // kNtpUnitsPerSecond units.
+        const int buf_length = static_cast<int>(built.block);
+        built.block_step = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
 
         // Publish cross-platform system info into the metrics struct.
         // Constant for the session; written once now that the DSP exists. Runs on every runtime — native's initialiseDsp() also
         // routes through init_memory().
-        publish_session_metrics(sample_rate, buf_length);
+        publish_session_metrics(st, sample_rate, buf_length);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(base);
         metrics->audio_output_channels.store(config.max_output_channels, std::memory_order_relaxed);
         metrics->audio_input_channels.store(config.max_input_channels, std::memory_order_relaxed);
 
         // (Re)initialise clockwork's timed queue. Clearing IS initialising
         // for a fixed-pool store, and this runs on every target's boot path.
 #if CLOCKWORK_SCHEDULER
-        clockwork_engine_schedule().clear();
+        if (EngineScheduler* q = clockwork_engine_schedule(core)) q->clear();
 #endif
-        update_scheduler_depth_metric(0);
+        update_scheduler_depth_metric(st, 0);
 
 
 #ifdef __EMSCRIPTEN__
-        clockwork_log("\n" CLOCKWORK_PRODUCT_BANNER);
+        clockwork_log(core, "\n" CLOCKWORK_PRODUCT_BANNER);
         // the product introduces itself under its banner; the substrate it runs
         // on follows, unless the product is clockwork itself
         // (clockwork itself has no version: standalone its line is the commit it was built from)
         if (std::strcmp(CLOCKWORK_PRODUCT_NAME, "clockwork") != 0) {
-            clockwork_log("%s v%s", CLOCKWORK_PRODUCT_NAME, CLOCKWORK_PRODUCT_VERSION);
-            clockwork_log("on Clockwork " CLOCKWORK_COMMIT);
+            clockwork_log(core, "%s v%s", CLOCKWORK_PRODUCT_NAME, CLOCKWORK_PRODUCT_VERSION);
+            clockwork_log(core, "on Clockwork " CLOCKWORK_COMMIT);
         } else {
-            clockwork_log("clockwork " CLOCKWORK_COMMIT);
+            clockwork_log(core, "clockwork " CLOCKWORK_COMMIT);
         }
-        clockwork_log("%.0fkHz %dch", sample_rate / 1000, config.max_output_channels);
-        clockwork_log("DSP: %s %s", dsp_name, dsp_version);
-        clockwork_log("");
-        clockwork_log("> engine ready...");
+        clockwork_log(core, "%.0fkHz %dch", sample_rate / 1000, config.max_output_channels);
+        clockwork_log(core, "DSP: %s %s", dsp_name, dsp_version);
+        clockwork_log(core, "");
+        clockwork_log(core, "> engine ready...");
         // Boot is done: every malloc from here on is one the memory model
         // says should not happen (guest_malloc.h), and is counted as such. A
         // host that opens its own client after this marks again when it is
@@ -2699,41 +2731,44 @@ extern "C" {
             const uintptr_t heap_base = (uintptr_t)&__heap_base, brk = (uintptr_t)sbrk(0);
             brk_after_dsp = brk;
             if (brk > heap_base)
-                arenaSetArea(shared_memory, CLOCKWORK_AREA_MALLOC, CLOCKWORK_SPACE_PROCESS, heap_base, brk - heap_base);
-            if (verbosity > 0) clockwork_log("malloc at boot: base %u · guest memory fast [%u,%u) · bulk [%u,%u) · rust heap [%u,%u) · after the pool %u · after scheduler %u · after dsp_new %u",
-                          (unsigned)heap_base, (unsigned)(uintptr_t)g_guest_memory, (unsigned)((uintptr_t)g_guest_memory + g_guest_memory_bytes),
-                          (unsigned)(uintptr_t)g_owned_bulk, (unsigned)((uintptr_t)g_owned_bulk + g_owned_bulk_bytes),
-                          (unsigned)clockwork_router_begin(), (unsigned)(clockwork_router_begin() + clockwork_router_bytes()),
+                arenaSetArea(base, CLOCKWORK_AREA_MALLOC, CLOCKWORK_SPACE_PROCESS, heap_base, brk - heap_base);
+            size_t own_pool_bytes = 0;
+            const auto own_pool = (uintptr_t)clockwork_heap_span(st.heap, CLOCKWORK_POOL_OWN, &own_pool_bytes);
+            if (verbosity > 0) clockwork_log(core, "malloc at boot: base %u · guest memory fast [%u,%u) · bulk [%u,%u) · own pool [%u,%u) · after the pool %u · after scheduler %u · after dsp_new %u",
+                          (unsigned)heap_base, (unsigned)(uintptr_t)guest_memory, (unsigned)((uintptr_t)guest_memory + guest_memory_bytes),
+                          (unsigned)(uintptr_t)st.memory.bulk, (unsigned)((uintptr_t)st.memory.bulk + st.memory.bulk_bytes),
+                          (unsigned)own_pool, (unsigned)(own_pool + own_pool_bytes),
                           (unsigned)brk_after_heap, (unsigned)brk_after_sched, (unsigned)brk_after_dsp);
             // And of those bytes, what the guest itself took with malloc and
             // new on the way up (guest_malloc.h): counted, not inferred.
             if (verbosity > 0 && clockwork_guest_malloc_counted())
-                clockwork_log("guest malloc at boot: %u calls, %u freed, %u bytes held",
-                              (unsigned)clockwork_guest_mallocs_boot(), (unsigned)clockwork_guest_frees(),
-                              (unsigned)clockwork_guest_malloc_bytes());
+                clockwork_log(core, "guest malloc at boot: %u calls, %u freed, %u bytes held",
+                              (unsigned)clockwork_guest_mallocs_boot(st), (unsigned)clockwork_guest_frees(st),
+                              (unsigned)clockwork_guest_malloc_bytes(st));
         }
 #else
         // No banner off the web, so the guest's identity is a line of its own.
-        clockwork_log("DSP: %s %s", dsp_name, dsp_version);
+        clockwork_log(core, "DSP: %s %s", dsp_name, dsp_version);
 #endif
         // Every asset the last instance held, the new one's before it says
         // anything of its own (hand_over_assets). None on a new arena.
-        if (g_dsp) hand_over_assets();
-        if (replacing && g_dsp) announce_instance(0);
+        if (st.guest.instance) {
+            hand_over_assets(st);
+            if (replacing) announce_instance(st, 0);
+        }
 #else  // !CLOCKWORK_SYNTH
         // No-DSP core: no instance, no audio render. The scheduler/router still
         // runs — derive the block-time constants from the AudioContext rate and a
         // default block size so the fire loop's OSC-time window is correct.
         const int buf_length = clockwork::kDefaultBlockSize;
-        g_osc_increment = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
-        g_osc_to_samples = sample_rate / clockwork::kNtpUnitsPerSecond;
+        st.build.block_step = (int64_t)((double)buf_length / sample_rate * clockwork::kNtpUnitsPerSecond);
 
-        publish_session_metrics(sample_rate, buf_length);
+        publish_session_metrics(st, sample_rate, buf_length);
 
 #if CLOCKWORK_SCHEDULER
-        clockwork_engine_schedule().clear();
+        if (EngineScheduler* q = clockwork_engine_schedule(core)) q->clear();
 #endif
-        update_scheduler_depth_metric(0);
+        update_scheduler_depth_metric(st, 0);
 #endif // CLOCKWORK_SYNTH
     }
 
@@ -2747,124 +2782,145 @@ extern "C" {
     // A COLD SWAP EMPTIES WHATEVER SUBSCRIPTION SET THE DSP WAS KEEPING, and a client
     // must re-subscribe. A registry that outlives an instance is state clockwork
     // cannot ask for and the DSP cannot hand over.
-    void destroy_dsp() {
-        // The audio thread is stopped (the caller's contract): what the instance
+    void destroy_dsp(ClockworkCore* core) {
+        clockwork::CoreState* const found = clockwork::state(core);
+        if (!found) return;
+        clockwork::CoreState& st = *found;
+        // No block renders meanwhile (the core's gate): what the instance
         // says as it goes, and what clockwork says for it, go on its ring after
         // everything it said before.
-        InstanceRingScope instance_ring;
+        const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_CONTROL, clockwork::GateHold::Take::Wait);
+        InstanceRingScope instance_ring(st);
         // From here until the next dsp_new succeeds there is no instance: the
         // generation word goes odd, before anything else goes, so a message
         // written from now on meets the boundary's refusal (in_ring_door.h).
         // The generation that is closing stays named, so a refusal from here
         // says which instance refused and a reader of the arena knows
         // "between instances" from the bytes.
-        if (shared_memory) arenaInstanceDown(shared_memory);
+        if (uint8_t* base = st.arena.at()) arenaInstanceDown(base);
         // An instance whose setup is still owed goes unannounced: it said
         // nothing, and the next one up announces itself.
-        g_owed.store(Owed::Nothing, std::memory_order_relaxed);
+        st.setup.owed.store(Owed::Nothing, std::memory_order_relaxed);
         // What was already in the in ring was written for this generation:
         // marked, for the next drain to answer (the marks).
-        mark_closing_generation();
+        mark_closing_generation(st);
         // The assets it held stay committed, for the next instance (hand_over_assets):
         // the bytes are the client's, and still where they were.
-        if (g_dsp) {
-            { GuestCallScope guest(GuestCall::Boot); dsp_free(g_dsp); }
-            g_dsp = nullptr;
+        clockwork::Guest& g = st.guest;
+        if (g.instance) {
+            { GuestCallScope guest(GuestCall::Boot); dsp_free(g.instance); }
+            g.instance = nullptr;
+            // The core's place among the guest's instances stays its own: a
+            // rebuild is never refused for a place another core took between
+            // (clockwork_core.h). Closing the core gives it back.
         }
         // The next instance's call counts start from nothing (guest_malloc.h).
         // What this one took from malloc and never freed stays held, and stays
         // in the held count: the bytes are still the guest's.
-        clockwork_guest_malloc_reset();
+        clockwork_guest_malloc_reset(st);
         // After dsp_free, so nothing can be sending as they go. See
         // dsp_host_open_sink: this is the other half of "clockwork closes
         // every sink a DSP opened when that DSP is freed".
-        close_dsp_sinks();
-        g_block_size = g_out_channels = g_in_channels = 0;
-        g_dsp_sample_rate = 0.0;
+        close_dsp_sinks(st);
+        clockwork::Build& b = st.build;
+        b.block = b.out_channels = b.in_channels = 0;
+        b.sample_rate = 0.0;
         // The guest's pool goes with the instance; its span stays for the
         // next build (teardown_memory gives the spans back).
-        clockwork_pool_teardown();
+        clockwork_heap_stop(st.heap, CLOCKWORK_POOL_GUEST);
+        clockwork_heap_release_system(st.heap, free_to_bulk);
 #if CLOCKWORK_SCHEDULER
-        clockwork_engine_schedule().clear();
+        if (EngineScheduler* q = clockwork_engine_schedule(core)) q->clear();
 #endif
-        update_scheduler_depth_metric(0);
-        g_in_seq_reset.store(true, std::memory_order_relaxed);
+        update_scheduler_depth_metric(st, 0);
+        st.ingress.seq_reset.store(true, std::memory_order_relaxed);
     }
 
-    void rebuild_dsp(double sample_rate, uint32_t device_buffer_frames) {
-        // The audio thread is stopped (the caller's contract), so this thread
-        // writes the instance's ring: what the instance says as it is built,
-        // and then its setup.
-        InstanceRingScope instance_ring;
+    void rebuild_dsp(ClockworkCore* core, double sample_rate, uint32_t device_buffer_frames) {
+        clockwork::CoreState* const st = clockwork::state(core);
+        if (!st) return;
+        // No block renders meanwhile (the core's gate), so this thread writes
+        // the instance's ring: what the instance says as it is built, and
+        // then its setup.
+        const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_CONTROL, clockwork::GateHold::Take::Wait);
+        InstanceRingScope instance_ring(*st);
         // The new rate, plus whatever channel ceilings the caller aimed at
         // with clockwork_set_channel_ceilings since the last build. Everything else
         // — the guest's config block, the arena, the regions — is where it
         // was; a rebuild is init_memory again, not a different function.
-        g_clockwork_config.sample_rate = sample_rate;
-        init_memory();
+        st->config.sample_rate = sample_rate;
+        init_memory(core);
         // Not up: there is no instance to announce, and the failed build is
         // the host's to report.
-        if (g_dsp) announce_instance(device_buffer_frames);
+        if (st->guest.instance) announce_instance(*st, device_buffer_frames);
     }
 
-    void come_back() {
-        const ClockworkConfig& now = g_clockwork_config;
+    void come_back(ClockworkCore* core) {
+        clockwork::CoreState* const found = clockwork::state(core);
+        if (!found) return;
+        clockwork::CoreState& st = *found;
+        const ClockworkConfig& now = st.config;
+        const clockwork::Build& built = st.build;
         // What no instance is carried across, whatever it survives: there is
         // none to carry (its build failed), it is not in the memory it was
         // built in, its config block is not the one it read, or the audio
         // thread left it partway through a block.
-        const bool same_memory = now.guest_memory == g_built_config.guest_memory
-                              && now.guest_memory_bytes == g_built_config.guest_memory_bytes
-                              && now.assets == g_built_config.assets
-                              && now.assets_bytes == g_built_config.assets_bytes
-                              && now.returns == g_built_config.returns
-                              && now.returns_bytes == g_built_config.returns_bytes
-                              && now.arena_bytes == g_built_config.arena_bytes
-                              && now.guest_bulk_bytes == g_built_config.guest_bulk_bytes
-                              && now.fp_env == g_built_config.fp_env;
-        const bool same_config = std::memcmp(shared_memory + GUEST_CONFIG_START, g_built_guest_config.data(),
-                                             GUEST_CONFIG_SIZE) == 0;
-        const bool torn = g_block_open.load(std::memory_order_acquire);
+        const bool same_memory = now.guest_memory == built.config.guest_memory
+                              && now.guest_memory_bytes == built.config.guest_memory_bytes
+                              && now.assets == built.config.assets
+                              && now.assets_bytes == built.config.assets_bytes
+                              && now.returns == built.config.returns
+                              && now.returns_bytes == built.config.returns_bytes
+                              && now.arena_bytes == built.config.arena_bytes
+                              && now.guest_bulk_bytes == built.config.guest_bulk_bytes
+                              && now.fp_env == built.config.fp_env;
+        const bool same_config = std::memcmp(st.arena.at() + st.arena.layout.guest_config_start,
+                                             built.guest_config.data(), GUEST_CONFIG_SIZE) == 0;
+        clockwork::CoreClock& cc = st.clock;
+        const bool torn = cc.block_open.load(std::memory_order_acquire);
         clockwork::RestartStep step = clockwork::RestartStep::Rebuild;
-        if (g_dsp && same_memory && same_config && !torn) {
-            const clockwork::RestartFacts built_for { g_dsp_sample_rate, g_block_size,
-                                                      g_built_config.input_channels, g_built_config.output_channels };
+        if (st.guest.instance && same_memory && same_config && !torn) {
+            const clockwork::RestartFacts built_for { built.sample_rate, built.block,
+                                                      built.config.input_channels, built.config.output_channels };
             const clockwork::RestartFacts back { now.sample_rate, build_block(now.block_size),
                                                  now.input_channels, now.output_channels };
-            step = clockwork::planRestart(built_for, back, g_dsp_survives).step;
+            step = clockwork::planRestart(built_for, back, clockwork_guest_survives()).step;
         }
         if (step == clockwork::RestartStep::Reconfigure
-            && !clockwork_guest_reconfigure(now.sample_rate, now.input_channels, now.output_channels))
+            && !clockwork_guest_reconfigure(core, now.sample_rate, now.input_channels, now.output_channels))
             step = clockwork::RestartStep::Rebuild;
 
         if (step == clockwork::RestartStep::Rebuild) {
             // The new instance's blocks are its own.
-            g_block_open.store(false, std::memory_order_relaxed);
+            cc.block_open.store(false, std::memory_order_relaxed);
             // A committed asset points into the assets area it was committed
             // in: one that has moved leaves nothing for the next instance.
-            if (now.assets != g_built_config.assets || now.assets_bytes != g_built_config.assets_bytes) {
-                InstanceRingScope instance_ring;
-                assets_release_all();
+            if (now.assets != built.config.assets || now.assets_bytes != built.config.assets_bytes) {
+                InstanceRingScope instance_ring(st);
+                assets_release_all(st);
             }
-            destroy_dsp();
-            rebuild_dsp(now.sample_rate, 0);   // no device: setup names the block
+            destroy_dsp(core);
+            rebuild_dsp(core, now.sample_rate, 0);   // no device: setup names the block
             return;
         }
         // The same instance, back, every region as it was, as at any hot
         // restart. The clock re-enters service and re-anchors at the next
         // block, never below its last time.
-        clock_enter_service(/*cold_boot*/ false);
-        if (step == clockwork::RestartStep::Reconfigure) clockwork_announce_facts(now.sample_rate, 0);
+        clock_enter_service(st, /*cold_boot*/ false);
+        if (step == clockwork::RestartStep::Reconfigure) clockwork_announce_facts(core, now.sample_rate, 0);
     }
 
 #endif
 
 #if !defined(__EMSCRIPTEN__) && CLOCKWORK_SYNTH
-    // Mirror of init_memory for engine shutdown: tear down the DSP instance and drop
-    // the engine's global view of the arena while it is still mapped, so the
-    // lanes guards (memory_initialized / control) reject post-shutdown calls
-    // instead of touching a freed or unmapped segment.
-    void teardown_memory() {
+    // Mirror of init_memory for the engine's end: tear down the DSP instance and
+    // clear the core's arena while it is still mapped, so the lanes calls
+    // (Arena::laid_out) reject what comes after instead of touching a freed or
+    // unmapped segment.
+    void teardown_memory(ClockworkCore* core) {
+        clockwork::CoreState* const found = clockwork::state(core);
+        if (!found) return;
+        clockwork::CoreState& st = *found;
         /*
          * THE PORT BINDINGS GO WITH THE ENGINE. A binding names the channels a
          * port occupies and the table holds CLOCKWORK_PORT_BUS_MAX of them; without
@@ -2879,37 +2935,38 @@ extern "C" {
          * The ports themselves belong to whoever opened them; only the routing is
          * the engine's.
          */
-        clockwork_port_bus_detach_all();
+        clockwork_port_bus_detach_all(core);
 
         // And the committed assets: a rebuild hands them on, the engine going
         // releases them, and each committer hears so.
         {
-            InstanceRingScope instance_ring;
-            assets_release_all();
+            InstanceRingScope instance_ring(st);
+            assets_release_all(st);
         }
-        destroy_dsp();
+        destroy_dsp(core);
         // The arenas clockwork reserved for the guest go with the engine, not
         // with the instance: a rebuild keeps them (destroy_dsp above), a
         // teardown returns them.
 #if !defined(__EMSCRIPTEN__) && !CLOCKWORK_HAS_TIERED_MEMORY
-        // The spans are cuts of the engine's block (g_engine_block), and the
-        // block goes whole: an engine's, not the process's. Nothing cut from
-        // it is live by now.
-        g_owned_fast = nullptr; g_owned_bulk = nullptr;
-        if (g_engine_block) {
-            std::free(g_engine_block);
-            g_engine_block = nullptr; g_engine_block_bytes = 0;
+        // The spans are cuts of the core's block, and the block goes whole:
+        // an engine's, not the process's. Nothing cut from it is live by now.
+        clockwork::Memory& m = st.memory;
+        m.fast = nullptr; m.bulk = nullptr;
+        if (m.block) {
+            clockwork::pages::unmap(m.block, m.block_bytes);
+            m.block = nullptr; m.block_bytes = 0;
         }
 #else
-        if (g_owned_fast) { clockwork::mem::free(g_owned_fast); g_owned_fast = nullptr; }
-        if (g_owned_bulk) { clockwork::mem::free(g_owned_bulk); g_owned_bulk = nullptr; }
+        clockwork::Memory& m = st.memory;
+        if (m.fast) { clockwork::mem::free(m.fast); m.fast = nullptr; }
+        if (m.bulk) { clockwork::mem::free(m.bulk); m.bulk = nullptr; }
 #endif
-        g_owned_fast_bytes = g_owned_bulk_bytes = 0;
-        memory_initialized = false;
-        clockwork_guest_fence_arena(nullptr);
-        shared_memory = nullptr;
-        cursors = nullptr;
-        metrics = nullptr;
+        m.fast_bytes = m.bulk_bytes = 0;
+        clockwork::Arena& arena = st.arena;
+        arena.ready.store(false, std::memory_order_release);
+        // The core has no arena now: a client finds no core over this memory.
+        clockwork_core_set_memory(core, nullptr, 0);
+        arena.base.store(nullptr, std::memory_order_release);
     }
 #endif
 
@@ -2919,17 +2976,19 @@ extern "C" {
     // refused into a full ring and lost. A refusal that cannot be encoded at
     // all is counted and the frame consumed: there is nothing truthful left
     // to say (clockwork_sys_refuse).
-    static bool refuse_when_room(uint32_t sourceId, const uint8_t* payload, uint32_t size,
+    static bool refuse_when_room(clockwork::CoreState& st, uint32_t sourceId, const uint8_t* payload, uint32_t size,
                                  const char* reason, uint32_t generation) {
         bool made = true;
+        RingCursors* const cursors = clockwork::cursors_in(st.arena.laid_out(), st.arena.layout);
+        if (!cursors) return false;
         clockwork_sys_refuse(payload, size, reason, generation,
-            [&made, sourceId](const uint8_t* d, uint32_t n) {
+            [&made, &st, sourceId, cursors](const uint8_t* d, uint32_t n) {
                 const uint32_t footprint =
                     (static_cast<uint32_t>(sizeof(Message)) + EGRESS_ROUTE_SIZE + n + 3u) & ~3u;
                 made = ring_fits(static_cast<uint32_t>(cursors->out_head.load(std::memory_order_relaxed)),
                                  static_cast<uint32_t>(cursors->out_tail.load(std::memory_order_acquire)),
-                                 RT_OUT_RING_SIZE, footprint)
-                    && emit_osc_out(sourceId, d, n);
+                                 st.arena.layout.profile.rt_out_ring_bytes, footprint)
+                    && emit_osc_out(st, sourceId, d, n);
             });
         return made;
     }
@@ -2945,28 +3004,34 @@ extern "C" {
     // generation it was written for; above it, from a writer that reads no
     // generation word, for want of an instance. Holding it would replay it
     // into whatever build comes next. Nothing is rendered.
-    static void drain_without_guest() {
+    static void drain_without_guest(clockwork::CoreState& st) {
+        clockwork::Ingress* const in = &st.ingress;
+        uint8_t* const base = st.arena.laid_out();
+        if (!base) return;
+        const clockwork::Layout& L = st.arena.layout;
+        RingCursors* const cursors = clockwork::cursors_in(base, L);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(base);
         constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
-        const auto blockTime = clockwork::Timetag::fromNtp(g_block_osc_time.load(std::memory_order_relaxed));
+        const auto blockTime = clockwork::Timetag::fromNtp(st.clock.block_ntp.load(std::memory_order_relaxed));
         ClockworkDrainStop stop = ClockworkDrainStop::Empty;
         clockwork_drain_ring(
-            shared_memory + IN_RING_START, IN_RING_SIZE,
-            &cursors->in_head, &cursors->in_tail, g_in_drain,
+            base + L.in_ring_start, L.profile.in_ring_bytes,
+            &cursors->in_head, &cursors->in_tail, in->drain,
             ClockworkDrainMetrics{ &metrics->messages_processed, nullptr,
                             &metrics->messages_dropped,
                             &metrics->messages_sequence_gaps },
             MAX_MESSAGES_PER_FRAME,
-            [blockTime](uint32_t sourceId, const uint8_t* payload,
+            [&st, blockTime, in, base](uint32_t sourceId, const uint8_t* payload,
                         uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
-                const RingMark* mark = g_in_marks.of(seq);
+                const RingMark* mark = in->marks.of(seq);
                 if (clockwork_sys_answers_without_guest(payload, payload_size)) {
-                    dispatch(payload, payload_size, sourceId, clockwork::Timetag::immediately(), blockTime);
+                    dispatch(st, payload, payload_size, sourceId, clockwork::Timetag::immediately(), blockTime);
                     return ClockworkDrainVerdict::Consume;
                 }
                 const bool refused = mark
-                    ? refuse_when_room(sourceId, payload, payload_size, mark->reason, mark->generation)
-                    : refuse_when_room(sourceId, payload, payload_size,
-                                       CLOCKWORK_REFUSED_NO_INSTANCE, arenaInstanceGeneration(shared_memory));
+                    ? refuse_when_room(st, sourceId, payload, payload_size, mark->reason, mark->generation)
+                    : refuse_when_room(st, sourceId, payload, payload_size,
+                                       CLOCKWORK_REFUSED_NO_INSTANCE, arenaInstanceGeneration(base));
                 return refused ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
             },
             &stop);
@@ -2979,14 +3044,17 @@ extern "C" {
     // call refuses a block's worth of what waits, as its ring has room, for
     // the host to relay between calls. How much still waits, in bytes: 0
     // once everything has been answered.
-    uint32_t clockwork_close() {
-        if (!memory_initialized || !cursors) return 0;
-        if (g_dsp) destroy_dsp();
-        InstanceRingScope instance_ring;
-        drain_without_guest();
+    uint32_t clockwork_close(ClockworkCore* core) {
+        clockwork::CoreState* const st = clockwork::state(core);
+        RingCursors* const cursors = st ? clockwork::cursors_in(st->arena.laid_out(), st->arena.layout) : nullptr;
+        if (!cursors) return 0;
+        const clockwork::GateHold gate(core, CLOCKWORK_ENTRY_CONTROL, clockwork::GateHold::Take::Wait);
+        if (st->guest.instance) destroy_dsp(core);
+        InstanceRingScope instance_ring(*st);
+        drain_without_guest(*st);
         const auto head = static_cast<uint32_t>(cursors->in_head.load(std::memory_order_acquire));
         const auto tail = static_cast<uint32_t>(cursors->in_tail.load(std::memory_order_acquire));
-        return (head - tail + IN_RING_SIZE) % IN_RING_SIZE;
+        return ring_used_bytes(head, tail, st->arena.layout.profile.in_ring_bytes);
     }
 #endif
 
@@ -2996,37 +3064,35 @@ extern "C" {
     // block_host_micros back (ClockworkBlockTime).
     // active_output_channels / active_input_channels: live channel counts
     EMSCRIPTEN_KEEPALIVE
-    bool process_audio(ClockworkBlockTime& time, uint32_t active_output_channels, uint32_t active_input_channels) {
-        InstanceRingScope instance_ring;   // the audio thread writes the instance's ring
-        BlockOpenScope block_open;         // until the block is done (g_block_open)
-        clockwork_pool_register_engine_thread();  // pool ownership follows the audio thread
-#if CLOCKWORK_SYNTH
-        if (!memory_initialized) {
-            return true; // Not ready — output silence
+    void process_audio(ClockworkCore* core, ClockworkBlockTime& time,
+                       uint32_t active_output_channels, uint32_t active_input_channels) {
+        clockwork::CoreState& st = *clockwork::state(core);
+        clockwork::CoreClock& cc = st.clock;
+        const clockwork::Build& build = st.build;
+        InstanceRingScope instance_ring(st);   // the audio thread writes the instance's ring
+        BlockOpenScope block_open(cc);     // until the block is done
+        uint8_t* const base = st.arena.laid_out();
+        if (!base) {
+            return; // not laid out: nothing to render
         }
-        if (!g_dsp) {
+        const clockwork::Layout& L = st.arena.layout;
+        RingCursors* const cursors = clockwork::cursors_in(base, L);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(base);
+#if CLOCKWORK_SYNTH
+        if (!st.guest.instance) {
             // The instance was destroyed for a cold swap and its successor is
             // being built: silence, and ingress waits for it. Unless the build
             // failed — then nothing is coming, and clockwork still answers.
-            if (g_boot_failed.load(std::memory_order_acquire) && cursors && metrics)
-                drain_without_guest();
-            return true;
-        }
-#else
-        // No-DSP core: there is no instance; the scheduler/router still ticks.
-        if (!memory_initialized) {
-            return true;
+            if (st.guest.boot_failed.load(std::memory_order_acquire))
+                drain_without_guest(st);
+            return;
         }
 #endif
-
-        if (!metrics) {
-            return false;
-        }
 
         // A new instance says nothing before its setup, nor a survived change
         // before its notice: one the ring had no room for says it now, or
         // waits, silent, for a block when it can.
-        if (!say_owed()) return true;
+        if (!say_owed(st)) return;
 
         // The engine's clock, kept here on every target (clock/TimeSource.h).
         // The host passed its frame count and clocks in `time`. This block:
@@ -3041,24 +3107,25 @@ extern "C" {
         // a gap.
         const double rate = static_cast<double>(metrics->audio_sample_rate.load(std::memory_order_relaxed));
         const double sample_pos = static_cast<double>(time.audio_frames);
-        ClockworkClock* clk = g_active_clockwork_clock.load(std::memory_order_acquire);
+        ClockworkClock* clk = cc.clock.load(std::memory_order_acquire);
         const bool freewheel = clk && clk->freewheelClock();
         const bool gap = !freewheel && rate > 0.0
-                      && clockwork_audio_back(time.wall_ntp, time.monotonic_secs, sample_pos / rate);
+                      && clockwork_audio_back(core, time.wall_ntp, time.monotonic_secs, sample_pos / rate);
 
 #if CLOCKWORK_SCHEDULER
-        clockwork_engine_schedule().drainPendingClear();
+        if (EngineScheduler* q = clockwork_engine_schedule(core)) q->drainPendingClear();
 #endif
 
         double current_ntp = clk ? clk->now() : time.wall_ntp;
         uint64_t host_micros = 0;
         if (clk && rate > 0.0) {
 #ifndef __EMSCRIPTEN__
-            LinkAudioHost* link = g_active_link_audio.load(std::memory_order_acquire);
+            LinkAudioHost* link = cc.link_audio.load(std::memory_order_acquire);
 #endif
-            const bool anchoring = !clk->audioThreadAnchored() || gap || g_anchor_at_first_block;
+            const bool asked = cc.anchor_requested.load(std::memory_order_acquire);
+            const bool anchoring = !clk->audioThreadAnchored() || gap || asked;
             if (anchoring) {
-                g_anchor_at_first_block = false;
+                if (asked) cc.anchor_requested.store(false, std::memory_order_release);
                 clk->resetAudioThreadTime(sample_pos, rate, time.wall_ntp,
                                           clk->floorRenderNtp(time.output_latency_frames));
 #ifndef __EMSCRIPTEN__
@@ -3066,6 +3133,8 @@ extern "C" {
 #endif
             }
             current_ntp = clk->updateAudioThreadNTP(sample_pos, rate, time.wall_ntp);
+            if (const double drift = clk->takeDriftReport(); drift != 0.0)
+                clockwork_log(core, "[clock] wall clock and audio clock have diverged by %+.1f ms", drift * 1000.0);
             clk->publishSampleClock(sample_pos, rate, current_ntp, time.output_latency_frames);
             // Publish the clock metrics immediately on an anchor, not at the
             // next flush, so readers and the history see it on that block.
@@ -3088,7 +3157,8 @@ extern "C" {
         metrics->process_count.store(pc, std::memory_order_relaxed);
         // The hour's history of every counter and gauge, a bucket at a time
         // on the engine's clock (metrics_history.h).
-        g_metrics_history.record(reinterpret_cast<const std::atomic<uint32_t>*>(metrics), current_ntp);
+        clockwork::metrics_history::Writer(base + METRICS_HISTORY_START)
+            .record(reinterpret_cast<const std::atomic<uint32_t>*>(metrics), current_ntp);
 
         // Host telemetry. Sample the ring fill every block so peaks stay a true
         // high-water mark (a burst can fill and drain within a few blocks); this is cheap
@@ -3097,64 +3167,43 @@ extern "C" {
         // display rate, and per-block flushing is costly where the metrics struct is in
         // slow memory (PSRAM on ESP32). process_count stays per-block as the block counter.
         {
-            int32_t in_head = cursors->in_head.load(std::memory_order_relaxed);
-            int32_t in_tail = cursors->in_tail.load(std::memory_order_relaxed);
-            uint32_t in_used = (in_head - in_tail + IN_RING_SIZE) % IN_RING_SIZE;
-            if (in_used > local_in_peak.load(std::memory_order_relaxed))
-                local_in_peak.store(in_used, std::memory_order_relaxed);
-
-            int32_t out_head = cursors->out_head.load(std::memory_order_relaxed);
-            int32_t out_tail = cursors->out_tail.load(std::memory_order_relaxed);
-            uint32_t out_used = (out_head - out_tail + RT_OUT_RING_SIZE) % RT_OUT_RING_SIZE;
-            if (out_used > local_out_peak.load(std::memory_order_relaxed))
-                local_out_peak.store(out_used, std::memory_order_relaxed);
-
-            int32_t nrt_out_head = cursors->nrt_out_head.load(std::memory_order_relaxed);
-            int32_t nrt_out_tail = cursors->nrt_out_tail.load(std::memory_order_relaxed);
-            uint32_t nrt_out_used = (nrt_out_head - nrt_out_tail + NRT_OUT_RING_SIZE) % NRT_OUT_RING_SIZE;
-            if (nrt_out_used > local_nrt_out_peak.load(std::memory_order_relaxed))
-                local_nrt_out_peak.store(nrt_out_used, std::memory_order_relaxed);
-
-            // Flush period in blocks, derived once from the audio rate to target ~30Hz
-            // (tracks sample rate / block size instead of a fixed divisor); 16 until the
-            // audio config is published.
-            uint32_t derived = metrics_flush_period.load(std::memory_order_relaxed);
-            if (derived == 0u) {
-                const uint32_t blk = metrics->audio_block_size.load(std::memory_order_relaxed);
-                const uint32_t sr  = metrics->audio_sample_rate.load(std::memory_order_relaxed);
-                if (blk && sr) {            // round(sr / (30 * blk)) in integer math
-                    uint32_t p = (sr + 15u * blk) / (30u * blk);
-                    derived = (p < 1u) ? 1u : p;
-                    metrics_flush_period.store(derived, std::memory_order_relaxed);
-                }
-            }
-            const uint32_t flush_period = (derived != 0u) ? derived : 16u;
-            if ((pc % flush_period) == 0u) {
+            const auto used = [](const std::atomic<int32_t>& head, const std::atomic<int32_t>& tail, uint32_t size) {
+                return ring_used_bytes(static_cast<uint32_t>(head.load(std::memory_order_relaxed)),
+                                       static_cast<uint32_t>(tail.load(std::memory_order_relaxed)), size);
+            };
+            const uint32_t in_used      = used(cursors->in_head, cursors->in_tail, L.profile.in_ring_bytes);
+            const uint32_t out_used     = used(cursors->out_head, cursors->out_tail, L.profile.rt_out_ring_bytes);
+            const uint32_t nrt_out_used = used(cursors->nrt_out_head, cursors->nrt_out_tail, L.profile.nrt_out_ring_bytes);
+            clockwork::MetricsFlush& mf = st.metrics;
+            mf.sample(in_used, out_used, nrt_out_used);
+            if ((pc % mf.period.load(std::memory_order_relaxed)) == 0u) {
                 if (clk) {
                     clk->publishClockMetrics(metrics, current_ntp, 4.0);
 #ifndef __EMSCRIPTEN__
-                    if (LinkAudioHost* link = g_active_link_audio.load(std::memory_order_acquire)) {
+                    if (LinkAudioHost* link = cc.link_audio.load(std::memory_order_acquire)) {
                         clk->publishLinkMetrics(metrics, 4.0);
                         link->publishMetrics(metrics);
                     }
 #endif
                 }
                 metrics->in_buffer_used_bytes.store(in_used, std::memory_order_relaxed);
-                metrics->in_buffer_peak_bytes.store(local_in_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                metrics->in_buffer_peak_bytes.store(mf.in_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 metrics->out_buffer_used_bytes.store(out_used, std::memory_order_relaxed);
-                metrics->out_buffer_peak_bytes.store(local_out_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                metrics->out_buffer_peak_bytes.store(mf.out_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 metrics->nrt_out_buffer_used_bytes.store(nrt_out_used, std::memory_order_relaxed);
-                metrics->nrt_out_buffer_peak_bytes.store(local_nrt_out_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                metrics->nrt_out_buffer_peak_bytes.store(mf.nrt_out_peak.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 // the guest's pool's and the rust heap's census: what is in use, the most ever, and the trouble counts;
                 // and the guest's mallocs (guest_malloc.h): what it holds, and how often it allocated while processing
-                metrics->guest_malloc_bytes.store((uint32_t)clockwork_guest_malloc_bytes(), std::memory_order_relaxed);
-                metrics->guest_mallocs_processing.store(clockwork_guest_mallocs_processing(), std::memory_order_relaxed);
+                metrics->guest_malloc_bytes.store((uint32_t)clockwork_guest_malloc_bytes(st), std::memory_order_relaxed);
+                metrics->guest_mallocs_processing.store(clockwork_guest_mallocs_processing(st), std::memory_order_relaxed);
                 metrics->mallocs_after_boot.store(clockwork_mallocs_after_boot(), std::memory_order_relaxed);
                 metrics->malloc_bytes_after_boot.store((uint32_t)clockwork_malloc_bytes_after_boot(), std::memory_order_relaxed);
-                metrics->guest_pool_used_bytes.store((uint32_t)clockwork_pool_used_bytes(), std::memory_order_relaxed);
-                metrics->guest_pool_peak_bytes.store((uint32_t)clockwork_pool_peak_bytes(), std::memory_order_relaxed);
-                metrics->rust_heap_used_bytes.store((uint32_t)clockwork_router_used_bytes(), std::memory_order_relaxed);
-                metrics->rust_heap_fallbacks.store(clockwork_router_fallback_allocs(), std::memory_order_relaxed);
+                const ClockworkPoolCensus guest_pool = clockwork_heap_census(st.heap, CLOCKWORK_POOL_GUEST);
+                metrics->guest_pool_used_bytes.store((uint32_t)guest_pool.used, std::memory_order_relaxed);
+                metrics->guest_pool_peak_bytes.store((uint32_t)guest_pool.peak, std::memory_order_relaxed);
+                const ClockworkPoolCensus own_pool = clockwork_heap_census(st.heap, CLOCKWORK_POOL_OWN);
+                metrics->rust_heap_used_bytes.store((uint32_t)own_pool.used, std::memory_order_relaxed);
+                metrics->rust_heap_fallbacks.store(own_pool.fallbacks, std::memory_order_relaxed);
             }
         }
 
@@ -3163,14 +3212,14 @@ extern "C" {
         // corruption — is the shared lanes walker (ring_drain.h); only the
         // perform/schedule/classify policy lives here, in the callback. The drain
         // and the scheduler fire below run on every build; only the audio render
-        // needs a DSP instance, so the `if (g_dsp)` guard is kept where the
+        // needs a DSP instance, so the `if (instance)` guard is kept where the
         // audio path is compiled in and elided where it is not.
 #if CLOCKWORK_SYNTH
-        if (g_dsp)
+        if (st.guest.instance)
 #endif
         {
             // Off-thread reset request (purge → clear_scheduler): apply it
-            // here so g_in_drain stays audio-thread-only. Read before the
+            // here so the drain state stays audio-thread-only. Read before the
             // exchange, and take the exchange only when a request is actually
             // waiting: a byte load compiles to one instruction, while the
             // exchange is a libatomic call under -mdisable-hardware-atomics
@@ -3178,9 +3227,10 @@ extern "C" {
             // asked?" on a block where the answer is almost always no. The
             // exchange still does the taking, so two threads cannot both
             // claim one request.
-            if (g_in_seq_reset.load(std::memory_order_relaxed) &&
-                g_in_seq_reset.exchange(false, std::memory_order_relaxed))
-                g_in_drain.lastSeq = -1;
+            clockwork::Ingress& in = st.ingress;
+            if (in.seq_reset.load(std::memory_order_relaxed) &&
+                in.seq_reset.exchange(false, std::memory_order_relaxed))
+                in.drain.lastSeq = -1;
 
             // Bound per block to stay within the audio budget.
             constexpr uint32_t MAX_MESSAGES_PER_FRAME = 32;
@@ -3195,18 +3245,18 @@ extern "C" {
             // pair is what makes sample-accurate placement the DSP's arithmetic rather than
             // clockwork's.
             const auto currentOscTime = clockwork::Timetag::fromNtpSeconds(current_ntp);
-            const auto nextOscTime    = currentOscTime + g_osc_increment;
-            g_block_osc_time.store(currentOscTime.ntp(), std::memory_order_relaxed);
+            const auto nextOscTime    = currentOscTime + build.block_step;
+            cc.block_ntp.store(currentOscTime.ntp(), std::memory_order_relaxed);
 
             ClockworkDrainStop stop = ClockworkDrainStop::Empty;
             clockwork_drain_ring(
-                shared_memory + IN_RING_START, IN_RING_SIZE,
-                &cursors->in_head, &cursors->in_tail, g_in_drain,
+                base + L.in_ring_start, L.profile.in_ring_bytes,
+                &cursors->in_head, &cursors->in_tail, in.drain,
                 ClockworkDrainMetrics{ &metrics->messages_processed, nullptr,
                                 &metrics->messages_dropped,
                                 &metrics->messages_sequence_gaps },
                 MAX_MESSAGES_PER_FRAME,
-                [currentOscTime](uint32_t sourceId, const uint8_t* payload,
+                [&st, currentOscTime, &in](uint32_t sourceId, const uint8_t* payload,
                                  uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                     // Below the mark: written for a generation that has
                     // closed, or while the audio was away — refused to its
@@ -3217,10 +3267,10 @@ extern "C" {
                     // And below a mark of what is due (the audio away), a
                     // bundle for later goes through to play at its time: what
                     // a client sends as the audio comes back is not stale.
-                    if (const RingMark* mark = g_in_marks.of(seq);
+                    if (const RingMark* mark = in.marks.of(seq);
                         mark && !clockwork_sys_answers_without_guest(payload, payload_size)
                         && !(mark->onlyDue && bundle_for_later(payload, payload_size, currentOscTime)))
-                        return refuse_when_room(sourceId, payload, payload_size,
+                        return refuse_when_room(st, sourceId, payload, payload_size,
                                                 mark->reason, mark->generation)
                             ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
 
@@ -3230,7 +3280,7 @@ extern "C" {
                     // parked message is memcpy'd into the schedule's data pool,
                     // and dsp_osc is documented as not retaining bytes — so
                     // nothing outlives this callback holding the pointer.
-                    ingest_frame(payload, payload_size, sourceId, currentOscTime);
+                    ingest_frame(st, payload, payload_size, sourceId, currentOscTime);
                     return ClockworkDrainVerdict::Consume;
                 },
                 &stop);
@@ -3239,21 +3289,17 @@ extern "C" {
             // limited logging and the status flag — stays the engine's.
             uint32_t gaps_after =
                 metrics->messages_sequence_gaps.load(std::memory_order_relaxed);
-            if (gaps_after != gaps_before &&
-                gap_log_count.load(std::memory_order_relaxed) < 5) {
-                clockwork_log("WARNING: IN sequence gap: %u message(s) missing (total %u)",
+            if (gaps_after != gaps_before && in.gap_log.say())
+                clockwork_log(st.core, "WARNING: IN sequence gap: %u message(s) missing (total %u)",
                              gaps_after - gaps_before, gaps_after);
-                gap_log_count.fetch_add(1, std::memory_order_relaxed);
-            }
             if (stop == ClockworkDrainStop::BadMagic || stop == ClockworkDrainStop::BadLength ||
                 stop == ClockworkDrainStop::BadCursor) {
-                if (corruption_count.load(std::memory_order_relaxed) < 5) {
-                    clockwork_log("ERROR: IN ring corrupt (%s): head=%d tail=%d - pending region dropped",
+                if (in.corrupt_log.say()) {
+                    clockwork_log(st.core, "ERROR: IN ring corrupt (%s): head=%d tail=%d - pending region dropped",
                                  stop == ClockworkDrainStop::BadMagic  ? "bad magic" :
                                  stop == ClockworkDrainStop::BadLength ? "bad length" : "bad cursor",
                                  cursors->in_head.load(std::memory_order_relaxed),
                                  cursors->in_tail.load(std::memory_order_relaxed));
-                    corruption_count.fetch_add(1, std::memory_order_relaxed);
                 }
                 if (stop == ClockworkDrainStop::BadLength)
                     cursors->status_flags.fetch_or(STATUS_FRAGMENTED_MSG, std::memory_order_relaxed);
@@ -3269,7 +3315,7 @@ extern "C" {
             // to its sink — no queue is involved and this runs whether or not
             // one was compiled in. The engine that owns the clock out publishes
             // it; a host with none (the worklet) has nothing to generate.
-            if (MidiClockOut* clockOut = g_active_midi_clock_out.load(std::memory_order_acquire))
+            if (MidiClockOut* clockOut = cc.midi_clock_out.load(std::memory_order_acquire))
                 clockOut->generate(current_ntp);
 
 #if CLOCKWORK_SCHEDULER
@@ -3279,15 +3325,16 @@ extern "C" {
             // difference from currentOscTime is exactly the sub-block offset
             // the DSP needs, and flattening it to "now" would throw away the
             // sample accuracy.
-            clockwork_fire_due(clockwork_engine_schedule(), nextOscTime, currentOscTime,
-                [](const uint8_t* d, uint32_t n, uint32_t origin,
-                   clockwork::Timetag when, clockwork::Timetag blockTime) {
-                    if (note_lateness(when, blockTime)) return;   // shed: too late to play
-                    dispatch(d, n, origin, when, blockTime);
-                });
-            // Publish queue depth once per block, after draining.
-            update_scheduler_depth_metric(
-                static_cast<uint32_t>(clockwork_engine_schedule().size()));
+            if (EngineScheduler* q = clockwork_engine_schedule(core)) {
+                clockwork_fire_due(*q, nextOscTime, currentOscTime,
+                    [&st](const uint8_t* d, uint32_t n, uint32_t origin,
+                          clockwork::Timetag when, clockwork::Timetag blockTime) {
+                        if (note_lateness(st, when, blockTime)) return;   // later than the host allows
+                        dispatch(st, d, n, origin, when, blockTime);
+                    });
+                // Publish queue depth once per block, after draining.
+                update_scheduler_depth_metric(st, static_cast<uint32_t>(q->size()));
+            }
 #else
             // No queue: nothing waits, so nothing fires and the depth is 0 by
             // construction. The block-time window above is still computed —
@@ -3297,7 +3344,7 @@ extern "C" {
 #endif
 
 #if CLOCKWORK_SYNTH
-            const uint32_t QUANTUM_SIZE = g_block_size;
+            const uint32_t QUANTUM_SIZE = build.block;
 
             // Render one block. The DSP reads `in` and WRITES `out`. Nothing is zeroed
             // first: dsp_api.h says output is written, not accumulated, so a DSP with nothing
@@ -3327,7 +3374,7 @@ extern "C" {
                 // sample and a microphone arrive by the same door on stable
                 // channels (clockwork_port_bus.h). Nothing happens at all when
                 // nothing is bound.
-                pull_port_sources(QUANTUM_SIZE);
+                pull_port_sources(st, QUANTUM_SIZE);
 
                 // Hosted plugin tracks are ports like any other: the send
                 // lanes are a sink pushed below, the return lanes a source
@@ -3339,16 +3386,16 @@ extern "C" {
                 // config carried only the ceilings.
                 {
                     GuestCallScope guest(GuestCall::Processing);   // the render is the guest's; the sinks after it are not
-                    dsp_process(g_dsp,
-                                g_in_channels ? g_in_ptrs : nullptr, g_in_channels,
-                                g_out_ptrs, g_out_channels,
+                    dsp_process(st.guest.instance,
+                                build.in_channels ? st.staging.in_ptrs : nullptr, build.in_channels,
+                                st.staging.out_ptrs, build.out_channels,
                                 QUANTUM_SIZE,
                                 currentOscTime.abi());
                 }
 
                 // Sinks after: what a sink records is what the DSP actually
                 // emitted (the "post" answer to open question 1 in docs/PORTS.md).
-                push_port_sinks(QUANTUM_SIZE);
+                push_port_sinks(st, QUANTUM_SIZE);
             }
             // Advance the engine frame count past this block; tap streams anchor on it, on every host.
             if (clk) clk->advanceEngineFrames(sample_pos + static_cast<double>(QUANTUM_SIZE));
@@ -3358,24 +3405,23 @@ extern "C" {
             // block, at the channel count the slot was formatted with. A
             // client draws the master mix, or records it, or meters the
             // input, from these and asks the guest for nothing.
-            if (g_shm_audio_buffers) {
+            {
                 const auto tap = [&](uint32_t slot, const float* bus) {
-                    auto* t = &g_shm_audio_buffers[slot];
+                    shm_audio_buffer* const t = clockwork::scopeSlot(base, L, slot);
                     const uint32_t ch = t->channels;
-                    if (ch == 0) return;
-                    const float* channel_data[SCOPE_CHANNELS];
+                    if (ch == 0 || ch > L.profile.scope_channels || !bus) return;
+                    const float* channel_data[CLOCKWORK_MAX_CHANNELS];
                     for (uint32_t c = 0; c < ch; ++c)
                         channel_data[c] = bus + static_cast<size_t>(c) * QUANTUM_SIZE;
-                    shm_audio_buffer_writer(t).write(channel_data, ch, QUANTUM_SIZE);
+                    shm_audio_buffer_writer(t, L.profile.scope_frames, L.profile.scope_channels)
+                        .write(channel_data, ch, QUANTUM_SIZE);
                 };
-                tap(SCOPE_OUT_SLOT, static_audio_bus);
-                tap(SCOPE_IN_SLOT,  static_audio_in);
+                tap(SCOPE_OUT_SLOT, st.staging.out);
+                tap(SCOPE_IN_SLOT,  st.staging.in);
             }
 
 #endif // CLOCKWORK_SYNTH
         }
-
-        return true; // Keep processor alive
     }
 
     // Frame a log line as a `/clockwork/debug <text>` OSC message and emit it.
@@ -3386,8 +3432,13 @@ extern "C" {
     // both, so delivery is identical. WASM is single-threaded with no NRT-out
     // drainer, so it always uses RT-out. Either way the line leaves as an ordinary
     // addressed OSC message the host dispatches to its debug channel.
-    static void emit_debug_osc(const char* text, uint32_t len) {
-        if (!memory_initialized) return;
+    // False when the core's ring is not laid out, and nothing was written.
+    static bool emit_debug_osc(clockwork::CoreState& st, const char* text, uint32_t len) {
+        uint8_t* const base = st.arena.laid_out();
+        if (!base) return false;
+        const clockwork::Layout& L = st.arena.layout;
+        RingCursors* const cursors = clockwork::cursors_in(base, L);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(base);
         if (len > 960) len = 960;  // matches buildDebugOsc's clamp; keeps the metric in sync
 
         std::array<char, 1024> pkt{};
@@ -3395,30 +3446,28 @@ extern "C" {
 
         // The audio thread owns the lock-free RT-out ring, so it logs there. Any
         // other thread routes to the locked NRT-out ring instead — but only where a
-        // backend drains it (g_nrt_egress_drained, published by the native NRT
+        // backend drains it (Egress::nrt_drained, published by the native NRT
         // gateway). A single-threaded worklet target (WASM / self-driven device)
         // never drains NRT-out and has no second RT-out writer, so it always uses
         // the always-safe RT-out. Capability signal, not an __EMSCRIPTEN__ branch,
         // so every target shares one codepath.
         const bool useRtOut =
-            t_writes_instance_ring ||
-            !g_nrt_egress_drained.load(std::memory_order_relaxed);
+            t_instance_ring_of == &st || !st.egress.nrt_drained.load(std::memory_order_relaxed);
         if (useRtOut) {
             ::ring_buffer_write(
-                shared_memory + RT_OUT_RING_START, RT_OUT_RING_SIZE,
+                base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
                 EGRESS_BROADCAST_NOTIFY, 0,  // route, source_id (debug broadcasts)
                 pkt.data(), p, &cursors->status_flags, metrics);   // a refused log line is counted too
         } else {
-            clockwork_egress_nrt_write(EGRESS_BROADCAST_NOTIFY, 0,
+            clockwork_egress_nrt_write(st.core, EGRESS_BROADCAST_NOTIFY, 0,
                                 reinterpret_cast<const uint8_t*>(pkt.data()), p);
         }
 
         // Count the debug line for the metrics view.
-        if (metrics) {
-            metrics->debug_messages_received.fetch_add(1, std::memory_order_relaxed);
-            metrics->debug_bytes_received.fetch_add(len, std::memory_order_relaxed);
-        }
+        metrics->debug_messages_received.fetch_add(1, std::memory_order_relaxed);
+        metrics->debug_bytes_received.fetch_add(len, std::memory_order_relaxed);
+        return true;
     }
 
     /*
@@ -3435,7 +3484,7 @@ extern "C" {
      * Both are visible with no engine, which is the only property that
      * matters here.
      */
-    static void clockwork_boot_fail(const char* fmt, ...) {
+    static void clockwork_boot_fail(clockwork::CoreState& st, const char* fmt, ...) {
         std::array<char, 512> buffer{};
         va_list args;
         va_start(args, fmt);
@@ -3443,7 +3492,7 @@ extern "C" {
         va_end(args);
         // And kept, for the host to hand its clients: a reason on stderr is a
         // reason only someone reading the terminal ever sees.
-        record_boot_error("%s", buffer.data());
+        record_boot_error(st, "%s", buffer.data());
 #ifdef __EMSCRIPTEN__
         emscripten_console_error(buffer.data());
 #else
@@ -3451,193 +3500,176 @@ extern "C" {
 #endif
     }
 
-#ifndef __EMSCRIPTEN__
-    // Native pre-ring hold (see clockwork_log in clockwork_config.h). Lines
-    // logged while an engine is booting and the ring does not exist yet wait
-    // here; release() replays them onto the ring in order, or prints them to
-    // stderr when the boot never reached the ring. Bounded so a boot that
-    // logs in a loop cannot grow without limit — past the cap, lines go to
-    // stderr directly.
-    static std::mutex g_early_log_mutex;
-    static std::vector<std::string> g_early_log;
-    static bool g_early_log_holding = false;
-    static constexpr size_t kEarlyLogMaxLines = 256;
-
-    extern "C" void clockwork_log_hold(void) {
-        std::lock_guard<std::mutex> lk(g_early_log_mutex);
-        g_early_log_holding = true;
-    }
-
-    extern "C" void clockwork_log_release(void) {
-        std::vector<std::string> held;
-        {
-            std::lock_guard<std::mutex> lk(g_early_log_mutex);
-            g_early_log_holding = false;
-            held.swap(g_early_log);
-        }
-        for (auto& line : held) {
-            if (memory_initialized)
-                emit_debug_osc(line.data(), static_cast<uint32_t>(line.size()));
-            else
-                fprintf(stderr, "%s\n", line.c_str());   // stdio-ok: no ring came up for this boot
-        }
-        if (!memory_initialized && !held.empty()) fflush(stderr);   // stdio-ok
-    }
-
-    // A line with no ring to go to: held during a boot, otherwise stderr.
-    static void clockwork_log_no_ring(const char* text) {
-        {
-            std::lock_guard<std::mutex> lk(g_early_log_mutex);
-            if (g_early_log_holding && g_early_log.size() < kEarlyLogMaxLines) {
-                g_early_log.emplace_back(text);
-                return;
-            }
-        }
+    // A line no ring takes: on the web the console, natively stderr.
+    static void log_no_ring(const char* text) {
+#ifdef __EMSCRIPTEN__
+        emscripten_console_log(text);
+#else
         fprintf(stderr, "%s\n", text);   // stdio-ok: no engine ring exists
         fflush(stderr);                   // stdio-ok
+#endif
+    }
+
+    // Native: a core's boot holds what is logged before its ring exists
+    // (EarlyLog). Bounded, so a boot that logs in a loop cannot grow it
+    // without limit.
+    static constexpr size_t kEarlyLogMaxLines = 256;
+
+    // Held by `st`, if its boot holds: true when it took the line.
+    static bool hold_line(clockwork::CoreState& st, const char* text, uint32_t len) {
+        clockwork::EarlyLog& el = st.early_log;
+        const std::lock_guard<std::mutex> lk(el.lock);
+        if (!el.holding || el.lines.size() >= kEarlyLogMaxLines) return false;
+        el.lines.emplace_back(text, len);
+        return true;
+    }
+
+    // Onto `st`'s ring, or held by its boot: false when neither took it.
+    static bool log_line(clockwork::CoreState& st, const char* text, uint32_t len) {
+        return emit_debug_osc(st, text, len) || hold_line(st, text, len);
+    }
+
+#ifndef __EMSCRIPTEN__
+    extern "C" void clockwork_log_hold(ClockworkCore* core) {
+        clockwork::CoreState* const st = clockwork::state(core);
+        if (!st) return;
+        const std::lock_guard<std::mutex> lk(st->early_log.lock);
+        st->early_log.holding = true;
+    }
+
+    extern "C" void clockwork_log_release(ClockworkCore* core) {
+        clockwork::CoreState* const st = clockwork::state(core);
+        if (!st) return;
+        std::vector<std::string> held;
+        {
+            const std::lock_guard<std::mutex> lk(st->early_log.lock);
+            st->early_log.holding = false;
+            held.swap(st->early_log.lines);
+        }
+        for (const auto& line : held)
+            if (!emit_debug_osc(*st, line.data(), static_cast<uint32_t>(line.size())))
+                log_no_ring(line.c_str());   // no ring came up for this boot
     }
 #endif
 
-    static int clockwork_log_impl(const char* fmt, va_list args) {
+    // A line `st` says (DspHost::log): onto its ring, or held by its boot,
+    // or where a line with no ring goes.
+    static void log_to(clockwork::CoreState& st, const char* text) {
+        if (!log_line(st, text, static_cast<uint32_t>(std::strlen(text)))) log_no_ring(text);
+    }
+
+    // A line of `core`'s log (clockwork_log): onto its ring, or held by its
+    // boot; with no core, or none that took it, to the console.
+    static void log_to_core(ClockworkCore* core, const char* text, uint32_t len) {
+        clockwork::CoreState* const st = clockwork::state(core);
+        if (!st || !log_line(*st, text, len)) log_no_ring(text);
+    }
+
+    static int clockwork_log_impl(ClockworkCore* core, const char* fmt, va_list args) {
         std::array<char, 1024> buffer{};
-        int result = vsnprintf(buffer.data(), buffer.size(), fmt, args);
-        if (!memory_initialized) {
-#ifdef __EMSCRIPTEN__
-            emscripten_console_log(buffer.data());
-#else
-            clockwork_log_no_ring(buffer.data());
-#endif
-            return result;
-        }
-        uint32_t len = 0;
-        while (len < buffer.size() && buffer[len] != '\0') len++;
-        emit_debug_osc(buffer.data(), len);
+        const int result = vsnprintf(buffer.data(), buffer.size(), fmt, args);
+        log_to_core(core, buffer.data(), static_cast<uint32_t>(std::strlen(buffer.data())));
         return result;
     }
 
-    // Variadic version - for direct C++ calls
     extern "C" EMSCRIPTEN_KEEPALIVE
-    int clockwork_log(const char* fmt, ...) {
+    int clockwork_log(ClockworkCore* core, const char* fmt, ...) {
         va_list args;
         va_start(args, fmt);
-        int result = clockwork_log_impl(fmt, args);
+        const int result = clockwork_log_impl(core, fmt, args);
         va_end(args);
         return result;
     }
 
-    // va_list version - for function pointers (matches PrintFunc signature)
+    // For a caller holding a va_list of its own.
     extern "C" EMSCRIPTEN_KEEPALIVE
-    int clockwork_log_va(const char* fmt, va_list args) {
-        return clockwork_log_impl(fmt, args);
+    int clockwork_log_va(ClockworkCore* core, const char* fmt, va_list args) {
+        return clockwork_log_impl(core, fmt, args);
     }
 
-    // Raw version - already-formatted string (avoids the vsnprintf double-copy).
+    // An already-formatted line, without the copy through vsnprintf.
     extern "C" EMSCRIPTEN_KEEPALIVE
-    int clockwork_log_raw(const char* msg, uint32_t len) {
-        if (!memory_initialized || !msg || len == 0) return 0;
-        emit_debug_osc(msg, len);
-        return (int)len;
+    int clockwork_log_raw(ClockworkCore* core, const char* msg, uint32_t len) {
+        if (!msg || len == 0) return 0;
+        log_to_core(core, msg, len);
+        return static_cast<int>(len);
     }
 
+    // The block's buses and its geometry, as the build laid them out
+    // (lanes.h). A cold swap can rebuild at a different width than boot, so
+    // a caller that caches the channel counts (ClockworkProcessor's clamps)
+    // reads them again afterwards. Clockwork answers from what it
+    // configured, never by asking the DSP.
     EMSCRIPTEN_KEEPALIVE
-    uint32_t get_process_count() {
-        return metrics ? metrics->process_count.load(std::memory_order_relaxed) : 0;
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    uint32_t get_messages_processed() {
-        return metrics ? metrics->messages_processed.load(std::memory_order_relaxed) : 0;
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    uint32_t get_messages_dropped() {
-        return metrics ? metrics->messages_dropped.load(std::memory_order_relaxed) : 0;
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    uint32_t get_status_flags() {
-        return cursors ? cursors->status_flags.load(std::memory_order_relaxed) : 0;
-    }
-
-    // Live channel widths. A cold swap can rebuild at a different width than
-    // boot, so callers that cache channel counts (ClockworkProcessor's
-    // output/input clamps) re-sync from these afterwards rather than trusting
-    // boot-time values. Clockwork answers from what it CONFIGURED, never by
-    // asking the DSP.
+    uint32_t clockwork_out_channels(ClockworkCore* core) {
 #if CLOCKWORK_SYNTH
-    EMSCRIPTEN_KEEPALIVE
-    int get_audio_num_output_buses() {
-        return g_dsp ? static_cast<int>(g_out_channels) : 0;
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    int get_audio_num_input_buses() {
-        return g_dsp ? static_cast<int>(g_in_channels) : 0;
-    }
-#endif // CLOCKWORK_SYNTH
-
-    // engine audio output accessor — the master mix staging buffer. In the
-    // no-synth build it is never written (no render), so the host reads silence;
-    // the symbol stays so lanes.cpp's clockwork_audio_out() links either way.
-    EMSCRIPTEN_KEEPALIVE
-    uintptr_t get_audio_output_bus() {
-        if (!memory_initialized) {
-            return 0;
-        }
-
-        return reinterpret_cast<uintptr_t>(static_audio_bus);
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    ClockworkTimetag get_audio_block_time() {
-        // The OSC time of the block being processed: what a port's transfer
-        // signal, which runs inside the block but is handed no metadata,
-        // stamps on what it hands to another process.
-        return ClockworkTimetag{g_block_osc_time.load(std::memory_order_relaxed)};
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    double get_audio_sample_rate() {
-        // The rate the DSP was initialised at; 0 until then. What a handler on
-        // the audio thread divides by to turn a timetag into a frame offset.
-        return g_dsp_sample_rate;
-    }
-
-    EMSCRIPTEN_KEEPALIVE
-    int get_audio_buffer_samples() {
-        // Block size currently in use. On web this is always 128
-        // (AudioWorklet render quantum). On native it reflects whatever was
-        // configured at boot. No instance yet: the default block.
-#if CLOCKWORK_SYNTH
-        return g_block_size ? static_cast<int>(g_block_size)
-                            : clockwork::kDefaultBlockSize;
+        const clockwork::CoreState* st = clockwork::state(core);
+        return st && st->guest.instance ? st->build.out_channels : 0;
 #else
-        return clockwork::kDefaultBlockSize;
-#endif
-    }
-
-    // The input staging buffer a host fills before the tick. It is the
-    // clockwork's memory, channel-major like the output, and it is what
-    // dsp_process is handed as `in`.
-    EMSCRIPTEN_KEEPALIVE
-    uintptr_t get_audio_input_bus() {
-#if CLOCKWORK_SYNTH
-        if (!memory_initialized || !g_dsp || g_in_channels == 0) {
-            return 0;
-        }
-        return reinterpret_cast<uintptr_t>(static_audio_in);
-#else
+        (void)core;
         return 0;
 #endif
     }
 
-    // Return the time conversion offset (NTP seconds when AudioContext was 0).
     EMSCRIPTEN_KEEPALIVE
-    double get_time_offset() {
-        return g_time_zero_osc;
+    uint32_t clockwork_in_channels(ClockworkCore* core) {
+#if CLOCKWORK_SYNTH
+        const clockwork::CoreState* st = clockwork::state(core);
+        return st && st->guest.instance ? st->build.in_channels : 0;
+#else
+        (void)core;
+        return 0;
+#endif
     }
 
-} // namespace engine
+    // The master mix, the output side of the core's staging: null before a
+    // build has laid it out, which a host plays as silence.
+    EMSCRIPTEN_KEEPALIVE
+    const float* clockwork_audio_out(ClockworkCore* core) {
+        const clockwork::CoreState* st = clockwork::state(core);
+        return st && st->arena.laid_out() ? st->staging.out : nullptr;
+    }
+
+    // The input a host fills before the tick, channel-major like the output:
+    // what dsp_process is handed as `in`. Null with no instance or no input.
+    EMSCRIPTEN_KEEPALIVE
+    float* clockwork_audio_in(ClockworkCore* core) {
+        const clockwork::CoreState* st = clockwork::state(core);
+        return st && st->arena.laid_out() && st->guest.instance ? st->staging.in : nullptr;
+    }
+
+    // The OSC time of the block being processed: what a port's transfer
+    // signal, which runs inside the block but is handed no metadata, stamps
+    // on what it hands to another process.
+    EMSCRIPTEN_KEEPALIVE
+    ClockworkTimetag clockwork_block_time(ClockworkCore* core) {
+        const clockwork::CoreClock* c = clockwork::core_clock(core);
+        return ClockworkTimetag{c ? c->block_ntp.load(std::memory_order_relaxed) : 0};
+    }
+
+    // The rate the DSP was initialised at; 0 until then. What a handler on
+    // the audio thread divides by to turn a timetag into a frame offset.
+    EMSCRIPTEN_KEEPALIVE
+    double clockwork_sample_rate(ClockworkCore* core) {
+        const clockwork::Build* b = clockwork::build(core);
+        return b ? b->sample_rate : 0.0;
+    }
+
+    // The block in use: 128 on the web (the AudioWorklet's render quantum),
+    // natively what was configured at boot; the default block with no
+    // instance yet.
+    EMSCRIPTEN_KEEPALIVE
+    uint32_t clockwork_block_size(ClockworkCore* core) {
+#if CLOCKWORK_SYNTH
+        const clockwork::Build* b = clockwork::build(core);
+        return b && b->block ? b->block : clockwork::kDefaultBlockSize;
+#else
+        (void)core;
+        return clockwork::kDefaultBlockSize;
+#endif
+    }
+
+} // extern "C"
 
 // ============================================================================
 // RING BUFFER HELPER FUNCTIONS (outside namespace for C++ linkage)
@@ -3665,11 +3697,23 @@ bool ring_buffer_write(
     std::atomic<int32_t>* sequence,
     uint32_t route,
     uint32_t source_id,
-    const void* data,
-    uint32_t data_size,
+    const RingPart* parts,
+    uint32_t n_parts,
     std::atomic<uint32_t>* status_flags,
     PerformanceMetrics* pm
 ) {
+    // The parts laid end to end are the OSC payload; more than the ring
+    // could ever hold is refused as a full ring is.
+    uint32_t data_size = 0;
+    for (uint32_t i = 0; i < n_parts; ++i) {
+        if (parts[i].size > buffer_size - data_size) {
+            if (pm) pm->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
+            if (status_flags) status_flags->fetch_or(STATUS_BUFFER_FULL, std::memory_order_relaxed);
+            return false;
+        }
+        data_size += parts[i].size;
+    }
+
     // Egress frame: Message{sourceId = token} + [route:u32][osc]; the route word
     // counts toward the message length.
     Message header{};
@@ -3713,7 +3757,12 @@ bool ring_buffer_write(
     std::memcpy(buffer_start + current_head, &header, sizeof(Message));
 
     std::memcpy(buffer_start + current_head + sizeof(Message), &route, sizeof(uint32_t));
-    std::memcpy(buffer_start + current_head + sizeof(Message) + sizeof(uint32_t), data, data_size);
+    uint8_t* at = buffer_start + current_head + sizeof(Message) + sizeof(uint32_t);
+    for (uint32_t i = 0; i < n_parts; ++i) {
+        if (parts[i].size == 0) continue;
+        std::memcpy(at, parts[i].data, parts[i].size);
+        at += parts[i].size;
+    }
 
     // Zero the 0-3 alignment pad bytes (determinism: no stale ring bytes
     // inside a frame's footprint).
@@ -3728,7 +3777,7 @@ bool ring_buffer_write(
     // Track peak buffer usage at write time — the reader may drain the
     // buffer before the periodic metrics sampling sees the fill level.
     if (pm) {
-        uint32_t used = (new_head - current_tail + buffer_size) % buffer_size;
+        const uint32_t used = ring_used_bytes(static_cast<uint32_t>(new_head), static_cast<uint32_t>(current_tail), buffer_size);
         uint32_t prev = pm->out_buffer_peak_bytes.load(std::memory_order_relaxed);
         while (used > prev) {
             if (pm->out_buffer_peak_bytes.compare_exchange_weak(
@@ -3740,42 +3789,49 @@ bool ring_buffer_write(
     return true;
 }
 
+bool ring_buffer_write(
+    uint8_t* buffer_start,
+    uint32_t buffer_size,
+    std::atomic<int32_t>* head,
+    std::atomic<int32_t>* tail,
+    std::atomic<int32_t>* sequence,
+    uint32_t route,
+    uint32_t source_id,
+    const void* data,
+    uint32_t data_size,
+    std::atomic<uint32_t>* status_flags,
+    PerformanceMetrics* pm
+) {
+    const RingPart part{ data, data_size };
+    return ring_buffer_write(buffer_start, buffer_size, head, tail, sequence, route, source_id,
+                             &part, 1, status_flags, pm);
+}
+
 // ── Clockwork's own timed queue ────────────────────────────────────────────
 //
 // The store, the fire loop and the classifier all live in this file. Holding a
 // schedule is the DSP's own affair, declared with DspInfo::holds_schedule, so
 // nothing bridges back across the boundary for it.
 
-// Process lifetime, like every other piece of clockwork state (one arena, one
-// clock, one ingress). File scope rather than a function-local static so the
-// audio thread's every use is a plain address and not a guard check.
-// CLOCKWORK_COLD_BSS puts the data pool in bulk RAM on tiered targets; the
-// constructor still runs, placing it there.
 #if CLOCKWORK_SCHEDULER
-/*
- * CONSTRUCTED ON FIRST USE, NOT AT STATIC-INIT. As a file-scope static its
- * constructor runs before init_memory and clockwork_pool_boot, so its 4MB data
- * pool fails to allocate and clockwork_sched_new returns null — after which every
- * add is silently counted into scheduler_dropped and looks exactly like ordinary
- * overload backpressure.
- *
- * clockwork_sched_warm() below is called from init_memory so the first
- * construction happens on the control thread at boot, not on the audio thread
- * mid-block.
- */
-EngineScheduler& clockwork_engine_schedule() {
-    static EngineScheduler s;
-    return s;
+EngineScheduler* clockwork_engine_schedule(const ClockworkCore* core) {
+    const clockwork::Schedule* sc = clockwork::schedule(core);
+    return sc && sc->store ? &sc->store->s : nullptr;
 }
 
-// Force the construction above to happen here, at a moment when allocating is
-// safe. Cheap and idempotent; the point is the side effect.
-void clockwork_sched_warm() {
-    if (!clockwork_engine_schedule().ready()) {
+// Build `core`'s store, at its boot: on the control thread, once the
+// engine's heap is up — built any earlier its data pool fails to allocate,
+// and every add would be counted into scheduler_dropped as if it were
+// overload. Idempotent.
+void clockwork_sched_warm(ClockworkCore* core) {
+    clockwork::Schedule* sc = clockwork::schedule(core);
+    if (!sc) return;
+    if (!sc->store) sc->store = new (std::nothrow) ScheduleStore();
+    if (!sc->store || !sc->store->s.ready()) {
         // Loud, once, and unmistakable. A queue that failed to build refuses
         // every add exactly as a full one does, so without this the only
         // symptom is a scheduler_dropped count that looks like backpressure.
-        clockwork_log("FATAL: the scheduler could not be built (%d slots, %d byte pool). "
+        clockwork_log(core, "FATAL: the scheduler could not be built (%d slots, %d byte pool). "
                 "Nothing scheduled will ever fire.",
                 (int)SCHEDULER_SLOT_COUNT, (int)SCHEDULER_DATA_POOL_SIZE);
     }
@@ -3790,31 +3846,35 @@ void clockwork_sched_warm() {
 // refusal for anything else the prefix claimed. Never reaches the DSP: the boundary
 // already decided that. The verbs and their replies are in clockwork_sys.h — pure
 // byte work, so they are tested without an ingress.
-bool clockwork_clockwork_sys_route(void* /*routeCtx*/, const void* callCtx,
+bool clockwork_clockwork_sys_route(void* routeCtx, const void* callCtx,
                       const uint8_t* data, std::size_t len) {
-    using namespace engine;
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    if (!st) return true;
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     const uint32_t token = cc ? cc->sourceId : 0;
     // The clock comes from the arena, so the snapshot verb answers against the
     // same published mirror the guest reads — not the engine's own getters,
     // which are not realtime-safe when Link is running.
-    const auto* clockState = shared_memory
-        ? reinterpret_cast<const ClockworkClockState*>(shared_memory + CLOCK_STATE_START)
+    uint8_t* const base = st->arena.at();
+    const auto* clockState = base
+        ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
         : nullptr;
     handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
-        [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); },
-        clockState, arenaInstanceGeneration(shared_memory));
+        [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); },
+        clockState, arenaInstanceGeneration(base));
     return true;   // the prefix is claimed whole, answered or refused
 }
 
-bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
+bool clockwork_sched_flush_route(void* routeCtx, const void* callCtx,
                                  const uint8_t* data, std::size_t len) {
-    using namespace engine;
+    auto* const core = static_cast<ClockworkCore*>(routeCtx);
+    clockwork::CoreState* const st = clockwork::state(core);
+    if (!st) return true;
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     const uint32_t token = cc ? cc->sourceId : 0;
     const auto refuse = [&](const char* reason) {
-        clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason, arenaInstanceGeneration(shared_memory),
-            [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); });
+        clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason, arenaInstanceGeneration(st->arena.at()),
+            [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); });
     };
 #if CLOCKWORK_SCHEDULER
     // No tag, or "", is the user's tag rather than the wildcard, so a tagless
@@ -3826,9 +3886,10 @@ bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
         refuse(CLOCKWORK_REFUSED_MALFORMED);
         return true;
     }
-    clockwork_engine_schedule().flush(tagName && *tagName
-        ? sched_tag_hash(tagName, std::strlen(tagName))
-        : SCHED_TAG_DEFAULT);
+    if (EngineScheduler* q = clockwork_engine_schedule(core))
+        q->flush(tagName && *tagName
+            ? sched_tag_hash(tagName, std::strlen(tagName))
+            : SCHED_TAG_DEFAULT);
 #else
     refuse(CLOCKWORK_SCHEDULER_ABSENT);
 #endif
@@ -3843,7 +3904,7 @@ bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
 // here, unless it has a FRONT — a thread of its own that answers the control
 // verbs, which on the web is the client's main thread, the only place Web
 // MIDI and the Gamepad API exist at all. With
-// g_host_forward set, that front is the far end: the verb goes out over the
+// its core's Routing::host_forward set, that front is the far end: the verb goes out over the
 // egress, to the origin that sent it, and the host answers or refuses it.
 //
 // THE FRAME CARRIES THE CALL'S TIME. A verb the scheduler fired reaches this
@@ -3859,49 +3920,52 @@ bool clockwork_sched_flush_route(void* /*routeCtx*/, const void* callCtx,
 // take ping with it.
 bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
                                   const uint8_t* data, std::size_t len) {
-    using namespace engine;
-    if (!g_host_forward.load(std::memory_order_acquire))
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    if (!st || !st->routing.host_forward.load(std::memory_order_acquire))
         return clockwork_clockwork_sys_route(routeCtx, callCtx, data, len);
 
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     const uint32_t token = cc ? cc->sourceId : 0;
-    const auto* clockState = shared_memory
-        ? reinterpret_cast<const ClockworkClockState*>(shared_memory + CLOCK_STATE_START)
+    uint8_t* const base = st->arena.at();
+    const auto* clockState = base
+        ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
         : nullptr;
     switch (handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
-                [token](const uint8_t* d, uint32_t n) { emit_osc_out(token, d, n); },
-                clockState, arenaInstanceGeneration(shared_memory))) {
+                [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); },
+                clockState, arenaInstanceGeneration(base))) {
         case ClockworkSysRt::NotClaimed:  return false;
         case ClockworkSysRt::Answered:    return true;
         case ClockworkSysRt::UnknownVerb: break;
     }
 
-    forward_to_host(token, cc ? cc->when : clockwork::Timetag::immediately(), data, static_cast<uint32_t>(len));
+    const RingPart verb{ data, static_cast<uint32_t>(len) };
+    forward_to_host(*st, token, cc ? cc->when : clockwork::Timetag::immediately(), &verb, 1);
     return true;   // claimed whole: the host answers or refuses it from here
 }
 
 // One element to the host, wrapped with its time: "#bundle" NUL, timetag
-// (big-endian 64), element size (big-endian 32), the element. Built by hand:
-// oscpack's stream cannot take an already-encoded element. The buffer is the
-// audio thread's — the only caller — and is sized for the widest verb the IN
-// ring carries, which is not something to put on a stack.
-static void forward_to_host(uint32_t token, clockwork::Timetag when, const uint8_t* element, uint32_t len) {
-    using namespace engine;
-    static constexpr uint32_t kHeader = 8 + 8 + 4;
-    static std::array<uint8_t, kHeader + 66560> frame;
-    if (len > frame.size() - kHeader) {
-        if (oversize_forward_log_count.fetch_add(1, std::memory_order_relaxed) < 8)
-            clockwork_log("WARNING: %s of %u bytes dropped — wider than the host forward carries",
-                          reinterpret_cast<const char*>(element), static_cast<unsigned>(len));
-        return;
-    }
+// (big-endian 64), element size (big-endian 32), the element — laid down on
+// the ring behind that header from the pieces it is in, so nothing is
+// gathered first. Built by hand: oscpack's stream cannot take an
+// already-encoded element. Too wide for the ring, it is refused and counted
+// there, as any frame is. Whether it went on the ring.
+static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork::Timetag when,
+                            const RingPart* element, uint32_t n_parts) {
+    static constexpr uint32_t kMaxParts = 4;
+    if (n_parts == 0 || n_parts > kMaxParts - 1) return false;
+    uint64_t len = 0;
+    for (uint32_t i = 0; i < n_parts; ++i) len += element[i].size;
+    if (len > UINT32_MAX) return false;
     // The wire form of immediately is 1.
     const uint64_t tt = when.isImmediate() ? 1u : when.ntp();
-    std::memcpy(frame.data(), "#bundle", 8);
-    for (unsigned i = 0; i < 8; ++i) frame[8 + i]  = static_cast<uint8_t>(tt >> (56u - 8u * i));
-    for (unsigned i = 0; i < 4; ++i) frame[16 + i] = static_cast<uint8_t>(len >> (24u - 8u * i));
-    std::memcpy(frame.data() + kHeader, element, len);
-    emit_osc_out(token, frame.data(), kHeader + len);
+    std::array<uint8_t, 8 + 8 + 4> header{};
+    std::memcpy(header.data(), "#bundle", 8);
+    for (unsigned i = 0; i < 8; ++i) header[8 + i]  = static_cast<uint8_t>(tt >> (56u - 8u * i));
+    for (unsigned i = 0; i < 4; ++i) header[16 + i] = static_cast<uint8_t>(len >> (24u - 8u * i));
+    std::array<RingPart, kMaxParts> parts{};
+    parts[0] = RingPart{ header.data(), static_cast<uint32_t>(header.size()) };
+    for (uint32_t i = 0; i < n_parts; ++i) parts[1 + i] = element[i];
+    return emit_osc_parts(st, reply_route(token), token, parts.data(), n_parts + 1);
 }
 
 // An inbound event, on the audio thread, on every host (clockwork_sys.h).
@@ -3911,62 +3975,80 @@ static void forward_to_host(uint32_t token, clockwork::Timetag when, const uint8
 // it asked. The message is passed through byte for byte, trailing arrival
 // time included; the guest gets the same DrainCallCtx every message gets,
 // with `when` the block it was drained in.
-bool clockwork_event_route(void* /*routeCtx*/, const void* callCtx,
+bool clockwork_event_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len) {
-    using namespace engine;
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    if (!st) return true;
     const char* verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
     const uint32_t route = std::strncmp(verb, "gamepad/", 8) == 0
                          ? EGRESS_BROADCAST_GAMEPAD : EGRESS_BROADCAST_MIDI;
-    emit_osc_route(route, 0, data, static_cast<uint32_t>(len));
-    if (g_dsp_wants_events)
-        clockwork_dsp_default_route(nullptr, callCtx, data, len);
+    emit_osc_route(*st, route, 0, data, static_cast<uint32_t>(len));
+    if (guest_wants_events())
+        clockwork_dsp_default_route(routeCtx, callCtx, data, len);
     return true;
 }
 
 // A guest's MIDI send, to the host (clockwork_event_sink.h,
-// clockwork_sink_set_host_emit): the bytes and the port as one message,
+// clockwork_sink_set_host_emitter): the bytes and the port as one message,
 // "/clockwork/midi/sink/send ,sb <port> <bytes>", forwarded with the send's
 // time exactly as a verb is. Origin 0: a sink has no caller to answer, and on
 // the web the one client hears everything the egress carries. The host's
 // front opens the port on demand — opening a sink onto a port opens the port,
 // as it does natively — and hands the browser the bytes with the time.
-static int clockwork_sink_host_emit(uint32_t kind, const char* target,
+static int clockwork_sink_host_emit(void* ctx, uint32_t kind, const char* target,
                                     const uint8_t* bytes, uint32_t len, ClockworkTimetag when) {
-    if (kind != kClockworkSinkMidi || !target || !bytes || len == 0) return 0;
-    static std::array<char, 64 + 256 + 66560> element;
-    try {
-        osc::OutboundPacketStream ps(element.data(), element.size());
-        ps << osc::BeginMessage(CLOCKWORK_SYS("midi/sink/send"))
-           << target
-           << osc::Blob(bytes, static_cast<osc::osc_bundle_element_size_t>(len))
-           << osc::EndMessage;
-        forward_to_host(0, clockwork::Timetag::fromAbi(when), reinterpret_cast<const uint8_t*>(ps.Data()),
-                        static_cast<uint32_t>(ps.Size()));
-        return 1;
-    } catch (...) {
-        return 0;   // would not encode (a port name past all reason): a drop, counted by the sink
-    }
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(ctx));
+    if (!st || kind != kClockworkSinkMidi || !target || !bytes || len == 0) return 0;
+    // The message's head on the stack — its address, type tags, the port
+    // and the blob's size — then the bytes where they are, then the blob's
+    // padding. A port name past all reason does not encode: a drop, counted
+    // by the sink.
+    static constexpr char kAddress[] = CLOCKWORK_SYS("midi/sink/send");
+    static constexpr uint32_t kMaxTarget = 255;
+    const size_t target_len = std::strlen(target);
+    if (target_len > kMaxTarget) return 0;
+    constexpr auto padded = [](size_t n) { return (n + 4u) & ~size_t{3}; };   // a string and its NULs
+    std::array<uint8_t, padded(sizeof kAddress - 1) + 4 + padded(kMaxTarget) + 4> head{};
+    size_t at = 0;
+    std::memcpy(head.data(), kAddress, sizeof kAddress - 1);
+    at += padded(sizeof kAddress - 1);
+    std::memcpy(head.data() + at, ",sb", 3);
+    at += 4;
+    std::memcpy(head.data() + at, target, target_len);
+    at += padded(target_len);
+    for (unsigned i = 0; i < 4; ++i) head[at + i] = static_cast<uint8_t>(len >> (24u - 8u * i));
+    at += 4;
+    static constexpr uint8_t kZeros[3] = {};
+    const RingPart message[] = {
+        { head.data(), static_cast<uint32_t>(at) },
+        { bytes, len },
+        { kZeros, (4u - (len & 3u)) & 3u },
+    };
+    // Not on the ring is not sent: the sink counts it dropped.
+    return forward_to_host(*st, 0, clockwork::Timetag::fromAbi(when), message, 3) ? 1 : 0;
 }
 
 // /clockwork/asset/commit ,iiiiiif id kind offset bytes channels frames rate
 // (dsp_api.h, "Assets"). Audio thread. Every check happens before the guest is
 // touched, and every refusal names the id and says why.
-bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
+bool clockwork_asset_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len) {
-    using namespace engine;
+    clockwork::CoreState* const found = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    if (!found) return true;
+    clockwork::CoreState& st = *found;
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     const uint32_t origin = cc ? cc->sourceId : 0;
     const char* verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
     if (std::strcmp(verb, "asset/commit") != 0) {
         // Claimed by prefix, not a verb of this layer: refuse as the sys route does.
         handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
-            [origin](const uint8_t* d, uint32_t n) { emit_osc_out(origin, d, n); },
-            nullptr, arenaInstanceGeneration(shared_memory));
+            [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); },
+            nullptr, arenaInstanceGeneration(st.arena.at()));
         return true;
     }
     int32_t id = -1;
     auto refuse = [&](const char* why) {
-        asset_emit(origin, CLOCKWORK_SYS("asset/refused"), static_cast<uint32_t>(id), why);
+        asset_emit(st, origin, CLOCKWORK_SYS("asset/refused"), static_cast<uint32_t>(id), why);
         return true;
     };
     int32_t kind = 0, offset = 0, bytes = 0, channels = 0, frames = 0;
@@ -3988,10 +4070,11 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
     } catch (const osc::Exception&) {
         return refuse("commit takes id kind offset bytes channels frames rate");
     }
-    if (id < 0 || static_cast<uint32_t>(id) == kAssetTombstone) return refuse("bad id");
-    if (!g_dsp) return refuse("no guest");
-    const uint8_t* assets = static_cast<const uint8_t*>(g_clockwork_config.assets);
-    uint64_t lane = g_clockwork_config.assets_bytes;
+    if (id < 0 || static_cast<uint32_t>(id) == clockwork::Assets::kTombstone) return refuse("bad id");
+    if (!st.guest.instance) return refuse("no guest");
+    const ClockworkConfig& cfg = st.config;
+    const uint8_t* assets = static_cast<const uint8_t*>(cfg.assets);
+    uint64_t lane = cfg.assets_bytes;
 #ifdef __EMSCRIPTEN__
     // On the web the assets area is the top of the memory and grows with it
     // (js/memory_layout.js): its size is from its base to the end of the
@@ -4029,8 +4112,8 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
     default:
         return refuse("unknown kind");
     }
-    if (asset_lookup(asset.id)) return refuse("id is still held; release it first");
-    AssetSlot* slot = asset_insert(asset.id, origin);
+    if (st.assets.lookup(asset.id)) return refuse("id is still held; release it first");
+    Asset* slot = st.assets.insert(asset.id, origin);
     if (!slot) return refuse("too many assets held");
     // All of it, for an instance built after this one (hand_over_assets).
     slot->offset      = static_cast<uint32_t>(offset);
@@ -4040,12 +4123,12 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
     slot->sample_rate = asset.sample_rate;
     slot->kind        = static_cast<uint8_t>(asset.kind);
     int rc;
-    { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(g_dsp, &asset); }
+    { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(st.guest.instance, &asset); }
     if (rc != 0) {
-        asset_remove(slot);
+        clockwork::Assets::remove(*slot);
         return refuse("the guest refused it");
     }
-    asset_emit(origin, CLOCKWORK_SYS("asset/committed"), asset.id, nullptr);
+    asset_emit(st, origin, CLOCKWORK_SYS("asset/committed"), asset.id, nullptr);
     return true;
 }
 
@@ -4056,16 +4139,16 @@ bool clockwork_asset_route(void* /*routeCtx*/, const void* callCtx,
 // `when` is the message's timetag and `origin` the token to answer on; both
 // travel with the call, so nothing here builds a reply object or knows how a
 // reply gets back.
-bool clockwork_dsp_default_route(void* /*routeCtx*/, const void* callCtx,
+bool clockwork_dsp_default_route(void* routeCtx, const void* callCtx,
                           const uint8_t* data, std::size_t len) {
-    using namespace engine;
-    if (!g_dsp) return true;
+    Dsp* const instance = clockwork::instance_of(static_cast<ClockworkCore*>(routeCtx));
+    if (!instance) return true;
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
     // blockTime goes too: without it the DSP can only difference against the
     // block it last RENDERED, which is one behind the block this message is
     // for.
     GuestCallScope guest(GuestCall::Processing);
-    dsp_osc(g_dsp, data, static_cast<uint32_t>(len),
+    dsp_osc(instance, data, static_cast<uint32_t>(len),
             cc ? cc->when.abi() : clockwork_timetag_immediately(), cc ? cc->sourceId : 0,
             cc ? cc->blockTime.abi() : ClockworkTimetag{0});
     return true;
@@ -4085,13 +4168,12 @@ bool clockwork_dsp_default_route(void* /*routeCtx*/, const void* callCtx,
 //
 // Written here because this is where a channel's identity is decided: the
 // device's width at init_memory, and a port's range at attach. Control thread
-// only — every caller below already holds PortCtlLock or is inside
+// only — every caller below already holds the port bus's lock or is inside
 // init_memory.
 namespace {
 
-ClockworkChannelMapState* channelMap() {
-    if (!shared_memory) return nullptr;
-    return reinterpret_cast<ClockworkChannelMapState*>(shared_memory + CHANNEL_MAP_START);
+ClockworkChannelMapState* channel_map_in(uint8_t* base) {
+    return base ? reinterpret_cast<ClockworkChannelMapState*>(base + CHANNEL_MAP_START) : nullptr;
 }
 
 // The cold half is being rewritten while the generation is odd.
@@ -4113,8 +4195,8 @@ uint32_t bare_channel_word(uint32_t channel, uint32_t device_width) {
                                   : channelWord(CLOCKWORK_CH_NONE, 0);
 }
 
-void channel_map_set_device(uint32_t in_width, uint32_t out_width) {
-    ClockworkChannelMapState* m = channelMap();
+void channel_map_set_device(clockwork::CoreState& st, uint32_t in_width, uint32_t out_width) {
+    ClockworkChannelMapState* m = channel_map_in(st.arena.at());
     if (!m) return;
     ColdWrite guard(m);
     m->device_in.store(in_width,   std::memory_order_relaxed);
@@ -4137,12 +4219,11 @@ std::atomic<uint32_t>* channel_side(ClockworkChannelMapState* m, uint32_t direct
     return direction == kClockworkPortSource ? m->in.data() : m->out.data();
 }
 
-void channel_map_bind(ClockworkPort port, uint32_t first) {
-    ClockworkChannelMapState* m = channelMap();
+void channel_map_bind(ClockworkCore* core, ClockworkChannelMapState* m, const ClockworkPorts* ports, ClockworkPort port, uint32_t first) {
     if (!m || port == CLOCKWORK_PORT_NONE) return;
-    const uint32_t dir   = static_cast<uint32_t>(clockwork_port_direction(port));
-    const uint32_t count = clockwork_port_channels(port);
-    const char*    name  = clockwork_port_name(port);
+    const uint32_t dir   = static_cast<uint32_t>(clockwork_port_direction(ports, port));
+    const uint32_t count = clockwork_port_channels(ports, port);
+    const char*    name  = clockwork_port_name(ports, port);
 
     ColdWrite guard(m);
     uint32_t slot = 0;
@@ -4159,7 +4240,7 @@ void channel_map_bind(ClockworkPort port, uint32_t first) {
         // No room to describe it. The audio still flows — the bus table is what
         // moves frames — so this is a reporting limit, said out loud rather
         // than a channel that lies about being unclaimed.
-        clockwork_log("[channel-map] more than %u streams; '%s' is bound but not described",
+        clockwork_log(core, "[channel-map] more than %u streams; '%s' is bound but not described",
                 CHANNEL_MAP_MAX_STREAMS, name ? name : "?");
         return;
     }
@@ -4169,8 +4250,7 @@ void channel_map_bind(ClockworkPort port, uint32_t first) {
         side[first + c].store(word, std::memory_order_release);
 }
 
-void channel_map_unbind(ClockworkPort port) {
-    ClockworkChannelMapState* m = channelMap();
+void channel_map_unbind(ClockworkChannelMapState* m, ClockworkPort port) {
     if (!m || port == CLOCKWORK_PORT_NONE) return;
     ColdWrite guard(m);
     for (ClockworkStreamEntry& e : m->streams) {
@@ -4190,19 +4270,21 @@ void channel_map_unbind(ClockworkPort port) {
 
 } // namespace
 
-extern "C" const ClockworkChannelMapState* clockwork_channel_map(void) {
-    return channelMap();
+extern "C" const ClockworkChannelMapState* clockwork_channel_map(ClockworkCore* core) {
+    return channel_map_in(clockwork::arena_base(core));
 }
 
-extern "C" int clockwork_port_bus_attach(ClockworkPort port, uint32_t first_channel) {
-    if (port == CLOCKWORK_PORT_NONE || !clockwork_port_is_open(port)) return 0;
-    PortCtlLock lock;   // control side only; the audio thread never waits
+extern "C" int clockwork_port_bus_attach(ClockworkCore* core, ClockworkPort port, uint32_t first_channel) {
+    clockwork::CoreState* const st = clockwork::state(core);
+    if (!st || port == CLOCKWORK_PORT_NONE || !clockwork_port_is_open(st->ports, port)) return 0;
+    clockwork::PortBus& bus = st->port_bus;
+    const clockwork::PortBus::Lock lock(bus);   // control side only; the audio thread never waits
     // Already attached: refuse rather than silently move it. Two entries for
     // one port would read it twice a block and the second read would be
     // silence, which is a bug that sounds like a fault in the endpoint.
-    for (auto& b : g_port_bus)
+    for (const auto& b : bus.bindings)
         if (b.port.load(std::memory_order_acquire) == port) return 0;
-    for (auto& b : g_port_bus) {
+    for (auto& b : bus.bindings) {
         if (b.port.load(std::memory_order_acquire) != CLOCKWORK_PORT_NONE) continue;
         // Range first, then the MAP, then the port. The store that publishes
         // the entry is still the last one, so the audio thread cannot see a
@@ -4210,39 +4292,45 @@ extern "C" int clockwork_port_bus_attach(ClockworkPort port, uint32_t first_chan
         // BEFORE the binding goes live, so a channel is never carrying audio
         // it cannot account for.
         b.first_channel = first_channel;
-        channel_map_bind(port, first_channel);
+        channel_map_bind(core, channel_map_in(clockwork::arena_base(core)), st->ports, port, first_channel);
         b.port.store(port, std::memory_order_release);
         return 1;
     }
     return 0;   // table full
 }
 
-extern "C" void clockwork_port_bus_detach(ClockworkPort port) {
-    if (port == CLOCKWORK_PORT_NONE) return;
-    PortCtlLock lock;
-    for (auto& b : g_port_bus) {
+extern "C" void clockwork_port_bus_detach(ClockworkCore* core, ClockworkPort port) {
+    clockwork::CoreState* const st = clockwork::state(core);
+    if (!st || port == CLOCKWORK_PORT_NONE) return;
+    const clockwork::PortBus::Lock lock(st->port_bus);
+    for (auto& b : st->port_bus.bindings) {
         if (b.port.load(std::memory_order_acquire) != port) continue;
         // Unpublish first, announce second: the DSP is never told a stream is
         // gone while the block that says so is still handing it that stream's
         // audio. first_channel is left alone — the entry is unpublished, and
         // the next attach writes it before publishing again.
         b.port.store(CLOCKWORK_PORT_NONE, std::memory_order_release);
-        channel_map_unbind(port);
+        channel_map_unbind(channel_map_in(clockwork::arena_base(core)), port);
         return;
     }
 }
 
-extern "C" void clockwork_port_bus_detach_all(void) {
-    PortCtlLock lock;
-    for (auto& b : g_port_bus) {
+extern "C" void clockwork_port_bus_detach_all(ClockworkCore* core) {
+    clockwork::CoreState* const st = clockwork::state(core);
+    if (!st) return;
+    ClockworkChannelMapState* const m = channel_map_in(clockwork::arena_base(core));
+    const clockwork::PortBus::Lock lock(st->port_bus);
+    for (auto& b : st->port_bus.bindings) {
         const ClockworkPort p = b.port.exchange(CLOCKWORK_PORT_NONE, std::memory_order_acq_rel);
-        if (p != CLOCKWORK_PORT_NONE) channel_map_unbind(p);
+        if (p != CLOCKWORK_PORT_NONE) channel_map_unbind(m, p);
     }
 }
 
-extern "C" uint32_t clockwork_port_bus_attached(void) {
+extern "C" uint32_t clockwork_port_bus_attached(ClockworkCore* core) {
+    const clockwork::CoreState* const st = clockwork::state(core);
+    if (!st) return 0;
     uint32_t n = 0;
-    for (auto& b : g_port_bus)
+    for (const auto& b : st->port_bus.bindings)
         if (b.port.load(std::memory_order_acquire) != CLOCKWORK_PORT_NONE) ++n;
     return n;
 }

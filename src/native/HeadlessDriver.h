@@ -28,6 +28,7 @@ class ClockworkProcessor;
 class ClockworkClock;
 class LinkAudioHost;
 struct PerformanceMetrics;
+struct ClockworkCore;
 
 // The driver's clock. Nanoseconds from any origin, never going back.
 struct HeadlessPacer {
@@ -65,6 +66,8 @@ public:
     // Set before start(), as configure is.
     void setClockworkClock(ClockworkClock* sc);
     void setLinkAudio(LinkAudioHost* la);
+    // The engine's core, which every block ticks.
+    void setCore(ClockworkCore* core);
     // The engine's dashboard block, mirrored into per block; null skips it.
     void setMetrics(PerformanceMetrics* m);
     // What the driver paces on; null is the system pacer.
@@ -106,6 +109,7 @@ private:
     ClockworkProcessor* mCallback         = nullptr;
     ClockworkClock*        mClockworkClock       = nullptr;
     LinkAudioHost*   mLinkAudio      = nullptr;
+    ClockworkCore*   mCore           = nullptr;
     PerformanceMetrics* mMetrics     = nullptr;
     std::shared_ptr<HeadlessPacer> mPacer;
     int                mSampleRate        = 48000;

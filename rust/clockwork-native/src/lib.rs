@@ -16,18 +16,22 @@
 /// whatever else this build turned off.
 pub use clockwork_heap;
 
-/// What every Rust subsystem in this archive allocates with: unarmed, the
-/// system allocator; armed by the host at boot (`clockwork_router_arm`,
-/// from clockwork_pool.cpp), anything allocated inside an engine entry point
-/// — a sink's or a port's queues, opened from the audio thread — comes from
-/// one block the host took once, listed in the arena table as the rust heap;
-/// and anything allocated inside a guest entry point (a Rust guest's Box and
-/// Vec) comes from the guest's own bulk memory, through the hooks the host's
-/// pool installs (`clockwork_router_guest_hooks`).
+/// What every Rust subsystem in this archive allocates with: the router
+/// reads the thread's entry (clockwork-heap, `entry`) and routes by it —
+/// outside any core, the system allocator; inside a door by the thread
+/// holding a core's gate — a sink's or a port's queues, opened from the
+/// audio thread — the core's own pool, one block the core took once, listed
+/// in the arena table as the rust heap; and anything allocated inside a guest entry
+/// point (a Rust guest's Box and Vec) comes from that core's guest pool, over
+/// the guest's own bulk memory (clockwork_heap::core_heap).
 /// The one `#[global_allocator]` of the crate graph: a staticlib that
 /// re-exports this one (string_lid's lid-native) must not declare another.
 #[global_allocator]
 static ALLOCATOR: clockwork_heap::router::RtRouter = clockwork_heap::router::RtRouter;
+
+/// One engine's core: `clockwork_core_new` and `clockwork_core_close`, the
+/// handle every lanes.h entry point takes (src/clockwork_core.h).
+pub use clockwork_core;
 
 /// Tap slot claim and release, for the same reason: clockwork's, and used
 /// by whichever guest is attached.

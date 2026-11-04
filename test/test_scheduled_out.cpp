@@ -90,11 +90,11 @@ struct Receiver {
 };
 
 // The MIDI sink whose target is `port`, if the engine opened one.
-ClockworkSink midiSinkFor(const std::string& port) {
+ClockworkSink midiSinkFor(const ClockworkSinks* table, const std::string& port) {
     ClockworkSink sinks[64];
-    const uint32_t n = clockwork_sink_list(sinks, 64);
+    const uint32_t n = clockwork_sink_list(table, sinks, 64);
     for (uint32_t i = 0; i < n; ++i)
-        if (clockwork_sink_kind(sinks[i]) == kClockworkSinkMidi && port == clockwork_sink_target(sinks[i]))
+        if (clockwork_sink_kind(table, sinks[i]) == kClockworkSinkMidi && port == clockwork_sink_target(table, sinks[i]))
             return sinks[i];
     return CLOCKWORK_SINK_NONE;
 }
@@ -210,9 +210,12 @@ TEST_CASE("scheduled OSC leaves at its time, not when the scheduler fired it",
 // this runs on every platform and under every sanitizer.
 TEST_CASE("scheduled MIDI reaches its sink carrying its time, with the host as the endpoint",
           "[engine][schedule][midi]") {
-    struct ForwardOff { ~ForwardOff() { clockwork_host_forward(0); } } guard;
-    clockwork_host_forward(1);
     Engine e;
+    struct ForwardOff {
+        ClockworkCore* core;
+        ~ForwardOff() { clockwork_host_forward(core, 0); }
+    } guard{ e.engine.core() };
+    clockwork_host_forward(e.engine.core(), 1);
     const char* port = "Fake Synth";
     osc_test::Builder b;
     b.begin(CLOCKWORK_SYS("midi/out/note_off"))
@@ -248,10 +251,10 @@ TEST_CASE("scheduled MIDI reaches its sink carrying its time, with the host as t
     CHECK(sent.argString(0) == port);
     CHECK(sent.argBlob(1) == std::vector<uint8_t>{0x80, 60, 0});
 
-    const ClockworkSink sink = midiSinkFor(port);
+    const ClockworkSink sink = midiSinkFor(clockwork_core_sinks(e.engine.core()), port);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     ClockworkSinkStats st{};
-    REQUIRE(clockwork_sink_stats(sink, &st));
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(e.engine.core()), sink, &st));
     CHECK(st.sent == 1);
     CHECK(st.scheduled == 1);                  // the host holds it to its time
     CHECK(st.late == 0);                       // seen before its time, not at it
@@ -351,8 +354,8 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(static_cast<int>((kSinkLeadSec + 1.5) * 1000));
     while (std::chrono::steady_clock::now() < deadline) {
-        sink = midiSinkFor(port);
-        if (sink != CLOCKWORK_SINK_NONE && clockwork_sink_stats(sink, &st) && st.sent >= 1) break;
+        sink = midiSinkFor(clockwork_core_sinks(e.engine.core()), port);
+        if (sink != CLOCKWORK_SINK_NONE && clockwork_sink_stats(clockwork_core_sinks(e.engine.core()), sink, &st) && st.sent >= 1) break;
         e.engine.pumpAudioBlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }

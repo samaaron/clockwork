@@ -27,6 +27,7 @@
 #include "clockwork_prefix.h"
 #include "clockwork_sys.h"
 #include "audio_processor.h"
+#include "core_state.h"
 #include "dsp_api.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -64,7 +65,7 @@ osc_test::ParsedReply ask(const char* verb, const char* replyAddress) {
 }
 
 uint8_t* arena() {
-    auto* base = static_cast<uint8_t*>(clockwork_lanes_base());
+    auto* base = static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core()));
     REQUIRE(base != nullptr);
     return base;
 }
@@ -89,11 +90,11 @@ void settle() {
 // engine has to say about that leaves on the rings, then the arena is
 // re-initialised and the new instance built. Returns what left.
 std::vector<lanes_test::EgressFrame> coldRestart() {
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     auto said = lanes_test::drainRt();
     for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     return said;
 }
 
@@ -120,7 +121,7 @@ TEST_CASE("restarts: the session clock keeps its tempo across a cold restart",
 TEST_CASE("restarts: the node id counter keeps its count across a cold restart",
           "[restarts][regions]") {
     settle();
-    auto* counter = region<std::atomic<int32_t>>(NODE_ID_COUNTER_START);
+    auto* counter = region<std::atomic<int32_t>>(clockwork::kDefaultLayout.node_id_counter_start);
     const int32_t saved = counter->load(std::memory_order_acquire);
     counter->store(0x5EED, std::memory_order_release);
 
@@ -152,7 +153,7 @@ TEST_CASE("restarts: the clock anchor is the host's and keeps across a cold rest
 TEST_CASE("restarts: the scope is reformatted and its write position restarts",
           "[restarts][regions]") {
     settle();
-    auto* out = region<shm_audio_buffer>(SCOPE_START) + CLOCKWORK_TAP_OUT;
+    auto* out = region<shm_audio_buffer>(SCOPE_START + CLOCKWORK_TAP_OUT * clockwork::kDefaultLayout.scope_slot_bytes);
     lanes_test::tickUntil(4, nullptr);
     REQUIRE(out->enabled.load(std::memory_order_acquire) == 1u);
     REQUIRE(out->write_position.load(std::memory_order_acquire) > 0u);
@@ -172,7 +173,7 @@ TEST_CASE("restarts: the taps start with every slot free",
           "[restarts][regions]") {
     settle();
     coldRestart();
-    const auto* taps = arena() + TAPS_START;
+    const auto* taps = arena() + clockwork::kDefaultLayout.taps_start;
     const auto* activeCount = reinterpret_cast<const std::atomic<uint32_t>*>(taps + 4);
     CHECK(activeCount->load(std::memory_order_acquire) == 0u);
     // The first slot, byte for byte: state free, nothing claimed.
@@ -206,15 +207,15 @@ TEST_CASE("restarts: the metrics count on across a cold restart, so what a teard
 TEST_CASE("restarts: the in ring and the instance's ring keep their place across a cold restart, and setup follows the old instance's words",
           "[restarts][regions]") {
     settle();
-    const auto* cursors = region<RingCursors>(RING_CURSORS_START);
+    const auto* cursors = region<RingCursors>(clockwork::kDefaultLayout.ring_cursors_start);
     // The old instance answers, and nobody reads it before the rebuild.
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
     lanes_test::tick();
     const int32_t inHead = cursors->in_head.load(), inSequence = cursors->in_sequence.load();
-    destroy_dsp();
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    destroy_dsp(lanes_test::core());
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
 
     // The in ring: where it was, its sequence going on — nothing in it was
     // the rebuild's to throw away.
@@ -246,7 +247,7 @@ TEST_CASE("restarts: the guest window is zeroed until the new instance lays it o
     settle();
     struct Window { uint32_t magic, seq, value, writes; };
     constexpr uint32_t kWindowMagic = 0x57494e44u;   // 'WIND', the placeholder's
-    const auto* w = region<const Window>(GUEST_WINDOW_START);
+    const auto* w = region<const Window>(clockwork::kDefaultLayout.guest_window_start);
     const auto pub = osc_test::message("/dummy/region/window", 0x7e57, 0);
     REQUIRE(lanes_test::ingress(pub.ptr(), pub.size(), kClient));
     lanes_test::tickUntil(4, nullptr);
@@ -409,7 +410,7 @@ TEST_CASE("restarts: more waiting at a cold restart than the instance's ring can
 TEST_CASE("restarts: a message sent while there is no instance is refused at once",
           "[restarts][transport]") {
     settle();
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
@@ -431,8 +432,8 @@ TEST_CASE("restarts: a message sent while there is no instance is refused at onc
         CHECK(r.argString(1) == "no instance");
     }
 
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     const auto after = lanes_test::tickUntil(4, "/dummy/pong");
     CHECK(findAddress(after, "/dummy/pong") == nullptr);
 }
@@ -440,7 +441,7 @@ TEST_CASE("restarts: a message sent while there is no instance is refused at onc
 TEST_CASE("restarts: a message written in place while there is no instance is refused, as one sent is",
           "[restarts][transport]") {
     settle();
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
@@ -448,7 +449,7 @@ TEST_CASE("restarts: a message written in place while there is no instance is re
     // (clockwork_client_send_begin / _commit): the same door as a send, and
     // the same refusal, whether at the reservation or at the commit.
     ClockworkStatus st = CLOCKWORK_OK;
-    uint8_t* base = static_cast<uint8_t*>(clockwork_lanes_base());
+    uint8_t* base = static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core()));
     ClockworkClient* c = clockwork_client_open_memory(base, arenaHeader(base)->arena_bytes, &st);
     REQUIRE(c != nullptr);
     const auto ping = osc_test::message("/dummy/ping");
@@ -460,8 +461,8 @@ TEST_CASE("restarts: a message written in place while there is no instance is re
     CHECK(st == CLOCKWORK_E_NO_INSTANCE);
     clockwork_client_close(c);
 
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     const auto after = lanes_test::tickUntil(4, "/dummy/pong");
     CHECK(findAddress(after, "/dummy/pong") == nullptr);
 }
@@ -469,7 +470,7 @@ TEST_CASE("restarts: a message written in place while there is no instance is re
 TEST_CASE("restarts: clockwork's own verbs are answered while there is no instance",
           "[restarts][transport]") {
     settle();
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
@@ -478,7 +479,7 @@ TEST_CASE("restarts: clockwork's own verbs are answered while there is no instan
     // build answers.
     const auto ping = osc_test::message(CLOCKWORK_SYS("ping"));
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("pong"));
     const auto* pong = findAddress(frames, CLOCKWORK_SYS("pong"));
     CHECK(pong != nullptr);
@@ -510,7 +511,7 @@ TEST_CASE("restarts: what hands the guest something was written for its instance
     // Waiting when the instance goes.
     REQUIRE(lanes_test::ingress(commit.ptr(), commit.size(), kClient));
     REQUIRE(lanes_test::ingress(sync.ptr(), sync.size(), kClient));
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
@@ -522,8 +523,8 @@ TEST_CASE("restarts: what hands the guest something was written for its instance
 
     // The next instance: the waiting commit refused as the closing
     // generation's, the sync beside it answered, and nothing committed.
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("synced"));
     CHECK(refusalOf(frames, CLOCKWORK_REFUSED_REBUILDING) == static_cast<int32_t>(closing));
     CHECK(findAddress(frames, CLOCKWORK_SYS("synced")) != nullptr);
@@ -547,7 +548,7 @@ TEST_CASE("restarts: the generation is in the arena header, even with an instanc
     // Torn down: the word goes odd FIRST, before anything else of the
     // teardown, and names the generation that is closing. A reader in
     // another process knows "between instances" from the bytes alone.
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     CHECK_FALSE(clockwork_arena_has_instance(h));
     CHECK(clockwork_arena_generation(h) == gen);
     lanes_test::drainRt();
@@ -555,8 +556,8 @@ TEST_CASE("restarts: the generation is in the arena header, even with an instanc
 
     // Built: even again, one on. The header is the region a rebuild keeps,
     // so the count is continuous across every build on this arena.
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     CHECK(clockwork_arena_has_instance(h));
     CHECK(clockwork_arena_generation(h) == gen + 1);
 }
@@ -569,7 +570,7 @@ TEST_CASE("restarts: a refusal names the generation that refused",
     // In the ring at the teardown.
     const auto ping = osc_test::message("/dummy/ping");
     REQUIRE(lanes_test::ingress(ping.ptr(), ping.size(), kClient));
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
 
@@ -589,8 +590,8 @@ TEST_CASE("restarts: a refusal names the generation that refused",
     // Built again. What waited at the teardown is refused by the next drain,
     // naming the generation that was closing, the one its sender had been
     // talking to.
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     const auto waited = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
     const auto* atTeardown = findAddress(waited, CLOCKWORK_SYS("error"));
     REQUIRE(atTeardown != nullptr);
@@ -617,9 +618,9 @@ TEST_CASE("restarts: a refusal names the generation that refused",
 // ── The control ring ─────────────────────────────────────────────────────────
 
 namespace {
-const ControlRingCursors* controlRing() { return region<const ControlRingCursors>(CONTROL_RING_START); }
+const ControlRingCursors* controlRing() { return region<const ControlRingCursors>(clockwork::kDefaultLayout.control_ring_start); }
 int32_t controlHead() { return controlRing()->head.load(std::memory_order_acquire); }
-int32_t inHead() { return region<RingCursors>(RING_CURSORS_START)->in_head.load(std::memory_order_acquire); }
+int32_t inHead() { return region<RingCursors>(clockwork::kDefaultLayout.ring_cursors_start)->in_head.load(std::memory_order_acquire); }
 } // namespace
 
 TEST_CASE("restarts: with the control ring served, a control verb goes there and not through the audio thread; without, everything rides the in ring",
@@ -632,7 +633,7 @@ TEST_CASE("restarts: with the control ring served, a control verb goes there and
     // Nobody drains the control ring in this binary (the lanes have no
     // control pass), so the word is off: a control verb rides the in ring as
     // it always did, and the audio thread forwards it along its chain.
-    REQUIRE_FALSE(clockwork_control_served());
+    REQUIRE_FALSE(clockwork_control_served(lanes_test::core()));
     {
         const int32_t in0 = inHead(), ctl0 = controlHead();
         REQUIRE(lanes_test::ingress(notify.ptr(), notify.size(), kClient));
@@ -645,8 +646,8 @@ TEST_CASE("restarts: with the control ring served, a control verb goes there and
     // control pass drains it): from then on a control verb is written there,
     // where no audio block is between it and its answer, while a verb the
     // audio thread performs and the guest's traffic ride the in ring.
-    clockwork_control_serve(1);
-    REQUIRE(clockwork_control_served());
+    clockwork_control_serve(lanes_test::core(), 1);
+    REQUIRE(clockwork_control_served(lanes_test::core()));
     {
         const int32_t in0 = inHead(), ctl0 = controlHead();
         REQUIRE(lanes_test::ingress(notify.ptr(), notify.size(), kClient));
@@ -662,7 +663,7 @@ TEST_CASE("restarts: with the control ring served, a control verb goes there and
 
     // Between instances the control ring takes a control verb as before: it
     // is clockwork's, answered with or without a guest, and never refused.
-    destroy_dsp();
+    destroy_dsp(lanes_test::core());
     lanes_test::drainRt();
     lanes_test::drainNrt();
     {
@@ -673,11 +674,11 @@ TEST_CASE("restarts: with the control ring served, a control verb goes there and
         for (auto& f : lanes_test::drainNrt()) said.push_back(std::move(f));
         CHECK(findAddress(said, CLOCKWORK_SYS("error")) == nullptr);
     }
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     // And a rebuild leaves the ring alone: lifetime arena.
     CHECK(controlHead() != 0);
-    clockwork_control_serve(0);
+    clockwork_control_serve(lanes_test::core(), 0);
     // What this case queued is nobody's to drain here: the ring is left as a
     // control pass would find it, and the next case does not read it.
 }
@@ -850,12 +851,13 @@ TEST_CASE("restarts: an instance whose audio went in the middle of a block is bu
     const uint32_t gen = generationNow();
     // As the audio thread leaves it if it is stopped partway through a block:
     // whatever the block was changing is half changed.
-    g_block_open = true;
+    std::atomic<bool>& open = clockwork::core_clock(lanes_test::core())->block_open;
+    open = true;
 
     lanes_test::comeBack();
 
     CHECK(generationNow() == gen + 1);
-    CHECK_FALSE(g_block_open);
+    CHECK_FALSE(open);
     drainBoth();
 }
 

@@ -26,7 +26,7 @@ inline void refuseClientVerb(OscEgress* egress, uint32_t token,
     static std::atomic<uint32_t> refusals{0};
     const uint32_t n = refusals.fetch_add(1, std::memory_order_relaxed);
     if (n == 0 || n % 100 == 0)
-        clockwork_log("ERROR: %s refused — %s [%u so far]",
+        clockwork_log(egress ? egress->core() : nullptr, "ERROR: %s refused — %s [%u so far]",
                       reinterpret_cast<const char*>(data), CLOCKWORK_CLIENT_VERBS_ABSENT, n + 1);
     if (egress) egress->refuse(token, data, size, CLOCKWORK_CLIENT_VERBS_ABSENT);
 }

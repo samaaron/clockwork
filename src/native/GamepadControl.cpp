@@ -21,6 +21,8 @@
 #include <cstring>
 #include <string>
 
+ClockworkCore* GamepadControl::core() const { return mEgress ? mEgress->core() : nullptr; }
+
 void GamepadControl::init(OscEgress* egress) {
     mEgress = egress;
     if (!mGamepad) {
@@ -68,7 +70,7 @@ bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_
 // disconnect/enable changes and an explicit /clockwork/gamepad/refresh, so this
 // is flood-safe. Per-event traffic (/clockwork/gamepad/in/axis, /clockwork/gamepad/in/button) is
 // deliberately not logged. Payload: <n:i> [name:s enabled:i]*
-static void logGamepadDevicesChange(const uint8_t* data, uint32_t len) {
+static void logGamepadDevicesChange(ClockworkCore* core, const uint8_t* data, uint32_t len) {
     if (std::strcmp(reinterpret_cast<const char*>(data), CLOCKWORK_SYS("gamepad/devices")) != 0) return;
     std::string names;
     try {
@@ -85,7 +87,7 @@ static void logGamepadDevicesChange(const uint8_t* data, uint32_t len) {
             if (it != msg.ArgumentsEnd()) ++it;       // enabled flag
         }
     } catch (...) { return; }
-    clockwork_log("[gamepad] devices: [%s]", names.c_str());
+    clockwork_log(core, "[gamepad] devices: [%s]", names.c_str());
 }
 
 // A reply goes to its caller. An event goes into the IN ring, to be answered
@@ -96,11 +98,10 @@ void GamepadControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_
     if (kind == CLOCKWORK_GAMEPAD_EMIT_REPLY) {
         self->mEgress->reply(self->mReplyToken, osc, len);
     } else {
-        logGamepadDevicesChange(osc, len);
-        if (!clockwork_ingress_write(osc, len, 0)) {
-            static std::atomic<uint32_t> dropped{0};
-            if (dropped.fetch_add(1, std::memory_order_relaxed) < 8)
-                clockwork_log("WARNING: gamepad event %s dropped — IN ring full",
+        logGamepadDevicesChange(self->core(), osc, len);
+        if (!clockwork_ingress_write(self->mEgress->core(), osc, len, 0)) {
+            if (self->mDroppedLog.say())
+                clockwork_log(self->core(), "WARNING: gamepad event %s dropped — IN ring full",
                               reinterpret_cast<const char*>(osc));
         }
     }

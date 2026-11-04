@@ -53,13 +53,13 @@ typedef void (*clockwork_osc_stream_closed_fn)(void* ctx, uint32_t conn_id);
  * IPv4 interface, "::" for IPv6 — the secret crosses the wire in the clear,
  * so the log notes an open bind). Port 0 binds ephemerally — read it back
  * with clockwork_osc_stream_port. Null on bind failure. */
-ClockworkOscStream* clockwork_osc_tcp_start(void* ctx, clockwork_osc_stream_packet_fn on_packet,
+ClockworkOscStream* clockwork_osc_tcp_start(struct ClockworkCore* core, void* ctx, clockwork_osc_stream_packet_fn on_packet,
                               clockwork_osc_stream_closed_fn on_closed,
                               const ClockworkCommsSecret* secret, int32_t port,
                               const uint8_t* bind_addr, uint32_t bind_addr_len);
 /* UDS stream at `path` (socket file created 0600, stale file replaced). Null
  * on failure, and always null on Windows. */
-ClockworkOscStream* clockwork_osc_uds_stream_start(void* ctx, clockwork_osc_stream_packet_fn on_packet,
+ClockworkOscStream* clockwork_osc_uds_stream_start(struct ClockworkCore* core, void* ctx, clockwork_osc_stream_packet_fn on_packet,
                                      clockwork_osc_stream_closed_fn on_closed,
                                      const ClockworkCommsSecret* secret,
                                      const uint8_t* path, uint32_t path_len);
@@ -67,7 +67,7 @@ ClockworkOscStream* clockwork_osc_uds_stream_start(void* ctx, clockwork_osc_stre
  * full pipe path. Instances carry an owner-only DACL (SYSTEM + current user)
  * and PIPE_REJECT_REMOTE_CLIENTS; the first instance is squat-checked
  * (FILE_FLAG_FIRST_PIPE_INSTANCE). Always null on non-Windows platforms. */
-ClockworkOscStream* clockwork_osc_pipe_start(void* ctx, clockwork_osc_stream_packet_fn on_packet,
+ClockworkOscStream* clockwork_osc_pipe_start(struct ClockworkCore* core, void* ctx, clockwork_osc_stream_packet_fn on_packet,
                                clockwork_osc_stream_closed_fn on_closed,
                                const ClockworkCommsSecret* secret,
                                const uint8_t* name, uint32_t name_len);

@@ -11,10 +11,13 @@
  */
 #pragma once
 
+#include "log_limit.h"
+
 #include <cstdint>
 
 struct ClockworkMidi;       // rust/clockwork-midi/cpp/clockwork_midi.h
 class OscEgress;
+struct ClockworkCore;
 class ClockworkClock;
 class MidiClockOut;
 struct DrainCallCtx;
@@ -25,6 +28,8 @@ public:
     // (the control pass's thread), the render thread its one consumer.
     void init(OscEgress* egress, ClockworkClock* clock, MidiClockOut* clockOut);
     void shutdown();
+    // The engine's core, whose log this control's lines are; null before init.
+    ClockworkCore* core() const;
 
     // Handle one "/clockwork/midi/" command off the audio thread (NRT gateway). Returns
     // true if it belongs to this subsystem (always, for a "/clockwork/midi/" prefix).
@@ -69,4 +74,6 @@ private:
     // route its REPLY back to the caller. NRT-thread-only; REPLY emits are
     // synchronous within handleMidiCommand. Async emits (/clockwork/midi/in, ports) broadcast.
     uint32_t    mReplyToken = 0;
+    // An event dropped on a full IN ring: said eight times.
+    clockwork::LogLimit mDroppedLog = clockwork::LogLimit::first(8);
 };

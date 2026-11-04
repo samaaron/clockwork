@@ -148,6 +148,8 @@ constexpr double kMaxInputLatencySeconds = 2.0;
 #define CLOCKWORK_LINK_AUDIO 0
 #endif
 
+struct ClockworkCore;   // clockwork_core.h
+
 #if CLOCKWORK_LINK_AUDIO
 
 #include "native/vendor/LinkAudioInputRenderer.hpp"
@@ -197,10 +199,10 @@ public:
     std::vector<link_audio::Channel> listChannels() const;
 
     // The lanes subscriptions arrive on (clockwork_reserve_link_audio_lanes),
-    // reserved by the engine before the boot that lays them out: eight stereo
-    // peers at once.
+    // reserved on the engine's core before the boot that lays them out: eight
+    // stereo peers at once.
     static constexpr uint32_t kLanes = 16;
-    static void reserveLanes();
+    static void reserveLanes(ClockworkCore* core);
 
     // ─── Input subscriptions ──────────────────────────────────────────────
     // The peer's channel onto a pair of the Link Audio lanes, which the bridge
@@ -233,7 +235,8 @@ public:
     // until it has both a rate and something to fill.
     // `allocatedInputChannels` is the width the DSP allocated (device inputs
     // plus reserved lanes), NOT the device's width — see channelPairFits.
-    void setAudioFormat(uint32_t sampleRate, uint32_t allocatedInputChannels);
+    // Where the lanes are is `core`'s, as its last build laid them out.
+    void setAudioFormat(ClockworkCore* core, uint32_t sampleRate, uint32_t allocatedInputChannels);
 
     // Once per block, after it has read its ports: where each subscription's
     // port stands, and the host time the next block reads it at — the date
@@ -418,6 +421,12 @@ private:
     // channel pair has to fit under. Streams come and go, so this is
     // checked per add rather than assumed once.
     std::atomic<uint32_t>   mInputChannels{0};
+    // The core whose channels the subscriptions' ports are bound to, as the
+    // last setAudioFormat named it.
+    std::atomic<ClockworkCore*> mCore{nullptr};
+    ClockworkCore* core() const { return mCore.load(std::memory_order_acquire); }
+    // That core's ports, which the subscriptions' ports are opened in.
+    const ClockworkPorts* ports() const { return clockwork_core_ports(core()); }
     // The Link Audio lanes (clockwork_link_audio_lane_base) as of the last
     // setAudioFormat: the pairs addInput hands out, and what every
     // subscription moves with when a wider device moves them. Under
@@ -465,7 +474,7 @@ public:
     bool isPublishEnabled() const { return mAudioPublishEnabled; }
     std::vector<link_audio::Channel> listChannels() const { return {}; }
 
-    static void reserveLanes() {}
+    static void reserveLanes(ClockworkCore*) {}
     std::optional<uint32_t> addInput(const char*, const char*) { return std::nullopt; }
     void removeInput(const char*, const char*) {}
     void clearInputs() {}
@@ -476,7 +485,7 @@ public:
     void removeSink(const char*) {}
     std::vector<link_audio::SinkInfo> listSinks() const { return {}; }
 
-    void setAudioFormat(uint32_t, uint32_t) {}
+    void setAudioFormat(ClockworkCore*, uint32_t, uint32_t) {}
     void dateReads(uint64_t) {}
     void publishAuxSinks(const float*, uint32_t, uint32_t, uint32_t, uint64_t, double) {}
     bool publishAudioBlock(const float*, const float*, size_t, uint32_t, uint64_t,

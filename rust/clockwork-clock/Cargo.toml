@@ -14,3 +14,4 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }

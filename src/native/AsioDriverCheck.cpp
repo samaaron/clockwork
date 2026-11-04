@@ -69,13 +69,13 @@ bool inprocServerPath(const std::wstring& clsid, std::wstring& path) {
 }
 
 // One line per driver per process — this runs on every device rescan.
-void logRejectionOnce(const std::string& name, const std::string& dll) {
+void logRejectionOnce(ClockworkCore* core, const std::string& name, const std::string& dll) {
     static std::mutex mutex;
     static std::set<std::string> logged;
     std::lock_guard<std::mutex> lock(mutex);
     if (!logged.insert(name).second)
         return;
-    clockwork_log(
+    clockwork_log(core,
             "[asio] hiding '%s': driver DLL is built for another architecture "
             "and cannot load in this process (%s)",
             name.c_str(), dll.c_str());
@@ -85,7 +85,7 @@ void logRejectionOnce(const std::string& name, const std::string& dll) {
 
 namespace clockwork::device {
 
-std::set<std::string> unloadableAsioDrivers() {
+std::set<std::string> unloadableAsioDrivers(ClockworkCore* core) {
     std::set<std::string> unloadable;
 
     HKEY asioKey = nullptr;
@@ -130,7 +130,7 @@ std::set<std::string> unloadableAsioDrivers() {
 
         const std::string name = narrow(description);
         unloadable.insert(name);
-        logRejectionOnce(name, narrow(dll));
+        logRejectionOnce(core, name, narrow(dll));
     }
 
     RegCloseKey(asioKey);
@@ -143,7 +143,7 @@ std::set<std::string> unloadableAsioDrivers() {
 
 namespace clockwork::device {
 
-std::set<std::string> unloadableAsioDrivers() { return {}; }
+std::set<std::string> unloadableAsioDrivers(ClockworkCore*) { return {}; }
 
 } // namespace clockwork::device
 

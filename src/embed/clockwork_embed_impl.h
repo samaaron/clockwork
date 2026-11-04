@@ -3,8 +3,8 @@
 // The handle behind clockwork_embed.h, shared by the attach path
 // (clockwork_embed.cpp) and the device boot (native/ClockworkEmbedDevice.cpp).
 #pragma once
+#include "clockwork_core.h"
 #include "clockwork_embed.h"
-#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -30,11 +30,7 @@ struct ClockworkEmbed {
     uint32_t inHead = 0,  inCount = 0;    // received, not yet ticked
     uint64_t rendered = 0;   // this host's count of the audio it has rendered: its block time's frames
 
-    // Owned by this handle; the single attachment it holds.
-    bool attached = false;
+    // The attach path's core, made and closed by this handle. A booted
+    // handle's core is its engine's.
+    ClockworkCore* core = nullptr;
 };
-
-// The process's one handle, so a second boot or attach is refused rather
-// than stacked. Reads are the control thread's; nothing on the audio thread
-// looks at it.
-extern std::atomic<ClockworkEmbed*> g_clockwork_embed;

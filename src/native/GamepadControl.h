@@ -13,16 +13,21 @@
  */
 #pragma once
 
+#include "log_limit.h"
+
 #include <cstdint>
 
 struct ClockworkGamepad;    // rust/clockwork-gamepad/cpp/clockwork_gamepad.h
 class OscEgress;
+struct ClockworkCore;
 struct DrainCallCtx;
 
 class GamepadControl {
 public:
     void init(OscEgress* egress);
     void shutdown();
+    // The engine's core, whose log this control's lines are; null before init.
+    ClockworkCore* core() const;
 
     // Handle one "/clockwork/gamepad/" command off the audio thread (NRT gateway).
     // Returns true if it belongs to this subsystem (always, for a "/clockwork/gamepad/"
@@ -39,4 +44,6 @@ private:
     // Origin token held for synchronous emitCb REPLYs during handleGamepadCommand
     // (the Rust callback carries no call ctx). Async device emits broadcast.
     uint32_t   mReplyToken = 0;
+    // An event dropped on a full IN ring: said eight times.
+    clockwork::LogLimit mDroppedLog = clockwork::LogLimit::first(8);
 };

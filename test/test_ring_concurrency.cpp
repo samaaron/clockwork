@@ -36,18 +36,13 @@
 #include "ring/ring.h"           // Message, MESSAGE_MAGIC
 #include "RingBufferWriter.h"    // shared MPSC writer (ingress + NRT-egress)
 #include "lanes/ring_drain.h"    // clockwork_drain_ring consumer
+#include "LanesFixture.h"        // a core to route through
+#include "core_state.h"          // its Egress
 
-// Clockwork globals for the debug-egress routing test (audio_processor.cpp).
+// The engine's log, for the debug-egress routing test (audio_processor.cpp).
 // Declared directly rather than via audio_processor.h, which pulls in the
 // <emscripten/...> shim that is not on this target's include path.
-extern "C" int clockwork_log(const char* fmt, ...);
-extern "C" {
-    extern uint8_t*            shared_memory;
-    extern RingCursors*    cursors;
-    extern PerformanceMetrics* metrics;
-    extern bool                memory_initialized;
-}
-extern std::atomic<bool> g_nrt_egress_drained;   // NRT-out drainer present (capability)
+extern "C" int clockwork_log(ClockworkCore* core, const char* fmt, ...);
 
 namespace {
 
@@ -162,36 +157,36 @@ TEST_CASE("MPSC ring: concurrent producers and a drainer lose no frames",
 // ─────────────────────────────────────────────────────────────────────────────
 TEST_CASE("off-audio-thread clockwork_log routes to NRT-out, not the RT-out ring",
           "[RingConcurrency]") {
-    // Self-contained arena + save/restore, so the test neither depends on
-    // clockwork init nor disturbs global state for other tests.
-    static std::vector<uint8_t> arena(ARENA_SIZE, 0);
-    uint8_t*            savedSM   = shared_memory;
-    RingCursors*    savedC    = cursors;
-    PerformanceMetrics* savedM    = metrics;
-    const bool          savedInit = memory_initialized;
-    const bool          savedDrn  = g_nrt_egress_drained.load(std::memory_order_relaxed);
+    // A core whose egress decides the route (lanes_test::boot), then a
+    // self-contained arena + save/restore, so the test does not disturb the
+    // engine's for other tests.
+    lanes_test::boot();
+    clockwork::CoreState& st = *clockwork::state(lanes_test::core());
+    std::atomic<bool>& drained = st.egress.nrt_drained;
+    static std::vector<uint8_t> scratch(clockwork::kDefaultLayout.arena_bytes, 0);
+    uint8_t* const savedBase  = st.arena.at();
+    const bool     savedReady = st.arena.ready.load();
+    const bool     savedDrn   = drained.load(std::memory_order_relaxed);
 
-    shared_memory = arena.data();
-    cursors       = reinterpret_cast<RingCursors*>(arena.data() + RING_CURSORS_START);
-    metrics       = nullptr;   // the debug emitter guards on this; keeps the arena minimal
-    RingCursors* c = cursors;
+    st.arena.base.store(scratch.data());
+    RingCursors* c = clockwork::cursors_in(scratch.data(), clockwork::kDefaultLayout);
     c->out_head.store(0);      c->out_tail.store(0);      c->out_sequence.store(0);
     c->nrt_out_head.store(0);  c->nrt_out_tail.store(0);  c->nrt_out_sequence.store(0);
-    memory_initialized = true;
+    st.arena.ready.store(true);
 
     // Drainer present (native NRT gateway): off-thread debug goes to NRT-out and
     // leaves the single-writer RT-out ring untouched.
-    g_nrt_egress_drained.store(true, std::memory_order_relaxed);
-    clockwork_log("ring-route-test off-audio-thread line");
+    drained.store(true, std::memory_order_relaxed);
+    clockwork_log(lanes_test::core(), "ring-route-test off-audio-thread line");
     CHECK(c->out_head.load()     == 0);   // RT-out untouched
     CHECK(c->nrt_out_head.load() != 0);   // NRT-out advanced
 
     // No drainer (self-driven target): falls back to the always-safe RT-out ring.
-    g_nrt_egress_drained.store(false, std::memory_order_relaxed);
-    clockwork_log("ring-route-test self-driven-fallback line");
+    drained.store(false, std::memory_order_relaxed);
+    clockwork_log(lanes_test::core(), "ring-route-test self-driven-fallback line");
     CHECK(c->out_head.load() != 0);       // RT-out advanced
 
-    shared_memory = savedSM; cursors = savedC; metrics = savedM;
-    memory_initialized = savedInit;
-    g_nrt_egress_drained.store(savedDrn, std::memory_order_relaxed);
+    st.arena.base.store(savedBase);
+    st.arena.ready.store(savedReady);
+    drained.store(savedDrn, std::memory_order_relaxed);
 }

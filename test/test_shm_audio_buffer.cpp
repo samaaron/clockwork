@@ -22,6 +22,7 @@
  * device: a capture ring is a capture ring whatever filled it.
  */
 #include "shm_audio_buffer.hpp"
+#include "shared_memory.h"   // clockwork::kDefaultLayout
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -32,10 +33,13 @@
 
 namespace {
 
+// A slot laid out as the target's default, on the heap: its header and its
+// frames, zeroed, as the arena hands it over.
+constexpr uint32_t kFrames   = clockwork::kDefaultLayout.profile.scope_frames;
+constexpr uint32_t kChannels = clockwork::kDefaultLayout.profile.scope_channels;
 struct Slot {
-    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[sizeof(shm_audio_buffer)] };
+    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[scope_slot_bytes(kFrames, kChannels)]() };
     shm_audio_buffer* get() { return reinterpret_cast<shm_audio_buffer*>(bytes.get()); }
-    Slot() { std::memset(bytes.get(), 0, sizeof(shm_audio_buffer)); }
 };
 
 float sampleAt(uint64_t frame, uint32_t ch) {
@@ -57,10 +61,10 @@ void writeBlock(shm_audio_buffer_writer& w, uint64_t from, uint32_t frames) {
 TEST_CASE("shm audio: frames pulled out are the frames written in",
           "[shm_audio]") {
     Slot slot;
-    shm_audio_buffer_writer w(slot.get());
+    shm_audio_buffer_writer w(slot.get(), kFrames, kChannels);
     REQUIRE(w.activate(2, 48000, 4096));
 
-    shm_audio_buffer_reader r(slot.get());
+    shm_audio_buffer_reader r(slot.get(), kFrames, kChannels);
     REQUIRE(r.is_active());
     REQUIRE(r.channels() == 2);
     REQUIRE(r.sample_rate() == 48000);
@@ -87,7 +91,7 @@ TEST_CASE("shm audio: frames pulled out are the frames written in",
 TEST_CASE("shm audio: a pull spanning the ring wrap is contiguous",
           "[shm_audio]") {
     Slot slot;
-    shm_audio_buffer_writer w(slot.get());
+    shm_audio_buffer_writer w(slot.get(), kFrames, kChannels);
     // A capacity the block size does NOT divide, so a write straddles the
     // boundary rather than always landing on it — the arrangement in which a
     // dropped modulo still places every sample correctly and the test proves
@@ -96,7 +100,7 @@ TEST_CASE("shm audio: a pull spanning the ring wrap is contiguous",
     REQUIRE(w.activate(2, 48000, cap));
     REQUIRE(cap % 512 != 0);
 
-    shm_audio_buffer_reader r(slot.get());
+    shm_audio_buffer_reader r(slot.get(), kFrames, kChannels);
     r.seek_to_start();
 
     // Write past the wrap, pulling as we go so the reader never falls behind.
@@ -122,11 +126,11 @@ TEST_CASE("shm audio: a pull spanning the ring wrap is contiguous",
 TEST_CASE("shm audio: a lapped reader is told exactly how much it lost",
           "[shm_audio]") {
     Slot slot;
-    shm_audio_buffer_writer w(slot.get());
+    shm_audio_buffer_writer w(slot.get(), kFrames, kChannels);
     const uint32_t cap = 2048;
     REQUIRE(w.activate(2, 48000, cap));
 
-    shm_audio_buffer_reader r(slot.get());
+    shm_audio_buffer_reader r(slot.get(), kFrames, kChannels);
     r.seek_to_start();
 
     // THE CASE THIS FILE EXISTS FOR. The writer does not wait, so a slow
@@ -160,9 +164,9 @@ TEST_CASE("shm audio: a lapped reader is told exactly how much it lost",
 TEST_CASE("shm audio: a partial pull leaves the rest for the next call",
           "[shm_audio]") {
     Slot slot;
-    shm_audio_buffer_writer w(slot.get());
+    shm_audio_buffer_writer w(slot.get(), kFrames, kChannels);
     REQUIRE(w.activate(2, 48000, 4096));
-    shm_audio_buffer_reader r(slot.get());
+    shm_audio_buffer_reader r(slot.get(), kFrames, kChannels);
     r.seek_to_start();
 
     writeBlock(w, 0, 1000);
@@ -190,7 +194,7 @@ TEST_CASE("shm audio: interleaved and per-channel writes agree",
     // over. They must place samples identically or a recording made through
     // one path and metered through the other would disagree.
     Slot a, b;
-    shm_audio_buffer_writer wa(a.get()), wb(b.get());
+    shm_audio_buffer_writer wa(a.get(), kFrames, kChannels), wb(b.get(), kFrames, kChannels);
     REQUIRE(wa.activate(2, 48000, 4096));
     REQUIRE(wb.activate(2, 48000, 4096));
 
@@ -203,7 +207,7 @@ TEST_CASE("shm audio: interleaved and per-channel writes agree",
     writeBlock(wa, 0, n);
     wb.write_interleaved(inter.data(), n);
 
-    shm_audio_buffer_reader ra(a.get()), rb(b.get());
+    shm_audio_buffer_reader ra(a.get(), kFrames, kChannels), rb(b.get(), kFrames, kChannels);
     ra.seek_to_start(); rb.seek_to_start();
     std::vector<float> oa(n * 2, 1.0f), ob(n * 2, 2.0f);
     REQUIRE(ra.pull(oa.data(), n) == n);
@@ -214,17 +218,17 @@ TEST_CASE("shm audio: interleaved and per-channel writes agree",
 TEST_CASE("shm audio: an oversized capacity is refused, not clamped silently",
           "[shm_audio]") {
     Slot slot;
-    shm_audio_buffer_writer w(slot.get());
-    // The data array is inline and fixed, so a capacity past it would have the
+    shm_audio_buffer_writer w(slot.get(), kFrames, kChannels);
+    // The ring is the slot's layout's, so a capacity past it would have the
     // writer indexing outside the arena. Refusing at activate() is the only
     // moment a caller can be told; clamping would give it a ring quietly
     // shorter than the one it asked for and a recording quietly shorter than
     // the one it expected.
-    REQUIRE_FALSE(w.activate(2, 48000, SCOPE_FRAMES + 1));
-    shm_audio_buffer_reader r(slot.get());
+    REQUIRE_FALSE(w.activate(2, 48000, clockwork::kDefaultLayout.profile.scope_frames + 1));
+    shm_audio_buffer_reader r(slot.get(), kFrames, kChannels);
     REQUIRE_FALSE(r.is_active());
 
-    REQUIRE(w.activate(2, 48000, SCOPE_FRAMES));
+    REQUIRE(w.activate(2, 48000, clockwork::kDefaultLayout.profile.scope_frames));
     REQUIRE(r.is_active());
 }
 
@@ -233,14 +237,13 @@ TEST_CASE("shm audio: an oversized capacity is refused, not clamped silently",
 // left as it was, cursor included, rather than read from pointers the
 // caller never set.
 TEST_CASE("audio buffer: a write with fewer channels than the slot's writes nothing", "[shm][audio]") {
-    auto mem = std::make_unique<shm_audio_buffer>();
-    memset(static_cast<void*>(mem.get()), 0, sizeof(shm_audio_buffer));
-    shm_audio_buffer_writer w(mem.get());
+    Slot mem;
+    shm_audio_buffer_writer w(mem.get(), kFrames, kChannels);
     REQUIRE(w.activate(2, 48000, 4096));
     std::vector<float> mono(64, 1.0f);
     const float* one[1] = { mono.data() };
     w.write(one, 1, 64);
-    shm_audio_buffer_reader r(mem.get());
+    shm_audio_buffer_reader r(mem.get(), kFrames, kChannels);
     CHECK(r.writer_position() == 0);
     // and with the slot's own count it writes, as ever
     std::vector<float> l(64, 1.0f), rr(64, 2.0f);

@@ -57,7 +57,7 @@ inline void checkCoherent(EngineFixture& fix) {
     if (open) {
         CHECK(fix.waitForBlocks(20));
         INFO("the device plays at " << e.currentDevice().activeSampleRate << " Hz");
-        CHECK(clockwork_sample_rate() == e.currentDevice().activeSampleRate);
+        CHECK(clockwork_sample_rate(e.core()) == e.currentDevice().activeSampleRate);
     }
 }
 

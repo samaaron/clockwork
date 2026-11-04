@@ -25,6 +25,8 @@
 #include <set>
 #include <string>
 
+struct ClockworkCore;
+
 namespace clockwork::device {
 
 // Display names (exactly as JUCE reports them, i.e. the driver's
@@ -36,7 +38,7 @@ namespace clockwork::device {
 // unreadable, unregistered, or failing for any other reason is treated as
 // usable, so a working driver is never hidden by a failed lookup.
 //
-// Always empty off Windows.
-std::set<std::string> unloadableAsioDrivers();
+// Always empty off Windows. `core`: the engine asking, told of each one hidden.
+std::set<std::string> unloadableAsioDrivers(ClockworkCore* core);
 
 } // namespace clockwork::device

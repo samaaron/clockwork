@@ -55,7 +55,7 @@ constexpr const char* kRegionVar = "CLOCKWORK_FENCE_REGION";
 
 // Where a region of the arena that is up starts, by its stable id.
 uint8_t* regionBase(uint32_t id) {
-    auto* base = static_cast<uint8_t*>(get_shared_memory_base());
+    auto* base = static_cast<uint8_t*>(clockwork_lanes_base(lanes_test::core()));
     REQUIRE(base != nullptr);
     const auto* h = reinterpret_cast<const ClockworkArenaHeader*>(base);
     const ClockworkArenaEntry* e = clockwork_arena_find(h, id);

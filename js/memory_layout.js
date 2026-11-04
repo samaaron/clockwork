@@ -131,7 +131,7 @@ export const MemoryLayout = {
 
     /**
      * What the engine takes of memArenaSize beside the guest's two spans, in
-     * bytes: the RT router's block (CLOCKWORK_ROUTER_BYTES, 1 MB) and the
+     * bytes: the core's own pool (CLOCKWORK_OWN_POOL_BYTES, 1 MB) and the
      * placement arena's own headers. A client that sizes memArenaSize
      * for a guest's declared memory (SuperSonic does, from scsynth's
      * options) adds this, or the guest's bulk want does not fit and the

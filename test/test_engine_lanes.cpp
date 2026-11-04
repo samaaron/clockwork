@@ -90,7 +90,7 @@ TEST_CASE("engine: the arena is there with no shared segment too",
 TEST_CASE("engine: the guest's memory is carved from the engine's one block",
           "[boundary][regions][engine]") {
     Engine e;
-    const ClockworkArenaHeader* h = clockwork_arena_header();
+    const ClockworkArenaHeader* h = clockwork_arena_header(e.engine.core());
     REQUIRE(h != nullptr);
     const auto span = [](const ClockworkArenaAreaEntry* a) {
         const uint64_t base  = (uint64_t)a->base_lo  | ((uint64_t)a->base_hi  << 32);

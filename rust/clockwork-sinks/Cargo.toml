@@ -16,6 +16,7 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 # The RT router: a sink's or a port's queues are made inside an engine entry
 # point, so they come from the router's block, not the system allocator.
 clockwork-heap = { path = "../clockwork-heap" }

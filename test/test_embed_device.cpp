@@ -9,11 +9,13 @@
 #include "FakeAudioDevice.h"
 #include "OscTestUtils.h"
 #include "clockwork_embed.h"
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -101,13 +103,15 @@ TEST_CASE("embed: boot opens the device, ticks itself, answers through its clien
         CHECK(pong);
     }
 
-    // A second boot while this one runs is refused; after close it is not.
-    CHECK(clockwork_embed_boot(&cfg, &st) == nullptr);
-    CHECK(st == CLOCKWORK_E_PERM);
+    // A second boot while this one runs is an engine of its own, on a device
+    // of its own, and closing one leaves the other.
+    ClockworkEmbed* beside = clockwork_embed_boot(&cfg, &st);
+    REQUIRE(beside != nullptr);
+    CHECK(st == CLOCKWORK_OK);
+    CHECK(clockwork_embed_client(beside) != c);
     clockwork_embed_close(h);
-    h = clockwork_embed_boot(&cfg, &st);
-    REQUIRE(h != nullptr);
-    clockwork_embed_close(h);
+    CHECK(clockwork_embed_client(beside) != nullptr);
+    clockwork_embed_close(beside);
 }
 
 // The device an engine booted on, read back through the door.
@@ -190,6 +194,58 @@ TEST_CASE("embed: boot reports the device it opened, and opens the driver it is 
     CHECK(std::string(deviceOf(h).driver) == "FakeOtherDriver");
     CHECK(std::string(deviceOf(h).device) == "Fake Other Speakers");
     clockwork_embed_close(h);
+}
+
+// Every /clockwork/debug line `c` has for us, as text, read until none is
+// there for `settle`.
+static std::vector<std::string> debugLines(ClockworkClient* c, std::chrono::milliseconds settle) {
+    std::vector<std::string> lines;
+    auto quietUntil = std::chrono::steady_clock::now() + settle;
+    while (std::chrono::steady_clock::now() < quietUntil) {
+        ClockworkClientMessage m[16];
+        const uint32_t n = clockwork_client_poll(c, m, 16);
+        if (n == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        quietUntil = std::chrono::steady_clock::now() + settle;
+        for (uint32_t i = 0; i < n; ++i) {
+            const auto r = osc_test::parseReply(m[i].bytes, m[i].length);
+            if (r.address == "/clockwork/debug") lines.push_back(r.argString(0));
+        }
+    }
+    return lines;
+}
+
+static bool anySays(const std::vector<std::string>& lines, const char* text) {
+    return std::any_of(lines.begin(), lines.end(),
+                       [text](const std::string& l) { return l.find(text) != std::string::npos; });
+}
+
+// An engine's log is its own (docs/ENGINES.md): what another engine in
+// the process says while booting, on its own threads, lands on its ring and
+// nowhere else. The line pinned is one every boot says from the engine's
+// own thread, outside any block.
+TEST_CASE("embed: an engine's log carries its own lines and none of another engine's", "[embed][engine]") {
+    OnFakeDevices devices;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* a = bootOn(nullptr, &st);
+    REQUIRE(a != nullptr);
+    ClockworkClient* ca = clockwork_embed_client(a);
+    const auto aBoot = debugLines(ca, std::chrono::milliseconds(200));
+    REQUIRE(anySays(aBoot, "[device-setup] available drivers"));
+
+    ClockworkEmbed* b = bootOn("FakeOtherDriver", &st);
+    REQUIRE(b != nullptr);
+    const auto bBoot = debugLines(clockwork_embed_client(b), std::chrono::milliseconds(200));
+    CHECK(anySays(bBoot, "[device-setup] available drivers"));
+
+    const auto aAfter = debugLines(ca, std::chrono::milliseconds(200));
+    for (const auto& l : aAfter) INFO("a heard: " << l);
+    CHECK_FALSE(anySays(aAfter, "[device-setup] available drivers"));
+
+    clockwork_embed_close(b);
+    clockwork_embed_close(a);
 }
 
 TEST_CASE("embed: boot opens the machine's own device and ticks", "[.hardware][embed]") {

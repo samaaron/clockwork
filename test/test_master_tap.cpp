@@ -24,7 +24,9 @@ TEST_CASE("scope OUT slot: the OUT slot flows from boot on a device host and car
     EngineFixture fx(cfg);
     ClockworkRegion taps {};
     REQUIRE(clockwork_client_region(fx.engine().egressClient(), CLOCKWORK_REGION_SCOPE, &taps) == CLOCKWORK_OK);
-    auto* out = static_cast<shm_audio_buffer*>(taps.base) + CLOCKWORK_TAP_OUT;
+    // The region is its slots end to end.
+    auto* out = reinterpret_cast<shm_audio_buffer*>(static_cast<uint8_t*>(taps.base)
+                                                    + CLOCKWORK_TAP_OUT * (taps.bytes / SCOPE_SLOTS));
     CHECK(out->enabled.load() == 1);
     CHECK(out->channels >= 1);
 
@@ -37,11 +39,11 @@ TEST_CASE("scope OUT slot: the OUT slot flows from boot on a device host and car
     CHECK(b - a == uint64_t(blocks) * block);
 
     // What plays is what the tap carries.
-    shm_audio_buffer_reader reader(out);
+    shm_audio_buffer_reader reader(out, clockwork::kDefaultLayout.profile.scope_frames, clockwork::kDefaultLayout.profile.scope_channels);
     reader.seek_to_live();
     fx.send(osc_test::message("/dummy/tone"));
     fx.pumpBlock(48000 / 5 / block);                  // 0.2 s
-    std::vector<float> buf(4096 * SCOPE_CHANNELS);
+    std::vector<float> buf(4096 * clockwork::kDefaultLayout.profile.scope_channels);
     float peak = 0.f;
     for (int i = 0; i < 8; ++i) {
         const uint32_t n = reader.pull(buf.data(), 4096, nullptr);

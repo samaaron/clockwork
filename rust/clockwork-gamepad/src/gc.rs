@@ -26,6 +26,7 @@
 //! on this backend (GCController exposes haptics via GCDeviceHaptics /
 //! Core Haptics).
 
+use clockwork_fence::no_unwind;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,9 +53,11 @@ extern "C" {
 }
 
 extern "C" fn enable_background_events(_ctx: *mut std::ffi::c_void) {
-    // SAFETY: a class method with no preconditions beyond running on the
-    // main queue, which is why it is dispatched here.
-    unsafe { GCController::setShouldMonitorBackgroundEvents(true) };
+    no_unwind((), || {
+        // SAFETY: a class method with no preconditions beyond running on the
+        // main queue, which is why it is dispatched here.
+        unsafe { GCController::setShouldMonitorBackgroundEvents(true) };
+    })
 }
 
 /// Input reads happen every poll tick; hotplug reconciliation (an ObjC

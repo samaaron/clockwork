@@ -65,7 +65,7 @@ fn new_ctx() -> *mut Ctx {
 fn create(ctx: *mut Ctx) -> *mut ClockworkMidi {
     // SAFETY: a null app name is allowed by the contract; the callbacks and
     // ctx outlive the subsystem, which the test closes before returning.
-    unsafe { clockwork_midi_create(ctx.cast::<c_void>(), emit_cb, clock_cb, transport_cb, std::ptr::null()) }
+    unsafe { clockwork_midi_create(std::ptr::null_mut(), ctx.cast::<c_void>(), emit_cb, clock_cb, transport_cb, std::ptr::null()) }
 }
 
 /// Resolve a virtual port's bare name to the handle the subsystem enumerates.

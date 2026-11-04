@@ -2,10 +2,11 @@
 // Copyright (c) 2025 Sam Aaron
 //! Native C ABI for the MIDI subsystem — the boundary the C++ engine links against.
 //!
-//! The engine creates one instance, supplying three host callbacks, and feeds it
-//! decoded-from-the-wire `/clockwork/midi/*` OSC via [`clockwork_midi_handle_osc`]. The subsystem
-//! owns its midir device IO (and midir's own input thread); it never touches the
-//! audio thread. Clock-OUT generation lives engine-side in MidiClockOut.
+//! Each core's engine makes a handle, supplying three host callbacks, and feeds it
+//! decoded-from-the-wire `/clockwork/midi/*` OSC via [`clockwork_midi_handle_osc`].
+//! The handles share the process's MIDI ([`ProcessMidi`]): one midir device IO
+//! (and midir's own input thread), which never touches the audio thread.
+//! Clock-OUT generation lives engine-side in MidiClockOut.
 //!
 //! Data flows back to the engine through the callbacks:
 //! * `emit` — a `/clockwork/midi/in/*` (or `/clockwork/midi/ports*`) OSC packet
@@ -20,9 +21,10 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::device::{InputCallback, MidiIo};
+use clockwork_log::ClockworkCore;
 use crate::message::MidiMessage;
 use crate::schema::{decode_out, encode_in_at, encode_ports, encode_ports_reply, OutCommand};
 use crate::sync::{transport_event, TransportEvent};
@@ -106,14 +108,84 @@ struct InputState {
     muted: HashSet<String>,
 }
 
-/// The opaque handle the C++ side owns.
-pub struct ClockworkMidi {
+/// One core in the process's MIDI: its callbacks, and the ports it follows
+/// the clock of.
+struct Listener {
+    host: Host,
+    input: Arc<Mutex<InputState>>,
+}
+
+type Listeners = Mutex<Vec<Arc<Listener>>>;
+
+/// The process's MIDI (docs/ENGINES.md): one OS client and one watcher,
+/// shared by every core's handle and gone with the last. What a port sends
+/// and what changes in the ports reach every core; which ports are open is
+/// the process's, as the devices are. The first core's app name names the
+/// client.
+struct ProcessMidi {
     // Declared first so it drops first: stopping the watcher's thread before the
     // rest tears down guarantees no refresh runs against half-dropped state.
     _watcher: crate::watcher::Watcher,
-    host: Host,
     io: Arc<Mutex<MidiIo>>,
-    input: Arc<Mutex<InputState>>,
+    listeners: Arc<Listeners>,
+}
+
+static PROCESS: Mutex<Option<Weak<ProcessMidi>>> = Mutex::new(None);
+
+/// The process's MIDI, started by the first core to ask, which is told what
+/// starting it found.
+fn process_midi(core: *mut ClockworkCore, client_name: String) -> Arc<ProcessMidi> {
+    let mut held = PROCESS.lock().unwrap();
+    if let Some(midi) = held.as_ref().and_then(Weak::upgrade) {
+        return midi;
+    }
+    let listeners: Arc<Listeners> = Arc::new(Mutex::new(Vec::new()));
+
+    // The input callback runs inside the OS MIDI stack's callback frame
+    // (CoreMIDI read proc / WinRT handler), so it must never unwind. It holds
+    // the list while it calls each core, so a core that leaves waits for it.
+    let heard = listeners.clone();
+    let on_input: InputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, when: u64, bytes: &[u8]| {
+        no_unwind((), || handle_input(&heard.lock().unwrap(), norm, raw, ts, when, bytes));
+    });
+    let io = Arc::new(Mutex::new(MidiIo::new(core, client_name, on_input)));
+    // Published so another subsystem can send through the same
+    // connections rather than opening a second client — see
+    // device::publish_shared. Weakly held there, so the last core's handle
+    // still closes every port.
+    crate::device::publish_shared(&io);
+
+    // Native hot-swap: the OS device-change notification (WinRT DeviceWatcher /
+    // CoreMIDI notify / ALSA announce) re-enumerates and diff-broadcasts
+    // `/clockwork/midi/ports` directly — no JUCE, no audio-thread, no polling.
+    let (watch_listeners, watch_io) = (listeners.clone(), io.clone());
+    let on_change: crate::watcher::OnChange =
+        Arc::new(move || no_unwind((), || refresh_and_broadcast(&watch_listeners, &watch_io)));
+    let midi = Arc::new(ProcessMidi { _watcher: crate::watcher::Watcher::new(on_change), io, listeners });
+    *held = Some(Arc::downgrade(&midi));
+    midi
+}
+
+/// Every core's, under the list's lock: a core that leaves waits for it.
+fn emit_all(listeners: &Listeners, kind: i32, osc: &[u8]) {
+    for l in listeners.lock().unwrap().iter() {
+        l.host.emit(kind, osc);
+    }
+}
+
+/// The opaque handle the C++ side owns: one core's place in the process's
+/// MIDI.
+pub struct ClockworkMidi {
+    me: Arc<Listener>,
+    midi: Arc<ProcessMidi>,
+}
+
+impl Drop for ClockworkMidi {
+    fn drop(&mut self) {
+        // Out of the list under its lock, so once this returns no callback
+        // reaches the core; the last handle then closes every port.
+        self.midi.listeners.lock().unwrap().retain(|l| !Arc::ptr_eq(l, &self.me));
+    }
 }
 
 /// Send now, or hand the platform the delay if the message is for later.
@@ -136,7 +208,7 @@ impl ClockworkMidi {
     fn handle(&self, cmd: OutCommand) {
         match cmd {
             OutCommand::Send { port, msg, when } => {
-                let mut io = self.io.lock().unwrap();
+                let mut io = self.midi.io.lock().unwrap();
                 // channel 0 is the "all channels" sentinel (wire channel -1):
                 // fan a channel-voice message out to all 16 channels.
                 if msg.channel() == Some(0) {
@@ -148,7 +220,7 @@ impl ClockworkMidi {
                 }
             }
             OutCommand::SendRaw { port, bytes, when } => {
-                send_at_or_now(&mut self.io.lock().unwrap(), &port, &bytes, when)
+                send_at_or_now(&mut self.midi.io.lock().unwrap(), &port, &bytes, when)
             }
 
             // One immediate clock pulse, for a caller that wants a single 0xF8.
@@ -156,12 +228,12 @@ impl ClockworkMidi {
             // the engine's ClockworkClock-timed MidiClockOut (C++), which
             // hands each tick straight to a sink carrying its own time —
             // those pulses do NOT come back through here.
-            OutCommand::ClockTick { port } => self.io.lock().unwrap().send(&port, &[0xF8]),
+            OutCommand::ClockTick { port } => self.midi.io.lock().unwrap().send(&port, &[0xF8]),
             // Per-port clock-follow toggle. Every enabled input is tracked by
             // default; this opts a port out (mute) or back in. Muting stops the
             // pulse feed so its engine-side timeline goes stale and is reclaimed.
             OutCommand::ClockSync { port, enabled } => {
-                let mut is = self.input.lock().unwrap();
+                let mut is = self.me.input.lock().unwrap();
                 if enabled {
                     is.muted.remove(&port);
                 } else {
@@ -171,7 +243,7 @@ impl ClockworkMidi {
 
             OutCommand::Enable { port, input, enabled } => {
                 {
-                    let mut io = self.io.lock().unwrap();
+                    let mut io = self.midi.io.lock().unwrap();
                     if port == "*" {
                         io.enable_all(input, enabled);
                     } else if input {
@@ -183,7 +255,7 @@ impl ClockworkMidi {
                 self.push_ports();
             }
             OutCommand::Refresh => {
-                self.io.lock().unwrap().refresh();
+                self.midi.io.lock().unwrap().refresh();
                 self.push_ports();
             }
             OutCommand::PortsList => self.reply_ports(),
@@ -194,50 +266,54 @@ impl ClockworkMidi {
     }
 
     fn reply_ports(&self) {
-        let (ins, outs) = self.io.lock().unwrap().port_lists();
-        self.host.emit(EMIT_REPLY, &encode_ports_reply(&ins, &outs));
+        let (ins, outs) = self.midi.io.lock().unwrap().port_lists();
+        self.me.host.emit(EMIT_REPLY, &encode_ports_reply(&ins, &outs));
     }
 
+    // The ports are the process's, so every core is told.
     fn push_ports(&self) {
-        let (ins, outs) = self.io.lock().unwrap().port_lists();
-        self.host.emit(EMIT_BROADCAST, &encode_ports(&ins, &outs));
+        let (ins, outs) = self.midi.io.lock().unwrap().port_lists();
+        emit_all(&self.midi.listeners, EMIT_BROADCAST, &encode_ports(&ins, &outs));
     }
 }
 
-/// Handle one inbound message (runs on midir's input thread). `norm` is the
-/// normalised port handle (estimator key + /clockwork/midi/in address + timeline key);
-/// `raw` is the friendly OS name passed through for timeline labelling.
-fn handle_input(host: &Host, input: &Arc<Mutex<InputState>>,
-                norm: &str, raw: &str, ts_us: u64, when: u64, bytes: &[u8]) {
+/// Handle one inbound message (runs on midir's input thread) for every core.
+/// `norm` is the normalised port handle (estimator key + /clockwork/midi/in
+/// address + timeline key); `raw` is the friendly OS name passed through for
+/// timeline labelling.
+fn handle_input(listeners: &[Arc<Listener>], norm: &str, raw: &str, ts_us: u64, when: u64, bytes: &[u8]) {
     let msg = match MidiMessage::parse(bytes) {
         Some(m) => m,
         None => return,
     };
+    // Opted out via /clockwork/midi/clock/sync: the port drives none of that
+    // core's timelines.
+    let follows = |l: &Listener| !l.input.lock().unwrap().muted.contains(norm);
 
     // Clock pulses feed each port's engine-side timeline (beat + tempo are
     // computed in ClockworkClock), so we just forward every 0xF8 with its OS
-    // timestamp unless the port is muted. They never enter the /clockwork/midi/in ring.
+    // timestamp. They never enter the /clockwork/midi/in ring.
     if msg.is_clock_pulse() {
-        if input.lock().unwrap().muted.contains(norm) {
-            return; // opted out via /clockwork/midi/clock/sync — don't drive a timeline
+        for l in listeners.iter().filter(|l| follows(l)) {
+            l.host.clock(norm, raw, ts_us);
         }
-        host.clock(norm, raw, ts_us);
         return;
     }
 
-    // Transport/position drives the originating port's timeline (unless muted).
+    // Transport/position drives the originating port's timeline.
     if let Some(ev) = transport_event(&msg) {
-        let muted = input.lock().unwrap().muted.contains(norm);
-        if !muted {
-            let (kind, beat) = transport_code(ev);
-            host.transport(norm, raw, kind, beat);
+        let (kind, beat) = transport_code(ev);
+        for l in listeners.iter().filter(|l| follows(l)) {
+            l.host.transport(norm, raw, kind, beat);
         }
     }
 
     // Everything else surfaces as a /clockwork/midi/in/* event for the
     // engine/clients, carrying the moment the OS stamped it, as on the web.
     if let Some(osc) = encode_in_at(norm, &msg, when) {
-        host.emit(EMIT_BROADCAST, &osc);
+        for l in listeners {
+            l.host.emit(EMIT_BROADCAST, &osc);
+        }
     }
 }
 
@@ -252,87 +328,60 @@ fn transport_code(ev: TransportEvent) -> (i32, f64) {
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
-/// Create the MIDI subsystem. Returns an owning pointer (null on failure); free
-/// with [`clockwork_midi_destroy`]. The callbacks and `ctx` must remain valid until then.
+/// A core's place in the process's MIDI, which starts when no core holds it.
+/// Returns an owning pointer (null on failure); free with
+/// [`clockwork_midi_destroy`]. The callbacks and `ctx` must remain valid until then.
 ///
 /// # Safety
 /// `app_name` is a NUL-terminated C string or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_create(
+    core: *mut ClockworkCore,
     ctx: *mut c_void,
     emit: EmitFn,
     clock: ClockFn,
     transport: TransportFn,
     app_name: *const std::ffi::c_char,
 ) -> *mut ClockworkMidi {
-    // The OS MIDI registry client name other apps see; NULL/"" falls back.
-    let client_name = if app_name.is_null() {
-        String::new()
-    } else {
-        // SAFETY: NUL-terminated per the contract above; null was checked.
-        unsafe { std::ffi::CStr::from_ptr(app_name) }
-            .to_string_lossy()
-            .into_owned()
-    };
-    let client_name = if client_name.is_empty() {
-        "clockwork".to_string()
-    } else {
-        client_name
-    };
     no_unwind(std::ptr::null_mut(), || {
-        let host = Host {
-            ctx,
-            emit,
-            clock,
-            transport,
+        // The OS MIDI registry client name other apps see; NULL/"" falls back.
+        let client_name = if app_name.is_null() {
+            String::new()
+        } else {
+            // SAFETY: NUL-terminated per the contract above; null was checked.
+            unsafe { std::ffi::CStr::from_ptr(app_name) }
+                .to_string_lossy()
+                .into_owned()
         };
-
-        let input = Arc::new(Mutex::new(InputState::default()));
-
-        // The input callback runs inside the OS MIDI stack's callback frame
-        // (CoreMIDI read proc / WinRT handler), so it must never unwind.
-        let in_state = input.clone();
-        let on_input: InputCallback = Arc::new(move |norm: &str, raw: &str, ts: u64, when: u64, bytes: &[u8]| {
-            no_unwind((), || handle_input(&host, &in_state, norm, raw, ts, when, bytes));
+        let client_name = if client_name.is_empty() {
+            "clockwork".to_string()
+        } else {
+            client_name
+        };
+        let me = Arc::new(Listener {
+            host: Host { ctx, emit, clock, transport },
+            input: Arc::new(Mutex::new(InputState::default())),
         });
-        let io = Arc::new(Mutex::new(MidiIo::new(client_name, on_input)));
-        // Published so another subsystem can send through the same
-        // connections rather than opening a second client — see
-        // device::publish_shared. Weakly held there, so this stays the
-        // only owner and clockwork_midi_destroy still closes every port.
-        crate::device::publish_shared(&io);
-
-        // Native hot-swap: the OS device-change notification (WinRT DeviceWatcher /
-        // CoreMIDI notify / ALSA announce) re-enumerates and diff-broadcasts
-        // `/clockwork/midi/ports` directly — no JUCE, no audio-thread, no polling.
-        let watch_host = host;
-        let watch_io = io.clone();
-        let on_change: crate::watcher::OnChange =
-            Arc::new(move || no_unwind((), || refresh_and_broadcast(&watch_host, &watch_io)));
-        let watcher = crate::watcher::Watcher::new(on_change);
-
-        Box::into_raw(Box::new(ClockworkMidi {
-            _watcher: watcher,
-            host,
-            io,
-            input,
-        }))
+        let midi = process_midi(core, client_name);
+        midi.listeners.lock().unwrap().push(me.clone());
+        Box::into_raw(Box::new(ClockworkMidi { me, midi }))
     })
 }
 
-/// Destroy the subsystem: closes all ports.
+/// Leave the process's MIDI; the last core's handle closes every port.
 ///
 /// # Safety
 /// `handle` is null or from [`clockwork_midi_create`], not yet destroyed,
 /// and nothing uses it afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_destroy(handle: *mut ClockworkMidi) {
-    if handle.is_null() {
-        return;
-    }
-    // Box dropped here → `io` drops → all midir connections close.
-    // SAFETY: the box `clockwork_midi_create` leaked, freed once.
-    no_unwind((), || drop(unsafe { Box::from_raw(handle) }));
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the box `clockwork_midi_create` leaked, freed once.
+        drop(unsafe { Box::from_raw(handle) })
+    })
 }
 
 /// One wire message from [`clockwork_midi_encode_out`]: the port it is for (`"*"` =
@@ -367,12 +416,12 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
     ctx: *mut c_void,
     cb: EncodeOutFn,
 ) -> i32 {
-    if data.is_null() {
-        return 0;
-    }
-    // SAFETY: readable for `len` bytes, per the contract; null was refused.
-    let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
     no_unwind(0, || {
+        if data.is_null() {
+            return 0;
+        }
+        // SAFETY: readable for `len` bytes, per the contract; null was refused.
+        let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
         let emit = |port: &str, wire: &[u8], when: u64| {
             cb(ctx, port.as_ptr(), port.len() as u32, wire.as_ptr(), wire.len() as u32,
                clockwork_osc::Timetag::from_ntp(when));
@@ -407,18 +456,20 @@ pub unsafe extern "C" fn clockwork_midi_encode_out(
 /// bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_handle_osc(handle: *mut ClockworkMidi, data: *const u8, len: u32) -> *const c_char {
-    if handle.is_null() || data.is_null() {
-        return Refusal::Malformed.reason().as_ptr();
-    }
-    // SAFETY: a live handle and a readable byte string, per the contract;
-    // nulls were refused above.
-    let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
-    no_unwind(ptr::null(), || match decode_out(bytes) {
-        Ok(cmd) => {
-            me.handle(cmd);
-            ptr::null()
+    no_unwind(ptr::null(), || {
+        if handle.is_null() || data.is_null() {
+            return Refusal::Malformed.reason().as_ptr();
         }
-        Err(refusal) => refusal.reason().as_ptr(),
+        // SAFETY: a live handle and a readable byte string, per the contract;
+        // nulls were refused above.
+        let (me, bytes) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
+        match decode_out(bytes) {
+            Ok(cmd) => {
+                me.handle(cmd);
+                ptr::null()
+            }
+            Err(refusal) => refusal.reason().as_ptr(),
+        }
     })
 }
 
@@ -429,19 +480,21 @@ pub unsafe extern "C" fn clockwork_midi_handle_osc(handle: *mut ClockworkMidi, d
 /// `handle` is null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_emit_ports(handle: *mut ClockworkMidi) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: a live handle, per the contract.
-    let me = unsafe { &*handle };
-    no_unwind((), || me.reply_ports());
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let me = unsafe { &*handle };
+        me.reply_ports()
+    })
 }
 
 /// Re-enumerate devices and, only if the port list actually changed, broadcast
 /// the updated `/clockwork/midi/ports` to subscribers. Shared by the C ABI [`clockwork_midi_refresh`]
 /// and the native hot-swap [`crate::watcher::Watcher`]; the change check keeps a
 /// device-event storm from spamming `/clockwork/midi/ports`.
-fn refresh_and_broadcast(host: &Host, io: &Mutex<MidiIo>) {
+fn refresh_and_broadcast(listeners: &Listeners, io: &Mutex<MidiIo>) {
     let updated = {
         let mut io = io.lock().unwrap();
         let before = io.port_lists();
@@ -450,7 +503,7 @@ fn refresh_and_broadcast(host: &Host, io: &Mutex<MidiIo>) {
         if after != before { Some(after) } else { None }
     };
     if let Some((ins, outs)) = updated {
-        host.emit(EMIT_BROADCAST, &encode_ports(&ins, &outs));
+        emit_all(listeners, EMIT_BROADCAST, &encode_ports(&ins, &outs));
     }
 }
 
@@ -463,12 +516,14 @@ fn refresh_and_broadcast(host: &Host, io: &Mutex<MidiIo>) {
 /// `handle` is null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_midi_refresh(handle: *mut ClockworkMidi) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: a live handle, per the contract.
-    let me = unsafe { &*handle };
-    no_unwind((), || refresh_and_broadcast(&me.host, &me.io));
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, per the contract.
+        let me = unsafe { &*handle };
+        refresh_and_broadcast(&me.midi.listeners, &me.midi.io)
+    })
 }
 
 #[cfg(test)]
@@ -492,15 +547,67 @@ mod tests {
         // The web stamps each event with when it arrived; natively the OS
         // stamps it at the system boundary, and that stamp rides on the event
         // as its trailing timetag, so a client reads one shape on every host.
-        let host = Host { ctx: std::ptr::null_mut(), emit: capture, clock: no_clock, transport: no_transport };
-        let input = Arc::new(Mutex::new(InputState::default()));
+        let me = Arc::new(Listener {
+            host: Host { ctx: std::ptr::null_mut(), emit: capture, clock: no_clock, transport: no_transport },
+            input: Arc::new(Mutex::new(InputState::default())),
+        });
         EMITTED.lock().unwrap().clear();
         let when = 0xE000_0000_8000_0000u64;
-        handle_input(&host, &input, "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
+        handle_input(&[me], "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
         let sent = EMITTED.lock().unwrap().clone();
         assert_eq!(sent.len(), 1);
         let m = osc::decode(&sent[0]).unwrap();
         assert_eq!(m.addr, clockwork_osc::clockwork_sys!("midi/in/note_on"));
         assert_eq!(m.args.last(), Some(&OscArg::TimeTag(when)));
+    }
+
+    // What each core's handle was told, by core.
+    static HEARD: StdMutex<Vec<(usize, Vec<u8>)>> = StdMutex::new(Vec::new());
+
+    extern "C" fn heard_by(ctx: *mut c_void, _: i32, osc: *const u8, len: u32) {
+        // SAFETY: the bytes Host::emit hands over, for this call.
+        let bytes = unsafe { slice::from_raw_parts(osc, len as usize) };
+        HEARD.lock().unwrap().push((ctx as usize, bytes.to_vec()));
+    }
+
+    fn heard(core: usize, addr: &str) -> usize {
+        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && osc::decode(b).is_some_and(|m| m.addr == addr)).count()
+    }
+
+    // The process's MIDI is every core's (docs/ENGINES.md, suspect 9):
+    // one OS client, what a port sends and what changes in the ports reach
+    // every core, and the client stays while any core holds it.
+    #[test]
+    fn every_core_hears_the_process_midi_and_it_stays_while_any_core_does() {
+        HEARD.lock().unwrap().clear();
+        // SAFETY: callbacks that outlive the handles, and no app name.
+        let make = |core: usize| unsafe { clockwork_midi_create(ptr::null_mut(), ptr::without_provenance_mut(core), heard_by, no_clock, no_transport, ptr::null()) };
+        let (a, b) = (make(1), make(2));
+        assert!(!a.is_null() && !b.is_null());
+
+        crate::device::shared().unwrap().lock().unwrap().hear("keys", "Keys", 0, 0, &[0x90, 60, 100]);
+        let note_on = clockwork_osc::clockwork_sys!("midi/in/note_on");
+        assert_eq!((heard(1, note_on), heard(2, note_on)), (1, 1), "a note from a port reaches every core");
+
+        // Closing no input at all still says what the ports are, to every core.
+        let close = osc::encode(clockwork_osc::clockwork_sys!("midi/in/enable"), &[OscArg::Str("*".into()), OscArg::Int(0)]);
+        // SAFETY: a live handle and a readable packet.
+        assert!(unsafe { clockwork_midi_handle_osc(a, close.as_ptr(), close.len() as u32) }.is_null());
+        // Read while no delivery is under way: a device plugged in tells
+        // every core at once, at any time.
+        let ports = clockwork_osc::clockwork_sys!("midi/ports");
+        let (one, two) = {
+            // SAFETY: a live handle.
+            let _quiet = unsafe { &*a }.midi.listeners.lock().unwrap();
+            (heard(1, ports), heard(2, ports))
+        };
+        assert!(one >= 1 && one == two, "a change in the ports reaches every core: {one}, {two}");
+
+        // SAFETY: each handle destroyed once, and not used after.
+        unsafe { clockwork_midi_destroy(b) };
+        assert!(crate::device::shared().is_some(), "a core still holds the process's MIDI");
+        // SAFETY: as above.
+        unsafe { clockwork_midi_destroy(a) };
+        assert!(crate::device::shared().is_none(), "the last core took it with it");
     }
 }

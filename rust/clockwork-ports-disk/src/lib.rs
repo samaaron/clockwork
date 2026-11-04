@@ -24,3 +24,11 @@ pub mod pace;
 pub mod sink;
 pub mod source;
 pub mod wav;
+
+/// The port a worker runs on: the table it is in, its handle there, and
+/// its channel count as the worker found it at open.
+pub(crate) struct Feed<'a> {
+    pub ports: &'a clockwork_ports::registry::Ports,
+    pub port: u32,
+    pub channels: usize,
+}

@@ -55,7 +55,7 @@ bool mapsWritable(int fd, size_t bytes) {
 
 TEST_CASE("shm-security: the published segment is anonymous, owner-only, close-on-exec and handed out read-only",
           "[shm][security]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     const int rw = creator.native_handle();
     const int ro = creator.reader_handle();
     REQUIRE(rw >= 0);
@@ -100,13 +100,13 @@ TEST_CASE("shm-security: the published segment is anonymous, owner-only, close-o
 
 TEST_CASE("shm: the published segment is the header and the arena, and nothing a client writes",
           "[shm]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     // The whole of it: the header's reserved span, then the arena blob.
-    CHECK(creator.segment_size() == detail_shm_segment::SHM_BLOB_OFFSET + ARENA_SIZE);
+    CHECK(creator.segment_size() == detail_shm_segment::SHM_BLOB_OFFSET + clockwork::kDefaultLayout.arena_bytes);
     auto* hdr = reinterpret_cast<const detail_shm_segment::shm_segment_header*>(
         creator.get_base() - detail_shm_segment::SHM_BLOB_OFFSET);
     CHECK(hdr->blob_offset == detail_shm_segment::SHM_BLOB_OFFSET);
-    CHECK(hdr->blob_size   == ARENA_SIZE);
+    CHECK(hdr->blob_size   == clockwork::kDefaultLayout.arena_bytes);
     // Unpublished until the engine says so.
     CHECK(hdr->magic == 0);
     creator.publish();
@@ -182,7 +182,7 @@ TEST_CASE("shm: the command segment holds the peer plane and the two lanes, one 
 }
 
 TEST_CASE("shm: the arena's table says where the lanes are", "[shm][peer]") {
-    shm_segment_creator published;
+    shm_segment_creator published{clockwork::kDefaultLayout};
     shm_command_segment_creator cmd;
     // The engine tells the published arena where the command segment put
     // them: offsets from the command segment's base, in that space.
@@ -210,8 +210,8 @@ TEST_CASE("shm: the arena's table says where the lanes are", "[shm][peer]") {
 TEST_CASE("shm-security: two creators never share memory", "[shm][security]") {
     // Nothing is named, so there is nothing to collide on: each creator gets
     // its own pages, whatever else exists.
-    shm_segment_creator a;
-    shm_segment_creator b;
+    shm_segment_creator a{clockwork::kDefaultLayout};
+    shm_segment_creator b{clockwork::kDefaultLayout};
     CHECK(a.native_handle() != b.native_handle());
     a.get_base()[0] = 1;
     b.get_base()[0] = 2;
@@ -261,7 +261,7 @@ TEST_CASE("shm-security: a reader's handle given to the peer's class is refused,
     // The two segments have different magics: a client that asked for one
     // and was handed the other must say so rather than read the wrong
     // layout.
-    shm_segment_creator published;
+    shm_segment_creator published{clockwork::kDefaultLayout};
     published.publish();
     shm_command_segment_creator cmd;
     bool threw = false;
@@ -276,7 +276,7 @@ TEST_CASE("shm-security: a reader's handle given to the peer's class is refused,
 
 TEST_CASE("shm-security: stream readers pin the client mapping (no dangling reads)",
           "[shm][security]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
 
     // An observer hands reader copies to long-lived widgets, then remaps by
@@ -296,7 +296,7 @@ TEST_CASE("shm-security: stream readers pin the client mapping (no dangling read
 
 TEST_CASE("shm-security: stream reader clamps corrupt slot geometry",
           "[shm][security]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
     shm_segment_client client(shm_dup_handle(creator.reader_handle()));
     auto reader = client.get_tap_stream_reader(0);
@@ -306,7 +306,7 @@ TEST_CASE("shm-security: stream reader clamps corrupt slot geometry",
     // slot must clamp to the compile-time ring geometry rather than push
     // reads out of bounds (or divide by a zero capacity).
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
+        creator.get_base() + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 0xFFFFu;
     slot->capacity_frames = 0;
@@ -330,7 +330,7 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     // header. Simulated by moving regions in the header after creation: the
     // client must read from where the header says, not from where this build's
     // constants would put them.
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
     // The table is the arena's own, at the front of the blob.
     auto* arena = const_cast<ClockworkArenaHeader*>(arenaHeader(creator.get_base()));
@@ -358,7 +358,7 @@ TEST_CASE("shm: a client follows the engine's published layout, not its own cons
     CHECK(client.layout().window_offset == movedStats);
 
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
+        creator.get_base() + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 2;
     slot->capacity_frames = TAP_RING_FRAMES;   // more than the engine says it has
@@ -375,7 +375,7 @@ TEST_CASE("shm-security: client refuses a layout that runs past the segment or s
     // arena's (where every region inside the blob is).
     using H = detail_shm_segment::shm_segment_header;
     auto refused = [](auto tamper) {
-        shm_segment_creator creator;
+        shm_segment_creator creator{clockwork::kDefaultLayout};
         creator.publish();
         auto* hdr = reinterpret_cast<H*>(creator.get_base() - detail_shm_segment::SHM_BLOB_OFFSET);
         auto* arena = const_cast<ClockworkArenaHeader*>(arenaHeader(creator.get_base()));
@@ -421,7 +421,7 @@ TEST_CASE("shm-security: client refuses a layout that runs past the segment or s
 
 TEST_CASE("shm client exposes the observer views inside its own mapping",
           "[shm]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
     shm_segment_client client(shm_dup_handle(creator.reader_handle()));
     const uint8_t* base = client.get_base();
@@ -429,20 +429,20 @@ TEST_CASE("shm client exposes the observer views inside its own mapping",
     // The rings are the engine's; a reader sees where they are and how full
     // they are, and can write none of it.
     auto in = client.get_in_ring();
-    CHECK(in.base == base + IN_RING_START);
-    CHECK(in.size == IN_RING_SIZE);
+    CHECK(in.base == base + clockwork::kDefaultLayout.in_ring_start);
+    CHECK(in.size == clockwork::kDefaultLayout.profile.in_ring_bytes);
     REQUIRE(in.head != nullptr);
     REQUIRE(in.tail != nullptr);
     static_assert(std::is_const_v<std::remove_pointer_t<decltype(in.head)>>, "a reader's cursors are const");
     static_assert(std::is_const_v<std::remove_pointer_t<decltype(in.base)>>, "a reader's ring bytes are const");
 
     auto out = client.get_out_ring();
-    CHECK(out.base == base + RT_OUT_RING_START);
-    CHECK(out.size == RT_OUT_RING_SIZE);
+    CHECK(out.base == base + clockwork::kDefaultLayout.rt_out_ring_start);
+    CHECK(out.size == clockwork::kDefaultLayout.profile.rt_out_ring_bytes);
 
     auto nrt = client.get_nrt_out_ring();
-    CHECK(nrt.base == base + NRT_OUT_RING_START);
-    CHECK(nrt.size == NRT_OUT_RING_SIZE);
+    CHECK(nrt.base == base + clockwork::kDefaultLayout.nrt_out_ring_start);
+    CHECK(nrt.size == clockwork::kDefaultLayout.profile.nrt_out_ring_bytes);
 
     CHECK(client.get_metrics_flat()
           == reinterpret_cast<const std::atomic<uint32_t>*>(base + METRICS_START));
@@ -462,8 +462,9 @@ TEST_CASE("shm: the returns area is shared with the peer, and addressed by offse
     shm_command_client peer(shm_dup_handle(cmd.native_handle()));
 
     // THE BULK LANES, and the reason they are in a segment rather than in the
-    // arena: the arena is arena_storage, a static array, and multi-megabyte
-    // .bss would be paid by every target including the embedded ones. The
+    // arena: an arena is a core's own memory or a device's static storage,
+    // and multi-megabyte lanes there would be paid by every target including
+    // the embedded ones. The
     // segment is mmap'd, so this costs nothing where it is not mapped.
     uint8_t*       engineSide = cmd.get_returns();
     const uint8_t* peerSide   = peer.get_returns();  // const: the guest writes this

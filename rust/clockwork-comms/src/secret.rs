@@ -88,15 +88,17 @@ fn os_random(out: &mut [u8]) -> std::io::Result<()> {
 /// `bytes` is null or readable for 32 bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_comms_secret_from_bytes(bytes: *const u8) -> *mut ClockworkCommsSecret {
-    if bytes.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: readable for 32 bytes, per the contract.
-    let bytes: [u8; SECRET_BYTES] = unsafe { *bytes.cast::<[u8; SECRET_BYTES]>() };
-    match ClockworkCommsSecret::from_bytes(bytes) {
-        Some(s) => Box::into_raw(Box::new(s)),
-        None => std::ptr::null_mut(),
-    }
+    no_unwind(core::ptr::null_mut(), || {
+        if bytes.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: readable for 32 bytes, per the contract.
+        let bytes: [u8; SECRET_BYTES] = unsafe { *bytes.cast::<[u8; SECRET_BYTES]>() };
+        match ClockworkCommsSecret::from_bytes(bytes) {
+            Some(s) => Box::into_raw(Box::new(s)),
+            None => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// A new secret from the operating system's random source, for a process
@@ -121,17 +123,19 @@ pub unsafe extern "C" fn clockwork_comms_secret_auth_packet(
     out: *mut u8,
     cap: u32,
 ) -> u32 {
-    if secret.is_null() || out.is_null() {
-        return 0;
-    }
-    // SAFETY: a live secret, per the contract.
-    let packet = unsafe { &*secret }.auth_packet();
-    if packet.len() > cap as usize {
-        return 0;
-    }
-    // SAFETY: `out` is writable for `cap` bytes and `packet` fits.
-    unsafe { std::ptr::copy_nonoverlapping(packet.as_ptr(), out, packet.len()) };
-    packet.len() as u32
+    no_unwind(0, || {
+        if secret.is_null() || out.is_null() {
+            return 0;
+        }
+        // SAFETY: a live secret, per the contract.
+        let packet = unsafe { &*secret }.auth_packet();
+        if packet.len() > cap as usize {
+            return 0;
+        }
+        // SAFETY: `out` is writable for `cap` bytes and `packet` fits.
+        unsafe { std::ptr::copy_nonoverlapping(packet.as_ptr(), out, packet.len()) };
+        packet.len() as u32
+    })
 }
 
 /// A copy a server can own. Null for null. Free with
@@ -143,11 +147,13 @@ pub unsafe extern "C" fn clockwork_comms_secret_auth_packet(
 pub unsafe extern "C" fn clockwork_comms_secret_clone(
     secret: *const ClockworkCommsSecret,
 ) -> *mut ClockworkCommsSecret {
-    if secret.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: live, per the contract.
-    Box::into_raw(Box::new(unsafe { &*secret }.clone()))
+    no_unwind(core::ptr::null_mut(), || {
+        if secret.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: live, per the contract.
+        Box::into_raw(Box::new(unsafe { &*secret }.clone()))
+    })
 }
 
 /// 1 if `packet` is exactly this secret's auth packet, compared in time that
@@ -161,22 +167,26 @@ pub unsafe extern "C" fn clockwork_comms_secret_admits(
     packet: *const u8,
     len: u32,
 ) -> i32 {
-    if secret.is_null() || packet.is_null() {
-        return 0;
-    }
-    // SAFETY: live and readable for `len` bytes, per the contract.
-    let (secret, packet) = unsafe { (&*secret, std::slice::from_raw_parts(packet, len as usize)) };
-    secret.admits(packet) as i32
+    no_unwind(0, || {
+        if secret.is_null() || packet.is_null() {
+            return 0;
+        }
+        // SAFETY: live and readable for `len` bytes, per the contract.
+        let (secret, packet) = unsafe { (&*secret, std::slice::from_raw_parts(packet, len as usize)) };
+        secret.admits(packet) as i32
+    })
 }
 
 /// # Safety
 /// `secret` is null or from a secret function above, freed once.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_comms_secret_free(secret: *mut ClockworkCommsSecret) {
-    if !secret.is_null() {
-        // SAFETY: the box a secret function leaked, freed once, here.
-        drop(unsafe { Box::from_raw(secret) });
-    }
+    no_unwind((), || {
+        if !secret.is_null() {
+            // SAFETY: the box a secret function leaked, freed once, here.
+            drop(unsafe { Box::from_raw(secret) });
+        }
+    })
 }
 
 #[cfg(test)]

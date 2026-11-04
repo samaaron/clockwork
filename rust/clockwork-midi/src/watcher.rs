@@ -244,6 +244,7 @@ mod imp {
 // ── macOS: CoreMIDI client notifications ──────────────────────────────────────
 #[cfg(target_os = "macos")]
 mod imp {
+    use clockwork_fence::no_unwind;
     use super::{Coalescer, OnChange};
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -317,8 +318,10 @@ mod imp {
 
     // The stop source's perform callback: stops the run loop it fired on.
     extern "C" fn stop_this_run_loop(_: *const c_void) {
-        // SAFETY: the current thread's run loop, which is the one running.
-        unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
+        no_unwind((), || {
+            // SAFETY: the current thread's run loop, which is the one running.
+            unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
+        })
     }
 
     fn notify_loop(stop: Arc<AtomicBool>, stopper: Arc<Mutex<Option<Stopper>>>, coalescer: Coalescer) {

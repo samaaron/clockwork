@@ -29,6 +29,7 @@ store = []
 parse = []
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 # For `clockwork_sys!`, the ONE place the reserved prefix is spelled in the Rust tree.
 # The schedule parser derives every byte offset from it, so the parser cannot
 # fall out of step with the prefix.

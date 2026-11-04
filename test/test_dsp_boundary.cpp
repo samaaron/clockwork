@@ -34,6 +34,7 @@
 #include "clock/clock_math.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstring>
 #include "clock/timetag.h"
 
 #include <cstdint>
@@ -210,7 +211,7 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
 
     {
         const uint64_t at  = lanes_test::tick();
-        const float*   out = clockwork_audio_out();
+        const float*   out = clockwork_audio_out(lanes_test::core());
         for (uint32_t i = 0; i < bl; ++i)
             REQUIRE((out[i] != 0.0f) == onOld(at + i));
     }
@@ -224,7 +225,7 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
 
     {
         const uint64_t at  = lanes_test::tick();
-        const float*   out = clockwork_audio_out();
+        const float*   out = clockwork_audio_out(lanes_test::core());
         for (uint32_t i = 0; i < bl; ++i)
             REQUIRE((out[i] != 0.0f) == onNew(at + i));
     }
@@ -237,7 +238,7 @@ TEST_CASE("dsp boundary: a timed message waits in clockwork and arrives on time"
     lanes_test::drainRt();
     {
         const uint64_t at  = lanes_test::tick();
-        const float*   out = clockwork_audio_out();
+        const float*   out = clockwork_audio_out(lanes_test::core());
         for (uint32_t i = 0; i < bl; ++i)
             REQUIRE((out[i] != 0.0f) == onOld(at + i));
     }
@@ -326,14 +327,14 @@ TEST_CASE("dsp boundary: input reaches the DSP on the channel the host filled",
 
     // A different constant per channel, and a ramp within each, so a
     // half-block copy or an off-by-one offset is visible too.
-    float* in = clockwork_audio_in();
+    float* in = clockwork_audio_in(lanes_test::core());
     REQUIRE(in != nullptr);
     for (uint32_t ch = 0; ch < lanes_test::kInChannels; ++ch)
         for (uint32_t i = 0; i < bl; ++i)
             in[ch * bl + i] = static_cast<float>(ch + 1) + static_cast<float>(i) / 1000.0f;
 
     lanes_test::tick();
-    const float* out = clockwork_audio_out();
+    const float* out = clockwork_audio_out(lanes_test::core());
     REQUIRE(out != nullptr);
     for (uint32_t ch = 0; ch < lanes_test::kInChannels; ++ch)
         for (uint32_t i = 0; i < bl; ++i)
@@ -370,14 +371,32 @@ struct DirectDsp {
         cfg.block_size = 64;
         cfg.max_input_channels = max_in;
         cfg.max_output_channels = max_out;
-        const char* err = nullptr;
-        dsp = dsp_new(&cfg, nullptr, &err);
+        char err[DSP_REFUSAL_BYTES] = {};
+        dsp = dsp_new(&cfg, nullptr, err, sizeof err);
+        INFO(err);
         REQUIRE(dsp != nullptr);
     }
     ~DirectDsp() { dsp_free(dsp); }
 };
 
 } // namespace
+
+TEST_CASE("dsp boundary: a refusal is written into the host's buffer, cut short to fit",
+          "[dsp][boundary]") {
+    DspConfig cfg{};   // no rate and no block: refused
+    char err[DSP_REFUSAL_BYTES];
+    std::memset(err, 'x', sizeof err);
+    REQUIRE(dsp_new(&cfg, nullptr, err, sizeof err) == nullptr);
+    CHECK(std::string(err).find("dummy dsp") == 0);
+
+    // Eight bytes hold seven characters and the NUL, and nothing is written past them.
+    char small[12];
+    std::memset(small, 'x', sizeof small);
+    REQUIRE(dsp_new(&cfg, nullptr, small, 8) == nullptr);
+    CHECK(std::string(small, 7) == "dummy d");
+    CHECK(small[7] == '\0');
+    CHECK(small[8] == 'x');
+}
 
 TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
           "[dsp][channels]") {
@@ -485,7 +504,7 @@ TEST_CASE("dsp boundary: what the DSP logs leaves as an addressed OSC message",
 TEST_CASE("dsp boundary: the table names the guest's window once the guest binds",
           "[dsp][arena][audience]") {
     lanes_test::boot();
-    const ClockworkArenaHeader* h = clockwork_arena_header();
+    const ClockworkArenaHeader* h = clockwork_arena_header(lanes_test::core());
     REQUIRE(h != nullptr);
     const ClockworkArenaEntry* w = clockwork_arena_find(h, CLOCKWORK_ARENA_GUEST_WINDOW);
     REQUIRE(w != nullptr);

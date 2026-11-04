@@ -1,0 +1,78 @@
+scenario bulk
+boot rate=48000 block=64 in=2 out=2
+send 2f64756d6d792f6173736574732f6861736800002c6969000000000000010000
+send 2f64756d6d792f6173736574732f6861736800002c696900000003e800001000
+send 2f64756d6d792f626c6f622f70726f64756365002c696900000493e00000005a
+block 0 61e9de8e73879125
+  rt source=0 route=2 seq=0 /clockwork/debug 2f636c6f636b776f726b2f6465627567000000002c7300005b6d656d6f72795d205741524e494e473a2074657374206d656d6f72792070726f66696c652028434c4f434b574f524b5f53434f50455f5345434f4e44533d31302920e28094206172656e61206c61796f757420646966666572732066726f6d2070726f64756374696f6e20726561646572733b20646f206e6f74207368697020746869732062696e61727900000000
+  rt source=0 route=2 seq=1 /clockwork/debug 2f636c6f636b776f726b2f6465627567000000002c7300004453503a2064756d6d79203000000000
+  rt source=0 route=2 seq=2 /dummy/assets/is 2f64756d6d792f6173736574732f6973000000002c69690000010000744bab62
+  rt source=0 route=2 seq=3 /dummy/assets/is 2f64756d6d792f6173736574732f6973000000002c696900000010007d2b99e3
+  rt source=0 route=2 seq=4 /dummy/blob/at 2f64756d6d792f626c6f622f617400002c6969690000000000000000000493e0fdc0c645
+block 64 61e9de8e73879125
+block 128 61e9de8e73879125
+block 192 61e9de8e73879125
+returns dedff06484ce0aa5
+metric engineProcessCount 4
+metric engineMessagesProcessed 3
+metric engineMessagesDropped 0
+metric engineSchedulerDepth 0
+metric engineSchedulerPeakDepth 0
+metric engineSchedulerDropped 0
+metric engineSequenceGaps 0
+metric engineWasmErrors 0
+metric engineSchedulerLates 0
+metric oscOutMessagesSent 0
+metric oscOutBytesSent 0
+metric oscInMessagesReceived 5
+metric oscInBytesReceived 328
+metric oscInMessagesDropped 0
+metric oscInCorrupted 0
+metric debugMessagesReceived 2
+metric debugBytesReceived 152
+metric inBufferUsedBytes 0
+metric outBufferUsedBytes 0
+metric nrtOutBufferUsedBytes 0
+metric inBufferPeakBytes 0
+metric outBufferPeakBytes 408
+metric nrtOutBufferPeakBytes 0
+metric engineSchedulerMaxLateMs 0
+metric engineSchedulerLastLateMs 0
+metric engineSchedulerLastLateTick 0
+metric ringBufferDirectWriteFails 0
+metric linkPeers 0
+metric linkTempoMbpm 0
+metric linkBeatCenti 0
+metric linkPhaseCenti 0
+metric linkPlaying 0
+metric linkAudioInChannels 0
+metric linkAudioStreamRate 0
+metric linkAudioUnderruns 0
+metric linkAudioBufferedMs 0
+metric linkAudioDriftPpm 0
+metric linkAudioPublish 0
+metric linkAudioSinks 0
+metric engineSchedulerCapacity 512
+metric engineSchedulerPoolBytes 524288
+metric audioSampleRate 48000
+metric audioBlockSize 64
+metric audioOutputChannels 2
+metric audioInputChannels 2
+metric clockTempoMbpm 120000
+metric clockPlaying 0
+metric clockDriftUs 0
+metric clockOffsetMs 0
+metric audioContextState 0
+metric guestPoolUsedBytes 0
+metric guestPoolPeakBytes 0
+metric egressFramesRefused 0
+metric rustHeapUsedBytes 0
+metric rustHeapFallbacks 0
+metric guestMallocBytes 0
+metric guestMallocsProcessing 0
+metric mallocsAfterBoot 0
+metric mallocBytesAfterBoot 0
+metric egressFramesUndelivered 0
+metric clockAnchors 1
+metric engineSchedulerLateDropped 0
+metric cuesDropped 0

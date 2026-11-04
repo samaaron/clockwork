@@ -533,7 +533,7 @@ TEST_CASE("DeviceEvents: a device that cannot be opened again leaves the engine 
     cfg.sampleRate = 44100;
     EngineFixture fix(cfg);
     REQUIRE(fix.engine().currentDevice().activeSampleRate == 44100.0);
-    REQUIRE(clockwork_sample_rate() == 44100.0);
+    REQUIRE(clockwork_sample_rate(fix.engine().core()) == 44100.0);
 
     {   // going: no channels, and it will not open
         auto hold = fix.engine().testHoldSwapGate();
@@ -545,7 +545,7 @@ TEST_CASE("DeviceEvents: a device that cannot be opened again leaves the engine 
     REQUIRE(sys->reportOpenDeviceChanged());
 
     checkPlayingOn(fix, "Fake Speakers");
-    CHECK(clockwork_sample_rate() == 48000.0);
+    CHECK(clockwork_sample_rate(fix.engine().core()) == 48000.0);
 }
 
 TEST_CASE("DeviceEvents: a switch at the same rate that fails while the device "
@@ -562,7 +562,7 @@ TEST_CASE("DeviceEvents: a switch at the same rate that fails while the device "
     cfg.sampleRate = 44100;
     EngineFixture fix(cfg);
     subscribe(fix);
-    REQUIRE(clockwork_sample_rate() == 44100.0);
+    REQUIRE(clockwork_sample_rate(fix.engine().core()) == 44100.0);
 
     {   // the device playing goes as the switch begins
         auto hold = fix.engine().testHoldSwapGate();
@@ -572,7 +572,7 @@ TEST_CASE("DeviceEvents: a switch at the same rate that fails while the device "
     INFO("the switch said: " << done.argString(5));
 
     checkPlayingOn(fix, "Fake Speakers");
-    CHECK(clockwork_sample_rate() == 48000.0);
+    CHECK(clockwork_sample_rate(fix.engine().core()) == 48000.0);
 }
 
 TEST_CASE("DeviceEvents: the engine's own switch, reported back by the device, "

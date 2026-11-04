@@ -78,8 +78,10 @@ export async function bootEngine() {
   });
   const x = engine.exports;
   x.__wasm_call_ctors?.();
+  // The engine's core (clockwork_core.h): the one this memory holds, else a new one.
+  bootedCore = x.clockwork_core_held() || x.clockwork_core_new(0);
   x.clockwork_init(
-    48000, 128, 0, 2, 0,
+    bootedCore, 48000, 128, 0, 2, 0,
     L.guestMemoryOffset, L.guestMemorySize, 0, 0, L.memArenaSize,
     L.assetsOffset, L.assetsSize, L.returnsOffset, L.returnsSize);
   const arenaBase = x.get_arena_base();
@@ -135,7 +137,7 @@ export async function bootEngine() {
 
 /** Run one block of the engine: the tick, passing this host's frame count and its own time as the wall clock
  *  (the NTP epoch plus the audio rendered so far, like a self-driven host), so the engine never sees a gap. */
-let blockTime = 0, blockFrames = 0, bootedMemory = null;
+let blockTime = 0, blockFrames = 0, bootedMemory = null, bootedCore = 0;
 export function block(x) {
   // ClockworkBlockTime (lanes.h), 64 bytes in the engine's memory (the last booted: a test boots one engine):
   // u32 struct_bytes, u32 output_latency_frames (0), u64 audio_frames, f64 wall_ntp, f64 monotonic_secs (0),
@@ -146,6 +148,6 @@ export function block(x) {
   words[2] = blockFrames >>> 0;
   words[3] = Math.floor(blockFrames / 4294967296) >>> 0;
   new Float64Array(bootedMemory.buffer, blockTime + 16, 1)[0] = 2208988800 + blockFrames / 48000;
-  x.clockwork_tick(blockTime, 2, 0);
+  x.clockwork_tick(bootedCore, blockTime, 2, 0);
   blockFrames += 128;
 }

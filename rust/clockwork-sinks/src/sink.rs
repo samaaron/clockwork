@@ -121,6 +121,9 @@ pub struct Sink {
     /// Who calls [`Sink::pump`] — the crate's drain thread, or the caller.
     /// See [`crate::registry::Drive`].
     pub drive: crate::registry::Drive,
+    /// Whether the guest opened it: such a sink closes with the instance
+    /// (`Sinks::close_guests`).
+    pub guest: bool,
     /// The target as given at open. Kept alive because `clockwork_sink_target` hands
     /// out the pointer, which is therefore valid exactly as long as the sink.
     pub target: CString,
@@ -145,13 +148,14 @@ pub struct Sink {
 
 impl Sink {
     pub fn new(kind: u32, target: CString, layout: &Layout,
-               endpoint: Arc<dyn Endpoint>, drive: crate::registry::Drive) -> Sink {
+               endpoint: Arc<dyn Endpoint>, drive: crate::registry::Drive, guest: bool) -> Sink {
         let classes = layout.classes().iter()
             .map(|c| MsgQueue::new(c.cells, c.cell_bytes as usize))
             .collect();
         Sink {
             kind,
             drive,
+            guest,
             target,
             classes,
             arrival: AtomicU64::new(0),
@@ -365,7 +369,7 @@ mod tests {
         let sink = Sink::new(KIND_OSC, CString::new("capture").unwrap(),
                              &Layout::single(crate::queue::DEFAULT_CELL_BYTES as u32, capacity),
                              ep.clone() as Arc<dyn Endpoint>,
-                             crate::registry::Drive::Manual);
+                             crate::registry::Drive::Manual, false);
         (sink, ep)
     }
 
@@ -373,7 +377,7 @@ mod tests {
         let ep = Arc::new(CaptureEndpoint::new());
         let sink = Sink::new(KIND_OSC, CString::new("capture").unwrap(), layout,
                              ep.clone() as Arc<dyn Endpoint>,
-                             crate::registry::Drive::Manual);
+                             crate::registry::Drive::Manual, false);
         (sink, ep)
     }
 
@@ -606,7 +610,7 @@ mod flush_tests {
         let sink = Sink::new(KIND_OSC, CString::new("capture").unwrap(),
                              &Layout::single(crate::queue::DEFAULT_CELL_BYTES as u32, capacity),
                              ep.clone() as Arc<dyn Endpoint>,
-                             crate::registry::Drive::Manual);
+                             crate::registry::Drive::Manual, false);
         (sink, ep)
     }
 

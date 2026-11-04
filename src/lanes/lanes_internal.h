@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "../clockwork_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,62 +35,73 @@ extern "C" {
    (clockwork_egress_nrt_max_frame): the ring is a fixed size, and a frame
    has to be able to drain. Either refusal is counted
    (PerformanceMetrics::egress_frames_refused). */
-bool clockwork_egress_nrt_write(uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t route, uint32_t token,
                          const uint8_t* osc, uint32_t len);
 
-/* The most OSC bytes one NRT egress frame carries. */
-uint32_t clockwork_egress_nrt_max_frame(void);
+/* The most OSC bytes one NRT egress frame of `core` carries: its ring's. */
+uint32_t clockwork_egress_nrt_max_frame(const ClockworkCore* core);
 
 /* Whether the NRT egress ring has `bytes` free (0 before init): what the
    control pass checks before it answers a verb, holding the verb back rather
    than have its answers refused. When it has not, the ring's next reader to
    make room wakes the pass (clockwork_egress_nrt_room_made). */
-int clockwork_egress_nrt_room(uint32_t bytes);
+int clockwork_egress_nrt_room(ClockworkCore* core, uint32_t bytes);
 
 /* Bytes in the NRT egress ring that no reader has taken yet (0 before init):
    frames on their way to a client, which the next egress drain hands to the
    transport. */
-uint32_t clockwork_egress_nrt_pending(void);
+uint32_t clockwork_egress_nrt_pending(ClockworkCore* core);
 
 /* Ask to be woken by the next reader to make room, for a producer that holds
    a frame after a refused write: it writes once more after asking, for room
    made in between. */
-void clockwork_egress_nrt_want_room(void);
+void clockwork_egress_nrt_want_room(ClockworkCore* core);
 
 /* Every reader of the NRT egress ring, after it gives room back
    (clockwork_ring_give_back): wakes the control pass if it holds work for
    room in the ring (clockwork_control_wake). */
-void clockwork_egress_nrt_room_made(void);
+void clockwork_egress_nrt_room_made(ClockworkCore* core);
 
 /* Block until the engine has said something since `*seen` — a block that
    wrote the RT egress ring, an NRT egress write, or clockwork_egress_wake —
-   or `timeout_ms` passes (UINT32_MAX: no deadline). `*seen` becomes the
-   count now. 1 when it moved, 0 when the time passed first. Any thread but
-   the audio thread; what clockwork_client_wait is in the engine's process. */
-int clockwork_egress_wait(uint32_t* seen, uint32_t timeout_ms);
+   or `timeout_ms` passes (UINT32_MAX: no deadline), or the core begins to
+   close. `*seen` becomes the count now. 1 when it moved, 0 when the time
+   passed first, -1 when the core closed under the wait (and at once for a
+   core closing or gone). The wait holds the core (clockwork_core.h). Any
+   thread but the audio thread; what clockwork_client_wait is in the engine's
+   process. */
+int clockwork_egress_wait(ClockworkCore* core, uint32_t* seen, uint32_t timeout_ms);
 
 /* Move the count and wake every waiter, as if the engine had said something:
    for a host ending a wait it parked (clockwork_client_wake). Any thread. */
-void clockwork_egress_wake(void);
+void clockwork_egress_wake(ClockworkCore* core);
 
 /* Count `n` deliveries the transport could not make for a frame that left an
    egress ring (PerformanceMetrics::egress_frames_undelivered): whoever hands
    egress to a transport, after each frame. */
-void clockwork_egress_count_undelivered(uint32_t n);
+void clockwork_egress_count_undelivered(ClockworkCore* core, uint32_t n);
 
-void clockwork_lanes_reset_in_ring(void);
-void clockwork_lanes_reset_rt_out_ring(void);
-void clockwork_lanes_reset_nrt_out_ring(void);
+void clockwork_lanes_reset_in_ring(ClockworkCore* core);
+void clockwork_lanes_reset_rt_out_ring(ClockworkCore* core);
+void clockwork_lanes_reset_nrt_out_ring(ClockworkCore* core);
 
 #ifdef __cplusplus
 }
 
 #include "../in_ring_door.h"
 
+struct RingPart;   // workers/RingBufferWriter.h
+
+// clockwork_egress_nrt_write with the OSC laid down from `parts` end to end,
+// nothing gathered first: for a frame made of pieces held apart. The same
+// refusals, counted the same.
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t route, uint32_t token,
+                                      const RingPart* parts, uint32_t n_parts);
+
 // clockwork_ingress_write, saying which of its two refusals it made: full (a
 // moment: try again) or no instance (answered: the refusal is on the NRT
 // egress for the source, and the message is done with). For a door of the
 // engine's own that holds a message while the ring is full and must not hold
 // one that has been answered — a shm peer's plane.
-InRingWrite clockwork_ingress_write_status(const uint8_t* osc, uint32_t len, uint32_t source_id);
+InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id);
 #endif

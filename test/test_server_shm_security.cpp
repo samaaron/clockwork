@@ -26,7 +26,7 @@ using detail_shm_segment::shm_dup_handle;
 
 TEST_CASE("shm-security: tap readers pin the client mapping (no dangling reads)",
           "[shm][security]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
 
     // A GUI hands reader copies to long-lived widgets, then remaps on engine
@@ -46,7 +46,7 @@ TEST_CASE("shm-security: tap readers pin the client mapping (no dangling reads)"
 
 TEST_CASE("shm-security: tap reader clamps corrupt slot geometry",
           "[shm][security]") {
-    shm_segment_creator creator;
+    shm_segment_creator creator{clockwork::kDefaultLayout};
     creator.publish();
     shm_segment_client client(shm_dup_handle(creator.reader_handle()));
     auto reader = client.get_tap_stream_reader(0);
@@ -56,7 +56,7 @@ TEST_CASE("shm-security: tap reader clamps corrupt slot geometry",
     // slot must clamp to the compile-time ring geometry rather than push
     // reads out of bounds (or divide by a zero capacity).
     auto* slot = reinterpret_cast<shm_tap_stream*>(
-        creator.get_base() + TAPS_START + TAPS_HEADER_SIZE);
+        creator.get_base() + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
     slot->state.store(1, std::memory_order_release);
     slot->channels = 0xFFFFu;
     slot->capacity_frames = 0;

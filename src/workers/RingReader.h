@@ -57,6 +57,7 @@ public:
     explicit RingReader(const char* threadName) : mName(threadName) {
         mDrains.reserve(4);  // fixed before start(); reserve so run() never reallocs
     }
+    const char* name() const { return mName; }
     ~RingReader() { stop(); }
 
     RingReader(const RingReader&) = delete;

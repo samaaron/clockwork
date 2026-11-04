@@ -57,10 +57,11 @@ inside it), **stack** (the engine thread's call stack: the linker's
 reservation, which on the web is the audio worklet's, since the worklet
 instantiates the module), and **malloc** (what the code took with `malloc`
 and `new` up to the frontier at boot; on the web the engine's memory lies
-inside it). Three more are the engine's: the **rust-heap**, the block the
-RT router serves, from which clockwork's Rust subsystems allocate whenever
-an engine entry point is on the stack (a sink's or a port's queues), taken
-once at boot for the life of the process; and **engine-memory**, the one
+inside it). Three more are the engine's: the **rust-heap**, the core's own
+pool, from which clockwork's Rust subsystems allocate whenever the thread
+holding the core's gate opens a door (a sink's or a port's queues), taken
+at the core's first init and given back when the core goes; and
+**engine-memory**, the one
 block the guest's spans are carved from (on the web it holds the arena at
 its start too; natively the arena is static or a segment, and the router's
 block is the process's, so neither is in it).
@@ -157,7 +158,7 @@ its own cursor and catches up losslessly; the ring holds a second.
 |---|---|
 | `magic`, `version` | `'CWAR'`; the version this table was written to |
 | `header_bytes` | the reservation at the front; the first region starts here |
-| `instance_id` | which engine, for a process that will one day hold more than one; 0 |
+| `instance_id` | which engine: its core's id (`clockwork_core_id`), numbered from 1 in the order the process made them |
 | `arena_bytes`, `clockwork_bytes`, `guest_offset`, `guest_bytes` | the halves; they meet, and cover the arena |
 | `area_count`, `area_bytes` | the area table |
 | `entry_count`, `entry_bytes` | the region table |
@@ -207,7 +208,7 @@ Everyone, the same way:
   `js/lib/ring.js`).
 - **Rust** (`clockwork-abi::arena`) declares the same structs, held to the C
   header by the compiled probe.
-- **A host on the lanes ABI** gets it from `clockwork_arena_header()`.
+- **A host on the lanes ABI** gets it from `clockwork_arena_header(core)`.
 - **A memory map** draws the areas from the area table and colours every
   region from its five facts, inferring nothing.
 

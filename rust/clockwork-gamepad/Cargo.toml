@@ -17,6 +17,7 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 # Shared OSC codec + OSC-safe name normalisation (also used by clockwork-midi).
 clockwork-osc = { path = "../clockwork-osc" }
 

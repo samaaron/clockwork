@@ -32,7 +32,7 @@ extern "C" fn on_dropped(_: *mut c_void, _: u32) {}
 
 #[test]
 fn the_cue_threads_sleep_until_a_datagram_and_destroy_ends_them_at_once() {
-    let osc = clockwork_osc_create(std::ptr::null_mut(), on_emit, on_dropped);
+    let osc = clockwork_osc_create(std::ptr::null_mut(), std::ptr::null_mut(), on_emit, on_dropped);
     assert!(!osc.is_null());
     let port = UdpSocket::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
     // SAFETY: a live handle.

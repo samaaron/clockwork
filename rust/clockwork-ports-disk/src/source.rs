@@ -36,9 +36,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use clockwork_ports::registry as ports;
+use clockwork_ports::registry::Ports;
 
 use crate::pace::{self, Stop};
+use crate::Feed;
 use crate::wav::WavReader;
 
 /// Frames per disk read. Big enough that the syscall is not the cost, small
@@ -58,8 +59,9 @@ pub struct DiskSource {
 impl DiskSource {
     /// `session_rate` is the rate the audio thread reads the port at, which
     /// paces the worker. It converts nothing.
-    pub fn open(path: &Path, port: u32, session_rate: u32) -> std::io::Result<DiskSource> {
-        let port_channels = ports::channels(port);
+    /// `port` is a source in `ports`, which the worker keeps while it runs.
+    pub fn open(path: &Path, ports: Arc<Ports>, port: u32, session_rate: u32) -> std::io::Result<DiskSource> {
+        let port_channels = ports.channels(port);
         if port_channels == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -90,7 +92,10 @@ impl DiskSource {
             let produced = Arc::clone(&produced);
             std::thread::Builder::new()
                 .name("cw-disk-source".into())
-                .spawn(move || run(reader, port, port_channels as usize, session_rate, &stop, &eof, &produced))?
+                .spawn(move || {
+                    let feed = Feed { ports: &ports, port, channels: port_channels as usize };
+                    run(reader, feed, session_rate, &stop, &eof, &produced)
+                })?
         };
 
         Ok(DiskSource {
@@ -116,19 +121,20 @@ impl Drop for DiskSource {
 }
 
 fn run(
-    mut reader: WavReader, port: u32, port_channels: usize, session_rate: u32,
+    mut reader: WavReader, feed: Feed<'_>, session_rate: u32,
     stop: &Stop, eof: &AtomicBool, produced: &AtomicU64,
 ) {
+    let Feed { ports, port, channels: port_channels } = feed;
     let file_channels = reader.channels as usize;
     let mut from_file = vec![0.0f32; CHUNK_FRAMES * file_channels];
     let mut to_port = vec![0.0f32; CHUNK_FRAMES * port_channels];
-    let tick = pace::quarter_ring(ports::capacity(port), session_rate);
+    let tick = pace::quarter_ring(ports.capacity(port), session_rate);
 
     loop {
         // Fill all the room there is.
         loop {
             if stop.is_set() { return; }
-            let room = ports::writable(port) as usize;
+            let room = ports.writable(port) as usize;
             if room == 0 { break; }
             let want = core::cmp::min(room, CHUNK_FRAMES);
 
@@ -160,7 +166,7 @@ fn run(
             // This worker is the ring's only writer and the audio thread only
             // empties it, so the room it saw is still there. Less taken means
             // the port has gone.
-            let took = ports::produce(port, &to_port[..got * port_channels]) as usize;
+            let took = ports.produce(port, &to_port[..got * port_channels]) as usize;
             produced.fetch_add(took as u64, Ordering::Relaxed);
             if took < got { return; }
         }
@@ -170,7 +176,7 @@ fn run(
             stop.sleep_until(None);
             return;
         }
-        if ports::channels(port) == 0 { return; }   // the port has gone
+        if ports.channels(port) == 0 { return; }   // the port has gone
         if stop.sleep_until(Some(Instant::now() + tick)) { return; }
     }
 }

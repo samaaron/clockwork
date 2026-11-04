@@ -14,13 +14,17 @@
  * engine's own code, so its body lifts the poison for its own duration and
  * puts it back.
  *
- * Poison is process-wide, not per thread. In a running engine, clients and
- * transports read and write the arena from their own threads while the audio
- * thread is inside the guest, and every one of those would be reported. So
- * the fence is ARMED BY A HARNESS, never by the engine: a test fixture whose
- * one thread is the only thing touching the arena arms it, and the engine
- * under that fixture runs with it. Natively, a fence that is not armed costs
- * nothing; in a build without AddressSanitizer every function here is empty.
+ * The arena fenced is the one of the core whose guest call the thread is
+ * inside (its entry says which), and each thread keeps its own account of
+ * what it has poisoned, so two cores' guests on two threads fence apart. But
+ * poison itself is process-wide, not per thread: in a running engine,
+ * clients and transports read and write the arena from their own threads
+ * while the audio thread is inside the guest, and every one of those would
+ * be reported. So the fence is ARMED BY A HARNESS, never by the engine: a
+ * test fixture whose one thread is the only thing touching each arena arms
+ * it, and the engines under that fixture run with it. Natively, a fence that
+ * is not armed costs nothing; in a build without AddressSanitizer every
+ * function here is empty.
  */
 #pragma once
 #include <cstdint>
@@ -29,11 +33,7 @@
 // fenced. Disarming lifts any poison that is up.
 void clockwork_guest_fence_arm(bool armed);
 
-// The arena the fence guards: the engine says so when it takes an arena and
-// again, with nullptr, when it lets it go.
-void clockwork_guest_fence_arena(const uint8_t* base);
-
-// A guest entry point opened or closed (clockwork_guest_call_begin/end).
+// A guest entry point opened or closed (GuestCallScope, guest_malloc.h).
 void clockwork_guest_fence_close();
 void clockwork_guest_fence_open();
 
@@ -44,5 +44,5 @@ struct HostCallScope {
     HostCallScope(const HostCallScope&) = delete;
     HostCallScope& operator=(const HostCallScope&) = delete;
 private:
-    bool mLifted = false;
+    const uint8_t* mLifted = nullptr;   // the arena whose poison this scope lifted
 };

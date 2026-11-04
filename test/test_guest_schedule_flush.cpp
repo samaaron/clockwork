@@ -41,8 +41,8 @@ void pingAhead(EngineFixture& fix) {
                               { osc_test::message("/dummy/ping") }));
 }
 
-uint32_t blocksForSeconds(double s) {
-    return static_cast<uint32_t>(s * engine_test::kSampleRate / get_audio_buffer_samples());
+uint32_t blocksForSeconds(EngineFixture& fix, double s) {
+    return static_cast<uint32_t>(s * engine_test::kSampleRate / clockwork_block_size(fix.engine().core()));
 }
 
 }  // namespace
@@ -51,7 +51,7 @@ TEST_CASE("GuestScheduleFlush: a bundle sent ahead reaches the guest when it fal
           "[scheduler][guest]") {
     EngineFixture fix(theCaseKeepsTheClock());
     pingAhead(fix);
-    fix.pumpBlock(blocksForSeconds(2.0));
+    fix.pumpBlock(blocksForSeconds(fix, 2.0));
     OscReply pong;
     CHECK(fix.waitForReply("/dummy/pong", pong, 200));
 }
@@ -61,7 +61,7 @@ TEST_CASE("GuestScheduleFlush: the guest clearing its schedule drops what was se
     EngineFixture fix(theCaseKeepsTheClock());
     pingAhead(fix);
     fix.send(osc_test::message("/dummy/flush"));
-    fix.pumpBlock(blocksForSeconds(2.0));
+    fix.pumpBlock(blocksForSeconds(fix, 2.0));
     OscReply pong;
     INFO(fix.debugMessagesDump());
     CHECK_FALSE(fix.waitForReply("/dummy/pong", pong, 200));

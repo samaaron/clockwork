@@ -110,7 +110,7 @@ TEST_CASE("blobs: a blob arrives at the guest whole, as an ordinary argument",
 
     // 64 KB, or as much as half the in ring holds where that is less (the
     // smallest profile's is 32 KB).
-    const uint32_t n = std::min<uint32_t>(64 * 1024, IN_RING_SIZE / 2 - 64);
+    const uint32_t n = std::min<uint32_t>(64 * 1024, clockwork::kDefaultLayout.profile.in_ring_bytes / 2 - 64);
     const auto payload = makeBlob(0xABCD, n);
 
     const auto msg = osc_test::messageWithBlob("/dummy/blob", payload.data(), payload.size());
@@ -139,14 +139,14 @@ TEST_CASE("blobs: a blob far larger than the egress ring still arrives",
     lanes_test::boot();
     lanes_test::drainRt();
 
-    // Bigger than RT_OUT_RING_SIZE, comfortably inside IN_RING_SIZE. This is
+    // Bigger than clockwork::kDefaultLayout.profile.rt_out_ring_bytes, comfortably inside clockwork::kDefaultLayout.profile.in_ring_bytes. This is
     // the asymmetry stated as a fact rather than as a header constant: the
     // inbound path carries payloads the outbound path cannot. 32 KB past the
     // egress ring, or half way to half the in ring where that is less (the
     // smallest profile's rings are 8 KB and 32 KB).
-    static_assert(RT_OUT_RING_SIZE < IN_RING_SIZE / 2, "the inbound path is the wider");
-    const uint32_t n = RT_OUT_RING_SIZE + std::min<uint32_t>(32 * 1024, (IN_RING_SIZE / 2 - RT_OUT_RING_SIZE) / 2);
-    REQUIRE(n < IN_RING_SIZE / 2);
+    static_assert(clockwork::kDefaultLayout.profile.rt_out_ring_bytes < clockwork::kDefaultLayout.profile.in_ring_bytes / 2, "the inbound path is the wider");
+    const uint32_t n = clockwork::kDefaultLayout.profile.rt_out_ring_bytes + std::min<uint32_t>(32 * 1024, (clockwork::kDefaultLayout.profile.in_ring_bytes / 2 - clockwork::kDefaultLayout.profile.rt_out_ring_bytes) / 2);
+    REQUIRE(n < clockwork::kDefaultLayout.profile.in_ring_bytes / 2);
     const auto payload = makeBlob(0x1234, n);
 
     const auto msg = osc_test::messageWithBlob("/dummy/blob", payload.data(), payload.size());
@@ -208,7 +208,7 @@ TEST_CASE("blobs: a blob too big for the egress ring is refused, and the guest i
 
     // Larger than the ring can ever hold, so this is not a full-ring race: it
     // cannot fit at any moment, with any cursor positions.
-    const uint32_t n = RT_OUT_RING_SIZE + 16 * 1024;
+    const uint32_t n = clockwork::kDefaultLayout.profile.rt_out_ring_bytes + 16 * 1024;
     REQUIRE(n < lanes_test::kGuestMemoryBytes);   // the guest can still build it
 
     const auto ask = osc_test::message("/dummy/blob/emit",
@@ -249,7 +249,7 @@ TEST_CASE("blobs: a client stages a multi-megabyte payload and the guest reads i
     const uint32_t seed = 0x3C;
     const uint32_t offset = 1024;   // NOT zero: an offset that is ignored
                                     // rather than resolved passes at base.
-    REQUIRE(n > IN_RING_SIZE);
+    REQUIRE(n > clockwork::kDefaultLayout.profile.in_ring_bytes);
     REQUIRE(offset + n <= lanes_test::kAssetsBytes);
 
     // The client is the region's only writer. lanes_test::assets() hands back a
@@ -303,7 +303,7 @@ TEST_CASE("blobs: the guest produces a multi-megabyte blob and a client takes it
     // just how it is checked.
     const uint32_t n = 2 * 1024 * 1024;
     const uint32_t seed = 0x5A;
-    REQUIRE(n > RT_OUT_RING_SIZE);
+    REQUIRE(n > clockwork::kDefaultLayout.profile.rt_out_ring_bytes);
     REQUIRE(n <= lanes_test::kReturnsBytes);
 
     const auto ask = osc_test::message("/dummy/blob/produce",

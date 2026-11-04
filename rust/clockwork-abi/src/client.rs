@@ -110,6 +110,20 @@ pub struct ClockworkRegion {
     pub writable: c_int,
 }
 
+/// The scope's shape, from the engine's table: slot `i` lies `slot_bytes * i`
+/// from the scope region's base, a header of `header_bytes` and a ring of
+/// `frames` frames of up to `channels` channels.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClockworkScopeShape {
+    pub struct_bytes: u32,
+    pub slots: u32,
+    pub slot_bytes: u32,
+    pub header_bytes: u32,
+    pub frames: u32,
+    pub channels: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClockworkClientClock {
@@ -223,5 +237,6 @@ extern "C" {
         out_floats: u32,
         out_channels: *mut u32,
     ) -> u32;
+    pub fn clockwork_client_scope_shape(c: *mut ClockworkClient, out: *mut ClockworkScopeShape) -> ClockworkStatus;
 }
 

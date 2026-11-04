@@ -51,10 +51,11 @@
 #include <thread>
 #include <vector>
 
-// Clockwork's own (destroy_dsp, rebuild_dsp, g_dsp): a device switch is what
-// frees a DSP, and freeing a DSP is the only way to see clockwork close the
-// sinks that DSP opened.
+// Clockwork's own (destroy_dsp, rebuild_dsp, the core's guest): a device
+// switch is what frees a DSP, and freeing a DSP is the only way to see
+// clockwork close the sinks that DSP opened.
 #include "audio_processor.h"
+#include "core_state.h"
 
 namespace {
 
@@ -67,13 +68,13 @@ constexpr const char* kDiscard = "127.0.0.1:9";
 
 // The table is process-global, so nothing may leak out of a case.
 struct Sinks {
-    Sinks()  { lanes_test::boot(); clockwork_sink_close_all(); }
-    ~Sinks() { clockwork_sink_close_all(); }
+    Sinks()  { lanes_test::boot(); clockwork_sink_close_all(clockwork_core_sinks(lanes_test::core())); }
+    ~Sinks() { clockwork_sink_close_all(clockwork_core_sinks(lanes_test::core())); }
 };
 
 ClockworkSinkStats statsOf(ClockworkSink sink) {
     ClockworkSinkStats s{};
-    REQUIRE(clockwork_sink_stats(sink, &s) != 0);
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &s) != 0);
     return s;
 }
 
@@ -89,7 +90,7 @@ bool settled(ClockworkSink sink, uint64_t n, int max_ms = 30000) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         ClockworkSinkStats s{};
-        if (clockwork_sink_stats(sink, &s) != 0 && s.sent + s.dropped >= n) return true;
+        if (clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &s) != 0 && s.sent + s.dropped >= n) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return false;
@@ -155,14 +156,14 @@ TEST_CASE("sinks: a sink is a slot that keeps its identity until it is closed",
     Sinks guard;
 
     ClockworkSink list[8] = {};
-    REQUIRE(clockwork_sink_list(list, 8) == 0);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 0);
 
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_is_open(sink) == 1);
-    REQUIRE(clockwork_sink_kind(sink) == kClockworkSinkOsc);
-    REQUIRE(clockwork_sink_target(sink) != nullptr);
-    REQUIRE(std::string(clockwork_sink_target(sink)) == kDiscard);
+    REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), sink) == 1);
+    REQUIRE(clockwork_sink_kind(clockwork_core_sinks(lanes_test::core()), sink) == kClockworkSinkOsc);
+    REQUIRE(clockwork_sink_target(clockwork_core_sinks(lanes_test::core()), sink) != nullptr);
+    REQUIRE(std::string(clockwork_sink_target(clockwork_core_sinks(lanes_test::core()), sink)) == kDiscard);
 
     // A new sink has done nothing, and says so in all four numbers.
     const ClockworkSinkStats fresh = statsOf(sink);
@@ -171,35 +172,35 @@ TEST_CASE("sinks: a sink is a slot that keeps its identity until it is closed",
     REQUIRE(fresh.late == 0);
     REQUIRE(fresh.scheduled == 0);
 
-    REQUIRE(clockwork_sink_list(list, 8) == 1);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 1);
     REQUIRE(list[0] == sink);
 
-    clockwork_sink_close(sink);
-    REQUIRE(clockwork_sink_is_open(sink) == 0);
-    REQUIRE(clockwork_sink_list(list, 8) == 0);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
+    REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), sink) == 0);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 0);
 }
 
 TEST_CASE("sinks: a closed or invented handle refuses rather than faulting",
           "[sinks]") {
     Sinks guard;
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    clockwork_sink_close(sink);
-    clockwork_sink_close(sink);       // twice is safe
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);       // twice is safe
 
     const uint8_t body[3] = { 0x90, 60, 100 };
     for (ClockworkSink bad : { sink, CLOCKWORK_SINK_NONE, ClockworkSink(1),
                          ClockworkSink(0xdeadbeefu), ClockworkSink(0xffffffffu) }) {
         INFO("handle " << bad);
-        REQUIRE(clockwork_sink_is_open(bad) == 0);
-        REQUIRE(clockwork_sink_kind(bad) == 0);
-        REQUIRE(clockwork_sink_target(bad) == nullptr);
-        REQUIRE(clockwork_sink_send(bad, body, 3, clockwork_timetag_immediately()) == 0);
+        REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), bad) == 0);
+        REQUIRE(clockwork_sink_kind(clockwork_core_sinks(lanes_test::core()), bad) == 0);
+        REQUIRE(clockwork_sink_target(clockwork_core_sinks(lanes_test::core()), bad) == nullptr);
+        REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), bad, body, 3, clockwork_timetag_immediately()) == 0);
 
         // A refused stats call leaves the caller's struct alone: a caller that
         // ignored the return would otherwise read zeros as facts.
         ClockworkSinkStats s{ 7, 7, 7, 7 };
-        REQUIRE(clockwork_sink_stats(bad, &s) == 0);
+        REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), bad, &s) == 0);
         REQUIRE(s.sent == 7);
         REQUIRE(s.dropped == 7);
         REQUIRE(s.late == 7);
@@ -212,16 +213,16 @@ TEST_CASE("sinks: a destination that is not there is refused at open",
     Sinks guard;
     // The refusal is the feature. A sink that opened onto nothing would accept
     // every message, deliver none, and report `sent` for all of them.
-    REQUIRE(clockwork_sink_open(kClockworkSinkOsc, "not-a-destination", 64) == CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:0", 64) == CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_open(kClockworkSinkOsc, nullptr, 64) == CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_open(static_cast<ClockworkSinkKind>(7), kDiscard, 64) == CLOCKWORK_SINK_NONE);
+    REQUIRE(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, "not-a-destination", 64) == CLOCKWORK_SINK_NONE);
+    REQUIRE(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, "127.0.0.1:0", 64) == CLOCKWORK_SINK_NONE);
+    REQUIRE(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, nullptr, 64) == CLOCKWORK_SINK_NONE);
+    REQUIRE(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), static_cast<ClockworkSinkKind>(7), kDiscard, 64) == CLOCKWORK_SINK_NONE);
     // No MIDI subsystem has been created in this binary, so there is no port
     // to open onto and no sink to be had.
-    REQUIRE(clockwork_sink_open(kClockworkSinkMidi, "anything", 64) == CLOCKWORK_SINK_NONE);
+    REQUIRE(clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkMidi, "anything", 64) == CLOCKWORK_SINK_NONE);
     // Nothing was left behind by any of that.
     ClockworkSink list[8] = {};
-    REQUIRE(clockwork_sink_list(list, 8) == 0);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 0);
 }
 
 TEST_CASE("sinks: every message is either sent or dropped, and none is lost",
@@ -231,14 +232,14 @@ TEST_CASE("sinks: every message is either sent or dropped, and none is lost",
     // reading at all: offer far more than the sink can hold, and every single
     // one is in exactly one column. A sink that quietly swallowed the overflow
     // would report a total short of what it was given.
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 8);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 8);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
 
     constexpr uint64_t kSends = 20000;
     const uint8_t body[3] = { 0x90, 60, 100 };
     uint64_t accepted = 0;
     for (uint64_t i = 0; i < kSends; ++i) {
-        if (clockwork_sink_send(sink, body, 3, clockwork_timetag_immediately()) != 0) ++accepted;
+        if (clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, body, 3, clockwork_timetag_immediately()) != 0) ++accepted;
     }
 
     // Nothing waited: the sink is genuinely shallower than the offer, and the
@@ -254,7 +255,7 @@ TEST_CASE("sinks: every message is either sent or dropped, and none is lost",
     // Nothing was scheduled: no native backend has a timestamped send, and
     // UDP has no such thing at all.
     REQUIRE(s.scheduled == 0);
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
 }
 
 // ── The boundary: a DSP with a handle and a send ────────────────────────────────
@@ -292,64 +293,64 @@ TEST_CASE("sinks: a message wider than the base cell rides a wider class",
     // counts what reached the endpoint.
     const OscShape sh = oscShape();
     REQUIRE(sh.n >= 2);   // the shape has a wider class to ride
-    REQUIRE(clockwork_install_sink_profiles() != 0);   // no engine in this binary
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 0);
+    REQUIRE(clockwork_install_sink_profiles(clockwork_core_sinks(lanes_test::core())) != 0);   // no engine in this binary
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_max_message_bytes(sink) == sh.widest());
+    REQUIRE(clockwork_sink_max_message_bytes(clockwork_core_sinks(lanes_test::core()), sink) == sh.widest());
 
     // The widest cell, or the widest datagram if the cell is wider: the wire
     // is the endpoint's limit, and a message the socket refuses is a drop.
     const uint32_t wireWidest = std::min(sh.widest(), CLOCKWORK_MAX_DATAGRAM_BYTES);
     std::vector<uint8_t> mid(sh.baseWidth() + 1, 0xAB), big(wireWidest, 0xCD);
-    REQUIRE(clockwork_sink_send(sink, mid.data(), static_cast<uint32_t>(mid.size()), clockwork_timetag_immediately()) != 0);
-    REQUIRE(clockwork_sink_send(sink, big.data(), static_cast<uint32_t>(big.size()), clockwork_timetag_immediately()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, mid.data(), static_cast<uint32_t>(mid.size()), clockwork_timetag_immediately()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, big.data(), static_cast<uint32_t>(big.size()), clockwork_timetag_immediately()) != 0);
 
     ClockworkSinkStats st{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);   // wedge-only
     while (std::chrono::steady_clock::now() < deadline) {
-        if (clockwork_sink_stats(sink, &st) != 0 && st.sent + st.dropped >= 2) break;
+        if (clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &st) != 0 && st.sent + st.dropped >= 2) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     CHECK(st.sent == 2);
     CHECK(st.dropped == 0);
-    clockwork_sink_close(sink);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
 }
 
 TEST_CASE("sinks: a message wider than the widest class is refused whole and counted",
           "[sinks][classes]") {
-    REQUIRE(clockwork_install_sink_profiles() != 0);
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 0);
+    REQUIRE(clockwork_install_sink_profiles(clockwork_core_sinks(lanes_test::core())) != 0);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    const uint32_t widest = clockwork_sink_max_message_bytes(sink);
+    const uint32_t widest = clockwork_sink_max_message_bytes(clockwork_core_sinks(lanes_test::core()), sink);
     std::vector<uint8_t> over(widest + 1, 0xEE);
-    CHECK(clockwork_sink_send(sink, over.data(), static_cast<uint32_t>(over.size()), clockwork_timetag_immediately()) == 0);
+    CHECK(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, over.data(), static_cast<uint32_t>(over.size()), clockwork_timetag_immediately()) == 0);
     ClockworkSinkStats st{};
-    REQUIRE(clockwork_sink_stats(sink, &st) != 0);
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), sink, &st) != 0);
     CHECK(st.dropped == 1);
     CHECK(st.sent == 0);
     // Exactly the widest cell fits.
-    CHECK(clockwork_sink_send(sink, over.data(), widest, clockwork_timetag_immediately()) != 0);
-    clockwork_sink_close(sink);
+    CHECK(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, over.data(), widest, clockwork_timetag_immediately()) != 0);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
 }
 
 TEST_CASE("sinks: capacity at open sizes the base class and leaves the rest",
           "[sinks][classes]") {
     const OscShape sh = oscShape();
-    REQUIRE(clockwork_install_sink_profiles() != 0);
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 0);
+    REQUIRE(clockwork_install_sink_profiles(clockwork_core_sinks(lanes_test::core())) != 0);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     // What the profile reserves is pinned in test_sink_profile.cpp; here the
     // question is what `capacity` adds: base cells, at the base width, and
     // nothing else.
     const uint32_t asked = 64;
-    const ClockworkSink deeper = clockwork_sink_open(kClockworkSinkOsc, kDiscard, asked);
+    const ClockworkSink deeper = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, asked);
     REQUIRE(deeper != CLOCKWORK_SINK_NONE);
     const uint64_t added = uint64_t(roundedDepth(asked)) * sh.baseWidth()
                          - uint64_t(sh.baseDepth()) * sh.baseWidth();
-    CHECK(clockwork_sink_bytes_reserved(deeper) == clockwork_sink_bytes_reserved(sink) + added);
-    CHECK(clockwork_sink_max_message_bytes(deeper) == clockwork_sink_max_message_bytes(sink));
-    clockwork_sink_close(deeper);
-    clockwork_sink_close(sink);
+    CHECK(clockwork_sink_bytes_reserved(clockwork_core_sinks(lanes_test::core()), deeper) == clockwork_sink_bytes_reserved(clockwork_core_sinks(lanes_test::core()), sink) + added);
+    CHECK(clockwork_sink_max_message_bytes(clockwork_core_sinks(lanes_test::core()), deeper) == clockwork_sink_max_message_bytes(clockwork_core_sinks(lanes_test::core()), sink));
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), deeper);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), sink);
 }
 
 TEST_CASE("sinks: the DSP opens a sink and gets a handle back", "[sinks][boundary]") {
@@ -359,9 +360,9 @@ TEST_CASE("sinks: the DSP opens a sink and gets a handle back", "[sinks][boundar
 
     // The handle the DSP was given names the sink clockwork holds — the
     // whole content of "the DSP emits to a handle, not to an address".
-    REQUIRE(clockwork_sink_is_open(sink) == 1);
-    REQUIRE(clockwork_sink_kind(sink) == kClockworkSinkOsc);
-    REQUIRE(std::string(clockwork_sink_target(sink)) == kDiscard);
+    REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), sink) == 1);
+    REQUIRE(clockwork_sink_kind(clockwork_core_sinks(lanes_test::core()), sink) == kClockworkSinkOsc);
+    REQUIRE(std::string(clockwork_sink_target(clockwork_core_sinks(lanes_test::core()), sink)) == kDiscard);
 
     // And a destination it cannot have is refused all the way back to the DSP,
     // which reports CLOCKWORK_SINK_NONE rather than a handle that does nothing.
@@ -434,24 +435,24 @@ TEST_CASE("sinks: freeing the DSP closes the sinks it opened",
     Sinks guard;
     const ClockworkSink sink = dspOpenSink(kDiscard, kClockworkSinkOsc, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    REQUIRE(clockwork_sink_is_open(sink) == 1);
+    REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), sink) == 1);
 
     // dsp_api.h gives a DSP no close, on the grounds that its sinks last
     // exactly as long as it does. This is the half of that promise clockwork
     // keeps. Without it a device switch would leak a slot per sink per switch,
     // and the leak would present as sinks that stop opening after a while
     // rather than as anything a log would show.
-    destroy_dsp();
-    REQUIRE(clockwork_sink_is_open(sink) == 0);
+    destroy_dsp(lanes_test::core());
+    REQUIRE(clockwork_sink_is_open(clockwork_core_sinks(lanes_test::core()), sink) == 0);
     ClockworkSink list[8] = {};
-    REQUIRE(clockwork_sink_list(list, 8) == 0);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 0);
 
-    rebuild_dsp(lanes_test::kSampleRate, lanes_test::kBufLength);
-    REQUIRE(g_dsp != nullptr);
+    rebuild_dsp(lanes_test::core(), lanes_test::kSampleRate, lanes_test::kBufLength);
+    REQUIRE(clockwork::instance_of(lanes_test::core()) != nullptr);
     // A fresh instance holds no sinks, and the old handle cannot reach one.
     const uint8_t body[1] = { 0x00 };
-    REQUIRE(clockwork_sink_send(sink, body, 1, clockwork_timetag_immediately()) == 0);
-    REQUIRE(clockwork_sink_list(list, 8) == 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, body, 1, clockwork_timetag_immediately()) == 0);
+    REQUIRE(clockwork_sink_list(clockwork_core_sinks(lanes_test::core()), list, 8) == 0);
 
     // And the new instance can open its own, on a slot the closed one left.
     const ClockworkSink again = dspOpenSink(kDiscard, kClockworkSinkOsc, 64);
@@ -469,12 +470,12 @@ clockwork::Timetag sink_now() {
 }  // namespace
 //
 // Through the C ABI, because that is how a consumer reaches it: a run-stop is
-// a client or a host calling clockwork_sink_flush_all(), not Rust calling Rust.
+// a client or a host calling clockwork_sink_flush_all(clockwork_core_sinks(lanes_test::core())), not Rust calling Rust.
 
 TEST_CASE("sinks: a flush cancels what is pending and says how many",
           "[sinks][flush]") {
-    clockwork_sink_close_all();
-    const ClockworkSink s = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:57999", 64);
+    clockwork_sink_close_all(clockwork_core_sinks(lanes_test::core()));
+    const ClockworkSink s = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, "127.0.0.1:57999", 64);
     REQUIRE(s != CLOCKWORK_SINK_NONE);
 
     // Far enough out that no look-ahead reaches them, so they are all still
@@ -482,19 +483,19 @@ TEST_CASE("sinks: a flush cancels what is pending and says how many",
     const clockwork::Timetag distant = sink_now() + (int64_t)(1ull << 32) * 60;
     const uint8_t msg[4] = {'/','x',0,0};
     for (int i = 0; i < 5; ++i)
-        REQUIRE(clockwork_sink_send(s, msg, sizeof msg, (distant + i).abi()) != 0);
+        REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), s, msg, sizeof msg, (distant + i).abi()) != 0);
 
-    CHECK(clockwork_sink_flush(s) == 5);
+    CHECK(clockwork_sink_flush(clockwork_core_sinks(lanes_test::core()), s) == 5);
 
     ClockworkSinkStats st{};
-    REQUIRE(clockwork_sink_stats(s, &st));
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), s, &st));
     CHECK(st.cancelled == 5);
     // A cancellation is not a failure to carry: counting it as a drop would
     // make a working run-stop look like a broken sink.
     CHECK(st.dropped == 0);
     CHECK(st.sent == 0);
 
-    clockwork_sink_close(s);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), s);
 }
 
 TEST_CASE("sinks: flush_all reaches every sink, whoever queued them",
@@ -502,32 +503,32 @@ TEST_CASE("sinks: flush_all reaches every sink, whoever queued them",
     // The reason cancellation belongs on the sink rather than on a queue: a
     // guest sending through clockwork_sink_send and a client sending verbs end up in
     // the same place, so one call covers both.
-    clockwork_sink_close_all();
-    const ClockworkSink a = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:57998", 32);
-    const ClockworkSink b = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:57997", 32);
+    clockwork_sink_close_all(clockwork_core_sinks(lanes_test::core()));
+    const ClockworkSink a = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, "127.0.0.1:57998", 32);
+    const ClockworkSink b = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, "127.0.0.1:57997", 32);
     REQUIRE(a != CLOCKWORK_SINK_NONE);
     REQUIRE(b != CLOCKWORK_SINK_NONE);
 
     const clockwork::Timetag distant = sink_now() + (int64_t)(1ull << 32) * 60;
     const uint8_t msg[4] = {'/','y',0,0};
-    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, distant.abi()) != 0);
-    REQUIRE(clockwork_sink_send(a, msg, sizeof msg, (distant + 1).abi()) != 0);
-    REQUIRE(clockwork_sink_send(b, msg, sizeof msg, distant.abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), a, msg, sizeof msg, distant.abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), a, msg, sizeof msg, (distant + 1).abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), b, msg, sizeof msg, distant.abi()) != 0);
 
-    CHECK(clockwork_sink_flush_all() == 3);
+    CHECK(clockwork_sink_flush_all(clockwork_core_sinks(lanes_test::core())) == 3);
 
     ClockworkSinkStats st{};
-    REQUIRE(clockwork_sink_stats(a, &st)); CHECK(st.cancelled == 2);
-    REQUIRE(clockwork_sink_stats(b, &st)); CHECK(st.cancelled == 1);
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), a, &st)); CHECK(st.cancelled == 2);
+    REQUIRE(clockwork_sink_stats(clockwork_core_sinks(lanes_test::core()), b, &st)); CHECK(st.cancelled == 1);
 
-    clockwork_sink_close(a);
-    clockwork_sink_close(b);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), a);
+    clockwork_sink_close(clockwork_core_sinks(lanes_test::core()), b);
 }
 
 TEST_CASE("sinks: flushing a closed or invented handle answers 0",
           "[sinks][flush]") {
-    CHECK(clockwork_sink_flush(CLOCKWORK_SINK_NONE) == 0);
-    CHECK(clockwork_sink_flush(999999u) == 0);
+    CHECK(clockwork_sink_flush(clockwork_core_sinks(lanes_test::core()), CLOCKWORK_SINK_NONE) == 0);
+    CHECK(clockwork_sink_flush(clockwork_core_sinks(lanes_test::core()), 999999u) == 0);
 }
 
 // ── The drain's waits ────────────────────────────────────────────────────────
@@ -539,13 +540,13 @@ TEST_CASE("sinks: flushing a closed or invented handle answers 0",
 TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out at its time and not before",
           "[sinks][drain]") {
     Sinks guard;
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     const auto ping = osc_test::message("/ping");
 
     // Nothing is queued, so the drain is asleep and only the send can wake it.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), clockwork_timetag_immediately()) != 0);   // immediately
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, ping.ptr(), ping.size(), clockwork_timetag_immediately()) != 0);   // immediately
     CHECK(settled(sink, 1));
 
     // A message timed 300 ms ahead is held, then sent at its time. The count
@@ -553,7 +554,7 @@ TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out 
     // or before that reading: never before its time, however late this thread
     // wakes.
     const auto at = clockwork::Timetag::fromNtpSeconds(wallClockNTP() + 0.3);
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at.abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, ping.ptr(), ping.size(), at.abi()) != 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto sentBy = statsOf(sink).sent;
     const auto clock = clockwork::Timetag::fromNtpSeconds(wallClockNTP());
@@ -565,7 +566,7 @@ TEST_CASE("sinks: a send wakes the sleeping drain, and a timed message goes out 
 TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is sent", "[sinks][drain][wakes]") {
     if (!thread_wakes::countable()) SKIP("per-thread wake counts are read from Linux's /proc");
     Sinks guard;
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, kDiscard, 64);
+    const ClockworkSink sink = clockwork_sink_open(clockwork_core_sinks(lanes_test::core()), kClockworkSinkOsc, kDiscard, 64);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
     // Polling every 500 us would wake about 1000 times in these 500 ms.
     auto woke = thread_wakes::over("cw-sink-drain", std::chrono::milliseconds(500));
@@ -575,7 +576,7 @@ TEST_CASE("sinks: the drain does not wake while nothing is due and nothing is se
     // A message timed a minute ahead must not wake the drain before then.
     const auto ping = osc_test::message("/ping");
     const auto at = clockwork::Timetag::fromNtpSeconds(wallClockNTP() + 60.0);
-    REQUIRE(clockwork_sink_send(sink, ping.ptr(), ping.size(), at.abi()) != 0);
+    REQUIRE(clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, ping.ptr(), ping.size(), at.abi()) != 0);
     woke = thread_wakes::over("cw-sink-drain", std::chrono::milliseconds(500));
     REQUIRE(woke);
     CHECK(*woke <= 2);

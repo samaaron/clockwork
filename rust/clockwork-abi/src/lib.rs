@@ -39,4 +39,5 @@ pub mod sink;
 pub mod lanes;
 pub mod arena;
 pub mod embed;
+pub mod profile;
 pub mod timetag;

@@ -118,6 +118,7 @@ name = "clockwork-audio-decode"
 version = "0.1.0"
 dependencies = [
  "clockwork-corpus",
+ "clockwork-fence",
  "symphonia",
 ]
 
@@ -142,12 +143,16 @@ dependencies = [
 [[package]]
 name = "clockwork-clock"
 version = "0.1.0"
+dependencies = [
+ "clockwork-fence",
+]
 
 [[package]]
 name = "clockwork-comms"
 version = "0.1.0"
 dependencies = [
  "clockwork-corpus",
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-osc-net",
@@ -158,7 +163,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "clockwork-core"
+version = "0.1.0"
+dependencies = [
+ "clockwork-abi",
+ "clockwork-fence",
+ "clockwork-heap",
+ "clockwork-ports",
+ "clockwork-sinks",
+ "clockwork-taps",
+ "clockwork-wait",
+]
+
+[[package]]
 name = "clockwork-corpus"
+version = "0.1.0"
+
+[[package]]
+name = "clockwork-fence"
 version = "0.1.0"
 
 [[package]]
@@ -167,6 +189,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "clockwork-corpus",
+ "clockwork-fence",
  "clockwork-osc",
  "gilrs",
  "objc2",
@@ -177,16 +200,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "clockwork-guards"
+version = "0.1.0"
+dependencies = [
+ "object",
+ "proc-macro2",
+ "syn",
+]
+
+[[package]]
 name = "clockwork-heap"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "libc",
+ "loom",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "clockwork-log"
 version = "0.1.0"
+dependencies = [
+ "clockwork-abi",
+ "clockwork-fence",
+]
 
 [[package]]
 name = "clockwork-midi"
@@ -194,6 +232,7 @@ version = "0.1.0"
 dependencies = [
  "alsa",
  "clockwork-corpus",
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-wait",
@@ -211,6 +250,7 @@ dependencies = [
  "clockwork-audio-decode",
  "clockwork-clock",
  "clockwork-comms",
+ "clockwork-core",
  "clockwork-gamepad",
  "clockwork-heap",
  "clockwork-midi",
@@ -227,6 +267,7 @@ name = "clockwork-osc"
 version = "0.1.0"
 dependencies = [
  "clockwork-corpus",
+ "clockwork-fence",
 ]
 
 [[package]]
@@ -234,6 +275,7 @@ name = "clockwork-osc-net"
 version = "0.1.0"
 dependencies = [
  "clockwork-corpus",
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-wait",
@@ -244,6 +286,7 @@ dependencies = [
 name = "clockwork-ports"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-heap",
  "clockwork-slots",
  "portable-atomic",
@@ -253,6 +296,7 @@ dependencies = [
 name = "clockwork-ports-disk"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-ports",
  "clockwork-wait",
  "portable-atomic",
@@ -263,6 +307,7 @@ name = "clockwork-schedule"
 version = "0.1.0"
 dependencies = [
  "clockwork-corpus",
+ "clockwork-fence",
  "clockwork-osc",
 ]
 
@@ -270,6 +315,7 @@ dependencies = [
 name = "clockwork-sinks"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-heap",
  "clockwork-log",
  "clockwork-midi",
@@ -298,6 +344,8 @@ version = "0.1.0"
 name = "clockwork-taps"
 version = "0.1.0"
 dependencies = [
+ "clockwork-abi",
+ "clockwork-fence",
  "portable-atomic",
 ]
 
@@ -792,6 +840,15 @@ dependencies = [
  "bitflags",
  "libc",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

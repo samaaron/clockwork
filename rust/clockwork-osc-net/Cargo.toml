@@ -17,6 +17,7 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 socket2 = "0.6.4"
 # Complete OSC 1.0 codec (messages + bundles) + the shared C-ABI scaffolding.
 clockwork-osc = { path = "../clockwork-osc" }

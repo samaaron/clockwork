@@ -4,12 +4,11 @@
 // The device boot is native/ClockworkEmbedDevice.cpp.
 #include "clockwork_embed_impl.h"
 #include "lanes/lanes.h"
+#include "clockwork_config.h"   // clockwork_log
 #include "shared_memory.h"
 #include <chrono>
 #include <cstring>
 #include <new>
-
-std::atomic<ClockworkEmbed*> g_clockwork_embed { nullptr };
 
 namespace {
 
@@ -33,6 +32,32 @@ struct Ring {
     float* channel(uint32_t c) { return base + static_cast<size_t>(c) * cap; }
 };
 
+// Size the handle to `config` and the engine it now runs at: the geometry,
+// and the two FIFOs, empty. What attach and reconfigure share. False when the
+// FIFOs could not be had.
+bool fit(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
+    h->sampleRate  = clockwork_sample_rate(h->core);
+    h->block       = clockwork_block_size(h->core);
+    h->inChannels  = config->input_channels;
+    h->outChannels = config->output_channels;
+    const uint32_t maxFrames = config->max_render_frames ? config->max_render_frames : 4096;
+    h->capacity = h->block + maxFrames;
+    try {
+        h->outRing.assign(static_cast<size_t>(h->outChannels) * h->capacity, 0.0f);
+        h->inRing.assign(static_cast<size_t>(h->inChannels ? h->inChannels : 1) * h->capacity, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    h->outHead = h->outCount = 0;
+    h->inHead = h->inCount = 0;
+    // The clock is the engine's. clockwork_audio_starts, which follows this,
+    // makes the next block re-anchor it, never below the sample clock already
+    // in the arena, so it carries on from the previous time rather than going
+    // backwards.
+    h->rendered = 0;
+    return true;
+}
+
 } // namespace
 
 extern "C" {
@@ -42,57 +67,77 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         fail(status, CLOCKWORK_E_ARG);
         return nullptr;
     }
-    if (g_clockwork_embed.load(std::memory_order_acquire)) {
-        fail(status, CLOCKWORK_E_PERM);
+    // A core of its own: refused (E_PERM) only where a process holds one.
+    ClockworkStatus made = CLOCKWORK_OK;
+    ClockworkCore* core = clockwork_core_new(&made);
+    if (!core) {
+        fail(status, made);
         return nullptr;
     }
-    const int rc = clockwork_attach(config->sample_rate, config->block_size,
-                                    config->input_channels, config->output_channels,
-                                    /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
-                                    nullptr, 0, nullptr, 0);
-    if (rc == CLOCKWORK_ATTACH_REFUSED) {
-        fail(status, CLOCKWORK_E_PERM);
+    if (config->profile && clockwork_set_profile(core, config->profile)) {
+        clockwork_core_close(core);
+        fail(status, CLOCKWORK_E_ARG);
         return nullptr;
     }
+    clockwork_init(core, config->sample_rate, config->block_size,
+                   config->input_channels, config->output_channels,
+                   /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
+                   nullptr, 0, nullptr, 0);
     auto* h = new (std::nothrow) ClockworkEmbed();
-    if (!h) { clockwork_detach(); fail(status, CLOCKWORK_E_NOMEM); return nullptr; }
+    if (!h) { clockwork_core_close(core); fail(status, CLOCKWORK_E_NOMEM); return nullptr; }
     h->kind        = ClockworkEmbed::Kind::Attached;
-    h->attached    = true;
-    // What we actually got: a joiner's arguments were not applied.
-    h->sampleRate  = clockwork_sample_rate();
-    h->block       = clockwork_block_size();
-    h->inChannels  = config->input_channels;
-    h->outChannels = config->output_channels;
+    h->core        = core;
+    if (!fit(h, config)) {
+        clockwork_core_close(core);
+        delete h;
+        fail(status, CLOCKWORK_E_NOMEM);
+        return nullptr;
+    }
 
-    const uint32_t maxFrames = config->max_render_frames ? config->max_render_frames : 4096;
-    h->capacity = h->block + maxFrames;
-    h->outRing.assign(static_cast<size_t>(h->outChannels) * h->capacity, 0.0f);
-    h->inRing.assign(static_cast<size_t>(h->inChannels ? h->inChannels : 1) * h->capacity, 0.0f);
-    // The clock is the engine's. clockwork_audio_starts (below) makes the
-    // next block re-anchor it, never below the sample clock already in the
-    // arena, so a host re-attaching to memory that is still up continues
-    // from the previous time rather than going backwards.
-    h->rendered = 0;
-
+    // An engine with no guest is no engine for a plugin: the build's refusal
+    // — one instance too many in this process, a guest that would not start
+    // — is the handle's refusal, with the reason on the core's log.
+    if (const char* why = clockwork_boot_error(core); why || !clockwork_lanes_base(core)) {
+        clockwork_log(core, "embed attach refused: %s", why ? why : "the engine's memory could not be laid out");
+        clockwork_core_close(core);
+        delete h;
+        fail(status, why ? CLOCKWORK_E_NO_INSTANCE : CLOCKWORK_E_NOMEM);
+        return nullptr;
+    }
     ClockworkStatus st = CLOCKWORK_OK;
-    uint8_t* const base = static_cast<uint8_t*>(clockwork_lanes_base());
+    uint8_t* const base = static_cast<uint8_t*>(clockwork_lanes_base(core));
     const uint32_t arenaBytes = arenaHeader(base)->arena_bytes;
     h->client = clockwork_client_open_memory(base, arenaBytes, &st);
     if (!h->client) {
-        clockwork_detach();
+        clockwork_core_close(core);
         delete h;
         fail(status, st);
         return nullptr;
     }
     h->ownsClient = true;
     // This host's audio starts now: the next block re-anchors the clock.
-    clockwork_audio_starts(ntpNow(), monoNow());
-    g_clockwork_embed.store(h, std::memory_order_release);
+    clockwork_audio_starts(h->core, ntpNow(), monoNow());
     fail(status, CLOCKWORK_OK);
     return h;
 }
 
 ClockworkClient* clockwork_embed_client(ClockworkEmbed* h) { return h ? h->client : nullptr; }
+
+ClockworkStatus clockwork_embed_reconfigure(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached || !readable(config)
+        || config->sample_rate <= 0 || config->output_channels == 0)
+        return CLOCKWORK_E_ARG;
+    // Audio coming back to the engine that is up (docs/RESTARTS.md): the
+    // instance carries on, is told, or is built again.
+    clockwork_init(h->core, config->sample_rate, config->block_size,
+                   config->input_channels, config->output_channels,
+                   /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
+                   nullptr, 0, nullptr, 0);
+    if (!fit(h, config)) return CLOCKWORK_E_NOMEM;
+    // This host's audio starts again now: the next block re-anchors the clock.
+    clockwork_audio_starts(h->core, ntpNow(), monoNow());
+    return CLOCKWORK_OK;
+}
 ClockworkStatus clockwork_embed_device(const ClockworkEmbed* h, ClockworkEmbedDevice* out) {
     if (!out) return CLOCKWORK_E_ARG;
     const uint32_t bytes = out->struct_bytes;
@@ -136,7 +181,7 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
         // block of input (padded with silence when a block is not yet in)
         // and leaves a block of output.
         while (h->outCount < chunk) {
-            float* busIn = clockwork_audio_in();
+            float* busIn = clockwork_audio_in(h->core);
             if (h->inChannels && busIn) {
                 const uint32_t have = h->inCount < block ? h->inCount : block;
                 for (uint32_t c = 0; c < h->inChannels; ++c) {
@@ -156,10 +201,11 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
             time.audio_frames   = h->rendered;
             time.wall_ntp       = ntpNow();
             time.monotonic_secs = monoNow();
-            clockwork_tick(&time, h->outChannels, h->inChannels);
+            const ClockworkTick tick = clockwork_tick(h->core, &time, h->outChannels, h->inChannels);
             h->rendered += block;
 
-            const float* bus = clockwork_audio_out();
+            // Silence for a block the core did not render (lanes.h).
+            const float* bus = tick == CLOCKWORK_TICK_RENDERED ? clockwork_audio_out(h->core) : nullptr;
             for (uint32_t c = 0; c < h->outChannels; ++c) {
                 float* ring = outRing.channel(c);
                 const float* src = bus ? bus + static_cast<size_t>(c) * block : nullptr;
@@ -191,9 +237,7 @@ void clockwork_embed_close(ClockworkEmbed* h) {
     if (!h) return;
     if (h->ownsClient && h->client) clockwork_client_close(h->client);
     if (h->closeEngine) h->closeEngine(h->engine);
-    if (h->attached) clockwork_detach();
-    ClockworkEmbed* expected = h;
-    g_clockwork_embed.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+    clockwork_core_close(h->core);
     delete h;
 }
 

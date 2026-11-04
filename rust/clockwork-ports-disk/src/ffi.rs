@@ -13,9 +13,13 @@
 //! not need to survive their owner — none of the reasons a port has a slot
 //! apply, and a second registry for them would duplicate the slot table.
 
+use clockwork_fence::no_unwind;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use clockwork_ports::registry::Ports;
 
 use crate::sink::DiskSink;
 use crate::source::DiskSource;
@@ -24,6 +28,21 @@ use crate::source::DiskSource;
 pub struct ClockworkDiskSource(DiskSource);
 /// Opaque to C.
 pub struct ClockworkDiskSink(DiskSink);
+
+/// A hold on the table a port is in, for the worker to keep while it runs.
+///
+/// # Safety
+/// `ports` is null or a live table from clockwork_ports_new or
+/// clockwork_core_ports: either is an `Arc`'s.
+unsafe fn table_of(ports: *const Ports) -> Option<Arc<Ports>> {
+    if ports.is_null() { return None; }
+    // SAFETY: an `Arc`'s pointer, live, per the contract: one more hold, and
+    // the `Arc` made from it gives that hold back when it goes.
+    unsafe {
+        Arc::increment_strong_count(ports);
+        Some(Arc::from_raw(ports))
+    }
+}
 
 /// # Safety
 /// `p` is null or a NUL-terminated C string.
@@ -47,17 +66,22 @@ unsafe fn path_of(p: *const c_char) -> Option<PathBuf> {
 /// not a WAV this reader understands, the port is not open, or the rate is 0.
 ///
 /// # Safety
-/// `path` is a NUL-terminated C string.
+/// `ports` is null or a live table of ports (clockwork_ports_new, a core's
+/// clockwork_core_ports); `path` is a NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_open(
-    path: *const c_char, port: c_uint, session_rate: c_uint,
+    ports: *const Ports, path: *const c_char, port: c_uint, session_rate: c_uint,
 ) -> *mut ClockworkDiskSource {
-    // SAFETY: the contract above is `path_of`'s.
-    let Some(p) = (unsafe { path_of(path) }) else { return core::ptr::null_mut() };
-    match DiskSource::open(&p, port, session_rate) {
-        Ok(s) => Box::into_raw(Box::new(ClockworkDiskSource(s))),
-        Err(_) => core::ptr::null_mut(),
-    }
+    no_unwind(core::ptr::null_mut(), || {
+        // SAFETY: the contract above is `table_of`'s and `path_of`'s.
+        let (Some(ports), Some(p)) = (unsafe { table_of(ports) }, unsafe { path_of(path) }) else {
+            return core::ptr::null_mut();
+        };
+        match DiskSource::open(&p, ports, port, session_rate) {
+            Ok(s) => Box::into_raw(Box::new(ClockworkDiskSource(s))),
+            Err(_) => core::ptr::null_mut(),
+        }
+    })
 }
 
 /// Stop the worker and free the handle. Does not close the port: the port
@@ -68,9 +92,11 @@ pub unsafe extern "C" fn clockwork_disk_source_open(
 /// `h` came from `clockwork_disk_source_open` and is not used again.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_close(h: *mut ClockworkDiskSource) {
-    if h.is_null() { return; }
-    // SAFETY: the box the open call leaked, freed once, per the contract.
-    unsafe { drop(Box::from_raw(h)) };
+    no_unwind((), || {
+        if h.is_null() { return; }
+        // SAFETY: the box the open call leaked, freed once, per the contract.
+        unsafe { drop(Box::from_raw(h)) };
+    })
 }
 
 /// Frames in the file, from its header. 0 for a NULL handle.
@@ -79,9 +105,11 @@ pub unsafe extern "C" fn clockwork_disk_source_close(h: *mut ClockworkDiskSource
 /// `h` is a live handle or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_frames(h: *const ClockworkDiskSource) -> u64 {
-    if h.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*h).0.total_frames() }
+    no_unwind(0, || {
+        if h.is_null() { return 0; }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*h).0.total_frames() }
+    })
 }
 
 /// The file's own sample rate. NOT converted to the session's — see
@@ -91,9 +119,11 @@ pub unsafe extern "C" fn clockwork_disk_source_frames(h: *const ClockworkDiskSou
 /// `h` is a live handle or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_sample_rate(h: *const ClockworkDiskSource) -> c_uint {
-    if h.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*h).0.sample_rate() }
+    no_unwind(0, || {
+        if h.is_null() { return 0; }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*h).0.sample_rate() }
+    })
 }
 
 /// Frames handed to the port so far.
@@ -102,9 +132,11 @@ pub unsafe extern "C" fn clockwork_disk_source_sample_rate(h: *const ClockworkDi
 /// `h` is a live handle or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_frames_produced(h: *const ClockworkDiskSource) -> u64 {
-    if h.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*h).0.frames_produced() }
+    no_unwind(0, || {
+        if h.is_null() { return 0; }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*h).0.frames_produced() }
+    })
 }
 
 /// Non-zero once the whole file has been handed to the port. The port then
@@ -114,27 +146,33 @@ pub unsafe extern "C" fn clockwork_disk_source_frames_produced(h: *const Clockwo
 /// `h` is a live handle or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_source_eof(h: *const ClockworkDiskSource) -> c_int {
-    if h.is_null() { return 1; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*h).0.at_eof() as c_int }
+    no_unwind(0, || {
+        if h.is_null() { return 1; }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*h).0.at_eof() as c_int }
+    })
 }
 
 /// Start draining `port` (an open SINK) into a new 32-bit float WAV at `path`,
 /// written by the audio thread at `sample_rate`. NULL if the rate is 0.
 ///
 /// # Safety
-/// `path` is a NUL-terminated C string.
+/// As `clockwork_disk_source_open`.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_sink_open(
-    path: *const c_char, port: c_uint, sample_rate: c_uint, channels: c_uint,
+    ports: *const Ports, path: *const c_char, port: c_uint, sample_rate: c_uint, channels: c_uint,
 ) -> *mut ClockworkDiskSink {
-    // SAFETY: the contract above is `path_of`'s.
-    let Some(p) = (unsafe { path_of(path) }) else { return core::ptr::null_mut() };
-    if channels == 0 || channels > u16::MAX as u32 { return core::ptr::null_mut(); }
-    match DiskSink::open(&p, port, sample_rate, channels as u16) {
-        Ok(s) => Box::into_raw(Box::new(ClockworkDiskSink(s))),
-        Err(_) => core::ptr::null_mut(),
-    }
+    no_unwind(core::ptr::null_mut(), || {
+        // SAFETY: the contract above is `table_of`'s and `path_of`'s.
+        let (Some(ports), Some(p)) = (unsafe { table_of(ports) }, unsafe { path_of(path) }) else {
+            return core::ptr::null_mut();
+        };
+        if channels == 0 || channels > u16::MAX as u32 { return core::ptr::null_mut(); }
+        match DiskSink::open(&p, ports, port, sample_rate, channels as u16) {
+            Ok(s) => Box::into_raw(Box::new(ClockworkDiskSink(s))),
+            Err(_) => core::ptr::null_mut(),
+        }
+    })
 }
 
 /// Drain what is left, patch the header with the real length, join the worker,
@@ -144,9 +182,11 @@ pub unsafe extern "C" fn clockwork_disk_sink_open(
 /// `h` came from `clockwork_disk_sink_open` and is not used again.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_sink_close(h: *mut ClockworkDiskSink) {
-    if h.is_null() { return; }
-    // SAFETY: the box the open call leaked, freed once, per the contract.
-    unsafe { drop(Box::from_raw(h)) };
+    no_unwind((), || {
+        if h.is_null() { return; }
+        // SAFETY: the box the open call leaked, freed once, per the contract.
+        unsafe { drop(Box::from_raw(h)) };
+    })
 }
 
 /// Frames written to the file so far.
@@ -155,7 +195,9 @@ pub unsafe extern "C" fn clockwork_disk_sink_close(h: *mut ClockworkDiskSink) {
 /// `h` is a live handle or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_disk_sink_frames(h: *const ClockworkDiskSink) -> u64 {
-    if h.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*h).0.frames_written() }
+    no_unwind(0, || {
+        if h.is_null() { return 0; }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*h).0.frames_written() }
+    })
 }

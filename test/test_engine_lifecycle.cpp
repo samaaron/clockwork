@@ -119,7 +119,7 @@ TEST_CASE("Double shutdown is safe", "[lifecycle]") {
 }
 
 // shutdown() must not leave the lanes entry points armed against a dead
-// engine: memory_initialized gates clockwork_ingress_write/clockwork_tick, and
+// engine: the core's arena gates clockwork_ingress_write/clockwork_tick, and
 // with the shm-backed arena the segment is unmapped at the end of shutdown — a
 // write that passes the guard afterwards touches unmapped memory.
 TEST_CASE("Lanes entry points reject after shutdown (process-local arena)",
@@ -132,10 +132,11 @@ TEST_CASE("Lanes entry points reject after shutdown (process-local arena)",
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
+    ClockworkCore* const core = engine.core();
     engine.shutdown();
 
     auto pkt = osc_test::message("/dummy/ping");
-    CHECK_FALSE(clockwork_ingress_write(pkt.ptr(), pkt.size(), 0));
+    CHECK_FALSE(clockwork_ingress_write(core, pkt.ptr(), pkt.size(), 0));
 }
 
 TEST_CASE("Lanes entry points reject after shutdown (shm-backed arena)",
@@ -148,13 +149,14 @@ TEST_CASE("Lanes entry points reject after shutdown (shm-backed arena)",
 
     engine.init(cfg);
     REQUIRE(engine.isRunning());
+    ClockworkCore* const core = engine.core();
     engine.shutdown();   // unmaps the segment
 
     // A write that passes the guards here dereferences the unmapped segment
     // (SIGSEGV/SIGBUS), so "returns false" also proves "does not touch the
     // dead arena".
     auto pkt = osc_test::message("/dummy/ping");
-    CHECK_FALSE(clockwork_ingress_write(pkt.ptr(), pkt.size(), 0));
+    CHECK_FALSE(clockwork_ingress_write(core, pkt.ptr(), pkt.size(), 0));
 }
 
 TEST_CASE("Null onReply callback does not crash", "[lifecycle]") {
@@ -310,30 +312,57 @@ TEST_CASE("A block pumped while a cold swap has the DSP down is dropped, and pum
         return "";
     };
 
-    const uint32_t droppedBefore = engine.pumpsDroppedBySwap();
+    const uint32_t droppedBefore = engine.blocksBusy();
     const auto result = engine.switchDevice("", 44100);   // a rate change: a cold swap
     pumper.join();
     REQUIRE(result.success);
     CHECK(renderedDuring == 0);
-    CHECK(engine.pumpsDroppedBySwap() - droppedBefore == 8);
+    CHECK(engine.blocksBusy() - droppedBefore == 8);
 
     const uint32_t before = engine.processor().processCount.value.load(std::memory_order_acquire);
     engine.pumpAudioBlock();
     CHECK(engine.processor().processCount.value.load(std::memory_order_acquire) == before + 1);
 }
 
-TEST_CASE("An engine booted again in the same process carries the generation on from the last",
+TEST_CASE("An engine lays out the lanes its host reserves", "[lifecycle][lanes]") {
+    // A host with plugin tracks asks for their lanes in its config
+    // (Config::reservedLanes); they lie above the device, from the stable
+    // base.
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.reservedLanes = 4;
+    EngineFixture fix(cfg);
+    CHECK(clockwork_reserved_lanes(fix.engine().core()) == 4);
+    CHECK(clockwork_lane_base(fix.engine().core()) == 32);
+}
+
+TEST_CASE("An engine its host boots again carries the generation on from the last, handed over",
           "[lifecycle][restarts][generation]") {
     // A client of the first engine may still hold a refusal or a setup that
-    // named its generation; the next engine in the process must never name
-    // one already used (docs/RESTARTS.md, "The generation"). The NIF's stop
-    // and start, and a host's shutdown and init, are this.
+    // named its generation; the engine its host boots for it next must never
+    // name one already used (docs/RESTARTS.md, "The generation"). The NIF's
+    // stop and start, and a host's shutdown and init, are this: the host
+    // hands over the last generation (Config::carriedGeneration).
     uint32_t first = 0;
     {
         EngineFixture fix;
         first = fix.engine().generation();
         REQUIRE(first > 0);
     }
-    EngineFixture fix;
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.carriedGeneration = first;
+    EngineFixture fix(cfg);
     CHECK(fix.engine().generation() > first);
+}
+
+TEST_CASE("An engine whose host hands nothing over numbers its own generations from the first",
+          "[lifecycle][restarts][generation]") {
+    // Engines in one process are independent: what one opened is nothing to
+    // the next unless a host says it follows on (docs/ENGINES.md,
+    // slice 30).
+    {
+        EngineFixture fix;
+        REQUIRE(fix.engine().generation() > 0);
+    }
+    EngineFixture fix;
+    CHECK(fix.engine().generation() == 1);
 }

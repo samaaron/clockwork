@@ -24,7 +24,10 @@
 
 // The engine's arena, as audio_processor.cpp publishes it: the same base an
 // in-process client addresses.
-extern "C" { extern uint8_t* shared_memory; }
+namespace {
+// The engine's arena (clockwork_lanes_base).
+uint8_t* arenaBase(const engine_test::Engine& e) { return static_cast<uint8_t*>(clockwork_lanes_base(e.engine.core())); }
+}
 
 #include <chrono>
 #include <cmath>
@@ -39,8 +42,8 @@ namespace {
 
 // A handle onto the engine this process is running, which is what a plugin's
 // GUI has and what a WebAssembly build has: same address space, no segment.
-ClockworkClient* openInProcess(ClockworkStatus* st) {
-    return clockwork_client_open_memory(shared_memory, ARENA_SIZE, st);
+ClockworkClient* openInProcess(const Engine& e, ClockworkStatus* st) {
+    return clockwork_client_open_memory(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, st);
 }
 
 } // namespace
@@ -50,7 +53,7 @@ TEST_CASE("client abi: a message sent through the boundary reaches the guest",
     Engine e;
 
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
     REQUIRE(c != nullptr);
 
@@ -74,7 +77,7 @@ TEST_CASE("client abi: the engine's own ingest goes through the same door",
     Engine e;
 
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto viaAbi = osc_test::message("/dummy/ping");
@@ -116,7 +119,7 @@ TEST_CASE("client abi: a message built in the ring arrives like any other",
     // whole point: this is the same door, entered without a buffer.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -144,7 +147,7 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     // the ring could hold at 64 KiB apiece, is the assertion.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     // The ring is filled with an address the guest has no verb for: taken off
@@ -154,7 +157,7 @@ TEST_CASE("client abi: the ring advances by what was used, not what was asked fo
     // is not what this case is about. The same length as a ping.
     const auto unanswered = osc_test::message("/dummy/none");
     const uint32_t bound = 64 * 1024;
-    const uint32_t rounds = (IN_RING_SIZE / bound) * 4;
+    const uint32_t rounds = (clockwork::kDefaultLayout.profile.in_ring_bytes / bound) * 4;
     REQUIRE(rounds > 4);
 
     // NOTHING IS DRAINED WHILE THIS RUNS, which is what makes it an
@@ -192,7 +195,7 @@ TEST_CASE("client abi: a reservation given back leaves the ring working",
     // and releases, and a bad length does the same rather than holding on.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -226,7 +229,7 @@ TEST_CASE("client abi: a second reservation is refused rather than deadlocked",
     // hang, not an error, so it is refused before the lock is touched.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     REQUIRE(clockwork_client_send_begin(c, 64, &st) != nullptr);
@@ -241,7 +244,7 @@ TEST_CASE("client abi: a second reservation is refused rather than deadlocked",
     // without taking the lock — proven by the working send afterwards.
     CHECK(clockwork_client_send_begin(c, 0, &second) == nullptr);
     CHECK(second == CLOCKWORK_E_ARG);
-    CHECK(clockwork_client_send_begin(c, IN_RING_SIZE + 1024, &second) == nullptr);
+    CHECK(clockwork_client_send_begin(c, clockwork::kDefaultLayout.profile.in_ring_bytes + 1024, &second) == nullptr);
     CHECK(second == CLOCKWORK_E_TOO_BIG);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -253,7 +256,7 @@ TEST_CASE("client abi: a second reservation is refused rather than deadlocked",
 TEST_CASE("client abi: refusals are told apart", "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -266,7 +269,7 @@ TEST_CASE("client abi: refusals are told apart", "[client][abi]") {
     // Too big is a verdict, not a moment. A frame larger than the ring will
     // never fit however long a caller waits, so it is refused differently from
     // a ring that happens to be full.
-    std::vector<uint8_t> huge(IN_RING_SIZE + 1024, 0);
+    std::vector<uint8_t> huge(clockwork::kDefaultLayout.profile.in_ring_bytes + 1024, 0);
     CHECK(clockwork_client_send(c, huge.data(),
                                 static_cast<uint32_t>(huge.size()), 0) == CLOCKWORK_E_TOO_BIG);
 
@@ -281,7 +284,7 @@ TEST_CASE("client abi: between instances a message for the guest is refused at t
     // (docs/RESTARTS.md).
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     const auto ping = osc_test::message("/dummy/ping");
@@ -316,12 +319,12 @@ TEST_CASE("client abi: a control verb of clockwork's is written to the control r
     // verbs the audio thread performs, and the guest's, ride the in ring.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
-    REQUIRE(clockwork_control_served());
+    REQUIRE(clockwork_control_served(e.engine.core()));
 
-    const auto* cursors = reinterpret_cast<const RingCursors*>(shared_memory + RING_CURSORS_START);
-    const auto* control = reinterpret_cast<const ControlRingCursors*>(shared_memory + CONTROL_RING_START);
+    const auto* cursors = reinterpret_cast<const RingCursors*>(arenaBase(e) + clockwork::kDefaultLayout.ring_cursors_start);
+    const auto* control = reinterpret_cast<const ControlRingCursors*>(arenaBase(e) + clockwork::kDefaultLayout.control_ring_start);
     const auto notify = osc_test::message(CLOCKWORK_SYS("notify"));
     const auto ping   = osc_test::message(CLOCKWORK_SYS("ping"));
     const auto guest  = osc_test::message("/dummy/ping");
@@ -348,37 +351,40 @@ TEST_CASE("client abi: a control verb of clockwork's is written to the control r
 
 TEST_CASE("client abi: regions are named, and absent is an answer",
           "[client][abi]") {
-    Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
-    REQUIRE(st == CLOCKWORK_OK);
-
     ClockworkRegion reg{};
-    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &reg) == CLOCKWORK_OK);
-    CHECK(reg.base == shared_memory + METRICS_START);
-    CHECK(reg.bytes == METRICS_SIZE);
-    CHECK(reg.writable == 0);          // the engine's to write, not ours
+    {
+        Engine e;
+        ClockworkClient* c = openInProcess(e, &st);
+        REQUIRE(st == CLOCKWORK_OK);
 
-    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_WINDOW, &reg) == CLOCKWORK_OK);
-    CHECK(reg.bytes == GUEST_WINDOW_SIZE);
+        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &reg) == CLOCKWORK_OK);
+        CHECK(reg.base == arenaBase(e) + METRICS_START);
+        CHECK(reg.bytes == METRICS_SIZE);
+        CHECK(reg.writable == 0);          // the engine's to write, not ours
 
-    // The device layer's account of its callback, beside the metrics: the
-    // same flat-uint32 shape, the region the schema's nativeStats table
-    // indexes, and nothing a client may write.
-    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_NATIVE_STATS, &reg) == CLOCKWORK_OK);
-    CHECK(reg.base == shared_memory + NATIVE_STATS_START);
-    CHECK(reg.bytes == NATIVE_STATS_SIZE);
-    CHECK(reg.writable == 0);
+        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_WINDOW, &reg) == CLOCKWORK_OK);
+        CHECK(reg.bytes == clockwork::kDefaultLayout.profile.window_bytes);
 
-    // The lanes, where the engine carved them in this process (the case
-    // below holds them). A region this engine does not expose says so rather
-    // than handing back a pointer into whatever is next along: an engine
-    // booted with no lanes has none to name.
-    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_OK);
-    clockwork_client_close(c);
+        // The device layer's account of its callback, beside the metrics: the
+        // same flat-uint32 shape, the region the schema's nativeStats table
+        // indexes, and nothing a client may write.
+        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_NATIVE_STATS, &reg) == CLOCKWORK_OK);
+        CHECK(reg.base == arenaBase(e) + NATIVE_STATS_START);
+        CHECK(reg.bytes == NATIVE_STATS_SIZE);
+        CHECK(reg.writable == 0);
 
+        // The lanes, where the engine carved them in this process (the case
+        // below holds them). A region this engine does not expose says so rather
+        // than handing back a pointer into whatever is next along: an engine
+        // booted with no lanes has none to name.
+        REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_OK);
+        clockwork_client_close(c);
+    }
+
+    // One engine at a time in a process (clockwork_core.h): the first is gone.
     Engine bare([](ClockworkEngine::Config& cfg) { cfg.assetsBytes = 0; cfg.returnsBytes = 0; });
-    c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(bare, &st);
     REQUIRE(st == CLOCKWORK_OK);
     CHECK(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &reg) == CLOCKWORK_E_ABSENT);
     CHECK(clockwork_client_region(c, CLOCKWORK_REGION_RETURNS, &reg) == CLOCKWORK_E_ABSENT);
@@ -389,7 +395,7 @@ TEST_CASE("client abi: an older caller's struct is not written past",
           "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     // A caller built against a smaller version of the struct sets its own
@@ -411,8 +417,8 @@ TEST_CASE("client abi: an older caller's struct is not written past",
     ClockworkClientInfo full{};
     full.struct_bytes = sizeof(full);
     REQUIRE(clockwork_client_info(c, &full) == CLOCKWORK_OK);
-    CHECK(full.sample_rate == Catch::Approx(clockwork_sample_rate()));
-    CHECK(full.block_frames == clockwork_block_size());
+    CHECK(full.sample_rate == Catch::Approx(clockwork_sample_rate(e.engine.core())));
+    CHECK(full.block_frames == clockwork_block_size(e.engine.core()));
     CHECK(full.output_channels > 0);
     CHECK(full.features & CLOCKWORK_FEATURE_TAPS);
 
@@ -426,7 +432,7 @@ TEST_CASE("client abi: a tap slot reads as silence unless it is live", "[client]
     // last window as if it were sounding now.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkAudioTapReader r{};
@@ -443,8 +449,8 @@ TEST_CASE("client abi: a tap slot reads as silence unless it is live", "[client]
 
     // The slot's producer claims it and writes a ramp: the reader sees the
     // ramp, right-aligned to the write edge.
-    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + TAPS_START + TAPS_HEADER_SIZE);
-    shm_tap_stream_writer w(slot);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(arenaBase(e) + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
+    shm_tap_stream_writer w(slot, clockwork::kDefaultLayout.profile.tap_ring_frames);
     w.activate(2);
     std::vector<float> l(256), rr(256);
     for (uint32_t i = 0; i < 256; ++i) { l[i] = static_cast<float>(i); rr[i] = -static_cast<float>(i); }
@@ -475,7 +481,7 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
     // changes for every one, so a client that noted it can tell.
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkAudioTapReader r{};
@@ -483,9 +489,9 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
     REQUIRE(clockwork_client_audio_tap_open(c, 1, &r) == CLOCKWORK_OK);
     const uint32_t before = clockwork_client_audio_tap_activations(&r);
 
-    auto* slot = reinterpret_cast<shm_tap_stream*>(shared_memory + TAPS_START + TAPS_HEADER_SIZE
-                                                      + TAP_SLOT_SIZE);
-    shm_tap_stream_writer w(slot);
+    auto* slot = reinterpret_cast<shm_tap_stream*>(arenaBase(e) + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE
+                                                      + clockwork::kDefaultLayout.tap_slot_bytes);
+    shm_tap_stream_writer w(slot, clockwork::kDefaultLayout.profile.tap_ring_frames);
     w.activate(2);
     slot->state.store(0, std::memory_order_release);   // and gone again, unseen
     CHECK(clockwork_client_audio_tap_valid(&r) == 0);
@@ -501,7 +507,7 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
 TEST_CASE("client abi: the clock arrives as one snapshot", "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientClock clk{};
@@ -529,7 +535,7 @@ TEST_CASE("client abi: the sample clock says which frame is heard at which NTP, 
           "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
     ClockworkClientSampleClock a{};
@@ -545,9 +551,9 @@ TEST_CASE("client abi: the sample clock says which frame is heard at which NTP, 
     ClockworkClientSampleClock b{};
     b.struct_bytes = sizeof(b);
     REQUIRE(clockwork_client_sample_clock(c, &b) == CLOCKWORK_OK);
-    CHECK(b.engine_frames == a.engine_frames + clockwork_block_size());
+    CHECK(b.engine_frames == a.engine_frames + clockwork_block_size(e.engine.core()));
     CHECK(b.dac_ntp - a.dac_ntp
-          == Catch::Approx(double(clockwork_block_size()) / engine_test::kSampleRate).margin(1e-6));
+          == Catch::Approx(double(clockwork_block_size(e.engine.core())) / engine_test::kSampleRate).margin(1e-6));
 
     // The frame-to-NTP arithmetic is the library's, so every binding agrees
     // to the bit: the snapshot's own frame is its own NTP, and either way of
@@ -571,7 +577,7 @@ TEST_CASE("clock: from a freewheel origin, frame f is heard at origin + f / rate
     const auto heard = [](double origin) {
         Engine e([origin](ClockworkEngine::Config& cfg) { cfg.freewheelOriginNtp = origin; });
         ClockworkStatus st = CLOCKWORK_E_ARG;
-        ClockworkClient* c = openInProcess(&st);
+        ClockworkClient* c = openInProcess(e, &st);
         REQUIRE(st == CLOCKWORK_OK);
         e.pump(0.25);
         ClockworkClientSampleClock sc{};
@@ -603,7 +609,7 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
     CHECK(clockwork_client_open_memory(tiny, sizeof tiny, &st) == nullptr);
     CHECK(st == CLOCKWORK_E_ARG);
 
-    CHECK(clockwork_client_open_memory(nullptr, ARENA_SIZE, &st) == nullptr);
+    CHECK(clockwork_client_open_memory(nullptr, clockwork::kDefaultLayout.arena_bytes, &st) == nullptr);
     CHECK(st == CLOCKWORK_E_ARG);
 
     // And every status has words, because a binding raising an exception has
@@ -618,7 +624,7 @@ TEST_CASE("client abi: opening rejects memory that cannot hold an engine",
 // built separately still finds the rings. The audio thread does not — its drain
 // addresses them with compile-time constants:
 //
-//     clockwork_drain_ring(shared_memory + IN_RING_START, IN_RING_SIZE,
+//     clockwork_drain_ring(arenaBase(e) + clockwork::kDefaultLayout.in_ring_start, clockwork::kDefaultLayout.profile.in_ring_bytes,
 //                          &cursors->in_head, &cursors->in_tail, ...)
 //
 // Two sources of truth for one address. They agree only while the table the
@@ -634,10 +640,10 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
 
     ShmReaderLayout table{};
     const char* why = nullptr;
-    REQUIRE(ShmReaderLayout::from_arena(shared_memory, ARENA_SIZE, table, &why));
+    REQUIRE(ShmReaderLayout::from_arena(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, table, &why));
     INFO("from_arena refused: " << (why ? why : "-"));
 
-    const ShmReaderLayout k = ShmReaderLayout::from_constants();
+    const ShmReaderLayout k = ShmReaderLayout::from_layout(clockwork::kDefaultLayout);
 
     // The ingress path first: this is the one whose disagreement would strand a
     // client's traffic where the drain cannot see it.
@@ -659,7 +665,7 @@ TEST_CASE("the arena's published layout is the one the audio thread compiled",
 // ── A client's base, across a cold device swap ───────────────────────────────
 //
 // A client caches the arena base it was opened over (ClientImpl::base, from
-// clockwork_lanes_base()). A cold device switch runs rebuild_dsp -> init_memory,
+// clockwork_lanes_base(core)). A cold device switch runs rebuild_dsp -> init_memory,
 // and init_memory is what resolves that base. If a swap re-points the arena,
 // every client opened before it writes into memory the audio thread has
 // stopped reading, and the write still succeeds because the layouts are
@@ -676,7 +682,7 @@ TEST_CASE("a client still reaches the engine after a cold device swap",
           "[client][coldswap]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_OK;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(c != nullptr);
 
     // The pattern the cases above prove works: send through the ABI, and let
@@ -709,7 +715,7 @@ TEST_CASE("a client still reaches the engine after a cold device swap",
 TEST_CASE("client abi: an in-process handle reaches the lanes the engine carved", "[client][abi][lanes]") {
     Engine fx;
     ClockworkStatus st = CLOCKWORK_E_NOT_FOUND;
-    ClockworkClient* c = openInProcess(&st);
+    ClockworkClient* c = openInProcess(fx, &st);
     REQUIRE(c != nullptr);
 
     ClockworkRegion assets {};

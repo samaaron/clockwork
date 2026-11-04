@@ -31,5 +31,5 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
 // correlation token like every other /clock reply. Both dispatch tails
 // (native EngineControl, wasm audio_processor) call this so the refusal
 // wire contract has a single authoring site.
-void replyClockUnsupported(const uint8_t* data, uint32_t size,
+void replyClockUnsupported(struct ClockworkCore* core, const uint8_t* data, uint32_t size,
                            const ClockReply& reply);

@@ -16,7 +16,8 @@
 #include "clockwork_prefix.h"
 #include "engine_state.h"
 #include "shm_segment.hpp"
-#include "audio_processor.h"   // control / shared_memory arena globals
+#include "audio_processor.h"
+#include "core_state.h"        // the engine's arena
 #include "lanes/lanes.h"       // clockwork_lanes_base
 #include "shared_memory.h"     // IN ring layout
 #include "ring/ring.h"         // Message wire header
@@ -235,12 +236,12 @@ TEST_CASE("EngineState: a new arena starts empty, whatever the memory held befor
     {
         EngineFixture first;
         auto* counter = reinterpret_cast<std::atomic<int32_t>*>(
-            static_cast<uint8_t*>(clockwork_lanes_base()) + NODE_ID_COUNTER_START);
+            static_cast<uint8_t*>(clockwork_lanes_base(first.engine().core())) + clockwork::kDefaultLayout.node_id_counter_start);
         counter->store(0x5EED, std::memory_order_release);
     }
     EngineFixture second;
     const auto* counter = reinterpret_cast<const std::atomic<int32_t>*>(
-        static_cast<const uint8_t*>(clockwork_lanes_base()) + NODE_ID_COUNTER_START);
+        static_cast<const uint8_t*>(clockwork_lanes_base(second.engine().core())) + clockwork::kDefaultLayout.node_id_counter_start);
     CHECK(counter->load(std::memory_order_acquire) == 0);
 }
 
@@ -287,9 +288,11 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
     }
     fix.clearReplies();
 
+    uint8_t* const base = clockwork::laid_out_base(fix.engine().core());
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(fix.engine().core()));
     const int32_t h0 = cursors->in_head.load(std::memory_order_acquire);
     REQUIRE(h0 > 0);
-    REQUIRE(static_cast<uint32_t>(h0) + 64 < IN_RING_SIZE);  // room for the frame below
+    REQUIRE(static_cast<uint32_t>(h0) + 64 < clockwork::kDefaultLayout.profile.in_ring_bytes);  // room for the frame below
 
     // Producer stalls mid-write: lock held, head loaded, payload not yet copied.
     int32_t unlocked = 0;
@@ -308,12 +311,12 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
         hdr.sequence = static_cast<uint32_t>(
             cursors->in_sequence.fetch_add(1, std::memory_order_relaxed));
         hdr.sourceId = 0;
-        uint8_t* slot = shared_memory + IN_RING_START + h0;
+        uint8_t* slot = base + clockwork::kDefaultLayout.in_ring_start + h0;
         std::memcpy(slot, &hdr, sizeof(Message));
         std::memcpy(slot + sizeof(Message), pkt.ptr(), pkt.size());
         const uint32_t aligned = (hdr.length + 3u) & ~3u;
         cursors->in_head.store(
-            static_cast<int32_t>((static_cast<uint32_t>(h0) + aligned) % IN_RING_SIZE),
+            static_cast<int32_t>((static_cast<uint32_t>(h0) + aligned) % clockwork::kDefaultLayout.profile.in_ring_bytes),
             std::memory_order_release);
         cursors->in_write_lock.store(0, std::memory_order_release);
     }

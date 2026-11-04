@@ -143,26 +143,24 @@ impl Endpoint for CaptureEndpoint {
 /// host that takes a message this way holds it to its time itself, took it
 /// as SCHEDULED.
 pub type HostEmit = unsafe extern "C" fn(
-    kind: u32, target: *const std::os::raw::c_char,
+    ctx: *mut std::ffi::c_void, kind: u32, target: *const std::os::raw::c_char,
     bytes: *const u8, len: u32, when: Timetag,
 ) -> i32;
 
-static HOST_EMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Install (or, with `None`, remove) the host's emitter. While one is
-/// installed, every MIDI sink opened through the C ABI goes to it — see
-/// [`crate::registry::open`].
-pub fn set_host_emit(f: Option<HostEmit>) {
-    HOST_EMIT.store(f.map_or(0, |f| f as usize), std::sync::atomic::Ordering::Release);
+/// The host's emitter and the context it is handed back: one record, so the
+/// two are installed together. The installer keeps it alive until it
+/// installs another or none.
+#[repr(C)]
+pub struct HostEmitter {
+    pub emit: HostEmit,
+    pub ctx: *mut std::ffi::c_void,
 }
-
-pub fn host_emit() -> Option<HostEmit> {
-    let p = HOST_EMIT.load(std::sync::atomic::Ordering::Acquire);
-    if p == 0 { return None; }
-    // SAFETY: the only writer stores a `HostEmit` (or 0), so a non-zero value
-    // is one.
-    Some(unsafe { std::mem::transmute::<usize, HostEmit>(p) })
-}
+// SAFETY: the record is only read once installed; `ctx` is the host's, never
+// dereferenced here, only handed back to `emit`, which the host makes safe to
+// call from the thread a sink sends on.
+unsafe impl Sync for HostEmitter {}
+// SAFETY: as above.
+unsafe impl Send for HostEmitter {}
 
 /// A sink whose endpoint is THE HOST: each message goes back to it, with its
 /// time, for the host to put on a wire the substrate cannot reach.
@@ -180,27 +178,44 @@ pub fn host_emit() -> Option<HostEmit> {
 /// here to pump. A message handed over this way is past a flush's reach the
 /// moment it is sent, which is the same trade the look-ahead window makes,
 /// without the window.
+///
+/// It reads the emitter its table holds at each delivery, so an emitter the
+/// host withdraws is never called again.
 pub struct HostEndpoint {
     kind: u32,
     target: std::ffi::CString,
+    /// The emitter cell of the table the sink is in (`Sinks`).
+    emitter: *const std::sync::atomic::AtomicPtr<HostEmitter>,
 }
+// SAFETY: the cell is atomic and read only; the table it is in closes every
+// sink, and so drops this endpoint, before the table goes, so the pointer is
+// valid wherever the endpoint is.
+unsafe impl Send for HostEndpoint {}
+// SAFETY: as above.
+unsafe impl Sync for HostEndpoint {}
 
 impl HostEndpoint {
-    /// `None` when no host emitter is installed, or the target cannot be a C
-    /// string.
-    pub fn for_target(kind: u32, target: &str) -> Option<HostEndpoint> {
-        host_emit()?;
-        Some(HostEndpoint { kind, target: std::ffi::CString::new(target).ok()? })
+    /// `None` when the target cannot be a C string. `emitter` is the cell of
+    /// the table the sink is opened in, which outlives the sink.
+    pub fn for_target(kind: u32, target: &str,
+                      emitter: &std::sync::atomic::AtomicPtr<HostEmitter>) -> Option<HostEndpoint> {
+        Some(HostEndpoint { kind, target: std::ffi::CString::new(target).ok()?, emitter })
+    }
+
+    fn host(&self) -> Option<&HostEmitter> {
+        // SAFETY: the cell outlives this endpoint (above); the installer keeps
+        // the record it names alive while it is installed.
+        unsafe { (*self.emitter).load(std::sync::atomic::Ordering::Acquire).as_ref() }
     }
 }
 
 impl Endpoint for HostEndpoint {
     fn deliver(&self, bytes: &[u8], when: Timetag) -> Delivery {
-        let Some(emit) = host_emit() else { return Delivery::Failed };
-        // SAFETY: a NUL-terminated target and a slice's pointer and length,
-        // which is the emitter's contract.
+        let Some(host) = self.host() else { return Delivery::Failed };
+        // SAFETY: the host's context, a NUL-terminated target and a slice's
+        // pointer and length, which is the emitter's contract.
         let took = unsafe {
-            emit(self.kind, self.target.as_ptr(), bytes.as_ptr(), bytes.len() as u32, when)
+            (host.emit)(host.ctx, self.kind, self.target.as_ptr(), bytes.as_ptr(), bytes.len() as u32, when)
         };
         if took != 0 { Delivery::Scheduled } else { Delivery::Failed }
     }

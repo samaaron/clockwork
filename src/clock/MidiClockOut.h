@@ -162,6 +162,11 @@ public:
     uint32_t dropped() const { return mDropped.load(std::memory_order_relaxed); }
     uint64_t sent()    const { return mSent.load(std::memory_order_relaxed); }
 
+    // The table of sinks the ticks leave through: the engine's core's, set
+    // before the first block and read by every block after.
+    void setSinks(const ClockworkSinks* sinks) { mSinks.store(sinks, std::memory_order_release); }
+    const ClockworkSinks* sinks() const { return mSinks.load(std::memory_order_acquire); }
+
 private:
     // A tick: when it is due, where it goes, and which byte it is (a clock
     // pulse, or a follower's Start / Stop). CLOCKWORK_SINK_NONE means fan out
@@ -200,26 +205,19 @@ private:
     std::atomic<uint32_t> mTail{0};       // consumer writes, producer reads
     std::atomic<bool>     mResetPending{false};
     std::atomic<uint32_t> mDropped{0};
+    std::atomic<const ClockworkSinks*> mSinks{nullptr};
     std::atomic<uint64_t> mSent{0};
 };
-
-// The engine's MidiClockOut, for the render path in audio_processor.cpp —
-// which is shared with the worklet build and has no engine object to ask.
-// Published by ClockworkEngine at boot beside g_active_clockwork_clock, single
-// publisher, cleared at shutdown; null wherever no engine owns one (the
-// worklet), and then nothing generates. Not a singleton: the instance is a
-// ClockworkEngine member, and a test builds its own.
-extern std::atomic<MidiClockOut*> g_active_midi_clock_out;
 
 // Find the open MIDI sink for `port`, opening one if there is none. Command
 // thread only. CLOCKWORK_SINK_NONE if `port` is "*" or empty (fan out at send time),
 // or if no sink could be opened — a build with no MIDI endpoint refuses, and
 // the burst is then generated and dropped rather than silently reshaped.
-ClockworkSink midi_clock_sink_for_port(const std::string& port);
+ClockworkSink midi_clock_sink_for_port(const ClockworkSinks* sinks, const std::string& port);
 
 // The same lookup with "*" allowed: one sink onto every open output, which is
 // what a note to "*" wants (the clock fans out itself because each port's
 // ticks are its own). This is THE sink for a port — notes, raw bytes and
 // clock ticks all leave through it, so a port's accounting is in one place.
 // Command thread only. CLOCKWORK_SINK_NONE if none could be opened.
-ClockworkSink midi_sink_for_port(const std::string& port);
+ClockworkSink midi_sink_for_port(const ClockworkSinks* sinks, const std::string& port);

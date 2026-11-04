@@ -16,6 +16,7 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 # AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
 # (Xtensa): real atomics where the ISA has them, a critical section where it
 # does not — which is only ever the device, where these counters are idle.

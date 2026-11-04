@@ -18,7 +18,6 @@
 //! endpoint, a fraction of that for a MIDI port. An embedded profile shrinks
 //! or drops the wide classes; `memory_profile.h` owns the numbers.
 
-use std::sync::Mutex;
 
 use crate::queue::{round_capacity, DEFAULT_CELL_BYTES};
 use crate::sink::{KIND_MIDI, KIND_OSC};
@@ -114,30 +113,6 @@ pub fn default_for(kind: u32) -> Layout {
     Layout::normalise(classes).expect("the defaults are well formed")
 }
 
-/// Kind → the layout a host installed. Consulted at OPEN only, which is a
-/// control-thread call, so a lock here costs the audio thread nothing.
-static INSTALLED: Mutex<Vec<(u32, Layout)>> = Mutex::new(Vec::new());
-
-/// Install a shape for a kind. Returns false for a shape that does not
-/// normalise; the previous shape (or the default) then stays.
-pub fn install(kind: u32, classes: Vec<Class>) -> bool {
-    let Some(layout) = Layout::normalise(classes) else { return false };
-    let Ok(mut installed) = INSTALLED.lock() else { return false };
-    installed.retain(|(k, _)| *k != kind);
-    installed.push((kind, layout));
-    true
-}
-
-/// The shape a sink of `kind` is built to: installed, else the default.
-pub fn for_kind(kind: u32) -> Layout {
-    if let Ok(installed) = INSTALLED.lock() {
-        if let Some((_, l)) = installed.iter().find(|(k, _)| *k == kind) {
-            return l.clone();
-        }
-    }
-    default_for(kind)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,14 +161,4 @@ mod tests {
         assert_eq!(deeper.classes()[1..], osc.classes()[1..], "the wide classes are untouched");
     }
 
-    #[test]
-    fn an_installed_shape_replaces_the_default_for_its_kind_only() {
-        const KIND: u32 = 77;   // a kind nothing else in the test binary installs
-        assert_eq!(for_kind(KIND), default_for(KIND));
-        assert!(install(KIND, vec![Class { cell_bytes: 32, cells: 4 }]));
-        assert_eq!(for_kind(KIND), Layout::single(32, 4));
-        assert!(!install(KIND, vec![]), "a bad shape is refused…");
-        assert_eq!(for_kind(KIND), Layout::single(32, 4), "…and the good one stays");
-        assert_eq!(for_kind(KIND + 1), default_for(KIND + 1), "another kind is untouched");
-    }
 }

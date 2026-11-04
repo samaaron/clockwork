@@ -9,6 +9,7 @@
 #include "audio_config.h"
 #include "clockwork_config.h"   // clockwork_log
 #include "lanes/lanes.h"
+#include "audio_processor.h"   // clockwork_publish_audio_load
 #include "dsp_api.h"            // DspFpEnv: what this host declares about its audio thread
 #include <chrono>
 #include <cmath>
@@ -16,13 +17,11 @@
 #include <cstring>
 #include <numeric>
 
-extern "C" void clockwork_publish_audio_load(uint32_t cpuAvgCenti, uint32_t cpuPeakCenti,
-                                       uint32_t callbackOverruns);
-
 // Shared per-DSP-block render (see ClockworkProcessor.h). One copy of the
 // tick → publish sequence for both HeadlessDriver and the engine's manual
 // pump.
-void renderAudioBlock(LinkAudioHost& linkAudio,
+ClockworkTick renderAudioBlock(ClockworkCore* core,
+                      LinkAudioHost& linkAudio,
                       uint32_t blockSize,
                       uint32_t numOutputChannels,
                       uint32_t numInputChannels,
@@ -31,7 +30,8 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                       uint32_t publishChannels) {
     if (publishChannels == 0) publishChannels = numOutputChannels;
     time.struct_bytes = sizeof time;
-    clockwork_tick(&time, numOutputChannels, numInputChannels);
+    const ClockworkTick tick = clockwork_tick(core, &time, numOutputChannels, numInputChannels);
+    if (tick != CLOCKWORK_TICK_RENDERED) return tick;
     const uint64_t hostMicros = time.block_host_micros;
     // This block has read its ports (pull_port_sources, in the tick): what
     // each is at now is read when the next block begins, a block on. Dated
@@ -44,7 +44,7 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
             std::llround(1e6 * double(blockSize) / double(sampleRate))));
     // Publish the main sink (stereo when nOut >= 2, mono fallback for 1).
     // No-op when Link Audio is off / no subscriber.
-    if (const float* outputBus = clockwork_audio_out()) {
+    if (const float* outputBus = clockwork_audio_out(core)) {
         if (publishChannels >= 2) {
             linkAudio.publishAudioBlock(outputBus, outputBus + blockSize,
                                         static_cast<size_t>(blockSize), sampleRate, hostMicros);
@@ -53,6 +53,7 @@ void renderAudioBlock(LinkAudioHost& linkAudio,
                                         static_cast<size_t>(blockSize), sampleRate, hostMicros);
         }
     }
+    return tick;
 }
 
 ClockworkProcessor::ClockworkProcessor() = default;
@@ -81,8 +82,8 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
     // Choose the DSP block size. bufLen == 0 means "use platform
     // default" (always 128 on web due to AudioWorklet; on native the caller
     // normally picks one from the opened device's buffer). Clamp
-    // into [32, kMaxBlockSize] because static_audio_bus is sized at the
-    // max, and too-small blocks waste control-rate density.
+    // into [32, kMaxBlockSize]: the profile's largest block, and too-small
+    // blocks waste control-rate density.
     int chosen = (bufLen > 0) ? bufLen : clockwork::kDefaultBlockSize;
     chosen = std::clamp(chosen, 32, clockwork::kMaxBlockSize);
     mBufLen = chosen;
@@ -100,19 +101,20 @@ void ClockworkProcessor::initialiseDsp(uint8_t* ringBufferStorage,
     // (Smoothie's device callback does, before each block), so say so: the
     // guest reads DspConfig::fp_env and must not discover the flag by rendering
     // a different filter tail here than it renders in a browser.
-    clockwork_declare_fp_env(DSP_FP_ENV_FLUSH_TO_ZERO);
+    clockwork_declare_fp_env(mCore, DSP_FP_ENV_FLUSH_TO_ZERO);
 
     // Link Audio's lanes, which the bridge hands to subscriptions: the engine
     // reserves them itself, before the boot that lays them out, so every
     // native host has the same channels.
-    LinkAudioBridge::reserveLanes();
+    LinkAudioBridge::reserveLanes(mCore);
 
     // Boot through the lanes ABI. Clockwork's geometry travels as arguments;
     // the guest's block travels as bytes it copies without reading; the guest's
     // region travels as a base and a length. That region is NULL when there is
     // no public segment — a headless engine has no client to share bulk with,
     // so a guest allocates from the system.
-    clockwork_init(static_cast<double>(sampleRate),
+    clockwork_init(mCore,
+             static_cast<double>(sampleRate),
              static_cast<uint32_t>(mBufLen),
              static_cast<uint32_t>(numInputChannels),
              static_cast<uint32_t>(numOutputChannels),
@@ -141,18 +143,18 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     // The device's audio starts now with its sample count at 0: the next
     // block re-anchors the clock, and clockwork_audio_starts measures the
     // gap before it.
-    clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
+    clockwork_audio_starts(mCore, wallClockNTP(), clockwork::monotonicSeconds());
     // A device restart can change the rate under a running engine, so the
     // endpoint is told again here as well as at initialiseDsp.
-    mLinkAudio->setAudioFormat(static_cast<uint32_t>(mSampleRate),
-                               clockworkLinkInputWidth(mNumInputChannels));
+    mLinkAudio->setAudioFormat(mCore, static_cast<uint32_t>(mSampleRate),
+                               clockworkLinkInputWidth(mCore, mNumInputChannels));
     std::fill(mPrefetchBuf.begin(), mPrefetchBuf.end(), 0.0f);
 
     // A device (re)start can hand the callback to a brand-new audio thread, so
     // re-arm realtime promotion; the first IO callback below performs it on the
     // audio thread itself (this function runs on the control thread).
     mRealtimeElevated.store(false, std::memory_order_relaxed);
-    mFirstCallbackLogged.store(false, std::memory_order_relaxed);
+    mFirstCallbackLog.reset();
 
     // Sync our internal channel counts from what the device actually opened.
     // mNumInput/OutputChannels are what we tell the DSP (via clockwork_tick's
@@ -200,7 +202,7 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
         mAccumPerChanCap = perChanNeeded;
     size_t neededSize = static_cast<size_t>(mAccumPerChanCap) * chans;
     if (mInputAccum.size() < neededSize) {
-        clockwork_log("[smoothie] resizing input accum: %zu -> %zu floats "
+        clockwork_log(mCore, "[smoothie] resizing input accum: %zu -> %zu floats "
                 "(perChanCap=%d chans=%d hwBuf=%d activeIn=%d mNumIn=%d)",
                 mInputAccum.size(), neededSize, mAccumPerChanCap, chans,
                 hwBufSize, activeIn, mNumInputChannels);
@@ -230,13 +232,13 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     // the wrong thing" / aggregate-ordering issues in user bug reports.
     // One per device start, so the volume is bounded.
     {
-        clockwork_log("[smoothie] output channels (%d total):", static_cast<int>(device.outputs.size()));
+        clockwork_log(mCore, "[smoothie] output channels (%d total):", static_cast<int>(device.outputs.size()));
         for (size_t i = 0; i < device.outputs.size(); ++i) {
-            clockwork_log("[smoothie]   [%d] %s%s", static_cast<int>(i),
+            clockwork_log(mCore, "[smoothie]   [%d] %s%s", static_cast<int>(i),
                     device.outputs[i].name.c_str(), device.outputs[i].active ? " (active)" : "");
         }
     }
-    clockwork_log("[smoothie] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
+    clockwork_log(mCore, "[smoothie] aboutToStart: device='%s' type='%s' sr=%d bs=%d activeOut=%d activeIn=%d outLat=%d inLat=%d",
             device.name.c_str(),
             device.driver.c_str(),
             mSampleRate,
@@ -250,7 +252,7 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
 }
 
 void ClockworkProcessor::deviceStopped() {
-    clockwork_log("[smoothie] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
+    clockwork_log(mCore, "[smoothie] audioDeviceStopped (callbackCount=%u)", mCallbackCount);
     mSamplePosition = 0.0;
     mPrefetchCount  = 0;
 }
@@ -272,7 +274,7 @@ void ClockworkProcessor::resume() {
     // The device's audio starts again with its sample count at 0: the next
     // block re-anchors the clock, and clockwork_audio_starts measures the
     // pause as a gap.
-    clockwork_audio_starts(wallClockNTP(), clockwork::monotonicSeconds());
+    clockwork_audio_starts(mCore, wallClockNTP(), clockwork::monotonicSeconds());
     mCallbackCount  = 0;       // re-arm warmup for new device
     mOverrunCount   = 0;
     mTotalUs        = 0.0;
@@ -287,9 +289,9 @@ void ClockworkProcessor::resume() {
     // A non-zero output width doubles as a DSP-alive check — a failed rebuild
     // leaves no instance and these answer 0, in which case keep the previous
     // widths.
-    if (get_audio_num_output_buses() > 0) {
-        mDspOutputChannels = get_audio_num_output_buses();
-        mDspInputChannels  = get_audio_num_input_buses();
+    if (clockwork_out_channels(mCore) > 0) {
+        mDspOutputChannels = static_cast<int>(clockwork_out_channels(mCore));
+        mDspInputChannels  = static_cast<int>(clockwork_in_channels(mCore));
     }
 
     // What follows fades in from silence, and no fade-out is under way.
@@ -343,8 +345,8 @@ void ClockworkProcessor::process(
     // later in this callback, the line is already on the ring for the gateway
     // thread to surface. Warmup-phase only, so the log never lands on a
     // steady-state block.
-    if (!mFirstCallbackLogged.exchange(true, std::memory_order_relaxed)) {
-        clockwork_log("[smoothie] first audio callback: numSamples=%d out=%d in=%d",
+    if (mFirstCallbackLog.say()) {
+        clockwork_log(mCore, "[smoothie] first audio callback: numSamples=%d out=%d in=%d",
                 numSamples, numOutputChannels, numInputChannels);
     }
 
@@ -354,7 +356,7 @@ void ClockworkProcessor::process(
     // permission) leaves the thread unchanged; see RealtimeThread.h.
     if (!mRealtimeElevated.exchange(true, std::memory_order_relaxed)) {
         const auto rt = clockwork::elevateCurrentThreadToRealtime();
-        clockwork_log("[smoothie] audio thread realtime: status=%d policy=%d prio=%d err=%d",
+        clockwork_log(mCore, "[smoothie] audio thread realtime: status=%d policy=%d prio=%d err=%d",
                static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
     }
 
@@ -491,7 +493,7 @@ void ClockworkProcessor::process(
         // If the accumulator doesn't have a full block yet (common at startup
         // when HW buffer < mBufLen), fall back to zero-padding the rest;
         // a rare edge case, not the common path.
-        float* inputBus = clockwork_audio_in();
+        float* inputBus = clockwork_audio_in(mCore);
         if (inputBus && nIn > 0) {
             int usable = std::min(mInputAccumCount, mBufLen);
             // Clamp to the DSP's input channel count: mNumInputChannels tracks
@@ -529,17 +531,19 @@ void ClockworkProcessor::process(
         blockTime.monotonic_secs        = cbMono;
         blockTime.output_latency_frames = outputLatencyFrames;
         blockTime.link_host_micros      = linkHostMicros;
-        renderAudioBlock(*mLinkAudio,
-                         static_cast<uint32_t>(mBufLen),
-                         static_cast<uint32_t>(mNumOutputChannels),
-                         static_cast<uint32_t>(mNumInputChannels),
-                         static_cast<uint32_t>(mSampleRate),
-                         blockTime,
-                         static_cast<uint32_t>(nOut));
+        const ClockworkTick tick = renderAudioBlock(mCore, *mLinkAudio,
+                                                    static_cast<uint32_t>(mBufLen),
+                                                    static_cast<uint32_t>(mNumOutputChannels),
+                                                    static_cast<uint32_t>(mNumInputChannels),
+                                                    static_cast<uint32_t>(mSampleRate),
+                                                    blockTime,
+                                                    static_cast<uint32_t>(nOut));
         if (linkHostMicros != 0) linkHostMicros += engineBlockMicros;
         mSamplePosition += mBufLen;
 
-        const float* outputBus = clockwork_audio_out();
+        // A block the core rendered; none while a control call holds its
+        // gate, and the buffers are that call's.
+        const float* outputBus = tick == CLOCKWORK_TICK_RENDERED ? clockwork_audio_out(mCore) : nullptr;
         if (outputBus) {
             int needed  = numSamples - outputFilled;
             int toCopy  = std::min(needed, mBufLen);
@@ -561,10 +565,10 @@ void ClockworkProcessor::process(
                 mPrefetchCount = leftover;
             }
         } else {
-            // Engine not ready yet — init_memory hasn't run so the output
-            // bus is null. Emit silence for the rest of this callback
-            // rather than spinning in the while loop. This can happen
-            // briefly at boot between aboutToStart and initialiseDsp().
+            // No block: the engine is not ready yet (init_memory has not run,
+            // briefly at boot between aboutToStart and initialiseDsp()), or a
+            // control call holds the core. Emit silence for the rest of this
+            // callback rather than spinning in the while loop.
             for (int ch = 0; ch < nOut; ++ch)
                 if (outputChannelData[ch])
                     std::memset(outputChannelData[ch] + outputFilled, 0,
@@ -597,7 +601,7 @@ void ClockworkProcessor::process(
             std::chrono::duration<double>(cbEnd.time_since_epoch()).count();
         if (nowSec - mLastOverrunLogSec >= 1.0) {
             mLastOverrunLogSec = nowSec;
-            clockwork_log("[overrun] render took %.1fms of %.1fms budget "
+            clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget "
                    "(total overruns: %u)",
                    cbUs / 1000.0, budgetUs / 1000.0, mOverrunCount);
         }
@@ -611,7 +615,7 @@ void ClockworkProcessor::process(
         const double instPct = (cbUs / budgetUs) * 100.0;
         mLoadAvgPct  += (instPct - mLoadAvgPct) * 0.1;            // ~10-callback EMA
         mLoadPeakPct = std::max(instPct, mLoadPeakPct * 0.95);   // decaying peak
-        clockwork_publish_audio_load(static_cast<uint32_t>(std::lround(mLoadAvgPct * 100.0)),
+        clockwork_publish_audio_load(mCore, static_cast<uint32_t>(std::lround(mLoadAvgPct * 100.0)),
                                static_cast<uint32_t>(std::lround(mLoadPeakPct * 100.0)),
                                mOverrunCount);
     }

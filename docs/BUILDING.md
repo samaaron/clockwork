@@ -79,8 +79,8 @@ else. A shuffled run prints its seed first ("Randomness seeded to");
 `--order rand --rng-seed <seed>` runs the same order again.
 
 `clockwork_lanes_reserved_tests` is a separate binary because it boots with
-channels reserved above the device (where Link peer audio lands), and
-clockwork is a process singleton.
+channels reserved above the device (where Link peer audio lands), and every
+case in a binary is written against its fixture's one geometry.
 
 The engine cases boot a whole engine, whose control plane is run by the
 engine's own gateway thread unless the host takes it (`Config::

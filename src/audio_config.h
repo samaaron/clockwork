@@ -8,36 +8,15 @@
  * size pin on the web build (AudioWorklet's fixed render quantum) while
  * letting native pick a block size that matches the hardware callback.
  *
- * All runtime code should read the actual block size from g_block_size
- * (audio_processor.cpp, exposed across the ABI as clockwork_block_size()); these
- * constants only size static buffers (like static_audio_bus) which need a
- * compile-time max.
+ * All runtime code should read the actual block size from the core's
+ * Build::block (core_state.h, exposed across the ABI as
+ * clockwork_block_size(core)); these constants are the profile's limits a
+ * build is held to.
  */
 
-#include <cstdio>
-#include <cstdlib>
-#include "process_env.h"
-
 #include "memory_profile.h"
-#include "clockwork_config.h"   // clockwork_log, for DEV_LOG
 
 namespace clockwork {
-
-// Runtime-gated diagnostic logging, for detail that would pollute normal
-// operation. Enabled for a specific bug report by launching with
-// CLOCKWORK_DEV_LOG=1 in the environment — no rebuild needed.
-//
-// Evaluated once on first call and cached in a function-local static,
-// so the hot-path cost is a single atomic load after initialisation.
-// Compile-time gating would save even that but forces a rebuild for
-// support requests, which is a worse tradeoff.
-inline bool devLogEnabled() {
-    static const bool enabled = []() {
-        const char* v = clockwork::processEnv("CLOCKWORK_DEV_LOG");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    return enabled;
-}
 
 #ifdef __EMSCRIPTEN__
 // AudioWorklet render quantum is fixed at 128 samples by the Web Audio
@@ -47,9 +26,9 @@ inline constexpr int kDefaultBlockSize = 128;
 #else
 // Non-WASM build — block size comes from memory_profile.h (default max 1024,
 // which covers every HW buffer we've seen on macOS/Windows/Linux drivers,
-// typically 64–512). Embedded profiles shrink this hard: static_audio_bus
-// costs kMaxBlockSize * kMaxChannels * 4 B in .bss, so 1024 × 128 = 512 KB on
-// desktop but e.g. 64 × 2 = 512 B on the ESP32-S3 profile.
+// typically 64–512). Embedded profiles shrink this hard: a core's staging
+// (core_state.h, Staging) holds a block of every channel each way, in fast
+// RAM.
 inline constexpr int kMaxBlockSize     = CLOCKWORK_MAX_BLOCK_SIZE;
 inline constexpr int kDefaultBlockSize = CLOCKWORK_DEFAULT_BLOCK_SIZE;
 #endif
@@ -59,8 +38,3 @@ inline constexpr int kDefaultBlockSize = CLOCKWORK_DEFAULT_BLOCK_SIZE;
 inline constexpr int kMaxChannels = CLOCKWORK_MAX_CHANNELS;
 
 } // namespace clockwork
-
-// The runtime-gated line, on the funnel like every other: nothing here
-// writes to stdio. No trailing newline in fmt.
-#define DEV_LOG(fmt, ...) \
-    do { if (clockwork::devLogEnabled()) clockwork_log(fmt, ##__VA_ARGS__); } while (0)

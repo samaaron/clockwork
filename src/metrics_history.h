@@ -89,10 +89,11 @@ struct Window {
     uint32_t covered = 0;   // buckets the window found recorded; 0: nothing, or no history for this metric
 };
 
-// The audio thread's writer. Bound once to the region; record() once a block.
+// The audio thread's writer over the region; record() once a block. Holds
+// nothing but where the region is: everything it keeps is in the region.
 class Writer {
 public:
-    void bind(uint8_t* region) { mRegion = region; }
+    explicit Writer(uint8_t* region) : mRegion(region) {}
 
     void record(const std::atomic<uint32_t>* metricWords, double ntp) {
         if (!mRegion) return;
@@ -183,7 +184,7 @@ private:
         }
     }
 
-    uint8_t* mRegion = nullptr;
+    uint8_t* const mRegion;
 };
 
 // One bucket of a level, `back` buckets before the current (0: the current,

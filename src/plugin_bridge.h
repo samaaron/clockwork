@@ -264,17 +264,19 @@ struct Prefixed {
 constexpr uint32_t BRIDGE_ORIGIN_TOKEN = 0x54425247;
 
 // ── Names ──────────────────────────────────────────────────────────────────
-// Short, and from the engine's pid. macOS caps a POSIX shm or sem name at
-// 31 characters including the slash; these leave room for a 10-digit pid.
+// From the engine's pid and its core's id (clockwork_core_id), so engines
+// side by side in one process each have their own. Short: macOS caps a POSIX
+// shm or sem name at 31 characters including the slash, and both numbers in
+// hex leave room for any pid and any id.
 
-inline std::string segment_name(int32_t engine_pid) {
+inline std::string segment_name(int32_t engine_pid, uint32_t core_id) {
     std::array<char, 64> buf{};
-    std::snprintf(buf.data(), buf.size(), "clockwork_bridge_%d", static_cast<int>(engine_pid));
+    std::snprintf(buf.data(), buf.size(), "clockwork_br_%x_%x", static_cast<unsigned>(engine_pid), core_id);
     return buf.data();
 }
-inline std::string doorbell_name(int32_t engine_pid) {
+inline std::string doorbell_name(int32_t engine_pid, uint32_t core_id) {
     std::array<char, 64> buf{};
-    std::snprintf(buf.data(), buf.size(), "/clockwork_bell_%d", static_cast<int>(engine_pid));
+    std::snprintf(buf.data(), buf.size(), "/clockwork_bl_%x_%x", static_cast<unsigned>(engine_pid), core_id);
     return buf.data();
 }
 

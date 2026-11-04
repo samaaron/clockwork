@@ -14,6 +14,12 @@
 #include <string>
 
 namespace {
+
+// A table of sinks of these cases' own: no engine here.
+const ClockworkSinks* testSinks() {
+    static const ClockworkSinks* const table = clockwork_sinks_new(nullptr);
+    return table;
+}
 struct Parsed {
     uint32_t widths[CLOCKWORK_SINK_CLASSES_MAX] = {};
     uint32_t depths[CLOCKWORK_SINK_CLASSES_MAX] = {};
@@ -78,12 +84,12 @@ TEST_CASE("sink profile: the build's strings parse, and a sink reserves what the
     // Whatever the string is — the default, a CMake override, an embedded
     // profile — an OSC sink opened after the install the engine does at boot
     // is that shape. (This binary has no engine, so it installs here.)
-    REQUIRE(clockwork_install_sink_profiles() != 0);
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:9", 0);
+    REQUIRE(clockwork_install_sink_profiles(testSinks()) != 0);
+    const ClockworkSink sink = clockwork_sink_open(testSinks(), kClockworkSinkOsc, "127.0.0.1:9", 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    CHECK(clockwork_sink_bytes_reserved(sink) == reserves(osc));
-    CHECK(clockwork_sink_max_message_bytes(sink) == widest);
-    clockwork_sink_close(sink);
+    CHECK(clockwork_sink_bytes_reserved(testSinks(), sink) == reserves(osc));
+    CHECK(clockwork_sink_max_message_bytes(testSinks(), sink) == widest);
+    clockwork_sink_close(testSinks(), sink);
 
     const Parsed midi = parse(CLOCKWORK_MIDI_SINK_CLASSES);
     REQUIRE(midi.n > 0);
@@ -99,22 +105,22 @@ TEST_CASE("sink profile: an installed shape is what a sink of that kind opens wi
     // the built-in one.
     const uint32_t widths[] = { 32, 4096 };
     const uint32_t depths[] = { 4, 1 };
-    REQUIRE(clockwork_sink_profile(kClockworkSinkOsc, 2, widths, depths) != 0);
-    const ClockworkSink sink = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:9", 0);
+    REQUIRE(clockwork_sink_profile(testSinks(), kClockworkSinkOsc, 2, widths, depths) != 0);
+    const ClockworkSink sink = clockwork_sink_open(testSinks(), kClockworkSinkOsc, "127.0.0.1:9", 0);
     REQUIRE(sink != CLOCKWORK_SINK_NONE);
-    CHECK(clockwork_sink_max_message_bytes(sink) == 4096u);
+    CHECK(clockwork_sink_max_message_bytes(testSinks(), sink) == 4096u);
     // A class is two cells at least, so "4096:1" reserves two of them.
-    CHECK(clockwork_sink_bytes_reserved(sink) == 4u * 32u + 2u * 4096u);
-    clockwork_sink_close(sink);
+    CHECK(clockwork_sink_bytes_reserved(testSinks(), sink) == 4u * 32u + 2u * 4096u);
+    clockwork_sink_close(testSinks(), sink);
 
     // A shape that does not hold together is refused, and the good one stays.
     const uint32_t twice[] = { 32, 32 };
     const uint32_t ones[]  = { 1, 1 };
-    CHECK(clockwork_sink_profile(kClockworkSinkOsc, 2, twice, ones) == 0);
-    const ClockworkSink again = clockwork_sink_open(kClockworkSinkOsc, "127.0.0.1:9", 0);
+    CHECK(clockwork_sink_profile(testSinks(), kClockworkSinkOsc, 2, twice, ones) == 0);
+    const ClockworkSink again = clockwork_sink_open(testSinks(), kClockworkSinkOsc, "127.0.0.1:9", 0);
     REQUIRE(again != CLOCKWORK_SINK_NONE);
-    CHECK(clockwork_sink_max_message_bytes(again) == 4096u);
-    clockwork_sink_close(again);
+    CHECK(clockwork_sink_max_message_bytes(testSinks(), again) == 4096u);
+    clockwork_sink_close(testSinks(), again);
 
-    REQUIRE(clockwork_install_sink_profiles() != 0);
+    REQUIRE(clockwork_install_sink_profiles(testSinks()) != 0);
 }

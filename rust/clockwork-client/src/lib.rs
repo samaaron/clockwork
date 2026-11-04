@@ -56,7 +56,7 @@ pub use client::{
     Client, Clock, Features, Info, Message, Messages, Region, RegionId, Ring, Route,
     SampleClock, Tap, POLL_BATCH,
 };
-pub use embed::{Device, Embed, EmbedConfig, Renderer, RENDER_MAX_CHANNELS};
+pub use embed::{Device, Embed, EmbedConfig, Profile, Renderer, RENDER_MAX_CHANNELS};
 pub use error::{Error, Result};
 pub use metrics::{Metrics, NativeStats, METRICS_WORDS_MAX, NATIVE_STATS_WORDS_MAX};
 pub use metrics_schema::{Metric, NativeStat};

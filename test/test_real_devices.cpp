@@ -52,12 +52,12 @@ ClockworkEngine::Config realConfig() {
 // The loudest sample on the first input channel over `ms`. A microphone in a
 // room is never exactly silent; a channel nothing feeds (a virtual device's
 // own returns, which a wrong channel offset would record) is.
-float inputPeak(int ms) {
+float inputPeak(EngineFixture& fix, int ms) {
     float peak = 0.0f;
     const auto until = Clock::now() + std::chrono::milliseconds(ms);
     while (Clock::now() < until) {
-        if (const float* in = clockwork_audio_in()) {
-            const int block = get_audio_buffer_samples();
+        if (const float* in = clockwork_audio_in(fix.engine().core())) {
+            const int block = static_cast<int>(clockwork_block_size(fix.engine().core()));
             for (int i = 0; i < block; ++i) peak = std::max(peak, std::fabs(in[i]));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -185,7 +185,7 @@ TEST_CASE("Hardware: boots on the default output with the default microphone, re
              << ", recording from '" << cur.inputDeviceName << "'");
         CHECK(cur.activeInputChannels > 0);
         CHECK(fix.waitForBlocks(200, 5000));
-        const float peak = inputPeak(1000);
+        const float peak = inputPeak(fix, 1000);
         WARN("microphone peak over 1 s: " << peak);
         CHECK(peak > 0.0f);   // zero: no microphone permission, or the wrong channels
 #ifdef __APPLE__
@@ -233,7 +233,7 @@ TEST_CASE("Hardware: the microphone plays with every output that pairs with it, 
         if (d.pairs) {
             CHECK(cur.inputDeviceName == mic);
             CHECK(cur.activeInputChannels > 0);
-            const float peak = inputPeak(500);
+            const float peak = inputPeak(fix, 500);
             CHECK(peak > 0.0f);   // the microphone's channels, not the output's own inputs
 #ifdef __APPLE__
             CHECK(within(2000, [&] { return ourAggregates() == (d.name == mic ? 0 : 1); }));
@@ -261,7 +261,7 @@ TEST_CASE("Hardware: the microphone plays with every output that pairs with it, 
     CHECK(cur.name == first.name);
     CHECK(cur.inputDeviceName == mic);
     CHECK(cur.activeInputChannels > 0);
-    CHECK(inputPeak(500) > 0.0f);
+    CHECK(inputPeak(fix, 500) > 0.0f);
 }
 
 // A device can refuse a rate it lists (an interface whose clock is set on the
@@ -285,7 +285,7 @@ TEST_CASE("Hardware: an output and a separate microphone change rate together, "
         const auto cur = fix.engine().currentDevice();
         CHECK(cur.inputDeviceName == first.inputDeviceName);
         CHECK(fix.waitForBlocks(100, 5000));
-        const float peak = inputPeak(500);
+        const float peak = inputPeak(fix, 500);
         CHECK(peak > 0.0f);
 #ifdef __APPLE__
         const double outRate = nominalRate(cur.name);

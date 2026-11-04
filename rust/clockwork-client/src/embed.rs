@@ -11,14 +11,17 @@
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use clockwork_abi::client::ClockworkStatus;
 use clockwork_abi::embed::{
     clockwork_embed_attach, clockwork_embed_block_size, clockwork_embed_boot,
     clockwork_embed_client, clockwork_embed_close, clockwork_embed_device,
-    clockwork_embed_render, clockwork_embed_sample_rate, ClockworkEmbed, ClockworkEmbedConfig,
-    ClockworkEmbedDevice, CLOCKWORK_EMBED_NO_INPUT,
+    clockwork_embed_reconfigure, clockwork_embed_render, clockwork_embed_sample_rate,
+    ClockworkEmbed, ClockworkEmbedConfig, ClockworkEmbedDevice, CLOCKWORK_EMBED_NO_INPUT,
+};
+use clockwork_abi::profile::{
+    clockwork_profile_check, clockwork_profile_default, clockwork_profile_plugin, ClockworkProfile,
 };
 
 use crate::client::Client;
@@ -26,6 +29,47 @@ use crate::error::{check, refused, Error, Result};
 
 /// The most channels one render call carries either way.
 pub const RENDER_MAX_CHANNELS: usize = 64;
+
+/// The sizes an engine's memory is laid out from (`clockwork_profile.h`):
+/// the target's own, a plugin's, or either with its sizes changed through
+/// the fields it derefs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile(ClockworkProfile);
+
+impl Profile {
+    /// This target's own sizes.
+    pub fn target() -> Profile {
+        let mut p = ClockworkProfile::new();
+        // SAFETY: a profile that says its own size, live for the call.
+        unsafe { clockwork_profile_default(&mut p) };
+        Profile(p)
+    }
+
+    /// A plugin's: many engines to a process, each small.
+    pub fn plugin() -> Profile {
+        let mut p = ClockworkProfile::new();
+        // SAFETY: as `target`.
+        unsafe { clockwork_profile_plugin(&mut p) };
+        Profile(p)
+    }
+
+    /// Why no engine can be laid out from it, or `None` when one can.
+    pub fn refused(&self) -> Option<String> {
+        // SAFETY: a profile that says its own size, live for the call; the
+        // answer is null or a static NUL-terminated string.
+        let why = unsafe { clockwork_profile_check(&self.0) };
+        // SAFETY: as above.
+        (!why.is_null()).then(|| unsafe { CStr::from_ptr(why) }.to_string_lossy().into_owned())
+    }
+}
+
+impl Deref for Profile {
+    type Target = ClockworkProfile;
+    fn deref(&self) -> &ClockworkProfile { &self.0 }
+}
+impl DerefMut for Profile {
+    fn deref_mut(&mut self) -> &mut ClockworkProfile { &mut self.0 }
+}
 
 /// How to bring an engine up. Every field is optional for a boot; an attach
 /// needs a sample rate and output channels.
@@ -40,6 +84,7 @@ pub struct EmbedConfig {
     device: Option<String>,
     driver: Option<String>,
     no_input: bool,
+    profile: Option<Profile>,
 }
 
 impl EmbedConfig {
@@ -113,6 +158,14 @@ impl EmbedConfig {
     }
 
     /// The ABI's struct, with the strings it points at held beside it.
+    /// The sizes the engine's memory is laid out from; the target's own
+    /// without one. One no engine can be laid out from is refused with
+    /// [`Error::Arg`]: [`Profile::refused`] says why.
+    pub fn profile(mut self, profile: Profile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     fn raw(&self) -> Result<RawConfig> {
         let c = |s: &Option<String>| -> Result<Option<CString>> {
             match s {
@@ -132,16 +185,19 @@ impl EmbedConfig {
         cfg.device = ptr(&strings[1]);
         cfg.driver = ptr(&strings[2]);
         cfg.flags = if self.no_input { CLOCKWORK_EMBED_NO_INPUT } else { 0 };
-        Ok(RawConfig { cfg, _strings: strings })
+        let profile = self.profile.map(|p| Box::new(p.0));
+        cfg.profile = profile.as_deref().map_or(core::ptr::null(), |p| p as *const ClockworkProfile);
+        Ok(RawConfig { cfg, _strings: strings, _profile: profile })
     }
 }
 
-/// The ABI struct and the heap strings its pointers name. A `CString`'s
-/// bytes do not move when the `CString` does, so this may be returned and
-/// moved before the call that reads it.
+/// The ABI struct and the heap strings and profile its pointers name. A
+/// `CString`'s bytes and a `Box`'s contents do not move when they do, so
+/// this may be returned and moved before the call that reads it.
 struct RawConfig {
     cfg: ClockworkEmbedConfig,
     _strings: [Option<CString>; 3],
+    _profile: Option<Box<ClockworkProfile>>,
 }
 
 /// What a booted engine is actually running on, which may not be what was
@@ -183,8 +239,9 @@ impl Device {
 /// closes the engine — a booted one closes its device and shuts down, an
 /// attached one detaches — and the client with it.
 ///
-/// One engine per process: a second boot or attach is refused with
-/// [`Error::Perm`].
+/// Each handle is an engine of its own, independent of every other in the
+/// process. A wasm build and an ESP-IDF board hold one engine per process
+/// and refuse a second with [`Error::Perm`].
 ///
 /// Derefs to its [`Client`], so `embed.send(..)` and `embed.poll()` are the
 /// client's. [`Embed::split`] hands the render half to another thread.
@@ -201,7 +258,7 @@ unsafe impl Send for Embed {}
 impl Embed {
     /// Bring an engine up on the audio device and let it tick itself.
     /// [`Error::Absent`] when this build has no device layer, [`Error::Perm`]
-    /// when the process already has an engine.
+    /// where the process holds one engine and has it.
     pub fn boot(config: &EmbedConfig) -> Result<Embed> {
         let raw = config.raw()?;
         let mut st = ClockworkStatus::OK;
@@ -212,8 +269,8 @@ impl Embed {
     }
 
     /// Bring an engine up with no device: you render. Needs a sample rate
-    /// and output channels; [`Error::Perm`] when the process already has an
-    /// engine.
+    /// and output channels; [`Error::Perm`] where the process holds one
+    /// engine and has it.
     pub fn attach(config: &EmbedConfig) -> Result<Embed> {
         let raw = config.raw()?;
         let mut st = ClockworkStatus::OK;
@@ -237,6 +294,21 @@ impl Embed {
         }
     }
 
+    /// Change the engine's rate, block or channels and keep the engine: what
+    /// a plugin host does between deactivating an instance and activating it
+    /// again. The `&mut self` keeps any [`Renderer`] from rendering through
+    /// it. [`Error::Arg`] for a booted engine (its device is the engine's
+    /// own) or a config it cannot read. Dropping the handle instead ends the
+    /// engine.
+    pub fn reconfigure(&mut self, config: &EmbedConfig) -> Result<()> {
+        let raw = config.raw()?;
+        // SAFETY: a live handle, borrowed mutably so nothing renders through
+        // it; a struct that says its own size, whose strings live in `raw`
+        // across the call.
+        let st = unsafe { clockwork_embed_reconfigure(self.raw.as_ptr(), &raw.cfg) };
+        if st.is_ok() { Ok(()) } else { Err(refused(st)) }
+    }
+
     /// The client over this engine.
     pub fn client(&self) -> &Client {
         &self.client
@@ -254,7 +326,7 @@ impl Embed {
         (Renderer { raw: self.raw, _embed: PhantomData }, &mut self.client)
     }
 
-    /// The rate the engine actually runs at (an attach may have joined one).
+    /// The rate the engine runs at.
     pub fn sample_rate(&self) -> f64 {
         // SAFETY: a live handle.
         unsafe { clockwork_embed_sample_rate(self.raw.as_ptr()) }

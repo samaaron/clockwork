@@ -67,10 +67,13 @@ struct EngineMeta {
 // shrink it without touching this header.
 using EngineScheduler = Scheduler<EngineMeta, SCHEDULER_SLOT_COUNT, SCHEDULER_DATA_POOL_SIZE>;
 
-// The process-wide instance (audio_processor.cpp). Clockwork is a
-// process singleton — one arena, one clock, one ingress — and the queue is
-// part of that, so it is reached by accessor rather than passed around.
-EngineScheduler& clockwork_engine_schedule();
+// A core's store (core_state.h, Schedule::store).
+struct ScheduleStore {
+    EngineScheduler s;
+};
+struct ClockworkCore;
+// `core`'s store, or null before its first boot built it.
+EngineScheduler* clockwork_engine_schedule(const ClockworkCore* core);
 
 #else  // !CLOCKWORK_SCHEDULER
 

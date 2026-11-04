@@ -13,6 +13,7 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
 socket2 = "0.6.4"
 clockwork-osc = { path = "../clockwork-osc" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }

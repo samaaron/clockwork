@@ -4,7 +4,6 @@
  * RingReader.cpp — see RingReader.h.
  */
 #include "RingReader.h"
-#include "clockwork_config.h"   // clockwork_log
 
 // The reader whose thread this is, set by run() before its first pass, so
 // running() and pause() can answer a call from its own handler without
@@ -52,12 +51,9 @@ bool RingReader::pause() {
     // The acknowledgement normally lands within one drain pass. The deadline
     // stays: a reader wedged behind a foreign lock must degrade to an unparked
     // (pre-pause) swap, not hang the device switch.
-    const bool parked = clockwork::wait_for_condition(
+    return clockwork::wait_for_condition(
         mParkedAt, [&] { return mParkedAt.value.load(std::memory_order_acquire) == ask; },
         clockwork::WaitClock::now() + std::chrono::seconds(2));
-    if (!parked)
-        clockwork_log("[%s] pause: reader did not park within 2s — proceeding unparked", mName);
-    return parked;
 }
 
 void RingReader::resume() {

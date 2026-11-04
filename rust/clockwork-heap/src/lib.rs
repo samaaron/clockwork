@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
-//! The growable pool behind `clockwork_heap`.
+//! The pool behind `clockwork_heap`.
 //!
 //! clockwork pre-allocates a block of memory at boot and suballocates from
 //! it, so a running engine never calls the system allocator on a path that
@@ -61,8 +61,17 @@ extern crate alloc;
 #[allow(unused_imports)]
 use alloc::boxed::Box;
 use core::ffi::c_void;
+use core::sync::atomic::Ordering::Relaxed;
 
+// Under loom the crate is the pool and the map's models: a core's heap and
+// the router stand on the process's map, which loom's atomics cannot be.
+#[cfg(all(feature = "std", not(loom)))]
+pub mod core_heap;
 #[cfg(feature = "std")]
+pub mod entry;
+#[cfg(feature = "std")]
+pub mod map;
+#[cfg(all(feature = "std", not(loom)))]
 pub mod router;
 
 /// Bytes a pool spends on its own bookkeeping at the head of every area.
@@ -284,11 +293,12 @@ pub struct HeapPool {
     /// Head of the free list for each class.
     heads: [[*mut Block; SL_COUNT]; FL_COUNT],
     /// Payload bytes handed out and not yet given back, and the most ever: the pool's own census, for the
-    /// metrics (block sizes as carved, so a request rounded up counts as what it took).
-    used: usize,
-    peak: usize,
+    /// metrics (block sizes as carved, so a request rounded up counts as what it took). Written by the
+    /// pool's one user, read by any thread (`CoreHeap::census`), so atomic.
+    used: core::sync::atomic::AtomicUsize,
+    peak: core::sync::atomic::AtomicUsize,
     /// Frees of a block already free: a caller's bug, refused and counted.
-    double_frees: u32,
+    double_frees: core::sync::atomic::AtomicU32,
 }
 
 impl HeapPool {
@@ -313,11 +323,27 @@ impl HeapPool {
             fl_bitmap: 0,
             sl_bitmap: [0; FL_COUNT],
             heads: [[core::ptr::null_mut(); SL_COUNT]; FL_COUNT],
-            used: 0,
-            peak: 0,
-            double_frees: 0,
+            used: core::sync::atomic::AtomicUsize::new(0),
+            peak: core::sync::atomic::AtomicUsize::new(0),
+            double_frees: core::sync::atomic::AtomicU32::new(0),
         };
         pool.add_area(initial_size);
+        pool
+    }
+
+    /// A pool over one span its caller owns and keeps, which never grows:
+    /// what the span cannot meet answers null. The span's whole length is
+    /// one area, headers included.
+    ///
+    /// # Safety
+    /// `span..span + bytes` must be valid, 16-aligned memory that nothing
+    /// else uses while the pool runs.
+    pub unsafe fn over(span: *mut u8, bytes: usize) -> HeapPool {
+        let mut pool = HeapPool::new(None, None, core::ptr::null_mut(), 0, 0);
+        if !span.is_null() && bytes > AREA_HDR + BLOCK_HDR {
+            // SAFETY: the caller's contract, and the size holds both headers.
+            unsafe { pool.install_area(span, bytes) };
+        }
         pool
     }
 
@@ -413,10 +439,20 @@ impl HeapPool {
         if mem.is_null() {
             return core::ptr::null_mut();
         }
-
-        let area = mem.cast::<Area>();
         // SAFETY: the host gave `size` bytes, checked above to hold both
         // headers, and `NewAreaFunc` promises them 16-aligned.
+        unsafe { self.install_area(mem.cast::<u8>(), size) }
+    }
+
+    /// Make `size` bytes at `mem` an area of the pool, its whole span one
+    /// free block.
+    ///
+    /// # Safety
+    /// `mem..mem + size` must be valid, 16-aligned memory that holds both
+    /// headers and is the pool's from now on.
+    unsafe fn install_area(&mut self, mem: *mut u8, size: usize) -> *mut Area {
+        let area = mem.cast::<Area>();
+        // SAFETY: the caller's contract.
         unsafe {
             (*area).next = self.areas;
             (*area).size = size;
@@ -482,8 +518,9 @@ impl HeapPool {
                         self.fl_push(rest);
                     }
                     (*b).free = false;
-                    self.used += (*b).size;
-                    if self.used > self.peak { self.peak = self.used; }
+                    let used = self.used.load(Relaxed) + (*b).size;
+                    self.used.store(used, Relaxed);
+                    if used > self.peak.load(Relaxed) { self.peak.store(used, Relaxed); }
                     return Block::payload(b);
                 }
             }
@@ -522,11 +559,11 @@ impl HeapPool {
             // twice and corrupt it; refused and counted instead, so the
             // caller's bug is visible (double_frees) rather than the pool's.
             if (*b).free {
-                self.double_frees += 1;
+                self.double_frees.fetch_add(1, Relaxed);
                 return;
             }
             (*b).free = true;
-            self.used = self.used.saturating_sub((*b).size);
+            self.used.store(self.used.load(Relaxed).saturating_sub((*b).size), Relaxed);
 
             // Coalesce with the physical neighbours, both in constant time:
             // the successor is one step forward, the predecessor is what
@@ -561,7 +598,7 @@ impl HeapPool {
     /// allocations. Used when the DSP is being rebuilt and nothing from the
     /// previous one survives.
     pub fn free_all_internal(&mut self) {
-        self.used = 0;
+        self.used.store(0, Relaxed);
         self.fl_bitmap = 0;
         self.sl_bitmap = [0; FL_COUNT];
         self.heads = [[core::ptr::null_mut(); SL_COUNT]; FL_COUNT];
@@ -607,219 +644,111 @@ unsafe fn first_block(area: *mut Area) -> *mut Block {
     unsafe { area.cast::<u8>().add(AREA_HDR).cast::<Block>() }
 }
 
-// ── C ABI ───────────────────────────────────────────────────────────────────
-//
-// The pool is reached from C++ (`clockwork_heap.cpp`), which owns the
-// lifetime and the lock. An opaque handle rather than a struct, so the layout
-// stays this crate's business.
+// ── The census and the check ────────────────────────────────────────────────
 
-/// Create a pool. Returns null if the initial area could not be obtained.
-///
-/// # Safety
-/// The callbacks must behave as [`NewAreaFunc`] and [`FreeAreaFunc`] say.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_new(
-    new_area: NewAreaFunc,
-    free_area: FreeAreaFunc,
-    area_ctx: *mut c_void,
-    initial_size: usize,
-    growth_size: usize,
-) -> *mut c_void {
-    let pool = Box::new(HeapPool::new(new_area, free_area, area_ctx, initial_size, growth_size));
-    Box::into_raw(pool).cast::<c_void>()
+/// What a walk of a pool found ([`HeapPool::check`]): `code` 0 when the pool
+/// is whole, else the first thing found wrong (1 a chain ran past its area,
+/// 2 a block size, 3 a boundary tag, 4 adjacent free blocks, 5 a free-list
+/// entry not free, 6 a free list and its bitmap disagree, 7 a free block
+/// missing from or doubled in the index); with it, where the walk stopped:
+/// the bad block's header, and the payload and size of the block before it,
+/// the allocation that most likely wrote past its end.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PoolCheck {
+    pub code: i32,
+    pub bad: usize,
+    pub prev_payload: usize,
+    pub prev_size: usize,
 }
 
-/// Destroy a pool, handing every area back through its free callback.
-///
-/// # Safety
-/// `pool` must be null or a handle from [`clockwork_heap_pool_new`] that has
-/// not been destroyed, and nothing may use it afterwards.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_free(pool: *mut c_void) {
-    if !pool.is_null() {
-        // SAFETY: the handle is the box `clockwork_heap_pool_new` leaked, and
-        // this is its one owner from here on.
-        unsafe { drop(Box::from_raw(pool.cast::<HeapPool>())) };
+impl HeapPool {
+    /// Payload bytes handed out and not yet given back.
+    pub fn used_bytes(&self) -> usize {
+        self.used.load(Relaxed)
     }
-}
 
-/// # Safety
-/// `pool` must be null or a live handle, and the caller must hold whatever
-/// lock keeps it to one thread at a time.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_alloc(pool: *mut c_void, bytes: usize) -> *mut c_void {
-    if pool.is_null() {
-        return core::ptr::null_mut();
+    /// The most ever in use at once.
+    pub fn peak_bytes(&self) -> usize {
+        self.peak.load(Relaxed)
     }
-    // SAFETY: a live handle, used by one thread at a time, per the contract.
-    unsafe { (*pool.cast::<HeapPool>()).alloc(bytes).cast::<c_void>() }
-}
 
-/// # Safety
-/// As for [`clockwork_heap_pool_alloc`], and `ptr` must be null or a payload
-/// this pool returned that has not already been given back.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_dealloc(pool: *mut c_void, ptr: *mut c_void) {
-    if pool.is_null() {
-        return;
+    /// Frees of a block already free, refused: a caller's bug made visible.
+    pub fn double_frees(&self) -> u32 {
+        self.double_frees.load(Relaxed)
     }
-    // SAFETY: the contract above is exactly `HeapPool::free`'s.
-    unsafe { (*pool.cast::<HeapPool>()).free(ptr.cast::<u8>()) };
-}
 
-/// # Safety
-/// As for [`clockwork_heap_pool_alloc`]; every payload the pool handed out
-/// is dead afterwards.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_free_all(pool: *mut c_void) {
-    if !pool.is_null() {
-        // SAFETY: a live handle, used by one thread at a time, per the contract.
-        unsafe { (*pool.cast::<HeapPool>()).free_all_internal() };
-    }
-}
-
-/// # Safety
-/// `pool` must be null or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_total_area(pool: *const c_void) -> usize {
-    if pool.is_null() {
-        return 0;
-    }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*pool.cast::<HeapPool>()).total_area() }
-}
-
-/// What a caller must add to the space it wants usable when sizing a backing
-/// block.
-/// Payload bytes in use now, and the most ever. Null is 0.
-///
-/// # Safety
-/// `pool` must be null or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_used_bytes(pool: *const c_void) -> usize {
-    if pool.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*pool.cast::<HeapPool>()).used }
-}
-/// # Safety
-/// `pool` must be null or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_peak_bytes(pool: *const c_void) -> usize {
-    if pool.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*pool.cast::<HeapPool>()).peak }
-}
-
-/// Where the last failed check stopped: the bad block's header, and the
-/// payload and size of the block before it (the allocation that most likely
-/// wrote past its end). 0 when the last check passed or never ran.
-pub static CHECK_BAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-pub static CHECK_PREV_PAYLOAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-pub static CHECK_PREV_SIZE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-#[no_mangle]
-pub extern "C" fn clockwork_heap_pool_check_bad() -> usize { CHECK_BAD.load(core::sync::atomic::Ordering::Relaxed) }
-#[no_mangle]
-pub extern "C" fn clockwork_heap_pool_check_prev_payload() -> usize { CHECK_PREV_PAYLOAD.load(core::sync::atomic::Ordering::Relaxed) }
-#[no_mangle]
-pub extern "C" fn clockwork_heap_pool_check_prev_size() -> usize { CHECK_PREV_SIZE.load(core::sync::atomic::Ordering::Relaxed) }
-
-/// Walk the pool's areas and free lists and say whether it is whole: 0 when
-/// every block tiles its area with agreeing boundary tags and the index
-/// names exactly the free blocks, else a small code for the first thing
-/// found wrong (1 chain ran past its area, 2 block size, 3 boundary tag,
-/// 4 adjacent free blocks, 5 free-list entry not free, 6 free list and
-/// bitmap disagree, 7 a free block missing from or doubled in the index).
-/// For a host hunting a corruption: not for the audio path, it walks
-/// everything.
-///
-/// # Safety
-/// `pool` must be null or a live handle, used by one thread at a time.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_check(pool: *const c_void) -> i32 {
-    if pool.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract; the walk is the pool's own.
-    let p = unsafe { &*pool.cast::<HeapPool>() };
-    let note = |b: *mut Block, prev: *mut Block| {
-        CHECK_BAD.store(b as usize, core::sync::atomic::Ordering::Relaxed);
-        // SAFETY: `prev` was walked to by the same tags and lies in the area.
-        unsafe {
-            CHECK_PREV_PAYLOAD.store(if prev.is_null() { 0 } else { Block::payload(prev) as usize }, core::sync::atomic::Ordering::Relaxed);
-            CHECK_PREV_SIZE.store(if prev.is_null() { 0 } else { (*prev).size }, core::sync::atomic::Ordering::Relaxed);
-        }
-    };
-    let mut free_count = 0usize;
-    let mut a = p.areas;
-    while !a.is_null() {
-        // SAFETY: the walk takes the same steps the pool does, by its own
-        // tags, and checks each stays inside the area before taking it;
-        // the first bad step is reported rather than followed.
-        unsafe {
-            let end = a.cast::<u8>().add((*a).size);
-            let mut b = first_block(a);
-            let mut prev: *mut Block = core::ptr::null_mut();
-            loop {
-                if b.cast::<u8>() >= end { note(b, prev); return 1; }
-                if (*b).size % ALIGN != 0 || (*b).size < ALIGN { note(b, prev); return 2; }
-                if prev.is_null() { if (*b).prev_size != 0 { note(b, prev); return 3; } }
-                else if (*b).prev_size as usize != (*prev).size { note(b, prev); return 3; }
-                if (*b).free {
-                    if !prev.is_null() && (*prev).free { return 4; }
-                    free_count += 1;
+    /// Walk the areas and free lists and say whether the pool is whole: every
+    /// block tiles its area with agreeing boundary tags and the index names
+    /// exactly the free blocks. For a host hunting a corruption, not for the
+    /// audio path: it walks everything.
+    pub fn check(&self) -> PoolCheck {
+        let found = |code: i32, b: *mut Block, prev: *mut Block| PoolCheck {
+            code,
+            bad: b as usize,
+            // SAFETY: `prev` was walked to by the same tags and lies in the area.
+            prev_payload: if prev.is_null() { 0 } else { unsafe { Block::payload(prev) as usize } },
+            // SAFETY: as above.
+            prev_size: if prev.is_null() { 0 } else { unsafe { (*prev).size } },
+        };
+        let wrong = |code: i32| PoolCheck { code, ..PoolCheck::default() };
+        let mut free_count = 0usize;
+        let mut a = self.areas;
+        while !a.is_null() {
+            // SAFETY: the walk takes the same steps the pool does, by its own
+            // tags, and checks each stays inside the area before taking it;
+            // the first bad step is reported rather than followed.
+            unsafe {
+                let end = a.cast::<u8>().add((*a).size);
+                let mut b = first_block(a);
+                let mut prev: *mut Block = core::ptr::null_mut();
+                loop {
+                    if b.cast::<u8>() >= end { return found(1, b, prev); }
+                    if (*b).size % ALIGN != 0 || (*b).size < ALIGN { return found(2, b, prev); }
+                    if prev.is_null() { if (*b).prev_size != 0 { return found(3, b, prev); } }
+                    else if (*b).prev_size as usize != (*prev).size { return found(3, b, prev); }
+                    if (*b).free {
+                        if !prev.is_null() && (*prev).free { return wrong(4); }
+                        free_count += 1;
+                    }
+                    if (*b).last {
+                        if Block::next(b).cast::<u8>() > end { return wrong(1); }
+                        break;
+                    }
+                    prev = b;
+                    b = Block::next(b);
                 }
-                if (*b).last {
-                    if Block::next(b).cast::<u8>() > end { return 1; }
-                    break;
-                }
-                prev = b;
-                b = Block::next(b);
-            }
-            a = (*a).next;
-        }
-    }
-    let mut indexed = 0usize;
-    for f in 0..FL_COUNT {
-        if (p.sl_bitmap[f] != 0) != (p.fl_bitmap & (1u32 << f) != 0) { return 6; }
-        for l in 0..SL_COUNT {
-            let head = p.heads[f][l];
-            if head.is_null() == (p.sl_bitmap[f] & (1u32 << l) != 0) { return 6; }
-            let mut b = head;
-            let mut back: *mut Block = core::ptr::null_mut();
-            let mut steps = 0usize;
-            while !b.is_null() {
-                // SAFETY: only blocks in the areas are ever put on a list,
-                // and the walk is bounded by the free count found above.
-                unsafe {
-                    if !(*b).free { return 5; }
-                    if mapping_insert((*b).size) != (f, l) { return 7; }
-                    if fl_prev(b) != back { return 7; }
-                    back = b;
-                    b = fl_next(b);
-                }
-                steps += 1;
-                if steps > free_count + 1 { return 7; }
-                indexed += 1;
+                a = (*a).next;
             }
         }
+        let mut indexed = 0usize;
+        for f in 0..FL_COUNT {
+            if (self.sl_bitmap[f] != 0) != (self.fl_bitmap & (1u32 << f) != 0) { return wrong(6); }
+            for l in 0..SL_COUNT {
+                let head = self.heads[f][l];
+                if head.is_null() == (self.sl_bitmap[f] & (1u32 << l) != 0) { return wrong(6); }
+                let mut b = head;
+                let mut back: *mut Block = core::ptr::null_mut();
+                let mut steps = 0usize;
+                while !b.is_null() {
+                    // SAFETY: only blocks in the areas are ever put on a list,
+                    // and the walk is bounded by the free count found above.
+                    unsafe {
+                        if !(*b).free { return wrong(5); }
+                        if mapping_insert((*b).size) != (f, l) { return wrong(7); }
+                        if fl_prev(b) != back { return wrong(7); }
+                        back = b;
+                        b = fl_next(b);
+                    }
+                    steps += 1;
+                    if steps > free_count + 1 { return wrong(7); }
+                    indexed += 1;
+                }
+            }
+        }
+        if indexed != free_count { return wrong(7); }
+        PoolCheck::default()
     }
-    if indexed != free_count { return 7; }
-    0
-}
-
-/// Frees of a block already free, refused: a caller's bug made visible.
-///
-/// # Safety
-/// `pool` must be null or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn clockwork_heap_pool_double_frees(pool: *const c_void) -> u32 {
-    if pool.is_null() { return 0; }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*pool.cast::<HeapPool>()).double_frees }
-}
-
-#[no_mangle]
-pub extern "C" fn clockwork_heap_pool_area_overhead() -> usize {
-    AREA_OVERHEAD
 }
 
 #[cfg(test)]
@@ -1192,11 +1121,11 @@ mod tests {
         unsafe {
             p.free(a);
             p.free(a);
-            assert_eq!(p.double_frees, 1);
+            assert_eq!(p.double_frees(), 1);
             p.free(b);
         }
         // The pool is whole: one area, one free block, every byte back.
-        assert_eq!(p.used, 0);
+        assert_eq!(p.used_bytes(), 0);
         let c = p.alloc(60 * 1024);
         assert!(!c.is_null());
     }

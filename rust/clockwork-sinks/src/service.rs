@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025-2026 Sam Aaron
-//! The one thread that drains every sink.
+//! The one thread that drains every sink, of every table.
 //!
 //! # Why the crate owns a thread at all
 //!
@@ -12,8 +12,9 @@
 //! lot here, because a sink's work is a few microseconds and sixty-four
 //! threads asleep is worse than one awake.
 //!
-//! It starts on the first sink opened and stops when the last one closes.
-//! Nothing runs in a process that opened no sink.
+//! It starts on the first sink opened and stops when the last one closes,
+//! whichever table — whichever core — they are in. Nothing runs in a process
+//! that opened no sink.
 //!
 //! # How it sleeps
 //!
@@ -26,12 +27,13 @@
 //! drain thread, and a timed message goes out at its time, to the resolution
 //! of the OS timer.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
+use clockwork_log::CoreRef;
 use clockwork_wait::Doorbell;
 
-use crate::registry;
+use crate::registry::Sinks;
 use crate::time;
 use clockwork_osc::Timetag;
 
@@ -49,6 +51,27 @@ const MIN_SLEEP: std::time::Duration = std::time::Duration::from_micros(100);
 /// (`kWallClockFollow`, src/host/host_scheduler.h).
 const WALL_CLOCK_FOLLOW: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Every table made ([`Sinks::new`]) and not yet gone: what the drain walks.
+static TABLES: Mutex<Vec<Weak<Sinks>>> = Mutex::new(Vec::new());
+
+/// A new table, for the drain to walk from now on.
+pub(crate) fn register(table: &Arc<Sinks>) {
+    if let Ok(mut tables) = TABLES.lock() {
+        tables.retain(|t| t.strong_count() > 0);
+        tables.push(Arc::downgrade(table));
+    }
+}
+
+/// The tables still live, held for one pass.
+fn live() -> Vec<Arc<Sinks>> {
+    TABLES.lock().map(|tables| tables.iter().filter_map(Weak::upgrade).collect()).unwrap_or_default()
+}
+
+/// Sinks open, every table together.
+fn open_count() -> u32 {
+    live().iter().map(|t| t.open_count()).sum()
+}
+
 /// The lifecycle, under a lock rather than a flag.
 ///
 /// A flag plus a compare-exchange has a window where the thread has decided to
@@ -59,29 +82,29 @@ const WALL_CLOCK_FOLLOW: std::time::Duration = std::time::Duration::from_secs(1)
 static RUNNING: Mutex<bool> = Mutex::new(false);
 
 /// Start the drain if it is not already running. Called by every
-/// `Drive::Service` open.
-pub fn ensure_running() {
+/// `Drive::Service` open; `core` is the opener's, told when it cannot.
+pub fn ensure_running(core: CoreRef) {
     let Ok(mut running) = RUNNING.lock() else { return };
     if *running { return; }
     match std::thread::Builder::new().name("cw-sink-drain".into()).spawn(run) {
         Ok(_) => *running = true,
         // No thread. Sinks still accept and count; nothing is delivered, and
         // the numbers say so rather than the process pretending.
-        Err(e) => clockwork_log::log!("[sinks] could not start the drain thread: {e}"),
+        Err(e) => clockwork_log::log!(core.ptr(), "[sinks] could not start the drain thread: {e}"),
     }
 }
 
 fn run() {
     loop {
         let now = time::now();
-        let next = registry::pump_service(now);
+        let next = live().iter().filter_map(|t| t.pump_service(now)).min();
 
-        if registry::open_count() == 0 {
+        if open_count() == 0 {
             // Under the lock, so an `open` cannot decide we are still running
             // while we are deciding to stop. Re-checked inside it, because a
             // sink may have opened between the count above and the lock.
             if let Ok(mut running) = RUNNING.lock() {
-                if registry::open_count() == 0 {
+                if open_count() == 0 {
                     *running = false;
                     return;
                 }
@@ -92,7 +115,7 @@ fn run() {
         // earliest held message is due. Measured from the clock after the
         // pump, which may have spent a while delivering.
         let deadline = sleep_for(next, time::now()).map(|d| Instant::now() + d);
-        DRAIN.sleep(|| registry::any_queued() || registry::open_count() == 0, deadline);
+        DRAIN.sleep(|| { let t = live(); t.iter().any(|t| t.any_queued()) || t.iter().all(|t| t.open_count() == 0) }, deadline);
     }
 }
 

@@ -32,8 +32,7 @@ constexpr double   kT0 = 3900000000.0;   // an NTP instant, on a minute
 struct Rig {
     std::vector<uint8_t> region = std::vector<uint8_t>(kRegionBytes, 0);
     std::array<std::atomic<uint32_t>, schema::kMetricWords> words{};
-    Writer writer;
-    Rig() { writer.bind(region.data()); }
+    Writer writer{region.data()};
     void block(double ntp) { writer.record(words.data(), ntp); }
     Window at(uint32_t level, uint32_t buckets, uint32_t offset) const {
         return window(region.data(), level, buckets, offset);

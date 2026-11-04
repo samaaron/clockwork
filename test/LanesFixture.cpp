@@ -11,7 +11,7 @@
 
 #include "lanes/lanes.h"
 #include "audio_processor.h"   // destroy_dsp, rebuild_dsp
-#include "guest_fence.h"       // armed here: one thread, so the fence can hold every region
+#include "guest_fence.h"       // armed here: one thread per core, so the fence can hold every region
 #include "dsp_api.h"      // DspFpEnv
 #include "OscTestUtils.h"
 
@@ -19,63 +19,71 @@
 #include <cstring>
 
 namespace lanes_test {
-namespace {
 
-uint32_t   gBlockSize  = 0;
-uint64_t   gSamplePos  = 0;
-uint64_t   gDspOrigin  = 0;   // gSamplePos when freshDsp() last made an instance
-bool       gBooted     = false;
-double     gBaseNtp    = kEpochNtp;
-bool       gResume     = false;   // another host rendered since this fixture last ticked (ticked())
+// Reserved for the guest, and the two bulk staging regions. A lane's for as
+// long as it lives: clockwork holds the pointers across every rebuild, and
+// the lane closes its core before it lets them go.
+struct alignas(16) Lane::Buffers {
+    uint8_t guest[kGuestMemoryBytes];
+    uint8_t assets[kAssetsBytes];
+    uint8_t returns[kReturnsBytes];
+};
 
-void drainInto(std::vector<EgressFrame>& out,
-               uint32_t (*drain)(ClockworkEgressFn, void*, uint32_t)) {
-    drain([](void* ctx, uint32_t sourceId, uint32_t route,
-             const uint8_t* osc, uint32_t len, uint32_t seq) {
-        auto* v = static_cast<std::vector<EgressFrame>*>(ctx);
-        // Every frame must decode with the parser the clients read with.
-        INFO("an egress frame of " << len << " bytes the client parser (clockwork-osc) would not decode");
-        CHECK(clockwork_osc_decodes(osc, len) == 1);
-        EgressFrame f;
-        f.sourceId = sourceId;
-        f.route    = route;
-        f.seq      = seq;
-        f.data.assign(osc, osc + len);
-        v->push_back(std::move(f));
-    }, &out, /*max_frames=*/0);
+Lane::Lane(size_t guestBulkBytes, const ClockworkProfile* profile) : mBuffers(std::make_unique<Buffers>()) {
+    ClockworkStatus made = CLOCKWORK_OK;
+    mCore = clockwork_core_new(&made);
+    if (profile) {
+        const char* why = clockwork_set_profile(mCore, profile);
+        INFO((why ? why : ""));
+        REQUIRE(why == nullptr);
+    }
+    if (guestBulkBytes) clockwork_set_guest_bulk_bytes(mCore, guestBulkBytes);
+    // Before clockwork_init: the reservation is read at every init_memory, and
+    // widens the channel counts the DSP is allocated for.
+    if (kReservedLanes > 0) clockwork_reserve_lanes(mCore, kReservedLanes);
+    if (kLinkAudioLanes > 0) clockwork_reserve_link_audio_lanes(mCore, kLinkAudioLanes);
+    // One thread at a time touches a lane's arena, so the guest fence can hold
+    // every region the guest was not handed (guest_fence.h); in a build
+    // without AddressSanitizer this arms nothing.
+    clockwork_guest_fence_arm(true);
+    // This fixture arms nothing on the thread that ticks, so denormals are
+    // honoured, and it says so — the guest reports what it was told
+    // (test_dsp_regions.cpp), which is the declaration's whole job.
+    clockwork_declare_fp_env(mCore, DSP_FP_ENV_DENORMALS_HONOURED);
+    // A full host: clockwork's geometry as arguments, a config block for the
+    // guest, an arena reserved for the guest's own memory, and the two
+    // one-way bulk staging regions.
+    init(kSampleRate, kBufLength, kInChannels, kOutChannels, kGuestConfigSlots);
 }
 
-} // namespace
+Lane::~Lane() { clockwork_core_close(mCore); }
 
-// Reserved for the guest. Static rather than heap-allocated so its lifetime is
-// the process's: clockwork holds the pointer across every rebuild, so a
-// region with a shorter lifetime would be a use-after-free.
-alignas(16) static uint8_t gGuestMemory[kGuestMemoryBytes];
-alignas(16) static uint8_t gAssets[kAssetsBytes];
-alignas(16) static uint8_t gReturns[kReturnsBytes];
+void Lane::init(double rate, uint32_t block, uint32_t inputs, uint32_t outputs, const uint32_t (&config)[4]) {
+    clockwork_init(mCore, rate, block, inputs, outputs, /*verbosity*/ 0,
+                   mBuffers->guest, kGuestMemoryBytes,
+                   config, static_cast<uint32_t>(sizeof config),
+                   // No placement span: this fixture's allocator is the system
+                   // one, which is what every native host passes.
+                   /*arena_bytes*/ 0,
+                   mBuffers->assets,  kAssetsBytes,
+                   mBuffers->returns, kReturnsBytes);
+    mBlockSize = clockwork_block_size(mCore);
+}
 
-const uint8_t* guestMemory() { return gGuestMemory; }
-namespace {
-// Open a client on the engine's arena (not the guest's reservation) to read from it.
-ClockworkClient* openClient() {
+const uint8_t* Lane::guestMemory() const { return mBuffers->guest; }
+uint8_t*       Lane::assets()            { return mBuffers->assets; }
+const uint8_t* Lane::returns() const     { return mBuffers->returns; }
+
+ClockworkClient* Lane::openClient() const {
     ClockworkStatus st = CLOCKWORK_OK;
-    uint8_t* const arena = static_cast<uint8_t*>(get_shared_memory_base());
-    REQUIRE(arena != nullptr);
-    ClockworkClient* c = clockwork_client_open_memory(arena, reinterpret_cast<const ClockworkArenaHeader*>(arena)->arena_bytes, &st);
-    REQUIRE(c != nullptr);
-    return c;
+    uint8_t* const arena = static_cast<uint8_t*>(clockwork_lanes_base(mCore));
+    if (!arena) return nullptr;
+    return clockwork_client_open_memory(arena, reinterpret_cast<const ClockworkArenaHeader*>(arena)->arena_bytes, &st);
 }
 
-// Another host (clockwork_embed_render) ticked the engine on the real wall
-// clock, so the engine's clock is now ahead of this fixture's timeline. Rebase
-// gBaseNtp so that ntpAtFrame(gSamplePos) equals the sample clock the engine
-// last published, and tell the engine this host's audio is starting: the next
-// tick re-anchors at exactly that time (the engine floors an anchor at the
-// published sample clock), so ntpAtFrame stays exact.
-// The sample clock the engine last published, through a client: its NTP
-// time for the first frame of the last block rendered, 0 before the first.
-double readPublishedNtp() {
+double Lane::publishedNtp() const {
     ClockworkClient* c = openClient();
+    if (!c) return 0.0;
     ClockworkClientSampleClock sc {};
     sc.struct_bytes = sizeof sc;
     const ClockworkStatus st = clockwork_client_sample_clock(c, &sc);
@@ -83,134 +91,162 @@ double readPublishedNtp() {
     return st == CLOCKWORK_OK ? sc.dac_ntp : 0.0;
 }
 
-void resume() {
-    gResume = false;
-    const double published = readPublishedNtp();
+bool Lane::metricWord(uint32_t offset, uint32_t& word) const {
+    ClockworkClient* c = openClient();
+    if (!c) return false;
+    uint32_t words[clockwork::metrics_schema::kMetricWords] = {};
+    const uint32_t n = clockwork_client_metrics(c, words, clockwork::metrics_schema::kMetricWords);
+    clockwork_client_close(c);
+    if (offset >= n) return false;
+    word = words[offset];
+    return true;
+}
+
+void Lane::ticked(uint64_t frames) {
+    mSamplePos += frames;
+    mResume = true;
+}
+
+// Another host (clockwork_embed_render) ticked the engine on the real wall
+// clock, so the engine's clock is now ahead of this lane's timeline. Rebase
+// so that ntpAt(position) equals the sample clock the engine last published,
+// and tell the engine this host's audio is starting: the next tick
+// re-anchors at exactly that time (the engine floors an anchor at the
+// published sample clock), so frame times stay exact.
+void Lane::resumeIfTicked() {
+    if (!mResume) return;
+    mResume = false;
+    const double published = publishedNtp();
     if (published > 0.0)
-        gBaseNtp = std::max(gBaseNtp, published - static_cast<double>(gSamplePos) / kSampleRate);
-    clockwork_audio_starts(ntpAtFrame(gSamplePos), /*monotonic_secs*/ 0.0);
+        mBaseNtp = std::max(mBaseNtp, published - static_cast<double>(mSamplePos) / kSampleRate);
+    clockwork_audio_starts(mCore, ntpAt(mSamplePos), /*monotonic_secs*/ 0.0);
+}
+
+uint64_t Lane::freshDsp() {
+    destroy_dsp(mCore);
+    rebuild_dsp(mCore, kSampleRate, kBufLength);
+    mDspOrigin = mSamplePos;
+    return mSamplePos;
+}
+
+void Lane::comeBack(double rate, uint32_t block, uint32_t inputs, uint32_t outputs, const uint32_t (&config)[4]) {
+    const uint32_t before = clockwork_arena_generation(clockwork_arena_header(mCore));
+    init(rate, block, inputs, outputs, config);
+    // A new instance counts its frames from here, as freshDsp's does.
+    if (clockwork_arena_generation(clockwork_arena_header(mCore)) != before) mDspOrigin = mSamplePos;
+}
+
+uint64_t Lane::tick() {
+    const uint64_t at = mSamplePos;
+    ClockworkBlockTime time {};
+    time.struct_bytes = sizeof time;
+    time.audio_frames = mSamplePos;
+    time.wall_ntp     = ntpAt(mSamplePos);   // its own time for a wall, and no monotonic clock: a lane sees no gap
+    clockwork_tick(mCore, &time, kOutChannels, kInChannels);
+    mSamplePos += mBlockSize;
+    return at;
+}
+
+std::vector<EgressFrame> Lane::drain(uint32_t (*from)(ClockworkCore*, ClockworkEgressFn, void*, uint32_t)) {
+    std::vector<EgressFrame> out;
+    from(mCore, [](void* ctx, uint32_t sourceId, uint32_t route,
+                   const uint8_t* osc, uint32_t len, uint32_t seq) {
+        auto* v = static_cast<std::vector<EgressFrame>*>(ctx);
+        EgressFrame f;
+        f.sourceId = sourceId;
+        f.route    = route;
+        f.seq      = seq;
+        f.decodes  = clockwork_osc_decodes(osc, len) == 1;
+        f.data.assign(osc, osc + len);
+        v->push_back(std::move(f));
+    }, &out, /*max_frames=*/0);
+    return out;
+}
+
+std::vector<EgressFrame> Lane::drainRt()  { return drain(&clockwork_egress_rt_drain); }
+std::vector<EgressFrame> Lane::drainNrt() { return drain(&clockwork_egress_nrt_drain); }
+
+bool Lane::ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId) {
+    return clockwork_ingress_write(mCore, osc, len, sourceId);
+}
+
+// ── The default lane: the free functions' ─────────────────────────────────
+
+Lane& defaultLane() {
+    // The process's for the whole binary, as a host's engine is.
+    static Lane* const lane = new Lane();
+    return *lane;
+}
+
+namespace {
+// Every frame must decode with the parser the clients read with.
+std::vector<EgressFrame> checked(std::vector<EgressFrame> frames) {
+    for (const auto& f : frames) {
+        INFO("an egress frame of " << f.data.size() << " bytes the client parser (clockwork-osc) would not decode");
+        CHECK(f.decodes);
+    }
+    return frames;
 }
 } // namespace
 
+const uint8_t* guestMemory() { return defaultLane().guestMemory(); }
+uint8_t*       assets()      { return defaultLane().assets(); }
+const uint8_t* returns()     { return defaultLane().returns(); }
+
 double baseNtp() {
     boot();
-    return gBaseNtp;
+    return defaultLane().baseNtp();
 }
 
 double publishedNtp() {
     boot();
-    return readPublishedNtp();
+    return defaultLane().publishedNtp();
 }
 
 uint32_t metricWord(uint32_t offset) {
-    ClockworkClient* c = openClient();
-    uint32_t words[clockwork::metrics_schema::kMetricWords] = {};
-    const uint32_t n = clockwork_client_metrics(c, words, clockwork::metrics_schema::kMetricWords);
-    clockwork_client_close(c);
-    REQUIRE(offset < n);
-    return words[offset];
+    uint32_t word = 0;
+    REQUIRE(defaultLane().metricWord(offset, word));
+    return word;
 }
-uint8_t*       assets()       { return gAssets; }
-const uint8_t* returns()      { return gReturns; }
 
 uint32_t boot() {
-    if (gBooted) {
-        if (gResume) resume();
-        return gBlockSize;
-    }
-    // Before clockwork_init: the reservation is read at every init_memory, and
-    // widens the channel counts the DSP is allocated for.
-    if (kReservedLanes > 0) clockwork_reserve_lanes(kReservedLanes);
-    if (kLinkAudioLanes > 0) clockwork_reserve_link_audio_lanes(kLinkAudioLanes);
-    // This thread is the only one that touches the arena, so the guest fence
-    // can hold every region the guest was not handed (guest_fence.h); in a
-    // build without AddressSanitizer this arms nothing.
-    clockwork_guest_fence_arm(true);
-    // This fixture arms nothing on the thread that ticks, so denormals are
-    // honoured, and it says so — the guest reports what it was told
-    // (test_dsp_regions.cpp), which is the declaration's whole job.
-    clockwork_declare_fp_env(DSP_FP_ENV_DENORMALS_HONOURED);
-    // A full host: clockwork's geometry as arguments, a config block for the
-    // guest, an arena reserved for the guest's own memory, and the two
-    // one-way bulk staging regions.
-    clockwork_init(kSampleRate,
-             kBufLength,
-             kInChannels,
-             kOutChannels,
-             /*verbosity*/ 0,
-             gGuestMemory,
-             kGuestMemoryBytes,
-             kGuestConfigSlots,
-             static_cast<uint32_t>(sizeof kGuestConfigSlots),
-             // No placement span: this fixture's allocator is the system one,
-             // which is what every native host passes.
-             /*arena_bytes*/ 0,
-             gAssets,  kAssetsBytes,
-             gReturns, kReturnsBytes);
-    gBlockSize = clockwork_block_size();
-    gBooted    = true;
-    return gBlockSize;
+    Lane& lane = defaultLane();
+    REQUIRE(lane.core() != nullptr);
+    lane.resumeIfTicked();
+    return lane.block();
 }
 
-void ticked(uint64_t frames) {
-    gSamplePos += frames;
-    gResume = true;
-}
+void     ticked(uint64_t frames) { defaultLane().ticked(frames); }
+uint64_t position()              { return defaultLane().position(); }
 
-uint64_t position() { return gSamplePos; }
+ClockworkCore* core() {
+    boot();
+    return defaultLane().core();
+}
 
 uint64_t freshDsp() {
     boot();
-    destroy_dsp();
-    rebuild_dsp(kSampleRate, kBufLength);
-    gDspOrigin = gSamplePos;
-    return gSamplePos;
+    return defaultLane().freshDsp();
 }
 
 void comeBack(double rate, uint32_t block, uint32_t inputs, uint32_t outputs, const uint32_t (&config)[4]) {
     boot();
-    const uint32_t before = clockwork_arena_generation(clockwork_arena_header());
-    clockwork_init(rate, block, inputs, outputs, /*verbosity*/ 0,
-                   gGuestMemory, kGuestMemoryBytes,
-                   config, static_cast<uint32_t>(sizeof config),
-                   /*arena_bytes*/ 0,
-                   gAssets,  kAssetsBytes,
-                   gReturns, kReturnsBytes);
-    gBlockSize = clockwork_block_size();
-    // A new instance counts its frames from here, as freshDsp's does.
-    if (clockwork_arena_generation(clockwork_arena_header()) != before) gDspOrigin = gSamplePos;
+    defaultLane().comeBack(rate, block, inputs, outputs, config);
 }
 
-uint64_t dspFrame(uint64_t streamFrame) { return streamFrame - gDspOrigin; }
+uint64_t dspFrame(uint64_t streamFrame) { return defaultLane().dspFrame(streamFrame); }
 
 uint64_t tick() {
     boot();
-    const uint64_t at  = gSamplePos;
-    const double   ntp = ntpAtFrame(gSamplePos);
-    ClockworkBlockTime time {};
-    time.struct_bytes = sizeof time;
-    time.audio_frames = gSamplePos;
-    time.wall_ntp     = ntp;   // its own time for a wall, and no monotonic clock: a fixture sees no gap
-    clockwork_tick(&time, kOutChannels, kInChannels);
-    gSamplePos += gBlockSize;
-    return at;
+    return defaultLane().tick();
 }
 
-std::vector<EgressFrame> drainRt() {
-    std::vector<EgressFrame> out;
-    drainInto(out, &clockwork_egress_rt_drain);
-    return out;
-}
-
-std::vector<EgressFrame> drainNrt() {
-    std::vector<EgressFrame> out;
-    drainInto(out, &clockwork_egress_nrt_drain);
-    return out;
-}
+std::vector<EgressFrame> drainRt()  { return checked(defaultLane().drainRt()); }
+std::vector<EgressFrame> drainNrt() { return checked(defaultLane().drainNrt()); }
 
 bool ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId) {
     boot();
-    return clockwork_ingress_write(osc, len, sourceId);
+    return defaultLane().ingress(osc, len, sourceId);
 }
 
 std::vector<EgressFrame> tickUntil(int maxBlocks, const char* address) {

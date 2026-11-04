@@ -58,6 +58,21 @@ extern "C" {
 typedef uint32_t ClockworkPort;
 #define CLOCKWORK_PORT_NONE 0u
 
+/* ── The table ──────────────────────────────────────────────────────────────
+ *
+ * A port is a slot in a TABLE, and its handle names it in that table and in
+ * no other. Every call below names the table: an engine's core has one
+ * (clockwork_core_ports, clockwork_core.h), and a host that has ports of its
+ * own without a core — a plugin bridge, a test — makes one. NULL names none,
+ * and every call answers as for a port that is not open.
+ *
+ * A table is counted: an endpoint that runs on one of its ports (a disk
+ * stream, clockwork_disk.h) keeps it for as long as it runs, and its ports
+ * close when the last holder lets it go. */
+typedef struct ClockworkPorts ClockworkPorts;
+const ClockworkPorts* clockwork_ports_new(void);
+void                  clockwork_ports_free(const ClockworkPorts* ports);
+
 typedef enum ClockworkPortDirection {
     kClockworkPortSource = 1,   /* endpoint -> clockwork (disk playback, Link peer, …) */
     kClockworkPortSink   = 2,   /* clockwork -> endpoint (recording, Link publish, …) */
@@ -78,7 +93,7 @@ typedef enum ClockworkPortDirection {
  *
  * Call from a control thread, never the audio thread: this allocates.
  */
-ClockworkPort clockwork_port_open(const char* name, ClockworkPortDirection dir,
+ClockworkPort clockwork_port_open(const ClockworkPorts* ports, const char* name, ClockworkPortDirection dir,
                       uint32_t channels, uint32_t capacity_frames);
 
 /*
@@ -90,11 +105,11 @@ ClockworkPort clockwork_port_open(const char* name, ClockworkPortDirection dir,
  * to call twice; never from inside the port's own signal, which it would
  * wait on.
  */
-void clockwork_port_close(ClockworkPort port);
+void clockwork_port_close(const ClockworkPorts* ports, ClockworkPort port);
 
 /* Shape, for a caller that has only the slot. 0 if the port is closed. */
-uint32_t clockwork_port_channels(ClockworkPort port);
-int      clockwork_port_is_open(ClockworkPort port);
+uint32_t clockwork_port_channels(const ClockworkPorts* ports, ClockworkPort port);
+int      clockwork_port_is_open(const ClockworkPorts* ports, ClockworkPort port);
 
 /*
  * Which way the port runs, or 0 if it is closed.
@@ -104,7 +119,7 @@ int      clockwork_port_is_open(ClockworkPort port);
  * Without this each consumer keeps a shadow record of a fact the substrate
  * already holds, which is the duplication ports exist to end.
  */
-ClockworkPortDirection clockwork_port_direction(ClockworkPort port);
+ClockworkPortDirection clockwork_port_direction(const ClockworkPorts* ports, ClockworkPort port);
 
 /* ── The audio thread ───────────────────────────────────────────────────── */
 
@@ -113,14 +128,15 @@ ClockworkPortDirection clockwork_port_direction(ClockworkPort port);
  * Returns how many frames were really available; the remainder of `out` is
  * ZEROED, so a caller may always use the whole block. An endpoint that has
  * fallen behind therefore sounds like silence rather than like a glitch, and
- * the shortfall is counted.
+ * the shortfall is counted. A NULL `out`, or a NULL channel in it, takes the
+ * frames and drops them.
  *
  * `channels` is the caller's count. If the port has fewer, the extra output
  * channels are zeroed; if it has more, the extras are discarded. A count
  * mismatch is a fact to handle, not an error to refuse — the device can
  * change underneath a running stream.
  */
-uint32_t clockwork_port_read(ClockworkPort port, float* const* out,
+uint32_t clockwork_port_read(const ClockworkPorts* ports, ClockworkPort port, float* const* out,
                        uint32_t channels, uint32_t frames);
 
 /*
@@ -128,7 +144,7 @@ uint32_t clockwork_port_read(ClockworkPort port, float* const* out,
  * anything not accepted is dropped and counted. Never blocks, so a slow
  * endpoint costs audio nothing but its own recording.
  */
-uint32_t clockwork_port_write(ClockworkPort port, const float* const* in,
+uint32_t clockwork_port_write(const ClockworkPorts* ports, ClockworkPort port, const float* const* in,
                         uint32_t channels, uint32_t frames);
 
 /* ── The endpoint's side ────────────────────────────────────────────────── */
@@ -143,13 +159,13 @@ uint32_t clockwork_port_write(ClockworkPort port, const float* const* in,
  * Lock-free, so these may be called from a realtime-ish thread too, but they
  * are meant for the disk reader, the file writer, the network peer.
  */
-uint32_t clockwork_port_produce(ClockworkPort port, const float* interleaved, uint32_t frames);
-uint32_t clockwork_port_consume(ClockworkPort port, float* interleaved, uint32_t frames);
+uint32_t clockwork_port_produce(const ClockworkPorts* ports, ClockworkPort port, const float* interleaved, uint32_t frames);
+uint32_t clockwork_port_consume(const ClockworkPorts* ports, ClockworkPort port, float* interleaved, uint32_t frames);
 
 /* How many frames could be produced into / consumed from this port right now.
    A disk reader uses this to decide whether to bother reading. */
-uint32_t clockwork_port_writable(ClockworkPort port);
-uint32_t clockwork_port_readable(ClockworkPort port);
+uint32_t clockwork_port_writable(const ClockworkPorts* ports, ClockworkPort port);
+uint32_t clockwork_port_readable(const ClockworkPorts* ports, ClockworkPort port);
 
 /* How far the reader and the writer have got, in frames since the port
    opened; 0 for a closed port. They wrap at 2^32, so only their differences
@@ -157,8 +173,8 @@ uint32_t clockwork_port_readable(ClockworkPort port);
    position taken together with a time dates every frame behind it — the
    frame `n` past it is read `n` frames after that time, short of an underrun.
    Lock-free, and safe on the audio thread. */
-uint32_t clockwork_port_read_position(ClockworkPort port);
-uint32_t clockwork_port_write_position(ClockworkPort port);
+uint32_t clockwork_port_read_position(const ClockworkPorts* ports, ClockworkPort port);
+uint32_t clockwork_port_write_position(const ClockworkPorts* ports, ClockworkPort port);
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
 
@@ -170,21 +186,21 @@ uint32_t clockwork_port_write_position(ClockworkPort port);
  * silence is a correct response to an underrun and an indistinguishable one
  * from silence that was meant.
  */
-uint64_t clockwork_port_underruns(ClockworkPort port);
-uint64_t clockwork_port_overruns(ClockworkPort port);
+uint64_t clockwork_port_underruns(const ClockworkPorts* ports, ClockworkPort port);
+uint64_t clockwork_port_overruns(const ClockworkPorts* ports, ClockworkPort port);
 
 /* Every open port's slot, for metrics and for a client asking what exists.
    Writes at most `cap` and returns how many there are. */
-uint32_t clockwork_port_list(ClockworkPort* out, uint32_t cap);
+uint32_t clockwork_port_list(const ClockworkPorts* ports, ClockworkPort* out, uint32_t cap);
 
 /* Diagnostics: the name given at open, or NULL. Valid until the port closes. */
-const char* clockwork_port_name(ClockworkPort port);
+const char* clockwork_port_name(const ClockworkPorts* ports, ClockworkPort port);
 
 /*
  * Close every open port: for shutdown, and so one test case cannot leak slots
  * into the next. Not for the audio thread.
  */
-void clockwork_port_close_all(void);
+void clockwork_port_close_all(const ClockworkPorts* ports);
 
 /* ── Shared storage, and a transfer signal ──────────────────────────────── */
 
@@ -214,7 +230,7 @@ void clockwork_port_close_all(void);
  */
 #define CLOCKWORK_PORT_SHARED_HEADER_BYTES 128
 
-ClockworkPort clockwork_port_open_shared(const char* name, ClockworkPortDirection dir,
+ClockworkPort clockwork_port_open_shared(const ClockworkPorts* ports, const char* name, ClockworkPortDirection dir,
                              uint32_t channels, uint32_t capacity_frames,
                              uint8_t* storage, size_t storage_bytes, int reset);
 
@@ -232,7 +248,7 @@ size_t clockwork_port_shared_bytes(uint32_t channels, uint32_t capacity_frames);
  * signal. Returns 0 if the port is not open.
  */
 typedef void (*ClockworkPortSignal)(ClockworkPort port, void* ctx);
-int clockwork_port_set_signal(ClockworkPort port, ClockworkPortSignal f, void* ctx);
+int clockwork_port_set_signal(const ClockworkPorts* ports, ClockworkPort port, ClockworkPortSignal f, void* ctx);
 
 #ifdef __cplusplus
 }

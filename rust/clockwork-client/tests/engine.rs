@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
-//! The crate against a real engine: attached headless in this process,
-//! with the dummy DSP (dsp/dummy), which answers `/dummy/ping` with
-//! `/dummy/pong` and renders a pulse train.
+//! The crate against real engines: each test attaches one of its own,
+//! headless in this process, with the dummy DSP (dsp/dummy), which answers
+//! `/dummy/ping` with `/dummy/pong` and renders a pulse train.
 //!
-//! One engine per process, and cargo runs a binary's tests on several
-//! threads, so every test here takes the one engine under a lock and
-//! renders it itself — nothing ticks in the background unless a test
-//! stands up a [`Renderer`] thread to.
+//! Cargo runs a binary's tests on several threads, so several engines run
+//! at once. Each test renders its own — nothing ticks in the background
+//! unless a test stands up a [`Renderer`] thread to.
 
 // The Rust host: the engine (clockwork-sys) and the subsystems it calls back
 // into (clockwork-native, `host`). A crate nothing names is not linked.
@@ -15,13 +14,12 @@ extern crate clockwork_native;
 extern crate clockwork_sys;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use clockwork_abi::arena::{geom, ClockworkArenaRegion};
 use clockwork_abi::client::CLOCKWORK_CLIENT_ABI_VERSION;
 use clockwork_client::{
-    Client, Embed, EmbedConfig, Error, Metric, NativeStat, RegionId, Ring, Route, AudioTapRead,
+    Client, Embed, EmbedConfig, Error, Metric, NativeStat, Profile, RegionId, Ring, Route, AudioTapRead,
     AUDIO_TAP_MAX_CHANNELS,
 };
 use clockwork_native::clockwork_taps;
@@ -31,20 +29,13 @@ use clockwork_native::clockwork_taps;
 const ORIGIN: u32 = 0x5245_5A5A;
 const RATE: f64 = 48_000.0;
 
-static ENGINE: Mutex<Option<Embed>> = Mutex::new(None);
-
 fn config() -> EmbedConfig {
     EmbedConfig::new().sample_rate(RATE).input_channels(2).output_channels(2).max_render_frames(4096)
 }
 
-/// The engine, attached on first use. A test that panicked poisons the
-/// lock; the engine underneath is still fine.
-fn engine() -> MutexGuard<'static, Option<Embed>> {
-    let mut g = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
-    if g.is_none() {
-        *g = Some(Embed::attach(&config()).expect("attach a headless engine"));
-    }
-    g
+/// An engine of the test's own, attached headless.
+fn engine() -> Embed {
+    Embed::attach(&config()).expect("attach a headless engine")
 }
 
 fn ping() -> Vec<u8> {
@@ -60,8 +51,8 @@ fn render_blocks(e: &mut Embed, blocks: usize) {
 }
 
 /// Render and drain until nothing more comes out for a few blocks: the
-/// engine has answered everything an earlier test left in its rings, so a
-/// test that counts replies counts only its own.
+/// engine has said everything it says at start, so a test that counts
+/// replies counts only its own.
 fn settle(e: &mut Embed) {
     let mut quiet = 0;
     for _ in 0..10_000 {
@@ -85,8 +76,7 @@ fn processed(e: &Embed) -> u32 {
 
 #[test]
 fn attach_reports_the_geometry_it_runs_at_and_has_no_device() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     assert_eq!(e.sample_rate(), RATE);
     assert!(e.block_size() > 0);
     let info = e.info().unwrap();
@@ -101,18 +91,68 @@ fn attach_reports_the_geometry_it_runs_at_and_has_no_device() {
 }
 
 #[test]
-fn one_engine_per_process_and_a_config_it_cannot_serve_is_refused() {
-    let _g = engine();
-    assert_eq!(Embed::attach(&config()).err(), Some(Error::Perm));
-    // Refused for the argument before the process is looked at.
+fn engines_side_by_side_answer_each_their_own_and_a_config_it_cannot_serve_is_refused() {
+    let first = &mut engine();
+    settle(first);
+    let mut beside = engine();
+    settle(&mut beside);
+    beside.send(&ping(), ORIGIN).unwrap();
+    render_blocks(&mut beside, 1);
+    render_blocks(first, 1);
+    assert!(beside.poll().any(|m| m.address() == "/dummy/pong"), "the second answers its own ping");
+    assert!(!first.poll().any(|m| m.address() == "/dummy/pong"), "the first heard nothing of it");
+    // Closing one leaves the other.
+    drop(beside);
+    first.send(&ping(), ORIGIN).unwrap();
+    render_blocks(first, 1);
+    assert!(first.poll().any(|m| m.address() == "/dummy/pong"), "the first still answers");
     assert_eq!(Embed::attach(&EmbedConfig::new().output_channels(2)).err(), Some(Error::Arg));
     assert_eq!(Embed::attach(&EmbedConfig::new().sample_rate(RATE)).err(), Some(Error::Arg));
 }
 
+// An engine laid out from a plugin's profile beside one laid out from the
+// target's (docs/ENGINES.md): its memory is its own size, and it
+// answers as any engine does.
+#[test]
+fn an_engine_from_a_plugin_profile_is_its_own_size_and_answers_the_same() {
+    let plugin = Profile::plugin();
+    assert_eq!(plugin.refused(), None);
+    let mut small = Embed::attach(&config().profile(plugin)).expect("a plugin's engine");
+    let big = engine();
+    let ingress = |e: &Embed| e.region(RegionId::Ingress).unwrap().len();
+    assert_eq!(ingress(&small), plugin.in_ring_bytes as usize);
+    assert_eq!(ingress(&big), Profile::target().in_ring_bytes as usize);
+    assert!(ingress(&small) < ingress(&big));
+    settle(&mut small);
+    small.send(&ping(), ORIGIN).unwrap();
+    render_blocks(&mut small, 1);
+    assert!(small.poll().any(|m| m.address() == "/dummy/pong"));
+
+    // One no engine can be laid out from says why, and is refused.
+    let mut tiny = Profile::plugin();
+    tiny.in_ring_bytes = 1000;
+    assert!(tiny.refused().is_some_and(|why| why.contains("4 KB")), "{:?}", tiny.refused());
+    assert_eq!(Embed::attach(&config().profile(tiny)).err(), Some(Error::Arg));
+}
+
+#[test]
+fn a_reconfigure_keeps_the_engine_and_runs_it_at_the_new_rate() {
+    let e = &mut engine();
+    settle(e);
+    for rate in [44_100.0, RATE] {
+        e.reconfigure(&config().sample_rate(rate)).unwrap();
+        assert_eq!(e.sample_rate(), rate);
+        settle(e);
+        e.send(&ping(), ORIGIN).unwrap();
+        render_blocks(e, 1);
+        assert!(e.poll().any(|m| m.address() == "/dummy/pong"), "answered at {rate} Hz");
+    }
+    assert_eq!(e.reconfigure(&EmbedConfig::new().output_channels(2)).err(), Some(Error::Arg));
+}
+
 #[test]
 fn a_ping_is_answered_on_the_next_block_with_the_origin_echoed() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     e.send(&ping(), ORIGIN).unwrap();
     render_blocks(e, 1);
@@ -129,8 +169,7 @@ fn a_ping_is_answered_on_the_next_block_with_the_origin_echoed() {
 
 #[test]
 fn send_refuses_nothing_and_too_much_and_a_full_ring_is_a_retry() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     assert_eq!(e.send(&[], ORIGIN).err(), Some(Error::Arg));
     let huge = vec![0u8; 1 << 20];
@@ -175,13 +214,11 @@ fn send_refuses_nothing_and_too_much_and_a_full_ring_is_a_retry() {
         e.drain();
     }
     assert!(done > sent, "{done} of {} processed", sent + 1);
-    settle(e);
 }
 
 #[test]
 fn send_with_builds_the_message_in_the_ring_and_never_wedges_it() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     let p = ping();
     e.send_with(64, ORIGIN, |buf| {
@@ -210,8 +247,7 @@ fn send_with_builds_the_message_in_the_ring_and_never_wedges_it() {
 
 #[test]
 fn drain_takes_everything_and_sequences_are_monotonic() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     let p = ping();
     for _ in 0..10 {
@@ -243,8 +279,7 @@ fn drain_takes_everything_and_sequences_are_monotonic() {
 
 #[test]
 fn a_wait_is_over_when_a_block_says_something_and_not_before() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     // Caught up with whatever was said before.
     while e.wait(Some(Duration::ZERO)).unwrap() {}
@@ -259,8 +294,7 @@ fn a_wait_is_over_when_a_block_says_something_and_not_before() {
 
 #[test]
 fn on_egress_tells_another_thread_each_time_and_stops_when_told() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     // The engine has said something, so the listener is told once at the
     // start, for it.
@@ -286,8 +320,7 @@ fn on_egress_tells_another_thread_each_time_and_stops_when_told() {
 
 #[test]
 fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     let block = e.block_size() as usize;
     let (mut renderer, client) = e.split();
@@ -319,8 +352,7 @@ fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
 
 #[test]
 fn a_tap_watches_both_rings_without_taking() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     settle(e);
     let (mut renderer, client) = e.split();
     let block = client.info().unwrap().block_frames as usize;
@@ -347,8 +379,7 @@ fn a_tap_watches_both_rings_without_taking() {
 
 #[test]
 fn regions_are_named_and_absent_is_an_answer() {
-    let g = engine();
-    let e = g.as_ref().unwrap();
+    let e = &engine();
     let metrics = e.region(RegionId::Metrics).unwrap();
     assert!(metrics.len() >= 4 && !metrics.is_writable());
     assert_eq!(metrics.read_u32(metrics.len() / 4), None);
@@ -368,8 +399,7 @@ fn regions_are_named_and_absent_is_an_answer() {
 
 #[test]
 fn metrics_are_a_block_that_counts_the_blocks_rendered() {
-    let mut g = engine();
-    let e = g.as_mut().unwrap();
+    let e = &mut engine();
     let before = e.metrics();
     render_blocks(e, 4);
     let after = e.metrics();
@@ -386,8 +416,7 @@ fn metrics_are_a_block_that_counts_the_blocks_rendered() {
 
 #[test]
 fn native_stats_read_as_a_block_and_a_headless_engine_never_overruns() {
-    let g = engine();
-    let e = g.as_ref().unwrap();
+    let e = &engine();
     let s = e.native_stats().unwrap();
     assert!(s.len() >= clockwork_client::metrics_schema::NATIVE_STATS.len());
     assert_eq!(s.overruns(), 0);
@@ -398,8 +427,7 @@ fn native_stats_read_as_a_block_and_a_headless_engine_never_overruns() {
 
 #[test]
 fn the_clock_is_one_snapshot_and_beats_follow_its_tempo() {
-    let g = engine();
-    let e = g.as_ref().unwrap();
+    let e = &engine();
     let c = e.clock().unwrap();
     assert!(c.bpm() > 0.0, "{c:?}");
     let origin = c.beat_origin_ntp();
@@ -415,8 +443,10 @@ fn the_clock_is_one_snapshot_and_beats_follow_its_tempo() {
 
 #[test]
 fn the_sample_clock_pairs_a_frame_with_the_ntp_it_is_heard_at() {
-    let g = engine();
-    let e = g.as_ref().unwrap();
+    let e = &mut engine();
+    // Published by a block.
+    assert!(e.sample_clock().is_err());
+    render_blocks(e, 1);
     let c = e.sample_clock().unwrap();
     assert!(c.sample_rate() > 0, "{c:?}");
     assert_eq!(c.ntp_at_frame(c.engine_frames()), c.dac_ntp());
@@ -426,13 +456,18 @@ fn the_sample_clock_pairs_a_frame_with_the_ntp_it_is_heard_at() {
 
 #[test]
 fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written() {
-    let g = engine();
-    let e = g.as_ref().unwrap();
+    let e = &engine();
     // The buffer-sizing constant is the engine's own geometry, or the read
     // above it is wrong.
+    // The engine's core, found from memory it publishes, as a client in this
+    // process finds it.
+    let metrics = e.region(RegionId::Metrics).unwrap();
+    // SAFETY: the engine is attached, so its arena is mapped; a lookup.
+    let core = unsafe { clockwork_abi::lanes::clockwork_core_of_memory(metrics.as_ptr().cast()) };
+    assert!(!core.is_null(), "the engine's metrics are in its core's arena");
     // SAFETY: the engine is attached, so the arena header is mapped and
     // published; read only.
-    let header = unsafe { &*clockwork_abi::lanes::clockwork_arena_header() };
+    let header = unsafe { &*clockwork_abi::lanes::clockwork_arena_header(core) };
     let tap_entry = header.find(ClockworkArenaRegion::CLOCKWORK_TAPS).expect("the arena has a tap region");
     assert_eq!(tap_entry.geom[geom::TAP_CHANNELS] as usize, AUDIO_TAP_MAX_CHANNELS);
 
@@ -450,7 +485,10 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
     // Now a writer claims the slot and writes a ramp, as a guest does. The
     // claim counts as a live spell.
     let went_live = tap.activations();
-    assert!(clockwork_taps::stream_activate(0, 2));
+    // SAFETY: the engine is attached, so its arena is mapped.
+    let arena = unsafe { clockwork_abi::lanes::clockwork_lanes_base(core) }.cast::<u8>();
+    // SAFETY: the engine's arena, mapped while it is attached.
+    assert!(unsafe { clockwork_taps::stream_activate(arena, 0, 2) });
     assert_eq!(tap.activations(), went_live.wrapping_add(1));
     let n = 1024usize;
     let mut ramp = vec![0.0f32; n * 2];
@@ -458,7 +496,8 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
         ramp[f * 2] = f as f32;
         ramp[f * 2 + 1] = -(f as f32);
     }
-    clockwork_taps::stream_write(0, &ramp, n, 0);
+    // SAFETY: as above.
+    unsafe { clockwork_taps::stream_write(arena, 0, &ramp, n, 0) };
     assert!(tap.is_valid());
     let got = tap.read_newest(256, &mut out);
     assert_eq!(got, AudioTapRead { frames: 256, channels: 2 });
@@ -478,7 +517,8 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
     let got = tap.read_audible(64, &mut out);
     assert!(got.frames <= 64);
 
-    clockwork_taps::stream_release(0);
+    // SAFETY: as above.
+    unsafe { clockwork_taps::stream_release(arena, 0) };
     assert!(!tap.is_valid());
     // Released, it still says it went live: a reader that polled only after
     // the release can tell.
@@ -490,7 +530,6 @@ fn a_tap_slot_reads_silence_until_a_writer_claims_it_and_then_what_was_written()
 
 #[test]
 fn an_endpoint_is_named_by_port_and_an_engine_that_is_not_there_is_not_found() {
-    let _g = engine();
     let ep = Client::default_endpoint(57_110);
     assert!(ep.contains("57110"), "{ep}");
     assert_ne!(Client::default_endpoint(57_111), ep);

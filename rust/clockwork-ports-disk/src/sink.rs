@@ -29,9 +29,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use clockwork_ports::registry as ports;
+use clockwork_ports::registry::Ports;
 
 use crate::pace::{self, Stop};
+use crate::Feed;
 use crate::wav::WavWriter;
 
 const CHUNK_FRAMES: usize = 4096;
@@ -45,10 +46,11 @@ pub struct DiskSink {
 impl DiskSink {
     /// `sample_rate` is the file's and the session's: the audio thread writes
     /// the port at it, which paces the worker.
-    pub fn open(path: &Path, port: u32, sample_rate: u32, channels: u16)
+    /// `port` is a sink in `ports`, which the worker keeps while it runs.
+    pub fn open(path: &Path, ports: Arc<Ports>, port: u32, sample_rate: u32, channels: u16)
         -> std::io::Result<DiskSink>
     {
-        let port_channels = ports::channels(port);
+        let port_channels = ports.channels(port);
         if port_channels == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -74,8 +76,8 @@ impl DiskSink {
             std::thread::Builder::new()
                 .name("cw-disk-sink".into())
                 .spawn(move || {
-                    run(writer, port, port_channels as usize, channels as usize, sample_rate,
-                        &stop, &written)
+                    let feed = Feed { ports: &ports, port, channels: port_channels as usize };
+                    run(writer, feed, channels as usize, sample_rate, &stop, &written)
                 })?
         };
         Ok(DiskSink { stop, written, worker: Some(worker) })
@@ -92,12 +94,13 @@ impl Drop for DiskSink {
 }
 
 fn run(
-    mut writer: WavWriter, port: u32, port_channels: usize, file_channels: usize,
+    mut writer: WavWriter, feed: Feed<'_>, file_channels: usize,
     sample_rate: u32, stop: &Stop, written: &AtomicU64,
 ) {
+    let Feed { ports, port, channels: port_channels } = feed;
     let mut from_port = vec![0.0f32; CHUNK_FRAMES * port_channels];
     let mut to_file = vec![0.0f32; CHUNK_FRAMES * file_channels];
-    let tick = pace::quarter_ring(ports::capacity(port), sample_rate);
+    let tick = pace::quarter_ring(ports.capacity(port), sample_rate);
 
     'worker: loop {
         // Read the stop BEFORE the drain. The audio thread's last write came
@@ -107,10 +110,10 @@ fn run(
 
         // Write all that has arrived.
         loop {
-            let avail = ports::readable(port) as usize;
+            let avail = ports.readable(port) as usize;
             if avail == 0 { break; }
             let want = core::cmp::min(avail, CHUNK_FRAMES);
-            let got = ports::consume(port, &mut from_port[..want * port_channels]) as usize;
+            let got = ports.consume(port, &mut from_port[..want * port_channels]) as usize;
             if got == 0 { break; }
 
             let data: &[f32] = if file_channels == port_channels {
@@ -135,7 +138,7 @@ fn run(
             written.store(writer.frames(), Ordering::Relaxed);
         }
 
-        if stopping || ports::channels(port) == 0 { break; }
+        if stopping || ports.channels(port) == 0 { break; }
         stop.sleep_until(Some(Instant::now() + tick));
     }
     let _ = writer.finish();

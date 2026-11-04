@@ -29,6 +29,8 @@ extern "C" const char* clockwork_app_name();
 #include <cstring>
 #include <string>
 
+ClockworkCore* MidiControl::core() const { return mEgress ? mEgress->core() : nullptr; }
+
 void MidiControl::init(OscEgress* egress, ClockworkClock* clock, MidiClockOut* clockOut) {
     mEgress   = egress;
     mClock    = clock;
@@ -40,7 +42,7 @@ void MidiControl::init(OscEgress* egress, ClockworkClock* clock, MidiClockOut* c
             broadcastTimelines();
         });
     if (!mMidi) {
-        mMidi = clockwork_midi_create(this, &MidiControl::emitCb, &MidiControl::clockCb,
+        mMidi = clockwork_midi_create(core(), this, &MidiControl::emitCb, &MidiControl::clockCb,
                                &MidiControl::transportCb, clockwork_app_name());
     }
 }
@@ -108,21 +110,21 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
 // release it at the block it fired in — up to a block early, plus whatever
 // this thread's wake cost. The Rust side still owns the encoding.
 bool MidiControl::handleOutVerb(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
-    struct Ctx { clockwork::Timetag when; uint32_t dropped; } ctx{ meta.when, 0 };
+    struct Ctx { clockwork::Timetag when; uint32_t dropped; const ClockworkSinks* sinks; } ctx{ meta.when, 0, mClockOut->sinks() };
     const auto onMessage = [](void* c, const uint8_t* port, uint32_t portLen,
                               const uint8_t* bytes, uint32_t len, ClockworkTimetag verbWhen) {
         auto* self = static_cast<Ctx*>(c);
         const std::string name(reinterpret_cast<const char*>(port), portLen);
-        const ClockworkSink sink = midi_sink_for_port(name.empty() ? "*" : name);
+        const ClockworkSink sink = midi_sink_for_port(self->sinks, name.empty() ? "*" : name);
         // A verb's own time (immediately: none) wins over the call's, as it
         // does when the verb is handled by the Rust side.
         const ClockworkTimetag when = clockwork_timetag_is_immediate(verbWhen) ? self->when.abi() : verbWhen;
-        if (sink == CLOCKWORK_SINK_NONE || !clockwork_sink_send(sink, bytes, len, when))
+        if (sink == CLOCKWORK_SINK_NONE || !clockwork_sink_send(self->sinks, sink, bytes, len, when))
             ++self->dropped;
     };
     if (!clockwork_midi_encode_out(data, size, &ctx, onMessage)) return false;
     if (ctx.dropped)
-        clockwork_log("WARNING: %s: %u message(s) had no port to go to",
+        clockwork_log(core(), "WARNING: %s: %u message(s) had no port to go to",
                 reinterpret_cast<const char*>(data), ctx.dropped);
     return true;
 }
@@ -212,13 +214,13 @@ bool MidiControl::handleClockOutVerb(const uint8_t* data, uint32_t size) {
         // would claim it.
         const int id = mClock->resolveOrClaimTimeline(timeline.c_str());
         if (id < 0) {
-            clockwork_log("WARNING: %s: no timeline named '%s' to follow on '%s'",
+            clockwork_log(core(), "WARNING: %s: no timeline named '%s' to follow on '%s'",
                     addr, timeline.c_str(), port.c_str());
             return true;
         }
         // The sink is resolved HERE, on the command thread (see MidiClockOut.h).
-        if (!mClockOut->follow(port, timeline, id, midi_clock_sink_for_port(port))) {
-            clockwork_log("WARNING: %s: %u ports already follow a clock; '%s' refused",
+        if (!mClockOut->follow(port, timeline, id, midi_clock_sink_for_port(mClockOut->sinks(), port))) {
+            clockwork_log(core(), "WARNING: %s: %u ports already follow a clock; '%s' refused",
                     addr, MidiClockOut::kMaxFollowers, port.c_str());
             return true;
         }
@@ -260,7 +262,7 @@ void MidiControl::refreshDevices() {
 // Per-event traffic (/clockwork/midi/in/*, /clockwork/midi/out/*, clock pulses) is
 // deliberately not logged.
 // Payload: <nIn:i> [name:s enabled:i]* <nOut:i> [name:s enabled:i]*
-static void logMidiPortsChange(const uint8_t* data, uint32_t len) {
+static void logMidiPortsChange(ClockworkCore* core, const uint8_t* data, uint32_t len) {
     if (std::strcmp(reinterpret_cast<const char*>(data), CLOCKWORK_SYS("midi/ports")) != 0) return;
     std::string ins, outs;
     try {
@@ -281,7 +283,7 @@ static void logMidiPortsChange(const uint8_t* data, uint32_t len) {
         readList(ins);
         readList(outs);
     } catch (...) { return; }
-    clockwork_log("[midi] ports: in=[%s] out=[%s]", ins.c_str(), outs.c_str());
+    clockwork_log(core, "[midi] ports: in=[%s] out=[%s]", ins.c_str(), outs.c_str());
 }
 
 // A reply goes to its caller. An EVENT — what a port sent, a ports change —
@@ -296,11 +298,10 @@ void MidiControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t l
     if (kind == CLOCKWORK_MIDI_EMIT_REPLY) {
         self->mEgress->reply(self->mReplyToken, osc, len);
     } else {
-        logMidiPortsChange(osc, len);
-        if (!clockwork_ingress_write(osc, len, 0)) {
-            static std::atomic<uint32_t> dropped{0};
-            if (dropped.fetch_add(1, std::memory_order_relaxed) < 8)
-                clockwork_log("WARNING: MIDI event %s dropped — IN ring full",
+        logMidiPortsChange(self->core(), osc, len);
+        if (!clockwork_ingress_write(self->mEgress->core(), osc, len, 0)) {
+            if (self->mDroppedLog.say())
+                clockwork_log(self->core(), "WARNING: MIDI event %s dropped — IN ring full",
                               reinterpret_cast<const char*>(osc));
         }
     }

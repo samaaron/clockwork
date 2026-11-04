@@ -53,6 +53,10 @@ namespace {
 struct ClientImpl {
     uint8_t* base   = nullptr;
     uint32_t bytes  = 0;
+    // The core whose arena this is, when that core is in this process
+    // (clockwork_core_of_memory): what a wait sleeps on and a poll that
+    // makes room wakes. Null over another process's memory.
+    ClockworkCore* core = nullptr;
     // Where every region is: the arena's own table (clockwork_arena.h),
     // whichever way the handle was opened. Nothing below addresses the arena
     // through a constant.
@@ -180,6 +184,7 @@ ClockworkClient* clockwork_client_open_memory(void* base, uint32_t bytes,
     c->base  = static_cast<uint8_t*>(base);
     c->bytes = L.blob_size;
     c->L     = L;
+    c->core  = clockwork_core_of_memory(base);
     fail(out_status, CLOCKWORK_OK);
     return reinterpret_cast<ClockworkClient*>(c.release());
 }
@@ -341,6 +346,11 @@ void clockwork_client_close(ClockworkClient* handle) {
     delete c;
 }
 
+ClockworkCore* clockwork_client_core(const ClockworkClient* handle) {
+    const auto* c = reinterpret_cast<const ClientImpl*>(handle);
+    return c ? c->core : nullptr;
+}
+
 ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientInfo* out) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out || out->struct_bytes < sizeof(uint32_t) * 4) return CLOCKWORK_E_ARG;
@@ -411,7 +421,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
             c->L.control_ring_size - CONTROL_RING_HEADER_SIZE,
             &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
             osc, bytes, origin);
-        if (ok) clockwork_control_wake();   // the pass that drains it (lanes.h)
+        if (ok) clockwork_control_wake(c->core);   // the pass that drains it (lanes.h)
         return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
     }
 
@@ -607,7 +617,7 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     RingCursors* ctl = c->control();
     clockwork_ring_give_back(&ctl->out_tail, &ctl->out_read);
     clockwork_ring_give_back(&ctl->nrt_out_tail, &ctl->nrt_out_read);
-    clockwork_egress_nrt_room_made();
+    clockwork_egress_nrt_room_made(c->core);
 
     // TWO RINGS, ONE READ. The audio thread answers on the OUT ring; the NRT
     // gateway — the subsystems, the state changes, every broadcast — on the
@@ -638,12 +648,14 @@ ClockworkStatus clockwork_client_wait(ClockworkClient* handle, uint32_t* seen, u
     if (c->commands) return CLOCKWORK_E_ABSENT;   // the peer's replies: not this process's word
     // Nothing of the handle's past this point: any thread may be here while
     // another polls, and the count is the caller's.
-    return clockwork_egress_wait(seen, timeout_ms) ? CLOCKWORK_OK : CLOCKWORK_E_TIMEOUT;
+    if (!c->core) return CLOCKWORK_E_ABSENT;   // memory no core in this process holds
+    const int moved = clockwork_egress_wait(c->core, seen, timeout_ms);
+    return moved > 0 ? CLOCKWORK_OK : moved == 0 ? CLOCKWORK_E_TIMEOUT : CLOCKWORK_E_CLOSED;
 #endif
 }
 
 void clockwork_client_wake(ClockworkClient* handle) {
-    if (handle) clockwork_egress_wake();
+    if (auto* c = reinterpret_cast<ClientImpl*>(handle)) clockwork_egress_wake(c->core);
 }
 
 void clockwork_client_count_undelivered(ClockworkClient* handle, uint32_t n) {
@@ -831,23 +843,20 @@ ClockworkStatus clockwork_client_audio_tap_open(ClockworkClient* handle, uint32_
 
 int clockwork_client_audio_tap_valid(const ClockworkAudioTapReader* r) {
     if (!r || !r->_internal) return 0;
-    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
-                               r->_ring_frames);
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), r->_ring_frames);
     return rd.valid() ? 1 : 0;
 }
 
 uint32_t clockwork_client_audio_tap_activations(const ClockworkAudioTapReader* r) {
     if (!r || !r->_internal) return 0;
-    return shm_tap_stream_reader(static_cast<shm_tap_stream*>(r->_internal), nullptr,
-                                   r->_ring_frames).activations();
+    return shm_tap_stream_reader(static_cast<shm_tap_stream*>(r->_internal), r->_ring_frames).activations();
 }
 
 uint64_t clockwork_client_audio_tap_audible_end(ClockworkClient* handle,
                                             const ClockworkAudioTapReader* r) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !r || !r->_internal) return 0;
-    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
-                               r->_ring_frames);
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), r->_ring_frames);
     // The AUDIBLE edge, not the write head: the engine writes a buffer ahead of
     // what has left the speakers, so a window ending at the write position
     // shows audio nobody has heard yet and the drawing runs ahead of the sound.
@@ -862,8 +871,7 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* handle, const Clockwor
         if (out_channels) *out_channels = 0;
         return 0;
     }
-    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), nullptr,
-                               r->_ring_frames);
+    shm_tap_stream_reader rd(static_cast<shm_tap_stream*>(r->_internal), r->_ring_frames);
     if (!rd.valid()) {
         // The slot is not live — never claimed, or released since the reader
         // was opened. The ring still holds whatever was last written, and the
@@ -875,6 +883,18 @@ uint32_t clockwork_client_audio_tap_read(ClockworkClient* handle, const Clockwor
         return 0;
     }
     return rd.copy_window(end, frames, out, out_channels);
+}
+
+ClockworkStatus clockwork_client_scope_shape(ClockworkClient* handle, ClockworkScopeShape* out) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || out->struct_bytes < sizeof(ClockworkScopeShape)) return CLOCKWORK_E_ARG;
+    out->struct_bytes = sizeof(ClockworkScopeShape);
+    out->slots        = c->L.audio_slot_count;
+    out->slot_bytes   = c->L.audio_slot_bytes;
+    out->header_bytes = c->L.audio_header_bytes;
+    out->frames       = c->L.audio_frames;
+    out->channels     = c->L.audio_channels;
+    return CLOCKWORK_OK;
 }
 
 uint32_t clockwork_client_scope_read(ClockworkClient* handle, uint32_t slot, uint32_t frames,

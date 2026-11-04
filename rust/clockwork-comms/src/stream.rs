@@ -271,6 +271,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use clockwork_log::{ClockworkCore, CoreRef};
 use clockwork_osc::ffi::no_unwind;
 
 use clockwork_wait::ready::{AsRawSock, ReadyWait};
@@ -446,6 +447,8 @@ fn admit(conns: &Mutex<HashMap<u32, Conn>>, id: u32) -> bool {
 
 /// State shared between the accept loop, reader threads, and the C ABI.
 struct Shared {
+    /// The core whose server this is: what its lines name.
+    core: CoreRef,
     stop: AtomicBool,
     conns: Mutex<HashMap<u32, Conn>>,
     next_id: AtomicU32, // conn ids from 1, never reused (0 = in-process)
@@ -481,7 +484,7 @@ impl StreamServerImpl for SocketServer {
         // client from every audience. The logged error kind says which:
         // WouldBlock/TimedOut is a client that went WRITE_TIMEOUT without
         // reading, anything else failed outright.
-        clockwork_log::log!("[osc] stream conn {conn_id} dropped — reply write failed: {err}");
+        clockwork_log::log!(self.shared.core.ptr(), "[osc] stream conn {conn_id} dropped — reply write failed: {err}");
         if let Some(c) = self.shared.conns.lock().unwrap().remove(&conn_id) {
             c.writer.lock().unwrap().shutdown_both();
             c.wake.wake();
@@ -586,12 +589,12 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
         c.writer.lock().unwrap().shutdown_both();
     }
     if gate == Gate::Refused {
-        refuse(&shared.refused, id);
+        refuse(shared.core, &shared.refused, id);
     } else if gate == Gate::OverCap {
-        clockwork_log::log!("[osc] stream conn {id} closed — over the connection cap");
+        clockwork_log::log!(shared.core.ptr(), "[osc] stream conn {id} closed — over the connection cap");
     } else if !shared.stop.load(Ordering::Relaxed) && gate == Gate::Open {
         if let Some(why) = why {
-            clockwork_log::log!("[osc] stream conn {id} dropped — {why}");
+            clockwork_log::log!(shared.core.ptr(), "[osc] stream conn {id} dropped — {why}");
         }
         host.closed(id);
     }
@@ -600,9 +603,9 @@ fn run_reader<C: ConnReader>(mut conn: C, id: u32, shared: Arc<Shared>, host: Ho
 /// Count a connection closed for not presenting the secret, and say so for
 /// the first few: anything on the machine can connect, so a stream of them
 /// must not become a stream of log lines.
-pub(crate) fn refuse(refused: &AtomicU64, id: u32) {
+pub(crate) fn refuse(core: CoreRef, refused: &AtomicU64, id: u32) {
     if refused.fetch_add(1, Ordering::Relaxed) < 5 {
-        clockwork_log::log!("[osc] stream conn {id} refused — its first frame was not the secret, or it sent none in time");
+        clockwork_log::log!(core.ptr(), "[osc] stream conn {id} refused — its first frame was not the secret, or it sent none in time");
     }
 }
 
@@ -661,7 +664,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
             // Block until a connection is waiting or the server stops.
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if let Err(e) = shared.wait.wait(&[listener.raw_sock()], None) {
-                    clockwork_log::log!("[osc] stream server stopped accepting: its wait failed: {e}");
+                    clockwork_log::log!(shared.core.ptr(), "[osc] stream server stopped accepting: its wait failed: {e}");
                     return;
                 }
             }
@@ -671,7 +674,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
             // unless the server stops.
             Err(_) => {
                 if let Err(e) = shared.wait.pause(Duration::from_millis(20)) {
-                    clockwork_log::log!("[osc] stream server stopped accepting: its wait failed: {e}");
+                    clockwork_log::log!(shared.core.ptr(), "[osc] stream server stopped accepting: its wait failed: {e}");
                     return;
                 }
             }
@@ -680,6 +683,7 @@ fn run_accept<A: Acceptor>(listener: A, shared: Arc<Shared>, host: Host) {
 }
 
 fn start_socket_server<A: Acceptor>(
+    core: CoreRef,
     listener: A,
     host: Host,
     secret: ClockworkCommsSecret,
@@ -687,6 +691,7 @@ fn start_socket_server<A: Acceptor>(
     path: Option<PathBuf>,
 ) -> Option<ClockworkOscStream> {
     let shared = Arc::new(Shared {
+        core,
         stop: AtomicBool::new(false),
         conns: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(1),
@@ -716,11 +721,12 @@ fn start_socket_server<A: Acceptor>(
 /// # Safety
 /// `secret` is null or live.
 pub(crate) unsafe fn take_secret(
+    core: CoreRef,
     what: &str,
     secret: *const ClockworkCommsSecret,
 ) -> Option<ClockworkCommsSecret> {
     if secret.is_null() {
-        clockwork_log::log!("[osc] {what} not started: no secret");
+        clockwork_log::log!(core.ptr(), "[osc] {what} not started: no secret");
         return None;
     }
     // SAFETY: live, per the contract.
@@ -747,6 +753,7 @@ fn bind_address(addr: &str) -> &str {
 /// `bind_addr_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_tcp_start(
+    core: *mut ClockworkCore,
     ctx: *mut c_void,
     on_packet: StreamPacketFn,
     on_closed: StreamClosedFn,
@@ -756,8 +763,9 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
     bind_addr_len: u32,
 ) -> *mut ClockworkOscStream {
     no_unwind(std::ptr::null_mut(), || {
+        let core = CoreRef::new(core);
         // SAFETY: null or live, per the contract.
-        let Some(secret) = (unsafe { take_secret("TCP", secret) }) else {
+        let Some(secret) = (unsafe { take_secret(core, "TCP", secret) }) else {
             return std::ptr::null_mut();
         };
         if !(0..=65535).contains(&port) {
@@ -774,19 +782,19 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
         let listener = match TcpListener::bind((addr, port as u16)) {
             Ok(l) => l,
             Err(e) => {
-                clockwork_log::log!("[osc] TCP bind {addr}:{port} failed: {e}");
+                clockwork_log::log!(core.ptr(), "[osc] TCP bind {addr}:{port} failed: {e}");
                 return std::ptr::null_mut();
             }
         };
         if let Ok(local) = listener.local_addr() {
-            clockwork_osc_net::note_bind("TCP", local, "the secret crosses the network in the clear");
+            clockwork_osc_net::note_bind(core.ptr(), "TCP", local, "the secret crosses the network in the clear");
         }
         let bound = listener.local_addr().map(|a| a.port() as i32).unwrap_or(port);
         if listener.set_nonblocking(true).is_err() {
             return std::ptr::null_mut();
         }
         let host = Host { ctx, on_packet, on_closed };
-        match start_socket_server(listener, host, secret, bound, None) {
+        match start_socket_server(core, listener, host, secret, bound, None) {
             Some(srv) => Box::into_raw(Box::new(srv)),
             None => std::ptr::null_mut(),
         }
@@ -803,6 +811,7 @@ pub unsafe extern "C" fn clockwork_osc_tcp_start(
 /// `secret` is null or live; `path` is null or readable for `path_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
+    core: *mut ClockworkCore,
     ctx: *mut c_void,
     on_packet: StreamPacketFn,
     on_closed: StreamClosedFn,
@@ -810,12 +819,13 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
     path: *const u8,
     path_len: u32,
 ) -> *mut ClockworkOscStream {
-    #[cfg(unix)]
-    {
-        no_unwind(std::ptr::null_mut(), || {
+    no_unwind(std::ptr::null_mut(), || {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
+            let core = CoreRef::new(core);
             // SAFETY: null or live, per the contract.
-            let Some(secret) = (unsafe { take_secret("UDS stream", secret) }) else {
+            let Some(secret) = (unsafe { take_secret(core, "UDS stream", secret) }) else {
                 return std::ptr::null_mut();
             };
             if path.is_null() {
@@ -834,7 +844,7 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
             let listener = match UnixListener::bind(&pb) {
                 Ok(l) => l,
                 Err(e) => {
-                    clockwork_log::log!("[osc] UDS stream bind {path} failed: {e}");
+                    clockwork_log::log!(core.ptr(), "[osc] UDS stream bind {path} failed: {e}");
                     return std::ptr::null_mut();
                 }
             };
@@ -846,17 +856,17 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
                 return std::ptr::null_mut();
             }
             let host = Host { ctx, on_packet, on_closed };
-            match start_socket_server(listener, host, secret, 0, Some(pb)) {
+            match start_socket_server(core, listener, host, secret, 0, Some(pb)) {
                 Some(srv) => Box::into_raw(Box::new(srv)),
                 None => std::ptr::null_mut(),
             }
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (ctx, on_packet, on_closed, secret, path, path_len);
-        std::ptr::null_mut()
-    }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (core, ctx, on_packet, on_closed, secret, path, path_len);
+            std::ptr::null_mut()
+        }
+    })
 }
 
 /// The server's actual bound TCP port (useful when started with port 0), or
@@ -866,11 +876,13 @@ pub unsafe extern "C" fn clockwork_osc_uds_stream_start(
 /// `handle` is null or a live handle from a stream start function.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_stream_port(handle: *mut ClockworkOscStream) -> i32 {
-    if handle.is_null() {
-        return 0;
-    }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*handle).0.port() }
+    no_unwind(0, || {
+        if handle.is_null() {
+            return 0;
+        }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*handle).0.port() }
+    })
 }
 
 /// How many connections this server has closed for not presenting the secret:
@@ -881,11 +893,13 @@ pub unsafe extern "C" fn clockwork_osc_stream_port(handle: *mut ClockworkOscStre
 /// `handle` is null or a live handle from a stream start function.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_stream_refused(handle: *mut ClockworkOscStream) -> u64 {
-    if handle.is_null() {
-        return 0;
-    }
-    // SAFETY: a live handle, per the contract.
-    unsafe { (*handle).0.refused() }
+    no_unwind(0, || {
+        if handle.is_null() {
+            return 0;
+        }
+        // SAFETY: a live handle, per the contract.
+        unsafe { (*handle).0.refused() }
+    })
 }
 
 /// Send one OSC packet, framed, to connection `conn_id`. Returns 1 on send,
@@ -902,13 +916,15 @@ pub unsafe extern "C" fn clockwork_osc_stream_send(
     data: *const u8,
     len: u32,
 ) -> i32 {
-    if handle.is_null() || data.is_null() {
-        return 0;
-    }
-    // SAFETY: a live handle and a readable byte string, per the contract;
-    // nulls were refused above.
-    let (me, data) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
-    no_unwind(0, || me.0.send(conn_id, data) as i32)
+    no_unwind(0, || {
+        if handle.is_null() || data.is_null() {
+            return 0;
+        }
+        // SAFETY: a live handle and a readable byte string, per the contract;
+        // nulls were refused above.
+        let (me, data) = unsafe { (&*handle, slice::from_raw_parts(data, len as usize)) };
+        me.0.send(conn_id, data) as i32
+    })
 }
 
 /// Stop accepting, close every connection, join the threads, free the server.
@@ -919,11 +935,13 @@ pub unsafe extern "C" fn clockwork_osc_stream_send(
 /// nothing uses it afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_stream_stop(handle: *mut ClockworkOscStream) {
-    if handle.is_null() {
-        return;
-    }
-    // SAFETY: the box the start function leaked, freed once, here.
-    no_unwind((), || drop(unsafe { Box::from_raw(handle) }));
+    no_unwind((), || {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the box the start function leaked, freed once, here.
+        drop(unsafe { Box::from_raw(handle) })
+    })
 }
 
 #[cfg(test)]
@@ -1014,7 +1032,7 @@ pub(crate) mod tests {
         let ctx = cap as *const Cap as *mut c_void;
         // SAFETY: `bind` is a live str.
         let h = unsafe {
-            clockwork_osc_tcp_start(ctx, on_packet, on_closed, test_secret(), 0,
+            clockwork_osc_tcp_start(std::ptr::null_mut(), ctx, on_packet, on_closed, test_secret(), 0,
                              bind.as_ptr(), bind.len() as u32)
         };
         assert!(!h.is_null(), "tcp server should start");
@@ -1127,7 +1145,7 @@ pub(crate) mod tests {
         let bind = "127.0.0.1";
         // SAFETY: a null secret is what this case passes; `bind` is a live str.
         let h = unsafe {
-            clockwork_osc_tcp_start(ctx, on_packet, on_closed, std::ptr::null(), 0,
+            clockwork_osc_tcp_start(std::ptr::null_mut(), ctx, on_packet, on_closed, std::ptr::null(), 0,
                                     bind.as_ptr(), bind.len() as u32)
         };
         assert!(h.is_null());
@@ -1137,7 +1155,7 @@ pub(crate) mod tests {
             let p = path.to_str().unwrap();
             // SAFETY: as above; `p` is a live str.
             let h = unsafe {
-                clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, std::ptr::null(),
+                clockwork_osc_uds_stream_start(std::ptr::null_mut(), ctx, on_packet, on_closed, std::ptr::null(),
                                                p.as_ptr(), p.len() as u32)
             };
             assert!(h.is_null());
@@ -1470,6 +1488,7 @@ pub(crate) mod tests {
 
     fn empty_shared() -> Arc<Shared> {
         Arc::new(Shared {
+            core: CoreRef::new(std::ptr::null_mut()),
             stop: AtomicBool::new(false),
             conns: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
@@ -1705,7 +1724,7 @@ pub(crate) mod tests {
             let p = path.to_str().unwrap();
             // SAFETY: `p` is a live str.
             let h = unsafe {
-                clockwork_osc_uds_stream_start(ctx, on_packet, on_closed, test_secret(),
+                clockwork_osc_uds_stream_start(std::ptr::null_mut(), ctx, on_packet, on_closed, test_secret(),
                                         p.as_ptr(), p.len() as u32)
             };
             assert!(!h.is_null(), "uds stream server should start over a stale file");

@@ -12,16 +12,10 @@ workspace = true
 [lib]
 crate-type = ["rlib"]
 
-[features]
-# Linked into a real host: one that defines `clockwork_shm_base` and
-# `clockwork_tap_geometry` itself — the engine, through clockwork-sys — so
-# the hostless defaults build.rs makes stay out of the link. They must: they
-# are an archive that sits AHEAD of the engine's on rustc's line, and an
-# archive answers the first unresolved reference, so with both present the
-# defaults would win and the tap plane would quietly read from nowhere.
-host = []
-
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
+# The arena's own table, where the tap region's geometry is read.
+clockwork-abi = { path = "../clockwork-abi" }
 # AtomicU64 everywhere, including 32-bit chips without 64-bit atomics
 # (Xtensa): real atomics where the ISA has them, a critical section where it
 # does not — which is only ever the device, where these counters are idle.

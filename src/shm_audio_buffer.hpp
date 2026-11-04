@@ -8,11 +8,12 @@
 //   - Native: inside the cross-process shm segment. A
 //     GUI reads recordings while clockwork runs in a separate process.
 //     C++ tests read the slots in-place.
-//   - Web: inside arena_storage (the WASM SharedArrayBuffer). JS
+//   - Web: inside the arena (the WASM SharedArrayBuffer). JS
 //     and Playwright read directly via typed-array views.
 //
-//  One wire format, one reader/writer. The data array is inline because
-//  both segments are flat fixed-layout regions with no dynamic allocator.
+//  One wire format, one reader/writer. A slot is a 32-byte header and its
+//  frames right after it, as many as the core's layout gives (shared_memory.h,
+//  clockwork::Layout): both segments are flat regions with no allocator.
 //
 //  The two slots are clockwork's taps — see "The taps" below. A guest's own
 //  taps are its tap streams (shm_tap_stream.hpp); nothing of a guest's
@@ -27,20 +28,10 @@
 #include <cstring>
 #include <memory>
 
-// memory_profile.h is a pure-macro leaf header with no further dependencies,
-// so including it here keeps this header standalone while ensuring every
-// translation unit — whether it reaches this header via shared_memory.h or
-// directly (native shm segment, C++ tests) — sees the same capture-ring sizing.
-#include "memory_profile.h"
+#include "memory_profile.h"   // CLOCKWORK_SCOPE_SAMPLE_RATE
 
 namespace detail_shm_audio {
 
-// Slot count and per-slot ring sizing come from memory_profile.h. Slots must
-// be small enough that the inline data arrays fit inside arena_storage /
-// The shm segment at the configured ring size. CLOCKWORK_SCOPE_SECONDS sets the
-// duration (1s in production; test builds bump it so windows don't wrap);
-// CLOCKWORK_SCOPE_FRAMES can override the frame count directly to express
-// sub-second rings that the integer seconds knob cannot.
 // ── The taps ────────────────────────────────────────────────────────────────
 // Two slots, clockwork's, written inside every tick at the device edge:
 //   OUT — what left for the device this block, after the guest and after
@@ -50,23 +41,24 @@ namespace detail_shm_audio {
 // DAW's process. A client always has the master mix, and the input, with no
 // guest cooperation, through the SCOPE entry of the arena table
 // (clockwork_arena.h). Each slot carries `channels` live device channels, up
-// to CLOCKWORK_TAP_CHANNELS (memory_profile.h); `enabled` says the tap is
+// to the ceiling its core's layout sized it for; `enabled` says the tap is
 // live (the device has that direction); the cursor is monotonic and a
 // reader catches up losslessly from its own position (shm_audio_buffer_reader).
 // The taps flow from boot: nothing gates them.
 inline constexpr uint32_t SCOPE_SLOTS       = 2;
 inline constexpr uint32_t SCOPE_OUT_SLOT    = 0;
 inline constexpr uint32_t SCOPE_IN_SLOT     = 1;
-inline constexpr uint32_t MAX_SHM_AUDIO_BUFFERS = SCOPE_SLOTS;     // the old name
-inline constexpr uint32_t SCOPE_MASTER_SLOT = SCOPE_OUT_SLOT;  // the old name
 
 inline constexpr uint32_t SCOPE_SAMPLE_RATE = CLOCKWORK_SCOPE_SAMPLE_RATE;
-inline constexpr uint32_t SCOPE_SECONDS     = CLOCKWORK_SCOPE_SECONDS;
-inline constexpr uint32_t SCOPE_FRAMES      = CLOCKWORK_SCOPE_FRAMES;
-inline constexpr uint32_t SCOPE_CHANNELS    = CLOCKWORK_TAP_CHANNELS;  // the ceiling a slot's ring is sized for
 // Per-slot header bytes (atomics + sizes + 64-bit write_position +
-// padding). Guaranteed 32 by the static_assert on offsetof(..., data).
+// padding), the frames following.
 inline constexpr uint32_t SCOPE_HEADER_SIZE = 32;
+
+// A slot's bytes for a ring of `frames` frames of `channels` channels: the
+// header, the frames, 16-aligned so the next slot's header is.
+inline constexpr uint64_t scope_slot_bytes(uint32_t frames, uint32_t channels) {
+    return (uint64_t(SCOPE_HEADER_SIZE) + uint64_t(frames) * channels * sizeof(float) + 15u) & ~uint64_t(15u);
+}
 
 struct alignas(16) shm_audio_buffer {
     // Producer toggles this; consumers gate on it. 0 = idle / no writes,
@@ -82,22 +74,19 @@ struct alignas(16) shm_audio_buffer {
     // frame; falling more than capacity_frames behind = data loss (gap).
     std::atomic<uint64_t> write_position;
 
-    // Pad to 32 bytes (header) so data starts at a 16-aligned offset.
+    // Pad to 32 bytes (header) so the frames start at a 16-aligned offset.
     std::array<uint32_t, 2> _reserved;
 
-    // Interleaved float ring [ch0_f0, ch1_f0, ch0_f1, ch1_f1, ...].
-    // Wraps modulo capacity_frames.
-    std::array<float, static_cast<size_t>(SCOPE_FRAMES) * SCOPE_CHANNELS> data;
+    // The interleaved float ring that follows the header
+    // [ch0_f0, ch1_f0, ch0_f1, ch1_f1, ...], wrapping modulo capacity_frames.
+    float*       frames()       { return reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this) + SCOPE_HEADER_SIZE); }
+    const float* frames() const { return reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(this) + SCOPE_HEADER_SIZE); }
 };
 
 static_assert(std::is_trivially_destructible<shm_audio_buffer>::value,
               "shm_audio_buffer must be trivially destructible (lives in shm)");
-static_assert(offsetof(shm_audio_buffer, data) == 32,
-              "shm_audio_buffer header must be 32 bytes (data 16-aligned)");
-
-inline constexpr uint32_t SCOPE_SLOT_SIZE  = sizeof(shm_audio_buffer);
-inline constexpr uint32_t SCOPE_SIZE =
-    MAX_SHM_AUDIO_BUFFERS * SCOPE_SLOT_SIZE;
+static_assert(sizeof(shm_audio_buffer) == SCOPE_HEADER_SIZE,
+              "shm_audio_buffer is the slot's 32-byte header (frames 16-aligned)");
 
 // ──── Producer side ─────────────────────────────────────────────────────
 //
@@ -108,23 +97,24 @@ inline constexpr uint32_t SCOPE_SIZE =
 class shm_audio_buffer_writer {
 public:
     shm_audio_buffer_writer() = default;
-    explicit shm_audio_buffer_writer(shm_audio_buffer* buf) : _buf(buf) {}
+    // `max_frames` and `max_channels`: the ring the slot was laid out for.
+    shm_audio_buffer_writer(shm_audio_buffer* buf, uint32_t max_frames, uint32_t max_channels)
+        : _buf(buf), _max_frames(max_frames), _max_channels(max_channels) {}
 
     bool valid() const { return _buf != nullptr; }
 
-    // Format the slot and mark it live. `channels` must be <= SCOPE_CHANNELS;
-    // `capacity_frames` must be <= SCOPE_FRAMES (the inline ring size).
+    // Format the slot and mark it live, within the ring it was laid out for.
     // The cursor starts again: a reader's position is relative to this.
     bool activate(uint32_t channels, uint32_t sample_rate,
                   uint32_t capacity_frames) {
         if (!_buf) return false;
-        if (channels == 0 || channels > SCOPE_CHANNELS) return false;
-        if (capacity_frames == 0 || capacity_frames > SCOPE_FRAMES) return false;
+        if (channels == 0 || channels > _max_channels) return false;
+        if (capacity_frames == 0 || capacity_frames > _max_frames) return false;
         _buf->channels = channels;
         _buf->sample_rate = sample_rate;
         _buf->capacity_frames = capacity_frames;
         _buf->write_position.store(0, std::memory_order_relaxed);
-        memset(_buf->data.data(), 0, sizeof(_buf->data));
+        memset(_buf->frames(), 0, size_t(_max_frames) * _max_channels * sizeof(float));
         _buf->enabled.store(1, std::memory_order_release);
         return true;
     }
@@ -142,14 +132,14 @@ public:
         if (channels > num_channels) return;
         uint32_t slot = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - slot < num_frames) ? (cap - slot) : num_frames;
-        float* dst = _buf->data.data() + static_cast<size_t>(slot) * channels;
+        float* dst = _buf->frames() + static_cast<size_t>(slot) * channels;
         for (uint32_t f = 0; f < first; ++f) {
             for (uint32_t c = 0; c < channels; ++c)
                 dst[f * channels + c] = channel_data[c][f];
         }
         if (first < num_frames) {
             uint32_t wrap = num_frames - first;
-            dst = _buf->data.data();
+            dst = _buf->frames();
             for (uint32_t f = 0; f < wrap; ++f) {
                 for (uint32_t c = 0; c < channels; ++c)
                     dst[f * channels + c] = channel_data[c][first + f];
@@ -166,10 +156,10 @@ public:
         uint32_t channels = _buf->channels;
         uint32_t slot = static_cast<uint32_t>(pos % cap);
         uint32_t first = (cap - slot < num_frames) ? (cap - slot) : num_frames;
-        memcpy(_buf->data.data() + static_cast<size_t>(slot) * channels, data,
+        memcpy(_buf->frames() + static_cast<size_t>(slot) * channels, data,
                static_cast<size_t>(first) * channels * sizeof(float));
         if (first < num_frames) {
-            memcpy(_buf->data.data(), data + static_cast<size_t>(first) * channels,
+            memcpy(_buf->frames(), data + static_cast<size_t>(first) * channels,
                    static_cast<size_t>(num_frames - first) * channels * sizeof(float));
         }
         _buf->write_position.store(pos + num_frames, std::memory_order_release);
@@ -179,6 +169,8 @@ public:
 
 private:
     shm_audio_buffer* _buf = nullptr;
+    uint32_t _max_frames = 0;
+    uint32_t _max_channels = 0;
 };
 
 // ──── Consumer side ─────────────────────────────────────────────────────
@@ -190,17 +182,14 @@ private:
 class shm_audio_buffer_reader {
 public:
     shm_audio_buffer_reader() = default;
-    // keepalive pins the mapping the slot pointer reaches into (see
-    // shm_segment_client): reader copies survive the client that
-    // minted them. Engine-side readers pass nothing — their arena is static.
-    // `max_frames` is the ring capacity the slot's ENGINE allocated; a
-    // cross-process reader passes the engine's published value rather than
-    // this build's SCOPE_FRAMES.
-    explicit shm_audio_buffer_reader(shm_audio_buffer* buf,
-                                     std::shared_ptr<const void> keepalive = nullptr,
-                                     uint32_t max_frames = SCOPE_FRAMES)
+    // `max_frames` and `max_channels` are the ring the slot's engine laid
+    // out (the table's scope geometry). keepalive pins the mapping the slot
+    // pointer reaches into (see shm_segment_client): reader copies survive
+    // the client that minted them. Engine-side readers pass nothing.
+    shm_audio_buffer_reader(shm_audio_buffer* buf, uint32_t max_frames, uint32_t max_channels,
+                            std::shared_ptr<const void> keepalive = nullptr)
         : _buf(buf), _keepalive(std::move(keepalive)),
-          _max_frames(max_frames == 0 ? SCOPE_FRAMES : max_frames) {}
+          _max_frames(max_frames), _max_channels(max_channels) {}
 
     bool valid() const { return _buf != nullptr; }
     bool is_active() const {
@@ -242,7 +231,8 @@ public:
         uint32_t cap = _buf->capacity_frames;
         if (cap == 0 || cap > _max_frames) cap = _max_frames;
         uint32_t channels = _buf->channels;
-        if (channels == 0 || channels > SCOPE_CHANNELS) channels = SCOPE_CHANNELS;
+        if (channels == 0 || channels > _max_channels) channels = _max_channels;
+        if (cap == 0 || channels == 0) return 0;
 
         if (avail > cap) {
             uint64_t gap = avail - cap;
@@ -259,10 +249,10 @@ public:
 
         uint32_t slot = static_cast<uint32_t>(_last_read_pos % cap);
         uint32_t first = (cap - slot < to_read) ? (cap - slot) : to_read;
-        memcpy(out, _buf->data.data() + static_cast<size_t>(slot) * channels,
+        memcpy(out, _buf->frames() + static_cast<size_t>(slot) * channels,
                static_cast<size_t>(first) * channels * sizeof(float));
         if (first < to_read) {
-            memcpy(out + static_cast<size_t>(first) * channels, _buf->data.data(),
+            memcpy(out + static_cast<size_t>(first) * channels, _buf->frames(),
                    static_cast<size_t>(to_read - first) * channels * sizeof(float));
         }
         _last_read_pos += to_read;
@@ -274,7 +264,8 @@ public:
 private:
     shm_audio_buffer* _buf = nullptr;
     std::shared_ptr<const void> _keepalive;
-    uint32_t      _max_frames = SCOPE_FRAMES;
+    uint32_t      _max_frames = 0;
+    uint32_t      _max_channels = 0;
     uint64_t      _last_read_pos = 0;
 };
 
@@ -284,20 +275,8 @@ using detail_shm_audio::shm_audio_buffer;
 using detail_shm_audio::shm_audio_buffer_writer;
 using detail_shm_audio::shm_audio_buffer_reader;
 using detail_shm_audio::SCOPE_SAMPLE_RATE;
-using detail_shm_audio::SCOPE_SECONDS;
-using detail_shm_audio::SCOPE_CHANNELS;
-using detail_shm_audio::SCOPE_FRAMES;
 using detail_shm_audio::SCOPE_HEADER_SIZE;
-using detail_shm_audio::SCOPE_SLOT_SIZE;
-using detail_shm_audio::SCOPE_SIZE;
-using detail_shm_audio::SCOPE_MASTER_SLOT;
-using detail_shm_audio::MAX_SHM_AUDIO_BUFFERS;
+using detail_shm_audio::scope_slot_bytes;
 using detail_shm_audio::SCOPE_SLOTS;
 using detail_shm_audio::SCOPE_OUT_SLOT;
 using detail_shm_audio::SCOPE_IN_SLOT;
-
-// Process-global pointer to the slot array. Assigned once during
-// audio_processor init and read-only after it. This is how a DSP reaches its
-// slots: an extern is the whole of the arrangement, so nothing has to be
-// threaded through the boundary for a region clockwork only publishes.
-extern shm_audio_buffer* g_shm_audio_buffers;

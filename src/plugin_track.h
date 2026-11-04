@@ -19,7 +19,7 @@
  *   send   = output channels  base + 2*slot, +1   (the graph writes here)
  *   return = input channels   base + 2*slot, +1   (the graph reads here)
  *
- * `base` is where the engine's lanes start (clockwork_lane_base() in the engine,
+ * `base` is where the engine's lanes start (clockwork_lane_base(core) in the engine,
  * handed to this model with clockwork_track_set_lane_base). The graph sends to a
  * track with an ordinary Out.ar on the send channels, and hears it back with
  * SoundIn.ar on the return channels — no new UGen, nothing the graph has to

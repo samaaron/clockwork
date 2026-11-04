@@ -8,7 +8,6 @@
  */
 #include "clock/TimeSource.h"
 #include "clock/clock_math.h"
-#include "clockwork_config.h"   // clockwork_log
 
 #include <algorithm>
 #include <cstdint>
@@ -67,13 +66,11 @@ double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate
     const double drift = wallNow - (baseNTP + sampleOffsetSec);
 
     // Surface timebase disturbances (wall-clock step/slew, callback stall):
-    // a step is said at once; a persisting condition at most once a minute
-    // (DriftLogGate). Not while an anchor settles: its first reading is
-    // expected to be off, and the median takes that up. clockwork_log is a
-    // lock-free egress-ring write.
+    // a step is reported at once; a persisting condition at most once a
+    // minute (DriftLogGate). Not while an anchor settles: its first reading
+    // is expected to be off, and the median takes that up.
     const bool settled = mSettleCount >= clockwork::kAnchorSettleBlocks;
-    if (settled && mDriftLogGate.offer(drift, wallNow))
-        clockwork_log("[clock] wall clock and audio clock have diverged by %+.1f ms", drift * 1000.0);
+    if (settled && mDriftLogGate.offer(drift, wallNow)) mDriftToReport = drift;
 
     // What this block moves the clock against its samples by. An anchor
     // settling (kAnchorSettleBlocks): nothing, until the last block of the

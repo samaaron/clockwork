@@ -31,11 +31,13 @@ using detail_shm_segment::sample_clock_view;
 
 namespace {
 
-std::unique_ptr<shm_tap_stream> makeSlot() {
-    auto slot = std::make_unique<shm_tap_stream>();
-    memset(static_cast<void*>(slot.get()), 0, sizeof(shm_tap_stream));
-    return slot;
-}
+// A slot on the heap, laid out as the target's default: its header and its
+// frames, zeroed, as the arena hands it over.
+constexpr uint32_t kRing = clockwork::kDefaultLayout.profile.tap_ring_frames;
+struct Slot {
+    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[tap_slot_bytes(kRing)]() };
+    shm_tap_stream* get() { return reinterpret_cast<shm_tap_stream*>(bytes.get()); }
+};
 
 // One stereo block whose per-channel samples are generated from their
 // absolute frame index, so windows read back from any cursor position
@@ -85,10 +87,10 @@ void writeSineIndexedBlock(shm_tap_stream_writer& w, uint64_t engineFrames,
 
 TEST_CASE("tap-stream: writer/reader round-trip with interleaved windows",
           "[tap][stream]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     REQUIRE(r.valid());
     CHECK(r.channels() == 2);
@@ -112,10 +114,10 @@ TEST_CASE("tap-stream: writer/reader round-trip with interleaved windows",
 
 TEST_CASE("tap-stream: short history zero-fills the window lead-in",
           "[tap][stream]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeIndexedBlock(w, 100, 32, 0);
     std::vector<float> out(128 * 2, -1.0f);
@@ -132,10 +134,10 @@ TEST_CASE("tap-stream: short history zero-fills the window lead-in",
 
 TEST_CASE("tap-stream: ring wrap preserves window continuity",
           "[tap][stream]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // Write ~1.5 rings in 512-frame blocks.
     const uint32_t cap = TAP_RING_FRAMES;
@@ -157,10 +159,10 @@ TEST_CASE("tap-stream: ring wrap preserves window continuity",
 
 TEST_CASE("tap-stream: engine-frame gaps heal the cursor mapping",
           "[tap][stream]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeIndexedBlock(w, 1000, 128, 0);
     // A paused node group skips ten blocks: the next write arrives with an
@@ -173,10 +175,10 @@ TEST_CASE("tap-stream: engine-frame gaps heal the cursor mapping",
 
 TEST_CASE("tap-stream: copy_window clamps a cursor beyond the writer",
           "[tap][stream]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeIndexedBlock(w, 0, 256, 0);
     std::vector<float> out(64 * 2, -1.0f);
@@ -188,10 +190,10 @@ TEST_CASE("tap-stream: copy_window clamps a cursor beyond the writer",
 
 TEST_CASE("tap-stream: audible_end windows streams on the sample clock",
           "[tap][stream][sampleclock]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
     writeIndexedBlock(w, 10000, 1024, 0);  // base=10000, writer=1024
 
     sample_clock_view v;
@@ -249,10 +251,10 @@ TEST_CASE("tap-stream: headless engine publishes an advancing sample clock",
 
 TEST_CASE("tap-stream: copy_triggered_window aligns to a rising zero-crossing",
           "[tap][stream][trigger]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeSineIndexedBlock(w, 0, 1000, 0);
 
@@ -274,10 +276,10 @@ TEST_CASE("tap-stream: copy_triggered_window aligns to a rising zero-crossing",
 
 TEST_CASE("tap-stream: copy_triggered_window without a crossing matches the rolling window",
           "[tap][stream][trigger]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // All-positive DC left, index tracer right: the L+R mix never goes
     // negative, so there is no rising zero-crossing anywhere.
@@ -299,10 +301,10 @@ TEST_CASE("tap-stream: copy_triggered_window without a crossing matches the roll
 
 TEST_CASE("tap-stream: copy_triggered_window zero-fills like copy_window",
           "[tap][stream][trigger]") {
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     writeSineIndexedBlock(w, 0, 100, 0);   // only 100 real frames
 
@@ -336,13 +338,13 @@ TEST_CASE("tap-stream: the ring covers a two-second output latency",
     constexpr uint32_t kLatency = 88712;   // frames, as the device reported
     constexpr uint32_t kWindow  = kRate / 4;   // the 250 ms scrolling strip
 
-    CHECK(shm_tap_ring_covers(kLatency, kRate));
-    CHECK_FALSE(shm_tap_ring_covers(TAP_RING_FRAMES, kRate));   // a ring of pure latency leaves no window
+    CHECK(shm_tap_ring_covers(kRing, kLatency, kRate));
+    CHECK_FALSE(shm_tap_ring_covers(kRing, kRing, kRate));   // a ring of pure latency leaves no window
 
-    auto slot = makeSlot();
-    shm_tap_stream_writer w(slot.get());
+    Slot slot;
+    shm_tap_stream_writer w(slot.get(), kRing);
     w.activate(2);
-    shm_tap_stream_reader r(slot.get());
+    shm_tap_stream_reader r(slot.get(), kRing);
 
     // Three seconds rendered, 512 frames a block, anchored at engine frame 0.
     const uint32_t kBlocks = (kRate * 3) / 512;

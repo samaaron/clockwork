@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include "clockwork_core.h"
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -28,6 +29,9 @@ public:
     // onDebug: host log channel for /clockwork/debug.
     void init(IOscTransport*                                  transport,
               const std::function<void(const std::string&)>*  onDebug);
+    // The engine's core, whose NRT-out ring every frame goes into.
+    void setCore(ClockworkCore* core) { mCore = core; }
+    ClockworkCore* core() const { return mCore; }
 
 
     // ── Producer side: frame into the NRT-out ring (never delivers here) ──────
@@ -56,7 +60,7 @@ public:
     // The guest instance's generation now, off the arena: the number every
     // refusal and statechange above carries, and a rebuilt instance's setup
     // (docs/RESTARTS.md).
-    static uint32_t generationNow();
+    uint32_t generationNow() const;
 
     // ── Gateway side: deliver (only the NRT gateway calls these) ──────────────
     // Drain handler for one egress frame (OUT or NRT-out), route already peeled
@@ -101,6 +105,7 @@ private:
     void frame(Route route, uint32_t token, const uint8_t* osc, uint32_t size);
 
     IOscTransport*                                  mTransport = nullptr;
+    ClockworkCore*                                  mCore = nullptr;
     const std::function<void(const std::string&)>*  mOnDebug   = nullptr;
     std::function<bool(const uint8_t*, uint32_t)>    mInterceptor;  // pre-dispatch swallow hook
 };

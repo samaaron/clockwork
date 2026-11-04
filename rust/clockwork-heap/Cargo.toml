@@ -12,6 +12,11 @@ workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+clockwork-fence = { path = "../clockwork-fence", default-features = false }
+
+# The address map's loom models (src/map.rs), under RUSTFLAGS="--cfg loom".
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 # tests/constant_time.rs measures the thread's own CPU time, which a busy
 # machine cannot inflate: clock_gettime(CLOCK_THREAD_CPUTIME_ID) on Unix,
@@ -28,4 +33,4 @@ windows-sys = { version = "0.61", features = [
 
 [features]
 default = ["std"]
-std = []
+std = ["clockwork-fence/std"]

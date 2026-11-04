@@ -269,7 +269,8 @@ decision made by code that nobody argued for is still open.
    so. Silently starting late is the worse answer.)
 5. **One slot namespace or two?** ~~Sources and sinks could share numbering or
    be independent.~~ **Answered: one, shared.** A `ClockworkPort` names a slot in a
-   single table whichever way it runs, and `clockwork_port_direction()` — which the
+   single table whichever way it runs — its core's, or a host's own
+   (`clockwork_ports_new`) — and `clockwork_port_direction()` — which the
    header did not originally have — says which. Two namespaces would mean two
    tables, two full checks and a handle that means different things depending
    on where it came from. A loopback is now a source and a sink with a thread

@@ -20,12 +20,15 @@
 //! cross-target type-check plus the CI transport harness (run.ps1).
 
 
+use clockwork_fence::no_unwind;
+use clockwork_log::ClockworkCore;
 use std::ffi::c_void;
 
 use crate::stream::ClockworkOscStream;
 
 #[cfg(windows)]
 mod imp {
+    use clockwork_log::CoreRef;
     use std::collections::HashMap;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -279,6 +282,8 @@ mod imp {
     }
 
     struct Shared {
+        /// The core whose server this is: what its lines name.
+        core: CoreRef,
         stop: AtomicBool,
         stop_event: Event, // set once on stop; ends every connect, read and write wait
         conns: Mutex<HashMap<u32, Arc<PipeConn>>>,
@@ -318,7 +323,7 @@ mod imp {
             // reports the close.
             self.shared.conns.lock().unwrap().remove(&conn_id);
             if conn.evict() {
-                clockwork_log::log!("[osc] pipe conn {conn_id} dropped — reply write failed or timed out");
+                clockwork_log::log!(self.shared.core.ptr(), "[osc] pipe conn {conn_id} dropped — reply write failed or timed out");
             }
             false
         }
@@ -498,9 +503,9 @@ mod imp {
             shared.conns.lock().unwrap().remove(&id);
             conn.close();
             if gate == Gate::Refused {
-                refuse(&shared.refused, id);
+                refuse(shared.core, &shared.refused, id);
             } else if gate == Gate::OverCap {
-                clockwork_log::log!("[osc] pipe conn {id} closed — over the connection cap");
+                clockwork_log::log!(shared.core.ptr(), "[osc] pipe conn {id} closed — over the connection cap");
             } else if gate == Gate::Open && !shared.stop.load(Ordering::Acquire) {
                 host.closed(id);
             }
@@ -508,6 +513,7 @@ mod imp {
     }
 
     pub(super) fn start(
+        core: CoreRef,
         host: Host,
         secret: ClockworkCommsSecret,
         name: &str,
@@ -546,7 +552,7 @@ mod imp {
             )
         };
         if first == INVALID_HANDLE_VALUE {
-            clockwork_log::log!("[osc] named pipe create {full} failed (name in use?)");
+            clockwork_log::log!(core.ptr(), "[osc] named pipe create {full} failed (name in use?)");
             return None;
         }
 
@@ -556,6 +562,7 @@ mod imp {
             return None;
         };
         let shared = Arc::new(Shared {
+            core,
             stop: AtomicBool::new(false),
             stop_event,
             conns: Mutex::new(HashMap::new()),
@@ -595,6 +602,7 @@ mod imp {
 /// `secret` is null or live; `name` is null or readable for `name_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn clockwork_osc_pipe_start(
+    core: *mut ClockworkCore,
     ctx: *mut c_void,
     on_packet: crate::stream::StreamPacketFn,
     on_closed: crate::stream::StreamClosedFn,
@@ -602,11 +610,12 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
     name: *const u8,
     name_len: u32,
 ) -> *mut ClockworkOscStream {
-    #[cfg(windows)]
-    {
-        clockwork_osc::ffi::no_unwind(std::ptr::null_mut(), || {
+    no_unwind(std::ptr::null_mut(), || {
+        #[cfg(windows)]
+        {
+            let core = CoreRef::new(core);
             // SAFETY: null or live, per the contract.
-            let Some(secret) = (unsafe { crate::stream::take_secret("named pipe", secret) }) else {
+            let Some(secret) = (unsafe { crate::stream::take_secret(core, "named pipe", secret) }) else {
                 return std::ptr::null_mut();
             };
             if name.is_null() {
@@ -621,17 +630,17 @@ pub unsafe extern "C" fn clockwork_osc_pipe_start(
                 return std::ptr::null_mut();
             }
             let host = crate::stream::Host { ctx, on_packet, on_closed };
-            match imp::start(host, secret, name) {
+            match imp::start(core, host, secret, name) {
                 Some(srv) => Box::into_raw(Box::new(srv)),
                 None => std::ptr::null_mut(),
             }
-        })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (ctx, on_packet, on_closed, secret, name, name_len);
-        std::ptr::null_mut()
-    }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (core, ctx, on_packet, on_closed, secret, name, name_len);
+            std::ptr::null_mut()
+        }
+    })
 }
 
 // Only a Windows runner has a named pipe: the ci.yml `rust (windows-x64)` job
@@ -650,7 +659,7 @@ mod tests {
         let ctx = cap as *const Cap as *mut c_void;
         // SAFETY: `name` is a live str; the secret outlives the server.
         let h = unsafe {
-            clockwork_osc_pipe_start(ctx, on_packet, on_closed, test_secret(), name.as_ptr(), name.len() as u32)
+            clockwork_osc_pipe_start(std::ptr::null_mut(), ctx, on_packet, on_closed, test_secret(), name.as_ptr(), name.len() as u32)
         };
         assert!(!h.is_null(), "pipe server should start");
         h
