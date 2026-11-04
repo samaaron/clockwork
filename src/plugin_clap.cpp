@@ -76,6 +76,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(_WIN32)
@@ -803,10 +804,6 @@ uint32_t param_count(const Instance* p) {
     return p->params->count(p->plugin);
 }
 
-/* Static storage, so out->group_name is valid after this returns even when
-   the module cache is short. A local temporary would dangle. */
-static const std::string kEmptyModule;
-
 int param_info(const Instance* p, uint32_t index, PluginParam* out) {
     if (!p || !p->params || !out) return 0;
     clap_param_info_t info{};
@@ -831,10 +828,13 @@ int param_info(const Instance* p, uint32_t index, PluginParam* out) {
        module path gives the same shape as VST3's unit id — an opaque integer
        that compares equal within a group — so a caller groups identically for
        both formats and never has to know which one it is holding. */
-    const std::string& mod =
-        (index < p->param_modules.size()) ? p->param_modules[index] : kEmptyModule;
-    out->group      = static_cast<int32_t>(std::hash<std::string>{}(mod));
-    out->group_name = mod.c_str();
+    /* out->group_name must outlive this call: the cache's string, or a literal
+       when the cache is short. The hash of a view equals the hash of the
+       string with the same characters. */
+    const char* const mod =
+        (index < p->param_modules.size()) ? p->param_modules[index].c_str() : "";
+    out->group      = static_cast<int32_t>(std::hash<std::string_view>{}(mod));
+    out->group_name = mod;
 
     double v = info.default_value;
     if (p->params->get_value) p->params->get_value(p->plugin, info.id, &v);

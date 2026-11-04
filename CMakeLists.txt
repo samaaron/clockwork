@@ -885,19 +885,21 @@ endif()
 # staticlib — each carries its own copy of std). The C++ boundaries are
 # src/native/{MidiControl,GamepadControl,OscControl}.cpp against the headers in
 # each crate's cpp/ directory.
-if(CLOCKWORK_RUST AND EMSCRIPTEN)
-    # The worklet shares its heap with JavaScript, so std must be rebuilt with
-    # atomics and bulk memory (-Z build-std), which only nightly can do. The
-    # pin is a preference: a box with a floating `nightly` that has rust-src
-    # still builds, with a note. A toolchain that merely RESOLVES is not one
-    # that works — `rustup which` will install a bare dated toolchain — so
-    # only one that is listed AND carries the std sources is taken.
-    set(CLOCKWORK_RUST_NIGHTLY "nightly-2026-07-02" CACHE STRING
-        "The nightly toolchain that rebuilds std for the wasm target")
+# A build that rebuilds std (-Z build-std) needs a nightly toolchain with the
+# std sources: the web, whose std must carry atomics, and a sanitizer, whose
+# std must be instrumented. The pin is a preference: a box with a floating
+# `nightly` that has rust-src still builds, with a note. A toolchain that
+# merely RESOLVES is not one that works — `rustup which` will install a bare
+# dated toolchain — so only one that is listed AND carries the std sources is
+# taken. Sets CARGO_EXECUTABLE and CLOCKWORK_RUSTC_EXECUTABLE for the caller;
+# `why` names the build in the refusal, and any further arguments are lines
+# of advice after it.
+set(CLOCKWORK_RUST_NIGHTLY "nightly-2026-07-02" CACHE STRING
+    "The nightly toolchain for a build that rebuilds std (the web, a sanitizer)")
+function(clockwork_nightly_cargo why)
     find_program(RUSTUP_EXECUTABLE rustup REQUIRED)
     execute_process(COMMAND ${RUSTUP_EXECUTABLE} toolchain list
                     OUTPUT_VARIABLE _toolchains OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    set(CARGO_EXECUTABLE "")
     foreach(_tc IN ITEMS ${CLOCKWORK_RUST_NIGHTLY} nightly)
         if(NOT _toolchains MATCHES "(^|\n)${_tc}")
             continue()
@@ -911,21 +913,25 @@ if(CLOCKWORK_RUST AND EMSCRIPTEN)
         if(NOT EXISTS "${_rust_bin}/../lib/rustlib/src/rust/library/Cargo.lock")
             continue()
         endif()
-        set(CARGO_EXECUTABLE "${_rust_bin}/cargo")
-        set(CLOCKWORK_RUSTC_EXECUTABLE "${_rustc}")
+        set(CARGO_EXECUTABLE "${_rust_bin}/cargo" PARENT_SCOPE)
+        set(CLOCKWORK_RUSTC_EXECUTABLE "${_rustc}" PARENT_SCOPE)
         if(NOT _tc STREQUAL CLOCKWORK_RUST_NIGHTLY)
             message(STATUS "rust: ${CLOCKWORK_RUST_NIGHTLY} not installed, using ${_tc}")
         else()
             message(STATUS "rust: ${_tc}")
         endif()
-        break()
+        return()
     endforeach()
-    if(NOT CARGO_EXECUTABLE)
-        message(FATAL_ERROR
-            "a nightly Rust toolchain with rust-src is required for the web build:\n"
-            "  rustup toolchain install ${CLOCKWORK_RUST_NIGHTLY} --component rust-src\n"
-            "  rustup target add wasm32-unknown-emscripten --toolchain ${CLOCKWORK_RUST_NIGHTLY}")
-    endif()
+    string(JOIN "\n  " _advice "  rustup toolchain install ${CLOCKWORK_RUST_NIGHTLY} --component rust-src" ${ARGN})
+    message(FATAL_ERROR
+        "a nightly Rust toolchain with rust-src is required for ${why}:\n${_advice}")
+endfunction()
+
+if(CLOCKWORK_RUST AND EMSCRIPTEN)
+    # The worklet shares its heap with JavaScript, so std must be rebuilt with
+    # atomics and bulk memory.
+    clockwork_nightly_cargo("the web build"
+        "rustup target add wasm32-unknown-emscripten --toolchain ${CLOCKWORK_RUST_NIGHTLY}")
     target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
 elseif(CLOCKWORK_RUST AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # iOS is a cross build: rustc needs the target's std, which only a rustup
@@ -966,7 +972,21 @@ elseif(CLOCKWORK_RUST AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
     message(STATUS "rust: ${CLOCKWORK_RUST_IOS_TOOLCHAIN} for ${CLOCKWORK_RUST_TRIPLE}")
     target_compile_definitions(clockwork PRIVATE CLOCKWORK_RUST_LOG=1)
 elseif(CLOCKWORK_RUST)
-    find_program(CARGO_EXECUTABLE cargo REQUIRED)
+    if(CLOCKWORK_SANITIZE MATCHES "thread")
+        # ThreadSanitizer judges only what was built with it. The Rust
+        # subsystems hold the core's gate and its wait words, so an ordering
+        # they give two C++ threads reads as a race unless they are
+        # instrumented too (-Zsanitizer, nightly only), on a std rebuilt the
+        # same way.
+        clockwork_nightly_cargo("ThreadSanitizer (the Rust subsystems and std are instrumented too)")
+        execute_process(COMMAND ${CLOCKWORK_RUSTC_EXECUTABLE} -vV
+                        OUTPUT_VARIABLE _rustc_v OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REGEX MATCH "host: ([^\n]+)" _ "${_rustc_v}")
+        set(CLOCKWORK_RUST_TRIPLE ${CMAKE_MATCH_1})
+        set(CLOCKWORK_RUST_SANITIZE thread)
+    else()
+        find_program(CARGO_EXECUTABLE cargo REQUIRED)
+    endif()
     # The umbrella carries clockwork-log, so the engine can route the Rust
     # subsystems' lines onto its debug ring (ClockworkEngine::init). An
     # embedder that supplies the crates itself installs a sink from Rust.
@@ -1063,8 +1083,22 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "IPHONEOS_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
     list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --target ${CLOCKWORK_RUST_TRIPLE})
 else()
-    set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE})
-    set(CLOCKWORK_RUST_CARGO_ENV)
+    set(CLOCKWORK_RUST_CARGO_ENV ${CMAKE_COMMAND} -E env)
+    # The flags that pick the target, shared with the bridge's own build
+    # below: none for a plain host build, which cargo places under target/
+    # directly; the host triple and a rebuilt std for a sanitizer, which
+    # cargo places under target/<triple>/ as it does any explicit target.
+    set(CLOCKWORK_RUST_TARGET_FLAGS)
+    if(CLOCKWORK_RUST_SANITIZE)
+        set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_TRIPLE}/${CLOCKWORK_RUST_PROFILE})
+        list(APPEND CLOCKWORK_RUST_CARGO_ENV
+            "RUSTFLAGS=-Zsanitizer=${CLOCKWORK_RUST_SANITIZE}"
+            "RUSTC=${CLOCKWORK_RUSTC_EXECUTABLE}")
+        set(CLOCKWORK_RUST_TARGET_FLAGS --target ${CLOCKWORK_RUST_TRIPLE} -Z build-std)
+    else()
+        set(CLOCKWORK_RUST_TARGET_DIR ${CLOCKWORK_RUST_WORKSPACE}/target/${CLOCKWORK_RUST_PROFILE})
+    endif()
+    list(APPEND CLOCKWORK_RUST_CARGO_FLAGS ${CLOCKWORK_RUST_TARGET_FLAGS})
     if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
         # rustc reads the deployment floor from the environment, as clang does
         # from the flag: without it the crates' objects carry the SDK's version,
@@ -1073,7 +1107,7 @@ else()
         # crates; the standard library's objects are the toolchain's (a
         # Homebrew rust is built on the host's SDK and still warns for std —
         # a rustup toolchain's prebuilt std does not).
-        set(CLOCKWORK_RUST_CARGO_ENV ${CMAKE_COMMAND} -E env
+        list(APPEND CLOCKWORK_RUST_CARGO_ENV
             "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
     endif()
 endif()
@@ -1556,12 +1590,12 @@ if(CLOCKWORK_PLUGINS)
         if(CLOCKWORK_CARGO_OFFLINE)
             list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --offline)
         endif()
-        list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --locked)
+        list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --locked ${CLOCKWORK_RUST_TARGET_FLAGS})
         # Built from Clockwork's workspace whoever is embedding: the bridge
         # is clockwork's binary, and an embedder's umbrella has nothing it
         # needs.
         set(CLOCKWORK_BRIDGE_RUST_LIB
-            ${CLOCKWORK_RUST_DIR}/target/${CLOCKWORK_RUST_PROFILE}/${CMAKE_STATIC_LIBRARY_PREFIX}clockwork_bridge_native${CMAKE_STATIC_LIBRARY_SUFFIX})
+            ${CLOCKWORK_RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}clockwork_bridge_native${CMAKE_STATIC_LIBRARY_SUFFIX})
         add_custom_target(clockwork_bridge_rust ALL
             BYPRODUCTS ${CLOCKWORK_BRIDGE_RUST_LIB}
             COMMAND ${CLOCKWORK_RUST_CARGO_ENV} ${CARGO_EXECUTABLE} build ${CLOCKWORK_BRIDGE_CARGO_FLAGS} -p clockwork-bridge-native

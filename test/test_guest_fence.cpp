@@ -23,6 +23,7 @@
  * address it is given.
  */
 #include "LanesFixture.h"
+#include "Sanitizers.h"
 #include "OscTestUtils.h"
 #include "audio_processor.h"
 #include "clockwork_arena.h"
@@ -32,18 +33,8 @@
 #include <cstring>
 #include <string>
 
-#if defined(__SANITIZE_ADDRESS__)
-#define CLOCKWORK_FENCE_ASAN 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define CLOCKWORK_FENCE_ASAN 1
-#endif
-#endif
-#ifndef CLOCKWORK_FENCE_ASAN
-#define CLOCKWORK_FENCE_ASAN 0
-#endif
 
-#if CLOCKWORK_FENCE_ASAN && !defined(_WIN32)
+#if CLOCKWORK_UNDER_ASAN && !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -85,7 +76,7 @@ TEST_CASE("guest fence child: the guest pokes the region it was told to", "[.fen
     lanes_test::tickUntil(2, nullptr);
 }
 
-#if CLOCKWORK_FENCE_ASAN && !defined(_WIN32)
+#if CLOCKWORK_UNDER_ASAN && !defined(_WIN32)
 
 namespace {
 
@@ -148,4 +139,4 @@ TEST_CASE("guest fence: a guest that writes its own window is left alone",
     CHECK(WEXITSTATUS(run.status) == 0);
 }
 
-#endif  // CLOCKWORK_FENCE_ASAN && !_WIN32
+#endif  // CLOCKWORK_UNDER_ASAN && !_WIN32

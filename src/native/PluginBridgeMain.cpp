@@ -537,7 +537,7 @@ int main(int argc, char** argv) {
     }
     const long pid = std::strtol(argv[1], nullptr, 10);
     if (pid <= 0) { std::fprintf(stderr, "bad engine pid: %s\n", argv[1]); return 1; }
-    const unsigned long core = std::strtoul(argv[2], nullptr, 10);
+    const unsigned long long core = std::strtoull(argv[2], nullptr, 10);
     if (core == 0 || core > UINT32_MAX) { std::fprintf(stderr, "bad core id: %s\n", argv[2]); return 1; }
     // Nothing escapes main: an exception out of it is std::terminate with no
     // line in the log, and the engine sees only a host that stopped.

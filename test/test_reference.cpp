@@ -40,8 +40,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
-#include <barrier>
+#include <condition_variable>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -49,6 +50,7 @@
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -59,6 +61,42 @@
 namespace {
 
 using lanes_test::Lane;
+
+// A barrier whose ordering ThreadSanitizer sees. libc++'s std::barrier runs
+// its arrival tree inside libc++.dylib, which no sanitizer build instruments,
+// so what it orders reads as a race; a mutex and a condition variable are
+// intercepted wherever they are.
+class Barrier {
+public:
+    explicit Barrier(size_t parties) : parties_(parties) {}
+    void arrive_and_wait() {
+        std::unique_lock<std::mutex> lk(m_);
+        const size_t phase = phase_;
+        if (++arrived_ == parties_) {
+            arrived_ = 0;
+            ++phase_;
+            cv_.notify_all();
+            return;
+        }
+        cv_.wait(lk, [&] { return phase_ != phase; });
+    }
+    // Arrive for this phase and leave: one party fewer from the next.
+    void arrive_and_drop() {
+        const std::lock_guard<std::mutex> lk(m_);
+        --parties_;
+        if (arrived_ == parties_) {
+            arrived_ = 0;
+            ++phase_;
+            cv_.notify_all();
+        }
+    }
+private:
+    std::mutex m_;
+    std::condition_variable cv_;
+    size_t parties_;
+    size_t arrived_ = 0;
+    size_t phase_ = 0;
+};
 
 // The guest's bulk memory on a lane beside others: enough for every
 // scenario's pool, a sixty-fourth of the desktop's figure.
@@ -491,7 +529,7 @@ TEST_CASE("independence: every scenario beside the others, each on a thread of i
     const auto want = alone();
     Beside b;
     Fault fault;
-    std::barrier together(static_cast<std::ptrdiff_t>(kScenarioCount));
+    Barrier together(kScenarioCount);
     std::vector<std::thread> threads;
     for (auto& s : b.scenarios)
         threads.emplace_back([&s, &together, &fault] {
@@ -525,7 +563,7 @@ TEST_CASE("independence: every scenario beside the others, each block on a threa
     // Each round, which scenario steps on which thread; every thread works its
     // list, and the round ends when all have.
     std::vector<std::vector<size_t>> rounds(kThreads);
-    std::barrier start(static_cast<std::ptrdiff_t>(kThreads + 1)), end(static_cast<std::ptrdiff_t>(kThreads + 1));
+    Barrier start(kThreads + 1), end(kThreads + 1);
     std::atomic<bool> stop{false};
     Fault fault;
     std::vector<std::thread> pool;

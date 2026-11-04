@@ -20,6 +20,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "EngineFixture.h"
+#include "Sanitizers.h"
 #include "TestSecret.h"
 #include "clockwork_prefix.h"
 #include "OscTestUtils.h"
@@ -33,32 +34,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Detect ThreadSanitizer (GCC macro or Clang feature) — used to gate the
-// spam-flood loop below, which wedges under TSan for reasons unrelated to the
-// property it tests (see that TEST_CASE's guard comment).
-#if defined(__SANITIZE_THREAD__)
-#  define CLOCKWORK_TSAN 1
-#elif defined(__has_feature)
-#  if __has_feature(thread_sanitizer)
-#    define CLOCKWORK_TSAN 1
-#  endif
-#endif
-
 // Sanitizer builds run several times slower, and this test also churns child
 // processes (fork/exec/SIGKILL) that contend with the engine's threads — so a
 // fixed 2s reply/poll timeout can expire before a perfectly live engine
 // answers. Scale the waits up under a sanitizer build only.
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-constexpr int kTimeoutScale = 4;
-#elif defined(__has_feature)
-#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-constexpr int kTimeoutScale = 4;
-#  else
-constexpr int kTimeoutScale = 1;
-#  endif
-#else
-constexpr int kTimeoutScale = 1;
-#endif
+constexpr int kTimeoutScale = (CLOCKWORK_UNDER_ASAN || CLOCKWORK_UNDER_TSAN) ? 4 : 1;
 
 // Engine-liveness waits (/dummy/ping round trips, ring-drain checks) run against a
 // free-running headless driver whose audio thread a loaded CI runner can
@@ -168,7 +148,7 @@ bool waitPeerExit(pid_t pid, int timeoutMs = 10000) {
 // Release and ASan builds; the plane's *race* behaviour is covered under TSan
 // in-process by test_shm_peer_plane.cpp. The lighter reattach case below still
 // runs under TSan.
-#ifndef CLOCKWORK_TSAN
+#if !CLOCKWORK_UNDER_TSAN
 TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls the engine",
           "[shm][peer][crash]") {
     constexpr unsigned kPort = 57224;
@@ -253,7 +233,7 @@ TEST_CASE("shm-peer crash: SIGKILL mid-traffic never corrupts the ring or stalls
         REQUIRE(answered);
     }
 }
-#endif // !CLOCKWORK_TSAN
+#endif // !CLOCKWORK_UNDER_TSAN
 
 TEST_CASE("shm-peer crash: a corpse holding the writer lock stalls nobody; reattach recovers it",
           "[shm][peer][crash]") {

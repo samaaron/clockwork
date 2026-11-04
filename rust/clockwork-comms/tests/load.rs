@@ -245,6 +245,7 @@ fn pipe_load() {
     // SAFETY: `name` is a live String.
     let handle = unsafe {
         clockwork_osc_pipe_start(
+            std::ptr::null_mut(),
             Arc::as_ptr(&sink).cast_mut().cast::<c_void>(),
             on_packet,
             on_closed,

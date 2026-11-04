@@ -15,6 +15,7 @@
 #include "shared_memory.h"
 #include "OscTestUtils.h"
 #include "ResidentMemory.h"
+#include "Sanitizers.h"
 #include "audio_processor.h"   // destroy_dsp, rebuild_dsp
 
 #include <catch2/catch_test_macros.hpp>
@@ -215,6 +216,7 @@ TEST_CASE("profile: 32 plugin cores fit the budget, each costing what its guest 
     { Core warm(&plugin); }
     const size_t before = test_memory::residentBytes();
     if (before == 0) SKIP("this platform does not say how much of the process is resident");
+    if (CLOCKWORK_UNDER_ASAN || CLOCKWORK_UNDER_TSAN) SKIP("a sanitizer's shadow memory is resident too");
     constexpr int kCores = 32;
     constexpr size_t kBudget = 128u << 20;
     std::vector<std::unique_ptr<Core>> cores;

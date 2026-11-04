@@ -63,8 +63,8 @@ CI replays every fuzz target over its corpus (the seeds and every past
 crasher) on each push, and fuzzes each target under libFuzzer for two hours
 nightly (`.github/workflows/security.yml`). A new crasher is encrypted to the
 maintainer's key before it is uploaded. The C and C++ parsers above also run
-under ASan and UBSan, and the threaded code under TSan, in the `sanitize` jobs
-of `.github/workflows/ci.yml`.
+under ASan and UBSan, and the threaded code, C++ and Rust alike, under TSan,
+in the `sanitize` jobs of `.github/workflows/ci.yml`.
 
 ## Known gaps
 
