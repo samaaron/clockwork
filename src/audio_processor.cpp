@@ -587,7 +587,7 @@ extern "C" {
     // any other thread (watchdog, recovery, boot on native), and this one
     // for any other core, writes the locked NRT-out ring, so no instance's
     // ring ever has a second concurrent writer.
-    thread_local const clockwork::CoreState* t_instance_ring_of = nullptr;
+    static thread_local const clockwork::CoreState* t_instance_ring_of = nullptr;
     struct InstanceRingScope {
         explicit InstanceRingScope(const clockwork::CoreState& st) : prev(t_instance_ring_of) { t_instance_ring_of = &st; }
         ~InstanceRingScope() { t_instance_ring_of = prev; }
@@ -3500,13 +3500,17 @@ extern "C" {
 #endif
     }
 
-    // A line no ring takes: on the web the console, natively stderr.
-    static void log_no_ring(const char* text) {
+    // A line no ring takes: on the web the console, natively stderr. `len`
+    // bytes of `text`, which need not be NUL-terminated (a Rust line is not).
+    static void log_no_ring(const char* text, uint32_t len) {
 #ifdef __EMSCRIPTEN__
-        emscripten_console_log(text);
+        std::array<char, 1024> line{};
+        const size_t n = std::min<size_t>(len, line.size() - 1);
+        std::memcpy(line.data(), text, n);
+        emscripten_console_log(line.data());
 #else
-        fprintf(stderr, "%s\n", text);   // stdio-ok: no engine ring exists
-        fflush(stderr);                   // stdio-ok
+        fprintf(stderr, "%.*s\n", static_cast<int>(len), text);   // stdio-ok: no engine ring exists
+        fflush(stderr);                                            // stdio-ok
 #endif
     }
 
@@ -3548,21 +3552,22 @@ extern "C" {
         }
         for (const auto& line : held)
             if (!emit_debug_osc(*st, line.data(), static_cast<uint32_t>(line.size())))
-                log_no_ring(line.c_str());   // no ring came up for this boot
+                log_no_ring(line.data(), static_cast<uint32_t>(line.size()));   // no ring came up for this boot
     }
 #endif
 
     // A line `st` says (DspHost::log): onto its ring, or held by its boot,
     // or where a line with no ring goes.
     static void log_to(clockwork::CoreState& st, const char* text) {
-        if (!log_line(st, text, static_cast<uint32_t>(std::strlen(text)))) log_no_ring(text);
+        const auto len = static_cast<uint32_t>(std::strlen(text));
+        if (!log_line(st, text, len)) log_no_ring(text, len);
     }
 
     // A line of `core`'s log (clockwork_log): onto its ring, or held by its
     // boot; with no core, or none that took it, to the console.
     static void log_to_core(ClockworkCore* core, const char* text, uint32_t len) {
         clockwork::CoreState* const st = clockwork::state(core);
-        if (!st || !log_line(*st, text, len)) log_no_ring(text);
+        if (!st || !log_line(*st, text, len)) log_no_ring(text, len);
     }
 
     static int clockwork_log_impl(ClockworkCore* core, const char* fmt, va_list args) {

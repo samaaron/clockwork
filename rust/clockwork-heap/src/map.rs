@@ -239,7 +239,9 @@ pub fn chunks(base: usize, bytes: usize) -> Option<impl Iterator<Item = usize> +
 
 /// Whether `[base, base + bytes)` touches the chunk at `chunk`.
 pub fn touches(base: usize, bytes: usize, chunk: usize) -> bool {
-    bytes != 0 && base < chunk.saturating_add(CHUNK_BYTES) && base + bytes > chunk
+    // Saturating on both sides: a span ending at the top of a 32-bit address
+    // space ends past every chunk, as it should.
+    bytes != 0 && base < chunk.saturating_add(CHUNK_BYTES) && base.saturating_add(bytes) > chunk
 }
 
 /// The node `at` points to, made and published if there is none yet; a
@@ -397,7 +399,7 @@ mod tests {
         let last = (COVERED - CHUNK_BYTES as u64) as usize;
         assert_eq!(map.publish(last, 2 * CHUNK_BYTES, owner(1)), Err(Refused::Range));
         map.publish(last, CHUNK_BYTES, owner(1)).unwrap();
-        assert_eq!(map.owner_of(last + CHUNK_BYTES - 1), owner(1).as_ptr());
+        assert_eq!(map.owner_of(last + (CHUNK_BYTES - 1)), owner(1).as_ptr());
         assert!(map.owner_of(0).is_null());
     }
 

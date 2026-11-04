@@ -177,6 +177,9 @@ fn storage_of(file: &object::File, sym: &object::Symbol) -> Option<Storage> {
         )
         || name.starts_with(".init_array")
         || name.starts_with(".fini_array")
+        // Read-only once the loader has relocated it: GCC's home for vtables,
+        // typeinfo and constant tables that hold addresses.
+        || name.starts_with(".data.rel.ro")
     {
         return None;
     }
@@ -197,6 +200,7 @@ fn skipped(name: &str) -> bool {
     name.starts_with("__")
         || name.starts_with("_OBJC_")
         || name.starts_with("_ZGV")
+        || name.starts_with("DW.ref.")   // GCC's references to the unwinder's personality and typeinfo
         || name.ends_with("$tlv$init")
         || name.starts_with(".L")
         || name.starts_with("ltmp")
@@ -243,6 +247,21 @@ fn normalise(name: &str, rust: bool) -> String {
     let mut out = String::with_capacity(name.len());
     let mut rest = name;
     while !rest.is_empty() {
+        // A function-local static: clang names the function with its
+        // parentheses (`f()::x`), GCC without (`f::x`). One spelling, and
+        // a lambda after the parentheses is still a lambda.
+        if let Some(tail) = rest.strip_prefix("()::") {
+            out.push_str("::");
+            rest = tail;
+            if let Some(after) = rest.strip_prefix("$_") {
+                let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+                if digits > 0 {
+                    out.push_str("{lambda}");
+                    rest = &after[digits..];
+                }
+            }
+            continue;
+        }
         if let Some(tail) = rest.strip_prefix("::$_") {
             let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
             if digits > 0 {
@@ -497,7 +516,11 @@ mod tests {
             normalise("E::init(E::Config const&)::{lambda(double)#1}::operator()(double) const::lastLogSec", false),
             "E::init(E::Config const&)::{lambda}::operator()(double) const::lastLogSec"
         );
-        assert_eq!(normalise("f()::{lambda(std::pair<int, int>)#12}::x", false), "f()::{lambda}::x");
+        assert_eq!(normalise("f()::{lambda(std::pair<int, int>)#12}::x", false), "f::{lambda}::x");
+        // clang and GCC name a function-local static's function differently.
+        assert_eq!(normalise("guest_info()::info", false), "guest_info::info");
+        assert_eq!(normalise("guest_info::info", false), "guest_info::info");
+        assert_eq!(normalise("f()::$_4::operator()(int) const::x", false), "f::{lambda}::operator()(int) const::x");
         assert_eq!(normalise("price$_value", false), "price$_value");
     }
 

@@ -219,7 +219,11 @@ uint32_t boot() {
 void     ticked(uint64_t frames) { defaultLane().ticked(frames); }
 uint64_t position()              { return defaultLane().position(); }
 
+// The lane's core, booting it on the first ask. A core already there is
+// handed back with no assertion, so a case's own threads may ask for it:
+// Catch2's assertions are the test thread's alone.
 ClockworkCore* core() {
+    if (ClockworkCore* c = defaultLane().core()) return c;
     boot();
     return defaultLane().core();
 }

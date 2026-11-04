@@ -22,6 +22,8 @@
 
 use clockwork_fence::no_unwind;
 use clockwork_log::ClockworkCore;
+#[cfg(windows)]
+use clockwork_log::CoreRef;
 use std::ffi::c_void;
 
 use crate::stream::ClockworkOscStream;

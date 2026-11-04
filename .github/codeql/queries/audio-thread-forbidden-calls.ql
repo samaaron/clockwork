@@ -95,11 +95,12 @@ predicate outside(Function f) {
  *  walk of calls cannot see. Stated here once, in review, rather than
  *  dismissed alert by alert. */
 predicate neverOnTheAudioThread(Function f) {
-  // The logger's no-ring path, taken only while memory_initialized is false.
-  // The audio thread never runs then: the device callback is attached after
-  // init_memory builds the ring and its device closed before teardown_memory,
-  // and process_audio returns before logging when there is no ring.
-  f.hasName("clockwork_log_no_ring")
+  // The logger's no-ring path: a line of a core whose ring is not laid out
+  // yet (held by its boot) or of no core at all (the console). The audio
+  // thread never runs there: a tick on a core without its ring returns
+  // before anything logs, and a device is opened after the ring is laid out
+  // and closed before it is torn down.
+  f.hasName(["log_no_ring", "hold_line"])
 }
 
 /** A call edge, with virtual dispatch widened to every override: a call

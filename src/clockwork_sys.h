@@ -87,7 +87,7 @@ void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
     // below and none is ever dropped: the address and the reason padded to
     // four, the message's own address and type tag, and the generation.
     std::array<char, 200> why{};
-    for (size_t i = 0; reason && reason[i] != '\0' && i < why.size() - 1; ++i) why[i] = reason[i];
+    for (size_t i = 0; reason && i < why.size() - 1 && reason[i] != '\0'; ++i) why[i] = reason[i];
     constexpr size_t kFrame = 256 + 4 + 200 + 4 + 24 + 8 + 4;
     std::array<char, kFrame> buf{};
     static_assert(kFrame <= 512, "a refusal rides the audio thread's stack");

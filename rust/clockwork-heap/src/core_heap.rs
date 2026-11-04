@@ -885,6 +885,7 @@ mod tests {
     // dropped and counted, never handed to the system allocator as if it
     // were the system's. All in one case, as all read process-wide counts.
     #[test]
+    #[cfg_attr(miri, ignore = "keeps a span for good, as the product does, which Miri reports as a leak")]
     fn a_cores_own_pool_gives_its_span_back_empty_and_is_counted_when_not() {
         use std::alloc::{GlobalAlloc, Layout};
         let span = Span::new(CHUNK_BYTES);

@@ -25,7 +25,7 @@ shared | guest_malloc.cpp: (anonymous namespace)::g_mark_calls | the whole progr
 shared | guest_malloc.cpp: (anonymous namespace)::g_mark_held | the whole program's mallocs after boot: the process's, counted only on the web, where a process holds one core
 
 # ── Constants: built once, or to be labelled ─────────────────────────────────
-constant | audio_processor.cpp: guest_info()::info | the linked guest's description: dsp_describe() answers at run time, so it is read once
+constant | audio_processor.cpp: guest_info::info | the linked guest's description: dsp_describe() answers at run time, so it is read once
 constant | osc::BeginArray | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | osc::BeginBundleImmediate | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | osc::EndArray | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
@@ -34,8 +34,8 @@ constant | osc::EndMessage | oscpack's tag objects: to be labelled inline conste
 constant | osc::Infinitum | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | osc::Nil | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | osc::OscNil | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
-constant | plugin_discovery.cpp: (anonymous namespace)::searchPaths()::paths | the plugin folders, built once from the environment
-constant | ClockworkEngine.cpp: ClockworkEngine::sendDeviceReport()::{lambda}::operator()(osc::OutboundPacketStream&) const::canonical | to be a constexpr array
+constant | plugin_discovery.cpp: (anonymous namespace)::searchPaths::paths | the plugin folders, built once from the environment
+constant | ClockworkEngine.cpp: ClockworkEngine::sendDeviceReport::{lambda}::operator()(osc::OutboundPacketStream&) const::canonical | to be a constexpr array
 constant | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::HostContext::getName(char16_t*)::kName | to be labelled constexpr: a writable pointer to constant text today
 constant | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::tuidToHex(char const*)::kHex | to be labelled constexpr: a writable pointer to constant text today
 
@@ -45,7 +45,7 @@ shared | clockwork_core::LIVE | the registry of cores: how many are live, so a p
 shared | clockwork_core::HANDLES | the registry of cores: every handle made, newest first, for the walks over the live cores
 shared | clockwork_core::GUESTS | the registry of cores: how many hold a guest instance, against how many the guest says a process may hold
 shared | clockwork_heap::map::MAP | the address map: which core's heap owns each chunk of memory, for a free from any thread (docs/ENGINES.md)
-shared | audio_processor.cpp: pool_check_wanted()::wanted | CLOCKWORK_POOL_CHECK, read once by the process: a diagnostic every core follows
+shared | audio_processor.cpp: pool_check_wanted::wanted | CLOCKWORK_POOL_CHECK, read once by the process: a diagnostic every core follows
 shared | clockwork_heap::core_heap::OUTLIVED | cores that went with clockwork memory still in their own pool: the process's count, which the tests require at 0
 shared | clockwork_heap::core_heap::OUTLIVED_FREES | frees of blocks that outlived their core, dropped and counted: the process's count, which the tests require at 0
 shared | clockwork_heap::entry::ENTRY | each thread's entry: the core its call works inside and the kind of call (docs/ENGINES.md)
@@ -61,8 +61,8 @@ shared | plugin_clap.cpp: clockwork_plugin_clap::(anonymous namespace)::g_scan_c
 shared | plugin_clap.cpp: clockwork_plugin_clap::(anonymous namespace)::g_scan_mu | per bridge process: the scan results
 shared | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::g_scan_cache | per bridge process: the scan results
 shared | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::g_scan_mu | per bridge process: the scan results
-shared only=macos | PluginEditorWindow.mm: (anonymous namespace)::ensureApp()::done | the bridge main thread's editor windows
-shared only=macos | PluginEditorWindow.mm: (anonymous namespace)::registry()::r | the bridge main thread's editor windows
+shared only=macos | PluginEditorWindow.mm: (anonymous namespace)::ensureApp::done | the bridge main thread's editor windows
+shared only=macos | PluginEditorWindow.mm: (anonymous namespace)::registry::r | the bridge main thread's editor windows
 shared | clockwork_audio_file.cpp: (anonymous namespace)::gDecodeLimit | the client's decode limit; to be an argument of the decode call
 shared | ClockworkEngine.cpp: (anonymous namespace)::g_defaultDrivers | the default drivers a test installs to keep every engine off real audio
 shared | ClockworkEngine.cpp: (anonymous namespace)::g_defaultDriversMutex | the default drivers a test installs to keep every engine off real audio
@@ -74,12 +74,12 @@ shared | mem_region.cpp: clockwork::mem::(anonymous namespace)::g_head | the mem
 shared | mem_region.cpp: clockwork::mem::(anonymous namespace)::g_lock | the memory provider over the process's memory; its first-fit allocator to be the TLSF
 shared | clockwork_midi::device::SHARED | the MIDI service's device IO, for the sinks that send through it
 shared | clockwork_midi::ffi::PROCESS | the MIDI service: one OS client, a handle per core, closed by the last
-shared | ClockworkEngine.cpp: (anonymous namespace)::publishedAppName()::name | the name the OS shows; to be set once by the process, not by every engine's boot
+shared | ClockworkEngine.cpp: (anonymous namespace)::publishedAppName::name | the name the OS shows; to be set once by the process, not by every engine's boot
 shared | clockwork_log::SINK | the one log sink; a line names its core
 shared | clockwork_sinks::service::DRAIN | the one sink drain thread, which walks every core's sinks
 shared | clockwork_sinks::service::RUNNING | the one sink drain thread, which walks every core's sinks
 shared | clockwork_sinks::service::TABLES | the one sink drain thread's list of every core's table
-shared | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::hostContext()::ctx | the one stateless IHostApplication every plugin in the bridge is handed
+shared | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::hostContext::ctx | the one stateless IHostApplication every plugin in the bridge is handed
 shared only=windows | clockwork_midi::watcher::MTA | the Windows COM apartment, an OS fact of the process
 
 # ── Tests only ───────────────────────────────────────────────────────────────

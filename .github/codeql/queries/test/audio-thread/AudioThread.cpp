@@ -19,7 +19,8 @@ static void grow() { malloc(64); }                       // allocates
 static void guard() { lock_guard lk(g_mutex); }         // may block on a lock
 static void say() { fprintf(stderr_stream, "x"); }      // does file IO
 static void place() { ::new (g_slot) Voice{1}; }         // placement new: fine
-static void clockwork_log_no_ring() { fprintf(stderr_stream, "y"); }   // never on the audio thread: fine
+static void log_no_ring() { fprintf(stderr_stream, "y"); }   // never on the audio thread: fine
+static void hold_line() { lock_guard lk(g_mutex); }          // never on the audio thread: fine
 
 static void mix() { grow(); guard(); }
 
@@ -27,7 +28,8 @@ void renderAudioBlock(float* out, int frames) {
     mix();
     say();
     place();
-    clockwork_log_no_ring();
+    log_no_ring();
+    hold_line();
     for (int i = 0; i < frames; ++i) out[i] = 0.0f;
 }
 
