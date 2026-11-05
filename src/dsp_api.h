@@ -212,10 +212,6 @@ typedef struct DspConfig {
     const void* guest_config;
     uint32_t    guest_config_bytes;
 
-    /* Pins the RNG seed for an offline render, so two runs of the same score
-       agree. 0 for "seed however you like". */
-    int32_t  deterministic_seed;
-
     /* THE FLOATING-POINT ENVIRONMENT OF THE THREAD dsp_process RUNS ON, as the
      * host declared it (DspFpEnv). Denormal flush-to-zero is a per-thread CPU
      * flag; the native device layer arms it on its audio thread, a web worklet

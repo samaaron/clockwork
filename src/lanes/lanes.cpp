@@ -480,10 +480,6 @@ void clockwork_set_guest_bulk_bytes(ClockworkCore* core, size_t bytes) {
     if (ClockworkConfig* c = setup_of(core)) c->guest_bulk_bytes = bytes;
 }
 
-void clockwork_set_deterministic_seed(ClockworkCore* core, int32_t seed) {
-    if (ClockworkConfig* c = setup_of(core)) c->deterministic_seed = seed;
-}
-
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif

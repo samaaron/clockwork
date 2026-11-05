@@ -87,10 +87,6 @@ struct ClockworkConfig {
     uint32_t lanes_space        = CLOCKWORK_SPACE_UNKNOWN;
     uint64_t assets_at          = 0;
     uint64_t returns_at         = 0;
-    // Pins the guest's random numbers for an offline render, so two runs of
-    // one score agree (DspConfig::deterministic_seed); 0 lets it seed as it
-    // likes (clockwork_set_deterministic_seed).
-    int32_t  deterministic_seed = 0;
     // The generation a new arena goes on from (docs/RESTARTS.md, "The
     // generation"): the last this core opened, raised by one its host hands
     // over from memory that has gone (clockwork_carry_generation). The

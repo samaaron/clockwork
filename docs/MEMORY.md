@@ -396,9 +396,12 @@ recommended, with one change at step 5, noted there.
    arena, its working memory and what it takes through `alloc_bytes` —
    and scsynth broke it with ~800 KB of globals and load-time mallocs. Its
    lookup tables (the sine tables, the polar LUTs, the FFT windows and
-   cosine tables: `scsynth_tables.cpp`) are now built at the start of its
-   working memory on every `World_New`, and `dsp_memory_bytes` adds
-   `SCSYNTH_TABLES_BYTES` for them. `dsp_api.h` states a guest's memory in
+   cosine tables: `scsynth_tables.cpp`) were then built at the start of its
+   working memory on every `World_New`, and `dsp_memory_bytes` added
+   `SCSYNTH_TABLES_BYTES` for them. Since 2026-11-05 they are constants,
+   generated into `scsynth_tables.cpp` and read-only data the symbol map
+   names as such (BOUNDARY.md lets a guest keep constants); the memory term
+   is gone. `dsp_api.h` states a guest's memory in
    three sentences. Clockwork cannot stop a guest keeping globals or calling
    malloc, and such a guest runs; what it can do is construct its own layout
    (next) and count what a guest does outside the doors. Moving the tables

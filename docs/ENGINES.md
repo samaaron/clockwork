@@ -106,8 +106,14 @@ promise that it keeps none, and two checks hold the guest to it
 render, bit for bit, what each renders alone. A core keeps its place while
 its own instance is freed and rebuilt. A build past the count is refused
 with the reason, and an embed attach or boot whose guest did not start is
-refused with `E_NO_INSTANCE`. scsynth declares 1 until SuperSonic makes it
-plural.
+refused with `E_NO_INSTANCE`. scsynth declares any (SuperSonic, since
+2026-11-05: its statics went into the World, into constants and behind a
+leading `World*`; its sync guide says how).
+
+Whether a guest renders the same twice is the guest's own affair: a seed
+for its random numbers is one of its options, given in its config text
+before the build like any other (scsynth's `randomSeed`). Clockwork has
+no seed of its own.
 
 ### Plugin binaries
 
@@ -161,4 +167,3 @@ place the property is not yet uniform.
   should be `constexpr`.
 - `reset_taps` clears the whole taps region at every build; clearing the
   slot headers would do.
-- scsynth as a plural guest (SuperSonic's work).

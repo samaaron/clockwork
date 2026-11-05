@@ -71,7 +71,6 @@ pub struct DspConfig {
     /// Opaque to clockwork; the host's and the guest's private matter.
     pub guest_config: *const c_void,
     pub guest_config_bytes: u32,
-    pub deterministic_seed: i32,
     /// A `DSP_FP_ENV_*` value.
     pub fp_env: i32,
 }

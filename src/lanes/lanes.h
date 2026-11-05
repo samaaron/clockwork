@@ -362,11 +362,6 @@ void clockwork_set_guest_bulk_bytes(ClockworkCore* core, size_t bytes);
  * own sizes. The core's control thread, before its first clockwork_init. */
 const char* clockwork_set_profile(ClockworkCore* core, const ClockworkProfile* profile);
 
-/* Pin the guest's random numbers for an offline render, so two runs of one
- * score agree (DspConfig::deterministic_seed), for the NEXT build. 0, the
- * default, lets the guest seed as it likes. */
-void clockwork_set_deterministic_seed(ClockworkCore* core, int32_t seed);
-
 /* A generation an engine in memory now gone opened, which this core's next
  * new arena goes on from, so none is named twice to a client that outlived
  * that engine (docs/RESTARTS.md, "The generation"): a page reloading into new

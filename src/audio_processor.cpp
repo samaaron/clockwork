@@ -2115,8 +2115,6 @@ extern "C" {
         config.persistent       = base + L.guest_persist_start;
         config.persistent_bytes = L.profile.persist_bytes;
 
-        config.deterministic_seed = cfg.deterministic_seed;
-
         config.block_size = build_block(config.block_size);
         if (config.max_output_channels > clockwork::kMaxChannels)
             config.max_output_channels = clockwork::kMaxChannels;

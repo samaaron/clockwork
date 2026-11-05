@@ -54,7 +54,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         sample_rate, block_size, max_input_channels, max_output_channels, clock, channel_map,
         shm_window, shm_window_bytes, persistent, persistent_bytes, memory, memory_bytes,
         memory_bulk, memory_bulk_bytes, assets, assets_bytes, returns, returns_bytes,
-        guest_config, guest_config_bytes, deterministic_seed, fp_env,
+        guest_config, guest_config_bytes, fp_env,
     });
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release,
         alloc_bytes, tap_open, tap_write, tap_close, flush_schedule });

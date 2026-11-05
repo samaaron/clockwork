@@ -63,7 +63,6 @@
  *
  *   /dummy/region/config          -> ,iiiii <bytes> <slot0..3>
  *   /dummy/region/geometry        -> ,iiii  <rate> <block> <in> <out>
- *   /dummy/region/seed            -> ,i     <deterministic_seed>
  *   /dummy/region/memory          -> ,iii   <bytes> <was_zero> <read_write_ok>
  *   /dummy/region/clock           -> ,iii   <present> <millibeats> <playing>
  *   /dummy/region/window ,ii <v> <_>        publish v through shm_window
@@ -1409,15 +1408,6 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/geometry-is", v, 4);
-            if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
-        }
-        return;
-    }
-    if (addressIs(bytes, len, "/dummy/region/seed")) {
-        if (d->host.emit_osc) {
-            const uint32_t v[1] = { static_cast<uint32_t>(d->config.deterministic_seed) };
-            uint8_t reply[64];
-            const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/region/seed-is", v, 1);
             if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
         }
         return;

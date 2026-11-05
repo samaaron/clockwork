@@ -136,24 +136,6 @@ TEST_CASE("regions: clockwork's geometry reaches the guest without a round trip"
     REQUIRE(clockwork_block_size(lanes_test::core()) == lanes_test::kBufLength);
 }
 
-TEST_CASE("regions: the seed a host pins reaches the guest at the next build",
-          "[boundary][regions]") {
-    lanes_test::boot();
-    lanes_test::drainRt();
-    // Unpinned, the guest seeds as it likes.
-    REQUIRE(ask("/dummy/region/seed", "/dummy/region/seed-is").argInt(0) == 0);
-
-    // Pinned, as an offline render pins it, for the build after.
-    clockwork_set_deterministic_seed(lanes_test::core(), 1234);
-    lanes_test::freshDsp();
-    lanes_test::drainRt();
-    CHECK(ask("/dummy/region/seed", "/dummy/region/seed-is").argInt(0) == 1234);
-
-    clockwork_set_deterministic_seed(lanes_test::core(), 0);
-    lanes_test::freshDsp();
-    lanes_test::drainRt();
-}
-
 // ── guest_memory: reserved, zeroed, and the guest's alone ───────────────────
 
 TEST_CASE("regions: the guest's memory arrives zeroed, whole, and writable",

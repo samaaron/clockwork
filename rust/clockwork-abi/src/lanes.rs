@@ -140,8 +140,6 @@ unsafe extern "C" {
     /// A floor under the guest's bulk memory (the span its allocations come from) for the next build; 0 = the
     /// profile's default.
     pub fn clockwork_set_guest_bulk_bytes(core: *mut ClockworkCore, bytes: usize);
-    /// Pins the guest's random numbers for an offline render; 0 lets it seed as it likes.
-    pub fn clockwork_set_deterministic_seed(core: *mut ClockworkCore, seed: i32);
     /// Why the last build has no guest, or null when it has one. NUL-terminated.
     pub fn clockwork_boot_error(core: *mut ClockworkCore) -> *const c_char;
 

@@ -22,7 +22,7 @@ int main(void) {
     F(DspConfig, memory_bulk); F(DspConfig, memory_bulk_bytes); F(DspConfig, assets);
     F(DspConfig, assets_bytes); F(DspConfig, returns); F(DspConfig, returns_bytes);
     F(DspConfig, guest_config); F(DspConfig, guest_config_bytes);
-    F(DspConfig, deterministic_seed); F(DspConfig, fp_env);
+    F(DspConfig, fp_env);
 
     S(DspHost);
     F(DspHost, ctx); F(DspHost, emit_osc); F(DspHost, log); F(DspHost, open_sink);
