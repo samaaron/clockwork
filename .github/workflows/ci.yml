@@ -533,6 +533,9 @@ jobs:
             -DCLOCKWORK_NIF=ON
       - name: Build
         run: cmake --build build --config Release --parallel 2 --target clockwork_nif
+      - name: The NIF exports nif_init and nothing else
+        if: runner.os != 'Windows'
+        run: scripts/check-exports.sh build/clockwork.so nif_init
 
   # ------------------------------------------------------------------- rust --
   rust:

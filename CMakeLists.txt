@@ -776,6 +776,44 @@ if(WIN32 AND CLOCKWORK_ASIO)
     message(STATUS "ASIO enabled (JUCE_ASIO=1, Steinberg SDK under GPLv3, ${ASIOSDK_DIR})")
 endif()
 
+# A shared module exports the entry points named and nothing else: everything
+# else is hidden by the compiler and, for what the static libraries bring, by
+# the linker. A host's dynamic linker can then bind nothing of the host's to
+# this module's symbols, nor this module's calls to the host's: BEAM exports
+# abs_1, floor_1 and more, the names of scsynth's unary operators, and a NIF
+# exporting those too had the engine call BEAM's (supersonic #8).
+# scripts/check-exports.sh holds a built module to this.
+function(clockwork_exports_only target)
+    cmake_parse_arguments(EO "" "" "ENTRY" ${ARGN})
+    if(NOT EO_ENTRY)
+        message(FATAL_ERROR "clockwork_exports_only(${target}) names no ENTRY")
+    endif()
+    set_target_properties(${target} PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    set(_list ${CMAKE_CURRENT_BINARY_DIR}/${target}-exports)
+    if(APPLE)
+        # Mach-O names carry a leading underscore.
+        list(TRANSFORM EO_ENTRY PREPEND "_" OUTPUT_VARIABLE _names)
+        string(JOIN "\n" _text ${_names})
+        file(WRITE ${_list}.txt "${_text}\n")
+        target_link_options(${target} PRIVATE "LINKER:-exported_symbols_list,${_list}.txt")
+    elseif(WIN32)
+        # A DLL exports what is marked for export; the .def names exactly
+        # the entry points.
+        string(JOIN "\n    " _text ${EO_ENTRY})
+        file(WRITE ${_list}.def "EXPORTS\n    ${_text}\n")
+        target_sources(${target} PRIVATE ${_list}.def)
+    else()
+        string(JOIN "; " _text ${EO_ENTRY})
+        file(WRITE ${_list}.map "{\n  global: ${_text};\n  local: *;\n};\n")
+        target_link_options(${target} PRIVATE
+            "LINKER:--version-script=${_list}.map"
+            "LINKER:--exclude-libs,ALL")
+    endif()
+endfunction()
+
 if(CLOCKWORK_NIF)
     # (CMAKE_POSITION_INDEPENDENT_CODE is set far above, before the first
     # add_library — see there for why it cannot live here.)
@@ -822,6 +860,8 @@ if(CLOCKWORK_NIF)
     target_link_libraries(clockwork_nif PRIVATE
         clockwork_comms
         clockwork_bundle)
+    # ERL_NIF_INIT defines nif_init, the one symbol erlang:load_nif looks up.
+    clockwork_exports_only(clockwork_nif ENTRY nif_init)
 
     if(APPLE)
         # load_nif wants .so on every Unix, not .dylib; and the BEAM's own
@@ -1288,10 +1328,9 @@ endif()
 # A plugin binary built on Clockwork (src/clockwork_plugin.h, docs/ENGINES.md
 # 3.7): a shared module a host loads, perhaps beside another plugin with a
 # Clockwork of its own, so it exports the entry points named and nothing
-# else: no host's dynamic linker can then bind another module's calls to
-# this module's Clockwork, or this module's to another's. The entry points
-# are marked CLOCKWORK_PLUGIN_ENTRY; everything else is hidden by the
-# compiler and, for what the static libraries bring, by the linker.
+# else (clockwork_exports_only): no host's dynamic linker can then bind
+# another module's calls to this module's Clockwork, or this module's to
+# another's. The entry points are marked CLOCKWORK_PLUGIN_ENTRY.
 #
 #   clockwork_plugin_module(my_plugin ENTRY clap_entry)
 function(clockwork_plugin_module target)
@@ -1299,32 +1338,9 @@ function(clockwork_plugin_module target)
     if(NOT PM_ENTRY)
         message(FATAL_ERROR "clockwork_plugin_module(${target}) names no ENTRY")
     endif()
-    set_target_properties(${target} PROPERTIES
-        C_VISIBILITY_PRESET hidden
-        CXX_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON)
     target_link_libraries(${target} PRIVATE clockwork_bundle)
     target_include_directories(${target} PRIVATE ${CLOCKWORK_INCLUDE_DIRS})
-    set(_list ${CMAKE_CURRENT_BINARY_DIR}/${target}-exports)
-    if(APPLE)
-        # Mach-O names carry a leading underscore.
-        list(TRANSFORM PM_ENTRY PREPEND "_" OUTPUT_VARIABLE _names)
-        string(JOIN "\n" _text ${_names})
-        file(WRITE ${_list}.txt "${_text}\n")
-        target_link_options(${target} PRIVATE "LINKER:-exported_symbols_list,${_list}.txt")
-    elseif(WIN32)
-        # A DLL exports what is marked for export; the .def names exactly
-        # the entry points.
-        string(JOIN "\n    " _text ${PM_ENTRY})
-        file(WRITE ${_list}.def "EXPORTS\n    ${_text}\n")
-        target_sources(${target} PRIVATE ${_list}.def)
-    else()
-        string(JOIN "; " _text ${PM_ENTRY})
-        file(WRITE ${_list}.map "{\n  global: ${_text};\n  local: *;\n};\n")
-        target_link_options(${target} PRIVATE
-            "LINKER:--version-script=${_list}.map"
-            "LINKER:--exclude-libs,ALL")
-    endif()
+    clockwork_exports_only(${target} ENTRY ${PM_ENTRY})
 endfunction()
 
 # ─── The web module ──────────────────────────────────────────────────────────
