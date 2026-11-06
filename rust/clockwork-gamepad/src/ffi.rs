@@ -320,7 +320,8 @@ mod tests {
     // leaves the others registered.
     #[test]
     fn every_core_hears_the_process_gamepads_and_one_leaving_leaves_the_others() {
-        HEARD.lock().unwrap().clear();
+        // The tally is the module's, and the tests run at once: each counts its
+        // own cores only, and none clears it.
         let (a, b) = (clockwork_gamepad_create(ptr::without_provenance_mut(1), heard_by), clockwork_gamepad_create(ptr::without_provenance_mut(2), heard_by));
         assert!(!a.is_null() && !b.is_null());
         let devices = clockwork_sys!("gamepad/devices");
