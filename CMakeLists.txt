@@ -1333,7 +1333,7 @@ endfunction()
 # JavaScript of its own: js/workers/clockwork_audio_worklet.js loads it.
 if(EMSCRIPTEN)
     set(CLOCKWORK_WEB_MODULE_NAME "clockwork" CACHE STRING
-        "Basename of the wasm module (a product names its own: SuperSonic's is scsynth-nrt)")
+        "Basename of the wasm module (a product names its own: SuperSonic's is clockwork-scsynth)")
     set(CLOCKWORK_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist/wasm" CACHE PATH
         "Where the module is written")
     set(CLOCKWORK_WEB_STACK_SIZE 1048576 CACHE STRING "The wasm stack, bytes")
