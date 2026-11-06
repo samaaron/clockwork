@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+name: Requeue unstarted jobs
+description: >
+  Queue again the jobs of a failed workflow run that GitHub cancelled before
+  they ran a step, because no runner took them. Three times at most. A run
+  a person cancelled, or a newer push superseded, is left alone, as is a
+  job that ran and failed. The calling job needs `actions: write`.
+inputs:
+  run-id:
+    description: The workflow run to look at (github.event.workflow_run.id).
+    required: true
+  max-attempts:
+    description: Attempts of the run after which no job is queued again.
+    default: "3"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: node "${{ github.action_path }}/requeue.mjs" --repo "${{ github.repository }}" --run "${{ inputs.run-id }}" --max-attempts "${{ inputs.max-attempts }}"

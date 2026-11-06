@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
+# Copyright (c) 2026 Sam Aaron
+#
+# A job GitHub cancels before it runs a step is one no runner took, not a
+# verdict on the code. When such jobs fail a run, queue them again: three
+# times at most (.github/actions/requeue-unstarted).
+name: Requeue unstarted jobs
+
+on:
+  workflow_run:
+    workflows: [ci, codeql, security]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  requeue:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/actions/requeue-unstarted
+      - uses: ./.github/actions/requeue-unstarted
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
