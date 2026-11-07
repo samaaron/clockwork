@@ -121,8 +121,10 @@ phase_test() {
     # process of its own, then every case in one process in a shuffled order.
     ctest --test-dir "$BUILD_DIR" --output-on-failure -LE rt -j 4 --timeout 300
     ctest --test-dir "$BUILD_DIR" --output-on-failure -L rt -j 1 --timeout 300
-    "$BUILD_DIR/test/clockwork_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
-    "$BUILD_DIR/test/clockwork_engine_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"}
+    # --durations yes prints each test's name when it finishes, so if a test
+    # hangs, the log shows the test that ran before it.
+    "$BUILD_DIR/test/clockwork_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes
+    "$BUILD_DIR/test/clockwork_engine_tests" "~[rt]" --order rand ${GITHUB_RUN_NUMBER:+--rng-seed "$GITHUB_RUN_NUMBER"} --durations yes
 }
 
 phase_rust() {
