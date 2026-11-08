@@ -171,7 +171,8 @@ struct ClockworkCore;   // clockwork_core.h
 
 class LinkAudioBridge {
 public:
-    explicit LinkAudioBridge(ableton::LinkAudio& link) : mLink(link) {}
+    // Both out of line: the stand-in channels' type is the .cpp's alone.
+    explicit LinkAudioBridge(ableton::LinkAudio& link);
     /*
      * Stop the worker, then give the ports back.
      *
@@ -182,10 +183,7 @@ public:
      * per subscription per engine, and a process that builds an engine per
      * test eventually cannot open a port at all.
      */
-    ~LinkAudioBridge() {
-        stopEndpoint();
-        clearInputs();
-    }
+    ~LinkAudioBridge();
 
     LinkAudioBridge(const LinkAudioBridge&) = delete;
     LinkAudioBridge& operator=(const LinkAudioBridge&) = delete;
@@ -284,6 +282,38 @@ public:
     // peer's audio dropped at the door. Subscriptions or none.
     uint64_t datedBlocks() const { return mDatedBlocks.load(std::memory_order_relaxed); }
 
+    // ─── A stand-in peer ──────────────────────────────────────────────────
+    //
+    // A peer the engine hears without Link's network, for tests that must
+    // hear the same thing on every run. Its channels are listed with Link's
+    // (listChannels) and subscribed the same way (addInput). Its audio is cut
+    // into Link's wire chunks and stamped on the session by Link's own
+    // Resizer, as a Link peer's sink does, and each chunk is handed to the
+    // subscriptions as Link's source hands it, so everything after Link's
+    // network is what a real peer's audio meets. With Link off the session is
+    // the engine's own, and nothing else can join it.
+    void addStandInChannel(const char* peerName, const char* channelName);
+    // The peer's audio: `numFrames` frames of `numChannels` (1 or 2),
+    // interleaved, at `sampleRate`, the first heard at `hostMicros` on Link's
+    // clock. Like a Link peer's, it goes nowhere while nothing subscribes.
+    // False when there is no such stand-in channel or the audio is malformed.
+    bool sendStandInAudio(const char* peerName, const char* channelName, const float* interleaved,
+                          uint32_t numFrames, uint32_t numChannels, uint32_t sampleRate,
+                          uint64_t hostMicros);
+
+    // ─── The endpoint, run by hand ────────────────────────────────────────
+    //
+    // By hand, the endpoint has no thread of its own and runs when
+    // runEndpoint() is called: every pass there is work for, as a worker that
+    // is never late runs. For tests that must hear the same thing on every
+    // run, which make it late by not calling.
+    void setEndpointByHand(bool byHand);
+    void runEndpoint();
+
+    // When the next block reads, on Link's clock, as the last block dated it
+    // (dateReads); 0 before any block has.
+    uint64_t nextReadMicros() const { return mNextReadMicros.load(std::memory_order_relaxed); }
+
 private:
     // Up to 2048-frame stereo blocks; the DSP normally runs at 128.
     static constexpr size_t kSinkMaxSamples = 4096;
@@ -325,9 +355,12 @@ private:
         // began, so its count starts at the worker's first offer.
         std::optional<uint64_t> underrunsAtStart;
         // Underruns, resyncs and warps as the worker last saw them, and when
-        // that last went up: a stream in trouble lately reads as a dropout.
+        // that last went up, on Link's clock as the reads are dated: a stream
+        // in trouble lately reads as a dropout.
         uint64_t troubleSeen{0};
-        std::chrono::steady_clock::time_point troubleAt{};
+        uint64_t troubleAtMicros{0};
+        // Fed by a stand-in peer, not a Link source.
+        bool     standIn{false};
     };
     uint64_t underrunsSinceStart(const InputSubscription& sub) const;
     uint64_t troubleOf(const InputSubscription& sub) const;
@@ -339,6 +372,10 @@ private:
     // outlives the engine. Call with mInputSubMutex held.
     void endInput(InputSubscription& sub);
     std::vector<InputSubscription> mInputSubs;
+    // The stand-in peer's channels (LinkAudioBridge.cpp). Under mInputSubMutex.
+    struct StandInChannel;
+    std::vector<std::unique_ptr<StandInChannel>> mStandIns;
+    const StandInChannel* standInNamed(const char* peerName, const char* channelName) const;
     // The underruns of subscriptions since removed. Under mInputSubMutex.
     uint64_t mRetiredUnderruns{0};
     // Lock-free fast path for the empty case.
@@ -414,6 +451,8 @@ private:
 
     std::jthread            mEndpointThread;
     std::atomic<bool>       mEndpointRun{false};
+    std::atomic<bool>       mEndpointByHand{false};
+    std::atomic<uint64_t>   mNextReadMicros{0};   // dateReads: when the next block reads
     std::atomic<int>        mEndpointRealtime{-1};   // RealtimeStatus, -1 until the worker asked
     std::atomic<uint64_t>   mDatedBlocks{0};
     std::atomic<uint32_t>   mSampleRate{0};
@@ -493,6 +532,13 @@ public:
 
     void resetForVisibilityChange() {}
     void ensureMainSink() {}
+
+    void addStandInChannel(const char*, const char*) {}
+    bool sendStandInAudio(const char*, const char*, const float*, uint32_t, uint32_t, uint32_t,
+                          uint64_t) { return false; }
+    void setEndpointByHand(bool) {}
+    void runEndpoint() {}
+    uint64_t nextReadMicros() const { return 0; }
 
     bool tryReadSinkCount(uint32_t&) const { return false; }
     std::optional<clockwork::RealtimeStatus> endpointRealtime() const { return std::nullopt; }

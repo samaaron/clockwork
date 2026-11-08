@@ -13,6 +13,10 @@
 
 #if CLOCKWORK_LINK_AUDIO
 
+#include <ableton/link_audio/AudioBuffer.hpp>
+#include <ableton/link_audio/BeatTimeMapping.hpp>
+#include <ableton/link_audio/Resizer.hpp>
+#include <ableton/link_audio/v1/Messages.hpp>
 #include <ableton/util/FloatIntConversion.hpp>
 
 #include "clockwork_config.h"   // clockwork_log
@@ -63,6 +67,121 @@ inline void interleaveFloatToInt16(const float* L, const float* R,
 
 }  // namespace
 
+// ─── A stand-in peer ──────────────────────────────────────────────────────
+
+/*
+ * A stand-in channel: its name and ids, and Link's own Resizer, which cuts
+ * the peer's audio into the chunks a Link peer's sink sends, a wire message's
+ * worth at a time, each stamped on from the last. What the Resizer hands on
+ * is what Link's decoder delivers, so each chunk becomes one buffer for the
+ * subscriptions, made as Link's source makes it (LinkAudio.ipp).
+ */
+struct LinkAudioBridge::StandInChannel {
+    // The audio a Link peer's message carries (Encoder::kMaxAudioBytes).
+    static constexpr size_t kWireAudioBytes =
+        576 - ableton::link_audio::v1::kHeaderSize - ableton::link_audio::AudioBuffer::kNonAudioBytes;
+
+    struct Deliver {
+        LinkAudioBridge*   bridge;
+        ableton::ChannelId id;
+        void operator()(int16_t* samples, const ableton::link_audio::AudioBuffer::Chunks& chunks,
+                        uint32_t numChannels, uint32_t sampleRate,
+                        const ableton::link_audio::Id& sessionId) {
+            for (const auto& chunk : chunks) {
+                ableton::LinkAudioSource::BufferHandle bh{};
+                bh.samples              = samples;
+                bh.info.numChannels     = numChannels;
+                bh.info.numFrames       = chunk.numFrames;
+                bh.info.sampleRate      = sampleRate;
+                bh.info.count           = chunk.count;
+                bh.info.sessionBeatTime = chunk.beginBeats.floating();
+                bh.info.tempo           = chunk.tempo.bpm();
+                bh.info.sessionId       = sessionId;
+                for (auto& sub : bridge->mInputSubs)
+                    if (sub.standIn && sub.channelId == id && sub.renderer) sub.renderer->push(bh);
+                samples += size_t(chunk.numFrames) * numChannels;
+            }
+        }
+    };
+
+    StandInChannel(LinkAudioBridge* bridge, std::string peer, std::string channel,
+                   ableton::ChannelId channelId, ableton::PeerId peer_)
+        : peerName(std::move(peer)), channelName(std::move(channel)), id(channelId), peerId(peer_),
+          resizer(ableton::util::injectVal(Deliver{bridge, channelId})) {}
+
+    std::string          peerName, channelName;
+    ableton::ChannelId   id;
+    ableton::PeerId      peerId;
+    std::vector<int16_t> samples;
+    ableton::link_audio::Resizer<int16_t, Deliver, kWireAudioBytes> resizer;
+};
+
+LinkAudioBridge::LinkAudioBridge(ableton::LinkAudio& link) : mLink(link) {}
+
+LinkAudioBridge::~LinkAudioBridge() {
+    stopEndpoint();
+    clearInputs();
+}
+
+const LinkAudioBridge::StandInChannel* LinkAudioBridge::standInNamed(const char* peerName,
+                                                                     const char* channelName) const {
+    for (const auto& c : mStandIns)
+        if (c->peerName == peerName && c->channelName == channelName) return c.get();
+    return nullptr;
+}
+
+void LinkAudioBridge::addStandInChannel(const char* peerName, const char* channelName) {
+    if (!peerName || !channelName) return;
+    std::lock_guard<std::mutex> lk(mInputSubMutex);
+    if (standInNamed(peerName, channelName)) return;
+    // Ids no Link peer makes: Link's are random, these count up after a
+    // marker, and a peer's channels share its id.
+    ableton::PeerId peerId{};
+    peerId[0] = 0x5a; peerId[1] = 0x01;
+    peerId[7] = static_cast<uint8_t>(mStandIns.size());
+    for (const auto& c : mStandIns)
+        if (c->peerName == peerName) peerId = c->peerId;
+    ableton::ChannelId channelId{};
+    channelId[0] = 0x5a; channelId[1] = 0x02;
+    channelId[7] = static_cast<uint8_t>(mStandIns.size());
+    mStandIns.push_back(std::make_unique<StandInChannel>(this, peerName, channelName, channelId, peerId));
+}
+
+bool LinkAudioBridge::sendStandInAudio(const char* peerName, const char* channelName,
+                                       const float* interleaved, uint32_t numFrames,
+                                       uint32_t numChannels, uint32_t sampleRate,
+                                       uint64_t hostMicros) {
+    if (!peerName || !channelName || !interleaved || numFrames == 0
+        || (numChannels != 1 && numChannels != 2) || sampleRate == 0)
+        return false;
+    std::lock_guard<std::mutex> lk(mInputSubMutex);
+    StandInChannel* c = nullptr;
+    for (auto& s : mStandIns)
+        if (s->peerName == peerName && s->channelName == channelName) c = s.get();
+    if (!c) return false;
+    // A Link peer sends to its receivers only, so its Resizer is not fed
+    // while nothing subscribes.
+    const bool heard = std::any_of(mInputSubs.begin(), mInputSubs.end(),
+        [&](const auto& s) { return s.standIn && s.channelId == c->id; });
+    if (!heard) return true;
+    // As a Link peer's sink commits (LinkAudio.ipp, Sink.hpp): int16 samples,
+    // the first frame's beat on the session as a global beat, and the
+    // session's tempo and id.
+    c->samples.resize(size_t(numFrames) * numChannels);
+    for (size_t i = 0; i < c->samples.size(); ++i)
+        c->samples[i] = ableton::util::floatToInt16(interleaved[i]);
+    constexpr double kQuantum = 4.0;
+    const auto state = mLink.captureAppSessionState();
+    const auto& api  = ableton::detail::linkApiState(state);
+    const double beats =
+        state.beatAtTime(std::chrono::microseconds(static_cast<int64_t>(hostMicros)), kQuantum);
+    c->resizer(c->samples.data(), numFrames, numChannels, sampleRate,
+               ableton::link_audio::globalBeatAtBeat(api.timeline, ableton::link::Beats{beats},
+                                                     ableton::link::Beats{kQuantum}),
+               api.timeline.tempo, api.timelineSessionId);
+    return true;
+}
+
 // ─── Publish gate + channel discovery ────────────────────────────────────
 
 void LinkAudioBridge::setPublishEnabled(bool publish, bool linkEnabled) {
@@ -100,6 +219,9 @@ std::vector<link_audio::Channel> LinkAudioBridge::listChannels() const {
         out.push_back({bytesToHex16(c.id), c.name,
                        bytesToHex16(c.peerId), c.peerName});
     }
+    std::lock_guard<std::mutex> lk(mInputSubMutex);
+    for (const auto& c : mStandIns)
+        out.push_back({bytesToHex16(c->id), c->channelName, bytesToHex16(c->peerId), c->peerName});
     return out;
 }
 
@@ -115,12 +237,17 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
         [&](const auto& c) {
             return c.peerName == peerName && c.name == channelName;
         });
+    std::optional<ableton::ChannelId> standInId;
     if (match == channels.end()) {
+        std::lock_guard<std::mutex> lk(mInputSubMutex);
+        if (const auto* c = standInNamed(peerName, channelName)) standInId = c->id;
+    }
+    if (match == channels.end() && !standInId) {
         clockwork_log(core(), "[link-audio] no channel '%s' published by peer '%s'",
                 channelName, peerName);
         return std::nullopt;
     }
-    const ableton::ChannelId newChannelId = match->id;
+    const ableton::ChannelId newChannelId = standInId ? *standInId : match->id;
 
     /*
      * THE BRIDGE CHOOSES THE PAIR. A client cannot: it does not know where
@@ -170,9 +297,10 @@ std::optional<uint32_t> LinkAudioBridge::addInput(const char* peerName, const ch
     sub.peerName    = peerName;
     sub.channelName = channelName;
     sub.channelId   = newChannelId;
+    sub.standIn     = standInId.has_value();
     sub.renderer = std::make_unique<
         clockwork_link::LinkAudioInputRenderer<ableton::LinkAudio>>(mLink, &mEndpointWake);
-    sub.renderer->subscribe(newChannelId);
+    if (!sub.standIn) sub.renderer->subscribe(newChannelId);
 
     // The port this peer's audio arrives through, bound to the pair. Stereo
     // always: the renderer mirrors a mono source to both, so the DSP sees a
@@ -324,11 +452,14 @@ std::vector<link_audio::InputStatus> LinkAudioBridge::listInputs() const {
         s.driftPpm                = sub.renderer->lastDriftPpm();
 
         // A full buffer is not a stream that is being heard: a dropout is
-        // also one that has gapped, jumped or bent in the last second.
-        constexpr float kMinHealthyBufferSeconds = 0.005f;
-        constexpr auto  kTroubleHold = std::chrono::seconds(1);
-        const bool troubledLately = sub.troubleSeen > 0
-            && std::chrono::steady_clock::now() - sub.troubleAt < kTroubleHold;
+        // also one that has gapped, jumped or bent in the last second. The
+        // stream's second, on Link's clock as the reads are dated, not the
+        // machine's: the same on a freewheel clock as at a device's pace.
+        constexpr float   kMinHealthyBufferSeconds = 0.005f;
+        constexpr int64_t kTroubleHoldMicros = 1'000'000;
+        const int64_t sinceTrouble = static_cast<int64_t>(mNextReadMicros.load(std::memory_order_relaxed))
+                                   - static_cast<int64_t>(sub.troubleAtMicros);
+        const bool troubledLately = sub.troubleSeen > 0 && sinceTrouble < kTroubleHoldMicros;
         const bool everReceived = sub.renderer->everReceived();
         if (!everReceived) {
             s.state = link_audio::ConnectionState::Connecting;
@@ -484,6 +615,7 @@ void LinkAudioBridge::forgetReadDates(ClockworkPort port) {
 void LinkAudioBridge::dateReads(uint64_t nextReadHostMicros) {
     if (nextReadHostMicros == 0) return;   // no Link clock: nothing to date by
     mDatedBlocks.fetch_add(1, std::memory_order_relaxed);
+    mNextReadMicros.store(nextReadHostMicros, std::memory_order_relaxed);
     for (auto& d : mReadDates) {
         const uint32_t generation = d.generation.load(std::memory_order_acquire);
         const ClockworkPort port  = d.port.load(std::memory_order_relaxed);
@@ -538,7 +670,26 @@ LinkAudioBridge::nextWriteReadAt(const InputSubscription& sub, uint32_t sampleRa
 
 void LinkAudioBridge::startEndpoint() {
     if (mEndpointRun.exchange(true, std::memory_order_acq_rel)) return;
+    if (mEndpointByHand.load(std::memory_order_relaxed)) return;   // runEndpoint runs it
     mEndpointThread = std::jthread([this](const std::stop_token& stop) { endpointLoop(stop); });
+}
+
+void LinkAudioBridge::setEndpointByHand(bool byHand) {
+    stopEndpoint();
+    mEndpointByHand.store(byHand, std::memory_order_relaxed);
+    if (mSampleRate.load(std::memory_order_relaxed) != 0 && mInputSubCount.load(std::memory_order_relaxed) != 0)
+        startEndpoint();
+}
+
+// A pass that asks to run again at once has more to do, and one that would
+// sleep has nothing until something changes. The bound is a fault's: the
+// passes there is work for are a few a subscription.
+void LinkAudioBridge::runEndpoint() {
+    if (!mEndpointByHand.load(std::memory_order_relaxed)) return;
+    constexpr int kMostPasses = 4096;
+    for (int pass = 0; pass < kMostPasses; ++pass)
+        if (endpointPass().kind != clockwork::NextPass::Kind::Now) return;
+    clockwork_log(core(), "[link-audio] the endpoint still had work after %d passes run by hand", kMostPasses);
 }
 
 void LinkAudioBridge::stopEndpoint() {
@@ -607,8 +758,8 @@ clockwork::NextPass LinkAudioBridge::endpointPass() {
             for (auto& sub : mInputSubs) {
                 if (sub.port == CLOCKWORK_PORT_NONE || !sub.renderer) continue;
                 if (const uint64_t trouble = troubleOf(sub); trouble > sub.troubleSeen) {
-                    sub.troubleSeen = trouble;
-                    sub.troubleAt   = std::chrono::steady_clock::now();
+                    sub.troubleSeen     = trouble;
+                    sub.troubleAtMicros = mNextReadMicros.load(std::memory_order_relaxed);
                 }
 
                 uint32_t room = clockwork_port_writable(ports(), sub.port);

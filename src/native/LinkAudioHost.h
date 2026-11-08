@@ -128,6 +128,21 @@ public:
     // Blocks that dated their reads so far: see LinkAudioBridge::datedBlocks.
     uint64_t datedBlocks() const { return mBridge.datedBlocks(); }
 
+    // A stand-in peer and the endpoint run by hand, for tests that must hear
+    // the same thing on every run (LinkAudioBridge.h says how).
+    void addStandInChannel(const char* peerName, const char* channelName) {
+        mBridge.addStandInChannel(peerName, channelName);
+    }
+    bool sendStandInAudio(const char* peerName, const char* channelName, const float* interleaved,
+                          uint32_t numFrames, uint32_t numChannels, uint32_t sampleRate,
+                          uint64_t hostMicros) {
+        return mBridge.sendStandInAudio(peerName, channelName, interleaved, numFrames, numChannels,
+                                        sampleRate, hostMicros);
+    }
+    void setEndpointByHand(bool byHand) { mBridge.setEndpointByHand(byHand); }
+    void runEndpoint() { mBridge.runEndpoint(); }
+    uint64_t nextReadMicros() const { return mBridge.nextReadMicros(); }
+
     // ─── ClockworkClock::LinkVisibilityListener ─────────────────────────────────
     void linkWillChangeVisibility() override;
     void linkDidEnable() override;

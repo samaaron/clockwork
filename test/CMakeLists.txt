@@ -521,6 +521,10 @@ add_executable(clockwork_engine_tests
     # Every driver dates the Link Audio reads it makes: the device callback,
     # the headless thread, the manual pump. Compiles to nothing without Link Audio.
     test_link_audio_drivers.cpp
+    # A Link peer's audio, heard exactly: a stand-in peer, the endpoint run by
+    # hand, the engine pumped on a freewheel clock. Compiles to nothing
+    # without Link Audio.
+    test_link_audio_stand_in.cpp
     test_swap_characterization.cpp
     test_dead_device.cpp
     test_real_devices.cpp
