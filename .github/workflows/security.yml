@@ -20,9 +20,12 @@
 #   fuzz       nightly only: each target under libFuzzer for two hours. A
 #              crasher is sealed to .github/fuzz-crasher.pub before it is
 #              uploaded (scripts/encrypt-crasher.sh), since an artifact on a
-#              public repository is readable by anyone signed in. A crasher,
-#              once fixed, is committed to the target's corpus/regressions and
-#              replayed on every push from then on.
+#              public repository is readable by anyone signed in. Its log is
+#              public too, and libFuzzer prints a short input into it, so the
+#              fuzzer runs through scripts/run-fuzzer.sh: the whole output is
+#              sealed with the crasher and the log shows it without the
+#              inputs. A crasher, once fixed, is committed to the target's
+#              corpus/regressions and replayed on every push from then on.
 
 name: security
 
@@ -161,10 +164,12 @@ jobs:
         run: |
           mkdir -p corpus artifacts
           if [[ "${{ matrix.kind }}" == "rust" ]]; then
-            cargo +nightly fuzz run --fuzz-dir rust/fuzz ${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions -- \
+            scripts/run-fuzzer.sh artifacts \
+              cargo +nightly fuzz run --fuzz-dir rust/fuzz ${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions -- \
               -dict=${{ matrix.dict }} -max_total_time=7200 -rss_limit_mb=1024 -malloc_limit_mb=256 -artifact_prefix=artifacts/
           else
-            build-fuzz/${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions \
+            scripts/run-fuzzer.sh artifacts \
+              build-fuzz/${{ matrix.target }} corpus ${{ matrix.seeds }}/seeds ${{ matrix.seeds }}/regressions \
               -dict=${{ matrix.dict }} -max_total_time=7200 -rss_limit_mb=1024 -malloc_limit_mb=256 -artifact_prefix=artifacts/
           fi
       - name: Seal the crasher
