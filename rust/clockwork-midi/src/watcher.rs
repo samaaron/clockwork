@@ -43,6 +43,16 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 /// enumerable yet when the OS first announced its device.
 const SETTLE: Duration = Duration::from_millis(450);
 
+/// The coalescer's two waits: a burst's quiet period, then the settle.
+#[derive(Clone, Copy)]
+struct Timing {
+    debounce: Duration,
+    settle: Duration,
+}
+
+/// What a device watcher waits.
+const DEVICE_TIMING: Timing = Timing { debounce: DEBOUNCE, settle: SETTLE };
+
 /// Owns the worker thread that turns OS event pokes into [`OnChange`] calls.
 /// Backends obtain a [`Sender`] via [`Coalescer::poker`] and send `()` per event.
 struct Coalescer {
@@ -53,12 +63,16 @@ struct Coalescer {
 
 impl Coalescer {
     fn new(on_change: OnChange) -> Self {
+        Self::with_timing(on_change, DEVICE_TIMING)
+    }
+
+    fn with_timing(on_change: OnChange, timing: Timing) -> Self {
         let (tx, rx) = mpsc::channel::<()>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let handle = thread::Builder::new()
             .name("cw-midi-settle".into())
-            .spawn(move || coalesce_loop(rx, stop_thread, on_change))
+            .spawn(move || coalesce_loop(rx, stop_thread, on_change, timing))
             .expect("spawn cw-midi-settle thread");
         Coalescer { tx, stop, handle: Some(handle) }
     }
@@ -80,7 +94,7 @@ impl Drop for Coalescer {
     }
 }
 
-fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange) {
+fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange, timing: Timing) {
     let mut burst_waiting = false;
     loop {
         // Block until the first event of a burst (or the stop poke), unless
@@ -91,7 +105,7 @@ fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange) {
         burst_waiting = false;
         // Drain the rest of the burst: keep extending until it goes quiet.
         loop {
-            match rx.recv_timeout(DEBOUNCE) {
+            match rx.recv_timeout(timing.debounce) {
                 Ok(()) => {
                     if stop.load(Ordering::SeqCst) {
                         return;
@@ -109,7 +123,7 @@ fn coalesce_loop(rx: Receiver<()>, stop: Arc<AtomicBool>, on_change: OnChange) {
         // the first refresh. Downstream diffs the device lists, so otherwise
         // this is a no-op. The stop ends this wait at once. An event during the
         // wait starts a new burst, coalesced after this refresh.
-        let settle_at = Instant::now() + SETTLE;
+        let settle_at = Instant::now() + timing.settle;
         loop {
             match rx.recv_timeout(settle_at.saturating_duration_since(Instant::now())) {
                 Ok(()) if stop.load(Ordering::SeqCst) => return,
@@ -536,7 +550,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
 
-    fn counting() -> (Coalescer, Arc<AtomicU32>) {
+    fn counting(timing: Timing) -> (Coalescer, Arc<AtomicU32>) {
         let calls = Arc::new(AtomicU32::new(0));
         let on_change: OnChange = {
             let calls = calls.clone();
@@ -544,7 +558,7 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
             })
         };
-        (Coalescer::new(on_change), calls)
+        (Coalescer::with_timing(on_change, timing), calls)
     }
 
     fn until(calls: &AtomicU32, n: u32) -> bool {
@@ -557,20 +571,27 @@ mod tests {
 
     #[test]
     fn a_stop_during_the_settle_wait_ends_it_at_once() {
-        let (c, calls) = counting();
+        // A settle of an hour, and 30 s for the drop: one that ends the wait
+        // returns at once, one that waited it out could not come back in
+        // time, and nothing a busy machine does falls between the two.
+        let timing = Timing { debounce: Duration::from_millis(1), settle: Duration::from_secs(3600) };
+        let (c, calls) = counting(timing);
         c.poker().send(()).unwrap();
         // The burst has gone quiet and the first refresh has run, so the
-        // settle wait has begun.
+        // settle wait has begun, or begins with the stop already sent.
         assert!(until(&calls, 1));
-        let t0 = Instant::now();
-        drop(c);
-        assert!(t0.elapsed() < SETTLE / 2, "drop waited out the settle");
+        let (dropped, done) = mpsc::channel();
+        thread::spawn(move || {
+            drop(c);
+            let _ = dropped.send(());
+        });
+        assert!(done.recv_timeout(Duration::from_secs(30)).is_ok(), "drop waited out the settle");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a refresh ran after the stop");
     }
 
     #[test]
     fn an_event_during_the_settle_wait_starts_a_new_burst_after_it() {
-        let (c, calls) = counting();
+        let (c, calls) = counting(DEVICE_TIMING);
         c.poker().send(()).unwrap();
         assert!(until(&calls, 1));
         c.poker().send(()).unwrap();   // during the settle
