@@ -17,8 +17,13 @@
  *   - after the host has gone on without the stream — a stall, the ring read
  *     dry — the stream rejoins the present: the audio of now, not the audio
  *     that was missed played fast to catch up; one resync, no warp;
- *   - a hole in the peer's stream is nothing to render, then the stream as it
- *     resumes; one resync, no warp;
+ *   - a hole in the peer's stream is nothing to render, then, in the render
+ *     it ends in, silence until the stream resumes and the stream from there;
+ *     one resync, no warp, and the silence counted as the hole's;
+ *   - a stream that begins within a render, at its start or after a hole, is
+ *     silence until its first frame and then the stream from it, where its
+ *     stamps put it: not that frame at once, early, and bent back, nor the
+ *     render waited out and the stream's first frames never heard;
  *   - a clock re-measurement that moves the timeline under a stream by tens
  *     of milliseconds is steered to, not a lost place: no resync, no warp;
  *   - a buffer that arrives wakes the endpoint when it asked for one, kept
@@ -177,6 +182,27 @@ constexpr double kExact = 1e-2;
 
 Micros framesLater(Micros t, double frames) {
     return t + Micros(static_cast<int64_t>(std::llround(1e6 * frames / double(kRate))));
+}
+
+// As render(), for a render that may begin before the peer's frame `first`,
+// the first it made after nothing: before it is silence, and the converter
+// brings the stream in from silence over its reach either side of it. Only
+// what is past that reach is held to the peer's sine.
+Rendered renderFrom(Session& session, Renderer& renderer, const Peer& peer, Micros hostTime,
+                    uint64_t first, size_t frames) {
+    std::vector<double> l(frames), r(frames);
+    Rendered out;
+    out.frames = renderer.receive(l.data(), r.data(), frames, session.state, double(kRate),
+                                  hostTime, kQuantum);
+    const double frameAtHost = double((hostTime - peer.t0).count()) * double(kRate) / 1e6;
+    const double from = double(first) + double(Renderer::reach(kRate, double(kRate)));
+    for (size_t i = 0; i < out.frames; ++i) {
+        const double f = frameAtHost + double(i);
+        if (f < from) continue;
+        const double want = std::sin(kTau * kHz * f / double(kRate));
+        out.maxError = std::max(out.maxError, std::fabs(l[i] - want));
+    }
+    return out;
 }
 
 
@@ -602,7 +628,8 @@ TEST_CASE("input renderer: a hole in the peer's stream is nothing to render, the
           "[link-audio][renderer]") {
     // The peer's callback stalled for 100 ms: those frames were never made,
     // and its stamps go on from the present. Asked inside the hole there is
-    // nothing yet; asked after it, the stream as it resumes, whole.
+    // nothing yet; in the render the hole ends in, silence and then the
+    // stream as it resumes, where its stamps put it; and on from there.
     Session session;
     Renderer renderer(session.link);
     renderer.setLatencySeconds(0.0);
@@ -621,11 +648,21 @@ TEST_CASE("input renderer: a hole in the peer's stream is nothing to render, the
     // the interpolator's reach short of its edge, and nothing from inside it.
     const uint64_t edge = at;
     size_t beforeHole = 0;
-    for (; at < holeEnd; at += kRender) {
+    for (; at + kRender <= holeEnd; at += kRender) {
         beforeHole += render(session, renderer, peer, framesLater(peer.t0, double(at))).frames;
     }
     CHECK(beforeHole == holeAt - edge - Renderer::reach(kRate, double(kRate)));
     CHECK(renderer.warps() == 0);
+    CHECK(renderer.holeFrames() == 0);
+
+    // The render the hole ends in: its silence, then the stream from where
+    // the peer resumed it. The silence is the hole's, and counted so.
+    REQUIRE(at < holeEnd);
+    const auto across = renderFrom(session, renderer, peer, framesLater(peer.t0, double(at)), holeEnd, kRender);
+    CHECK(across.frames == kRender);
+    CHECK(across.maxError < kExact);
+    CHECK(std::llabs(int64_t(renderer.holeFrames()) - int64_t(holeEnd - at)) <= 1);
+    at += kRender;
 
     // Past the hole: the stream as the peer resumed it, and on from there.
     const auto resumed = render(session, renderer, peer, framesLater(peer.t0, double(at)));
@@ -672,6 +709,76 @@ TEST_CASE("input renderer: a short hole asked across a device's block at a time 
     const auto resumed = render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock);
     CHECK(resumed.frames == kDeviceBlock);
     CHECK(resumed.maxError < kExact);
+    CHECK(renderer.resyncs() == 1);
+    CHECK(renderer.warps() == 0);
+}
+
+// A stamp's rounding is allowed kHoleSeconds, a millisecond, so a stream asked
+// for that little before its first frame is not waited for: the first frame
+// is the next thing heard. It is heard where its stamps put it, after the
+// silence before it. It used to be heard at once, early by however much it was
+// asked for before, and the stream was then bent a hundredth to its place,
+// 70 ms of it out of tune.
+TEST_CASE("input renderer: a stream asked for just before its first frame starts there, where its stamps put it",
+          "[link-audio][renderer]") {
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    peer.publish(750);
+
+    Micros host = framesLater(peer.t0, -30.0);   // 0.6 ms before its first frame
+    const auto first = renderFrom(session, renderer, peer, host, 0, kRender);
+    CHECK(first.frames == kRender);
+    CHECK(first.maxError < kExact);
+    host = framesLater(host, double(kRender));
+    for (int block = 0; block < 20; ++block) {   // 213 ms on
+        const auto at = render(session, renderer, peer, host);
+        INFO("render " << block + 1 << " after the first");
+        REQUIRE(at.frames == kRender);
+        CHECK(at.maxError < kExact);
+        host = framesLater(host, double(kRender));
+    }
+    CHECK(renderer.resyncs() == 0);
+    CHECK(renderer.warps() == 0);
+}
+
+// The endpoint asks a device block at a time, and after a hole the first ask
+// that is not waited out falls inside that millisecond before the stream
+// resumes: here 30 frames before it.
+TEST_CASE("input renderer: after a hole, a stream asked for just before it resumes starts there, where its stamps put it",
+          "[link-audio][renderer]") {
+    Session session;
+    Renderer renderer(session.link);
+    renderer.setLatencySeconds(0.0);
+    Peer peer{session, renderer, Micros(1'000'000'000)};
+    constexpr size_t kDeviceBlock = 64;
+    peer.publish(150);                      // 200 ms
+    const uint64_t holeAt = peer.frame;
+    peer.skip(75 * kDeviceBlock + 30);      // 100.6 ms never made
+    peer.publish(600);
+    const uint64_t resumesAt = holeAt + 75 * kDeviceBlock + 30;
+
+    uint64_t at = 4800;
+    for (; at + kDeviceBlock + Renderer::reach(kRate, double(kRate)) < holeAt; at += kDeviceBlock) {
+        REQUIRE(render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock).frames
+                == kDeviceBlock);
+    }
+    for (; at + 30 < resumesAt; at += kDeviceBlock) {   // to the hole's edge, then nothing
+        render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock);
+    }
+    REQUIRE(at + 30 == resumesAt);
+    const auto resumed = renderFrom(session, renderer, peer, framesLater(peer.t0, double(at)), resumesAt,
+                                    kDeviceBlock);
+    CHECK(resumed.frames == kDeviceBlock);
+    CHECK(resumed.maxError < kExact);
+    for (int block = 0; block < 160; ++block) {   // 213 ms on
+        at += kDeviceBlock;
+        const auto on = render(session, renderer, peer, framesLater(peer.t0, double(at)), kDeviceBlock);
+        INFO("render " << block + 1 << " after the stream resumed");
+        REQUIRE(on.frames == kDeviceBlock);
+        CHECK(on.maxError < kExact);
+    }
     CHECK(renderer.resyncs() == 1);
     CHECK(renderer.warps() == 0);
 }

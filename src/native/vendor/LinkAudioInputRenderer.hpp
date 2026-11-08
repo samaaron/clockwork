@@ -190,6 +190,13 @@ public:
   uint64_t warps() const {
       return mWarps.load(std::memory_order_relaxed);
   }
+  // Frames of a hole in the peer's stream rendered as silence, so that the
+  // stream after it begins where its stamps put it: heard as the hole, and
+  // counted with the frames the audio thread found missing. Silence before
+  // the stream's very first frame is not a hole, and is not counted.
+  uint64_t holeFrames() const {
+      return mHoleFrames.load(std::memory_order_relaxed);
+  }
   // True if we've received at least one buffer.
   bool everReceived() const {
       return mLastSampleRate.load(std::memory_order_relaxed) > 0;
@@ -288,6 +295,7 @@ public:
     mSteering = false;
     mDrift = 0.0;   // the next subscription's peer keeps its own time
     mRate = 1.0;
+    mBegun = false;
   }
 
   // Playback lookahead in wall-clock seconds — consumer plays buffers
@@ -413,12 +421,14 @@ public:
       else break;
     }
     // Nor across a hole: what was kept behind the target is the stream only
-    // if it follows on to the slots the target is in.
+    // if it follows on to the slots the target is in. A slot that ends by the
+    // target is only there for the converter, and with a hole after it, it is
+    // not the stream that leads up to the target.
     while (!moStartReadPos && mpQueueReader->numRetainedSlots() > 1
            && followingOn(sessionState, quantum, safeBpm) == 0)
     {
-      const auto next = (*mpQueueReader)[1]->mInfo.beginBeats(sessionState, quantum);
-      if (!next || *next > targetBeatsAtBufferBegin) break;
+      const auto end = (*mpQueueReader)[0]->mInfo.endBeats(sessionState, quantum);
+      if (!end || *end > targetBeatsAtBufferBegin) break;
       mpQueueReader->releaseSlot();
     }
 
@@ -428,14 +438,13 @@ public:
       return rendered(0);
     }
 
-    // Wait for buffers to catch up to our target. A target in the crack
-    // between two buffers' stamps — the one before dropped as too old, this
-    // one beginning a rounding later — is not ahead of what has arrived:
-    // this buffer's first frame is the place.
-    const auto slackBeats = kHoleSeconds * safeBpm / 60.0;
+    // Wait for time when the stream begins after this render ends: nothing
+    // of it is heard in it. When it begins within the render, the render is
+    // silence until its first frame and the stream from there, where its
+    // stamps put it (the start below, before that frame).
     if (!moStartReadPos
         && (*mpQueueReader)[0]->mInfo.beginBeats(sessionState, quantum)
-             > targetBeatsAtBufferBegin + slackBeats)
+             >= targetBeatsAtBufferEnd)
     {
       lose();
       mWaitsForTime = true;
@@ -447,7 +456,8 @@ public:
     // widens its filter, and so does steering by kMaxBend.
     const size_t reachFrames = reach((*mpQueueReader)[0]->mInfo.sampleRate, sampleRate);
 
-    if (!moStartReadPos)
+    const bool starts = !moStartReadPos;
+    if (starts)
     {
       // The slot the target is in, past those kept behind it for the converter.
       double before = 0.0;
@@ -461,9 +471,11 @@ public:
       const auto& info = (*mpQueueReader)[at]->mInfo;
       const auto startBufferBegin = *info.beginBeats(sessionState, quantum);
       const auto startBufferEnd = *info.endBeats(sessionState, quantum);
-      double startPos = before + std::max(0.0, linearInterpolate(targetBeatsAtBufferBegin,
-                                                                 startBufferBegin, startBufferEnd,
-                                                                 0.0, double(info.numFrames)));
+      // Before the slot's first frame when the stream begins within this
+      // render. Taken as that first frame at once, it was heard early by as
+      // much, and the stream bent a hundredth back to its place over 70 ms.
+      double startPos = before + linearInterpolate(targetBeatsAtBufferBegin, startBufferBegin,
+                                                   startBufferEnd, 0.0, double(info.numFrames));
 
       // The converter starts on the stream behind the start, read up to it
       // and thrown away: the first frame heard is the stream there, with the
@@ -471,19 +483,20 @@ public:
       // to it at the rate that lands on the start exactly, between two frames
       // as the stamps put it. It needs the reach after the start to have
       // arrived; until it has, nothing is placed. Before the stream's first
-      // frame there is nothing, and silence stands in.
-      const double from = std::max(0.0, std::floor(startPos) - double(reachFrames));
-      const double lead = startPos - from;
-      const bool primed = lead >= kPrimeLeastFrames;
-      const double steps = std::max(1.0, std::floor(lead));
-      const double primeRatio = primed ? steps / lead : 1.0;
+      // frame there is nothing, and silence stands in (stage): a start before
+      // it is read up to through silence, and the stream comes in from it
+      // through the converter as it would from any audio.
+      const double from = std::floor(startPos) - double(reachFrames);
+      const double lead = startPos - from;   // the reach, and the start's fraction of a frame
+      const double steps = std::floor(lead);
+      const double primeRatio = steps / lead;
       if (startPos + double(std::max(reachFrames, reach(primeRatio)))
             > double(followingOnFrames(sessionState, quantum, safeBpm)))
         return rendered(0);
       src_reset(mConverter.get());
-      mFeedPos = static_cast<size_t>(from);
+      mFeedPos = static_cast<int64_t>(from);
       mFeedLimit = followingOnFrames(sessionState, quantum, safeBpm);
-      if (primed && !read(primeRatio, static_cast<size_t>(steps), nullptr, nullptr))
+      if (!read(primeRatio, static_cast<size_t>(steps), nullptr, nullptr))
         return rendered(0);   // never: the reach was there to read
       // What the converter holds of the slots behind the start is in it now:
       // they go, and the read position is in the first slot again.
@@ -492,7 +505,7 @@ public:
       {
         const auto gone = (*mpQueueReader)[0]->mInfo.numFrames;
         startPos -= double(gone);
-        mFeedPos -= gone;
+        mFeedPos -= static_cast<int64_t>(gone);
         mpQueueReader->releaseSlot();
       }
       moStartReadPos = startPos;
@@ -613,6 +626,12 @@ public:
       lose();   // never: the reach was there to read
       return rendered(0);
     }
+    // A stream that began again within this render, after a hole: the
+    // render's frames before its first are the hole, heard.
+    if (starts && mBegun && startFramePos < 0.0)
+      mHoleFrames.fetch_add(std::min<uint64_t>(frames, static_cast<uint64_t>(std::ceil(-startFramePos / frameIncrement))),
+                            std::memory_order_relaxed);
+    mBegun = true;
 
     // The slots read past go: the converter has what it needs of them.
     auto readPos = startFramePos + totalFrames;
@@ -621,7 +640,7 @@ public:
     {
       const auto gone = (*mpQueueReader)[0]->mInfo.numFrames;
       readPos -= double(gone);
-      mFeedPos -= gone;
+      mFeedPos -= static_cast<int64_t>(gone);
       mpQueueReader->releaseSlot();
     }
     *moStartReadPos = readPos;
@@ -632,8 +651,9 @@ public:
     // buffer.
     if (mpQueueReader->numRetainedSlots() > 0) {
       const auto& curInfo = (*mpQueueReader)[0]->mInfo;
+      // From the stream's first frame: the silence before it is not held.
       float buffered =
-        (float(curInfo.numFrames) - static_cast<float>(*moStartReadPos)) /
+        (float(curInfo.numFrames) - static_cast<float>(std::max(0.0, *moStartReadPos))) /
         float(curInfo.sampleRate);
       for (size_t i = 1; i < mpQueueReader->numRetainedSlots(); ++i) {
         const auto& info = (*mpQueueReader)[i]->mInfo;
@@ -700,10 +720,6 @@ private:
   // A target further than this from the read position has strayed: over a
   // stretch the clocks part by tens of microseconds at most.
   static constexpr double kStrayedSeconds = 0.0005;
-  // A start nearer the stream's first frame than this is at it: the
-  // converter cannot be read up to it at a ratio libsamplerate takes (at
-  // most 256 output frames a source frame).
-  static constexpr double kPrimeLeastFrames = 1.0 / 128.0;
   // Frames the converter is offered, and asked for, at a time.
   static constexpr size_t kChunkFrames = 256;
 
@@ -754,7 +770,7 @@ private:
       data.data_out = mOut.data();
       data.output_frames = static_cast<long>(std::min(kChunkFrames, frames - done));
       if (src_process(mConverter.get(), &data) != 0) return false;
-      mFeedPos += static_cast<size_t>(data.input_frames_used);
+      mFeedPos += static_cast<int64_t>(data.input_frames_used);
       const auto got = static_cast<size_t>(data.output_frames_gen);
       if (got == 0 && data.input_frames_used == 0) return false;
       if (outL)
@@ -771,19 +787,27 @@ private:
   }
 
   // The stream from the feed position into mIn, as much as fits and no
-  // further than mFeedLimit, interleaved as libsamplerate takes it. Frames
-  // in it the converter does not take are staged again next time.
+  // further than mFeedLimit, interleaved as libsamplerate takes it. Before
+  // the stream's first frame (a negative position, where a start before it
+  // is read up to) there is nothing, and silence is fed. Frames in it the
+  // converter does not take are staged again next time.
   size_t stage()
   {
-    const size_t n = mFeedLimit > mFeedPos ? std::min(kChunkFrames, mFeedLimit - mFeedPos) : 0;
+    const int64_t limit = static_cast<int64_t>(mFeedLimit);
+    const size_t n = limit > mFeedPos
+      ? static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(kChunkFrames), limit - mFeedPos))
+      : 0;
+    size_t i = 0;
+    for (; i < n && mFeedPos + static_cast<int64_t>(i) < 0; ++i)
+      mIn[kChannels * i] = mIn[kChannels * i + 1] = 0.0f;
     size_t slot = 0;
-    size_t idx = mFeedPos;
-    while (n > 0 && idx >= (*mpQueueReader)[slot]->mInfo.numFrames)
+    size_t idx = static_cast<size_t>(std::max<int64_t>(mFeedPos, 0));
+    while (i < n && idx >= (*mpQueueReader)[slot]->mInfo.numFrames)
     {
       idx -= (*mpQueueReader)[slot]->mInfo.numFrames;
       ++slot;
     }
-    for (size_t i = 0; i < n; ++i)
+    for (; i < n; ++i)
     {
       const auto& buffer = *((*mpQueueReader)[slot]);
       mIn[kChannels * i]     = static_cast<float>(buffer.mSamplesL[idx]);
@@ -896,14 +920,19 @@ private:
   std::shared_ptr<typename Queue::Writer> mpQueueWriter;
   std::shared_ptr<typename Queue::Reader> mpQueueReader;
   // The stream read between its samples; what it has taken, in source frames
-  // from the first retained slot's first, and how far it may be fed; and the
-  // two buffers it reads from and writes to. receive() only.
+  // from the first retained slot's first (before it, negative, is silence),
+  // and how far it may be fed; and the two buffers it reads from and writes
+  // to. receive() only.
   std::unique_ptr<SRC_STATE, ConverterDelete> mConverter;
-  size_t mFeedPos = 0;
+  int64_t mFeedPos = 0;
   size_t mFeedLimit = 0;
   std::array<float, kChannels * kChunkFrames> mIn{};
   std::array<float, kChannels * kChunkFrames> mOut{};
   std::optional<double> moStartReadPos;
+  // Whether the stream has been heard since the subscription began: silence
+  // rendered before a start after that is a hole's (holeFrames). receive()
+  // only, and unsubscribe().
+  bool mBegun = false;
   // The host time, in microseconds, the stream's audio so far ends at: the
   // next render follows on by asking for it. receive() only.
   std::optional<double> moFollowOnMicros;
@@ -947,6 +976,7 @@ private:
   std::atomic<int32_t>  mLastDriftPpm{0};
   std::atomic<uint64_t> mResyncs{0};
   std::atomic<uint64_t> mWarps{0};
+  std::atomic<uint64_t> mHoleFrames{0};
   std::atomic<uint64_t> mDroppedSourceBuffers{0};
   std::atomic<uint64_t> mNetworkGapBuffers{0};
   std::atomic<uint64_t> mLastSeenCount{0};

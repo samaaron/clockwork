@@ -402,9 +402,12 @@ bool LinkAudioBridge::setInputLatencySeconds(const char* peerName,
     return false;
 }
 
+// The frames heard short since the stream began: what the audio thread found
+// missing from the port, and what of a hole the renderer rendered as silence
+// to place the stream after it where its stamps put it.
 uint64_t LinkAudioBridge::underrunsSinceStart(const InputSubscription& sub) const {
     if (!sub.underrunsAtStart || sub.port == CLOCKWORK_PORT_NONE) return 0;
-    return clockwork_port_underruns(ports(), sub.port) - *sub.underrunsAtStart;
+    return clockwork_port_underruns(ports(), sub.port) - *sub.underrunsAtStart + sub.renderer->holeFrames();
 }
 
 uint64_t LinkAudioBridge::troubleOf(const InputSubscription& sub) const {

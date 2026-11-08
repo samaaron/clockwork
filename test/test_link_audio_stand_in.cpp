@@ -59,15 +59,12 @@ constexpr double   kSettleSeconds = 0.25;
 // the renderer steers out what that leaves, so a stream heard whole wanders
 // by a few hundredths of a frame (under 0.15 at either rate).
 constexpr double   kOnSineFrames = 0.25;
-// After a hole in the peer's stream, the stream comes back a fraction of a
-// millisecond from where its stamps put it and is steered onto it within
-// this (31 frames out, 70 ms to steer, at 48 kHz).
-constexpr double   kRejoinSeconds = 0.1;
 // A run of exact zeros this long is silence a short read left: a sine is
 // exactly 0 for a sample at most.
 constexpr size_t   kSilentRun = 8;
 // Either side of a silence the converter is filling in from nothing, or
-// fading out to it: its filter's reach at these rates.
+// fading out to it: its filter's reach at these rates (libsamplerate's medium
+// filter, 46 frames at 48 kHz, 50 to 44.1 kHz), and some.
 constexpr size_t   kEdgeFrames = 64;
 
 // Listening starts at this block, whatever the setup took. An OSC exchange
@@ -208,18 +205,16 @@ struct Rig {
 // rate: its phase and level fitted by least squares over the first 100 ms.
 // A run of at least kSilentRun exact zeros is silence. Any other sample is on
 // the sine when it is within kOnSineFrames of where the sine puts it, at the
-// edge of a silence within kEdgeFrames of one, rejoining within `rejoin`
-// frames after a silence ends, and off otherwise.
+// edge of a silence within kEdgeFrames of one, and off otherwise.
 struct Judged {
     size_t silences = 0;       // runs of silence
     size_t silentFrames = 0;
-    size_t rejoining = 0;      // off the sine just after a silence
-    size_t off = 0;            // off the sine anywhere else
+    size_t off = 0;            // off the sine
     size_t firstOff = SIZE_MAX;
     double worstFrames = 0.0;  // the farthest a sample on the sine is from it, in frames
 };
 
-Judged judge(const std::vector<float>& s, size_t from, int rate, size_t rejoin = 0) {
+Judged judge(const std::vector<float>& s, size_t from, int rate) {
     Judged j;
     const double w = kTau * kHz / double(rate);
     // Most a sample moves for a timing error of a frame: the sine's slope.
@@ -237,21 +232,16 @@ Judged judge(const std::vector<float>& s, size_t from, int rate, size_t rejoin =
     const double b = (xc * ss - xs * sc) / det;
 
     std::vector<bool> silent(s.size(), false);
-    std::vector<size_t> ends;
     for (size_t n = from; n < s.size();) {
         size_t m = n;
         while (m < s.size() && s[m] == 0.0f) ++m;
         if (m - n >= kSilentRun) {
             ++j.silences;
             j.silentFrames += m - n;
-            ends.push_back(m);
             std::fill(silent.begin() + long(n), silent.begin() + long(m), true);
         }
         n = m == n ? n + 1 : m;
     }
-    const auto rejoining = [&](size_t n) {
-        return std::any_of(ends.begin(), ends.end(), [&](size_t e) { return n >= e && n < e + rejoin; });
-    };
     const auto nearSilence = [&](size_t n) {
         const size_t lo = n > kEdgeFrames ? n - kEdgeFrames : 0;
         const size_t hi = std::min(s.size(), n + kEdgeFrames + 1);
@@ -259,11 +249,9 @@ Judged judge(const std::vector<float>& s, size_t from, int rate, size_t rejoin =
         return false;
     };
     for (size_t n = from; n < s.size(); ++n) {
-        if (silent[n]) continue;
+        if (silent[n] || nearSilence(n)) continue;
         const double d = std::fabs(double(s[n]) - (a * std::sin(w * double(n)) + b * std::cos(w * double(n))));
         if (d <= kOnSineFrames * perFrame) { j.worstFrames = std::max(j.worstFrames, d / perFrame); continue; }
-        if (nearSilence(n)) continue;
-        if (rejoining(n)) { ++j.rejoining; continue; }
         if (j.off++ == 0) j.firstOff = n;
     }
     return j;
@@ -274,7 +262,7 @@ std::string account(const Rig& rig, const Judged& j, const link_audio::InputStat
     o << "engine " << rig.rate << " Hz, device buffer " << rig.deviceFrames << ", peer buffer "
       << rig.peerBlock << ": heard " << rig.heard.size() << " frames, audio from frame "
       << rig.firstAudio() << "; " << j.silences << " silences (" << j.silentFrames << " frames), "
-      << j.rejoining << " samples rejoining, " << j.off << " samples off the sine (first at "
+      << j.off << " samples off the sine (first at "
       << j.firstOff << "), the rest within " << j.worstFrames << " frames"
       << "; the engine counted " << in.underruns << " underruns, " << in.resyncs << " resyncs, "
       << in.warps << " warps, drift " << in.driftPpm << " ppm, state " << int(in.state);
@@ -339,7 +327,7 @@ TEST_CASE("Link Audio: a peer that stops sending for 100 ms is heard as silence 
             const auto during = rig.input();
             rig.listen(1.2);
             const size_t from = rig.firstAudio() + static_cast<size_t>(kSettleSeconds * rate);
-            const Judged j = judge(rig.heard, from, rate, static_cast<size_t>(kRejoinSeconds * rate));
+            const Judged j = judge(rig.heard, from, rate);
             const auto in = rig.input();
             INFO(account(rig, j, in));
             CHECK(j.silences == 1);
@@ -348,7 +336,11 @@ TEST_CASE("Link Audio: a peer that stops sending for 100 ms is heard as silence 
             CHECK(j.silentFrames + frames >= static_cast<size_t>(0.1 * rate));
             CHECK(j.silentFrames <= static_cast<size_t>(0.1 * rate) + frames + kEdgeFrames);
             CHECK(j.off == 0);
-            CHECK(in.underruns == j.silentFrames);
+            // Every frame of the hole is counted. The last of it, the
+            // converter's reach before the stream, is not exact silence: the
+            // stream coming in from it.
+            CHECK(in.underruns >= j.silentFrames);
+            CHECK(in.underruns <= j.silentFrames + kEdgeFrames);
             CHECK(in.resyncs == 1);
             CHECK(in.warps == 0);
             CHECK(during.state == ConnectionState::Dropout);
@@ -436,6 +428,38 @@ TEST_CASE("Link Audio: an input's latency setting delays what is heard by exactl
             INFO("the click heard at frame " << heardAt << ", " << *peak << ", due at " << due);
             CHECK(std::llabs(heardAt - due) <= 1);
             CHECK(std::fabs(*peak) > 0.25f);
+        }
+    }
+}
+
+// The peer's first frame, and its first after it stalls, each a click: heard
+// where its stamp and the latency put it, to the frame. Each is the first
+// thing heard after silence, where the renderer starts a stream afresh.
+TEST_CASE("Link Audio: a peer's first frame, and its first after a hole, are heard where their stamps put them",
+          "[link-audio][stand-in]") {
+    for (const auto& [rate, frames] : kDevices) {
+        DYNAMIC_SECTION("engine " << rate << " Hz, device buffer " << frames) {
+            Rig rig(rate, frames);
+            uint64_t resumesAt = UINT64_MAX;
+            rig.signal = [&](uint64_t f) { return f == 0 || f == resumesAt ? kLevel : 0.0; };
+            rig.listen(0.5);
+            rig.peerStalls(0.1);
+            resumesAt = rig.frame;
+            rig.listen(0.5);
+            const auto peakNear = [&](int64_t due) {
+                const int64_t lo = std::max<int64_t>(0, due - 600);
+                const int64_t hi = std::min<int64_t>(int64_t(rig.heard.size()), due + 600);
+                int64_t at = lo;
+                for (int64_t n = lo; n < hi; ++n)
+                    if (std::fabs(rig.heard[size_t(n)]) > std::fabs(rig.heard[size_t(at)])) at = n;
+                return at;
+            };
+            const int64_t firstDue = rig.dueAt(0, 0.05), resumedDue = rig.dueAt(resumesAt, 0.05);
+            const int64_t first = peakNear(firstDue), resumed = peakNear(resumedDue);
+            INFO("the first click heard at frame " << first << ", due at " << firstDue
+                 << "; the click after the hole heard at " << resumed << ", due at " << resumedDue);
+            CHECK(std::llabs(first - firstDue) <= 1);
+            CHECK(std::llabs(resumed - resumedDue) <= 1);
         }
     }
 }
