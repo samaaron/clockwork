@@ -504,6 +504,95 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
     clockwork_client_close(c);
 }
 
+TEST_CASE("client abi: a copy holds what a reader in place reads", "[client][abi][copy]") {
+    // For a reader with no view of the arena (js/lib/copy.js reads it; the
+    // node test copy.test.mjs holds it to JavaScript's reads sample for
+    // sample). Here: the parts are the engine's bytes, a tap's window is
+    // audio_tap_read's, and what cannot be copied is refused or says so.
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(e, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    auto* slot = reinterpret_cast<shm_tap_stream*>(arenaBase(e) + clockwork::kDefaultLayout.taps_start + TAPS_HEADER_SIZE);
+    shm_tap_stream_writer w(slot, clockwork::kDefaultLayout.profile.tap_ring_frames);
+    w.activate(2);
+    std::vector<float> l(256), r(256);
+    for (uint32_t i = 0; i < 256; ++i) { l[i] = static_cast<float>(i); r[i] = -static_cast<float>(i); }
+    const float* block[2] = { l.data(), r.data() };
+    w.write(block, 256, 0);
+
+    const ClockworkCopyWant wants[] = {
+        { CLOCKWORK_COPY_TAP, 0, 64 },
+        { CLOCKWORK_COPY_TAP, 1, 64 },              // never claimed
+        { CLOCKWORK_COPY_TAP, 100000, 64 },         // no such slot
+        { CLOCKWORK_COPY_SCOPE, 100000, 64 },
+    };
+    const uint32_t parts = CLOCKWORK_COPY_ARENA | CLOCKWORK_COPY_METRICS;
+    const uint32_t size = clockwork_client_copy_bytes(c, parts, wants, 4);
+    REQUIRE(size > sizeof(ClockworkCopyHeader));
+    std::vector<uint8_t> out(size + 8, 0xAA);
+    CHECK(clockwork_client_copy(c, parts, wants, 4, out.data(), size - 1) == 0);
+    CHECK(clockwork_client_copy(c, parts | 0x80u, wants, 4, out.data(), size) == 0);
+    CHECK(clockwork_client_copy(nullptr, parts, wants, 4, out.data(), size) == 0);
+    CHECK(clockwork_client_copy_bytes(nullptr, parts, wants, 4) == 0);
+
+    const uint32_t n = clockwork_client_copy(c, parts, wants, 4, out.data(), size);
+    REQUIRE(n > 0);
+    REQUIRE(n <= size);
+    CHECK(out[size] == 0xAA);   // nothing past what was given
+    ClockworkCopyHeader h{};
+    std::memcpy(&h, out.data(), sizeof h);
+    CHECK(h.magic == CLOCKWORK_COPY_MAGIC);
+    CHECK(h.version == CLOCKWORK_COPY_VERSION);
+    CHECK(h.bytes == n);
+    CHECK(h.windows == 4);
+
+    size_t at = sizeof h;
+    const auto* arena = reinterpret_cast<const ClockworkArenaHeader*>(arenaBase(e));
+    REQUIRE(h.arena_bytes == arena->header_bytes);
+    CHECK(std::memcmp(out.data() + at, arenaBase(e), h.arena_bytes) == 0);
+    at += (h.arena_bytes + 7u) & ~7u;
+    ClockworkRegion metrics{}, window{};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &metrics) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_WINDOW, &window) == CLOCKWORK_OK);
+    REQUIRE(h.metrics_bytes >= metrics.bytes + window.bytes);
+    CHECK(std::memcmp(out.data() + at, metrics.base, metrics.bytes) == 0);
+    CHECK(std::memcmp(out.data() + at + metrics.bytes, window.base, window.bytes) == 0);
+    at += (h.metrics_bytes + 7u) & ~7u;
+
+    ClockworkCopyWindow tap{};
+    std::memcpy(&tap, out.data() + at, sizeof tap);
+    CHECK(tap.source == CLOCKWORK_COPY_TAP);
+    CHECK(tap.slot == 0);
+    CHECK(tap.channels == 2);
+    CHECK(tap.frames == 64);
+    CHECK(tap.write_position == 256);
+    CHECK(tap.activations == 1);
+    ClockworkAudioTapReader rd{};
+    rd.struct_bytes = sizeof(rd);
+    REQUIRE(clockwork_client_audio_tap_open(c, 0, &rd) == CLOCKWORK_OK);
+    std::vector<float> inPlace(64 * TAP_STREAM_CHANNELS);
+    uint32_t channels = 0;
+    REQUIRE(clockwork_client_audio_tap_read(c, &rd, UINT64_MAX, 64, inPlace.data(), &channels) == 64);
+    CHECK(std::memcmp(out.data() + at + sizeof tap, inPlace.data(), 64 * 2 * sizeof(float)) == 0);
+    at += sizeof tap + 64 * 2 * sizeof(float);
+
+    for (uint32_t i = 1; i < 4; ++i) {
+        INFO("want " << i);
+        ClockworkCopyWindow nothing{};
+        std::memcpy(&nothing, out.data() + at, sizeof nothing);
+        CHECK(nothing.source == wants[i].source);
+        CHECK(nothing.slot == wants[i].slot);
+        CHECK(nothing.channels == 0);
+        CHECK(nothing.frames == 0);
+        at += sizeof nothing;
+    }
+    CHECK(at == n);
+
+    clockwork_client_close(c);
+}
+
 TEST_CASE("client abi: the clock arrives as one snapshot", "[client][abi]") {
     Engine e;
     ClockworkStatus st = CLOCKWORK_E_ARG;

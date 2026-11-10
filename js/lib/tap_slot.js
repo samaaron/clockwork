@@ -52,10 +52,26 @@ export function readTapSlot(views, frames) {
   // Untrusted runtime value: clamp so a corrupt slot can't index outside the
   // ring views.
   const channels = Math.min(Math.max(views.meta[SLOT.CHANNELS], 1), views.maxChannels);
-  const cap = views.ringFrames;
   const end = Atomics.load(views.cursor, 0);
   if (end === 0n) return null;
+  return ringWindow(views.data, channels, views.ringFrames, end, frames);
+}
 
+/**
+ * The newest `frames` frames (at most `cap`) of an interleaved ring of `cap`
+ * frames whose writer has reached frame `end`: the window ends there, keeps
+ * the read margin clear of the ring's oldest edge, and is zero-filled at the
+ * front where the ring no longer holds it. The rule every reader of a ring of
+ * frames keeps: copy_window's (shm_tap_stream.hpp), and clockwork_client_copy's
+ * for a tap slot or a scope slot.
+ * @param {Float32Array} data  the ring
+ * @param {number} channels  the stride the writer interleaves at
+ * @param {number} cap  the ring's length in frames
+ * @param {bigint} end  the frame the writer has reached
+ * @param {number} frames  how many the reader wants
+ * @returns {{ frames: number, channels: number, writePosition: bigint, interleaved: Float32Array }}
+ */
+export function ringWindow(data, channels, cap, end, frames) {
   const want = Math.min(frames, cap);
   let start = end > BigInt(want) ? end - BigInt(want) : 0n;
   const margin = BigInt(Math.min(cap >> 2, READ_MARGIN_FRAMES));
@@ -67,7 +83,7 @@ export function readTapSlot(views, frames) {
   const fill = want - real;
   let at = Number(start % BigInt(cap));
   for (let i = 0; i < real; i++) {
-    for (let c = 0; c < channels; c++) out[(fill + i) * channels + c] = views.data[at * channels + c];
+    for (let c = 0; c < channels; c++) out[(fill + i) * channels + c] = data[at * channels + c];
     at = (at + 1) % cap;
   }
   return { frames: want, channels, writePosition: end, interleaved: out };

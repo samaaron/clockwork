@@ -1390,7 +1390,8 @@ if(EMSCRIPTEN)
         _clockwork_client_tap_poll _clockwork_client_tap_missed
         _clockwork_client_audio_tap_open _clockwork_client_audio_tap_valid
         _clockwork_client_audio_tap_activations
-        _clockwork_client_audio_tap_audible_end _clockwork_client_audio_tap_read)
+        _clockwork_client_audio_tap_audible_end _clockwork_client_audio_tap_read
+        _clockwork_client_copy_bytes _clockwork_client_copy)
     if(CLOCKWORK_WEB_AUDIO_FILES)
         list(APPEND CLOCKWORK_WEB_EXPORTS
             _clockwork_audio_probe_memory _clockwork_audio_decode_memory

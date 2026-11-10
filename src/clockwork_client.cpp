@@ -929,6 +929,136 @@ uint32_t clockwork_client_scope_read(ClockworkClient* handle, uint32_t slot, uin
     return static_cast<uint32_t>(n);
 }
 
+namespace {
+
+constexpr uint64_t align8(uint64_t n) { return (n + 7u) & ~uint64_t(7u); }
+
+// The arena's header and tables, as many bytes as the header says it holds.
+uint32_t arenaPartBytes(const ClientImpl* c) {
+    const auto* h = reinterpret_cast<const ClockworkArenaHeader*>(c->base);
+    return h->header_bytes <= c->bytes ? h->header_bytes : 0;
+}
+
+uint32_t metricsPartBytes(const ClientImpl* c) {
+    return c->L.metrics_bytes + c->L.window_bytes + c->L.metrics_history_bytes;
+}
+
+// The most floats a want's window can hold: frames at most the ring's, at the widest stride its slots carry.
+uint64_t windowFloats(const ClientImpl* c, const ClockworkCopyWant& w) {
+    if (w.source == CLOCKWORK_COPY_TAP && w.slot < c->L.tapSlotCount())
+        return uint64_t(w.frames < c->L.tap_ring_frames ? w.frames : c->L.tap_ring_frames) * TAP_STREAM_CHANNELS;
+    if (w.source == CLOCKWORK_COPY_SCOPE && w.slot < c->L.audio_slot_count)
+        return uint64_t(w.frames < c->L.audio_frames ? w.frames : c->L.audio_frames) * c->L.audio_channels;
+    return 0;
+}
+
+uint64_t copyBytes(const ClientImpl* c, uint32_t parts, const ClockworkCopyWant* wants, uint32_t count) {
+    uint64_t n = sizeof(ClockworkCopyHeader);
+    if (parts & CLOCKWORK_COPY_ARENA) n += align8(arenaPartBytes(c));
+    if (parts & CLOCKWORK_COPY_METRICS) n += align8(metricsPartBytes(c));
+    for (uint32_t i = 0; i < count; ++i)
+        n += sizeof(ClockworkCopyWindow) + align8(windowFloats(c, wants[i]) * sizeof(float));
+    return n;
+}
+
+// A tap slot's window into `w` and the floats after it, read as copy_window reads it.
+void copyTap(ClientImpl* c, const ClockworkCopyWant& want, ClockworkCopyWindow& w, float* floats) {
+    uint8_t* at = c->L.tapSlotAt(c->base, want.slot);
+    if (!at) return;
+    const shm_tap_stream_reader rd(reinterpret_cast<shm_tap_stream*>(at), c->L.tap_ring_frames);
+    w.activations = rd.activations();
+    w.write_position = rd.write_position();
+    if (!rd.valid() || w.write_position == 0) return;
+    const uint32_t cap = rd.capacity_frames();
+    const uint32_t frames = want.frames < cap ? want.frames : cap;
+    uint32_t channels = rd.channels();
+    if (frames) rd.copy_window(w.write_position, frames, floats, &channels);
+    w.channels = channels;
+    w.frames = frames;
+}
+
+// A scope slot's window, by the same rule; its header held to the ring the engine published, as scope_read holds it.
+void copyScope(ClientImpl* c, const ClockworkCopyWant& want, ClockworkCopyWindow& w, float* floats) {
+    if (want.slot >= c->L.audio_slot_count) return;
+    auto* buf = reinterpret_cast<shm_audio_buffer*>(
+        c->base + c->L.audio_offset + static_cast<size_t>(want.slot) * c->L.audio_slot_bytes);
+    if (buf->enabled.load(std::memory_order_acquire) != 1) return;
+    const uint32_t channels = buf->channels;
+    uint32_t cap = buf->capacity_frames;
+    if (channels == 0 || channels > c->L.audio_channels) return;
+    if (cap == 0 || cap > c->L.audio_frames) cap = c->L.audio_frames;
+    const uint64_t writer = buf->write_position.load(std::memory_order_acquire);
+    w.write_position = writer;
+    if (writer == 0) return;
+    const uint32_t frames = want.frames < cap ? want.frames : cap;
+    const float* ring = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(buf) + c->L.audio_header_bytes);
+    ring_window(ring, channels, cap, writer, writer, frames, floats);
+    w.channels = channels;
+    w.frames = frames;
+}
+
+}  // namespace
+
+uint32_t clockwork_client_copy_bytes(ClockworkClient* handle, uint32_t parts,
+                                     const ClockworkCopyWant* wants, uint32_t count) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || (count && !wants)) return 0;
+    const uint64_t n = copyBytes(c, parts, wants, count);
+    return n <= UINT32_MAX ? static_cast<uint32_t>(n) : 0;
+}
+
+uint32_t clockwork_client_copy(ClockworkClient* handle, uint32_t parts,
+                               const ClockworkCopyWant* wants, uint32_t count,
+                               void* out, uint32_t bytes) {
+    auto* c = reinterpret_cast<ClientImpl*>(handle);
+    if (!c || !out || (count && !wants)) return 0;
+    if (parts & ~uint32_t(CLOCKWORK_COPY_ARENA | CLOCKWORK_COPY_METRICS)) return 0;
+    if (copyBytes(c, parts, wants, count) > bytes) return 0;
+
+    auto* base = static_cast<uint8_t*>(out);
+    ClockworkCopyHeader h{};
+    h.magic = CLOCKWORK_COPY_MAGIC;
+    h.version = CLOCKWORK_COPY_VERSION;
+    h.generation = arenaGenerationLoad(c->base);
+    h.windows = count;
+    uint64_t at = sizeof h;
+    // Each part, then the zeros to the next 8-byte boundary: a copy's bytes are all written.
+    auto put = [&](const uint8_t* from, uint32_t n) {
+        std::memcpy(base + at, from, n);
+        std::memset(base + at + n, 0, align8(n) - n);
+        at += align8(n);
+    };
+    if (parts & CLOCKWORK_COPY_ARENA) {
+        h.arena_bytes = arenaPartBytes(c);
+        put(c->base, h.arena_bytes);
+    }
+    if (parts & CLOCKWORK_COPY_METRICS) {
+        h.metrics_bytes = metricsPartBytes(c);
+        std::memcpy(base + at, c->base + c->L.metrics_offset, c->L.metrics_bytes);
+        std::memcpy(base + at + c->L.metrics_bytes, c->base + c->L.window_offset, c->L.window_bytes);
+        std::memcpy(base + at + c->L.metrics_bytes + c->L.window_bytes,
+                    c->base + c->L.metrics_history_offset, c->L.metrics_history_bytes);
+        std::memset(base + at + h.metrics_bytes, 0, align8(h.metrics_bytes) - h.metrics_bytes);
+        at += align8(h.metrics_bytes);
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        ClockworkCopyWindow w{};
+        w.source = wants[i].source;
+        w.slot = wants[i].slot;
+        auto* floats = reinterpret_cast<float*>(base + at + sizeof w);
+        if (w.source == CLOCKWORK_COPY_TAP) copyTap(c, wants[i], w, floats);
+        else if (w.source == CLOCKWORK_COPY_SCOPE) copyScope(c, wants[i], w, floats);
+        std::memcpy(base + at, &w, sizeof w);
+        at += sizeof w;
+        const uint32_t n = w.channels * w.frames * uint32_t(sizeof(float));
+        std::memset(base + at + n, 0, align8(n) - n);
+        at += align8(n);
+    }
+    h.bytes = static_cast<uint32_t>(at);
+    std::memcpy(base, &h, sizeof h);
+    return h.bytes;
+}
+
 double clockwork_client_beat_at(const ClockworkClientClock* clock, double ntp_seconds) {
     if (!clock) return 0.0;
     return clockwork::beatAt(ntp_seconds, clock->beat_origin_ntp, clock->bpm);

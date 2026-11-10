@@ -714,6 +714,86 @@ typedef struct ClockworkScopeShape {
 /* Fill `out`. E_ARG for a null handle or a struct too small to fill. */
 ClockworkStatus clockwork_client_scope_shape(ClockworkClient* c, ClockworkScopeShape* out);
 
+/* ── Copies ──────────────────────────────────────────────────────────────────
+ *
+ * For a reader that cannot map the engine's memory: a page in a plugin's web
+ * view, a page whose engine renders in a worklet with no shared memory. It is
+ * handed copies of what it would otherwise read in place, made here, so every
+ * host that hands one over sends the same bytes and one reader reads them
+ * (js/lib/copy.js).
+ *
+ * A copy is a ClockworkCopyHeader, then each part asked for and a window per
+ * want, in that order, every one starting on an 8-byte boundary:
+ *
+ *   CLOCKWORK_COPY_ARENA    the arena's header and tables, for a reader that
+ *                           has not seen this engine: where every region is
+ *   CLOCKWORK_COPY_METRICS  the metrics, the guest's window and the metrics
+ *                           history, back to back (a part an arena has not
+ *                           got is not there)
+ *   a window per want       a ClockworkCopyWindow, then frames * channels
+ *                           floats, interleaved
+ *
+ * A window is the newest `frames` frames of a tap slot or a scope slot, at
+ * most its ring's length: it ends where the writer has reached, keeps the
+ * read margin clear of the ring's oldest edge, and is zero-filled at the front
+ * where the ring holds nothing, as a reader of the slot in place reads it
+ * (shm_tap_stream.hpp's copy_window). A slot that is not live or has not been
+ * written, and a slot there is no such thing as, is a window of no channels.
+ */
+#define CLOCKWORK_COPY_MAGIC   0x59504F43u   /* "COPY", little-endian */
+#define CLOCKWORK_COPY_VERSION 1u
+
+enum {
+    CLOCKWORK_COPY_ARENA   = 1u << 0,
+    CLOCKWORK_COPY_METRICS = 1u << 1,
+};
+
+typedef enum ClockworkCopySource {
+    CLOCKWORK_COPY_TAP   = 1,   /* a tap slot: the guest's, then the tracks' (Taps, above) */
+    CLOCKWORK_COPY_SCOPE = 2,   /* the device's scope: CLOCKWORK_TAP_OUT or CLOCKWORK_TAP_IN */
+} ClockworkCopySource;
+
+typedef struct ClockworkCopyWant {
+    uint32_t source;   /* ClockworkCopySource */
+    uint32_t slot;
+    uint32_t frames;   /* the newest this many; 0 for the slot's header alone */
+} ClockworkCopyWant;
+
+typedef struct ClockworkCopyHeader {
+    uint32_t magic;           /* CLOCKWORK_COPY_MAGIC */
+    uint32_t version;         /* CLOCKWORK_COPY_VERSION */
+    uint32_t bytes;           /* the whole copy, this header included */
+    uint32_t generation;      /* the arena's generation word: a reader holding
+                               * another generation's tables asks for them again */
+    uint32_t arena_bytes;     /* 0 when not asked for */
+    uint32_t metrics_bytes;   /* 0 when not asked for */
+    uint32_t windows;         /* one a want, in the order wanted */
+    uint32_t _reserved;
+} ClockworkCopyHeader;
+
+typedef struct ClockworkCopyWindow {
+    uint32_t source;          /* as wanted */
+    uint32_t slot;            /* as wanted */
+    uint32_t channels;        /* 0: nothing to show, and nothing follows */
+    uint32_t frames;          /* frames * channels floats follow */
+    uint32_t activations;     /* a tap slot's live spells (clockwork_client_audio_tap_activations); 0 for the scope */
+    uint32_t _reserved;
+    uint64_t write_position;  /* the frame the writer has reached, counted from the slot's start */
+} ClockworkCopyWindow;
+
+/* The most bytes a copy of `parts` and `count` wants can take: what `out`
+ * must hold. 0 for a null handle. */
+uint32_t clockwork_client_copy_bytes(ClockworkClient* c, uint32_t parts,
+                                     const ClockworkCopyWant* wants, uint32_t count);
+
+/* Make the copy in `out`. Returns the bytes written; 0, with nothing promised
+ * of `out`, for a null handle, a part this version does not know, or `bytes`
+ * fewer than clockwork_client_copy_bytes says. It only reads: any thread,
+ * any handle, a reader's too. */
+uint32_t clockwork_client_copy(ClockworkClient* c, uint32_t parts,
+                               const ClockworkCopyWant* wants, uint32_t count,
+                               void* out, uint32_t bytes);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

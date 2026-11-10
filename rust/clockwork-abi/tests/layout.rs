@@ -73,6 +73,9 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkClientMessage { bytes, length, origin, route, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });
     expect!(mine, ClockworkScopeShape { struct_bytes, slots, slot_bytes, header_bytes, frames, channels });
+    expect!(mine, ClockworkCopyWant { source, slot, frames });
+    expect!(mine, ClockworkCopyHeader { magic, version, bytes, generation, arena_bytes, metrics_bytes, windows, _reserved });
+    expect!(mine, ClockworkCopyWindow { source, slot, channels, frames, activations, _reserved, write_position });
     expect!(mine, ClockworkClientClock {
         struct_bytes, bpm, beat_origin_ntp, is_playing_at_ntp, is_playing, flags, meter_num, meter_den,
     });

@@ -58,6 +58,16 @@ int main(void) {
     S(ClockworkScopeShape);
     F(ClockworkScopeShape, struct_bytes); F(ClockworkScopeShape, slots); F(ClockworkScopeShape, slot_bytes);
     F(ClockworkScopeShape, header_bytes); F(ClockworkScopeShape, frames); F(ClockworkScopeShape, channels);
+    S(ClockworkCopyWant);
+    F(ClockworkCopyWant, source); F(ClockworkCopyWant, slot); F(ClockworkCopyWant, frames);
+    S(ClockworkCopyHeader);
+    F(ClockworkCopyHeader, magic); F(ClockworkCopyHeader, version); F(ClockworkCopyHeader, bytes);
+    F(ClockworkCopyHeader, generation); F(ClockworkCopyHeader, arena_bytes); F(ClockworkCopyHeader, metrics_bytes);
+    F(ClockworkCopyHeader, windows); F(ClockworkCopyHeader, _reserved);
+    S(ClockworkCopyWindow);
+    F(ClockworkCopyWindow, source); F(ClockworkCopyWindow, slot); F(ClockworkCopyWindow, channels);
+    F(ClockworkCopyWindow, frames); F(ClockworkCopyWindow, activations); F(ClockworkCopyWindow, _reserved);
+    F(ClockworkCopyWindow, write_position);
 
     S(ClockworkClientClock);
     F(ClockworkClientClock, struct_bytes); F(ClockworkClientClock, bpm);

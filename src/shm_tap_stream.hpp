@@ -42,7 +42,7 @@ inline constexpr uint32_t TAP_STREAM_CHANNELS = 2;  // streams are stereo
 // callback appends several engine blocks back-to-back (up to
 // CLOCKWORK_MAX_BLOCK_SIZE frames each), so a one-block margin is not
 // enough. copy_window clamps this to a quarter of small (embedded) rings.
-// js/clockwork.js getTap applies the same formula — keep them in step.
+// js/lib/tap_slot.js ringWindow applies the same formula — keep them in step.
 inline constexpr uint32_t TAP_READ_MARGIN_FRAMES = 2048;
 
 // The longest window a consumer draws from a stream: a client's inline
@@ -66,6 +66,41 @@ inline constexpr bool shm_tap_ring_covers(uint32_t ring_frames, uint32_t latency
         (cap / 4 < TAP_READ_MARGIN_FRAMES) ? cap / 4 : TAP_READ_MARGIN_FRAMES;
     const double window = sample_rate * TAP_DISPLAY_WINDOW_MS / 1000.0;
     return double(latency_frames) + window + double(margin) <= double(cap);
+}
+
+// The window every reader of a ring of frames takes (a tap slot's
+// copy_window, a scope slot's in clockwork_client_copy; tap_slot.js
+// ringWindow in place): the `frames` frames ending at `end` of an interleaved
+// ring of `cap` frames whose writer has reached `writer`, clamped to what the
+// ring still holds less the read margin, zero-filled at the front for the
+// rest. `out` holds frames * channels floats and is always fully written.
+// Returns the real (non-fill) frames.
+inline uint32_t ring_window(const float* ring, uint32_t channels, uint32_t cap,
+                            uint64_t writer, uint64_t end, uint32_t frames, float* out) {
+    if (end > writer) end = writer;
+    uint64_t start = (end > frames) ? end - frames : 0;
+    // Oldest frame the ring still holds, plus a margin covering the largest
+    // burst a writer appends between reader loads (a hardware callback
+    // renders several engine blocks back-to-back). Clamped for small rings.
+    const uint32_t margin = (cap / 4 < TAP_READ_MARGIN_FRAMES) ? cap / 4 : TAP_READ_MARGIN_FRAMES;
+    const uint64_t oldest = (writer > cap) ? writer - cap + margin : 0;
+    if (start < oldest) start = oldest;
+    if (start > end) start = end;
+
+    const uint32_t real = static_cast<uint32_t>(end - start);
+    const uint32_t fill = frames - real;
+    std::memset(out, 0, static_cast<size_t>(fill) * channels * sizeof(float));
+    if (real == 0) return 0;
+
+    float* dst = out + static_cast<size_t>(fill) * channels;
+    const uint32_t at = static_cast<uint32_t>(start % cap);
+    const uint32_t first = (cap - at < real) ? (cap - at) : real;
+    std::memcpy(dst, ring + static_cast<size_t>(at) * channels,
+                static_cast<size_t>(first) * channels * sizeof(float));
+    if (first < real)
+        std::memcpy(dst + static_cast<size_t>(first) * channels, ring,
+                    static_cast<size_t>(real - first) * channels * sizeof(float));
+    return real;
 }
 
 // copy_triggered_window's trigger_offset when no rising crossing was found
@@ -256,34 +291,7 @@ public:
         }
         const uint32_t cap = capacity_frames();       // sanitized
         const uint64_t writer = _slot->write_position.load(std::memory_order_acquire);
-        if (end_cursor > writer) end_cursor = writer;
-
-        uint64_t start = (end_cursor > frames) ? end_cursor - frames : 0;
-        // Oldest frame the ring still holds, plus a margin covering the
-        // largest burst a writer appends between reader loads (a hardware
-        // callback renders several engine blocks back-to-back). Clamped for
-        // small embedded rings.
-        const uint32_t margin =
-            (cap / 4 < TAP_READ_MARGIN_FRAMES) ? cap / 4
-                                                     : TAP_READ_MARGIN_FRAMES;
-        const uint64_t oldest = (writer > cap) ? writer - cap + margin : 0;
-        if (start < oldest) start = oldest;
-        if (start > end_cursor) start = end_cursor;
-
-        const uint32_t real = static_cast<uint32_t>(end_cursor - start);
-        const uint32_t fill = frames - real;
-        std::memset(out, 0, static_cast<size_t>(fill) * channels * sizeof(float));
-        if (real == 0) return 0;
-
-        float* dst = out + static_cast<size_t>(fill) * channels;
-        uint32_t at = static_cast<uint32_t>(start % cap);
-        uint32_t first = (cap - at < real) ? (cap - at) : real;
-        std::memcpy(dst, _slot->frames() + static_cast<size_t>(at) * channels,
-                    static_cast<size_t>(first) * channels * sizeof(float));
-        if (first < real)
-            std::memcpy(dst + static_cast<size_t>(first) * channels, _slot->frames(),
-                        static_cast<size_t>(real - first) * channels * sizeof(float));
-        return real;
+        return ring_window(_slot->frames(), channels, cap, writer, end_cursor, frames, out);
     }
 
     // copy_window's sweep-mode sibling: the window is aligned to the first
@@ -372,3 +380,4 @@ using detail_shm_tap::tap_slot_bytes;
 using detail_shm_tap::TAP_TRIGGER_NONE;
 using detail_shm_tap::TAP_DISPLAY_WINDOW_MS;
 using detail_shm_tap::shm_tap_ring_covers;
+using detail_shm_tap::ring_window;

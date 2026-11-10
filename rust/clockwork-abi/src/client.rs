@@ -124,6 +124,54 @@ pub struct ClockworkScopeShape {
     pub channels: u32,
 }
 
+/// Copies, for a reader that cannot map the engine's memory (clockwork_client.h, "Copies").
+pub const CLOCKWORK_COPY_MAGIC: u32 = 0x5950_4F43;
+pub const CLOCKWORK_COPY_VERSION: u32 = 1;
+/// The arena's header and tables.
+pub const CLOCKWORK_COPY_ARENA: u32 = 1 << 0;
+/// The metrics, the guest's window and the metrics history, back to back.
+pub const CLOCKWORK_COPY_METRICS: u32 = 1 << 1;
+/// A want's source: a tap slot.
+pub const CLOCKWORK_COPY_TAP: u32 = 1;
+/// A want's source: the device's scope ([`crate::arena::CLOCKWORK_TAP_OUT`] / [`crate::arena::CLOCKWORK_TAP_IN`]).
+pub const CLOCKWORK_COPY_SCOPE: u32 = 2;
+
+/// A window to copy: the newest `frames` frames of `slot` of `source`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClockworkCopyWant {
+    pub source: u32,
+    pub slot: u32,
+    pub frames: u32,
+}
+
+/// The front of a copy.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClockworkCopyHeader {
+    pub magic: u32,
+    pub version: u32,
+    pub bytes: u32,
+    pub generation: u32,
+    pub arena_bytes: u32,
+    pub metrics_bytes: u32,
+    pub windows: u32,
+    pub _reserved: u32,
+}
+
+/// The front of a window in a copy; `frames * channels` floats follow.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClockworkCopyWindow {
+    pub source: u32,
+    pub slot: u32,
+    pub channels: u32,
+    pub frames: u32,
+    pub activations: u32,
+    pub _reserved: u32,
+    pub write_position: u64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClockworkClientClock {
@@ -238,5 +286,14 @@ extern "C" {
         out_channels: *mut u32,
     ) -> u32;
     pub fn clockwork_client_scope_shape(c: *mut ClockworkClient, out: *mut ClockworkScopeShape) -> ClockworkStatus;
+    pub fn clockwork_client_copy_bytes(c: *mut ClockworkClient, parts: u32, wants: *const ClockworkCopyWant, count: u32) -> u32;
+    pub fn clockwork_client_copy(
+        c: *mut ClockworkClient,
+        parts: u32,
+        wants: *const ClockworkCopyWant,
+        count: u32,
+        out: *mut c_void,
+        bytes: u32,
+    ) -> u32;
 }
 

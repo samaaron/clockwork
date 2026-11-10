@@ -23,6 +23,8 @@ import { ClockworkClock } from "./lib/clockwork_clock.js";
 import { AudioHealthMonitor } from "./lib/audio_health_monitor.js";
 import { AudioCapture } from "./lib/audio_capture.js";
 import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./lib/tap_slot.js";
+import { scopeSlotViews, readScopeSlot } from "./lib/scope_slot.js";
+import { CopyReader, readCopy, encodeWants, COPY_PART, COPY_SOURCE } from "./lib/copy.js";
 import { readArena, regionBytes, readGeneration, instanceGeneration, REGION, REGION_NAMES } from "./lib/arena.js";
 import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
 import { IN_WRITE_LOCK } from "./lib/ring_cursor_offsets.js";
@@ -229,6 +231,10 @@ export class Clockwork {
 
   // Cached TypedArray views for tap slots (lazily initialized, avoids per-frame allocations)
   #tapViews = null;
+  #copies = null;           // CopyReader: postMessage and copies modes
+  #wantsTold = "";          // what the worklet was last told to copy (postMessage)
+  #wantsTimer = null;
+  #copiesArena = null;      // the generation word whose tables are held (copies)
 
   /* Guest options are the product's to validate — clockwork enforces its own
    * rules (128-frame blocks and the rest) through its own `audio` options.
@@ -288,7 +294,8 @@ export class Clockwork {
     const workerBaseURL = options.workerBaseURL || (baseURL ? `${baseURL}workers/` : null);
     const wasmBaseURL = options.wasmBaseURL || (coreBaseURL ? `${coreBaseURL}wasm/` : null);
 
-    if (!workerBaseURL || !wasmBaseURL) {
+    // An engine elsewhere has no files here: its host hands this page copies (below).
+    if (options.mode !== 'copies' && (!workerBaseURL || !wasmBaseURL)) {
       throw new Error(
         `Clockwork needs to be told where its files are.\n\n` +
         `Clockwork is not a package of its own: it ships inside the product\n` +
@@ -309,8 +316,18 @@ export class Clockwork {
     const guestOptions = { ...options.guestOptions };
     // The transport, unless the caller says: SAB where the page is
     // cross-origin isolated (the headers are there, so the lower-latency
-    // path is open), postMessage everywhere else.
+    // path is open), postMessage everywhere else. Or `copies`: the engine
+    // runs in this page's host (a plugin, its web view this page), which
+    // hands it copies of the engine's memory (js/lib/copy.js) through
+    // `options.copies.fetch(parts, wants) → Promise<ArrayBuffer>`, whose
+    // bytes are clockwork_client_copy's. Nothing boots here, and nothing
+    // is sent: it reads.
     const mode = options.mode || (globalThis.crossOriginIsolated ? 'sab' : 'postMessage');
+    if (mode === 'copies' && typeof options.copies?.fetch !== 'function') {
+      throw new Error("Clockwork's copies mode needs its host: { copies: { fetch(parts, wants) } }");
+    }
+    // Where the engine's memory cannot be read in place, its copies: what the page read lately is what is copied.
+    this.#copies = mode === 'sab' ? null : new CopyReader();
 
     // What the guest declares about itself: its metrics (js/lib/guest_metrics.js).
     // Nothing else — clockwork holds no opinion about which engine is
@@ -320,12 +337,13 @@ export class Clockwork {
     // After the declaration is resolved, because the reader needs what this
     // guest says it exposes. None is a normal answer.
     this.#metricsReader = new MetricsReader({
-      mode,
+      mode: mode === 'copies' ? 'postMessage' : mode,   // either way the metrics are a copy's
       guestMetrics: this.#guestMetrics,
     });
 
     this.#config = {
       mode: mode,
+      copies: options.copies ?? null,
       snapshotIntervalMs: options.snapshotIntervalMs ?? SNAPSHOT_INTERVAL_MS,
       // The latest a timed event may play, ms: one later is dropped and counted (engineSchedulerLateDropped).
       // 0, the default, plays everything, however late. A page that can be flooded sets a limit.
@@ -482,6 +500,7 @@ export class Clockwork {
    * when it could not come up, where `midiError` says why.
    */
   async enableMidi(opts = true) {
+    this.#refuseInCopies("open MIDI");
     this.#config.midi = opts;
     await this.#initializeFront();
     return this.midi;
@@ -512,7 +531,7 @@ export class Clockwork {
     if (this.#initialized) return;
     if (this.#initPromise) return this.#initPromise;
 
-    this.#initPromise = this.#doInit();
+    this.#initPromise = this.#config.mode === 'copies' ? this.#doInitCopies() : this.#doInit();
     return this.#initPromise;
   }
 
@@ -553,6 +572,82 @@ export class Clockwork {
     }
   }
 
+  // The engine is in the host: its tables from the host's first copy, then a copy each frame of what was read
+  // lately. Nothing here sends, so nothing here can wedge the engine.
+  async #doInitCopies() {
+    this.#initializing = true;
+    this.bootStats.initStartTime = performance.now();
+    const epoch = this.#lifeEpoch;
+    this.#setEngineState('booting', 'init');
+    try {
+      const copy = readCopy(await this.#config.copies.fetch(COPY_PART.ARENA | COPY_PART.METRICS, encodeWants([])));
+      if (epoch !== this.#lifeEpoch) throw new Error("shut down while starting");
+      this.#takeCopy(copy);
+      if (!this.#metricsReader.bufferConstants) throw new Error("the host's first copy has no arena tables");
+      this.#initialized = true;
+      this.#initializing = false;
+      this.bootStats.initDuration = performance.now() - this.bootStats.initStartTime;
+      this.#setEngineState('running', 'boot');
+      this.#pullCopies(epoch);
+      await this.#announceReady({ setup: false });   // a host's world on its engine is the host's to build
+    } catch (error) {
+      this.#initializing = false;
+      this.#initPromise = null;
+      if (epoch === this.#lifeEpoch) this.#setEngineState('error', 'boot-failed', { error });
+      this.#eventEmitter.emit('error', error);
+      throw error;
+    }
+  }
+
+  // A copy, taken: the arena's tables when it carries them, its metrics, its windows.
+  #takeCopy(copy) {
+    if (copy.arena) {
+      const bc = readArena(copy.arena, 0).constants;
+      this.#metricsReader.initSharedViews(null, 0, bc);
+      this.#copiesArena = copy.generation;
+    }
+    this.#copies.take(copy);
+    if (copy.metrics) this.#metricsReader.updateSnapshot(copy.metrics);
+  }
+
+  // Each frame the page draws, a copy of what it read lately, one at a time; nothing while nothing is read, or while
+  // the page is hidden (no frames). The tables again when the engine's generation has moved.
+  #pullCopies(epoch) {
+    const later = (fn) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(fn) : setTimeout(fn, 16));
+    let said = false;
+    const pull = async () => {
+      if (epoch !== this.#lifeEpoch) return;
+      const { wants, metrics } = this.#copies.wants();
+      const stale = this.#copies.generation !== this.#copiesArena;
+      if (wants.length || metrics || stale) {
+        const parts = (metrics ? COPY_PART.METRICS : 0) | (stale ? COPY_PART.ARENA : 0);
+        try {
+          const copy = readCopy(await this.#config.copies.fetch(parts, encodeWants(wants)));
+          if (epoch === this.#lifeEpoch) this.#takeCopy(copy);
+          said = false;
+        } catch (error) {
+          // said once a spell: a host that cannot copy now may again
+          if (!said) this.#warn(`the engine's host could not hand over a copy: ${error?.message ?? error}`);
+          said = true;
+        }
+      }
+      later(pull);
+    };
+    later(pull);
+  }
+
+  // postMessage: the worklet told what to copy when it changes, and again until nothing is read (a want lapses).
+  #tellWorkletWants() {
+    const { wants } = this.#copies.wants();
+    const key = wants.map((w) => `${w.source}:${w.slot}:${w.frames}`).join(",");
+    if (key !== this.#wantsTold && this.#workletNode) {
+      this.#wantsTold = key;
+      this.#workletNode.port.postMessage({ type: 'copyWants', wants: encodeWants(wants) });
+    }
+    clearTimeout(this.#wantsTimer);
+    this.#wantsTimer = wants.length ? setTimeout(() => this.#tellWorkletWants(), 250) : null;
+  }
+
   // ============================================================================
   // METRICS API
   // ============================================================================
@@ -569,6 +664,7 @@ export class Clockwork {
    * @returns {Object}
    */
   getMetricsHistory() {
+    this.#copies?.metrics();
     const bc = this.#metricsReader?.bufferConstants;
     return readHistoryWindows(this.#metricsReader?.historyWords(), bc);
   }
@@ -1123,9 +1219,10 @@ export class Clockwork {
     const bc = this.#metricsReader.bufferConstants;
     if (!bc) return null;
 
-    if (this.#config.mode === 'postMessage') {
-      // The snapshot is METRICS followed by the window, copied as one unit,
-      // so the window starts where the metrics end.
+    if (this.#config.mode !== 'sab') {
+      // The copy's metrics part is METRICS followed by the window, copied as
+      // one unit, so the window starts where the metrics end.
+      this.#copies.metrics();
       const snapshot = this.#metricsReader.getSnapshotBuffer();
       if (!snapshot) return null;
       return { buffer: snapshot, offset: bc.METRICS_SIZE, size: bc.GUEST_WINDOW_SIZE };
@@ -1252,7 +1349,9 @@ export class Clockwork {
    *
    * The stream is a lossless interleaved ring with a monotonic write cursor
    * (see docs/PORTS.md); this copies out the window ending at
-   * the current cursor. SAB mode only for now.
+   * the current cursor. With no view of the engine's memory (postMessage,
+   * copies) it is the newest copy's window, and asking is what has the next
+   * copies hold it: null until one has.
    *
    * @param {number} tapNum - Tap slot index (0 to maxTaps-1)
    * @param {number} [frames] - Window length; defaults to 1024
@@ -1265,9 +1364,7 @@ export class Clockwork {
     if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return null;
     if (tapNum < 0 || tapNum >= bc.TAP_SLOT_COUNT) return null;
 
-    // TODO: PM mode — read from latest heartbeat snapshot
-    if (!this.#metricsReader.sharedBuffer) return null;
-
+    if (!this.#metricsReader.sharedBuffer) return this.#fromCopies(() => this.#copies.window(COPY_SOURCE.TAP, tapNum, frames));
     return readTapSlot(this.#getTapSlotViews(tapNum), frames);
   }
 
@@ -1275,22 +1372,24 @@ export class Clockwork {
    * How many times a tap slot has gone live. A reader polls, and a slot can
    * be claimed and released between two polls (a loop started and stopped in
    * a moment); a reader that noted this and sees another number knows the
-   * slot went live in between. Wraps: compare for change only. SAB mode only.
+   * slot went live in between. Wraps: compare for change only. With no view
+   * of the engine's memory, the newest copy's count, as getTap.
    *
    * @param {number} tapNum - Tap slot index (0 to maxTaps-1)
-   * @returns {number|null} null when uninitialised, out of range, or not SAB
+   * @returns {number|null} null when uninitialised, out of range, or before a copy has held it
    */
   getTapActivations(tapNum) {
     if (!this.#initialized) return null;
     const bc = this.#metricsReader.bufferConstants;
     if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return null;
     if (tapNum < 0 || tapNum >= bc.TAP_SLOT_COUNT) return null;
-    if (!this.#metricsReader.sharedBuffer) return null;
+    if (!this.#metricsReader.sharedBuffer) return this.#fromCopies(() => this.#copies.activations(COPY_SOURCE.TAP, tapNum));
     return tapSlotActivations(this.#getTapSlotViews(tapNum));
   }
 
   /**
-   * Get all active tap slots.
+   * Get all active tap slots: with no view of the engine's memory, those of
+   * the slots read lately that the newest copy holds live.
    * @returns {Array<{ index: number, channels: number }>}
    */
   getTaps() {
@@ -1298,7 +1397,7 @@ export class Clockwork {
 
     const bc = this.#metricsReader.bufferConstants;
     if (!bc || bc.TAPS_START == null || bc.TAP_SLOT_COUNT == null) return [];
-    if (!this.#metricsReader.sharedBuffer) return [];
+    if (!this.#metricsReader.sharedBuffer) return this.#copies.live(COPY_SOURCE.TAP);
 
     const taps = [];
     for (let i = 0; i < bc.TAP_SLOT_COUNT; i++) {
@@ -1308,6 +1407,36 @@ export class Clockwork {
       }
     }
     return taps;
+  }
+
+  /**
+   * The newest `frames` frames of the device's scope: what left for the device
+   * (slot 0, SCOPE_OUT_SLOT) or what arrived from it (slot 1, SCOPE_IN_SLOT),
+   * in the shape getTap returns. Written by the engine on every host whatever
+   * the guest does, so it is how a page draws the master mix. With no view of
+   * the engine's memory, the newest copy's window, as getTap.
+   *
+   * @param {number} slot - 0 for the output, 1 for the input
+   * @param {number} [frames] - Window length; defaults to 2048
+   * @returns {{ frames: number, channels: number, writePosition: bigint, interleaved: Float32Array }|null}
+   *   null for a direction the device has not got, or before anything is written
+   */
+  getDeviceScope(slot = 0, frames = 2048) {
+    if (!this.#initialized) return null;
+    const bc = this.#metricsReader.bufferConstants;
+    if (!bc || bc.SCOPE_START == null || slot < 0 || slot >= bc.SCOPE_SLOTS) return null;
+    if (!this.#metricsReader.sharedBuffer) return this.#fromCopies(() => this.#copies.window(COPY_SOURCE.SCOPE, slot, frames));
+    const views = scopeSlotViews(this.#metricsReader.sharedBuffer, this.#metricsReader.arenaBase + bc.SCOPE_START + slot * bc.SCOPE_SLOT_SIZE,
+      { headerBytes: bc.SCOPE_HEADER_SIZE, frames: bc.SCOPE_FRAMES, channels: bc.SCOPE_CHANNELS });
+    return readScopeSlot(views, frames);
+  }
+
+  // A read of the copies, and the worklet told when what it asked for has changed (postMessage mode: the
+  // worklet copies what the page reads; in copies mode the next fetch asks for it).
+  #fromCopies(read) {
+    const out = read();
+    if (this.#config.mode === 'postMessage') this.#tellWorkletWants();
+    return out;
   }
 
   /**
@@ -1424,6 +1553,7 @@ export class Clockwork {
 
   sendOSC(oscData) {
     this.#ensureInitialized("send OSC data");
+    this.#refuseInCopies("send OSC");
 
     const uint8Data = this.#toUint8Array(oscData);
     this.#sendPreparedOSC(uint8Data);
@@ -1817,6 +1947,8 @@ export class Clockwork {
 
   async shutdown() {
     if (!this.#initialized && !this.#initializing) return;
+    clearTimeout(this.#wantsTimer);
+    this.#wantsTold = "";
 
     // A boot under way sees this and stops (#doInit's stillWanted), and the client is no longer starting
     this.#lifeEpoch++;
@@ -2440,8 +2572,10 @@ export class Clockwork {
 
             // PostMessage mode: set initial snapshot
             if (this.#config.mode === 'postMessage' && event.data.initialSnapshot) {
-              this.#metricsReader.updateSnapshot(event.data.initialSnapshot);
+              this.#takeCopy(readCopy(event.data.initialSnapshot));
             }
+            // a new worklet (a boot, a reload) copies nothing until it is told what the page reads
+            this.#wantsTold = "";
 
             resolve();
            } catch (error) {
@@ -2474,9 +2608,10 @@ export class Clockwork {
           break;
 
         case "snapshot":
+          // a copy (clockwork_client_copy): the metrics on the heartbeat, the windows the page reads each frame
           if (data.buffer) {
-            this.#metricsReader.updateSnapshot(data.buffer);
-            this.#snapshotsSent = data.snapshotsSent;
+            this.#takeCopy(readCopy(data.buffer));
+            if (data.snapshotsSent != null) this.#snapshotsSent = data.snapshotsSent;
           }
           break;
 
@@ -2587,6 +2722,7 @@ export class Clockwork {
   }
 
   #updateMergedArray() {
+    this.#copies?.metrics();   // read: so the next copies hold them (copies mode)
     this.#metricsReader.updateMergedArray(this.#metricsContext());
   }
 
@@ -2602,6 +2738,13 @@ export class Clockwork {
     const buffer = this.#metricsReader.getSnapshotBuffer();
     if (!buffer) return null;
     return new Uint32Array(buffer, 0, 1)[0];
+  }
+
+  // In copies mode the engine is the host's: the page reads it and drives nothing of it.
+  #refuseInCopies(what) {
+    if (this.#config.mode === 'copies') {
+      throw new Error(`Clockwork cannot ${what} here: in copies mode the engine runs in the page's host, and is the host's to drive`);
+    }
   }
 
   #ensureInitialized(actionDescription = "perform this operation") {

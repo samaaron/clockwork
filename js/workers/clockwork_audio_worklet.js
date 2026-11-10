@@ -12,6 +12,13 @@ import * as MetricsOffsets from '../lib/metrics_offsets.js';
 // ClockworkClientMessage (bytes, length, origin, route, sequence).
 const REGION_INGRESS = 7;
 const CLIENT_MESSAGE_BYTES = 20;
+// Copies (clockwork_client_copy, js/lib/copy.js): postMessage mode's word for the engine's memory. The metrics on
+// the snapshot heartbeat; the windows the page reads, as often as it draws. Room for both is claimed once, at boot.
+const COPY_METRICS = 2;           // CLOCKWORK_COPY_METRICS
+const COPY_WANT_WORDS = 3;        // ClockworkCopyWant: source, slot, frames
+const COPY_MAX_WANTS = 64;
+const COPY_WINDOW_ROOM = 2 * 1024 * 1024;   // the windows' bytes in one copy: the wants that fit, in the order asked
+const COPY_WINDOWS_INTERVAL = 1 / 60;       // seconds of audio between copies of the windows
 import { calculateAllControlIndices } from '../lib/ring_cursor_offsets.js';
 import { readArena, readGeneration, instanceGeneration } from '../lib/arena.js';
 import { sampleClockReader } from '../lib/sample_clock.js';
@@ -372,12 +379,9 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 })),
             },
 
-            // Metrics + node tree snapshot
+            // A copy: the metrics (the snapshot heartbeat) and the windows the page reads
             snapshot: {
                 message: { type: 'snapshot', buffer: null, snapshotsSent: 0 },
-                buffer: null,       // Sized after bufferConstants known
-                bufferView: null,
-                size: 0,
             },
 
             // OSC log entries
@@ -404,28 +408,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         p.replies.message.messages = p.replies.entries;
         p.log.message.entries = p.log.entries;
 
-        if (this.bufferConstants && this.wasmMemory) {
-            const bc = this.bufferConstants;
-            const size = bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE + (bc.METRICS_HISTORY_SIZE || 0);
-            p.snapshot.buffer = new ArrayBuffer(size);
-            p.snapshot.bufferView = new Uint8Array(p.snapshot.buffer);
-            p.snapshot.size = size;
-            p.snapshot.message.buffer = p.snapshot.buffer;
-
-            // Pre-allocated source views: the metrics (in the clockwork
-            // block) and the guest's window (in the guest region), copied
-            // into one snapshot as metrics then window — the shape the
-            // client reads back (readWindow: the window at METRICS_SIZE).
-            // Valid as long as WASM memory does not grow.
-            p.snapshot.metricsView = new Uint8Array(this.wasmMemory.buffer,
-                this.arenaBase + bc.METRICS_START, bc.METRICS_SIZE);
-            p.snapshot.windowView = new Uint8Array(this.wasmMemory.buffer,
-                this.arenaBase + bc.GUEST_WINDOW_START, bc.GUEST_WINDOW_SIZE);
-            // and the metrics history after the window (metrics_history.js)
-            p.snapshot.historyView = bc.METRICS_HISTORY_SIZE
-                ? new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.METRICS_HISTORY_START, bc.METRICS_HISTORY_SIZE)
-                : null;
-        }
     }
 
     // Open the client boundary over the engine's own heap.
@@ -475,6 +457,35 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         }
 
         this.wasmExports.clockwork_worklet_free(stPtr);
+
+        // postMessage mode's copies: room for the wants and for the largest copy, claimed here, once
+        if (this.mode === 'postMessage') {
+            const x = this.wasmExports;
+            this.copyWants = x.clockwork_worklet_alloc(COPY_MAX_WANTS * COPY_WANT_WORDS * 4);
+            this.copyWantCount = 0;
+            this.copyRoom = x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS, 0, 0) + COPY_WINDOW_ROOM;
+            this.copyAt = x.clockwork_worklet_alloc(this.copyRoom);
+            this.lastWindowsTime = -1;
+        }
+    }
+
+    // The page's wants (copy.js encodeWants): as many as fit in the room claimed at boot, in the order asked.
+    setCopyWants(words) {
+        if (!this.copyAt) return;
+        const x = this.wasmExports;
+        const all = Math.min(COPY_MAX_WANTS, Math.floor(words.length / COPY_WANT_WORDS));
+        new Uint32Array(this.wasmMemory.buffer, this.copyWants, all * COPY_WANT_WORDS).set(words.subarray(0, all * COPY_WANT_WORDS));
+        let count = all;
+        while (count && x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS, this.copyWants, count) > this.copyRoom) count--;
+        this.copyWantCount = count;
+    }
+
+    // A copy of the engine (clockwork_client_copy) as an ArrayBuffer to hand over; null when there is no room for it.
+    makeCopy(parts, windows) {
+        if (!this.copyAt) return null;
+        const n = this.wasmExports.clockwork_client_copy(this.clientHandle, parts,
+            windows ? this.copyWants : 0, windows ? this.copyWantCount : 0, this.copyAt, this.copyRoom);
+        return n ? new Uint8Array(this.wasmMemory.buffer, this.copyAt, n).slice().buffer : null;
     }
 
     // Read one ClockworkClientMessage out of the array a drain just filled.
@@ -615,61 +626,42 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         this.metricsView[MetricsOffsets.ENGINE_MESSAGES_DROPPED]++;
     }
 
-    // Read metrics + the guest's window from WASM memory and send via
-    // postMessage: immediately when the window's version word moves, otherwise
-    // on interval. Two copies into one pre-allocated pool, metrics then
-    // window. Nothing here reads INSIDE the window — the version stamp is the
-    // whole of the contract (dsp_api.h shm_window).
-    // Returns true if a snapshot was sent, so log entries batch on the same tick.
+    // The page's copy of the engine (postMessage mode): the metrics, the guest's window and the metrics history
+    // immediately when the window's version word moves, otherwise on the snapshot interval; the windows the page
+    // reads (its wants) every COPY_WINDOWS_INTERVAL. One copy for whatever is due, made by clockwork_client_copy, so
+    // it is the bytes every host hands over. Nothing here reads INSIDE the window — the version stamp is the whole
+    // of the contract (dsp_api.h shm_window).
+    // Returns true when the metrics went, so log entries batch on the same heartbeat.
     checkAndSendSnapshot(audioTime) {
         const bc = this.bufferConstants;
-        if (!bc || !this.wasmMemory || this.arenaBase === null || !this.pmPools) return false;
+        if (!bc || !this.wasmMemory || this.arenaBase === null || !this.pmPools || !this.copyAt) return false;
 
-        const windowBase = this.arenaBase + bc.GUEST_WINDOW_START;
-        // Reuse existing atomicView to avoid creating new typed array
-        const versionOffset = windowBase / 4;   // the guest's version stamp, word 0
+        const versionOffset = (this.arenaBase + bc.GUEST_WINDOW_START) / 4;   // the guest's version stamp, word 0
         const currentVersion = this.atomicView[versionOffset];
-        const versionChanged = currentVersion !== this.lastTreeVersion;
-
-        if (versionChanged) {
+        let metrics = false;
+        if (currentVersion !== this.lastTreeVersion) {
             this.lastTreeVersion = currentVersion;
-            this.lastTreeSendTime = audioTime;
-        } else {
-            if (this.lastTreeSendTime >= 0 && audioTime - this.lastTreeSendTime < this.treeSnapshotMinInterval) {
-                return false; // Skip this frame, will send on next interval
-            }
-            this.lastTreeSendTime = audioTime;
+            metrics = true;
+        } else if (this.lastTreeSendTime < 0 || audioTime - this.lastTreeSendTime >= this.treeSnapshotMinInterval) {
+            metrics = true;
         }
+        const windows = this.copyWantCount > 0
+            && (this.lastWindowsTime < 0 || audioTime - this.lastWindowsTime >= COPY_WINDOWS_INTERVAL);
+        if (!metrics && !windows) return false;
 
-        const pool = this.pmPools.snapshot;
-        if (!pool.buffer || !pool.metricsView) return false;
-
-        // Metrics, then the window, then the metrics history — pre-allocated views, no allocation.
-        pool.bufferView.set(pool.metricsView, 0);
-        pool.bufferView.set(pool.windowView, pool.metricsView.length);
-        if (pool.historyView) pool.bufferView.set(pool.historyView, pool.metricsView.length + pool.windowView.length);
-
-        // Send via postMessage (structured clone - pool remains valid for reuse)
-        this.treeSnapshotsSent++;
-        pool.message.snapshotsSent = this.treeSnapshotsSent;
-        this.port.postMessage(pool.message);
-        return true;
-    }
-
-    // Read metrics + the guest's window as one snapshot: metrics first, then
-    // the window at offset METRICS_SIZE, which is where readWindow() on the
-    // client side reads it back. Returns a raw ArrayBuffer (transferable) or
-    // null if not ready. Used only for the initial snapshot.
-    readMetricsAndTreeBuffer() {
-        if (!this.bufferConstants || !this.wasmMemory || this.arenaBase === null) {
-            return null;
+        const buffer = this.makeCopy(metrics ? COPY_METRICS : 0, windows);
+        if (!buffer) return false;
+        if (metrics) {
+            this.lastTreeSendTime = audioTime;
+            this.treeSnapshotsSent++;
         }
-        const bc = this.bufferConstants;
-        const buffer = new ArrayBuffer(bc.METRICS_SIZE + bc.GUEST_WINDOW_SIZE);
-        const out = new Uint8Array(buffer);
-        out.set(new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.METRICS_START, bc.METRICS_SIZE), 0);
-        out.set(new Uint8Array(this.wasmMemory.buffer, this.arenaBase + bc.GUEST_WINDOW_START, bc.GUEST_WINDOW_SIZE), bc.METRICS_SIZE);
-        return buffer;
+        if (windows) this.lastWindowsTime = audioTime;
+        const message = this.pmPools.snapshot.message;
+        message.buffer = buffer;
+        message.snapshotsSent = this.treeSnapshotsSent;
+        this.port.postMessage(message, [buffer]);
+        message.buffer = null;
+        return metrics;
     }
 
     // Read and send OSC log entries from the IN ring (postMessage mode). Called
@@ -1150,7 +1142,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
 
                             this.isInitialized = true;
 
-                            const initialSnapshot = this.mode === 'postMessage' ? this.readMetricsAndTreeBuffer() : undefined;
+                            const initialSnapshot = this.mode === 'postMessage' ? this.makeCopy(COPY_METRICS, false) ?? undefined : undefined;
 
                             const msg = {
                                 type: 'initialized',
@@ -1197,6 +1189,11 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                 }
                 this.port.postMessage({ type: 'exportCalled', callId: data.callId, result, error });
                 return;
+            }
+
+            // what the page reads of the engine (postMessage mode): its windows go in the copies from now on
+            if (data.type === 'copyWants') {
+                this.setCopyWants(data.wants);
             }
 
             if (data.type === 'setClockOffset') {
