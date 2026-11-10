@@ -123,3 +123,9 @@ metric egressFramesUndelivered 0
 metric clockAnchors 4
 metric engineSchedulerLateDropped 0
 metric cuesDropped 0
+metric deviceMissedCycles 0
+metric deviceClockJumps 0
+metric deviceClockJumpFrames 0
+metric silentCallbacks 0
+metric callbackGapRecentUs 0
+metric callbackGapMaxUs 0

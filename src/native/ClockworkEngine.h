@@ -442,6 +442,8 @@ public:
     // forwards the message to the NRT command ring with its origin token. Runs on
     // the audio thread; the control pass drains the ring and runs the subsystems.
     static bool nrtForwardSink(void* ctx, const void* callCtx, const uint8_t* data, std::size_t len);
+    // A message refused on its way in, said at most once a second (mRefusedInLog).
+    void noteRefusedIn(const uint8_t* data, uint32_t size, const char* why);
 
     // One route adapter for every backend route: forward the immutable call
     // metadata + (data, len) to a member handler of subsystem T. ctx is the owning
@@ -1103,6 +1105,9 @@ private:
     // An over-wide control message dropped: said eight times, then counted
     // in the metrics alone.
     clockwork::LogLimit       mNrtOversizeLog = clockwork::LogLimit::first(8);
+    // A message refused on its way in: a line a second at most, by the
+    // monotonic clock in ns (noteRefusedIn).
+    clockwork::LogSpacing     mRefusedInLog{1000000000ULL};
     std::atomic<int32_t>      mNrtHead{0};
     std::atomic<int32_t>      mNrtTail{0};
     std::atomic<int32_t>      mNrtSeq{0};

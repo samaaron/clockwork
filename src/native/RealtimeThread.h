@@ -38,4 +38,10 @@ RealtimeResult elevateCurrentThreadToRealtime();
 // On Linux and Windows it is the call above.
 RealtimeResult elevateCurrentThreadToRealtime(double periodSeconds);
 
+// The CPU time the calling thread has had, in seconds from an origin of its
+// own; negative where the platform can't say finely (Windows). Read around a
+// piece of work, it tells the work from time the thread spent waiting or set
+// aside by the scheduler. A non-blocking call, fit for the audio thread.
+double currentThreadCpuSeconds();
+
 }  // namespace clockwork

@@ -39,6 +39,17 @@ extern "C" {
                                       uint32_t callbackOverruns);
     void clockwork_publish_nrt_blocking(struct ClockworkCore* core, uint32_t maxPassUs, uint32_t recentWorstUs,
                                         uint32_t inFlightUs);
+    // How a native engine's device kept time (the metrics block's words
+    // 66-71), as its processor counted since the engine started.
+    typedef struct ClockworkDeviceTime {
+        uint32_t missed_cycles;        // cycles the driver says the device missed
+        uint32_t clock_jumps;          // times its sample clock moved by other than the frames played
+        uint32_t clock_jump_frames;    // the frames it skipped over in them
+        uint32_t silent_callbacks;     // callbacks played as silence for want of a block
+        uint32_t callback_gap_recent_us;   // longest time between two callbacks' starts, this minute and the last
+        uint32_t callback_gap_max_us;      // and since the engine started
+    } ClockworkDeviceTime;
+    void clockwork_publish_device_time(struct ClockworkCore* core, const ClockworkDeviceTime* time);
 
     // The one rule for a guest's memory wants (DspInfo::memory_bytes_wanted /
     // memory_bulk_bytes_wanted), stated once so the boot path and a test agree:

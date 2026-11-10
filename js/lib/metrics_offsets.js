@@ -131,7 +131,7 @@ export const CLOCK_DRIFT_US = 50;
 // the clock's anchors at 63 included: what the reader copies from the SAB
 // before the context writes its own slots over 51-52 (METRICS_SIZE / 4 in
 // shared_memory.h).
-export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 65 fields in use
+export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 72 fields in use
 
 // =============================================================================
 // Context metrics [51-52, 64-67] (written by main thread into merged array only)
@@ -165,6 +165,13 @@ export const EGRESS_FRAMES_UNDELIVERED = 62;
 export const CLOCK_ANCHORS = 63;
 export const SCHEDULER_LATE_DROPPED = 64;   // timed events dropped as later than the host allows
 export const CUES_DROPPED = 65;             // cues the cue port's rate limit dropped (native only: the web has no cue port)
+// 66-71: how the device kept time, as the native processor sees it with each callback (0 on the web).
+export const DEVICE_MISSED_CYCLES     = 66;   // cycles the driver says the device missed
+export const DEVICE_CLOCK_JUMPS       = 67;   // times the device's sample clock moved by other than the frames played
+export const DEVICE_CLOCK_JUMP_FRAMES = 68;   // the frames it skipped over in them
+export const SILENT_CALLBACKS         = 69;   // callbacks played as silence for want of a block
+export const CALLBACK_GAP_RECENT_US   = 70;   // longest time between two callbacks, this minute and the last (µs)
+export const CALLBACK_GAP_MAX_US      = 71;   // and since the engine started
 export const CTX_IN_BUFFER_CAPACITY = 80;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 81;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 82;        // Static from bufferConstants

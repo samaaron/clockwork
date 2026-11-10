@@ -10,6 +10,8 @@
  */
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <cstdint>
 #include <thread>
 
 #include "native/RealtimeThread.h"
@@ -113,3 +115,26 @@ TEST_CASE("elevateCurrentThreadToRealtime is a no-op on this platform", "[realti
 }
 
 #endif
+
+// The CPU time a thread has had: what tells an audio callback that took long
+// because it worked from one that took long because the thread was waiting or
+// set aside (the [overrun] line). It grows while the thread works, and not
+// while it sleeps.
+TEST_CASE("currentThreadCpuSeconds grows with work and not with sleep", "[realtime]") {
+    const double start = clockwork::currentThreadCpuSeconds();
+#if defined(_WIN32)
+    CHECK(start < 0.0);   // too coarse to say on Windows: it says so
+#else
+    REQUIRE(start >= 0.0);
+    // Working: 10 ms of it, however busy the machine.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    volatile uint64_t spin = 0;
+    while (clockwork::currentThreadCpuSeconds() - start < 0.010 && std::chrono::steady_clock::now() < deadline)
+        for (int i = 0; i < 10000; ++i) spin = spin + 1;
+    const double worked = clockwork::currentThreadCpuSeconds();
+    CHECK(worked - start >= 0.010);
+    // Asleep for 50 ms: barely any.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(clockwork::currentThreadCpuSeconds() - worked < 0.010);
+#endif
+}

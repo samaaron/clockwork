@@ -133,6 +133,28 @@ it is listed, else the last input if it is listed.
 - **The audio thread** reaches the session only through the attached
   processor, and takes no lock.
 
+## What a dropout leaves behind
+
+A device can lose audio the engine rendered on time, so the processor
+checks, with every callback, what the driver says about how the device kept
+time (`smoothie::BlockTime`, `ClockworkProcessor::noteDeviceTime`). Each is
+counted in the metrics block since the engine started (words 66-71, the
+panel's Device card), and said in the log at most once a second:
+
+| what | from | count | log |
+|---|---|---|---|
+| cycles the driver says the device missed | `getXRunCount`: CoreAudio's overload notices, ALSA's xruns | `deviceMissedCycles` | `[device] the driver says the device missed …` |
+| the device's sample clock moving by other than the frames played | the buffer's sample time (CoreAudio) | `deviceClockJumps`, `deviceClockJumpFrames` | `[device] the device's clock moved …` |
+| a callback with no block to play, once the engine has rendered one | the core's gate held, or no block ready | `silentCallbacks` | `[device] … frames played as silence: …` |
+| the longest time between two callbacks | the monotonic clock | `callbackGapRecentUs`, `callbackGapMaxUs` | none |
+
+A render that overran its budget is the processor's own (`cbOverruns`,
+`[overrun]`, with how much of the callback the thread spent on the CPU: an
+overrun that was not work was time the thread waited or was set aside by the
+scheduler), and audio away for over `kClockStepSeconds` is the clock's
+(`[clock] audio resumed after …`). A driver that can't say leaves its count
+at 0.
+
 ## Testing
 
 No test opens a real device unless it is tagged `[.hardware]`
@@ -144,7 +166,8 @@ real session whose only drivers are fakes, with their devices scripted —
 - **dying where they stand;**
 - **lying about their rate;**
 - **held at another rate by another app;**
-- **unplugged and back.**
+- **unplugged and back;**
+- **missing cycles, or skipping frames of their own clock.**
 
 Each fake driver behaves like a real one (`behaveLike`): how CoreAudio,
 WASAPI, ASIO, ALSA, JACK or PipeWire hears of a change, and whether it has a

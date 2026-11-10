@@ -95,6 +95,12 @@ inline constexpr FieldInfo kFields[] = {
     { 63, "clockAnchors", "count", "Times the audio clock was re-anchored since boot" },
     { 64, "engineSchedulerLateDropped", "count", "Timed events dropped for coming due later than the host allows (schedulerLateLimitMs); 0 unless a host set a limit" },
     { 65, "cuesDropped", "count", "Cues the cue port's rate limit dropped: a sender over its rate, or the port over its own. 0 unless someone floods it" },
+    { 66, "deviceMissedCycles", "count", "Cycles the audio driver says the device missed since the engine started (macOS's overload notices, ALSA's xruns): audio that never reached the device. 0 where the driver can't say" },
+    { 67, "deviceClockJumps", "count", "Times the device's own sample clock moved by other than the frames played: audio the device skipped or replayed" },
+    { 68, "deviceClockJumpFrames", "frames", "Frames the device's sample clock skipped over in those jumps" },
+    { 69, "silentCallbacks", "count", "Audio callbacks played as silence for want of a block, once the engine had rendered its first: a control call holding the engine, or no block ready" },
+    { 70, "callbackGapRecentUs", "us", "Longest time between the starts of two audio callbacks, this minute and the last" },
+    { 71, "callbackGapMaxUs", "us", "Longest time between the starts of two audio callbacks since the engine started" },
     { 80, "inBufferCapacity", "bytes", "IN ring buffer capacity" },
     { 81, "outBufferCapacity", "bytes", "OUT ring buffer capacity" },
     { 82, "nrtOutBufferCapacity", "bytes", "NRT-out ring buffer capacity" },
@@ -145,6 +151,8 @@ inline constexpr CompositeInfo kComposites[] = {
     { "linkAudioPublishSinks", "Link Audio publishing state (1 = on) | active output sinks" },
     { "busChannelsOutIn", "Output | input audio bus channels" },
     { "nrtWorstRecentBoot", "Worst control pass in the last minute | since boot (ms)" },
+    { "deviceClockJumpsFrames", "Times the device's sample clock moved by other than the frames played | the frames it skipped over" },
+    { "callbackGapRecentBoot", "Longest time between the starts of two audio callbacks, lately | since the engine started (ms)" },
 };
 
 // The engine's block as words: whether each is signed, and its slot in the
@@ -162,9 +170,9 @@ inline constexpr int8_t kMetricHistorySlot[kMetricWords] = {
     14, 15, 16, 17, 18, 19, 20, 21, 22, 23, -1, 24, 25, 26, 27, 28,
     29, 30, 31, 32, 33, 34, 35, -1, -1, -1, -1, -1, -1, -1, 36, 37,
     38, 39, 40, 41, -1, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
-    53, 54, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    53, 54, 55, 56, 57, 58, 59, 60, -1, -1, -1, -1, -1, -1, -1, -1,
 };
-inline constexpr uint32_t kMetricHistoryCount = 55;
+inline constexpr uint32_t kMetricHistoryCount = 61;
 
 inline const char* descriptionForComposite(const char* key)
 {
@@ -286,6 +294,16 @@ inline constexpr LayoutCell kLayoutCells[] = {
     { CellType::Metric, 44, "", "", "" },
     { CellType::Separator, 0, " | ", "", "" },
     { CellType::Metric, 45, "", "muted", "" },
+    { CellType::Metric, 66, "", "error", "" },
+    { CellType::Metric, 67, "", "error", "" },
+    { CellType::Separator, 0, " | ", "", "" },
+    { CellType::Metric, 68, "", "muted", "" },
+    { CellType::Text, 0, " frames", "muted", "" },
+    { CellType::Metric, 69, "", "error", "" },
+    { CellType::Metric, 70, "", "", "latencyUs" },
+    { CellType::Separator, 0, " | ", "", "" },
+    { CellType::Metric, 71, "", "muted", "latencyUs" },
+    { CellType::Text, 0, " ms", "muted", "" },
     { CellType::Metric, 46, "", "", "milliBpm" },
     { CellType::Text, 0, " bpm", "muted", "" },
     { CellType::Metric, 47, "", "dim", "centi" },
@@ -350,21 +368,25 @@ inline constexpr LayoutRow kLayoutRows[] = {
     { "rate", "Output sample rate", Platform::Both, false, 0, 0, "", 49, 2 },
     { "block", "Audio block size in frames per callback", Platform::Both, false, 0, 0, "", 51, 2 },
     { "channels", "Output | input audio bus channels", Platform::Both, false, 0, 0, "", 53, 3 },
-    { "tempo", "Tempo of the engine's internal ClockworkClock", Platform::Both, false, 0, 0, "", 56, 2 },
-    { "beat", "Current ClockworkClock beat position", Platform::Both, false, 0, 0, "", 58, 1 },
-    { "phase", "Phase within the quantum", Platform::Both, false, 0, 0, "", 59, 1 },
-    { "playing", "Transport playing (0/1)", Platform::Both, false, 0, 0, "", 60, 1 },
-    { "peers", "Connected Ableton Link peers on the network", Platform::Native, false, 0, 0, "", 61, 1 },
-    { "load", "Average DSP load: how much of each audio callback's time budget the render consumed, smoothed over the last ~10 callbacks. 100% means rendering ate the whole real-time deadline", Platform::Native, false, 0, 0, "", 62, 2 },
-    { "peak", "Peak DSP load: spikes show immediately, then decay ~5% per callback so they fade instead of pinning forever. Sustained values near 100% risk audible glitches", Platform::Native, false, 0, 0, "", 64, 2 },
-    { "overruns", "Audio callbacks that overran their time budget", Platform::Native, false, 0, 0, "", 66, 1 },
-    { "blocked", "How long the control thread has been stuck in the command it is handling right now. Anything but 0 means later commands, and every reply behind them, are waiting", Platform::Native, false, 0, 0, "", 67, 2 },
-    { "worst", "Worst control pass in the last minute | since boot (ms)", Platform::Native, false, 0, 0, "", 69, 4 },
-    { "in", "Received Link Audio channels and their sample rate", Platform::Native, false, 0, 0, "", 73, 4 },
-    { "underruns", "Link Audio input frames that arrived too late to play, every input together", Platform::Native, false, 0, 0, "", 77, 1 },
-    { "buffered", "Received Link Audio held ahead of playback, the most of any input (ms)", Platform::Native, false, 0, 0, "", 78, 2 },
-    { "drift", "Read-rate deviation from the sender's clock (parts per million)", Platform::Native, false, 0, 0, "", 80, 2 },
-    { "publish", "Link Audio publishing state (1 = on) | active output sinks", Platform::Native, false, 0, 0, "", 82, 4 },
+    { "missed", "Cycles the audio driver says the device missed since the engine started (macOS's overload notices, ALSA's xruns): audio that never reached the device. 0 where the driver can't say", Platform::Native, false, 0, 0, "", 56, 1 },
+    { "clock jumps", "Times the device's sample clock moved by other than the frames played | the frames it skipped over", Platform::Native, false, 0, 0, "", 57, 4 },
+    { "silent", "Audio callbacks played as silence for want of a block, once the engine had rendered its first: a control call holding the engine, or no block ready", Platform::Native, false, 0, 0, "", 61, 1 },
+    { "longest gap", "Longest time between the starts of two audio callbacks, lately | since the engine started (ms)", Platform::Native, false, 0, 0, "", 62, 4 },
+    { "tempo", "Tempo of the engine's internal ClockworkClock", Platform::Both, false, 0, 0, "", 66, 2 },
+    { "beat", "Current ClockworkClock beat position", Platform::Both, false, 0, 0, "", 68, 1 },
+    { "phase", "Phase within the quantum", Platform::Both, false, 0, 0, "", 69, 1 },
+    { "playing", "Transport playing (0/1)", Platform::Both, false, 0, 0, "", 70, 1 },
+    { "peers", "Connected Ableton Link peers on the network", Platform::Native, false, 0, 0, "", 71, 1 },
+    { "load", "Average DSP load: how much of each audio callback's time budget the render consumed, smoothed over the last ~10 callbacks. 100% means rendering ate the whole real-time deadline", Platform::Native, false, 0, 0, "", 72, 2 },
+    { "peak", "Peak DSP load: spikes show immediately, then decay ~5% per callback so they fade instead of pinning forever. Sustained values near 100% risk audible glitches", Platform::Native, false, 0, 0, "", 74, 2 },
+    { "overruns", "Audio callbacks that overran their time budget", Platform::Native, false, 0, 0, "", 76, 1 },
+    { "blocked", "How long the control thread has been stuck in the command it is handling right now. Anything but 0 means later commands, and every reply behind them, are waiting", Platform::Native, false, 0, 0, "", 77, 2 },
+    { "worst", "Worst control pass in the last minute | since boot (ms)", Platform::Native, false, 0, 0, "", 79, 4 },
+    { "in", "Received Link Audio channels and their sample rate", Platform::Native, false, 0, 0, "", 83, 4 },
+    { "underruns", "Link Audio input frames that arrived too late to play, every input together", Platform::Native, false, 0, 0, "", 87, 1 },
+    { "buffered", "Received Link Audio held ahead of playback, the most of any input (ms)", Platform::Native, false, 0, 0, "", 88, 2 },
+    { "drift", "Read-rate deviation from the sender's clock (parts per million)", Platform::Native, false, 0, 0, "", 90, 2 },
+    { "publish", "Link Audio publishing state (1 = on) | active output sinks", Platform::Native, false, 0, 0, "", 92, 4 },
 };
 
 inline constexpr LayoutPanel kLayoutPanels[] = {
@@ -375,9 +397,10 @@ inline constexpr LayoutPanel kLayoutPanels[] = {
     { "Ring Buffer Level", 19, 4 },
     { "AudioWorklet", 23, 4 },
     { "Audio", 27, 4 },
-    { "Clock", 31, 5 },
-    { "Performance", 36, 5 },
-    { "Link Audio", 41, 5 },
+    { "Device", 31, 4 },
+    { "Clock", 35, 5 },
+    { "Performance", 40, 5 },
+    { "Link Audio", 45, 5 },
 };
 
 } // namespace metrics_schema

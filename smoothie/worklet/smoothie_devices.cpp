@@ -147,6 +147,7 @@ public:
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override {
         std::lock_guard<std::mutex> lock(mLifecycle);
+        mDevice.store(device);
         if (mLifecycleProcessor != nullptr) mLifecycleProcessor->deviceStarting(describe(*device));
     }
 
@@ -160,6 +161,10 @@ public:
         if (Processor* processor = mProcessor.load()) {
             BlockTime time;
             if (context.hostTimeNs != nullptr) time.hostTimeNs = *context.hostTimeNs;
+            if (context.deviceSampleTime != nullptr) time.deviceFrame = *context.deviceSampleTime;
+            // The device calling is the one that started: it is alive.
+            if (juce::AudioIODevice* device = mDevice.load())
+                if (const int misses = device->getXRunCount(); misses >= 0) time.driverMisses = misses;
             processor->process(inputs, numInputs, outputs, numOutputs, frames, time);
         } else {
             for (int c = 0; c < numOutputs; ++c)
@@ -170,6 +175,7 @@ public:
 
     void audioDeviceStopped() override {
         std::lock_guard<std::mutex> lock(mLifecycle);
+        mDevice.store(nullptr);
         if (mLifecycleProcessor != nullptr) mLifecycleProcessor->deviceStopped();
     }
 
@@ -178,6 +184,9 @@ private:
     Processor*              mLifecycleProcessor = nullptr;   // under mLifecycle
     std::atomic<Processor*> mProcessor{nullptr};              // what a block calls
     std::atomic<bool>       mInBlock{false};
+    // The device between its start and its stop: what a block asks for its
+    // missed cycles.
+    std::atomic<juce::AudioIODevice*> mDevice{nullptr};
 };
 
 }  // namespace

@@ -70,6 +70,14 @@ struct AudioIODeviceCallbackContext
         an integer holding the current value; otherwise, this will be nullptr.
     */
     const uint64_t* hostTimeNs = nullptr;
+
+    /** smoothie addition: the device's own count of frames at this buffer's
+        first frame, as its clock keeps it (CoreAudio's sample time), or
+        nullptr when the driver can't say. From one buffer to the next it
+        moves by the frames played, unless the device skipped or replayed
+        some.
+    */
+    const double* deviceSampleTime = nullptr;
 };
 
 //==============================================================================

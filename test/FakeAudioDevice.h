@@ -93,6 +93,16 @@ struct FakeDeviceSpec {
     // is overridden straight back. 0 = no one else.
     std::atomic<double> heldRate { 0 };
 
+    // How its driver says it kept time (juce::AudioIODeviceCallbackContext::
+    // deviceSampleTime, getXRunCount). Its sample clock goes with each buffer,
+    // from 0 as it starts, moving by the frames it played. Atomic: a case sets
+    // them on a running engine.
+    // Frames the clock jumps before the next buffer, as hardware that missed
+    // a cycle does (negative: replayed); taken by that buffer.
+    std::atomic<int64_t> skipFrames { 0 };
+    // Cycles its driver says the device missed since it opened.
+    std::atomic<int> missedCycles { 0 };
+
     // What the device played on its first output, when a case listens: every
     // block in the order played, and the sample count at each stop — where a
     // run of blocks ended. Null: nothing is kept.
@@ -327,6 +337,7 @@ public:
     bool joinedVirtualTime() const { return !mPlaying.load() || mJoinedVirtual; }
 
     bool isPlaying() override { return mPlaying.load(); }
+    int getXRunCount() const noexcept override { return primary()->missedCycles.load(); }
     std::string getLastError() override { return {}; }
     int getCurrentBufferSizeSamples() override { return mBufferSize; }
     double getCurrentSampleRate() override { return mRate; }
@@ -396,6 +407,7 @@ private:
         const auto period = std::chrono::microseconds(static_cast<int64_t>(periodUs));
         auto next = std::chrono::steady_clock::now();
         FakeSystem& sys = *mSystem;
+        double sampleTime = 0;   // the device's own clock, from 0 as it starts
         while (mPlaying.load()) {
             // On the case's clock: wait for this block to fall due (the first
             // is due as the device joins).
@@ -421,10 +433,14 @@ private:
                     }
                 }
             }
+            sampleTime += static_cast<double>(primary()->skipFrames.exchange(0));
+            juce::AudioIODeviceCallbackContext context;
+            context.deviceSampleTime = &sampleTime;
             if (mCallback)
                 mCallback->audioDeviceIOCallbackWithContext(
                     nIn > 0 ? inPtrs.data() : nullptr, nIn,
-                    outPtrs.data(), nOut, mBufferSize, {});
+                    outPtrs.data(), nOut, mBufferSize, context);
+            sampleTime += mBufferSize;
             if (const auto& played = primary()->played; played && nOut > 0) {
                 std::lock_guard<std::mutex> pl(played->m);
                 played->samples.insert(played->samples.end(), outBufs[0].begin(), outBufs[0].end());

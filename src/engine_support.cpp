@@ -15,6 +15,7 @@
 #include "dsp_api.h"
 #include "shared_memory.h"
 #include "core_state.h"        // the core's arena
+#include "audio_processor.h"   // ClockworkDeviceTime
 
 /* ── Native statistics ───────────────────────────────────────────────────────
  *
@@ -47,4 +48,18 @@ extern "C" void clockwork_publish_nrt_blocking(ClockworkCore* core, uint32_t max
     store_stat(core, NATIVE_STAT_NRT_MAX_PASS_US, maxPassUs);
     store_stat(core, NATIVE_STAT_NRT_RECENT_WORST_US, recentWorstUs);
     store_stat(core, NATIVE_STAT_NRT_IN_FLIGHT_US, inFlightUs);
+}
+
+/* How the device kept time, into the metrics block (words 66-71): the
+ * processor's own totals, so a block a restart cleared is whole again at the
+ * next callback. */
+extern "C" void clockwork_publish_device_time(ClockworkCore* core, const ClockworkDeviceTime* t) {
+    PerformanceMetrics* const m = clockwork::metrics_in(clockwork::laid_out_base(core));
+    if (!m || !t) return;
+    m->device_missed_cycles.store(t->missed_cycles, std::memory_order_relaxed);
+    m->device_clock_jumps.store(t->clock_jumps, std::memory_order_relaxed);
+    m->device_clock_jump_frames.store(t->clock_jump_frames, std::memory_order_relaxed);
+    m->silent_callbacks.store(t->silent_callbacks, std::memory_order_relaxed);
+    m->callback_gap_recent_us.store(t->callback_gap_recent_us, std::memory_order_relaxed);
+    m->callback_gap_max_us.store(t->callback_gap_max_us, std::memory_order_relaxed);
 }

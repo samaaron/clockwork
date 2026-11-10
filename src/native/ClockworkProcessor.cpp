@@ -155,6 +155,11 @@ void ClockworkProcessor::deviceStarting(const smoothie::DeviceInfo& device) {
     // audio thread itself (this function runs on the control thread).
     mRealtimeElevated.store(false, std::memory_order_relaxed);
     mFirstCallbackLog.reset();
+    // A new device run: its first callback is measured against nothing.
+    mLastDeviceFrame  = -1.0;
+    mLastFrames       = 0;
+    mLastDriverMisses = -1;
+    mLastCallbackSec  = 0.0;
 
     // Sync our internal channel counts from what the device actually opened.
     // mNumInput/OutputChannels are what we tell the DSP (via clockwork_tick's
@@ -276,7 +281,8 @@ void ClockworkProcessor::resume() {
     // pause as a gap.
     clockwork_audio_starts(mCore, wallClockNTP(), clockwork::monotonicSeconds());
     mCallbackCount  = 0;       // re-arm warmup for new device
-    mOverrunCount   = 0;
+    // mOverrunCount is not reset: overruns count since the engine started,
+    // as every count on the panel does, so a restart cannot hide one.
     mTotalUs        = 0.0;
     mMaxUs          = 0.0;
 
@@ -332,6 +338,84 @@ bool ClockworkProcessor::isPaused() const {
     return mPaused.load(std::memory_order_acquire);
 }
 
+// --- How the device kept time ---
+//
+// What a dropout leaves in what the driver says, when every block rendered in
+// time: the driver's own count of cycles the device missed, the device's
+// sample clock moving by other than the frames played, and the time between
+// callbacks. Counted since the engine started, published with the DSP load at
+// the end of each callback that is not paused (clockwork_publish_device_time:
+// a restart may be resetting the metrics block meanwhile), and each kind said
+// in the log at most once a second. No I/O: clockwork_log only writes the
+// core's ring.
+void ClockworkProcessor::noteDeviceTime(int frames, const smoothie::BlockTime& time) {
+    const double now = clockwork::monotonicSeconds();
+    const auto nowNs = static_cast<uint64_t>(now * 1e9);
+    const double frameMs = mSampleRate > 0 ? 1000.0 / mSampleRate : 0.0;
+
+    // The time since the last callback of this device run: the longest this
+    // minute and the last, and ever.
+    if (mGapMinuteStart <= 0.0) mGapMinuteStart = now;
+    if (now - mGapMinuteStart >= 60.0) {
+        mGapLastMinuteUs = mGapThisMinuteUs;
+        mGapThisMinuteUs = 0.0;
+        mGapMinuteStart  = now;
+    }
+    if (mLastCallbackSec > 0.0) {
+        const double gapUs = (now - mLastCallbackSec) * 1e6;
+        mGapThisMinuteUs = std::max(mGapThisMinuteUs, gapUs);
+        if (gapUs > mDeviceTime.callback_gap_max_us)
+            mDeviceTime.callback_gap_max_us = static_cast<uint32_t>(std::min(gapUs, 4.0e9));
+    }
+    mLastCallbackSec = now;
+    mDeviceTime.callback_gap_recent_us =
+        static_cast<uint32_t>(std::min(std::max(mGapThisMinuteUs, mGapLastMinuteUs), 4.0e9));
+
+    // The driver's own count of the cycles it missed (CoreAudio's overload
+    // notices, ALSA's xruns), from when this device run was first measured.
+    if (time.driverMisses >= 0) {
+        if (mLastDriverMisses >= 0 && time.driverMisses > mLastDriverMisses) {
+            const auto missed = static_cast<uint32_t>(std::min<int64_t>(time.driverMisses - mLastDriverMisses, 1 << 30));
+            mDeviceTime.missed_cycles += missed;
+            if (mMissedLog.say(nowNs))
+                clockwork_log(mCore, "[device] the driver says the device missed %u cycle%s "
+                              "(%u since the engine started)",
+                              missed, missed == 1 ? "" : "s", mDeviceTime.missed_cycles);
+        }
+        mLastDriverMisses = time.driverMisses;
+    }
+
+    // The device's own sample clock against the frames it was given: a
+    // difference is audio it skipped (ahead) or replayed (behind).
+    if (time.deviceFrame >= 0.0) {
+        if (mLastDeviceFrame >= 0.0) {
+            const double moved = time.deviceFrame - mLastDeviceFrame - mLastFrames;
+            if (std::fabs(moved) >= 1.0) {
+                mDeviceTime.clock_jumps++;
+                if (moved > 0.0)
+                    mDeviceTime.clock_jump_frames += static_cast<uint32_t>(std::min(moved, 1.0e9));
+                if (mJumpLog.say(nowNs))
+                    clockwork_log(mCore, "[device] the device's clock moved %+.0f frames (%+.1f ms) beyond the "
+                                  "%d it played (%u jumps since the engine started)",
+                                  moved, moved * frameMs, mLastFrames, mDeviceTime.clock_jumps);
+            }
+        }
+        mLastDeviceFrame = time.deviceFrame;
+    }
+    mLastFrames = frames;
+}
+
+// A callback the device played as silence for want of a block: the engine not
+// built yet, or a control call holding it (CLOCKWORK_TICK_BUSY: a restart).
+void ClockworkProcessor::noteSilentCallback(int frames, bool busy) {
+    mDeviceTime.silent_callbacks++;
+    const double now = clockwork::monotonicSeconds();
+    if (mSilentLog.say(static_cast<uint64_t>(now * 1e9)))
+        clockwork_log(mCore, "[device] %d frames played as silence: %s (%u callbacks since the engine started)",
+                      frames, busy ? "a control call held the engine" : "the engine had no block ready",
+                      mDeviceTime.silent_callbacks);
+}
+
 void ClockworkProcessor::process(
     const float* const* inputChannelData,
     int numInputChannels,
@@ -359,6 +443,10 @@ void ClockworkProcessor::process(
         clockwork_log(mCore, "[smoothie] audio thread realtime: status=%d policy=%d prio=%d err=%d",
                static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
     }
+
+    // How the device kept time up to this callback: on every callback, paused
+    // or warming up too, because a dropout is the device's whatever is played.
+    noteDeviceTime(numSamples, time);
 
     // ── If paused, output silence and touch nothing else ──────────────────────
     // Placed before the warmup counter and mSamplePosition reads
@@ -411,6 +499,9 @@ void ClockworkProcessor::process(
 
     // ── Timing measurement ────────────────────────────────────────────────────
     auto cbStart = std::chrono::high_resolution_clock::now();
+    // The thread's own CPU time too: an overrun that was not work was time
+    // the thread waited or was set aside, and the line says which.
+    const double cpuStart = clockwork::currentThreadCpuSeconds();
     const double cbWall = wallClockNTP();   // this callback's wall time: the clock's target, and the engine's record of it
     const double cbMono = clockwork::monotonicSeconds();   // and its monotonic time: the record a set clock cannot fool
 
@@ -545,6 +636,7 @@ void ClockworkProcessor::process(
         // gate, and the buffers are that call's.
         const float* outputBus = tick == CLOCKWORK_TICK_RENDERED ? clockwork_audio_out(mCore) : nullptr;
         if (outputBus) {
+            mRendered = true;
             int needed  = numSamples - outputFilled;
             int toCopy  = std::min(needed, mBufLen);
 
@@ -573,6 +665,8 @@ void ClockworkProcessor::process(
                 if (outputChannelData[ch])
                     std::memset(outputChannelData[ch] + outputFilled, 0,
                                 static_cast<size_t>(numSamples - outputFilled) * sizeof(float));
+            // At boot, before the engine's first block, silence is the plan.
+            if (mRendered) noteSilentCallback(numSamples - outputFilled, tick == CLOCKWORK_TICK_BUSY);
             outputFilled = numSamples;
         }
     }
@@ -601,9 +695,15 @@ void ClockworkProcessor::process(
             std::chrono::duration<double>(cbEnd.time_since_epoch()).count();
         if (nowSec - mLastOverrunLogSec >= 1.0) {
             mLastOverrunLogSec = nowSec;
-            clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget "
-                   "(total overruns: %u)",
-                   cbUs / 1000.0, budgetUs / 1000.0, mOverrunCount);
+            const double cpuEnd = clockwork::currentThreadCpuSeconds();
+            if (cpuStart >= 0.0 && cpuEnd >= cpuStart)
+                clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget, %.2fms of it on the CPU "
+                       "(total overruns: %u)",
+                       cbUs / 1000.0, budgetUs / 1000.0, (cpuEnd - cpuStart) * 1000.0, mOverrunCount);
+            else
+                clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget "
+                       "(total overruns: %u)",
+                       cbUs / 1000.0, budgetUs / 1000.0, mOverrunCount);
         }
     }
 
@@ -619,6 +719,7 @@ void ClockworkProcessor::process(
                                static_cast<uint32_t>(std::lround(mLoadPeakPct * 100.0)),
                                mOverrunCount);
     }
+    clockwork_publish_device_time(mCore, &mDeviceTime);
 
     // ── 5. The block is done: count it and wake its waiters ────────────────────
     blockDone();

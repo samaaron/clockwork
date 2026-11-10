@@ -832,9 +832,16 @@ public:
 
             const auto* timeStamp = numOutputChans > 0 ? outputTimestamp : inputTimestamp;
             const auto nanos = timeStamp != nullptr ? timeConversions.hostTimeToNanos (timeStamp->mHostTime) : 0;
+            // smoothie: the device's sample clock goes with each buffer, so the
+            // processor can see the device skip or replay frames
+            // (AudioIODeviceCallbackContext::deviceSampleTime).
+            const bool sampleTimeValid = timeStamp != nullptr
+                                      && (timeStamp->mFlags & kAudioTimeStampSampleTimeValid) != 0;
+            const double sampleTime = sampleTimeValid ? timeStamp->mSampleTime : 0.0;
             const AudioIODeviceCallbackContext context
             {
                 timeStamp != nullptr ? &nanos : nullptr,
+                sampleTimeValid ? &sampleTime : nullptr,
             };
 
             callback->audioDeviceIOCallbackWithContext (getTempBuffers (inStream),  numInputChans,
@@ -1064,7 +1071,9 @@ public:
 
     CoreAudioIODevice& owner;
     int bitDepth = 32;
-    int xruns = 0;
+    // smoothie: atomic. CoreAudio's notification thread counts overloads, and
+    // the audio thread reads the count with each buffer (getXRunCount).
+    std::atomic<int> xruns { 0 };
     Array<double> sampleRates;
     Array<int> bufferSizes;
     AudioDeviceID deviceID;
@@ -1157,7 +1166,7 @@ private:
                 return x.mSelector == kAudioDeviceProcessorOverload;
             });
 
-            intern.xruns += xruns;
+            intern.xruns.fetch_add (static_cast<int> (xruns), std::memory_order_relaxed);
 
             const auto detailsChanged = std::any_of (pa, pa + numAddresses, [] (const AudioObjectPropertyAddress& x)
             {
@@ -1261,7 +1270,7 @@ public:
     double getCurrentSampleRate() override              { return internal->getSampleRate(); }
     int getCurrentBitDepth() override                   { return internal->bitDepth; }
     int getCurrentBufferSizeSamples() override          { return internal->getBufferSize(); }
-    int getXRunCount() const noexcept override          { return internal->xruns; }
+    int getXRunCount() const noexcept override          { return internal->xruns.load (std::memory_order_relaxed); }
 
     int getIndexOfDevice (bool asInput) const           { return indexOfName (deviceType->getDeviceNames (asInput), getName()); }
 
@@ -1283,7 +1292,7 @@ public:
                  double sampleRate, int bufferSizeSamples) override
     {
         isOpen_ = true;
-        internal->xruns = 0;
+        internal->xruns.store (0, std::memory_order_relaxed);
 
         if (bufferSizeSamples <= 0)
             bufferSizeSamples = getDefaultBufferSize();

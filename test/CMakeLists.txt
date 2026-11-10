@@ -510,6 +510,8 @@ add_executable(clockwork_engine_tests
     test_callback_watchdog.cpp
     test_headless_pacing.cpp
     test_audio_gap.cpp
+    test_device_dropouts.cpp
+    test_refused_in.cpp
     test_late_events.cpp
     test_cold_swap_recovery.cpp
     test_rate_skew_recovery.cpp

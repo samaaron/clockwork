@@ -48,7 +48,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 66 in use
+constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 72 in use
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -803,7 +803,25 @@ struct alignas(4) PerformanceMetrics {
     // /clockwork/osc/cue-server/limit): a sender over its rate, or the port
     // over its own. 0 unless someone floods it.
     std::atomic<uint32_t> cues_dropped;              // 65
-    std::atomic<uint32_t> reserved[14];              // 66-79: room for what comes next, 0
+    // How the device kept time, as the processor sees it with each callback
+    // (ClockworkProcessor; native only, 0 on the web): what can be heard as a
+    // dropout while every block rendered in time. Since the engine started.
+    // Cycles the driver says the device missed (CoreAudio's overload
+    // notices, ALSA's xruns): 0 where the driver can't say.
+    std::atomic<uint32_t> device_missed_cycles;      // 66
+    // Times the device's own sample clock moved by other than the frames
+    // played, and the frames it skipped over in them.
+    std::atomic<uint32_t> device_clock_jumps;        // 67
+    std::atomic<uint32_t> device_clock_jump_frames;  // 68
+    // Callbacks the device played as silence for want of a block, once the
+    // engine had rendered its first: a control call holding it, or no block
+    // ready.
+    std::atomic<uint32_t> silent_callbacks;          // 69
+    // The longest time between the starts of two callbacks of one device
+    // run, in microseconds: lately (this minute and the last) and ever.
+    std::atomic<uint32_t> callback_gap_recent_us;    // 70
+    std::atomic<uint32_t> callback_gap_max_us;       // 71
+    std::atomic<uint32_t> reserved[8];               // 72-79: room for what comes next, 0
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -1373,6 +1391,12 @@ CLOCKWORK_ASSERT_METRIC(clock_drift_us,                  50);
 CLOCKWORK_ASSERT_METRIC(clock_anchors,                   63);
 CLOCKWORK_ASSERT_METRIC(scheduler_late_dropped,          64);
 CLOCKWORK_ASSERT_METRIC(cues_dropped,                    65);
+CLOCKWORK_ASSERT_METRIC(device_missed_cycles,            66);
+CLOCKWORK_ASSERT_METRIC(device_clock_jumps,              67);
+CLOCKWORK_ASSERT_METRIC(device_clock_jump_frames,        68);
+CLOCKWORK_ASSERT_METRIC(silent_callbacks,                69);
+CLOCKWORK_ASSERT_METRIC(callback_gap_recent_us,          70);
+CLOCKWORK_ASSERT_METRIC(callback_gap_max_us,             71);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
 // regions that follow (ClockworkClockState) are 8-byte aligned and read via

@@ -2,6 +2,8 @@
 // Copyright (c) 2025 Sam Aaron
 #include "RealtimeThread.h"
 
+#include <ctime>   // clock_gettime, CLOCK_THREAD_CPUTIME_ID
+
 #if defined(__linux__)
 #include <cerrno>
 #include <pthread.h>
@@ -121,6 +123,18 @@ RealtimeResult elevateCurrentThreadToRealtime(double) {
     return elevateCurrentThreadToRealtime();
 }
 
+#endif
+
+#if defined(_WIN32)
+// GetThreadTimes counts in scheduler quanta (~15 ms): too coarse for a
+// callback of a millisecond, so it says nothing rather than something wrong.
+double currentThreadCpuSeconds() { return -1.0; }
+#else
+double currentThreadCpuSeconds() {
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return -1.0;
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+}
 #endif
 
 }  // namespace clockwork

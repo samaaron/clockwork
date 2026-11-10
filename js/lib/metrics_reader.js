@@ -175,6 +175,13 @@ export class MetricsReader {
       engineSchedulerLateDropped: m[MetricsOffsets.SCHEDULER_LATE_DROPPED],
       // cues the cue port's rate limit dropped (0 on the web, which has no cue port)
       cuesDropped: m[MetricsOffsets.CUES_DROPPED],
+      // how the device kept time, as the native processor sees it (0 on the web)
+      deviceMissedCycles: m[MetricsOffsets.DEVICE_MISSED_CYCLES],
+      deviceClockJumps: m[MetricsOffsets.DEVICE_CLOCK_JUMPS],
+      deviceClockJumpFrames: m[MetricsOffsets.DEVICE_CLOCK_JUMP_FRAMES],
+      silentCallbacks: m[MetricsOffsets.SILENT_CALLBACKS],
+      callbackGapRecentUs: m[MetricsOffsets.CALLBACK_GAP_RECENT_US],
+      callbackGapMaxUs: m[MetricsOffsets.CALLBACK_GAP_MAX_US],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)

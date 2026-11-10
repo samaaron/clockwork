@@ -13,6 +13,7 @@
 
 #include "smoothie_worklet.h"
 #include "lanes/lanes.h"   // ClockworkBlockTime
+#include "audio_processor.h"   // ClockworkDeviceTime
 #include "workers/RingReader.h"
 #include "workers/wait_word.h"
 #include "clock/clock_math.h"
@@ -274,4 +275,26 @@ private:
     double   mLoadAvgPct    = 0.0;
     double   mLoadPeakPct   = 0.0;
 
+    // How the device keeps time, as each callback's BlockTime says: what can
+    // be heard as a dropout while every block rendered in time. Checked on
+    // every callback, paused or not (noteDeviceTime); the audio thread's.
+    // What one device run's next callback is measured against: reset as
+    // each device starts (deviceStarting), before its first callback.
+    double   mLastDeviceFrame  = -1.0;   // the device's frame count at the last callback; -1: none
+    int      mLastFrames       = 0;      // and the frames that callback played
+    int64_t  mLastDriverMisses = -1;     // the driver's count of missed cycles then; -1: none
+    double   mLastCallbackSec  = 0.0;    // the last callback's start, monotonic; 0: none
+    // Since the engine started: never reset, so the metric words they are
+    // published to (clockwork_publish_device_time) count every device run.
+    ClockworkDeviceTime mDeviceTime{};
+    bool     mRendered = false;          // the engine has rendered a block: silence from here is counted
+    double   mGapThisMinuteUs = 0.0;     // the longest gap since mGapMinuteStart
+    double   mGapLastMinuteUs = 0.0;     // and in the minute before
+    double   mGapMinuteStart  = 0.0;
+    // One line a second at most for each, by the monotonic clock in ns.
+    clockwork::LogSpacing mMissedLog{1000000000ULL};
+    clockwork::LogSpacing mJumpLog{1000000000ULL};
+    clockwork::LogSpacing mSilentLog{1000000000ULL};
+    void noteDeviceTime(int frames, const smoothie::BlockTime& time);
+    void noteSilentCallback(int frames, bool busy);
 };

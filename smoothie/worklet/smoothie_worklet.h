@@ -40,11 +40,20 @@ struct DeviceInfo {
     std::vector<Channel> outputs;      // every output the device has, in order
 };
 
-// When a block is, as far as the driver can say.
+// When a block is, and how the device has kept time, as far as the driver can
+// say.
 struct BlockTime {
     // The host clock at the block's first frame, in nanoseconds; 0 when the
     // driver supplies none, and the processor keeps its own clock instead.
     uint64_t hostTimeNs = 0;
+    // The device's own count of frames at the block's first frame, as its
+    // clock keeps it; -1 when the driver can't say. From one block to the
+    // next it moves by the frames played, unless the device skipped or
+    // replayed some.
+    double deviceFrame = -1;
+    // Cycles the driver says the device missed since it opened (CoreAudio's
+    // overload notices, ALSA's xruns); -1 when the driver can't say.
+    int64_t driverMisses = -1;
 };
 
 // The processor a device runs: what an AudioWorkletProcessor is to a browser.

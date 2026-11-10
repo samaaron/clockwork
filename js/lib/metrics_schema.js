@@ -42,6 +42,8 @@ const COMPOSITES = {
   linkAudioPublishSinks:     { description: 'Link Audio publishing state (1 = on) | active output sinks' },
   busChannelsOutIn:          { description: 'Output | input audio bus channels' },
   nrtWorstRecentBoot:        { description: 'Worst control pass in the last minute | since boot (ms)' },
+  deviceClockJumpsFrames:    { description: 'Times the device\'s sample clock moved by other than the frames played | the frames it skipped over' },
+  callbackGapRecentBoot:     { description: 'Longest time between the starts of two audio callbacks, lately | since the engine started (ms)' },
 };
 
 export const METRICS_SCHEMA = {
@@ -160,6 +162,14 @@ export const METRICS_SCHEMA = {
     engineSchedulerLateDropped:   { offset: 64, type: 'counter',  unit: 'count', description: 'Timed events dropped for coming due later than the host allows (schedulerLateLimitMs); 0 unless a host set a limit' },
     // The cue port's rate limit (clockwork_osc_set_limit): counted by the cue server, which the web has none of.
     cuesDropped:                  { offset: 65, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Cues the cue port\'s rate limit dropped: a sender over its rate, or the port over its own. 0 unless someone floods it' },
+    // How the device kept time, as the native processor sees it with each callback (ClockworkProcessor): what can
+    // be heard as a dropout while every block rendered in time. The web's device is the browser's (glitchCount).
+    deviceMissedCycles:           { offset: 66, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Cycles the audio driver says the device missed since the engine started (macOS\'s overload notices, ALSA\'s xruns): audio that never reached the device. 0 where the driver can\'t say' },
+    deviceClockJumps:             { offset: 67, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Times the device\'s own sample clock moved by other than the frames played: audio the device skipped or replayed' },
+    deviceClockJumpFrames:        { offset: 68, nativeOnly: true, type: 'counter',  unit: 'frames', description: 'Frames the device\'s sample clock skipped over in those jumps' },
+    silentCallbacks:              { offset: 69, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Audio callbacks played as silence for want of a block, once the engine had rendered its first: a control call holding the engine, or no block ready' },
+    callbackGapRecentUs:          { offset: 70, nativeOnly: true, type: 'gauge',    unit: 'us', description: 'Longest time between the starts of two audio callbacks, this minute and the last' },
+    callbackGapMaxUs:             { offset: 71, nativeOnly: true, type: 'gauge',    unit: 'us', description: 'Longest time between the starts of two audio callbacks since the engine started' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -246,6 +256,15 @@ export const METRICS_SCHEMA = {
           { label: 'rate',     cells: [{ key: 'audioSampleRate' }, { text: ' Hz', kind: 'muted' }] },
           { label: 'block',    cells: [{ key: 'audioBlockSize' }, { text: ' frames', kind: 'muted' }] },
           { label: 'channels', tooltip: COMPOSITES.busChannelsOutIn.description, cells: [{ key: 'audioOutputChannels' }, { sep: ' | ' }, { key: 'audioInputChannels', kind: 'muted' }] },
+        ]
+      },
+      {
+        title: 'Device',
+        rows: [
+          { label: 'missed',      cells: [{ key: 'deviceMissedCycles', kind: 'error' }] },
+          { label: 'clock jumps', tooltip: COMPOSITES.deviceClockJumpsFrames.description, cells: [{ key: 'deviceClockJumps', kind: 'error' }, { sep: ' | ' }, { key: 'deviceClockJumpFrames', kind: 'muted' }, { text: ' frames', kind: 'muted' }] },
+          { label: 'silent',      cells: [{ key: 'silentCallbacks', kind: 'error' }] },
+          { label: 'longest gap', tooltip: COMPOSITES.callbackGapRecentBoot.description, cells: [{ key: 'callbackGapRecentUs', format: 'latencyUs' }, { sep: ' | ' }, { key: 'callbackGapMaxUs', kind: 'muted', format: 'latencyUs' }, { text: ' ms', kind: 'muted' }] },
         ]
       },
       {

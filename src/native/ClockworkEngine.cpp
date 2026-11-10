@@ -1814,6 +1814,7 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
             mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    if (!written) noteRefusedIn(data, size, clockwork_client_status_text(status));
     // No guest instance to take it: refuse it to the sender with the
     // standard refusal, so a transport's peer and an in-process caller get
     // the same reply as a sender on the lanes ABI does (docs/RESTARTS.md).
@@ -1934,7 +1935,22 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
     // no reply).
     if (!ok && self->mMetrics)
         self->mMetrics->messages_dropped.fetch_add(1, std::memory_order_relaxed);
+    if (!ok && len <= kNrtMaxCommand)
+        self->noteRefusedIn(data, static_cast<uint32_t>(len), "the audio-to-control ring was full");
     return true;  // consumed — control never falls through to the DSP
+}
+
+// A message refused on its way in (PerformanceMetrics::messages_dropped), said
+// at most once a second with the count so far: the count alone says neither
+// when nor which. Any thread, the audio thread too: log() only writes a ring.
+void ClockworkEngine::noteRefusedIn(const uint8_t* data, uint32_t size, const char* why) {
+    const auto nowNs = static_cast<uint64_t>(clockwork::monotonicSeconds() * 1e9);
+    if (!mRefusedInLog.say(nowNs)) return;
+    uint32_t a = 0;
+    while (a < size && a < 64 && data[a] != '\0') ++a;
+    log("[engine] a message was refused on its way in: %.*s (%u bytes): %s (%u refused since the engine started)",
+        static_cast<int>(a), reinterpret_cast<const char*>(data), static_cast<unsigned>(size), why,
+        mMetrics ? mMetrics->messages_dropped.load(std::memory_order_relaxed) : 0u);
 }
 
 // --- Device switch / reopen orchestration -------------------------------------

@@ -116,6 +116,12 @@ pub const FIELDS: &[FieldInfo] = &[
     FieldInfo { offset: 63, key: "clockAnchors", unit: "count", description: "Times the audio clock was re-anchored since boot" },
     FieldInfo { offset: 64, key: "engineSchedulerLateDropped", unit: "count", description: "Timed events dropped for coming due later than the host allows (schedulerLateLimitMs); 0 unless a host set a limit" },
     FieldInfo { offset: 65, key: "cuesDropped", unit: "count", description: "Cues the cue port's rate limit dropped: a sender over its rate, or the port over its own. 0 unless someone floods it" },
+    FieldInfo { offset: 66, key: "deviceMissedCycles", unit: "count", description: "Cycles the audio driver says the device missed since the engine started (macOS's overload notices, ALSA's xruns): audio that never reached the device. 0 where the driver can't say" },
+    FieldInfo { offset: 67, key: "deviceClockJumps", unit: "count", description: "Times the device's own sample clock moved by other than the frames played: audio the device skipped or replayed" },
+    FieldInfo { offset: 68, key: "deviceClockJumpFrames", unit: "frames", description: "Frames the device's sample clock skipped over in those jumps" },
+    FieldInfo { offset: 69, key: "silentCallbacks", unit: "count", description: "Audio callbacks played as silence for want of a block, once the engine had rendered its first: a control call holding the engine, or no block ready" },
+    FieldInfo { offset: 70, key: "callbackGapRecentUs", unit: "us", description: "Longest time between the starts of two audio callbacks, this minute and the last" },
+    FieldInfo { offset: 71, key: "callbackGapMaxUs", unit: "us", description: "Longest time between the starts of two audio callbacks since the engine started" },
     FieldInfo { offset: 80, key: "inBufferCapacity", unit: "bytes", description: "IN ring buffer capacity" },
     FieldInfo { offset: 81, key: "outBufferCapacity", unit: "bytes", description: "OUT ring buffer capacity" },
     FieldInfo { offset: 82, key: "nrtOutBufferCapacity", unit: "bytes", description: "NRT-out ring buffer capacity" },
@@ -153,6 +159,8 @@ pub const COMPOSITES: &[CompositeInfo] = &[
     CompositeInfo { key: "linkAudioPublishSinks", description: "Link Audio publishing state (1 = on) | active output sinks" },
     CompositeInfo { key: "busChannelsOutIn", description: "Output | input audio bus channels" },
     CompositeInfo { key: "nrtWorstRecentBoot", description: "Worst control pass in the last minute | since boot (ms)" },
+    CompositeInfo { key: "deviceClockJumpsFrames", description: "Times the device's sample clock moved by other than the frames played | the frames it skipped over" },
+    CompositeInfo { key: "callbackGapRecentBoot", description: "Longest time between the starts of two audio callbacks, lately | since the engine started (ms)" },
 ];
 
 /// The performance metrics by name. `m as u32` is the offset.
@@ -225,6 +233,12 @@ pub enum Metric {
     ClockAnchors = 63,
     EngineSchedulerLateDropped = 64,
     CuesDropped = 65,
+    DeviceMissedCycles = 66,
+    DeviceClockJumps = 67,
+    DeviceClockJumpFrames = 68,
+    SilentCallbacks = 69,
+    CallbackGapRecentUs = 70,
+    CallbackGapMaxUs = 71,
     InBufferCapacity = 80,
     OutBufferCapacity = 81,
     NrtOutBufferCapacity = 82,
@@ -240,7 +254,7 @@ pub enum Metric {
 
 impl Metric {
     /// Every metric, in offset order.
-    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkCommit, Metric::EngineSchedulerCapacity, Metric::EngineSchedulerPoolBytes, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::ClockDriftUs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::GuestPoolUsedBytes, Metric::GuestPoolPeakBytes, Metric::EgressFramesRefused, Metric::RustHeapUsedBytes, Metric::RustHeapFallbacks, Metric::GuestMallocBytes, Metric::GuestMallocsProcessing, Metric::MallocsAfterBoot, Metric::MallocBytesAfterBoot, Metric::EgressFramesUndelivered, Metric::ClockAnchors, Metric::EngineSchedulerLateDropped, Metric::CuesDropped, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
+    pub const ALL: &'static [Metric] = &[Metric::EngineProcessCount, Metric::EngineMessagesProcessed, Metric::EngineMessagesDropped, Metric::EngineSchedulerDepth, Metric::EngineSchedulerPeakDepth, Metric::EngineSchedulerDropped, Metric::EngineSequenceGaps, Metric::EngineWasmErrors, Metric::EngineSchedulerLates, Metric::OscOutMessagesSent, Metric::OscOutBytesSent, Metric::OscInMessagesReceived, Metric::OscInBytesReceived, Metric::OscInMessagesDropped, Metric::OscInCorrupted, Metric::DebugMessagesReceived, Metric::DebugBytesReceived, Metric::InBufferUsedBytes, Metric::OutBufferUsedBytes, Metric::NrtOutBufferUsedBytes, Metric::InBufferPeakBytes, Metric::OutBufferPeakBytes, Metric::NrtOutBufferPeakBytes, Metric::EngineSchedulerMaxLateMs, Metric::EngineSchedulerLastLateMs, Metric::EngineSchedulerLastLateTick, Metric::RingBufferDirectWriteFails, Metric::LinkPeers, Metric::LinkTempoMbpm, Metric::LinkBeatCenti, Metric::LinkPhaseCenti, Metric::LinkPlaying, Metric::LinkAudioInChannels, Metric::LinkAudioStreamRate, Metric::LinkAudioUnderruns, Metric::LinkAudioBufferedMs, Metric::LinkAudioDriftPpm, Metric::LinkAudioPublish, Metric::LinkAudioSinks, Metric::ClockworkCommit, Metric::EngineSchedulerCapacity, Metric::EngineSchedulerPoolBytes, Metric::AudioSampleRate, Metric::AudioBlockSize, Metric::AudioOutputChannels, Metric::AudioInputChannels, Metric::ClockTempoMbpm, Metric::ClockBeatCenti, Metric::ClockPhaseCenti, Metric::ClockPlaying, Metric::ClockDriftUs, Metric::ClockOffsetMs, Metric::AudioContextState, Metric::GuestPoolUsedBytes, Metric::GuestPoolPeakBytes, Metric::EgressFramesRefused, Metric::RustHeapUsedBytes, Metric::RustHeapFallbacks, Metric::GuestMallocBytes, Metric::GuestMallocsProcessing, Metric::MallocsAfterBoot, Metric::MallocBytesAfterBoot, Metric::EgressFramesUndelivered, Metric::ClockAnchors, Metric::EngineSchedulerLateDropped, Metric::CuesDropped, Metric::DeviceMissedCycles, Metric::DeviceClockJumps, Metric::DeviceClockJumpFrames, Metric::SilentCallbacks, Metric::CallbackGapRecentUs, Metric::CallbackGapMaxUs, Metric::InBufferCapacity, Metric::OutBufferCapacity, Metric::NrtOutBufferCapacity, Metric::Mode, Metric::GlitchCount, Metric::GlitchDurationMs, Metric::AverageLatencyUs, Metric::MaxLatencyUs, Metric::AudioHealthPct, Metric::TotalFramesDurationMs, Metric::HasPlaybackStats];
 
     /// The word this metric is, in the metrics array.
     pub const fn offset(self) -> u32 {
@@ -316,17 +330,23 @@ impl Metric {
             Metric::ClockAnchors => &FIELDS[63],
             Metric::EngineSchedulerLateDropped => &FIELDS[64],
             Metric::CuesDropped => &FIELDS[65],
-            Metric::InBufferCapacity => &FIELDS[66],
-            Metric::OutBufferCapacity => &FIELDS[67],
-            Metric::NrtOutBufferCapacity => &FIELDS[68],
-            Metric::Mode => &FIELDS[69],
-            Metric::GlitchCount => &FIELDS[70],
-            Metric::GlitchDurationMs => &FIELDS[71],
-            Metric::AverageLatencyUs => &FIELDS[72],
-            Metric::MaxLatencyUs => &FIELDS[73],
-            Metric::AudioHealthPct => &FIELDS[74],
-            Metric::TotalFramesDurationMs => &FIELDS[75],
-            Metric::HasPlaybackStats => &FIELDS[76],
+            Metric::DeviceMissedCycles => &FIELDS[66],
+            Metric::DeviceClockJumps => &FIELDS[67],
+            Metric::DeviceClockJumpFrames => &FIELDS[68],
+            Metric::SilentCallbacks => &FIELDS[69],
+            Metric::CallbackGapRecentUs => &FIELDS[70],
+            Metric::CallbackGapMaxUs => &FIELDS[71],
+            Metric::InBufferCapacity => &FIELDS[72],
+            Metric::OutBufferCapacity => &FIELDS[73],
+            Metric::NrtOutBufferCapacity => &FIELDS[74],
+            Metric::Mode => &FIELDS[75],
+            Metric::GlitchCount => &FIELDS[76],
+            Metric::GlitchDurationMs => &FIELDS[77],
+            Metric::AverageLatencyUs => &FIELDS[78],
+            Metric::MaxLatencyUs => &FIELDS[79],
+            Metric::AudioHealthPct => &FIELDS[80],
+            Metric::TotalFramesDurationMs => &FIELDS[81],
+            Metric::HasPlaybackStats => &FIELDS[82],
         }
     }
 
