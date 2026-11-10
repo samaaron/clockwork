@@ -16,12 +16,14 @@
  */
 
 import { calculateInControlIndices } from '../lib/ring_cursor_offsets.js';
-import { getCurrentNTPFromPerformance as getCurrentNTP } from '../lib/osc_classifier.js';
+import { engineTimeReader } from '../lib/sample_clock.js';
 import { runSabWorker } from '../lib/sab_worker_loop.js';
 import { RingTap } from '../lib/ring.js';
 
 let tap = null;
 let reportedMissed = 0;
+// when a message was seen going in, on the engine's clock: the one its time stamp is on
+const engineNow = engineTimeReader();
 
 /**
  * Read whatever has been sent since this worker last looked.
@@ -31,6 +33,7 @@ function readLogMessages(ctx) {
 
     const entries = [];
     const bytes = ctx.rings.ingress.bytes;
+    const seenAt = engineNow(ctx);
 
     tap.poll(0, (origin, offset, length, sequence) => {
         // Posted to the main thread, so they outlive the ring's copy.
@@ -38,7 +41,7 @@ function readLogMessages(ctx) {
             sourceId: origin,
             oscData: bytes.slice(offset, offset + length),
             sequence,
-            timestamp: getCurrentNTP(),
+            timestamp: seenAt,
         });
     });
 

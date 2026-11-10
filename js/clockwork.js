@@ -106,7 +106,7 @@ function formatOscArgHtml(arg, address, argIndex) {
 function formatOscLineHtml(msg, sequence, timestamp, startTime, sourceId) {
   const address = msg[0];
   const args = msg.slice(1);
-  const relTime = startTime && timestamp ? (timestamp - startTime).toFixed(2) : '';
+  const relTime = startTime && timestamp ? Math.max(0, timestamp - startTime).toFixed(2) : '';
   let html = `<span class="clockwork-osc-seq">[${sequence}]</span>`;
   if (relTime) html += ` <span class="clockwork-osc-time">${relTime}</span>`;
   if (sourceId !== undefined) html += ` <span class="clockwork-osc-source">ch${sourceId}</span>`;
@@ -121,7 +121,7 @@ function formatOscLineHtml(msg, sequence, timestamp, startTime, sourceId) {
 function formatBundleHtml(decoded, sequence, timestamp, startTime, sourceId) {
   if (!decoded.packets) return formatOscLineHtml(decoded, sequence, timestamp, startTime, sourceId);
   if (decoded.packets.length === 1) return formatOscLineHtml(decoded.packets[0], sequence, timestamp, startTime, sourceId);
-  const relTime = startTime && timestamp ? (timestamp - startTime).toFixed(2) : '';
+  const relTime = startTime && timestamp ? Math.max(0, timestamp - startTime).toFixed(2) : '';
   let html = `<span class="clockwork-osc-seq">[${sequence}]</span>`;
   if (relTime) html += ` <span class="clockwork-osc-time">${relTime}</span>`;
   if (sourceId !== undefined) html += ` <span class="clockwork-osc-source">ch${sourceId}</span>`;
@@ -186,6 +186,7 @@ export class Clockwork {
   #eventEmitter;
   #metricsReader;
   #clock;
+  #logStartNtp = 0;   // the session's start on the engine's clock (#logStart)
   #audioCapture;
   #audioHealthMonitor;
 
@@ -1092,7 +1093,15 @@ export class Clockwork {
     for (const error of setup ? await this.#eventEmitter.emitAsync('setup') : []) {
       this.#eventEmitter.emit('error', new Error(`a 'setup' listener failed: ${error?.message ?? error}`, { cause: error }));
     }
+    this.#logStartNtp = this.#clock?.now() || 0;
     this.#eventEmitter.emit('ready', { capabilities: this.#capabilities, bootStats: this.bootStats });
+  }
+
+  // The session's start on the engine's clock, which the html lines count their time from: taken as it is ready, or
+  // a line before then counts from itself. The clock never goes back, so no line's time is below nought.
+  #logStart(timestamp) {
+    if (!this.#logStartNtp) this.#logStartNtp = timestamp;
+    return this.#logStartNtp;
   }
 
   // ============================================================================
@@ -2119,6 +2128,7 @@ export class Clockwork {
       workerBaseURL: this.#config.workerBaseURL,
       snapshotIntervalMs: this.#config.snapshotIntervalMs,
       getAudioContextTime: () => this.#audioContext?.currentTime ?? 0,
+      engineNow: () => this.#clock?.now() ?? 0,
     };
 
     if (mode === 'sab') {
@@ -2206,7 +2216,7 @@ export class Clockwork {
             }
 
             if (this.#eventEmitter.hasListeners('out:html')) {
-              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.#clock?.now() ?? 0, entry.sourceId);
+              const html = formatBundleHtml(msg, entry.sequence, entry.timestamp, this.#logStart(entry.timestamp), entry.sourceId);
               this.#eventEmitter.emit('out:html', { html, sequence: entry.sequence, timestamp: entry.timestamp });
             }
           } catch (e) { /* skip decoded events on decode failure */ }
@@ -2320,7 +2330,7 @@ export class Clockwork {
       }
 
       if (this.#eventEmitter.hasListeners('in:html')) {
-        const html = formatOscLineHtml(msg, sequence, timestamp, this.#clock?.now() ?? 0);
+        const html = formatOscLineHtml(msg, sequence, timestamp, this.#logStart(timestamp));
         this.#eventEmitter.emit('in:html', { html, sequence, timestamp });
       }
     } catch (e) {

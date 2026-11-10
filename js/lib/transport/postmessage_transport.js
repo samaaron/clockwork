@@ -4,7 +4,6 @@
 import { Transport } from './transport.js';
 import { createWorker } from '../worker_loader.js';
 import { OscChannel } from '../osc_channel.js';
-import { getCurrentNTPFromPerformance } from '../osc_classifier.js';
 
 /**
  * PostMessage Transport
@@ -52,11 +51,13 @@ export class PostMessageTransport extends Transport {
 
     // Timing functions
     #getAudioContextTime;
+    #engineNow;
 
     /**
      * @param {Object} config
      * @param {string} config.workerBaseURL - Base URL for worker scripts
      * @param {Function} config.getAudioContextTime - Returns AudioContext.currentTime
+     * @param {Function} [config.engineNow] - The engine's clock (clock.now()): when a message was seen, to or from it
      * @param {number} [config.snapshotIntervalMs] - Interval for metrics/tree snapshots
      */
     constructor(config) {
@@ -65,6 +66,7 @@ export class PostMessageTransport extends Transport {
         this.#workerBaseURL = config.workerBaseURL;
         this.#snapshotIntervalMs = config.snapshotIntervalMs;
         this.#getAudioContextTime = config.getAudioContextTime;
+        this.#engineNow = config.engineNow ?? (() => 0);
     }
 
     /**
@@ -278,7 +280,7 @@ export class PostMessageTransport extends Transport {
                         this.#oscInMessagesReceived++;
                         this.#oscInBytesReceived += entry.length;
                         if (this.#onReplyCallback) {
-                            this.#onReplyCallback(oscData, entry.sequence, getCurrentNTPFromPerformance());
+                            this.#onReplyCallback(oscData, entry.sequence, this.#engineNow());
                         }
                     }
                 }
@@ -316,6 +318,7 @@ export class PostMessageTransport extends Transport {
                         // New packed buffer format
                         const logBuffer = new Uint8Array(data.buffer);
                         const entries = [];
+                        const seenAt = this.#engineNow();
                         for (let i = 0; i < data.count; i++) {
                             const entry = data.entries[i];
                             // entry has { offset, length, originalLength, sourceId, sequence }
@@ -324,7 +327,7 @@ export class PostMessageTransport extends Transport {
                                 oscData,
                                 sourceId: entry.sourceId,
                                 sequence: entry.sequence,
-                                timestamp: getCurrentNTPFromPerformance(),
+                                timestamp: seenAt,
                                 truncated: entry.length < entry.originalLength,
                                 originalLength: entry.originalLength,
                             });

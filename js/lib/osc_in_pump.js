@@ -18,7 +18,7 @@
  */
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateOutControlIndices } from './ring_cursor_offsets.js';
-import { getCurrentNTPFromPerformance as getCurrentNTP } from './osc_classifier.js';
+import { engineTimeReader } from './sample_clock.js';
 import { runSabWorker } from './sab_worker_loop.js';
 import { EgressReader } from './ring.js';
 
@@ -52,10 +52,12 @@ export function runOscInPump({ onFrames, endpoint, name = 'OSCInPump' } = {}) {
     lastSequenceReceived = -1;
   }
 
+  const engineNow = engineTimeReader();
   function readOscMessages(ctx) {
     const { metricsView } = ctx;
     if (!reader) return [];
     const messages = [];
+    const seenAt = engineNow(ctx);   // on the engine's clock, as the time stamps the engine works to are
     reader.poll(0, (bytes, origin, route, sequence) => {
       if (lastSequenceReceived >= 0) {
         const expectedSeq = (lastSequenceReceived + 1) & 0xFFFFFFFF;
@@ -71,7 +73,7 @@ export function runOscInPump({ onFrames, endpoint, name = 'OSCInPump' } = {}) {
 
       // `bytes` is a view into the ring, which the engine will write over.
       // These entries outlive this call, so they take a copy.
-      messages.push({ oscData: bytes.slice(), sequence, timestamp: getCurrentNTP() });
+      messages.push({ oscData: bytes.slice(), sequence, timestamp: seenAt });
     });
     return messages;
   }

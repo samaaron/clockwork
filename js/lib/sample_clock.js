@@ -65,3 +65,22 @@ export function sampleClockReader(buffer, byteOffset) {
     return null;
   };
 }
+
+/**
+ * The engine's time as a worker running sab_worker_loop reads it (its ctx holds the arena's buffer and place): the
+ * sample clock's renderNtp, the clock bundles are stamped on and clock.now() reads, so the time a worker says it saw
+ * a message is comparable with the message's own time stamp. 0 before the engine's first block. The reader is made
+ * again over a new buffer or arena (a reload).
+ */
+export function engineTimeReader() {
+  let buffer = null, base = -1, read = null;
+  const into = {};
+  return (ctx) => {
+    if (ctx.sharedBuffer !== buffer || ctx.arenaBase !== base) {
+      buffer = ctx.sharedBuffer;
+      base = ctx.arenaBase;
+      read = buffer ? sampleClockReader(buffer, base + ctx.bufferConstants.SAMPLE_CLOCK_START) : null;
+    }
+    return read?.(into)?.renderNtp ?? 0;
+  };
+}
