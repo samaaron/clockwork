@@ -268,6 +268,20 @@
 #define CLOCKWORK_RETURNS_BYTES (8u * 1024u * 1024u)    // 8 MB, guest -> client
 #endif
 
+// The bulk lanes an attached engine (clockwork_embed_attach) takes when its
+// host names no size: the target's, as a device boot takes. Not on a board,
+// whose host passes them or has none, nor on the web, where the page's
+// memory layout places them (docs/MEMORY.md).
+#ifndef CLOCKWORK_EMBED_ASSETS_BYTES
+  #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_DEFAULT && !defined(__EMSCRIPTEN__)
+  #define CLOCKWORK_EMBED_ASSETS_BYTES  CLOCKWORK_ASSETS_BYTES
+  #define CLOCKWORK_EMBED_RETURNS_BYTES CLOCKWORK_RETURNS_BYTES
+  #else
+  #define CLOCKWORK_EMBED_ASSETS_BYTES  0u
+  #define CLOCKWORK_EMBED_RETURNS_BYTES 0u
+  #endif
+#endif
+
 // Committed assets the guest may hold at once: the asset table, one entry
 // per asset, kept across a rebuild so a new instance is handed
 // every one (docs/RESTARTS.md). A power of two; a commit past what the

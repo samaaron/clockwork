@@ -44,6 +44,16 @@ pub struct ClockworkEmbedConfig {
     /// case-insensitive match; an unresolvable name keeps the default with
     /// a warning. ASIO needs `device` too.
     pub driver: *const c_char,
+    /// The assets area (docs/MEMORY.md): where a client stages bulk for the
+    /// guest, a sample above all. Address space, its pages taken only as they
+    /// are written. 0 = the target's default (`CLOCKWORK_EMBED_ASSETS_BYTES`),
+    /// none on a board and on the web.
+    pub assets_bytes: u32,
+    /// The returns area: bulk the guest hands back. As `assets_bytes`.
+    pub returns_bytes: u32,
+    /// The guest's options, as the text it reads (scsynth's: one `name=value`
+    /// a line), under `GUEST_CONFIG_SIZE` bytes; null = the guest's defaults.
+    pub guest_config: *const c_char,
 }
 
 /// What a booted engine is running on — the driver and device that opened
@@ -127,6 +137,9 @@ impl ClockworkEmbedConfig {
             profile: core::ptr::null(),
             flags: 0,
             driver: core::ptr::null(),
+            assets_bytes: 0,
+            returns_bytes: 0,
+            guest_config: core::ptr::null(),
         }
     }
 }

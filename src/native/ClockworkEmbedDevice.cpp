@@ -9,6 +9,7 @@
 #include "native/ClockworkEngine.h"
 #include "owner.h"
 #include "lanes/lanes.h"
+#include "shared_memory.h"   // GUEST_CONFIG_SIZE
 #include <memory>
 #include <new>
 
@@ -53,7 +54,9 @@ static ClockworkStatus deviceInfoOf(void* p, ClockworkEmbedDevice* out) {
 
 extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbedConfig* config, ClockworkStatus* status) {
     const auto fail = [status](ClockworkStatus s) { if (status) *status = s; return static_cast<ClockworkEmbed*>(nullptr); };
-    if (!config || config->struct_bytes < sizeof(ClockworkEmbedConfig)) return fail(CLOCKWORK_E_ARG);
+    if (!config || config->struct_bytes < sizeof(ClockworkEmbedConfig)
+        || (config->guest_config && std::strlen(config->guest_config) >= GUEST_CONFIG_SIZE))
+        return fail(CLOCKWORK_E_ARG);
 
     // Owned here until the handle has it: a boot that throws (init) takes
     // the engine down with this, not leaves it.
@@ -82,6 +85,9 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     if (config->app_name && *config->app_name) cfg.appName = config->app_name;
     if (config->device && *config->device)     cfg.hardwareDevice = config->device;
     if (config->driver && *config->driver)     cfg.audioDriver    = config->driver;   // resolveBootDriver, as --audio-driver
+    if (config->assets_bytes)  cfg.assetsBytes  = config->assets_bytes;
+    if (config->returns_bytes) cfg.returnsBytes = config->returns_bytes;
+    if (config->guest_config)  cfg.guestConfig  = config->guest_config;
     cfg.shmSegment       = false;  // in-process: no segment
     cfg.hostDrainsEgress = true;   // the embedder polls the client; the gateway must not also drain
     cfg.callbackWatchdog = true;

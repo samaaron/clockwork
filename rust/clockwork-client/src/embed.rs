@@ -85,6 +85,9 @@ pub struct EmbedConfig {
     driver: Option<String>,
     no_input: bool,
     profile: Option<Profile>,
+    assets_bytes: u32,
+    returns_bytes: u32,
+    guest_config: Option<String>,
 }
 
 impl EmbedConfig {
@@ -166,6 +169,28 @@ impl EmbedConfig {
         self
     }
 
+    /// The assets area (docs/MEMORY.md): where a client stages bulk for the
+    /// guest, a sample above all. Address space, its pages taken only as
+    /// they are written, so size it for the most held at once; 0 is the
+    /// target's default (none on a board and on the web).
+    pub fn assets_bytes(mut self, bytes: u32) -> Self {
+        self.assets_bytes = bytes;
+        self
+    }
+
+    /// The returns area: bulk the guest hands back. As [`Self::assets_bytes`].
+    pub fn returns_bytes(mut self, bytes: u32) -> Self {
+        self.returns_bytes = bytes;
+        self
+    }
+
+    /// The guest's options, as the text it reads (scsynth's: one
+    /// `name=value` a line); its own defaults otherwise.
+    pub fn guest_config(mut self, text: &str) -> Self {
+        self.guest_config = Some(text.to_owned());
+        self
+    }
+
     fn raw(&self) -> Result<RawConfig> {
         let c = |s: &Option<String>| -> Result<Option<CString>> {
             match s {
@@ -173,7 +198,7 @@ impl EmbedConfig {
                 None => Ok(None),
             }
         };
-        let strings = [c(&self.app_name)?, c(&self.device)?, c(&self.driver)?];
+        let strings = [c(&self.app_name)?, c(&self.device)?, c(&self.driver)?, c(&self.guest_config)?];
         let ptr = |s: &Option<CString>| s.as_ref().map_or(core::ptr::null(), |s| s.as_ptr());
         let mut cfg = ClockworkEmbedConfig::new();
         cfg.sample_rate = self.sample_rate;
@@ -184,6 +209,9 @@ impl EmbedConfig {
         cfg.app_name = ptr(&strings[0]);
         cfg.device = ptr(&strings[1]);
         cfg.driver = ptr(&strings[2]);
+        cfg.guest_config = ptr(&strings[3]);
+        cfg.assets_bytes = self.assets_bytes;
+        cfg.returns_bytes = self.returns_bytes;
         cfg.flags = if self.no_input { CLOCKWORK_EMBED_NO_INPUT } else { 0 };
         let profile = self.profile.map(|p| Box::new(p.0));
         cfg.profile = profile.as_deref().map_or(core::ptr::null(), |p| p as *const ClockworkProfile);
@@ -196,7 +224,7 @@ impl EmbedConfig {
 /// this may be returned and moved before the call that reads it.
 struct RawConfig {
     cfg: ClockworkEmbedConfig,
-    _strings: [Option<CString>; 3],
+    _strings: [Option<CString>; 4],
     _profile: Option<Box<ClockworkProfile>>,
 }
 

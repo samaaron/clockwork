@@ -5,7 +5,9 @@
 #include "clockwork_embed_impl.h"
 #include "lanes/lanes.h"
 #include "clockwork_config.h"   // clockwork_log
-#include "shared_memory.h"
+#include "memory_profile.h"     // CLOCKWORK_EMBED_ASSETS_BYTES
+#include "shared_memory.h"      // GUEST_CONFIG_SIZE
+#include "shm_segment.hpp"      // shm_lane_geometry
 #include <chrono>
 #include <cstring>
 #include <new>
@@ -15,7 +17,41 @@ namespace {
 ClockworkStatus fail(ClockworkStatus* out, ClockworkStatus s) { if (out) *out = s; return s; }
 
 bool readable(const ClockworkEmbedConfig* c) {
-    return c && c->struct_bytes >= sizeof(ClockworkEmbedConfig);
+    return c && c->struct_bytes >= sizeof(ClockworkEmbedConfig)
+        && (!c->guest_config || std::strlen(c->guest_config) < GUEST_CONFIG_SIZE);
+}
+
+// The handle's bulk lanes and the guest's options, as `config` asks. The
+// lanes are one allocation and stay untouched: address space until a client
+// writes a sample in. False when they could not be had.
+bool takeBulk(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
+    const auto lanes = detail_shm_segment::shm_lane_geometry::of(
+        config->assets_bytes ? config->assets_bytes : CLOCKWORK_EMBED_ASSETS_BYTES,
+        config->returns_bytes ? config->returns_bytes : CLOCKWORK_EMBED_RETURNS_BYTES);
+    const size_t bytes = lanes.assets_size + lanes.returns_size;
+    if (bytes) {
+        h->lanes.reset(new (std::nothrow) uint8_t[bytes]);   // NOLINT(cppcoreguidelines-owning-memory): nothrow new into the unique_ptr
+        if (!h->lanes) return false;
+    }
+    h->assetsBytes  = static_cast<uint32_t>(lanes.assets_size);
+    h->returnsBytes = static_cast<uint32_t>(lanes.returns_size);
+    h->guestConfig  = config->guest_config ? config->guest_config : "";
+    return true;
+}
+
+// The core booted, or brought back, at `config`'s geometry with the handle's
+// lanes and options: what attach and reconfigure share.
+void initCore(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
+    const bool options = !h->guestConfig.empty();
+    uint8_t* const lanes = h->lanes.get();
+    clockwork_init(h->core, config->sample_rate, config->block_size,
+                   config->input_channels, config->output_channels,
+                   /*verbosity*/ 0, nullptr, 0,
+                   options ? h->guestConfig.c_str() : nullptr,
+                   options ? static_cast<uint32_t>(h->guestConfig.size() + 1) : 0,
+                   /*arena_bytes*/ 0,
+                   h->assetsBytes ? lanes : nullptr, h->assetsBytes,
+                   h->returnsBytes ? lanes + h->assetsBytes : nullptr, h->returnsBytes);
 }
 
 double ntpNow() {
@@ -79,14 +115,17 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         fail(status, CLOCKWORK_E_ARG);
         return nullptr;
     }
-    clockwork_init(core, config->sample_rate, config->block_size,
-                   config->input_channels, config->output_channels,
-                   /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
-                   nullptr, 0, nullptr, 0);
     auto* h = new (std::nothrow) ClockworkEmbed();
     if (!h) { clockwork_core_close(core); fail(status, CLOCKWORK_E_NOMEM); return nullptr; }
     h->kind        = ClockworkEmbed::Kind::Attached;
     h->core        = core;
+    if (!takeBulk(h, config)) {
+        clockwork_core_close(core);
+        delete h;
+        fail(status, CLOCKWORK_E_NOMEM);
+        return nullptr;
+    }
+    initCore(h, config);
     if (!fit(h, config)) {
         clockwork_core_close(core);
         delete h;
@@ -128,11 +167,9 @@ ClockworkStatus clockwork_embed_reconfigure(ClockworkEmbed* h, const ClockworkEm
         || config->sample_rate <= 0 || config->output_channels == 0)
         return CLOCKWORK_E_ARG;
     // Audio coming back to the engine that is up (docs/RESTARTS.md): the
-    // instance carries on, is told, or is built again.
-    clockwork_init(h->core, config->sample_rate, config->block_size,
-                   config->input_channels, config->output_channels,
-                   /*verbosity*/ 0, nullptr, 0, nullptr, 0, /*arena_bytes*/ 0,
-                   nullptr, 0, nullptr, 0);
+    // instance carries on, is told, or is built again. The lanes and the
+    // guest's options are the ones it was attached with.
+    initCore(h, config);
     if (!fit(h, config)) return CLOCKWORK_E_NOMEM;
     // This host's audio starts again now: the next block re-anchors the clock.
     clockwork_audio_starts(h->core, ntpNow(), monoNow());

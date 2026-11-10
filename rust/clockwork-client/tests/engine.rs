@@ -392,9 +392,11 @@ fn regions_are_named_and_absent_is_an_answer() {
     let stats = e.region(RegionId::NativeStats).unwrap();
     assert!(stats.len() >= 4 * clockwork_client::metrics_schema::NATIVE_STATS.len());
     assert!(!stats.is_writable());
-    // An in-process handle over bare memory cannot see the bulk lanes.
-    assert_eq!(e.region(RegionId::Assets).err(), Some(Error::Absent));
-    assert_eq!(e.region(RegionId::Returns).err(), Some(Error::Absent));
+    // The bulk lanes are the handle's own (docs/MEMORY.md): the assets area, which a client writes a sample into,
+    // and the returns area after it.
+    let assets = e.region(RegionId::Assets).unwrap();
+    assert!(!assets.is_empty() && assets.is_writable());
+    assert!(!e.region(RegionId::Returns).unwrap().is_empty());
 }
 
 #[test]

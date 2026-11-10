@@ -88,7 +88,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     expect!(mine, ClockworkSink {});
     expect!(mine, ClockworkEmbedConfig {
         struct_bytes, sample_rate, block_size, input_channels, output_channels, max_render_frames,
-        app_name, device, profile, flags, driver,
+        app_name, device, profile, flags, driver, assets_bytes, returns_bytes, guest_config,
     });
     expect!(mine, ClockworkProfile {
         struct_bytes, in_ring_bytes, rt_out_ring_bytes, nrt_out_ring_bytes, scope_frames, scope_channels,

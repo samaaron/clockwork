@@ -72,6 +72,18 @@ typedef struct ClockworkEmbedConfig {
                                     * name, else a unique case-insensitive match; a name that
                                     * resolves to nothing keeps the default with a warning rather
                                     * than refusing to boot. ASIO needs `device` as well. */
+    uint32_t    assets_bytes;      /* the assets area (docs/MEMORY.md): where a client stages bulk
+                                    * for the guest, a sample above all, read in place. Address
+                                    * space, its pages taken only as they are written, so a host
+                                    * sizes it for the most it will hold at once. 0 = the target's
+                                    * default: CLOCKWORK_EMBED_ASSETS_BYTES (memory_profile.h),
+                                    * which is none on a board and on the web. */
+    uint32_t    returns_bytes;     /* the returns area: bulk the guest hands back (a recording);
+                                    * as assets_bytes, with CLOCKWORK_EMBED_RETURNS_BYTES */
+    const char* guest_config;      /* the guest's options, as the text it reads (scsynth's: one
+                                    * `name=value` a line), at most GUEST_CONFIG_SIZE bytes with its
+                                    * NUL, else E_ARG; NULL = the guest's own defaults. An option
+                                    * the guest refuses is its refusal to start: E_NO_INSTANCE. */
 } ClockworkEmbedConfig;
 
 /* What a booted engine is actually running on: the driver and device that
@@ -121,6 +133,8 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
  * it again. Not while render runs. The engine does the least that gets it
  * back where it was (docs/RESTARTS.md): at the rate it had, the instance
  * carries on; at another it takes, it is told; otherwise it is rebuilt.
+ * Its assets and returns areas, and what they hold, and the guest's options
+ * stay as attached: the config's own are not read.
  * E_ARG for a booted handle (its device is the engine's own) or a config it
  * cannot read. Closing the handle instead ends the engine. */
 ClockworkStatus clockwork_embed_reconfigure(ClockworkEmbed* h, const ClockworkEmbedConfig* config);

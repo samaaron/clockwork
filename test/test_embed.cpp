@@ -322,3 +322,117 @@ TEST_CASE("embed: host input reaches the guest, a block late at most", "[embed]"
     for (uint32_t f = 0; f < block * 3; ++f)
         REQUIRE((got[f * 2] == 0.25f || got[f * 2] == 0.0f));
 }
+
+// The assets area (docs/MEMORY.md): where a client stages bulk for the guest,
+// a sample above all, outside the arena and provided by whoever boots the
+// engine. An attached engine is booted by its handle, so the handle provides
+// it, as a device boot does: a plugin loads samples like any host.
+namespace {
+osc_test::Packet assetCommit(int32_t id, int32_t offset, int32_t bytes) {
+    osc_test::Builder b;
+    auto& s = b.begin("/clockwork/asset/commit");
+    s << id << int32_t(CLOCKWORK_ASSET_RAW) << offset << bytes << int32_t(0) << int32_t(0) << 0.0f;
+    return b.end();
+}
+uint32_t fnv(const uint8_t* p, uint32_t n) {
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+// Renders until the client hears `address` answering `origin`, or a second of blocks has gone by.
+bool renderUntil(ClockworkEmbed* h, uint32_t origin, const std::string& address, std::vector<int32_t>* args = nullptr) {
+    ClockworkClient* c = clockwork_embed_client(h);
+    std::vector<float> l(256), r(256);
+    float* out[2] = { l.data(), r.data() };
+    for (int i = 0; i < 200; ++i) {
+        clockwork_embed_render(h, out, 2, nullptr, 0, 256);
+        ClockworkClientMessage m[64];
+        for (uint32_t n; (n = clockwork_client_poll(c, m, 64)) > 0;)
+            for (uint32_t k = 0; k < n; ++k)
+                if (m[k].origin == origin && osc_test::parseAddress(m[k].bytes, m[k].length) == address) {
+                    if (args) {
+                        const osc_test::ParsedReply p = osc_test::parseReply(m[k].bytes, m[k].length);
+                        for (int a = 0; a < p.argCount(); ++a) args->push_back(p.argInt(a));
+                    }
+                    return true;
+                }
+    }
+    return false;
+}
+}
+
+TEST_CASE("embed: an attached engine has an assets area, and a sample staged there reaches the guest", "[embed][asset]") {
+    Handle e;
+    REQUIRE(e.h != nullptr);
+    ClockworkClient* c = clockwork_embed_client(e.h);
+    ClockworkRegion assets {};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_ASSETS, &assets) == CLOCKWORK_OK);
+    REQUIRE(assets.base != nullptr);
+    REQUIRE(assets.bytes >= 65536);
+
+    // the client's bytes, where it chose to put them; the guest reads these very bytes
+    auto* lane = static_cast<uint8_t*>(assets.base);
+    const uint32_t off = 4096, n = 1000;
+    for (uint32_t i = 0; i < n; ++i) lane[off + i] = static_cast<uint8_t>((i * 7) ^ 0x5A);
+    const auto commit = assetCommit(7, int32_t(off), int32_t(n));
+    REQUIRE(clockwork_client_send(c, commit.ptr(), commit.size(), 0x7711) == CLOCKWORK_OK);
+    CHECK(renderUntil(e.h, 0x7711, "/clockwork/asset/committed"));
+
+    const auto last = osc_test::message("/dummy/asset/last");
+    REQUIRE(clockwork_client_send(c, last.ptr(), last.size(), 0x7712) == CLOCKWORK_OK);
+    std::vector<int32_t> got;
+    REQUIRE(renderUntil(e.h, 0x7712, "/dummy/asset/last.reply", &got));
+    REQUIRE(got.size() == 7);
+    CHECK(got[0] == 7);
+    CHECK(got[2] == int32_t(n));
+    CHECK(static_cast<uint32_t>(got[6]) == fnv(lane + off, n));
+}
+
+TEST_CASE("embed: the assets area is the size the host asks for, and stays as attached through a reconfigure", "[embed][asset]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.assets_bytes = 3u * 1024u * 1024u;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(h != nullptr);
+    ClockworkRegion assets {};
+    REQUIRE(clockwork_client_region(clockwork_embed_client(h), CLOCKWORK_REGION_ASSETS, &assets) == CLOCKWORK_OK);
+    CHECK(assets.bytes == cfg.assets_bytes);
+    const void* base = assets.base;
+
+    // a host's deactivate and activate: what a client staged is where it was
+    static_cast<uint8_t*>(assets.base)[100] = 0x3C;
+    ClockworkEmbedConfig again = cfg;
+    again.assets_bytes = 1024;   // not read: the area stays as attached
+    REQUIRE(clockwork_embed_reconfigure(h, &again) == CLOCKWORK_OK);
+    ClockworkRegion after {};
+    REQUIRE(clockwork_client_region(clockwork_embed_client(h), CLOCKWORK_REGION_ASSETS, &after) == CLOCKWORK_OK);
+    CHECK(after.base == base);
+    CHECK(after.bytes == cfg.assets_bytes);
+    CHECK(static_cast<uint8_t*>(after.base)[100] == 0x3C);
+    clockwork_embed_close(h);
+}
+
+TEST_CASE("embed: the guest's options reach the guest as the host wrote them; ones too long are refused", "[embed]") {
+    // the dummy guest reports the first four words of what it was given (/dummy/region/config)
+    const char text[] = "abcdefghijklmnop qrstuvwxyz";
+    ClockworkEmbedConfig cfg = config();
+    cfg.guest_config = text;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(h != nullptr);
+    const auto ask = osc_test::message("/dummy/region/config");
+    REQUIRE(clockwork_client_send(clockwork_embed_client(h), ask.ptr(), ask.size(), 0x7713) == CLOCKWORK_OK);
+    std::vector<int32_t> got;
+    REQUIRE(renderUntil(h, 0x7713, "/dummy/region/config-is", &got));
+    REQUIRE(got.size() == 5);
+    CHECK(static_cast<uint32_t>(got[0]) >= sizeof text);   // the region holds it, NUL and all
+    uint32_t words[4];
+    std::memcpy(words, text, sizeof words);
+    for (int i = 0; i < 4; ++i) CHECK(static_cast<uint32_t>(got[1 + i]) == words[i]);
+    clockwork_embed_close(h);
+
+    const std::string tooLong(GUEST_CONFIG_SIZE, 'x');
+    cfg.guest_config = tooLong.c_str();
+    CHECK(clockwork_embed_attach(&cfg, &st) == nullptr);
+    CHECK(st == CLOCKWORK_E_ARG);
+}

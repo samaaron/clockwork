@@ -6,6 +6,8 @@
 #include "clockwork_core.h"
 #include "clockwork_embed.h"
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 struct ClockworkEmbed {
@@ -33,4 +35,12 @@ struct ClockworkEmbed {
     // The attach path's core, made and closed by this handle. A booted
     // handle's core is its engine's.
     ClockworkCore* core = nullptr;
+
+    // The attach path's bulk lanes (docs/MEMORY.md), the assets area then the
+    // returns area in one allocation, untouched until a client writes them;
+    // and the guest's options. Both given to the core at every init, so a
+    // reconfigure keeps them, and freed after the core.
+    std::unique_ptr<uint8_t[]> lanes;
+    uint32_t assetsBytes = 0, returnsBytes = 0;
+    std::string guestConfig;
 };
