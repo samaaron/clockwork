@@ -151,9 +151,24 @@ panel's Device card), and said in the log at most once a second:
 A render that overran its budget is the processor's own (`cbOverruns`,
 `[overrun]`, with how much of the callback the thread spent on the CPU: an
 overrun that was not work was time the thread waited or was set aside by the
-scheduler), and audio away for over `kClockStepSeconds` is the clock's
+scheduler; a second line says how much of it was rendering blocks, and how
+many messages the callback handled), and audio away for over `kClockStepSeconds` is the clock's
 (`[clock] audio resumed after …`). A driver that can't say leaves its count
 at 0.
+
+Two lines say what those are read against:
+
+- `[device-setup] audio thread …`, as each device run starts: what was asked
+  of the OS for the device's thread (raised to realtime on Linux and Windows;
+  on macOS left as CoreAudio set it), and how the thread is scheduled now:
+  CoreAudio's time constraint (its period, the computation it is given and
+  the deadline), a POSIX policy and priority, or a Win32 priority
+  (`clockwork::currentThreadScheduling`).
+- `[load] …`, after a minute in which a render took over half its budget
+  (an overrun among them): how long that minute's renders took, start to
+  finish and on the CPU, as the middle one, the 99th in 100 and the longest
+  (`clockwork::RenderSpread`), so an overrun is read against how close the
+  ordinary blocks run to the budget.
 
 ## Testing
 

@@ -125,6 +125,79 @@ RealtimeResult elevateCurrentThreadToRealtime(double) {
 
 #endif
 
+#if defined(__APPLE__)
+
+ThreadScheduling currentThreadScheduling() {
+    ThreadScheduling s{};
+    thread_time_constraint_policy_data_t tc{};
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t isDefault = FALSE;   // in: the thread's own; out: TRUE when it has none
+    const kern_return_t kr = thread_policy_get(
+        pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
+        reinterpret_cast<thread_policy_t>(&tc), &count, &isDefault);
+    if (kr == KERN_SUCCESS && !isDefault) {
+        mach_timebase_info_data_t tb{};
+        mach_timebase_info(&tb);
+        const double secondsPerTick = tb.denom ? double(tb.numer) / double(tb.denom) * 1e-9 : 1e-9;
+        s.kind        = ThreadScheduling::Kind::TimeConstrained;
+        s.period      = tc.period * secondsPerTick;
+        s.computation = tc.computation * secondsPerTick;
+        s.constraint  = tc.constraint * secondsPerTick;
+        s.preemptible = tc.preemptible != 0;
+        return s;
+    }
+    sched_param p{};
+    if (pthread_getschedparam(pthread_self(), &s.policy, &p) == 0) {
+        s.kind     = ThreadScheduling::Kind::Posix;
+        s.priority = p.sched_priority;
+    }
+    return s;
+}
+
+#elif defined(_WIN32)
+
+ThreadScheduling currentThreadScheduling() {
+    ThreadScheduling s{};
+    const int priority = GetThreadPriority(GetCurrentThread());
+    if (priority != THREAD_PRIORITY_ERROR_RETURN) {
+        s.kind     = ThreadScheduling::Kind::Windows;
+        s.priority = priority;
+    }
+    return s;
+}
+
+#elif defined(__linux__)
+
+ThreadScheduling currentThreadScheduling() {
+    ThreadScheduling s{};
+    sched_param p{};
+    if (pthread_getschedparam(pthread_self(), &s.policy, &p) == 0) {
+        s.kind     = ThreadScheduling::Kind::Posix;
+        s.priority = p.sched_priority;
+    }
+    return s;
+}
+
+#else
+
+ThreadScheduling currentThreadScheduling() { return {}; }
+
+#endif
+
+const char* schedulingPolicyName(int policy) {
+#if defined(__APPLE__) || defined(__linux__)
+    switch (policy) {
+        case SCHED_OTHER: return "SCHED_OTHER";
+        case SCHED_FIFO:  return "SCHED_FIFO";
+        case SCHED_RR:    return "SCHED_RR";
+        default:          break;
+    }
+#else
+    (void)policy;
+#endif
+    return "another policy";
+}
+
 #if defined(_WIN32)
 // GetThreadTimes counts in scheduler quanta (~15 ms): too coarse for a
 // callback of a millisecond, so it says nothing rather than something wrong.

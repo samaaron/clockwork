@@ -38,6 +38,28 @@ RealtimeResult elevateCurrentThreadToRealtime();
 // On Linux and Windows it is the call above.
 RealtimeResult elevateCurrentThreadToRealtime(double periodSeconds);
 
+// How the calling thread is scheduled now, as the OS has it: what the audio
+// thread was given, said as each device starts. Never blocks, never allocates.
+struct ThreadScheduling {
+    enum class Kind {
+        TimeConstrained,  // macOS's time-constraint policy, CoreAudio's for its I/O threads
+        Posix,            // a POSIX policy and priority (Linux; a macOS thread without the time constraint)
+        Windows,          // a Win32 thread priority
+        Unknown,          // the OS would not say
+    };
+    Kind kind = Kind::Unknown;
+    // TimeConstrained, in seconds: the thread runs once a period, needs the
+    // computation, and must be done within the constraint of its start.
+    double period = 0.0, computation = 0.0, constraint = 0.0;
+    bool preemptible = false;
+    int policy = 0;     // Posix: SCHED_OTHER, SCHED_FIFO, SCHED_RR
+    int priority = 0;   // Posix: the policy's priority; Windows: GetThreadPriority
+};
+ThreadScheduling currentThreadScheduling();
+
+// A POSIX policy's name ("SCHED_RR"), or "another policy".
+const char* schedulingPolicyName(int policy);
+
 // The CPU time the calling thread has had, in seconds from an origin of its
 // own; negative where the platform can't say finely (Windows). Read around a
 // piece of work, it tells the work from time the thread spent waiting or set

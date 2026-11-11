@@ -50,6 +50,13 @@ extern "C" {
         uint32_t callback_gap_max_us;      // and since the engine started
     } ClockworkDeviceTime;
     void clockwork_publish_device_time(struct ClockworkCore* core, const ClockworkDeviceTime* time);
+    // What the engine has done so far, as its metrics block counts it: read
+    // either side of a callback, the difference is what that callback did
+    // (the [overrun] line). Memory reads only; zeros before the block is laid out.
+    typedef struct ClockworkWorkCounts {
+        uint32_t messages;        // messages handled (messages_processed)
+    } ClockworkWorkCounts;
+    ClockworkWorkCounts clockwork_work_counts(struct ClockworkCore* core);
 
     // The one rule for a guest's memory wants (DspInfo::memory_bytes_wanted /
     // memory_bulk_bytes_wanted), stated once so the boot path and a test agree:

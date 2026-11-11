@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>    // snprintf: the audio thread line's words
 #include <cstring>
 #include <numeric>
 
@@ -416,6 +417,64 @@ void ClockworkProcessor::noteSilentCallback(int frames, bool busy) {
                       mDeviceTime.silent_callbacks);
 }
 
+void ClockworkProcessor::sayAudioThread(const clockwork::RealtimeResult& asked) {
+    // What was asked of the OS. The words are fixed or take an int: nothing
+    // here allocates on the audio thread.
+    char what[80] = "left as the driver set it";
+    switch (asked.status) {
+        case clockwork::RealtimeStatus::Applied:
+#if defined(_WIN32)
+            std::snprintf(what, sizeof what, asked.policy == 1 ? "raised to MMCSS Pro Audio, time-critical"
+                                                               : "raised to time-critical");
+#else
+            std::snprintf(what, sizeof what, "raised to realtime");
+#endif
+            break;
+        case clockwork::RealtimeStatus::NotPermitted:
+            std::snprintf(what, sizeof what, "not raised to realtime: not permitted (error %d)", asked.error);
+            break;
+        case clockwork::RealtimeStatus::Failed:
+            std::snprintf(what, sizeof what, "not raised to realtime (error %d)", asked.error);
+            break;
+        case clockwork::RealtimeStatus::NotSupported:
+            break;
+    }
+    const clockwork::ThreadScheduling now = clockwork::currentThreadScheduling();
+    switch (now.kind) {
+        case clockwork::ThreadScheduling::Kind::TimeConstrained:
+            clockwork_log(mCore, "[device-setup] audio thread %s: time-constrained, every %.3f ms, %.3f ms of "
+                          "computation, done within %.3f ms%s",
+                          what, now.period * 1e3, now.computation * 1e3, now.constraint * 1e3,
+                          now.preemptible ? ", preemptible" : "");
+            break;
+        case clockwork::ThreadScheduling::Kind::Posix:
+            clockwork_log(mCore, "[device-setup] audio thread %s: %s, priority %d",
+                          what, clockwork::schedulingPolicyName(now.policy), now.priority);
+            break;
+        case clockwork::ThreadScheduling::Kind::Windows:
+            clockwork_log(mCore, "[device-setup] audio thread %s: thread priority %d", what, now.priority);
+            break;
+        case clockwork::ThreadScheduling::Kind::Unknown:
+            clockwork_log(mCore, "[device-setup] audio thread %s: its scheduling unknown", what);
+            break;
+    }
+}
+
+void ClockworkProcessor::sayRenderSpread(const clockwork::RenderSpread::Summary& s) {
+    if (s.cpuRenders > 0)
+        clockwork_log(mCore, "[load] in the last %.0f s, %u blocks of %.2f ms rendered: on the CPU, half within "
+                      "%.2f ms, 99 in 100 within %.2f ms, the longest %.2f ms; start to finish, half within %.2f ms, "
+                      "99 in 100 within %.2f ms, the longest %.2f ms; %u over budget",
+                      s.seconds, s.renders, s.budgetUs / 1e3,
+                      s.cpuMedianUs / 1e3, s.cpu99Us / 1e3, s.cpuLongestUs / 1e3,
+                      s.wallMedianUs / 1e3, s.wall99Us / 1e3, s.wallLongestUs / 1e3, s.overBudget);
+    else
+        clockwork_log(mCore, "[load] in the last %.0f s, %u blocks of %.2f ms rendered: start to finish, half "
+                      "within %.2f ms, 99 in 100 within %.2f ms, the longest %.2f ms; %u over budget",
+                      s.seconds, s.renders, s.budgetUs / 1e3,
+                      s.wallMedianUs / 1e3, s.wall99Us / 1e3, s.wallLongestUs / 1e3, s.overBudget);
+}
+
 void ClockworkProcessor::process(
     const float* const* inputChannelData,
     int numInputChannels,
@@ -438,11 +497,8 @@ void ClockworkProcessor::process(
     // rather than in deviceStarting (control thread) because this
     // callback runs on the audio thread. A denied request (no rtprio
     // permission) leaves the thread unchanged; see RealtimeThread.h.
-    if (!mRealtimeElevated.exchange(true, std::memory_order_relaxed)) {
-        const auto rt = clockwork::elevateCurrentThreadToRealtime();
-        clockwork_log(mCore, "[smoothie] audio thread realtime: status=%d policy=%d prio=%d err=%d",
-               static_cast<int>(rt.status), rt.policy, rt.priority, rt.error);
-    }
+    if (!mRealtimeElevated.exchange(true, std::memory_order_relaxed))
+        sayAudioThread(clockwork::elevateCurrentThreadToRealtime());
 
     // How the device kept time up to this callback: on every callback, paused
     // or warming up too, because a dropout is the device's whatever is played.
@@ -504,6 +560,11 @@ void ClockworkProcessor::process(
     const double cpuStart = clockwork::currentThreadCpuSeconds();
     const double cbWall = wallClockNTP();   // this callback's wall time: the clock's target, and the engine's record of it
     const double cbMono = clockwork::monotonicSeconds();   // and its monotonic time: the record a set clock cannot fool
+    // What the engine had done before this callback, and how long its
+    // renders take: what an overrun's line says of it. Memory and clock
+    // reads, no calls into the OS.
+    const ClockworkWorkCounts workBefore = clockwork_work_counts(mCore);
+    double renderUs = 0.0;
 
     // The audio was away? That is asked with the block clock below
     // (beginAudioBlock: the one rule on every target), from these clocks.
@@ -622,6 +683,7 @@ void ClockworkProcessor::process(
         blockTime.monotonic_secs        = cbMono;
         blockTime.output_latency_frames = outputLatencyFrames;
         blockTime.link_host_micros      = linkHostMicros;
+        const auto renderStart = std::chrono::high_resolution_clock::now();
         const ClockworkTick tick = renderAudioBlock(mCore, *mLinkAudio,
                                                     static_cast<uint32_t>(mBufLen),
                                                     static_cast<uint32_t>(mNumOutputChannels),
@@ -629,6 +691,7 @@ void ClockworkProcessor::process(
                                                     static_cast<uint32_t>(mSampleRate),
                                                     blockTime,
                                                     static_cast<uint32_t>(nOut));
+        renderUs += std::chrono::duration<double, std::micro>(std::chrono::high_resolution_clock::now() - renderStart).count();
         if (linkHostMicros != 0) linkHostMicros += engineBlockMicros;
         mSamplePosition += mBufLen;
 
@@ -682,6 +745,8 @@ void ClockworkProcessor::process(
     auto cbEnd = std::chrono::high_resolution_clock::now();
     double cbUs = std::chrono::duration<double, std::micro>(cbEnd - cbStart).count();
     double budgetUs = (static_cast<double>(numSamples) / mSampleRate) * 1e6;
+    const double cpuEnd = clockwork::currentThreadCpuSeconds();
+    const double cpuUs = cpuStart >= 0.0 && cpuEnd >= cpuStart ? (cpuEnd - cpuStart) * 1e6 : -1.0;
 
     mCallbackCount++;
     mTotalUs += cbUs;
@@ -695,11 +760,15 @@ void ClockworkProcessor::process(
             std::chrono::duration<double>(cbEnd.time_since_epoch()).count();
         if (nowSec - mLastOverrunLogSec >= 1.0) {
             mLastOverrunLogSec = nowSec;
-            const double cpuEnd = clockwork::currentThreadCpuSeconds();
-            if (cpuStart >= 0.0 && cpuEnd >= cpuStart)
+            const ClockworkWorkCounts workAfter = clockwork_work_counts(mCore);
+            clockwork_log(mCore, "[overrun] of that render, %.2fms was rendering blocks and %.2fms the rest of the "
+                   "callback; it handled %u message%s",
+                   renderUs / 1000.0, (cbUs - renderUs) / 1000.0,
+                   workAfter.messages - workBefore.messages, workAfter.messages - workBefore.messages == 1 ? "" : "s");
+            if (cpuUs >= 0.0)
                 clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget, %.2fms of it on the CPU "
                        "(total overruns: %u)",
-                       cbUs / 1000.0, budgetUs / 1000.0, (cpuEnd - cpuStart) * 1000.0, mOverrunCount);
+                       cbUs / 1000.0, budgetUs / 1000.0, cpuUs / 1000.0, mOverrunCount);
             else
                 clockwork_log(mCore, "[overrun] render took %.1fms of %.1fms budget "
                        "(total overruns: %u)",
@@ -720,6 +789,12 @@ void ClockworkProcessor::process(
                                mOverrunCount);
     }
     clockwork_publish_device_time(mCore, &mDeviceTime);
+
+    mRenderSpread.note(cbUs, cpuUs, budgetUs, cbMono);
+    if (mRenderSpread.due(cbMono, kRenderSpreadSeconds)) {
+        const auto spread = mRenderSpread.take(cbMono);
+        if (spread.worthSaying()) sayRenderSpread(spread);
+    }
 
     // ── 5. The block is done: count it and wake its waiters ────────────────────
     blockDone();

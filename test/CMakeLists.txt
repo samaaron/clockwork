@@ -58,6 +58,8 @@ add_executable(clockwork_tests
 
     # How often one kind of log line is said.
     test_log_limit.cpp
+    # How long a stretch of renders took, for the [load] line.
+    test_render_spread.cpp
 
     # OSC: the codec, the ingress router, and the one prefix clockwork keeps.
     test_osc_codec.cpp

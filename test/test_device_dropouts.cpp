@@ -10,7 +10,8 @@
  * metrics block's words 66-71, and said in the log, so a dropout someone hears
  * is a dropout the engine can show. The stand-in device's driver says what a
  * real one does: its sample clock with each buffer, and its count of missed
- * cycles.
+ * cycles. And how the device's thread is scheduled is said as it starts, for
+ * a dropout that was the scheduler's.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -114,6 +115,26 @@ TEST_CASE("device dropouts: a callback with no block to play is counted as silen
     sys->advanceBy(100'000);
     REQUIRE(fix.pollUntil([&] { return m.silent_callbacks.load() >= 1u; }));
     REQUIRE(fix.pollUntil([&] { return linesSaying(fix, "played as silence: a control call held the engine") == 1; }));
+}
+
+// How the device's thread was left, said once as each device run starts:
+// whether a dropout was the scheduler's is read against it.
+TEST_CASE("device dropouts: the audio thread's scheduling is said as the device starts", "[dropouts][engine]") {
+    auto sys = fake_audio::makeSimpleSystem();
+    EngineFixture fix(fake_audio::fakeEngineConfig(sys, "Fake Speakers"));
+    REQUIRE(fix.waitForBlocks(20));
+    fix.clearDebugMessages();
+    // A buffer change starts the device again, on a thread that may be new.
+    REQUIRE(fix.engine().switchDevice("", 0, 256).success);
+    REQUIRE(fix.waitForBlocks(40));
+    INFO(fix.debugMessagesDump());
+    REQUIRE(fix.pollUntil([&] { return linesSaying(fix, "[device-setup] audio thread ") == 1; }));
+#if defined(__APPLE__)
+    // The stand-in device's thread is an ordinary one, and macOS's is left as the driver set it.
+    CHECK(linesSaying(fix, "[device-setup] audio thread left as the driver set it: SCHED_OTHER, priority ") == 1);
+#endif
+    REQUIRE(fix.waitForBlocks(40));
+    CHECK(linesSaying(fix, "[device-setup] audio thread ") == 1);   // once a device run, not once a callback
 }
 
 TEST_CASE("device dropouts: the longest time between callbacks is kept, lately and since the engine started",

@@ -9,10 +9,17 @@
  * (no abort, no change).
  */
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <thread>
+
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <sched.h>   // SCHED_*
+#endif
 
 #include "native/RealtimeThread.h"
 
@@ -115,6 +122,51 @@ TEST_CASE("elevateCurrentThreadToRealtime is a no-op on this platform", "[realti
 }
 
 #endif
+
+// How the calling thread is scheduled, as the OS has it: the audio thread's
+// line as each device starts ([device-setup] audio thread …). Read on threads
+// of the case's own, whose scheduling it set.
+TEST_CASE("currentThreadScheduling says how the calling thread is scheduled", "[realtime]") {
+    using Kind = clockwork::ThreadScheduling::Kind;
+    clockwork::ThreadScheduling plain{};
+    std::thread([&] { plain = clockwork::currentThreadScheduling(); }).join();
+#if defined(_WIN32)
+    CHECK(plain.kind == Kind::Windows);
+    CHECK(plain.priority == THREAD_PRIORITY_NORMAL);
+#else
+    CHECK(plain.kind == Kind::Posix);
+    CHECK(std::string(clockwork::schedulingPolicyName(plain.policy)) == "SCHED_OTHER");
+#endif
+
+#if defined(__APPLE__)
+    // CoreAudio's policy, as the plugin bridge's render thread is given it:
+    // a millisecond's period, a quarter of it to compute, done within three quarters.
+    clockwork::RealtimeStatus status{};
+    clockwork::ThreadScheduling constrained{};
+    std::thread([&] {
+        status = clockwork::elevateCurrentThreadToRealtime(0.001).status;
+        constrained = clockwork::currentThreadScheduling();
+    }).join();
+    REQUIRE(status == clockwork::RealtimeStatus::Applied);
+    REQUIRE(constrained.kind == Kind::TimeConstrained);
+    CHECK_THAT(constrained.period, Catch::Matchers::WithinAbs(0.001, 1e-6));
+    // The kernel keeps the period and the deadline as asked; the computation it may raise to its own least.
+    CHECK(constrained.computation >= 0.00025 - 1e-6);
+    CHECK(constrained.computation <= constrained.constraint);
+    CHECK_THAT(constrained.constraint, Catch::Matchers::WithinAbs(0.00075, 1e-6));
+    CHECK(constrained.preemptible);
+#endif
+}
+
+TEST_CASE("schedulingPolicyName names the POSIX policies", "[realtime]") {
+#if defined(_WIN32)
+    CHECK(std::string(clockwork::schedulingPolicyName(0)) == "another policy");
+#else
+    CHECK(std::string(clockwork::schedulingPolicyName(SCHED_RR)) == "SCHED_RR");
+    CHECK(std::string(clockwork::schedulingPolicyName(SCHED_FIFO)) == "SCHED_FIFO");
+    CHECK(std::string(clockwork::schedulingPolicyName(-1)) == "another policy");
+#endif
+}
 
 // The CPU time a thread has had: what tells an audio callback that took long
 // because it worked from one that took long because the thread was waiting or

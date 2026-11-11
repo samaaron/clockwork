@@ -63,3 +63,11 @@ extern "C" void clockwork_publish_device_time(ClockworkCore* core, const Clockwo
     m->callback_gap_recent_us.store(t->callback_gap_recent_us, std::memory_order_relaxed);
     m->callback_gap_max_us.store(t->callback_gap_max_us, std::memory_order_relaxed);
 }
+
+extern "C" ClockworkWorkCounts clockwork_work_counts(ClockworkCore* core) {
+    ClockworkWorkCounts c{};
+    const PerformanceMetrics* const m = clockwork::metrics_in(clockwork::laid_out_base(core));
+    if (!m) return c;
+    c.messages      = m->messages_processed.load(std::memory_order_relaxed);
+    return c;
+}

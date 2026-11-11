@@ -18,6 +18,8 @@
 #include "workers/wait_word.h"
 #include "clock/clock_math.h"
 #include "log_limit.h"
+#include "RealtimeThread.h"   // RealtimeResult
+#include "RenderSpread.h"
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -297,4 +299,15 @@ private:
     clockwork::LogSpacing mSilentLog{1000000000ULL};
     void noteDeviceTime(int frames, const smoothie::BlockTime& time);
     void noteSilentCallback(int frames, bool busy);
+
+    // How the audio thread was left at a device run's first callback: what
+    // was asked of the OS, and how the thread is scheduled now.
+    void sayAudioThread(const clockwork::RealtimeResult& asked);
+
+    // How long a stretch of renders took, said when one of them went over
+    // half its budget: start to finish and on the CPU, the middle, the 99th
+    // in 100 and the longest. The audio thread's, kept across device runs.
+    static constexpr double kRenderSpreadSeconds = 60.0;
+    clockwork::RenderSpread mRenderSpread;
+    void sayRenderSpread(const clockwork::RenderSpread::Summary& spread);
 };
