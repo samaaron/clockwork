@@ -40,6 +40,8 @@ jobs:
         run: scripts/check-threads.sh
       - name: Forbid reaching a core's regions through the default layout
         run: scripts/check-layout.sh
+      - name: Check oscpack's types have the wire format's sizes on every target
+        run: scripts/check-oscpack-types.sh
 
   # --------------------------------------------------------- globals guard --
   # Every mutable variable with static storage in Clockwork's own code is on

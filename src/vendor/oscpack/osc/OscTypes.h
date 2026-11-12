@@ -47,8 +47,10 @@ namespace osc{
 typedef __int64 int64;
 typedef unsigned __int64 uint64;
 
-#elif defined(__x86_64__) || defined(_M_X64)
+#elif (defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32)
 
+// clockwork: not on Windows, where long is 32 bits under GCC too (MinGW):
+// there the branch below gives long long (CLOCKWORK-CHANGES.md, 5).
 typedef long int64;
 typedef unsigned long uint64;
 
@@ -72,6 +74,10 @@ typedef signed long int32;
 typedef unsigned long uint32;
 
 #endif
+
+// clockwork: the sizes the wire format needs, on whatever target this builds for.
+static_assert(sizeof(int32) == 4 && sizeof(uint32) == 4, "osc::int32 must be 32 bits");
+static_assert(sizeof(int64) == 8 && sizeof(uint64) == 8, "osc::int64 must be 64 bits");
 
 
 enum ValueTypeSizes{
