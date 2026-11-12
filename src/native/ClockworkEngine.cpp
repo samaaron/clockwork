@@ -2533,7 +2533,7 @@ void ClockworkEngine::sendSwitchDone(const SwapResult& result,
     mEgress.broadcastToTargets(packet.ptr(), packet.size());
 }
 
-void ClockworkEngine::sendDeviceReport() {
+void ClockworkEngine::sendDeviceReport(Report when) {
     if (!mEgress.hasSubscribers()) return;
     // Serialise session access against device mutations / recovery's
     // recreate. Recursive: the mutation paths call this while holding the gate.
@@ -2848,6 +2848,17 @@ void ClockworkEngine::sendDeviceReport() {
         infoMsg << mIntendedDriver.c_str();
         infoMsg << osc::EndMessage;
     });
+
+    // A change to the list that the report does not show (a device it leaves
+    // out coming and going) tells the clients nothing.
+    std::string report;
+    for (const OscPacket* p : { &tablePacket, &devPacket, &inDevPacket, &infoPacket })
+        report.append(reinterpret_cast<const char*>(p->ptr()), p->size());
+    if (when == Report::IfChanged && report == mLastDeviceReport) {
+        log("[device-list] unchanged for clients — not reported");
+        return;
+    }
+    mLastDeviceReport = std::move(report);
 
     // Fan out to all registered notify subscribers via the transport. The
     // table goes first so a client already holds the grouped lists when the
@@ -4676,9 +4687,9 @@ void ClockworkEngine::reconcileDevices() {
         mPreferredOutputDevice, mPreferredInputDevice,
         currentOutput, currentActiveIn, outputNames, inputNames);
 
-    // The list as last reported, so a change that leaves it as it was isn't
-    // re-sent. The field/record separators are control chars that can't
-    // appear in a name.
+    // The list as last seen, so a change that leaves it as it was is neither
+    // logged nor reported. The field/record separators are control chars that
+    // can't appear in a name.
     std::string fingerprint;
     for (auto& d : devices) {
         fingerprint += d.name;
@@ -4710,7 +4721,7 @@ void ClockworkEngine::reconcileDevices() {
         // A follow opens another device; only without one is the device
         // played on looked at as it stands.
         if (followDefaultOutput() || reconcileOpenDevice()) acted = true;
-        if (!acted && listChanged) printDeviceList();
+        if (!acted && listChanged) printDeviceList(Report::IfChanged);
     }
 }
 
@@ -4997,7 +5008,7 @@ std::string ClockworkEngine::setDeviceMode(const std::string& mode) {
     return "";
 }
 
-void ClockworkEngine::printDeviceList() {
+void ClockworkEngine::printDeviceList(Report when) {
     if (!mDevices) return;
 
     // Skip rescan — calling scanForDevices() right after a device switch
@@ -5021,7 +5032,7 @@ void ClockworkEngine::printDeviceList() {
             mDeviceMode.empty() ? "system" : mDeviceMode.c_str());
     log("[audio-devices-end]");
 
-    sendDeviceReport();
+    sendDeviceReport(when);
 }
 
 // --- Recording ---

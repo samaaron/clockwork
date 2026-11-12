@@ -11,7 +11,8 @@
  * once, a report sent while the device list is half rebuilt that deselects
  * the user's microphone, rates offered that the microphone cannot run at,
  * ALSA devices offered that PipeWire holds and nothing can open, and no way
- * to go back to following the system default.
+ * to go back to following the system default. And a report is news: a device
+ * the report leaves out coming and going sends none.
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -246,6 +247,11 @@ TEST_CASE("DeviceReport: a device list caught mid-change, missing the microphone
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
     subscribe(fix);
     REQUIRE(pick(fix, "", "Fake Microphone").argInt(0) == 1);
+    flushReplies(fix);
+    // What the clients hold from here on: the microphone, selected and offered.
+    const auto held = latest(fix, CLOCKWORK_SYS("input-devices"));
+    CHECK(held.argString(0) == "Fake Microphone");
+    CHECK(offeredInputs(held) == std::vector<std::string>{ "Fake Microphone" });
     fix.clearReplies();
 
     {   // the device layer's list, read halfway through a rebuild
@@ -260,13 +266,13 @@ TEST_CASE("DeviceReport: a device list caught mid-change, missing the microphone
     CHECK(countOf(fix, CLOCKWORK_SYS("devices")) == 0);
     CHECK(fix.engine().currentDevice().activeInputChannels == 2);
 
+    // The list whole again is the list the clients hold: nothing to send.
     mic->hidden = false;
     REQUIRE(sys->reportListChanged());
     deviceLaneDone(fix.engine());
-    OscReply inputs;
-    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("input-devices"), inputs, 10000));
-    CHECK(inputs.parsed().argString(0) == "Fake Microphone");
-    CHECK(offeredInputs(inputs.parsed()) == std::vector<std::string>{ "Fake Microphone" });
+    flushReplies(fix);
+    CHECK(countOf(fix, CLOCKWORK_SYS("input-devices")) == 0);
+    CHECK(fix.engine().currentDevice().activeInputChannels == 2);
 }
 
 // The pair's rates are its driver's to give (CoreAudio's aggregate offers
@@ -380,4 +386,54 @@ TEST_CASE("DeviceReport: wireless devices are not offered, and while one is "
     report();
     CHECK(contains(offeredInputs(latest(fix, CLOCKWORK_SYS("input-devices"))),
                    "Fake Microphone"));
+}
+
+
+TEST_CASE("DeviceReport: a device the report leaves out coming and going sends no "
+          "report, and a device it offers coming still does", "[DeviceReport]") {
+    // A phone's microphone, which macOS lists and drops every few minutes
+    // while the phone is near: wireless, so never offered.
+    auto phone = device("Fake Phone Microphone", 0, 1);
+    phone->kind = "ccwd";
+    phone->wireless = true;
+    phone->hidden = true;
+    auto headphones = device("Fake Headphones", 2, 0);
+    headphones->hidden = true;
+    auto sys = std::make_shared<FakeSystem>();
+    sys->types.push_back({ "FakeDriver", { device("Fake Speakers", 2, 0), headphones, phone,
+                                           device("Fake Microphone", 0, 2) }, 0 });
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+    auto reports = [&] {
+        return countOf(fix, CLOCKWORK_SYS("device-table")) + countOf(fix, CLOCKWORK_SYS("devices"))
+             + countOf(fix, CLOCKWORK_SYS("input-devices")) + countOf(fix, CLOCKWORK_SYS("info"));
+    };
+    // The list, asked for as a GUI asks at boot.
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/report")));
+    REQUIRE(fix.pollUntil([&] { return countOf(fix, CLOCKWORK_SYS("info")) > 0; }, 30000));
+    deviceLaneDone(fix.engine());
+    flushReplies(fix);
+    fix.clearReplies();
+
+    for (int i = 0; i < 4; ++i) {
+        phone->hidden = !phone->hidden;
+        REQUIRE(sys->reportListChanged());
+        deviceLaneDone(fix.engine());
+    }
+    flushReplies(fix);
+    INFO(fix.debugMessagesDump());
+    CHECK(reports() == 0);
+
+    // Asked, the engine answers, changed or not.
+    fix.send(osc_test::message(CLOCKWORK_SYS("devices/report")));
+    CHECK(fix.pollUntil([&] { return countOf(fix, CLOCKWORK_SYS("info")) > 0; }, 30000));
+
+    fix.clearReplies();
+    headphones->hidden = false;
+    REQUIRE(sys->reportListChanged());
+    REQUIRE(fix.pollUntil([&] { return countOf(fix, CLOCKWORK_SYS("devices")) > 0; }, 30000));
+    bool offered = false;
+    for (auto& o : offeredOutputs(latest(fix, CLOCKWORK_SYS("devices"))))
+        offered = offered || o.name == "Fake Headphones";
+    CHECK(offered);
 }

@@ -482,7 +482,11 @@ public:
 
     // Device control surface (called by EngineControl + engine lifecycle).
     // Builds the device/input/info report and pushes it to notify subscribers.
-    void sendDeviceReport();
+    // Asked for, or after the engine changed its device or settings, it always
+    // goes out; on a change to the OS's device list, only when it differs from
+    // the last report sent, so a device it leaves out coming and going is no news.
+    enum class Report { Always, IfChanged };
+    void sendDeviceReport(Report when = Report::Always);
     // Push the truthful outcome of a debounced switch to subscribers.
     void sendSwitchDone(const SwapResult& result,
                         const std::string& requestedOutput,
@@ -762,7 +766,7 @@ public:
     std::string preferredOutputDevice() const { return mPreferredOutputDevice; }
     std::string preferredInputDevice() const  { return mPreferredInputDevice; }
 
-    void printDeviceList();
+    void printDeviceList(Report when = Report::Always);
 
     // --- Purge stale messages: every one answered to its sender with
     // `reason` (a CLOCKWORK_REFUSED_* phrase), none dropped silently. On the
@@ -1440,10 +1444,13 @@ private:
     // it (traits with its rates) is never probed. A name gone from its driver's list is forgotten, so a
     // device plugged back in is probed afresh. Under the gate (listDevices).
     mutable std::map<std::string, DeviceInfo>    mDeviceProbes;
-    // The audio device list as reconcileDevices last reported it, so
-    // a change that leaves the list as it was (a device's own property, an
-    // aggregate the device layer made) doesn't re-send the device report. Device lane only.
+    // The audio device list as reconcileDevices last saw it, so a change
+    // that leaves the list as it was (a device's own property, an aggregate
+    // the device layer made) is neither logged nor reported. Device lane only.
     std::string                                  mLastAudioDeviceFingerprint;
+    // The last device report as broadcast, its packets' bytes end to end: a
+    // report on a list change that matches it is not sent. Under mSwapMutex.
+    std::string                                  mLastDeviceReport;
     // Read by the host's CFRunLoop pump at every tick (isRunLoopSuppressed).
     std::atomic<bool>        mSuppressRunLoop{false};
     std::string              mDeviceMode;   // empty = system/auto, non-empty = manual device name
