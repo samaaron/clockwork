@@ -35,7 +35,7 @@ constant | osc::Infinitum | oscpack's tag objects: to be labelled inline constex
 constant | osc::Nil | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | osc::OscNil | oscpack's tag objects: to be labelled inline constexpr (vendor/oscpack/CLOCKWORK-CHANGES.md)
 constant | plugin_discovery.cpp: (anonymous namespace)::searchPaths::paths | the plugin folders, built once from the environment
-constant | ClockworkEngine.cpp: ClockworkEngine::sendDeviceReport::{lambda}::operator()(osc::OutboundPacketStream&) const::canonical | to be a constexpr array
+constant | ClockworkEngine.cpp: ClockworkEngine::sendDeviceReport(ClockworkEngine::Report)::{lambda}::operator()(osc::OutboundPacketStream&) const::canonical | to be a constexpr array
 constant | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::HostContext::getName(char16_t*)::kName | to be labelled constexpr: a writable pointer to constant text today
 constant | plugin_vst3.cpp: clockwork_plugin_vst3::(anonymous namespace)::tuidToHex(char const*)::kHex | to be labelled constexpr: a writable pointer to constant text today
 
