@@ -62,9 +62,9 @@
  * rather than failing the call.
  *
  * THE ENGINE'S OWN TRANSPORTS ARE CLIENTS OF THIS, and that is the point of
- * putting it here rather than in a helper library beside the GUI. A UDP
- * datagram from a machine across the room does not enter the engine by a
- * private door: the receiving thread mints an origin token for the sender and
+ * putting it here rather than in a helper library beside the GUI. A message
+ * from a client on a socket does not enter the engine by a private door: the
+ * receiving thread mints an origin token for the sender and
  * calls clockwork_client_send with it, exactly as an in-process GUI does. One
  * ingress path, one implementation of the ring arithmetic, and a bug in it is
  * a bug everywhere rather than a bug in whichever copy was written last.

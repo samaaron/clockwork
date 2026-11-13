@@ -13,13 +13,13 @@ in at least seven places, and every one of them invented its own plumbing:
 
 | | direction | lines | mechanism |
 |---|---|---|---|
-| `RecordWriter` | sink | 48 + .cpp | lock-free FIFO → `TimeSliceThread` → `clockwork_audio_file.h` |
+| `RecordWriter` | sink | 48 + .cpp | lock-free FIFO → `TimeSliceThread` → `clockwork_audio_file.h` — since removed: a client records the master tap itself |
 | `shm_audio_buffer` | sink | 283 | SPSC ring in shared memory, monotonic write cursor — now the two scope slots clockwork writes at the device edge (docs/ARENA.md) |
 | `shm_tap_stream` | sink | 332 | SPSC ring per tap slot, same protocol plus extras |
 | Link aux publish | sink | (in the 232) | bus range → Link, per block |
 | device output | sink | — | the backend's own callback |
 | device input | source | — | the backend's own callback |
-| Link peer audio | source | (in the 232) | drained into private buses — no longer reachable: the verb that set it up is refused, because the boundary exposes no bus pool |
+| Link peer audio | source | (in the 232) | drained into private buses — now a source port on Link Audio's own lanes (below) |
 
 And an eighth that was discussed and never written: **streaming a sample from
 disk**, for material too large to hold — the looper and long-sample case.

@@ -17,7 +17,7 @@
  * single predicate and lives in clockwork_sys.h; this type is what clockwork uses
  * to sort its own verbs once the boundary has already claimed them.
  *
- * Transports (UDP socket, NIF send_osc, SHM) deliver bytes here and nothing more
+ * Transports (a stream socket, NIF send_osc, SHM) deliver bytes here and nothing more
  * — they don't know the address-space; the engine does. Adding a subsystem is a
  * single registerRoute() call, never a transport change.
  *

@@ -439,8 +439,8 @@ typedef struct DspInfo {
      * on the audio thread, beside the clients that subscribed to them. The
      * one exception to the rule that nothing under "/clockwork/" reaches a
      * DSP, and made only because the DSP asked. Each carries the moment it
-     * arrived as a trailing `t` argument when the host knows it (the web does;
-     * a native port's arrival is the block it was drained in), so a DSP that
+     * arrived as a trailing `t` argument when the host knows it (a MIDI
+     * port's is the moment the OS or the browser stamped it), so a DSP that
      * holds its own schedule can place it on its own timeline. Zero: a client
      * that wants the DSP to hear a keyboard relays it. Same host on both
      * sides: a DSP that sets this never learns which host it is on. */

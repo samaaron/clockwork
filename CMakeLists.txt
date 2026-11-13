@@ -199,7 +199,7 @@ option(CLOCKWORK_RUST "Build the Rust subsystems' umbrella staticlib with cargo 
 # ── The timed-event store ────────────────────────────────────────────────────
 # OFF removes clockwork's timed queue entirely — the Rust crate is not
 # compiled and no store, slot pool or data pool is carried. What is lost with
-# it: /clockwork-sys/schedule, /clockwork-sys/sched/flush, timed MIDI clock out and timed
+# it: /clockwork/schedule, /clockwork/sched/flush, timed MIDI clock out and timed
 # OSC forwarding. Everything timed, in other words, except what a DSP schedules
 # for itself; immediate messages are unaffected and a timed message still
 # reaches the DSP at once, carrying its original timetag, for the DSP to decide
@@ -217,7 +217,7 @@ option(CLOCKWORK_RUST "Build the Rust subsystems' umbrella staticlib with cargo 
 # This is a compile-time switch and DspInfo::holds_schedule is a runtime one,
 # and they are not redundant: see src/scheduler/engine_schedule.h, which states
 # how the two compose.
-option(CLOCKWORK_SCHEDULER "Build clockwork's timed-event store (/clockwork-sys/schedule, /clockwork-sys/sched/flush, timed MIDI out, timed OSC forwarding). OFF forwards every message immediately, carrying its timetag." ON)
+option(CLOCKWORK_SCHEDULER "Build clockwork's timed-event store (/clockwork/schedule, /clockwork/sched/flush, timed MIDI out, timed OSC forwarding). OFF forwards every message immediately, carrying its timetag." ON)
 
 # The CLIENT half of the verb surface (docs/SURFACE.md): /clockwork/midi/out/*,
 # /clockwork/midi/clock/beat and /clockwork/osc/send — the verbs that exist
@@ -1563,7 +1563,7 @@ if(CLOCKWORK_PLUGINS)
         target_link_libraries(clockwork_plugin_host PUBLIC clockwork_plugin_clap)
     endif()
 
-    # The verbs: the /clockwork-sys/track/* surface, decoded where the plugins are.
+    # The verbs: the /clockwork/track/* surface, decoded where the plugins are.
     # Part of the host library because both the bridge and a test that hosts
     # in-process want them, and neither wants the other's main().
     target_sources(clockwork_plugin_host PRIVATE ${CLOCKWORK_SRC}/plugin_bridge_verbs.cpp)
