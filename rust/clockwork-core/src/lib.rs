@@ -116,7 +116,9 @@ struct Hold<'a>(&'a ClockworkCore);
 
 impl<'a> Hold<'a> {
     fn on(handle: &'a ClockworkCore) -> Option<Hold<'a>> {
-        handle.hold().then_some(Hold(handle))
+        // Made only once the hold is taken: a Hold made and dropped for a core
+        // that refused it would let go of a hold that was never its own.
+        handle.hold().then(|| Hold(handle))
     }
 }
 
@@ -841,6 +843,32 @@ mod tests {
         assert!(!clockwork_core_live(core));
         assert_eq!(FREED.load(Ordering::SeqCst), 0x8);
         assert_eq!(clockwork_core_said_wait(core, 0, 10), -1, "a wait on a closed core");
+    }
+
+    // A search over every core (a client opened over memory looks for its
+    // core) meets one that is closing with a thread still inside: it is looked
+    // past, and the look takes nothing from that thread's hold.
+    #[test]
+    fn a_search_past_a_closing_core_leaves_its_holds_alone() {
+        let _turn = TURN.lock().unwrap();
+        FREED.store(0, Ordering::SeqCst);
+        let core = make();
+        assert!(clockwork_core_adopt_state(core, 0x10 as *mut c_void, Some(free_counted)));
+        assert!(clockwork_core_hold(core));
+        let at = core as usize;
+        let closer = std::thread::spawn(move || clockwork_core_close(at as *mut ClockworkCore));
+        while clockwork_core_hold(core) {
+            clockwork_core_unhold(core);
+            std::thread::yield_now();
+        }
+        assert!(clockwork_core_of_memory(0x1000 as *const c_void).is_null(), "no core has that memory");
+        assert_eq!(handle_of(core).unwrap().inside.load(Ordering::SeqCst), 1, "the hold still stands");
+        assert!(clockwork_core_live(core), "freed under a hold");
+        assert_eq!(FREED.load(Ordering::SeqCst), 0);
+        clockwork_core_unhold(core);
+        closer.join().unwrap();
+        assert!(!clockwork_core_live(core));
+        assert_eq!(FREED.load(Ordering::SeqCst), 0x10);
     }
 
     #[test]

@@ -152,7 +152,8 @@ mod imp {
         fn new() -> Option<Event> {
             // SAFETY: default security, manual reset, not signalled, unnamed.
             let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-            (!h.is_null()).then_some(Event(h))
+            // Made only for a handle there is: an Event dropped closes what it holds.
+            (!h.is_null()).then(|| Event(h))
         }
     }
     impl Drop for Event {
