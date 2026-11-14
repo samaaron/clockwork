@@ -212,6 +212,44 @@ TEST_CASE("EngineState: a bulk memory the system cannot provide stops the boot, 
     CHECK(s.argString(1).find("bulk") != std::string::npos);
 }
 
+// A host can ask for more bulk memory than any address space holds, with
+// clockwork_set_guest_bulk_bytes. The engine then cannot map its block and the
+// boot stops with an error. The case above only reaches that error on 32-bit
+// builds. On 64-bit its request maps, and the guest refuses instead.
+TEST_CASE("EngineState: a bulk size the system cannot map leaves the engine in error, saying why",
+          "[EngineState][heap]") {
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.guestBulkBytes = std::numeric_limits<size_t>::max() - (64u << 20);
+    EngineFixture fix(cfg);
+    CHECK(fix.engine().engineState() == EngineState::Error);
+
+    fix.send(osc_test::message(CLOCKWORK_SYS("notify")));
+    OscReply ack, state;
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("notify.reply"), ack));
+    REQUIRE(fix.waitForReply(CLOCKWORK_SYS("statechange"), state));
+    const auto s = state.parsed();
+    REQUIRE(s.argCount() >= 2);
+    CHECK(s.argString(0) == "error");
+    INFO("reason: " << s.argString(1));
+    CHECK(s.argString(1).find("bulk") != std::string::npos);
+}
+
+// The refused engine must release what it claimed, so the next engine in the
+// same process boots normally.
+TEST_CASE("EngineState: after a bulk size the system cannot map, the next engine boots", "[EngineState][heap]") {
+    {
+        auto cfg = EngineFixture::defaultConfig();
+        cfg.guestBulkBytes = std::numeric_limits<size_t>::max() - (64u << 20);
+        EngineFixture refused(cfg);
+        CHECK(refused.engine().engineState() == EngineState::Error);
+    }
+    EngineFixture next(EngineFixture::defaultConfig());
+    CHECK(next.engine().engineState() == EngineState::Running);
+    next.send(osc_test::message("/dummy/ping"));
+    OscReply pong;
+    CHECK(next.waitForReply("/dummy/pong", pong));
+}
+
 TEST_CASE("EngineState: the next engine takes the profile's bulk memory again", "[EngineState][heap]") {
     // The span is one engine's, not the process's: a later boot whose guest
     // declares nothing gets the default, and a pool that only the bigger
