@@ -3,21 +3,15 @@
 //! The timed-event store.
 //!
 //! Opaque payload bytes keyed by an int64 timetag, released in time order,
-//! each carrying a caller-defined metadata record and a tag used for selective
-//! cancellation.
+//! each carrying a tag used for selective cancellation.
 //!
-//! # The three pools
+//! # The two pools
 //!
 //! * **slots** — a fixed array of records, threaded into a free list. One slot
 //!   per live event.
 //! * **data** — one byte pool, bump-allocated. A freed slot leaves a hole;
 //!   holes are reclaimed by [`Store::compact`], which slides the live chunks
 //!   down in place. When the last slot goes the head simply resets to 0.
-//! * **meta** — `slot_count * meta_size` bytes, aligned to `meta_align`,
-//!   addressed by slot index. This crate NEVER reads or writes them: the
-//!   caller is handed a pointer to its slot's bytes by [`Store::add`] and
-//!   constructs whatever it likes there. That is what keeps the store generic
-//!   over a C++ type it cannot name.
 //!
 //! Ordering is a binary min-heap of `(when, stability)`, `when` in
 //! [`Timetag`] order: immediately first, then real times in serial-number
@@ -39,7 +33,6 @@
 use clockwork_osc::Timetag;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::alloc::{alloc_zeroed, dealloc, Layout};
 
 /// The largest slot pool this store will build. The C++ header it implements
 /// keeps slot indices in an `int16_t`, and its `static_assert` says so; the
@@ -103,70 +96,14 @@ struct Live {
     slot: i32,
 }
 
-/// A due event, handed to the caller. `meta` and `data` borrow the store's
-/// pools; the C ABI turns them into pointers that stay valid until
-/// [`Store::release`] is called for `slot`, and a Rust caller copies what it
-/// keeps before releasing.
+/// A due event, handed to the caller. `data` borrows the store's pool; the
+/// C ABI turns it into a pointer that stays valid until [`Store::release`] is
+/// called for `slot`, and a Rust caller copies what it keeps before releasing.
 pub struct Event<'a> {
     pub when: Timetag,
     pub tag: u32,
-    pub meta: &'a [u8],
     pub data: &'a [u8],
     pub slot: i32,
-}
-
-/// The caller's metadata, one fixed-size record per slot, opaque to us.
-struct MetaArena {
-    ptr: *mut u8,
-    layout: Layout,
-    stride: usize,
-    /// False when the memory came from the caller and is not ours to free.
-    owned: bool,
-}
-
-impl MetaArena {
-    fn new(slot_count: usize, meta_size: usize, meta_align: usize) -> Option<Self> {
-        if meta_size == 0 || !meta_align.is_power_of_two() || meta_size % meta_align != 0 {
-            return None;
-        }
-        let bytes = meta_size.checked_mul(slot_count)?;
-        let layout = Layout::from_size_align(bytes, meta_align).ok()?;
-        // Zeroed so a caller that reads a slot it never wrote sees zeros
-        // rather than whatever the allocator had, matching a C++ member array
-        // in BSS.
-        // SAFETY: never zero-sized: `meta_size` is non-zero and `Store::new`,
-        // the one caller, refuses a zero slot count.
-        let ptr = unsafe { alloc_zeroed(layout) };
-        if ptr.is_null() {
-            return None;
-        }
-        Some(MetaArena { ptr, layout, stride: meta_size, owned: true })
-    }
-
-    /// Record `i`, as bytes.
-    #[inline]
-    fn slot(&self, i: usize) -> &[u8] {
-        // SAFETY: `i < slot_count` at every call site; the arena is
-        // `slot_count * stride` bytes, zeroed at creation.
-        unsafe { core::slice::from_raw_parts(self.ptr.add(i * self.stride), self.stride) }
-    }
-
-    /// Record `i`, writable.
-    #[inline]
-    fn slot_mut(&mut self, i: usize) -> &mut [u8] {
-        // SAFETY: as `slot`, and `&mut self` makes the access exclusive.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr.add(i * self.stride), self.stride) }
-    }
-}
-
-impl Drop for MetaArena {
-    fn drop(&mut self) {
-        if self.owned {
-            // SAFETY: `owned` means `new` allocated it with this layout, and
-            // this is its one free.
-            unsafe { dealloc(self.ptr, self.layout) }
-        }
-    }
 }
 
 pub struct Store {
@@ -182,7 +119,6 @@ pub struct Store {
     queue: ManuallyDrop<Box<[Entry]>>,
     scratch: ManuallyDrop<Box<[Live]>>,
     data: ManuallyDrop<Box<[u8]>>,
-    meta: MetaArena,
     data_head: u32,
     queue_size: usize,
     live: i32,
@@ -212,21 +148,13 @@ impl Drop for Store {
 impl Store {
     /// Build a store. The only allocating call in this file.
     ///
-    /// `meta_size` / `meta_align` describe the caller's per-event record;
-    /// nothing here interprets it. Returns `None` for a count outside
-    /// [`MAX_SLOT_COUNT`], an empty data pool, a meta description that is not
-    /// a valid C layout, or an allocation failure.
-    pub fn new(
-        slot_count: u32,
-        data_pool_size: u32,
-        meta_size: u32,
-        meta_align: u32,
-    ) -> Option<Store> {
+    /// Returns `None` for a count outside [`MAX_SLOT_COUNT`] or an empty data
+    /// pool.
+    pub fn new(slot_count: u32, data_pool_size: u32) -> Option<Store> {
         if slot_count == 0 || slot_count > MAX_SLOT_COUNT || data_pool_size == 0 {
             return None;
         }
         let n = slot_count as usize;
-        let meta = MetaArena::new(n, meta_size as usize, meta_align as usize)?;
         let mut s = Store {
             slots: ManuallyDrop::new(vec![
                 Slot {
@@ -247,7 +175,6 @@ impl Store {
             scratch: ManuallyDrop::new(
                 vec![Live { off: 0, size: 0, slot: -1 }; n].into_boxed_slice()),
             data: ManuallyDrop::new(vec![0u8; data_pool_size as usize].into_boxed_slice()),
-            meta,
             data_head: 0,
             queue_size: 0,
             live: 0,
@@ -266,18 +193,8 @@ impl Store {
      * Callers size a static array from this, so it must be computable without
      * allocating and without a Store existing yet.
      */
-    pub fn bytes_needed(
-        slot_count: u32,
-        data_pool_size: u32,
-        meta_size: u32,
-        meta_align: u32,
-    ) -> Option<usize> {
+    pub fn bytes_needed(slot_count: u32, data_pool_size: u32) -> Option<usize> {
         if slot_count == 0 || slot_count > MAX_SLOT_COUNT || data_pool_size == 0 {
-            return None;
-        }
-        if meta_size == 0 || !(meta_align as usize).is_power_of_two()
-            || meta_size % meta_align != 0
-        {
             return None;
         }
         let n = slot_count as usize;
@@ -287,7 +204,6 @@ impl Store {
             (core::mem::size_of::<Entry>().checked_mul(n)?, core::mem::align_of::<Entry>()),
             (core::mem::size_of::<Live>().checked_mul(n)?,  core::mem::align_of::<Live>()),
             (data_pool_size as usize, 1usize),
-            ((meta_size as usize).checked_mul(n)?, meta_align as usize),
         ] {
             total = align_up(total, align).checked_add(size)?;
         }
@@ -318,10 +234,8 @@ impl Store {
         len: usize,
         slot_count: u32,
         data_pool_size: u32,
-        meta_size: u32,
-        meta_align: u32,
     ) -> Option<Store> {
-        let needed = Store::bytes_needed(slot_count, data_pool_size, meta_size, meta_align)?;
+        let needed = Store::bytes_needed(slot_count, data_pool_size)?;
         if mem.is_null() || len < needed {
             return None;
         }
@@ -346,7 +260,6 @@ impl Store {
         let scratch_p = carve(core::mem::size_of::<Live>() * n, core::mem::align_of::<Live>())
             .cast::<Live>();
         let data_p = carve(data_pool_size as usize, 1);
-        let meta_p = carve(meta_size as usize * n, meta_align as usize);
 
         // The carved regions are uninitialised; reset() below writes every
         // slot and entry, and the data pool is only ever read back through
@@ -372,12 +285,6 @@ impl Store {
             queue: ManuallyDrop::new(queue),
             scratch: ManuallyDrop::new(scratch),
             data: ManuallyDrop::new(data),
-            meta: MetaArena {
-                ptr: meta_p,
-                layout: Layout::from_size_align(meta_size as usize * n, meta_align as usize).ok()?,
-                stride: meta_size as usize,
-                owned: false,
-            },
             data_head: 0,
             queue_size: 0,
             live: 0,
@@ -394,29 +301,28 @@ impl Store {
 
     /// Copy `data` in, to fire at `when` under `tag`.
     ///
-    /// Returns the caller's metadata record for this event — the caller
-    /// writes its record there — or `None` if the slot pool or the data pool
-    /// is full, with no state changed either way.
-    pub fn add(&mut self, when: Timetag, tag: u32, data: &[u8]) -> Option<&mut [u8]> {
+    /// Returns false, with no state changed, if the slot pool or the data
+    /// pool is full.
+    pub fn add(&mut self, when: Timetag, tag: u32, data: &[u8]) -> bool {
         if self.queue_size >= self.slots.len() {
-            return None;
+            return false;
         }
-        let size = u32::try_from(data.len()).ok()?;
+        let Ok(size) = u32::try_from(data.len()) else { return false };
         let pool = self.data.len() as u64;
         if size as u64 > pool {
             // Never fits, whatever we free. Checked before the align below so
             // that cannot overflow either.
-            return None;
+            return false;
         }
         let aligned = (size as u64 + 3) & !3;
         if self.data_head as u64 + aligned > pool {
             self.compact();
             if self.data_head as u64 + aligned > pool {
-                return None;
+                return false;
             }
         }
 
-        let slot = self.alloc_slot()?;
+        let Some(slot) = self.alloc_slot() else { return false };
 
         let offset = self.data_head;
         self.data[offset as usize..offset as usize + data.len()].copy_from_slice(data);
@@ -434,7 +340,7 @@ impl Store {
         s.pending = true;
 
         self.heap_push(Entry { when, stability, slot: slot as i32 });
-        Some(self.meta.slot_mut(slot))
+        true
     }
 
     /// Timetag of the earliest live event, if there is one.
@@ -444,7 +350,7 @@ impl Store {
     }
 
     /// Take the earliest event if it is due at or before `now`. The returned
-    /// slices borrow the pools; release the slot once they are done with.
+    /// slice borrows the data pool; release the slot once it is done with.
     pub fn pop_due(&mut self, now: Timetag) -> Option<Event<'_>> {
         if self.queue_size == 0 || self.queue[0].when > now {
             return None;
@@ -457,7 +363,6 @@ impl Store {
         Some(Event {
             when: s.when,
             tag: s.tag,
-            meta: self.meta.slot(slot),
             // `offset + size <= data.len()` holds for every live slot.
             data: &self.data[s.offset as usize..s.offset as usize + s.size as usize],
             slot: slot as i32,
@@ -707,30 +612,34 @@ mod tests {
         BASE.plus(offset)
     }
 
-    /// The store's metadata is opaque bytes it never reads, so the tests give
-    /// it a `u32` — exactly what clockwork's own `EngineMeta` is — and read
-    /// it back through the pointer `add` hands out.
+    /// The store carries nothing beside an event's time, tag and bytes, so a
+    /// test that has to tell events apart gives each a four-byte payload
+    /// holding a number (`add_numbered`, read back with `number`).
     struct S(Store);
+
+    fn number(bytes: &[u8]) -> u32 {
+        u32::from_ne_bytes(bytes.try_into().expect("a four-byte numbered payload"))
+    }
 
     impl S {
         fn new(slots: u32, pool: u32) -> S {
-            S(Store::new(slots, pool, 4, 4).expect("store"))
+            S(Store::new(slots, pool).expect("store"))
         }
-        fn add(&mut self, when: i64, tag: u32, meta: u32, payload: &[u8]) -> bool {
-            let Some(m) = self.0.add(t(when), tag, payload) else { return false };
-            m[..4].copy_from_slice(&meta.to_ne_bytes());
-            true
+        fn add(&mut self, when: i64, tag: u32, payload: &[u8]) -> bool {
+            self.0.add(t(when), tag, payload)
         }
-        /// Pop one due event and return `(when, tag, meta, payload)`, releasing
-        /// its slot — the popDue/release pair the fire loop performs.
-        fn pop(&mut self, now: i64) -> Option<(i64, u32, u32, Vec<u8>)> {
+        fn add_numbered(&mut self, when: i64, tag: u32, n: u32) -> bool {
+            self.add(when, tag, &n.to_ne_bytes())
+        }
+        /// Pop one due event and return `(when, tag, payload)`, releasing its
+        /// slot — the popDue/release pair the fire loop performs.
+        fn pop(&mut self, now: i64) -> Option<(i64, u32, Vec<u8>)> {
             let e = self.0.pop_due(t(now))?;
-            let meta = u32::from_ne_bytes(e.meta[..4].try_into().unwrap());
             let (when, tag, slot, bytes) = (e.when.offset_from(BASE), e.tag, e.slot, e.data.to_vec());
             self.0.release(slot);
-            Some((when, tag, meta, bytes))
+            Some((when, tag, bytes))
         }
-        fn drain(&mut self, now: i64) -> Vec<(i64, u32, u32, Vec<u8>)> {
+        fn drain(&mut self, now: i64) -> Vec<(i64, u32, Vec<u8>)> {
             let mut v = Vec::new();
             while let Some(e) = self.pop(now) {
                 v.push(e);
@@ -747,11 +656,11 @@ mod tests {
     fn out_of_order_insertion_pops_in_time_order_fifo_within_a_timetag() {
         let mut s = S::new(16, 8192);
         // Deliberately scrambled, with a repeated timetag in the middle.
-        assert!(s.add(300, KEEP, 3, D));
-        assert!(s.add(100, KEEP, 1, D));
-        assert!(s.add(100, KEEP, 2, D)); // same time as 1, added later
-        assert!(s.add(200, KEEP, 4, D));
-        let order: Vec<u32> = s.drain(FAR).iter().map(|e| e.2).collect();
+        assert!(s.add_numbered(300, KEEP, 3));
+        assert!(s.add_numbered(100, KEEP, 1));
+        assert!(s.add_numbered(100, KEEP, 2)); // same time as 1, added later
+        assert!(s.add_numbered(200, KEEP, 4));
+        let order: Vec<u32> = s.drain(FAR).iter().map(|e| number(&e.2)).collect();
         assert_eq!(order, vec![1, 2, 4, 3]);
     }
 
@@ -765,11 +674,11 @@ mod tests {
         for i in 0..400 {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let when = (x >> 40) & 0xFFFF; // heavy repetition, so FIFO matters
-            assert!(s.add(when, KEEP, i, D));
+            assert!(s.add_numbered(when, KEEP, i));
             expect.push((when, i));
         }
         expect.sort_by_key(|&(w, i)| (w, i)); // stable order == insertion order
-        let got: Vec<(i64, u32)> = s.drain(FAR).iter().map(|e| (e.0, e.2)).collect();
+        let got: Vec<(i64, u32)> = s.drain(FAR).iter().map(|e| (e.0, number(&e.2))).collect();
         assert_eq!(got, expect);
     }
 
@@ -777,14 +686,14 @@ mod tests {
     fn an_event_exactly_at_now_is_due_and_one_tick_later_is_not() {
         let mut s = S::new(16, 8192);
         assert_eq!(s.0.next_time(), None);
-        assert!(s.add(500, KEEP, 7, D));
+        assert!(s.add_numbered(500, KEEP, 7));
         assert_eq!(s.0.next_time(), Some(t(500)));
 
         assert!(s.pop(499).is_none(), "not yet due");
         assert_eq!(s.0.size(), 1, "and still live");
 
-        let (when, tag, meta, _) = s.pop(500).expect("due AT its timetag");
-        assert_eq!((when, tag, meta), (500, KEEP, 7));
+        let (when, tag, bytes) = s.pop(500).expect("due AT its timetag");
+        assert_eq!((when, tag, number(&bytes)), (500, KEEP, 7));
         assert_eq!(s.0.size(), 0);
         assert_eq!(s.0.next_time(), None);
     }
@@ -796,8 +705,8 @@ mod tests {
         let before = Timetag::from_ntp(0xFFFF_FFFF_8000_0000);
         let after = before.plus(1 << 32);
         let mut s = S::new(16, 8192);
-        assert!(s.0.add(after, KEEP, D).is_some());
-        assert!(s.0.add(before, KEEP, D).is_some());
+        assert!(s.0.add(after, KEEP, D));
+        assert!(s.0.add(before, KEEP, D));
         assert_eq!(s.0.next_time(), Some(before));
         assert!(s.0.pop_due(before.plus(-1)).is_none(), "neither is due yet");
         let first = s.0.pop_due(after).expect("due");
@@ -810,17 +719,17 @@ mod tests {
     #[test]
     fn immediately_pops_before_every_real_time() {
         let mut s = S::new(16, 8192);
-        assert!(s.add(100, KEEP, 1, D));
-        assert!(s.0.add(Timetag::IMMEDIATELY, KEEP, D).is_some());
+        assert!(s.add(100, KEEP, D));
+        assert!(s.0.add(Timetag::IMMEDIATELY, KEEP, D));
         assert_eq!(s.0.pop_due(t(100)).expect("due").when, Timetag::IMMEDIATELY);
     }
 
     #[test]
     fn flush_cancels_exactly_one_tag_and_zero_cancels_everything() {
         let mut s = S::new(16, 8192);
-        assert!(s.add(100, KEEP, 0, D));
-        assert!(s.add(200, FLUSHME, 0, D));
-        assert!(s.add(300, KEEP, 0, D));
+        assert!(s.add(100, KEEP, D));
+        assert!(s.add(200, FLUSHME, D));
+        assert!(s.add(300, KEEP, D));
         assert_eq!(s.0.size(), 3);
 
         s.0.flush(FLUSHME);
@@ -828,8 +737,8 @@ mod tests {
         assert_eq!(s.0.next_time(), Some(t(100)));
         assert_eq!(s.drain(FAR).len(), 2, "the flushed event never surfaces");
 
-        assert!(s.add(100, KEEP, 0, D));
-        assert!(s.add(200, FLUSHME, 0, D));
+        assert!(s.add(100, KEEP, D));
+        assert!(s.add(200, FLUSHME, D));
         s.0.flush(0);
         assert_eq!(s.0.size(), 0);
         assert_eq!(s.0.next_time(), None);
@@ -843,9 +752,9 @@ mod tests {
         // opaque value and not on a name the store knows.
         const CALLER: u32 = tag_hash(b"anything at all");
         let mut s = S::new(16, 8192);
-        assert!(s.add(100, TAG_DEFAULT, 0, D));
-        assert!(s.add(200, CALLER, 0, D));
-        assert!(s.add(300, TAG_SYNTH, 0, D));
+        assert!(s.add(100, TAG_DEFAULT, D));
+        assert!(s.add(200, CALLER, D));
+        assert!(s.add(300, TAG_SYNTH, D));
         s.0.flush(TAG_DEFAULT);
         assert_eq!(s.0.size(), 2);
         assert_eq!(s.0.next_time(), Some(t(200)), "the caller-tagged event survives");
@@ -859,13 +768,13 @@ mod tests {
         // live one never reaches the heap top, so its capacity is never
         // reclaimed and add() starts lying about being full.
         let mut s = S::new(4, 8192);
-        assert!(s.add(10, KEEP, 0, D));
+        assert!(s.add(10, KEEP, D));
         for i in 0..1000 {
-            assert!(s.add(1000 + i, FLUSHME, 0, D));
+            assert!(s.add(1000 + i, FLUSHME, D));
             s.0.flush(FLUSHME);
             assert_eq!(s.0.size(), 1);
         }
-        assert!(s.add(20, KEEP, 0, D));
+        assert!(s.add(20, KEEP, D));
         assert_eq!(s.0.size(), 2);
     }
 
@@ -877,7 +786,7 @@ mod tests {
         let mut s = S::new(64, 1 << 16);
         for i in 0..40i64 {
             let tag = if i % 3 == 0 { FLUSHME } else { KEEP };
-            assert!(s.add(1000 - i, tag, i as u32, D));
+            assert!(s.add(1000 - i, tag, D));
         }
         s.0.flush(FLUSHME);
         let whens: Vec<i64> = s.drain(FAR).iter().map(|e| e.0).collect();
@@ -890,8 +799,8 @@ mod tests {
     #[test]
     fn the_clear_handshake_is_requested_once_and_consumed_once() {
         let mut s = S::new(16, 8192);
-        assert!(s.add(100, KEEP, 0, D));
-        assert!(s.add(200, FLUSHME, 0, D));
+        assert!(s.add(100, KEEP, D));
+        assert!(s.add(200, FLUSHME, D));
         assert!(!s.0.drain_pending_clear(), "nothing requested yet");
         assert_eq!(s.0.size(), 2);
 
@@ -908,27 +817,27 @@ mod tests {
     fn a_full_slot_pool_refuses_and_freeing_one_reopens_exactly_one() {
         let mut s = S::new(4, 8192);
         for i in 0..4 {
-            assert!(s.add(100 + i, KEEP, 0, &[0]));
+            assert!(s.add(100 + i, KEEP, &[0]));
         }
         assert!(s.0.full());
         assert_eq!(s.0.size(), 4);
-        assert!(!s.add(200, KEEP, 0, &[0]));
+        assert!(!s.add(200, KEEP, &[0]));
         assert_eq!(s.0.size(), 4, "a refused add changes nothing");
 
         assert!(s.pop(FAR).is_some());
         assert!(!s.0.full());
-        assert!(s.add(200, KEEP, 0, &[0]));
-        assert!(!s.add(201, KEEP, 0, &[0]), "exactly one");
+        assert!(s.add(200, KEEP, &[0]));
+        assert!(!s.add(201, KEEP, &[0]), "exactly one");
     }
 
     #[test]
     fn a_payload_larger_than_the_whole_pool_is_refused_outright() {
         let mut s = S::new(16, 256);
         assert_eq!(s.0.data_capacity(), 256);
-        assert!(!s.add(100, KEEP, 0, &[0u8; 300]));
+        assert!(!s.add(100, KEEP, &[0u8; 300]));
         assert_eq!(s.0.size(), 0);
         assert_eq!(s.0.data_used(), 0, "refused before anything was reserved");
-        assert!(s.add(100, KEEP, 0, &[0u8; 256]), "exactly the capacity fits");
+        assert!(s.add(100, KEEP, &[0u8; 256]), "exactly the capacity fits");
         assert_eq!(s.0.data_used(), 256);
     }
 
@@ -936,12 +845,12 @@ mod tests {
     fn the_data_pool_fills_while_slots_stay_free_and_full_misses_it() {
         let mut s = S::new(64, 256);
         let mut added = 0i64;
-        while s.add(1000 + added, KEEP, 0, &[0u8; 64]) {
+        while s.add(1000 + added, KEEP, &[0u8; 64]) {
             added += 1;
         }
         assert!(added < 64, "ran out of data pool, not slots");
         assert!(!s.0.full(), "full() is slot-count only");
-        assert!(!s.add(2000, KEEP, 0, &[0]), "not even one byte fits");
+        assert!(!s.add(2000, KEEP, &[0]), "not even one byte fits");
     }
 
     #[test]
@@ -949,9 +858,9 @@ mod tests {
         // One event pinned at the far end means the pool never drains, so the
         // ONLY way churn can continue is in-place compaction.
         let mut s = S::new(512, 524288);
-        assert!(s.add(FAR, KEEP, 0, &[0u8; 64]));
+        assert!(s.add(FAR, KEEP, &[0u8; 64]));
         for i in 0..10_000i64 {
-            assert!(s.add(i, KEEP, 0, &[0xABu8; 152]), "exhausted at {i}");
+            assert!(s.add(i, KEEP, &[0xABu8; 152]), "exhausted at {i}");
             assert!(s.pop(FAR).is_some());
         }
         assert_eq!(s.0.size(), 1);
@@ -960,13 +869,12 @@ mod tests {
     #[test]
     fn compaction_moves_bytes_without_corrupting_them() {
         let mut s = S::new(16, 8192);
-        assert!(s.add(FAR, KEEP, 0, &[0u8; 32]));
+        assert!(s.add(FAR, KEEP, &[0u8; 32]));
         for i in 0..100u32 {
             let marker: Vec<u8> =
                 (0..64u32).map(|b| ((i * 7 + b) & 0xFF) as u8).collect();
-            assert!(s.add(i as i64, KEEP, i, &marker));
-            let (_, _, meta, bytes) = s.pop(FAR).expect("due");
-            assert_eq!(meta, i);
+            assert!(s.add(i as i64, KEEP, &marker));
+            let (_, _, bytes) = s.pop(FAR).expect("due");
             assert_eq!(bytes, marker, "payload survived the churn");
         }
     }
@@ -978,20 +886,22 @@ mod tests {
         let mut s = S::new(32, 1024);
         let body = |n: u8| vec![n; 100];
         for i in 0..8u8 {
-            assert!(s.add(1000 + i as i64, if i % 2 == 0 { KEEP } else { FLUSHME }, i as u32, &body(i)));
+            assert!(s.add(1000 + i as i64, if i % 2 == 0 { KEEP } else { FLUSHME }, &body(i)));
         }
         s.0.flush(FLUSHME); // four holes, interleaved with four survivors
-        assert!(s.add(2000, KEEP, 99, &body(99)), "compaction makes room");
-        for (_, _, meta, bytes) in s.drain(FAR) {
-            assert_eq!(bytes, body(meta as u8), "chunk {meta} intact after the slide");
-        }
+        assert!(s.add(2000, KEEP, &body(99)), "compaction makes room");
+        // The even-numbered chunks survived the flush; they and the new one
+        // come back in time order, each whole.
+        let got: Vec<Vec<u8>> = s.drain(FAR).into_iter().map(|e| e.2).collect();
+        let want: Vec<Vec<u8>> = [0u8, 2, 4, 6, 99].iter().map(|&n| body(n)).collect();
+        assert_eq!(got, want, "every live chunk intact after the slide");
     }
 
     #[test]
     fn a_drained_queue_resets_the_data_head() {
         let mut s = S::new(16, 8192);
         for i in 0..5 {
-            assert!(s.add(i, KEEP, 0, &[1u8; 8]));
+            assert!(s.add(i, KEEP, &[1u8; 8]));
         }
         assert!(s.0.data_used() > 0);
         s.drain(FAR);
@@ -1000,19 +910,16 @@ mod tests {
 
     #[test]
     fn an_impossible_shape_is_refused_rather_than_built() {
-        assert!(Store::new(0, 8192, 4, 4).is_none(), "no slots");
-        assert!(Store::new(16, 0, 4, 4).is_none(), "no data pool");
-        assert!(Store::new(MAX_SLOT_COUNT + 1, 8192, 4, 4).is_none(), "past the index width");
-        assert!(Store::new(16, 8192, 4, 3).is_none(), "alignment not a power of two");
-        assert!(Store::new(16, 8192, 6, 4).is_none(), "size not a multiple of alignment");
-        assert!(Store::new(16, 8192, 0, 1).is_none(), "a zero-size record");
-        assert!(Store::new(MAX_SLOT_COUNT, 8192, 4, 4).is_some(), "the limit itself is fine");
+        assert!(Store::new(0, 8192).is_none(), "no slots");
+        assert!(Store::new(16, 0).is_none(), "no data pool");
+        assert!(Store::new(MAX_SLOT_COUNT + 1, 8192).is_none(), "past the index width");
+        assert!(Store::new(MAX_SLOT_COUNT, 8192).is_some(), "the limit itself is fine");
     }
 
     #[test]
     fn releasing_the_same_slot_twice_or_a_nonsense_slot_is_a_no_op() {
         let mut s = S::new(4, 8192);
-        assert!(s.add(1, KEEP, 0, D));
+        assert!(s.add(1, KEEP, D));
         let slot = s.0.pop_due(t(FAR)).expect("due").slot;
         s.0.release(slot);
         assert_eq!(s.0.size(), 0);
@@ -1020,15 +927,15 @@ mod tests {
         s.0.release(-1);
         s.0.release(9999);
         assert_eq!(s.0.size(), 0);
-        assert!(s.add(2, KEEP, 0, D), "the free list is intact");
+        assert!(s.add(2, KEEP, D), "the free list is intact");
     }
 
     #[test]
     fn a_zero_length_payload_is_stored_and_returned() {
         let mut s = S::new(4, 64);
-        assert!(s.add(5, KEEP, 42, &[]));
-        let (when, _, meta, bytes) = s.pop(FAR).expect("due");
-        assert_eq!((when, meta), (5, 42));
+        assert!(s.add(5, KEEP, &[]));
+        let (when, _, bytes) = s.pop(FAR).expect("due");
+        assert_eq!(when, 5);
         assert!(bytes.is_empty());
     }
 
@@ -1036,11 +943,11 @@ mod tests {
     fn stability_is_not_reset_by_a_clear() {
         // Two events added either side of a clear must still order FIFO.
         let mut s = S::new(16, 8192);
-        assert!(s.add(1, KEEP, 1, D));
+        assert!(s.add_numbered(1, KEEP, 1));
         s.0.clear();
-        assert!(s.add(7, KEEP, 2, D));
-        assert!(s.add(7, KEEP, 3, D));
-        let order: Vec<u32> = s.drain(FAR).iter().map(|e| e.2).collect();
+        assert!(s.add_numbered(7, KEEP, 2));
+        assert!(s.add_numbered(7, KEEP, 3));
+        let order: Vec<u32> = s.drain(FAR).iter().map(|e| number(&e.2)).collect();
         assert_eq!(order, vec![2, 3]);
     }
 }

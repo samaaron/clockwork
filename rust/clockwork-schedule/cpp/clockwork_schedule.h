@@ -31,32 +31,26 @@ extern "C" {
 /* Opaque store. */
 typedef struct ClockworkSched ClockworkSched;
 
-/* A due event. `meta` and `data` borrow the store's pools and stay valid until
+/* A due event. `data` borrows the store's pool and stays valid until
  * clockwork_sched_release is called for `slot`. */
 typedef struct ClockworkSchedEvent {
     ClockworkTimetag when;
     uint32_t    tag;
     uint32_t    size;
-    const void* meta;   /* the caller's record for this event, meta_size bytes */
     const uint8_t* data;
     int32_t     slot;   /* opaque; hand back to clockwork_sched_release */
 } ClockworkSchedEvent;
 
-/* Build a store. `meta_size`/`meta_align` describe the caller's per-event
- * record; the store never reads it, it only reserves and addresses it, which
- * is what lets Rust carry a C++ type it cannot name. Returns NULL for a
- * slot_count of 0 or above 32767, an empty data pool, a meta description that
- * is not a valid layout, or an allocation failure. */
-ClockworkSched* clockwork_sched_new(uint32_t slot_count, uint32_t data_pool_size,
-                        uint32_t meta_size, uint32_t meta_align);
+/* Build a store. Returns NULL for a slot_count of 0 or above 32767, or an
+ * empty data pool. */
+ClockworkSched* clockwork_sched_new(uint32_t slot_count, uint32_t data_pool_size);
 
 /*
  * Bytes a caller must supply to clockwork_sched_new_in_place, or 0 for an invalid
  * shape. Computable before any scheduler exists, so a static array can be
  * sized against it at startup and the result checked.
  */
-size_t clockwork_sched_bytes_needed(uint32_t slot_count, uint32_t data_pool_size,
-                              uint32_t meta_size, uint32_t meta_align);
+size_t clockwork_sched_bytes_needed(uint32_t slot_count, uint32_t data_pool_size);
 
 /*
  * Build a scheduler inside memory the caller owns. ALLOCATES NOTHING, so it
@@ -73,14 +67,12 @@ size_t clockwork_sched_bytes_needed(uint32_t slot_count, uint32_t data_pool_size
  * Do not pass the result to clockwork_sched_free; the memory is not ours.
  */
 ClockworkSched* clockwork_sched_new_in_place(uint8_t* mem, size_t len,
-                                 uint32_t slot_count, uint32_t data_pool_size,
-                                 uint32_t meta_size, uint32_t meta_align);
+                                 uint32_t slot_count, uint32_t data_pool_size);
 void      clockwork_sched_free(ClockworkSched* h);
 
-/* Store `size` bytes to fire at `when` under `tag`. Returns this event's
- * metadata slot — the caller constructs its record there — or NULL if the slot
- * pool or the data pool is full, with no state changed. */
-void*     clockwork_sched_add(ClockworkSched* h, ClockworkTimetag when, uint32_t tag,
+/* Store `size` bytes to fire at `when` under `tag`. Returns 1, or 0 with no
+ * state changed if the slot pool or the data pool is full. */
+int32_t   clockwork_sched_add(ClockworkSched* h, ClockworkTimetag when, uint32_t tag,
                         const uint8_t* data, uint32_t size);
 
 /* The earliest live event's timetag into `*out`: 1, or 0 with `*out` untouched

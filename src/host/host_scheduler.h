@@ -47,10 +47,6 @@
 
 namespace clockwork_host {
 
-// Per-event metadata: the host keeps nothing beside an event's time, tag and
-// bytes.
-struct HostMeta {};
-
 class HostScheduler {
 public:
     explicit HostScheduler(ClockworkSysRoutes& routes) : mRoutes(routes) {}
@@ -90,8 +86,7 @@ public:
             if (c.kind == Command::Flush) {
                 mCore.flush(c.tag);
             } else {
-                mCore.add(c.when, c.tag, HostMeta{},
-                          c.bytes.data(), static_cast<uint32_t>(c.bytes.size()));
+                mCore.add(c.when, c.tag, c.bytes.data(), static_cast<uint32_t>(c.bytes.size()));
             }
         }
         clockwork_fire_due(mCore, now, /*blockTime*/ clockwork::Timetag(),
@@ -138,7 +133,7 @@ public:
 private:
     static constexpr int kSlots    = 256;
     static constexpr int kDataPool = kSlots * 1024;
-    using Core = Scheduler<HostMeta, kSlots, kDataPool>;
+    using Core = Scheduler<kSlots, kDataPool>;
 
     struct Command {
         enum Kind { Schedule, Flush } kind;

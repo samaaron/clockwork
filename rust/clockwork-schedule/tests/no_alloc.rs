@@ -88,35 +88,32 @@ fn disarm() -> usize {
 #[cfg(feature = "store")]
 #[test]
 fn construction_allocates_and_the_fire_path_does_not() {
-    let h = clockwork_sched_new(256, 65536, 4, 4);
+    let h = clockwork_sched_new(256, 65536);
     assert!(!h.is_null());
 
     // A payload big enough that the pool must be recycled many times over, so
     // the loop below is guaranteed to drive compaction and not merely the
     // easy bump-allocate path.
     let payload = [0xABu8; 200];
-    let meta: u32 = 7;
 
-    // SAFETY: `h` is a live store; `payload` outlives every add; each meta
-    // slot is 4 bytes at 4-byte alignment, so a `u32` fits; `ev` is only
-    // read after a pop returned 1.
+    // SAFETY: `h` is a live store; `payload` outlives every add; `ev` is only
+    // read after a pop returned 1, and its `data` is readable for `size`
+    // bytes until the release that follows.
     unsafe {
         // Pin one event at the far end so the pool never drains to zero: the
         // only way the churn below can keep succeeding is in-place compaction.
-        let pin = clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64);
-        assert!(!pin.is_null());
+        assert_eq!(clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64), 1);
 
         arm();
         let mut fired = 0usize;
         for i in 0..5_000i64 {
-            let m = clockwork_sched_add(h, at(i), 1, payload.as_ptr(), payload.len() as u32);
-            assert!(!m.is_null(), "add refused at {i} — the pool stopped recycling");
-            std::ptr::write(m.cast::<u32>(), meta);
+            let added = clockwork_sched_add(h, at(i), 1, payload.as_ptr(), payload.len() as u32);
+            assert_eq!(added, 1, "add refused at {i} — the pool stopped recycling");
 
             let mut ev = std::mem::MaybeUninit::<ClockworkSchedEvent>::uninit();
             while clockwork_sched_pop_due(h, at(i), ev.as_mut_ptr()) == 1 {
                 let e = ev.assume_init_ref();
-                assert_eq!(std::ptr::read(e.meta.cast::<u32>()), meta);
+                assert_eq!(std::slice::from_raw_parts(e.data, e.size as usize), payload);
                 clockwork_sched_release(h, e.slot);
                 fired += 1;
             }
@@ -127,7 +124,7 @@ fn construction_allocates_and_the_fire_path_does_not() {
                 clockwork_sched_request_clear(h);
                 assert_eq!(clockwork_sched_drain_pending_clear(h), 1);
                 // The clear took the pin too; put it back.
-                assert!(!clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64).is_null());
+                assert_eq!(clockwork_sched_add(h, at(1 << 50), 1, payload.as_ptr(), 64), 1);
             }
             let mut next = Timetag::default();
             let _ = clockwork_sched_next_time(h, &mut next);
@@ -198,20 +195,20 @@ fn parsing_a_wire_message_allocates_nothing() {
 fn in_place_construction_allocates_nothing_and_still_schedules() {
     use clockwork_schedule::Store;
 
-    let need = Store::bytes_needed(64, 4096, 4, 4).expect("valid shape");
+    let need = Store::bytes_needed(64, 4096).expect("valid shape");
     let mut backing = vec![0u8; need];          // allocated BEFORE arming
 
     arm();
     // SAFETY: `backing` is `need` writable bytes and outlives `s`.
     let mut s = unsafe {
-        Store::new_in(backing.as_mut_ptr(), backing.len(), 64, 4096, 4, 4)
+        Store::new_in(backing.as_mut_ptr(), backing.len(), 64, 4096)
     }
     .expect("in-place construction");
 
     // And the fire path still works, still without allocating.
     let msg = [1u8, 2, 3, 4, 5, 6, 7, 8];
     for i in 0..16 {
-        assert!(s.add(at(1_000 + i as i64), 7, &msg).is_some(), "add {i} refused");
+        assert!(s.add(at(1_000 + i as i64), 7, &msg), "add {i} refused");
     }
     let mut fired = 0;
     while s.pop_due(at(2_000)).is_some() {
@@ -226,20 +223,18 @@ fn in_place_construction_allocates_nothing_and_still_schedules() {
 #[test]
 fn bytes_needed_refuses_shapes_new_in_would_refuse() {
     use clockwork_schedule::Store;
-    assert!(Store::bytes_needed(0, 4096, 4, 4).is_none(), "no slots");
-    assert!(Store::bytes_needed(64, 0, 4, 4).is_none(), "no data pool");
-    assert!(Store::bytes_needed(u32::MAX, 4096, 4, 4).is_none(), "past the index width");
-    assert!(Store::bytes_needed(64, 4096, 0, 4).is_none(), "no meta");
-    assert!(Store::bytes_needed(64, 4096, 3, 4).is_none(), "meta not a multiple of align");
+    assert!(Store::bytes_needed(0, 4096).is_none(), "no slots");
+    assert!(Store::bytes_needed(64, 0).is_none(), "no data pool");
+    assert!(Store::bytes_needed(u32::MAX, 4096).is_none(), "past the index width");
 }
 
 #[test]
 fn a_short_buffer_is_refused_rather_than_overrun() {
     use clockwork_schedule::Store;
-    let need = Store::bytes_needed(64, 4096, 4, 4).unwrap();
+    let need = Store::bytes_needed(64, 4096).unwrap();
     let mut small = vec![0u8; need - 1];
     // SAFETY: `small` is exactly `small.len()` writable bytes; the refusal
     // is the point, and nothing outlives the call.
-    let got = unsafe { Store::new_in(small.as_mut_ptr(), small.len(), 64, 4096, 4, 4) };
+    let got = unsafe { Store::new_in(small.as_mut_ptr(), small.len(), 64, 4096) };
     assert!(got.is_none(), "a buffer one byte short must be refused");
 }

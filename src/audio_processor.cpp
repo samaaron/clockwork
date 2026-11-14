@@ -1656,7 +1656,7 @@ extern "C" {
             return;
         }
         EngineScheduler* q = clockwork_engine_schedule(st.core);
-        if (!q || !q->add(when, tag, EngineMeta{}, body, bodyLen)) {
+        if (!q || !q->add(when, tag, body, bodyLen)) {
             increment_scheduler_drop_metric(st);   // pool full / oversize
             if (st.schedule.refused_log.say())
                 // Rate-limited, because an overloaded queue refuses in bursts.

@@ -29,9 +29,8 @@
 //!
 //! # What is deliberately absent
 //!
-//! What an event *means*. The store holds bytes and a caller-defined metadata
-//! record it never reads; who delivers a due event, and to what, is entirely
-//! the caller's business. There is no OSC dispatch here, no synth, no engine
+//! What an event *means*. The store holds bytes it never reads; who delivers
+//! a due event, and to what, is entirely the caller's business. There is no OSC dispatch here, no synth, no engine
 //! and no notion of a block.
 //!
 //! # Real-time safety

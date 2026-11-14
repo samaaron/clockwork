@@ -8,13 +8,13 @@
     Generic real-time timed-event scheduler.
 
     Stores opaque event payloads keyed by an int64 timetag and releases them in
-    time order. Each event carries a caller-defined Meta value and a tag used for
-    selective cancellation. The structure is RT-safe: a fixed metadata pool, a
-    shared bump-allocated data pool with in-place compaction, and a binary
-    min-heap of (timetag, slot index) entries. No allocation, no locks.
+    time order. Each event carries a tag used for selective cancellation. The
+    structure is RT-safe: a fixed slot pool, a shared bump-allocated data pool
+    with in-place compaction, and a binary min-heap of (timetag, slot index)
+    entries. No allocation, no locks.
 
-    Payload bytes and Meta are opaque to the scheduler; what an event means and
-    how it is delivered when due is entirely the caller's concern.
+    Payload bytes are opaque to the scheduler; what an event means and how it
+    is delivered when due is entirely the caller's concern.
 
     ── Where the implementation lives ───────────────────────────────────────────
 
@@ -23,11 +23,9 @@
     left here is the template — because the template is the part that cannot
     cross a C ABI. It carries two things Rust cannot be given:
 
-      * `Meta`, a C++ type the store must reserve room for, address by slot and
-        hand back typed, without ever being able to name it. The ABI takes its
-        size and alignment; `add` constructs the caller's object in the storage
-        the store reserved, and `popDue` hands the same address back as a
-        `const Meta*`. The store itself never reads a byte of it.
+      * the queue's memory: an array member sized at compile time from
+        `SlotCount` and `DataPoolSize`, so a static scheduler's queue is in
+        BSS and is never allocated.
       * `sched_tag_hash`, which must stay `constexpr`: test_scheduler.cpp asserts
         its results in `static_assert`, and no call across a C ABI can satisfy
         one. It is therefore spelled twice, here and in
@@ -43,9 +41,7 @@
 #include <cstddef>
 #include <array>
 #include <cstdint>
-#include <new>
 #include <optional>
-#include <type_traits>
 
 #include "clockwork_schedule.h"
 #include "clock/timetag.h"
@@ -65,24 +61,17 @@ constexpr uint32_t SCHED_TAG_DEFAULT = sched_tag_hash("default", 7);
 // them untouched; they are cleared via the wildcard flush(0) / clear().
 constexpr uint32_t SCHED_TAG_SYNTH = sched_tag_hash("synth", 5);
 
-template <typename Meta, int SlotCount, int DataPoolSize>
+template <int SlotCount, int DataPoolSize>
 class Scheduler {
     static_assert(SlotCount > 0 && SlotCount <= 32767,
                   "SlotCount must be positive and fit the int16_t slot index");
     static_assert(DataPoolSize > 0, "DataPoolSize must be positive");
-    // The store reserves Meta-shaped storage and addresses it by slot; it never
-    // copies or destroys one. So a Meta must be safe to leave unwound when its
-    // slot is reused, and cheap to construct in place.
-    static_assert(std::is_trivially_destructible<Meta>::value,
-                  "Meta must be trivially destructible: a released slot is "
-                  "reused without running a destructor");
 
 public:
     // A due event handed to the caller. Valid until release() is called for it.
     struct Event {
         clockwork::Timetag when;
         uint32_t       tag  = 0;
-        const Meta*    meta = nullptr;
         const uint8_t* data = nullptr;
         uint32_t       size = 0;
         int            slot = -1;   // opaque; pass back to release()
@@ -101,8 +90,8 @@ public:
      * The arena is sized generously at compile time and checked against the
      * real figure at construction: the Rust layout is not visible from here,
      * so guessing it would be two places computing one thing. 128 bytes a
-     * slot covers the slot record, the queue entry, the scratch entry and the
-     * meta, which together measure well under that.
+     * slot covers the slot record, the queue entry and the scratch entry,
+     * which together measure well under that.
      *
      * This is the same trade the ring buffers already make — address space in
      * the data segment, in exchange for memory that cannot fail to exist.
@@ -113,9 +102,7 @@ public:
     Scheduler()
         : mStore(clockwork_sched_new_in_place(mArena.data(), kArenaBytes,
                                         static_cast<uint32_t>(SlotCount),
-                                        static_cast<uint32_t>(DataPoolSize),
-                                        static_cast<uint32_t>(sizeof(Meta)),
-                                        static_cast<uint32_t>(alignof(Meta)))) {}
+                                        static_cast<uint32_t>(DataPoolSize))) {}
 
     // Nothing to free: the arena is ours and static.
     ~Scheduler() = default;
@@ -126,9 +113,6 @@ public:
     Scheduler(const Scheduler&)            = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
-    // Store `data`/`size` to fire at timetag `when`, carrying `meta` and keyed by
-    // `tag`. Returns false (no state change) if the slot pool or data pool is
-    // full. RT-safe; no allocation.
     /*
      * Did the store actually build?
      *
@@ -145,20 +129,14 @@ public:
        wants to say by how much it fell short. */
     static size_t bytesNeeded() {
         return clockwork_sched_bytes_needed(static_cast<uint32_t>(SlotCount),
-                                      static_cast<uint32_t>(DataPoolSize),
-                                      static_cast<uint32_t>(sizeof(Meta)),
-                                      static_cast<uint32_t>(alignof(Meta)));
+                                      static_cast<uint32_t>(DataPoolSize));
     }
 
-    bool add(clockwork::Timetag when, uint32_t tag, const Meta& meta,
-             const uint8_t* data, uint32_t size) {
-        void* slot = clockwork_sched_add(mStore, when.abi(), tag, data, size);
-        if (!slot) return false;
-        // Construct the caller's record in the storage the store reserved.
-        // Placement new, so this allocates nothing and the object handed back
-        // by popDue is a real Meta and not a reinterpreted pointer.
-        ::new (slot) Meta(meta);
-        return true;
+    // Store `data`/`size` to fire at timetag `when`, keyed by `tag`. Returns
+    // false (no state change) if the slot pool or data pool is full. RT-safe;
+    // no allocation.
+    bool add(clockwork::Timetag when, uint32_t tag, const uint8_t* data, uint32_t size) {
+        return clockwork_sched_add(mStore, when.abi(), tag, data, size) != 0;
     }
 
     // Timetag of the earliest live event, if there is one.
@@ -174,7 +152,7 @@ public:
     Event popDue(clockwork::Timetag now) {
         ClockworkSchedEvent e;
         if (!clockwork_sched_pop_due(mStore, now.abi(), &e)) return Event{};
-        return Event{ clockwork::Timetag::fromAbi(e.when), e.tag, static_cast<const Meta*>(e.meta),
+        return Event{ clockwork::Timetag::fromAbi(e.when), e.tag,
                       e.data, e.size, static_cast<int>(e.slot) };
     }
 

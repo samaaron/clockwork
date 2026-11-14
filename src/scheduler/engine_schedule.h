@@ -56,14 +56,10 @@
 
 #include "Scheduler.h"   // sched_tag_hash + SCHED_TAG_* + the generic store
 
-// Per-event metadata: clockwork keeps nothing beside an event's time, tag and
-// bytes.
-struct EngineMeta {};
-
 // The one instantiation clockwork runs. Sizes come from the build profile
 // (SCHEDULER_SLOT_COUNT / SCHEDULER_DATA_POOL_SIZE) so an embedded profile can
 // shrink it without touching this header.
-using EngineScheduler = Scheduler<EngineMeta, SCHEDULER_SLOT_COUNT, SCHEDULER_DATA_POOL_SIZE>;
+using EngineScheduler = Scheduler<SCHEDULER_SLOT_COUNT, SCHEDULER_DATA_POOL_SIZE>;
 
 // A core's store (core_state.h, Schedule::store).
 struct ScheduleStore {
