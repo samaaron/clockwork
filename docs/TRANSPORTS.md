@@ -139,28 +139,24 @@ hand-off: `clockwork_client_open_shm(endpoint, secret)` for a reader,
 `clockwork_client_open_shm_peer(endpoint, secret)` for the peer, with
 `clockwork_client_default_endpoint(port)` for the derived name.
 
-## Origins
+## The writer label
 
-Every command carries an **origin** in its ring `Message` header, and a reply
-carries it back. `dsp_api.h` calls it `origin`; the well-known constants are
-named `*_ORIGIN_TOKEN`.
+A ring frame's `Message` header has a `sourceId` field, and a frame written
+into the ingress ring carries a **writer label** there: the last argument of
+`clockwork_client_send` and `clockwork_ingress_write`. It is a label of the
+sender's own choosing, stored in the frame's ring header for whoever watches
+the ring (a tap, the web's traffic log). Clockwork never reads it, the guest
+is not given it, and no answer carries it.
 
-The transport mints it on the way in:
+* the web labels each thread that writes the ingress ring (0 the main
+  thread, 1 and up the workers), and its traffic log shows which thread sent
+  what;
+* the engine's own `ingest` writes 0;
+* the shm plane labels the peer's frames `SHM_PEER_WRITER`, in the ingress
+  ring and in the plane's reply ring;
+* every frame on the egress rings carries 0.
 
-* the stream transports use the connection id, minted from 1 and never
-  reused, so a token survives a scheduled event's delay and dies with its
-  connection;
-* the shm plane uses one constant, `SHM_PEER_ORIGIN_TOKEN`, because it has
-  exactly one peer;
-* `0` is the in-process caller's, and what a message nobody asked for
-  carries.
-
-Clockwork inspects the value nowhere. An engine has one client, and
-everything on the egress is handed to it: `IOscTransport` is one call,
-`deliver`. The origin is a **label, not an address**: it lets the client
-match an answer to its request. A host that wants more than that (several
-receivers of its own, a record of who asked) builds it on its side, on the
-label or in its own messages.
-
-A DSP therefore keeps no client registry: it echoes back the `origin` it was
-given.
+An engine has one client, and everything on the egress is handed to it:
+`IOscTransport` is one call, `deliver`. A client that must match an answer to
+its request carries an id in its own OSC messages. A stream transport keeps
+its client's connection id to itself.

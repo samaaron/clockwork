@@ -136,8 +136,8 @@ TEST_CASE("shm-peer: command ring commands reach the engine and reply",
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
 
-    // The fixture's transport surfaces replies for every token via onReply,
-    // so the peer command's reply lands in the fixture collector.
+    // The fixture's transport surfaces every reply via onReply, so the peer
+    // command's reply lands in the fixture collector.
     REQUIRE(peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 4242)));
 
     OscReply reply;

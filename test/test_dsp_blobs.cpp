@@ -190,9 +190,6 @@ TEST_CASE("blobs: a SMALL blob leaves the same way it arrived",
 
     const auto* out = findAddress(frames, "/dummy/blob-out");
     REQUIRE(out != nullptr);
-    // Routed to the asking client, like any other reply — a blob is not a
-    // different kind of message and does not get different routing.
-    REQUIRE(out->sourceId == kClient);
 
     const auto r = osc_test::parseReply(out->data.data(),
                                         static_cast<uint32_t>(out->data.size()));

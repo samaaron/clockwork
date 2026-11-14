@@ -536,7 +536,7 @@ void manyWaiting(Reader reader) {
     // reply ring either way.
     int waiting = 0;
     const auto ping = restart_model::oldAsk();
-    while (waiting < 4000 && cell.engine().ingest(ping.ptr(), ping.size(), 0) == CLOCKWORK_OK) ++waiting;
+    while (waiting < 4000 && cell.engine().ingest(ping.ptr(), ping.size()) == CLOCKWORK_OK) ++waiting;
     REQUIRE(waiting > 500);
 
     const uint32_t before = cell.engine().generation();

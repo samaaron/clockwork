@@ -30,8 +30,7 @@
  *   verbs that PLAY a track (note, cc, bend, notes_off, param, plugin/param)
  *   are audio-thread routes: each is turned into a frame offset and put on
  *   the realtime ring for the bridge's audio thread to apply within the same
- *   block. Everything else goes on the control ring with the caller's origin
- *   token, and the bridge's answers come back on the OUT ring, so relaying
+ *   block. Everything else goes on the control ring, and the bridge's answers come back on the OUT ring, so relaying
  *   one is a write onto the NRT
  *   egress lane — the same ring every other control-thread reply takes.
  *   One verb is read on the way through: "track/timeline" names a timeline

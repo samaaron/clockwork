@@ -47,8 +47,8 @@ public:
     // is only the thread + wake + registration wrapper around it.
     using Metrics = ClockworkDrainMetrics;
 
-    // (sourceId, payload, payloadSize, sequence). sourceId carries the origin
-    // token on the control ring; a drain that has no use for it ignores it.
+    // (sourceId, payload, payloadSize, sequence). sourceId is the frame's
+    // writer label; a drain that has no use for it ignores it.
     using OnMessage = std::function<void(uint32_t, const uint8_t*, uint32_t, uint32_t)>;
     // The same, with a say in whether the message is consumed: Retain leaves
     // it, and everything behind it, for the next pass (ring_drain.h).

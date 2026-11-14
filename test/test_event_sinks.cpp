@@ -113,7 +113,6 @@ ClockworkSink dspOpenSink(const char* target, ClockworkSinkKind kind, uint32_t c
         const auto r = osc_test::parseReply(f.data.data(),
                                             static_cast<uint32_t>(f.data.size()));
         if (r.address != "/dummy/sink/opened") continue;
-        REQUIRE(f.sourceId == kClient);   // routed to the asker, not broadcast
         REQUIRE(r.argCount() == 1);
         return static_cast<ClockworkSink>(r.argInt(0));
     }

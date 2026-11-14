@@ -59,7 +59,6 @@ osc_test::ParsedReply ask(const char* verb, const char* replyAddress) {
     const auto frames = lanes_test::tickUntil(4, replyAddress);
     const auto* reply = findAddress(frames, replyAddress);
     REQUIRE(reply != nullptr);
-    REQUIRE(reply->sourceId == kClient);
     return osc_test::parseReply(reply->data.data(),
                                 static_cast<uint32_t>(reply->data.size()));
 }
@@ -353,13 +352,12 @@ TEST_CASE("restarts: a message in the in ring at a cold restart is refused to it
     const uint32_t closing = clockwork_arena_generation(arenaHeader(arena()));
     coldRestart();
 
-    // Refused to the one who sent it by the next drain, naming the message,
-    // why, and the generation it was written for: clockwork has the address
-    // and the token, which is all a refusal needs.
+    // Refused by the next drain, naming the message, why, and the generation
+    // it was written for: clockwork has the address, which is all a refusal
+    // needs.
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
     const auto* refusal = findAddress(frames, CLOCKWORK_SYS("error"));
     REQUIRE(refusal != nullptr);
-    CHECK(refusal->sourceId == kClient);
     const auto r = osc_test::parseReply(refusal->data.data(),
                                         static_cast<uint32_t>(refusal->data.size()));
     REQUIRE(r.argCount() == 3);
@@ -424,7 +422,6 @@ TEST_CASE("restarts: a message sent while there is no instance is refused at onc
     const auto* refusal = findAddress(said, CLOCKWORK_SYS("error"));
     CHECK(refusal != nullptr);
     if (refusal) {
-        CHECK(refusal->sourceId == kClient);
         const auto r = osc_test::parseReply(refusal->data.data(),
                                             static_cast<uint32_t>(refusal->data.size()));
         REQUIRE(r.argCount() >= 2);
@@ -906,7 +903,6 @@ TEST_CASE("restarts: an asset a new instance will not take is released to the cl
     REQUIRE(released != nullptr);
     REQUIRE(setup != nullptr);
     CHECK(released < setup);
-    CHECK(released->sourceId == kClient);
     CHECK(osc_test::parseReply(released->data.data(), static_cast<uint32_t>(released->data.size())).argInt(0) == 9);
     // And the id is the client's to commit again.
     lanes_test::comeBack();

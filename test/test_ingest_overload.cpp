@@ -107,8 +107,8 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     StreamOscTransport tcp;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    tcp.setIngest([&engine](const uint8_t* d, uint32_t n, uint32_t token) {
-        engine.ingest(d, n, token);
+    tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
+        engine.ingest(d, n);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());
@@ -211,8 +211,8 @@ TEST_CASE("Answers to a client that has gone are counted undelivered",
     StreamOscTransport tcp;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    tcp.setIngest([&engine](const uint8_t* d, uint32_t n, uint32_t token) {
-        engine.ingest(d, n, token);
+    tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
+        engine.ingest(d, n);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());

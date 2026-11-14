@@ -69,11 +69,6 @@ private:
     OscEgress*    mEgress   = nullptr;
     ClockworkClock*     mClock    = nullptr;
     MidiClockOut* mClockOut = nullptr;
-    // The current command's origin token, held for the duration of a synchronous
-    // clockwork_midi_handle_osc call so emitCb (a Rust callback with no call ctx) can
-    // route its REPLY back to the caller. NRT-thread-only; REPLY emits are
-    // synchronous within handleMidiCommand. Async emits (/clockwork/midi/in, ports) broadcast.
-    uint32_t    mReplyToken = 0;
     // An event dropped on a full IN ring: said eight times.
     clockwork::LogLimit mDroppedLog = clockwork::LogLimit::first(8);
 };

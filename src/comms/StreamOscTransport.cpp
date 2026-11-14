@@ -69,11 +69,11 @@ uint64_t StreamOscTransport::refusedConnections() const {
     return server ? clockwork_osc_stream_refused(server) : 0;
 }
 
-// Rust reader thread → ingest carrying the connection id as the origin token.
+// Rust reader thread → ingest. The connection that sent it is the client.
 void StreamOscTransport::onPacket(void* ctx, uint32_t conn, const uint8_t* osc, uint32_t len) {
     auto* self = static_cast<StreamOscTransport*>(ctx);
     self->mClient.store(conn, std::memory_order_release);
-    if (self->mIngest) self->mIngest(osc, len, conn);
+    if (self->mIngest) self->mIngest(osc, len);
 }
 
 // Rust reader thread, once per ended connection: the client has gone, and

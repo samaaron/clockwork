@@ -5,14 +5,14 @@
 // /clockwork/param/define, list, set and text, answered on the thread that
 // ticks the core. A define is a blob of records and a blob of text, the same
 // bytes the table holds, from the client, validated by nothing before. Each
-// input is a run of frames, over one connection or another, so one frame
+// input is a run of frames, so one frame
 // meets the table the frames before it left. After every frame the table must be one every reader
 // can read: its header whole, its count the slots taken, each entry's facts
 // in agreement, its text inside the text, its value inside its range. Every
 // reply must decode as a message of clockwork's.
 //
-// An input: frames back to back, each a byte choosing the verb and the
-// connection, a length (u16, little-endian) and that many bytes. The verb's
+// An input: frames back to back, each a byte choosing the verb (its low
+// three bits), a length (u16, little-endian) and that many bytes. The verb's
 // address is put in front, so the bytes are the type tags and arguments;
 // verb 4 is the bytes as they come, for an address the route does not know.
 
@@ -124,7 +124,7 @@ extern "C" void* clockwork_core_state(const ClockworkCore* core) {
     return core ? &reinterpret_cast<Fixture*>(const_cast<ClockworkCore*>(core))->state : nullptr;
 }
 
-extern "C" bool clockwork_emit_osc(ClockworkCore*, uint32_t, const uint8_t* osc, uint32_t len) {
+extern "C" bool clockwork_emit_osc(ClockworkCore*, const uint8_t* osc, uint32_t len) {
     check(len != 0 && len % 4 == 0);
     check(clockwork_sys_claims(osc, len));
     // an exact copy: a reply that does not decode within its length is the sanitizer's, or oscpack's to throw
@@ -164,8 +164,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         }
         frame.insert(frame.end(), body, body + take);
 
-        DrainCallCtx ctx;
-        ctx.sourceId = (pick & 8u) ? 0x9a7e1u : 0x51de2u;   // the client's connection, or the one it has after it comes back
+        const DrainCallCtx ctx{};
         clockwork::params::route(fixture.core(), &ctx, frame.data(), frame.size());
         checkTable(fixture.arena.get());
     }

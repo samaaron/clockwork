@@ -132,7 +132,7 @@ TEST_CASE("ring_buffer_write frames header, payload and advancing sequence", "[R
     REQUIRE(ring_buffer_write(
         buffer, BUF_SIZE, &head, &tail, &seq, 7, payload, len, nullptr, nullptr));
 
-    // Frame = Message{sourceId = token} + [route:u32] + payload. The header
+    // Frame = Message{sourceId} + payload. The header
     // length is the EXACT frame size; the cursor advances by that length
     // rounded up to 4 bytes (the frame footprint), so frames always start
     // 4-aligned. Read headers via memcpy as the readers do.
@@ -143,7 +143,7 @@ TEST_CASE("ring_buffer_write frames header, payload and advancing sequence", "[R
     REQUIRE(msg.magic == MESSAGE_MAGIC);
     REQUIRE(msg.length == frame);
     REQUIRE(msg.sequence == 0u);
-    REQUIRE(msg.sourceId == 7u);  // the origin token we passed
+    REQUIRE(msg.sourceId == 7u);  // the source_id we passed
     // The payload follows the header directly.
     REQUIRE(std::memcmp(buffer + sizeof(Message), payload, len) == 0);
     REQUIRE(head.load() == static_cast<int32_t>(footprint));

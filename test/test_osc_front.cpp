@@ -29,7 +29,7 @@ struct Inner final : IOscTransport {
 // Takes every frame whose bytes start with "/mine".
 struct Front final : OscFront {
     int seen = 0;
-    bool ingress(const uint8_t*, uint32_t, uint32_t) override { return false; }
+    bool ingress(const uint8_t*, uint32_t) override { return false; }
     bool egress(const uint8_t* d, uint32_t n) override {
         ++seen;
         return n >= 5 && std::memcmp(d, "/mine", 5) == 0;

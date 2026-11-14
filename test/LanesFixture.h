@@ -164,7 +164,6 @@ uint64_t dspFrame(uint64_t streamFrame);
 
 // One frame off an egress ring.
 struct EgressFrame {
-    uint32_t             sourceId = 0;
     uint32_t             seq      = 0;
     bool                 decodes  = true;   // by the parser clients read with (clockwork-osc)
     std::vector<uint8_t> data;
@@ -206,7 +205,7 @@ public:
                   const uint32_t (&config)[4] = kGuestConfigSlots);
     std::vector<EgressFrame> drainRt();
     std::vector<EgressFrame> drainNrt();
-    bool ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId = 0);
+    bool ingress(const uint8_t* osc, uint32_t len, uint32_t writer = 0);
     double publishedNtp() const;
     // One metric word, as a client reads it; false when there is none there.
     bool metricWord(uint32_t offset, uint32_t& word) const;
@@ -237,7 +236,7 @@ std::vector<EgressFrame> drainRt();
 std::vector<EgressFrame> drainNrt();
 
 // Write one OSC packet into the IN ring. Returns false when the ring is full.
-bool ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId = 0);
+bool ingress(const uint8_t* osc, uint32_t len, uint32_t writer = 0);
 
 // Tick until a frame with OSC address `address` has been drained, or until
 // `maxBlocks` blocks have gone by. Returns EVERYTHING drained across those

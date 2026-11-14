@@ -22,8 +22,8 @@
 //! a silent connection holds its slot for [`AUTH_DEADLINE`] at most. What
 //! stands behind the one client, and how many it serves, is the host's.
 //! Connection ids are
-//! minted monotonically from 1 and never reused — the C++ transport uses them
-//! directly as origin tokens (0 = in-process caller, so ids start at 1).
+//! minted monotonically from 1 and never reused; the C++ transport keeps
+//! its client's id (0 is no connection, so ids start at 1).
 //!
 //! On disconnect (EOF, error, or protocol violation) the connection leaves
 //! the registry and, if it got past the secret, `on_closed` fires, so the

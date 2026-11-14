@@ -15,10 +15,7 @@
  * in shared memory (the peer cannot stall the host by stomping it).
  *
  * The host never blocks on peer state: a full reply ring (slow or dead peer)
- * drops the packet and counts it in the plane's rep_dropped. Token semantics
- * mirror the socket transports — send() resolves only SHM_PEER_ORIGIN_TOKEN
- * (the token the gateway drain stamps on every peer command); anything else
- * is undeliverable here. The peer is the client, and what it asked to be told
+ * drops the packet and counts it in the plane's rep_dropped. The peer is the client, and what it asked to be told
  * is the core's to keep (lanes.h).
  *
  * Binds to the ENGINE'S plane slot (ClockworkEngine::peerPlaneSlot()) rather

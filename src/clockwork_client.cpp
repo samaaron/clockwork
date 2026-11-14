@@ -386,20 +386,21 @@ ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientIn
 
 ClockworkStatus clockwork_client_send(ClockworkClient* handle,
                                       const uint8_t* osc, uint32_t bytes,
-                                      uint32_t origin) {
+                                      uint32_t writer) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !osc || bytes == 0) return CLOCKWORK_E_ARG;
     if (c->reader()) return CLOCKWORK_E_PERM;
 #if !defined(__EMSCRIPTEN__)
     // The peer's road: the plane's command ring, which the engine's control
-    // pass drains into the same door every other sender meets. A frame that
+    // pass drains: clockwork's control verbs it performs, and the rest it
+    // writes through the same door every other sender meets. A frame that
     // cannot fit an empty ring will never fit.
     if (ShmPeerPlaneHeader* plane = c->plane()) {
         if (bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return CLOCKWORK_E_TOO_BIG;
         if (!RingBufferWriter::write(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
                                      &plane->cmd_head, &plane->cmd_tail,
                                      &plane->cmd_sequence, &plane->cmd_write_lock,
-                                     osc, bytes, origin))
+                                     osc, bytes, writer))
             return CLOCKWORK_E_FULL;
         c->commands->wake_engine();   // the pass reads it now, block or no block
         return CLOCKWORK_OK;
@@ -423,7 +424,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
             c->base + c->L.control_ring_offset + CONTROL_RING_HEADER_SIZE,
             c->L.control_ring_size - CONTROL_RING_HEADER_SIZE,
             &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
-            osc, bytes, origin);
+            osc, bytes, writer);
         if (ok) clockwork_control_wake(c->core);   // the pass that drains it (lanes.h)
         return ok ? CLOCKWORK_OK : CLOCKWORK_E_FULL;
     }
@@ -433,7 +434,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     // not addressed to. The generation word is in the arena's header, so a
     // client in another process reads the same word.
     switch (in_ring_write(c->base, c->base + c->L.in_ring_offset, c->L.in_ring_size,
-                          c->control(), osc, bytes, origin)) {
+                          c->control(), osc, bytes, writer)) {
         case InRingWrite::Written:    return CLOCKWORK_OK;
         case InRingWrite::NoInstance: return CLOCKWORK_E_NO_INSTANCE;
         case InRingWrite::Full:       break;
@@ -481,7 +482,7 @@ uint8_t* clockwork_client_send_begin(ClockworkClient* handle, uint32_t max_bytes
 }
 
 ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
-                                             uint32_t bytes, uint32_t origin) {
+                                             uint32_t bytes, uint32_t writer) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c) return CLOCKWORK_E_ARG;
     if (!c->pending.valid()) return CLOCKWORK_E_ARG;
@@ -497,7 +498,7 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
         }
         RingBufferWriter::commit(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
                                  &plane->cmd_head, &plane->cmd_sequence,
-                                 &plane->cmd_write_lock, c->pending, bytes, origin);
+                                 &plane->cmd_write_lock, c->pending, bytes, writer);
         c->pending = {};
         c->commands->wake_engine();
         return CLOCKWORK_OK;
@@ -524,7 +525,7 @@ ClockworkStatus clockwork_client_send_commit(ClockworkClient* handle,
     RingBufferWriter::commit(
         c->base + c->L.in_ring_offset, c->L.in_ring_size,
         &c->control()->in_head, &c->control()->in_sequence,
-        &c->control()->in_write_lock, c->pending, bytes, origin);
+        &c->control()->in_write_lock, c->pending, bytes, writer);
     c->pending = {};
     return CLOCKWORK_OK;
 }
@@ -559,20 +560,20 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     // here; the engine counts its own side.
     if (ShmPeerPlaneHeader* plane = c->plane()) {
         c->peerBatch.clear();
-        std::vector<std::array<uint32_t, 4>> heads;   // offset, length, origin, sequence
+        std::vector<std::array<uint32_t, 4>> heads;   // offset, length, writer, sequence
         clockwork_drain_ring(
             shm_peer_rep_ring(plane), SHM_PEER_REP_RING_SIZE,
             &plane->rep_head, &plane->rep_tail,
             c->peerDrain, ClockworkDrainMetrics{}, max,
-            [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
-                heads.push_back({ static_cast<uint32_t>(c->peerBatch.size()), len, sourceId, seq });
+            [&](uint32_t writer, const uint8_t* payload, uint32_t len, uint32_t seq) {
+                heads.push_back({ static_cast<uint32_t>(c->peerBatch.size()), len, writer, seq });
                 c->peerBatch.insert(c->peerBatch.end(), payload, payload + len);
                 return ClockworkDrainVerdict::Consume;
             });
         for (size_t i = 0; i < heads.size(); ++i) {
             out[i].bytes    = c->peerBatch.data() + heads[i][0];
             out[i].length   = heads[i][1];
-            out[i].origin   = heads[i][2];
+            out[i].writer   = heads[i][2];
             out[i].sequence = heads[i][3];
         }
         // The engine may hold commands back for the room this read made.
@@ -594,11 +595,11 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
 
     // An egress frame is the OSC; an empty one says nothing.
     ClockworkClientMessage* next = out;   // where the next message goes
-    auto take = [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
+    auto take = [&](uint32_t writer, const uint8_t* payload, uint32_t len, uint32_t seq) {
         if (len == 0) return ClockworkDrainVerdict::Consume;
         next->bytes    = payload;
         next->length   = len;
-        next->origin   = sourceId;
+        next->writer   = writer;
         next->sequence = seq;
         ++next;
         return ClockworkDrainVerdict::Consume;
@@ -1216,10 +1217,10 @@ uint32_t clockwork_client_tap_poll(ClockworkClientTap* handle,
     uint32_t n = 0;
     clockwork_drain_ring(
         t->buffer, t->size, t->head, &cursor, t->drain, dm, max,
-        [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
+        [&](uint32_t writer, const uint8_t* payload, uint32_t len, uint32_t seq) {
             out[n].bytes    = payload;
             out[n].length   = len;
-            out[n].origin   = sourceId;
+            out[n].writer   = writer;
             out[n].sequence = seq;
             ++n;
             return ClockworkDrainVerdict::Consume;

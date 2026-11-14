@@ -51,7 +51,7 @@ public:
     // must be safe for that — a lock-free ring is.
     struct Emit {
         virtual ~Emit() = default;
-        virtual void reply(uint32_t token, const uint8_t* osc, uint32_t len) = 0;
+        virtual void reply(const uint8_t* osc, uint32_t len) = 0;
         virtual void broadcast(const uint8_t* osc, uint32_t len) = 0;
         virtual void debug(const std::string& line) = 0;
         // The guest instance's generation, for a refusal to carry
@@ -73,7 +73,7 @@ public:
 
     // Main thread: one control verb. `osc` is the whole message, address
     // first. Returns false if the address is not a track verb at all.
-    bool handleControl(uint32_t token, const uint8_t* osc, uint32_t len);
+    bool handleControl(const uint8_t* osc, uint32_t len);
 
     // Audio thread: one realtime verb, at `frameOffset` within the block.
     // Returns false if the address is not a realtime track verb.
@@ -89,9 +89,9 @@ private:
 
     void broadcastState(ClockworkTrackId t);
     void broadcastFolders();
-    void sendTracks(const char* address, uint32_t replyToken);
-    void sendFolders(const char* address, uint32_t replyToken);
-    void scanAndSendPlugins(uint32_t replyToken);
+    void sendTracks(const char* address, bool asReply);
+    void sendFolders(const char* address, bool asReply);
+    void scanAndSendPlugins();
     void changed();
 
     Emit*  mEmit = nullptr;

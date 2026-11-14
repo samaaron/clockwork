@@ -86,8 +86,8 @@ inline void checkNoEgressLost(const ClockworkEngine& engine, EgressLossExpected 
     }
     if (!expected.undelivered) {
         const uint32_t undelivered = m.egress_frames_undelivered.load(std::memory_order_relaxed);
-        INFO(undelivered << " frame(s) the transport could not deliver: a reply to a token no client "
-             "answers to, or a subscriber it could not reach (PerformanceMetrics::egress_frames_undelivered)");
+        INFO(undelivered << " frame(s) the transport could not deliver: no client there, "
+             "or one it could not reach (PerformanceMetrics::egress_frames_undelivered)");
         CHECK(undelivered == 0u);
     }
 }
@@ -252,7 +252,7 @@ SwapResult switchWhenFree(Fix& fix, Args&&... args) {
 // setup, the device reports. A case that waits for any of those needs this.
 //
 // The engine answers /clockwork/notify with notify.reply and THEN a snapshot
-// of its state (snapshotStateTo: reason "snapshot", or an error's own
+// of its state (snapshotState: reason "snapshot", or an error's own
 // reason). Both are the handshake, not anything the case heard happen, so
 // both are in before the slate is cleared. Clearing on the reply alone lets
 // the snapshot land after the clear, where a case reads its "running" as a

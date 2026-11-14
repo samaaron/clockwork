@@ -7,9 +7,8 @@
  * whoever embeds it decides what stands behind that door: nothing (an
  * in-process host answers its own calls through CallbackTransport), or one of
  * the transports here. Each of these listens on the wire, writes what it
- * receives through the client boundary with an origin token of its own
- * minting, and resolves that token back to a connection when the engine
- * replies. A transport says who the client is and tells the core when it
+ * receives through the client boundary, and sends what the engine
+ * replies to its client's connection. A transport says who the client is and tells the core when it
  * has gone; what the client asked to be told is the core's to keep
  * (lanes.h, clockwork_client_wants).
  *

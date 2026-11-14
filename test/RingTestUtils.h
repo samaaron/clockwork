@@ -27,7 +27,6 @@ namespace ring_test {
 // copy of the scheduled OSC packet, so it stays valid after the slot is freed.
 struct Fired {
     int64_t              when   = 0;
-    uint32_t             origin = 0;
     std::vector<uint8_t> data;
 };
 
@@ -38,7 +37,7 @@ inline std::vector<Fired> drainDue(Scheduler& es, int64_t now) {
     for (;;) {
         auto e = es.popDue(now);
         if (!e.valid()) break;
-        out.push_back(Fired{e.when, e.meta->origin,
+        out.push_back(Fired{e.when,
                             std::vector<uint8_t>(e.data, e.data + e.size)});
         es.release(e);
     }

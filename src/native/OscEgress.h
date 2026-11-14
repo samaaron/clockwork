@@ -8,7 +8,7 @@
  * under a lock. The NRT gateway drains that ring and dispatches each message to
  * the injected IOscTransport (reply/broadcast/subscribe) — the only thing that
  * knows about sockets, pids or addresses. Debug rides the host's onDebug
- * callback. The engine here deals only in opaque origin tokens.
+ * callback.
  */
 #pragma once
 
@@ -35,13 +35,13 @@ public:
 
 
     // ── Producer side: frame into the NRT-out ring (never delivers here) ──────
-    // An answer; `token` is the origin threaded from the call ctx.
-    void reply(uint32_t token, const uint8_t* data, uint32_t size);
+    // An answer to a verb.
+    void reply(const uint8_t* data, uint32_t size);
     // Answer the verb in `data` with "/clockwork/error <address> <reason>
-    // <generation>", to the caller that sent it. The generation is the guest
+    // <generation>". The generation is the guest
     // instance's now, read off the arena (docs/RESTARTS.md), as every
     // statechange and setup below carries it.
-    void refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason);
+    void refuse(const uint8_t* data, uint32_t size, const char* reason);
     // A notice of one kind, for the client: written only while it has asked
     // for that kind (lanes.h, clockwork_client_wants).
     void broadcastToTargets(const uint8_t* data, uint32_t size);      // the engine's lifecycle
@@ -53,11 +53,12 @@ public:
     // "/clockwork/statechange ,ssi <state> <reason> <generation>": restarting
     // names the generation closing, running after a rebuild the one opened.
     void sendStateChange(const char* state, const char* reason);
-    // Caller-targeted statechange for post-init registrants (stream
-    // transports connect only after boot and miss the boot broadcast).
+    // The statechange sent in answer to a client that has just asked for the
+    // lifecycle's notices (stream transports connect only after boot and
+    // miss the boot broadcast): written whether or not notices are on.
     // Note: no setup variant — /clockwork/setup is a rebuild EVENT, never
     // replayed to late joiners (it would trigger spurious client reinits).
-    void sendStateChangeTo(uint32_t token, const char* state, const char* reason);
+    void sendStateChangeTo(const char* state, const char* reason);
     // The guest instance's generation now, off the arena: the number every
     // refusal and statechange above carries, and a rebuilt instance's setup
     // (docs/RESTARTS.md).
@@ -79,7 +80,7 @@ public:
     bool wanted(uint32_t kind) const;
 
 private:
-    void frame(uint32_t token, const uint8_t* osc, uint32_t size);
+    void frame(const uint8_t* osc, uint32_t size);
 
     IOscTransport*                                  mTransport = nullptr;
     ClockworkCore*                                  mCore = nullptr;

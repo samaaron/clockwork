@@ -113,12 +113,12 @@ maybe("a tap watches ingress without taking it from the engine", async () => {
   for (let i = 0; i < 3; i++) ringWrite(rings.ingress, oscMessage("/test/ping"), 42);
 
   const seen = [];
-  tap.poll(0, (origin, offset, length) => {
-    seen.push({ text: new TextDecoder().decode(rings.ingress.bytes.slice(offset, offset + 10)), origin });
+  tap.poll(0, (sourceId, offset, length) => {
+    seen.push({ text: new TextDecoder().decode(rings.ingress.bytes.slice(offset, offset + 10)), sourceId });
   });
   assert.equal(seen.length, 3, "the tap saw all three");
   assert.equal(seen[0].text, "/test/ping");
-  assert.equal(seen[0].origin, 42, "and who sent them");
+  assert.equal(seen[0].sourceId, 42, "and the label they were written with");
 
   // Watching took nothing: the engine still gets all three.
   block(x);

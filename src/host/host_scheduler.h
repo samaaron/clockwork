@@ -47,10 +47,9 @@
 
 namespace clockwork_host {
 
-// Per-event metadata. The host has no reply path so `origin` is unused (always
-// 0), but the field matches EngineMeta so the shared clockwork_fire_due loop reads
-// ev.meta->origin uniformly across both schedulers.
-struct HostMeta { uint32_t origin = 0; };
+// Per-event metadata: the host keeps nothing beside an event's time, tag and
+// bytes.
+struct HostMeta {};
 
 class HostScheduler {
 public:
@@ -96,7 +95,7 @@ public:
             }
         }
         clockwork_fire_due(mCore, now, /*blockTime*/ clockwork::Timetag(),
-            [this](const uint8_t* d, uint32_t n, uint32_t, clockwork::Timetag, clockwork::Timetag) {
+            [this](const uint8_t* d, uint32_t n, clockwork::Timetag, clockwork::Timetag) {
                 mRoutes.ingest(d, n, /*callCtx*/ nullptr);
             });
     }

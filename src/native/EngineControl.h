@@ -32,14 +32,13 @@ public:
         mLinkAudio = linkAudio;
     }
 
-    // The NRT reader threads the origin token as call metadata, then calls
-    // these through that table (see ClockworkEngine's NRT gateway control drain).
+    // The NRT reader calls these through that table (see ClockworkEngine's NRT gateway control drain).
     bool handleLinkCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size);
     bool handleEngineCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size);
 
 private:
     // Refuse one claimed-but-unknown address under the reserved prefix.
-    void refuseUnknown(uint32_t token, const uint8_t* data, uint32_t size);
+    void refuseUnknown(const uint8_t* data, uint32_t size);
 
     // The end of a /clockwork/devices/switch that did not go through the
     // debounced switchDevice (which reports its own): name the device the

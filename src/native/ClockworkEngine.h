@@ -378,14 +378,10 @@ public:
     // the engine owns the routing, the transports know only their medium.
     // Adding a clockwork subsystem is one ClockworkSysRoutes::add of a sub-namespace;
     // it cannot move the boundary, because the boundary has no table to register in.
-    // `originToken` is an opaque transport handle (minted by the transport at
-    // its entry point) the egress later resolves to route replies
-    // back; 0 means an anonymous in-process / embedder caller. No default — every
-    // entry point assigns an origin, so an unstamped 0 can never sneak in.
     // Returns what the client door said (clockwork_client_send): CLOCKWORK_OK,
     // CLOCKWORK_E_FULL (no room this moment), CLOCKWORK_E_TOO_BIG (never room),
     // CLOCKWORK_E_CLOSED (no engine to send to). Anything but OK is a drop.
-    ClockworkStatus ingest(const uint8_t* data, uint32_t size, uint32_t originToken);
+    ClockworkStatus ingest(const uint8_t* data, uint32_t size);
     bool isRunning() const { return mRunning.load(); }
 
     // The client handle over this engine's memory, for a host that drains
@@ -432,7 +428,7 @@ public:
 
     // Audio-thread control route (the fallback on mAudioRoutes: every claimed
     // address this thread does not answer itself):
-    // forwards the message to the NRT command ring with its origin token. Runs on
+    // forwards the message to the NRT command ring. Runs on
     // the audio thread; the control pass drains the ring and runs the subsystems.
     static bool nrtForwardSink(void* ctx, const void* callCtx, const uint8_t* data, std::size_t len);
     // A message refused on its way in, said at most once a second (mRefusedInLog).
@@ -628,12 +624,12 @@ public:
     // here as any client reads it.
     uint32_t                 generation() const;
 
-    // Send the current lifecycle state directly to one caller. Stream-
+    // Send the client the current lifecycle state. Stream-
     // transport clients (TCP/UDS/pipe) can only connect after init, so they
     // miss the boot-time statechange broadcast — the /clockwork/notify
     // handler replays it per new registrant. State only, never the setup
     // event. Reads atomics only; safe from the NRT gateway thread.
-    void snapshotStateTo(uint32_t token);
+    void snapshotState();
 
     // No recording API: the engine opens no files. Its master mix leaves
     // through the scope (shm_audio_buffer slot 0), and a client that
@@ -1086,7 +1082,7 @@ private:
     using NrtRing = std::array<uint8_t, kNrtRingSize>;
     const std::unique_ptr<NrtRing> mNrtBuffer = std::make_unique<NrtRing>();
     // What the audio thread prefixes each control frame with, so the call's
-    // time survives the hop (the ring header carries only the origin token).
+    // time survives the hop (the ring header has no slot for it).
     struct NrtEnvelope {
         clockwork::Timetag when;        // the message's OSC timetag, or immediately
         clockwork::Timetag blockTime;   // the block it was fired in
@@ -1367,7 +1363,7 @@ private:
     std::atomic<bool>        mRunning{false};
     std::atomic<EngineState> mEngineState{EngineState::Stopped};
     // Why the engine is in error, replayed to a client that registers after
-    // the transition (snapshotStateTo). Set on every move into Error.
+    // the transition (snapshotState). Set on every move into Error.
     mutable std::mutex       mErrorReasonMutex;
     std::string              mErrorReason;
     // Read by Link network-thread callbacks before they touch the egress.

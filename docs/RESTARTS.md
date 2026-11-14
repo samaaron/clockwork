@@ -5,7 +5,7 @@
 An engine restarts in two ways, and this document says what each one does
 to every region of memory, what a client is told, and what the guest owes.
 It is written in clockwork's terms only: a guest instance, the arena and
-its regions (docs/ARENA.md), messages in with a token, replies out, a
+its regions (docs/ARENA.md), messages in, replies out, a
 device, an engine state and a generation. What the guest keeps in its
 regions, and what its messages mean, is the guest's business and is not
 described here. SuperSonic works to this contract today; the next guest
@@ -207,7 +207,7 @@ producer in another thread may be mid-write through a rebuild.
 | scope | rebuild | kept, continues | reformatted at the new device's channels; the write position restarts at 0 | a reader's cursor starts again |
 | taps | rebuild | kept | every slot free | the slot state |
 | ring cursors, status flags | rebuild | kept | the status flags: a fresh word; every ring's cursors go with their ring | n/a |
-| in ring | cold boot | kept, drained as usual | kept: what waited for the old instance is refused by the next drain, below the teardown's mark, naming the generation that closed; clockwork's own is answered | `/clockwork/error` to the token |
+| in ring | cold boot | kept, drained as usual | kept: what waited for the old instance is refused by the next drain, below the teardown's mark, naming the generation that closed; clockwork's own is answered | `/clockwork/error` |
 | RT out ring, NRT out ring | cold boot | kept | kept: what the old instance said stays for its readers, and the new instance's `setup` follows it | the replies themselves |
 | control ring | arena | kept | kept, never reset: it carries clockwork's own control verbs, none of them the instance's ("The control ring", below) | n/a |
 | guest window | rebuild | kept | zeroed; the new instance lays it out again | the window's identity reads 0 until it does |
@@ -229,7 +229,7 @@ Messages are the one place a restart can lose something a client is
 waiting on, so these are the rules a client may rely on:
 
 1. **No message is dropped without a word.** A message for the guest that
-   cannot reach a guest is answered to its token with `/clockwork/error`,
+   cannot reach a guest is answered with `/clockwork/error`,
    the message's address, and one of three reasons, each a fact
    (`CLOCKWORK_REFUSED_*` in src/clockwork_sys.h):
 
@@ -239,7 +239,7 @@ waiting on, so these are the rules a client may rely on:
    | `rebuilding` | it was waiting in the in ring when the instance was torn down | the next drain, of everything below the mark the teardown set |
    | `stalled` | it was waiting when the host said what waited was to go (the page's `purge()`, `clockwork_ingress_mark_stale`) and is due. The engine never says this of its own accord: after a gap what waited plays, late by the gap, and a bundle for later plays at its time | the next drain, of everything due below the mark the host set (the schedule is cleared with it) |
 
-   Clockwork has the address and the token, which is all a refusal needs;
+   Clockwork has the address, which is all a refusal needs;
    it never needs to know what the message meant. A client reads every one
    as "wait for `/clockwork/setup`", never as an error to show.
 
@@ -270,14 +270,14 @@ waiting on, so these are the rules a client may rely on:
    that closed, and takes the rest to the door, which refuses a message once
    if there is still no instance.
 
-   Where a door can reach the asker's egress it writes the refusal there
+   Where a door can reach the egress it writes the refusal there
    and also says so to its caller; where it cannot, the caller speaks:
 
-   | door | to the asker | to the caller |
+   | door | to the client | to the caller |
    |---|---|---|
    | `clockwork_client_send`, and `clockwork_client_send_begin`/`_commit` at the commit (C, Rust, the shm peers) | the status is the word | `CLOCKWORK_E_NO_INSTANCE` / `Error::NoInstance` |
-   | `ClockworkEngine::ingest` (every socket transport, `sendOSC`, the NIF) | `/clockwork/error` to the token | the status |
-   | `clockwork_ingress_write` (the lanes ABI) | `/clockwork/error` on the NRT egress for the source | `false` |
+   | `ClockworkEngine::ingest` (every socket transport, `sendOSC`, the NIF) | `/clockwork/error` | the status |
+   | `clockwork_ingress_write` (the lanes ABI) | `/clockwork/error` on the NRT egress | `false` |
    | `OscChannel.send` (the browser) | `/clockwork/error` through the client's inbound path, from the main thread's channel; `onRefused` and `lastRefusal` on any channel | `false` |
 
    A refusal at a door that finds no room on clockwork's ring is lost, and

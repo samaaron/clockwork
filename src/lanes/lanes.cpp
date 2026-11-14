@@ -94,13 +94,13 @@ void clockwork_lanes_reset_nrt_out_ring(ClockworkCore* core) {
 
 // ── Ingress ─────────────────────────────────────────────────────────────────
 
-bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id) {
-    return clockwork_ingress_write_status(core, osc, len, source_id) == InRingWrite::Written;
+bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t writer) {
+    return clockwork_ingress_write_status(core, osc, len, writer) == InRingWrite::Written;
 }
 
 } // extern "C"
 
-InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id) {
+InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t writer) {
     uint8_t* const base = clockwork::laid_out_base(core);
     if (!clockwork::ingress(core) || !base || !osc || len == 0)
         return InRingWrite::Full;
@@ -117,29 +117,29 @@ InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* o
                 base + control + CONTROL_RING_HEADER_SIZE,
                 CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE,
                 &ctl->head, &ctl->tail, &ctl->sequence, &ctl->write_lock,
-                osc, len, source_id))
+                osc, len, writer))
             return InRingWrite::Full;
         clockwork_control_wake(core);
         return InRingWrite::Written;
     }
     // No guest instance to take it: refused at the boundary (in_ring_door.h),
-    // with the word on the NRT egress for the source that sent it, as the
+    // with the word on the NRT egress, as the
     // client ABI's status says the same to its caller (docs/RESTARTS.md).
     // Clockwork's own verbs go through and wait in the ring for the engine,
     // instance or none.
     const clockwork::Layout& L = clockwork::layout_of(core);
     const InRingWrite wrote = in_ring_write(base, base + L.in_ring_start, L.profile.in_ring_bytes,
-                                            cursors, osc, len, source_id);
+                                            cursors, osc, len, writer);
     if (wrote == InRingWrite::NoInstance)
         clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
             arenaInstanceGeneration(base),
-            [core, source_id](const uint8_t* d, uint32_t n) {
-                clockwork_egress_nrt_write(core, source_id, d, n);
+            [core](const uint8_t* d, uint32_t n) {
+                clockwork_egress_nrt_write(core, d, n);
             });
     return wrote;
 }
 
-bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core,
                                       const RingPart* parts, uint32_t n_parts) {
     clockwork::Egress* e = clockwork::egress(core);
     uint8_t* const base = clockwork::laid_out_base(core);
@@ -165,7 +165,7 @@ bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
         base + L.nrt_out_ring_start, L.profile.nrt_out_ring_bytes,
         &cursors->nrt_out_head, &cursors->nrt_out_tail,
         &cursors->nrt_out_sequence, &e->nrt_write_lock,
-        parts, n_parts, token);
+        parts, n_parts, 0);
     // Refused for want of room: counted, since the line logging it would
     // ride this same full ring (PerformanceMetrics::egress_frames_refused).
     if (!written) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
@@ -193,8 +193,8 @@ static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
                                   uint32_t max_frames) {
     clockwork_ring_give_back(tail, read);   // a client's last batch, if it had one
     const uint32_t delivered = clockwork_drain_ring(buffer, size, head, read, st, m, max_frames,
-        [fn, ctx](uint32_t sourceId, const uint8_t* payload, uint32_t n, uint32_t seq) {
-            if (n != 0) fn(ctx, sourceId, payload, n, seq);   // an empty frame says nothing
+        [fn, ctx](uint32_t /*writer*/, const uint8_t* payload, uint32_t n, uint32_t seq) {
+            if (n != 0) fn(ctx, payload, n, seq);   // an empty frame says nothing
             return ClockworkDrainVerdict::Consume;
         });
     clockwork_ring_give_back(tail, read);
@@ -290,11 +290,10 @@ void clockwork_egress_nrt_room_made(ClockworkCore* core) {
         clockwork_control_wake(core);
 }
 
-bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t token,
-                         const uint8_t* osc, uint32_t len) {
+bool clockwork_egress_nrt_write(ClockworkCore* core, const uint8_t* osc, uint32_t len) {
     if (!osc || len == 0) return false;
     const RingPart part{ osc, len };
-    return clockwork_egress_nrt_write_parts(core, token, &part, 1);
+    return clockwork_egress_nrt_write_parts(core, &part, 1);
 }
 
 // ── Waiting for egress (lanes_internal.h) ───────────────────────────────────

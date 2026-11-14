@@ -18,10 +18,10 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-/// One drained egress frame: the origin it was written with, the OSC bytes
-/// (valid only for the duration of the call), and the ring sequence number.
+/// One drained egress frame: the OSC bytes (valid only for the duration of
+/// the call) and the ring sequence number.
 pub type ClockworkEgressFn = Option<
-    unsafe extern "C" fn(ctx: *mut c_void, source_id: u32, osc: *const u8, len: u32, seq: u32),
+    unsafe extern "C" fn(ctx: *mut c_void, osc: *const u8, len: u32, seq: u32),
 >;
 
 /// One engine (`ClockworkCore`, src/clockwork_core.h). Opaque.
@@ -101,7 +101,7 @@ unsafe extern "C" {
     pub fn clockwork_core_of_memory(at: *const c_void) -> *mut ClockworkCore;
 
     // ── Ingress ──
-    pub fn clockwork_ingress_write(core: *mut ClockworkCore, osc: *const u8, len: u32, source_id: u32) -> bool;
+    pub fn clockwork_ingress_write(core: *mut ClockworkCore, osc: *const u8, len: u32, writer: u32) -> bool;
 
     // ── Egress ── one draining thread per ring; max_frames 0 drains all.
     pub fn clockwork_egress_rt_drain(core: *mut ClockworkCore, f: ClockworkEgressFn, ctx: *mut c_void, max_frames: u32) -> u32;

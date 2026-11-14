@@ -103,14 +103,13 @@ ClockworkSink OscControl::sinkFor(const std::string& host, int port) {
 #endif // CLOCKWORK_CLIENT_VERBS
 
 bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
-    const uint32_t token = meta.sourceId;
     if (size < CLOCKWORK_SYS_LEN("osc/") + 1 ||
         std::memcmp(data, CLOCKWORK_SYS("osc/"), CLOCKWORK_SYS_LEN("osc/")) != 0) return false;
     const char* addr = reinterpret_cast<const char*>(data);
 
     if (std::strcmp(addr, CLOCKWORK_SYS("osc/notify/subscribe")) == 0) {
         if (mEgress) mEgress->want(CLOCKWORK_WANTS_OSC, true);
-        ackSubscribeIfTokened(mEgress, token, data, size,
+        ackSubscribeIfTokened(mEgress, data, size,
                               CLOCKWORK_SYS("osc/notify/subscribe.reply"));
         return true;
     }
@@ -123,7 +122,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
     // The client half is not in this build (docs/SURFACE.md): the send verb
     // is refused BY NAME, to the caller, rather than ignored.
     if (clockwork_sys_is_client_verb(addr)) {
-        refuseClientVerb(mEgress, token, data, size);
+        refuseClientVerb(mEgress, data, size);
         return true;
     }
 #endif
@@ -151,7 +150,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                 clockwork_log(core(), "WARNING: /clockwork/osc/send dropped — bad host/port/blob "
                        "(host='%s' port=%d innerLen=%d)",
                        host.c_str(), port, static_cast<int>(innerLen));
-                if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
+                if (mEgress) mEgress->refuse(data, size, CLOCKWORK_REFUSED_MALFORMED);
                 return true;
             }
             // Through the sink for the endpoint, carrying the message's time:
@@ -180,7 +179,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
                     std::snprintf(reason.data(), reason.size(), "sink full");
                 clockwork_log(core(), "WARNING: /clockwork/osc/send to %s:%d dropped — %s",
                        host.c_str(), port, reason.data());
-                if (mEgress) mEgress->refuse(token, data, size, reason.data());
+                if (mEgress) mEgress->refuse(data, size, reason.data());
             }
         } else
 #endif // CLOCKWORK_CLIENT_VERBS
@@ -199,7 +198,7 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             const int perSecond = argInt(it, end, -1);
             const int perSender = argInt(it, end, -1);
             if (perSecond < 0 || perSender < 0) {
-                if (mEgress) mEgress->refuse(token, data, size, "limit takes two ints: cues per second for the port and for each sender, 0 for none");
+                if (mEgress) mEgress->refuse(data, size, "limit takes two ints: cues per second for the port and for each sender, 0 for none");
                 return true;
             }
             if (mOsc) clockwork_osc_set_limit(mOsc, perSecond, perSender);
@@ -210,17 +209,17 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
             s << osc::BeginMessage(CLOCKWORK_SYS("osc/cue-server/limit.reply"))
               << static_cast<osc::int32>(perSecond) << static_cast<osc::int32>(perSender)
               << osc::EndMessage;
-            if (mEgress) mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
+            if (mEgress) mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
                                         static_cast<uint32_t>(s.Size()));
         } else if (mEgress) {
-            mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
+            mEgress->refuse(data, size, CLOCKWORK_REFUSED_UNKNOWN);
         }
     } catch (const std::exception& e) {
         clockwork_log(core(), "[osc] malformed %s (%u bytes): %s", addr, size, e.what());
-        if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
+        if (mEgress) mEgress->refuse(data, size, CLOCKWORK_REFUSED_MALFORMED);
     } catch (...) {
         clockwork_log(core(), "[osc] malformed %s (%u bytes)", addr, size);
-        if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_MALFORMED);
+        if (mEgress) mEgress->refuse(data, size, CLOCKWORK_REFUSED_MALFORMED);
     }
     return true;
 }

@@ -38,7 +38,7 @@ public:
     virtual ~OscFront() = default;
 
     // A packet from a client, before the engine sees it. True: taken.
-    virtual bool ingress(const uint8_t* data, uint32_t size, uint32_t token) = 0;
+    virtual bool ingress(const uint8_t* data, uint32_t size) = 0;
 
     // A frame from the engine for the client, before the transport delivers
     // it. True: taken (the front may have sent something else in its place).

@@ -97,7 +97,7 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
 
     // Follow every port on the Link timeline (the engine's default, 120 BPM).
     auto pkt = follow("*", "link", 7);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     osc_test::ParsedReply r;
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/follow.reply"), 7, r));
     CHECK(r.argCount() == 3);
@@ -105,7 +105,7 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
     CHECK(r.argString(1) == "link");
 
     pkt = followers(8);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 8, r));
     REQUIRE(r.argCount() == 3);
     CHECK(r.argString(0) == "*");
@@ -124,7 +124,7 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
     // Unfollow: what is already recorded (at most the horizon) still goes
     // out, then nothing does.
     pkt = unfollow("*", 9);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/unfollow.reply"), 9, r));
     CHECK(r.argCount() == 2);
     CHECK(r.argString(0) == "*");
@@ -134,7 +134,7 @@ TEST_CASE("midi/clock/follow clocks the Link timeline out until unfollow",
     CHECK(released(out) == after);
 
     pkt = followers(10);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 10, r));
     CHECK(r.argCount() == 1);   // the token alone: nobody follows
 }
@@ -149,9 +149,9 @@ TEST_CASE("midi/clock/follow refuses a name that is nothing, and claims a midi:<
     // that comes back after it proves the refusal was handled and changed
     // nothing.
     auto pkt = follow("other", "midi", 12);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     pkt = followers(13);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 13, r));
     CHECK(r.argCount() == 1);
 
@@ -160,13 +160,13 @@ TEST_CASE("midi/clock/follow refuses a name that is nothing, and claims a midi:<
     // follow claims its slot the way /clockwork/clock/midi:<handle>/tempo/set
     // would.
     pkt = follow("*", "midi:never-seen", 11);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/follow.reply"), 11, r));
     CHECK(r.argString(0) == "*");
     CHECK(r.argString(1) == "midi:never-seen");
 
     pkt = followers(14);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 14, r));
     REQUIRE(r.argCount() == 3);
     CHECK(r.argString(0) == "*");
@@ -184,24 +184,24 @@ TEST_CASE("midi/clock/follow, followers and unfollow answer a port name of any l
     const std::string port = "port " + std::string(4096, 'p');
 
     auto pkt = follow(port.c_str(), "link", 21);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/follow.reply"), 21, r));
     CHECK(r.argString(0) == port);
     CHECK(r.argString(1) == "link");
 
     pkt = followers(22);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 22, r));
     REQUIRE(r.argCount() == 3);
     CHECK(r.argString(0) == port);
 
     pkt = unfollow(port.c_str(), 23);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/unfollow.reply"), 23, r));
     CHECK(r.argString(0) == port);
 
     pkt = followers(24);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     REQUIRE(replyWithToken(e, CLOCKWORK_SYS("midi/clock/followers.reply"), 24, r));
     CHECK(r.argCount() == 1);
 }

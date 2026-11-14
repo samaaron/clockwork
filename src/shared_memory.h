@@ -594,8 +594,7 @@ static_assert(clockwork::kDefaultLayout.guest_window_start % 16 == 0
 // Message frame (magic/length/sequence/sourceId) is defined in ring/ring.h.
 
 // Egress framing: every frame on both egress rings is
-// Message{sourceId = origin token} + [osc]. Everything on them is for the
-// one client.
+// Message{sourceId = 0} + [osc]. Everything on them is for the one client.
 
 // Control pointers structure (4-byte aligned for atomics, padded to 56 bytes for 8-byte alignment)
 struct alignas(4) RingCursors {

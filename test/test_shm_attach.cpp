@@ -554,7 +554,7 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
         for (uint32_t i = 0; i < n; ++i) {
             if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0) {
                 heard = true;
-                CHECK(msgs[i].origin == SHM_PEER_ORIGIN_TOKEN);
+                CHECK(msgs[i].writer == SHM_PEER_WRITER);   // the label on the reply ring's frames
             }
         }
         return heard;

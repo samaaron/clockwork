@@ -64,8 +64,8 @@
  * THE ENGINE'S OWN TRANSPORTS ARE CLIENTS OF THIS, and that is the point of
  * putting it here rather than in a helper library beside the GUI. A message
  * from a client on a socket does not enter the engine by a private door: the
- * receiving thread mints an origin token for the sender and
- * calls clockwork_client_send with it, exactly as an in-process GUI does. One
+ * receiving thread calls clockwork_client_send, exactly as an in-process GUI
+ * does. One
  * ingress path, one implementation of the ring arithmetic, and a bug in it is
  * a bug everywhere rather than a bug in whichever copy was written last.
  *
@@ -263,10 +263,10 @@ ClockworkCore* clockwork_client_core(const ClockworkClient* c);
  * the peer. A reader has no such ring and gets CLOCKWORK_E_PERM. Returns as
  * soon as it is queued: the engine reads it on its next block.
  *
- * `origin` is the client's own token, echoed back on any reply so a client
- * with several conversations in flight can tell them apart. Zero is legal and
- * means "I am not distinguishing". The reply reaches the client either way:
- * there is one client, and the origin decides nothing.
+ * `writer` is a label of the sender's own choosing, stored in the frame's
+ * ring header for whoever watches the ring (a tap, the web's traffic log).
+ * Clockwork never reads it, the guest is not given it, and no answer carries
+ * it.
  *
  * CLOCKWORK_E_FULL is a moment, not a verdict: the ring drains every block, so
  * a caller retries. CLOCKWORK_E_TOO_BIG is a verdict — the message is larger
@@ -274,7 +274,7 @@ ClockworkCore* clockwork_client_core(const ClockworkClient* c);
  */
 ClockworkStatus clockwork_client_send(ClockworkClient* c,
                                       const uint8_t* osc, uint32_t bytes,
-                                      uint32_t origin);
+                                      uint32_t writer);
 
 /* ── Sending without a buffer of your own ────────────────────────────────────
  *
@@ -293,7 +293,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* c,
  *     uint8_t* p = clockwork_client_send_begin(c, upper_bound, &st);
  *     if (p) {
  *         uint32_t n = encode_into(p, upper_bound);
- *         clockwork_client_send_commit(c, n, origin);
+ *         clockwork_client_send_commit(c, n, writer);
  *     }
  *
  * BEGIN HOLDS THE RING'S WRITE LOCK UNTIL COMMIT OR ABORT. No other producer
@@ -318,7 +318,7 @@ uint8_t* clockwork_client_send_begin(ClockworkClient* c, uint32_t max_bytes,
  * left open, so a caller that got the length wrong does not also wedge the
  * ring. */
 ClockworkStatus clockwork_client_send_commit(ClockworkClient* c, uint32_t bytes,
-                                             uint32_t origin);
+                                             uint32_t writer);
 
 /* Give back an open reservation without publishing. Nothing a reader can see
  * was changed. Accepted with no reservation open, so an error path can call it
@@ -336,7 +336,10 @@ void clockwork_client_send_abort(ClockworkClient* c);
 typedef struct ClockworkClientMessage {
     const uint8_t* bytes;
     uint32_t       length;
-    uint32_t       origin;   /* the token the request carried, or 0 */
+    uint32_t       writer;   /* the label in the frame's ring header: the sender's
+                              * on an ingress frame a tap watches, 0 on an
+                              * egress frame, SHM_PEER_WRITER on a frame of
+                              * the peer plane's reply ring */
     uint32_t       sequence; /* monotonic per ring; a gap means the ring lapped */
 } ClockworkClientMessage;
 
@@ -351,7 +354,7 @@ typedef struct ClockworkClientMessage {
  *
  * WHICH RINGS: an in-process handle takes from the arena's two egress rings;
  * the peer takes from its command plane's reply ring, where every frame is a
- * reply or a notification for it (origin the plane's token). A reader has no ring to take from and gets 0.
+ * reply or a notification for it. A reader has no ring to take from and gets 0.
  *
  * SINGLE CONSUMER, AND THE RING HAS ONE. Polling TAKES: it advances the
  * egress ring's own read cursor, which lives in the engine's ring cursors and

@@ -30,7 +30,6 @@
 #include <optional>
 
 #include "scheduler/Scheduler.h"
-#include "scheduler/engine_schedule.h"   // EngineMeta: the Meta clockwork actually schedules with
 
 namespace {
 struct TestMeta { uint32_t v = 0; };
@@ -329,27 +328,8 @@ TEST_CASE("Scheduler - payload bytes survive pool churn intact", "[scheduler]") 
 
 // ── Guarantees the store's callers rely on ───────────────────────────────────
 //
-// Three guarantees pinned apart from the data-structure cases above: the
-// caller's origin survives to fire time, a due event is handed over once, and
-// events fire on the right block with no drift.
-
-TEST_CASE("Scheduler - the scheduling caller's origin survives to fire time",
-          "[scheduler]") {
-    Scheduler<EngineMeta, 16, 8192> es;
-    const uint8_t osc[] = { 0x90, 60, 100 };
-    REQUIRE(es.add(/*when*/ at(1000), SCHED_TAG_DEFAULT, EngineMeta{/*origin*/ 4242},
-                   osc, sizeof osc));
-
-    // A scheduled message is answered long after the caller's request returned,
-    // so the token has to be stored with the event rather than read from
-    // whatever is being dispatched when it fires. Without it the reply carries
-    // origin 0, and the caller cannot tell which request it answers.
-    auto e = es.popDue(at(2000));
-    REQUIRE(e.valid());
-    REQUIRE(e.meta != nullptr);
-    CHECK(e.meta->origin == 4242u);
-    es.release(e);
-}
+// Two guarantees pinned apart from the data-structure cases above: a due
+// event is handed over once, and events fire on the right block with no drift.
 
 TEST_CASE("Scheduler - a due event is handed over exactly once",
           "[scheduler][regression]") {

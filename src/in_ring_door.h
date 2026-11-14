@@ -34,10 +34,10 @@ inline bool in_ring_takes(const void* arena, const uint8_t* osc, uint32_t len) {
 enum class InRingWrite { Written, Full, NoInstance };
 
 // Write one message into the in ring of the arena at `arena`, whose ring is
-// `ring_size` bytes at `ring`, as `origin`, if the ring takes it.
+// `ring_size` bytes at `ring`, labelled `writer`, if the ring takes it.
 inline InRingWrite in_ring_write(const void* arena, uint8_t* ring, uint32_t ring_size,
                                  RingCursors* c, const uint8_t* osc, uint32_t len,
-                                 uint32_t origin) {
+                                 uint32_t writer) {
     const auto r = RingBufferWriter::reserve(ring, ring_size, &c->in_head, &c->in_tail,
                                              &c->in_write_lock, len);
     if (!r.valid())
@@ -48,6 +48,6 @@ inline InRingWrite in_ring_write(const void* arena, uint8_t* ring, uint32_t ring
     }
     std::memcpy(r.payload, osc, len);
     RingBufferWriter::commit(ring, ring_size, &c->in_head, &c->in_sequence, &c->in_write_lock,
-                             r, len, origin);
+                             r, len, writer);
     return InRingWrite::Written;
 }

@@ -588,7 +588,8 @@ impl ShmPeer {
         hdr[0..4].copy_from_slice(&MESSAGE_MAGIC.to_ne_bytes());
         hdr[4..8].copy_from_slice(&(total as u32).to_ne_bytes());
         hdr[8..12].copy_from_slice(&s.to_ne_bytes());
-        // sourceId 0: the host drain re-stamps SHM_PEER_ORIGIN_TOKEN.
+        // sourceId 0: the host drain does not read it, and labels the
+        // frame SHM_PEER_WRITER on the way in.
         // SAFETY: `aligned` bytes at `uh` were shown free above, under the
         // lock, and `aligned <= sz`.
         unsafe {

@@ -35,8 +35,8 @@
 class OscIngress {
 public:
     // routeCtx is the handler's own state (a ring writer, a subsystem); callCtx
-    // is the immutable per-call metadata (a const DrainCallCtx: origin token +
-    // timetag); data/len is borrowed — a handler consumes it synchronously (copy
+    // is the immutable per-call metadata (a const DrainCallCtx: the message's
+    // timetag and its block's); data/len is borrowed — a handler consumes it synchronously (copy
     // into a ring / handle inline). Returns true iff it owned the packet.
     using Handler = bool (*)(void* routeCtx, const void* callCtx, const uint8_t* data, size_t len);
 

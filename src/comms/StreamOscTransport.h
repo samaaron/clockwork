@@ -9,10 +9,9 @@
  * TCP, UDS stream, and Windows named pipes (they share the ClockworkOscStream C ABI
  * and the 4-byte big-endian length-prefixed wire format).
  *
- * A connection id IS the origin token: minted from 1 by the Rust leaf, never
- * reused, dead the moment the connection closes. So there is no origin table
- * and no LRU eviction (an established client can never be churned out by
- * strangers). The Rust leaf admits one client.
+ * The client is a connection id: minted from 1 by the Rust leaf, never
+ * reused, dead the moment the connection closes. The transport keeps the
+ * id of its client and tells nobody else. The Rust leaf admits one client.
  *
  * The NRT gateway is the sole caller of the IOscTransport methods, but
  * on_closed fires on a reader thread: the client has gone, and the core is
@@ -36,8 +35,8 @@ public:
     // A transport owns a socket and a thread: not a thing to copy or move.
     StreamOscTransport(const StreamOscTransport&) = delete;
     StreamOscTransport& operator=(const StreamOscTransport&) = delete;
-    // Called per inbound packet: (osc, len, originToken). Set before start().
-    using IngestFn = std::function<void(const uint8_t*, uint32_t, uint32_t)>;
+    // Called per inbound packet: (osc, len). Set before start().
+    using IngestFn = std::function<void(const uint8_t*, uint32_t)>;
 
     ~StreamOscTransport() override;
 

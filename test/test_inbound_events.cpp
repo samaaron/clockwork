@@ -12,8 +12,8 @@
  * (DspInfo::wants_events). Driven through the lanes ABI, which is the
  * worklet's shape and the native engine's underneath. What these pin:
  *
- *   - an event goes out to the client that asked for its kind, from
- *     origin 0, byte for byte — a trailing arrival timetag included;
+ *   - an event goes out to the client that asked for its kind, byte for
+ *     byte — a trailing arrival timetag included;
  *   - the guest that asked hears it, on the audio thread, through dsp_osc;
  *   - the ports and devices pushes are events too;
  *   - a VERB that lives under an event's name — midi/in/enable,
@@ -85,7 +85,6 @@ TEST_CASE("inbound events: a MIDI event goes to the client that asked and to the
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("midi/in/note_on"));
     const auto* out = find(frames, CLOCKWORK_SYS("midi/in/note_on"));
     REQUIRE(out != nullptr);
-    CHECK(out->sourceId == 0);                 // an event answers nobody
     CHECK(out->data == ev.data);               // byte for byte, timetag included
     CHECK(find(frames, CLOCKWORK_SYS("error")) == nullptr);
 

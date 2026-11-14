@@ -24,7 +24,7 @@
 //!
 //! Replies (`/clockwork/gamepad/devices.reply`) are emitted synchronously inside
 //! [`clockwork_gamepad_handle_osc`] / [`clockwork_gamepad_emit_devices`] on the caller's
-//! thread, while the engine's origin token still identifies the caller.
+//! thread.
 
 use std::ffi::{c_char, c_void};
 use std::ptr;

@@ -241,7 +241,7 @@ TEST_CASE("client tap: the ingress ring can be watched but not drained",
     const uint32_t n = clockwork_client_tap_poll(tap, msgs, 8);
     REQUIRE(n >= 1);
     CHECK(std::string(reinterpret_cast<const char*>(msgs[0].bytes)) == "/dummy/ping");
-    CHECK(msgs[0].origin == 0xABCD);          // who sent it, as the ring records
+    CHECK(msgs[0].writer == 0xABCD);          // the label it was sent with, as the ring records
     CHECK(msgs[0].length == ping.size());     // ingress frames carry no route word
 
     // Watching took nothing: the engine still receives it and answers.

@@ -2,10 +2,9 @@
 // Copyright (c) 2026 Sam Aaron
 //
 // Seeds for fuzz_params: runs of frames as the target reads them (a byte for
-// the verb and the connection, a length, the arguments), each a thing a client
-// really does with the parameter table: declare, set, list, read text,
-// redeclare, retire, and all of it again after it has come back on another
-// connection.
+// the verb, a length, the arguments), each a thing a client really does with
+// the parameter table: declare, set, list, read text, redeclare, retire, and
+// all of it again after it has come back.
 
 #include "params/clockwork_params.h"
 
@@ -20,7 +19,7 @@
 
 namespace {
 
-enum : uint8_t { kDefine = 0, kList = 1, kSet = 2, kText = 3, kOther = 8 };   // kOther: the client's other connection
+enum : uint8_t { kDefine = 0, kList = 1, kSet = 2, kText = 3, kOther = 8 };   // kOther: a bit above the verb, which the target does not read
 
 using Bytes = std::vector<uint8_t>;
 
@@ -107,7 +106,7 @@ int main(int argc, char** argv) {
     ClockworkParamEntry gone{}; gone.id = 1;
     ClockworkParamEntry fresh = entry(6, "fresh", CLOCKWORK_PARAM_STEPPED, 0.f, 7.f, 3.f);
     Run().frame(kDefine, define({ level })).frame(kDefine, define({ wider })).frame(kDefine, define({ gone, fresh })).frame(kList, none()).save(dir, "redeclare-and-retire");
-    // the client, back on another connection: its entries are still its own
+    // the client, back after going away: its entries are still its own
     Run().frame(kDefine, define({ level, temp }, text)).frame(kSet | kOther, set({ { 1, 0.75f } }))
          .frame(kDefine | kOther, define({ wider })).frame(kDefine | kOther, define({ gone })).frame(kSet | kOther, set({ { 5, 1.f } })).save(dir, "another-connection");
     // text that fills its room, so a later define has to close the gaps

@@ -50,7 +50,7 @@ ClockworkClientSampleClock sampleClock(const Engine& e) {
 
 void echo(Engine& e) {
     const auto m = osc_test::message("/dummy/echo");
-    REQUIRE(e.engine.ingest(m.ptr(), m.size(), 0) == CLOCKWORK_OK);
+    REQUIRE(e.engine.ingest(m.ptr(), m.size()) == CLOCKWORK_OK);
 }
 
 // What channel c carries at frame f: distinct per channel, never zero, and

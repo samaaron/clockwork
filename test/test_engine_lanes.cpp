@@ -33,7 +33,7 @@ namespace {
 // per block, so a reply needs blocks to ride out on.
 osc_test::ParsedReply askGuest(Engine& e, const char* verb, const char* replyAddr) {
     const auto msg = osc_test::message(verb);
-    e.engine.ingest(msg.ptr(), msg.size(), 0);
+    e.engine.ingest(msg.ptr(), msg.size());
     osc_test::ParsedReply r;
     REQUIRE(e.reply(replyAddr, r));
     return r;

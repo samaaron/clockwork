@@ -503,8 +503,8 @@ void TrackControl::gatewayPass() {
     }
 }
 
-// The bridge's answers are already framed [route][osc] with the caller's
-// token, which is exactly the NRT egress lane's shape — so each one is
+// The bridge's answers are frames of OSC, which is exactly the NRT egress
+// lane's shape — so each one is
 // re-queued onto that lane rather than handed to the transport directly.
 // That keeps the bridge invisible in the only way that matters: a host that
 // drains the lanes (clockwork_egress_nrt_drain) sees a track reply the same way it
@@ -518,12 +518,12 @@ void TrackControl::relayOut() {
     ClockworkDrainStop stop = ClockworkDrainStop::Empty;
     clockwork_drain_ring(out_ring(mSeg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
         256,
-        [core = mEngine->core()](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
+        [core = mEngine->core()](uint32_t, const uint8_t* payload, uint32_t len, uint32_t) {
             if (len == 0) return ClockworkDrainVerdict::Consume;
-            if (clockwork_egress_nrt_write(core, token, payload, len)) return ClockworkDrainVerdict::Consume;
+            if (clockwork_egress_nrt_write(core, payload, len)) return ClockworkDrainVerdict::Consume;
             // Once more after asking to be woken, for room made in between.
             clockwork_egress_nrt_want_room(core);
-            return clockwork_egress_nrt_write(core, token, payload, len)
+            return clockwork_egress_nrt_write(core, payload, len)
                 ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
         },
         &stop);
@@ -619,7 +619,7 @@ std::vector<uint8_t> TrackControl::resolveTimelineVerb(
     }
 }
 
-bool TrackControl::handleTrackCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
+bool TrackControl::handleTrackCommand(const DrainCallCtx& /*meta*/, const uint8_t* data, uint32_t size) {
     if (!mHeader) {
         broadcastError("bridge", "plugin hosting is not available in this engine");
         return true;
@@ -636,7 +636,7 @@ bool TrackControl::handleTrackCommand(const DrainCallCtx& meta, const uint8_t* d
     }
     MsgRing& r = mHeader->ctl;
     if (!RingBufferWriter::write(ctl_ring(mSeg.ptr), CTL_RING_SIZE, &r.head, &r.tail, &r.sequence,
-                                 &r.write_lock, data, size, meta.sourceId)) {
+                                 &r.write_lock, data, size, 0)) {
         r.dropped.fetch_add(1, std::memory_order_relaxed);
         broadcastError("bridge", mProcess.running()
                        ? "the plugin process is not keeping up; try again"
@@ -660,7 +660,7 @@ bool TrackControl::audioSink(void* ctx, const void* callCtx, const uint8_t* data
     MsgRing& r = h->rt;
     if (!RingBufferWriter::write(rt_ring(self->mSeg.ptr), RT_RING_SIZE, &r.head, &r.tail, &r.sequence,
                                  &r.write_lock, frame.data(), static_cast<uint32_t>(sizeof(Prefixed) + len),
-                                 meta.sourceId)) {
+                                 0)) {
         r.dropped.fetch_add(1, std::memory_order_relaxed);
         self->mRtDropped.fetch_add(1, std::memory_order_relaxed);
     }

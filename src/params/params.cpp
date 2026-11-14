@@ -22,7 +22,6 @@
 #include <cmath>
 #include <cstring>
 
-#include "IngressCallCtx.h"
 #include "audio_processor.h"     // clockwork_emit_osc
 #include "clockwork_sys.h"       // CLOCKWORK_SYS, clockwork_sys_refuse
 #include "core_state.h"          // arena_base, metrics_in
@@ -478,18 +477,16 @@ void write_value(ClockworkCore* core, const Table& t, uint32_t slot, float value
 
 struct Call {
     ClockworkCore* core;
-    uint32_t token;
     const uint8_t* data;
     uint32_t len;
     void refuse(const char* reason) const {
         if (clockwork::arena_base(core)) metrics_of(core).params_refused.fetch_add(1u, std::memory_order_relaxed);
         ClockworkCore* const c = core;
-        const uint32_t t = token;
         clockwork_sys_refuse(data, len, reason, arenaInstanceGeneration(clockwork::arena_base(core)),
-            [c, t](const uint8_t* d, uint32_t n) { clockwork_emit_osc(c, t, d, n); });
+            [c](const uint8_t* d, uint32_t n) { clockwork_emit_osc(c, d, n); });
     }
     void reply(const osc::OutboundPacketStream& ps) const {
-        clockwork_emit_osc(core, token, reinterpret_cast<const uint8_t*>(ps.Data()), static_cast<uint32_t>(ps.Size()));
+        clockwork_emit_osc(core, reinterpret_cast<const uint8_t*>(ps.Data()), static_cast<uint32_t>(ps.Size()));
     }
 };
 
@@ -631,8 +628,8 @@ void reset(ClockworkCore* core) {
 bool route(void* routeCtx, const void* callCtx, const uint8_t* data, std::size_t len) {
     auto* const core = static_cast<ClockworkCore*>(routeCtx);
     if (!clockwork::state(core)) return true;
-    const auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    const Call call{ core, cc ? cc->sourceId : 0u, data, static_cast<uint32_t>(len) };
+    (void)callCtx;
+    const Call call{ core, data, static_cast<uint32_t>(len) };
     const char* const verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_LEN("param/");
     const std::size_t rest = len - CLOCKWORK_SYS_LEN("param/");
     const auto is = [&](const char* v) {

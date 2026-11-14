@@ -55,12 +55,8 @@ void MidiControl::shutdown() {
 }
 
 bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
-    const uint32_t token = meta.sourceId;
     if (size < CLOCKWORK_SYS_LEN("midi/") + 1 ||
         std::memcmp(data, CLOCKWORK_SYS("midi/"), CLOCKWORK_SYS_LEN("midi/")) != 0) return false;
-    // Hold the origin for synchronous emitCb REPLYs during this call (see header).
-    mReplyToken = token;
-
     // The client's switch for the kind (lanes.h), turned here: these verbs
     // reach the control thread by the control ring. The address is the
     // leading, NUL-terminated OSC string.
@@ -68,7 +64,7 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
     if (std::strcmp(addr, CLOCKWORK_SYS("midi/notify/subscribe")) == 0) {
         if (mEgress && mEgress->want(CLOCKWORK_WANTS_MIDI, true) && mMidi)
             clockwork_midi_emit_ports(mMidi);   // the ports there now, when it newly asks
-        ackSubscribeIfTokened(mEgress, token, data, size,
+        ackSubscribeIfTokened(mEgress, data, size,
                               CLOCKWORK_SYS("midi/notify/subscribe.reply"));
         return true;
     }
@@ -83,7 +79,7 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
     // here, before the Rust subsystem — which would otherwise send them at
     // once, exactly as if the option were on.
     if (clockwork_sys_is_client_verb(addr)) {
-        refuseClientVerb(mEgress, token, data, size);
+        refuseClientVerb(mEgress, data, size);
         return true;
     }
 #endif
@@ -96,7 +92,7 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
     // Everything else is the subsystem's to take or refuse.
     if (!mMidi) return true;
     if (const char* refusal = clockwork_midi_handle_osc(mMidi, data, size); refusal && mEgress)
-        mEgress->refuse(token, data, size, refusal);
+        mEgress->refuse(data, size, refusal);
     return true;
 }
 
@@ -201,7 +197,7 @@ bool MidiControl::handleClockOutVerb(const uint8_t* data, uint32_t size) {
         out << osc::EndMessage;
     };
     auto send = [&](const OscPacket& packet) {
-        if (mEgress) mEgress->reply(mReplyToken, packet.ptr(), packet.size());
+        if (mEgress) mEgress->reply(packet.ptr(), packet.size());
     };
 
     switch (verb) {
@@ -297,7 +293,7 @@ void MidiControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t l
     auto* self = static_cast<MidiControl*>(ctx);
     if (!self->mEgress) return;
     if (kind == CLOCKWORK_MIDI_EMIT_REPLY) {
-        self->mEgress->reply(self->mReplyToken, osc, len);
+        self->mEgress->reply(osc, len);
     } else {
         logMidiPortsChange(self->core(), osc, len);
         if (!clockwork_ingress_write(self->mEgress->core(), osc, len, 0)) {

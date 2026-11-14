@@ -14,7 +14,7 @@
  *   1. Stopping the reader does not depend on anyone else waking it.
  *
  *   2. A frame written to a drained ring and followed by one wake is
- *      delivered to the onMessage callback, payload and origin token intact.
+ *      delivered to the onMessage callback, payload and writer label intact.
  *      An idle reader runs no pass at all, and no wake is lost however the
  *      writes, the wakes and the passes interleave.
  *

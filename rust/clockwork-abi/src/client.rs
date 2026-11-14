@@ -75,8 +75,9 @@ pub const CLOCKWORK_WAIT_FOREVER: u32 = 0xFFFF_FFFF;
 pub struct ClockworkClientMessage {
     pub bytes: *const u8,
     pub length: u32,
-    /// The origin the request it answers carried; 0 for one nobody asked for.
-    pub origin: u32,
+    /// The label in the frame's ring header: the sender's on an ingress frame
+    /// a tap watches, 0 on an egress frame.
+    pub writer: u32,
     pub sequence: u32,
 }
 
@@ -233,9 +234,9 @@ extern "C" {
 
     pub fn clockwork_client_info(c: *mut ClockworkClient, out: *mut ClockworkClientInfo) -> ClockworkStatus;
 
-    pub fn clockwork_client_send(c: *mut ClockworkClient, osc: *const u8, bytes: u32, origin: u32) -> ClockworkStatus;
+    pub fn clockwork_client_send(c: *mut ClockworkClient, osc: *const u8, bytes: u32, writer: u32) -> ClockworkStatus;
     pub fn clockwork_client_send_begin(c: *mut ClockworkClient, max_bytes: u32, out_status: *mut ClockworkStatus) -> *mut u8;
-    pub fn clockwork_client_send_commit(c: *mut ClockworkClient, bytes: u32, origin: u32) -> ClockworkStatus;
+    pub fn clockwork_client_send_commit(c: *mut ClockworkClient, bytes: u32, writer: u32) -> ClockworkStatus;
     pub fn clockwork_client_send_abort(c: *mut ClockworkClient);
     pub fn clockwork_client_poll(c: *mut ClockworkClient, out: *mut ClockworkClientMessage, max: u32) -> u32;
     pub fn clockwork_client_count_undelivered(c: *mut ClockworkClient, n: u32);

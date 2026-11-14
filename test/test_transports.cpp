@@ -38,20 +38,20 @@ namespace {
 using osc_test::message;
 using osc_test::parseAddress;
 
-// Record every ingested (packet, token) pair.
+// Record every ingested packet.
 struct IngestLog {
     std::mutex mu;
-    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> items;
+    std::vector<std::vector<uint8_t>> items;
 
-    void record(const uint8_t* d, uint32_t n, uint32_t token) {
+    void record(const uint8_t* d, uint32_t n) {
         std::lock_guard<std::mutex> lk(mu);
-        items.emplace_back(token, std::vector<uint8_t>(d, d + n));
+        items.emplace_back(d, d + n);
     }
     size_t count() {
         std::lock_guard<std::mutex> lk(mu);
         return items.size();
     }
-    std::pair<uint32_t, std::vector<uint8_t>> at(size_t i) {
+    std::vector<uint8_t> at(size_t i) {
         std::lock_guard<std::mutex> lk(mu);
         return items.at(i);
     }
@@ -80,11 +80,11 @@ std::string tmpSock(const char* name) {
 
 } // namespace
 
-TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect prune",
+TEST_CASE("StreamOscTransport/TCP: framed round trip, disconnect prune",
           "[transport][tcp]") {
     IngestLog log;
     StreamOscTransport t;
-    t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
+    t.setIngest([&](const uint8_t* d, uint32_t n) { log.record(d, n); });
     t.initialiseTcp(0, "127.0.0.1");  // port 0 → ephemeral, read back below
     t.setSecret(testSecret());
     REQUIRE(t.start());
@@ -95,8 +95,7 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect 
     writeFramed(fd, probe.data);
     REQUIRE(waitUntil([&] { return log.count() == 1; }));
 
-    auto [token, pkt] = log.at(0);
-    CHECK(token >= 1);  // 0 is the in-process caller
+    const auto pkt = log.at(0);
     CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/status");
 
     // What the engine sends out goes down the client's connection, framed.
@@ -125,7 +124,7 @@ TEST_CASE("StreamOscTransport/TCP: no secret, no port, and a client without it g
     CHECK_FALSE(bare.start());
 
     StreamOscTransport t;
-    t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
+    t.setIngest([&](const uint8_t* d, uint32_t n) { log.record(d, n); });
     t.initialiseTcp(0, "127.0.0.1");
     t.setSecret(testSecret());
     REQUIRE(t.start());
@@ -144,7 +143,7 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
           "[transport][uds]") {
     IngestLog log;
     StreamOscTransport t;
-    t.setIngest([&](const uint8_t* d, uint32_t n, uint32_t tok) { log.record(d, n, tok); });
+    t.setIngest([&](const uint8_t* d, uint32_t n) { log.record(d, n); });
     std::string path = tmpSock("st.sock");
     t.initialiseUds(path);
     t.setSecret(testSecret());
@@ -158,7 +157,7 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
     auto probe = message("/g_queryTree", 0, 0);
     writeFramed(fd, probe.data);
     REQUIRE(waitUntil([&] { return log.count() == 1; }));
-    auto [token, pkt] = log.at(0);
+    const auto pkt = log.at(0);
     CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/g_queryTree");
 
     auto reply = message("/g_queryTree.reply");

@@ -369,9 +369,8 @@ struct PortBus {
     };
 };
 
-// The assets committed to the guest, by id (dsp_api.h, "Assets"): who
-// committed each, and what it is, so a release is told to the right client
-// and an instance built again is handed every asset the last one held. A
+// The assets committed to the guest, by id (dsp_api.h, "Assets"): what each
+// is, so an instance built again is handed every asset the last one held. A
 // fixed table probed by id, of the profile's size (CLOCKWORK_ASSET_SLOTS, a
 // power of two), made with the core's state: no allocation on the audio
 // thread, and a full table is a refusal. The audio thread's, and the build's
@@ -379,7 +378,6 @@ struct PortBus {
 struct Assets {
     struct Slot {
         uint32_t id;
-        uint32_t origin;
         uint32_t offset;        // into the assets area
         uint32_t byte_count;
         uint32_t channels;
@@ -398,8 +396,8 @@ struct Assets {
     Slot* lookup(uint32_t id);
     // A slot for an id lookup did not find: the first on its chain that is
     // free, or a released asset's; null when the table is full.
-    Slot* insert(uint32_t id, uint32_t origin);
-    static void remove(Slot& s) { s.id = kTombstone; s.origin = 0; }
+    Slot* insert(uint32_t id);
+    static void remove(Slot& s) { s.id = kTombstone; }
     Slot* begin() { return slots.get(); }
     Slot* end() { return slots.get() + count; }
 

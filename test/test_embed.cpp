@@ -64,22 +64,21 @@ shm_audio_buffer_reader scopeReader(ClockworkEmbed* h, uint32_t slot) {
     return shm_audio_buffer_reader(scopeSlot(h, slot), clockwork::kDefaultLayout.profile.scope_frames,
                                    clockwork::kDefaultLayout.profile.scope_channels);
 }
-// The reply at `address` that answers `origin`, read off a client or a tap
-// by `poll`. The egress is one stream for everything that talks to the
+// The reply at `address`, read off a client or a tap by `poll`. The egress is one stream for everything that talks to the
 // engine, and in this binary for every test before this one too: whatever is
 // ahead of the reply is not this test's, so it reads until the reply or the
 // end of what is there, and says what it passed if the reply never came.
 template <typename Poll>
-bool takeReply(Poll poll, uint32_t origin, const std::string& address) {
+bool takeReply(Poll poll, const std::string& address) {
     ClockworkClientMessage m[64];
     std::string passed;
     for (uint32_t n; (n = poll(m, 64)) > 0;)
         for (uint32_t i = 0; i < n; ++i) {
             const auto a = osc_test::parseAddress(m[i].bytes, m[i].length);
-            if (a == address && m[i].origin == origin) return true;
-            passed += a + " (" + std::to_string(m[i].origin) + ") ";
+            if (a == address) return true;
+            passed += a + " ";
         }
-    UNSCOPED_INFO("no " << address << " answering " << origin << "; passed: " << passed);
+    UNSCOPED_INFO("no " << address << "; passed: " << passed);
     return false;
 }
 }
@@ -107,7 +106,7 @@ TEST_CASE("embed: attach hands back a handle with the engine's geometry and a wo
     dev.struct_bytes = sizeof dev;
     CHECK(clockwork_embed_device(e.h, &dev) == CLOCKWORK_E_ARG);
     CHECK(takeReply([c](ClockworkClientMessage* m, uint32_t max) { return clockwork_client_poll(c, m, max); },
-                    0x5a5a, "/dummy/pong"));
+                    "/dummy/pong"));
 }
 
 // Engines side by side in one process (docs/ENGINES.md.2): each
@@ -136,8 +135,8 @@ TEST_CASE("embed: two attaches are two engines, each its own, and closing one le
     float* outB[2] = { bl.data(), br.data() };
     REQUIRE(clockwork_embed_render(a.h, outA, 2, nullptr, 0, 64) == 64);
     REQUIRE(clockwork_embed_render(b.h, outB, 2, nullptr, 0, 64) == 64);
-    CHECK(takeReply(pollA, 0xa1, "/dummy/pong"));
-    CHECK(takeReply(pollB, 0xb2, "/dummy/pong"));
+    CHECK(takeReply(pollA, "/dummy/pong"));
+    CHECK(takeReply(pollB, "/dummy/pong"));
     // The same frames of the same guest: the same audio, each engine's own.
     CHECK(al == bl);
     CHECK(ar == br);
@@ -146,7 +145,7 @@ TEST_CASE("embed: two attaches are two engines, each its own, and closing one le
     a.h = nullptr;
     REQUIRE(clockwork_client_send(cb, ping.ptr(), ping.size(), 0xb3) == CLOCKWORK_OK);
     REQUIRE(clockwork_embed_render(b.h, outB, 2, nullptr, 0, 64) == 64);
-    CHECK(takeReply(pollB, 0xb3, "/dummy/pong"));
+    CHECK(takeReply(pollB, "/dummy/pong"));
 }
 
 // A guest that says any (DSP_INSTANCES_ANY) promises it keeps nothing
@@ -240,24 +239,24 @@ TEST_CASE("embed: a tap on the handle's client watches both rings without taking
     ClockworkClientTap* out = clockwork_client_tap_open(c, CLOCKWORK_REGION_EGRESS, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
-    const uint32_t origin = 0x5245u;
+    const uint32_t writer = 0x5245u;
     const auto ping = osc_test::message("/dummy/ping");
-    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), origin) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_send(c, ping.ptr(), ping.size(), writer) == CLOCKWORK_OK);
     ClockworkClientMessage m[8];
     uint32_t n = clockwork_client_tap_poll(in, m, 8);
     REQUIRE(n == 1);
     CHECK(osc_test::parseAddress(m[0].bytes, m[0].length) == "/dummy/ping");
-    CHECK(m[0].origin == origin);
+    CHECK(m[0].writer == writer);   // the label it was sent with, as the ring records
 
     float l[64], r[64];
     float* o[2] = { l, r };
     REQUIRE(clockwork_embed_render(e.h, o, 2, nullptr, 0, 64) == 64);
     CHECK(takeReply([out](ClockworkClientMessage* msgs, uint32_t max) { return clockwork_client_tap_poll(out, msgs, max); },
-                    origin, "/dummy/pong"));
+                    "/dummy/pong"));
     CHECK(clockwork_client_tap_missed(in) + clockwork_client_tap_missed(out) == 0);
     // Watching took nothing: the consumer still gets the reply.
     CHECK(takeReply([c](ClockworkClientMessage* msgs, uint32_t max) { return clockwork_client_poll(c, msgs, max); },
-                    origin, "/dummy/pong"));
+                    "/dummy/pong"));
 
     clockwork_client_tap_close(in);
     clockwork_client_tap_close(out);
@@ -343,8 +342,8 @@ uint32_t fnv(const uint8_t* p, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
     return h;
 }
-// Renders until the client hears `address` answering `origin`, or a second of blocks has gone by.
-bool renderUntil(ClockworkEmbed* h, uint32_t origin, const std::string& address, std::vector<int32_t>* args = nullptr) {
+// Renders until the client hears `address`, or a second of blocks has gone by.
+bool renderUntil(ClockworkEmbed* h, const std::string& address, std::vector<int32_t>* args = nullptr) {
     ClockworkClient* c = clockwork_embed_client(h);
     std::vector<float> l(256), r(256);
     float* out[2] = { l.data(), r.data() };
@@ -353,7 +352,7 @@ bool renderUntil(ClockworkEmbed* h, uint32_t origin, const std::string& address,
         ClockworkClientMessage m[64];
         for (uint32_t n; (n = clockwork_client_poll(c, m, 64)) > 0;)
             for (uint32_t k = 0; k < n; ++k)
-                if (m[k].origin == origin && osc_test::parseAddress(m[k].bytes, m[k].length) == address) {
+                if (osc_test::parseAddress(m[k].bytes, m[k].length) == address) {
                     if (args) {
                         const osc_test::ParsedReply p = osc_test::parseReply(m[k].bytes, m[k].length);
                         for (int a = 0; a < p.argCount(); ++a) args->push_back(p.argInt(a));
@@ -380,12 +379,12 @@ TEST_CASE("embed: an attached engine has an assets area, and a sample staged the
     for (uint32_t i = 0; i < n; ++i) lane[off + i] = static_cast<uint8_t>((i * 7) ^ 0x5A);
     const auto commit = assetCommit(7, int32_t(off), int32_t(n));
     REQUIRE(clockwork_client_send(c, commit.ptr(), commit.size(), 0x7711) == CLOCKWORK_OK);
-    CHECK(renderUntil(e.h, 0x7711, "/clockwork/asset/committed"));
+    CHECK(renderUntil(e.h, "/clockwork/asset/committed"));
 
     const auto last = osc_test::message("/dummy/asset/last");
     REQUIRE(clockwork_client_send(c, last.ptr(), last.size(), 0x7712) == CLOCKWORK_OK);
     std::vector<int32_t> got;
-    REQUIRE(renderUntil(e.h, 0x7712, "/dummy/asset/last.reply", &got));
+    REQUIRE(renderUntil(e.h, "/dummy/asset/last.reply", &got));
     REQUIRE(got.size() == 7);
     CHECK(got[0] == 7);
     CHECK(got[2] == int32_t(n));
@@ -427,7 +426,7 @@ TEST_CASE("embed: the guest's options reach the guest as the host wrote them; on
     const auto ask = osc_test::message("/dummy/region/config");
     REQUIRE(clockwork_client_send(clockwork_embed_client(h), ask.ptr(), ask.size(), 0x7713) == CLOCKWORK_OK);
     std::vector<int32_t> got;
-    REQUIRE(renderUntil(h, 0x7713, "/dummy/region/config-is", &got));
+    REQUIRE(renderUntil(h, "/dummy/region/config-is", &got));
     REQUIRE(got.size() == 5);
     CHECK(static_cast<uint32_t>(got[0]) >= sizeof text);   // the region holds it, NUL and all
     uint32_t words[4];

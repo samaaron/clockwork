@@ -9,7 +9,7 @@
 import * as MetricsOffsets from '../lib/metrics_offsets.js';
 // From src/clockwork_client.h, for the client this worklet opens on its own
 // instance: the ring a tap watches (ClockworkRegionId), and the size of one
-// ClockworkClientMessage (bytes, length, origin, sequence).
+// ClockworkClientMessage (bytes, length, writer, sequence).
 const REGION_INGRESS = 7;
 const CLIENT_MESSAGE_BYTES = 16;
 // Copies (clockwork_client_copy, js/lib/copy.js): postMessage mode's word for the engine's memory. The metrics on
@@ -496,7 +496,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         return {
             ptr: view.getUint32(at, true),
             length: view.getUint32(at + 4, true),
-            origin: view.getUint32(at + 8, true),
+            writer: view.getUint32(at + 8, true),
             sequence: view.getUint32(at + 12, true),
         };
     }
@@ -702,7 +702,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             entry.offset = bufferOffset;
             entry.length = actualLength;
             entry.originalLength = m.length;   // Receiver can detect truncation
-            entry.sourceId = m.origin;
+            entry.sourceId = m.writer;
             entry.sequence = m.sequence;
 
             bufferOffset += actualLength;

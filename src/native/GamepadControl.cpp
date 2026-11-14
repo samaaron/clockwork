@@ -37,13 +37,9 @@ void GamepadControl::shutdown() {
     }
 }
 
-bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
-    const uint32_t token = meta.sourceId;
+bool GamepadControl::handleGamepadCommand(const DrainCallCtx& /*meta*/, const uint8_t* data, uint32_t size) {
     if (size < CLOCKWORK_SYS_LEN("gamepad/") + 1 ||
         std::memcmp(data, CLOCKWORK_SYS("gamepad/"), CLOCKWORK_SYS_LEN("gamepad/")) != 0) return false;
-    // Hold the origin for synchronous emitCb REPLYs during this call (see header).
-    mReplyToken = token;
-
     // The client's switch for the kind (lanes.h), turned here: these verbs
     // reach the control thread by the control ring. The address is the
     // leading, NUL-terminated OSC string.
@@ -51,7 +47,7 @@ bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_
     if (std::strcmp(addr, CLOCKWORK_SYS("gamepad/notify/subscribe")) == 0) {
         if (mEgress && mEgress->want(CLOCKWORK_WANTS_GAMEPAD, true) && mGamepad)
             clockwork_gamepad_emit_devices(mGamepad);  // the devices there now, when it newly asks
-        ackSubscribeIfTokened(mEgress, token, data, size,
+        ackSubscribeIfTokened(mEgress, data, size,
                               CLOCKWORK_SYS("gamepad/notify/subscribe.reply"));
         return true;
     }
@@ -63,7 +59,7 @@ bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_
     // Everything else is the subsystem's to take or refuse.
     if (!mGamepad) return true;
     if (const char* refusal = clockwork_gamepad_handle_osc(mGamepad, data, size); refusal && mEgress)
-        mEgress->refuse(token, data, size, refusal);
+        mEgress->refuse(data, size, refusal);
     return true;
 }
 
@@ -97,7 +93,7 @@ void GamepadControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_
     auto* self = static_cast<GamepadControl*>(ctx);
     if (!self->mEgress) return;
     if (kind == CLOCKWORK_GAMEPAD_EMIT_REPLY) {
-        self->mEgress->reply(self->mReplyToken, osc, len);
+        self->mEgress->reply(osc, len);
     } else {
         logGamepadDevicesChange(self->core(), osc, len);
         if (!clockwork_ingress_write(self->mEgress->core(), osc, len, 0)) {

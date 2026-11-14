@@ -83,7 +83,6 @@ bool waitFor(const std::function<bool()>& pred, int ms) {
 
 // A received OSC message, decoded enough to assert on.
 struct Msg {
-    uint32_t token = 0;
     uint32_t len = 0;      // the whole frame, as the out ring held it
     std::string addr;
     std::vector<std::string> strs;
@@ -169,8 +168,8 @@ struct Engine {
         proc.wait();
     }
 
-    // A verb on the control ring, with a token to find the reply by.
-    void control(uint32_t token, const std::function<void(osc::OutboundPacketStream&)>& fill) {
+    // A verb on the control ring.
+    void control(const std::function<void(osc::OutboundPacketStream&)>& fill) {
         char buf[2048];
         osc::OutboundPacketStream s(buf, sizeof buf);
         fill(s);
@@ -178,7 +177,7 @@ struct Engine {
         REQUIRE(RingBufferWriter::write(ctl_ring(seg.ptr), CTL_RING_SIZE, &r.head, &r.tail,
                                         &r.sequence, &r.write_lock,
                                         reinterpret_cast<const uint8_t*>(s.Data()),
-                                        static_cast<uint32_t>(s.Size()), token));
+                                        static_cast<uint32_t>(s.Size()), 0));
     }
     // An event on the realtime ring: [frame offset][osc].
     void realtime(uint32_t frameOffset, const std::function<void(osc::OutboundPacketStream&)>& fill) {
@@ -197,10 +196,9 @@ struct Engine {
     void drain() {
         MsgRing& r = h->out;
         clockwork_drain_ring(out_ring(seg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, outDrain, ClockworkDrainMetrics{}, 0,
-            [&](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
+            [&](uint32_t, const uint8_t* payload, uint32_t len, uint32_t) {
                 if (len == 0) return ClockworkDrainVerdict::Consume;
                 Msg m;
-                m.token = token;
                 m.len = len;
                 try {
                     osc::ReceivedMessage msg(osc::ReceivedPacket(
@@ -217,12 +215,13 @@ struct Engine {
                 return ClockworkDrainVerdict::Consume;
             });
     }
-    // The first message at `addr` with `token`, waiting for it.
-    bool await(const char* addr, uint32_t token, Msg& out, int ms = 10000) {
+    // The first message at `addr` since `assets` was last cleared, waiting
+    // for it. A case that asks the same verb again clears `assets` first.
+    bool await(const char* addr, Msg& out, int ms = 10000) {
         return waitFor([&] {
             drain();
             for (auto& m : assets)
-                if (m.addr == addr && m.token == token) { out = m; return true; }
+                if (m.addr == addr) { out = m; return true; }
             return false;
         }, ms);
     }
@@ -264,18 +263,18 @@ struct Engine {
     // The usual studio: one track with the test gain plugin on it.
     int trackWithGain() {
         Msg m;
-        control(11, [](osc::OutboundPacketStream& s) {
+        control([](osc::OutboundPacketStream& s) {
             s << osc::BeginMessage(CLOCKWORK_SYS("track/create")) << "g" << osc::EndMessage;
         });
-        REQUIRE(await(CLOCKWORK_SYS("track/create.reply"), 11, m));
+        REQUIRE(await(CLOCKWORK_SYS("track/create.reply"), m));
         REQUIRE(m.ints.size() == 2);
         REQUIRE(m.ints[1] == 1);
         const int track = m.ints[0];
-        control(12, [&](osc::OutboundPacketStream& s) {
+        control([&](osc::OutboundPacketStream& s) {
             s << osc::BeginMessage(CLOCKWORK_SYS("track/plugin/add")) << track
               << CLOCKWORK_VST3_TEST_PLUGIN_BUNDLE << 0 << osc::EndMessage;
         });
-        REQUIRE(await(CLOCKWORK_SYS("track/plugin/add.reply"), 12, m));
+        REQUIRE(await(CLOCKWORK_SYS("track/plugin/add.reply"), m));
         REQUIRE(m.ints.size() == 2);
         REQUIRE(m.ints[1] == 1);
         REQUIRE(m.strs[0] == "ClockworkTestGain");
@@ -292,7 +291,7 @@ TEST_CASE("the bridge joins the segment and renders what it is sent", "[plugin][
 
     // The join announces what it has: nothing.
     Msg m;
-    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), BRIDGE_ORIGIN_TOKEN, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), m));
 
     e.trackWithGain();
 
@@ -320,10 +319,10 @@ TEST_CASE("a track is bound to a timeline over the control ring", "[plugin][brid
     Msg m;
 
     // The query: the default.
-    e.control(21, [&](osc::OutboundPacketStream& s) {
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 21, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     REQUIRE(m.ints.size() == 2);
     CHECK(m.ints[0] == track);
     CHECK(m.ints[1] == 1);
@@ -333,46 +332,50 @@ TEST_CASE("a track is bound to a timeline over the control ring", "[plugin][brid
     // A midi timeline, with the id the engine resolved (TrackControl puts it
     // there; this test stands where the engine stands).
     e.assets.clear();
-    e.control(22, [&](osc::OutboundPacketStream& s) {
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << "midi:iac-1" << 1 << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 22, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     CHECK(m.ints[1] == 1);
     CHECK(m.strs[0] == "midi:iac-1");
     // ...and the studio was rebroadcast, with the timeline trailing the list.
-    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), BRIDGE_ORIGIN_TOKEN, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), m));
     REQUIRE(!m.strs.empty());
     CHECK(m.strs.back() == "midi:iac-1");
-    e.control(23, [&](osc::OutboundPacketStream& s) {
+    e.assets.clear();
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 23, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     CHECK(m.strs[0] == "midi:iac-1");
 
     // A name with no id is one the engine could not resolve: refused, and
     // the binding stands.
-    e.control(24, [&](osc::OutboundPacketStream& s) {
+    e.assets.clear();
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << "midi:nope" << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 24, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     CHECK(m.ints[1] == 0);
     CHECK(m.strs[0] == "no such timeline");
-    REQUIRE(e.await(CLOCKWORK_SYS("track/error"), BRIDGE_ORIGIN_TOKEN, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/error"), m));
     CHECK(m.strs[0] == "timeline");
 
     // Back to the clock, by name and with no id: the bridge knows this one.
-    e.control(25, [&](osc::OutboundPacketStream& s) {
+    e.assets.clear();
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << track << "link" << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 25, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     CHECK(m.ints[1] == 1);
     CHECK(m.strs[0] == "link");
 
     // A track that is not there.
-    e.control(26, [&](osc::OutboundPacketStream& s) {
+    e.assets.clear();
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/timeline")) << 999 << "link" << osc::EndMessage;
     });
-    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), 26, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/timeline.reply"), m));
     CHECK(m.ints[1] == 0);
     CHECK(m.strs[0] == "no such track");
 }
@@ -418,17 +421,17 @@ TEST_CASE("the bridge scans the folders it is given and says what it found", "[p
     Engine e;
     REQUIRE(e.spawn(false));
     const std::string dir = std::filesystem::path(CLOCKWORK_VST3_TEST_PLUGIN_BUNDLE).parent_path().string();
-    e.control(21, [&](osc::OutboundPacketStream& s) {
+    e.control([&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/folders/add")) << dir.c_str() << osc::EndMessage;
     });
-    e.control(22, [](osc::OutboundPacketStream& s) {
+    e.control([](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("track/scan")) << osc::EndMessage;
     });
     Msg m;
-    REQUIRE(e.await(CLOCKWORK_SYS("track/plugins.reply"), 22, m, 60000));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/plugins.reply"), m, 60000));
     // <total> <offset> <count>. The platform folders may hold any number of
     // plugins, so the answer may be several pages; the first says how many
-    // there are, and the rest arrive on the same token until the offsets
+    // there are, and the rest arrive at the same address until the offsets
     // cover the total.
     REQUIRE(m.ints.size() >= 3);
     const int total = m.ints[0];
@@ -438,13 +441,13 @@ TEST_CASE("the bridge scans the folders it is given and says what it found", "[p
         e.drain();
         int covered = 0;
         for (auto& p : e.assets)
-            if (p.addr == CLOCKWORK_SYS("track/plugins.reply") && p.token == 22 && p.ints.size() >= 3)
+            if (p.addr == CLOCKWORK_SYS("track/plugins.reply") && p.ints.size() >= 3)
                 covered = std::max(covered, p.ints[1] + p.ints[2]);
         return covered >= total;
     }, 5000));
     bool found = false;
     for (auto& p : e.assets) {
-        if (p.addr != CLOCKWORK_SYS("track/plugins.reply") || p.token != 22) continue;
+        if (p.addr != CLOCKWORK_SYS("track/plugins.reply")) continue;
         // Every page is one frame on the engine's NRT egress lane, which
         // refuses anything over 8 KB: a page that does not fit is a page
         // nobody hears. That bound is the reason pages are byte-capped.
@@ -469,7 +472,7 @@ TEST_CASE("the bridge scans the folders it is given and says what it found", "[p
     }
     REQUIRE(found);
     // And the broadcast, the copy the GUI hears.
-    REQUIRE(e.await(CLOCKWORK_SYS("track/plugins"), BRIDGE_ORIGIN_TOKEN, m, 5000));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/plugins"), m, 5000));
     e.stop();
 }
 
@@ -505,7 +508,7 @@ TEST_CASE("a bridge killed outright comes back with its tracks", "[plugin][bridg
     REQUIRE(e.h->restore.load() == 0);
 
     Msg m;
-    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), BRIDGE_ORIGIN_TOKEN, m));
+    REQUIRE(e.await(CLOCKWORK_SYS("track/list"), m));
     // The list carries the track, its name and the plugin that came back.
     bool sawTrack = false, sawPlugin = false;
     for (auto& s : m.strs) { if (s == "g") sawTrack = true; if (s == "ClockworkTestGain") sawPlugin = true; }

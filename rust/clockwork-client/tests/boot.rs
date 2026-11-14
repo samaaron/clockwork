@@ -118,7 +118,7 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             // the fastest for the same job, and this waits on a device
             // callback rather than on work we are driving.
             let got = e.poll_until(Duration::from_secs(15), |m| {
-                (m.address() == "/dummy/pong").then_some(m.origin)
+                (m.address() == "/dummy/pong").then_some(())
             });
             let after = counts(&e);
             let ticks_after = after.0;
@@ -128,7 +128,7 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             // a different finding entirely from an answer that was merely slow.
             assert_eq!(
                 got,
-                Some(0x424f_4f54),
+                Some(()),
                 "no pong within 15s. ticks {} (count {ticks_before} -> {ticks_after}); \
                  osc_in_received {} -> {}; engine_processed {} -> {}; osc_out_sent {} -> {}; \
                  in_dropped {} -> {}; in_corrupted {} -> {}; \

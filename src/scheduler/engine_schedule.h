@@ -56,11 +56,9 @@
 
 #include "Scheduler.h"   // sched_tag_hash + SCHED_TAG_* + the generic store
 
-// Per-event metadata. The origin token is threaded so a reply to a message
-// that fired late still reaches the client that sent it.
-struct EngineMeta {
-    uint32_t origin = 0;
-};
+// Per-event metadata: clockwork keeps nothing beside an event's time, tag and
+// bytes.
+struct EngineMeta {};
 
 // The one instantiation clockwork runs. Sizes come from the build profile
 // (SCHEDULER_SLOT_COUNT / SCHEDULER_DATA_POOL_SIZE) so an embedded profile can

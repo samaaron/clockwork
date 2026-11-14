@@ -83,12 +83,12 @@ Assets::Slot* Assets::lookup(uint32_t id) {
     return nullptr;
 }
 
-Assets::Slot* Assets::insert(uint32_t id, uint32_t origin) {
+Assets::Slot* Assets::insert(uint32_t id) {
     for (uint32_t i = 0, h = id * 2654435761u; i < count; ++i, ++h) {
         Slot& s = slots[h & (count - 1)];
         if (!s.used || s.id == kTombstone) {
             s = Slot{};
-            s.id = id; s.origin = origin; s.used = true;
+            s.id = id; s.used = true;
             return &s;
         }
     }

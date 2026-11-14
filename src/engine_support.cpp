@@ -5,8 +5,8 @@
  *
  * Statistics written into shared memory from what the DSP is willing to report
  * about itself. Everything a guest needs FROM clockwork is in dsp_api.h:
- * DspHost::log, DspConfig's shm_window and clock, and an origin token in place
- * of a reply object.
+ * DspHost::log, DspConfig's shm_window and clock, and DspHost::emit_osc in
+ * place of a reply object.
  */
 #include <atomic>
 #include <cstring>

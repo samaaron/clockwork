@@ -53,6 +53,7 @@ All of it is in the full engine's control thread.
   `/clockwork/notify/clear`. *(Gone.)*
 - Replies routed by a message's origin; origin 0 standing for "the
   subscribers", so some replies for the host can reach the remote client.
+  *(Gone.)*
 - Plugin tracks that answer the caller and broadcast as well.
 - Nothing refuses a second command peer; the shared-memory peer is drained
   beside whatever transport is installed.
@@ -199,11 +200,12 @@ Read in SuperSonic and Sonic Pi on 2026-11-13 by search, not by a full audit.
    the NIF follow.
 
    Left for later, on size and not on merit:
-   - **The origin.** With one client it is only a label the client matches
-     answers by, which a client could carry in its own messages. Removing it
-     reaches the guest's `emit_osc` and `dsp_osc`, the scheduler and the
-     client calls. The ring header's field would stay: the web labels the
-     writing thread with it.
+   - **The origin.** Removed (2026-11-14): `dsp_osc` and `emit_osc` carry
+     none, the scheduler stores none, and no answer brings one back. A
+     client that matches answers to requests carries an id in its own
+     messages. What stays is the ring header's field, as the writer label:
+     a sender's send call sets it (`writer`), the web labels the writing
+     thread with it, and a tap or the traffic log reads it.
    - **Subscribing on a full engine** is taken by the control thread, by the
      control ring, while events are routed on the audio thread. An event
      sent straight behind a subscribe can pass before the switch is on. The

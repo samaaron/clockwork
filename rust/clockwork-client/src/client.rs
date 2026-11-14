@@ -41,7 +41,7 @@ pub const POLL_BATCH: usize = 64;
 const EMPTY_SLOT: ClockworkClientMessage = ClockworkClientMessage {
     bytes: core::ptr::null(),
     length: 0,
-    origin: 0,
+    writer: 0,
     sequence: 0,
 };
 
@@ -211,18 +211,19 @@ impl Client {
     }
 
     /// One OSC message or bundle, copied into the ingress ring; the engine
-    /// reads it on its next block. `origin` is echoed on any reply so a
-    /// client with several conversations in flight can tell them apart;
-    /// zero means "not distinguishing". The reply reaches the client
-    /// either way. [`Error::Full`] is a moment — retry;
+    /// reads it on its next block. `writer` is a label of the sender's own
+    /// choosing, stored in the frame's ring header for whoever watches the
+    /// ring (a tap, the web's traffic log). Clockwork never reads it, the
+    /// guest is not given it, and no answer carries it.
+    /// [`Error::Full`] is a moment — retry;
     /// [`Error::TooBig`] is a verdict.
-    pub fn send(&self, osc: &[u8], origin: u32) -> Result<()> {
+    pub fn send(&self, osc: &[u8], writer: u32) -> Result<()> {
         if osc.is_empty() {
             return Err(Error::Arg);
         }
         let bytes = u32::try_from(osc.len()).map_err(|_| Error::TooBig)?;
         // SAFETY: a live handle and `bytes` bytes of a live slice.
-        check(unsafe { clockwork_client_send(self.raw.as_ptr(), osc.as_ptr(), bytes, origin) })
+        check(unsafe { clockwork_client_send(self.raw.as_ptr(), osc.as_ptr(), bytes, writer) })
     }
 
     /// Build the message in the ring, where it is going to live: `fill`
@@ -231,7 +232,7 @@ impl Client {
     /// no other producer can write — so it must fill bytes and nothing else.
     /// A `fill` that panics, or returns 0 or more than `max_bytes`, has its
     /// reservation given back and nothing a reader can see is changed.
-    pub fn send_with<F>(&self, max_bytes: u32, origin: u32, fill: F) -> Result<()>
+    pub fn send_with<F>(&self, max_bytes: u32, writer: u32, fill: F) -> Result<()>
     where
         F: FnOnce(&mut [u8]) -> usize,
     {
@@ -254,7 +255,7 @@ impl Client {
         reservation.open = false;
         // SAFETY: the reservation is open and `used` is within its bound;
         // commit closes it on every status.
-        check(unsafe { clockwork_client_send_commit(self.raw.as_ptr(), used as u32, origin) })
+        check(unsafe { clockwork_client_send_commit(self.raw.as_ptr(), used as u32, writer) })
     }
 
     /// Take what is waiting on the engine's egress: up to the poll batch,
@@ -574,8 +575,9 @@ pub struct Info {
 pub struct Message<'a> {
     /// The OSC packet.
     pub bytes: &'a [u8],
-    /// The token the request carried, or 0.
-    pub origin: u32,
+    /// The label in the frame's ring header: the sender's on an ingress
+    /// frame a tap watches, 0 on an egress frame.
+    pub writer: u32,
     /// Monotonic per ring; a gap means the ring lapped.
     pub sequence: u32,
 }
@@ -590,7 +592,7 @@ impl<'a> Message<'a> {
             // cannot happen while 'a lives.
             unsafe { core::slice::from_raw_parts(m.bytes, m.length as usize) }
         };
-        Message { bytes, origin: m.origin, sequence: m.sequence }
+        Message { bytes, writer: m.writer, sequence: m.sequence }
     }
 
     /// The OSC address, for an OSC message: the bytes up to the first NUL.
@@ -602,12 +604,6 @@ impl<'a> Message<'a> {
             Ok(s) if s.starts_with('/') => s,
             _ => "",
         }
-    }
-
-    /// True for a message carrying `origin`: an answer to a request sent
-    /// with it.
-    pub fn is_reply_to(&self, origin: u32) -> bool {
-        self.origin == origin
     }
 }
 
@@ -890,20 +886,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_message_knows_its_address_and_origin() {
+    fn a_message_knows_its_address_and_writer() {
         let osc = b"/dummy/pong\0,\0\0\0";
-        let slot = ClockworkClientMessage { bytes: osc.as_ptr(), length: osc.len() as u32, origin: 7, sequence: 3 };
+        let slot = ClockworkClientMessage { bytes: osc.as_ptr(), length: osc.len() as u32, writer: 7, sequence: 3 };
         let m = Message::from_slot(&slot);
         assert_eq!(m.address(), "/dummy/pong");
         assert_eq!(m.bytes, osc);
-        assert!(m.is_reply_to(7));
-        assert!(!m.is_reply_to(8));
+        assert_eq!(m.writer, 7);
 
         let bundle = b"#bundle\0";
-        let slot = ClockworkClientMessage { bytes: bundle.as_ptr(), length: 8, origin: 0, sequence: 4 };
+        let slot = ClockworkClientMessage { bytes: bundle.as_ptr(), length: 8, writer: 0, sequence: 4 };
         let m = Message::from_slot(&slot);
         assert_eq!(m.address(), "");
-        assert!(!m.is_reply_to(7));
 
         let empty = Message::from_slot(&EMPTY_SLOT);
         assert!(empty.bytes.is_empty());

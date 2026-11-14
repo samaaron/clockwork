@@ -229,15 +229,15 @@ and the work is bounded by the capacity.
 | Verb | Arguments | Does | Answers |
 |---|---|---|---|
 | `define` | `,b` a blob of `ClockworkParamEntry` records, the same bytes the table holds, native byte order; `live` and `definer` ignored; kind 0 retires. `,bb` when any has text: `text` is then where its run starts in the second blob | declares, replaces or retires, all or none; moves the generation | `define.reply ,ii gen count`, or `/clockwork/error` naming the reason: no room, no room for text, a bad range, a bad name, no such kind, facts that contradict each other, bad text, a role or a group that does not fit, an id another definer holds, no such parameter (a retire of one not there), malformed |
-| `list` | `,i first` slot, 0 if absent | | a page of at most 16 live entries from that slot: `list.reply ,iii gen count next`, then one `entry ,isifffiiiiffii id name kind min max default unit flags group slot value taper role text-bytes` per entry, every frame to the asker; `next` is where the next page starts, 0 at the last. A page fits the smallest ring |
-| `text` | `,i id` | | `text.reply ,iib id gen run`, to the asker, empty when it has none; apart from `list` because a page of runs would not fit the smallest ring. `/clockwork/error` for no such parameter |
+| `list` | `,i first` slot, 0 if absent | | a page of at most 16 live entries from that slot: `list.reply ,iii gen count next`, then one `entry ,isifffiiiiffii id name kind min max default unit flags group slot value taper role text-bytes` per entry; `next` is where the next page starts, 0 at the last. A page fits the smallest ring |
+| `text` | `,i id` | | `text.reply ,iib id gen run`, empty when it has none; apart from `list` because a page of runs would not fit the smallest ring. `/clockwork/error` for no such parameter |
 | `set` | `,if…` id value pairs | writes the values, held to range and rounded for the integer kinds, all or none; inside `/clockwork/schedule`, in the block of its sample | nothing on success; `/clockwork/error` for no such parameter, read-only, a value that is no finite number, malformed |
 
 A `list` is a state and a `set` of many restores one: a preset is a named
 list a client keeps.
 
-**The table is read, never announced.** A verb answers its asker and nobody
-else is told: a change costs the thread that ticks the core one store, however
+**The table is read, never announced.** A verb is answered and nothing
+else is said: a change costs the thread that ticks the core one store, however
 many readers there are and however fast a host automates. A reader sees the set
 of entries change by the generation and a value by its slot, and the
 `paramMoves` metric says in one load whether a set moved any value since it

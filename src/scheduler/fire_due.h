@@ -6,13 +6,13 @@
  *
  *
  * fire_due.h — the shared scheduler fire loop. Pop every event due at/through
- * `nextTime` in time order and hand each to `dispatch` with its threaded metadata
- * (origin token + timetag) plus this block's start. The engine and the standalone
+ * `nextTime` in time order and hand each to `dispatch` with its timetag plus
+ * this block's start. The engine and the standalone
  * host run the SAME loop; only the dispatch sink differs (the engine routes
  * through clockwork/DSP boundary, which hands anything the reserved prefix does
  * not claim to the DSP; the host through its own clockwork routes, with no DSP
  * attached). `Scheduler` is duck-typed: popDue → Event{valid, data, size,
- * when, meta->origin} → release.
+ * when} → release.
  */
 #pragma once
 
@@ -24,7 +24,7 @@ inline void clockwork_fire_due(Scheduler& sched, clockwork::Timetag nextTime, cl
     for (;;) {
         auto ev = sched.popDue(nextTime);
         if (!ev.valid()) break;
-        dispatch(ev.data, ev.size, ev.meta->origin, ev.when, blockTime);
+        dispatch(ev.data, ev.size, ev.when, blockTime);
         sched.release(ev);
     }
 }

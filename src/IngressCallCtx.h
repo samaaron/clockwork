@@ -2,8 +2,8 @@
 // Copyright (c) 2025 Sam Aaron
 /*
  * IngressCallCtx.h — the immutable per-call metadata the dispatch path passes to
- * every backend via OscIngress::ingest(). One bundle (origin token + timetag)
- * travels with each message; each backend reads what it needs.
+ * every backend via OscIngress::ingest(). One bundle of times travels with
+ * each message; each backend reads what it needs.
  */
 #pragma once
 
@@ -13,10 +13,6 @@
 #include <cstdint>
 
 struct DrainCallCtx {
-    uint32_t      sourceId = 0;        // origin token — threaded to every backend so a
-                                       // reply can be routed back to the sender. It is
-                                       // also what dsp_osc() carries and DspHost::emit_osc
-                                       // hands back, so no reply TYPE crosses the boundary.
     clockwork::Timetag when;           // OSC timetag of this message; immediately unless set.
                                        // Passed to the DSP, which derives its own
                                        // sub-block placement from it; other handlers ignore.

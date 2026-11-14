@@ -60,7 +60,7 @@ extern "C" {
 
 namespace {
 
-constexpr uint32_t kClient = 0x5eed;   // not 0: an answer is told from a notice by its origin
+constexpr uint32_t kClient = 0x5eed;   // the label on this file's ingress frames
 
 const lanes_test::EgressFrame* findAddress(
     const std::vector<lanes_test::EgressFrame>& frames, const char* address) {
@@ -89,7 +89,6 @@ int64_t askWhen(const osc_test::Packet& pkt, int maxBlocks = 8) {
     const auto frames = lanes_test::tickUntil(maxBlocks, "/dummy/when-was");
     const auto* f = findAddress(frames, "/dummy/when-was");
     REQUIRE(f != nullptr);
-    CHECK(f->sourceId == kClient);
     return whenWasArg(*f);
 }
 
@@ -119,7 +118,6 @@ TEST_CASE("no scheduler: an immediate message still reaches the DSP",
     const auto frames = lanes_test::tickUntil(4, "/dummy/pong");
     const auto* pong = findAddress(frames, "/dummy/pong");
     REQUIRE(pong != nullptr);
-    CHECK(pong->sourceId == kClient);
 }
 
 TEST_CASE("no scheduler: a timed bundle arrives at once, with its timetag intact",
@@ -157,7 +155,6 @@ TEST_CASE("no scheduler: a timed bundle arrives at once, with its timetag intact
     const auto frames = lanes_test::tickUntil(1, "/dummy/when-was");
     const auto* f = findAddress(frames, "/dummy/when-was");
     REQUIRE(f != nullptr);
-    CHECK(f->sourceId == kClient);
     CHECK(whenWasArg(*f) == due);   // intact, to the sub-sample fraction
     CHECK(whenWasArg(*f) != 1);     // not flattened to "immediately"
     CHECK(whenWasArg(*f) != 0);
@@ -223,7 +220,6 @@ TEST_CASE("no scheduler: /clockwork/schedule refuses and says so, rather than "
     // something was refused, this says what and why.
     const auto* err = findAddress(frames, "/clockwork/error");
     REQUIRE(err != nullptr);
-    CHECK(err->sourceId == kClient);
     const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
     CHECK(r.argString(0) == CLOCKWORK_SYS("schedule"));
     CHECK(r.argString(1) == "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)");
@@ -240,7 +236,6 @@ TEST_CASE("no scheduler: sched/flush is refused to the caller", "[scheduler][abs
     const auto frames = lanes_test::tickUntil(4, "/clockwork/error");
     const auto* err = findAddress(frames, "/clockwork/error");
     REQUIRE(err != nullptr);
-    CHECK(err->sourceId == kClient);
     const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
     CHECK(r.argString(0) == CLOCKWORK_SYS("sched/flush"));
     CHECK(r.argString(1) == "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)");

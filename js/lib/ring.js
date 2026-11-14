@@ -114,7 +114,7 @@ export function engineRings(buffer, arenaBase, constants) {
  *
  * @param {object}     ring
  * @param {Uint8Array} payload   the frame's bytes; may be empty
- * @param {number}     sourceId  carried in the header (the origin)
+ * @param {number}     sourceId  the writer's label, carried in the header
  * @returns {boolean} false when it does not fit; the ring is then unchanged
  */
 export function ringWrite(ring, payload, sourceId = 0) {
@@ -192,8 +192,8 @@ export function ringWrite(ring, payload, sourceId = 0) {
  *   says why the walk ended: 'empty', 'max', 'bad-cursor', 'bad-magic' or
  *   'bad-length'
  * @param {number}   max      frames to consume at most; 0 for no limit
- * @param {(origin: number, offset: number, length: number, sequence: number) => void} onFrame
- *   `offset` is into ring.bytes, valid until the cursor passes it
+ * @param {(sourceId: number, offset: number, length: number, sequence: number) => void} onFrame
+ *   `sourceId` is the label the frame was written with; `offset` is into ring.bytes, valid until the cursor passes it
  * @param {object}   [metrics]  { view, received, bytes, corrupted, seqGaps }:
  *   a Uint32Array and the indices in it to count into; any left out is not
  *   counted. Gaps in the sequence are tracked only when seqGaps is given.
@@ -266,7 +266,7 @@ export function ringDrain(ring, from, state, max, onFrame, metrics = null) {
 
         const length = view.getUint32(ut + 4, true);
         const sequence = view.getUint32(ut + 8, true);
-        const origin = view.getUint32(ut + 12, true);
+        const sourceId = view.getUint32(ut + 12, true);
         // The length is held to the ring BEFORE it is rounded: rounding a
         // length within four of 2^32 wraps (int32 arithmetic) to a footprint
         // of nothing, which every fit check below would pass while the
@@ -291,7 +291,7 @@ export function ringDrain(ring, from, state, max, onFrame, metrics = null) {
         // Counted before delivery, so whoever is handed the frame sees it counted.
         count(m.received, 1);
         count(m.bytes, payload);
-        if (payload > 0) onFrame(origin, ut + HEADER_BYTES, payload, sequence);
+        if (payload > 0) onFrame(sourceId, ut + HEADER_BYTES, payload, sequence);
 
         Atomics.store(cw, ci, (ut + footprint) % size);
 
@@ -367,7 +367,7 @@ export class EgressReader {
      * back to the writer: a caller keeping it longer copies it.
      *
      * @param {number} max  frames at most; 0 for no limit
-     * @param {(bytes: Uint8Array, origin: number, sequence: number) => void} onMessage
+     * @param {(bytes: Uint8Array, sequence: number) => void} onMessage
      * @returns {number} messages delivered
      */
     poll(max, onMessage) {
@@ -380,10 +380,10 @@ export class EgressReader {
             if (ring.bytes.length === 0) continue;
             if (i > 0 && max !== 0 && this.#taken >= max) break;
             const room = max === 0 ? 0 : max - this.#taken;
-            ringDrain(ring, this.#from[i], this.#states[i], room, (origin, offset, length, sequence) => {
+            ringDrain(ring, this.#from[i], this.#states[i], room, (_sourceId, offset, length, sequence) => {
                 if (length === 0) return;   // an empty frame says nothing: consumed, not delivered
                 this.#taken++;
-                onMessage(ring.bytes.subarray(offset, offset + length), origin, sequence);
+                onMessage(ring.bytes.subarray(offset, offset + length), sequence);
             }, this.#metrics);
         }
         return this.#taken;
@@ -425,9 +425,9 @@ export class RingTap {
     poll(max, onFrame) {
         let delivered = 0;
         this.#gaps[0] = 0;
-        ringDrain(this.#ring, this.#from, this.#state, max, (origin, offset, length, sequence) => {
+        ringDrain(this.#ring, this.#from, this.#state, max, (sourceId, offset, length, sequence) => {
             delivered++;
-            onFrame(origin, offset, length, sequence);
+            onFrame(sourceId, offset, length, sequence);
         }, this.#metrics);
         this.#missed += this.#gaps[0];
         return delivered;

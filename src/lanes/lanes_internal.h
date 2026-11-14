@@ -30,13 +30,11 @@
 extern "C" {
 #endif
 
-/* token is the origin the frame is written with (0 for one nobody asked for).
-   False when the ring is full, or when len is more than a frame can carry
+/* One frame onto the NRT egress ring. False when the ring is full, or when len is more than a frame can carry
    (clockwork_egress_nrt_max_frame): the ring is a fixed size, and a frame
    has to be able to drain. Either refusal is counted
    (PerformanceMetrics::egress_frames_refused). */
-bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t token,
-                         const uint8_t* osc, uint32_t len);
+bool clockwork_egress_nrt_write(ClockworkCore* core, const uint8_t* osc, uint32_t len);
 
 /* The most OSC bytes one NRT egress frame of `core` carries: its ring's. */
 uint32_t clockwork_egress_nrt_max_frame(const ClockworkCore* core);
@@ -95,13 +93,13 @@ struct RingPart;   // workers/RingBufferWriter.h
 // clockwork_egress_nrt_write with the OSC laid down from `parts` end to end,
 // nothing gathered first: for a frame made of pieces held apart. The same
 // refusals, counted the same.
-bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core,
                                       const RingPart* parts, uint32_t n_parts);
 
 // clockwork_ingress_write, saying which of its two refusals it made: full (a
 // moment: try again) or no instance (answered: the refusal is on the NRT
-// egress for the source, and the message is done with). For a door of the
+// egress, and the message is done with). For a door of the
 // engine's own that holds a message while the ring is full and must not hold
 // one that has been answered — a shm peer's plane.
-InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id);
+InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t writer);
 #endif

@@ -93,31 +93,33 @@ struct LanesArena {
 // ClockworkEgressFn capture sink.
 struct Captured {
     int      frames = 0;
-    uint32_t sourceId = 0, seq = 0;
+    uint32_t seq = 0;
     std::vector<uint8_t> osc;
+    // The address of the last frame captured.
+    std::string address() const { return std::string(reinterpret_cast<const char*>(osc.data())); }
 };
-void capture(void* ctx, uint32_t sourceId,
-             const uint8_t* osc, uint32_t len, uint32_t seq) {
+void capture(void* ctx, const uint8_t* osc, uint32_t len, uint32_t seq) {
     auto* c = static_cast<Captured*>(ctx);
-    c->frames++; c->sourceId = sourceId; c->seq = seq;
+    c->frames++; c->seq = seq;
     c->osc.assign(osc, osc + len);
 }
 
 // RT egress is written inside clockwork_tick; this puts one frame on the
-// OUT ring directly, as the audio thread would. "/test/filler"
-// is an arbitrary address that no handler owns — it exists only to prove the
-// lane carries bytes.
+// OUT ring directly, as the audio thread would. The addresses are arbitrary
+// ones that no handler owns — they exist only to prove the lane carries
+// bytes, and to tell one frame from another.
 constexpr char kFiller[] = "/test/filler";
-bool writeRtFrame(uint32_t sourceId) {
+constexpr char kLater[]  = "/test/latest";
+bool writeRtFrame(const char (&address)[13]) {
     std::atomic<int32_t> lock{0};
     uint8_t framed[sizeof(kFiller)];
-    std::memcpy(framed, kFiller, sizeof(kFiller));
+    std::memcpy(framed, address, sizeof(framed));
     uint8_t* const base = clockwork::laid_out_base(lanes_test::core());
     RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(lanes_test::core()));
     return RingBufferWriter::write(
         base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
         &cursors->out_head, &cursors->out_tail, &cursors->out_sequence, &lock,
-        framed, sizeof(framed), sourceId);
+        framed, sizeof(framed), 0);
 }
 
 // A standalone test ring: buffer + cursors + a writer, independent of the
@@ -447,26 +449,24 @@ TEST_CASE("lanes ABI: clockwork_ingress_write frames a message onto the IN ring"
     REQUIRE(gotPayload == std::vector<uint8_t>(msg, msg + sizeof(msg)));
 }
 
-TEST_CASE("lanes ABI: NRT egress write -> drain round-trips token and payload", "[lanes][abi]") {
+TEST_CASE("lanes ABI: NRT egress write -> drain round-trips the payload", "[lanes][abi]") {
     LanesArena arena;
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
-    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), 42, payload, sizeof(payload)));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), payload, sizeof(payload)));
 
     Captured cap;
     REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &cap, 0) == 1);
     REQUIRE(cap.frames == 1);
-    REQUIRE(cap.sourceId == 42);  // token rides through as the frame sourceId
     REQUIRE(cap.osc == std::vector<uint8_t>(payload, payload + sizeof(payload)));
 }
 
 TEST_CASE("lanes ABI: RT egress drain delivers a framed OUT frame", "[lanes][abi]") {
     LanesArena arena;
-    REQUIRE(writeRtFrame(99));
+    REQUIRE(writeRtFrame(kFiller));
 
     Captured cap;
     REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &cap, 0) == 1);
-    REQUIRE(cap.sourceId == 99);
-    REQUIRE(std::string(reinterpret_cast<const char*>(cap.osc.data())) == kFiller);
+    REQUIRE(cap.address() == kFiller);
 }
 
 // The egress rings have one read cursor, and both ways of taking from them
@@ -482,8 +482,8 @@ TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing the
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
-    REQUIRE(writeRtFrame(1));
-    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), 2, payload, sizeof(payload)));
+    REQUIRE(writeRtFrame(kFiller));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), payload, sizeof(payload)));
     Captured rt, nrt;
     REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &rt, 0) == 1);
     REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &nrt, 0) == 1);
@@ -492,10 +492,10 @@ TEST_CASE("lanes ABI: a client polling after the egress drains takes nothing the
     CHECK(clockwork_client_poll(c, m, 8) == 0);
 
     // And what arrives after the handover is the client's, once.
-    REQUIRE(writeRtFrame(3));
+    REQUIRE(writeRtFrame(kLater));
     const uint32_t n = clockwork_client_poll(c, m, 8);
     REQUIRE(n == 1);
-    CHECK(m[0].origin == 3);
+    CHECK(std::string(reinterpret_cast<const char*>(m[0].bytes)) == kLater);
     CHECK(clockwork_client_poll(c, m, 8) == 0);
     clockwork_client_close(c);
 }
@@ -507,8 +507,8 @@ TEST_CASE("lanes ABI: the egress drains after a client poll take nothing it took
     REQUIRE(c != nullptr);
 
     const uint8_t payload[] = {'/', 'x', 0, 0};   // arbitrary filler bytes
-    REQUIRE(writeRtFrame(1));
-    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), 2, payload, sizeof(payload)));
+    REQUIRE(writeRtFrame(kFiller));
+    REQUIRE(clockwork_egress_nrt_write(lanes_test::core(), payload, sizeof(payload)));
     ClockworkClientMessage m[8];
     REQUIRE(clockwork_client_poll(c, m, 8) == 2);
     clockwork_client_close(c);
@@ -519,10 +519,10 @@ TEST_CASE("lanes ABI: the egress drains after a client poll take nothing it took
     CHECK(again.frames == 0);
 
     // And what arrives after the handover is the drain's, once.
-    REQUIRE(writeRtFrame(3));
+    REQUIRE(writeRtFrame(kLater));
     Captured next;
     REQUIRE(clockwork_egress_rt_drain(lanes_test::core(), capture, &next, 0) == 1);
-    CHECK(next.sourceId == 3);
+    CHECK(next.address() == kLater);
     CHECK(clockwork_egress_rt_drain(lanes_test::core(), capture, &next, 0) == 0);
 }
 
@@ -591,16 +591,16 @@ TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or fo
 
     // The NRT ring: written until it refuses, then three more.
     int written = 0;
-    while (clockwork_egress_nrt_write(lanes_test::core(), 1, payload, sizeof(payload))) ++written;
+    while (clockwork_egress_nrt_write(lanes_test::core(), payload, sizeof(payload))) ++written;
     REQUIRE(written > 0);
-    for (int i = 0; i < 3; ++i) REQUIRE_FALSE(clockwork_egress_nrt_write(lanes_test::core(), 1, payload, sizeof(payload)));
+    for (int i = 0; i < 3; ++i) REQUIRE_FALSE(clockwork_egress_nrt_write(lanes_test::core(), payload, sizeof(payload)));
     CHECK(arena.metrics->egress_frames_refused.load() == 4u);
 
     // The RT ring, through the writer the audio thread uses.
     std::atomic<uint32_t> status{0};
     while (ring_buffer_write(arena.base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
                              &arena.cursors->out_head, &arena.cursors->out_tail, &arena.cursors->out_sequence,
-                             1, payload, sizeof(payload), &status, arena.metrics)) {}
+                             0, payload, sizeof(payload), &status, arena.metrics)) {}
     CHECK(arena.metrics->egress_frames_refused.load() == 5u);
     CHECK((status.load() & STATUS_BUFFER_FULL) != 0u);
 
@@ -609,7 +609,7 @@ TEST_CASE("lanes ABI: a frame either egress ring refuses, for want of room or fo
     // its own goes no further, and the client gets nothing. (Clockwork's own
     // producer also answers one with an error, OscEgress.)
     std::vector<uint8_t> huge(clockwork_egress_nrt_max_frame(lanes_test::core()) + 1, 0);
-    CHECK_FALSE(clockwork_egress_nrt_write(lanes_test::core(), 1, huge.data(), static_cast<uint32_t>(huge.size())));
+    CHECK_FALSE(clockwork_egress_nrt_write(lanes_test::core(), huge.data(), static_cast<uint32_t>(huge.size())));
     CHECK(arena.metrics->egress_frames_refused.load() == 6u);
 
     // Nothing on the way in was refused.

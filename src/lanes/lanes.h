@@ -87,16 +87,17 @@ extern "C" {
  * when the ring is full (backpressure: the caller decides whether to
  * drop, retry, or count it).
  *
- * source_id is an opaque writer/origin token carried in the Message header
- * and surfaced on egress for reply routing. Web: 0 = main thread, 1+ =
- * workers. Native: the transport origin token (0 = in-process embedder).
+ * writer is a label of the sender's own choosing, stored in the frame's ring
+ * header for whoever watches the ring (a tap, the web's traffic log; the web
+ * uses 0 = main thread, 1+ = workers). Clockwork never reads it, the guest is
+ * not given it, and no answer carries it.
  *
  * Messages written on the audio thread before clockwork_tick() are drained by
  * that same tick, subject to the per-block drain bound — so a co-resident
  * component running in the host's audio callback can emit OSC pre-tick and
  * have it performed in the same block.
  */
-bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t source_id);
+bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t writer);
 
 /* ── Egress ────────────────────────────────────────────────────────────────
  * Two single-consumer rings out of the engine:
@@ -112,8 +113,7 @@ bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t l
  * same thread for both). These drains and clockwork_client_poll move the
  * same read cursor, so a host may hand the stream from one to the other and
  * the one taking over starts where the other stopped. The callback receives
- * one frame at a time; source_id is the origin the frame was written with,
- * seq the ring sequence number (gap detection is
+ * one frame at a time; seq is the ring sequence number (gap detection is
  * the caller's choice). Payload points into the ring itself (frames are
  * contiguous by wire invariant) and is valid only for the duration of the
  * call.
@@ -121,8 +121,7 @@ bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t l
  * Returns the number of frames delivered. max_frames == 0 means drain
  * everything available.
  */
-typedef void (*ClockworkEgressFn)(void* ctx, uint32_t source_id,
-                           const uint8_t* osc, uint32_t len, uint32_t seq);
+typedef void (*ClockworkEgressFn)(void* ctx, const uint8_t* osc, uint32_t len, uint32_t seq);
 
 uint32_t clockwork_egress_rt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
 uint32_t clockwork_egress_nrt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames);
@@ -432,7 +431,7 @@ const char* clockwork_boot_error(ClockworkCore* core);
 /* ── The host as the end of clockwork's chain ──────────────────────────────
  * A /clockwork/ verb the audio thread does not answer itself is, on a host
  * with no NRT thread, either REFUSED there or FORWARDED to the host: sent
- * back out over the egress to the origin that sent it, wrapped in a bundle
+ * back out over the egress, wrapped in a bundle
  * whose timetag is the call's time (1 for a verb that never waited), for a
  * front of the host's own to answer or refuse. The web client is such a
  * host — its main thread owns Web MIDI and the Gamepad API, so it answers

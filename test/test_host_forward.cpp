@@ -8,8 +8,8 @@
  * have a FRONT — a thread of its own that answers the control
  * verbs, which on the web is the client's main thread, the only place Web
  * MIDI and the Gamepad API exist — and with clockwork_host_forward(lanes_test::core(), 1) the
- * audio thread forwards to it: the verb goes back out over the egress, to
- * the origin that sent it, wrapped in a bundle carrying the call's time.
+ * audio thread forwards to it: the verb goes back out over the egress,
+ * wrapped in a bundle carrying the call's time.
  *
  * Driven through the lanes ABI, which is exactly the shape of the worklet:
  * bytes in the IN ring, one block rendered, frames off the RT egress ring.
@@ -43,7 +43,7 @@
 
 namespace {
 
-constexpr uint32_t kClient = 0x40f7;   // not 0: an answer is told from a notice by its origin
+constexpr uint32_t kClient = 0x40f7;   // the label on this file's ingress frames
 
 // What a forwarded frame looks like once taken apart.
 using osc_test::Forwarded;
@@ -94,7 +94,6 @@ TEST_CASE("host forward: off, an unknown verb is refused on the audio thread",
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("error"));
     const auto* err = find(frames, CLOCKWORK_SYS("error"));
     REQUIRE(err != nullptr);
-    CHECK(err->sourceId == kClient);
     const auto p = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
     CHECK(p.argString(0) == CLOCKWORK_SYS("midi/out/note_on"));
     CHECK(findBundle(frames) == nullptr);
@@ -113,7 +112,6 @@ TEST_CASE("host forward: on, the verb goes back to its sender whole, inside an i
     const auto frames = lanes_test::tickUntil(4, nullptr);
     const auto* fwd = findBundle(frames);
     REQUIRE(fwd != nullptr);
-    CHECK(fwd->sourceId == kClient);
 
     const Forwarded f = unwrap(*fwd);
     REQUIRE(f.isBundle);
@@ -154,7 +152,6 @@ TEST_CASE("host forward: ping is answered on the audio thread either way",
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("pong"));
     const auto* pong = find(frames, CLOCKWORK_SYS("pong"));
     REQUIRE(pong != nullptr);
-    CHECK(pong->sourceId == kClient);
     const auto p = osc_test::parseReply(pong->data.data(), static_cast<uint32_t>(pong->data.size()));
     CHECK(p.argInt(0) == 77);
     CHECK(findBundle(frames) == nullptr);          // not forwarded as well
@@ -192,7 +189,6 @@ TEST_CASE("host forward: a verb the scheduler fired carries the moment it was sc
     const auto frames = lanes_test::tickUntil(4, nullptr);
     const auto* fwd = findBundle(frames);
     REQUIRE(fwd != nullptr);
-    CHECK(fwd->sourceId == kClient);
     const Forwarded f = unwrap(*fwd);
     CHECK(f.address == CLOCKWORK_SYS("midi/out/note_on"));
     CHECK(f.element == inner.data);
@@ -273,7 +269,6 @@ TEST_CASE("host forward: on, a MIDI sink opens onto the host and a send goes out
     const auto frames = lanes_test::drainRt();
     const auto* fwd = findBundle(frames);
     REQUIRE(fwd != nullptr);
-    CHECK(fwd->sourceId == 0);                       // a sink has no caller
     const Forwarded f = unwrap(*fwd);
     CHECK(f.timetag == when.ntp());
     CHECK(f.address == CLOCKWORK_SYS("midi/sink/send"));

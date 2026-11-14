@@ -53,9 +53,6 @@ static uint32_t g_last_generation = 0;
 // The product's front, when it has one (clockwork_nif_front.h): published and
 // unpublished with g_engine, under the same lock.
 static std::unique_ptr<OscFront> g_front;
-// The BEAM is the engine's client, and this is the token its messages carry
-// and its answers bring back.
-static constexpr uint32_t kBeamToken = 1;
 
 // ─── Subscriber registry ────────────────────────────────────────────────────
 //
@@ -510,12 +507,12 @@ static ERL_NIF_TERM nif_send_osc(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     // (from its own thread, as a reply), and the rest goes on to the engine.
     // Every reply reaches every registered process (NifTransport).
     const auto size = static_cast<uint32_t>(bin.size);
-    if (g_front && g_front->ingress(bin.data, size, kBeamToken))
+    if (g_front && g_front->ingress(bin.data, size))
         return enif_make_atom(env, "ok");
     const auto error = [env](const char* why) {
         return enif_make_tuple2(env, enif_make_atom(env, "error"), enif_make_atom(env, why));
     };
-    switch (g_engine->ingest(bin.data, size, kBeamToken)) {
+    switch (g_engine->ingest(bin.data, size)) {
         case CLOCKWORK_OK:        return enif_make_atom(env, "ok");
         case CLOCKWORK_E_FULL:    return error("full");       // no room this moment
         case CLOCKWORK_E_TOO_BIG: return error("too_big");    // never room: bulk goes in the assets area

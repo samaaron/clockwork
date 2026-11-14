@@ -35,12 +35,12 @@ TEST_CASE("A message refused on its way in is counted and said, by its address a
     std::vector<uint8_t> wide(clockwork::kDefaultLayout.profile.in_ring_bytes + 64, 0);
     const char address[] = "/too/wide";
     std::memcpy(wide.data(), address, sizeof address);
-    CHECK(fix.engine().ingest(wide.data(), static_cast<uint32_t>(wide.size()), 0) != CLOCKWORK_OK);
+    CHECK(fix.engine().ingest(wide.data(), static_cast<uint32_t>(wide.size())) != CLOCKWORK_OK);
     CHECK(m.messages_dropped.load() == before + 1);
     REQUIRE(fix.pollUntil([&] { return linesSaying(fix, "a message was refused on its way in: /too/wide") == 1; }));
 
     // Again within the second: counted, not said again.
-    CHECK(fix.engine().ingest(wide.data(), static_cast<uint32_t>(wide.size()), 0) != CLOCKWORK_OK);
+    CHECK(fix.engine().ingest(wide.data(), static_cast<uint32_t>(wide.size())) != CLOCKWORK_OK);
     CHECK(m.messages_dropped.load() == before + 2);
     fix.pollUntil([] { return false; }, 200);   // what the control pass would carry, carried
     CHECK(linesSaying(fix, "a message was refused on its way in") == 1);

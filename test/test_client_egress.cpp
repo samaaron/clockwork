@@ -5,8 +5,7 @@
  *
  * The engine writes two rings: the audio thread's replies (OUT) and the
  * NRT gateway's (NRT-out — the subsystems, the state changes, the
- * broadcasts). One read function, clockwork_client_poll, takes from both,
- * each frame with the origin it answers. A
+ * broadcasts). One read function, clockwork_client_poll, takes from both. A
  * host that drains egress itself (Config::hostDrainsEgress) tells the engine
  * so, and the engine's own gateway then leaves the rings alone: the host is
  * the consumer, on native as the JavaScript client already is on the web.
@@ -43,7 +42,7 @@ extern bool ring_buffer_write(
 
 namespace {
 
-struct Frame { uint32_t origin; std::string address; };
+struct Frame { std::string address; };
 
 // Everything the client can take right now.
 std::vector<Frame> takeAll(ClockworkClient* c) {
@@ -52,7 +51,7 @@ std::vector<Frame> takeAll(ClockworkClient* c) {
     for (;;) {
         const uint32_t n = clockwork_client_poll(c, batch, 64);
         for (uint32_t i = 0; i < n; ++i)
-            out.push_back({ batch[i].origin, osc_test::parseAddress(batch[i].bytes, batch[i].length) });
+            out.push_back({ osc_test::parseAddress(batch[i].bytes, batch[i].length) });
         if (n < 64) break;
     }
     return out;
@@ -73,7 +72,7 @@ bool waitForFrame(const std::function<void()>& pump, ClockworkClient* c, const c
 
 } // namespace
 
-TEST_CASE("client egress: one poll takes from both rings, each frame with its origin",
+TEST_CASE("client egress: one poll takes from both rings",
           "[client][egress]") {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
     cfg.hostDrainsEgress = true;
@@ -83,20 +82,16 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
 
     takeAll(c);   // what boot said, set aside
 
-    // The audio thread answers on the OUT ring, to the token that asked.
+    // The audio thread answers on the OUT ring.
     const auto ping = osc_test::message("/dummy/ping");
-    fx.engine().ingest(ping.ptr(), ping.size(), 7);
-    Frame pong;
-    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/dummy/pong", &pong));
-    CHECK(pong.origin == 7);
+    fx.engine().ingest(ping.ptr(), ping.size());
+    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/dummy/pong", nullptr));
 
-    // The NRT gateway answers on the NRT-out ring, to its token, and the
-    // same poll takes that too.
+    // The NRT gateway answers on the NRT-out ring, and the same poll takes
+    // that too.
     const auto notify = osc_test::message("/clockwork/notify", int32_t{1});
-    fx.engine().ingest(notify.ptr(), notify.size(), 9);
-    Frame reply;
-    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/clockwork/notify.reply", &reply));
-    CHECK(reply.origin == 9);
+    fx.engine().ingest(notify.ptr(), notify.size());
+    REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/clockwork/notify.reply", nullptr));
 }
 
 TEST_CASE("client egress: with the host draining, the engine's gateway leaves the rings alone",
@@ -234,7 +229,7 @@ TEST_CASE("client egress: a thread waits until the engine says something, then p
     while (!parked) std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));   // asleep, not merely started
     const auto ping = osc_test::message("/dummy/ping");
-    REQUIRE(fx.engine().ingest(ping.ptr(), ping.size(), 7) == CLOCKWORK_OK);
+    REQUIRE(fx.engine().ingest(ping.ptr(), ping.size()) == CLOCKWORK_OK);
     fx.pumpBlock();
     waiter.join();
     CHECK(answered);
@@ -286,7 +281,7 @@ TEST_CASE("client egress: verbs held for room in the egress ring are answered on
     // them answers with more than the egress ring holds.
     const auto ask = osc_test::message(CLOCKWORK_SYS("clock/time/now/get"));
     int sent = 0;
-    while (sent < 100000 && fx.engine().ingest(ask.ptr(), ask.size(), 0) == CLOCKWORK_OK) ++sent;
+    while (sent < 100000 && fx.engine().ingest(ask.ptr(), ask.size()) == CLOCKWORK_OK) ++sent;
     REQUIRE(sent > 0);
 
     // Read, and only read.

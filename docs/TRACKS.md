@@ -171,9 +171,9 @@ executable has none, so its editor windows could be seen but not chosen. The two
 Header      geometry, liveness, the block time, the mirrored session clock
 send ring   the engine's sink   → the bridge's source     (clockwork_port_open_shared)
 return ring the bridge's sink   → the engine's source
-ctl ring    control verbs, engine → bridge, with the caller's token
+ctl ring    control verbs, engine → bridge
 rt ring     audio-thread verbs, engine → bridge, [frame offset][osc]
-out ring    replies and broadcasts, bridge → engine, [egress route][osc]
+out ring    replies and broadcasts, bridge → engine
 mirror      the rig as JSON, rewritten by the bridge after every change
 ```
 
@@ -181,9 +181,8 @@ The engine's ingress routes every `/clockwork/track/*` verb to
 `TrackControl`, which writes it to a ring and returns; the bridge decodes
 it (`TrackVerbs`), acts, and writes its reply — or a broadcast, or a debug
 line — to the out ring, which the engine's NRT gateway drains once per block
-and hands to `OscEgress` with the route and token the frame carries. A
-reply reaches the caller that asked; a broadcast reaches every subscriber;
-neither side knows the other's sockets.
+and writes onto the NRT egress. A reply and a broadcast both reach the
+client; neither side knows the other's sockets.
 
 **When it dies.** The engine checks the bridge's liveness every gateway
 pass: a process that exited or was signalled, one that stopped rendering

@@ -51,8 +51,7 @@
  * refuses, so the sink holds the message itself.)
  *
  * NOT FOR ANSWERING CLIENTS. `DspHost::emit_osc` already replies to a request
- * or notifies listeners, carrying an origin token — reply routing a sink has
- * no concept of. Answering a client and sending to a MIDI port look alike and
+ * or notifies listeners. Answering a client and sending to a MIDI port look alike and
  * are not the same act; collapsing them would put reply semantics into every
  * endpoint that has no use for them.
  */

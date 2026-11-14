@@ -25,8 +25,7 @@
  *                 the lane base; the bridge's SOURCE for the same memory.
  *   RETURN ring — audio, bridge -> engine. The mirror image.
  *   CTL ring    — messages, engine NRT thread -> bridge main thread: the
- *                 track verbs, as OSC, with the caller's origin token as the
- *                 frame's sourceId so the reply can find its way back.
+ *                 track verbs, as OSC.
  *   RT ring     — messages, engine audio thread -> bridge audio thread: the
  *                 events that must land on a frame (notes, controls,
  *                 parameter moves), each prefixed with its frame offset.
@@ -259,10 +258,6 @@ struct Prefixed {
     uint32_t word;
     // payload follows
 };
-
-// The origin token the bridge's own frames carry on the OUT ring when they
-// are broadcasts rather than replies (a reply carries the caller's token).
-constexpr uint32_t BRIDGE_ORIGIN_TOKEN = 0x54425247;
 
 // ── Names ──────────────────────────────────────────────────────────────────
 // From the engine's pid and its core's id (clockwork_core_id), so engines

@@ -24,8 +24,8 @@ struct alignas(4) Message {
     uint32_t magic;       // MESSAGE_MAGIC for validation
     uint32_t length;      // total frame size including this header
     uint32_t sequence;    // sequence number for ordering
-    uint32_t sourceId;    // writer/origin token (web: 0 = main thread, 1+ =
-                          // workers; native: the transport origin token)
+    uint32_t sourceId;    // the writer's label, of its own choosing (web: 0 =
+                          // main thread, 1+ = workers); 0 on egress frames
     // payload follows (binary data — OSC on every ring here)
 };
 

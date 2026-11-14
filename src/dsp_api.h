@@ -252,12 +252,11 @@ typedef struct DspHost {
     void* ctx;
 
     /* Send OSC out — a reply, a notification, anything — to the client.
-     * There is one client, and everything sent here reaches it. `origin`
-     * echoes the value the message being answered arrived with, so the
-     * client can tell which request an answer is to: A REPLY CARRIES THE
-     * ORIGIN IT WAS GIVEN, and a message nobody asked for carries 0. Callable
-     * from the audio thread. A non-zero return means the frame was queued,
-     * never that anything received it.
+     * There is one client, and everything sent here reaches it. Nothing is
+     * attached to the bytes: a guest whose client must match an answer to a
+     * request carries an id of its own in the OSC. Callable from the audio
+     * thread. A non-zero return means the frame was queued, never that
+     * anything received it.
      *
      * BULK DOES NOT GO HERE: sending copies the payload into the egress ring,
      * so a large reply is a large memcpy in the audio callback. Write it into
@@ -265,7 +264,7 @@ typedef struct DspHost {
      *
      * Returns non-zero if accepted. A full ring DROPS and counts rather than
      * blocking, so a guest that sends bulk here gets a refusal it can see. */
-    int (*emit_osc)(void* ctx, uint32_t origin, const uint8_t* bytes, uint32_t len);
+    int (*emit_osc)(void* ctx, const uint8_t* bytes, uint32_t len);
 
     /* Diagnostics. `level` follows syslog severities (3 = error, 6 = info,
      * 7 = debug). Hand it FINISHED TEXT: it formats nothing.
@@ -596,8 +595,6 @@ void dsp_process(struct Dsp* dsp,
  * sub-block placement possible. OSC's "immediately" is kept, and
  * clockwork_timetag_is_immediate says so.
  *
- * `origin` identifies the sender; pass it to DspHost::emit_osc unchanged.
- *
  * `block_time` is the timetag of the first frame of THE BLOCK THIS MESSAGE IS
  * FOR — the other half of dsp_process's placement arithmetic. Messages are
  * delivered before dsp_process renders the block they belong to, so a DSP that
@@ -627,7 +624,6 @@ void dsp_osc(struct Dsp* dsp,
              const uint8_t* bytes,
              uint32_t len,
              ClockworkTimetag when,
-             uint32_t origin,
              ClockworkTimetag block_time);
 
 
@@ -672,7 +668,6 @@ typedef struct ClockworkAsset {
     uint32_t    struct_bytes;   /* sizeof(ClockworkAsset), for the guest to check */
     uint32_t    id;
     uint32_t    kind;           /* CLOCKWORK_ASSET_* */
-    uint32_t    origin;         /* who committed it; opaque to the guest */
     const void* bytes;          /* into the assets area; valid until the guest releases */
     uint32_t    byte_count;
     uint32_t    channels;       /* AUDIO_F32 only, else 0 */

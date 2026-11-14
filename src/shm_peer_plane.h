@@ -14,8 +14,8 @@
  * every other clockwork ring (ring/ring.h; RingBufferWriter / ring_drain).
  *
  *   command ring: peer produces, the host's NRT gateway consumes and feeds
- *                 the ordinary ingest path (so routing, scheduling, and reply
- *                 tokens behave exactly as they do for socket transports).
+ *                 the ordinary ingest path (so routing and scheduling behave
+ *                 exactly as they do for socket transports).
  *   reply ring:   the NRT gateway produces (ShmTransport — the gateway is the
  *                 sole transport caller, so single-producer holds by
  *                 construction), the peer consumes.
@@ -45,9 +45,9 @@
  * the ownership fields and needs no liveness view of the peer: a dead peer
  * costs the host nothing.
  *
- * Commands are stamped with SHM_PEER_ORIGIN_TOKEN by the host drain — the
- * frame's own sourceId is ignored, so origin identity is assigned by the
- * transport exactly as with sockets, never trusted from shared memory.
+ * The host drain writes each command into the ingress ring labelled
+ * SHM_PEER_WRITER; the label on the peer's own frame is ignored, never
+ * trusted from shared memory.
  */
 #pragma once
 
@@ -65,11 +65,11 @@
 constexpr uint32_t SHM_PEER_CMD_RING_SIZE = 256 * 1024;
 constexpr uint32_t SHM_PEER_REP_RING_SIZE = 128 * 1024;
 
-// The origin token the host drain stamps on every peer command, and the only
-// token ShmTransport resolves (send() to any other token reports
-// undeliverable, mirroring the socket transports' resolve semantics).
-// Distinctive value ("SHMP") so it reads clearly in logs and ring dumps.
-constexpr uint32_t SHM_PEER_ORIGIN_TOKEN = 0x53484D50;
+// The writer label on the peer's frames: the host drain puts it on every peer
+// command it writes into the ingress ring, and ShmTransport on every frame of
+// the reply ring. Distinctive value ("SHMP") so it reads clearly in logs and
+// ring dumps.
+constexpr uint32_t SHM_PEER_WRITER = 0x53484D50;
 
 struct alignas(8) ShmPeerPlaneHeader {
     // ── ownership (peer-written; the host never touches these) ──────────────

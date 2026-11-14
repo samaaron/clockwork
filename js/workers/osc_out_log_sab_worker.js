@@ -35,10 +35,10 @@ function readLogMessages(ctx) {
     const bytes = ctx.rings.ingress.bytes;
     const seenAt = engineNow(ctx);
 
-    tap.poll(0, (origin, offset, length, sequence) => {
+    tap.poll(0, (sourceId, offset, length, sequence) => {
         // Posted to the main thread, so they outlive the ring's copy.
         entries.push({
-            sourceId: origin,
+            sourceId,
             oscData: bytes.slice(offset, offset + length),
             sequence,
             timestamp: seenAt,

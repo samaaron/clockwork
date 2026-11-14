@@ -98,9 +98,8 @@ pub struct DspTapHandle {
 #[derive(Clone, Copy)]
 pub struct DspHost {
     pub ctx: *mut c_void,
-    /// Reply to `origin`, or notify listeners with origin 0. Non-zero if queued.
-    pub emit_osc:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, origin: u32, bytes: *const u8, len: u32) -> c_int>,
+    /// Send OSC to the client. Non-zero if queued.
+    pub emit_osc: Option<unsafe extern "C" fn(ctx: *mut c_void, bytes: *const u8, len: u32) -> c_int>,
     pub log: Option<unsafe extern "C" fn(ctx: *mut c_void, level: c_int, text: *const c_char)>,
     /// Control thread only.
     pub open_sink: Option<
@@ -219,8 +218,6 @@ pub struct ClockworkAsset {
     pub id: u32,
     /// A `CLOCKWORK_ASSET_*` value.
     pub kind: u32,
-    /// Who committed it; opaque to the guest.
-    pub origin: u32,
     pub bytes: *const c_void,
     pub byte_count: u32,
     /// `AUDIO_F32` only, else 0.
@@ -257,7 +254,6 @@ pub type DspOscFn = unsafe extern "C" fn(
     bytes: *const u8,
     len: u32,
     when: ClockworkTimetag,
-    origin: u32,
     block_time: ClockworkTimetag,
 );
 /// Return 0 to take the asset, non-zero to refuse it.

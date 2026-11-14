@@ -175,7 +175,7 @@ TEST_CASE("scheduled OSC leaves at its time, not when the scheduler fired it",
 
     const double when = wallClockNTP() + kLeadSec;
     const auto   pkt  = scheduled(when, send);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
 
     // The engine's clock passes `when` within milliseconds of wall time.
     e.pump(kLeadSec + 0.1);
@@ -224,7 +224,7 @@ TEST_CASE("scheduled MIDI reaches its sink carrying its time, with the host as t
     const double   when    = wallClockNTP() + kLeadSec;
     const uint64_t whenTag = clockwork::Timetag::fromNtpSeconds(when).ntp();
     const auto     pkt     = scheduled(when, noteOff);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     e.pump(kLeadSec + 0.1);
 
     // The forwarded bundle, once the control pass has handed the fired note
@@ -275,7 +275,7 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
     // runs against the same list a client sees. On macOS the virtual
     // destination above is one of them; elsewhere the first port there is.
     const auto list = osc_test::message(CLOCKWORK_SYS("midi/ports/list"));
-    e.engine.ingest(list.ptr(), list.size(), 0);
+    e.engine.ingest(list.ptr(), list.size());
     osc_test::ParsedReply ports;
     REQUIRE(e.reply(CLOCKWORK_SYS("midi/ports.reply"), ports));
     // <nIn:i> [name:s enabled:i]* <nOut:i> [name:s enabled:i]*
@@ -300,7 +300,7 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
         osc_test::Builder en;
         en.begin(CLOCKWORK_SYS("midi/out/enable")) << port.c_str() << static_cast<int32_t>(1);
         const auto p = en.end();
-        e.engine.ingest(p.ptr(), p.size(), 0);
+        e.engine.ingest(p.ptr(), p.size());
         e.pump(0.01);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -320,7 +320,7 @@ TEST_CASE("scheduled MIDI reaches its port carrying its time",
     constexpr double kSinkLeadSec = 2.0;
     const double when = wallClockNTP() + kSinkLeadSec;
     const auto   pkt  = scheduled(when, noteOff);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
     e.pump(kSinkLeadSec + 0.1);
 
 #ifdef __APPLE__

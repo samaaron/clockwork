@@ -24,9 +24,8 @@ use clockwork_client::{
 };
 use clockwork_native::clockwork_taps;
 
-/// Our origin token: non-zero, so a reply is told from a message nobody
-/// asked for.
-const ORIGIN: u32 = 0x5245_5A5A;
+/// The label our frames carry in the ingress ring's header.
+const WRITER: u32 = 0x5245_5A5A;
 const RATE: f64 = 48_000.0;
 
 fn config() -> EmbedConfig {
@@ -96,14 +95,14 @@ fn engines_side_by_side_answer_each_their_own_and_a_config_it_cannot_serve_is_re
     settle(first);
     let mut beside = engine();
     settle(&mut beside);
-    beside.send(&ping(), ORIGIN).unwrap();
+    beside.send(&ping(), WRITER).unwrap();
     render_blocks(&mut beside, 1);
     render_blocks(first, 1);
     assert!(beside.poll().any(|m| m.address() == "/dummy/pong"), "the second answers its own ping");
     assert!(!first.poll().any(|m| m.address() == "/dummy/pong"), "the first heard nothing of it");
     // Closing one leaves the other.
     drop(beside);
-    first.send(&ping(), ORIGIN).unwrap();
+    first.send(&ping(), WRITER).unwrap();
     render_blocks(first, 1);
     assert!(first.poll().any(|m| m.address() == "/dummy/pong"), "the first still answers");
     assert_eq!(Embed::attach(&EmbedConfig::new().output_channels(2)).err(), Some(Error::Arg));
@@ -124,7 +123,7 @@ fn an_engine_from_a_plugin_profile_is_its_own_size_and_answers_the_same() {
     assert_eq!(ingress(&big), Profile::target().in_ring_bytes as usize);
     assert!(ingress(&small) < ingress(&big));
     settle(&mut small);
-    small.send(&ping(), ORIGIN).unwrap();
+    small.send(&ping(), WRITER).unwrap();
     render_blocks(&mut small, 1);
     assert!(small.poll().any(|m| m.address() == "/dummy/pong"));
 
@@ -143,7 +142,7 @@ fn a_reconfigure_keeps_the_engine_and_runs_it_at_the_new_rate() {
         e.reconfigure(&config().sample_rate(rate)).unwrap();
         assert_eq!(e.sample_rate(), rate);
         settle(e);
-        e.send(&ping(), ORIGIN).unwrap();
+        e.send(&ping(), WRITER).unwrap();
         render_blocks(e, 1);
         assert!(e.poll().any(|m| m.address() == "/dummy/pong"), "answered at {rate} Hz");
     }
@@ -151,17 +150,17 @@ fn a_reconfigure_keeps_the_engine_and_runs_it_at_the_new_rate() {
 }
 
 #[test]
-fn a_ping_is_answered_on_the_next_block_with_the_origin_echoed() {
+fn a_ping_is_answered_on_the_next_block_and_its_answer_carries_no_label() {
     let e = &mut engine();
     settle(e);
-    e.send(&ping(), ORIGIN).unwrap();
+    e.send(&ping(), WRITER).unwrap();
     render_blocks(e, 1);
     let pong = e
         .poll()
         .find(|m| m.address() == "/dummy/pong")
-        .map(|m| (m.origin, m.sequence))
+        .map(|m| (m.writer, m.sequence))
         .expect("a /dummy/pong after one block");
-    assert_eq!(pong.0, ORIGIN);
+    assert_eq!(pong.0, 0);
     // Nothing more: the reply was taken.
     assert!(e.poll().all(|m| m.address() != "/dummy/pong"));
 }
@@ -170,16 +169,16 @@ fn a_ping_is_answered_on_the_next_block_with_the_origin_echoed() {
 fn send_refuses_nothing_and_too_much_and_a_full_ring_is_a_retry() {
     let e = &mut engine();
     settle(e);
-    assert_eq!(e.send(&[], ORIGIN).err(), Some(Error::Arg));
+    assert_eq!(e.send(&[], WRITER).err(), Some(Error::Arg));
     let huge = vec![0u8; 1 << 20];
-    assert_eq!(e.send(&huge, ORIGIN).err(), Some(Error::TooBig));
+    assert_eq!(e.send(&huge, WRITER).err(), Some(Error::TooBig));
     assert!(Error::Full.is_retry());
     // Fill the ring without rendering: pings until it says so.
     let p = ping();
     let before = processed(e);
     let mut sent = 0u32;
     let full = loop {
-        match e.send(&p, ORIGIN) {
+        match e.send(&p, WRITER) {
             Ok(()) => sent += 1,
             Err(Error::Full) => break true,
             Err(other) => panic!("{other}"),
@@ -197,7 +196,7 @@ fn send_refuses_nothing_and_too_much_and_a_full_ring_is_a_retry() {
     for _ in 0..10_000 {
         render_blocks(e, 1);
         e.drain();
-        if e.send(&p, ORIGIN).is_ok() {
+        if e.send(&p, WRITER).is_ok() {
             sent_after = true;
             break;
         }
@@ -220,26 +219,26 @@ fn send_with_builds_the_message_in_the_ring_and_never_wedges_it() {
     let e = &mut engine();
     settle(e);
     let p = ping();
-    e.send_with(64, ORIGIN, |buf| {
+    e.send_with(64, WRITER, |buf| {
         buf[..p.len()].copy_from_slice(&p);
         p.len()
     })
     .unwrap();
     // A fill that lies about its length is refused and the reservation
     // given back...
-    assert_eq!(e.send_with(64, ORIGIN, |_| 65).err(), Some(Error::Arg));
-    assert_eq!(e.send_with(64, ORIGIN, |_| 0).err(), Some(Error::Arg));
+    assert_eq!(e.send_with(64, WRITER, |_| 65).err(), Some(Error::Arg));
+    assert_eq!(e.send_with(64, WRITER, |_| 0).err(), Some(Error::Arg));
     // ...and so is one that panics, so the ring is not stopped for the life
     // of the process. (The panic is the point; its report is not.)
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        e.send_with(64, ORIGIN, |_| panic!("mid-fill"))
+        e.send_with(64, WRITER, |_| panic!("mid-fill"))
     }));
     std::panic::set_hook(hook);
     assert!(panicked.is_err());
     // The ring still takes a message after all three.
-    e.send(&p, ORIGIN).unwrap();
+    e.send(&p, WRITER).unwrap();
     render_blocks(e, 1);
     assert_eq!(e.poll().filter(|m| m.address() == "/dummy/pong").count(), 2);
 }
@@ -250,7 +249,7 @@ fn drain_takes_everything_and_sequences_are_monotonic() {
     settle(e);
     let p = ping();
     for _ in 0..10 {
-        e.send(&p, ORIGIN).unwrap();
+        e.send(&p, WRITER).unwrap();
     }
     render_blocks(e, 1);
     e.set_poll_batch(4);
@@ -269,7 +268,7 @@ fn drain_takes_everything_and_sequences_are_monotonic() {
     assert!(seqs.windows(2).all(|w| w[1] > w[0]), "{seqs:?}");
     e.set_poll_batch(clockwork_client::POLL_BATCH);
     for _ in 0..10 {
-        e.send(&p, ORIGIN).unwrap();
+        e.send(&p, WRITER).unwrap();
     }
     render_blocks(e, 1);
     assert!(e.drain() >= 10);
@@ -285,7 +284,7 @@ fn a_wait_is_over_when_a_block_says_something_and_not_before() {
     assert!(!e.wait(Some(Duration::from_millis(20))).unwrap(), "nothing rendered, nothing said");
     render_blocks(e, 1);
     assert!(!e.wait(Some(Duration::ZERO)).unwrap(), "a block that said nothing");
-    e.send(&ping(), ORIGIN).unwrap();
+    e.send(&ping(), WRITER).unwrap();
     render_blocks(e, 1);
     assert!(e.wait(Some(Duration::ZERO)).unwrap(), "the block that answered");
     assert!(e.poll().any(|m| m.address() == "/dummy/pong"));
@@ -297,7 +296,7 @@ fn on_egress_tells_another_thread_each_time_and_stops_when_told() {
     settle(e);
     // The engine has said something, so the listener is told once at the
     // start, for it.
-    e.send(&ping(), ORIGIN).unwrap();
+    e.send(&ping(), WRITER).unwrap();
     render_blocks(e, 1);
     e.drain();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -307,7 +306,7 @@ fn on_egress_tells_another_thread_each_time_and_stops_when_told() {
     .unwrap();
     rx.recv_timeout(Duration::from_secs(5)).expect("told at the start");
     // Then for the block that answers a ping: the pong is there to take.
-    e.send(&ping(), ORIGIN).unwrap();
+    e.send(&ping(), WRITER).unwrap();
     render_blocks(e, 1);
     rx.recv_timeout(Duration::from_secs(5)).expect("told when the block answered");
     assert!(e.poll().any(|m| m.address() == "/dummy/pong"));
@@ -333,14 +332,14 @@ fn a_renderer_on_another_thread_ticks_while_the_client_waits_for_its_reply() {
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
-        client.send(&ping(), ORIGIN).unwrap();
+        client.send(&ping(), WRITER).unwrap();
         // Bounded only against a pong that never comes: the renderer thread
         // takes the time it takes on a loaded machine.
         let got = client.poll_until(Duration::from_secs(30), |m| {
-            (m.address() == "/dummy/pong").then_some(m.origin)
+            (m.address() == "/dummy/pong").then_some(())
         });
         stop.store(true, Ordering::Relaxed);
-        assert_eq!(got, Some(ORIGIN));
+        assert_eq!(got, Some(()));
         // And a wait for something that never comes ends when told.
         let never = client.poll_until(Duration::from_millis(30), |m| {
             (m.address() == "/dummy/never").then_some(())
@@ -360,20 +359,20 @@ fn a_tap_watches_both_rings_without_taking() {
         let mut ingress = client.tap(Ring::Ingress).unwrap();
         let mut egress = client.tap(Ring::Egress).unwrap();
         assert_eq!((ingress.ring(), egress.ring()), (Ring::Ingress, Ring::Egress));
-        client.send(&ping(), ORIGIN).unwrap();
+        client.send(&ping(), WRITER).unwrap();
         // The ingress ring is the engine's to consume, so it is watched
         // between the send and the block that eats it — which is when a
         // logger sees it too.
-        let seen_in: Vec<(String, u32)> = ingress.poll().map(|m| (m.address().to_owned(), m.origin)).collect();
-        assert_eq!(seen_in, [("/dummy/ping".to_owned(), ORIGIN)]);
+        let seen_in: Vec<(String, u32)> = ingress.poll().map(|m| (m.address().to_owned(), m.writer)).collect();
+        assert_eq!(seen_in, [("/dummy/ping".to_owned(), WRITER)]);
         renderer.render(&mut [l.as_mut_slice(), r.as_mut_slice()], &[], block);
         let seen_out: Vec<(String, u32)> =
-            egress.poll().map(|m| (m.address().to_owned(), m.origin)).collect();
-        assert!(seen_out.contains(&("/dummy/pong".to_owned(), ORIGIN)), "{seen_out:?}");
+            egress.poll().map(|m| (m.address().to_owned(), m.writer)).collect();
+        assert!(seen_out.contains(&("/dummy/pong".to_owned(), 0)), "{seen_out:?}");
         assert_eq!(ingress.missed() + egress.missed(), 0);
     }
     // Watching took nothing: the consumer still gets the reply.
-    assert!(client.poll().any(|m| m.is_reply_to(ORIGIN) && m.address() == "/dummy/pong"));
+    assert!(client.poll().any(|m| m.address() == "/dummy/pong"));
 }
 
 #[test]
@@ -567,7 +566,7 @@ fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
     e.send(&clockwork_osc::encode("/clockwork/param/define", &[
         OscArg::Blob(d.entry_bytes().to_vec()),
         OscArg::Blob(d.text().to_vec()),
-    ]), ORIGIN).unwrap();
+    ]), WRITER).unwrap();
     render_blocks(e, 1);
 
     let moved_before;
@@ -590,7 +589,7 @@ fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
     // facts it holds still stand.
     e.send(&clockwork_osc::encode("/clockwork/param/set", &[
         OscArg::Int(MODE as i32), OscArg::Float(1.0),
-    ]), ORIGIN).unwrap();
+    ]), WRITER).unwrap();
     render_blocks(e, 1);
     let client = e.client();
     let mut table = client.params().unwrap();

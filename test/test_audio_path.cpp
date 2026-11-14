@@ -147,7 +147,7 @@ void setPulse(uint32_t widthMs, uint32_t periodMs) {
     const auto msg = osc_test::message("/dummy/pulse",
                                        static_cast<int32_t>(widthMs),
                                        static_cast<int32_t>(periodMs));
-    REQUIRE(lanes_test::ingress(msg.ptr(), msg.size(), /*sourceId=*/0));
+    REQUIRE(lanes_test::ingress(msg.ptr(), msg.size(), /*writer=*/0));
     lanes_test::tick();          // the block that drains and applies it
     lanes_test::drainRt();       // keep the egress ring tidy for other cases
 }

@@ -74,13 +74,13 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         window_magic, window_version, survives, instances,
     });
     expect!(mine, ClockworkAsset {
-        struct_bytes, id, kind, origin, bytes, byte_count, channels, frames, sample_rate,
+        struct_bytes, id, kind, bytes, byte_count, channels, frames, sample_rate,
     });
     expect!(mine, ClockworkClientInfo {
         struct_bytes, abi_version, engine_version, features, sample_rate, block_frames,
         input_channels, output_channels,
     });
-    expect!(mine, ClockworkClientMessage { bytes, length, origin, sequence });
+    expect!(mine, ClockworkClientMessage { bytes, length, writer, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });
     expect!(mine, ClockworkScopeShape { struct_bytes, slots, slot_bytes, header_bytes, frames, channels });
     expect!(mine, ClockworkCopyWant { source, slot, frames });

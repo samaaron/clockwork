@@ -197,8 +197,7 @@ ingress, which is exactly what it is not. The `/clockwork/` prefix stays what it
 is: the rule for things arriving from *outside*.
 
 **Client replies are not sinks.** `DspHost::emit_osc` already answers a
-request or notifies listeners, and carries reply-routing semantics (an origin
-token, or zero for broadcast) that a sink has no concept of. Sinks are for
+request or notifies listeners. Sinks are for
 *external destinations* — a MIDI port, an OSC endpoint. Answering a client and
 sending to a MIDI port look alike and are not the same act.
 

@@ -8,7 +8,7 @@
 //! behind the same stream ABI, the owner-only Unix datagram socket, and the
 //! peer side of the shared-memory command plane. Each delivers a received
 //! packet to the host, which writes it through the client boundary; each is
-//! handed replies by the host, resolved by origin token. The C ABI the C++
+//! handed replies by the host for its client. The C ABI the C++
 //! transports link against is in `src/comms/clockwork_comms_abi.h`.
 //!
 //! This crate depends on `clockwork-osc-net` only for what the engine itself

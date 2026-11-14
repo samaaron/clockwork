@@ -26,7 +26,7 @@ TEST_CASE("clock/offset is not a native verb: refused as unsupported",
     Engine e;
 
     const auto pkt = osc_test::message(CLOCKWORK_SYS("clock/offset"), 0.5f);
-    e.engine.ingest(pkt.ptr(), pkt.size(), 0);
+    e.engine.ingest(pkt.ptr(), pkt.size());
 
     osc_test::ParsedReply r;
     REQUIRE(e.reply(CLOCKWORK_SYS("clock/unsupported"), r));
@@ -40,9 +40,9 @@ TEST_CASE("clock/meter sets the session meter and the query reads it back",
     Engine e;
 
     auto set = osc_test::message(CLOCKWORK_SYS("clock/meter"), 7, 8);
-    e.engine.ingest(set.ptr(), set.size(), 0);
+    e.engine.ingest(set.ptr(), set.size());
     auto get = osc_test::message(CLOCKWORK_SYS("clock/meter"), 42);
-    e.engine.ingest(get.ptr(), get.size(), 0);
+    e.engine.ingest(get.ptr(), get.size());
 
     osc_test::ParsedReply r;
     REQUIRE(e.reply(CLOCKWORK_SYS("clock/meter.reply"), r));
@@ -51,7 +51,7 @@ TEST_CASE("clock/meter sets the session meter and the query reads it back",
     CHECK(r.argInt(2) == 42);
 
     auto bar = osc_test::message(CLOCKWORK_SYS("clock/bar"), 43);
-    e.engine.ingest(bar.ptr(), bar.size(), 0);
+    e.engine.ingest(bar.ptr(), bar.size());
     REQUIRE(e.reply(CLOCKWORK_SYS("clock/bar.reply"), r));
     CHECK(r.argDouble(1) >= 0.0);
     CHECK(r.argDouble(1) < 3.5);

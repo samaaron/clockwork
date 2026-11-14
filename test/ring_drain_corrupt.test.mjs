@@ -27,7 +27,7 @@ test("a length whose footprint rounding overflows is dropped and the tail resync
   const state = { lastSeq: -1 };
   const delivered = [];
   const consumed = ringDrain(ring, { words, index: ring.tail }, state, 0,
-    (origin, offset, length) => delivered.push({ offset, length }));
+    (_sourceId, offset, length) => delivered.push({ offset, length }));
   assert.equal(consumed, 0);
   assert.deepEqual(delivered, []);
   assert.equal(state.stop, "bad-length");

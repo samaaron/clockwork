@@ -130,7 +130,7 @@ add_executable(clockwork_tests
     # The parameter table (docs/PARAMS.md), through the lanes ABI; test_params_engine.cpp below on a native engine.
     test_params.cpp
     test_rt_alloc.cpp
-    # The origin-token reply path, the ring wire against its golden corpus,
+    # The gateway's reply path, the ring wire against its golden corpus,
     # the shm segment as a trust boundary, the graph-robustness policy, and
     # the command transports against real sockets.
     test_reply_routing.cpp

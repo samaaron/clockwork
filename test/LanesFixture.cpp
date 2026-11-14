@@ -149,11 +149,9 @@ uint64_t Lane::tick() {
 
 std::vector<EgressFrame> Lane::drain(uint32_t (*from)(ClockworkCore*, ClockworkEgressFn, void*, uint32_t)) {
     std::vector<EgressFrame> out;
-    from(mCore, [](void* ctx, uint32_t sourceId,
-                   const uint8_t* osc, uint32_t len, uint32_t seq) {
+    from(mCore, [](void* ctx, const uint8_t* osc, uint32_t len, uint32_t seq) {
         auto* v = static_cast<std::vector<EgressFrame>*>(ctx);
         EgressFrame f;
-        f.sourceId = sourceId;
         f.seq      = seq;
         f.decodes  = clockwork_osc_decodes(osc, len) == 1;
         f.data.assign(osc, osc + len);
@@ -165,8 +163,8 @@ std::vector<EgressFrame> Lane::drain(uint32_t (*from)(ClockworkCore*, ClockworkE
 std::vector<EgressFrame> Lane::drainRt()  { return drain(&clockwork_egress_rt_drain); }
 std::vector<EgressFrame> Lane::drainNrt() { return drain(&clockwork_egress_nrt_drain); }
 
-bool Lane::ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId) {
-    return clockwork_ingress_write(mCore, osc, len, sourceId);
+bool Lane::ingress(const uint8_t* osc, uint32_t len, uint32_t writer) {
+    return clockwork_ingress_write(mCore, osc, len, writer);
 }
 
 // ── The default lane: the free functions' ─────────────────────────────────
@@ -247,9 +245,9 @@ uint64_t tick() {
 std::vector<EgressFrame> drainRt()  { return checked(defaultLane().drainRt()); }
 std::vector<EgressFrame> drainNrt() { return checked(defaultLane().drainNrt()); }
 
-bool ingress(const uint8_t* osc, uint32_t len, uint32_t sourceId) {
+bool ingress(const uint8_t* osc, uint32_t len, uint32_t writer) {
     boot();
-    return defaultLane().ingress(osc, len, sourceId);
+    return defaultLane().ingress(osc, len, writer);
 }
 
 std::vector<EgressFrame> tickUntil(int maxBlocks, const char* address) {

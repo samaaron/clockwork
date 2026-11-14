@@ -76,7 +76,7 @@ uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
 // end. Defined below with the forward route.
 static int clockwork_sink_host_emit(void* ctx, uint32_t kind, const char* target,
                                     const uint8_t* bytes, uint32_t len, ClockworkTimetag when);
-static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork::Timetag when,
+static bool forward_to_host(clockwork::CoreState& st, clockwork::Timetag when,
                             const RingPart* element, uint32_t n_parts);
 
 // The core's emitter installed, or none.
@@ -228,7 +228,7 @@ static void clock_set_meter(void* ctx, int32_t num, int32_t den) {
     clock_set_follow(ctx, said, 0.0);
 }
 // What a client that has just asked for the timeline's notices is sent.
-static void clock_subscribed(const ClockworkClock& clk, ReplyChannel& chan, uint32_t token,
+static void clock_subscribed(const ClockworkClock& clk, ReplyChannel& chan,
                              const uint8_t* data, uint32_t len) {
     try {
         const osc::ReceivedMessage msg(osc::ReceivedPacket(reinterpret_cast<const char*>(data),
@@ -241,13 +241,13 @@ static void clock_subscribed(const ClockworkClock& clk, ReplyChannel& chan, uint
         if (tokened) {
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/subscribe.reply")) << echo << osc::EndMessage;
-            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+            chan.reply(reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
         }
         const ClockworkClockSnapshot now = readClockworkClock(clk.state());
         {
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << now.bpm << osc::EndMessage;
-            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+            chan.reply(reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
         }
         {
             osc::OutboundPacketStream s(buf.data(), buf.size());
@@ -255,7 +255,7 @@ static void clock_subscribed(const ClockworkClock& clk, ReplyChannel& chan, uint
               << static_cast<int32_t>(now.is_playing ? 1 : 0)
               << static_cast<osc::int64>(std::llround(now.is_playing_at_ntp * 1e6))
               << osc::EndMessage;
-            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+            chan.reply(reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
         }
     } catch (...) {
         // malformed: asked for all the same, and told nothing
@@ -268,8 +268,7 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
     ClockworkCore* const core = chan ? static_cast<ClockworkCore*>(chan->ctx) : nullptr;
     ClockworkClock* clk = clockwork::clock_of(core);
     if (!clk) return true;   // clock route owns /clockwork/clock/; drop during startup, don't error
-    auto* cc  = static_cast<const DrainCallCtx*>(callCtx);
-    uint32_t token = cc ? cc->sourceId : 0;              // reply metadata, threaded in
+    (void)callCtx;
     // The client asks for the timeline's notices, or to be told no more
     // (lanes.h). Asking is answered with where the timeline is now, as each
     // notice will say it, and acked when it came with a token, as every
@@ -279,14 +278,14 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
         const bool ask = std::strcmp(addr, CLOCKWORK_SYS("clock/notify/subscribe")) == 0;
         if (ask || std::strcmp(addr, CLOCKWORK_SYS("clock/notify/unsubscribe")) == 0) {
             clockwork_client_wants(core, CLOCKWORK_WANTS_CLOCK, ask);
-            if (ask && chan) clock_subscribed(*clk, *chan, token, data, static_cast<uint32_t>(len));
+            if (ask && chan) clock_subscribed(*clk, *chan, data, static_cast<uint32_t>(len));
             return true;
         }
     }
     const ClockSets sets{ core, &clock_set_tempo, &clock_set_playing, &clock_set_meter };
     const bool handled = handleClockCoreOsc(*clk, data, static_cast<uint32_t>(len),
-        [chan, token](const uint8_t* d, uint32_t n) {
-            if (chan) chan->reply(token, d, n);
+        [chan](const uint8_t* d, uint32_t n) {
+            if (chan) chan->reply(d, n);
         }, &sets);
     if (!handled && chan) {
         // Not a clock-core verb. Before refusing, offer it to clockwork's own
@@ -301,7 +300,7 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
             ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
             : nullptr;
         const auto rt = handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
-            [chan, token](const uint8_t* d, uint32_t n) { chan->reply(token, d, n); },
+            [chan](const uint8_t* d, uint32_t n) { chan->reply(d, n); },
             clockState, arenaInstanceGeneration(base));
         if (rt == ClockworkSysRt::Answered) return true;
 
@@ -310,8 +309,8 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
         // so clients can tell "unsupported here" from "lost datagram". Pair
         // with /clockwork/clock/capabilities/get for feature detection.
         replyClockUnsupported(core, data, static_cast<uint32_t>(len),
-            [chan, token](const uint8_t* d, uint32_t n) {
-                chan->reply(token, d, n);
+            [chan](const uint8_t* d, uint32_t n) {
+                chan->reply(d, n);
             });
     }
     return true;
@@ -770,17 +769,16 @@ extern "C" {
     //
     // Every reply and notification clockwork emits leaves here: the answers to
     // /clockwork/, the worklet's clock replies, and — through DspHost —
-    // everything the DSP says. An `origin` token goes in and DspHost::emit_osc comes
-    // out, so no reply TYPE crosses the boundary at all.
+    // everything the DSP says. No reply TYPE crosses the boundary at all.
     //
-    // Everything on the egress is for the one client; the origin rides with
-    // a frame and decides nothing. Lane choice keeps RT-out single-writer —
-    // the audio thread owns it; any other thread takes the locked NRT-out ring.
+    // Everything on the egress is for the one client. Lane choice keeps
+    // RT-out single-writer — the audio thread owns it; any other thread takes
+    // the locked NRT-out ring.
     // Returns whether the frame was QUEUED, not whether anyone got it, so
     // DspHost::emit_osc can pass a refusal on.
     //
     // One OSC payload laid down from `parts`, with nothing gathered first.
-    static bool emit_osc_parts(clockwork::CoreState& st, uint32_t origin,
+    static bool emit_osc_parts(clockwork::CoreState& st,
                                const RingPart* parts, uint32_t n_parts) {
         uint8_t* const base = st.arena.laid_out();
         if (!base || n_parts == 0)
@@ -793,18 +791,18 @@ extern "C" {
             return ::ring_buffer_write(
                 base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                origin, parts, n_parts, &cursors->status_flags, clockwork::metrics_in(base));
+                0, parts, n_parts, &cursors->status_flags, clockwork::metrics_in(base));
         }
-        return clockwork_egress_nrt_write_parts(st.core, origin, parts, n_parts);
+        return clockwork_egress_nrt_write_parts(st.core, parts, n_parts);
     }
-    static bool emit_osc_out(clockwork::CoreState& st, uint32_t origin, const uint8_t* osc, uint32_t len) {
+    static bool emit_osc_out(clockwork::CoreState& st, const uint8_t* osc, uint32_t len) {
         if (!osc || len == 0) return false;
         const RingPart part{ osc, len };
-        return emit_osc_parts(st, origin, &part, 1);
+        return emit_osc_parts(st, &part, 1);
     }
-    bool clockwork_emit_osc(ClockworkCore* core, uint32_t origin, const uint8_t* osc, uint32_t len) {
+    bool clockwork_emit_osc(ClockworkCore* core, const uint8_t* osc, uint32_t len) {
         clockwork::CoreState* st = clockwork::state(core);
-        return st && emit_osc_out(*st, origin, osc, len);
+        return st && emit_osc_out(*st, osc, len);
     }
 
     // The core's state behind a host callback's context, which is the core.
@@ -818,13 +816,12 @@ extern "C" {
     // so a DSP's reply takes the route every other reply takes; log is clockwork_log,
     // so its diagnostics land in the same debug stream; open_sink/send_sink are its
     // own output path; free_bytes gives back what clockwork allocated. A DSP needs no
-    // client registry held on its behalf — it answers the origin it was given.
+    // client registry held on its behalf: there is one client, and emit_osc reaches it.
     // Every host callback is the engine's own work inside the guest's call:
     // HostCallScope lifts the guest fence for its body (guest_fence.h).
-    static int dsp_host_emit_osc(void* ctx, uint32_t origin,
-                           const uint8_t* bytes, uint32_t len) {
+    static int dsp_host_emit_osc(void* ctx, const uint8_t* bytes, uint32_t len) {
         HostCallScope host;
-        return emit_osc_out(state_of(ctx), origin, bytes, len) ? 1 : 0;
+        return emit_osc_out(state_of(ctx), bytes, len) ? 1 : 0;
     }
 
     static void log_to(clockwork::CoreState& st, const char* text);
@@ -1058,13 +1055,13 @@ extern "C" {
     // core's table (Assets, core_state.h).
     using Asset = clockwork::Assets::Slot;
 
-    void asset_emit(clockwork::CoreState& st, uint32_t origin, const char* address, uint32_t id, const char* reason) {
+    void asset_emit(clockwork::CoreState& st, const char* address, uint32_t id, const char* reason) {
         char buf[192];
         osc::OutboundPacketStream ps(buf, sizeof buf);
         ps << osc::BeginMessage(address) << static_cast<int32_t>(id);
         if (reason) ps << reason;
         ps << osc::EndMessage;
-        emit_osc_out(st, origin, reinterpret_cast<const uint8_t*>(ps.Data()),
+        emit_osc_out(st, reinterpret_cast<const uint8_t*>(ps.Data()),
                      static_cast<uint32_t>(ps.Size()));
     }
 
@@ -1095,8 +1092,8 @@ extern "C" {
            << static_cast<int32_t>(sn.buffer_frames.load(std::memory_order_relaxed))
            << static_cast<int32_t>(arenaInstanceGeneration(st.arena.at()))
            << osc::EndMessage;
-        if (!emit_osc_out(st, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
-                            static_cast<uint32_t>(ps.Size())))
+        if (!emit_osc_out(st, reinterpret_cast<const uint8_t*>(ps.Data()),
+                          static_cast<uint32_t>(ps.Size())))
             return false;
         sn.owed.store(Owed::Nothing, std::memory_order_relaxed);
         return true;
@@ -1132,26 +1129,25 @@ extern "C" {
         say_owed(*st);
     }
 
-    // DspHost::asset_release — the guest is done; the committing client hears.
+    // DspHost::asset_release — the guest is done; the client hears.
     static int dsp_host_asset_release(void* ctx, uint32_t id) {
         HostCallScope host;
         clockwork::CoreState& st = state_of(ctx);
         Asset* s = st.assets.lookup(id);
         if (!s) return 0;
-        const uint32_t origin = s->origin;
         clockwork::Assets::remove(*s);
-        asset_emit(st, origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
+        asset_emit(st, CLOCKWORK_SYS("asset/released"), id, nullptr);
         return 1;
     }
 
-    // Every asset released: each committer told, and the table forgotten.
+    // Every asset released: the client told of each, and the table forgotten.
     // When the engine goes (teardown_memory), and when audio comes back to an
     // assets area that has moved, where no committed asset points at
     // anything any more.
     void assets_release_all(clockwork::CoreState& st) {
         for (Asset& s : st.assets) {
             if (s.used && s.id != clockwork::Assets::kTombstone)
-                asset_emit(st, s.origin, CLOCKWORK_SYS("asset/released"), s.id, nullptr);
+                asset_emit(st, CLOCKWORK_SYS("asset/released"), s.id, nullptr);
             s = Asset{};
         }
     }
@@ -1160,7 +1156,7 @@ extern "C" {
     // and before it says setup (docs/RESTARTS.md): the bytes are the client's,
     // in the assets area a rebuild keeps, so nothing a client lent is lost to
     // a rebuild and nothing has to be sent again. An asset the new instance
-    // will not take is released there, and its committer hears so, as from a
+    // will not take is released there, and the client hears so, as from a
     // guest that let go.
     static void hand_over_assets(clockwork::CoreState& st) {
         const ClockworkConfig& cfg = st.config;
@@ -1171,7 +1167,6 @@ extern "C" {
             asset.struct_bytes = sizeof asset;
             asset.id           = s.id;
             asset.kind         = s.kind;
-            asset.origin       = s.origin;
             asset.bytes        = assets ? assets + s.offset : nullptr;
             asset.byte_count   = s.byte_count;
             asset.channels     = s.channels;
@@ -1180,9 +1175,9 @@ extern "C" {
             int rc = 1;
             if (assets) { GuestCallScope guest(GuestCall::Processing); rc = dsp_asset(st.guest.instance, &asset); }
             if (rc == 0) continue;
-            const uint32_t origin = s.origin, id = s.id;
+            const uint32_t id = s.id;
             clockwork::Assets::remove(s);
-            asset_emit(st, origin, CLOCKWORK_SYS("asset/released"), id, nullptr);
+            asset_emit(st, CLOCKWORK_SYS("asset/released"), id, nullptr);
         }
     }
 
@@ -1230,12 +1225,12 @@ extern "C" {
     }
 
 #if CLOCKWORK_SYNTH
-    // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
-    // routed by the per-call token. Lets the audio thread's control routes
+    // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring.
+    // Lets the audio thread's control routes
     // (the /clockwork/clock namespace) reply through the backend contract without
     // any DSP-specific reply type. Shared by every core with no control thread.
-    void rt_reply_emit(void* ctx, uint32_t token, const uint8_t* osc, uint32_t len) {
-        emit_osc_out(state_of(ctx), token, osc, len);
+    void rt_reply_emit(void* ctx, const uint8_t* osc, uint32_t len) {
+        emit_osc_out(state_of(ctx), osc, len);
     }
 #endif
 
@@ -1294,10 +1289,10 @@ extern "C" {
     // Rate-limited the way the LATE/SHED logs are: a client that schedules in
     // a loop would otherwise fill the debug stream with one identical line per
     // message, which buries the first one — the only one anybody reads.
-    static inline void refuse_schedule_verb(clockwork::CoreState& st, const uint8_t* data, uint32_t len, uint32_t origin) {
+    static inline void refuse_schedule_verb(clockwork::CoreState& st, const uint8_t* data, uint32_t len) {
         increment_scheduler_drop_metric(st);
         clockwork_sys_refuse(data, len, CLOCKWORK_SCHEDULER_ABSENT, arenaInstanceGeneration(st.arena.at()),
-            [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); });
+            [&st](const uint8_t* d, uint32_t n) { emit_osc_out(st, d, n); });
         if (st.schedule.refused_log.say())
             clockwork_log(st.core, "ERROR: " CLOCKWORK_SYS("schedule") " refused — this build has no "
                    "timed store (built with CLOCKWORK_SCHEDULER=OFF; that "
@@ -1523,12 +1518,11 @@ extern "C" {
     // `when` is the message's intended OSC timetag (or immediately) and
     // `blockTime` this block's start in OSC time. Both are passed through to
     // the DSP, which is the only side that can place an event within a block
-    // (dsp_api.h); every clockwork route ignores them. `token` is the
-    // sender/origin, threaded through for reply routing. Threaded explicitly
+    // (dsp_api.h); every clockwork route ignores them. Threaded explicitly
     // rather than held in a global, so a handler's inputs are all in the ctx.
-    void dispatch(clockwork::CoreState& st, const uint8_t* osc, uint32_t len, uint32_t token,
+    void dispatch(clockwork::CoreState& st, const uint8_t* osc, uint32_t len,
                   clockwork::Timetag when, clockwork::Timetag blockTime) {
-        const DrainCallCtx cc{ token, when, blockTime };
+        const DrainCallCtx cc{ when, blockTime };
         clockwork::Routing& r = st.routing;
         OscSplit* boundary = r.split.load(std::memory_order_acquire);
         if (boundary && boundary->ingest(osc, len, &cc)) return;
@@ -1613,7 +1607,7 @@ extern "C" {
     //
     // Anything due now goes to dispatch(), which is also where a fired event
     // lands — one delivery path, whether a message waited or not.
-    static void ingest_frame(clockwork::CoreState& st, const uint8_t* data, uint32_t len, uint32_t origin,
+    static void ingest_frame(clockwork::CoreState& st, const uint8_t* data, uint32_t len,
                              clockwork::Timetag blockTime) {
         if (!data || len == 0) return;
 
@@ -1635,7 +1629,7 @@ extern "C" {
             if (!sp.ok) {                       // malformed: counted, and its sender told
                 increment_scheduler_drop_metric(st);
                 clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, arenaInstanceGeneration(st.arena.at()),
-                    [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); });
+                    [&st](const uint8_t* d, uint32_t n) { emit_osc_out(st, d, n); });
                 return;
             }
             body         = sp.blob;
@@ -1649,7 +1643,7 @@ extern "C" {
             // is the ONE thing that must not go quietly: a verb that vanishes
             // without explanation is worse than either holding it or refusing
             // it, so say what happened and name the switch that caused it.
-            refuse_schedule_verb(st, data, len, origin);
+            refuse_schedule_verb(st, data, len);
             return;
 #endif
         }
@@ -1658,11 +1652,11 @@ extern "C" {
         if (when.isImmediate() || !clockworkHolds) {
             // Immediate, or a DSP that holds its own schedule: straight
             // through, carrying whatever time it was given.
-            dispatch(st, body, bodyLen, origin, when, blockTime);
+            dispatch(st, body, bodyLen, when, blockTime);
             return;
         }
         EngineScheduler* q = clockwork_engine_schedule(st.core);
-        if (!q || !q->add(when, tag, EngineMeta{origin}, body, bodyLen)) {
+        if (!q || !q->add(when, tag, EngineMeta{}, body, bodyLen)) {
             increment_scheduler_drop_metric(st);   // pool full / oversize
             if (st.schedule.refused_log.say())
                 // Rate-limited, because an overloaded queue refuses in bursts.
@@ -1679,7 +1673,7 @@ extern "C" {
         // hold it in, so every message goes straight through CARRYING ITS ORIGINAL
         // TIMETAG — including for a DSP that asked us to hold it. Flattening `when` to
         // "now" here would destroy the one piece of information it needs to cope.
-        dispatch(st, body, bodyLen, origin, when, blockTime);
+        dispatch(st, body, bodyLen, when, blockTime);
 #endif
     }
 
@@ -3147,19 +3141,19 @@ extern "C" {
     // refused into a full ring and lost. A refusal that cannot be encoded at
     // all is counted and the frame consumed: there is nothing truthful left
     // to say (clockwork_sys_refuse).
-    static bool refuse_when_room(clockwork::CoreState& st, uint32_t sourceId, const uint8_t* payload, uint32_t size,
+    static bool refuse_when_room(clockwork::CoreState& st, const uint8_t* payload, uint32_t size,
                                  const char* reason, uint32_t generation) {
         bool made = true;
         RingCursors* const cursors = clockwork::cursors_in(st.arena.laid_out(), st.arena.layout);
         if (!cursors) return false;
         clockwork_sys_refuse(payload, size, reason, generation,
-            [&made, &st, sourceId, cursors](const uint8_t* d, uint32_t n) {
+            [&made, &st, cursors](const uint8_t* d, uint32_t n) {
                 const uint32_t footprint =
                     (static_cast<uint32_t>(sizeof(Message)) + n + 3u) & ~3u;
                 made = ring_fits(static_cast<uint32_t>(cursors->out_head.load(std::memory_order_relaxed)),
                                  static_cast<uint32_t>(cursors->out_tail.load(std::memory_order_acquire)),
                                  st.arena.layout.profile.rt_out_ring_bytes, footprint)
-                    && emit_osc_out(st, sourceId, d, n);
+                    && emit_osc_out(st, d, n);
             });
         return made;
     }
@@ -3192,16 +3186,16 @@ extern "C" {
                             &metrics->messages_dropped,
                             &metrics->messages_sequence_gaps },
             MAX_MESSAGES_PER_FRAME,
-            [&st, blockTime, in, base](uint32_t sourceId, const uint8_t* payload,
+            [&st, blockTime, in, base](uint32_t /*writer*/, const uint8_t* payload,
                         uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                 const RingMark* mark = in->marks.of(seq);
                 if (clockwork_sys_answers_without_guest(payload, payload_size)) {
-                    dispatch(st, payload, payload_size, sourceId, clockwork::Timetag::immediately(), blockTime);
+                    dispatch(st, payload, payload_size, clockwork::Timetag::immediately(), blockTime);
                     return ClockworkDrainVerdict::Consume;
                 }
                 const bool refused = mark
-                    ? refuse_when_room(st, sourceId, payload, payload_size, mark->reason, mark->generation)
-                    : refuse_when_room(st, sourceId, payload, payload_size,
+                    ? refuse_when_room(st, payload, payload_size, mark->reason, mark->generation)
+                    : refuse_when_room(st, payload, payload_size,
                                        CLOCKWORK_REFUSED_NO_INSTANCE, arenaInstanceGeneration(base));
                 return refused ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
             },
@@ -3466,7 +3460,7 @@ extern "C" {
                                 &metrics->messages_dropped,
                                 &metrics->messages_sequence_gaps },
                 MAX_MESSAGES_PER_FRAME,
-                [&st, currentOscTime, &in](uint32_t sourceId, const uint8_t* payload,
+                [&st, currentOscTime, &in](uint32_t /*writer*/, const uint8_t* payload,
                                  uint32_t payload_size, uint32_t seq) -> ClockworkDrainVerdict {
                     // Below the mark: written for a generation that has
                     // closed, or while the audio was away — refused to its
@@ -3480,7 +3474,7 @@ extern "C" {
                     if (const RingMark* mark = in.marks.of(seq);
                         mark && !clockwork_sys_answers_without_guest(payload, payload_size)
                         && !(mark->onlyDue && bundle_for_later(payload, payload_size, currentOscTime)))
-                        return refuse_when_room(st, sourceId, payload, payload_size,
+                        return refuse_when_room(st, payload, payload_size,
                                                 mark->reason, mark->generation)
                             ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
 
@@ -3490,7 +3484,7 @@ extern "C" {
                     // parked message is memcpy'd into the schedule's data pool,
                     // and dsp_osc is documented as not retaining bytes — so
                     // nothing outlives this callback holding the pointer.
-                    ingest_frame(st, payload, payload_size, sourceId, currentOscTime);
+                    ingest_frame(st, payload, payload_size, currentOscTime);
                     return ClockworkDrainVerdict::Consume;
                 },
                 &stop);
@@ -3537,10 +3531,10 @@ extern "C" {
             // sample accuracy.
             if (EngineScheduler* q = clockwork_engine_schedule(core)) {
                 clockwork_fire_due(*q, nextOscTime, currentOscTime,
-                    [&st](const uint8_t* d, uint32_t n, uint32_t origin,
+                    [&st](const uint8_t* d, uint32_t n,
                           clockwork::Timetag when, clockwork::Timetag blockTime) {
                         if (note_lateness(st, when, blockTime)) return;   // later than the host allows
-                        dispatch(st, d, n, origin, when, blockTime);
+                        dispatch(st, d, n, when, blockTime);
                     });
                 // Publish queue depth once per block, after draining.
                 update_scheduler_depth_metric(st, static_cast<uint32_t>(q->size()));
@@ -3715,11 +3709,10 @@ extern "C" {
             ::ring_buffer_write(
                 base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                0,   // no origin: a log line answers nobody
+                0,
                 pkt.data(), p, &cursors->status_flags, metrics);   // a refused log line is counted too
         } else {
-            clockwork_egress_nrt_write(st.core, 0,
-                                reinterpret_cast<const uint8_t*>(pkt.data()), p);
+            clockwork_egress_nrt_write(st.core, reinterpret_cast<const uint8_t*>(pkt.data()), p);
         }
 
         // Count the debug line for the metrics view.
@@ -3976,7 +3969,7 @@ bool ring_buffer_write(
         data_size += parts[i].size;
     }
 
-    // Egress frame: Message{sourceId = token} + [osc].
+    // The frame: Message{sourceId = source_id} + [osc].
     Message header{};
     header.magic = MESSAGE_MAGIC;
     header.length = sizeof(Message) + data_size;
@@ -4109,8 +4102,7 @@ bool clockwork_clockwork_sys_route(void* routeCtx, const void* callCtx,
                       const uint8_t* data, std::size_t len) {
     clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
     if (!st) return true;
-    auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    const uint32_t token = cc ? cc->sourceId : 0;
+    (void)callCtx;
     // The clock comes from the arena, so the snapshot verb answers against the
     // same published mirror the guest reads — not the engine's own getters,
     // which are not realtime-safe when Link is running.
@@ -4119,7 +4111,7 @@ bool clockwork_clockwork_sys_route(void* routeCtx, const void* callCtx,
         ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
         : nullptr;
     handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
-        [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); },
+        [st](const uint8_t* d, uint32_t n) { emit_osc_out(*st, d, n); },
         clockState, arenaInstanceGeneration(base));
     return true;   // the prefix is claimed whole, answered or refused
 }
@@ -4129,11 +4121,10 @@ bool clockwork_sched_flush_route(void* routeCtx, const void* callCtx,
     auto* const core = static_cast<ClockworkCore*>(routeCtx);
     clockwork::CoreState* const st = clockwork::state(core);
     if (!st) return true;
-    auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    const uint32_t token = cc ? cc->sourceId : 0;
+    (void)callCtx;
     const auto refuse = [&](const char* reason) {
         clockwork_sys_refuse(data, static_cast<uint32_t>(len), reason, arenaInstanceGeneration(st->arena.at()),
-            [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); });
+            [st](const uint8_t* d, uint32_t n) { emit_osc_out(*st, d, n); });
     };
 #if CLOCKWORK_SCHEDULER
     // No tag, or "", is the user's tag rather than the wildcard, so a tagless
@@ -4164,7 +4155,7 @@ bool clockwork_sched_flush_route(void* routeCtx, const void* callCtx,
 // verbs, which on the web is the client's main thread, the only place Web
 // MIDI and the Gamepad API exist at all. With
 // its core's Routing::host_forward set, that front is the far end: the verb goes out over the
-// egress, to the origin that sent it, and the host answers or refuses it.
+// egress, and the host answers or refuses it.
 //
 // THE FRAME CARRIES THE CALL'S TIME. A verb the scheduler fired reaches this
 // thread up to a block early, and the host's device (a MIDI port that
@@ -4184,13 +4175,12 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
         return clockwork_clockwork_sys_route(routeCtx, callCtx, data, len);
 
     auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    const uint32_t token = cc ? cc->sourceId : 0;
     uint8_t* const base = st->arena.at();
     const auto* clockState = base
         ? reinterpret_cast<const ClockworkClockState*>(base + CLOCK_STATE_START)
         : nullptr;
     switch (handle_clockwork_sys_rt(data, static_cast<uint32_t>(len),
-                [st, token](const uint8_t* d, uint32_t n) { emit_osc_out(*st, token, d, n); },
+                [st](const uint8_t* d, uint32_t n) { emit_osc_out(*st, d, n); },
                 clockState, arenaInstanceGeneration(base))) {
         case ClockworkSysRt::NotClaimed:  return false;
         case ClockworkSysRt::Answered:    return true;
@@ -4198,7 +4188,7 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
     }
 
     const RingPart verb{ data, static_cast<uint32_t>(len) };
-    forward_to_host(*st, token, cc ? cc->when : clockwork::Timetag::immediately(), &verb, 1);
+    forward_to_host(*st, cc ? cc->when : clockwork::Timetag::immediately(), &verb, 1);
     return true;   // claimed whole: the host answers or refuses it from here
 }
 
@@ -4227,7 +4217,7 @@ bool clockwork_wants_route(void* routeCtx, const void* callCtx, const uint8_t* d
 // gathered first. Built by hand: oscpack's stream cannot take an
 // already-encoded element. Too wide for the ring, it is refused and counted
 // there, as any frame is. Whether it went on the ring.
-static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork::Timetag when,
+static bool forward_to_host(clockwork::CoreState& st, clockwork::Timetag when,
                             const RingPart* element, uint32_t n_parts) {
     static constexpr uint32_t kMaxParts = 4;
     if (n_parts == 0 || n_parts > kMaxParts - 1) return false;
@@ -4243,7 +4233,7 @@ static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork:
     std::array<RingPart, kMaxParts> parts{};
     parts[0] = RingPart{ header.data(), static_cast<uint32_t>(header.size()) };
     for (uint32_t i = 0; i < n_parts; ++i) parts[1 + i] = element[i];
-    return emit_osc_parts(st, token, parts.data(), n_parts + 1);
+    return emit_osc_parts(st, parts.data(), n_parts + 1);
 }
 
 // An inbound event, on the audio thread, on every host (clockwork_sys.h).
@@ -4258,7 +4248,7 @@ bool clockwork_event_route(void* routeCtx, const void* callCtx,
     const bool pad = std::strncmp(verb, "gamepad/", 8) == 0;
     // For the client, if it asked for this kind (lanes.h).
     if (st->routing.client_wants.load(std::memory_order_relaxed) & (pad ? CLOCKWORK_WANTS_GAMEPAD : CLOCKWORK_WANTS_MIDI))
-        emit_osc_out(*st, 0, data, static_cast<uint32_t>(len));
+        emit_osc_out(*st, data, static_cast<uint32_t>(len));
     if (guest_wants_events())
         clockwork_dsp_default_route(routeCtx, callCtx, data, len);
     return true;
@@ -4301,7 +4291,7 @@ static int clockwork_sink_host_emit(void* ctx, uint32_t kind, const char* target
         { kZeros, (4u - (len & 3u)) & 3u },
     };
     // Not on the ring is not sent: the sink counts it dropped.
-    return forward_to_host(*st, 0, clockwork::Timetag::fromAbi(when), message, 3) ? 1 : 0;
+    return forward_to_host(*st, clockwork::Timetag::fromAbi(when), message, 3) ? 1 : 0;
 }
 
 // /clockwork/asset/commit ,iiiiiif id kind offset bytes channels frames rate
@@ -4312,19 +4302,18 @@ bool clockwork_asset_route(void* routeCtx, const void* callCtx,
     clockwork::CoreState* const found = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
     if (!found) return true;
     clockwork::CoreState& st = *found;
-    auto* cc = static_cast<const DrainCallCtx*>(callCtx);
-    const uint32_t origin = cc ? cc->sourceId : 0;
+    (void)callCtx;
     const char* verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
     if (std::strcmp(verb, "asset/commit") != 0) {
         // Claimed by prefix, not a verb of this layer: refuse as the sys route does.
         handle_clockwork_sys_osc(data, static_cast<uint32_t>(len),
-            [&st, origin](const uint8_t* d, uint32_t n) { emit_osc_out(st, origin, d, n); },
+            [&st](const uint8_t* d, uint32_t n) { emit_osc_out(st, d, n); },
             nullptr, arenaInstanceGeneration(st.arena.at()));
         return true;
     }
     int32_t id = -1;
     auto refuse = [&](const char* why) {
-        asset_emit(st, origin, CLOCKWORK_SYS("asset/refused"), static_cast<uint32_t>(id), why);
+        asset_emit(st, CLOCKWORK_SYS("asset/refused"), static_cast<uint32_t>(id), why);
         return true;
     };
     int32_t kind = 0, offset = 0, bytes = 0, channels = 0, frames = 0;
@@ -4369,7 +4358,6 @@ bool clockwork_asset_route(void* routeCtx, const void* callCtx,
     asset.struct_bytes = sizeof asset;
     asset.id           = static_cast<uint32_t>(id);
     asset.kind         = static_cast<uint32_t>(kind);
-    asset.origin       = origin;
     asset.bytes        = assets + offset;
     asset.byte_count   = static_cast<uint32_t>(bytes);
     switch (kind) {
@@ -4389,7 +4377,7 @@ bool clockwork_asset_route(void* routeCtx, const void* callCtx,
         return refuse("unknown kind");
     }
     if (st.assets.lookup(asset.id)) return refuse("id is still held; release it first");
-    Asset* slot = st.assets.insert(asset.id, origin);
+    Asset* slot = st.assets.insert(asset.id);
     if (!slot) return refuse("too many assets held");
     // All of it, for an instance built after this one (hand_over_assets).
     slot->offset      = static_cast<uint32_t>(offset);
@@ -4404,7 +4392,7 @@ bool clockwork_asset_route(void* routeCtx, const void* callCtx,
         clockwork::Assets::remove(*slot);
         return refuse("the guest refused it");
     }
-    asset_emit(st, origin, CLOCKWORK_SYS("asset/committed"), asset.id, nullptr);
+    asset_emit(st, CLOCKWORK_SYS("asset/committed"), asset.id, nullptr);
     return true;
 }
 
@@ -4412,9 +4400,8 @@ bool clockwork_asset_route(void* routeCtx, const void* callCtx,
 // untouched. One call for a message and a bundle alike — dsp_osc takes "one
 // OSC message or bundle" and the DSP decides what that means.
 //
-// `when` is the message's timetag and `origin` the token to answer on; both
-// travel with the call, so nothing here builds a reply object or knows how a
-// reply gets back.
+// `when` is the message's timetag and travels with the call; nothing here
+// builds a reply object or knows how a reply gets back.
 bool clockwork_dsp_default_route(void* routeCtx, const void* callCtx,
                           const uint8_t* data, std::size_t len) {
     Dsp* const instance = clockwork::instance_of(static_cast<ClockworkCore*>(routeCtx));
@@ -4425,7 +4412,7 @@ bool clockwork_dsp_default_route(void* routeCtx, const void* callCtx,
     // for.
     GuestCallScope guest(GuestCall::Processing);
     dsp_osc(instance, data, static_cast<uint32_t>(len),
-            cc ? cc->when.abi() : clockwork_timetag_immediately(), cc ? cc->sourceId : 0,
+            cc ? cc->when.abi() : clockwork_timetag_immediately(),
             cc ? cc->blockTime.abi() : ClockworkTimetag{0});
     return true;
 }

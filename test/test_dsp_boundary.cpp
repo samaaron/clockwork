@@ -9,20 +9,15 @@
  *
  *   - a message crossing the boundary and a reply coming back. "/dummy/ping" goes
  *     in the IN ring, out through clockwork's classifier and default route
- *     to dsp_osc(), and the DSP answers through DspHost::emit_osc with the
- *     origin it was handed — which must arrive on the RT egress ring, routed
- *     to that same origin. Nothing in that chain is a clockwork type: the boundary
- *     carries a uint32 token in and a uint32 token out, never an engine
- *     struct or a function pointer.
+ *     to dsp_osc(), and the DSP answers through DspHost::emit_osc — which
+ *     must arrive on the RT egress ring. Nothing in that chain is a
+ *     clockwork type: the boundary carries OSC bytes in and OSC bytes out,
+ *     never an engine struct or a function pointer.
  *
  *   - dsp_describe(), and the one branch it governs. holds_schedule is read
  *     once at boot and decides where a timed message waits; the placeholder
  *     declares zero, so clockwork holds it, which is what the scheduled case
  *     below observes.
- *
- * The reply is asserted for its ORIGIN as well as its address: the origin
- * is how the client tells which request an answer is to, and a
- * "did /dummy/pong come back?" assertion cannot see one that lost it.
  */
 #include "LanesFixture.h"
 #include "OscTestUtils.h"
@@ -46,8 +41,7 @@ using Catch::Approx;
 
 namespace {
 
-// A token that is not 0, because 0 means "broadcast" and would make the
-// routing assertion below vacuous.
+// The label on this file's ingress frames.
 constexpr uint32_t kClient = 0x5eed;
 
 const lanes_test::EgressFrame* findAddress(
@@ -76,9 +70,6 @@ TEST_CASE("dsp boundary: a message crosses the boundary and its reply comes back
     const auto* pong  = findAddress(frames, "/dummy/pong");
 
     REQUIRE(pong != nullptr);
-    // DspHost::emit_osc was called with the origin dsp_osc() was given, and
-    // the frame carries it.
-    CHECK(pong->sourceId == kClient);
 }
 
 TEST_CASE("dsp boundary: the clock snapshot is answered on the audio thread",
@@ -99,7 +90,6 @@ TEST_CASE("dsp boundary: the clock snapshot is answered on the audio thread",
     const auto frames = lanes_test::tickUntil(4, "/clockwork/clock/state.reply");
     const auto* reply = findAddress(frames, "/clockwork/clock/state.reply");
     REQUIRE(reply != nullptr);
-    CHECK(reply->sourceId == kClient);   // the asker's origin, carried back
 
     const auto r = osc_test::parseReply(reply->data.data(),
                                         static_cast<uint32_t>(reply->data.size()));
@@ -130,7 +120,6 @@ TEST_CASE("dsp boundary: an address clockwork claims never reaches the DSP",
     const auto frames = lanes_test::tickUntil(4, "/clockwork/pong");
     const auto* pong  = findAddress(frames, "/clockwork/pong");
     REQUIRE(pong != nullptr);
-    CHECK(pong->sourceId == kClient);
 
     // And nothing under that prefix was answered by the DSP as well — one
     // claim, not two.
@@ -293,7 +282,6 @@ TEST_CASE("dsp boundary: a /clockwork/schedule it cannot read is refused to the 
     const auto frames = lanes_test::tickUntil(4, "/clockwork/error");
     const auto* err = findAddress(frames, "/clockwork/error");
     REQUIRE(err != nullptr);
-    CHECK(err->sourceId == kClient);
     const auto r = osc_test::parseReply(err->data.data(), static_cast<uint32_t>(err->data.size()));
     CHECK(r.argString(0) == "/clockwork/schedule");
     CHECK(r.argString(1) == "malformed");
@@ -414,9 +402,9 @@ TEST_CASE("dsp boundary: channel counts are per block, and slots are stable",
 
     // Echo mode, so what comes out names the input slot it came from.
     const auto echo = osc_test::message("/dummy/echo");
-    // Immediately, origin 0, no block time — the same block time the
-    // dsp_process calls below render at.
-    dsp_osc(d.dsp, echo.ptr(), echo.size(), clockwork_timetag_immediately(), 0, ClockworkTimetag{});
+    // Immediately, no block time — the same block time the dsp_process calls
+    // below render at.
+    dsp_osc(d.dsp, echo.ptr(), echo.size(), clockwork_timetag_immediately(), ClockworkTimetag{});
 
     SECTION("a slot keeps its identity when the count shrinks") {
         dsp_process(d.dsp, in_ptrs, 4, out_ptrs, 4, kFrames, ClockworkTimetag{});
@@ -472,7 +460,7 @@ TEST_CASE("dsp boundary: what the DSP logs leaves as an addressed OSC message",
     lanes_test::drainRt();
 
     // The three ways out of a DSP are not interchangeable and this is the one
-    // with no addressee at all. emit_osc answers an origin; send_sink names an
+    // with no addressee at all. emit_osc reaches the client; send_sink names an
     // endpoint; log has neither, so clockwork has to give it one — it frames
     // the line as /clockwork/debug and puts it on the same egress ring as
     // everything else, which is what lets a host dispatch it to a console

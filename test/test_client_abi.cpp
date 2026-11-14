@@ -70,9 +70,8 @@ TEST_CASE("client abi: a message sent through the boundary reaches the guest",
 
 TEST_CASE("client abi: the engine's own ingest goes through the same door",
           "[client][abi]") {
-    // THE POINT OF THE BOUNDARY. ClockworkEngine::ingest is what a UDP
-    // datagram reaches after the transport has minted an origin for its
-    // sender, and it calls clockwork_client_send rather than writing the ring
+    // THE POINT OF THE BOUNDARY. ClockworkEngine::ingest is what a transport's
+    // packet reaches, and it calls clockwork_client_send rather than writing the ring
     // itself. A client's message and a remote peer's therefore travel the same
     // code, and this asserts they land alike.
     Engine e;
@@ -86,9 +85,9 @@ TEST_CASE("client abi: the engine's own ingest goes through the same door",
     osc_test::ParsedReply r1;
     REQUIRE(e.reply("/dummy/pong", r1));
 
-    // The transport's route, with a different origin so the two are told apart.
+    // The transport's route.
     const auto viaIngest = osc_test::message("/dummy/ping");
-    e.engine.ingest(viaIngest.ptr(), viaIngest.size(), 0xBBBB);
+    e.engine.ingest(viaIngest.ptr(), viaIngest.size());
     osc_test::ParsedReply r2;
     REQUIRE(e.reply("/dummy/pong", r2));
 
@@ -102,14 +101,14 @@ TEST_CASE("client abi: the engine's ingest returns what the door said, and count
           "[client][abi]") {
     Engine e;
     const auto ping = osc_test::message("/dummy/ping");
-    CHECK(e.engine.ingest(ping.ptr(), ping.size(), 0xCCCC) == CLOCKWORK_OK);
+    CHECK(e.engine.ingest(ping.ptr(), ping.size()) == CLOCKWORK_OK);
     osc_test::ParsedReply r;
     REQUIRE(e.reply("/dummy/pong", r));
 
     const uint32_t droppedBefore = e.engine.getMetrics().messages_dropped.load();
     std::vector<uint8_t> huge(8u * 1024u * 1024u, 0);
     std::memcpy(huge.data(), "/big\0\0\0\0,\0\0\0", 12);
-    CHECK(e.engine.ingest(huge.data(), static_cast<uint32_t>(huge.size()), 0xCCCC) == CLOCKWORK_E_TOO_BIG);
+    CHECK(e.engine.ingest(huge.data(), static_cast<uint32_t>(huge.size())) == CLOCKWORK_E_TOO_BIG);
     CHECK(e.engine.getMetrics().messages_dropped.load() == droppedBefore + 1);
 }
 
