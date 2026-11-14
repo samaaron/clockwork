@@ -37,8 +37,8 @@ typedef struct DspConfig {
 
     /* CEILINGS, not counts. The live counts arrive per block and change while
        running: Link peers join and leave, aux sinks are added, a device switch
-       brings a different interface. Size buffers against these in dsp_new —
-       the only place a DSP may allocate — and read the live counts per block.
+       brings a different interface. Size buffers against these in dsp_new and
+       read the live counts per block.
        Clockwork guarantees the per-block counts never exceed them. */
     uint32_t max_input_channels;
     uint32_t max_output_channels;
@@ -606,7 +606,9 @@ void dsp_process(struct Dsp* dsp,
  * does not place events within a block may ignore it.
  *
  * ON THE AUDIO THREAD. Both call sites are inside process_audio and there is no
- * other delivery path, so this must not allocate or block.
+ * other delivery path, so this must not block, and must not call malloc or
+ * new. What it needs to keep it takes from the guest's own memory:
+ * DspHost::alloc_bytes, lock-free there, or in Rust Box and Vec.
  *
  * `bytes` POINTS INTO THE INGRESS RING and is valid only for this call. A guest
  * that wants to keep a payload must copy it out before returning — so the
