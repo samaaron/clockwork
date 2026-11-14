@@ -33,8 +33,11 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Just after midnight in the UK, whichever way its clocks stand. Off the
+  # hour: GitHub delays what is scheduled at the top of one.
   schedule:
-    - cron: "17 4 * * *"
+    - cron: "17 0 * * *"
+      timezone: "Europe/London"
   workflow_dispatch:
 
 permissions:
