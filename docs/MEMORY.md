@@ -14,6 +14,8 @@ Sizes are hand-computed from the constants, not measured.
 
 ## Part 1: what exists
 
+This part records the state on 2026-10-14. The other docs describe the code now.
+
 ### 1.1 The platforms
 
 | platform | process model | memory | status |
@@ -301,9 +303,9 @@ profile calls it single-tier. A later decision.
 
 ## Part 4: what was done
 
-Sam approved the model on 2026-10-14 and the five steps were taken as one
-change, in this order. The decisions in the earlier Part 4 were taken as
-recommended, with one change at step 5, noted there.
+Sam approved the model on 2026-10-14 and its five steps (1–5) were taken as
+one change, in this order; steps 6–19 followed. The decisions in the earlier
+Part 4 were taken as recommended, with one change at step 5, noted there.
 
 1. **Renames.** The arena v2 work folded in (ids in memory order, one name
    per region, format version 2), then: raw scope → **scope**, out ring →
@@ -378,9 +380,9 @@ recommended, with one change at step 5, noted there.
    cosine tables, built once by `InitializeFFTTables()`; those are static
    storage now, so the symbol map names them, and what `dsp_new` still
    takes with plain malloc is a few small objects.
-   The heap's and the rust heap's census — bytes in use, the peak, growths,
-   fallbacks — are metrics 53–57 (`js/lib/metrics_schema.js`, the slots the
-   buffer pool's metrics once held), written at
+   The heap's and the rust heap's census — bytes in use, the peak,
+   fallbacks — are metrics 53–54 and 56–57 (`js/lib/metrics_schema.js`,
+   the slots the buffer pool's metrics once held), written at
    the metrics flush, so a map reads the heap's use beside its size.
 8. **Static data, by symbol.** The web build writes the linker's map beside
    the module (`CLOCKWORK_WEB_LINK_MAP`) and `scripts/static-map.mjs` reduces
@@ -402,7 +404,7 @@ recommended, with one change at step 5, noted there.
    generated into `scsynth_tables.cpp` and read-only data the symbol map
    names as such (BOUNDARY.md lets a guest keep constants); the memory term
    is gone. `dsp_api.h` states a guest's memory in
-   three sentences. Clockwork cannot stop a guest keeping globals or calling
+   four sentences. Clockwork cannot stop a guest keeping globals or calling
    malloc, and such a guest runs; what it can do is construct its own layout
    (next) and count what a guest does outside the doors. Moving the tables
    found a reload bug on the web: a start-over of the placement arena
@@ -410,9 +412,9 @@ recommended, with one change at step 5, noted there.
    rebuilt heap's backing was handed the arena's start, where the guest's
    memory already was; the two overlapped, and the first heap allocation
    in `World_New` trapped. A start-over now forgets the owned spans too,
-   and the RT router's block — process-lifetime, in that arena — is the
-   arena's first allocation, taken again first after a reset and checked to
-   be where it was.
+   and the RT router's block — the core's for its life, in that arena — is
+   the arena's first allocation, taken again first after a reset and checked
+   to be where it was.
 
 10. **The guest's mallocs, counted.** The ~30 KB left in the malloc box
     after step 9 was scsynth's library registration: `new` inside
@@ -428,7 +430,7 @@ recommended, with one change at step 5, noted there.
     made while a guest call is open is counted as the guest's, host
     callbacks included. Sized by `malloc_usable_size`, so the number is what
     the allocator gave. Two metrics (58, 59; the context's slots moved up
-    two, `GUEST_METRICS_BASE` 71): **guestMallocBytes**, what the guest
+    two; `GUEST_METRICS_BASE` is 91): **guestMallocBytes**, what the guest
     holds from malloc now, and **guestMallocsProcessing**, allocator calls
     inside the processing entry points since boot — the number a
     well-behaved guest keeps at 0. A verbose boot prints "guest malloc at
@@ -452,7 +454,7 @@ recommended, with one change at step 5, noted there.
     from the same block on every boot, in the same order. A reload finds
     the block where it was (the globals survive the new module) and carves
     it again; nothing has to be remembered. The table lists it as
-    **`CLOCKWORK_AREA_ENGINE_MEMORY`** (15), placed on every boot, and
+    **`CLOCKWORK_AREA_ENGINE_MEMORY`** (14), placed on every boot, and
     `STATIC_DATA` on the web now holds only the program's globals. Natively
     nothing moved: `arena_storage` stays static and `clockwork::mem` stays
     the system allocator, reached through `clockwork_local_arena()`; the
@@ -497,9 +499,8 @@ recommended, with one change at step 5, noted there.
     makes the entry), so a Rust guest's `Box` and `Vec`
     land in its own memory by writing ordinary Rust; an allocation the pool
     cannot meet falls back to the system and is counted (the pool's
-    census, `clockwork_heap_census`). Areas 8 and 14 are
-    **`GUEST_MEMORY_BULK`** and **`GUEST_SPARE`**, 9 is
-    **`GUEST_MEMORY_FAST`**; metrics 53–54 are the guest's pool's census
+    census, `clockwork_heap_census`). Area 8 is **`GUEST_MEMORY_BULK`** and
+    9 **`GUEST_MEMORY_FAST`**; metrics 53–54 are the guest's pool's census
     (`guestPoolUsedBytes`, `guestPoolPeakBytes`). The
     web client sizes the engine's memory as the guest's two declared spans
     plus the engine's own overhead beside them (`MemoryLayout.engineOverhead`:
@@ -527,12 +528,13 @@ recommended, with one change at step 5, noted there.
     test now holds the allocator to the system while an engine runs and
     after it goes.) Two things stay out of the block, each for a reason
     the model states:
-    the arena, which natively is static storage or a shared-memory segment
-    other processes map, and the guest's memory must not be in a segment
-    any process can reach; and the router's block, which is the process's
-    for life while the block is a build's — a build whose guest wants more
-    than the block holds takes a new one (everything in it is per-build and
-    already gone) and the router's block stays where it was. The table
+    the arena, which natively is the core's own allocation or a
+    shared-memory segment other processes map, and the guest's memory must
+    not be in a segment any process can reach; and the router's block, which
+    is the core's for its life while the block is a build's — a build whose
+    guest wants more than the block holds takes a new one (everything in it
+    is per-build and already gone) and the router's block stays where it
+    was. The table
     lists it as `ENGINE_MEMORY` on every host; a tiered device has real
     regions to place into and no block. The last structural difference
     between the web and native layouts is gone: what differs now is where
@@ -612,8 +614,8 @@ recommended, with one change at step 5, noted there.
     the budget, and cost a block, an area, a knob, a growth path, a metric
     and a line on the map. Removed: the pool never grows, a pool that fills
     answers NULL loudly, and the fix is the guest's declaration or the
-    host's floor, both of which exist. Area 14 is now `ENGINE_MEMORY`;
-    metric 55 is a reserved pad; `CLOCKWORK_GUEST_SPARE_BYTES` is gone from
+    host's floor, both of which exist. Area 14 is `ENGINE_MEMORY`; metric 55
+    is `egressFramesRefused`; `CLOCKWORK_GUEST_SPARE_BYTES` is gone from
     every profile; the web's `engineOverhead` is 2 MB (the router's block
     and the headers). "Unused" stays for now: it is the web layout's
     `wasmHeapSize` budget for run-time malloc, which the count in step 17
@@ -631,8 +633,9 @@ recommended, with one change at step 5, noted there.
     the lock rather than passing silently, as it had under the old heap.
     Hunting it: the pool refuses and counts a double free (none here);
     then a walk of the whole pool after every engine-thread operation
-    (`CLOCKWORK_POOL_CHECK=1`, now `clockwork_heap_guest_check`) stopped at the
-    first broken header and named the allocation before it — scsynth's
+    (`CLOCKWORK_POOL_CHECK=1`, which runs `clockwork_heap_check` over the
+    guest's pool) stopped at the first broken header and named the
+    allocation before it — scsynth's
     audio bus, 64 channels by the embedded test's option, under a host
     handing it 80 in and 80 out (lanes a previous test had reserved, which
     the fixture's 2-in 2-out could not know about), overrun by every block.

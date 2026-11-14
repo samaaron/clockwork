@@ -209,5 +209,5 @@ export const CTX_HAS_PLAYBACK_STATS = 90;    // 1 if Chrome playbackStats availa
 export const GUEST_METRICS_BASE = 91;
 export const GUEST_METRICS_COUNT = 32;
 
-// Merged array size (slots 0-62 from SAB/snapshot, 50-52 and 64-67 context, 68-74 audio, 75+ the guest's)
+// Merged array size (slots 0-62 from SAB/snapshot, 50-52 and 64-67 context, 68-74 audio, 91+ the guest's)
 export const MERGED_ARRAY_SIZE = GUEST_METRICS_BASE + GUEST_METRICS_COUNT;  // 123

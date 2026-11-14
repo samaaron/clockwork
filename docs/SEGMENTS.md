@@ -156,7 +156,9 @@ In C++, `shm_attach::receive` is the reader's hand-off and
 mappings are `shm_segment_client` (read-only, `const` views) and
 `shm_command_client` (the plane and the lanes).
 
-The Rust `clockwork-client` crate mirrors the three opens, and the Rust
+The Rust `clockwork-client` crate has three of the four segment opens
+(`Client::open_shm`, `open_shm_handle` and `open_shm_peer`; not
+`clockwork_client_open_shm_peer_handles`), and the Rust
 `clockwork_comms::shm::ShmPeer` (the transport probe's peer) speaks the same
 protocol for the command segment alone, holding its lease for the life of
 the mapping.

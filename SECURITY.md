@@ -76,7 +76,10 @@ crasher ever found, deterministically, and the sample-file path is tried on
 every sample Sonic Pi ships against ffmpeg. Every night, each target runs
 under libFuzzer for two hours; a crasher is sealed to a key only the
 maintainer holds before it leaves the runner, and once fixed joins the corpus.
-`.github/workflows/security.yml` is the whole of it.
+The replay, the nightly runs and the SBOM scan are
+`.github/workflows/security.yml`. The sample check and the test suite under
+the sanitizers (ASan with UBSan, and TSan) are jobs in
+`.github/workflows/ci.yml`, and CodeQL is `.github/workflows/codeql.yml`.
 
 ## Scope
 

@@ -140,9 +140,12 @@ place the property is not yet uniform.
   reason, and none belongs to an engine. Runs on macOS and Linux in CI.
 - `scripts/check-guest-globals.sh`: a guest that says any has no mutable
   static at all (C and C++ objects; we don't read Rust guests yet).
-- `scripts/check-layout.sh`, `scripts/check-ffi.sh`,
-  `scripts/check-logging.sh`, `scripts/check-threads.sh`, each with a canary
-  and a count.
+- `scripts/check-layout.sh` and `scripts/check-ffi.sh`, each with a canary
+  that must be caught and a count of what it read.
+- `scripts/check-logging.sh` (no printing but through the log, and every
+  log line names its core) and
+  `scripts/check-threads.sh` (`std::jthread`, never `std::thread` or
+  `detach()`): greps, with no canary and no count.
 - `test/test_reference.cpp`: each scenario alone against a recorded trace
   (`test/reference/<platform>/`, darwin-arm64 so far), then the same
   scenarios beside each other (in turn, on threads, with a seeded pool,
@@ -167,3 +170,5 @@ place the property is not yet uniform.
   should be `constexpr`.
 - `reset_taps` clears the whole taps region at every build; clearing the
   slot headers would do.
+- A canary and a count for `scripts/check-logging.sh` and
+  `scripts/check-threads.sh`, as the layout and FFI guards have.

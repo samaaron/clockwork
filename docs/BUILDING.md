@@ -14,11 +14,17 @@ cmake -B build .
 cmake --build build --parallel 3
 ```
 
-That produces the library, its plugin bridge, and the test suite. There is no
-standalone server: an engine is a library with no process shape of its own,
-and the process around it — the command line, the sockets, the run loop — is
-the client's. clockwork-supersonic's `host/` is one such process, composed
-from the comms client library (`src/comms/`).
+That builds the library and, with `CLOCKWORK_PLUGINS` (on by default), its
+plugin bridge. When clockwork is the top-level project it also builds the
+scheduler host, `clockwork-scheduler-host` (`src/host/main.cpp`): an OSC and
+MIDI event scheduler with no synthesis engine, which drives the timed store
+off the wall clock behind a TCP control port. The test suite is built only
+when asked for (`-DBUILD_TESTS=ON`, below).
+
+There is no standalone engine server: an engine is a library with no process
+shape of its own, and the process around it — the command line, the sockets,
+the run loop — is the client's. SuperSonic's `host/` is one such process,
+composed from the comms client library (`src/comms/`).
 
 **Keep the parallelism modest.** An unbounded `make -j` will exhaust memory on a
 small machine: this build compiles four JUCE modules and a Rust workspace.
@@ -39,13 +45,14 @@ emcmake cmake -B build/web -DCMAKE_BUILD_TYPE=Release -DCLOCKWORK_DSP=dummy
 cmake --build build/web --parallel 3      # → dist/wasm/clockwork.wasm
 ```
 
-`scripts/build-web.sh` wraps that and bundles the JavaScript client and workers
-around the module. A product names its own module (`CLOCKWORK_WEB_MODULE_NAME`)
-and where it lands (`CLOCKWORK_WEB_DIST_DIR`), sizes the scheduler for its
-worklet (`CLOCKWORK_SCHEDULER_SLOT_COUNT`, `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE`)
-and may export more of its own
-(`CLOCKWORK_WEB_EXTRA_EXPORTS`); the exports the worklet calls are clockwork's
-list in `CMakeLists.txt`.
+`scripts/build-web.sh` wraps that for this tree: it configures `build/web`,
+writes `dist/wasm/clockwork.wasm`, and bundles the JavaScript client and
+workers into `dist/`. A product sets these on its own `emcmake cmake` ("Your
+own guest", below): its module's name (`CLOCKWORK_WEB_MODULE_NAME`) and where
+it lands (`CLOCKWORK_WEB_DIST_DIR`), the scheduler's size for its worklet
+(`CLOCKWORK_SCHEDULER_SLOT_COUNT`, `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE`), and
+exports of its own (`CLOCKWORK_WEB_EXTRA_EXPORTS`); the exports the worklet
+calls are clockwork's list in `CMakeLists.txt`.
 
 ## Tests
 
@@ -142,16 +149,200 @@ out and read by both (`test/test_samples_through_engine.cpp`). Run it after a
 build and before pushing a change to the decoders, the writers or the audio
 path; CI runs the same script. Needs npm and ffmpeg.
 
-## Choosing a DSP
+## Your own guest
 
-`-DCLOCKWORK_DSP=<name>` selects a directory under `dsp/` holding a
-`CMakeLists.txt` that defines a target of its own name and implements the entry
-points in [`src/dsp_api.h`](../src/dsp_api.h). Clockwork and the DSP call each
-other in both directions — clockwork runs blocks and hands over OSC, the DSP
-answers through `DspHost` — so they are linked as a group.
+A guest is a CMake target that implements the entry points in
+[`src/dsp_api.h`](../src/dsp_api.h) ([BOUNDARY.md](BOUNDARY.md)).
+`-DCLOCKWORK_DSP=<name>` names the target, and `CLOCKWORK_DSP_DIR` the
+directory holding its `CMakeLists.txt`, wherever it is; left empty, that is
+`dsp/<name>` in this tree. Clockwork and the guest call each other in both
+directions — clockwork runs blocks and hands over OSC, the guest answers
+through `DspHost` — so they are linked as a group.
 
-`dsp/dummy` is the default and is meant to be deleted once a real DSP is
-attached. See [BOUNDARY.md](BOUNDARY.md#5-the-dummy-dsp).
+`dsp/dummy` is the default, there so this tree can build and test itself
+([BOUNDARY.md](BOUNDARY.md#the-dummy-dsp)). A product leaves it in place and
+points the two variables at its own guest.
+
+| variable | default | |
+|---|---|---|
+| `CLOCKWORK_DSP` | `dummy` | the guest's CMake target, which must exist by that name |
+| `CLOCKWORK_DSP_DIR` | empty: `dsp/<CLOCKWORK_DSP>` here | the directory holding the guest's `CMakeLists.txt` |
+| `CLOCKWORK_RUST_WORKSPACE` | clockwork's `rust/` | the cargo workspace cargo runs in, whose `target/` the archive is read from |
+| `CLOCKWORK_RUST_PACKAGE` | `clockwork-native` | the umbrella package cargo builds (`-p`) |
+| `CLOCKWORK_RUST_LIB_NAME` | `clockwork_native` | the base name of the staticlib that package makes |
+| `CLOCKWORK_WEB_MODULE_NAME` | `clockwork` | the web module's file name, without `.wasm` |
+| `CLOCKWORK_WEB_DIST_DIR` | clockwork's `dist/wasm` | where the web module is written |
+
+`scripts/build-web.sh` passes the first five through: `CLOCKWORK_DSP` from
+the environment or `--dsp=<name>` (default `dummy`), and the other four from
+the environment, clearing each one that is unset. It does not pass
+`CLOCKWORK_WEB_MODULE_NAME` or `CLOCKWORK_WEB_DIST_DIR`: it always writes
+clockwork's `dist/wasm/clockwork.wasm` and bundles into clockwork's `dist/`.
+A product that names its own module runs `emcmake cmake` itself, as below.
+
+### A C or C++ guest
+
+```
+myproduct/
+  CMakeLists.txt
+  clockwork/                   this repository, as a submodule
+  dsp/mysynth/CMakeLists.txt
+  dsp/mysynth/mysynth.cpp      the nine entry points
+```
+
+```cmake
+# myproduct/CMakeLists.txt
+cmake_minimum_required(VERSION 3.24)
+project(myproduct LANGUAGES C CXX)
+set(CLOCKWORK_DSP     "mysynth" CACHE STRING "" FORCE)
+set(CLOCKWORK_DSP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dsp/mysynth" CACHE PATH "" FORCE)
+add_subdirectory(clockwork)
+add_executable(myproduct main.cpp)
+target_link_libraries(myproduct PRIVATE clockwork_bundle)
+```
+
+```cmake
+# myproduct/dsp/mysynth/CMakeLists.txt
+add_library(mysynth STATIC mysynth.cpp)
+target_link_libraries(mysynth PRIVATE clockwork)   # for dsp_api.h and the headers it includes
+```
+
+`clockwork_bundle` is the one target a product links: clockwork, the guest
+and the Rust archive, in the order the link needs. As a subdirectory,
+clockwork builds neither its tests nor the scheduler host
+(`CLOCKWORK_STANDALONE` is off).
+
+### A Rust guest
+
+A binary may link exactly one Rust staticlib, since each carries its own copy
+of std. So a Rust guest makes no staticlib of its own: the product builds one
+umbrella crate that holds clockwork's Rust subsystems and the guest, and
+points CMake at it.
+
+```
+myproduct/
+  CMakeLists.txt
+  clockwork/
+  dsp/mysynth/CMakeLists.txt       a target named mysynth, still required
+  dsp/mysynth/mysynth_guest.cpp
+  crates/mysynth-dsp/              the guest: the nine entry points, #[no_mangle] extern "C"
+  crates/mysynth-native/           the umbrella: Cargo.toml, Cargo.lock, src/lib.rs
+```
+
+The umbrella depends on `clockwork-native` with its default features off,
+and forwards the feature names CMake passes it. CMake builds it with
+`--no-default-features` and `--features` from the build's options: `midi`
+(and `winrt` on Windows), `gamepad`, `osc` with `comms`, and `schedule`.
+
+```toml
+# crates/mysynth-native/Cargo.toml
+[package]
+name = "mysynth-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = []
+midi = ["clockwork-native/midi"]
+gamepad = ["clockwork-native/gamepad"]
+osc = ["clockwork-native/osc"]
+comms = ["clockwork-native/comms"]
+schedule = ["clockwork-native/schedule"]
+winrt = ["clockwork-native/winrt"]
+
+[dependencies]
+clockwork-native = { path = "../../clockwork/rust/clockwork-native", default-features = false }
+mysynth-dsp = { path = "../mysynth-dsp" }
+
+# clockwork's workspace patches one crate (rust/Cargo.toml). A patch applies
+# only from the workspace root, so the umbrella repeats it.
+[patch.crates-io]
+symphonia-bundle-flac = { path = "../../clockwork/external/symphonia-bundle-flac" }
+
+[profile.release]
+opt-level = 3
+lto = true
+```
+
+```rust
+// crates/mysynth-native/src/lib.rs
+pub use clockwork_native;
+pub use mysynth_dsp;
+```
+
+Naming both crates is what puts each in the archive: clockwork's subsystems
+with its global allocator, and the guest's entry points. The guest crate
+takes the boundary's types from `clockwork-abi` (`clockwork_abi::dsp_api`),
+whose function types check a definition's signature
+(`const _: clockwork_abi::dsp_api::DspNewFn = dsp_new;`).
+
+```cmake
+# myproduct/CMakeLists.txt, beside the two CLOCKWORK_DSP lines above
+set(CLOCKWORK_RUST_WORKSPACE "${CMAKE_CURRENT_SOURCE_DIR}/crates/mysynth-native" CACHE PATH "" FORCE)
+set(CLOCKWORK_RUST_PACKAGE   "mysynth-native" CACHE STRING "" FORCE)
+set(CLOCKWORK_RUST_LIB_NAME  "mysynth_native" CACHE STRING "" FORCE)
+```
+
+```cmake
+# myproduct/dsp/mysynth/CMakeLists.txt
+add_library(mysynth STATIC mysynth_guest.cpp)
+target_link_libraries(mysynth PRIVATE clockwork)
+```
+
+What CMake assumes of the umbrella:
+
+- **A committed `Cargo.lock`.** cargo always runs with `--locked`, which
+  fails when the lock is missing or would change. Run `cargo generate-lockfile`
+  in the umbrella once and commit the result.
+- **Its release profile.** CMake passes `--release` for every build type but
+  Debug, so the umbrella workspace's `[profile.release]` builds the
+  subsystems and the guest, not clockwork's. Copy clockwork's
+  (`opt-level = 3`, `lto = true`): the guest's kernels are called across
+  crate boundaries on every sample.
+- **The library's path.** CMake reads
+  `<CLOCKWORK_RUST_WORKSPACE>/target/<profile>/lib<CLOCKWORK_RUST_LIB_NAME>.a`
+  (`<name>.lib` on Windows), and `target/<triple>/<profile>/` for the web,
+  iOS and a sanitizer build. So `CLOCKWORK_RUST_WORKSPACE` is the workspace
+  root, where `target/` is, and nothing may move that directory
+  (`CARGO_TARGET_DIR`, `build.target-dir`).
+- **A CMake target named `${CLOCKWORK_DSP}`.** clockwork links the guest's
+  target into the group whatever language the guest is written in. For a
+  Rust guest it is a static library of one C++ file that includes
+  `dsp_api.h` and defines one function, so the library is not empty.
+
+### For the web
+
+The same guest builds into the web module. The Rust half needs the nightly
+toolchain `CLOCKWORK_RUST_NIGHTLY` names (default `nightly-2026-07-02`, else
+a floating `nightly`), with `rust-src`, and the target:
+
+```sh
+rustup toolchain install nightly-2026-07-02 --component rust-src
+rustup target add wasm32-unknown-emscripten --toolchain nightly-2026-07-02
+```
+
+CMake rebuilds std with atomics for the shared heap: cargo runs with
+`--target wasm32-unknown-emscripten -Z build-std=std,panic_abort`, and with
+`RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals` in its
+environment. cargo takes `RUSTFLAGS` in place of any `rustflags` the
+product's own `.cargo/config.toml` sets, not beside them, so those do not
+reach this build.
+
+```sh
+emcmake cmake -S . -B build/web -DCMAKE_BUILD_TYPE=Release \
+      -DCLOCKWORK_WEB_MODULE_NAME=mysynth \
+      -DCLOCKWORK_WEB_DIST_DIR="$PWD/dist/wasm"
+cmake --build build/web --target clockwork_web --parallel 3   # → dist/wasm/mysynth.wasm
+```
+
+The JavaScript client and its workers are bundled as `scripts/build-web.sh`
+does in its last section: esbuild over `clockwork/js/clockwork.js` and each
+of `clockwork/js/workers/*.js`. The page names the module with `wasmUrl`
+("A web page", below).
 
 ## Options
 
@@ -159,7 +350,7 @@ attached. See [BOUNDARY.md](BOUNDARY.md#5-the-dummy-dsp).
 |---|---|---|
 | `BUILD_TESTS` | OFF | the Catch2 suite |
 | `CLOCKWORK_DEVICE` | ON | the native audio device layer (smoothie/JUCE). OFF builds the substrate for a host that owns its own audio callback — a plugin, a worklet, an embedded target |
-| `CLOCKWORK_DSP` | `dummy` | which DSP to link |
+| `CLOCKWORK_DSP` | `dummy` | which DSP to link; see "Your own guest" for it and the variables beside it |
 | `CLOCKWORK_MIDI` | ON | the Rust/midir MIDI subsystem |
 | `CLOCKWORK_GAMEPAD` | ON | the Rust/gilrs gamepad subsystem |
 | `CLOCKWORK_OSC` | ON | the Rust/std::net OSC subsystem |
@@ -167,7 +358,7 @@ attached. See [BOUNDARY.md](BOUNDARY.md#5-the-dummy-dsp).
 | `CLOCKWORK_CLIENT_VERBS` | ON | the client half of the verb surface: `midi/out/*`, `midi/clock/beat`, `osc/send`. OFF compiles them out and refuses them by name — for a guest that drives its own output through `clockwork_sink_send`. See [SURFACE.md](SURFACE.md) |
 | `CLOCKWORK_PLUGINS` | ON | host CLAP and VST3 plugins. Uses installed SDK headers when found (`CLAP_INCLUDE_DIR`, `VST3_PLUGINTERFACES_INCLUDE_DIR`), else fetches the pinned MIT copies. Native only |
 | `CLOCKWORK_NIF` | OFF | the BEAM NIF shared library |
-| `CLOCKWORK_STANDALONE` | ON when top-level | the scheduler host (`clockwork-scheduler-host`) and this suite |
+| `CLOCKWORK_STANDALONE` | ON when top-level | the scheduler host (`clockwork-scheduler-host`), and this tree's suite when `BUILD_TESTS` is on too |
 | `CLOCKWORK_CARGO_OFFLINE` | OFF | build the Rust subsystems with `--offline` (`--locked` is always passed) |
 | `CLOCKWORK_RUST` | ON | build the Rust subsystems' umbrella staticlib with cargo. OFF for a Rust embedder (`rust/clockwork-sys`), which takes the subsystem crates itself; the targets that link a binary here — `CLOCKWORK_STANDALONE`, `BUILD_TESTS`, `CLOCKWORK_PLUGINS`, `CLOCKWORK_NIF` — must be OFF with it |
 | `CLOCKWORK_PLUGIN_BRIDGE_DIR` | empty | a directory the engine also searches for the plugin bridge, after "beside its own executable" — for an installed layout that keeps the bridge out of PATH (`/usr/libexec/<pkg>`) |
@@ -311,21 +502,139 @@ used. And the two subsystems are optional: without a wasm-bindgen, or with
 bundles, and a page that asks for `midi: true` is told at init that the
 subsystem was not built (it boots without it, as below).
 
-### Serving it
+### A web page
 
-The page needs the two cross-origin isolation headers for the SAB transport,
-and a secure context for the AudioWorklet at all — plain http off localhost
-boots nothing. One server does both, for any product's directory:
+**Two headers.** The SAB transport needs the page cross-origin isolated, so
+serve it with
 
-```sh
-node scripts/serve.mjs --root example                     # http://127.0.0.1:8000/
-node scripts/serve.mjs --root example --host 0.0.0.0 --https   # the LAN, over TLS
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
 ```
 
-`--https` makes a self-signed certificate once (in `~/.clockwork/cert`);
-accept it once in each browser. With no `mode` given, the client picks SAB on
-an isolated page and postMessage elsewhere. `sync()` needs nothing declared:
-the barrier is clockwork's own verb, answered for every guest.
+and serve anything it loads from another origin with
+`Cross-Origin-Resource-Policy: cross-origin`, or with CORS.
+`scripts/serve.mjs` sends all three.
+
+**A secure context.** The AudioWorklet exists only over https, or over plain
+http on `localhost` or `127.0.0.1`. Plain http from any other address boots
+nothing.
+
+**Without isolation** the client runs in postMessage mode, and the page has
+no view of the engine's memory: the tap readers (`getTap`, `getTaps`,
+`getTapActivations`) answer from copies the worklet posts 60 times a second,
+and nothing until the first has come; `region` answers null and `regions`
+an empty list; audio capture is off, and `wasmMemory` is null. Metrics and the parameter
+table arrive in snapshots the worklet posts every `snapshotIntervalMs`
+(150 ms), the clock's time every few blocks, and `writeAssets` copies across
+rather than writing in place. With no `mode` given, the client picks SAB on an isolated
+page and postMessage elsewhere.
+
+**A press starts the audio.** A browser lets an AudioContext start only
+inside a user gesture. `init()` starts its context synchronously, before it
+awaits anything, so call it from the press. A browser that will not start it
+there (iOS, a page's autoplay rules) leaves it suspended: `init()` waits a
+second for it, then resolves with the context still suspended
+(`clockwork.audioContext.state`). Call `resume()` from the next press;
+`audiocontext:resumed` says when the audio runs.
+
+What a page passes to `new Clockwork({...})`:
+
+| option | |
+|---|---|
+| `baseURL` | where the build is: `clockwork.js`, `workers/` and `wasm/` under it. Or each part: `coreBaseURL` (the worklet and `wasm/`), `workerBaseURL`, `wasmBaseURL` |
+| `wasmUrl` | the engine module. Pass it: the default is `wasmBaseURL + "clockwork-engine.wasm"`, and the build writes `clockwork.wasm` (or `<CLOCKWORK_WEB_MODULE_NAME>.wasm`) |
+| `workletUrl` | the worklet; default `<coreBaseURL>workers/clockwork_audio_worklet.js` |
+| `mode` | `"sab"` or `"postMessage"`; default SAB on an isolated page. `"copies"`, with `copies: { fetch }`, is for a page inside a host that runs the engine itself and hands the page copies of its memory: nothing boots in the page |
+| `audio` | `{ outputChannels, inputChannels }`; default 2 and 0 |
+| `audioContextOptions` | for `new AudioContext`; default `{ latencyHint: "interactive", sampleRate: 48000 }` |
+| `audioContext` | a context of the page's own, used in place of one the client makes |
+| `memory` | sizes over `js/memory_layout.js`. `memArenaSize` (32 MB) is the engine's memory, which holds the guest's two spans: a guest that declares more needs more |
+| `midi`, `gamepad` | the main-thread subsystems (below); off by default |
+| `guestMetrics`, `guestMetricsPanels` | the guest's metrics ([BOUNDARY.md](BOUNDARY.md)) |
+| `schedulerLateLimitMs` | drop timed events later than this; default 0, which plays them all |
+| `pageLifecycle` | `{ pagehide: "shutdown" \| "none", hidden: "keep" \| "suspend" }`; default `shutdown` and `keep` |
+
+A product whose guest takes a config block subclasses `Clockwork` and
+overrides `encodeGuestConfig(ctx)` to return the bytes.
+
+A page that boots this tree's build, with the dummy guest, from the
+directory that holds `dist/`, and gets its audio back when the browser takes
+it away (below):
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<button id="start">Start</button>
+<p id="paused" hidden>Audio paused. <button id="resume">Tap to resume</button></p>
+<script type="module">
+  import { Clockwork } from "/dist/clockwork.js";
+
+  const clockwork = new Clockwork({
+    baseURL: "/dist/",
+    wasmUrl: "/dist/wasm/clockwork.wasm",
+  });
+  const paused = document.querySelector("#paused");
+  clockwork.on("audiocontext:suspended", () => { paused.hidden = false; });
+  clockwork.on("audiocontext:interrupted", () => { paused.hidden = false; });
+
+  document.querySelector("#start").addEventListener("click", async () => {
+    // From the press: the browser starts audio only inside one.
+    await clockwork.init();
+    clockwork.send("/dummy/tone");
+  });
+  document.querySelector("#resume").addEventListener("click", async () => {
+    // From the press too: recover() makes what it may need before it awaits.
+    if (await clockwork.recover()) paused.hidden = true;
+  });
+</script>
+```
+
+### Keeping the audio
+
+On a phone the browser takes the audio away from a running page often: the
+screen locks, another app or a call takes it, the tab goes to the background,
+or memory runs short and the worklet is killed. Only a press may start audio
+again, so a page needs a way back. A page without one goes silent and stays
+silent, and nothing reports it.
+
+- **`audiocontext:suspended`** or **`audiocontext:interrupted`**: the audio
+  has stopped. Show something to press.
+- **On that press, call `recover()`**, before awaiting anything. It resumes
+  the context when the worklet still answers. Otherwise it reloads the engine
+  onto a new context it makes inside the press, because iOS, after an
+  interruption, can hand back a context that says it is running and renders
+  nothing. It resolves `true` when the audio runs.
+- **`audiocontext:resumed`**, **`resumed`**, or **`audiocontext:statechange`**
+  with `state: "running"`: the audio is back, so take the prompt away. While a
+  `recover()` is under way, leave the prompt until it resolves: the context can
+  report running before anything renders.
+- **`reload:complete` `{ success, resumed }`**: with `resumed` the instance
+  carried on and nothing was lost. Otherwise a new instance was built: a
+  subclass's `restoreClientState()` ran first to put back what the product
+  holds, then `setup` was emitted. The parameter table can be back at its
+  defaults (its generation moved), so a client that set values sets them
+  again. With `success: false` nothing could be built: offer to load the page
+  again.
+
+To try a page's way back: `clockwork.audioContext.suspend()` stops the audio
+as the browser does, and `clockwork.reload()` rebuilds the engine as a killed
+worklet does.
+
+### Serving it
+
+`scripts/serve.mjs` serves a directory with the headers above, for any
+product's page:
+
+```sh
+node scripts/serve.mjs                                        # this directory, http://127.0.0.1:8000/
+node scripts/serve.mjs --root <dir> --host 0.0.0.0 --https    # another directory, to the LAN over TLS
+```
+
+`--root` is the directory the page and its `dist/` are in; the default is the
+current one. `--https` makes a self-signed certificate once (in
+`~/.clockwork/cert`); accept it once in each browser. `sync()` needs nothing
+declared: the barrier is clockwork's own verb, answered for every guest.
 
 ### MIDI and gamepad on the web
 
@@ -343,7 +652,7 @@ A page turns them on at construction — Web MIDI asks the user's permission,
 so nothing asks until a page says so:
 
 ```js
-new Clockwork({ baseURL: "/dist/", midi: true, gamepad: true })
+new Clockwork({ baseURL: "/dist/", wasmUrl: "/dist/wasm/clockwork.wasm", midi: true, gamepad: true })
 ```
 
 and then speaks the same verbs a native client does: `/clockwork/midi/ports/list`,

@@ -6,8 +6,8 @@
 A track is a name, an ordered chain of hosted plugins, and a pair of stereo
 lanes the DSP graph can address. It is how a plugin gets a place to live.
 `src/plugin_track.{h,cpp}` is the module; `src/plugin_bridge_verbs.cpp` is
-its OSC surface; [TRACKS.md](TRACKS.md) is the layer under
-it. Both run in the **plugin bridge**, a separate process
+its OSC surface; `src/plugin_host.h`, one plugin of whatever format, is the
+layer under it. Both run in the **plugin bridge**, a separate process
 (`src/native/PluginBridgeMain.cpp`, contract in `src/plugin_bridge.h`);
 `src/native/TrackControl.cpp` is the engine's side — it owns the shared
 memory, spawns the bridge, and relays the verbs. The engine itself never
@@ -79,14 +79,22 @@ walk:
    block.
 
 The return is primed with `slack_blocks` of silence when the ports open, so
-what goes out at block *k* comes back at block *k + slack*: **two blocks by
-default**, ~5 ms at 128 frames and 48 kHz. One block is what a plugin would
-cost in process; the other is a whole callback interval of grace for the
-bridge to render in, without which any render that overran the gap between
-two callbacks would be a dropout. `CLOCKWORK_PLUGIN_BRIDGE_SLACK=1` trades that
-grace away. A bridge that fell behind and caught up would leave the return
-deeper than it found it, so the engine trims it to `slack − 1` blocks each
-time it posts. A note played *on* a track is late by the same round trip,
+what goes out at block *k* comes back at block *k + slack*. **Two blocks**,
+~5 ms at 128 frames and 48 kHz, is what a callback of one block gets, and
+the least `slack_for` chooses unless the ring holds fewer (one, at a
+1024-frame engine block). One block is what a plugin would cost in process; the other is
+a whole callback interval of grace for the bridge to render in, without
+which any render that overran the gap between two callbacks would be a
+dropout. A longer callback ticks several engine blocks back to back, faster
+than the bridge wakes, so its slack is its block count plus two
+(`slack_for` in `src/plugin_bridge.h`; a 1024-frame callback at 128-frame
+blocks gets ten), bounded by the ring. The engine sizes it again when the
+device's buffer changes. `CLOCKWORK_PLUGIN_BRIDGE_SLACK` sets it outright,
+within the same bound; `1` trades the grace away. A bridge that fell behind
+and caught up would leave the return deeper than it found it, so the engine
+trims it each block, before it posts, to `slack − 1` blocks plus one less
+than the blocks in a callback (a callback pulls its blocks in a row, so
+that many more are the bridge on time, not late). A note played *on* a track is late by the same round trip,
 because it is rendered in the bridge too — events cross with the block they
 belong to and land on their frame within it.
 

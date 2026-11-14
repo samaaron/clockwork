@@ -32,14 +32,14 @@ its stack there too. Each thread therefore started a second copy of the engine
 module over the engine's memory, and claimed a *client slot*: 72 KB of the
 engine's memory for its stack and handle.
 
-That cost more than the job is worth:
+That cost more than the job was worth:
 
-- the slots region is in every arena. Native and embedded builds also reserve
-  576 KB for it, and never use it.
+- the slots region was in every arena. Native and embedded builds reserved
+  576 KB for it too, and never used it.
 - a second copy of the engine module on every such thread
-- a stack inside the arena, with no guard page. An overflow runs into the
+- a stack inside the arena, with no guard page. An overflow ran into the
   next slot.
-- a fixed number of slots, eight, which threads have to give back, including
+- a fixed number of slots, eight, which threads had to give back, including
   across a reload
 
 ## The change
@@ -98,13 +98,13 @@ means changing the C so every native caller goes through an accessor, adding a
 second wasm target and writing glue code. For this much logic it is out of
 proportion.
 
-### What goes
+### What went
 
 - the client slots region
 - `WasmClient`, and every second copy of the engine module
 - `clockwork_client_open_memory_in` and `clockwork_client_sizeof`, which only
-  the slots used. (Version 2 of the arena then renumbered its regions in memory
-  order, so there is no gap where they were.)
+  the slots used. (Version 2 of the arena renumbered its regions, so no id is
+  missing where they were.)
 - the engine's module and memory in a channel's transferable
 - the limit of eight, and the bookkeeping that gives slots back
 

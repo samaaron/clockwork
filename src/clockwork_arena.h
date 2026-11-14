@@ -122,7 +122,7 @@ enum ClockworkArenaArea {
     CLOCKWORK_AREA_GUEST_MEMORY_FAST   = 9,   /* outside the arena: the guest's fast memory (DspConfig::memory),
                                                  laid out by the guest by hand */
     CLOCKWORK_AREA_STATIC_DATA         = 10,  /* the program's static data: its globals. Natively the arena lies
-                                                 inside it; on the web the arena is in the engine's memory (15) */
+                                                 inside it; on the web the arena is in the engine's memory (14) */
     CLOCKWORK_AREA_STACK               = 11,  /* the engine thread's call stack: on the web, the audio worklet's */
     CLOCKWORK_AREA_MALLOC              = 12,  /* what the program's code has taken with malloc and new, to the
                                                  frontier at boot; on the web the engine's memory lies inside it */

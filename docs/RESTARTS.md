@@ -109,9 +109,9 @@ new arena carries the generation on, and its instance says `setup`.
 
 Closing an engine's core ends the engine: its instance, its memory and its
 arena go, and the next `clockwork_init` is a cold boot (docs/ENGINES.md,
-3.1). An embedded host that closes its handle and attaches again gets a
-new engine; one that wants its engine back keeps the handle and
-reconfigures it.
+"An engine is a core"). An embedded host that closes its handle and
+attaches again gets a new engine; one that wants its engine back keeps the
+handle and reconfigures it.
 
 `clockwork_init` on an arena that is already up is audio coming back,
 whoever calls it: an embedded host reconfiguring
@@ -126,7 +126,8 @@ takes, it is told, and `/clockwork/setup/changed` is said. Otherwise it is
 rebuilt and says `setup`; and it is rebuilt too, whatever it survives, when
 its guest config block is not the one it was built from, when the memory it
 was built in has moved, and when the audio thread left it partway through a
-block (`g_block_open`), with whatever that block was changing half changed.
+block (`CoreClock::block_open`), with whatever that block was changing half
+changed.
 
 ## The generation
 
@@ -169,9 +170,9 @@ On the wire it is:
   between instances names the generation that closed, since none has
   opened.
 
-The arena header's `instance_id` is a different axis: which engine, for a
-process that will one day hold more than one. It stays 0 and is not a
-generation.
+The arena header's `instance_id` is a different axis: which engine, the
+core's id (`clockwork_core_id`), numbered from 1 in the order the process
+made its cores. It is not a generation.
 
 ## Every region, at every event
 
@@ -206,6 +207,7 @@ producer in another thread may be mid-write through a rebuild.
 | ring cursors, status flags | rebuild | kept | the status flags: a fresh word; every ring's cursors go with their ring | n/a |
 | in ring | cold boot | kept, drained as usual | kept: what waited for the old instance is refused by the next drain, below the teardown's mark, naming the generation that closed; clockwork's own is answered | `/clockwork/error` to the token |
 | RT out ring, NRT out ring | cold boot | kept | kept: what the old instance said stays for its readers, and the new instance's `setup` follows it | the replies themselves |
+| control ring | arena | kept | kept, never reset: it carries clockwork's own control verbs, none of them the instance's ("The control ring", below) | n/a |
 | guest window | rebuild | kept | zeroed; the new instance lays it out again | the window's identity reads 0 until it does |
 
 And the areas outside the arena, and the engine's own stores:
@@ -337,16 +339,17 @@ waiting on, so these are the rules a client may rely on:
    hold thousands, and a client that halts on `restarting` re-sends its
    future after `setup`.
 
-A build with no guest at all (`CLOCKWORK_SYNTH` off) never lowers the flag:
-every message for a guest is refused with `no instance`, which is the
-truth, where before it was drained and dropped.
+A build with no guest at all (`CLOCKWORK_SYNTH` off) never makes the
+generation word even: every message for a guest is refused with
+`no instance`, which is the truth.
 
 ## The control ring
 
 Clockwork's own verbs are of two kinds. The audio thread performs some
 inside its block, because they are about the block: the liveness ping and
 echo, the ordering barrier (`sync`) and the clock snapshot, the schedule and
-its flush, an asset hand-off, an inbound event, what plays a hosted track.
+its flush, an asset hand-off, the parameter table's verbs, an inbound event
+(and the MIDI port and game controller lists), what plays a hosted track.
 Those ride the in ring with the guest's traffic, in order with it. Every
 other verb of clockwork's is CONTROL — `notify`, `devices/*`, the session
 tempo, a subsystem's verbs, a track's edits — and is answered by the
@@ -496,7 +499,7 @@ grid above shows say so; the fix follows the test.
 
 | # | where | against the model |
 |---|---|---|
-| 8 | the shm peer plane | its reply ring drops what does not fit when its peer is behind, at a rebuild or not; holding the engine's replies for one slow peer would hold every other client's, so it is left for a round of its own |
+| 8 | the shm peer plane | its reply ring drops, and counts, an answer to a guest message that does not fit when its peer is behind. Clockwork's own control verbs and the refusals at a rebuild wait for room and are not dropped |
 | 9 | the client ABI | a client in another process has no sanctioned read of the generation |
 | 10 | the plugin bridge (parked with tracks) | refusals carry generation 0; a track's errors are another shape, broadcast; timed track events vanish with the schedule; track tap slots go dark when the taps region resets |
 | 11 | the NIF | a send while there is no instance returns `not_running`, every status it does not name mapped to it (read; a test needs a way to hold an instance down from Erlang, which a boot the guest refuses does not give — the NIF shuts that engine down) |
