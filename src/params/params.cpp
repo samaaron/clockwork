@@ -188,6 +188,9 @@ bool role_fits(const ClockworkParamEntry& e) {
     }
 }
 
+// The most steps a choice may say: the names one entry's text has room for.
+constexpr uint32_t kChoiceStepsMost = CLOCKWORK_PARAM_TEXT_RUN_BYTES / 3u;
+
 // One entry's facts, on their own: docs/PARAMS.md, "Facts that agree".
 const char* facts_refused(const ClockworkParamEntry& e) {
     if (e.kind < CLOCKWORK_PARAM_CONTINUOUS || e.kind > CLOCKWORK_PARAM_GROUP
@@ -212,9 +215,12 @@ const char* facts_refused(const ClockworkParamEntry& e) {
         return CLOCKWORK_PARAM_REFUSED_RANGE;
     if (e.kind != CLOCKWORK_PARAM_CONTINUOUS && (!whole(e.min) || !whole(e.max) || !whole(e.def)))
         return CLOCKWORK_PARAM_REFUSED_RANGE;
+    // A choice's steps are counted against its names (text_refused), so it
+    // says no more than one entry's text could name: a name is a tag, a
+    // character at least and a NUL. That also keeps the count in an integer.
     if ((e.kind == CLOCKWORK_PARAM_SWITCH && (e.min != 0.f || e.max != 1.f))
         || (e.kind == CLOCKWORK_PARAM_NOTE && (e.min < 0.f || e.max > 127.f))
-        || (e.kind == CLOCKWORK_PARAM_CHOICE && e.min != 0.f))
+        || (e.kind == CLOCKWORK_PARAM_CHOICE && (e.min != 0.f || e.max >= static_cast<float>(kChoiceStepsMost))))
         return CLOCKWORK_PARAM_REFUSED_RANGE;
 
     if ((e.flags & CLOCKWORK_PARAM_AUTOMATABLE) && (e.flags & (CLOCKWORK_PARAM_READ_ONLY | CLOCKWORK_PARAM_HIDDEN)))

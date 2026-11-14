@@ -788,6 +788,27 @@ TEST_CASE("params: a choice carries one name per step, and nothing else has name
     CHECK(valueOf(30) == Approx(1.f));
 }
 
+// A choice's steps are counted to check its names against, so a choice says
+// no more steps than one entry's text could name: a name is a tag, a
+// character at least and a NUL. One that says more is a bad range, whatever
+// names it brings, and a maximum no count can hold is among them.
+TEST_CASE("params: a choice with more steps than an entry's text could name is refused", "[params][text][hostile]") {
+    clearTable();
+    const uint32_t CH = CLOCKWORK_PARAM_CHOICE;
+    const uint8_t V = CLOCKWORK_PARAM_TEXT_VALUE;
+    const auto defineIt = [](const ClockworkParamEntry& e, const std::string& text) { return refusal(Define{}.add(e, text).packet()); };
+    const float most = static_cast<float>(CLOCKWORK_PARAM_TEXT_RUN_BYTES / 3u);   // steps a run can name
+
+    for (float max : { 4294967296.f, 8589934592.f, 1e30f, most }) {
+        INFO("max " << max);
+        CHECK(defineIt(entry(31, "c", CH, 0.f, max, 0.f), "") == CLOCKWORK_PARAM_REFUSED_RANGE);
+        CHECK(defineIt(entry(31, "c", CH, 0.f, max, 0.f), run({ { V, "a" } })) == CLOCKWORK_PARAM_REFUSED_RANGE);
+        CHECK(slotOf(31) < 0);
+    }
+    // One fewer is a range a choice may say: refused here only for its names.
+    CHECK(defineIt(entry(31, "c", CH, 0.f, most - 1.f, 0.f), "") == CLOCKWORK_PARAM_REFUSED_TEXT);
+}
+
 TEST_CASE("params: a custom unit has words, and only a custom unit has", "[params][text]") {
     clearTable();
     const uint8_t U = CLOCKWORK_PARAM_TEXT_UNIT;

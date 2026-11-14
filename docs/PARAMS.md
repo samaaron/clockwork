@@ -94,6 +94,8 @@ than leaving each reader to pick a side:
 - **Unit.** Only on a continuous or stepped entry. A custom unit has words, and
   nothing else does.
 - **Value names.** A choice has exactly one per step, and nothing else has any.
+  So a choice has no more steps than one entry's text could name (a third
+  of its bytes): more is a bad range.
 - **Taper.** Only on a continuous entry. Logarithmic only over a range above zero.
   Even is 0 and nothing else, so 1 is refused.
 - **Role.** A bypass and a key held are switches, a key note is a note, a tempo is

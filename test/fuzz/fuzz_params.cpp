@@ -91,11 +91,20 @@ void checkTable(const uint8_t* arena) {
         check(std::isfinite(v) && v >= e.min && v <= e.max);
         if (e.kind != CLOCKWORK_PARAM_CONTINUOUS) check(std::floor(v) == v);
         // a run is whole strings: a tag, words, a NUL
+        uint32_t values = 0;
         for (int32_t i = 0; i < bytes;) {
             check(run[i] >= CLOCKWORK_PARAM_TEXT_FULL_NAME && run[i] <= CLOCKWORK_PARAM_TEXT_VALUE);
+            if (run[i] == CLOCKWORK_PARAM_TEXT_VALUE) ++values;
             const void* nul = (i + 1 < bytes) ? std::memchr(run.data() + i + 1, '\0', static_cast<size_t>(bytes - i - 1)) : nullptr;
             check(nul != nullptr);
             i = static_cast<int32_t>(static_cast<const uint8_t*>(nul) - run.data()) + 1;
+        }
+        // a choice has a name for each of its steps, and nothing else has any
+        if (e.kind == CLOCKWORK_PARAM_CHOICE) {
+            check(e.min == 0.f && e.max < static_cast<float>(CLOCKWORK_PARAM_TEXT_RUN_BYTES));
+            check(values == static_cast<uint32_t>(e.max) + 1u);
+        } else {
+            check(values == 0u);
         }
     }
     check(live == h->count);

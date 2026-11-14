@@ -78,8 +78,11 @@ clockwork_fuzz_target(fuzz_params fuzz_params.cpp
     ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp)
 # Writes runs of frames a client really sends, as the seeds the target starts
 # from (corpus/params/seeds).
-# audio_processor.h includes emscripten's header, which the native builds shim.
-target_include_directories(fuzz_params PRIVATE ${CLOCKWORK_SRC}/native/NativeShim)
+# audio_processor.h includes emscripten's header, which the native builds shim;
+# the core's state holds a host's transport, whose arithmetic is the clock
+# crate's header.
+target_include_directories(fuzz_params PRIVATE ${CLOCKWORK_SRC}/native/NativeShim
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../rust/clockwork-clock/cpp)
 add_executable(params_seeds params_seeds.cpp)
 target_include_directories(params_seeds PRIVATE ${CLOCKWORK_SRC})
 
