@@ -24,6 +24,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <stop_token>
 
@@ -35,7 +36,14 @@ public:
     }
 
     void sleepUntilNs(int64_t deadlineNs, const std::stop_token& stop) override {
-        const std::stop_callback wake(stop, [this] { mCv.notify_all(); });
+        // The stop is not said under the lock, so its wake takes the lock
+        // first: a thread that has looked and is about to sleep is asleep
+        // before the wake is sent, and one that looks later sees the stop.
+        // Sent without it, a wake between the look and the sleep is lost.
+        const std::stop_callback wake(stop, [this] {
+            { const std::lock_guard<std::mutex> lk(mMutex); }
+            mCv.notify_all();
+        });
         std::unique_lock<std::mutex> lk(mMutex);
         mDeadline = deadlineNs;
         // Free-running: the deadline is now, and the driver goes straight on.
@@ -47,7 +55,11 @@ public:
         }
         mSleeping = true;
         mCv.notify_all();   // settle() may be waiting for exactly this
-        mCv.wait(lk, [&] { return (!mStalled && mNow >= deadlineNs) || stop.stop_requested(); });
+        mCv.wait(lk, [&] {
+            const bool wake = (!mStalled && mNow >= deadlineNs) || stop.stop_requested();
+            if (!wake && mGoingToSleep) mGoingToSleep();
+            return wake;
+        });
         // A stalled thread is let go only by a stop, and the stall ends with it:
         // the thread started in its place sleeps as a healthy one does.
         if (stop.stop_requested()) mStalled = false;
@@ -110,6 +122,14 @@ public:
                             [&] { return mSleeping && (mStalled || mDeadline > mNow); });
     }
 
+    // Called on the driver's thread each time it has looked and is about to
+    // sleep, with the pacer's lock held: for the case that pins what a stop
+    // arriving at that moment does. Set before the driver sleeps.
+    void onGoingToSleep(std::function<void()> f) {
+        const std::lock_guard<std::mutex> lk(mMutex);
+        mGoingToSleep = std::move(f);
+    }
+
     // How many times the driver has woken from a sleep.
     uint64_t wakes() {
         const std::lock_guard<std::mutex> lk(mMutex);
@@ -125,6 +145,7 @@ private:
     bool     mStalled  = false;
     bool     mSleeping = false;
     uint64_t mWakes    = 0;
+    std::function<void()> mGoingToSleep;
     // So the engine's times look like a wall clock's, as every reader expects.
     const double mOriginNtp = wallClockNTP();
 };

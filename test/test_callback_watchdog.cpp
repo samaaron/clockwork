@@ -29,6 +29,7 @@
 #include "clockwork_prefix.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -119,6 +120,46 @@ double dacNtp(EngineFixture& fix) {
 }
 
 } // namespace
+
+// The engine stops a stalled driver thread and then waits for it to end. A
+// stop that arrives when the thread has just looked and is about to sleep
+// must still wake it: missed, the thread sleeps for ever and so does whoever
+// waits for it (a hung case, with nothing said). The pacer is held at that
+// moment here, so the stop lands in it every time.
+TEST_CASE("FakePacer: a stop arriving as a stalled thread goes back to sleep still wakes it", "[Watchdog][pacer]") {
+    FakePacer pacer;
+    pacer.hold();
+    pacer.stall();
+    std::atomic<bool> armed{false}, atTheMoment{false}, stopSent{false}, woke{false};
+    pacer.onGoingToSleep([&] {
+        if (!armed.exchange(false)) return;
+        atTheMoment = true;
+        // Long enough for the stop to be sent while this thread has looked
+        // and not yet slept. A stop that waits for the sleep is let through
+        // when this gives up.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (!stopSent && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+    });
+    std::jthread sleeper([&](std::stop_token stop) {
+        pacer.sleepUntilNs(INT64_MAX, stop);
+        woke = true;
+    });
+    REQUIRE(pacer.settle());
+
+    const auto within = [](std::atomic<bool>& flag, int ms) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (!flag && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+        return flag.load();
+    };
+    armed = true;
+    pacer.advanceMs(50);                 // time passes: the stalled thread wakes, looks, and goes back to sleep
+    REQUIRE(within(atTheMoment, 2000));
+    sleeper.request_stop();
+    stopSent = true;
+    const bool woken = within(woke, 2000);
+    if (!woken) pacer.advanceMs(0);      // let it go, so the case ends and says so
+    CHECK(woken);
+}
 
 TEST_CASE("Watchdog: silent during normal operation", "[Watchdog]") {
     Watched w;
