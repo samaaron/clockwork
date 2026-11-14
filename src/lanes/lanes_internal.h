@@ -30,12 +30,12 @@
 extern "C" {
 #endif
 
-/* token is the origin sourceId the frame replies to (broadcasts ignore it).
+/* token is the origin the frame is written with (0 for one nobody asked for).
    False when the ring is full, or when len is more than a frame can carry
    (clockwork_egress_nrt_max_frame): the ring is a fixed size, and a frame
    has to be able to drain. Either refusal is counted
    (PerformanceMetrics::egress_frames_refused). */
-bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t token,
                          const uint8_t* osc, uint32_t len);
 
 /* The most OSC bytes one NRT egress frame of `core` carries: its ring's. */
@@ -95,7 +95,7 @@ struct RingPart;   // workers/RingBufferWriter.h
 // clockwork_egress_nrt_write with the OSC laid down from `parts` end to end,
 // nothing gathered first: for a frame made of pieces held apart. The same
 // refusals, counted the same.
-bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
                                       const RingPart* parts, uint32_t n_parts);
 
 // clockwork_ingress_write, saying which of its two refusals it made: full (a

@@ -30,9 +30,10 @@
  * (clockwork_event_route) sends them out over the egress to the subsystem's
  * subscribers and hands them to the guest if it asked (DspInfo::wants_events)
  * — so a client or a guest hears an event the same way whichever side
- * produced it. On the web the one client hears every egress frame, so the
- * subscription rule is kept here: an event that comes back before the client
- * subscribed is dropped, as the native transport would not have sent it.
+ * produced it. Whether the client asked for a subsystem's events is the
+ * core's to keep, on the web as everywhere (clockwork_client_wants, lanes.h):
+ * the route writes an event out only while the client has, so the front
+ * takes no event coming back.
  */
 import { clockworkSys, isClockworkSys } from "./clockwork_sys.js";
 import * as oscFast from "./osc_fast.js";
@@ -93,8 +94,6 @@ export class HostFront {
     this._gamepad = null;
     this._midiError = null;
     this._gamepadError = null;
-    this._midiSubscribed = false;
-    this._gamepadSubscribed = false;
   }
 
   get midi() { return this._midi; }
@@ -152,8 +151,6 @@ export class HostFront {
     this._gamepad = null;
     this._midiError = null;
     this._gamepadError = null;
-    this._midiSubscribed = false;
-    this._gamepadSubscribed = false;
   }
 
   /**
@@ -165,7 +162,7 @@ export class HostFront {
    * else on the egress has that shape.
    */
   take(oscData) {
-    if (!oscFast.isBundle(oscData)) return this._takeEvent(oscData);
+    if (!oscFast.isBundle(oscData)) return false;
     if (oscData.length < 20) return false;
     const view = new DataView(oscData.buffer, oscData.byteOffset, oscData.byteLength);
     const size = view.getUint32(16, false);
@@ -180,22 +177,6 @@ export class HostFront {
     const whenMs = timetagToPerfMs(when);   // undefined: immediately
     this._handle(address, msg.slice(1), element, whenMs);
     return true;
-  }
-
-  // An event coming back off the egress (clockwork_event_route): the
-  // client's to hear if it subscribed to that subsystem, dropped if not.
-  // Cheap: only the address is read, and only under the two prefixes.
-  _takeEvent(oscData) {
-    if (oscData[0] !== 0x2f) return false;
-    let end = 0;
-    while (end < oscData.length && oscData[end] !== 0) end++;
-    if (end > 48) return false;   // longer than any event address
-    const address = String.fromCharCode.apply(null, oscData.subarray(0, end));
-    const isMidi = address.startsWith(MIDI_PREFIX + "in/") || address === clockworkSys("midi/ports");
-    const isPad = address.startsWith(GAMEPAD_PREFIX + "in/") || address === clockworkSys("gamepad/devices");
-    if (isMidi) return !this._midiSubscribed;
-    if (isPad) return !this._gamepadSubscribed;
-    return false;
   }
 
   _handle(address, args, element, whenMs) {
@@ -236,11 +217,11 @@ export class HostFront {
       case "refresh":
         return m.refresh();
       case "notify/subscribe":
-        this._midiSubscribed = true;
-        this._deliver(m.portsReply());   // the snapshot a new subscriber gets
+        // The core turned the client's switch as the verb passed
+        // (clockwork_wants_route); what is there now is the front's to say.
+        this._deliver(m.portsReply());
         return this._ack(clockworkSys("midi/notify/subscribe.reply"), args);
       case "notify/unsubscribe":
-        this._midiSubscribed = false;
         return;
       case "sink/send": {
         // A GUEST'S send: the engine's sink endpoint on the web is this
@@ -286,11 +267,9 @@ export class HostFront {
       case "refresh":
         return g.refresh();
       case "notify/subscribe":
-        this._gamepadSubscribed = true;
         this._deliver(g.devicesReply());
         return this._ack(clockworkSys("gamepad/notify/subscribe.reply"), args);
       case "notify/unsubscribe":
-        this._gamepadSubscribed = false;
         return;
       default:
         if (verb.startsWith("out/")) {

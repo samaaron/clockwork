@@ -109,18 +109,16 @@ void log(const char* fmt, ...) {
 
 // ── Where the answers go ─────────────────────────────────────────────────────
 // Every reply, broadcast and debug line is one frame on the OUT ring: the
-// egress route first, then the OSC, with the origin token as the frame's
-// sourceId. RingBufferWriter takes one contiguous buffer, so the two parts
-// are joined in a per-thread scratch first.
+// OSC, with the origin token as the frame's sourceId.
 class RingEmit final : public TrackVerbs::Emit {
 public:
     explicit RingEmit(Header* h, uint8_t* ring) : mHeader(h), mRing(ring) {}
 
     void reply(uint32_t token, const uint8_t* osc, uint32_t len) override {
-        put(EGRESS_REPLY, token, osc, len);
+        put(token, osc, len);
     }
     void broadcast(const uint8_t* osc, uint32_t len) override {
-        put(EGRESS_BROADCAST_NOTIFY, BRIDGE_ORIGIN_TOKEN, osc, len);
+        put(BRIDGE_ORIGIN_TOKEN, osc, len);
     }
     // The bridge is its own process and holds no arena: it cannot read the
     // guest instance's generation, so a refusal from here says 0, "none
@@ -133,20 +131,14 @@ public:
     void debug(const std::string& line) override {
         std::array<char, 1024> pkt{};
         const uint32_t n = clockwork::buildDebugOsc(pkt.data(), line.data(), static_cast<uint32_t>(line.size()));
-        put(EGRESS_BROADCAST_NOTIFY, BRIDGE_ORIGIN_TOKEN,
-            reinterpret_cast<const uint8_t*>(pkt.data()), n);
+        put(BRIDGE_ORIGIN_TOKEN, reinterpret_cast<const uint8_t*>(pkt.data()), n);
     }
 
 private:
-    void put(uint32_t route, uint32_t token, const uint8_t* osc, uint32_t len) {
-        thread_local std::vector<uint8_t> scratch;
-        scratch.resize(sizeof(uint32_t) + len);
-        std::memcpy(scratch.data(), &route, sizeof route);
-        std::memcpy(scratch.data() + sizeof(uint32_t), osc, len);
+    void put(uint32_t token, const uint8_t* osc, uint32_t len) {
         MsgRing& r = mHeader->out;
         if (!RingBufferWriter::write(mRing, clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, &r.sequence,
-                                     &r.write_lock, scratch.data(),
-                                     static_cast<uint32_t>(scratch.size()), token))
+                                     &r.write_lock, osc, len, token))
             r.dropped.fetch_add(1, std::memory_order_relaxed);
     }
 

@@ -918,7 +918,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // rest of the layout works: shared_memory is the public segment when there
     // is one and the core's own arena when there is not, so
     // metrics, the taps and the node-tree window are there either way. An
-    // engine embedded with no UDP port still has a client — the host
+    // engine embedded with no command transport still has a client — the host
     // application, in this process, reading in place — and a plugin's GUI
     // reads what the guest publishes through the returns area.
     // Sized by the host's config, like the segment's lanes; untouched here,
@@ -1052,8 +1052,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                             mCommandCreator->wake_event());
     // The egress rings' consumer is EITHER this pass or the host
     // (Config::hostDrainsEgress). Draining here goes through the client API
-    // like any client's would — one poll, both rings — and routes through
-    // the same table a host uses (EgressRouter.h). The off-audio-thread
+    // like any client's would — one poll, both rings — and hands each frame
+    // on by the rule a host uses (EgressRouter.h). The off-audio-thread
     // heap maintenance (interceptBufferFreed) runs here either way, since a
     // host that drains does not call it.
     if (cfg.hostDrainsEgress) {
@@ -1074,6 +1074,14 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     mNrtGateway.addTask([this]() {
         auto* plane = mPeerPlane.load(std::memory_order_acquire);
         if (!plane) return;
+        // Another peer has taken the plane (each attach counts itself,
+        // shm_peer_plane.h): the last one is gone, and what it asked to be
+        // told with it (lanes.h). Before the drain, so what the new peer
+        // asks for is its own.
+        if (const uint32_t claim = plane->generation.load(std::memory_order_acquire); claim != mPeerClaim) {
+            mPeerClaim = claim;
+            clockwork_client_gone(mCore);
+        }
         constexpr uint32_t kPeerDrainMaxFrames = 256;
         ClockworkDrainStop stop = ClockworkDrainStop::Empty;
         clockwork_drain_ring(
@@ -1095,7 +1103,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                         return ClockworkDrainVerdict::Retain;
                     clockwork_sys_refuse(d, n, mark->reason, mark->generation,
                         [core = mCore](const uint8_t* r, uint32_t rn) {
-                            clockwork_egress_nrt_write(core, EGRESS_REPLY, SHM_PEER_ORIGIN_TOKEN, r, rn);
+                            clockwork_egress_nrt_write(core, SHM_PEER_ORIGIN_TOKEN, r, rn);
                         });
                     return ClockworkDrainVerdict::Consume;
                 }
@@ -1368,7 +1376,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             std::array<char, 64> buf{};
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << bpm << osc::EndMessage;
-            egr->broadcastLinkNotify(
+            egr->broadcastClockNotify(
                 reinterpret_cast<const uint8_t*>(s.Data()),
                 static_cast<uint32_t>(s.Size()));
         });
@@ -1379,7 +1387,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers"))
               << static_cast<int32_t>(n) << osc::EndMessage;
-            egr->broadcastLinkNotify(
+            egr->broadcastClockNotify(
                 reinterpret_cast<const uint8_t*>(s.Data()),
                 static_cast<uint32_t>(s.Size()));
         });
@@ -1393,7 +1401,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
               << static_cast<int32_t>(playing ? 1 : 0)
               << static_cast<osc::int64>(std::llround(atNtp * 1e6))
               << osc::EndMessage;
-            egr->broadcastLinkNotify(
+            egr->broadcastClockNotify(
                 reinterpret_cast<const uint8_t*>(s.Data()),
                 static_cast<uint32_t>(s.Size()));
         });
@@ -1635,9 +1643,8 @@ void ClockworkEngine::shutdown() {
 // keeping.
 
 void ClockworkEngine::sendOSC(const uint8_t* data, uint32_t size) {
-    // The in-process entry point: origin 0 = an anonymous in-process caller,
-    // assigned explicitly here (every entry point mints its own origin — UDP
-    // interns the sender on recv).
+    // The in-process entry point: origin 0, a caller that does not tell its
+    // answers apart. One that does sends through ingest with a token.
     ingest(data, size, 0);
 }
 
@@ -1787,8 +1794,7 @@ void ClockworkEngine::drainEgressNow() {
     for (;;) {
         const uint32_t n = clockwork_client_poll(client, batch.data(), batch.size());
         for (uint32_t i = 0; i < n; ++i)
-            mEgress.dispatchEgress(batch[i].origin, batch[i].route,
-                                   batch[i].bytes, batch[i].length);
+            mEgress.dispatchEgress(batch[i].bytes, batch[i].length);
         if (n < batch.size()) break;
     }
 }
@@ -2512,7 +2518,7 @@ void ClockworkEngine::broadcastReopenDone(bool success, const std::string& devic
 void ClockworkEngine::sendSwitchDone(const SwapResult& result,
                                       const std::string& requestedOutput,
                                       const std::string& requestedInput) {
-    if (!mEgress.hasSubscribers()) return;
+    if (!mEgress.wanted(CLOCKWORK_WANTS_NOTIFY)) return;
 
     // Wire format (all fields present on every emit):
     //   success(int32),
@@ -2537,7 +2543,7 @@ void ClockworkEngine::sendSwitchDone(const SwapResult& result,
 }
 
 void ClockworkEngine::sendDeviceReport(Report when) {
-    if (!mEgress.hasSubscribers()) return;
+    if (!mEgress.wanted(CLOCKWORK_WANTS_NOTIFY)) return;
     // Serialise session access against device mutations / recovery's
     // recreate. Recursive: the mutation paths call this while holding the gate.
     std::lock_guard<std::recursive_timed_mutex> gate(mSwapMutex);

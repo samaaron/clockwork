@@ -29,6 +29,7 @@
 #include "FakeAudioDevice.h"
 #include "RestartModel.h"
 #include "ShmTransport.h"
+#include <atomic>
 #include "clockwork_arena.h"
 #include "clockwork_client.h"
 #include "lanes/lanes.h"   // clockwork_arena_header: the generation word
@@ -80,35 +81,18 @@ const char* readerName(Reader r) {
 
 constexpr int kBiggerBuffer = 512;
 
-// What a host serving a peer on the segment gives the engine: the peer's
-// transport for the peer's token, and the engine's own callbacks beside it
-// for every other — the fixture's reader among them.
-class PeerBeside : public IOscTransport {
+// One client at a time: the fixture, which boots the engine and hears its
+// first ping answered, and then the peer once it has attached to the plane.
+class FixtureThenPeer : public IOscTransport {
 public:
-    explicit PeerBeside(ClockworkEngine& e) : mOwn(&e.onReply, &e.onReplyRouted) {}
+    explicit FixtureThenPeer(ClockworkEngine& e) : mOwn(&e.onReply) {}
     ShmTransport peer;
-
-    bool send(uint32_t t, const uint8_t* d, uint32_t n, bool net) override {
-        return t == SHM_PEER_ORIGIN_TOKEN ? peer.send(t, d, n, net) : mOwn.send(t, d, n, net);
-    }
-    uint32_t broadcastNotify(const uint8_t* d, uint32_t n) override { return peer.broadcastNotify(d, n) + mOwn.broadcastNotify(d, n); }
-    uint32_t broadcastLink(const uint8_t* d, uint32_t n) override { return peer.broadcastLink(d, n); }
-    bool hasNotifySubscribers() const override { return peer.hasNotifySubscribers() || mOwn.hasNotifySubscribers(); }
-    bool subscribeNotify(uint32_t t) override { return of(t).subscribeNotify(t); }
-    void unsubscribeNotify(uint32_t t) override { of(t).unsubscribeNotify(t); }
-    void clearNotify() override { peer.clearNotify(); mOwn.clearNotify(); }
-    bool subscribeLink(uint32_t t) override { return of(t).subscribeLink(t); }
-    void unsubscribeLink(uint32_t t) override { of(t).unsubscribeLink(t); }
-    uint32_t broadcastMidi(const uint8_t* d, uint32_t n) override { return peer.broadcastMidi(d, n) + mOwn.broadcastMidi(d, n); }
-    bool subscribeMidi(uint32_t t) override { return of(t).subscribeMidi(t); }
-    void unsubscribeMidi(uint32_t t) override { of(t).unsubscribeMidi(t); }
-    uint32_t broadcastGamepad(const uint8_t* d, uint32_t n) override { return peer.broadcastGamepad(d, n) + mOwn.broadcastGamepad(d, n); }
-    bool subscribeGamepad(uint32_t t) override { return of(t).subscribeGamepad(t); }
-    void unsubscribeGamepad(uint32_t t) override { of(t).unsubscribeGamepad(t); }
+    void attach() { mPeerIsClient = true; }
+    bool deliver(const uint8_t* d, uint32_t n) override { return mPeerIsClient ? peer.deliver(d, n) : mOwn.deliver(d, n); }
 
 private:
-    IOscTransport& of(uint32_t t) { return t == SHM_PEER_ORIGIN_TOKEN ? static_cast<IOscTransport&>(peer) : mOwn; }
     CallbackTransport mOwn;
+    std::atomic<bool> mPeerIsClient{ false };
 };
 
 // A cell: an engine on fake devices, the reader, and what the reader heard.
@@ -132,7 +116,7 @@ public:
             cfg.shmSegment     = true;   // the public segment, and its plane
             cfg.shmCommands = true;
             mFix = std::make_unique<EngineFixture>(cfg, [this](ClockworkEngine& e) {
-                mTransport = std::make_unique<PeerBeside>(e);
+                mTransport = std::make_unique<FixtureThenPeer>(e);
                 e.setTransport(mTransport.get());
             });
         } else {
@@ -313,6 +297,7 @@ private:
     void attachPeer() {
         mTransport->peer.bindPlaneSlot(engine().peerPlaneSlot());
         REQUIRE(mTransport->peer.ready());
+        mTransport->attach();
         mSegment = std::make_unique<shm_command_client>(
             detail_shm_segment::shm_dup_handle(engine().shmCommandHandle()));
         mPlane = mSegment->get_peer_plane();
@@ -336,7 +321,7 @@ private:
     Reader                              mReader;
     Event                               mEvent;
     std::shared_ptr<FakeSystem>         mSys;
-    std::unique_ptr<PeerBeside>         mTransport;   // outlives the engine that sends through it
+    std::unique_ptr<FixtureThenPeer>    mTransport;   // outlives the engine that sends through it
     std::unique_ptr<EngineFixture>      mFix;
     std::unique_ptr<shm_command_client> mSegment;
     ShmPeerPlaneHeader*                 mPlane = nullptr;

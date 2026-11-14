@@ -366,20 +366,20 @@ TEST_CASE("DeviceEvents: the device list changing while recovery rebuilds the "
     }
     stop = true;
     os.join();
-    // The device is back, and the OS says so. The OS thread's last report
-    // may have said "gone" and still be in flight; a reopen on it finds no
-    // device and goes idle, and with no watchdog in this config only the
-    // next OS report brings the engine back. So report once more here.
     speakers->hidden = false;
-    sys->reportListChanged();
 
     INFO("reports=" << reports.load() << " recoveries=" << recoveries);
     CHECK(reports.load() > 0);
     CHECK(recoveries > 0);
 
-    // And the engine is still answering.
+    // The OS thread's last report may have hidden the device. A recovery then
+    // finds no device and leaves the engine idle, and this config has no
+    // watchdog, so only another report brings the engine back. A report sent
+    // while a recovery rebuilds the session goes nowhere, because the fake has
+    // no live driver then, so send one on every attempt.
     OscReply reply;
     const bool answered = fix.pollUntil([&] {
+        sys->reportListChanged();
         fix.send(osc_test::message("/dummy/ping"));
         return fix.waitForReply("/dummy/pong", reply, 200);
     }, 10000);

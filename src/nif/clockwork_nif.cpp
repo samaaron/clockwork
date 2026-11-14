@@ -53,9 +53,8 @@ static uint32_t g_last_generation = 0;
 // The product's front, when it has one (clockwork_nif_front.h): published and
 // unpublished with g_engine, under the same lock.
 static std::unique_ptr<OscFront> g_front;
-// The BEAM is one client of the engine, and this is its token: non-zero, so the
-// engine answers it directly (a reply to the sender, where 0 would be a
-// broadcast to the notify audience), and a front is offered those replies.
+// The BEAM is the engine's client, and this is the token its messages carry
+// and its answers bring back.
 static constexpr uint32_t kBeamToken = 1;
 
 // ─── Subscriber registry ────────────────────────────────────────────────────
@@ -66,12 +65,11 @@ static constexpr uint32_t kBeamToken = 1;
 // detected lazily — enif_send returns 0 — and only that pid is dropped, never the
 // whole audience.
 //
-// notifyTokens/linkSubscribed mirror the transport's subscriber gates
-// so the engine knows whether to bother emitting device- and Link-notify traffic;
-// they don't change WHO receives (always the registered pids), only WHETHER the
-// engine produces the optional broadcasts. Touched from BEAM scheduler threads
-// (register/clear), the lifecycle worker (clear on stop) and the NRT gateway
-// thread (deliver), so all access is locked.
+// What the BEAM asked to be told (the timeline's notices, MIDI, controllers,
+// outside OSC) is the core's to keep (lanes.h, clockwork_client_wants): the
+// pids are WHO receives, never WHETHER a notice is written. Touched from
+// BEAM scheduler threads (register/clear), the lifecycle worker (clear on
+// stop) and the NRT gateway thread (deliver), so all access is locked.
 // What a fan-out did: the pids it reached, and the ones it did not.
 struct Fanout {
     uint32_t reached = 0;
@@ -81,11 +79,6 @@ struct Fanout {
 struct Subscribers {
     mutable std::mutex   mutex;
     std::vector<ErlNifPid> pids;
-    std::set<uint32_t>   notifyTokens;   // gates hasNotifySubscribers()
-    bool                 linkSubscribed = false;
-    bool                 midiSubscribed = false;
-    bool                 gamepadSubscribed = false;
-    bool                 oscSubscribed = false;
 
     void addPid(const ErlNifPid& p) {
         std::lock_guard<std::mutex> lk(mutex);
@@ -100,11 +93,6 @@ struct Subscribers {
     void clear() {
         std::lock_guard<std::mutex> lk(mutex);
         pids.clear();
-        notifyTokens.clear();
-        linkSubscribed = false;
-        midiSubscribed = false;
-        gamepadSubscribed = false;
-        oscSubscribed = false;
     }
 
     // Frame {osc_reply, <<bytes>>} and fan out to every registered pid.
@@ -159,108 +147,18 @@ static Subscribers g_subs;
 //
 // The BEAM analogue of StreamOscTransport: an IOscTransport injected into the engine
 // (via setTransport) so the NIF is a first-class peer, not a shared-memory
-// observer. Unlike CallbackTransport it delivers Link broadcasts and the
-// networkOnly Link snapshot — a BEAM client can only see what enif_send hands
-// it. The NRT gateway is the sole caller of these methods, but
-// the subscriber registry it forwards to is locked (BEAM threads mutate it).
+// observer. The NRT gateway is the sole caller of deliver, but the pids it
+// forwards to are locked (BEAM threads mutate them).
 class NifTransport : public IOscTransport {
 public:
     explicit NifTransport(Subscribers* subs) : mSubs(subs) {}
 
-    // The token is always kBeamToken; the audience is the registered pids.
-    // networkOnly is ignored: the NIF is a real peer, so Link snapshots ship.
-    // A reply reached its caller if it reached any pid: every one of them is
-    // the caller. A broadcast missed each pid it did not reach.
-    bool send(uint32_t, const uint8_t* data, uint32_t size, bool /*networkOnly*/) override {
-        return mSubs->deliverOscReply(data, size).reached > 0;
+    // To every registered pid: each is the one client's own receiver, and a
+    // frame missed the client when it missed any of them.
+    bool deliver(const uint8_t* data, uint32_t size) override {
+        return mSubs->deliverOscReply(data, size).missed == 0;
     }
-    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override {
-        return mSubs->deliverOscReply(data, size).missed;
-    }
-    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override {
-        return broadcastIf(mSubs->linkSubscribed, data, size);
-    }
-
-    bool hasNotifySubscribers() const override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        return !mSubs->notifyTokens.empty();
-    }
-    bool subscribeNotify(uint32_t token) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        return mSubs->notifyTokens.insert(token).second;
-    }
-    void unsubscribeNotify(uint32_t token) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->notifyTokens.erase(token);
-    }
-    void clearNotify() override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->notifyTokens.clear();
-    }
-
-    // A BEAM caller is addressable (unlike a pure in-process observer), so Link
-    // notify is supported; delivery is gated on linkSubscribed in broadcastLink.
-    bool subscribeLink(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->linkSubscribed = true;
-        return true;
-    }
-    void unsubscribeLink(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->linkSubscribed = false;
-    }
-
-    // MIDI notify: a BEAM caller is addressable; delivery is gated
-    // on midiSubscribed.
-    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override {
-        return broadcastIf(mSubs->midiSubscribed, data, size);
-    }
-    bool subscribeMidi(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->midiSubscribed = true;
-        return true;
-    }
-    void unsubscribeMidi(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->midiSubscribed = false;
-    }
-
-    // Gamepad notify: same shape as the MIDI audience.
-    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override {
-        return broadcastIf(mSubs->gamepadSubscribed, data, size);
-    }
-    bool subscribeGamepad(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->gamepadSubscribed = true;
-        return true;
-    }
-    void unsubscribeGamepad(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->gamepadSubscribed = false;
-    }
-
-    // OSC cues heard by the cue server (/external-osc-cue), once a process
-    // has subscribed (/clockwork/osc/notify/subscribe).
-    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override {
-        return broadcastIf(mSubs->oscSubscribed, data, size);
-    }
-    bool subscribeOsc(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->oscSubscribed = true;
-        return true;
-    }
-    void unsubscribeOsc(uint32_t) override {
-        std::lock_guard<std::mutex> lk(mSubs->mutex);
-        mSubs->oscSubscribed = false;
-    }
-
 private:
-    // An audience gated on its flag: missed only by the pids it was meant for.
-    uint32_t broadcastIf(const bool& subscribed, const uint8_t* data, uint32_t size) {
-        bool wanted;
-        { std::lock_guard<std::mutex> lk(mSubs->mutex); wanted = subscribed; }
-        return wanted ? mSubs->deliverOscReply(data, size).missed : 0;
-    }
 
     Subscribers* mSubs;
 };

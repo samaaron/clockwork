@@ -371,7 +371,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
             // whether this call newly registered the caller: gating the ack
             // on "newly registered" would time out every confirm after the
             // first untokened subscribe.
-            mEgress->subscribeCallerToLinkNotify(token);
+            mEgress->want(CLOCKWORK_WANTS_CLOCK, true);
             ackSubscribeIfTokened(mEgress, token, data, size,
                                   CLOCKWORK_SYS("clock/notify/subscribe.reply"));
             const double initTempo = mClockworkClock->getBpm();
@@ -381,7 +381,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << initTempo
                   << osc::EndMessage;
-                mEgress->sendToCaller(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                                    static_cast<uint32_t>(s.Size()));
             }
             {
@@ -389,14 +389,14 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* d
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers")) << initPeers
                   << osc::EndMessage;
-                mEgress->sendToCaller(token, reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                                    static_cast<uint32_t>(s.Size()));
             }
             return true;
         }
 
         if (std::strcmp(addr, CLOCKWORK_SYS("clock/notify/unsubscribe")) == 0) {
-            mEgress->unsubscribeCallerFromLinkNotify(token);
+            mEgress->want(CLOCKWORK_WANTS_CLOCK, false);
             return true;
         }
 
@@ -496,7 +496,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             // virtual drivers like Voicemeeter installed) in the path of the
             // client's boot handshake. Clients that want the
             // device list ask for it with /clockwork/devices/report.
-            mEgress->subscribeCaller(token);
+            mEgress->want(CLOCKWORK_WANTS_NOTIFY, true);
             std::array<char, 128> buf{};
             osc::OutboundPacketStream s(buf.data(), buf.size());
             s << osc::BeginMessage(CLOCKWORK_SYS("notify.reply"))
@@ -513,14 +513,10 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("notify/unregister")) == 0) {
-            // Remove the caller from notify targets (polite shutdown).
-            mEgress->unsubscribeCaller(token);
+            // The client no longer asks for the engine's lifecycle.
+            mEgress->want(CLOCKWORK_WANTS_NOTIFY, false);
             return true;
 
-        } else if (std::strcmp(addr, CLOCKWORK_SYS("notify/clear")) == 0) {
-            // Remove all notify targets (used before a client restart).
-            mEgress->clearSubscribers();
-            return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/list")) == 0) {
             // Device questions are answered on the device lane, never here: the
@@ -664,10 +660,11 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t*
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/report")) == 0) {
-            // Register the caller for /clockwork/devices pushes: the same
-            // audience as /clockwork/notify. The integer argument (a reply
-            // port, for a UDP command port) is accepted and ignored.
-            mEgress->subscribeCaller(token);
+            // The client asks for /clockwork/devices pushes: the switch
+            // /clockwork/notify turns. An integer argument is accepted and
+            // ignored (a client written for a datagram command port named
+            // its reply port there).
+            mEgress->want(CLOCKWORK_WANTS_NOTIFY, true);
             // listDevices() is the ~10 s Windows COM probe — never inline here.
             mEngine->postDeviceTask([this] { mEngine->sendDeviceReport(); });
             return true;

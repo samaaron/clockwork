@@ -83,9 +83,8 @@ bool waitFor(const std::function<bool()>& pred, int ms) {
 
 // A received OSC message, decoded enough to assert on.
 struct Msg {
-    uint32_t route = 0;
     uint32_t token = 0;
-    uint32_t len = 0;      // the whole frame, [route][osc], as the out ring held it
+    uint32_t len = 0;      // the whole frame, as the out ring held it
     std::string addr;
     std::vector<std::string> strs;
     std::vector<int32_t> ints;
@@ -199,15 +198,14 @@ struct Engine {
         MsgRing& r = h->out;
         clockwork_drain_ring(out_ring(seg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, outDrain, ClockworkDrainMetrics{}, 0,
             [&](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
-                if (len <= sizeof(uint32_t)) return ClockworkDrainVerdict::Consume;
+                if (len == 0) return ClockworkDrainVerdict::Consume;
                 Msg m;
                 m.token = token;
                 m.len = len;
-                std::memcpy(&m.route, payload, sizeof m.route);
                 try {
                     osc::ReceivedMessage msg(osc::ReceivedPacket(
-                        reinterpret_cast<const char*>(payload + 4),
-                        static_cast<osc::osc_bundle_element_size_t>(len - 4)));
+                        reinterpret_cast<const char*>(payload),
+                        static_cast<osc::osc_bundle_element_size_t>(len)));
                     m.addr = msg.AddressPattern();
                     for (auto it = msg.ArgumentsBegin(); it != msg.ArgumentsEnd(); ++it) {
                         if (it->IsString()) m.strs.push_back(it->AsStringUnchecked());
@@ -295,7 +293,6 @@ TEST_CASE("the bridge joins the segment and renders what it is sent", "[plugin][
     // The join announces what it has: nothing.
     Msg m;
     REQUIRE(e.await(CLOCKWORK_SYS("track/list"), BRIDGE_ORIGIN_TOKEN, m));
-    REQUIRE(m.route == EGRESS_BROADCAST_NOTIFY);
 
     e.trackWithGain();
 

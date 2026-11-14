@@ -44,18 +44,19 @@ bool GamepadControl::handleGamepadCommand(const DrainCallCtx& meta, const uint8_
     // Hold the origin for synchronous emitCb REPLYs during this call (see header).
     mReplyToken = token;
 
-    // Subscription drives the egress audience (owned by the transport). The
-    // address is the leading, NUL-terminated OSC string.
+    // The client's switch for the kind (lanes.h), turned here: these verbs
+    // reach the control thread by the control ring. The address is the
+    // leading, NUL-terminated OSC string.
     const char* addr = reinterpret_cast<const char*>(data);
     if (std::strcmp(addr, CLOCKWORK_SYS("gamepad/notify/subscribe")) == 0) {
-        if (mEgress && mEgress->subscribeCallerToGamepadNotify(token) && mGamepad)
-            clockwork_gamepad_emit_devices(mGamepad);  // devices snapshot to the new subscriber
+        if (mEgress && mEgress->want(CLOCKWORK_WANTS_GAMEPAD, true) && mGamepad)
+            clockwork_gamepad_emit_devices(mGamepad);  // the devices there now, when it newly asks
         ackSubscribeIfTokened(mEgress, token, data, size,
                               CLOCKWORK_SYS("gamepad/notify/subscribe.reply"));
         return true;
     }
     if (std::strcmp(addr, CLOCKWORK_SYS("gamepad/notify/unsubscribe")) == 0) {
-        if (mEgress) mEgress->unsubscribeCallerFromGamepadNotify(token);
+        if (mEgress) mEgress->want(CLOCKWORK_WANTS_GAMEPAD, false);
         return true;
     }
 

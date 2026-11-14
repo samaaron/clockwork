@@ -60,7 +60,7 @@ extern "C" {
 
 namespace {
 
-constexpr uint32_t kClient = 0x5eed;   // not 0: 0 is the broadcast route
+constexpr uint32_t kClient = 0x5eed;   // not 0: an answer is told from a notice by its origin
 
 const lanes_test::EgressFrame* findAddress(
     const std::vector<lanes_test::EgressFrame>& frames, const char* address) {

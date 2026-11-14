@@ -12,7 +12,7 @@
  * and the sender hears scsynth's /done. That is a client's job, and this is
  * the seam a client is given to do it — the engine is not told.
  *
- * A front sees every packet in and every reply out, on the threads that
+ * A front sees every packet in and every frame out, on the threads that
  * carry them (a transport's receive thread; the NRT gateway), and says for
  * each whether it took it. It may call engine.ingest and the transport's
  * send from threads of its own. What it must not do is touch the audio
@@ -40,42 +40,25 @@ public:
     // A packet from a client, before the engine sees it. True: taken.
     virtual bool ingress(const uint8_t* data, uint32_t size, uint32_t token) = 0;
 
-    // A reply from the engine to `token`, before the transport sends it.
-    // True: taken (the front may have sent something else in its place).
-    virtual bool egress(uint32_t token, const uint8_t* data, uint32_t size) = 0;
+    // A frame from the engine for the client, before the transport delivers
+    // it. True: taken (the front may have sent something else in its place).
+    virtual bool egress(const uint8_t* data, uint32_t size) = 0;
 
     // One line for the boot log.
     virtual const char* describe() const = 0;
 };
 
-// The transport with a front in front of it: every send is offered to the
-// front first; everything else goes straight through.
+// The transport with a front in front of it: every frame is offered to the
+// front first.
 class FrontedTransport final : public IOscTransport {
 public:
     void attach(IOscTransport* inner, OscFront* front) { mInner = inner; mFront = front; }
     void detachFront() { mFront = nullptr; }
 
-    bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override {
-        if (mFront && mFront->egress(token, data, size)) return true;
-        return mInner && mInner->send(token, data, size, networkOnly);
+    bool deliver(const uint8_t* data, uint32_t size) override {
+        if (mFront && mFront->egress(data, size)) return true;
+        return mInner && mInner->deliver(data, size);
     }
-    uint32_t broadcastNotify(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastNotify(d, n) : 0; }
-    uint32_t broadcastLink(const uint8_t* d, uint32_t n) override   { return mInner ? mInner->broadcastLink(d, n) : 0; }
-    bool hasNotifySubscribers() const override { return mInner && mInner->hasNotifySubscribers(); }
-    bool subscribeNotify(uint32_t t) override   { return mInner && mInner->subscribeNotify(t); }
-    void unsubscribeNotify(uint32_t t) override { if (mInner) mInner->unsubscribeNotify(t); }
-    void clearNotify() override                 { if (mInner) mInner->clearNotify(); }
-    bool subscribeLink(uint32_t t) override     { return mInner && mInner->subscribeLink(t); }
-    void unsubscribeLink(uint32_t t) override   { if (mInner) mInner->unsubscribeLink(t); }
-    uint32_t broadcastMidi(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastMidi(d, n) : 0; }
-    bool subscribeMidi(uint32_t t) override     { return mInner && mInner->subscribeMidi(t); }
-    void unsubscribeMidi(uint32_t t) override   { if (mInner) mInner->unsubscribeMidi(t); }
-    uint32_t broadcastGamepad(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastGamepad(d, n) : 0; }
-    bool subscribeGamepad(uint32_t t) override  { return mInner && mInner->subscribeGamepad(t); }
-    void unsubscribeGamepad(uint32_t t) override { if (mInner) mInner->unsubscribeGamepad(t); }
-    uint32_t broadcastOsc(const uint8_t* d, uint32_t n) override { return mInner ? mInner->broadcastOsc(d, n) : 0; }
-    bool subscribeOsc(uint32_t t) override      { return mInner && mInner->subscribeOsc(t); }
-    void unsubscribeOsc(uint32_t t) override    { if (mInner) mInner->unsubscribeOsc(t); }
 
 private:
     IOscTransport* mInner = nullptr;

@@ -48,12 +48,15 @@ TEST_CASE("/clockwork/midi/notify/subscribe pushes a ports snapshot", "[midi]") 
 TEST_CASE("an inbound MIDI event reaches the subscriber, whichever side produced it", "[midi]") {
     // A subsystem's callback writes its events into the IN ring; a host's
     // front on the web does the same. From there one audio-thread route
-    // sends them to the MIDI audience — so an event pushed in here looks, to
-    // a subscriber, exactly like one a port sent. The fixture's transport
-    // surfaces every broadcast, so the subscription is for the audience's
-    // sake and the assertion is on delivery.
+    // sends them to the client that asked — so an event pushed in here looks,
+    // to a subscriber, exactly like one a port sent.
     EngineFixture fx;
-    fx.send(osc_test::message("/clockwork/midi/notify/subscribe"));
+    // A full engine takes a subscribe on its control thread and an event on
+    // its audio thread, by different rings: the client has asked once the
+    // subscribe is answered, and an event sent before that may pass unasked.
+    fx.send(osc_test::message("/clockwork/midi/notify/subscribe", 7));
+    OscReply ack;
+    REQUIRE(fx.waitForReply("/clockwork/midi/notify/subscribe.reply", ack));
     fx.clearReplies();
 
     osc_test::Builder b;

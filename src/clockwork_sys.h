@@ -318,6 +318,12 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
 // audio_processor.cpp.
 bool clockwork_event_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len);
+// A subscribe verb a host's front answers (/clockwork/<kind>/notify/subscribe
+// and unsubscribe), on a host with no control thread: the client's switch
+// for the kind is the core's, turned here (lanes.h, clockwork_client_wants),
+// and the verb goes on as clockwork_host_forward_route sends it.
+bool clockwork_wants_route(void* routeCtx, const void* callCtx,
+                           const uint8_t* data, std::size_t len);
 // "/clockwork/asset/…": the hand-off of a committed assets slot to the guest
 // (dsp_api.h, "Assets"). Registered on the audio thread of every host, since
 // the guest is only ever reached from there.

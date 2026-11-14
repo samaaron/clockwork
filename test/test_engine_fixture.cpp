@@ -60,7 +60,7 @@ void loseOneUndelivered(EngineFixture& fix) {
 void loseOneRefused(EngineFixture& fix) {
     std::vector<uint8_t> tooBig(clockwork_egress_nrt_max_frame(fix.engine().core()) + 1, 0);
     tooBig[0] = '/';
-    REQUIRE_FALSE(clockwork_egress_nrt_write(fix.engine().core(), EGRESS_REPLY, 1, tooBig.data(),
+    REQUIRE_FALSE(clockwork_egress_nrt_write(fix.engine().core(), 1, tooBig.data(),
                                              static_cast<uint32_t>(tooBig.size())));
 }
 }  // namespace

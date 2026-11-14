@@ -74,7 +74,7 @@ test("a reader the host runs on a port of its own has one loop reading, however 
           onInit: (ctx) => { reader = new EgressReader(ctx.rings); },
           readMessages: () => {
             const messages = [];
-            reader?.poll(0, (bytes, origin, route, sequence) => messages.push({ oscData: bytes.slice(), sequence, timestamp: 0 }));
+            reader?.poll(0, (bytes, origin, sequence) => messages.push({ oscData: bytes.slice(), sequence, timestamp: 0 }));
             return messages;
           },
           postResults: (messages) => port.postMessage({ type: "messages", messages }),

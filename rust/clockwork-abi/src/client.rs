@@ -75,15 +75,10 @@ pub const CLOCKWORK_WAIT_FOREVER: u32 = 0xFFFF_FFFF;
 pub struct ClockworkClientMessage {
     pub bytes: *const u8,
     pub length: u32,
-    /// The origin it answers; 0 for a broadcast.
+    /// The origin the request it answers carried; 0 for one nobody asked for.
     pub origin: u32,
-    /// A `CLOCKWORK_ROUTE_*` word (the EgressRoute the engine sent it by).
-    pub route: u32,
     pub sequence: u32,
 }
-
-pub const CLOCKWORK_ROUTE_REPLY: u32 = 0;
-pub const CLOCKWORK_ROUTE_NOTIFY: u32 = 2;
 
 /// `ClockworkRegionId`. A newtype, as [`ClockworkStatus`] is.
 #[repr(transparent)]
@@ -233,6 +228,7 @@ extern "C" {
     pub fn clockwork_client_open_shm_peer(endpoint: *const c_char, secret: *const u8, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
     pub fn clockwork_client_open_shm_peer_handles(reader_handle: isize, command_handle: isize, wake_event: isize, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
     pub fn clockwork_client_open_memory(base: *mut c_void, bytes: u32, out_status: *mut ClockworkStatus) -> *mut ClockworkClient;
+    pub fn clockwork_client_core(c: *const ClockworkClient) -> *mut crate::lanes::ClockworkCore;
     pub fn clockwork_client_close(c: *mut ClockworkClient);
 
     pub fn clockwork_client_info(c: *mut ClockworkClient, out: *mut ClockworkClientInfo) -> ClockworkStatus;

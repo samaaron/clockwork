@@ -594,17 +594,8 @@ static_assert(clockwork::kDefaultLayout.guest_window_start % 16 == 0
 // Message frame (magic/length/sequence/sourceId) is defined in ring/ring.h.
 
 // Egress framing: every frame on both egress rings is
-// Message{sourceId = origin token} + [route:u32][osc].
-enum EgressRoute : uint32_t {
-    EGRESS_REPLY            = 0,  // reply to the origin token
-    EGRESS_SEND_TO_CALLER   = 1,  // reply to the origin token, network peers only
-    EGRESS_BROADCAST_NOTIFY = 2,  // fan out to all notify subscribers
-    EGRESS_BROADCAST_LINK   = 3,  // fan out to all Link subscribers
-    EGRESS_BROADCAST_MIDI   = 4,  // fan out to all MIDI-notify subscribers
-    EGRESS_BROADCAST_GAMEPAD = 5, // fan out to all gamepad-notify subscribers
-    EGRESS_BROADCAST_OSC    = 6,  // fan out to all external-OSC-cue subscribers
-};
-constexpr uint32_t EGRESS_ROUTE_SIZE = sizeof(uint32_t);  // leading route word
+// Message{sourceId = origin token} + [osc]. Everything on them is for the
+// one client.
 
 // Control pointers structure (4-byte aligned for atomics, padded to 56 bytes for 8-byte alignment)
 struct alignas(4) RingCursors {

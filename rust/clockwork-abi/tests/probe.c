@@ -63,8 +63,7 @@ int main(void) {
 
     S(ClockworkClientMessage);
     F(ClockworkClientMessage, bytes); F(ClockworkClientMessage, length);
-    F(ClockworkClientMessage, origin); F(ClockworkClientMessage, route);
-    F(ClockworkClientMessage, sequence);
+    F(ClockworkClientMessage, origin); F(ClockworkClientMessage, sequence);
 
     S(ClockworkRegion);
     F(ClockworkRegion, base); F(ClockworkRegion, bytes); F(ClockworkRegion, writable);

@@ -109,13 +109,13 @@ bool OscControl::handleOscCommand(const DrainCallCtx& meta, const uint8_t* data,
     const char* addr = reinterpret_cast<const char*>(data);
 
     if (std::strcmp(addr, CLOCKWORK_SYS("osc/notify/subscribe")) == 0) {
-        if (mEgress) mEgress->subscribeCallerToOscNotify(token);
+        if (mEgress) mEgress->want(CLOCKWORK_WANTS_OSC, true);
         ackSubscribeIfTokened(mEgress, token, data, size,
                               CLOCKWORK_SYS("osc/notify/subscribe.reply"));
         return true;
     }
     if (std::strcmp(addr, CLOCKWORK_SYS("osc/notify/unsubscribe")) == 0) {
-        if (mEgress) mEgress->unsubscribeCallerFromOscNotify(token);
+        if (mEgress) mEgress->want(CLOCKWORK_WANTS_OSC, false);
         return true;
     }
 

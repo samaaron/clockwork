@@ -4,7 +4,7 @@
  * OscEgress.h — deferred egress framing + dispatch (transport-agnostic).
  *
  * Producer calls (reply / broadcast / debug, from EngineControl, Link, device
- * and loader threads) frame the OSC, tagged with a route, into the NRT-out ring
+ * and loader threads) frame the OSC into the NRT-out ring
  * under a lock. The NRT gateway drains that ring and dispatches each message to
  * the injected IOscTransport (reply/broadcast/subscribe) — the only thing that
  * knows about sockets, pids or addresses. Debug rides the host's onDebug
@@ -18,14 +18,14 @@
 #include <functional>
 #include <string>
 
-#include "shared_memory.h"   // EgressRoute
 #include "ReplyChannel.h"
+#include "lanes/lanes.h"     // CLOCKWORK_WANTS_*
 
 class IOscTransport;
 
 class OscEgress {
 public:
-    // transport: the egress sink (replies/broadcasts/subscriber registry).
+    // transport: the egress sink (replies and pushes to the client).
     // onDebug: host log channel for /clockwork/debug.
     void init(IOscTransport*                                  transport,
               const std::function<void(const std::string&)>*  onDebug);
@@ -35,19 +35,20 @@ public:
 
 
     // ── Producer side: frame into the NRT-out ring (never delivers here) ──────
-    // reply/sendToCaller route to `token` (the origin threaded from the call ctx).
+    // An answer; `token` is the origin threaded from the call ctx.
     void reply(uint32_t token, const uint8_t* data, uint32_t size);
     // Answer the verb in `data` with "/clockwork/error <address> <reason>
     // <generation>", to the caller that sent it. The generation is the guest
     // instance's now, read off the arena (docs/RESTARTS.md), as every
     // statechange and setup below carries it.
     void refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason);
-    void sendToCaller(uint32_t token, const uint8_t* data, uint32_t size);
-    void broadcastToTargets(const uint8_t* data, uint32_t size);
-    void broadcastLinkNotify(const uint8_t* data, uint32_t size);
-    void broadcastMidiNotify(const uint8_t* data, uint32_t size);  // → /clockwork/midi/notify audience
-    void broadcastGamepadNotify(const uint8_t* data, uint32_t size);  // → /clockwork/gamepad/notify audience
-    void broadcastOscNotify(const uint8_t* data, uint32_t size);  // → /clockwork/osc/notify audience
+    // A notice of one kind, for the client: written only while it has asked
+    // for that kind (lanes.h, clockwork_client_wants).
+    void broadcastToTargets(const uint8_t* data, uint32_t size);      // the engine's lifecycle
+    void broadcastClockNotify(const uint8_t* data, uint32_t size);    // the timeline's moves
+    void broadcastMidiNotify(const uint8_t* data, uint32_t size);     // a MIDI port's events and the ports
+    void broadcastGamepadNotify(const uint8_t* data, uint32_t size);  // a controller's events and the devices
+    void broadcastOscNotify(const uint8_t* data, uint32_t size);      // OSC from other programs
     void debug(const char* text, uint32_t len);        // → /clockwork/debug
     // "/clockwork/statechange ,ssi <state> <reason> <generation>": restarting
     // names the generation closing, running after a rebuild the one opened.
@@ -63,46 +64,22 @@ public:
     uint32_t generationNow() const;
 
     // ── Gateway side: deliver (only the NRT gateway calls these) ──────────────
-    // Drain handler for one egress frame (OUT or NRT-out), route already peeled
-    // by the lanes drain: peel /clockwork/debug to onDebug, run the
-    // interceptor, else route by tag to the transport.
-    void dispatchEgress(uint32_t originToken, uint32_t route,
-                        const uint8_t* osc, uint32_t oscLen);
+    // Drain handler for one egress frame (OUT or NRT-out): /clockwork/debug
+    // to onDebug, the interceptor, else the transport.
+    void dispatchEgress(const uint8_t* osc, uint32_t oscLen);
     // Optional pre-dispatch hook; returns true to swallow the message.
     void setInterceptor(std::function<bool(const uint8_t*, uint32_t)> fn) { mInterceptor = std::move(fn); }
-    // Deliver an already-OSC packet to the notify audience and a debug line.
+    // A debug line, to the host's log (onDebug).
     void deliverDebug(const char* text, uint32_t len);
 
-    // ── Subscriber registry — forwarded to the transport, keyed on the origin ─
-    // `token` is the caller's origin, threaded from the call ctx.
-    bool subscribeCaller(uint32_t token);        // true if newly registered
-    void unsubscribeCaller(uint32_t token);
-    void clearSubscribers();
-    bool hasSubscribers() const;
-    bool subscribeCallerToLinkNotify(uint32_t token);
-    void unsubscribeCallerFromLinkNotify(uint32_t token);
-    bool subscribeCallerToMidiNotify(uint32_t token);
-    void unsubscribeCallerFromMidiNotify(uint32_t token);
-    bool subscribeCallerToGamepadNotify(uint32_t token);
-    void unsubscribeCallerFromGamepadNotify(uint32_t token);
-    bool subscribeCallerToOscNotify(uint32_t token);
-    void unsubscribeCallerFromOscNotify(uint32_t token);
+    // ── What the client asked to be told: the core's switches (lanes.h) ───────
+    // Turn the switches in `kinds` (CLOCKWORK_WANTS_*) on or off: true when
+    // that changed any, which is when a verb sends what is there now.
+    bool want(uint32_t kinds, bool on);
+    bool wanted(uint32_t kind) const;
 
 private:
-    enum Route : uint32_t {
-        REPLY = 0, SEND_TO_CALLER = 1, BROADCAST_NOTIFY = 2, BROADCAST_LINK = 3, BROADCAST_MIDI = 4,
-        BROADCAST_GAMEPAD = 5, BROADCAST_OSC = 6
-    };
-    // Must match the shared on-ring EgressRoute values (shared_memory.h).
-    static_assert(uint32_t(REPLY) == uint32_t(EGRESS_REPLY) &&
-                  uint32_t(SEND_TO_CALLER) == uint32_t(EGRESS_SEND_TO_CALLER) &&
-                  uint32_t(BROADCAST_NOTIFY) == uint32_t(EGRESS_BROADCAST_NOTIFY) &&
-                  uint32_t(BROADCAST_LINK) == uint32_t(EGRESS_BROADCAST_LINK) &&
-                  uint32_t(BROADCAST_MIDI) == uint32_t(EGRESS_BROADCAST_MIDI) &&
-                  uint32_t(BROADCAST_GAMEPAD) == uint32_t(EGRESS_BROADCAST_GAMEPAD) &&
-                  uint32_t(BROADCAST_OSC) == uint32_t(EGRESS_BROADCAST_OSC),
-                  "OscEgress::Route must match shared_memory.h EgressRoute");
-    void frame(Route route, uint32_t token, const uint8_t* osc, uint32_t size);
+    void frame(uint32_t token, const uint8_t* osc, uint32_t size);
 
     IOscTransport*                                  mTransport = nullptr;
     ClockworkCore*                                  mCore = nullptr;

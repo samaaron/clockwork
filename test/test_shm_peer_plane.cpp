@@ -178,26 +178,58 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     CHECK(osc_test::parseAddress(replies[0].data(),
                                  static_cast<uint32_t>(replies[0].size())) == CLOCKWORK_SYS("clock/tempo.reply"));
 
-    // Notify subscription: /clockwork/notify from the peer flips the
-    // transport's audience flag and its .reply arrives on the reply ring.
+    // /clockwork/notify from the peer turns the client's switch in the core,
+    // and its .reply arrives on the reply ring.
+    const auto wantsNotify = [&] { return (clockwork_client_wanted(engine.core()) & CLOCKWORK_WANTS_NOTIFY) != 0u; };
     replies.clear();
-    REQUIRE_FALSE(transport.hasNotifySubscribers());
+    REQUIRE_FALSE(wantsNotify());
     REQUIRE(peerWrite(client, osc_test::message("/clockwork/notify")));
     got = waitUntil(engine, [&] {
         drainReplies(client, repState, replies);
-        return !replies.empty() && transport.hasNotifySubscribers();
+        return !replies.empty() && wantsNotify();
     });
     REQUIRE(got);
 
-    // Reply-ring frames carry the peer's origin token in the Message header —
-    // verified indirectly: send() to any other token must be undeliverable.
-    CHECK_FALSE(transport.send(0, replies[0].data(),
-                               static_cast<uint32_t>(replies[0].size()), false));
-    CHECK(transport.send(SHM_PEER_ORIGIN_TOKEN, replies[0].data(),
-                         static_cast<uint32_t>(replies[0].size()), false));
+    // What the transport is handed goes onto the peer's reply ring.
+    CHECK(transport.deliver(replies[0].data(), static_cast<uint32_t>(replies[0].size())));
 
     engine.shutdown();
     CHECK_FALSE(transport.ready());  // shutdown nulls the published plane
+}
+
+// What a client asked to be told ends with it (lanes.h): the peer that takes
+// the plane next starts with nothing asked for, so its own asking is new and
+// is answered with what is there now.
+TEST_CASE("shm-peer: the next peer on the plane does not inherit what the last one asked to be told",
+          "[shm][peer][wants]") {
+    constexpr unsigned kPort = 57229;
+    ShmTransport     transport;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.setTransport(&transport);
+    engine.init(planeConfig(kPort));
+    transport.bindPlaneSlot(engine.peerPlaneSlot());
+    REQUIRE(transport.ready());
+    const auto wanted = [&] { return clockwork_client_wanted(engine.core()); };
+
+    shm_command_client first(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
+    shm_peer_attach(first.get_peer_plane(), 1);
+    REQUIRE(peerWrite(first, osc_test::message("/clockwork/notify")));
+    REQUIRE(peerWrite(first, osc_test::message(CLOCKWORK_SYS("clock/notify/subscribe"))));
+    constexpr uint32_t kAsked = CLOCKWORK_WANTS_NOTIFY | CLOCKWORK_WANTS_CLOCK;
+    REQUIRE(waitUntil(engine, [&] { return (wanted() & kAsked) == kAsked; }));
+
+    // The first peer goes and another takes the plane, as the attach endpoint hands it over.
+    shm_command_client second(detail_shm_segment::shm_dup_handle(engine.shmCommandHandle()), wakeEventFor(engine));
+    shm_peer_attach(second.get_peer_plane(), 2);
+    REQUIRE(peerWrite(second, osc_test::message(CLOCKWORK_SYS("ping"))));
+    CHECK(waitUntil(engine, [&] { return wanted() == 0u; }));
+
+    // Its own asking is its own.
+    REQUIRE(peerWrite(second, osc_test::message(CLOCKWORK_SYS("clock/notify/subscribe"))));
+    CHECK(waitUntil(engine, [&] { return wanted() == CLOCKWORK_WANTS_CLOCK; }));
+    engine.shutdown();
 }
 
 TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the plane",

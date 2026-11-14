@@ -19,9 +19,8 @@
  * core (docs/ENGINES.md).
  *
  * Wire format (ring/ring.h): every ring frame is a 16-byte Message
- * header {magic, length, sequence, sourceId} followed by the payload.
- * Egress payloads carry a leading route word (EgressRoute, shared_memory.h)
- * before the OSC bytes.
+ * header {magic, length, sequence, sourceId} followed by the payload: the
+ * OSC bytes.
  *
  * ── Minimal host ───────────────────────────────────────────────────────────
  * A self-driven host (browser worklet, embedded, the test suite's fixture)
@@ -113,8 +112,8 @@ bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t l
  * same thread for both). These drains and clockwork_client_poll move the
  * same read cursor, so a host may hand the stream from one to the other and
  * the one taking over starts where the other stopped. The callback receives
- * one frame at a time; route is an EgressRoute value, source_id the origin
- * token the reply targets, seq the ring sequence number (gap detection is
+ * one frame at a time; source_id is the origin the frame was written with,
+ * seq the ring sequence number (gap detection is
  * the caller's choice). Payload points into the ring itself (frames are
  * contiguous by wire invariant) and is valid only for the duration of the
  * call.
@@ -122,7 +121,7 @@ bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t l
  * Returns the number of frames delivered. max_frames == 0 means drain
  * everything available.
  */
-typedef void (*ClockworkEgressFn)(void* ctx, uint32_t source_id, uint32_t route,
+typedef void (*ClockworkEgressFn)(void* ctx, uint32_t source_id,
                            const uint8_t* osc, uint32_t len, uint32_t seq);
 
 uint32_t clockwork_egress_rt_drain(ClockworkCore* core, ClockworkEgressFn fn, void* ctx, uint32_t max_frames);

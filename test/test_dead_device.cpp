@@ -78,6 +78,7 @@ TEST_CASE("DeadDevice: a recovery onto a device that never delivers audio is not
     // is about what the recovery says, as it says it.
     cfg.hostDrivesControl          = true;
     EngineFixture fix(cfg);
+    subscribe(fix);   // a device's outcome is the engine's lifecycle: told to a client that asked
 
     // The speakers stop answering, and the user asks for a reopen: it is
     // heard (the device still ticks when it arrives) and runs onto silence.
@@ -123,6 +124,7 @@ TEST_CASE("DeadDevice: a recovery whose pinned device delivers no audio, while t
     cfg.watchdogRecoveryCooldownMs = 0;
     cfg.hostDrivesControl          = true;     // as above: hear the outcome
     EngineFixture fix(cfg);
+    subscribe(fix);   // a device's outcome is the engine's lifecycle: told to a client that asked
     REQUIRE(fix.engine().preferredOutputDevice() == "Fake Interface");
 
     sys->at("Fake Interface").failStart = true;

@@ -497,7 +497,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             ptr: view.getUint32(at, true),
             length: view.getUint32(at + 4, true),
             origin: view.getUint32(at + 8, true),
-            sequence: view.getUint32(at + 16, true),
+            sequence: view.getUint32(at + 12, true),
         };
     }
 
@@ -570,7 +570,6 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             if (!m.length) continue;
             if (bufferOffset + m.length > C.REPLY_BUFFER_SIZE) break;
 
-            // The route word is already off; m.ptr is the OSC itself.
             pool.bufferView.set(heap.subarray(m.ptr, m.ptr + m.length), bufferOffset);
 
             const entry = pool.entries[count];

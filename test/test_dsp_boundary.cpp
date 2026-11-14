@@ -20,10 +20,9 @@
  *     declares zero, so clockwork holds it, which is what the scheduled case
  *     below observes.
  *
- * The reply is asserted for its ROUTE and ORIGIN as well as its address,
- * because an answer that reaches the wrong client is a bug a
- * "did /dummy/pong come back?" assertion cannot see: with a single test client
- * and a broadcast route it would pass just as happily.
+ * The reply is asserted for its ORIGIN as well as its address: the origin
+ * is how the client tells which request an answer is to, and a
+ * "did /dummy/pong come back?" assertion cannot see one that lost it.
  */
 #include "LanesFixture.h"
 #include "OscTestUtils.h"
@@ -77,11 +76,9 @@ TEST_CASE("dsp boundary: a message crosses the boundary and its reply comes back
     const auto* pong  = findAddress(frames, "/dummy/pong");
 
     REQUIRE(pong != nullptr);
-    // Routed back to the sender, not broadcast: DspHost::emit_osc was called
-    // with the origin dsp_osc() was given, and clockwork turned that into a
-    // reply frame addressed to it.
+    // DspHost::emit_osc was called with the origin dsp_osc() was given, and
+    // the frame carries it.
     CHECK(pong->sourceId == kClient);
-    CHECK(pong->route    == EGRESS_REPLY);
 }
 
 TEST_CASE("dsp boundary: the clock snapshot is answered on the audio thread",
@@ -102,7 +99,7 @@ TEST_CASE("dsp boundary: the clock snapshot is answered on the audio thread",
     const auto frames = lanes_test::tickUntil(4, "/clockwork/clock/state.reply");
     const auto* reply = findAddress(frames, "/clockwork/clock/state.reply");
     REQUIRE(reply != nullptr);
-    CHECK(reply->sourceId == kClient);   // to the asker, not the notify audience
+    CHECK(reply->sourceId == kClient);   // the asker's origin, carried back
 
     const auto r = osc_test::parseReply(reply->data.data(),
                                         static_cast<uint32_t>(reply->data.size()));

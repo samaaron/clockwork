@@ -296,6 +296,7 @@ TEST_CASE("Swap: /clockwork/devices/reopen recovers through the factory seam",
           "[SwapChar][recovery]") {
     auto sys = makeSimpleSystem();
     EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);   // a device's outcome is the engine's lifecycle: told to a client that asked
 
     // The recovery worker tears the manager down and rebuilds it via
     // makeDeviceManager() — with the factory seam that means fresh fakes,

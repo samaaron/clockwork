@@ -19,13 +19,13 @@ use std::time::Duration;
 use clockwork_abi::arena::{geom, ClockworkArenaRegion};
 use clockwork_abi::client::CLOCKWORK_CLIENT_ABI_VERSION;
 use clockwork_client::{
-    Client, Embed, EmbedConfig, Error, Metric, NativeStat, Profile, RegionId, Ring, Route, AudioTapRead,
+    Client, Embed, EmbedConfig, Error, Metric, NativeStat, Profile, RegionId, Ring, AudioTapRead,
     AUDIO_TAP_MAX_CHANNELS,
 };
 use clockwork_native::clockwork_taps;
 
-/// Our origin token: non-zero, so replies come back to us rather than to
-/// the notification audience.
+/// Our origin token: non-zero, so a reply is told from a message nobody
+/// asked for.
 const ORIGIN: u32 = 0x5245_5A5A;
 const RATE: f64 = 48_000.0;
 
@@ -159,10 +159,9 @@ fn a_ping_is_answered_on_the_next_block_with_the_origin_echoed() {
     let pong = e
         .poll()
         .find(|m| m.address() == "/dummy/pong")
-        .map(|m| (m.origin, m.route, m.sequence))
+        .map(|m| (m.origin, m.sequence))
         .expect("a /dummy/pong after one block");
     assert_eq!(pong.0, ORIGIN);
-    assert_eq!(pong.1, Route::Reply);
     // Nothing more: the reply was taken.
     assert!(e.poll().all(|m| m.address() != "/dummy/pong"));
 }
@@ -368,9 +367,9 @@ fn a_tap_watches_both_rings_without_taking() {
         let seen_in: Vec<(String, u32)> = ingress.poll().map(|m| (m.address().to_owned(), m.origin)).collect();
         assert_eq!(seen_in, [("/dummy/ping".to_owned(), ORIGIN)]);
         renderer.render(&mut [l.as_mut_slice(), r.as_mut_slice()], &[], block);
-        let seen_out: Vec<(String, u32, Route)> =
-            egress.poll().map(|m| (m.address().to_owned(), m.origin, m.route)).collect();
-        assert!(seen_out.contains(&("/dummy/pong".to_owned(), ORIGIN, Route::Reply)), "{seen_out:?}");
+        let seen_out: Vec<(String, u32)> =
+            egress.poll().map(|m| (m.address().to_owned(), m.origin)).collect();
+        assert!(seen_out.contains(&("/dummy/pong".to_owned(), ORIGIN)), "{seen_out:?}");
         assert_eq!(ingress.missed() + egress.missed(), 0);
     }
     // Watching took nothing: the consumer still gets the reply.

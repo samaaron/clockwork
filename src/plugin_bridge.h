@@ -54,8 +54,9 @@
  * block k comes back at block k + slack. One is the latency a plugin would
  * have in-process, but then the bridge must finish every render inside the
  * gap between two callbacks or the engine reads silence where the block
- * should be. Two — the default, ~5 ms at 128 frames and 48 kHz — gives the
- * bridge a whole callback interval of grace for the cost of one more block.
+ * should be. Two — the floor, ~5 ms at 128 frames and 48 kHz — gives the
+ * bridge a whole callback interval of grace for the cost of one more block;
+ * a longer callback gets more (slack_for, below).
  * A bridge that runs late and catches up would leave the return deeper than
  * it found it, so the engine trims it back to slack − 1 blocks (the steady
  * depth before it reads) each time it posts. A synchronous mode, where the
@@ -128,8 +129,8 @@ constexpr uint32_t DEFAULT_SLACK     = 2;
 // bridge takes to wake — so the return must already hold B, plus two: one
 // because the bridge can render a block while the callback is still pulling
 // (a slack of exactly B counts that as stale and drops it, a click per
-// callback), one for scheduling jitter. DEFAULT_SLACK is the floor, enough
-// for a callback of one or two blocks; a 1024-frame WASAPI buffer ticks
+// callback), one for scheduling jitter. DEFAULT_SLACK is the floor, what a
+// callback of one block gets; a 1024-frame WASAPI buffer ticks
 // eight, and at slack two would play a quarter of each callback and drop
 // the rest — a 375 Hz buzz. Bounded by
 // the ring: AUDIO_RING_FRAMES holds sixteen blocks of 128, one stays free.
@@ -253,7 +254,7 @@ inline uint8_t* out_ring(void* base)    { return static_cast<uint8_t*>(base) + O
 inline char*    mirror(void* base)      { return static_cast<char*>(base) + MIRROR_OFFSET; }
 
 // A frame on the RT ring: the offset of the event within the block, then the
-// OSC message. On the OUT ring: the egress route (EgressRoute), then the OSC.
+// OSC message. A frame on the OUT ring is the OSC message alone.
 struct Prefixed {
     uint32_t word;
     // payload follows

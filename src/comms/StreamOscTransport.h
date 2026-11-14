@@ -12,22 +12,19 @@
  * A connection id IS the origin token: minted from 1 by the Rust leaf, never
  * reused, dead the moment the connection closes. So there is no origin table
  * and no LRU eviction (an established client can never be churned out by
- * strangers), and subscription lifetime == connection lifetime: on_closed
- * prunes the client from every notify audience. The Rust leaf admits one
- * client.
+ * strangers). The Rust leaf admits one client.
  *
  * The NRT gateway is the sole caller of the IOscTransport methods, but
- * on_closed fires on a reader thread — one mutex covers the audience lists
- * for that cross-thread prune.
+ * on_closed fires on a reader thread: the client has gone, and the core is
+ * told (clockwork_client_gone), so what it asked to be told ends with its
+ * connection.
  */
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <string>
-#include <vector>
 
 #include "IOscTransport.h"
 #include "clockwork_comms_abi.h"
@@ -68,24 +65,7 @@ public:
     uint64_t refusedConnections() const;
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
-    bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
-    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override;
-    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
-    bool hasNotifySubscribers() const override;
-    bool subscribeNotify(uint32_t token) override;
-    void unsubscribeNotify(uint32_t token) override;
-    void clearNotify() override;
-    bool subscribeLink(uint32_t token) override;
-    void unsubscribeLink(uint32_t token) override;
-    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override;
-    bool subscribeMidi(uint32_t token) override;
-    void unsubscribeMidi(uint32_t token) override;
-    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override;
-    bool subscribeGamepad(uint32_t token) override;
-    void unsubscribeGamepad(uint32_t token) override;
-    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override;
-    bool subscribeOsc(uint32_t token) override;
-    void unsubscribeOsc(uint32_t token) override;
+    bool deliver(const uint8_t* data, uint32_t size) override;
 
 private:
     enum class Kind { None, Tcp, Uds, Pipe };
@@ -93,9 +73,6 @@ private:
     static void onPacket(void* ctx, uint32_t conn, const uint8_t* osc, uint32_t len);
     static void onClosed(void* ctx, uint32_t conn);
 
-    uint32_t broadcast(const std::vector<uint32_t>& list, const uint8_t* data, uint32_t size);
-    bool addConn(std::vector<uint32_t>& list, uint32_t token);
-    void removeConn(std::vector<uint32_t>& list, uint32_t token);
 
     Kind         mKind = Kind::None;
     ClockworkCore* mCore = nullptr;
@@ -110,12 +87,7 @@ private:
     std::atomic<ClockworkOscStream*> mServer{nullptr};
     IngestFn     mIngest;
 
-    // Audience lists hold conn ids. Guarded by mMutex: the gateway thread
-    // subscribes/broadcasts while reader threads prune via onClosed.
-    mutable std::mutex    mMutex;
-    std::vector<uint32_t> mNotifyTargets;
-    std::vector<uint32_t> mLinkNotifyTargets;
-    std::vector<uint32_t> mMidiNotifyTargets;
-    std::vector<uint32_t> mGamepadNotifyTargets;
-    std::vector<uint32_t> mOscNotifyTargets;
+    // The client's connection: the one whose packets are arriving, 0 with
+    // none. A reader thread's to write, the gateway's to read.
+    std::atomic<uint32_t> mClient{0};
 };

@@ -202,7 +202,7 @@ TEST_CASE("host control: with the host draining egress too, no engine thread sta
     fx.engine().ingest(notify.ptr(), notify.size(), 9);
 
     bool found = false;
-    uint32_t origin = 0, route = 0;
+    uint32_t origin = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!found && std::chrono::steady_clock::now() < deadline) {
         fx.pumpBlock();   // pumped: what the pass answers rides the ring the audio thread publishes
@@ -212,14 +212,12 @@ TEST_CASE("host control: with the host draining egress too, no engine thread sta
             if (osc_test::parseAddress(batch[i].bytes, batch[i].length) == CLOCKWORK_SYS("notify.reply")) {
                 found  = true;
                 origin = batch[i].origin;
-                route  = batch[i].route;
             }
         }
         if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     REQUIRE(found);
     CHECK(origin == 9);
-    CHECK(route == EGRESS_REPLY);
 
     OscReply r;
     CHECK_FALSE(fx.waitForReply(CLOCKWORK_SYS("notify.reply"), r, 200));

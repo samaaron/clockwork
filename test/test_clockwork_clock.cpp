@@ -435,7 +435,7 @@ TEST_CASE("ClockworkClock: midi tempo feed sets bpm and advances beats",
 
 // On both compile shapes: Link invokes the callback for a local commit, and
 // the session of one must do the same by hand, or a Link-less engine changes
-// tempo in silence and every other client keeps the old one.
+// tempo in silence and the rest of the client keeps the old one.
 TEST_CASE("ClockworkClock: a local setBpm fires the tempo callback exactly once",
           "[ClockworkClock]") {
     ClockworkClock sc;

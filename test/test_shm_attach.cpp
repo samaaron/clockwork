@@ -555,7 +555,6 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
             if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0) {
                 heard = true;
                 CHECK(msgs[i].origin == SHM_PEER_ORIGIN_TOKEN);
-                CHECK(msgs[i].route == CLOCKWORK_ROUTE_REPLY);
             }
         }
         return heard;

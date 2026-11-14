@@ -30,8 +30,7 @@ const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
 
 const SEED = 0xC10C;
 const REGION_INGRESS = 7;     // ClockworkRegionId
-const MESSAGE_BYTES = 20;     // ClockworkClientMessage: bytes, length, origin, route, sequence
-const ROUTE_BYTES = 4;        // an egress frame is [route:u32][osc]
+const MESSAGE_BYTES = 16;     // ClockworkClientMessage: bytes, length, origin, sequence
 
 // mulberry32: small, and the same sequence on every machine.
 function random(seed) {
@@ -78,8 +77,7 @@ function messagesAt(memory, at, count) {
     const ptr = view.getUint32(p, true), length = view.getUint32(p + 4, true);
     out.push({
       origin: view.getUint32(p + 8, true),
-      route: view.getUint32(p + 12, true),
-      sequence: view.getUint32(p + 16, true),
+      sequence: view.getUint32(p + 12, true),
       bytes: new Uint8Array(memory.buffer, ptr, length).slice(),
     });
   }
@@ -183,14 +181,14 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
 
   for (let op = 0; op < 6000; op++) {
     if (rand() < 0.8) {
-      // A frame is [route][osc], on either ring. One in twenty carries
+      // A frame is the OSC, on either ring. One in twenty carries
       // nothing at all, which both readers consume without delivering.
       const which = rand() < 0.5 ? "egress" : "nrtEgress";
       const ring = rings[which];
       const size = ring.bytes.length;
       const none = rand() < 0.05;
       const oscBytes = rand() < 0.9 ? below(rand, 2048) : below(rand, Math.floor(size / 3));
-      const payload = none ? new Uint8Array(0) : bytesOf(rand, ROUTE_BYTES + oscBytes);
+      const payload = none ? new Uint8Array(0) : bytesOf(rand, 1 + oscBytes);
       const origin = below(rand, 2 ** 32);
       const headBefore = Atomics.load(ring.words, ring.head);
 
@@ -209,8 +207,8 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
       const want = 1 + below(rand, rand() < 0.05 ? max : 3);
       const byC = messagesAt(memory, messages, x.clockwork_client_poll(handle, messages, want));
       const byJs = [];
-      reader.poll(want, (bytes, origin, route, sequence) =>
-        byJs.push({ origin, route, sequence, bytes: bytes.slice() }));
+      reader.poll(want, (bytes, origin, sequence) =>
+        byJs.push({ origin, sequence, bytes: bytes.slice() }));
 
       assert.deepEqual(byJs, byC, `op ${op}: C and JavaScript read the same frames`);
       for (const which of ["egress", "nrtEgress"])
@@ -221,11 +219,10 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
       for (const m of byC) {
         const head = expected.egress[0];
         const which = head && head.origin >>> 0 === m.origin
-          && m.bytes.length === head.bytes.length - ROUTE_BYTES ? "egress" : "nrtEgress";
+          && m.bytes.length === head.bytes.length ? "egress" : "nrtEgress";
         const sent = expected[which].shift();
         assert.equal(m.origin, sent.origin >>> 0, `op ${op}: origin`);
-        assert.equal(m.route, new DataView(sent.bytes.buffer).getUint32(0, true), `op ${op}: route`);
-        assert.deepEqual(m.bytes, sent.bytes.subarray(ROUTE_BYTES), `op ${op}: the bytes written are the bytes read`);
+        assert.deepEqual(m.bytes, sent.bytes, `op ${op}: the bytes written are the bytes read`);
         if (which === "nrtEgress") fromNrt++;
         read++;
       }

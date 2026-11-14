@@ -58,7 +58,7 @@ export function runOscInPump({ onFrames, endpoint, name = 'OSCInPump' } = {}) {
     if (!reader) return [];
     const messages = [];
     const seenAt = engineNow(ctx);   // on the engine's clock, as the time stamps the engine works to are
-    reader.poll(0, (bytes, origin, route, sequence) => {
+    reader.poll(0, (bytes, origin, sequence) => {
       if (lastSequenceReceived >= 0) {
         const expectedSeq = (lastSequenceReceived + 1) & 0xFFFFFFFF;
         if (sequence !== expectedSeq) {

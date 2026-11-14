@@ -9,8 +9,9 @@
  * the transports here. Each of these listens on the wire, writes what it
  * receives through the client boundary with an origin token of its own
  * minting, and resolves that token back to a connection when the engine
- * replies. Every notify audience is kept here, on the client's side: the
- * engine does not know who is on the other end.
+ * replies. A transport says who the client is and tells the core when it
+ * has gone; what the client asked to be told is the core's to keep
+ * (lanes.h, clockwork_client_wants).
  *
  * This is the native counterpart of what the JavaScript client does for the
  * worklet: the wire is the client's, on every platform. A host links

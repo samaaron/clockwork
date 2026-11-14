@@ -316,7 +316,6 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
     }
     return true;
 }
-#endif  // CLOCKWORK_WORKLET_CLOCK
 
 // Defined with the rest of the channel-map writer, down beside the port bus
 // that mostly drives it. Declared here because init_memory publishes the
@@ -335,7 +334,6 @@ bool ring_buffer_write(
     std::atomic<int32_t>* head,
     std::atomic<int32_t>* tail,
     std::atomic<int32_t>* sequence,
-    uint32_t route,
     uint32_t source_id,
     const RingPart* parts,
     uint32_t n_parts,
@@ -348,7 +346,6 @@ bool ring_buffer_write(
     std::atomic<int32_t>* head,
     std::atomic<int32_t>* tail,
     std::atomic<int32_t>* sequence,
-    uint32_t route,
     uint32_t source_id,
     const void* data,
     uint32_t data_size,
@@ -776,19 +773,14 @@ extern "C" {
     // everything the DSP says. An `origin` token goes in and DspHost::emit_osc comes
     // out, so no reply TYPE crosses the boundary at all.
     //
-    // Routing is the token's: non-zero replies to that client, 0 goes to the
-    // notify audience — the clients that sent /clockwork/notify, one
-    // unicast each, and none at all until someone subscribes. Lane choice
-    // keeps RT-out single-writer —
+    // Everything on the egress is for the one client; the origin rides with
+    // a frame and decides nothing. Lane choice keeps RT-out single-writer —
     // the audio thread owns it; any other thread takes the locked NRT-out ring.
     // Returns whether the frame was QUEUED, not whether anyone got it, so
     // DspHost::emit_osc can pass a refusal on.
-    static uint32_t reply_route(uint32_t origin) { return origin ? EGRESS_REPLY : EGRESS_BROADCAST_NOTIFY; }
-
-    // To a named audience (EgressRoute) — what an inbound event takes to
-    // reach the clients subscribed to its subsystem — one OSC payload laid
-    // down from `parts`, with nothing gathered first.
-    static bool emit_osc_parts(clockwork::CoreState& st, uint32_t route, uint32_t origin,
+    //
+    // One OSC payload laid down from `parts`, with nothing gathered first.
+    static bool emit_osc_parts(clockwork::CoreState& st, uint32_t origin,
                                const RingPart* parts, uint32_t n_parts) {
         uint8_t* const base = st.arena.laid_out();
         if (!base || n_parts == 0)
@@ -801,18 +793,18 @@ extern "C" {
             return ::ring_buffer_write(
                 base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                route, origin, parts, n_parts, &cursors->status_flags, clockwork::metrics_in(base));
+                origin, parts, n_parts, &cursors->status_flags, clockwork::metrics_in(base));
         }
-        return clockwork_egress_nrt_write_parts(st.core, route, origin, parts, n_parts);
-    }
-    static bool emit_osc_route(clockwork::CoreState& st, uint32_t route, uint32_t origin,
-                               const uint8_t* osc, uint32_t len) {
-        if (!osc || len == 0) return false;
-        const RingPart part{ osc, len };
-        return emit_osc_parts(st, route, origin, &part, 1);
+        return clockwork_egress_nrt_write_parts(st.core, origin, parts, n_parts);
     }
     static bool emit_osc_out(clockwork::CoreState& st, uint32_t origin, const uint8_t* osc, uint32_t len) {
-        return emit_osc_route(st, reply_route(origin), origin, osc, len);
+        if (!osc || len == 0) return false;
+        const RingPart part{ osc, len };
+        return emit_osc_parts(st, origin, &part, 1);
+    }
+    bool clockwork_emit_osc(ClockworkCore* core, uint32_t origin, const uint8_t* osc, uint32_t len) {
+        clockwork::CoreState* st = clockwork::state(core);
+        return st && emit_osc_out(*st, origin, osc, len);
     }
 
     // The core's state behind a host callback's context, which is the core.
@@ -1103,7 +1095,7 @@ extern "C" {
            << static_cast<int32_t>(sn.buffer_frames.load(std::memory_order_relaxed))
            << static_cast<int32_t>(arenaInstanceGeneration(st.arena.at()))
            << osc::EndMessage;
-        if (!emit_osc_route(st, EGRESS_BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
+        if (!emit_osc_out(st, 0, reinterpret_cast<const uint8_t*>(ps.Data()),
                             static_cast<uint32_t>(ps.Size())))
             return false;
         sn.owed.store(Owed::Nothing, std::memory_order_relaxed);
@@ -2109,6 +2101,10 @@ extern "C" {
             default_audio_routes.add("gamepad/devices",  &clockwork_event_route, core);
             // The VERBS that live under those names are not events: carved
             // back out to the host's end of the chain (longest match wins).
+            // What the client asks to be told: the switch here, the answer the host's.
+            default_audio_routes.add("midi/notify/",     &clockwork_wants_route, core);
+            default_audio_routes.add("gamepad/notify/",  &clockwork_wants_route, core);
+            default_audio_routes.add("osc/notify/",      &clockwork_wants_route, core);
             default_audio_routes.add("midi/in/enable",        &clockwork_host_forward_route, core);
             default_audio_routes.add("midi/ports/list",       &clockwork_host_forward_route, core);
             default_audio_routes.add("midi/ports/get",        &clockwork_host_forward_route, core);
@@ -3159,7 +3155,7 @@ extern "C" {
         clockwork_sys_refuse(payload, size, reason, generation,
             [&made, &st, sourceId, cursors](const uint8_t* d, uint32_t n) {
                 const uint32_t footprint =
-                    (static_cast<uint32_t>(sizeof(Message)) + EGRESS_ROUTE_SIZE + n + 3u) & ~3u;
+                    (static_cast<uint32_t>(sizeof(Message)) + n + 3u) & ~3u;
                 made = ring_fits(static_cast<uint32_t>(cursors->out_head.load(std::memory_order_relaxed)),
                                  static_cast<uint32_t>(cursors->out_tail.load(std::memory_order_acquire)),
                                  st.arena.layout.profile.rt_out_ring_bytes, footprint)
@@ -3719,10 +3715,10 @@ extern "C" {
             ::ring_buffer_write(
                 base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
                 &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                EGRESS_BROADCAST_NOTIFY, 0,  // route, source_id (debug broadcasts)
+                0,   // no origin: a log line answers nobody
                 pkt.data(), p, &cursors->status_flags, metrics);   // a refused log line is counted too
         } else {
-            clockwork_egress_nrt_write(st.core, EGRESS_BROADCAST_NOTIFY, 0,
+            clockwork_egress_nrt_write(st.core, 0,
                                 reinterpret_cast<const uint8_t*>(pkt.data()), p);
         }
 
@@ -3962,7 +3958,6 @@ bool ring_buffer_write(
     std::atomic<int32_t>* head,
     std::atomic<int32_t>* tail,
     std::atomic<int32_t>* sequence,
-    uint32_t route,
     uint32_t source_id,
     const RingPart* parts,
     uint32_t n_parts,
@@ -3981,11 +3976,10 @@ bool ring_buffer_write(
         data_size += parts[i].size;
     }
 
-    // Egress frame: Message{sourceId = token} + [route:u32][osc]; the route word
-    // counts toward the message length.
+    // Egress frame: Message{sourceId = token} + [osc].
     Message header{};
     header.magic = MESSAGE_MAGIC;
-    header.length = sizeof(Message) + static_cast<uint32_t>(sizeof(uint32_t)) + data_size;
+    header.length = sizeof(Message) + data_size;
     header.sequence = static_cast<uint32_t>(sequence->fetch_add(1, std::memory_order_relaxed));
     header.sourceId = source_id;
 
@@ -4023,8 +4017,7 @@ bool ring_buffer_write(
 
     std::memcpy(buffer_start + current_head, &header, sizeof(Message));
 
-    std::memcpy(buffer_start + current_head + sizeof(Message), &route, sizeof(uint32_t));
-    uint8_t* at = buffer_start + current_head + sizeof(Message) + sizeof(uint32_t);
+    uint8_t* at = buffer_start + current_head + sizeof(Message);
     for (uint32_t i = 0; i < n_parts; ++i) {
         if (parts[i].size == 0) continue;
         std::memcpy(at, parts[i].data, parts[i].size);
@@ -4062,7 +4055,6 @@ bool ring_buffer_write(
     std::atomic<int32_t>* head,
     std::atomic<int32_t>* tail,
     std::atomic<int32_t>* sequence,
-    uint32_t route,
     uint32_t source_id,
     const void* data,
     uint32_t data_size,
@@ -4070,7 +4062,7 @@ bool ring_buffer_write(
     PerformanceMetrics* pm
 ) {
     const RingPart part{ data, data_size };
-    return ring_buffer_write(buffer_start, buffer_size, head, tail, sequence, route, source_id,
+    return ring_buffer_write(buffer_start, buffer_size, head, tail, sequence, source_id,
                              &part, 1, status_flags, pm);
 }
 
@@ -4210,6 +4202,25 @@ bool clockwork_host_forward_route(void* routeCtx, const void* callCtx,
     return true;   // claimed whole: the host answers or refuses it from here
 }
 
+// A subscribe verb whose question a host's front answers:
+// /clockwork/<kind>/notify/subscribe and unsubscribe, on a host with no
+// control thread. The switch is the core's (lanes.h), turned here, and the
+// verb goes on to the front, which says what is there now. A full engine
+// takes these verbs on its control thread (the control ring), and turns the
+// switch there.
+bool clockwork_wants_route(void* routeCtx, const void* callCtx, const uint8_t* data, std::size_t len) {
+    const char* const verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
+    const uint32_t kind = std::strncmp(verb, "midi/", 5) == 0    ? CLOCKWORK_WANTS_MIDI
+                        : std::strncmp(verb, "gamepad/", 8) == 0 ? CLOCKWORK_WANTS_GAMEPAD
+                        : std::strncmp(verb, "osc/", 4) == 0     ? CLOCKWORK_WANTS_OSC : 0u;
+    const char* const what = std::strstr(verb, "/notify/");
+    if (kind && what) {
+        if (std::strcmp(what, "/notify/subscribe") == 0) clockwork_client_wants(static_cast<ClockworkCore*>(routeCtx), kind, true);
+        else if (std::strcmp(what, "/notify/unsubscribe") == 0) clockwork_client_wants(static_cast<ClockworkCore*>(routeCtx), kind, false);
+    }
+    return clockwork_host_forward_route(routeCtx, callCtx, data, len);
+}
+
 // One element to the host, wrapped with its time: "#bundle" NUL, timetag
 // (big-endian 64), element size (big-endian 32), the element — laid down on
 // the ring behind that header from the pieces it is in, so nothing is
@@ -4232,14 +4243,11 @@ static bool forward_to_host(clockwork::CoreState& st, uint32_t token, clockwork:
     std::array<RingPart, kMaxParts> parts{};
     parts[0] = RingPart{ header.data(), static_cast<uint32_t>(header.size()) };
     for (uint32_t i = 0; i < n_parts; ++i) parts[1 + i] = element[i];
-    return emit_osc_parts(st, reply_route(token), token, parts.data(), n_parts + 1);
+    return emit_osc_parts(st, token, parts.data(), n_parts + 1);
 }
 
 // An inbound event, on the audio thread, on every host (clockwork_sys.h).
-// Out to the subsystem's audience by the route word the egress already has
-// for it — the transport fans it out natively; on the web the one client
-// hears it and its front keeps the subscription rule — and to the guest if
-// it asked. The message is passed through byte for byte, trailing arrival
+// Out to the client if it asked for the kind, and to the guest if it asked. The message is passed through byte for byte, trailing arrival
 // time included; the guest gets the same DrainCallCtx every message gets,
 // with `when` the block it was drained in.
 bool clockwork_event_route(void* routeCtx, const void* callCtx,
@@ -4247,9 +4255,10 @@ bool clockwork_event_route(void* routeCtx, const void* callCtx,
     clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
     if (!st) return true;
     const char* verb = reinterpret_cast<const char*>(data) + CLOCKWORK_SYS_PREFIX_LEN;
-    const uint32_t route = std::strncmp(verb, "gamepad/", 8) == 0
-                         ? EGRESS_BROADCAST_GAMEPAD : EGRESS_BROADCAST_MIDI;
-    emit_osc_route(*st, route, 0, data, static_cast<uint32_t>(len));
+    const bool pad = std::strncmp(verb, "gamepad/", 8) == 0;
+    // For the client, if it asked for this kind (lanes.h).
+    if (st->routing.client_wants.load(std::memory_order_relaxed) & (pad ? CLOCKWORK_WANTS_GAMEPAD : CLOCKWORK_WANTS_MIDI))
+        emit_osc_out(*st, 0, data, static_cast<uint32_t>(len));
     if (guest_wants_events())
         clockwork_dsp_default_route(routeCtx, callCtx, data, len);
     return true;

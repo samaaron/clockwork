@@ -2,13 +2,21 @@
 <!-- Copyright (c) 2025-2026 Sam Aaron -->
 # The boundary
 
-clockwork is a realtime DSP engine host. For a DSP engine to be compatible with
-clockwork it needs to implement the following C ABI:
+clockwork is a realtime DSP engine host. A DSP engine — the guest — runs in
+clockwork when it defines the nine C entry points in `src/dsp_api.h`. All
+nine are required: clockwork calls every one, so a guest that leaves one out
+does not link.
 
 ```
-dsp_describe()                    what this DSP is, and its terms
-dsp_new(config, host, &err)       lifecycle
-dsp_free(dsp)
+dsp_describe()                    what this DSP is, and its terms (DspInfo)
+dsp_memory_bytes(cfg, cfg_bytes)  the fast memory this configuration adds
+dsp_memory_bulk_bytes(cfg,        the bulk memory this configuration adds
+                      cfg_bytes)
+dsp_new(config, host,             build an instance, or refuse with a reason
+        err, err_bytes)           written into `err`
+dsp_reconfigure(dsp, sample_rate, a device change the instance declared it
+                max_in, max_out)  survives: 0 takes it, non-zero refuses it
+dsp_free(dsp)                     destroy an instance
 dsp_process(dsp, in, n_in,        the tick — read `frames` from each input
             out, n_out,           channel, write `frames` to each output one
             frames, block_time)
@@ -18,8 +26,24 @@ dsp_asset(dsp, asset)             a client's bytes — a sample, a wavetable —
                                   bound where they lie, never copied
 ```
 
-Calls in the other direction go through `DspHost`, ten callbacks. **Every one
-may be NULL, so a DSP must check before calling.**
+A guest with no use for one still defines it: the two memory queries return
+0 (no claim beyond `DspInfo`), `dsp_reconfigure` returns non-zero (it is
+called only for a change `DspInfo::survives` names), and `dsp_asset`
+returns non-zero to refuse.
+
+`dsp_describe` returns a pointer clockwork keeps for the life of the
+process, so it points at static data.
+
+**`dsp_new`'s arguments live only for the call.** `config` and `host` point
+at clockwork's locals (`init_memory` in src/audio_processor.cpp). Copy the
+`DspConfig` fields and the `DspHost` you need into the instance before
+returning. What they point to — the two memory spans, the window, the
+persistent store, the clock, the channel map, the guest config, the assets
+and returns lanes, `host->ctx` and the callbacks — stays valid until
+`dsp_free`.
+
+Calls in the other direction go through `DspHost`, fourteen callbacks.
+**Every one may be NULL, so a DSP must check before calling.**
 
 ```
 emit_osc(ctx, origin,             send OSC out: a reply, or a notification
@@ -145,7 +169,8 @@ any other.
   (`egress_frames_undelivered`).
 - **Clockwork's own notices are asked for.** The engine's lifecycle
   (`/clockwork/statechange`, setup, device reports) is written only once the
-  client has sent `/clockwork/notify`; the timeline's, a port's, a
+  client has sent `/clockwork/notify` (or `/clockwork/devices/report`, which
+  asks for the same); the timeline's, a port's, a
   controller's and outside OSC only once it has subscribed to that kind
   (`clockwork_client_wants`, `lanes.h`). `/clockwork/debug` is a line for the
   host's log and is not sent to the client.
@@ -188,48 +213,76 @@ by the DSP's own declaration or the host profile's default, whichever is
 larger, and that never grows: what a DSP declared is what it has. The same
 on every platform.
 
-#### Two tiers, and what the DSP says it needs
+#### Two spans on every host, and what the DSP says it needs
 
-A device with two kinds of RAM — the ESP32-S3 has ~512 KiB of internal SRAM
-behind 8 MiB of slower PSRAM — hands the DSP two spans. `memory` is placed in
-the **fast** tier and `DspConfig::memory_bulk` in the **bulk** tier, so a DSP
-carves its hot state (VM slots, kernel state, wires) from one and its cold,
-large state (loop cells, sample data, tap rings) from the other, and which
-RAM is which is the host's memory profile's decision rather than something
-each DSP crate works out for itself. Both follow `memory`'s rules: the DSP's
-alone, zeroed at every `dsp_new`.
+Every host hands over a bulk span, and a fast span when the guest or the
+host's profile asks for one. On a desktop they are two cuts of one
+block of pages the core maps (`src/os_pages.h`): the fast span, then the
+bulk span. On the web both come from the engine's memory, the block the
+worklet claims at boot and the page sizes (`memArenaSize` in
+`js/memory_layout.js`). On a device with two kinds of RAM — the ESP32-S3 has
+~512 KiB of internal SRAM behind 8 MiB of slower PSRAM — `memory` is in the
+fast RAM and `memory_bulk` in the slow. So a DSP carves its hot state (VM
+slots, kernel state, wires) from one and allocates its cold, large state
+(loop cells, sample data) from the other, and is written once: only the
+sizes change per target. Which RAM is which is the host's memory profile's
+decision, not each DSP crate's.
 
-On a single-region host — desktop, web, the NIF — `memory_bulk` is NULL/0. There
-is one kind of memory, so there is nothing to place differently; whatever the
-DSP would have put in bulk goes in `memory`. Test `memory_bulk` for NULL, never
-the platform.
+The DSP declares what it needs of each span **statically**, in `DspInfo`:
+`memory_bytes_wanted` and `memory_bulk_bytes_wanted`. What its configuration
+adds it answers in `dsp_memory_bytes` and `dsp_memory_bulk_bytes`, which
+clockwork calls before every `dsp_new` with the config block in place. So a
+host learns the figure before booting audio rather than from a failed carve
+halfway through `dsp_new`. Each span is sized to the larger of the guest's
+figure and the host profile's default: `CLOCKWORK_GUEST_MEMORY_FAST_BYTES`,
+0 unless a tiered profile sets a floor, and `CLOCKWORK_GUEST_MEMORY_BULK_BYTES`,
+64 MB on a desktop and what is left of the engine's memory on the web. On
+the web and a tiered device the default is first held to what the tier has
+free. A host may give a bulk figure of its own, which stands in the
+default's place (`clockwork_set_guest_bulk_bytes`). clockwork checks each
+want against its own span (`clockwork_memory_meets`, src/audio_processor.h)
+and **refuses the boot with a logged reason when a want cannot be met. It
+never spills.** A hot pool that silently landed in PSRAM is a performance
+cliff with no error, which is worse than a boot that says why it stopped.
+Zero means "no claim": take what is offered, including nothing.
 
-The DSP declares what it needs of each tier **statically**, in `DspInfo`:
-`memory_bytes_wanted` and `memory_bulk_bytes_wanted`. A DSP that carves
-everything at `dsp_new` knows the figure before any instance exists, and a host
-should learn it before booting audio rather than from a failed carve halfway
-through `dsp_new`. clockwork checks the wants against what it can offer — on a
-tiered host each want against its own tier, on a single-region host both
-against `memory` — and **refuses the boot with a logged reason when a want
-cannot be met. It never spills.** A hot pool that silently landed in PSRAM is a
-performance cliff with no error, which is worse than a boot that says why it
-stopped. Zero means "no claim": take what is offered, including nothing.
+A host that wants to place the fast span itself passes one to
+`clockwork_init`, and it is handed over as it is. clockwork keeps its memory
+across rebuilds while the build wants the same size (each span's on the web
+and a tiered device, the two together on a desktop), and takes new when it
+wants another.
 
-Where the bytes come from: clockwork takes the fast span from its own fast
-tier (the web's placement arena, a desktop's malloc, a device's internal SRAM),
-sized to the want, and keeps it across rebuilds while the want still fits. A
-host that wants to place the span itself may pass one to `clockwork_init`,
-and it is handed over as is. The bulk span exists only on a tiered build, from
-clockwork's bulk tier, sized by the want or by `CLOCKWORK_GUEST_MEMORY_BULK_BYTES`.
+#### The allocation rule
+
+A guest allocates through clockwork and nothing else. In C or C++ that is
+`alloc_bytes` and `free_bytes`. In Rust it is `Box`, `Vec` and the rest of
+`alloc`: clockwork's global allocator (`rust/clockwork-heap/src/router.rs`,
+installed by `clockwork-native`) serves every allocation made while one of
+the guest's entry points is open from the same pool. Both take from
+`memory_bulk`, lock-free, so `dsp_new` and `dsp_osc` may allocate, on the
+audio thread included. `dsp_process` allocates nothing: what a block needs is
+laid out in `memory` or allocated before the block.
+
+The pool never grows. When it is full, `alloc_bytes` answers NULL, and a Rust
+allocation falls back to the system allocator and is counted in the pool's
+census (`clockwork_heap_census`): a sizing fault, made visible. The fix is a
+larger declaration.
+
+A guest never calls malloc or new itself. Nothing stops it, and such a guest
+runs, but clockwork can neither place that memory on a device's tier nor
+name it as the guest's. Where the link lets it, clockwork counts every such
+call made inside a guest entry point (`src/guest_malloc.h`; the metrics
+`guestMallocBytes` and `guestMallocsProcessing`).
+
+#### The bulk lanes
 
 `assets` and `returns` are the bulk channel for _binary blobs_ in and out. A client writes bytes straight into
 `assets` from its own thread and sends a short message saying where they are, so
 the DSP receives an offset rather than a payload, and the DSP does the same in
 reverse through `returns`. Nothing large crosses the audio thread in either
-direction — which matters because every entry point in this header is called on
-the audio thread, and on web that is forced: the DSP exists only inside the
+direction — which matters because `dsp_osc` and `dsp_asset` run on the audio
+thread, and on the web every entry point does: the DSP exists only inside the
 AudioWorklet, so there is no off-thread door to use instead.
-
 
 **Offsets, never pointers**, in any message naming a position in one of these.
 A reader maps the segment wherever the kernel puts it, which is not the address
@@ -243,18 +296,20 @@ answers are permitted:
   they arrived — sample playback, a wavetable, an impulse response. The range
   belongs to the DSP from the moment it is published and must be handed back
   explicitly: the client must not touch it until the DSP says it is done.
-- **Copy it into the arena.** Do this when you need to *mutate* the data —
+- **Copy it into your own memory.** Do this when you need to *mutate* the data —
   resample it, normalise it, convert its format — because the assets area is
   read-only to you. The range belongs to the client again as soon as `dsp_osc`
   returns, so nothing has to be tracked. The copy costs about 5% of a 128-frame
   block per megabyte, worst case, which is nothing for a sample and not nothing
   for a library.
 
-Native carves the assets area and the returns area out of a shared segment when there is
-one, so the same routes work cross-process. **The segment publishes them; it
-does not create them.** An engine embedded without a UDP port builds no segment
-and allocates the lanes in-process, where its client — the host application —
-reads them in place. Metrics, the scope and the window already work this way.
+Natively the assets area and the returns area are in the command segment
+when the engine has one (`Config::shmCommands`, docs/SEGMENTS.md), so the one
+peer that maps it fills and reads them from its own process. **The segment
+publishes them; it does not create them.** An engine with no command segment
+allocates the lanes in its own memory, where its client — the host
+application — reads them in place. On the web they are in the wasm memory,
+beside the engine's block, which the page shares in SAB mode.
 
 Check before using, and take the size from the matching `*_bytes` field.
 
@@ -509,16 +564,6 @@ any owes both:
 - two instances at once, each told something different, render bit for
   bit what each renders alone (the dummy's is in `test/test_embed.cpp`).
 
-### Who owns the schedule
-
-Either side. One engine keeps a host-side timed queue and fires per block;
-another parks programs in its own VM. Mandating either would get in the other's
-way.
-
-clockwork keeps a queue regardless — timed MIDI output and timed OSC forwarding
-are its own features. `DspInfo::holds_schedule` declares which you want:
-messages as they arrive, carrying their timetag, or when they come due.
-
 ### Which channels are which stream
 
 `dsp_process` sees an anonymous range of channels. A stereo file's left and
@@ -572,13 +617,17 @@ CLI, a browser tab running the same code compiled to WebAssembly.
 | `clockwork_client_tap_*`                   | watch a ring without taking from it              |
 | `clockwork_client_region`                  | address metrics, the guest's window, the rings   |
 | `clockwork_client_clock` / `_beat_at`      | the tempo grid, so every binding agrees to the bit |
+| `clockwork_client_sample_clock` / `_ntp_at_frame` | the engine's time: which frame is heard when, to stamp a timed message from |
+| `clockwork_client_audio_tap_*`, `_scope_read` | read the audio a guest publishes in a tap, and the device's scope |
 | `clockwork_audio_decode_*` / `_writer_*`   | decode and encode audio, from a file or memory   |
 
-**The engine's own transports are clients of this.** A UDP datagram from
-another machine does not enter by a private door: the receiving thread mints an
-origin for the sender and calls `clockwork_client_send`, exactly as an
-in-process GUI does. One ingress path, one implementation of the ring
-arithmetic.
+**The engine's own transports are clients of this.** A command from a socket
+does not enter by a private door: the transport's receiving thread names the
+sender with an origin and hands the message to the host, which gives it to
+`ClockworkEngine::ingest`; that calls `clockwork_client_send`, exactly as an
+in-process GUI does. One implementation of the ring arithmetic. (A shm peer
+writes a ring of its own, which the control pass writes into the same in
+ring: docs/SEGMENTS.md.)
 
 **Except in a browser, outside the worklet.** The worklet runs the engine's
 module, so it calls this. The page's other threads (the main thread, a worker
@@ -597,11 +646,9 @@ belong to whatever guest is loaded.
 ## What the client knows about the guest: nothing but its metrics
 
 The JavaScript client boots the engine, moves OSC in and out, and treats every
-message as opaque. It used to carry a **DSP profile** — the guest's word for a
-sync barrier (`/sync` for scsynth, `/tau/sync` for tau), the verbs to refuse
-on the guest's behalf, the address its refusals come on — so that `sync()`
-could work with any engine. That went on 2026-09-13, on the observation that
-the barrier was never the guest's fact to begin with:
+message as opaque. It carries no profile of the guest — no word for a sync
+barrier, no verbs to refuse on its behalf, no address its refusals come on —
+because none of those is the guest's fact for clockwork to hold:
 
 - **The barrier is clockwork's.** `sync()` means "everything I sent before this
   has been handed to the guest, in order", and the order is the ingress
@@ -609,7 +656,7 @@ the barrier was never the guest's fact to begin with:
   `/clockwork/synced [i id]` itself, on the audio thread, at the point the
   message is reached in the drain — for every guest, on every host,
   including the placeholder. A guest's own barrier verb, if it has one, is
-  just another verb to it.
+  another verb to it.
 - **Refusing a guest's verbs is the product's business.** scsynth's `/quit`
   would stop the audio thread; SuperSonic's `send()` refuses it. Clockwork
   has no opinion.
@@ -710,10 +757,11 @@ matches the full `/clockwork/` including the trailing slash, never bare
 
 `dsp/dummy` implements the boundary and nothing else — no graph, no voices, no
 definitions. It emits signal rather than silence, because a test asserting zeros
-passes just as happily when nothing is connected at all.
+passes as happily when nothing is connected at all.
 
 Three modes, selected over OSC (`/dummy/pulse ,ii width_ms period_ms`,
-`/dummy/tone`, `/dummy/ping`), which exercises the message path too.
+`/dummy/tone`, `/dummy/echo`), which exercises the message path too.
+`/dummy/ping` answers `/dummy/pong`.
 
 **Pulse (default)** — 10 ms every 500 ms, and the timing instrument. Every edge
 is a function of the absolute frame index, so a test can assert that pulse *k*
@@ -739,7 +787,10 @@ answers one `/dummy/stream/entry` per bound stream. That is a guest consuming
 the map, and it is how a test sees every field — a count alone cannot catch a
 swapped `first`/`count`, or a truncated name.
 
-Those addresses are not under `/clockwork/`: that prefix never reaches a DSP.
+Those addresses are not under `/clockwork/`. A message there is clockwork's,
+and reaches a DSP only inside a bundle, or as an inbound event the DSP asked
+for (`DspInfo::wants_events`).
 
-It exists so this repository can build and test itself, and should be deleted
-when a real DSP is attached. It is not a reference implementation.
+It exists so this repository can build and test itself. A product leaves it
+where it is and points `CLOCKWORK_DSP` and `CLOCKWORK_DSP_DIR` at its own guest
+(BUILDING.md, "Your own guest"). It is not a reference implementation.

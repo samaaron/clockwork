@@ -23,7 +23,7 @@
 #include "../audio_config.h"             // block-size and channel caps
 #include "../clockwork_prefix.h"         // clockwork_sys_claims: whose message this is
 #include "../clockwork_sys.h"            // clockwork_sys_refuse, the refusal reasons
-#include "../shared_memory.h"            // layout, RingCursors, EgressRoute
+#include "../shared_memory.h"            // layout, RingCursors
 #include "../in_ring_door.h"              // the in ring's boundary
 #include "../workers/RingBufferWriter.h" // the multi-producer ring writer
 #include "../workers/wait_word.h"        // what a client waits on for egress
@@ -134,17 +134,16 @@ InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* o
         clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
             arenaInstanceGeneration(base),
             [core, source_id](const uint8_t* d, uint32_t n) {
-                clockwork_egress_nrt_write(core, EGRESS_REPLY, source_id, d, n);
+                clockwork_egress_nrt_write(core, source_id, d, n);
             });
     return wrote;
 }
 
-bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
                                       const RingPart* parts, uint32_t n_parts) {
-    static constexpr uint32_t kMaxParts = 8;
     clockwork::Egress* e = clockwork::egress(core);
     uint8_t* const base = clockwork::laid_out_base(core);
-    if (!e || !base || n_parts == 0 || n_parts > kMaxParts - 1)
+    if (!e || !base || n_parts == 0)
         return false;
     RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
     PerformanceMetrics* const metrics = clockwork::metrics_in(base);
@@ -155,21 +154,18 @@ bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t route, uint3
     const uint32_t most = nrt_egress_max(L);
     uint32_t len = 0;
     for (uint32_t i = 0; i < n_parts; ++i) {
-        if (parts[i].size > most - EGRESS_ROUTE_SIZE - len) {
+        if (parts[i].size > most - len) {
             metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         len += parts[i].size;
     }
     if (len == 0) return false;
-    std::array<RingPart, kMaxParts> frame{};
-    frame[0] = RingPart{ &route, static_cast<uint32_t>(sizeof route) };
-    for (uint32_t i = 0; i < n_parts; ++i) frame[1 + i] = parts[i];
     const bool written = RingBufferWriter::write(
         base + L.nrt_out_ring_start, L.profile.nrt_out_ring_bytes,
         &cursors->nrt_out_head, &cursors->nrt_out_tail,
         &cursors->nrt_out_sequence, &e->nrt_write_lock,
-        frame.data(), n_parts + 1, token);
+        parts, n_parts, token);
     // Refused for want of room: counted, since the line logging it would
     // ride this same full ring (PerformanceMetrics::egress_frames_refused).
     if (!written) metrics->egress_frames_refused.fetch_add(1, std::memory_order_relaxed);
@@ -184,9 +180,8 @@ extern "C" {
 
 // ── Egress ──────────────────────────────────────────────────────────────────
 
-// Both egress rings carry Message frames whose payload is [route:u32][osc];
-// the drains peel the route word before the callback sees the OSC bytes.
-// They walk from the ring's read cursor, as clockwork_client_poll does, and
+// Both egress rings carry Message frames whose payload is the OSC. The
+// drains walk from the ring's read cursor, as clockwork_client_poll does, and
 // give the space back as soon as the walk ends (clockwork_ring_give_back).
 static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
                                   std::atomic<int32_t>* head,
@@ -199,12 +194,7 @@ static uint32_t drain_egress_ring(uint8_t* buffer, uint32_t size,
     clockwork_ring_give_back(tail, read);   // a client's last batch, if it had one
     const uint32_t delivered = clockwork_drain_ring(buffer, size, head, read, st, m, max_frames,
         [fn, ctx](uint32_t sourceId, const uint8_t* payload, uint32_t n, uint32_t seq) {
-            if (n >= EGRESS_ROUTE_SIZE) {
-                uint32_t route;
-                std::memcpy(&route, payload, sizeof(route));
-                fn(ctx, sourceId, route,
-                   payload + EGRESS_ROUTE_SIZE, n - EGRESS_ROUTE_SIZE, seq);
-            }
+            if (n != 0) fn(ctx, sourceId, payload, n, seq);   // an empty frame says nothing
             return ClockworkDrainVerdict::Consume;
         });
     clockwork_ring_give_back(tail, read);
@@ -254,7 +244,7 @@ uint32_t clockwork_egress_nrt_drain(ClockworkCore* core, ClockworkEgressFn fn, v
 }
 
 uint32_t clockwork_egress_nrt_max_frame(const ClockworkCore* core) {
-    return nrt_egress_max(clockwork::layout_of(core)) - EGRESS_ROUTE_SIZE;
+    return nrt_egress_max(clockwork::layout_of(core));
 }
 
 static uint32_t nrt_free(const RingCursors* cursors, const clockwork::Layout& L) {
@@ -300,11 +290,11 @@ void clockwork_egress_nrt_room_made(ClockworkCore* core) {
         clockwork_control_wake(core);
 }
 
-bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t route, uint32_t token,
+bool clockwork_egress_nrt_write(ClockworkCore* core, uint32_t token,
                          const uint8_t* osc, uint32_t len) {
     if (!osc || len == 0) return false;
     const RingPart part{ osc, len };
-    return clockwork_egress_nrt_write_parts(core, route, token, &part, 1);
+    return clockwork_egress_nrt_write_parts(core, token, &part, 1);
 }
 
 // ── Waiting for egress (lanes_internal.h) ───────────────────────────────────

@@ -328,9 +328,6 @@ export function ringGiveBack(ring) {
     Atomics.store(ring.words, ring.tail, Atomics.load(ring.words, ring.read));
 }
 
-// An egress frame is [route:u32][osc].
-export const ROUTE_BYTES = 4;
-
 /**
  * The engine's replies, from both egress rings. clockwork_client_poll.
  *
@@ -365,12 +362,12 @@ export class EgressReader {
     /**
      * Deliver what the engine has said since the last poll.
      *
-     * `bytes` is a view into the ring, the OSC with the route word off. It
-     * stays the reader's until the next poll, which is when its space goes
+     * `bytes` is a view into the ring: the OSC, everything on the egress
+     * being for the one client. It stays the reader's until the next poll, which is when its space goes
      * back to the writer: a caller keeping it longer copies it.
      *
      * @param {number} max  frames at most; 0 for no limit
-     * @param {(bytes: Uint8Array, origin: number, route: number, sequence: number) => void} onMessage
+     * @param {(bytes: Uint8Array, origin: number, sequence: number) => void} onMessage
      * @returns {number} messages delivered
      */
     poll(max, onMessage) {
@@ -384,10 +381,9 @@ export class EgressReader {
             if (i > 0 && max !== 0 && this.#taken >= max) break;
             const room = max === 0 ? 0 : max - this.#taken;
             ringDrain(ring, this.#from[i], this.#states[i], room, (origin, offset, length, sequence) => {
-                if (length < ROUTE_BYTES) return;   // nothing after the route: consumed, not delivered
+                if (length === 0) return;   // an empty frame says nothing: consumed, not delivered
                 this.#taken++;
-                onMessage(ring.bytes.subarray(offset + ROUTE_BYTES, offset + length),
-                          origin, ring.view.getUint32(offset, true), sequence);
+                onMessage(ring.bytes.subarray(offset, offset + length), origin, sequence);
             }, this.#metrics);
         }
         return this.#taken;

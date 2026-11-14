@@ -2,9 +2,8 @@
 // Copyright (c) 2026 Sam Aaron
 /*
  * test_osc_front.cpp — the seam a product's front is installed at
- * (src/native/OscFront.h): a reply the front takes never reaches the
- * transport, a reply it declines does, and nothing else about the transport
- * changes for having a front in front of it.
+ * (src/comms/OscFront.h): a frame the front takes never reaches the
+ * transport, and one it declines does.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -17,37 +16,19 @@
 namespace {
 
 struct Inner final : IOscTransport {
-    std::vector<std::pair<uint32_t, std::string>> sent;
-    std::vector<std::string> log;
-    bool send(uint32_t token, const uint8_t* d, uint32_t n, bool) override {
-        sent.emplace_back(token, std::string(reinterpret_cast<const char*>(d), n));
-        return true;
+    std::vector<std::string> sent;
+    bool delivers = true;
+    bool deliver(const uint8_t* d, uint32_t n) override {
+        sent.emplace_back(reinterpret_cast<const char*>(d), n);
+        return delivers;
     }
-    uint32_t broadcastNotify(const uint8_t*, uint32_t) override { log.push_back("notify"); return 0; }
-    uint32_t broadcastLink(const uint8_t*, uint32_t) override { log.push_back("link"); return 0; }
-    bool subscribers = true;
-    bool hasNotifySubscribers() const override { return subscribers; }
-    bool subscribeNotify(uint32_t) override { log.push_back("subNotify"); return true; }
-    void unsubscribeNotify(uint32_t) override { log.push_back("unsubNotify"); }
-    void clearNotify() override { log.push_back("clearNotify"); }
-    bool subscribeLink(uint32_t) override { log.push_back("subLink"); return true; }
-    void unsubscribeLink(uint32_t) override { log.push_back("unsubLink"); }
-    uint32_t broadcastMidi(const uint8_t*, uint32_t) override { log.push_back("midi"); return 0; }
-    bool subscribeMidi(uint32_t) override { log.push_back("subMidi"); return true; }
-    void unsubscribeMidi(uint32_t) override { log.push_back("unsubMidi"); }
-    uint32_t broadcastGamepad(const uint8_t*, uint32_t) override { log.push_back("gamepad"); return 0; }
-    bool subscribeGamepad(uint32_t) override { log.push_back("subGamepad"); return true; }
-    void unsubscribeGamepad(uint32_t) override { log.push_back("unsubGamepad"); }
-    uint32_t broadcastOsc(const uint8_t*, uint32_t) override { log.push_back("osc"); return 0; }
-    bool subscribeOsc(uint32_t) override { log.push_back("subOsc"); return true; }
-    void unsubscribeOsc(uint32_t) override { log.push_back("unsubOsc"); }
 };
 
-// Takes every reply whose bytes start with "/mine".
+// Takes every frame whose bytes start with "/mine".
 struct Front final : OscFront {
     int seen = 0;
     bool ingress(const uint8_t*, uint32_t, uint32_t) override { return false; }
-    bool egress(uint32_t, const uint8_t* d, uint32_t n) override {
+    bool egress(const uint8_t* d, uint32_t n) override {
         ++seen;
         return n >= 5 && std::memcmp(d, "/mine", 5) == 0;
     }
@@ -56,7 +37,7 @@ struct Front final : OscFront {
 
 } // namespace
 
-TEST_CASE("fronted transport: a taken reply stops at the front, a declined one goes on", "[front]") {
+TEST_CASE("fronted transport: a taken frame stops at the front, a declined one goes on", "[front]") {
     Inner inner;
     Front front;
     FrontedTransport t;
@@ -64,42 +45,26 @@ TEST_CASE("fronted transport: a taken reply stops at the front, a declined one g
 
     const char* mine = "/mine\0\0\0,\0\0\0";
     const char* other = "/other\0\0,\0\0\0";
-    CHECK(t.send(7, reinterpret_cast<const uint8_t*>(mine), 12, false));
-    CHECK(t.send(7, reinterpret_cast<const uint8_t*>(other), 12, false));
+    CHECK(t.deliver(reinterpret_cast<const uint8_t*>(mine), 12));
+    CHECK(t.deliver(reinterpret_cast<const uint8_t*>(other), 12));
     CHECK(front.seen == 2);
     REQUIRE(inner.sent.size() == 1);
-    CHECK(inner.sent[0].first == 7);
-    CHECK(inner.sent[0].second.rfind("/other", 0) == 0);
+    CHECK(inner.sent[0].rfind("/other", 0) == 0);
+
+    // What the inner transport could not deliver is said.
+    inner.delivers = false;
+    CHECK_FALSE(t.deliver(reinterpret_cast<const uint8_t*>(other), 12));
+    inner.delivers = true;
 
     // Detached, everything goes on.
     t.detachFront();
-    CHECK(t.send(7, reinterpret_cast<const uint8_t*>(mine), 12, false));
-    CHECK(inner.sent.size() == 2);
-    CHECK(front.seen == 2);
+    CHECK(t.deliver(reinterpret_cast<const uint8_t*>(mine), 12));
+    CHECK(inner.sent.size() == 3);
+    CHECK(front.seen == 3);
 }
 
-TEST_CASE("fronted transport: every other method is the inner transport's", "[front]") {
-    Inner inner;
-    Front front;
-    FrontedTransport t;
-    t.attach(&inner, &front);
-    const uint8_t d[4] = {};
-    t.broadcastNotify(d, 4); t.broadcastLink(d, 4);
-    CHECK(t.hasNotifySubscribers());
-    CHECK(t.subscribeNotify(1)); t.unsubscribeNotify(1); t.clearNotify();
-    CHECK(t.subscribeLink(1)); t.unsubscribeLink(1);
-    t.broadcastMidi(d, 4); CHECK(t.subscribeMidi(1)); t.unsubscribeMidi(1);
-    t.broadcastGamepad(d, 4); CHECK(t.subscribeGamepad(1)); t.unsubscribeGamepad(1);
-    t.broadcastOsc(d, 4); CHECK(t.subscribeOsc(1)); t.unsubscribeOsc(1);
-    const std::vector<std::string> expect = {
-        "notify", "link", "subNotify", "unsubNotify", "clearNotify",
-        "subLink", "unsubLink", "midi", "subMidi", "unsubMidi",
-        "gamepad", "subGamepad", "unsubGamepad", "osc", "subOsc", "unsubOsc" };
-    CHECK(inner.log == expect);
-
-    // With nothing attached, nothing happens and nothing is claimed.
+TEST_CASE("fronted transport: with nothing attached a frame reaches no one", "[front]") {
     FrontedTransport bare;
-    CHECK_FALSE(bare.send(1, d, 4, false));
-    CHECK_FALSE(bare.hasNotifySubscribers());
-    CHECK_FALSE(bare.subscribeNotify(1));
+    const uint8_t d[4] = {};
+    CHECK_FALSE(bare.deliver(d, 4));
 }

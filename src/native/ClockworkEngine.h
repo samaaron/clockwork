@@ -288,13 +288,6 @@ public:
 
     std::function<void(const uint8_t*, uint32_t)> onReply;
 
-    // The same traffic, with the routing that decided where it went: `origin`
-    // is the token it is addressed to and `route` an EgressRoute. onReply
-    // cannot show this — an in-process reply and an in-process notification
-    // both arrive through it — so a caller that needs to know whether an
-    // answer reached the client that asked, or the notify audience, sets this.
-    std::function<void(uint32_t origin, uint32_t route,
-                       const uint8_t*, uint32_t)> onReplyRouted;
     std::function<void(const std::string&)>        onDebug;
 
     // Inject the egress transport (a host that owns sockets injects one from
@@ -385,8 +378,8 @@ public:
     // the engine owns the routing, the transports know only their medium.
     // Adding a clockwork subsystem is one ClockworkSysRoutes::add of a sub-namespace;
     // it cannot move the boundary, because the boundary has no table to register in.
-    // `originToken` is an opaque transport handle (minted by the transport's
-    // internOrigin at its entry point) the egress later resolves to route replies
+    // `originToken` is an opaque transport handle (minted by the transport at
+    // its entry point) the egress later resolves to route replies
     // back; 0 means an anonymous in-process / embedder caller. No default — every
     // entry point assigns an origin, so an unstamped 0 can never sneak in.
     // Returns what the client door said (clockwork_client_send): CLOCKWORK_OK,
@@ -1030,7 +1023,7 @@ private:
     // injects a real transport via setTransport (a host that owns sockets
     // injects one from the comms client library). The engine owns no socket.
     // Bound to onReply by pointer so a runtime callback swap is seen.
-    CallbackTransport mDefaultTransport{&onReply, &onReplyRouted};
+    CallbackTransport mDefaultTransport{&onReply};
     IOscTransport*    mTransport = nullptr;
     OscEgress         mEgress;
     // The boundary (audio thread): ONE predicate, clockwork vs DSP. No route table.
@@ -1223,6 +1216,8 @@ private:
     // produces its reply ring. Null ⇒ the plane is inert.
     std::atomic<ShmPeerPlaneHeader*> mPeerPlane{nullptr};
     ClockworkDrainState                     mPeerDrainState;
+    // The plane's claim as the peer drain last saw it: the gateway's.
+    uint32_t                                mPeerClaim = 0;
     // Where in the peer's command ring the messages written for a generation
     // end (lanes/ring_marks.h): set by a cold restart while the control pass
     // is parked — the generation closing at the teardown, "no instance" at
@@ -1377,7 +1372,7 @@ private:
     std::string              mErrorReason;
     // Read by Link network-thread callbacks before they touch the egress.
     // Cleared early in shutdown() so in-flight callbacks skip
-    // broadcastLinkNotify. Narrows the window; shutdown's
+    // broadcastClockNotify. Narrows the window; shutdown's
     // setLinkVisibility(Off) call that follows joins the Link thread
     // and closes the race fully.
     std::atomic<bool>        mLinkCallbacksAlive{true};

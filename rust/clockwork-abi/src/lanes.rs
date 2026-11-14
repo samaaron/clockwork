@@ -18,11 +18,10 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-/// One drained egress frame: the origin token the reply targets, the route
-/// word, the OSC bytes (valid only for the duration of the call), and the
-/// ring sequence number.
+/// One drained egress frame: the origin it was written with, the OSC bytes
+/// (valid only for the duration of the call), and the ring sequence number.
 pub type ClockworkEgressFn = Option<
-    unsafe extern "C" fn(ctx: *mut c_void, source_id: u32, route: u32, osc: *const u8, len: u32, seq: u32),
+    unsafe extern "C" fn(ctx: *mut c_void, source_id: u32, osc: *const u8, len: u32, seq: u32),
 >;
 
 /// One engine (`ClockworkCore`, src/clockwork_core.h). Opaque.

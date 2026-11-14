@@ -165,7 +165,6 @@ uint64_t dspFrame(uint64_t streamFrame);
 // One frame off an egress ring.
 struct EgressFrame {
     uint32_t             sourceId = 0;
-    uint32_t             route    = 0;
     uint32_t             seq      = 0;
     bool                 decodes  = true;   // by the parser clients read with (clockwork-osc)
     std::vector<uint8_t> data;

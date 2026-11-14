@@ -3,104 +3,32 @@
 /*
  * CallbackTransport.h — in-process IOscTransport for embedders and tests.
  *
- * Replies and broadcasts surface through the engine's onReply callback (debug
- * through onDebug); the single observer is the host that set them. This is the
- * engine's default transport, so a bare `ClockworkEngine` works standalone.
- *
- * The notify sets gate broadcasts (hasNotifySubscribers): a notify broadcast
- * reaches onReply once something has subscribed. The MIDI, gamepad and OSC sets
- * gate nothing — those broadcasts always reach the observer; they only tell a
- * first subscribe from a repeat. Only the NRT gateway calls these, so no
- * locking is needed.
+ * Everything the engine sends out surfaces through the engine's onReply
+ * callback (debug through onDebug): the client is the host that set it. This
+ * is the engine's default transport, so a bare `ClockworkEngine` works
+ * standalone. Only the NRT gateway calls deliver, so no locking is needed.
  */
 #pragma once
 
 #include "IOscTransport.h"
-#include "shared_memory.h"   // EgressRoute
 
 #include <cstdint>
 #include <functional>
-#include <set>
 
 class CallbackTransport : public IOscTransport {
 public:
     // Bound to the engine's onReply member by pointer so a callback swapped at
     // runtime is always seen.
-    explicit CallbackTransport(
-        const std::function<void(const uint8_t*, uint32_t)>* onReply,
-        const std::function<void(uint32_t, uint32_t, const uint8_t*, uint32_t)>* onRouted = nullptr)
-        : mOnReply(onReply), mOnRouted(onRouted) {}
+    explicit CallbackTransport(const std::function<void(const uint8_t*, uint32_t)>* onReply)
+        : mOnReply(onReply) {}
 
-    // Missed only when the host is watching neither way: a reply is meant for
-    // the caller, and here the caller is whoever set onReply or onReplyRouted.
-    // A frame for a wire alone (a Link snapshot) is meant for no one here.
-    bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override {
-        const bool watched = routed(token, EGRESS_REPLY, data, size);
-        if (networkOnly) return true;
-        if (mOnReply && *mOnReply) { (*mOnReply)(data, size); return true; }
-        return watched;
-    }
-
-    // The audience is the one observer, and a host that set none asked for
-    // nothing: a broadcast here misses no one.
-    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override {
-        routed(0, EGRESS_BROADCAST_NOTIFY, data, size);
-        if (mOnReply && *mOnReply) (*mOnReply)(data, size);
-        return 0;
-    }
-
-    uint32_t broadcastLink(const uint8_t*, uint32_t) override { return 0; }  // no in-process Link audience
-
-    bool hasNotifySubscribers() const override {
-        return !mNotify.empty();
-    }
-    bool subscribeNotify(uint32_t token) override { return mNotify.insert(token).second; }
-    void unsubscribeNotify(uint32_t token) override { mNotify.erase(token); }
-    void clearNotify() override { mNotify.clear(); }
-
-    // An in-process caller has no port, so there is no Link-notify target.
-    bool subscribeLink(uint32_t) override { return false; }
-    void unsubscribeLink(uint32_t) override {}
-
-    // MIDI notify: deliver to the single in-process observer so an
-    // embedder/test can see /clockwork/midi/in/* events through onReply.
-    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override {
-        if (mOnReply && *mOnReply) (*mOnReply)(data, size);
-        return 0;
-    }
-    bool subscribeMidi(uint32_t token) override { return mMidi.insert(token).second; }
-    void unsubscribeMidi(uint32_t token) override { mMidi.erase(token); }
-
-    // Gamepad notify: deliver to the single in-process observer so an
-    // embedder/test can see /clockwork/gamepad/in/* events through onReply.
-    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override {
-        if (mOnReply && *mOnReply) (*mOnReply)(data, size);
-        return 0;
-    }
-    bool subscribeGamepad(uint32_t token) override { return mGamepad.insert(token).second; }
-    void unsubscribeGamepad(uint32_t token) override { mGamepad.erase(token); }
-
-    // OSC-cue notify: deliver to the single in-process observer so an
-    // embedder/test can see /external-osc-cue events through onReply.
-    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override {
-        if (mOnReply && *mOnReply) (*mOnReply)(data, size);
-        return 0;
-    }
-    bool subscribeOsc(uint32_t token) override { return mOsc.insert(token).second; }
-    void unsubscribeOsc(uint32_t token) override { mOsc.erase(token); }
-
-private:
-    // Whether a routed observer saw it.
-    bool routed(uint32_t origin, uint32_t route, const uint8_t* d, uint32_t n) const {
-        if (!mOnRouted || !*mOnRouted) return false;
-        (*mOnRouted)(origin, route, d, n);
+    // A host that set no callback hears nothing.
+    bool deliver(const uint8_t* data, uint32_t size) override {
+        if (!mOnReply || !*mOnReply) return false;
+        (*mOnReply)(data, size);
         return true;
     }
 
+private:
     const std::function<void(const uint8_t*, uint32_t)>* mOnReply;
-    const std::function<void(uint32_t, uint32_t, const uint8_t*, uint32_t)>* mOnRouted = nullptr;
-    std::set<uint32_t> mNotify;
-    std::set<uint32_t> mMidi;
-    std::set<uint32_t> mGamepad;
-    std::set<uint32_t> mOsc;
 };

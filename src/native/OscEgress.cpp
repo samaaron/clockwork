@@ -26,12 +26,12 @@ void OscEgress::init(IOscTransport*                                  transport,
     mOnDebug   = onDebug;
 }
 
-// ── Producer side: frame `[route][osc]` into the NRT-out ring ─────────────────
+// ── Producer side: frame the OSC into the NRT-out ring ────────────────────────
 
-void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t size) {
+void OscEgress::frame(uint32_t token, const uint8_t* osc, uint32_t size) {
     // The lanes NRT egress producer (src/lanes/lanes.cpp) owns the NRT-out
     // ring location and the producer lock.
-    if (clockwork_egress_nrt_write(mCore, static_cast<uint32_t>(route), token, osc, size)) return;
+    if (clockwork_egress_nrt_write(mCore, token, osc, size)) return;
 
     // Never silently. A frame the ring refuses is logged, and one too big for
     // a frame ever to carry is answered with an error in its place, so the
@@ -53,7 +53,7 @@ void OscEgress::frame(Route route, uint32_t token, const uint8_t* osc, uint32_t 
     clockwork_sys_refuse(osc, size, "the reply is too big for the engine's egress",
         generationNow(),
         [&](const uint8_t* d, uint32_t n) {
-            clockwork_egress_nrt_write(mCore, static_cast<uint32_t>(route), token, d, n);
+            clockwork_egress_nrt_write(mCore, token, d, n);
         });
 }
 
@@ -66,7 +66,7 @@ uint32_t OscEgress::generationNow() const {
 }
 
 void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
-    frame(REPLY, token, data, size);
+    frame(token, data, size);
 }
 
 void OscEgress::refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason) {
@@ -74,50 +74,45 @@ void OscEgress::refuse(uint32_t token, const uint8_t* data, uint32_t size, const
         [this, token](const uint8_t* d, uint32_t n) { reply(token, d, n); });
 }
 
-void OscEgress::sendToCaller(uint32_t token, const uint8_t* data, uint32_t size) {
-    frame(SEND_TO_CALLER, token, data, size);
-}
-
 void OscEgress::broadcastToTargets(const uint8_t* data, uint32_t size) {
-    frame(BROADCAST_NOTIFY, 0, data, size);
+    if (wanted(CLOCKWORK_WANTS_NOTIFY)) frame(0, data, size);
 }
 
-void OscEgress::broadcastLinkNotify(const uint8_t* data, uint32_t size) {
-    frame(BROADCAST_LINK, 0, data, size);
+void OscEgress::broadcastClockNotify(const uint8_t* data, uint32_t size) {
+    if (wanted(CLOCKWORK_WANTS_CLOCK)) frame(0, data, size);
 }
 
 void OscEgress::broadcastMidiNotify(const uint8_t* data, uint32_t size) {
-    frame(BROADCAST_MIDI, 0, data, size);
+    if (wanted(CLOCKWORK_WANTS_MIDI)) frame(0, data, size);
 }
 
 void OscEgress::broadcastGamepadNotify(const uint8_t* data, uint32_t size) {
-    frame(BROADCAST_GAMEPAD, 0, data, size);
+    if (wanted(CLOCKWORK_WANTS_GAMEPAD)) frame(0, data, size);
 }
 
 void OscEgress::broadcastOscNotify(const uint8_t* data, uint32_t size) {
-    frame(BROADCAST_OSC, 0, data, size);
+    if (wanted(CLOCKWORK_WANTS_OSC)) frame(0, data, size);
 }
 
 void OscEgress::debug(const char* text, uint32_t len) {
     std::array<char, 1024> pkt{};
     uint32_t p = clockwork::buildDebugOsc(pkt.data(), text, len);
-    frame(BROADCAST_NOTIFY, 0, reinterpret_cast<const uint8_t*>(pkt.data()), p);
+    frame(0, reinterpret_cast<const uint8_t*>(pkt.data()), p);
 }
 
 // ── Gateway side: dispatch one framed message to the transport / onDebug ─────
 
-void OscEgress::dispatchEgress(uint32_t originToken, uint32_t route,
-                               const uint8_t* osc, uint32_t oscLen) {
+void OscEgress::dispatchEgress(const uint8_t* osc, uint32_t oscLen) {
     // Engine pre-dispatch hook. It may consume the message by answering
     // true; the engine's current hook inspects nothing and never does.
     if (mInterceptor && mInterceptor(osc, oscLen)) return;
     if (!mTransport) return;
-    // The one routing table, shared with a host that drains egress itself,
-    // and what the transport could not deliver counted, as such a host counts it.
+    // The one rule, shared with a host that drains egress itself, and what
+    // the transport could not deliver counted, as such a host counts it.
     const std::function<void(const std::string&)> onDebug =
         [this](const std::string& s) { deliverDebug(s.data(), static_cast<uint32_t>(s.size())); };
     clockwork_egress_count_undelivered(
-        mCore, clockwork_route_egress(*mTransport, originToken, route, osc, oscLen, onDebug));
+        mCore, clockwork_route_egress(*mTransport, osc, oscLen, onDebug));
 }
 
 
@@ -125,57 +120,17 @@ void OscEgress::deliverDebug(const char* text, uint32_t len) {
     if (mOnDebug && *mOnDebug) (*mOnDebug)(std::string(text, len));
 }
 
-// ── Subscriber registry — forwarded to the transport, keyed on the origin ────
+// ── What the client asked to be told: the core's switches (lanes.h) ──────────
 
-bool OscEgress::subscribeCaller(uint32_t token) {
-    return mTransport && mTransport->subscribeNotify(token);
+bool OscEgress::want(uint32_t kinds, bool on) {
+    return clockwork_client_wants(mCore, kinds, on);
 }
 
-void OscEgress::unsubscribeCaller(uint32_t token) {
-    if (mTransport) mTransport->unsubscribeNotify(token);
+bool OscEgress::wanted(uint32_t kind) const {
+    return (clockwork_client_wanted(mCore) & kind) != 0u;
 }
 
-void OscEgress::clearSubscribers() {
-    if (mTransport) mTransport->clearNotify();
-}
-
-bool OscEgress::hasSubscribers() const {
-    return mTransport && mTransport->hasNotifySubscribers();
-}
-
-bool OscEgress::subscribeCallerToLinkNotify(uint32_t token) {
-    return mTransport && mTransport->subscribeLink(token);
-}
-
-void OscEgress::unsubscribeCallerFromLinkNotify(uint32_t token) {
-    if (mTransport) mTransport->unsubscribeLink(token);
-}
-
-bool OscEgress::subscribeCallerToMidiNotify(uint32_t token) {
-    return mTransport && mTransport->subscribeMidi(token);
-}
-
-void OscEgress::unsubscribeCallerFromMidiNotify(uint32_t token) {
-    if (mTransport) mTransport->unsubscribeMidi(token);
-}
-
-bool OscEgress::subscribeCallerToGamepadNotify(uint32_t token) {
-    return mTransport && mTransport->subscribeGamepad(token);
-}
-
-void OscEgress::unsubscribeCallerFromGamepadNotify(uint32_t token) {
-    if (mTransport) mTransport->unsubscribeGamepad(token);
-}
-
-bool OscEgress::subscribeCallerToOscNotify(uint32_t token) {
-    return mTransport && mTransport->subscribeOsc(token);
-}
-
-void OscEgress::unsubscribeCallerFromOscNotify(uint32_t token) {
-    if (mTransport) mTransport->unsubscribeOsc(token);
-}
-
-// ── Small generic lifecycle broadcasts (gated by an audience) ────────────────
+// ── Small generic lifecycle broadcasts ───────────────────────────────────────
 
 // The reason is a guest's words, at any length it gave them (a boot error,
 // up to the 511 bytes the boot keeps): the packet takes them whole.
@@ -194,7 +149,7 @@ static OscPacket stateChange(const char* state, const char* reason, uint32_t gen
 }
 
 void OscEgress::sendStateChange(const char* state, const char* reason) {
-    if (!hasSubscribers()) return;
+    if (!wanted(CLOCKWORK_WANTS_NOTIFY)) return;
     const OscPacket packet = stateChange(state, reason, generationNow());
     broadcastToTargets(packet.ptr(), packet.size());
 }

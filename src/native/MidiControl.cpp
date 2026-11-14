@@ -61,18 +61,19 @@ bool MidiControl::handleMidiCommand(const DrainCallCtx& meta, const uint8_t* dat
     // Hold the origin for synchronous emitCb REPLYs during this call (see header).
     mReplyToken = token;
 
-    // Subscription drives the egress audience (owned by the transport). The
-    // address is the leading, NUL-terminated OSC string.
+    // The client's switch for the kind (lanes.h), turned here: these verbs
+    // reach the control thread by the control ring. The address is the
+    // leading, NUL-terminated OSC string.
     const char* addr = reinterpret_cast<const char*>(data);
     if (std::strcmp(addr, CLOCKWORK_SYS("midi/notify/subscribe")) == 0) {
-        if (mEgress && mEgress->subscribeCallerToMidiNotify(token) && mMidi)
-            clockwork_midi_emit_ports(mMidi);   // ports snapshot to the new subscriber
+        if (mEgress && mEgress->want(CLOCKWORK_WANTS_MIDI, true) && mMidi)
+            clockwork_midi_emit_ports(mMidi);   // the ports there now, when it newly asks
         ackSubscribeIfTokened(mEgress, token, data, size,
                               CLOCKWORK_SYS("midi/notify/subscribe.reply"));
         return true;
     }
     if (std::strcmp(addr, CLOCKWORK_SYS("midi/notify/unsubscribe")) == 0) {
-        if (mEgress) mEgress->unsubscribeCallerFromMidiNotify(token);
+        if (mEgress) mEgress->want(CLOCKWORK_WANTS_MIDI, false);
         return true;
     }
 
@@ -339,6 +340,6 @@ void MidiControl::broadcastTimelines() {
         appendTimelineRows(s, tls);
         s << osc::EndMessage;
     });
-    mEgress->broadcastLinkNotify(packet.ptr(), packet.size());
+    mEgress->broadcastClockNotify(packet.ptr(), packet.size());
 }
 

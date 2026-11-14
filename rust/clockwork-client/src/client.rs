@@ -26,7 +26,7 @@ use clockwork_abi::client::{
     ClockworkClientMessage, ClockworkClientTap, ClockworkRegion, ClockworkRegionId,
     ClockworkStatus, CLOCKWORK_FEATURE_SCOPE, CLOCKWORK_FEATURE_BULK,
     CLOCKWORK_FEATURE_SCHEDULER, CLOCKWORK_FEATURE_TAPS, CLOCKWORK_FEATURE_WINDOW,
-    CLOCKWORK_ROUTE_NOTIFY, CLOCKWORK_ROUTE_REPLY, CLOCKWORK_WAIT_FOREVER,
+    CLOCKWORK_WAIT_FOREVER,
 };
 
 use crate::error::{check, refused, Error, Result};
@@ -42,7 +42,6 @@ const EMPTY_SLOT: ClockworkClientMessage = ClockworkClientMessage {
     bytes: core::ptr::null(),
     length: 0,
     origin: 0,
-    route: 0,
     sequence: 0,
 };
 
@@ -214,8 +213,8 @@ impl Client {
     /// One OSC message or bundle, copied into the ingress ring; the engine
     /// reads it on its next block. `origin` is echoed on any reply so a
     /// client with several conversations in flight can tell them apart;
-    /// zero means "not distinguishing" and sends replies to the
-    /// notification audience instead. [`Error::Full`] is a moment — retry;
+    /// zero means "not distinguishing". The reply reaches the client
+    /// either way. [`Error::Full`] is a moment — retry;
     /// [`Error::TooBig`] is a verdict.
     pub fn send(&self, osc: &[u8], origin: u32) -> Result<()> {
         if osc.is_empty() {
@@ -568,37 +567,6 @@ pub struct Info {
 
 // ── Receiving ──────────────────────────────────────────────────────────────
 
-/// Which ring a message rode: `CLOCKWORK_ROUTE_*`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Route {
-    /// An answer to the message's `origin`.
-    Reply,
-    /// To whoever subscribed to notifications.
-    Notify,
-    /// A route word this build does not name.
-    Other(u32),
-}
-
-impl Route {
-    /// From the ABI's word.
-    pub const fn from_raw(word: u32) -> Route {
-        match word {
-            CLOCKWORK_ROUTE_REPLY => Route::Reply,
-            CLOCKWORK_ROUTE_NOTIFY => Route::Notify,
-            other => Route::Other(other),
-        }
-    }
-
-    /// The ABI's word.
-    pub const fn raw(self) -> u32 {
-        match self {
-            Route::Reply => CLOCKWORK_ROUTE_REPLY,
-            Route::Notify => CLOCKWORK_ROUTE_NOTIFY,
-            Route::Other(w) => w,
-        }
-    }
-}
-
 /// One message off a ring. `bytes` are the ring's and live until the next
 /// poll on the handle or tap that produced them — which the lifetime says;
 /// copy them to keep them.
@@ -608,7 +576,6 @@ pub struct Message<'a> {
     pub bytes: &'a [u8],
     /// The token the request carried, or 0.
     pub origin: u32,
-    pub route: Route,
     /// Monotonic per ring; a gap means the ring lapped.
     pub sequence: u32,
 }
@@ -623,7 +590,7 @@ impl<'a> Message<'a> {
             // cannot happen while 'a lives.
             unsafe { core::slice::from_raw_parts(m.bytes, m.length as usize) }
         };
-        Message { bytes, origin: m.origin, route: Route::from_raw(m.route), sequence: m.sequence }
+        Message { bytes, origin: m.origin, sequence: m.sequence }
     }
 
     /// The OSC address, for an OSC message: the bytes up to the first NUL.
@@ -637,9 +604,10 @@ impl<'a> Message<'a> {
         }
     }
 
-    /// True for a reply carrying `origin`.
+    /// True for a message carrying `origin`: an answer to a request sent
+    /// with it.
     pub fn is_reply_to(&self, origin: u32) -> bool {
-        self.route == Route::Reply && self.origin == origin
+        self.origin == origin
     }
 }
 
@@ -922,28 +890,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_message_knows_its_address_and_route() {
+    fn a_message_knows_its_address_and_origin() {
         let osc = b"/dummy/pong\0,\0\0\0";
-        let slot = ClockworkClientMessage { bytes: osc.as_ptr(), length: osc.len() as u32, origin: 7, route: 0, sequence: 3 };
+        let slot = ClockworkClientMessage { bytes: osc.as_ptr(), length: osc.len() as u32, origin: 7, sequence: 3 };
         let m = Message::from_slot(&slot);
         assert_eq!(m.address(), "/dummy/pong");
         assert_eq!(m.bytes, osc);
         assert!(m.is_reply_to(7));
         assert!(!m.is_reply_to(8));
-        assert_eq!(m.route, Route::Reply);
 
         let bundle = b"#bundle\0";
-        let slot = ClockworkClientMessage { bytes: bundle.as_ptr(), length: 8, origin: 0, route: 2, sequence: 4 };
+        let slot = ClockworkClientMessage { bytes: bundle.as_ptr(), length: 8, origin: 0, sequence: 4 };
         let m = Message::from_slot(&slot);
         assert_eq!(m.address(), "");
-        assert_eq!(m.route, Route::Notify);
-        assert!(!m.is_reply_to(0));
+        assert!(!m.is_reply_to(7));
 
         let empty = Message::from_slot(&EMPTY_SLOT);
         assert!(empty.bytes.is_empty());
-        assert_eq!(Route::from_raw(9), Route::Other(9));
-        assert_eq!(Route::Other(9).raw(), 9);
-        assert_eq!(Route::Reply.raw(), CLOCKWORK_ROUTE_REPLY);
     }
 
     #[test]

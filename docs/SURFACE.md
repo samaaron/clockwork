@@ -21,7 +21,8 @@ open a socket, or notice a device being unplugged, because the guest is behind
                                   a port clocked continuously from a timeline
     osc/cue-server/*, osc/notify/*
     devices/*, drivers/*, clock/*, notify, debug, statechange
-    param/define, param/list, param/set     the parameter table (docs/PARAMS.md)
+    param/define, param/list, param/set,    the parameter table (docs/PARAMS.md)
+    param/text
 
 Plus the part with no OSC address at all: `clockwork_sink_send(sink, bytes, when)`,
 which is how a guest gets bytes onto a wire with a time attached. That is the
@@ -141,14 +142,15 @@ the engine refuses them, or forwards them to a host that asked for that.
 The ones that change the device — `devices/switch`, `devices/mode`,
 `devices/reopen`, `drivers/switch`, `inputs/enable` — do their work on the
 engine's device lane, not on the control pass: a device change can take
-seconds, and the pass serves every other client meanwhile. The ones that ask
+seconds, and the pass goes on answering meanwhile. The ones that ask
 about it — `devices/list`, `devices/current`, `devices/report`,
 `drivers/list` — are answered there too, so an answer describes the device
 any change in flight leaves behind, and the pass never waits for one.
 
 `devices/switch <output> <rate> <buffer> [<input>]` is acknowledged at once
 with `devices/switch.reply 1` — heard, nothing more — and ends in exactly one
-`devices/switch.done` broadcast to the notify subscribers:
+`devices/switch.done`, sent to a client that has asked for the engine's
+lifecycle (`/clockwork/notify`):
 
     success, requestedOutput, requestedInput, actualOutput, actualInput,
     error, inputUnavailable, inputUnavailableReason

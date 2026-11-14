@@ -573,7 +573,6 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
             out[i].bytes    = c->peerBatch.data() + heads[i][0];
             out[i].length   = heads[i][1];
             out[i].origin   = heads[i][2];
-            out[i].route    = CLOCKWORK_ROUTE_REPLY;
             out[i].sequence = heads[i][3];
         }
         // The engine may hold commands back for the room this read made.
@@ -593,17 +592,13 @@ uint32_t clockwork_client_poll(ClockworkClient* handle,
     dm.corrupted = &pm->osc_in_corrupted;
     dm.seqGaps   = &pm->messages_sequence_gaps;
 
-    // Egress frames are [route:u32][osc]; the route is peeled here so a
-    // client sees the address it sent to, not a length-prefixed blob.
+    // An egress frame is the OSC; an empty one says nothing.
     ClockworkClientMessage* next = out;   // where the next message goes
     auto take = [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
-        if (len < EGRESS_ROUTE_SIZE) return ClockworkDrainVerdict::Consume;
-        uint32_t route = 0;
-        std::memcpy(&route, payload, sizeof(route));
-        next->bytes    = payload + EGRESS_ROUTE_SIZE;
-        next->length   = len - EGRESS_ROUTE_SIZE;
+        if (len == 0) return ClockworkDrainVerdict::Consume;
+        next->bytes    = payload;
+        next->length   = len;
         next->origin   = sourceId;
-        next->route    = route;
         next->sequence = seq;
         ++next;
         return ClockworkDrainVerdict::Consume;
@@ -1129,7 +1124,6 @@ struct TapImpl {
     uint32_t    size   = 0;
     std::atomic<int32_t>* head = nullptr;
     int32_t     cursor = 0;
-    bool        peelRoute = false;   // egress frames carry a route word
     bool        owns_storage = true;
     uint64_t    missed = 0;
     ClockworkDrainState drain{};
@@ -1145,12 +1139,10 @@ bool tapBind(TapImpl* t, ClientImpl* c, uint32_t ring) {
         t->buffer    = c->base + c->L.in_ring_offset;
         t->size      = c->L.in_ring_size;
         t->head      = &c->control()->in_head;
-        t->peelRoute = false;
     } else if (ring == CLOCKWORK_REGION_EGRESS) {
         t->buffer    = c->base + c->L.out_ring_offset;
         t->size      = c->L.out_ring_size;
         t->head      = &c->control()->out_head;
-        t->peelRoute = true;
     } else {
         return false;
     }
@@ -1225,14 +1217,9 @@ uint32_t clockwork_client_tap_poll(ClockworkClientTap* handle,
     clockwork_drain_ring(
         t->buffer, t->size, t->head, &cursor, t->drain, dm, max,
         [&](uint32_t sourceId, const uint8_t* payload, uint32_t len, uint32_t seq) {
-            const uint32_t skip = t->peelRoute ? EGRESS_ROUTE_SIZE : 0u;
-            if (len < skip) return ClockworkDrainVerdict::Consume;
-            uint32_t route = 0;
-            if (t->peelRoute) std::memcpy(&route, payload, sizeof(route));
-            out[n].bytes    = payload + skip;
-            out[n].length   = len - skip;
+            out[n].bytes    = payload;
+            out[n].length   = len;
             out[n].origin   = sourceId;
-            out[n].route    = route;
             out[n].sequence = seq;
             ++n;
             return ClockworkDrainVerdict::Consume;

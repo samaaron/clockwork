@@ -265,8 +265,8 @@ ClockworkCore* clockwork_client_core(const ClockworkClient* c);
  *
  * `origin` is the client's own token, echoed back on any reply so a client
  * with several conversations in flight can tell them apart. Zero is legal and
- * means "I am not distinguishing" — it is NOT a broadcast, and a reply to it
- * goes to the engine's notification audience rather than to the sender.
+ * means "I am not distinguishing". The reply reaches the client either way:
+ * there is one client, and the origin decides nothing.
  *
  * CLOCKWORK_E_FULL is a moment, not a verdict: the ring drains every block, so
  * a caller retries. CLOCKWORK_E_TOO_BIG is a verdict — the message is larger
@@ -337,12 +337,8 @@ typedef struct ClockworkClientMessage {
     const uint8_t* bytes;
     uint32_t       length;
     uint32_t       origin;   /* the token the request carried, or 0 */
-    uint32_t       route;    /* CLOCKWORK_ROUTE_* */
     uint32_t       sequence; /* monotonic per ring; a gap means the ring lapped */
 } ClockworkClientMessage;
-
-#define CLOCKWORK_ROUTE_REPLY   0u   /* an answer to `origin` */
-#define CLOCKWORK_ROUTE_NOTIFY  2u   /* to whoever subscribed to notifications */
 
 /* Take up to `max` messages. Returns how many were written to `out`, which the
  * caller owns and sizes.
@@ -355,8 +351,7 @@ typedef struct ClockworkClientMessage {
  *
  * WHICH RINGS: an in-process handle takes from the arena's two egress rings;
  * the peer takes from its command plane's reply ring, where every frame is a
- * reply or a notification for it (route is CLOCKWORK_ROUTE_REPLY, origin the
- * plane's token). A reader has no ring to take from and gets 0.
+ * reply or a notification for it (origin the plane's token). A reader has no ring to take from and gets 0.
  *
  * SINGLE CONSUMER, AND THE RING HAS ONE. Polling TAKES: it advances the
  * egress ring's own read cursor, which lives in the engine's ring cursors and
@@ -384,7 +379,7 @@ uint32_t clockwork_client_poll(ClockworkClient* c,
  * (egressFramesUndelivered), as the engine's own gateway counts its own, so
  * whoever reads them sees every message that left the engine and reached no
  * one, whichever of the two delivered it. clockwork_route_egress (EgressRouter.h)
- * returns the number for a message it routes. */
+ * returns the number for a message it hands on. */
 void clockwork_client_count_undelivered(ClockworkClient* c, uint32_t n);
 
 /* ── Waiting ─────────────────────────────────────────────────────────────────

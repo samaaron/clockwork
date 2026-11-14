@@ -519,15 +519,11 @@ void TrackControl::relayOut() {
     clockwork_drain_ring(out_ring(mSeg.ptr), clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, mOutDrain, ClockworkDrainMetrics{},
         256,
         [core = mEngine->core()](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
-            if (len <= sizeof(Prefixed)) return ClockworkDrainVerdict::Consume;
-            uint32_t route = 0;
-            std::memcpy(&route, payload, sizeof route);
-            const uint8_t* osc = payload + sizeof(Prefixed);
-            const uint32_t oscLen = len - static_cast<uint32_t>(sizeof(Prefixed));
-            if (clockwork_egress_nrt_write(core, route, token, osc, oscLen)) return ClockworkDrainVerdict::Consume;
+            if (len == 0) return ClockworkDrainVerdict::Consume;
+            if (clockwork_egress_nrt_write(core, token, payload, len)) return ClockworkDrainVerdict::Consume;
             // Once more after asking to be woken, for room made in between.
             clockwork_egress_nrt_want_room(core);
-            return clockwork_egress_nrt_write(core, route, token, osc, oscLen)
+            return clockwork_egress_nrt_write(core, token, payload, len)
                 ? ClockworkDrainVerdict::Consume : ClockworkDrainVerdict::Retain;
         },
         &stop);

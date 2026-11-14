@@ -69,6 +69,7 @@ static osc_test::Packet scheduleOscSend(double ntp, const char* host, int port,
 // pushed to subscribers as /external-osc-cue <ip> <port> <address> <args...>.
 TEST_CASE("OSC cue server forwards inbound external OSC as a cue", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
 
     // Pick a free UDP port, then hand it to the cue server (probe closes first).
     const int cuePort = test_udp::freeLoopbackPort();
@@ -114,6 +115,7 @@ TEST_CASE("OSC cue server forwards inbound external OSC as a cue", "[osc]") {
 
 TEST_CASE("scheduled OSC out is delivered to the target host:port", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
 
     // A listener the test owns and binds, so there's no port race.
     test_udp::Socket listener;
@@ -174,6 +176,7 @@ static bool oscSinkOpenTo(const ClockworkSinks* sinks, const std::string& target
 // see a send when there is one.
 TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs it", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
 
     test_udp::Socket listener;
     REQUIRE(listener.bound());
@@ -220,6 +223,7 @@ TEST_CASE("OSC cue server forwards a command it receives as a cue and never runs
 // limit off.
 TEST_CASE("OSC cue server rate limit cuts a flood and counts what it dropped", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
     const auto& m = fx.engine().getMetrics();
     const int cuePort = test_udp::freeLoopbackPort();
 
@@ -285,6 +289,7 @@ TEST_CASE("OSC cue server rate limit cuts a flood and counts what it dropped", "
 // resolves in the cue socket's family, so it lands rather than going astray.
 TEST_CASE("OSC self-loop: sending to our own cue port comes back as a cue", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
 
     const int cuePort = test_udp::freeLoopbackPort();
     osc_test::Builder cfg;
@@ -320,6 +325,7 @@ TEST_CASE("OSC self-loop: sending to our own cue port comes back as a cue", "[os
 TEST_CASE("OSC self-loop works over IPv6 (::1)", "[osc]") {
     if (!ipv6_loopback_available()) { SUCCEED("no IPv6 loopback here"); return; }
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
 
     const int cuePort = test_udp::freeLoopbackPort();
     osc_test::Builder cfg;
@@ -353,6 +359,7 @@ TEST_CASE("OSC self-loop works over IPv6 (::1)", "[osc]") {
 // payload cap so an over-large message is never silently swallowed.
 TEST_CASE("OSC out: large message delivered, engine survives", "[osc]") {
     EngineFixture fx;
+    fx.send(osc_test::message("/clockwork/osc/notify/subscribe"));   // cues go to a client that asked for them
     test_udp::Socket listener;
     REQUIRE(listener.bound());
     const int targetPort = listener.port();

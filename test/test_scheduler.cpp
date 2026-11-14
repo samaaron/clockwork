@@ -342,8 +342,8 @@ TEST_CASE("Scheduler - the scheduling caller's origin survives to fire time",
 
     // A scheduled message is answered long after the caller's request returned,
     // so the token has to be stored with the event rather than read from
-    // whatever is being dispatched when it fires. Without it the reply routes
-    // on origin 0, which is the notify audience and not the caller.
+    // whatever is being dispatched when it fires. Without it the reply carries
+    // origin 0, and the caller cannot tell which request it answers.
     auto e = es.popDue(at(2000));
     REQUIRE(e.valid());
     REQUIRE(e.meta != nullptr);

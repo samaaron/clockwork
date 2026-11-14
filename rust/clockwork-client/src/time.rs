@@ -19,13 +19,17 @@ fn since_unix() -> Duration {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
 }
 
-/// Now, as NTP seconds — the domain of [`crate::Clock::beat_at`].
+/// Now, as NTP seconds — the domain of [`crate::Clock::beat_at`]. The wall
+/// clock's now, not the engine's: a timed message is stamped from the
+/// engine's clock, [`crate::Client::sample_clock`] (docs/BOUNDARY.md,
+/// "Sending to the guest").
 pub fn ntp_now() -> f64 {
     since_unix().as_secs_f64() + NTP_UNIX_OFFSET_SECONDS as f64
 }
 
 /// Now, as an OSC timetag (NTP 32.32). Exact integer arithmetic, so two
-/// calls a nanosecond apart differ by at most one tick.
+/// calls a nanosecond apart differ by at most one tick. The wall clock's,
+/// as [`ntp_now`] is.
 pub fn timetag_now() -> u64 {
     let d = since_unix();
     let secs = d.as_secs() + NTP_UNIX_OFFSET_SECONDS;
@@ -53,8 +57,9 @@ pub fn ntp_from_timetag(timetag: u64) -> f64 {
     (timetag >> 32) as f64 + (timetag & 0xffff_ffff) as f64 / TIMETAG_SECOND as f64
 }
 
-/// A timetag moved by `seconds`, either way. What a host does to anchor a
-/// piece a little into the future: `timetag_offset(timetag_now(), 0.5)`.
+/// A timetag moved by `seconds`, either way. Not C's
+/// `clockwork_timetag_offset`, which measures how far apart two timetags
+/// are.
 pub fn timetag_offset(timetag: u64, seconds: f64) -> u64 {
     timetag.wrapping_add_signed((seconds * TIMETAG_SECOND as f64) as i64)
 }

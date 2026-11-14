@@ -4,16 +4,17 @@
 
 How OSC commands reach clockwork, and how replies get back.
 
-**One at a time.** The server installs a single transport at startup
-(`engine.setTransport`). Passing more than one of the flags below is an error,
-not a merge:
+**One at a time.** An engine has one transport, installed by its host
+(`ClockworkEngine::setTransport`). The flags below are SuperSonic's host's
+(`host/EngineHost.cpp` in that repository), which takes exactly one of them
+and refuses to start with none, or with more than one:
 
 ```
-ERROR: pick at most one of --tcp / --uds / --pipe / --shm-commands
+pick exactly one of --tcp / --uds / --pipe / --shm-commands
 ```
 
-The cue server and outbound OSC are unaffected, and `-u` still numbers the
-shared-memory segment.
+The cue server and outbound OSC are unaffected, and that host's `-u` still
+numbers the shared-memory segment.
 
 | flag | transport | shape |
 |---|---|---|
@@ -63,10 +64,11 @@ there, `NifTransport` (`src/nif/clockwork_nif.cpp`), which hands each reply to
 the registered Erlang processes. The transports described in this file live in
 `src/comms/` (`clockwork_comms.h`, CMake target `clockwork_comms`, Rust crate
 `clockwork-comms`) and are linked by a HOST that wants a wire: SuperSonic's
-own main (clockwork-supersonic/host/), a GUI that embeds the engine and opens
-a port for its language server. The origin registry and the
-notify audiences live there too, on the client's side of the door, because
-"who is on the other end" was never the engine's question.
+own main (its `host/`), a GUI that embeds the engine and opens
+a port for its language server. Which connection the client is lives there
+too, on the client's side of the door, because "who is on the other end" was
+never the engine's question. What the client asked to be told is the core's
+to keep (`clockwork_client_wants`, `lanes.h`), the same on every host.
 
 That is the same arrangement as the web, where the JavaScript client owns the
 wire and the worklet knows nothing of it. A host that embeds clockwork in its
@@ -139,24 +141,26 @@ hand-off: `clockwork_client_open_shm(endpoint, secret)` for a reader,
 
 ## Origins
 
-Every command carries an **origin** in its ring `Message` header, and a reply is
-addressed to it. `dsp_api.h` calls it `origin`; the well-known constants are
+Every command carries an **origin** in its ring `Message` header, and a reply
+carries it back. `dsp_api.h` calls it `origin`; the well-known constants are
 named `*_ORIGIN_TOKEN`.
 
-The transport mints it on the way in and resolves it on the way out — same
-object, both ends:
+The transport mints it on the way in:
 
 * the stream transports use the connection id, minted from 1 and never
   reused, so a token survives a scheduled event's delay and dies with its
   connection;
 * the shm plane uses one constant, `SHM_PEER_ORIGIN_TOKEN`, because it has
   exactly one peer;
-* `0` is the in-process caller, and broadcast when replying.
+* `0` is the in-process caller's, and what a message nobody asked for
+  carries.
 
-Nothing between those two points inspects the value: `OscEgress::dispatchEgress`
-takes a `uint32_t` and hands it to `IOscTransport::send`. It is a **reply
-address, not a client identity** — a single client needs it just as much as
-several would, because the answer still has to find its way back.
+Clockwork inspects the value nowhere. An engine has one client, and
+everything on the egress is handed to it: `IOscTransport` is one call,
+`deliver`. The origin is a **label, not an address**: it lets the client
+match an answer to its request. A host that wants more than that (several
+receivers of its own, a record of who asked) builds it on its side, on the
+label or in its own messages.
 
 A DSP therefore keeps no client registry: it echoes back the `origin` it was
-given, and clockwork routes the reply.
+given.

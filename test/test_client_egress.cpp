@@ -6,7 +6,7 @@
  * The engine writes two rings: the audio thread's replies (OUT) and the
  * NRT gateway's (NRT-out — the subsystems, the state changes, the
  * broadcasts). One read function, clockwork_client_poll, takes from both,
- * each frame with the origin it answers and the route it was sent by. A
+ * each frame with the origin it answers. A
  * host that drains egress itself (Config::hostDrainsEgress) tells the engine
  * so, and the engine's own gateway then leaves the rings alone: the host is
  * the consumer, on native as the JavaScript client already is on the web.
@@ -38,12 +38,12 @@ uint8_t* arenaBase(const engine_test::Engine& e) { return static_cast<uint8_t*>(
 extern bool ring_buffer_write(
     uint8_t* buffer_start, uint32_t buffer_size,
     std::atomic<int32_t>* head, std::atomic<int32_t>* tail, std::atomic<int32_t>* sequence,
-    uint32_t route, uint32_t source_id, const void* data, uint32_t data_size,
+    uint32_t source_id, const void* data, uint32_t data_size,
     std::atomic<uint32_t>* status_flags, PerformanceMetrics* metrics);
 
 namespace {
 
-struct Frame { uint32_t origin, route; std::string address; };
+struct Frame { uint32_t origin; std::string address; };
 
 // Everything the client can take right now.
 std::vector<Frame> takeAll(ClockworkClient* c) {
@@ -52,7 +52,7 @@ std::vector<Frame> takeAll(ClockworkClient* c) {
     for (;;) {
         const uint32_t n = clockwork_client_poll(c, batch, 64);
         for (uint32_t i = 0; i < n; ++i)
-            out.push_back({ batch[i].origin, batch[i].route, osc_test::parseAddress(batch[i].bytes, batch[i].length) });
+            out.push_back({ batch[i].origin, osc_test::parseAddress(batch[i].bytes, batch[i].length) });
         if (n < 64) break;
     }
     return out;
@@ -73,7 +73,7 @@ bool waitForFrame(const std::function<void()>& pump, ClockworkClient* c, const c
 
 } // namespace
 
-TEST_CASE("client egress: one poll takes from both rings, each frame with its origin and route",
+TEST_CASE("client egress: one poll takes from both rings, each frame with its origin",
           "[client][egress]") {
     ClockworkEngine::Config cfg = EngineFixture::defaultConfig();
     cfg.hostDrainsEgress = true;
@@ -81,11 +81,7 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
     ClockworkClient* c = fx.engine().egressClient();
     REQUIRE(c != nullptr);
 
-    // Boot wrote to the NRT ring before anyone polled: the state changes are
-    // still there, routed to the notify audience, and the client takes them.
-    bool sawNotify = false;
-    for (const Frame& f : takeAll(c)) if (f.route == EGRESS_BROADCAST_NOTIFY) sawNotify = true;
-    CHECK(sawNotify);
+    takeAll(c);   // what boot said, set aside
 
     // The audio thread answers on the OUT ring, to the token that asked.
     const auto ping = osc_test::message("/dummy/ping");
@@ -93,7 +89,6 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
     Frame pong;
     REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/dummy/pong", &pong));
     CHECK(pong.origin == 7);
-    CHECK(pong.route == EGRESS_REPLY);
 
     // The NRT gateway answers on the NRT-out ring, to its token, and the
     // same poll takes that too.
@@ -102,7 +97,6 @@ TEST_CASE("client egress: one poll takes from both rings, each frame with its or
     Frame reply;
     REQUIRE(waitForFrame([&] { fx.pumpBlock(); }, c, "/clockwork/notify.reply", &reply));
     CHECK(reply.origin == 9);
-    CHECK(reply.route == EGRESS_REPLY);
 }
 
 TEST_CASE("client egress: with the host draining, the engine's gateway leaves the rings alone",
@@ -149,7 +143,7 @@ TEST_CASE("client egress: a polled message is the caller's until the next poll, 
     const auto fill = [&](const std::vector<uint8_t>& payload) {
         return ring_buffer_write(arenaBase(e) + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
                                  &ctl->out_head, &ctl->out_tail, &ctl->out_sequence,
-                                 EGRESS_REPLY, 7, payload.data(), static_cast<uint32_t>(payload.size()),
+                                 7, payload.data(), static_cast<uint32_t>(payload.size()),
                                  nullptr, nullptr);
     };
     const std::vector<uint8_t> coarse(200, 0xEE);

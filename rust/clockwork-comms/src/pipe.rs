@@ -596,8 +596,8 @@ mod imp {
 /// Start a named-pipe OSC server (Windows). `name` is a byte string (ptr+len,
 /// not NUL-terminated) — either a bare name ("clockwork-cmd") that is
 /// prefixed with `\\.\pipe\`, or a full pipe path. Instances carry an
-/// owner-only DACL and reject remote clients; `max_conns` is the instance
-/// count, so an over-cap connect fails busy. Same handle/send/stop ABI as the
+/// owner-only DACL and reject remote clients; a connect beyond the pipe's
+/// instances fails busy. Same handle/send/stop ABI as the
 /// socket stream servers, the secret included: without one it does not
 /// start. Always null on non-Windows platforms.
 ///

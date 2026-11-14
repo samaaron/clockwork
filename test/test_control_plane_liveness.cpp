@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 /*
- * test_control_plane_liveness.cpp — registering for notifications must not
+ * test_control_plane_liveness.cpp — asking for notifications must not
  * touch the audio device.
  *
- * A device report for each newly-seen client would put a device enumeration
+ * A device report on every /clockwork/notify would put a device enumeration
  * (on Windows, every device through COM, which virtual drivers can make
- * slow) in the path of the boot handshake, and a second client's
- * /clockwork/notify would then wait behind the first client's probe. Clients
- * that want the device list ask for it (/clockwork/devices/report).
+ * slow) in the path of the boot handshake, and the next /clockwork/notify
+ * (a client that came back) would then wait behind that probe. A client
+ * that wants the device list asks for it (/clockwork/devices/report).
  */
 #include <catch2/catch_test_macros.hpp>
 #include "EngineFixture.h"
@@ -37,12 +37,12 @@ TEST_CASE("Notify registration is device-free", "[control][notify]") {
     REQUIRE_FALSE(fix.waitForReply("/clockwork/devices", r, 250));
 }
 
-TEST_CASE("Notify registration stays device-free for every new client",
+TEST_CASE("Notify registration stays device-free each time it is asked",
           "[control][notify]") {
     EngineFixture fix;
 
-    // A second client registers after the first, from a different origin: a
-    // fresh client must not mean a fresh probe.
+    // The client asks again, as one that came back does: asking again must
+    // not mean a fresh probe.
     for (int i = 0; i < 3; ++i) {
         OscReply r;
         fix.send(osc_test::message("/clockwork/notify"));
@@ -131,11 +131,10 @@ TEST_CASE("Device report is still delivered when asked for", "[control][notify]"
 }
 
 #ifndef _WIN32
-// A UDP client names the port it wants the list on, since it may listen on a
-// socket other than the one it sends from. A stream client (TCP, UDS, a pipe,
-// shared memory) has no port to name: its connection is what is subscribed.
-// One that names a port anyway — a client written for UDP, moved to TCP —
-// is subscribed all the same.
+// A stream client (TCP, UDS, a pipe, shared memory) has no port to name:
+// the client is its connection. One that names a port anyway (a client
+// written for a datagram command port, which named the port it wanted the
+// list on) is subscribed all the same.
 TEST_CASE("Device report reaches a stream client that names a port",
           "[control][notify][transport]") {
     StreamOscTransport tcp;
@@ -172,6 +171,51 @@ TEST_CASE("Device report reaches a stream client that names a port",
     tcp.stop();
     CHECK(heard);
 }
+
+// One client: everything the engine sends out is for it. A message nobody
+// asked for by name (here the guest's answer to a command that carried no
+// origin) reaches a client that has asked to be told nothing.
+TEST_CASE("Everything on the egress reaches the one client, whoever asked",
+          "[control][egress][transport]") {
+    StreamOscTransport tcp;
+    ClockworkEngine engine;
+    engine.onDebug = [](const std::string&) {};
+    tcp.setIngest([&engine](const uint8_t* d, uint32_t n, uint32_t token) {
+        engine.ingest(d, n, token);
+    });
+    tcp.initialiseTcp(0, "127.0.0.1");
+    tcp.setSecret(testSecret());
+    engine.setTransport(&tcp);
+    auto cfg = EngineFixture::defaultConfig();
+    cfg.hostDrivesControl = false;
+    engine.init(cfg);
+    REQUIRE(tcp.start());
+
+    const int fd = connectTcp(tcp.boundPort());
+    // The client is whoever is connected: one frame from it, answered.
+    writeFramed(fd, osc_test::message("/dummy/ping").data);
+    auto hears = [&](const char* address) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            engine.pumpAudioBlock();
+            pollfd pfd{ fd, POLLIN, 0 };
+            if (::poll(&pfd, 1, 2) <= 0) continue;
+            const auto frame = readFramed(fd);
+            if (frame.empty()) return false;
+            if (osc_test::parseAddress(frame.data(), static_cast<uint32_t>(frame.size())) == address) return true;
+        }
+        return false;
+    };
+    REQUIRE(hears("/dummy/pong"));
+
+    const auto ping = osc_test::message("/dummy/ping");
+    REQUIRE(engine.ingest(ping.ptr(), ping.size(), 0) == CLOCKWORK_OK);
+    const bool heard = hears("/dummy/pong");
+    close(fd);
+    engine.shutdown();
+    tcp.stop();
+    CHECK(heard);
+}
 #endif
 
 // Device commands run on the device worker rather than the gateway, so the
@@ -193,18 +237,18 @@ TEST_CASE("Offloaded device commands still reply", "[control][notify]") {
 }
 
 // The control thread is the sole non-RT consumer: whatever it does while
-// handling one client's registration is time every other client spends
-// unanswered. Device work takes the swap gate, so the registrations are made
+// handling a registration is time every other command spends unanswered.
+// Device work takes the swap gate, so the registrations are made
 // while a swap holds it: each is answered all the same, where inline device
 // work (a probe of every device) would wait for the swap and never answer.
 // Structural, not a duration a loaded machine can overrun
 // (test_gateway_swap_gate.cpp holds the same line for every device question).
-TEST_CASE("Registering clients does not park the control thread",
+TEST_CASE("Registering for notifications does not park the control thread",
           "[control][blocking][notify]") {
     EngineFixture fix;
     auto swap = fix.engine().testHoldSwapGate();
 
-    // Five origins register during a real boot; none may wait behind
+    // Five registrations during a real boot; none may wait behind
     // another's device work.
     for (int i = 0; i < 5; ++i) {
         OscReply r;
@@ -268,7 +312,7 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     // takes its bytes, the route word and the ring's frame header (ring.h).
     size_t answerBytes = 0;
     { std::lock_guard<std::mutex> lock(mu); if (!replies.empty()) answerBytes = replies.front().size(); }
-    const uint64_t footprint = (sizeof(Message) + EGRESS_ROUTE_SIZE + answerBytes + 3u) & ~uint64_t{3};
+    const uint64_t footprint = (sizeof(Message) + answerBytes + 3u) & ~uint64_t{3};
     CHECK(static_cast<uint64_t>(sent) * footprint > clockwork::kDefaultLayout.profile.nrt_out_ring_bytes);
     checkNoEgressLost(engine);   // the pass waited for room: nothing was refused
     engine.shutdown();

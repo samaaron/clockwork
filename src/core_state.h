@@ -166,6 +166,9 @@ inline constexpr bool kHostForwardsByDefault = false;
 // nothing on the audio thread answers. Read by the audio thread every
 // dispatch.
 struct Routing {
+    // What the one client asked to be told (clockwork_client_wants, lanes.h):
+    // CLOCKWORK_WANTS_*. Read where a notice is written, on any thread.
+    std::atomic<uint32_t> client_wants{0};
     // The OSC boundary the audio thread classifies through: a full host's
     // own (the native engine publishes its split, and withdraws it when it
     // stops), else the core's.

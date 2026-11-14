@@ -99,19 +99,17 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, token routing, disconnect 
     CHECK(token >= 1);  // 0 is the in-process caller
     CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/status");
 
-    // Reply routing: send to the origin token reaches this client, framed.
+    // What the engine sends out goes down the client's connection, framed.
     auto reply = message("/status.reply", 1);
-    REQUIRE(t.send(token, reply.ptr(), reply.size(), false));
+    REQUIRE(t.deliver(reply.ptr(), reply.size()));
     auto body = readFramed(fd);
     REQUIRE(!body.empty());
     CHECK(parseAddress(body.data(), static_cast<uint32_t>(body.size())) == "/status.reply");
 
-    // Subscription lifetime == connection lifetime.
-    CHECK(t.subscribeNotify(token));
-    CHECK(t.hasNotifySubscribers());
+    // The client is its connection: once that has closed there is no
+    // client, and a frame reaches no one.
     close(fd);
-    REQUIRE(waitUntil([&] { return !t.hasNotifySubscribers(); }));
-    CHECK_FALSE(t.send(token, reply.ptr(), reply.size(), false));  // token is dead
+    REQUIRE(waitUntil([&] { return !t.deliver(reply.ptr(), reply.size()); }));
 
     t.stop();
 }
@@ -164,7 +162,7 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
     CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/g_queryTree");
 
     auto reply = message("/g_queryTree.reply");
-    REQUIRE(t.send(token, reply.ptr(), reply.size(), false));
+    REQUIRE(t.deliver(reply.ptr(), reply.size()));
     auto body = readFramed(fd);
     REQUIRE(!body.empty());
     CHECK(parseAddress(body.data(), static_cast<uint32_t>(body.size())) == "/g_queryTree.reply");

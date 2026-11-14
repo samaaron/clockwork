@@ -13,9 +13,9 @@
 #include <array>
 
 // The subsystem subscribe verbs (/midi, /gamepad, /osc, /clock +
-// /notify/subscribe) are fire-and-forget UDP from the client's point of
-// view: a subscribe sent while the server can't receive is silently
-// lost, and with it every event the subsystem would ever push. A client
+// /notify/subscribe) answer nothing by themselves: a subscribe the engine
+// never took is lost in silence, and with it every event the subsystem
+// would have pushed. A client
 // that needs certainty appends an int32 correlation token (the same
 // scheme as the /clockwork/clock request/reply verbs) and resends until
 // the token comes back on
@@ -47,9 +47,6 @@ inline void ackSubscribeIfTokened(OscEgress* egress, uint32_t callerToken,
     std::array<char, 96> buf{};
     osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(replyAddr) << rpcToken << osc::EndMessage;
-    // reply(), not sendToCaller(): an ack is the direct response to a
-    // request, and reply's routing also reaches in-process (embedder)
-    // callers — sendToCaller is network-only by design.
     egress->reply(callerToken,
                   reinterpret_cast<const uint8_t*>(s.Data()),
                   static_cast<uint32_t>(s.Size()));

@@ -17,9 +17,10 @@
  *   - a verb the scheduler fired reaches the port with the scheduled moment
  *     as its timestamp — the time survives the last hop;
  *   - an inbound event is not delivered but sent INTO the engine, as a
- *     native subsystem's callback writes it, and one coming back off the
- *     egress reaches the client only while it is subscribed; a subscribe is
- *     acked with its token, as natively.
+ *     native subsystem's callback writes it. One coming back off the egress
+ *     is the client's: the core wrote it because the client asked
+ *     (clockwork_client_wants, lanes.h), and the front keeps no switch of
+ *     its own. A subscribe is acked with its token, as natively.
  */
 import { test } from "node:test";
 import { testIf } from "./engine_boot.mjs";
@@ -168,7 +169,7 @@ maybe("MIDI: a guest's own send opens the port on demand and reaches it with its
   f.dispose();
 });
 
-maybe("MIDI: an event goes INTO the engine, and comes back to the client only while subscribed", async () => {
+maybe("MIDI: an event goes INTO the engine, and one coming back is left for the client", async () => {
   const { f, delivered, ingested, kbd } = await front({ midi: true });
   f.take(forwarded(encode(clockworkSys("midi/in/enable"), ["keys", 1])));
   // The enable's ports push is an event too: into the engine, not to the client.
@@ -181,19 +182,18 @@ maybe("MIDI: an event goes INTO the engine, and comes back to the client only wh
   assert.equal(ingested[1].length, 6, "the arrival timetag was not carried");
   assert.deepEqual(delivered, [], "an event was delivered to the client directly");
 
-  // What comes back off the egress (clockwork_event_route) is the client's
-  // only once subscribed: the front drops it until then, as the native
-  // transport would not have sent it.
+  // What comes back off the egress (clockwork_event_route) is the client's:
+  // the core writes an event out only while the client has asked for its
+  // kind, so the front has nothing to decide (test/midi.spec.mjs has the
+  // client that did not ask).
   const back = encode(clockworkSys("midi/in/note_on"), ["keys", 1, 60, 100]);
-  assert.equal(f.take(back), true, "an event reached an unsubscribed client");
+  assert.equal(f.take(back), false, "the front took an event the core sent the client");
 
   f.take(forwarded(encode(clockworkSys("midi/notify/subscribe"), [41])));
   // The snapshot a new subscriber gets, then the ack with its token.
   assert.equal(delivered[0][0], clockworkSys("midi/ports.reply"));
   assert.deepEqual(delivered[1], [clockworkSys("midi/notify/subscribe.reply"), 41]);
-  assert.equal(f.take(back), false, "a subscribed client's event was swallowed");
   assert.equal(f.take(encode(clockworkSys("midi/ports"), [0, 0])), false);
-  // A reply is never an event, subscribed or not.
   assert.equal(f.take(encode(clockworkSys("midi/ports.reply"), [0, 0])), false);
 
   // A token-less subscribe is silent, as natively.
@@ -202,8 +202,9 @@ maybe("MIDI: an event goes INTO the engine, and comes back to the client only wh
   assert.equal(delivered.length, n + 1);   // the snapshot only
   assert.equal(delivered[n][0], clockworkSys("midi/ports.reply"));
 
-  f.take(forwarded(encode(clockworkSys("midi/notify/unsubscribe"), [])));
-  assert.equal(f.take(back), true);
+  // An unsubscribe is taken and answers nothing.
+  assert.equal(f.take(forwarded(encode(clockworkSys("midi/notify/unsubscribe"), []))), true);
+  assert.equal(delivered.length, n + 1);
   f.dispose();
 });
 

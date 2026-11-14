@@ -15,7 +15,7 @@ to three rings:
 - **write ingress.** The main thread and each worker given a channel send
   OSC to the engine.
 - **drain RT egress and NRT egress.** The reply pump takes the engine's
-  replies, and peels the route word off each one.
+  replies.
 - **watch ingress.** The traffic logger reads what was sent without taking
   it, keeping its own place in the ring.
 

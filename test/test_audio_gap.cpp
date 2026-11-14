@@ -261,6 +261,7 @@ TEST_CASE("a cold swap never moves the engine's clock back",
     // read.
     auto sys = fake_audio::makeSimpleSystem();
     EngineFixture fix(fake_audio::fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);   // a device's outcome is the engine's lifecycle: told to a client that asked
     sys->useVirtualTime();
     sys->advanceBy(2'000'000);
     sys->useWallTime();

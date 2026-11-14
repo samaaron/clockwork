@@ -236,7 +236,7 @@ private:
 
     void egress(const char* ring, const std::vector<lanes_test::EgressFrame>& frames) {
         for (const auto& f : frames) {
-            mTrace << "  " << ring << " source=" << f.sourceId << " route=" << f.route << " seq=" << f.seq << " "
+            mTrace << "  " << ring << " source=" << f.sourceId << " seq=" << f.seq << " "
                    << osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size())) << " "
                    << hex(f.data) << (f.decodes ? "" : " UNDECODABLE") << "\n";
         }

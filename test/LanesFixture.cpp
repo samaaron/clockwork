@@ -149,12 +149,11 @@ uint64_t Lane::tick() {
 
 std::vector<EgressFrame> Lane::drain(uint32_t (*from)(ClockworkCore*, ClockworkEgressFn, void*, uint32_t)) {
     std::vector<EgressFrame> out;
-    from(mCore, [](void* ctx, uint32_t sourceId, uint32_t route,
+    from(mCore, [](void* ctx, uint32_t sourceId,
                    const uint8_t* osc, uint32_t len, uint32_t seq) {
         auto* v = static_cast<std::vector<EgressFrame>*>(ctx);
         EgressFrame f;
         f.sourceId = sourceId;
-        f.route    = route;
         f.seq      = seq;
         f.decodes  = clockwork_osc_decodes(osc, len) == 1;
         f.data.assign(osc, osc + len);

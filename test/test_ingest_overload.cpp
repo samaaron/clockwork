@@ -222,11 +222,12 @@ TEST_CASE("Answers to a client that has gone are counted undelivered",
     engine.init(cfg);
     REQUIRE(tcp.start());
 
-    // Subscribed, so the transport's audience says when it has seen the
-    // connection close.
+    // It asks for the engine's lifecycle, so the client's switch says when
+    // the transport has seen the connection close.
+    const auto wantsNotify = [&] { return (clockwork_client_wanted(engine.core()) & CLOCKWORK_WANTS_NOTIFY) != 0u; };
     const int fd = connectTcp(tcp.boundPort());
     REQUIRE(sendAll(fd, framed(osc_test::message(CLOCKWORK_SYS("notify")).data)));
-    REQUIRE(waitFor([&] { engine.controlPass(); return tcp.hasNotifySubscribers(); }));
+    REQUIRE(waitFor([&] { engine.controlPass(); return wantsNotify(); }));
     REQUIRE(engine.controlPass());   // the subscription's answer, delivered
 
     const Counts before = readCounts(engine);
@@ -235,7 +236,7 @@ TEST_CASE("Answers to a client that has gone are counted undelivered",
         REQUIRE(sendAll(fd, framed(osc_test::message(CLOCKWORK_SYS("sync"), int(id)).data)));
     REQUIRE(waitFor([&] { return readCounts(engine).taken - before.taken == kAsked; }));
     close(fd);
-    REQUIRE(waitFor([&] { return !tcp.hasNotifySubscribers(); }));
+    REQUIRE(waitFor([&] { return !wantsNotify(); }));
 
     engine.pumpAudioBlock();          // answered, into the egress ring
     REQUIRE(engine.controlPass());    // and handed to a transport with no one to give them to

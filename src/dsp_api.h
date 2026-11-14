@@ -252,16 +252,13 @@ typedef struct DspTapHandle {
 typedef struct DspHost {
     void* ctx;
 
-    /* Send OSC out — a reply, a notification, anything. `origin` echoes the
-     * value the message being answered arrived with, so clockwork can route it
-     * back. Callable from the audio thread.
-     *
-     * 0 addresses the notification audience — the clients that asked to be
-     * notified — one unicast per subscriber. That list is empty until someone
-     * subscribes, and a client that sent a request is not on it by virtue of
-     * having sent one, so a REPLY MUST CARRY THE ORIGIN IT WAS GIVEN. A
-     * non-zero return means the frame was queued, never that anything
-     * received it.
+    /* Send OSC out — a reply, a notification, anything — to the client.
+     * There is one client, and everything sent here reaches it. `origin`
+     * echoes the value the message being answered arrived with, so the
+     * client can tell which request an answer is to: A REPLY CARRIES THE
+     * ORIGIN IT WAS GIVEN, and a message nobody asked for carries 0. Callable
+     * from the audio thread. A non-zero return means the frame was queued,
+     * never that anything received it.
      *
      * BULK DOES NOT GO HERE: sending copies the payload into the egress ring,
      * so a large reply is a large memcpy in the audio callback. Write it into

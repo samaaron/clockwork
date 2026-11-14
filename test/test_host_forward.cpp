@@ -43,7 +43,7 @@
 
 namespace {
 
-constexpr uint32_t kClient = 0x40f7;   // not 0: 0 is the broadcast route
+constexpr uint32_t kClient = 0x40f7;   // not 0: an answer is told from a notice by its origin
 
 // What a forwarded frame looks like once taken apart.
 using osc_test::Forwarded;
@@ -232,7 +232,6 @@ extern bool ring_buffer_write(
     std::atomic<int32_t>* head,
     std::atomic<int32_t>* tail,
     std::atomic<int32_t>* sequence,
-    uint32_t route,
     uint32_t source_id,
     const void* data,
     uint32_t data_size,
@@ -332,7 +331,7 @@ TEST_CASE("host forward: a send the egress has no room for is counted dropped, n
     const uint8_t filler[8] = { '/', 'x', 0, 0, ',', 0, 0, 0 };
     while (ring_buffer_write(base + clockwork::kDefaultLayout.rt_out_ring_start, clockwork::kDefaultLayout.profile.rt_out_ring_bytes,
                              &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
-                             EGRESS_REPLY, 1, filler, sizeof filler, nullptr, nullptr)) {}
+                             1, filler, sizeof filler, nullptr, nullptr)) {}
 
     const uint8_t note[3] = { 0x90, 60, 100 };
     clockwork_sink_send(clockwork_core_sinks(lanes_test::core()), sink, note, 3, clockwork_timetag_immediately());

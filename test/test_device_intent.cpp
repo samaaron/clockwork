@@ -66,6 +66,7 @@ TEST_CASE("DeviceIntent: a recovery opens the user's devices, never the system d
     cfg.watchdogRecoveryCooldownMs = 0;
     cfg.hostDrivesControl          = true;   // hear the recovery's own account
     EngineFixture fix(cfg);
+    subscribe(fix);   // a device's outcome is the engine's lifecycle: told to a client that asked
     REQUIRE(fix.engine().currentDevice().inputDeviceName == "Fake Interface");
     resetOpens(*sys);
 

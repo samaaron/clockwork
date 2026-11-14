@@ -8,11 +8,11 @@
  * IN ring — written there by a native subsystem's callback, or by a host's
  * front on the web's main thread — and is answered on the audio thread by
  * one route (clockwork_event_route, clockwork_sys.h): out over the egress to
- * the subsystem's audience, and to the guest if it asked for events
+ * the client that asked for the subsystem's events, and to the guest if it asked for events
  * (DspInfo::wants_events). Driven through the lanes ABI, which is the
  * worklet's shape and the native engine's underneath. What these pin:
  *
- *   - an event goes out on the audience route for its subsystem, from
+ *   - an event goes out to the client that asked for its kind, from
  *     origin 0, byte for byte — a trailing arrival timetag included;
  *   - the guest that asked hears it, on the audio thread, through dsp_osc;
  *   - the ports and devices pushes are events too;
@@ -58,11 +58,19 @@ Heard askGuest() {
     return { r.argString(0), r.argInt(1) };
 }
 
+// The client has asked for a port's and a controller's events (lanes.h), for
+// one case: the fixture's core is every case's.
+struct Asked {
+    Asked() { clockwork_client_wants(lanes_test::core(), CLOCKWORK_WANTS_MIDI | CLOCKWORK_WANTS_GAMEPAD, true); }
+    ~Asked() { clockwork_client_wants(lanes_test::core(), CLOCKWORK_WANTS_MIDI | CLOCKWORK_WANTS_GAMEPAD, false); }
+};
+
 } // namespace
 
-TEST_CASE("inbound events: a MIDI event goes to the MIDI audience and to the guest, whole",
+TEST_CASE("inbound events: a MIDI event goes to the client that asked and to the guest, whole",
           "[events][lanes]") {
     lanes_test::boot();
+    const Asked asked;
     const Heard before = askGuest();
     lanes_test::drainRt();
 
@@ -77,7 +85,6 @@ TEST_CASE("inbound events: a MIDI event goes to the MIDI audience and to the gue
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("midi/in/note_on"));
     const auto* out = find(frames, CLOCKWORK_SYS("midi/in/note_on"));
     REQUIRE(out != nullptr);
-    CHECK(out->route == EGRESS_BROADCAST_MIDI);
     CHECK(out->sourceId == 0);                 // an event answers nobody
     CHECK(out->data == ev.data);               // byte for byte, timetag included
     CHECK(find(frames, CLOCKWORK_SYS("error")) == nullptr);
@@ -87,8 +94,9 @@ TEST_CASE("inbound events: a MIDI event goes to the MIDI audience and to the gue
     CHECK(after.last == CLOCKWORK_SYS("midi/in/note_on"));
 }
 
-TEST_CASE("inbound events: a gamepad event goes to the gamepad audience", "[events][lanes]") {
+TEST_CASE("inbound events: a gamepad event goes to the client that asked", "[events][lanes]") {
     lanes_test::boot();
+    const Asked asked;
     lanes_test::drainRt();
     osc_test::Builder b;
     b.begin(CLOCKWORK_SYS("gamepad/in/button")) << "pad" << "a" << static_cast<osc::int32>(1) << 1.0f;
@@ -97,13 +105,13 @@ TEST_CASE("inbound events: a gamepad event goes to the gamepad audience", "[even
     const auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("gamepad/in/button"));
     const auto* out = find(frames, CLOCKWORK_SYS("gamepad/in/button"));
     REQUIRE(out != nullptr);
-    CHECK(out->route == EGRESS_BROADCAST_GAMEPAD);
     CHECK(out->data == ev.data);
     CHECK(askGuest().last == CLOCKWORK_SYS("gamepad/in/button"));
 }
 
 TEST_CASE("inbound events: the ports and devices pushes are events too", "[events][lanes]") {
     lanes_test::boot();
+    const Asked asked;
     lanes_test::drainRt();
     osc_test::Builder p;
     p.begin(CLOCKWORK_SYS("midi/ports")) << static_cast<osc::int32>(1) << "keys" << static_cast<osc::int32>(1)
@@ -113,7 +121,6 @@ TEST_CASE("inbound events: the ports and devices pushes are events too", "[event
     auto frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("midi/ports"));
     const auto* out = find(frames, CLOCKWORK_SYS("midi/ports"));
     REQUIRE(out != nullptr);
-    CHECK(out->route == EGRESS_BROADCAST_MIDI);
 
     osc_test::Builder d;
     d.begin(CLOCKWORK_SYS("gamepad/devices")) << static_cast<osc::int32>(0);
@@ -122,7 +129,6 @@ TEST_CASE("inbound events: the ports and devices pushes are events too", "[event
     frames = lanes_test::tickUntil(4, CLOCKWORK_SYS("gamepad/devices"));
     const auto* dev = find(frames, CLOCKWORK_SYS("gamepad/devices"));
     REQUIRE(dev != nullptr);
-    CHECK(dev->route == EGRESS_BROADCAST_GAMEPAD);
 }
 
 TEST_CASE("inbound events: a verb under an event's name is still a verb", "[events][lanes]") {

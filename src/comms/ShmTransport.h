@@ -18,8 +18,8 @@
  * drops the packet and counts it in the plane's rep_dropped. Token semantics
  * mirror the socket transports — send() resolves only SHM_PEER_ORIGIN_TOKEN
  * (the token the gateway drain stamps on every peer command); anything else
- * is undeliverable here. The subscriber audiences collapse to booleans: there
- * is exactly one possible subscriber.
+ * is undeliverable here. The peer is the client, and what it asked to be told
+ * is the core's to keep (lanes.h).
  *
  * Binds to the ENGINE'S plane slot (ClockworkEngine::peerPlaneSlot()) rather
  * than a plane pointer, loading it per call — so it follows the engine's
@@ -51,43 +51,15 @@ public:
     }
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
-    bool send(uint32_t token, const uint8_t* data, uint32_t size, bool networkOnly) override;
-    uint32_t broadcastNotify(const uint8_t* data, uint32_t size) override;
-    uint32_t broadcastLink(const uint8_t* data, uint32_t size) override;
-    bool hasNotifySubscribers() const override { return mNotify.load(std::memory_order_relaxed); }
-    bool subscribeNotify(uint32_t token) override;
-    void unsubscribeNotify(uint32_t token) override;
-    void clearNotify() override;
-    bool subscribeLink(uint32_t token) override;
-    void unsubscribeLink(uint32_t token) override;
-    uint32_t broadcastMidi(const uint8_t* data, uint32_t size) override;
-    bool subscribeMidi(uint32_t token) override;
-    void unsubscribeMidi(uint32_t token) override;
-    uint32_t broadcastGamepad(const uint8_t* data, uint32_t size) override;
-    bool subscribeGamepad(uint32_t token) override;
-    void unsubscribeGamepad(uint32_t token) override;
-    uint32_t broadcastOsc(const uint8_t* data, uint32_t size) override;
-    bool subscribeOsc(uint32_t token) override;
-    void unsubscribeOsc(uint32_t token) override;
-
+    bool deliver(const uint8_t* data, uint32_t size) override { return writeReply(data, size); }
 private:
     // Write one packet into the reply ring; drop when unbound, drop + count
     // (rep_dropped) when full.
     bool writeReply(const uint8_t* data, uint32_t size);
-    uint32_t broadcastTo(const std::atomic<bool>& subscribed, const uint8_t* data, uint32_t size);
-    bool subscribeFlag(std::atomic<bool>& flag, uint32_t token);
-
     // Points at the engine's plane slot; bound (main thread) after the egress
     // drain thread is already running, so the pointer itself is atomic.
     std::atomic<std::atomic<ShmPeerPlaneHeader*>*> mPlaneSlot{nullptr};
 
     // Host-side writer serialisation for the reply ring (see file header).
     std::atomic<int32_t> mRepWriteLock{0};
-
-    // The one-peer subscriber audiences.
-    std::atomic<bool> mNotify{false};
-    std::atomic<bool> mLink{false};
-    std::atomic<bool> mMidi{false};
-    std::atomic<bool> mGamepad{false};
-    std::atomic<bool> mOsc{false};
 };
