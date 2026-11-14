@@ -1110,14 +1110,14 @@ class ClockworkProcessor extends AudioWorkletProcessor {
                             // is for a host that wants it gone).
                             this.wasmInstance.exports.clockwork_audio_starts(this.core, (Date.now() + 0.5) / 1000 + NTP_EPOCH_OFFSET, 0);
                             this.wasmInstance.exports.clockwork_set_timed_event_late_limit_ms(this.core, this.schedulerLateLimitMs || 0);
-                            // ClockworkBlockTime (lanes.h), 64 bytes, passed to every clockwork_tick:
+                            // ClockworkBlockTime (lanes.h), 56 bytes, passed to every clockwork_tick:
                             //   +0  u32 struct_bytes        +4  u32 output_latency_frames (0: unknown in a worklet)
                             //   +8  u64 audio_frames        +16 f64 wall_ntp
                             //   +24 f64 monotonic_secs (0)  +32 u64 link_host_micros (0)
                             //   +40 f64 block_ntp (out)     +48 u64 block_host_micros (out)
-                            this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(64);
-                            new Uint8Array(this.wasmMemory.buffer, this.blockTimePtr, 64).fill(0);
-                            new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr, 1)[0] = 64;
+                            this.blockTimePtr = this.wasmInstance.exports.clockwork_worklet_alloc(BLOCK_TIME_BYTES);
+                            new Uint8Array(this.wasmMemory.buffer, this.blockTimePtr, BLOCK_TIME_BYTES).fill(0);
+                            new Uint32Array(this.wasmMemory.buffer, this.blockTimePtr, 1)[0] = BLOCK_TIME_BYTES;
 
                             // A BUILD THAT REFUSED SAYS WHY, HERE. The engine
                             // records the reason (clockwork_boot_fail, or the

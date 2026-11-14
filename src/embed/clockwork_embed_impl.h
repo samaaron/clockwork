@@ -5,6 +5,8 @@
 #pragma once
 #include "clockwork_core.h"
 #include "clockwork_embed.h"
+#include "clock/host_transport.h"   // HostWord
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,6 +33,12 @@ struct ClockworkEmbed {
     uint32_t outHead = 0, outCount = 0;   // rendered, not yet served
     uint32_t inHead = 0,  inCount = 0;    // received, not yet ticked
     uint64_t rendered = 0;   // this host's count of the audio it has rendered: its block time's frames
+    // What the host has said of its transport (clockwork_embed_tempo and the
+    // rest) and the core has not yet been given, one of each kind, its frame
+    // in the count `rendered` keeps. Given to the core before the tick whose
+    // block the frame is in, or the first after.
+    struct Said { bool said = false; clockwork::HostWord word; };
+    std::array<Said, 4> said {};   // by HostWord::Kind: tempo, meter, playing, beat
 
     // The attach path's core, made and closed by this handle. A booted
     // handle's core is its engine's.

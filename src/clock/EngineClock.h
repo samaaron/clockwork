@@ -21,10 +21,24 @@ class ClockworkClock;
 
 using ClockReply = std::function<void(const uint8_t* data, uint32_t size)>;
 
+// How a set of the session's timeline is applied, for a caller on the audio
+// thread: the clock's own mutators may wait, and these must not. `atNtp` 0 is
+// now.
+struct ClockSets {
+    void* ctx;
+    void (*tempo)(void* ctx, double bpm, double atNtp);
+    void (*playing)(void* ctx, bool playing);
+    void (*meter)(void* ctx, int32_t num, int32_t den);
+};
+
 // Returns true if `data` is a clock-core /clock verb it handled (so the caller
 // stops), false for a non-/clock message or a /clock verb it doesn't own.
+// `sets` null: the caller may wait (a control thread), and the session's
+// timeline is set through the clock's own mutators. Given: the caller is the
+// audio thread, the timeline is set through `sets`, and the verbs that are
+// Link's own session's are left to whoever has a thread for them.
 bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t size,
-                        const ClockReply& reply);
+                        const ClockReply& reply, const ClockSets* sets = nullptr);
 
 // The one refusal for a /clock verb no route owns: replies
 // "/clockwork/clock/unsupported s:address", echoing the request's trailing int32

@@ -12,6 +12,7 @@
 
 #include "ReplyChannel.h"
 #include "clock/clock_math.h"     // kNtpUnitsPerSecond
+#include "clock/host_transport.h" // HostWord
 #include "clockwork_arena.h"      // CLOCKWORK_SPACE_UNKNOWN
 #include "clockwork_core.h"
 #include "clockwork_event_sink.h"  // ClockworkSinkHostEmitter
@@ -236,6 +237,26 @@ struct CoreClock {
     // Re-anchor the clock at the next block: the host's audio is starting,
     // or the core has just booted (clockwork_audio_starts).
     std::atomic<bool> anchor_requested{false};
+    // The host has said something of its own transport (clockwork_host_tempo
+    // and the rest): the clock state says so, SC_FLAG_HOST_TIMELINE.
+    std::atomic<bool> host_said{false};
+    // What it has said and the timeline has not yet followed
+    // (clockwork_host_tempo and the rest), in the order said: each is followed
+    // by the tick whose block its frame is in, or the first after. The
+    // ticking thread's, as the three below are.
+    static constexpr uint32_t kHostWords = 8;
+    std::array<HostWord, kHostWords> host_words{};
+    uint32_t host_word_count = 0;
+    // The beat it last said while the timeline played, as a line in its own
+    // frames: `value` at `frame`, running on at the tempo. Each block's grid
+    // is kept on it, so the timeline stays on the host's frames while the
+    // engine's time is steered by a wall clock. None while it is stopped.
+    bool     host_line = false;
+    HostWord host_line_at{};
+    // What following the host has moved and not yet told the clients
+    // (clockwork::kHostMoved*), and the block they were last told at.
+    uint32_t host_moved = 0;
+    double   host_said_ntp = 0.0;
 };
 
 // Where a core's regions are: the arena each is addressed in, where in it

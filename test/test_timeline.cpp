@@ -503,3 +503,23 @@ TEST_CASE("timeline: a midi timeline's verbs answer from its own snapshot",
     CHECK(r.argInt(0) == 4);
     CHECK(clock.resolveTimeline("midi:ghost") == -1);
 }
+
+// ── A timeline a host says its transport on (clockwork_host_transport.h) ─────
+
+// The host is one more source, as a Link peer is: nothing is refused. What a
+// client sets stands until the host next says its own.
+TEST_CASE("timeline: a client's set is taken on a timeline a host says its transport on", "[clock][timeline][host]") {
+    ClockworkClock clock;
+    clock.state()->setTempo(90.0, 1000.0);
+    clock.state()->setTransport(true, 1000.0);
+    clock.state()->setFlag(SC_FLAG_HOST_TIMELINE, true);
+
+    CHECK(ask(clock, floatMsg("/clockwork/clock/tempo/set", 140.0f)).all.empty());
+    CHECK(readClockworkClock(clock.state()).bpm == 140.0);
+    CHECK(ask(clock, osc_test::message("/clockwork/clock/transport/set", 0)).all.empty());
+    CHECK_FALSE(readClockworkClock(clock.state()).is_playing);
+    CHECK(ask(clock, osc_test::message("/clockwork/clock/meter", 3, 4)).all.empty());
+    CHECK(readClockworkClock(clock.state()).meter_num == 3);
+    // And the clock still says whose transport it has been following.
+    CHECK((readClockworkClock(clock.state()).flags & SC_FLAG_HOST_TIMELINE) != 0u);
+}

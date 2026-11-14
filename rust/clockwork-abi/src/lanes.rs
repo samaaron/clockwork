@@ -58,6 +58,21 @@ pub struct ClockworkBlockTime {
     pub block_host_micros: u64,
 }
 
+/// How a host says its beat to the timeline
+/// (clockwork_host_transport.h): its place in the bar, the timeline's bars put
+/// on its bars; or its beat number.
+pub const CLOCKWORK_BEAT_REQUEST: u32 = 0;
+pub const CLOCKWORK_BEAT_FORCE: u32 = 1;
+
+/// The kinds of notice the one client may ask to be told
+/// (`clockwork_client_wants`, lanes.h).
+pub const CLOCKWORK_WANTS_NOTIFY: u32 = 1 << 0;
+pub const CLOCKWORK_WANTS_CLOCK: u32 = 1 << 1;
+pub const CLOCKWORK_WANTS_MIDI: u32 = 1 << 2;
+pub const CLOCKWORK_WANTS_GAMEPAD: u32 = 1 << 3;
+pub const CLOCKWORK_WANTS_OSC: u32 = 1 << 4;
+pub const CLOCKWORK_WANTS_ALL: u32 = 31;
+
 /// `ClockworkTick`: what came of a tick (lanes.h). A newtype, as the
 /// client's enums are.
 #[repr(transparent)]
@@ -99,6 +114,22 @@ unsafe extern "C" {
     // passes its own time as wall_ntp and 0 as monotonic_secs and never sees
     // a gap. Returns false only on a fatal engine error.
     pub fn clockwork_tick(core: *mut ClockworkCore, time: *mut ClockworkBlockTime, out_channels: u32, in_channels: u32) -> ClockworkTick;
+    // A host with a transport of its own says it to the session's timeline
+    // (clockwork_host_transport.h) from the thread that ticks, between
+    // ticks, each for a frame of its own count: one more source of the
+    // timeline, as a Link peer is. False, and nothing said, for a value the
+    // timeline cannot take.
+    pub fn clockwork_host_tempo(core: *mut ClockworkCore, bpm: f64, frame: u64) -> bool;
+    pub fn clockwork_host_meter(core: *mut ClockworkCore, num: i32, den: i32, frame: u64) -> bool;
+    pub fn clockwork_host_playing(core: *mut ClockworkCore, playing: bool, frame: u64) -> bool;
+    pub fn clockwork_host_beat(core: *mut ClockworkCore, beat: f64, how: u32, frame: u64) -> bool;
+    // What the one client asked to be told: a switch for each kind of
+    // notice, the same on every host. clockwork_client_wants turns the
+    // switches in `kinds` (true when that changed any);
+    // clockwork_client_gone clears them all, for the next client. Any thread.
+    pub fn clockwork_client_wants(core: *mut ClockworkCore, kinds: u32, on: bool) -> bool;
+    pub fn clockwork_client_wanted(core: *mut ClockworkCore) -> u32;
+    pub fn clockwork_client_gone(core: *mut ClockworkCore);
     // clockwork_audio_back: called by the tick every block with the host's
     // clocks and its rendered audio in seconds; returns true when the audio
     // was away, in which case the clock re-anchors at that block. Nothing

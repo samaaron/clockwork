@@ -162,5 +162,14 @@ unsafe extern "C" {
         input: *const *const f32, in_channels: u32,
         frames: u32,
     ) -> u32;
+    /// The thread that renders, before the render it is true in: what a host
+    /// with a transport of its own says of it, each for `frame`, counted from
+    /// the next render's first frame (clockwork_host_transport.h). `how` is
+    /// `CLOCKWORK_BEAT_REQUEST` or `CLOCKWORK_BEAT_FORCE` (`crate::lanes`).
+    /// E_ARG for a booted handle, or a value the timeline cannot take.
+    pub fn clockwork_embed_tempo(h: *mut ClockworkEmbed, bpm: f64, frame: u32) -> ClockworkStatus;
+    pub fn clockwork_embed_meter(h: *mut ClockworkEmbed, num: i32, den: i32, frame: u32) -> ClockworkStatus;
+    pub fn clockwork_embed_playing(h: *mut ClockworkEmbed, playing: core::ffi::c_int, frame: u32) -> ClockworkStatus;
+    pub fn clockwork_embed_beat(h: *mut ClockworkEmbed, beat: f64, how: u32, frame: u32) -> ClockworkStatus;
     pub fn clockwork_embed_close(h: *mut ClockworkEmbed);
 }

@@ -40,6 +40,7 @@ export const SC_GENERATION_I32         = 9;   // byte 36
 export const SC_FLAG_LINK_ENABLED       = 1 << 0;
 export const SC_FLAG_START_STOP_SYNC    = 1 << 1;
 export const SC_FLAG_LINK_AUDIO_PUBLISH = 1 << 2;
+export const SC_FLAG_HOST_TIMELINE      = 1 << 3;
 
 // PM-mode worklet message types. The main thread posts these and the
 // worklet's onmessage handler dispatches on them.

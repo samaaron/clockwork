@@ -45,6 +45,7 @@
 #include <stdint.h>
 #include "clockwork_client.h"
 #include "clockwork_profile.h"
+#include "clockwork_host_transport.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -156,6 +157,26 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
                                 float* const* out, uint32_t out_channels,
                                 const float* const* in, uint32_t in_channels,
                                 uint32_t frames);
+
+/* A host with a transport of its own (a DAW) says it before the render it is
+ * true in, from the thread that calls render: its tempo, its time signature,
+ * whether it plays, and where its beat is, in quarter notes, by
+ * CLOCKWORK_BEAT_REQUEST or CLOCKWORK_BEAT_FORCE (clockwork_host_transport.h).
+ * It is one more source of the session's timeline, as a Link peer is: it
+ * says its transport with every render, so what another sets lasts until it
+ * does, and what it never says is left as it is. A host that never says
+ * anything has no transport, and the timeline is at its default. Each is for
+ * `frame`, counted from the first frame of the next render, and the timeline
+ * takes it from that frame, whatever the host's buffers and the engine's
+ * block. One of each is held between renders: said again before the render,
+ * the later is the one. What is the timeline's already moves nothing. No
+ * allocation, no lock. E_ARG, and nothing said: a booted handle; a tempo
+ * that is no number above 0; a time signature no bar can be built from; a
+ * beat that is no number, or a way of saying it that is neither. */
+ClockworkStatus clockwork_embed_tempo(ClockworkEmbed* h, double bpm, uint32_t frame);
+ClockworkStatus clockwork_embed_meter(ClockworkEmbed* h, int32_t num, int32_t den, uint32_t frame);
+ClockworkStatus clockwork_embed_playing(ClockworkEmbed* h, int playing, uint32_t frame);
+ClockworkStatus clockwork_embed_beat(ClockworkEmbed* h, double beat, uint32_t how, uint32_t frame);
 
 /* Release: a booted engine closes its device and shuts down; an attached
  * one detaches. The client is closed with it. */

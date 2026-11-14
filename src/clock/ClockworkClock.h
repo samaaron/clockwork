@@ -21,6 +21,7 @@
 #pragma once
 
 #include "clock/Timeline.h"
+#include "clockwork_host_transport.h"
 #include "shared_memory.h"
 
 #include <atomic>
@@ -32,6 +33,7 @@
 #include <vector>
 
 class LinkSession;
+namespace clockwork { struct HostWord; }
 
 // ─── ClockworkClock ──────────────────────────────────────────────────────────────
 class ClockworkClock {
@@ -268,6 +270,12 @@ public:
     // heard `outputLatencyFrames` after they are rendered: what the arena's
     // sample clock last published, as a reader took it. 0 with none published.
     double floorRenderNtp(uint32_t outputLatencyFrames) const;
+
+    // The session's timeline takes one thing its host said, true at
+    // atNtpSeconds (clock/host_transport.h): what moved, as
+    // clockwork::kHostMoved*. Nothing is announced: a follower re-reads the
+    // grid when the state's generation has moved on. The audio thread's.
+    uint32_t followHost(const clockwork::HostWord& said, double atNtpSeconds, double rate);
 
     // Freewheel clock mode: derive the audio-thread NTP purely from sample
     // position, skipping the wall-clock drift IIR in updateAudioThreadNTP.

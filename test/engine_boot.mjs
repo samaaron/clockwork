@@ -139,12 +139,12 @@ export async function bootEngine() {
  *  (the NTP epoch plus the audio rendered so far, like a self-driven host), so the engine never sees a gap. */
 let blockTime = 0, blockFrames = 0, bootedMemory = null, bootedCore = 0;
 export function block(x) {
-  // ClockworkBlockTime (lanes.h), 64 bytes in the engine's memory (the last booted: a test boots one engine):
+  // ClockworkBlockTime (lanes.h), 88 bytes in the engine's memory (the last booted: a test boots one engine):
   // u32 struct_bytes, u32 output_latency_frames (0), u64 audio_frames, f64 wall_ntp, f64 monotonic_secs (0),
-  // u64 link_host_micros (0), then the engine's outputs block_ntp and block_host_micros.
-  blockTime ||= x.clockwork_worklet_alloc(64);
-  const words = new Uint32Array(bootedMemory.buffer, blockTime, 16).fill(0);
-  words[0] = 64;
+  // u64 link_host_micros (0), the engine's outputs block_ntp and block_host_micros, then a host's timeline (0).
+  blockTime ||= x.clockwork_worklet_alloc(88);
+  const words = new Uint32Array(bootedMemory.buffer, blockTime, 22).fill(0);
+  words[0] = 88;
   words[2] = blockFrames >>> 0;
   words[3] = Math.floor(blockFrames / 4294967296) >>> 0;
   new Float64Array(bootedMemory.buffer, blockTime + 16, 1)[0] = 2208988800 + blockFrames / 48000;

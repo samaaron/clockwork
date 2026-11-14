@@ -32,6 +32,7 @@
 
 #include "clock/ClockworkClock.h"
 #include "clock/clock_math.h"
+#include "clock/host_transport.h"
 
 #include <chrono>
 #include <cmath>
@@ -94,6 +95,13 @@ public:
     void setStartStopSyncEnabled(bool enabled);
     void requestBeatAtTime(double beat, double atNtpSeconds, double quantum);
     void forceBeatAtTime(double beat, double atNtpSeconds, double quantum);
+
+    // The audio thread: one thing a host said of its own transport
+    // (clock/host_transport.h). The mirror takes it at once and
+    // Link's timeline with it, through Link's audio session state, so peers
+    // follow the host as they follow any peer. What moved, as
+    // clockwork::kHostMoved*.
+    uint32_t followHost(const clockwork::HostWord& said, double atNtpSeconds, double rate);
 
     // ─── Enable / async enable ───────────────────────────────────────────────
     // applyVisibility wires the deferred worker back to ClockworkClock's visibility
@@ -212,11 +220,11 @@ public:
     //
     // AND IT MUST BE ANNOUNCED. On the Ableton path Link invokes the tempo
     // callback for a local commit as it does for a peer's, and the engine turns
-    // that into /clockwork/clock/notify/tempo — which is how a client that set
-    // the tempo through another client learns of it (a language runtime hears a
+    // that into /clockwork/clock/notify/tempo — which is how one part of the
+    // client learns of a tempo another part set (a language runtime hears a
     // GUI's change this way, and re-anchors its beat on it). The callback is
     // fired here for the same reason: without it a Link-less engine changes
-    // tempo in silence and every other client keeps the old one.
+    // tempo in silence and the rest of the client keeps the old one.
     //
     // The beat held is the one at atNtpSeconds, the instant the tempo changes
     // (0: now) — ClockworkClock::setBpm says why a caller gives one.
@@ -241,6 +249,14 @@ public:
     // No peers in session-of-one — identical to requestBeatAtTime.
     void forceBeatAtTime(double beat, double atNtpSeconds, double quantum) {
         requestBeatAtTime(beat, atNtpSeconds, quantum);
+    }
+
+    // The audio thread: one thing a host said of its own transport
+    // (clock/host_transport.h). Straight onto the clock state, and
+    // unannounced: the callbacks above are the app thread's.
+    uint32_t followHost(const clockwork::HostWord& said, double atNtpSeconds, double rate) {
+        ClockworkClockState* s = mClock.state();
+        return s ? clockwork::followHost(*s, said, atNtpSeconds, rate) : 0u;
     }
 
     void setApplyVisibility(const std::function<void(LinkVisibility)>&) {}

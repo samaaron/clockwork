@@ -43,18 +43,20 @@ static constexpr int32_t kCapMidi = 1;
 static constexpr int32_t kCapMidi = 0;
 #endif
 
-// THREADING CONTRACT — this handler calls clock mutators (setBpm/setIsPlaying)
-// and Link-session reads (numPeers, …) that are NOT realtime-safe, and the
-// follower registry behind timeline(id) takes a lock. Its RT-safety therefore
-// lives in *where it is invoked*, not here:
-//   • Native (Link compiled in): runs on the NRT gateway thread — `/clock` is
-//     forwarded off the audio thread (nrtForwardSink → NRT command ring →
-//     EngineControl). Taking a lock here is fine.
-//   • WASM (no Link): runs inline on the audio thread, but CLOCKWORK_LINK is
-//     undefined and the registry is uncontended, so nothing blocks.
-// Never call this on the native audio thread: it would be an RT violation.
+// THREADING CONTRACT — the clock's mutators (setBpm/setIsPlaying) and the
+// Link session's own calls (numPeers, start/stop sync) are NOT realtime-safe,
+// and the follower registry behind timeline(id) takes a lock. Two callers:
+//   • A control thread (the full engine: `/clock` is forwarded off the audio
+//     thread to EngineControl), with no `sets`. It may wait: everything here
+//     is its to call.
+//   • The audio thread (a core with no control thread: the worklet, an
+//     attached core), with `sets`. The session's timeline is set through
+//     them, as a host's transport is (clock/host_transport.h); the registry
+//     is uncontended, as nothing feeds it there; and where Link is compiled
+//     the verbs of its own session are not answered, and are refused by the
+//     caller as any verb this build does not have.
 bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t size,
-                        const ClockReply& reply) {
+                        const ClockReply& reply, const ClockSets* sets) {
     if (size < CLOCKWORK_SYS_LEN("clock/") + 1 ||
         std::memcmp(data, CLOCKWORK_SYS("clock/"), CLOCKWORK_SYS_LEN("clock/")) != 0) return false;
     try {
@@ -135,7 +137,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             if (it != msg.ArgumentsEnd() && it->IsInt64())
                 atNtp = static_cast<double>(it->AsInt64Unchecked()) * 1e-6;
             if (id == 0) {
-                clock.setBpm(bpm, atNtp);               // Link timeline
+                if (sets) sets->tempo(sets->ctx, bpm, atNtp);
+                else clock.setBpm(bpm, atNtp);          // the session's timeline
             } else {
                 // Manual set on a midi timeline (claim the slot if this port
                 // hasn't clocked yet). A live external clock pulse overrides it
@@ -163,7 +166,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             if (id == 0) {
                 // Stamp with wallNow — verb carries no timestamp; 0.0 would mean
                 // "transitioned at NTP epoch 1900".
-                clock.setIsPlaying(playing, clock.wallNow());
+                if (sets) sets->playing(sets->ctx, playing);
+                else clock.setIsPlaying(playing, clock.wallNow());
             } else {
                 // Manual transport on a midi timeline (claim if needed): play →
                 // START at beat 0, stop → STOP. A live clock overrides.
@@ -211,7 +215,8 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
                 const int num = it->AsInt32Unchecked();
                 const int den = second->AsInt32Unchecked();
                 if (id == 0) {
-                    clock.setMeter(num, den);
+                    if (sets) sets->meter(sets->ctx, num, den);
+                    else clock.setMeter(num, den);
                 } else {
                     const int wid = clock.resolveOrClaimTimeline(tlname.data());
                     if (wid > 0) clock.setMidiTimelineMeter(wid, num, den);
@@ -351,6 +356,10 @@ bool handleClockCoreOsc(ClockworkClock& clock, const uint8_t* data, uint32_t siz
             return true;
         }
 
+#if CLOCKWORK_LINK
+        // What follows is Link's own session's, and its calls may wait.
+        if (sets) return false;
+#endif
         // ── Start/stop sync (Link-session property; not timeline-scoped) ──
         if (std::strcmp(verb, "start_stop_sync/set") == 0) {
             auto it = msg.ArgumentsBegin();

@@ -367,6 +367,10 @@ void ClockworkClock::publishLinkMetrics(PerformanceMetrics* m, double quantum) {
     mImpl->linkSession.publishLinkClockMetrics(m, quantum);
 }
 
+uint32_t ClockworkClock::followHost(const clockwork::HostWord& said, double atNtpSeconds, double rate) {
+    return mImpl->linkSession.followHost(said, atNtpSeconds, rate);
+}
+
 // ─── Audio-thread NTP (delegated to TimeSource) ─────────────────────────────
 // Thin delegations to the native time-source (WallClock + IIR). RT-safe;
 // link-time-concrete, no vtable on the audio-thread path.

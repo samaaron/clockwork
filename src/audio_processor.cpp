@@ -39,6 +39,7 @@ uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
 #include "osc/OscOutboundPacketStream.h"
 #include "clock/ClockworkClock.h"
 #include "clock/EngineClock.h"
+#include "clock/host_transport.h"
 #include "OscIngress.h"
 #include "IngressCallCtx.h"
 #include "clockwork_sys.h"        // the /clockwork/ prefix rule: clockwork here, DSP everywhere else
@@ -184,12 +185,83 @@ void clockwork_sched_warm(ClockworkCore* core);
 
 #include "clockwork_taps.h"
 
-#if CLOCKWORK_WORKLET_CLOCK
-// Audio-thread /clock handler (the wasm ingress route). Handles the cheap
-// clock-core verbs inline and replies via the OUT ring. /clockwork/clock is
-// clockwork's own namespace and is always consumed here — it never reaches the
-// DSP. (Native registers a different clock route that forwards to the NRT
-// thread.)
+// The audio thread's /clock handler, for a core with no control thread: the
+// worklet, an attached core. Answers the clock's own verbs inline and replies
+// on the OUT ring. /clockwork/clock is clockwork's own namespace and is
+// always consumed here — it never reaches the DSP. (The full engine registers
+// a clock route of its own, which forwards to its control thread.)
+//
+// A client's set of the session's timeline is taken as a host's transport is
+// (clock/host_transport.h): on the clock state, and on Link's session where
+// there is one, with no lock; and the clients hear what it moved at the next
+// block, as they hear a host's or a peer's.
+static void clock_set_follow(void* ctx, const clockwork::HostWord& said, double atNtp) {
+    ClockworkCore* const core = static_cast<ClockworkCore*>(ctx);
+    clockwork::CoreState* const st = clockwork::state(core);
+    ClockworkClock* const clk = clockwork::clock_of(core);
+    if (!st || !clk) return;
+    clockwork::CoreClock& cc = st->clock;
+    const double at = atNtp > 0.0 ? atNtp
+                    : static_cast<double>(cc.block_ntp.load(std::memory_order_relaxed)) / clockwork::kNtpUnitsPerSecond;
+    double rate = 0.0;
+    if (uint8_t* const base = st->arena.laid_out())
+        rate = static_cast<double>(clockwork::metrics_in(base)->audio_sample_rate.load(std::memory_order_relaxed));
+    cc.host_moved |= clk->followHost(said, at, rate);
+}
+static void clock_set_tempo(void* ctx, double bpm, double atNtp) {
+    clockwork::HostWord said;
+    said.kind = clockwork::HostWord::Tempo;
+    said.value = bpm;
+    clock_set_follow(ctx, said, atNtp);
+}
+static void clock_set_playing(void* ctx, bool playing) {
+    clockwork::HostWord said;
+    said.kind = clockwork::HostWord::Playing;
+    said.playing = playing;
+    clock_set_follow(ctx, said, 0.0);
+}
+static void clock_set_meter(void* ctx, int32_t num, int32_t den) {
+    clockwork::HostWord said;
+    said.kind = clockwork::HostWord::Meter;
+    said.num = num;
+    said.den = den;
+    clock_set_follow(ctx, said, 0.0);
+}
+// What a client that has just asked for the timeline's notices is sent.
+static void clock_subscribed(const ClockworkClock& clk, ReplyChannel& chan, uint32_t token,
+                             const uint8_t* data, uint32_t len) {
+    try {
+        const osc::ReceivedMessage msg(osc::ReceivedPacket(reinterpret_cast<const char*>(data),
+                                                           static_cast<osc::osc_bundle_element_size_t>(len)));
+        bool tokened = false;
+        int32_t echo = 0;
+        for (auto it = msg.ArgumentsBegin(); it != msg.ArgumentsEnd(); ++it)
+            if (it->IsInt32()) { tokened = true; echo = it->AsInt32Unchecked(); }
+        std::array<char, 96> buf{};
+        if (tokened) {
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/subscribe.reply")) << echo << osc::EndMessage;
+            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+        }
+        const ClockworkClockSnapshot now = readClockworkClock(clk.state());
+        {
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << now.bpm << osc::EndMessage;
+            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+        }
+        {
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/transport"))
+              << static_cast<int32_t>(now.is_playing ? 1 : 0)
+              << static_cast<osc::int64>(std::llround(now.is_playing_at_ntp * 1e6))
+              << osc::EndMessage;
+            chan.reply(token, reinterpret_cast<const uint8_t*>(s.Data()), static_cast<uint32_t>(s.Size()));
+        }
+    } catch (...) {
+        // malformed: asked for all the same, and told nothing
+    }
+}
+
 static bool clockCoreRoute(void* routeCtx, const void* callCtx,
                            const uint8_t* data, size_t len) {
     auto* chan = static_cast<ReplyChannel*>(routeCtx);   // RT egress, bound at registration; its context is the core
@@ -198,10 +270,24 @@ static bool clockCoreRoute(void* routeCtx, const void* callCtx,
     if (!clk) return true;   // clock route owns /clockwork/clock/; drop during startup, don't error
     auto* cc  = static_cast<const DrainCallCtx*>(callCtx);
     uint32_t token = cc ? cc->sourceId : 0;              // reply metadata, threaded in
+    // The client asks for the timeline's notices, or to be told no more
+    // (lanes.h). Asking is answered with where the timeline is now, as each
+    // notice will say it, and acked when it came with a token, as every
+    // subscribe is: a client asks again until it hears.
+    {
+        const char* const addr = reinterpret_cast<const char*>(data);
+        const bool ask = std::strcmp(addr, CLOCKWORK_SYS("clock/notify/subscribe")) == 0;
+        if (ask || std::strcmp(addr, CLOCKWORK_SYS("clock/notify/unsubscribe")) == 0) {
+            clockwork_client_wants(core, CLOCKWORK_WANTS_CLOCK, ask);
+            if (ask && chan) clock_subscribed(*clk, *chan, token, data, static_cast<uint32_t>(len));
+            return true;
+        }
+    }
+    const ClockSets sets{ core, &clock_set_tempo, &clock_set_playing, &clock_set_meter };
     const bool handled = handleClockCoreOsc(*clk, data, static_cast<uint32_t>(len),
         [chan, token](const uint8_t* d, uint32_t n) {
             if (chan) chan->reply(token, d, n);
-        });
+        }, &sets);
     if (!handled && chan) {
         // Not a clock-core verb. Before refusing, offer it to clockwork's own
         // system surface: /clockwork/clock/state/get lives there
@@ -1341,7 +1427,71 @@ extern "C" {
         clockwork::CoreClock* c = clockwork::core_clock(core);
         if (!c) return false;
         c->anchor_requested.store(true, std::memory_order_release);
+        // What a host said of its transport was for frames of the count that has just ended.
+        c->host_word_count = 0;
+        c->host_line = false;
         return audio_gap(core, wall_ntp, monotonic_secs, -1.0);
+    }
+
+    // What the client asked to be told (lanes.h).
+    EMSCRIPTEN_KEEPALIVE bool clockwork_client_wants(ClockworkCore* core, uint32_t kinds, bool on) {
+        clockwork::Routing* r = clockwork::routing(core);
+        kinds &= CLOCKWORK_WANTS_ALL;
+        if (!r || !kinds) return false;
+        const uint32_t was = on ? r->client_wants.fetch_or(kinds, std::memory_order_acq_rel)
+                                : r->client_wants.fetch_and(~kinds, std::memory_order_acq_rel);
+        return on ? (was & kinds) != kinds : (was & kinds) != 0u;
+    }
+    EMSCRIPTEN_KEEPALIVE uint32_t clockwork_client_wanted(ClockworkCore* core) {
+        clockwork::Routing* r = clockwork::routing(core);
+        return r ? r->client_wants.load(std::memory_order_acquire) : 0u;
+    }
+    EMSCRIPTEN_KEEPALIVE void clockwork_client_gone(ClockworkCore* core) {
+        if (clockwork::Routing* r = clockwork::routing(core)) r->client_wants.store(0u, std::memory_order_release);
+    }
+
+    // A host that says its transport (lanes.h). What it says waits in the
+    // core for the tick whose block its frame is in.
+    static bool host_says(ClockworkCore* core, const clockwork::HostWord& said) {
+        clockwork::CoreClock* c = clockwork::core_clock(core);
+        if (!c) return false;
+        if (c->host_word_count == clockwork::CoreClock::kHostWords) return false;
+        c->host_words[c->host_word_count++] = said;
+        c->host_said.store(true, std::memory_order_release);
+        return true;
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_tempo(ClockworkCore* core, double bpm, uint64_t frame) {
+        if (!clockwork::hostTempoValid(bpm)) return false;
+        clockwork::HostWord said;
+        said.kind = clockwork::HostWord::Tempo;
+        said.value = bpm;
+        said.frame = frame;
+        return host_says(core, said);
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_meter(ClockworkCore* core, int32_t num, int32_t den, uint64_t frame) {
+        if (!clockwork_timeline_meter_valid(num, den)) return false;
+        clockwork::HostWord said;
+        said.kind = clockwork::HostWord::Meter;
+        said.num = num;
+        said.den = den;
+        said.frame = frame;
+        return host_says(core, said);
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_playing(ClockworkCore* core, bool playing, uint64_t frame) {
+        clockwork::HostWord said;
+        said.kind = clockwork::HostWord::Playing;
+        said.playing = playing;
+        said.frame = frame;
+        return host_says(core, said);
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_beat(ClockworkCore* core, double beat, uint32_t how, uint64_t frame) {
+        if (!std::isfinite(beat) || (how != CLOCKWORK_BEAT_REQUEST && how != CLOCKWORK_BEAT_FORCE)) return false;
+        clockwork::HostWord said;
+        said.kind = clockwork::HostWord::Beat;
+        said.value = beat;
+        said.how = how;
+        said.frame = frame;
+        return host_says(core, said);
     }
 
     // The teardown's mark, exact: taken under the in ring's writer lock once
@@ -3083,6 +3233,8 @@ extern "C" {
     }
 #endif
 
+    static void say_host_moved(clockwork::CoreState& st, double blockNtp);
+
     // The per-block body on every host; clockwork_tick (lanes.h) wraps it.
     // `time` carries the host's frame count, wall and monotonic clocks,
     // output latency and Link stamp in, and gets block_ntp and
@@ -3171,6 +3323,43 @@ extern "C" {
         }
         time.block_ntp = current_ntp;
         time.block_host_micros = time.link_host_micros ? time.link_host_micros : host_micros;
+        // A host with a transport of its own: what it has said for a frame of this block, or one before it,
+        // is taken now, each at its frame's own time; what it has said for a later frame waits.
+        if (clk && cc.host_said.load(std::memory_order_relaxed)) {
+            // The clock state says a host has a transport, a state made again by a rebuild too.
+            if (!(readClockworkClock(clk->state()).flags & SC_FLAG_HOST_TIMELINE)) clk->state()->setFlag(SC_FLAG_HOST_TIMELINE, true);
+            const double block_end = sample_pos + static_cast<double>(clockwork_block_size(core));
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < cc.host_word_count; ++i) {
+                const clockwork::HostWord& said = cc.host_words[i];
+                const double frame = static_cast<double>(said.frame);
+                if (frame >= block_end || !(rate > 0.0)) {
+                    cc.host_words[kept++] = said;
+                    continue;
+                }
+                const double bpm_before = readClockworkClock(clk->state()).bpm;
+                cc.host_moved |= clk->followHost(said, current_ntp + (frame - sample_pos) / rate, rate);
+                const ClockworkClockSnapshot now = readClockworkClock(clk->state());
+                if (said.kind == clockwork::HostWord::Beat && now.is_playing) {
+                    cc.host_line = true;
+                    cc.host_line_at = said;
+                } else if (said.kind == clockwork::HostWord::Tempo && cc.host_line) {
+                    // Its line runs on to this frame at the tempo it had.
+                    cc.host_line_at.value += (frame - static_cast<double>(cc.host_line_at.frame)) * bpm_before / (60.0 * rate);
+                    cc.host_line_at.frame = said.frame;
+                } else if (!now.is_playing) {
+                    cc.host_line = false;
+                }
+            }
+            cc.host_word_count = kept;
+            // The grid at this block's first frame, kept on the host's line.
+            if (cc.host_line && rate > 0.0) {
+                clockwork::HostWord here = cc.host_line_at;
+                here.value += (sample_pos - static_cast<double>(here.frame)) * readClockworkClock(clk->state()).bpm / (60.0 * rate);
+                cc.host_moved |= clk->followHost(here, current_ntp, rate);
+            }
+        }
+        if (cc.host_moved) say_host_moved(st, current_ntp);
 
         // Load-add-store, not fetch_add: this counter has exactly one writer
         // (the audio thread, here) and readers only ever load it, so a
@@ -3458,6 +3647,54 @@ extern "C" {
     // drainer, so it always uses RT-out. Either way the line leaves as an ordinary
     // addressed OSC message the host dispatches to its debug channel.
     // False when the core's ring is not laid out, and nothing was written.
+    // The clients hear what following the host moved, as they hear a peer's
+    // on a Link session: the grid (its tempo, or its bars under
+    // the same tempo) as notify/tempo, on which a follower reads the grid
+    // again, and playing or stopped as notify/transport. At most once in
+    // kHostNotifySeconds, and what the ring has no room for is said at a
+    // later block.
+    static void say_host_moved(clockwork::CoreState& st, double blockNtp) {
+        clockwork::CoreClock& cc = st.clock;
+        // Said to a client that asked for the timeline's notices (lanes.h): one that did not reads the clock.
+        if (!(st.routing.client_wants.load(std::memory_order_relaxed) & CLOCKWORK_WANTS_CLOCK)) {
+            cc.host_moved = 0;
+            return;
+        }
+        const double since = blockNtp - cc.host_said_ntp;
+        if (since >= 0.0 && since < clockwork::kHostNotifySeconds) return;
+        uint8_t* const base = st.arena.laid_out();
+        const ClockworkClock* clk = cc.clock.load(std::memory_order_acquire);
+        if (!base || !clk) return;
+        const clockwork::Layout& L = st.arena.layout;
+        RingCursors* const cursors = clockwork::cursors_in(base, L);
+        PerformanceMetrics* const metrics = clockwork::metrics_in(base);
+        const ClockworkClockSnapshot now = readClockworkClock(clk->state());
+        const auto say = [&](const osc::OutboundPacketStream& s) {
+            return ::ring_buffer_write(
+                base + L.rt_out_ring_start, L.profile.rt_out_ring_bytes,
+                &cursors->out_head, &cursors->out_tail, &cursors->out_sequence,
+                0,
+                s.Data(), static_cast<uint32_t>(s.Size()), &cursors->status_flags, metrics);
+        };
+        std::array<char, 96> buf{};
+        constexpr uint32_t kGrid = clockwork::kHostMovedTempo | clockwork::kHostMovedGrid;
+        if (cc.host_moved & kGrid) {
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << now.bpm << osc::EndMessage;
+            if (say(s)) cc.host_moved &= ~kGrid;
+        }
+        if (cc.host_moved & clockwork::kHostMovedTransport) {
+            osc::OutboundPacketStream s(buf.data(), buf.size());
+            s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/transport"))
+              << static_cast<int32_t>(now.is_playing ? 1 : 0)
+              << static_cast<osc::int64>(std::llround(now.is_playing_at_ntp * 1e6))
+              << osc::EndMessage;
+            if (say(s)) cc.host_moved &= ~clockwork::kHostMovedTransport;
+        }
+        cc.host_moved &= ~clockwork::kHostMovedMeter;   // a meter has no notice: a reader of the clock finds it
+        cc.host_said_ntp = blockNtp;
+    }
+
     static bool emit_debug_osc(clockwork::CoreState& st, const char* text, uint32_t len) {
         uint8_t* const base = st.arena.laid_out();
         if (!base) return false;

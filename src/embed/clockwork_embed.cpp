@@ -3,12 +3,14 @@
 // clockwork_embed.h: the attach path and render, and what both paths share.
 // The device boot is native/ClockworkEmbedDevice.cpp.
 #include "clockwork_embed_impl.h"
+#include "clock/host_transport.h" // HostWord, hostTempoValid
 #include "lanes/lanes.h"
 #include "clockwork_config.h"   // clockwork_log
 #include "memory_profile.h"     // CLOCKWORK_EMBED_ASSETS_BYTES
 #include "shared_memory.h"      // GUEST_CONFIG_SIZE
 #include "shm_segment.hpp"      // shm_lane_geometry
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -91,6 +93,7 @@ bool fit(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
     // in the arena, so it carries on from the previous time rather than going
     // backwards.
     h->rendered = 0;
+    h->said = {};   // said for frames of the count that has just ended: the host says its transport again
     return true;
 }
 
@@ -187,6 +190,60 @@ ClockworkStatus clockwork_embed_device(const ClockworkEmbed* h, ClockworkEmbedDe
 double   clockwork_embed_sample_rate(const ClockworkEmbed* h) { return h ? h->sampleRate : 0.0; }
 uint32_t clockwork_embed_block_size(const ClockworkEmbed* h) { return h ? h->block : 0u; }
 
+// What a host says of its own transport: held, one of each kind, for the
+// render loop to give the core.
+static ClockworkStatus hostSays(ClockworkEmbed* h, clockwork::HostWord word, uint32_t frame) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached) return CLOCKWORK_E_ARG;
+    // The next frame the host is handed is the oldest one rendered and not yet served.
+    word.frame = h->rendered - h->outCount + frame;
+    h->said[word.kind] = { true, word };
+    return CLOCKWORK_OK;
+}
+ClockworkStatus clockwork_embed_tempo(ClockworkEmbed* h, double bpm, uint32_t frame) {
+    if (!clockwork::hostTempoValid(bpm)) return CLOCKWORK_E_ARG;
+    clockwork::HostWord word;
+    word.kind = clockwork::HostWord::Tempo;
+    word.value = bpm;
+    return hostSays(h, word, frame);
+}
+ClockworkStatus clockwork_embed_meter(ClockworkEmbed* h, int32_t num, int32_t den, uint32_t frame) {
+    if (!clockwork_timeline_meter_valid(num, den)) return CLOCKWORK_E_ARG;
+    clockwork::HostWord word;
+    word.kind = clockwork::HostWord::Meter;
+    word.num = num;
+    word.den = den;
+    return hostSays(h, word, frame);
+}
+ClockworkStatus clockwork_embed_playing(ClockworkEmbed* h, int playing, uint32_t frame) {
+    clockwork::HostWord word;
+    word.kind = clockwork::HostWord::Playing;
+    word.playing = playing != 0;
+    return hostSays(h, word, frame);
+}
+ClockworkStatus clockwork_embed_beat(ClockworkEmbed* h, double beat, uint32_t how, uint32_t frame) {
+    if (!std::isfinite(beat) || (how != CLOCKWORK_BEAT_REQUEST && how != CLOCKWORK_BEAT_FORCE)) return CLOCKWORK_E_ARG;
+    clockwork::HostWord word;
+    word.kind = clockwork::HostWord::Beat;
+    word.value = beat;
+    word.how = how;
+    return hostSays(h, word, frame);
+}
+// Give the core what the host has said for a frame before `end`, in the
+// order the timeline takes them: the tempo, the meter, playing, the beat.
+static void giveHostWords(ClockworkEmbed* h, uint64_t end) {
+    for (ClockworkEmbed::Said& s : h->said) {
+        if (!s.said || s.word.frame >= end) continue;
+        const clockwork::HostWord& w = s.word;
+        switch (w.kind) {
+            case clockwork::HostWord::Tempo:   clockwork_host_tempo(h->core, w.value, w.frame); break;
+            case clockwork::HostWord::Meter:   clockwork_host_meter(h->core, w.num, w.den, w.frame); break;
+            case clockwork::HostWord::Playing: clockwork_host_playing(h->core, w.playing, w.frame); break;
+            case clockwork::HostWord::Beat:    clockwork_host_beat(h->core, w.value, w.how, w.frame); break;
+        }
+        s.said = false;
+    }
+}
+
 uint32_t clockwork_embed_render(ClockworkEmbed* h,
                                 float* const* out, uint32_t out_channels,
                                 const float* const* in, uint32_t in_channels,
@@ -238,6 +295,7 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
             time.audio_frames   = h->rendered;
             time.wall_ntp       = ntpNow();
             time.monotonic_secs = monoNow();
+            giveHostWords(h, h->rendered + block);
             const ClockworkTick tick = clockwork_tick(h->core, &time, h->outChannels, h->inChannels);
             h->rendered += block;
 

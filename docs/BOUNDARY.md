@@ -458,12 +458,14 @@ construction, and uses the declaration only to know which it is paying for.
 
 clockwork does. Tempo, beat origin and transport are published as atomics.
 JavaScript reads them directly; `DspConfig::clock` hands the DSP the same bytes.
-Nothing pushes tempo at the DSP.
+Nothing pushes tempo at the DSP. The timeline is set by its sources: the
+clients, Link's peers, and a host with a transport of its own
+(`clockwork_host_transport.h`).
 
-Read that block with `readClockworkClock()` (`shared_memory.h`). There is no
-seqlock on it — coherence comes from store ordering, value first relaxed and the
-key field last with release, across five writers. clockwork supplies the reader
-so no DSP has to reproduce that.
+Read that block with `readClockworkClock()` (`clockwork_clock_state.h`; in
+Rust, `clockwork_abi::clock::read`). There is no seqlock on it — coherence
+comes from store ordering, value first relaxed and the key field last with
+release. clockwork supplies the reader so no DSP has to reproduce that.
 
 ### What survives a rebuild
 

@@ -81,6 +81,9 @@ add_executable(clockwork_tests
     # The ClockworkClockState write protocol: ordering and the re-anchor, on the
     # struct's own mutators, with no sleeping.
     test_clock_state.cpp
+    # A host's transport (a DAW's), followed: tempo, meter, playing, and the
+    # grid's bars on the host's.
+    test_host_transport.cpp
     test_clockwork_clock.cpp
     # One snapshot, one domain: ClockworkClock::timeline(id) and the rpc verbs that
     # answer from it. The follower registry behind the midi ids is tested in

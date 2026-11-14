@@ -47,6 +47,9 @@ const _: () = {
     assert!(core::mem::offset_of!(ClockworkClockState, generation) == 36);
 };
 
+/// `flags`: a host has said its own transport to the timeline (clockwork_host_transport.h).
+pub const SC_FLAG_HOST_TIMELINE: u32 = 1 << 3;
+
 /// One coherent reading of the clock (`ClockworkClockSnapshot`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClockSnapshot {

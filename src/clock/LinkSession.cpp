@@ -291,6 +291,27 @@ void LinkSession::forceBeatAtTime(double beat, double atNtpSeconds, double quant
         s->setOrigin(clockwork::originFor(beat, atNtpSeconds, tempo));
 }
 
+uint32_t LinkSession::followHost(const clockwork::HostWord& said, double atNtpSeconds, double rate) {
+    ClockworkClockState* s = mImpl->clock.state();
+    if (!s) return 0u;
+    const uint32_t moved = clockwork::followHost(*s, said, atNtpSeconds, rate);
+    constexpr uint32_t kLinks = clockwork::kHostMovedTempo | clockwork::kHostMovedTransport | clockwork::kHostMovedGrid;
+    if (!(moved & kLinks)) return moved;
+    // Link's timeline takes what the mirror now holds, at the same instant on
+    // Link's clock (the offset between the two sampled now, as setBpm's is),
+    // through the audio thread's session state: no lock.
+    const ClockworkClockSnapshot now = readClockworkClock(s);
+    const auto atLink = mImpl->link.clock().micros()
+                      + std::chrono::microseconds(static_cast<int64_t>((atNtpSeconds - wallClockNTP()) * 1e6));
+    auto st = mImpl->link.captureAudioSessionState();
+    if (moved & clockwork::kHostMovedTempo) st.setTempo(now.bpm, atLink);
+    if (moved & clockwork::kHostMovedGrid)
+        st.forceBeatAtTime(now.beatAt(atNtpSeconds), atLink, now.meter_num * 4.0 / now.meter_den);
+    if (moved & clockwork::kHostMovedTransport) st.setIsPlaying(now.is_playing, atLink);
+    mImpl->link.commitAudioSessionState(st);
+    return moved;
+}
+
 // ─── Enable / async enable ───────────────────────────────────────────────────
 
 void LinkSession::setApplyVisibility(std::function<void(LinkVisibility)> apply) {

@@ -63,6 +63,7 @@
 #include "clockwork_profile.h"
 #include "clockwork_arena.h"
 #include "clockwork_timetag.h"
+#include "clockwork_host_transport.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -188,7 +189,59 @@ typedef struct ClockworkBlockTime {
     double   block_ntp;             /* out: the engine's time for the block's first frame, NTP seconds */
     uint64_t block_host_micros;     /* out: the block's stamp in Link's clock (0 without Link) */
 } ClockworkBlockTime;
+#ifdef __cplusplus
+static_assert(sizeof(ClockworkBlockTime) == 56, "ClockworkBlockTime: 56 bytes (the worklet's BLOCK_TIME_BYTES, clockwork-abi's mirror)");
+#endif
 ClockworkTick clockwork_tick(ClockworkCore* core, ClockworkBlockTime* time, uint32_t out_channels, uint32_t in_channels);
+
+/* WHAT THE CLIENT ASKED TO BE TOLD. A core has one client at a time, so it
+ * keeps one switch for each kind of notice the client may ask for, the same
+ * on every host: a notice of a kind is written for the client only while its
+ * switch is on. Whoever answers a subscribe verb turns the switch (the core
+ * itself for the clock's and for the verbs it forwards; a host's control
+ * thread for its own), and whoever sees the client go clears them all, so the
+ * next client starts with nothing asked for.
+ *
+ * clockwork_client_wants turns the switches in `kinds` on or off: true when
+ * that changed any, which is when a verb sends what is there now. Any
+ * thread. */
+#define CLOCKWORK_WANTS_NOTIFY  (1u << 0)   /* the engine's lifecycle: statechange, setup, devices */
+#define CLOCKWORK_WANTS_CLOCK   (1u << 1)   /* the timeline's moves: /clockwork/clock/notify/… */
+#define CLOCKWORK_WANTS_MIDI    (1u << 2)   /* /clockwork/midi/in/… and /clockwork/midi/ports */
+#define CLOCKWORK_WANTS_GAMEPAD (1u << 3)   /* /clockwork/gamepad/in/… and /clockwork/gamepad/devices */
+#define CLOCKWORK_WANTS_OSC     (1u << 4)   /* OSC that arrived from other programs */
+#define CLOCKWORK_WANTS_ALL     31u
+bool     clockwork_client_wants(ClockworkCore* core, uint32_t kinds, bool on);
+uint32_t clockwork_client_wanted(ClockworkCore* core);
+void     clockwork_client_gone(ClockworkCore* core);
+
+/* A HOST'S OWN TRANSPORT (clockwork_host_transport.h). A host with a
+ * transport of its own says it to the session's timeline in these four, from
+ * the thread that ticks and between ticks: its tempo; its time signature;
+ * whether it plays; where its beat is, in quarter notes, by
+ * CLOCKWORK_BEAT_REQUEST or CLOCKWORK_BEAT_FORCE. It is one more source of the
+ * timeline, as a Link peer is, and it says its transport again with every
+ * block, so what another sets lasts until it does; what it never says is
+ * left as it is. Once it has said anything the clock state says a host has
+ * a transport (SC_FLAG_HOST_TIMELINE). A host that never says anything has
+ * none, and the timeline is at its default until a client or a peer sets it.
+ *
+ * Each is for `frame`, a frame in the host's own count of its audio
+ * (ClockworkBlockTime::audio_frames), which may be in a block already ticked,
+ * and is taken, in the order said, by the tick whose block that frame is in
+ * or the first after, before the guest runs, so what the guest reads
+ * through DspConfig::clock is the host's. No allocation, no lock.
+ *
+ * False, and nothing said: a core that is not live; a tempo that is no
+ * number above 0, a time signature no bar can be built from, a beat that is
+ * no number or a way of saying it that is neither; or more said than a tick
+ * has yet taken (8). What was said and not yet taken is dropped when the
+ * host's audio starts over (clockwork_audio_starts), its count of frames
+ * with it. */
+bool clockwork_host_tempo(ClockworkCore* core, double bpm, uint64_t frame);
+bool clockwork_host_meter(ClockworkCore* core, int32_t num, int32_t den, uint64_t frame);
+bool clockwork_host_playing(ClockworkCore* core, bool playing, uint64_t frame);
+bool clockwork_host_beat(ClockworkCore* core, double beat, uint32_t how, uint64_t frame);
 
 /* THE AUDIO WAS AWAY? The one rule on every target. The gap is the time that
  * passed since the last block less the audio rendered in it, by the host's

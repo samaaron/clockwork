@@ -275,5 +275,6 @@ inline void ClockworkClockState::copyFrom(const ClockworkClockState& src) {
 constexpr uint32_t SC_FLAG_LINK_ENABLED         = 1u << 0u;
 constexpr uint32_t SC_FLAG_START_STOP_SYNC      = 1u << 1u;
 constexpr uint32_t SC_FLAG_LINK_AUDIO_PUBLISH   = 1u << 2u;
+constexpr uint32_t SC_FLAG_HOST_TIMELINE        = 1u << 3u;   // a host has said its own transport to the timeline (clockwork_host_transport.h)
 
 #endif /* CLOCKWORK_CLOCK_STATE_H */
