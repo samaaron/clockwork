@@ -28,6 +28,7 @@
 #include "osc/OscOutboundPacketStream.h"
 #include "RingBufferWriter.h"
 #include "IngressCallCtx.h"
+#include "params/params.h"
 #include "workers/thread_name.h"
 #include <algorithm>
 #include <array>
@@ -1152,6 +1153,8 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // messages, or it would answer before what it answers for.
     mAudioRoutes.add("sync", &clockwork_clockwork_sys_route, mCore);
     mAudioRoutes.add("sched/flush", &clockwork_sched_flush_route, mCore);
+    // The parameter table (docs/PARAMS.md): held and answered on this thread, as on every host.
+    mAudioRoutes.add("param/", &clockwork::params::route, mCore);
     // The clock snapshot, from the published mirror, as on every host
     // (clockwork_sys.h): a caller that wants the clock this block renders
     // against cannot wait for the control thread.

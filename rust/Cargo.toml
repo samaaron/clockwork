@@ -92,6 +92,7 @@ members = [
     "clockwork-heap",
     "clockwork-taps",
     "clockwork-clock",
+    "clockwork-params",
     "clockwork-sys",
     "clockwork-client",
     "clockwork-log",

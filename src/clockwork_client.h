@@ -251,7 +251,8 @@ ClockworkStatus clockwork_client_info(ClockworkClient* c, ClockworkClientInfo* o
 
 /* The engine's core, when the client was opened over memory a core in this
  * process holds (clockwork_client_open_memory, an embed handle's client):
- * what a host names in a log line of that engine's (clockwork_log). NULL
+ * what a host names in a log line of that engine's (clockwork_log), and what
+ * the parameter table's calls take (params/clockwork_params.h). NULL
  * for a client of another process's engine, or of none. */
 ClockworkCore* clockwork_client_core(const ClockworkClient* c);
 
@@ -514,12 +515,16 @@ typedef enum ClockworkRegionId {
                                    * reads; an in-process handle's only, a segment
                                    * handle is refused (CLOCKWORK_E_PERM) */
     CLOCKWORK_REGION_EGRESS,      /* the ring the engine writes and clients read */
-    CLOCKWORK_REGION_NATIVE_STATS /* the device layer's own account of its callback:
+    CLOCKWORK_REGION_NATIVE_STATS,/* the device layer's own account of its callback:
                                    * DSP load average and peak (centi-percent of the
                                    * callback's budget) and callbacks that overran it.
                                    * A flat uint32 array, described by the nativeStats
                                    * table in metrics_schema.h. Zeros on an engine no
                                    * device drives (attach, a worklet). */
+    CLOCKWORK_REGION_PARAMS       /* the parameter table, read directly: pass the base
+                                   * to clockwork_params_header, or parse the bytes
+                                   * docs/PARAMS.md lays out. Writes go through the
+                                   * /clockwork/param/ verbs. */
 } ClockworkRegionId;
 
 typedef struct ClockworkRegion {
@@ -730,6 +735,11 @@ ClockworkStatus clockwork_client_scope_shape(ClockworkClient* c, ClockworkScopeS
  *   CLOCKWORK_COPY_METRICS  the metrics, the guest's window and the metrics
  *                           history, back to back (a part an arena has not
  *                           got is not there)
+ *   CLOCKWORK_COPY_PARAMS   the parameter table's region (docs/PARAMS.md), for
+ *                           a panel: whole as it stood at one generation, or,
+ *                           when a define kept writing while it was copied,
+ *                           with its generation word odd, which a reader of
+ *                           the table takes as "read again"
  *   a window per want       a ClockworkCopyWindow, then frames * channels
  *                           floats, interleaved
  *
@@ -746,6 +756,7 @@ ClockworkStatus clockwork_client_scope_shape(ClockworkClient* c, ClockworkScopeS
 enum {
     CLOCKWORK_COPY_ARENA   = 1u << 0,
     CLOCKWORK_COPY_METRICS = 1u << 1,
+    CLOCKWORK_COPY_PARAMS  = 1u << 2,
 };
 
 typedef enum ClockworkCopySource {
@@ -768,7 +779,7 @@ typedef struct ClockworkCopyHeader {
     uint32_t arena_bytes;     /* 0 when not asked for */
     uint32_t metrics_bytes;   /* 0 when not asked for */
     uint32_t windows;         /* one a want, in the order wanted */
-    uint32_t _reserved;
+    uint32_t params_bytes;    /* 0 when not asked for */
 } ClockworkCopyHeader;
 
 typedef struct ClockworkCopyWindow {

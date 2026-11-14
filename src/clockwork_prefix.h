@@ -90,7 +90,7 @@ inline bool clockwork_sys_is_audio_verb(const char* address) noexcept {
     // verbs are the port's inbound events.
     return is("ping") || is("echo") || is("sync") || is("schedule") || is("sched/flush")
         || is("clock/state/get")
-        || under("asset/")
+        || under("asset/") || under("param/")
         || (under("midi/in/") && !is("midi/in/enable")) || is("midi/ports")
         || under("gamepad/in/") || is("gamepad/devices")
         || is("track/note") || is("track/cc") || is("track/bend") || is("track/notes_off")

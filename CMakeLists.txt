@@ -598,6 +598,8 @@ set(CLOCKWORK_CORE_SOURCES
     # remote peer's traffic, so it is not optional and there is no second copy.
     ${CLOCKWORK_SRC}/clockwork_client.cpp
     ${CLOCKWORK_SRC}/clockwork_asset_pool.cpp
+    # The parameter table (docs/PARAMS.md): one region, three verbs, the guest's calls.
+    ${CLOCKWORK_SRC}/params/params.cpp
     # An engine in your process (src/clockwork_embed.h): attach and render
     # here; the device boot is in the device layer below.
     ${CLOCKWORK_SRC}/embed/clockwork_embed.cpp

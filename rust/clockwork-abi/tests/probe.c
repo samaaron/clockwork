@@ -9,6 +9,7 @@
 #include "lanes/lanes.h"
 #include "clockwork_arena.h"
 #include "clockwork_embed.h"
+#include "params/clockwork_params.h"
 
 #define S(T)     printf("size %s %zu\n", #T, sizeof(T))
 #define F(T, f)  printf("field %s %s %zu\n", #T, #f, offsetof(T, f))
@@ -28,7 +29,19 @@ int main(void) {
     F(DspHost, ctx); F(DspHost, emit_osc); F(DspHost, log); F(DspHost, open_sink);
     F(DspHost, send_sink); F(DspHost, free_bytes); F(DspHost, asset_release);
     F(DspHost, alloc_bytes); F(DspHost, tap_open); F(DspHost, tap_write); F(DspHost, tap_close);
-    F(DspHost, flush_schedule);
+    F(DspHost, flush_schedule); F(DspHost, param_define); F(DspHost, param_value); F(DspHost, param_set);
+    S(ClockworkBlockTime);
+    F(ClockworkBlockTime, struct_bytes); F(ClockworkBlockTime, output_latency_frames); F(ClockworkBlockTime, audio_frames);
+    F(ClockworkBlockTime, wall_ntp); F(ClockworkBlockTime, monotonic_secs); F(ClockworkBlockTime, link_host_micros);
+    F(ClockworkBlockTime, block_ntp); F(ClockworkBlockTime, block_host_micros);
+    S(ClockworkParamEntry);
+    F(ClockworkParamEntry, live); F(ClockworkParamEntry, id); F(ClockworkParamEntry, kind); F(ClockworkParamEntry, unit);
+    F(ClockworkParamEntry, flags); F(ClockworkParamEntry, group); F(ClockworkParamEntry, min); F(ClockworkParamEntry, max);
+    F(ClockworkParamEntry, def); F(ClockworkParamEntry, definer); F(ClockworkParamEntry, name); F(ClockworkParamEntry, taper); F(ClockworkParamEntry, role); F(ClockworkParamEntry, text); F(ClockworkParamEntry, text_bytes); F(ClockworkParamEntry, reserved);
+    S(ClockworkParamsHeader);
+    F(ClockworkParamsHeader, magic); F(ClockworkParamsHeader, version); F(ClockworkParamsHeader, capacity);
+    F(ClockworkParamsHeader, count); F(ClockworkParamsHeader, generation); F(ClockworkParamsHeader, values_offset);
+    F(ClockworkParamsHeader, entries_offset); F(ClockworkParamsHeader, entry_bytes); F(ClockworkParamsHeader, text_offset); F(ClockworkParamsHeader, text_capacity); F(ClockworkParamsHeader, text_used); F(ClockworkParamsHeader, reserved);
     S(DspTapHandle);
     F(DspTapHandle, slot); F(DspTapHandle, data); F(DspTapHandle, channels); F(DspTapHandle, max_frames);
 
@@ -63,7 +76,7 @@ int main(void) {
     S(ClockworkCopyHeader);
     F(ClockworkCopyHeader, magic); F(ClockworkCopyHeader, version); F(ClockworkCopyHeader, bytes);
     F(ClockworkCopyHeader, generation); F(ClockworkCopyHeader, arena_bytes); F(ClockworkCopyHeader, metrics_bytes);
-    F(ClockworkCopyHeader, windows); F(ClockworkCopyHeader, _reserved);
+    F(ClockworkCopyHeader, windows); F(ClockworkCopyHeader, params_bytes);
     S(ClockworkCopyWindow);
     F(ClockworkCopyWindow, source); F(ClockworkCopyWindow, slot); F(ClockworkCopyWindow, channels);
     F(ClockworkCopyWindow, frames); F(ClockworkCopyWindow, activations); F(ClockworkCopyWindow, _reserved);
@@ -101,9 +114,10 @@ int main(void) {
     printf("const CLOCKWORK_GEOM_WINDOW_VERSION %d\n", (int)CLOCKWORK_GEOM_WINDOW_VERSION);
     printf("const CLOCKWORK_REGION_EGRESS %d\n", (int)CLOCKWORK_REGION_EGRESS);
     printf("const CLOCKWORK_REGION_NATIVE_STATS %d\n", (int)CLOCKWORK_REGION_NATIVE_STATS);
+    printf("const CLOCKWORK_REGION_PARAMS %d\n", (int)CLOCKWORK_REGION_PARAMS);
     printf("const kClockworkSinkOsc %d\n", (int)kClockworkSinkOsc);
     printf("const CLOCKWORK_FEATURE_SCHEDULER %d\n", (int)CLOCKWORK_FEATURE_SCHEDULER);
-    printf("const CLOCKWORK_ROUTE_NOTIFY %d\n", (int)CLOCKWORK_ROUTE_NOTIFY);
+    printf("const CLOCKWORK_WANTS_OSC %d\n", (int)CLOCKWORK_WANTS_OSC);
     printf("const CLOCKWORK_ASSET_AUDIO_F32 %d\n", (int)CLOCKWORK_ASSET_AUDIO_F32);
     printf("const DSP_FP_ENV_FLUSH_TO_ZERO %d\n", (int)DSP_FP_ENV_FLUSH_TO_ZERO);
     printf("const CLOCKWORK_CLIENT_ABI_VERSION %d\n", (int)CLOCKWORK_CLIENT_ABI_VERSION);

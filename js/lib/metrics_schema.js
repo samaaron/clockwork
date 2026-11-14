@@ -170,6 +170,11 @@ export const METRICS_SCHEMA = {
     silentCallbacks:              { offset: 69, nativeOnly: true, type: 'counter',  unit: 'count', description: 'Audio callbacks played as silence for want of a block, once the engine had rendered its first: a control call holding the engine, or no block ready' },
     callbackGapRecentUs:          { offset: 70, nativeOnly: true, type: 'gauge',    unit: 'us', description: 'Longest time between the starts of two audio callbacks, this minute and the last' },
     callbackGapMaxUs:             { offset: 71, nativeOnly: true, type: 'gauge',    unit: 'us', description: 'Longest time between the starts of two audio callbacks since the engine started' },
+    // The parameter table: how many entries, how often that set changed, how often a value moved, what was refused.
+    paramsLive:                   { offset: 72, type: 'gauge',    unit: 'count', description: 'Entries in the parameter table' },
+    paramsGeneration:             { offset: 73, type: 'counter',  unit: 'count', description: 'Times the set of parameters changed' },
+    paramMoves:                   { offset: 74, type: 'counter',  unit: 'count', description: "Times a parameter's value moved" },
+    paramsRefused:                { offset: 75, type: 'counter',  unit: 'count', description: 'Parameter defines and sets refused' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in
@@ -223,6 +228,7 @@ export const METRICS_SCHEMA = {
           { label: 'refused out', tooltip: 'Replies, broadcasts and log lines an egress ring refused, for want of room or for their size: what the clients never got', cells: [{ key: 'egressFramesRefused', kind: 'error' }] },
           { label: 'undelivered', tooltip: 'Replies and broadcasts the transport could not deliver: a client gone, a datagram the socket refused, a peer whose reply ring was full', cells: [{ key: 'egressFramesUndelivered', kind: 'error' }] },
           { label: 'cues dropped', tooltip: 'Cues the cue port\'s rate limit dropped: a sender over its rate, or the port over its own', cells: [{ key: 'cuesDropped', kind: 'error' }] },
+          { label: 'parameters',  tooltip: 'Entries in the parameter table, and the times a value moved', cells: [{ key: 'paramsLive', kind: 'dim' }, { sep: ' | ' }, { key: 'paramMoves', kind: 'muted' }, { text: ' moves', kind: 'muted' }] },
           { label: 'clock',       tooltip: 'The difference between the audio clock and the wall clock (µs, signed) and number of times it was re-anchored since boot', cells: [{ key: 'clockDriftUs', format: 'signed' }, { text: ' µs', kind: 'muted' }, { sep: ' | ' }, { key: 'clockAnchors', kind: 'muted' }, { text: ' anchors', kind: 'muted' }] },
           { label: 'debug',       tooltip: COMPOSITES.debugCountBytes.description, cells: [{ key: 'debugMessagesReceived', kind: 'muted' }, { text: ' (' }, { key: 'debugBytesReceived', kind: 'muted', format: 'bytes' }, { text: ')' }] },
         ]

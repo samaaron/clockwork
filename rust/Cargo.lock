@@ -137,6 +137,7 @@ dependencies = [
  "clockwork-abi",
  "clockwork-native",
  "clockwork-osc",
+ "clockwork-params",
  "clockwork-sys",
 ]
 
@@ -280,6 +281,14 @@ dependencies = [
  "clockwork-osc",
  "clockwork-wait",
  "socket2",
+]
+
+[[package]]
+name = "clockwork-params"
+version = "0.1.0"
+dependencies = [
+ "clockwork-abi",
+ "wasm-bindgen",
 ]
 
 [[package]]

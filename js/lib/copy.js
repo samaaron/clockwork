@@ -11,10 +11,12 @@
 // an 8-byte boundary:
 //
 //   header   eight u32: magic, version, bytes, the arena's generation word,
-//            the arena part's bytes, the metrics part's bytes, windows, 0
+//            the arena part's bytes, the metrics part's bytes, windows, the
+//            parameter table's bytes
 //   arena    the arena's header and tables (arena.js readArena reads them)
 //   metrics  the metrics, the guest's window, the metrics history, back to
 //            back: what postMessage mode's snapshot has always been
+//   params   the parameter table's region (params.js reads it), when asked for
 //   window   six u32 — source, slot, channels, frames, activations, 0 — and
 //            the write position (u64), then frames * channels floats
 //
@@ -22,7 +24,7 @@
 // for lately, so the host copies those and no others.
 
 export const COPY = Object.freeze({ MAGIC: 0x59504F43, VERSION: 1, HEADER_BYTES: 32, WINDOW_HEADER_BYTES: 32 });
-export const COPY_PART = Object.freeze({ ARENA: 1, METRICS: 2 });
+export const COPY_PART = Object.freeze({ ARENA: 1, METRICS: 2, PARAMS: 4 });
 export const COPY_SOURCE = Object.freeze({ TAP: 1, SCOPE: 2 });
 
 const align8 = (n) => (n + 7) & ~7;
@@ -39,13 +41,13 @@ export function encodeWants(wants) {
  * null for a slot with nothing to show; `activations` is the slot's count of
  * live spells either way. Throws for bytes that are not a copy this reader knows.
  * @param {ArrayBuffer} buffer
- * @returns {{ generation: number, arena: ArrayBuffer|null, metrics: ArrayBuffer|null,
+ * @returns {{ generation: number, arena: ArrayBuffer|null, metrics: ArrayBuffer|null, params: ArrayBuffer|null,
  *             windows: Array<{ source: number, slot: number, activations: number, writePosition: bigint,
  *                              window: { frames: number, channels: number, writePosition: bigint, interleaved: Float32Array }|null }> }}
  */
 export function readCopy(buffer) {
   if (buffer.byteLength < COPY.HEADER_BYTES) throw new Error(`a copy is at least ${COPY.HEADER_BYTES} bytes, not ${buffer.byteLength}`);
-  const [magic, version, bytes, generation, arenaBytes, metricsBytes, count] = new Uint32Array(buffer, 0, 8);
+  const [magic, version, bytes, generation, arenaBytes, metricsBytes, count, paramsBytes] = new Uint32Array(buffer, 0, 8);
   if (magic !== COPY.MAGIC) throw new Error(`not a copy of an engine (magic ${magic.toString(16)})`);
   if (version !== COPY.VERSION) throw new Error(`a copy of version ${version}, this reader knows ${COPY.VERSION}`);
   if (bytes > buffer.byteLength) throw new Error(`a copy of ${bytes} bytes in ${buffer.byteLength}`);
@@ -59,6 +61,7 @@ export function readCopy(buffer) {
   };
   const arena = part(arenaBytes);
   const metrics = part(metricsBytes);
+  const params = part(paramsBytes);
   const windows = [];
   for (let i = 0; i < count; i++) {
     if (at + COPY.WINDOW_HEADER_BYTES > bytes) throw new Error("a copy's window runs past its end");
@@ -71,7 +74,7 @@ export function readCopy(buffer) {
     windows.push({ source, slot, activations, writePosition, window });
     at = align8(at + floats * 4);
   }
-  return { generation, arena, metrics, windows };
+  return { generation, arena, metrics, params, windows };
 }
 
 /** The newest `frames` of a window holding more. */
@@ -91,6 +94,8 @@ export class CopyReader {
   #windows = new Map();   // `${source}:${slot}` → the copy's entry
   #metrics = null;
   #metricsAsked = -Infinity;
+  #params = null;
+  #paramsAsked = -Infinity;
   #generation = null;
   #wantFor;
   #now;
@@ -135,7 +140,13 @@ export class CopyReader {
     return this.#metrics;
   }
 
-  /** The wants still current, for the next copy, and whether it should hold the metrics. */
+  /** The newest parameter table (params.js readParams), and a want for the next copy to hold it. */
+  params() {
+    this.#paramsAsked = this.#now();
+    return this.#params;
+  }
+
+  /** The wants still current, for the next copy, and whether it should hold the metrics and the parameter table. */
   wants() {
     const now = this.#now();
     const out = [];
@@ -143,7 +154,7 @@ export class CopyReader {
       if (now - want.asked > this.#wantFor) this.#wants.delete(key);
       else out.push(want);
     }
-    return { wants: out, metrics: now - this.#metricsAsked <= this.#wantFor };
+    return { wants: out, metrics: now - this.#metricsAsked <= this.#wantFor, params: now - this.#paramsAsked <= this.#wantFor };
   }
 
   /** The arena generation the newest copy carried, or null before one. */
@@ -153,6 +164,7 @@ export class CopyReader {
   take(copy) {
     this.#generation = copy.generation;
     if (copy.metrics) this.#metrics = copy.metrics;
+    if (copy.params) this.#params = copy.params;
     for (const entry of copy.windows) this.#windows.set(`${entry.source}:${entry.slot}`, entry);
     // a slot no longer asked for is no longer held: what was last copied of it is not the slot now
     for (const key of this.#windows.keys()) if (!this.#wants.has(key)) this.#windows.delete(key);

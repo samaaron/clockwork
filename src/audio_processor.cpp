@@ -135,6 +135,8 @@ extern "C" size_t emscripten_get_heap_size(void);   // the end of the memory, fo
 // a build with no store has to read its timetag to forward it honestly.
 #include "scheduler/engine_schedule.h"  // clockwork's own timed queue
 #include "host/osc_reader.h"            // sched/flush's tag, read without throwing
+#include "params/params.h"           // the parameter table: its region's reset, its verbs, the guest's calls
+#include "params/clockwork_params.h"
 #include "scheduler/schedule_parse.h"   // shared bundle / "/clockwork/schedule" parsing
 #if CLOCKWORK_SCHEDULER
 #include "scheduler/fire_due.h"         // shared scheduler fire loop
@@ -1118,6 +1120,26 @@ extern "C" {
 #endif
     }
 
+    // DspHost::param_define, param_value, param_set — the guest's three calls
+    // on the parameter table (clockwork_params.h), its entries its own.
+    static int32_t dsp_host_param_define(void* ctx, const struct ClockworkParamEntry* entries, uint32_t count,
+                                         const uint8_t* text, uint32_t text_bytes, uint32_t* slots) {
+        HostCallScope host;
+        const char* why = nullptr;
+        const int32_t n = clockwork_param_define(static_cast<ClockworkCore*>(ctx), entries, count, text, text_bytes,
+                                                 CLOCKWORK_PARAM_DEFINER_GUEST, slots, &why);
+        if (n < 0 && why) clockwork_log(static_cast<ClockworkCore*>(ctx), "ERROR: the guest's parameters were refused: %s", why);
+        return n;
+    }
+    static float dsp_host_param_value(void* ctx, uint32_t slot) {
+        HostCallScope host;
+        return clockwork_param_value(static_cast<ClockworkCore*>(ctx), slot);
+    }
+    static int dsp_host_param_set(void* ctx, uint32_t slot, float value) {
+        HostCallScope host;
+        return clockwork_param_set(static_cast<ClockworkCore*>(ctx), slot, value, CLOCKWORK_PARAM_DEFINER_GUEST);
+    }
+
     // What the guest is handed: the callbacks, with its core as their context.
     static DspHost dsp_host_for(ClockworkCore* core) {
         return DspHost{ core, &dsp_host_emit_osc, &dsp_host_log,
@@ -1125,15 +1147,15 @@ extern "C" {
                         &dsp_host_free_bytes, &dsp_host_asset_release,
                         &dsp_host_alloc_bytes,
                         &dsp_host_tap_open, &dsp_host_tap_write,
-                        &dsp_host_tap_close, &dsp_host_flush_schedule };
+                        &dsp_host_tap_close, &dsp_host_flush_schedule,
+                        &dsp_host_param_define, &dsp_host_param_value, &dsp_host_param_set };
     }
 
-#if CLOCKWORK_WORKLET_CLOCK && CLOCKWORK_SYNTH
+#if CLOCKWORK_SYNTH
     // The RT egress as a generic ReplyChannel: emit one OSC to the OUT ring,
-    // routed by the per-call token. Lets the worklet audio-thread control routes
+    // routed by the per-call token. Lets the audio thread's control routes
     // (the /clockwork/clock namespace) reply through the backend contract without
-    // any DSP-specific reply type. Shared by every worklet host (WASM + the
-    // self-driven device).
+    // any DSP-specific reply type. Shared by every core with no control thread.
     void rt_reply_emit(void* ctx, uint32_t token, const uint8_t* osc, uint32_t len) {
         emit_osc_out(state_of(ctx), token, osc, len);
     }
@@ -1610,6 +1632,8 @@ extern "C" {
     static void reset_metrics(ClockworkCore* core) { reset_words(core, METRICS_START, METRICS_SIZE); }
     static void reset_metrics_history(ClockworkCore* core) { reset_words(core, METRICS_HISTORY_START, METRICS_HISTORY_SIZE); }
     static void reset_native_stats(ClockworkCore* core) { reset_words(core, NATIVE_STATS_START, NATIVE_STATS_SIZE); }
+    // The parameter table: its header written, every slot free (params.cpp).
+    static void reset_params(ClockworkCore* core) { clockwork::params::reset(core); }
     // The host's: NTP start is write-once from the host once its audio runs,
     // drift and the global offset are what it measured about this machine's
     // clocks. A new arena, a new measurement.
@@ -1730,13 +1754,14 @@ extern "C" {
         // the lifetime before it looks; the list names every region anyway,
         // so the enum and the list stay held to each other.
         { CLOCKWORK_ARENA_CLOCKWORK_CONTROL_RING,    nullptr },
+        { CLOCKWORK_ARENA_CLOCKWORK_PARAMS,          &reset_params },
     };
     // Every region the enum names, once. The ids are 1..N and contiguous
     // (clockwork_arena.h: "stable numbers, in the order they lie"), so a
     // region added to the enum without a reset here does not compile, and
     // one listed twice does not either. The test holds the TABLE to this
     // list; this holds the list to the enum.
-    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY;
+    static constexpr uint32_t kRegionLast = CLOCKWORK_ARENA_CLOCKWORK_PARAMS;
     static constexpr bool region_resets_cover_every_region() {
         if (sizeof(kRegionResets) / sizeof(kRegionResets[0]) != kRegionLast) return false;
         for (uint32_t id = 1; id <= kRegionLast; ++id) {
@@ -1917,14 +1942,16 @@ extern "C" {
         OscSplit&           default_split        = routing.own_split;
         ClockworkSysRoutes& default_audio_routes = routing.own_routes;
         if (!default_split.wired()) {
-#if CLOCKWORK_WORKLET_CLOCK
+            // The clock's verbs, on every host with no control thread.
             routing.rt_reply = ReplyChannel{ &rt_reply_emit, core };
             default_audio_routes.add("clock/", &clockCoreRoute, &routing.rt_reply);
-#endif
             // The asset hand-off is audio-thread work on every host: the
             // guest is only ever reached from there.
             default_audio_routes.add("asset/", &clockwork_asset_route, core);
             default_audio_routes.add("sched/flush", &clockwork_sched_flush_route, core);
+            // The parameter table (docs/PARAMS.md): defined, listed and set on the
+            // thread that holds it, on every host.
+            default_audio_routes.add("param/", &clockwork::params::route, core);
             // Inbound events likewise: to their audience, and to the guest.
             default_audio_routes.add("midi/in/",         &clockwork_event_route, core);
             default_audio_routes.add("midi/ports",       &clockwork_event_route, core);

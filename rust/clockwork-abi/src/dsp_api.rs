@@ -9,6 +9,7 @@ use core::ffi::{c_char, c_int, c_void};
 
 use crate::sink::{ClockworkSink, ClockworkSinkKind};
 use crate::timetag::ClockworkTimetag;
+use crate::params::ClockworkParamEntry;
 
 /// The guest's instance: opaque to the host, `struct Dsp` in C.
 #[repr(C)]
@@ -148,6 +149,14 @@ pub struct DspHost {
     /// Drops the bundles clockwork holds for this DSP ahead of their time
     /// (a DSP's own "clear the schedule" verb). Callable from `dsp_process`.
     pub flush_schedule: Option<unsafe extern "C" fn(ctx: *mut c_void)>,
+    pub param_define: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void, entries: *const ClockworkParamEntry, count: u32,
+            text: *const u8, text_bytes: u32, slots: *mut u32,
+        ) -> i32,
+    >,
+    pub param_value: Option<unsafe extern "C" fn(ctx: *mut c_void, slot: u32) -> f32>,
+    pub param_set: Option<unsafe extern "C" fn(ctx: *mut c_void, slot: u32, value: f32) -> c_int>,
 }
 
 /// What `dsp_describe` answers. Static: describable before any instance.

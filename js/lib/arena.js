@@ -53,6 +53,7 @@ export const REGION = Object.freeze({
   CLOCKWORK_NRT_OUT_RING: 13,
   CLOCKWORK_CONTROL_RING: 17,   // clockwork's own control verbs (docs/RESTARTS.md); a later addition, numbered after
   CLOCKWORK_METRICS_HISTORY: 18,   // what every counter and gauge did over the last hour (metrics_history.js); a later addition
+  CLOCKWORK_PARAMS: 19,            // the parameter table (params.js); a later addition
   GUEST_WINDOW: 14,
   GUEST_CONFIG: 15, GUEST_PERSIST: 16,
 });
@@ -70,6 +71,8 @@ export const GEOM = Object.freeze({
   HISTORY_LEVELS: 0, HISTORY_BUCKETS: 1, HISTORY_METRICS: 2, HISTORY_WORDS: 3, HISTORY_HEADER_BYTES: 4,
   // the guest window: what the guest declared its window to be, 0 until it binds
   WINDOW_MAGIC: 0, WINDOW_VERSION: 1,
+  // the parameter table: slots, an entry's bytes, the header's bytes
+  PARAMS_CAPACITY: 0, PARAMS_ENTRY_BYTES: 1, PARAMS_HEADER_BYTES: 2,
 });
 
 /** The names a map shows, by id: `clockwork-metrics`, `guest-window`, … */
@@ -234,6 +237,8 @@ function constantsFrom(region, h) {
   try { controlRing = region(REGION.CLOCKWORK_CONTROL_RING); } catch { /* an arena without one */ }
   let history = null;
   try { history = region(REGION.CLOCKWORK_METRICS_HISTORY); } catch { /* an arena without one */ }
+  let params = null;
+  try { params = region(REGION.CLOCKWORK_PARAMS); } catch { /* an arena without one */ }
   return {
     ARENA_VERSION: h.version,
     ARENA_INSTANCE_ID: h.instanceId,
@@ -267,6 +272,8 @@ function constantsFrom(region, h) {
     METRICS_HISTORY_WORDS: history ? history.geom[GEOM.HISTORY_WORDS] : 0,
     METRICS_HISTORY_HEADER_BYTES: history ? history.geom[GEOM.HISTORY_HEADER_BYTES] : 0,
     GUEST_WINDOW_START: window.offset, GUEST_WINDOW_SIZE: window.bytes,
+    // The parameter table (params.js); 0 in an arena without one.
+    PARAMS_START: params ? params.offset : 0, PARAMS_SIZE: params ? params.bytes : 0,
     GLOBAL_OFFSET_START: anchors.offset + anchors.geom[GEOM.ANCHOR_GLOBAL], GLOBAL_OFFSET_SIZE: 4,
     CLOCK_STATE_START: clock.offset, CLOCK_STATE_SIZE: clock.bytes,
     SCOPE_START: scope.offset, SCOPE_SIZE: scope.bytes,

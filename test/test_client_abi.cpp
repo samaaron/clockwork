@@ -15,6 +15,7 @@
  */
 #include "EngineFixture.h"
 #include "clockwork_client.h"
+#include "params/clockwork_params.h"
 #include "lanes/lanes.h"
 #include "shared_memory.h"
 #include "shm_tap_stream.hpp"
@@ -500,6 +501,66 @@ TEST_CASE("client abi: a tap slot says how many times it went live", "[client][a
     ClockworkAudioTapReader none{};
     CHECK(clockwork_client_audio_tap_activations(&none) == 0);
     CHECK(clockwork_client_audio_tap_activations(nullptr) == 0);
+
+    clockwork_client_close(c);
+}
+
+TEST_CASE("client abi: a copy holds the parameter table when asked, whole or marked as being written", "[client][abi][copy][params]") {
+    // For a panel with no view of the arena (docs/PARAMS.md): the table's bytes
+    // as a reader in place has them, after the metrics and before the windows.
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(e, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+    ClockworkRegion table{}, metrics{};
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_PARAMS, &table) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &metrics) == CLOCKWORK_OK);
+    REQUIRE(table.bytes > sizeof(ClockworkParamsHeader));
+
+    const ClockworkCopyWant want = { CLOCKWORK_COPY_TAP, 0, 8 };
+    const uint32_t without = clockwork_client_copy_bytes(c, CLOCKWORK_COPY_METRICS, &want, 1);
+    const uint32_t parts = CLOCKWORK_COPY_METRICS | CLOCKWORK_COPY_PARAMS;
+    const uint32_t size = clockwork_client_copy_bytes(c, parts, &want, 1);
+    REQUIRE(size == without + ((table.bytes + 7u) & ~7u));
+    std::vector<uint8_t> out(size + 8, 0xAA);
+    // What a copy takes is at most what copy_bytes said: a window with nothing to show holds no floats.
+    const uint32_t n = clockwork_client_copy(c, parts, &want, 1, out.data(), size);
+    REQUIRE(n > 0);
+    REQUIRE(n <= size);
+    CHECK(out[size] == 0xAA);
+
+    ClockworkCopyHeader h{};
+    std::memcpy(&h, out.data(), sizeof h);
+    CHECK(h.bytes == n);
+    REQUIRE(h.params_bytes == table.bytes);
+    const size_t at = sizeof h + ((h.metrics_bytes + 7u) & ~7u);
+    CHECK(std::memcmp(out.data() + at, table.base, table.bytes) == 0);
+    CHECK(clockwork_params_header(out.data() + at) != nullptr);
+    // The window follows it.
+    ClockworkCopyWindow w{};
+    std::memcpy(&w, out.data() + at + ((h.params_bytes + 7u) & ~7u), sizeof w);
+    CHECK(w.source == CLOCKWORK_COPY_TAP);
+    CHECK(w.slot == 0);
+
+    // Not asked for, not there.
+    std::fill(out.begin(), out.end(), uint8_t(0xAA));
+    const uint32_t bare = clockwork_client_copy(c, CLOCKWORK_COPY_METRICS, &want, 1, out.data(), size);
+    REQUIRE(bare > 0);
+    CHECK(bare == n - ((table.bytes + 7u) & ~7u));
+    std::memcpy(&h, out.data(), sizeof h);
+    CHECK(h.params_bytes == 0);
+
+    // A define under way while the copy is made: the copy says so, with the odd
+    // generation a reader of the table waits on, and never passes for whole.
+    auto* live = reinterpret_cast<ClockworkParamsHeader*>(static_cast<uint8_t*>(table.base));
+    auto& word = *reinterpret_cast<std::atomic<uint32_t>*>(&live->generation);
+    const uint32_t even = word.load();
+    word.store(even + 1u);
+    REQUIRE(clockwork_client_copy(c, parts, &want, 1, out.data(), size) == n);
+    word.store(even);
+    ClockworkParamsHeader copied{};
+    std::memcpy(&copied, out.data() + at, sizeof copied);
+    CHECK((copied.generation & 1u) == 1u);
 
     clockwork_client_close(c);
 }

@@ -25,8 +25,11 @@
 #include "lanes/ring_drain.h"
 #include "workers/RingBufferWriter.h"
 #include "shm_tap_stream.hpp"
+#include "params/clockwork_params.h"   // ClockworkParamsHeader: the copy of the table
 
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -736,6 +739,11 @@ ClockworkStatus clockwork_client_region(ClockworkClient* handle, ClockworkRegion
         case CLOCKWORK_REGION_NATIVE_STATS:
             *out = { c->base + c->L.native_stats_offset, c->L.native_stats_bytes, 0 };
             return CLOCKWORK_OK;
+        // The parameter table, read directly as the metrics are: clockwork writes
+        // it, and a client's writes go through the verbs.
+        case CLOCKWORK_REGION_PARAMS:
+            *out = { c->base + c->L.params_offset, c->L.params_bytes, 0 };
+            return CLOCKWORK_OK;
     }
     return CLOCKWORK_E_ARG;
 }
@@ -943,6 +951,30 @@ uint32_t metricsPartBytes(const ClientImpl* c) {
     return c->L.metrics_bytes + c->L.window_bytes + c->L.metrics_history_bytes;
 }
 
+// The parameter table into `to`, as it stood at one generation: the copy again while a define moved the word
+// under it, and, when a define outlasted every try, its word made odd, so no reader takes a torn table for whole.
+void copyParams(const ClientImpl* c, uint8_t* to) {
+    const uint8_t* const from = c->base + c->L.params_offset;
+    const uint32_t n = c->L.params_bytes;
+    constexpr size_t kWordAt = offsetof(ClockworkParamsHeader, generation);
+    if (n < sizeof(ClockworkParamsHeader)) { std::memcpy(to, from, n); return; }
+    const auto& word = *reinterpret_cast<const std::atomic<uint32_t>*>(from + kWordAt);
+    bool whole = false;
+    for (int tries = 0; tries < 64 && !whole; ++tries) {
+        const uint32_t before = word.load(std::memory_order_acquire);
+        std::memcpy(to, from, n);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        whole = (before & 1u) == 0u && word.load(std::memory_order_relaxed) == before;
+        if (whole) std::memcpy(to + kWordAt, &before, sizeof before);
+    }
+    if (!whole) {
+        uint32_t odd = 0;
+        std::memcpy(&odd, to + kWordAt, sizeof odd);
+        odd |= 1u;
+        std::memcpy(to + kWordAt, &odd, sizeof odd);
+    }
+}
+
 // The most floats a want's window can hold: frames at most the ring's, at the widest stride its slots carry.
 uint64_t windowFloats(const ClientImpl* c, const ClockworkCopyWant& w) {
     if (w.source == CLOCKWORK_COPY_TAP && w.slot < c->L.tapSlotCount())
@@ -956,6 +988,7 @@ uint64_t copyBytes(const ClientImpl* c, uint32_t parts, const ClockworkCopyWant*
     uint64_t n = sizeof(ClockworkCopyHeader);
     if (parts & CLOCKWORK_COPY_ARENA) n += align8(arenaPartBytes(c));
     if (parts & CLOCKWORK_COPY_METRICS) n += align8(metricsPartBytes(c));
+    if (parts & CLOCKWORK_COPY_PARAMS) n += align8(c->L.params_bytes);
     for (uint32_t i = 0; i < count; ++i)
         n += sizeof(ClockworkCopyWindow) + align8(windowFloats(c, wants[i]) * sizeof(float));
     return n;
@@ -1012,7 +1045,7 @@ uint32_t clockwork_client_copy(ClockworkClient* handle, uint32_t parts,
                                void* out, uint32_t bytes) {
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out || (count && !wants)) return 0;
-    if (parts & ~uint32_t(CLOCKWORK_COPY_ARENA | CLOCKWORK_COPY_METRICS)) return 0;
+    if (parts & ~uint32_t(CLOCKWORK_COPY_ARENA | CLOCKWORK_COPY_METRICS | CLOCKWORK_COPY_PARAMS)) return 0;
     if (copyBytes(c, parts, wants, count) > bytes) return 0;
 
     auto* base = static_cast<uint8_t*>(out);
@@ -1040,6 +1073,12 @@ uint32_t clockwork_client_copy(ClockworkClient* handle, uint32_t parts,
                     c->base + c->L.metrics_history_offset, c->L.metrics_history_bytes);
         std::memset(base + at + h.metrics_bytes, 0, align8(h.metrics_bytes) - h.metrics_bytes);
         at += align8(h.metrics_bytes);
+    }
+    if (parts & CLOCKWORK_COPY_PARAMS) {
+        h.params_bytes = c->L.params_bytes;
+        copyParams(c, base + at);
+        std::memset(base + at + h.params_bytes, 0, align8(h.params_bytes) - h.params_bytes);
+        at += align8(h.params_bytes);
     }
     for (uint32_t i = 0; i < count; ++i) {
         ClockworkCopyWindow w{};

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 # Copyright (c) 2026 Sam Aaron
 #
-# build-web-subsystems.sh — the MIDI and gamepad cores for the browser's main
-# thread.
+# build-web-subsystems.sh — the MIDI, gamepad and parameter cores for the
+# browser's main thread.
 #
 # The worklet cannot own a MIDI port or a game controller: Web MIDI and the
 # Gamepad API exist on the main thread and nowhere else. So on the web those
@@ -13,10 +13,12 @@
 # compiled here to wasm-bindgen modules — for everything that is not I/O:
 # parsing, encoding, name normalisation, the diffing, the payloads. One core,
 # two hosts, so the /clockwork/midi/* and /clockwork/gamepad/* contracts
-# cannot drift between them.
+# cannot drift between them. clockwork-params is here for the same reason: what
+# a parameter's value means is one implementation, and a page calls it from the
+# main thread (js/lib/params_manager.js).
 #
-# Output: dist/midi/ and dist/gamepad/ (the JS glue the managers import) and
-# the two *_bg.wasm files copied into dist/wasm/ beside the engine's module,
+# Output: dist/midi/, dist/gamepad/ and dist/params/ (the JS glue the managers
+# import) and the *_bg.wasm files copied into dist/wasm/ beside the engine's module,
 # which is where the client fetches wasm from (wasmBaseURL).
 #
 # Called by build-web.sh before the client is bundled; runnable on its own.
@@ -84,10 +86,10 @@ else
 fi
 
 echo "building the main-thread subsystems for $TARGET..."
-( cd "$ROOT/rust" && cargo build --release --target "$TARGET" -p clockwork-midi -p clockwork-gamepad )
+( cd "$ROOT/rust" && cargo build --release --target "$TARGET" -p clockwork-midi -p clockwork-gamepad -p clockwork-params )
 
 mkdir -p "$DIST/wasm"
-for crate in midi gamepad; do
+for crate in midi gamepad params; do
     WASM="$ROOT/rust/target/$TARGET/release/clockwork_${crate}.wasm"
     [ -f "$WASM" ] || { echo "missing $WASM" >&2; exit 1; }
     "$WASM_BINDGEN" --target web --out-dir "$DIST/$crate" --out-name "clockwork_${crate}" "$WASM"

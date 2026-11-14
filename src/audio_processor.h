@@ -150,6 +150,11 @@ extern "C" {
     // core goes (core_state.cpp).
     void clockwork_free_local_arena(struct ClockworkCore* core);
 #endif
+    // One frame out over the egress, as every reply and report leaves, to
+    // the one client; the origin rides with it and decides nothing. For
+    // clockwork's own features in other files (src/params). Returns whether
+    // the frame was queued.
+    bool clockwork_emit_osc(struct ClockworkCore* core, uint32_t origin, const uint8_t* osc, uint32_t len);
 }
 
 #endif // CLOCKWORK_AUDIO_PROCESSOR_H

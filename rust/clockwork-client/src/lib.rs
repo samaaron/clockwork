@@ -51,9 +51,10 @@ mod audio_tap;
 pub mod time;
 
 pub use clockwork_abi as abi;
+pub use clockwork_params as params;
 
 pub use client::{
-    Client, Clock, Features, Info, Message, Messages, Region, RegionId, Ring, Route,
+    Client, Clock, Features, Info, Message, Messages, Region, RegionId, Ring,
     SampleClock, Tap, POLL_BATCH,
 };
 pub use embed::{Device, Embed, EmbedConfig, Profile, Renderer, RENDER_MAX_CHANNELS};

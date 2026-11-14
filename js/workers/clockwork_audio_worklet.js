@@ -9,14 +9,16 @@
 import * as MetricsOffsets from '../lib/metrics_offsets.js';
 // From src/clockwork_client.h, for the client this worklet opens on its own
 // instance: the ring a tap watches (ClockworkRegionId), and the size of one
-// ClockworkClientMessage (bytes, length, origin, route, sequence).
+// ClockworkClientMessage (bytes, length, origin, sequence).
 const REGION_INGRESS = 7;
-const CLIENT_MESSAGE_BYTES = 20;
+const CLIENT_MESSAGE_BYTES = 16;
 // Copies (clockwork_client_copy, js/lib/copy.js): postMessage mode's word for the engine's memory. The metrics on
 // the snapshot heartbeat; the windows the page reads, as often as it draws. Room for both is claimed once, at boot.
 const COPY_METRICS = 2;           // CLOCKWORK_COPY_METRICS
+const COPY_PARAMS = 4;            // CLOCKWORK_COPY_PARAMS
 const COPY_WANT_WORDS = 3;        // ClockworkCopyWant: source, slot, frames
 const COPY_MAX_WANTS = 64;
+const BLOCK_TIME_BYTES = 56;   // sizeof(ClockworkBlockTime), lanes.h
 const COPY_WINDOW_ROOM = 2 * 1024 * 1024;   // the windows' bytes in one copy: the wants that fit, in the order asked
 const COPY_WINDOWS_INTERVAL = 1 / 60;       // seconds of audio between copies of the windows
 import { calculateAllControlIndices } from '../lib/ring_cursor_offsets.js';
@@ -463,7 +465,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             const x = this.wasmExports;
             this.copyWants = x.clockwork_worklet_alloc(COPY_MAX_WANTS * COPY_WANT_WORDS * 4);
             this.copyWantCount = 0;
-            this.copyRoom = x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS, 0, 0) + COPY_WINDOW_ROOM;
+            this.copyRoom = x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS | COPY_PARAMS, 0, 0) + COPY_WINDOW_ROOM;
             this.copyAt = x.clockwork_worklet_alloc(this.copyRoom);
             this.lastWindowsTime = -1;
         }
@@ -476,7 +478,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
         const all = Math.min(COPY_MAX_WANTS, Math.floor(words.length / COPY_WANT_WORDS));
         new Uint32Array(this.wasmMemory.buffer, this.copyWants, all * COPY_WANT_WORDS).set(words.subarray(0, all * COPY_WANT_WORDS));
         let count = all;
-        while (count && x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS, this.copyWants, count) > this.copyRoom) count--;
+        while (count && x.clockwork_client_copy_bytes(this.clientHandle, COPY_METRICS | COPY_PARAMS, this.copyWants, count) > this.copyRoom) count--;
         this.copyWantCount = count;
     }
 
@@ -649,7 +651,8 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             && (this.lastWindowsTime < 0 || audioTime - this.lastWindowsTime >= COPY_WINDOWS_INTERVAL);
         if (!metrics && !windows) return false;
 
-        const buffer = this.makeCopy(metrics ? COPY_METRICS : 0, windows);
+        // the parameter table rides the metrics' heartbeat while the page reads it
+        const buffer = this.makeCopy(metrics ? COPY_METRICS | (this.copyParams ? COPY_PARAMS : 0) : 0, windows);
         if (!buffer) return false;
         if (metrics) {
             this.lastTreeSendTime = audioTime;
@@ -1194,6 +1197,7 @@ class ClockworkProcessor extends AudioWorkletProcessor {
             // what the page reads of the engine (postMessage mode): its windows go in the copies from now on
             if (data.type === 'copyWants') {
                 this.setCopyWants(data.wants);
+                this.copyParams = data.params === true;
             }
 
             if (data.type === 'setClockOffset') {

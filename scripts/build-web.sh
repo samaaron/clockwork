@@ -96,8 +96,8 @@ echo "built $OUT/clockwork.wasm ($(du -h "$OUT/clockwork.wasm" | cut -f1))"
 if [ "${CLOCKWORK_WEB_SUBSYSTEMS:-1}" != "0" ] && "$SCRIPT_DIR/build-web-subsystems.sh"; then
     :
 else
-    echo "the MIDI and gamepad subsystems are not built: stubbing their glue so the client still bundles"
-    for sub in midi gamepad; do
+    echo "the MIDI, gamepad and parameter subsystems are not built: stubbing their glue so the client still bundles"
+    for sub in midi gamepad params; do
         mkdir -p "$ROOT/dist/$sub"
         "$NODE" - "$ROOT/js/lib/${sub}_manager.js" "$sub" > "$ROOT/dist/$sub/clockwork_${sub}.js" <<'JS'
 const fs = require("node:fs");

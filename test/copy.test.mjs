@@ -23,6 +23,7 @@ import { readTapSlot, tapSlotViews, SLOT } from "../js/lib/tap_slot.js";
 import { readScopeSlot, scopeSlotViews, SCOPE_SLOT } from "../js/lib/scope_slot.js";
 import { readCopy, encodeWants, CopyReader, COPY_PART, COPY_SOURCE } from "../js/lib/copy.js";
 import { readArena } from "../js/lib/arena.js";
+import { readParams } from "../js/lib/params.js";
 import { Clockwork } from "../js/clockwork.js";
 import { bootEngine, haveWasm, testIf } from "./engine_boot.mjs";
 
@@ -205,6 +206,12 @@ maybe("a Clockwork whose engine is elsewhere reads the copies its host hands it"
   assert.deepEqual(new Set(chunks(last.wants).map((w) => w.join(":"))),
     new Set([`${COPY_SOURCE.TAP}:2:1500`, `${COPY_SOURCE.SCOPE}:${bc.SCOPE_OUT_SLOT}:2048`]),
     "it asks for what was read, at the most that was asked for");
+  // The parameter table (docs/PARAMS.md), for a panel in such a page: asked for once it is read, and the engine's own bytes.
+  assert.ok(!asked.some((a) => a.parts & COPY_PART.PARAMS), "no table copied before one is read");
+  const table = await until(() => engine.params(), "the parameter table");
+  const inPlace = readParams(buffer, arenaBase + bc.PARAMS_START, 8, bc.PARAMS_SIZE);
+  assert.deepEqual([table.capacity, table.generation, table.torn], [inPlace.capacity, inPlace.generation, false], "the table is the engine's");
+  assert.ok(asked.some((a) => a.parts & COPY_PART.PARAMS), "the table was asked for");
   assert.throws(() => engine.send("/status"), /copies mode/, "it sends nothing: the engine is its host's");
   await assert.rejects(engine.enableMidi(), /copies mode/);
 
@@ -218,6 +225,27 @@ maybe("a Clockwork whose engine is elsewhere reads the copies its host hands it"
     for (let i = 0; i < words.length; i += 3) out.push(words.slice(i, i + 3));
     return out;
   }
+});
+
+test("a copy's parameter table is read, and asked for only while it is read", () => {
+  // header, then a table part of 24 bytes (to the next 8), no windows
+  const table = Uint8Array.from({ length: 21 }, (_, i) => i + 1);
+  const buffer = new ArrayBuffer(32 + 24);
+  new Uint32Array(buffer, 0, 8).set([0x59504F43, 1, 32 + 24, 7, 0, 0, 0, table.length]);
+  new Uint8Array(buffer, 32, table.length).set(table);
+  const copy = readCopy(buffer);
+  assert.deepEqual([...new Uint8Array(copy.params)], [...table], "the table's bytes, and no more");
+
+  let now = 0;
+  const reader = new CopyReader({ wantFor: 1000, now: () => now });
+  assert.equal(reader.wants().params, false, "no table until it is read");
+  assert.equal(reader.params(), null, "nothing before a copy");
+  assert.equal(reader.wants().params, true);
+  reader.take(copy);
+  assert.deepEqual([...new Uint8Array(reader.params())], [...table]);
+  now = 1500;
+  assert.equal(reader.wants().params, false, "a table not read for a while is let go");
+  assert.equal(COPY_PART.PARAMS, 4);
 });
 
 test("a reader asks for what it read lately and no more", () => {

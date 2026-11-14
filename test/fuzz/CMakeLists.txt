@@ -3,8 +3,8 @@
 #
 # Fuzz targets for the C and C++ code that reads untrusted bytes: oscpack's
 # reader (every message a client sends the engine), the standalone host's
-# own reader, the ring drain over a peer's ring, the audio writer and Link's
-# wire. The audio decoders are Rust and fuzzed from rust/fuzz. A build of
+# own reader, the ring drain over a peer's ring, the parameter table's verbs,
+# the audio writer and Link's wire. The audio decoders are Rust and fuzzed from rust/fuzz. A build of
 # its own, kept out of the main tree's targets, so nothing here can change
 # what clockwork ships.
 #
@@ -67,6 +67,21 @@ clockwork_fuzz_target(fuzz_clockwork_sys fuzz_clockwork_sys.cpp
     ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
     ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
     ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp)
+
+# The parameter table's verbs (src/params/params.cpp): a define's blobs of
+# records and text, a set, a list, from any client, on the thread that ticks
+# the core. The core's state and its reply door are the target's own.
+clockwork_fuzz_target(fuzz_params fuzz_params.cpp
+    ${CLOCKWORK_SRC}/params/params.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscTypes.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscOutboundPacketStream.cpp
+    ${CLOCKWORK_SRC}/vendor/oscpack/osc/OscReceivedElements.cpp)
+# Writes runs of frames a client really sends, as the seeds the target starts
+# from (corpus/params/seeds).
+# audio_processor.h includes emscripten's header, which the native builds shim.
+target_include_directories(fuzz_params PRIVATE ${CLOCKWORK_SRC}/native/NativeShim)
+add_executable(params_seeds params_seeds.cpp)
+target_include_directories(params_seeds PRIVATE ${CLOCKWORK_SRC})
 
 # The ring drain over a ring and cursors another process wrote: the peer
 # plane's command ring (shm_peer_plane.h), filled by a peer with the segment.

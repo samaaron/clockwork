@@ -27,6 +27,7 @@ extern "C" {
 /* An instance. Opaque, with no C transcription of its fields anywhere, so
    nothing can drift. */
 struct Dsp;
+struct ClockworkParamEntry;   /* params/clockwork_params.h */
 
 /* ── What clockwork gives the DSP ─────────────────────────────────────── */
 
@@ -395,6 +396,27 @@ typedef struct DspHost {
      *
      * CALLABLE FROM dsp_process: it runs where the schedule is driven. */
     void (*flush_schedule)(void* ctx);
+    /* The parameter table (params/clockwork_params.h, docs/PARAMS.md): named
+     * values with a range that any client may read, set and hear move. A
+     * guest owes nothing to it; one that uses it has three calls.
+     *
+     * param_define declares, replaces or retires entries, all or none: the
+     * guest's ids are its own, and a client's define of one is refused. `text`
+     * is the blob the entries' text fields point into, or NULL. On
+     * success returns `count` and writes each entry's slot to `slots`; on
+     * refusal returns -1 and writes nothing, the reason logged. CALLABLE
+     * FROM dsp_new, and from the guest's own calls on the audio thread;
+     * never from another thread.
+     *
+     * param_value is a slot's value now: one load, for the audio thread.
+     *
+     * param_set writes a slot's value as the guest — a preset loaded, a knob
+     * of its own — held to the range, for any reader to see. Returns 1 when
+     * written, 0 when refused. Audio thread; never allocates or blocks. */
+    int32_t (*param_define)(void* ctx, const struct ClockworkParamEntry* entries, uint32_t count,
+                            const uint8_t* text, uint32_t text_bytes, uint32_t* slots);
+    float   (*param_value)(void* ctx, uint32_t slot);
+    int     (*param_set)(void* ctx, uint32_t slot, float value);
 } DspHost;
 
 /* ── What the DSP says about itself ─────────────────────────────────────── */

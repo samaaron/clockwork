@@ -32,15 +32,20 @@ send_sink(ctx, sink, bytes,       send to an opened sink, at a time
 free_bytes(ctx, ptr)              hand back memory taken through alloc_bytes
 asset_release(ctx, id)            done with an asset taken through dsp_asset;
                                   the client's slot goes back
-alloc_bytes(ctx, bytes)           take memory from the DSP's bulk memory, through
+alloc_bytes(ctx, bytes)           take memory from the DSP's bulk span, through
                                   clockwork's allocator
-tap_open(ctx, index,            claim a tap slot to publish audio into
-           channels, hnd)
-tap_write(ctx, hnd, channels,   append a block to a claimed tap
-            n_channels, frames)
-tap_close(ctx, hnd)             give the slot back
+tap_open(ctx, index,              claim a tap slot to publish audio into
+         channels, hnd)
+tap_write(ctx, hnd, channels,     append a block to a claimed tap
+          n_channels, frames)
+tap_close(ctx, hnd)               give the slot back
 flush_schedule(ctx)               drop the bundles clockwork holds for this DSP
                                   ahead of their time (its "clear the schedule")
+param_define(ctx, entries, count, declare, replace or retire parameters
+             text, text_bytes,    (docs/PARAMS.md)
+             slots)
+param_value(ctx, slot)            a parameter's value now
+param_set(ctx, slot, value)       set a parameter's value as the guest
 ```
 
 Not all callbacks can be called from all threads:
@@ -48,66 +53,102 @@ Not all callbacks can be called from all threads:
 | callback     | allowed threads                                         |
 |--------------|---------------------------------------------------------|
 | `emit_osc`   | any, including the audio thread                         |
-| `send_sink`  | any, including the audio thread                         |
-| `alloc_bytes` | any, including the audio thread; lock-free, answers NULL rather than blocking |
-| `free_bytes` | any, including the audio thread; freeing may defer       |
+| `send_sink`  | any, including the audio thread; never allocates, locks or blocks |
+| `alloc_bytes` | any. On the thread that holds the core — the audio thread during a block, the building thread during `dsp_new` — from the guest's pool, lock-free, answering NULL rather than blocking; on any other thread from the system allocator, on that thread |
+| `free_bytes` | any, including the audio thread; a free from a thread that does not hold the core is parked for the next call that does |
 | `log`        | any, including the audio thread, where it is lock-free and drops when the ring is full; formats nothing |
-| `open_sink`  | control thread only                                     |
+| `open_sink`  | `dsp_new`, never `dsp_process`: it allocates and may touch the device |
 | `asset_release` | `dsp_process` and `dsp_osc` — one short message, nothing else |
 | `tap_open` / `tap_write` / `tap_close` | any, including the audio thread; none allocates |
 | `flush_schedule` | `dsp_process` and `dsp_osc`, where the schedule is driven |
+| `param_define` | `dsp_new`, and the guest's own calls on the audio thread; never another thread |
+| `param_value` / `param_set` | the audio thread; neither allocates or blocks |
 
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
 drops and counts rather than blocking, so a refusal is visible.
 
-Everything a DSP allocates as it runs comes from `alloc_bytes` and goes back
-through `free_bytes`: the memory is the DSP's own bulk span, and the
-allocator over it is clockwork's, lock-free, so a DSP never ships an
-allocator and never reaches past this header for one. A DSP written in Rust
-does not call them at all: its `Box` and `Vec` land in the same span by
-themselves while one of its entry points is open, because clockwork's Rust
-global allocator routes them there. `tap_open`, `tap_write` and `tap_close`
-are the same idea for
-taps: clockwork owns the slots and the ring a client reads, and a DSP that
-publishes one claims a slot and appends blocks without learning the layout.
-
-**Those are the only doors.** A DSP includes `dsp_api.h`, the sink header it
-pulls in, and `clockwork_clock_state.h` to read `DspConfig::clock`, and
-nothing else of clockwork's: not the arena layout, not the pool, not the
-tap rings, not a global. SuperSonic's suite checks this against the scsynth
-guest's sources (`scripts/check-guest-boundary.sh`), because every reach past
-the header is a breakage waiting for the day the layout moves.
-
-`emit_osc` sends OSC back to clients, and its `origin` argument decides which
-of them. It is callable from the audio thread, which makes calls back into
+`emit_osc` sends OSC out to the client. There is one client, so its `origin`
+argument decides nothing: it rides with the message, for the client to match
+an answer to its request. It is callable from the audio thread, which makes calls back into
 clockwork during a block part of the contract rather than an exception to it.
 (`send_sink` is the other way out, and reaches MIDI and OSC destinations the
 DSP opened itself rather than clients.)
 
+`tap_open`, `tap_write` and `tap_close` let a DSP publish audio without
+learning the layout: clockwork owns the slots and the ring a client reads,
+and a DSP that publishes one claims a slot and appends blocks. Only a guest
+makes a tap live. A client reads one with `clockwork_client_audio_tap_*`
+(src/clockwork_client.h), `Client::audio_tap` in Rust, or `getTap` in
+JavaScript, which needs SAB mode.
+
+### Lifecycle
+
+| entry point | native thread | web thread | blocks meanwhile | called |
+|---|---|---|---|---|
+| `dsp_describe` | the thread building the instance | the worklet's | none | at every build |
+| `dsp_memory_bytes`, `dsp_memory_bulk_bytes` | the thread building the instance: the host's boot thread, or a restart's | the worklet's, inside `clockwork_init` | none | before every `dsp_new` |
+| `dsp_new` | the same | the same | none | at the first boot and at every cold restart |
+| `dsp_reconfigure` | a restart's thread | the worklet's, when a new worklet comes back over the same memory | none; natively the device is stopped | only for a change `DspInfo::survives` names |
+| `dsp_free` | a restart's thread, or the engine's shutdown | the worklet's, only when a new worklet over the same memory must rebuild the instance | none | before every rebuild, and at shutdown natively. Never when a page reloads into new memory or closes, or the browser kills the worklet: the memory goes with the page and nothing is called |
+| `dsp_process` | the audio thread: the device's callback, or the thread a host ticks from | the worklet's, from `process()` | this is the block | every block while there is an instance |
+| `dsp_osc` | the audio thread, before `dsp_process` in the same block | the worklet's | inside the block | for each message the block takes, and each held one that falls due |
+| `dsp_asset` | the audio thread for a commit; the building thread when a new instance is handed the assets the old one held | the worklet's | inside the block, or none | for each commit, and for each held asset at a rebuild |
+
+"None" means no block renders while the call runs: the calling thread holds
+the core (`GateHold`, src/core_state.h), and a block that finds it held
+renders silence and calls nothing. A web worklet makes all of these calls on
+its own thread, the audio thread, between two blocks. Natively only
+`dsp_process`, `dsp_osc` and `dsp_asset` run on the audio thread.
+
+### What a guest includes
+
+**These are the only doors.** A guest includes these of clockwork's headers
+and nothing else: not the arena layout, not the pool, not the tap rings, not
+a global.
+
+| header | what for | language |
+|---|---|---|
+| `dsp_api.h` | the boundary; it includes `clockwork_event_sink.h` (sinks) and `clockwork_timetag.h` (timetags and their arithmetic) | C |
+| `clockwork_clock_state.h` | `readClockworkClock()`, to read `DspConfig::clock` | C++ |
+| `params/clockwork_params.h` | `ClockworkParamEntry`, for a guest that calls `param_define` | C |
+
+SuperSonic's suite checks this against the scsynth guest's sources (its
+`scripts/check-guest-boundary.sh`), because every reach past the header is a
+breakage waiting for the day the layout moves.
+
+Two things a guest is handed it cannot read through those headers today:
+
+- **The clock, from C.** `clockwork_clock_state.h` is C++ (its fields are
+  `std::atomic`), so a C guest has no reader for `DspConfig::clock`. A Rust
+  guest has one: `clockwork_abi::clock::read`.
+- **The channel map, from C or Rust.** `ClockworkChannelMapState` and the
+  `CLOCKWORK_CH_*` kinds are declared in `shared_memory.h`, the internal C++
+  header that lays out the whole arena. A C++ guest that reads the map
+  includes it, as the dummy does. `clockwork-abi` declares the struct opaque
+  and has no reader.
+
 ### Replies
 
-Echo back the `origin` the incoming message arrived with, and clockwork routes
-the reply to that client. A DSP therefore needs no client registry of its own —
-it only has to hand back the `origin` it was given.
+Echo back the `origin` the incoming message arrived with. The client gets it
+with the reply and can tell which request it answers. A DSP needs no client
+registry of its own: there is one client, and everything a DSP sends reaches
+it, on every host.
 
 ### Notifications
 
-`origin` 0 addresses the notification audience: the clients that asked to be
-notified by sending `/clockwork/notify`. The transport sends one unicast
-per subscriber. Three things follow:
+Pass `origin` 0 for a message nobody asked for. It goes to the client like
+any other.
 
-- **It may reach nobody.** An empty subscriber list is a normal state, and
-  `emit_osc` still returns non-zero — that return says the frame was queued on
-  the egress ring, not that anything received it.
-- **It does not reach the caller.** Sending a request does not make a client a
-  notification subscriber. Answer a request with the `origin` you were handed;
-  0 is for unsolicited events.
-- **The audience is shared with clockwork's own traffic.** Engine state
-  changes, device reports and `/clockwork/debug` go to the same
-  subscribers, so a DSP emitting on 0 is talking into that stream.
-
-On web there is one client and the worklet strips the route word, so both cases
-arrive identically. The distinction is a native, multi-client one.
+- **It may reach nobody.** With no client there, `emit_osc` still returns
+  non-zero: that return says the frame was queued on the egress ring, not
+  that anything received it. What reached no one is counted
+  (`egress_frames_undelivered`).
+- **Clockwork's own notices are asked for.** The engine's lifecycle
+  (`/clockwork/statechange`, setup, device reports) is written only once the
+  client has sent `/clockwork/notify`; the timeline's, a port's, a
+  controller's and outside OSC only once it has subscribed to that kind
+  (`clockwork_client_wants`, `lanes.h`). `/clockwork/debug` is a line for the
+  host's log and is not sent to the client.
 
 ### Bulk
 
@@ -232,9 +273,167 @@ and change while running; neither exceeds the ceiling in `DspConfig`.
   must not be read.
 - **`block_time` is the OSC timetag of the block's first frame** (NTP 32.32). A
   message due at T lands at frame `(T - block_time) * sample_rate / 2^32`. The
-  DSP does that arithmetic; only it knows what acting at a frame means.
+  DSP does that arithmetic; only it knows what acting at a frame means. The
+  range and the rounding are under "Sending to the guest".
 
-Audio thread: no allocation, no locks, no IO.
+Audio thread: no allocation, no locks, no IO. What a block needs is laid out
+in `memory`, or allocated before the block.
+
+### Sending to the guest
+
+Either side may own the schedule. One engine keeps a host-side timed queue
+and fires per block; another parks programs in its own VM. Mandating either
+would get in the other's way, so `DspInfo::holds_schedule` declares which a
+guest wants: messages as they arrive, carrying their timetag, or when they
+come due. A build with the timed store keeps a queue either way: timed MIDI
+output and timed OSC forwarding are clockwork's own features.
+
+What a client sends reaches the guest in one of three forms. The rules are the
+same natively and on the web: one function decides (`ingest_frame` in
+src/audio_processor.cpp).
+
+**A message** — any address outside `/clockwork/` — goes to `dsp_osc` in the
+block that takes it, with `when` OSC's "immediately".
+
+**A bundle** (`#bundle` and a timetag) is the guest's, whole and unopened.
+clockwork never splits one and never routes what is inside it, so a
+`/clockwork/` verb inside a bundle reaches the guest with the rest and is not
+applied (src/clockwork_prefix.h). The timetag decides when:
+
+- `holds_schedule` 0: clockwork holds the bundle until it is due and hands it
+  over in the block it falls in, with `when` the bundle's timetag and
+  `block_time` the first frame of that block. A bundle whose time has passed,
+  or that says "immediately", goes in the block that takes it.
+- `holds_schedule` 1: the bundle goes to `dsp_osc` in the block that takes
+  it, with `when` its timetag, however far ahead that is. The guest's own
+  queue decides when it acts.
+
+**`/clockwork/schedule <when> <blob>`** is clockwork's own verb, and clockwork
+always holds it, whatever `holds_schedule` says. When it falls due its
+payload is routed again as if it had arrived then: a `/clockwork/` verb to
+clockwork, anything else — a message or a bundle — to `dsp_osc`, with `when`
+the scheduled time. Its wire forms (src/scheduler/schedule_parse.h,
+rust/clockwork-schedule/src/parse.rs):
+
+| type tags | `<when>` |
+|---|---|
+| `,tb` | an OSC timetag |
+| `,hb` | the same 64 bits, as an int64 |
+| `,db` | NTP seconds, as a double |
+| `,fb` | NTP seconds, as a float32. Accepted, but a float32 holds a time this far from 1900 only to the nearest 256 seconds: do not use it |
+
+One that does not parse is refused to its sender (`/clockwork/error`,
+`malformed`). A build without the timed store (`CLOCKWORK_SCHEDULER` off)
+refuses the verb by name, and hands every bundle over at once, timetag and
+all.
+
+Which to use: a bundle for the guest's own timed messages — it is the form a
+guest that holds its own schedule receives early. `/clockwork/schedule` to
+time one of clockwork's verbs (`/clockwork/param/set`,
+`/clockwork/midi/out/note_on`, `/clockwork/osc/send`), which a bundle cannot
+do, or to make a guest message wait in clockwork for a guest that holds its
+own schedule.
+
+**At most 32 incoming messages are taken per block** (`MAX_MESSAGES_PER_FRAME`
+in `process_audio`); the rest wait in the in ring for the next. A burst of
+messages therefore takes several blocks to reach the guest, and a timed
+bundle behind the burst is taken late: clockwork can fire a held bundle on
+time only once it has it. A bundle is one message, so a burst for the guest
+sent as one bundle is taken in one block.
+
+clockwork's store holds at most `CLOCKWORK_SCHEDULER_SLOT_COUNT` messages
+and `CLOCKWORK_SCHEDULER_DATA_POOL_SIZE` bytes of them (by default 512 and
+512 KB natively, 8192 and 4 MB on the web; the metrics
+`engineSchedulerCapacity` and `engineSchedulerPoolBytes`). One more is
+dropped, logged and counted (`engineSchedulerDropped`).
+
+#### Placing a message within the block
+
+`block_time` is the timetag of the first frame of the block the message is
+for and `when` the message's own, so the frame it acts at is
+
+```
+frame = round((when - block_time) * sample_rate / 2^32)
+```
+
+with `when - block_time` taken as a signed 64-bit difference:
+`clockwork_timetag_offset(block_time, when)` in C (src/clockwork_timetag.h),
+`Timetag::offset_from` in Rust (`clockwork-osc`). Its range is wider than the
+block:
+
+- clockwork hands a held message over in the first block whose end — the
+  next block's start — is at or after its time: the store pops everything
+  due at or before the next block's start (`pop_due` in
+  rust/clockwork-schedule/src/store.rs). So one due exactly at the next
+  block's start arrives a block early, at `frame == frames`, one past the
+  last frame.
+- A late one, whose time had passed when clockwork took it, gives a negative
+  frame.
+- "Immediately" has no offset: test it with `clockwork_timetag_is_immediate`
+  and act at frame 0.
+- With `holds_schedule` 1 the frame may be any distance ahead.
+
+So round, then clamp:
+
+```c
+/* The frame of this block at which a message due at `when` acts. */
+static uint32_t frame_in_block(ClockworkTimetag when, ClockworkTimetag block_time,
+                               double sample_rate, uint32_t frames) {
+    if (clockwork_timetag_is_immediate(when)) return 0;
+    const double f = floor((double)clockwork_timetag_offset(block_time, when)
+                           * sample_rate / 4294967296.0 + 0.5);
+    if (f <= 0.0) return 0;                       /* late: at once */
+    if (f >= (double)frames) return frames - 1;   /* due at the next block's start */
+    return (uint32_t)f;
+}
+```
+
+That plays a message due at the next block's start a frame early. A guest
+that keeps events from one block to the next can hold it instead and act at
+frame 0 of the next block.
+
+A guest that keeps its own queue can carry an event at `frames` into the next
+block, at frame 0, rather than play it one frame early.
+
+#### Which "now" to stamp from
+
+A client stamps a timed message from the engine's clock: the time its audio
+thread has reached, in which `block_time` is measured. The wall clock drifts
+from it (the metric `clockDriftUs`).
+
+- JavaScript: `clockwork.clock.now()`, in NTP seconds; 0 until the first
+  block. `Clockwork.osc.ntpNow()` and `clock.wallNow()` read the wall clock.
+- Rust: `Client::sample_clock()` (rust/clockwork-client). The engine's time
+  at the start of its latest block is `dac_ntp() - output_latency_frames() /
+  sample_rate()`; `dac_ntp()` is when that frame is heard.
+  `clockwork_client::timetag_now()` reads the wall clock.
+- C: `clockwork_client_sample_clock`, with the same arithmetic
+  (src/clockwork_client.h).
+
+Stamp far enough ahead for the message to reach the engine before its block:
+a block at least (2.7 ms at 128 frames and 48 kHz), plus the time the
+message takes to arrive. One that arrives late plays at once, and one more
+than a block late is counted (`engineSchedulerMaxLateMs`,
+`engineSchedulerLastLateMs`). A host may drop events later than a limit
+instead (`clockwork_set_timed_event_late_limit_ms`; the JavaScript client's
+`schedulerLateLimitMs`); the default, 0, plays them all.
+
+#### From JavaScript
+
+`send(address, ...args)` types each number by itself: a whole number goes
+as `i`, any other as `f`, a float32. Pass `{ type: "timetag", value }` (NTP
+seconds) for a time and `{ type: "float", value }` where a verb wants a float
+whatever the value: `/clockwork/param/set` takes `,if` and refuses a bare
+`1`, and a bare NTP time is a float32, which `/clockwork/schedule` reads to
+the nearest 256 seconds. A bundle is `Clockwork.osc.encodeBundle(time,
+packets)`, sent with `sendOSC`.
+
+```js
+const t = clockwork.clock.now() + 0.1;
+clockwork.sendOSC(Clockwork.osc.encodeBundle(t, [["/dummy/tone"]]));
+clockwork.send("/clockwork/schedule", { type: "timetag", value: t },
+  Clockwork.osc.encodeMessage("/clockwork/param/set", [3, { type: "float", value: 1 }]));
+```
 
 ### The floating-point environment
 

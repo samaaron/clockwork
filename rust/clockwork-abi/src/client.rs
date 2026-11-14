@@ -100,6 +100,7 @@ impl ClockworkRegionId {
     pub const INGRESS: ClockworkRegionId = ClockworkRegionId(7);
     pub const EGRESS: ClockworkRegionId = ClockworkRegionId(8);
     pub const NATIVE_STATS: ClockworkRegionId = ClockworkRegionId(9);
+    pub const PARAMS: ClockworkRegionId = ClockworkRegionId(10);
 }
 
 #[repr(C)]
@@ -131,6 +132,8 @@ pub const CLOCKWORK_COPY_VERSION: u32 = 1;
 pub const CLOCKWORK_COPY_ARENA: u32 = 1 << 0;
 /// The metrics, the guest's window and the metrics history, back to back.
 pub const CLOCKWORK_COPY_METRICS: u32 = 1 << 1;
+/// The parameter table's region, whole or with its generation word odd.
+pub const CLOCKWORK_COPY_PARAMS: u32 = 1 << 2;
 /// A want's source: a tap slot.
 pub const CLOCKWORK_COPY_TAP: u32 = 1;
 /// A want's source: the device's scope ([`crate::arena::CLOCKWORK_TAP_OUT`] / [`crate::arena::CLOCKWORK_TAP_IN`]).
@@ -156,7 +159,7 @@ pub struct ClockworkCopyHeader {
     pub arena_bytes: u32,
     pub metrics_bytes: u32,
     pub windows: u32,
-    pub _reserved: u32,
+    pub params_bytes: u32,
 }
 
 /// The front of a window in a copy; `frames * channels` floats follow.

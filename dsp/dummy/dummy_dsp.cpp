@@ -53,6 +53,11 @@
  *   /dummy/flush                drops what clockwork holds for it ahead of time
  *   /dummy/when                 -> /dummy/when-was ,h <timetag>
  *   /dummy/log ,s <text>        -> DspHost::log, framed as /clockwork/debug
+ *   /dummy/param/declare       declares "level" (id 1001) and "mode" (id 1002), as the
+ *                               config's paramsAtBoot=1 does at boot
+ *                               -> /dummy/param/declared ,ii <slot level> <slot mode>
+ *   /dummy/param/get ,i <slot>  -> /dummy/param/is ,if <slot> <value read on the audio thread>
+ *   /dummy/param/tell ,if <slot> <value>   the guest moves one of its own (DspHost::param_set)
  *
  * IT ALSO REPORTS ON ITS REGIONS, and that is not about making a noise either.
  * DspConfig hands a guest seven blocks of shared memory with different sets of
@@ -147,6 +152,7 @@
  */
 
 #include "dsp_api.h"
+#include "params/clockwork_params.h"
 #include "shared_memory.h"   // readClockworkClock — how a DSP consumes the clock; this one never asks
 
 #include <cmath>
@@ -256,6 +262,8 @@ struct DummyDsp {
     // instance that answers is the one that was told, not a new one.
     uint32_t  reconfigured = 0;
     uint32_t  built_output_channels = 0;   // dsp_new's ceiling: what dsp_reconfigure's headroom is measured from
+    // The slots of the two parameters this guest declares (declareParams).
+    uint32_t  param_slots[2] = { UINT32_MAX, UINT32_MAX };
 
     Mode      mode = Mode::Pulse;
     uint64_t  pulse_width  = 0;   // frames, computed from ms at the sample rate
@@ -510,6 +518,18 @@ bool addressIs(const uint8_t* b, uint32_t len, const char* addr) {
 // Read two big-endian int32 arguments after a ",ii" type tag. Returns false
 // unless the message really is that shape — a malformed message is ignored,
 // not guessed at.
+// ",if": an int32 and a float.
+bool readIntFloat(const uint8_t* b, uint32_t len, const char* addr, uint32_t* a, float* f) {
+    const uint32_t astart = padded(static_cast<uint32_t>(std::strlen(addr)));
+    if (len < astart + 4 + 8) return false;
+    if (std::memcmp(b + astart, ",if", 3) != 0) return false;
+    const uint8_t* p = b + astart + 4;
+    *a = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+    const uint32_t bits = (uint32_t(p[4]) << 24) | (uint32_t(p[5]) << 16) | (uint32_t(p[6]) << 8) | uint32_t(p[7]);
+    std::memcpy(f, &bits, 4);
+    return true;
+}
+
 bool readTwoInts(const uint8_t* b, uint32_t len, const char* addr,
                  uint32_t* a, uint32_t* c) {
     // padded() TAKES strlen, NOT strlen + 1 — it already accounts for the
@@ -672,6 +692,17 @@ uint32_t writeReplyInt32(uint8_t* buf, uint32_t cap, const char* address, uint32
     return putInt(buf, off, v);
 }
 
+// ",if": a slot and its value.
+uint32_t writeReplyIntFloat(uint8_t* buf, uint32_t cap, const char* address, uint32_t i, float f) {
+    const uint32_t need = padded(static_cast<uint32_t>(std::strlen(address))) + padded(3) + 8;
+    if (need > cap) return 0;
+    uint32_t off = putStr(buf, 0, address);
+    off = putStr(buf, off, ",if");
+    off = putInt(buf, off, i);
+    uint32_t bits; std::memcpy(&bits, &f, 4);
+    return putInt(buf, off, bits);
+}
+
 // N int32 arguments. The region reports below answer with several numbers at
 // once so that a test sees ONE consistent snapshot: asking for them one verb at
 // a time would let a block run in between and compare figures from two moments.
@@ -819,6 +850,23 @@ uint64_t dsp_memory_bulk_bytes(const void* guest_config, uint32_t guest_config_b
 // working memory is its static figure (kInfo.memory_bytes_wanted).
 uint64_t dsp_memory_bytes(const void*, uint32_t) { return 0; }
 
+// The two parameters this guest declares (clockwork_params.h): a level a
+// client may move, and a stepped mode. Declared in dsp_new, and again on
+// /dummy/param/declare; a redeclare finds the same slots and values.
+static bool declareParams(DummyDsp* d) {
+    if (!d->host.param_define) return false;
+    ClockworkParamEntry e[2] = {};
+    e[0].id = 1001; e[0].kind = CLOCKWORK_PARAM_CONTINUOUS; e[0].min = 0.f; e[0].max = 1.f; e[0].def = 0.5f;
+    e[0].unit = CLOCKWORK_PARAM_UNIT_NONE; e[0].flags = CLOCKWORK_PARAM_AUTOMATABLE;
+    std::snprintf(e[0].name, sizeof e[0].name, "level");
+    static const uint8_t kModes[] = "\x04" "pulse\0" "\x04" "tone\0" "\x04" "echo";   // the array's own NUL ends the last
+    e[1].id = 1002; e[1].kind = CLOCKWORK_PARAM_CHOICE; e[1].min = 0.f; e[1].max = 2.f; e[1].def = 0.f;
+    e[1].unit = CLOCKWORK_PARAM_UNIT_NONE; e[1].flags = CLOCKWORK_PARAM_AUTOMATABLE;
+    e[1].text = 0; e[1].text_bytes = sizeof kModes;
+    std::snprintf(e[1].name, sizeof e[1].name, "mode");
+    return d->host.param_define(d->host.ctx, e, 2, kModes, sizeof kModes, d->param_slots) == 2;
+}
+
 struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, char* err, uint32_t err_bytes) {
     if (!config || config->block_size == 0 || !(config->sample_rate > 0.0)) {
         refuse(nullptr, err, err_bytes, "dummy dsp: needs a sample rate and a block size");
@@ -842,6 +890,8 @@ struct Dsp* dsp_new(const DspConfig* config, const DspHost* host, char* err, uin
     }
     d->setPulse(kDefaultPulseWidthMs, kDefaultPulsePeriodMs);
     d->inspectRegions();
+    // Only when asked: a declare is a report, and the recorded traces hold none.
+    if (configNumber(config, "paramsAtBoot")) declareParams(d);
     return reinterpret_cast<struct Dsp*>(d);
 }
 
@@ -1054,6 +1104,34 @@ void dsp_osc(struct Dsp* dsp,
     // The guest's own "clear my schedule": what scsynth's /clearSched does.
     if (addressIs(bytes, len, "/dummy/flush")) {
         if (d->host.flush_schedule) d->host.flush_schedule(d->host.ctx);
+        return;
+    }
+    if (addressIs(bytes, len, "/dummy/param/declare")) {
+        declareParams(d);
+        if (d->host.emit_osc) {
+            uint8_t reply[64];
+            const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/param/declared", d->param_slots, 2);
+            if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
+        }
+        return;
+    }
+    if (addressIs(bytes, len, "/dummy/param/get")) {
+        const uint32_t astart = padded(static_cast<uint32_t>(std::strlen("/dummy/param/get")));
+        if (len < astart + 8 || std::memcmp(bytes + astart, ",i", 2) != 0) return;
+        const uint8_t* p = bytes + astart + 4;
+        const uint32_t slot = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+        const float v = d->host.param_value ? d->host.param_value(d->host.ctx, slot) : 0.f;
+        if (d->host.emit_osc) {
+            uint8_t reply[64];
+            const uint32_t n = writeReplyIntFloat(reply, sizeof reply, "/dummy/param/is", slot, v);
+            if (n) d->host.emit_osc(d->host.ctx, origin, reply, n);
+        }
+        return;
+    }
+    if (addressIs(bytes, len, "/dummy/param/tell")) {
+        uint32_t slot = 0; float v = 0.f;
+        if (readIntFloat(bytes, len, "/dummy/param/tell", &slot, &v) && d->host.param_set)
+            d->host.param_set(d->host.ctx, slot, v);
         return;
     }
     if (addressIs(bytes, len, "/dummy/ping")) {

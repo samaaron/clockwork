@@ -539,3 +539,70 @@ fn an_endpoint_is_named_by_port_and_an_engine_that_is_not_there_is_not_found() {
     assert_eq!(Client::open_shm(&ep, &secret).err(), Some(Error::NotFound));
     assert_eq!(Client::open_shm("bad\0endpoint", &secret).err(), Some(Error::Arg));
 }
+
+/// A table of anything, read from the engine's memory with no message sent: these
+/// are a machine's facts, to show that nothing in the table is about music.
+#[test]
+fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
+    use clockwork_client::params::*;
+    use clockwork_osc::OscArg;
+
+    const PUMP: u32 = 10;
+    const TEMPERATURE: u32 = 11;
+    const SPEED: u32 = 12;
+    const MODE: u32 = 13;
+    let custom = CLOCKWORK_PARAM_UNIT_CUSTOM;
+    let mut d = Define::new();
+    d.add(ClockworkParamEntry::new_group(PUMP, "Pump"), &[Say::Doc("The coolant pump")]);
+    d.add(ClockworkParamEntry::new(TEMPERATURE, "Temp", CLOCKWORK_PARAM_CONTINUOUS, -40.0, 125.0, 20.0)
+              .unit(custom).flags(CLOCKWORK_PARAM_READ_ONLY).group(PUMP),
+          &[Say::FullName("Coolant temperature"), Say::Unit("°C")]);
+    d.add(ClockworkParamEntry::new(SPEED, "Speed", CLOCKWORK_PARAM_CONTINUOUS, 100.0, 10000.0, 1000.0)
+              .unit(custom).taper(CLOCKWORK_PARAM_TAPER_LOG).group(PUMP),
+          &[Say::Unit("rpm"), Say::Doc("How fast it turns")]);
+    d.add(ClockworkParamEntry::new(MODE, "Mode", CLOCKWORK_PARAM_CHOICE, 0.0, 2.0, 0.0).group(PUMP),
+          &[Say::Value("Idle"), Say::Value("Run"), Say::Value("Fault")]);
+
+    let e = &mut engine();
+    settle(e);
+    e.send(&clockwork_osc::encode("/clockwork/param/define", &[
+        OscArg::Blob(d.entry_bytes().to_vec()),
+        OscArg::Blob(d.text().to_vec()),
+    ]), ORIGIN).unwrap();
+    render_blocks(e, 1);
+
+    let moved_before;
+    {
+        let mut table = e.client().params().expect("a table");
+        assert!(table.refresh());
+        assert_eq!(table.params().len(), 4);
+        let temperature = table.find(TEMPERATURE).unwrap();
+        assert_eq!(temperature.full_name(), "Coolant temperature");
+        assert_eq!(temperature.text_of(table.value(temperature.slot())), "20 °C");
+        let speed = table.find(SPEED).unwrap();
+        assert_eq!(speed.doc(), Some("How fast it turns"));
+        assert!((speed.position_of(1000.0) - 0.5).abs() < 1e-5, "a decade of a two-decade sweep");
+        assert_eq!(table.find(MODE).unwrap().text_of(table.value(table.find(MODE).unwrap().slot())), "Idle");
+        assert_eq!(table.find(PUMP).unwrap().doc(), Some("The coolant pump"));
+        moved_before = e.client().metrics().get(Metric::ParamMoves).unwrap();
+    }
+
+    // A set moves the value in memory: a reader sees it with no message, and the
+    // facts it holds still stand.
+    e.send(&clockwork_osc::encode("/clockwork/param/set", &[
+        OscArg::Int(MODE as i32), OscArg::Float(1.0),
+    ]), ORIGIN).unwrap();
+    render_blocks(e, 1);
+    let client = e.client();
+    let mut table = client.params().unwrap();
+    assert!(table.refresh());
+    let generation = table.generation();
+    let mode = table.find(MODE).unwrap().clone();
+    assert_eq!(mode.text_of(table.value(mode.slot())), "Run");
+    assert!(!table.refresh());
+    assert_eq!(table.generation(), generation);
+    let metrics = client.metrics();
+    assert_eq!(metrics.get(Metric::ParamMoves), Some(moved_before + 1));
+    assert_eq!(metrics.get(Metric::ParamsLive), Some(4));
+    assert_eq!(metrics.get(Metric::ParamsGeneration), Some(generation));
+}

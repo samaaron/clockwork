@@ -19,6 +19,8 @@ crate-type = ["rlib"]
 # The shape of the boundary. This crate adds the safety; the symbols are
 # resolved by whoever links the engine — clockwork-sys in a Rust host.
 clockwork-abi = { path = "../clockwork-abi" }
+# The parameter table read directly: pure Rust over the region's bytes.
+clockwork-params = { path = "../clockwork-params" }
 
 [dev-dependencies]
 # The tests are a Rust host: the engine in-process through clockwork-sys

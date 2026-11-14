@@ -124,6 +124,8 @@ add_executable(clockwork_tests
     LanesFixture.cpp
     test_audio_path.cpp
     test_dsp_boundary.cpp
+    # The parameter table (docs/PARAMS.md), through the lanes ABI; test_params_engine.cpp below on a native engine.
+    test_params.cpp
     test_rt_alloc.cpp
     # The origin-token reply path, the ring wire against its golden corpus,
     # the shm segment as a trust boundary, the graph-robustness policy, and
@@ -283,6 +285,7 @@ add_dependencies(clockwork_tests ${CLOCKWORK_DSP})
 target_link_libraries(clockwork_tests PRIVATE ${CLOCKWORK_LIB_GROUP} clockwork_comms Catch2::Catch2)
 target_compile_definitions(clockwork_tests PRIVATE
     CLOCKWORK_TESTS_BINARY="$<TARGET_FILE:clockwork_tests>"
+    CLOCKWORK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     RING_WIRE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ring_wire.txt"
     CLOCKWORK_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
 
@@ -503,6 +506,7 @@ add_executable(clockwork_engine_tests
     test_log_hold.cpp
     test_config_validation.cpp
     test_engine_state.cpp
+    test_params_engine.cpp
     test_restart_refusals.cpp
     test_restart_sequence.cpp
     test_restart_grid.cpp

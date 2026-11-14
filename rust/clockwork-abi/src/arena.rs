@@ -165,6 +165,11 @@ impl ClockworkArenaRegion {
     /// the control pass with no audio block in the loop (docs/RESTARTS.md).
     /// Numbered after the guest's regions, laid out in the transport area.
     pub const CLOCKWORK_CONTROL_RING: Self = Self(17);
+    /// What every counter and gauge did over the last hour (`metrics_history.h`).
+    pub const CLOCKWORK_METRICS_HISTORY: Self = Self(18);
+    /// The parameter table: a header, the values, the entries
+    /// (`params/clockwork_params.h`). Numbered after, laid out in the state area.
+    pub const CLOCKWORK_PARAMS: Self = Self(19);
     // guest-public
     pub const GUEST_WINDOW: Self = Self(14);
     // guest-private
@@ -207,6 +212,10 @@ pub mod geom {
     /// (`DspInfo::window_magic`, `window_version`), 0 until it binds.
     pub const WINDOW_MAGIC: usize = 0;
     pub const WINDOW_VERSION: usize = 1;
+    // the parameter table: slots, an entry's bytes, the header's bytes
+    pub const PARAMS_CAPACITY: usize = 0;
+    pub const PARAMS_ENTRY_BYTES: usize = 1;
+    pub const PARAMS_HEADER_BYTES: usize = 2;
 }
 
 // No region's geometry reaches past the words an entry holds.

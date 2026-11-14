@@ -159,7 +159,8 @@ TEST_CASE("clockwork-sys: which of clockwork's verbs the audio thread answers, a
                          "asset/commit", "asset/release", "midi/in/note_on", "midi/ports",
                          "gamepad/in/button", "gamepad/devices",
                          "track/note", "track/cc", "track/bend", "track/notes_off",
-                         "track/param", "track/plugin/param" };
+                         "track/param", "track/plugin/param",
+                         "param/define", "param/list", "param/set" };
     for (const char* v : audio) {
         const std::string addr = std::string(CLOCKWORK_SYS_PREFIX_LIT) + v;
         INFO(addr);

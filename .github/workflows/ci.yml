@@ -693,11 +693,11 @@ jobs:
           node-version: 22.x
           cache: npm
       - run: npm ci
-      # test/gamepad_manager, midi_manager and host_front import dist/midi/ and
-      # dist/gamepad/ — the wasm-bindgen glue for the two subsystems that live
-      # on the browser's main thread. dist/ is build output and gitignored, so
-      # a clean checkout has none and those three fail on an import that
-      # resolves fine on any machine that has run a web build.
+      # test/gamepad_manager, midi_manager, params_manager and host_front import
+      # dist/midi/, dist/gamepad/ and dist/params/ — the wasm-bindgen glue for the
+      # subsystems that live on the browser's main thread. dist/ is build output
+      # and gitignored, so a clean checkout has none and those fail on an import
+      # that resolves fine on any machine that has run a web build.
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
@@ -733,8 +733,8 @@ jobs:
           toolchain: nightly-2026-07-02
           components: rust-src
           # Both: the engine is emscripten, but build-web-subsystems.sh builds
-          # clockwork-midi and clockwork-gamepad for wasm32-unknown-unknown to
-          # hand them to wasm-bindgen. Without it the subsystems step fails on
+          # clockwork-midi, clockwork-gamepad and clockwork-params for
+          # wasm32-unknown-unknown to hand them to wasm-bindgen. Without it the subsystems step fails on
           # a missing std for that target, several minutes into the job.
           targets: wasm32-unknown-emscripten, wasm32-unknown-unknown
       - run: npm ci

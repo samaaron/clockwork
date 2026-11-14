@@ -420,6 +420,16 @@ impl Client {
         }
     }
 
+    /// The parameter table, read directly from the engine's memory: facts kept
+    /// until the generation moves, each value one load, no message sent. What a
+    /// panel or a visualiser draws from. Writes go through `/clockwork/param/set`.
+    pub fn params(&self) -> Result<clockwork_params::Reader<'_>> {
+        let region = self.region(RegionId::Params)?;
+        // SAFETY: the region is mapped for as long as this borrow of the handle,
+        // the reader only loads, and the engine writes it in atomic words.
+        unsafe { clockwork_params::Reader::from_raw(region.base.as_ptr().cast_const(), region.len()) }.ok_or(Error::Absent)
+    }
+
     /// One coherent reading of the engine's counters.
     pub fn metrics(&self) -> Metrics {
         Metrics::read(self)
@@ -744,6 +754,8 @@ pub enum RegionId {
     Egress,
     /// The device layer's account of its callback; see [`Client::native_stats`].
     NativeStats,
+    /// The parameter table; see [`Client::params`].
+    Params,
 }
 
 impl RegionId {
@@ -759,6 +771,7 @@ impl RegionId {
             RegionId::Ingress => ClockworkRegionId::INGRESS,
             RegionId::Egress => ClockworkRegionId::EGRESS,
             RegionId::NativeStats => ClockworkRegionId::NATIVE_STATS,
+            RegionId::Params => ClockworkRegionId::PARAMS,
         }
     }
 }
@@ -944,6 +957,7 @@ mod tests {
     #[test]
     fn region_ids_are_the_header_s() {
         assert_eq!(RegionId::NativeStats.raw(), ClockworkRegionId::NATIVE_STATS);
+        assert_eq!(RegionId::Params.raw(), ClockworkRegionId::PARAMS);
         assert_eq!(Ring::Ingress.region_id(), ClockworkRegionId::INGRESS.0 as u32);
         assert_eq!(Ring::Egress.region_id(), ClockworkRegionId::EGRESS.0 as u32);
     }

@@ -14,6 +14,7 @@
 
 #include "memory_profile.h"
 #include "clockwork_arena.h"   // the table every reader takes the layout from
+#include "params/clockwork_params.h"   // the parameter table's region, sized here
 #include "ring/ring.h"   // Message, MESSAGE_MAGIC, PADDING_MAGIC
 #include "shm_audio_buffer.hpp"
 #include "shm_tap_stream.hpp"
@@ -48,7 +49,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 72 in use
+constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 76 in use
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -412,7 +413,10 @@ constexpr uint32_t METRICS_START         = CLOCKWORK_STATE_START;
 // What every counter and gauge did over the last hour (metrics_history.h).
 constexpr uint32_t METRICS_HISTORY_START = alignArena16(METRICS_START + METRICS_SIZE);
 constexpr uint32_t METRICS_HISTORY_SIZE  = clockwork::metrics_history::kRegionBytes;
-constexpr uint32_t NATIVE_STATS_START    = alignArena16(METRICS_HISTORY_START + METRICS_HISTORY_SIZE);
+// The parameter table (params/clockwork_params.h).
+constexpr uint32_t PARAMS_START          = alignArena16(METRICS_HISTORY_START + METRICS_HISTORY_SIZE);
+constexpr uint32_t PARAMS_SIZE           = CLOCKWORK_PARAMS_REGION_BYTES(CLOCKWORK_PARAM_SLOTS, CLOCKWORK_PARAM_TEXT_BYTES);
+constexpr uint32_t NATIVE_STATS_START    = alignArena16(PARAMS_START + PARAMS_SIZE);
 // The host's clock anchors, as one region: the NTP start time (f64) then the
 // two offsets.
 constexpr uint32_t CLOCK_ANCHORS_START   = alignArena8(NATIVE_STATS_START + NATIVE_STATS_SIZE);
@@ -821,7 +825,15 @@ struct alignas(4) PerformanceMetrics {
     // run, in microseconds: lately (this minute and the last) and ever.
     std::atomic<uint32_t> callback_gap_recent_us;    // 70
     std::atomic<uint32_t> callback_gap_max_us;       // 71
-    std::atomic<uint32_t> reserved[8];               // 72-79: room for what comes next, 0
+    // The parameter table (params/clockwork_params.h): what a panel or a
+    // visualiser checks before it reads the table, and what the metrics history
+    // keeps. The entries it holds, the times that set changed, the times a value
+    // moved, and the defines and sets refused.
+    std::atomic<uint32_t> params_live;               // 72
+    std::atomic<uint32_t> params_generation;         // 73
+    std::atomic<uint32_t> param_moves;               // 74
+    std::atomic<uint32_t> params_refused;            // 75
+    std::atomic<uint32_t> reserved[4];               // 76-79: room for what comes next, 0
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -921,6 +933,7 @@ struct ShmReaderLayout {
     // same region. Zero on a build that carves none.
     uint32_t tap_track_slots = 0;
     uint32_t native_stats_offset = 0, native_stats_bytes = 0;
+    uint32_t params_offset = 0,       params_bytes = 0;
     uint32_t sample_clock_offset = 0, sample_clock_bytes = 0;
     uint32_t channel_map_offset = 0,  channel_map_bytes = 0;
 
@@ -953,6 +966,7 @@ struct ShmReaderLayout {
         L.tap_channels      = TAP_CHANNELS;
         L.tap_track_slots   = c.profile.track_tap_slots;
         L.native_stats_offset = NATIVE_STATS_START;   L.native_stats_bytes = NATIVE_STATS_SIZE;
+        L.params_offset       = PARAMS_START;         L.params_bytes      = PARAMS_SIZE;
         L.sample_clock_offset = SAMPLE_CLOCK_START;   L.sample_clock_bytes = SAMPLE_CLOCK_SIZE;
         L.channel_map_offset  = CHANNEL_MAP_START;    L.channel_map_bytes  = CHANNEL_MAP_SIZE;
         return L;
@@ -1000,6 +1014,9 @@ struct ShmReaderLayout {
         L.metrics_offset      = met->offset;  L.metrics_bytes     = met->geom[CLOCKWORK_GEOM_METRICS_FIELDS] * 4u;
         if (const auto* hist = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY)) {
             L.metrics_history_offset = hist->offset; L.metrics_history_bytes = hist->bytes;
+        }
+        if (const auto* par = clockwork_arena_find(h, CLOCKWORK_ARENA_CLOCKWORK_PARAMS)) {
+            L.params_offset = par->offset; L.params_bytes = par->bytes;
         }
         L.window_offset       = win->offset;  L.window_bytes      = win->bytes;
         L.clock_state_offset  = clk->offset;  L.clock_state_bytes = clk->bytes;
@@ -1144,6 +1161,9 @@ inline void writeArenaHeader(uint8_t* base, const clockwork::Layout& c, uint32_t
         kBlock, kFast, kColdBoot, { clockwork::metrics_history::kLevels, clockwork::metrics_history::kBuckets,
                                      clockwork::metrics_history::kMetrics, clockwork::metrics_history::kWords,
                                      clockwork::metrics_history::kHeaderBytes });
+    // Cold boot only, as the metrics: a rebuild keeps every parameter and its value.
+    put(CLOCKWORK_ARENA_CLOCKWORK_PARAMS,          PARAMS_START,          PARAMS_SIZE,          CLOCKWORK_OWNER_CLOCKWORK, kPublic,
+        kChange, kFast, kColdBoot, { CLOCKWORK_PARAM_SLOTS, sizeof(ClockworkParamEntry), sizeof(ClockworkParamsHeader) });
     put(CLOCKWORK_ARENA_CLOCKWORK_NATIVE_STATS,    NATIVE_STATS_START,    NATIVE_STATS_SIZE,    CLOCKWORK_OWNER_CLOCKWORK, kPublic,
         kBlock, kFast, kRebuild);
     put(CLOCKWORK_ARENA_CLOCKWORK_CLOCK_ANCHORS,   CLOCK_ANCHORS_START,   CLOCK_ANCHORS_SIZE,   CLOCKWORK_OWNER_HOST,      kPublic,
@@ -1397,6 +1417,10 @@ CLOCKWORK_ASSERT_METRIC(device_clock_jump_frames,        68);
 CLOCKWORK_ASSERT_METRIC(silent_callbacks,                69);
 CLOCKWORK_ASSERT_METRIC(callback_gap_recent_us,          70);
 CLOCKWORK_ASSERT_METRIC(callback_gap_max_us,             71);
+CLOCKWORK_ASSERT_METRIC(params_live,                     72);
+CLOCKWORK_ASSERT_METRIC(params_generation,               73);
+CLOCKWORK_ASSERT_METRIC(param_moves,                     74);
+CLOCKWORK_ASSERT_METRIC(params_refused,                  75);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
 // regions that follow (ClockworkClockState) are 8-byte aligned and read via

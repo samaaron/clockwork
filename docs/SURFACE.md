@@ -21,6 +21,7 @@ open a socket, or notice a device being unplugged, because the guest is behind
                                   a port clocked continuously from a timeline
     osc/cue-server/*, osc/notify/*
     devices/*, drivers/*, clock/*, notify, debug, statechange
+    param/define, param/list, param/set     the parameter table (docs/PARAMS.md)
 
 Plus the part with no OSC address at all: `clockwork_sink_send(sink, bytes, when)`,
 which is how a guest gets bytes onto a wire with a time attached. That is the
@@ -110,8 +111,9 @@ On the web there is no pass to run: the worklet has no NRT thread, and no
 device to answer a MIDI or gamepad verb with — Web MIDI and the Gamepad API
 exist on the main thread only. So the audio thread FORWARDS every verb it
 does not answer itself (ping, echo, the clock snapshot, `sched/flush`, the
-asset hand-off) back out over the egress to the client that sent it, wrapped
-in a bundle whose timetag is the call's time: 1 for a verb that never waited,
+asset hand-off, the parameter table) back out over the egress to the client
+that sent it, wrapped in a bundle whose timetag is the call's time: 1 for a
+verb that never waited,
 the scheduled moment for one the scheduler fired
 (`clockwork_host_forward_route`, `clockwork_host_forward` in `lanes.h`). The
 client's front (`js/lib/host_front.js`) is the far end: it answers

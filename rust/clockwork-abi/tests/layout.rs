@@ -22,6 +22,7 @@ use clockwork_abi::arena::*;
 use clockwork_abi::embed::*;
 use clockwork_abi::profile::*;
 use clockwork_abi::timetag::*;
+use clockwork_abi::params::*;
 
 macro_rules! expect {
     ($m:ident, $T:ty { $($f:ident),* $(,)? }) => {{
@@ -57,7 +58,16 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         guest_config, guest_config_bytes, fp_env,
     });
     expect!(mine, DspHost { ctx, emit_osc, log, open_sink, send_sink, free_bytes, asset_release,
-        alloc_bytes, tap_open, tap_write, tap_close, flush_schedule });
+        alloc_bytes, tap_open, tap_write, tap_close, flush_schedule, param_define, param_value, param_set });
+    {
+        use lanes::ClockworkBlockTime;
+        expect!(mine, ClockworkBlockTime {
+            struct_bytes, output_latency_frames, audio_frames, wall_ntp, monotonic_secs, link_host_micros,
+            block_ntp, block_host_micros,
+        });
+    }
+    expect!(mine, ClockworkParamEntry { live, id, kind, unit, flags, group, min, max, def, definer, name, taper, role, text, text_bytes, reserved });
+    expect!(mine, ClockworkParamsHeader { magic, version, capacity, count, generation, values_offset, entries_offset, entry_bytes, text_offset, text_capacity, text_used, reserved });
     expect!(mine, DspTapHandle { slot, data, channels, max_frames });
     expect!(mine, DspInfo {
         name, version, holds_schedule, memory_bytes_wanted, memory_bulk_bytes_wanted, wants_events,
@@ -70,11 +80,11 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         struct_bytes, abi_version, engine_version, features, sample_rate, block_frames,
         input_channels, output_channels,
     });
-    expect!(mine, ClockworkClientMessage { bytes, length, origin, route, sequence });
+    expect!(mine, ClockworkClientMessage { bytes, length, origin, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });
     expect!(mine, ClockworkScopeShape { struct_bytes, slots, slot_bytes, header_bytes, frames, channels });
     expect!(mine, ClockworkCopyWant { source, slot, frames });
-    expect!(mine, ClockworkCopyHeader { magic, version, bytes, generation, arena_bytes, metrics_bytes, windows, _reserved });
+    expect!(mine, ClockworkCopyHeader { magic, version, bytes, generation, arena_bytes, metrics_bytes, windows, params_bytes });
     expect!(mine, ClockworkCopyWindow { source, slot, channels, frames, activations, _reserved, write_position });
     expect!(mine, ClockworkClientClock {
         struct_bytes, bpm, beat_origin_ntp, is_playing_at_ntp, is_playing, flags, meter_num, meter_den,
@@ -126,9 +136,10 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         ("CLOCKWORK_E_NOMEM", ClockworkStatus::E_NOMEM.0 as i64),
         ("CLOCKWORK_REGION_EGRESS", ClockworkRegionId::EGRESS.0 as i64),
         ("CLOCKWORK_REGION_NATIVE_STATS", ClockworkRegionId::NATIVE_STATS.0 as i64),
+        ("CLOCKWORK_REGION_PARAMS", ClockworkRegionId::PARAMS.0 as i64),
         ("kClockworkSinkOsc", ClockworkSinkKind::OSC.0 as i64),
         ("CLOCKWORK_FEATURE_SCHEDULER", CLOCKWORK_FEATURE_SCHEDULER as i64),
-        ("CLOCKWORK_ROUTE_NOTIFY", CLOCKWORK_ROUTE_NOTIFY as i64),
+        ("CLOCKWORK_WANTS_OSC", lanes::CLOCKWORK_WANTS_OSC as i64),
         ("CLOCKWORK_ASSET_AUDIO_F32", CLOCKWORK_ASSET_AUDIO_F32 as i64),
         ("DSP_FP_ENV_FLUSH_TO_ZERO", DSP_FP_ENV_FLUSH_TO_ZERO as i64),
         ("CLOCKWORK_CLIENT_ABI_VERSION", CLOCKWORK_CLIENT_ABI_VERSION as i64),

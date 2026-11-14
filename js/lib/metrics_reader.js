@@ -182,6 +182,11 @@ export class MetricsReader {
       silentCallbacks: m[MetricsOffsets.SILENT_CALLBACKS],
       callbackGapRecentUs: m[MetricsOffsets.CALLBACK_GAP_RECENT_US],
       callbackGapMaxUs: m[MetricsOffsets.CALLBACK_GAP_MAX_US],
+      // the parameter table: entries, changes to that set, values moved, what was refused
+      paramsLive: m[MetricsOffsets.PARAMS_LIVE],
+      paramsGeneration: m[MetricsOffsets.PARAMS_GENERATION],
+      paramMoves: m[MetricsOffsets.PARAM_MOVES],
+      paramsRefused: m[MetricsOffsets.PARAMS_REFUSED],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)

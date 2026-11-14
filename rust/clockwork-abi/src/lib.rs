@@ -38,6 +38,7 @@ pub mod client;
 pub mod sink;
 pub mod lanes;
 pub mod arena;
+pub mod params;
 pub mod embed;
 pub mod profile;
 pub mod timetag;

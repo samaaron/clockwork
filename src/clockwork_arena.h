@@ -214,6 +214,8 @@ enum ClockworkArenaRegion {
     /* ── clockwork-state, continued: a later addition keeps its number ── */
     CLOCKWORK_ARENA_CLOCKWORK_METRICS_HISTORY = 18,  /* what every counter and gauge did over the last hour:
                                                         three rings of buckets (metrics_history.h) */
+    CLOCKWORK_ARENA_CLOCKWORK_PARAMS          = 19,  /* the parameter table: a header, the values, the
+                                                        entries (params/clockwork_params.h) */
 };
 
 /* The two scope slots, as slot indices into the scope: what left for the
@@ -238,6 +240,10 @@ enum ClockworkArenaGeom {
      * window_version), written when the guest binds; 0 until then */
     CLOCKWORK_GEOM_WINDOW_MAGIC        = 0,
     CLOCKWORK_GEOM_WINDOW_VERSION      = 1,
+    /* the parameter table: slots, an entry's bytes, the header's bytes */
+    CLOCKWORK_GEOM_PARAMS_CAPACITY     = 0,
+    CLOCKWORK_GEOM_PARAMS_ENTRY_BYTES  = 1,
+    CLOCKWORK_GEOM_PARAMS_HEADER_BYTES = 2,
     /* clock anchors: byte offsets within the region */
     CLOCKWORK_GEOM_ANCHOR_GLOBAL       = 0,   /* i32, milliseconds */
     /* scope */

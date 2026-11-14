@@ -1,0 +1,21 @@
+[package]
+name = "clockwork-params"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "The parameter table (docs/PARAMS.md) as Rust: a reader that parses the region's bytes directly, keeping the facts until the generation moves and loading each value from memory; and the one implementation of what a value means, its place on a knob and its words, for every bridge and panel. Compiles to a wasm-bindgen module for the web."
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib: the wasm-bindgen module. rlib: every Rust reader.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clockwork-abi = { path = "../clockwork-abi" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"

@@ -131,7 +131,7 @@ export const CLOCK_DRIFT_US = 50;
 // the clock's anchors at 63 included: what the reader copies from the SAB
 // before the context writes its own slots over 51-52 (METRICS_SIZE / 4 in
 // shared_memory.h).
-export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 72 fields in use
+export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 76 fields in use
 
 // =============================================================================
 // Context metrics [51-52, 64-67] (written by main thread into merged array only)
@@ -172,6 +172,11 @@ export const DEVICE_CLOCK_JUMP_FRAMES = 68;   // the frames it skipped over in t
 export const SILENT_CALLBACKS         = 69;   // callbacks played as silence for want of a block
 export const CALLBACK_GAP_RECENT_US   = 70;   // longest time between two callbacks, this minute and the last (µs)
 export const CALLBACK_GAP_MAX_US      = 71;   // and since the engine started
+// 72-75: the parameter table.
+export const PARAMS_LIVE = 72;              // entries in the parameter table
+export const PARAMS_GENERATION = 73;        // times that set changed
+export const PARAM_MOVES = 74;              // times a value moved
+export const PARAMS_REFUSED = 75;           // defines and sets refused
 export const CTX_IN_BUFFER_CAPACITY = 80;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 81;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 82;        // Static from bufferConstants

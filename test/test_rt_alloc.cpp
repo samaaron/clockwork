@@ -26,7 +26,13 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <new>
+#include <string>
+
+#include "clockwork_prefix.h"
+#include "memory_profile.h"
+#include "params/clockwork_params.h"
 
 // Under ThreadSanitizer the whole file reduces to one explicitly-skipped case:
 // clang links TSan's C++ runtime statically and it defines the replaceable
@@ -114,6 +120,96 @@ TEST_CASE("rt-alloc: draining and answering OSC allocates nothing", "[rt_alloc]"
 
     CHECK(allocs == 0);
     CHECK(frees == 0);
+}
+
+// The parameter verbs read a peer's frame and answer inside the block.
+TEST_CASE("rt-alloc: the parameter verbs allocate nothing", "[rt_alloc][params]") {
+    lanes_test::boot();
+    ClockworkParamEntry e[2] = {};
+    e[0].id = 7000; e[0].kind = CLOCKWORK_PARAM_CONTINUOUS; e[0].max = 1.f; std::strcpy(e[0].name, "a");
+    e[1].id = 7001; e[1].kind = CLOCKWORK_PARAM_STEPPED; e[1].max = 7.f; std::strcpy(e[1].name, "b");
+    const std::string doc = std::string("\x02") + "what it does" + std::string(1, '\0');
+    e[0].text_bytes = static_cast<uint32_t>(doc.size());
+    osc_test::Builder defines;
+    defines.begin(CLOCKWORK_SYS("param/define"))
+        << osc::Blob(e, static_cast<osc::osc_bundle_element_size_t>(sizeof e))
+        << osc::Blob(doc.data(), static_cast<osc::osc_bundle_element_size_t>(doc.size()));
+    const auto define = defines.end();
+    const auto text = osc_test::message(CLOCKWORK_SYS("param/text"), int32_t{ 7000 });
+    osc_test::Builder sets;
+    sets.begin(CLOCKWORK_SYS("param/set")) << osc::int32(7000) << 0.5f << osc::int32(7001) << 2.f;
+    const auto set = sets.end();
+    const auto list = osc_test::message(CLOCKWORK_SYS("param/list"));
+    const auto unknown = osc_test::message(CLOCKWORK_SYS("param/set"), int32_t{ 7999 });   // refused
+    ClockworkParamEntry gone[2] = {};
+    gone[0].id = 7000; gone[1].id = 7001;
+    const auto retire = osc_test::messageWithBlob(CLOCKWORK_SYS("param/define"), gone, sizeof gone);
+    for (const auto* p : { &define, &set, &list, &text, &unknown, &retire })
+        lanes_test::ingress(p->ptr(), p->size(), 1);
+
+    rt_alloc::reset();
+    {
+        rt_alloc::Guard guard;
+        lanes_test::tick();
+    }
+    const int64_t allocs = rt_alloc::g_allocs.load(std::memory_order_relaxed);
+    const int64_t frees  = rt_alloc::g_frees.load(std::memory_order_relaxed);
+    rt_alloc::reset();
+    const auto out = lanes_test::drainRt();
+    CHECK(allocs == 0);
+    CHECK(frees == 0);
+    // It did the work it was measured doing.
+    bool defined = false, listed = false, texted = false;
+    for (const auto& f : out) {
+        const auto addr = osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size()));
+        defined = defined || addr == CLOCKWORK_SYS("param/define.reply");
+        listed = listed || addr == CLOCKWORK_SYS("param/list.reply");
+        texted = texted || addr == CLOCKWORK_SYS("param/text.reply");
+    }
+    CHECK(defined);
+    CHECK(listed);
+    CHECK(texted);
+}
+
+// Closing the gaps in the text happens inside a define, so inside a block.
+TEST_CASE("rt-alloc: text that has to move allocates nothing", "[rt_alloc][params]") {
+    lanes_test::boot();
+    ClockworkParamEntry keep{}, churn{};
+    keep.id = 7100; keep.kind = CLOCKWORK_PARAM_CONTINUOUS; keep.max = 1.f; std::strcpy(keep.name, "keep");
+    churn.id = 7101; churn.kind = CLOCKWORK_PARAM_CONTINUOUS; churn.max = 1.f; std::strcpy(churn.name, "churn");
+    const std::string run = std::string("\x02") + std::string(CLOCKWORK_PARAM_TEXT_RUN_BYTES - 2u, 'x') + std::string(1, '\0');
+    const auto defineOf = [&](ClockworkParamEntry e) {
+        e.text_bytes = static_cast<uint32_t>(run.size());
+        osc_test::Builder b;
+        b.begin(CLOCKWORK_SYS("param/define"))
+            << osc::Blob(&e, static_cast<osc::osc_bundle_element_size_t>(sizeof e))
+            << osc::Blob(run.data(), static_cast<osc::osc_bundle_element_size_t>(run.size()));
+        return b.end();
+    };
+    const auto keeping = defineOf(keep);
+    const auto churning = defineOf(churn);
+    lanes_test::ingress(keeping.ptr(), keeping.size(), 1);
+    lanes_test::tick();
+    lanes_test::drainRt();
+    int64_t allocs = 0, frees = 0;
+    const uint32_t rounds = 2u * CLOCKWORK_PARAM_TEXT_BYTES / CLOCKWORK_PARAM_TEXT_RUN_BYTES;
+    uint32_t landed = 0;
+    for (uint32_t i = 0; i < rounds; ++i) {
+        lanes_test::ingress(churning.ptr(), churning.size(), 1);
+        rt_alloc::reset();
+        {
+            rt_alloc::Guard guard;
+            lanes_test::tick();
+        }
+        allocs += rt_alloc::g_allocs.load(std::memory_order_relaxed);
+        frees  += rt_alloc::g_frees.load(std::memory_order_relaxed);
+        rt_alloc::reset();
+        for (const auto& f : lanes_test::drainRt())
+            if (osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size())) == CLOCKWORK_SYS("param/define.reply")) ++landed;
+    }
+    CHECK(allocs == 0);
+    CHECK(frees == 0);
+    CHECK(landed == rounds);   // past the region's size, so the text moved on the way
 }
 
 #endif // RT_ALLOC_HOOKS_UNAVAILABLE

@@ -199,6 +199,8 @@ producer in another thread may be mid-write through a rebuild.
 | guest config | cold boot | kept | kept, handed to the new instance as it was | n/a |
 | guest persist | cold boot | kept | kept, handed to the new instance as it was | n/a |
 | metrics | cold boot | kept | kept: a count of what a teardown lost is still there after it; the gauges are rewritten within a block | n/a |
+| metrics history | cold boot | kept | kept: a rebuild carries the hour on | n/a |
+| parameter table | cold boot | kept | kept, every parameter and its value; a guest that defines its own again finds its slots where it left them (docs/PARAMS.md) | n/a |
 | native stats | rebuild | kept | to 0 | n/a |
 | sample clock | rebuild | kept, continues | emptied, then rewritten whole by the first block on the new device | its seqlock |
 | channel map | cold boot | kept | kept: the streams bound over channels outlive the instance; the device's own words are rewritten when the instance is built, as any attach rewrites an entry | its seqlock |
@@ -289,8 +291,9 @@ waiting on, so these are the rules a client may rely on:
    ring on a host with a control pass: it has a ring of its own ("The
    control ring" below), of lifetime `arena`, that a restart leaves alone.
    One of clockwork's audio-thread verbs that is not the guest's business —
-   a ping, an echo, a sync, the clock snapshot, a port listing, what plays
-   a hosted track — found in the in ring below a teardown's mark is
+   a ping, an echo, a sync, the clock snapshot, a parameter verb, the list
+   of MIDI ports or game controllers, what plays a hosted track — found in
+   the in ring below a teardown's mark is
    answered by the next drain, in its order, rather than refused. A verb
    that hands something to the guest — an asset, an inbound event, a
    scheduled message or the schedule's flush — was written for the old

@@ -26,6 +26,7 @@ import { tapSlotViews, tapSlotLive, tapSlotActivations, readTapSlot } from "./li
 import { scopeSlotViews, readScopeSlot } from "./lib/scope_slot.js";
 import { CopyReader, readCopy, encodeWants, COPY_PART, COPY_SOURCE } from "./lib/copy.js";
 import { readArena, regionBytes, readGeneration, instanceGeneration, REGION, REGION_NAMES } from "./lib/arena.js";
+import { ParamsReader, readParams } from "./lib/params.js";
 import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
 import { IN_WRITE_LOCK } from "./lib/ring_cursor_offsets.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
@@ -225,6 +226,8 @@ export class Clockwork {
   #cachedWasmBytes = null;
 
   #snapshotsSent = 0;
+  #paramsReader = null;
+  #paramConversions = null;
 
   #earlyDebugMessages = [];
   #debugRawHandler = null;
@@ -617,10 +620,10 @@ export class Clockwork {
     let said = false;
     const pull = async () => {
       if (epoch !== this.#lifeEpoch) return;
-      const { wants, metrics } = this.#copies.wants();
+      const { wants, metrics, params } = this.#copies.wants();
       const stale = this.#copies.generation !== this.#copiesArena;
-      if (wants.length || metrics || stale) {
-        const parts = (metrics ? COPY_PART.METRICS : 0) | (stale ? COPY_PART.ARENA : 0);
+      if (wants.length || metrics || params || stale) {
+        const parts = (metrics ? COPY_PART.METRICS : 0) | (stale ? COPY_PART.ARENA : 0) | (params ? COPY_PART.PARAMS : 0);
         try {
           const copy = readCopy(await this.#config.copies.fetch(parts, encodeWants(wants)));
           if (epoch === this.#lifeEpoch) this.#takeCopy(copy);
@@ -638,14 +641,14 @@ export class Clockwork {
 
   // postMessage: the worklet told what to copy when it changes, and again until nothing is read (a want lapses).
   #tellWorkletWants() {
-    const { wants } = this.#copies.wants();
-    const key = wants.map((w) => `${w.source}:${w.slot}:${w.frames}`).join(",");
+    const { wants, params } = this.#copies.wants();
+    const key = `${params ? "p" : ""}${wants.map((w) => `${w.source}:${w.slot}:${w.frames}`).join(",")}`;
     if (key !== this.#wantsTold && this.#workletNode) {
       this.#wantsTold = key;
-      this.#workletNode.port.postMessage({ type: 'copyWants', wants: encodeWants(wants) });
+      this.#workletNode.port.postMessage({ type: 'copyWants', wants: encodeWants(wants), params });
     }
     clearTimeout(this.#wantsTimer);
-    this.#wantsTimer = wants.length ? setTimeout(() => this.#tellWorkletWants(), 250) : null;
+    this.#wantsTimer = wants.length || params ? setTimeout(() => this.#tellWorkletWants(), 250) : null;
   }
 
   // ============================================================================
@@ -1295,6 +1298,56 @@ export class Clockwork {
   regions() {
     const arena = this.#arena();
     return arena ? [...arena.entries.keys()].map((id) => this.region(id)) : [];
+  }
+
+  /**
+   * Where the parameter table's bytes are, in every mode (docs/PARAMS.md lays them
+   * out): the shared memory itself, or, for a page with no view of it (postMessage
+   * mode, a host's copies), the newest copy that held the table, which is asked for
+   * while this is called and no longer.
+   *
+   * @returns {{buffer: ArrayBuffer|SharedArrayBuffer, offset: number, size: number}|null}
+   */
+  readParamsRegion() {
+    if (!this.#initialized) return null;
+    const bc = this.#metricsReader.bufferConstants;
+    if (!bc || !bc.PARAMS_SIZE) return null;
+    const sab = this.#metricsReader.sharedBuffer;
+    if (!sab) {
+      const table = this.#copies.params();
+      if (this.#config.mode === 'postMessage') this.#tellWorkletWants();
+      return table ? { buffer: table, offset: 0, size: table.byteLength } : null;
+    }
+    return { buffer: sab, offset: this.#metricsReader.arenaBase + bc.PARAMS_START, size: bc.PARAMS_SIZE };
+  }
+
+  /**
+   * The parameter table once over (lib/params.js readParams): the live entries with
+   * their facts, text and values. For a panel or a visualiser, paramsReader().
+   */
+  params() {
+    const where = this.readParamsRegion();
+    return where ? readParams(where.buffer, where.offset, 8, where.size) : null;
+  }
+
+  /**
+   * What a panel or a visualiser holds (lib/params.js ParamsReader): refresh() each
+   * frame costs one load unless the set of entries moved, and value() reads from the
+   * memory with no message and no allocation.
+   */
+  paramsReader() {
+    return this.#paramsReader ??= new ParamsReader(() => this.readParamsRegion());
+  }
+
+  /**
+   * What a value means, its place on a knob and its words, from the same Rust a
+   * plugin host's bridge calls (lib/params_manager.js). Loads its wasm the first time.
+   */
+  paramConversions() {
+    return this.#paramConversions ??= (async () => {
+      const { ParamConversions } = await import("./lib/params_manager.js");
+      return new ParamConversions({ wasm: this.#config.wasmBaseURL + "clockwork_params_bg.wasm" }).init();
+    })();
   }
 
   /** The arena's header and table (lib/arena.js readArena), or null when not SAB or not yet published. */

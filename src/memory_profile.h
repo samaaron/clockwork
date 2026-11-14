@@ -48,6 +48,15 @@
 // explicit -D.
 #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_ESP32S3
 
+  #ifndef CLOCKWORK_PARAM_SLOTS
+  #define CLOCKWORK_PARAM_SLOTS 16
+  #endif
+  #ifndef CLOCKWORK_PARAM_TEXT_BYTES
+  #define CLOCKWORK_PARAM_TEXT_BYTES 1024
+  #endif
+  #ifndef CLOCKWORK_PARAM_TEXT_RUN_BYTES
+  #define CLOCKWORK_PARAM_TEXT_RUN_BYTES 512
+  #endif
   #ifndef CLOCKWORK_IN_RING_SIZE
   #define CLOCKWORK_IN_RING_SIZE 32768          // 32 KB
   #endif
@@ -154,6 +163,15 @@
 // per AudioStream update). Values retuned against an on-device build.
 #if CLOCKWORK_DEVICE_PROFILE == CLOCKWORK_PROFILE_TEENSY41
 
+  #ifndef CLOCKWORK_PARAM_SLOTS
+  #define CLOCKWORK_PARAM_SLOTS 64
+  #endif
+  #ifndef CLOCKWORK_PARAM_TEXT_BYTES
+  #define CLOCKWORK_PARAM_TEXT_BYTES 4096
+  #endif
+  #ifndef CLOCKWORK_PARAM_TEXT_RUN_BYTES
+  #define CLOCKWORK_PARAM_TEXT_RUN_BYTES 512
+  #endif
   // As the ESP32-S3 profile: the arena is one span in fast RAM, so its
   // bulk-tier regions are kept small.
   #ifndef TAP_TRACK_SLOTS
@@ -371,6 +389,20 @@
 // always Link; slots 1..CLOCKWORK_MAX_TIMELINES are midi:<port> followers).
 #ifndef CLOCKWORK_MAX_TIMELINES
 #define CLOCKWORK_MAX_TIMELINES 8
+#endif
+
+// The parameter table (params/clockwork_params.h): its slots, 96 bytes of facts
+// and 4 of value each; the text they share; and the most one entry may have, so
+// that one reply to /clockwork/param/text fits the smallest ring. The embedded
+// profiles set their own, above.
+#ifndef CLOCKWORK_PARAM_SLOTS
+#define CLOCKWORK_PARAM_SLOTS 256
+#endif
+#ifndef CLOCKWORK_PARAM_TEXT_BYTES
+#define CLOCKWORK_PARAM_TEXT_BYTES 32768
+#endif
+#ifndef CLOCKWORK_PARAM_TEXT_RUN_BYTES
+#define CLOCKWORK_PARAM_TEXT_RUN_BYTES 2048
 #endif
 
 // Scheduler pool
