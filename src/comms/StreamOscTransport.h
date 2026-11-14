@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 
 #include "IOscTransport.h"
@@ -52,8 +53,13 @@ public:
     void initialisePipe(const std::string& name);  // Windows only
 
     // The engine's core, from bindCore: start() before it is told logs the
-    // server's lines to the console.
-    void bindCore(ClockworkCore* core) override { mCore = core; }
+    // server's lines to the console. The engine takes it back (nullptr)
+    // before it closes it; that waits for a reader thread that is telling
+    // the core its client has gone, so the core is never closed under one.
+    void bindCore(ClockworkCore* core) override {
+        const std::lock_guard<std::mutex> held(mCoreLock);
+        mCore = core;
+    }
 
     bool start();   // listen + accept; false on failure / unsupported platform
     void stop();
@@ -75,7 +81,8 @@ private:
 
 
     Kind         mKind = Kind::None;
-    ClockworkCore* mCore = nullptr;
+    ClockworkCore* mCore = nullptr;     // under mCoreLock once the server runs
+    std::mutex   mCoreLock;             // a reader thread's use of the core, against the engine taking it back
     const ClockworkCommsSecret* mSecret = nullptr;
     int          mPort = 0;             // Tcp
     std::string  mBindAddress;          // Tcp

@@ -1625,8 +1625,11 @@ void ClockworkEngine::shutdown() {
     // Closing the core ends its engine (docs/ENGINES.md): the DSP
     // instance and the arena view go while the segment is still mapped, and
     // after this the lanes entry points reject. Nothing ticks the core now:
-    // the device and every driver are stopped.
+    // the device and every driver are stopped. The transport gives the core
+    // up first: a thread of its own may be telling the core its client has
+    // gone (StreamOscTransport::onClosed), and bindCore waits for it.
     mProcessor.setCore(nullptr);
+    if (mTransport) mTransport->bindCore(nullptr);
     clockwork_core_close(mCore);
     mCore = nullptr;
 

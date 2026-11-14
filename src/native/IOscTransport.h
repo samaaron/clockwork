@@ -36,7 +36,7 @@ public:
     // The engine this transport carries, told by the engine when its core
     // exists (init): what the transport's own log lines name. A transport
     // with nothing to say of its own ignores it.
-    virtual void bindCore(ClockworkCore*) {}
+    virtual void bindCore(ClockworkCore*) {}   // nullptr at shutdown: the core is about to close
 
     // To the client. False when the frame reached no one: no client there,
     // a connection that refused the write, a full reply ring. Whoever drains

@@ -321,8 +321,7 @@ impl<T, const N: usize> SlotTable<T, N> {
     pub fn open(&self, make: impl FnOnce() -> T) -> u32 {
         let mut boxed = Some(Box::new(make()));
 
-        for idx in 0..N {
-            let slot = &self.slots[idx];
+        for (idx, slot) in self.slots.iter().enumerate() {
             let w = slot.word.load(Ordering::Acquire);
             if state(w) != STATE_FREE || refs(w) != 0 { continue; }
             let gen = generation(w);

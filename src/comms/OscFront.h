@@ -55,6 +55,10 @@ public:
     void attach(IOscTransport* inner, OscFront* front) { mInner = inner; mFront = front; }
     void detachFront() { mFront = nullptr; }
 
+    // The transport behind is the one that names the core in its log lines
+    // and tells it when its client has gone.
+    void bindCore(ClockworkCore* core) override { if (mInner) mInner->bindCore(core); }
+
     bool deliver(const uint8_t* data, uint32_t size) override {
         if (mFront && mFront->egress(data, size)) return true;
         return mInner && mInner->deliver(data, size);

@@ -18,6 +18,8 @@ namespace {
 struct Inner final : IOscTransport {
     std::vector<std::string> sent;
     bool delivers = true;
+    ClockworkCore* core = nullptr;
+    void bindCore(ClockworkCore* c) override { core = c; }
     bool deliver(const uint8_t* d, uint32_t n) override {
         sent.emplace_back(reinterpret_cast<const char*>(d), n);
         return delivers;
@@ -61,6 +63,20 @@ TEST_CASE("fronted transport: a taken frame stops at the front, a declined one g
     CHECK(t.deliver(reinterpret_cast<const uint8_t*>(mine), 12));
     CHECK(inner.sent.size() == 3);
     CHECK(front.seen == 3);
+}
+
+// The engine tells its transport its core at boot and takes it back at
+// shutdown; the transport behind a front is the one that uses it.
+TEST_CASE("fronted transport: the engine's core is the inner transport's to know", "[front]") {
+    Inner inner;
+    Front front;
+    FrontedTransport t;
+    t.attach(&inner, &front);
+    auto* const core = reinterpret_cast<ClockworkCore*>(&inner);   // an address, never followed
+    t.bindCore(core);
+    CHECK(inner.core == core);
+    t.bindCore(nullptr);
+    CHECK(inner.core == nullptr);
 }
 
 TEST_CASE("fronted transport: with nothing attached a frame reaches no one", "[front]") {

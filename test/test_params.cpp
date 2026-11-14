@@ -29,6 +29,7 @@
 #include "lanes/lanes.h"
 #include "metrics_schema.h"
 #include "params/clockwork_params.h"
+#include "params/params.h"
 #include "shared_memory.h"
 
 using Catch::Approx;
@@ -652,6 +653,10 @@ TEST_CASE("params: a reader on another thread never sees a torn entry", "[params
 // equal what the code produces, so the two readers always read one fixture.
 TEST_CASE("params: the committed fixture is what this build writes", "[params][reader][fixture]") {
     clearTable();
+    // As a cold boot leaves it: a table other cases have used keeps its text
+    // where they left it until a define wants the room, and the file is the
+    // bytes of a table nothing else has written.
+    clockwork::params::reset(lanes_test::core());
     Define d;
     d.add(groupEntry(9, "tone"), run({ { CLOCKWORK_PARAM_TEXT_DOC, "What shapes the tone" } }))
      .add(tapered(entry(1, "cutoff", CLOCKWORK_PARAM_CONTINUOUS, 20.f, 20000.f, 1000.f, CLOCKWORK_PARAM_UNIT_HERTZ, CLOCKWORK_PARAM_AUTOMATABLE, 9), CLOCKWORK_PARAM_TAPER_LOG),

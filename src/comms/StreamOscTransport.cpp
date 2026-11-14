@@ -81,8 +81,9 @@ void StreamOscTransport::onPacket(void* ctx, uint32_t conn, const uint8_t* osc, 
 void StreamOscTransport::onClosed(void* ctx, uint32_t conn) {
     auto* self = static_cast<StreamOscTransport*>(ctx);
     uint32_t was = conn;
-    if (self->mClient.compare_exchange_strong(was, 0u, std::memory_order_acq_rel) && self->mCore)
-        clockwork_client_gone(self->mCore);
+    if (!self->mClient.compare_exchange_strong(was, 0u, std::memory_order_acq_rel)) return;
+    const std::lock_guard<std::mutex> held(self->mCoreLock);
+    if (self->mCore) clockwork_client_gone(self->mCore);
 }
 
 // To the client's connection; with none, it reached no one.
