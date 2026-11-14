@@ -71,7 +71,7 @@ void quiesceAndReset(EngineFixture& fx) {
 // Write a 16-byte frame header at IN offset 0 and publish head one header past
 // it, so the drain sees exactly one frame available.
 void injectHeader(EngineFixture& fx, uint32_t magic, uint32_t length) {
-    uint32_t hdr[4] = { magic, length, /*sequence*/ 0, /*sourceId*/ 0 };
+    uint32_t hdr[4] = { magic, length, /*sequence*/ 0, /*token*/ 0 };
     std::memcpy(arena(fx) + clockwork::kDefaultLayout.in_ring_start, hdr, sizeof(hdr));
     control(fx)->in_tail.store(0, std::memory_order_release);
     control(fx)->in_head.store(static_cast<int32_t>(sizeof(Message)),

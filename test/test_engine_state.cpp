@@ -37,7 +37,7 @@ TEST_CASE("EngineState: starts Stopped before init", "[EngineState]") {
 
 TEST_CASE("EngineState: Running after init", "[EngineState]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
@@ -49,7 +49,7 @@ TEST_CASE("EngineState: Running after init", "[EngineState]") {
 
 TEST_CASE("EngineState: Stopped after shutdown", "[EngineState]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     ClockworkEngine::Config cfg;
     cfg.headless = true;
     EngineFixture::pumpByDefault(cfg);   // pumped, as defaultConfig()
@@ -348,7 +348,7 @@ TEST_CASE("EngineState: purge with a producer mid-write does not replay consumed
         hdr.length   = static_cast<uint32_t>(sizeof(Message)) + pkt.size();
         hdr.sequence = static_cast<uint32_t>(
             cursors->in_sequence.fetch_add(1, std::memory_order_relaxed));
-        hdr.sourceId = 0;
+        hdr.token = 0;
         uint8_t* slot = base + clockwork::kDefaultLayout.in_ring_start + h0;
         std::memcpy(slot, &hdr, sizeof(Message));
         std::memcpy(slot + sizeof(Message), pkt.ptr(), pkt.size());

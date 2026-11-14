@@ -23,7 +23,7 @@
 //
 // The LAST int32 argument is the token, matching the rpc convention of
 // appending it after the verb's own arguments.
-inline void ackSubscribeIfTokened(OscEgress* egress,
+inline void ackSubscribeIfTokened(OscEgress* egress, uint32_t callerToken,
                                   const uint8_t* data, uint32_t size,
                                   const char* replyAddr) {
     if (!egress) return;
@@ -47,6 +47,7 @@ inline void ackSubscribeIfTokened(OscEgress* egress,
     std::array<char, 96> buf{};
     osc::OutboundPacketStream s(buf.data(), buf.size());
     s << osc::BeginMessage(replyAddr) << rpcToken << osc::EndMessage;
-    egress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+    egress->reply(callerToken,
+                  reinterpret_cast<const uint8_t*>(s.Data()),
                   static_cast<uint32_t>(s.Size()));
 }

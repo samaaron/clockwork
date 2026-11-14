@@ -139,24 +139,46 @@ hand-off: `clockwork_client_open_shm(endpoint, secret)` for a reader,
 `clockwork_client_open_shm_peer(endpoint, secret)` for the peer, with
 `clockwork_client_default_endpoint(port)` for the derived name.
 
-## The writer label
+## Tokens
 
-A ring frame's `Message` header has a `sourceId` field, and a frame written
-into the ingress ring carries a **writer label** there: the last argument of
-`clockwork_client_send` and `clockwork_ingress_write`. It is a label of the
-sender's own choosing, stored in the frame's ring header for whoever watches
-the ring (a tap, the web's traffic log). Clockwork never reads it, the guest
-is not given it, and no answer carries it.
+Every message has a slot beside it for a number, a **token**, on the way in
+and on the way out. Zero means none.
 
-* the web labels each thread that writes the ingress ring (0 the main
-  thread, 1 and up the workers), and its traffic log shows which thread sent
-  what;
-* the engine's own `ingest` writes 0;
-* the shm plane labels the peer's frames `SHM_PEER_WRITER`, in the ingress
-  ring and in the plane's reply ring;
-* every frame on the egress rings carries 0.
+On the way in the sender sets it. Clockwork carries it in the frame's ring
+`Message` header and hands it to the DSP with the message (`dsp_osc`). On the
+way out whoever writes a message sets it: a DSP puts what it chooses there
+(`emit_osc`), and Clockwork puts the token of the message it is answering on
+its own answers and refusals, and zero on a notification. Whatever is in the
+slot is handed to the client with the message. Clockwork never acts on it.
 
-An engine has one client, and everything on the egress is handed to it:
-`IOscTransport` is one call, `deliver`. A client that must match an answer to
-its request carries an id in its own OSC messages. A stream transport keeps
-its client's connection id to itself.
+So a sender gets its token back on a DSP's answer only where the DSP passes
+it on.
+
+The token is a **label, not an address**. An engine has one client and
+everything on the egress is handed to it: `IOscTransport` is one call,
+`deliver(data, size, token)`. The token lets that client match an answer to
+the message it answers, and decides nothing about where the answer goes.
+
+Where a sender sets it:
+
+* an in-process client passes it to `clockwork_client_send`, and a host to
+  `ClockworkEngine::ingest`;
+* the shm peer passes it to `clockwork_client_send` too: it rides in the
+  command ring's frame, and an outgoing message's token rides in the reply
+  ring's;
+* a web channel writes its own id on every message it sends;
+* the stream transports carry OSC bytes alone, so a message from a socket
+  arrives with no token and an answer leaves without one. A host that wants
+  its remote client to use tokens carries them in its own framing;
+* the NIF sends every message with one fixed number.
+
+Where the client reads an outgoing message's token:
+
+* `clockwork_client_poll` gives each message's token in
+  `ClockworkClientMessage::token`;
+* a transport is given it by `deliver`, and `ClockworkEngine::onReply` after
+  it.
+
+Clockwork's own answers carry the token of the message they answer, a refusal
+included. A DSP's answers carry it when the DSP passes it back, which is the
+DSP's choice (docs/BOUNDARY.md).

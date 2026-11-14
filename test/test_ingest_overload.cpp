@@ -108,7 +108,7 @@ TEST_CASE("A client that overloads the engine sees it in the metrics and no comm
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
     tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
-        engine.ingest(d, n);
+        engine.ingest(d, n, 0);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());
@@ -212,7 +212,7 @@ TEST_CASE("Answers to a client that has gone are counted undelivered",
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
     tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
-        engine.ingest(d, n);
+        engine.ingest(d, n, 0);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());

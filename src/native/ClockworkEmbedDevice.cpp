@@ -64,7 +64,7 @@ extern "C" gsl::owner<ClockworkEmbed*> clockwork_embed_boot(const ClockworkEmbed
     if (!d) return fail(CLOCKWORK_E_NOMEM);
     d->engine = std::make_unique<ClockworkEngine>();
     d->engine->onDebug = [](const std::string&) {};
-    d->engine->onReply = [](const uint8_t*, uint32_t) {};
+    d->engine->onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     // The engine's core, made here so a refusal (E_PERM while the process
     // holds another) is a status, not a throw out of a C call. The engine's

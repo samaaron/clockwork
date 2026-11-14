@@ -34,14 +34,15 @@
 
 
 
-bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_t* data, uint32_t size) {
+bool EngineControl::handleLinkCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
+    const uint32_t token = meta.token;
     if (!mClockworkClock || size < 16) return false;
     if (std::memcmp(data, CLOCKWORK_SYS("clock/"), CLOCKWORK_SYS_LEN("clock/")) != 0) return false;
     // Clock-core verbs (tempo/transport/sync/rpc/queries) go through the shared
     // handler — the same one the web worklet uses. Native-only Link-session
     // verbs (visibility, peers, Link Audio, notify) fall through to below.
     if (handleClockCoreOsc(*mClockworkClock, data, size,
-            [this](const uint8_t* d, uint32_t n) { mEgress->reply(d, n); }))
+            [this, token](const uint8_t* d, uint32_t n) { mEgress->reply(token, d, n); }))
         return true;
     try {
         osc::ReceivedPacket pkt(reinterpret_cast<const char*>(data),
@@ -85,7 +86,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
               << static_cast<int32_t>(mClockworkClock->getLinkVisibility());
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -105,7 +106,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
               << static_cast<int32_t>(mLinkAudio->isPublishEnabled() ? 1 : 0);
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -126,7 +127,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
                 if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
                 s << osc::EndMessage;
             });
-            mEgress->reply(packet.ptr(), packet.size());
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -144,7 +145,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
                 if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
                 s << osc::EndMessage;
             });
-            mEgress->reply(packet.ptr(), packet.size());
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -176,7 +177,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
               << static_cast<int32_t>(pair ? static_cast<int32_t>(*pair) : -1);
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -229,7 +230,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
               << static_cast<int32_t>(ok ? 1 : 0);
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -262,7 +263,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
             // token only past its three.
             if (hasEchoToken && msg.ArgumentCount() > 3) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -291,7 +292,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
                 if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
                 s << osc::EndMessage;
             });
-            mEgress->reply(packet.ptr(), packet.size());
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
         }
 
@@ -339,7 +340,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
             }
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -371,7 +372,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
             // on "newly registered" would time out every confirm after the
             // first untokened subscribe.
             mEgress->want(CLOCKWORK_WANTS_CLOCK, true);
-            ackSubscribeIfTokened(mEgress, data, size,
+            ackSubscribeIfTokened(mEgress, token, data, size,
                                   CLOCKWORK_SYS("clock/notify/subscribe.reply"));
             const double initTempo = mClockworkClock->getBpm();
             const int32_t initPeers = static_cast<int32_t>(mClockworkClock->numPeers());
@@ -380,7 +381,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/tempo")) << initTempo
                   << osc::EndMessage;
-                mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                                    static_cast<uint32_t>(s.Size()));
             }
             {
@@ -388,7 +389,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("clock/notify/peers")) << initPeers
                   << osc::EndMessage;
-                mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                                    static_cast<uint32_t>(s.Size()));
             }
             return true;
@@ -423,7 +424,7 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
             }
             if (hasEchoToken) s << static_cast<osc::int32>(echoToken);
             s << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             return true;
         }
@@ -431,8 +432,8 @@ bool EngineControl::handleLinkCommand(const DrainCallCtx& /*meta*/, const uint8_
         // refuse explicitly instead of dropping silently, via the same
         // helper as the WASM route. Pair with /clockwork/clock/capabilities/get.
         replyClockUnsupported(mEngine->core(), data, size,
-            [this](const uint8_t* d, uint32_t n) {
-                mEgress->reply(d, n);
+            [this, token](const uint8_t* d, uint32_t n) {
+                mEgress->reply(token, d, n);
             });
         return true;
     } catch (...) {
@@ -457,8 +458,8 @@ static std::string cutName(const std::string& name) {
     return name.substr(0, n) + "\xE2\x80\xA6";
 }
 
-void EngineControl::refuseUnknown(const uint8_t* data, uint32_t size) {
-    if (mEgress) mEgress->refuse(data, size, CLOCKWORK_REFUSED_UNKNOWN);
+void EngineControl::refuseUnknown(uint32_t token, const uint8_t* data, uint32_t size) {
+    if (mEgress) mEgress->refuse(token, data, size, CLOCKWORK_REFUSED_UNKNOWN);
 }
 
 void EngineControl::finishSwitch(SwapResult result, const std::string& requestedOutput,
@@ -477,9 +478,10 @@ void EngineControl::finishSwitch(SwapResult result, const std::string& requested
 // the refusal for a claimed address nobody recognised. The prefix is claimed
 // whole, so an unknown verb under it is answered with an error and never falls
 // through to the DSP.
-bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint8_t* data, uint32_t size) {
+bool EngineControl::handleEngineCommand(const DrainCallCtx& meta, const uint8_t* data, uint32_t size) {
+    const uint32_t token = meta.token;
     if (!clockwork_sys_claims(data, size)) return false;
-    if (!mEngine || size < CLOCKWORK_SYS_PREFIX_LEN + 4u) { refuseUnknown(data, size); return true; }
+    if (!mEngine || size < CLOCKWORK_SYS_PREFIX_LEN + 4u) { refuseUnknown(token, data, size); return true; }
 
     try {
         osc::ReceivedPacket pkt(reinterpret_cast<const char*>(data),
@@ -501,13 +503,13 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
               << static_cast<osc::int32>(1)
               << CLOCKWORK_COMMIT   // which Clockwork (it has no version number: clockwork_config.h)
               << osc::EndMessage;
-            mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                       static_cast<uint32_t>(s.Size()));
             // Replay current lifecycle state to the new registrant: stream
             // clients connect only after init and missed the boot broadcasts
             // (a scheduling client ignores boot-time replays; the GUI needs them to leave
             // its "waiting" state).
-            mEngine->snapshotState();
+            mEngine->snapshotStateTo(token);
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("notify/unregister")) == 0) {
@@ -521,7 +523,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
             // device readers take the swap gate, and a cold swap holding it
             // waits for this pass to park (test_gateway_swap_gate.cpp). The
             // answer then describes the device any swap in flight leaves.
-            mEngine->postDeviceTask([this] {
+            mEngine->postDeviceTask([this, token] {
                 for (auto& dev : mEngine->listDevices()) {
                     if (dev.wireless) continue;
                     const OscPacket packet = oscPacketOf(4096, [&](osc::OutboundPacketStream& s) {
@@ -534,19 +536,19 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                             s << static_cast<float>(r);
                         s << osc::EndMessage;
                     });
-                    mEgress->reply(packet.ptr(), packet.size());
+                    mEgress->reply(token, packet.ptr(), packet.size());
                 }
                 // Done marker
                 std::array<char, 256> buf{};
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("devices/list.done")) << osc::EndMessage;
-                mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
             });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/current")) == 0) {
-            mEngine->postDeviceTask([this] {   // on the lane: see devices/list
+            mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
                 auto dev = mEngine->currentDevice();
                 const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
                     s << osc::BeginMessage(CLOCKWORK_SYS("devices/current.reply"))
@@ -558,7 +560,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                       << static_cast<osc::int32>(dev.activeInputChannels)
                       << osc::EndMessage;
                 });
-                mEgress->reply(packet.ptr(), packet.size());
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
@@ -593,7 +595,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                 osc::OutboundPacketStream s(buf.data(), buf.size());
                 s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.reply"))
                   << static_cast<osc::int32>(1) << osc::EndMessage;
-                mEgress->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+                mEgress->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
             }
 
@@ -654,7 +656,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                   << static_cast<osc::int32>(accepted ? 1 : 0)
                   << reason.c_str() << osc::EndMessage;
             });
-            mEgress->reply(packet.ptr(), packet.size());
+            mEgress->reply(token, packet.ptr(), packet.size());
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("devices/report")) == 0) {
@@ -675,7 +677,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
             }
 
             // Off the gateway: setDeviceMode reinitialises the device.
-            mEngine->postDeviceTask([this, mode] {
+            mEngine->postDeviceTask([this, token, mode] {
                 auto error = mEngine->setDeviceMode(mode);
                 const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
                     s << osc::BeginMessage(CLOCKWORK_SYS("devices/mode.reply"))
@@ -685,12 +687,12 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                         s << error.c_str();
                     s << osc::EndMessage;
                 });
-                mEgress->reply(packet.ptr(), packet.size());
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
         } else if (std::strcmp(addr, CLOCKWORK_SYS("drivers/list")) == 0) {
-            mEngine->postDeviceTask([this] {   // on the lane: see devices/list
+            mEngine->postDeviceTask([this, token] {   // on the lane: see devices/list
                 auto drivers = mEngine->listDrivers();
                 auto current = mEngine->currentDriver();
                 const OscPacket packet = oscPacketOf(4096, [&](osc::OutboundPacketStream& s) {
@@ -700,7 +702,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                         s << d.c_str();
                     s << osc::EndMessage;
                 });
-                mEgress->reply(packet.ptr(), packet.size());
+                mEgress->reply(token, packet.ptr(), packet.size());
             });
             return true;
 
@@ -712,7 +714,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
 
             // On the device lane: a cross-driver change takes seconds (the
             // device layer itself waits 1.5 s between drivers).
-            mEngine->postDeviceTask([this, driverName] {
+            mEngine->postDeviceTask([this, token, driverName] {
                 auto result = mEngine->switchDriver(driverName);
                 const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
                     s << osc::BeginMessage(CLOCKWORK_SYS("drivers/switch.reply"));
@@ -726,7 +728,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                     }
                     s << osc::EndMessage;
                 });
-                mEgress->reply(packet.ptr(), packet.size());
+                mEgress->reply(token, packet.ptr(), packet.size());
                 if (result.success)
                     mEngine->sendDeviceReport();
             });
@@ -744,7 +746,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
             // On the device lane — the swap can take seconds — and with the
             // output mode left alone: in system mode the engine goes on
             // following the default.
-            mEngine->postDeviceTask([this, numChannels] {
+            mEngine->postDeviceTask([this, token, numChannels] {
                 auto result = mEngine->enableInputChannels(numChannels);
                 const OscPacket packet = oscPacketOf(1024, [&](osc::OutboundPacketStream& s) {
                     s << osc::BeginMessage(CLOCKWORK_SYS("inputs/enable.reply"));
@@ -756,7 +758,7 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                     }
                     s << osc::EndMessage;
                 });
-                mEgress->reply(packet.ptr(), packet.size());
+                mEgress->reply(token, packet.ptr(), packet.size());
                 if (result.success)
                     mEngine->sendDeviceReport();
             });
@@ -775,6 +777,6 @@ bool EngineControl::handleEngineCommand(const DrainCallCtx& /*meta*/, const uint
                       reinterpret_cast<const char*>(data), size);
     }
 
-    refuseUnknown(data, size);
+    refuseUnknown(token, data, size);
     return true;
 }

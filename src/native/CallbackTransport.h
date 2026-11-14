@@ -19,16 +19,16 @@ class CallbackTransport : public IOscTransport {
 public:
     // Bound to the engine's onReply member by pointer so a callback swapped at
     // runtime is always seen.
-    explicit CallbackTransport(const std::function<void(const uint8_t*, uint32_t)>* onReply)
+    explicit CallbackTransport(const std::function<void(const uint8_t*, uint32_t, uint32_t)>* onReply)
         : mOnReply(onReply) {}
 
     // A host that set no callback hears nothing.
-    bool deliver(const uint8_t* data, uint32_t size) override {
+    bool deliver(const uint8_t* data, uint32_t size, uint32_t token) override {
         if (!mOnReply || !*mOnReply) return false;
-        (*mOnReply)(data, size);
+        (*mOnReply)(data, size, token);
         return true;
     }
 
 private:
-    const std::function<void(const uint8_t*, uint32_t)>* mOnReply;
+    const std::function<void(const uint8_t*, uint32_t, uint32_t)>* mOnReply;
 };

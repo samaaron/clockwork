@@ -123,9 +123,9 @@ TEST_CASE("restarts, engine: a message sent while there is no instance is refuse
     ClockworkStatus guestStatus = CLOCKWORK_OK, sysStatus = CLOCKWORK_E_ARG;
     fix.engine().testRebuildFailure = [&]() -> std::string {
         const auto ping = osc_test::message("/dummy/ping");
-        guestStatus = fix.engine().ingest(ping.ptr(), ping.size());
+        guestStatus = fix.engine().ingest(ping.ptr(), ping.size(), 0);
         const auto sys = osc_test::message(CLOCKWORK_SYS("ping"));
-        sysStatus = fix.engine().ingest(sys.ptr(), sys.size());
+        sysStatus = fix.engine().ingest(sys.ptr(), sys.size(), 0);
         return "";   // no failure: the rebuild goes ahead
     };
 

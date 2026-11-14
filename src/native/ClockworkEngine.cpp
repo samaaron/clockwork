@@ -332,7 +332,7 @@ uint32_t ClockworkEngine::generation() const {
     return mEgress.generationNow();
 }
 
-void ClockworkEngine::snapshotState() {
+void ClockworkEngine::snapshotStateTo(uint32_t token) {
     // Statechange only: lifecycle state is idempotent display state, safe to
     // replay to a late registrant. /clockwork/setup is deliberately NOT
     // replayed — it is an EVENT ("the DSP was rebuilt; reset what you were
@@ -344,10 +344,10 @@ void ClockworkEngine::snapshotState() {
     const EngineState state = mEngineState.load();
     if (state == EngineState::Error) {
         std::lock_guard<std::mutex> lock(mErrorReasonMutex);
-        mEgress.sendStateChangeTo(engineStateToString(state), mErrorReason.c_str());
+        mEgress.sendStateChangeTo(token, engineStateToString(state), mErrorReason.c_str());
         return;
     }
-    mEgress.sendStateChangeTo(engineStateToString(state), "snapshot");
+    mEgress.sendStateChangeTo(token, engineStateToString(state), "snapshot");
 }
 
 ClockworkEngine::~ClockworkEngine() {
@@ -1064,10 +1064,10 @@ void ClockworkEngine::initEngine(const Config& cfg) {
 
     // -- Control pass: peer command plane (SHM segment; shm_peer_plane.h) ----
     // One trusted external peer writes OSC frames into the plane's SPSC command
-    // ring; this task feeds them into the ordinary ingest path, labelled
-    // SHM_PEER_WRITER (the label on the peer's own frame is not read), and
-    // performs clockwork's control verbs itself while the control ring is
-    // served. Bounded per pass so a flooding peer cannot
+    // ring; this task feeds them into the ordinary ingest path, stamped with the
+    // reserved SHM-peer token — IDENTITY IS ASSIGNED HERE, NEVER TRUSTED
+    // FROM SHARED MEMORY. Registered before the control-ring drain so a forwarded
+    // command is handled the same pass. Bounded per pass so a flooding peer cannot
     // starve the other drains, and a pass that stops at the bound asks for the
     // next; a full IN ring retains the frame, giving lossless backpressure
     // through to the peer's own ring-full signal.
@@ -1091,7 +1091,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                             mMetrics ? &mMetrics->osc_in_corrupted : nullptr,
                             nullptr },
             kPeerDrainMaxFrames,
-            [this, plane](uint32_t /*frameSrc*/, const uint8_t* d, uint32_t n, uint32_t seq) {
+            [this, plane](uint32_t token, const uint8_t* d, uint32_t n, uint32_t seq) {
                 // Written for an instance that has gone, or between instances
                 // (mPeerMarks): refused to the peer, naming the generation that
                 // closed, then consumed. Clockwork's verbs that need no guest are
@@ -1102,12 +1102,12 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                     if (!clockwork_egress_nrt_room(mCore, 1024) || !peerAnswerRoom(mCore, plane, 1024))
                         return ClockworkDrainVerdict::Retain;
                     clockwork_sys_refuse(d, n, mark->reason, mark->generation,
-                        [core = mCore](const uint8_t* r, uint32_t rn) {
-                            clockwork_egress_nrt_write(core, r, rn);
+                        [core = mCore, token](const uint8_t* r, uint32_t rn) {
+                            clockwork_egress_nrt_write(core, token, r, rn);
                         });
                     return ClockworkDrainVerdict::Consume;
                 }
-                switch (clockwork_ingress_write_status(mCore, d, n, SHM_PEER_WRITER)) {
+                switch (clockwork_ingress_write_status(mCore, d, n, token)) {
                     case InRingWrite::Full:
                         return ClockworkDrainVerdict::Retain;   // IN ring full — retry next wake
                     case InRingWrite::NoInstance:
@@ -1250,20 +1250,22 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (clockwork::CoreClock* cc = clockwork::core_clock(mCore))
         cc->midi_clock_out.store(&mMidiClockOut, std::memory_order_release);
 
-    // Control pass drain #2: the control ring. Route the command by address to
+    // Control pass drain #2: the control ring. Thread the token to the
+    // handler as call metadata (the egress resolves it via the transport at reply
+    // time — no address touches the engine) and route the command by address to
     // its subsystem handler, off the audio thread. The control dispatcher takes
     // "clock/" to the Link surface and everything unclaimed to the engine's own.
     mNrtGateway.addDrain(
         mNrtBuffer->data(), kNrtRingSize, &mNrtHead, &mNrtTail,
-        [this](uint32_t, const uint8_t* d, uint32_t n, uint32_t) {
-            // Thread the time to the handler as metadata: the audio thread
-            // prefixed the frame with NrtEnvelope (nrtForwardSink).
+        [this](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
+            // Thread the token AND the time to the handler as metadata: the
+            // audio thread prefixed the frame with NrtEnvelope (nrtForwardSink).
             if (n < sizeof(NrtEnvelope)) return;
             NrtEnvelope env{};
             std::memcpy(&env, d, sizeof env);
             d += sizeof env;
             n -= static_cast<uint32_t>(sizeof env);
-            DrainCallCtx cc{ env.when, env.blockTime };
+            DrainCallCtx cc{ token, env.when, env.blockTime };
             // Remember the address across the call so a pass that blocks can be
             // reported by name, not just duration.
             noteInFlightCommand(d, n);
@@ -1283,9 +1285,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
         auto* ctl   = reinterpret_cast<ControlRingCursors*>(arena + L.control_ring_start);
         // A verb's answers pass through two rings that refuse a frame with
         // no room: the engine's NRT egress ring, and, for a
-        // peer, that peer's reply ring (ShmTransport; a peer's verbs are
-        // performed by the peer plane's drain above, which holds them for
-        // both). Nothing paces the
+        // peer, that peer's reply ring (ShmTransport). Nothing paces the
         // verbs in the control ring, so a run of verbs whose answers are
         // larger than they are can fill the first, and a peer that reads
         // slowly can fill the second; either way the answers (and the log
@@ -1307,7 +1307,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
             arena + L.control_ring_start + CONTROL_RING_HEADER_SIZE,
             CONTROL_RING_SIZE - CONTROL_RING_HEADER_SIZE, &ctl->head, &ctl->tail,
             RingReader::OnMessageVerdict(
-            [this, answerRoom](uint32_t, const uint8_t* d, uint32_t n, uint32_t) {
+            [this, answerRoom](uint32_t token, const uint8_t* d, uint32_t n, uint32_t) {
                 if (!clockwork_egress_nrt_room(mCore, answerRoom)) return ClockworkDrainVerdict::Retain;
                 // With a peer plane, the client is its peer and the answers
                 // go on to its reply ring: they wait for room there too. A
@@ -1315,7 +1315,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                 if (auto* plane = mPeerPlane.load(std::memory_order_acquire))
                     if (!peerAnswerRoom(mCore, plane, answerRoom))
                         return ClockworkDrainVerdict::Retain;
-                const DrainCallCtx cc{};
+                DrainCallCtx cc{ token, {}, {} };
                 noteInFlightCommand(d, n);
                 mControlRoutes.ingest(d, n, &cc);
                 mInFlightCommand[0] = '\0';
@@ -1457,7 +1457,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     if (mReconcileAfterBoot.exchange(false)) devicesChanged(0);
     // An engine whose build left no guest is not running a guest, and says so:
     // in error, with the reason the build gave, which every client that
-    // registers is told (snapshotState). It stays up — its transport and its
+    // registers is told (snapshotStateTo). It stays up — its transport and its
     // own verbs still answer — so a client can learn why and choose what next.
     if (const char* why = clockwork_boot_error(mCore))
         setEngineState(EngineState::Error, why);
@@ -1648,8 +1648,9 @@ void ClockworkEngine::shutdown() {
 // keeping.
 
 void ClockworkEngine::sendOSC(const uint8_t* data, uint32_t size) {
-    // The in-process entry point.
-    ingest(data, size);
+    // The in-process entry point: token 0, a caller that does not tell its
+    // answers apart. One that does sends through ingest with a token.
+    ingest(data, size, 0);
 }
 
 void ClockworkEngine::pumpAudioBlock() {
@@ -1798,12 +1799,12 @@ void ClockworkEngine::drainEgressNow() {
     for (;;) {
         const uint32_t n = clockwork_client_poll(client, batch.data(), batch.size());
         for (uint32_t i = 0; i < n; ++i)
-            mEgress.dispatchEgress(batch[i].bytes, batch[i].length);
+            mEgress.dispatchEgress(batch[i].token, batch[i].bytes, batch[i].length);
         if (n < batch.size()) break;
     }
 }
 
-ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size) {
+ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint32_t originToken) {
     // THROUGH THE CLIENT BOUNDARY, not past it. A datagram from another machine
     // and a call from a GUI in this process arrive here alike, and both go on
     // through clockwork_client_send — so the ring arithmetic a remote peer's
@@ -1811,9 +1812,10 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size) {
     // second copy that happens to agree today.
     //
     // The audio thread drains, classifies, and either performs the audio plane
-    // inline or forwards control to the NRT thread.
+    // inline or forwards control to the NRT thread, which resolves the token
+    // back to a reply address. Token 0 is in-process and replies via onReply.
     ClockworkClient* client = mClientHandle;
-    const ClockworkStatus status = client ? clockwork_client_send(client, data, size, 0)
+    const ClockworkStatus status = client ? clockwork_client_send(client, data, size, originToken)
                                           : CLOCKWORK_E_CLOSED;
     const bool written = status == CLOCKWORK_OK;
     if (mMetrics) {
@@ -1827,12 +1829,12 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size) {
         }
     }
     if (!written) noteRefusedIn(data, size, clockwork_client_status_text(status));
-    // No guest instance to take it: answer with the
+    // No guest instance to take it: refuse it to the sender with the
     // standard refusal, so a transport's peer and an in-process caller get
     // the same reply as a sender on the lanes ABI does (docs/RESTARTS.md).
     // The status is returned too, for a caller that reads statuses.
     if (status == CLOCKWORK_E_NO_INSTANCE)
-        mEgress.refuse(data, size, CLOCKWORK_REFUSED_NO_INSTANCE);
+        mEgress.refuse(originToken, data, size, CLOCKWORK_REFUSED_NO_INSTANCE);
     return status;
 }
 
@@ -1907,8 +1909,9 @@ void ClockworkEngine::resumeControlPass() {
 // the audio-thread half did not claim. Runs on the audio thread; the control
 // pass drains the ring and runs the subsystems.
 //
-// THE FRAME CARRIES THE CALL'S TIME. The ring header has no slot for `when`,
-// so the message is prefixed with NrtEnvelope. A verb fired from the scheduler reaches the audio thread up to one
+// THE FRAME CARRIES THE CALL'S TIME AS WELL AS ITS ORIGIN. The ring header has a
+// slot for the token and none for `when`, so the message is prefixed with
+// NrtEnvelope. A verb fired from the scheduler reaches the audio thread up to one
 // block early; without the envelope the time is lost on this hop and every
 // scheduled note leaves at block time (test_scheduled_out.cpp).
 bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
@@ -1927,7 +1930,7 @@ bool ClockworkEngine::nrtForwardSink(void* ctx, const void* callCtx,
         ok = RingBufferWriter::write(
             self->mNrtBuffer->data(), kNrtRingSize,
             &self->mNrtHead, &self->mNrtTail, &self->mNrtSeq, &self->mNrtLock,
-            frame, static_cast<uint32_t>(sizeof env + len), 0);
+            frame, static_cast<uint32_t>(sizeof env + len), cc ? cc->token : 0);
     } else {
         // Wider than the hop carries. Say so, rate-limited: the sender gets no
         // reply, and a count alone does not name the message.

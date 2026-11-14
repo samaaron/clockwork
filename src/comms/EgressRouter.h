@@ -28,7 +28,7 @@
 // clockwork_client_count_undelivered — so nothing that left an egress ring
 // goes missing unsaid. A debug line goes to the host's log, or nowhere when
 // the host keeps none, and misses no one either way.
-inline uint32_t clockwork_route_egress(IOscTransport& transport, const uint8_t* osc, uint32_t len,
+inline uint32_t clockwork_route_egress(IOscTransport& transport, uint32_t token, const uint8_t* osc, uint32_t len,
                                        const std::function<void(const std::string&)>& onDebug) {
     if (len >= clockwork::kDebugArgOffset
         && std::memcmp(osc, CLOCKWORK_SYS("debug"), CLOCKWORK_SYS_LEN("debug")) == 0) {
@@ -37,5 +37,5 @@ inline uint32_t clockwork_route_egress(IOscTransport& transport, const uint8_t* 
         onDebug(std::string(s, strnlen(s, len - clockwork::kDebugArgOffset)));
         return 0;
     }
-    return transport.deliver(osc, len) ? 0 : 1;
+    return transport.deliver(osc, len, token) ? 0 : 1;
 }

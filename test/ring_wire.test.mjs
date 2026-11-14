@@ -67,8 +67,8 @@ test("ring wire conformance (JavaScript): the corpus replays byte for byte", () 
         assert.equal(ok, op.expect === "ok",
           `${c.name}: write src=${op.sourceId} len=${op.payload.length} should be ${op.expect}`);
       } else {
-        ringDrain(ring, from, state, op.max, (sourceId, offset, length, sequence) => {
-          got.push({ seq: sequence, sourceId,
+        ringDrain(ring, from, state, op.max, (token, offset, length, sequence) => {
+          got.push({ seq: sequence, sourceId: token,
                      payload: toHex(ring.bytes.subarray(offset, offset + length)) });
         });
       }

@@ -26,7 +26,7 @@
 #![allow(unused_imports)]
 
 use clockwork_fence::no_unwind;
-use std::os::raw::{c_int, c_uint};
+use std::os::raw::{c_int, c_uint, c_void};
 
 #[cfg(feature = "parse")]
 use crate::parse;
@@ -50,15 +50,18 @@ pub struct ClockworkSched(Store);
 
 // ── The store ───────────────────────────────────────────────────────────────
 
-/// Build a store: `slot_count` events at most and a `data_pool_size`-byte
-/// payload pool. Returns null if the shape is impossible.
+/// Build a store: `slot_count` events at most, a `data_pool_size`-byte payload
+/// pool, and one `meta_size`-byte record per slot aligned to `meta_align`.
+/// Returns null if the shape is impossible or the allocation failed.
 #[no_mangle]
 pub extern "C" fn clockwork_sched_new(
     slot_count: c_uint,
     data_pool_size: c_uint,
+    meta_size: c_uint,
+    meta_align: c_uint,
 ) -> *mut ClockworkSched {
     no_unwind(core::ptr::null_mut(), || {
-        match Store::new(slot_count, data_pool_size) {
+        match Store::new(slot_count, data_pool_size, meta_size, meta_align) {
             Some(s) => Box::into_raw(Box::new(ClockworkSched(s))),
             None => core::ptr::null_mut(),
         }
@@ -71,10 +74,12 @@ pub extern "C" fn clockwork_sched_new(
 pub extern "C" fn clockwork_sched_bytes_needed(
     slot_count: c_uint,
     data_pool_size: c_uint,
+    meta_size: c_uint,
+    meta_align: c_uint,
 ) -> usize {
     no_unwind(0, || {
         // The handle itself lives in the caller's buffer too.
-        match Store::bytes_needed(slot_count, data_pool_size) {
+        match Store::bytes_needed(slot_count, data_pool_size, meta_size, meta_align) {
             Some(n) => n + core::mem::size_of::<ClockworkSched>() + core::mem::align_of::<ClockworkSched>(),
             None => 0,
         }
@@ -92,9 +97,11 @@ pub unsafe extern "C" fn clockwork_sched_new_in_place(
     len: usize,
     slot_count: c_uint,
     data_pool_size: c_uint,
+    meta_size: c_uint,
+    meta_align: c_uint,
 ) -> *mut ClockworkSched {
     no_unwind(core::ptr::null_mut(), || {
-        let needed = clockwork_sched_bytes_needed(slot_count, data_pool_size);
+        let needed = clockwork_sched_bytes_needed(slot_count, data_pool_size, meta_size, meta_align);
         if mem.is_null() || needed == 0 || len < needed {
             return core::ptr::null_mut();
         }
@@ -107,7 +114,7 @@ pub unsafe extern "C" fn clockwork_sched_new_in_place(
         let rest = unsafe { mem.add(used) };
         // SAFETY: `rest` is `len - used` writable bytes that outlive the store,
         // per the contract.
-        let store = match unsafe { Store::new_in(rest, len - used, slot_count, data_pool_size) } {
+        let store = match unsafe { Store::new_in(rest, len - used, slot_count, data_pool_size, meta_size, meta_align) } {
             Some(s) => s,
             None => return core::ptr::null_mut(),
         };
@@ -132,8 +139,9 @@ pub unsafe extern "C" fn clockwork_sched_free(h: *mut ClockworkSched) {
 
 /// Store `size` bytes of `data` to fire at `when` under `tag`.
 ///
-/// Returns 1, or 0 with nothing changed if the slot pool or the data pool is
-/// full.
+/// Returns the caller's metadata slot for this event — write the record there
+/// — or null if the slot pool or the data pool is full, with nothing changed.
+/// The pointer stays valid until the event's slot is released.
 ///
 /// # Safety
 /// `h` is a live handle or null; `data` is readable for `size` bytes.
@@ -144,17 +152,20 @@ pub unsafe extern "C" fn clockwork_sched_add(
     tag: c_uint,
     data: *const u8,
     size: c_uint,
-) -> c_int {
-    no_unwind(0, || {
+) -> *mut c_void {
+    no_unwind(core::ptr::null_mut(), || {
         // SAFETY: a live handle or null, per the contract.
-        let Some(s) = (unsafe { h.as_mut() }) else { return 0 };
+        let Some(s) = (unsafe { h.as_mut() }) else { return core::ptr::null_mut() };
         let bytes: &[u8] = if data.is_null() || size == 0 {
             &[]
         } else {
             // SAFETY: readable for `size` bytes per the contract.
             unsafe { core::slice::from_raw_parts(data, size as usize) }
         };
-        s.0.add(when, tag, bytes) as c_int
+        match s.0.add(when, tag, bytes) {
+            Some(meta) => meta.as_mut_ptr().cast::<c_void>(),
+            None => core::ptr::null_mut(),
+        }
     })
 }
 
@@ -183,6 +194,7 @@ pub struct ClockworkSchedEvent {
     pub when: Timetag,
     pub tag: c_uint,
     pub size: c_uint,
+    pub meta: *const c_void,
     pub data: *const u8,
     pub slot: c_int,
 }
@@ -207,13 +219,14 @@ pub unsafe extern "C" fn clockwork_sched_pop_due(
         }
         match s.0.pop_due(now) {
             Some(e) => {
-                // The slice becomes a pointer here: the C contract is that it
-                // stays valid until clockwork_sched_release for this slot.
+                // The slices become pointers here: the C contract is that they
+                // stay valid until clockwork_sched_release for this slot.
                 // SAFETY: `out` is writable, per the contract.
                 unsafe { *out = ClockworkSchedEvent {
                     when: e.when,
                     tag: e.tag,
                     size: e.data.len() as c_uint,
+                    meta: e.meta.as_ptr().cast::<c_void>(),
                     data: e.data.as_ptr(),
                     slot: e.slot,
                 } };

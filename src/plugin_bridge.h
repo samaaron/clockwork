@@ -25,7 +25,8 @@
  *                 the lane base; the bridge's SOURCE for the same memory.
  *   RETURN ring — audio, bridge -> engine. The mirror image.
  *   CTL ring    — messages, engine NRT thread -> bridge main thread: the
- *                 track verbs, as OSC.
+ *                 track verbs, as OSC, with the caller's token as the
+ *                 frame's token so the reply can find its way back.
  *   RT ring     — messages, engine audio thread -> bridge audio thread: the
  *                 events that must land on a frame (notes, controls,
  *                 parameter moves), each prefixed with its frame offset.

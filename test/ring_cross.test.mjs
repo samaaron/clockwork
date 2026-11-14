@@ -30,7 +30,7 @@ const maybe = testIf(haveWasm, "dist/wasm/clockwork.wasm");
 
 const SEED = 0xC10C;
 const REGION_INGRESS = 7;     // ClockworkRegionId
-const MESSAGE_BYTES = 16;     // ClockworkClientMessage: bytes, length, writer, sequence
+const MESSAGE_BYTES = 16;     // ClockworkClientMessage: bytes, length, token, sequence
 
 // mulberry32: small, and the same sequence on every machine.
 function random(seed) {
@@ -76,7 +76,7 @@ function messagesAt(memory, at, count) {
     const p = at + i * MESSAGE_BYTES;
     const ptr = view.getUint32(p, true), length = view.getUint32(p + 4, true);
     out.push({
-      writer: view.getUint32(p + 8, true),
+      token: view.getUint32(p + 8, true),
       sequence: view.getUint32(p + 12, true),
       bytes: new Uint8Array(memory.buffer, ptr, length).slice(),
     });
@@ -111,17 +111,17 @@ maybe("C writes ingress and JavaScript reads it, and a JavaScript writer leaves 
       // written, so it fills and refuses.
       const length = rand() < 0.9 ? 1 + below(rand, 4096) : 1 + below(rand, Math.floor(size / 3));
       const payload = bytesOf(rand, length);
-      const writer = below(rand, 2 ** 32);
+      const token = below(rand, 2 ** 32);
       const headBefore = Atomics.load(ring.words, ring.head);
 
       new Uint8Array(memory.buffer, scratch, length).set(payload);
-      const byC = x.clockwork_client_send(handle, scratch, length, writer) === 0;
-      const byJs = ringWrite(copy, payload, writer);
+      const byC = x.clockwork_client_send(handle, scratch, length, token) === 0;
+      const byJs = ringWrite(copy, payload, token);
       assert.equal(byJs, byC, `op ${op}: a ${length}-byte write, accepted by C ${byC}, by JavaScript ${byJs}`);
 
       if (byC) {
         accepted++;
-        expected.push({ writer, bytes: payload });
+        expected.push({ token, bytes: payload });
         if (Atomics.load(ring.words, ring.head) < headBefore) wraps++;
       } else {
         refused++;
@@ -129,14 +129,14 @@ maybe("C writes ingress and JavaScript reads it, and a JavaScript writer leaves 
     } else {
       const max = rand() < 0.05 ? 0 : 1 + below(rand, 3);   // 0 is everything
       const fromC = [], fromJs = [];
-      ringDrain(ring, fromRing, stRing, max, (writer, offset, length, sequence) =>
-        fromC.push({ writer, sequence, bytes: ring.bytes.slice(offset, offset + length) }));
-      ringDrain(copy, fromCopy, stCopy, max, (writer, offset, length, sequence) =>
-        fromJs.push({ writer, sequence, bytes: copy.bytes.slice(offset, offset + length) }));
+      ringDrain(ring, fromRing, stRing, max, (token, offset, length, sequence) =>
+        fromC.push({ token, sequence, bytes: ring.bytes.slice(offset, offset + length) }));
+      ringDrain(copy, fromCopy, stCopy, max, (token, offset, length, sequence) =>
+        fromJs.push({ token, sequence, bytes: copy.bytes.slice(offset, offset + length) }));
       assert.deepEqual(fromJs, fromC, `op ${op}: the two rings deliver the same frames`);
       for (const m of fromC) {
         const want = expected.shift();
-        assert.equal(m.writer, want.writer >>> 0, `op ${op}: the writer's label`);
+        assert.equal(m.token, want.token >>> 0, `op ${op}: token`);
         assert.deepEqual(m.bytes, want.bytes, `op ${op}: the bytes sent are the bytes read`);
         read++;
       }
@@ -189,28 +189,26 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
       const none = rand() < 0.05;
       const oscBytes = rand() < 0.9 ? below(rand, 2048) : below(rand, Math.floor(size / 3));
       const payload = none ? new Uint8Array(0) : bytesOf(rand, 1 + oscBytes);
+      const token = below(rand, 2 ** 32);
       const headBefore = Atomics.load(ring.words, ring.head);
 
-      // Labelled 0, as the engine writes its egress.
-      const onEngine = ringWrite(ring, payload, 0);
-      const onCopy = ringWrite(copies[which], payload, 0);
+      const onEngine = ringWrite(ring, payload, token);
+      const onCopy = ringWrite(copies[which], payload, token);
       assert.equal(onCopy, onEngine, `op ${op}: both ${which} rings take or refuse the frame alike`);
       if (onEngine) {
         accepted++;
         if (none) empty++;
-        else expected[which].push({ bytes: payload });
+        else expected[which].push({ token, bytes: payload });
         if (Atomics.load(ring.words, ring.head) < headBefore) wraps++;
       } else {
         refused++;
       }
     } else {
       const want = 1 + below(rand, rand() < 0.05 ? max : 3);
-      const polled = messagesAt(memory, messages, x.clockwork_client_poll(handle, messages, want));
-      for (const m of polled) assert.equal(m.writer, 0, `op ${op}: an egress frame carries no label`);
-      const byC = polled.map(({ sequence, bytes }) => ({ sequence, bytes }));
+      const byC = messagesAt(memory, messages, x.clockwork_client_poll(handle, messages, want));
       const byJs = [];
-      reader.poll(want, (bytes, sequence) =>
-        byJs.push({ sequence, bytes: bytes.slice() }));
+      reader.poll(want, (bytes, token, sequence) =>
+        byJs.push({ token, sequence, bytes: bytes.slice() }));
 
       assert.deepEqual(byJs, byC, `op ${op}: C and JavaScript read the same frames`);
       for (const which of ["egress", "nrtEgress"])
@@ -220,9 +218,10 @@ maybe("JavaScript writes both egress rings, and EgressReader reads them as clock
       // RT first, then NRT, each in the order written.
       for (const m of byC) {
         const head = expected.egress[0];
-        const which = head && m.bytes.length === head.bytes.length
-          && m.bytes.every((b, i) => b === head.bytes[i]) ? "egress" : "nrtEgress";
+        const which = head && head.token >>> 0 === m.token
+          && m.bytes.length === head.bytes.length ? "egress" : "nrtEgress";
         const sent = expected[which].shift();
+        assert.equal(m.token, sent.token >>> 0, `op ${op}: token`);
         assert.deepEqual(m.bytes, sent.bytes, `op ${op}: the bytes written are the bytes read`);
         if (which === "nrtEgress") fromNrt++;
         read++;
@@ -268,10 +267,10 @@ maybe("a C tap and a JavaScript tap watching ingress see the same frames and mis
       // Seldom enough that they fall behind and are lapped.
       const want = 1 + below(rand, max);
       const byC = messagesAt(memory, messages, x.clockwork_client_tap_poll(cTap, messages, want))
-        .map(({ writer, sequence, bytes }) => ({ writer, sequence, bytes }));
+        .map(({ token, sequence, bytes }) => ({ token, sequence, bytes }));
       const byJs = [];
-      jsTap.poll(want, (writer, offset, length, sequence) =>
-        byJs.push({ writer, sequence, bytes: ring.bytes.slice(offset, offset + length) }));
+      jsTap.poll(want, (token, offset, length, sequence) =>
+        byJs.push({ token, sequence, bytes: ring.bytes.slice(offset, offset + length) }));
       assert.deepEqual(byJs, byC, `op ${op}: the two taps see the same frames`);
       assert.equal(jsTap.missed, Number(x.clockwork_client_tap_missed(cTap)),
         `op ${op}: and have missed the same number`);

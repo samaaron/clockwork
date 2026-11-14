@@ -28,10 +28,10 @@ void OscEgress::init(IOscTransport*                                  transport,
 
 // ── Producer side: frame the OSC into the NRT-out ring ────────────────────────
 
-void OscEgress::frame(const uint8_t* osc, uint32_t size) {
+void OscEgress::frame(uint32_t token, const uint8_t* osc, uint32_t size) {
     // The lanes NRT egress producer (src/lanes/lanes.cpp) owns the NRT-out
     // ring location and the producer lock.
-    if (clockwork_egress_nrt_write(mCore, osc, size)) return;
+    if (clockwork_egress_nrt_write(mCore, token, osc, size)) return;
 
     // Never silently. A frame the ring refuses is logged, and one too big for
     // a frame ever to carry is answered with an error in its place, so the
@@ -53,7 +53,7 @@ void OscEgress::frame(const uint8_t* osc, uint32_t size) {
     clockwork_sys_refuse(osc, size, "the reply is too big for the engine's egress",
         generationNow(),
         [&](const uint8_t* d, uint32_t n) {
-            clockwork_egress_nrt_write(mCore, d, n);
+            clockwork_egress_nrt_write(mCore, token, d, n);
         });
 }
 
@@ -65,44 +65,44 @@ uint32_t OscEgress::generationNow() const {
     return base ? arenaInstanceGeneration(base) : 0u;
 }
 
-void OscEgress::reply(const uint8_t* data, uint32_t size) {
-    frame(data, size);
+void OscEgress::reply(uint32_t token, const uint8_t* data, uint32_t size) {
+    frame(token, data, size);
 }
 
-void OscEgress::refuse(const uint8_t* data, uint32_t size, const char* reason) {
+void OscEgress::refuse(uint32_t token, const uint8_t* data, uint32_t size, const char* reason) {
     clockwork_sys_refuse(data, size, reason, generationNow(),
-        [this](const uint8_t* d, uint32_t n) { reply(d, n); });
+        [this, token](const uint8_t* d, uint32_t n) { reply(token, d, n); });
 }
 
 void OscEgress::broadcastToTargets(const uint8_t* data, uint32_t size) {
-    if (wanted(CLOCKWORK_WANTS_NOTIFY)) frame(data, size);
+    if (wanted(CLOCKWORK_WANTS_NOTIFY)) frame(0, data, size);
 }
 
 void OscEgress::broadcastClockNotify(const uint8_t* data, uint32_t size) {
-    if (wanted(CLOCKWORK_WANTS_CLOCK)) frame(data, size);
+    if (wanted(CLOCKWORK_WANTS_CLOCK)) frame(0, data, size);
 }
 
 void OscEgress::broadcastMidiNotify(const uint8_t* data, uint32_t size) {
-    if (wanted(CLOCKWORK_WANTS_MIDI)) frame(data, size);
+    if (wanted(CLOCKWORK_WANTS_MIDI)) frame(0, data, size);
 }
 
 void OscEgress::broadcastGamepadNotify(const uint8_t* data, uint32_t size) {
-    if (wanted(CLOCKWORK_WANTS_GAMEPAD)) frame(data, size);
+    if (wanted(CLOCKWORK_WANTS_GAMEPAD)) frame(0, data, size);
 }
 
 void OscEgress::broadcastOscNotify(const uint8_t* data, uint32_t size) {
-    if (wanted(CLOCKWORK_WANTS_OSC)) frame(data, size);
+    if (wanted(CLOCKWORK_WANTS_OSC)) frame(0, data, size);
 }
 
 void OscEgress::debug(const char* text, uint32_t len) {
     std::array<char, 1024> pkt{};
     uint32_t p = clockwork::buildDebugOsc(pkt.data(), text, len);
-    frame(reinterpret_cast<const uint8_t*>(pkt.data()), p);
+    frame(0, reinterpret_cast<const uint8_t*>(pkt.data()), p);
 }
 
 // ── Gateway side: dispatch one framed message to the transport / onDebug ─────
 
-void OscEgress::dispatchEgress(const uint8_t* osc, uint32_t oscLen) {
+void OscEgress::dispatchEgress(uint32_t token, const uint8_t* osc, uint32_t oscLen) {
     // Engine pre-dispatch hook. It may consume the message by answering
     // true; the engine's current hook inspects nothing and never does.
     if (mInterceptor && mInterceptor(osc, oscLen)) return;
@@ -112,7 +112,7 @@ void OscEgress::dispatchEgress(const uint8_t* osc, uint32_t oscLen) {
     const std::function<void(const std::string&)> onDebug =
         [this](const std::string& s) { deliverDebug(s.data(), static_cast<uint32_t>(s.size())); };
     clockwork_egress_count_undelivered(
-        mCore, clockwork_route_egress(*mTransport, osc, oscLen, onDebug));
+        mCore, clockwork_route_egress(*mTransport, token, osc, oscLen, onDebug));
 }
 
 
@@ -154,13 +154,15 @@ void OscEgress::sendStateChange(const char* state, const char* reason) {
     broadcastToTargets(packet.ptr(), packet.size());
 }
 
-// The statechange in answer to /clockwork/notify. Connection-oriented clients
-// (TCP/UDS/pipe) can only register AFTER engine init, so the boot-time
-// statechange broadcast never reaches them; a new registrant is sent the
-// current lifecycle state (see the /clockwork/notify handler).
+// Caller-targeted statechange. Connection-oriented clients (TCP/UDS/pipe)
+// can only register AFTER engine init, so the boot-time statechange
+// broadcast never reaches them; a new registrant is sent the current
+// lifecycle state directly (see the /clockwork/notify handler).
 // Deliberately state-only: /clockwork/setup is a rebuild EVENT and must
 // never be replayed to late joiners.
-void OscEgress::sendStateChangeTo(const char* state, const char* reason) {
+void OscEgress::sendStateChangeTo(uint32_t token, const char* state, const char* reason) {
     const OscPacket packet = stateChange(state, reason, generationNow());
-    reply(packet.ptr(), packet.size());
+    // reply routing: this is part of the direct response to the caller's
+    // /clockwork/notify, and must also reach in-process (embedder) callers.
+    reply(token, packet.ptr(), packet.size());
 }

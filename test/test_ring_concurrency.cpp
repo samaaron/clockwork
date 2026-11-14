@@ -90,7 +90,7 @@ TEST_CASE("MPSC ring: concurrent producers and a drainer lose no frames",
                && std::chrono::steady_clock::now() < deadline) {
             clockwork_drain_ring(ring.data(), static_cast<uint32_t>(ring.size()),
                           &head, &tail, st, m, 0,
-                [&](uint32_t /*sourceId*/, const uint8_t* payload,
+                [&](uint32_t /*token*/, const uint8_t* payload,
                     uint32_t n, uint32_t /*seq*/) {
                     if (n != sizeof(Tag)) { ++badPayload; return ClockworkDrainVerdict::Consume; }
                     Tag t;

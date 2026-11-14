@@ -236,8 +236,7 @@ private:
 
     void egress(const char* ring, const std::vector<lanes_test::EgressFrame>& frames) {
         for (const auto& f : frames) {
-            // source: the label in the frame's ring header, 0 on every egress frame.
-            mTrace << "  " << ring << " seq=" << f.seq << " "
+            mTrace << "  " << ring << " source=" << f.token << " seq=" << f.seq << " "
                    << osc_test::parseAddress(f.data.data(), static_cast<uint32_t>(f.data.size())) << " "
                    << hex(f.data) << (f.decodes ? "" : " UNDECODABLE") << "\n";
         }

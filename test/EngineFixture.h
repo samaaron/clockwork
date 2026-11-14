@@ -86,8 +86,8 @@ inline void checkNoEgressLost(const ClockworkEngine& engine, EgressLossExpected 
     }
     if (!expected.undelivered) {
         const uint32_t undelivered = m.egress_frames_undelivered.load(std::memory_order_relaxed);
-        INFO(undelivered << " frame(s) the transport could not deliver: no client there, "
-             "or one it could not reach (PerformanceMetrics::egress_frames_undelivered)");
+        INFO(undelivered << " frame(s) the transport could not deliver: a reply to a token no client "
+             "answers to, or a subscriber it could not reach (PerformanceMetrics::egress_frames_undelivered)");
         CHECK(undelivered == 0u);
     }
 }
@@ -151,7 +151,7 @@ struct Engine {
     // different from the default boot.
     explicit Engine(const std::function<void(ClockworkEngine::Config&)>& tweak) {
         engine.onDebug = [](const std::string&) {};
-        engine.onReply = [this](const uint8_t* d, uint32_t n) {
+        engine.onReply = [this](const uint8_t* d, uint32_t n, uint32_t) {
             std::lock_guard<std::mutex> lock(mu);
             replies.emplace_back(d, d + n);
         };
@@ -218,6 +218,7 @@ struct Engine {
 struct OscReply {
     std::string          address;
     std::vector<uint8_t> raw;
+    uint32_t             token = 0;   // the token of the message it answers; 0 for a notification
 
     osc_test::ParsedReply parsed() const {
         return osc_test::parseReply(raw.data(), static_cast<uint32_t>(raw.size()));
@@ -252,7 +253,7 @@ SwapResult switchWhenFree(Fix& fix, Args&&... args) {
 // setup, the device reports. A case that waits for any of those needs this.
 //
 // The engine answers /clockwork/notify with notify.reply and THEN a snapshot
-// of its state (snapshotState: reason "snapshot", or an error's own
+// of its state (snapshotStateTo: reason "snapshot", or an error's own
 // reason). Both are the handshake, not anything the case heard happen, so
 // both are in before the slate is cleared. Clearing on the reply alone lets
 // the snapshot land after the clear, where a case reads its "running" as a

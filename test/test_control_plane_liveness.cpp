@@ -141,7 +141,7 @@ TEST_CASE("Device report reaches a stream client that names a port",
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
     tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
-        engine.ingest(d, n);
+        engine.ingest(d, n, 0);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());
@@ -172,15 +172,16 @@ TEST_CASE("Device report reaches a stream client that names a port",
     CHECK(heard);
 }
 
-// One client: everything the engine sends out is for it. The guest's answer
-// to a command reaches a client that has asked to be told nothing.
+// One client: everything the engine sends out is for it. A message nobody
+// asked for by name (here the guest's answer to a command that carried no
+// token) reaches a client that has asked to be told nothing.
 TEST_CASE("Everything on the egress reaches the one client, whoever asked",
           "[control][egress][transport]") {
     StreamOscTransport tcp;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
     tcp.setIngest([&engine](const uint8_t* d, uint32_t n) {
-        engine.ingest(d, n);
+        engine.ingest(d, n, 0);
     });
     tcp.initialiseTcp(0, "127.0.0.1");
     tcp.setSecret(testSecret());
@@ -208,7 +209,7 @@ TEST_CASE("Everything on the egress reaches the one client, whoever asked",
     REQUIRE(hears("/dummy/pong"));
 
     const auto ping = osc_test::message("/dummy/ping");
-    REQUIRE(engine.ingest(ping.ptr(), ping.size()) == CLOCKWORK_OK);
+    REQUIRE(engine.ingest(ping.ptr(), ping.size(), 0) == CLOCKWORK_OK);
     const bool heard = hears("/dummy/pong");
     close(fd);
     engine.shutdown();
@@ -270,7 +271,7 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     std::mutex mu;
     std::vector<std::vector<uint8_t>> replies;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [&](const uint8_t* d, uint32_t n) {
+    engine.onReply = [&](const uint8_t* d, uint32_t n, uint32_t) {
         std::lock_guard<std::mutex> lock(mu);
         replies.emplace_back(d, d + n);
     };
@@ -285,7 +286,7 @@ TEST_CASE("control ring: a pass with more answers than the egress ring holds los
     // than the egress ring holds.
     const auto ask = osc_test::message(CLOCKWORK_SYS("clock/time/now/get"));
     int sent = 0;
-    while (engine.ingest(ask.ptr(), ask.size()) == CLOCKWORK_OK) ++sent;
+    while (engine.ingest(ask.ptr(), ask.size(), 0) == CLOCKWORK_OK) ++sent;
     REQUIRE(sent > 0);
 
     auto answered = [&] {

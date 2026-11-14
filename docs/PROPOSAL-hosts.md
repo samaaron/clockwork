@@ -193,19 +193,22 @@ Read in SuperSonic and Sonic Pi on 2026-11-13 by search, not by a full audit.
    `lanes.h`), the same on every host, and a notice is written only while
    its switch is on. The subscribe verbs stay and turn them. Everything on
    the egress goes to the client: `IOscTransport` is one call, `deliver`,
-   and an egress frame is the OSC with no route word. The engine's lifecycle
+   and an egress frame is the OSC with no route word. Each message
+   has an optional token slot beside it, to and from the guest: a label a
+   sender and a guest may use to match an answer to a message, which decides
+   nothing (docs/TRANSPORTS.md, "Tokens"). The engine's lifecycle
    is told to a client that sent `/clockwork/notify`, a host in the same
    program included. The web front's own copy of the switches is removed.
    `/clockwork/notify/clear` is removed. SuperSonic's host, its front and
    the NIF follow.
 
    Left for later, on size and not on merit:
-   - **The origin.** Removed (2026-11-14): `dsp_osc` and `emit_osc` carry
-     none, the scheduler stores none, and no answer brings one back. A
-     client that matches answers to requests carries an id in its own
-     messages. What stays is the ring header's field, as the writer label:
-     a sender's send call sets it (`writer`), the web labels the writing
-     thread with it, and a tap or the traffic log reads it.
+   - **A token of the sender's choosing on every target.** A web channel
+     writes its fixed id as the token of everything it sends, the NIF sends
+     one fixed number and delivers none, and a socket carries none. A
+     per-message token on the web's send and reply listeners, on the NIF's
+     messages, and in a host's socket framing, would make it the same
+     everywhere.
    - **Subscribing on a full engine** is taken by the control thread, by the
      control ring, while events are routed on the audio thread. An event
      sent straight behind a subscribe can pass before the switch is on. The

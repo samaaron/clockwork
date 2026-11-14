@@ -19,8 +19,13 @@ namespace {
 
 struct Sink final : IOscTransport {
     std::vector<std::string> log;
+    std::vector<uint32_t>    tokens;
     bool delivers = true;
-    bool deliver(const uint8_t* d, uint32_t n) override { log.push_back(osc_test::parseAddress(d, n)); return delivers; }
+    bool deliver(const uint8_t* d, uint32_t n, uint32_t token) override {
+        log.push_back(osc_test::parseAddress(d, n));
+        tokens.push_back(token);
+        return delivers;
+    }
 };
 
 } // namespace
@@ -31,10 +36,16 @@ TEST_CASE("egress router: every frame is handed to the client", "[egress][router
     auto onDebug = [&](const std::string& s) { debug.push_back(s); };
     for (const char* address : { "/x", "/clockwork/statechange", "/clockwork/midi/in/note_on" }) {
         const auto m = osc_test::message(address);
-        CHECK(clockwork_route_egress(sink, m.ptr(), m.size(), onDebug) == 0);
+        CHECK(clockwork_route_egress(sink, 0, m.ptr(), m.size(), onDebug) == 0);
     }
     const std::vector<std::string> expect = { "/x", "/clockwork/statechange", "/clockwork/midi/in/note_on" };
     CHECK(sink.log == expect);
+
+    // With the token its frame carried, which decides nothing about where it goes.
+    sink.tokens.clear();
+    const auto answer = osc_test::message("/x");
+    CHECK(clockwork_route_egress(sink, 42, answer.ptr(), answer.size(), onDebug) == 0);
+    CHECK(sink.tokens == std::vector<uint32_t>{ 42 });
     CHECK(debug.empty());
 }
 
@@ -44,22 +55,22 @@ TEST_CASE("egress router: what the transport could not deliver comes back as a c
     Sink sink;
     sink.delivers = false;
     const auto m = osc_test::message("/x");
-    CHECK(clockwork_route_egress(sink, m.ptr(), m.size(), {}) == 1);
+    CHECK(clockwork_route_egress(sink, 0, m.ptr(), m.size(), {}) == 1);
     // A log line is no client's message, whether or not a log takes it.
     const auto debug = osc_test::message("/clockwork/debug", "a line");
-    CHECK(clockwork_route_egress(sink, debug.ptr(), debug.size(), {}) == 0);
+    CHECK(clockwork_route_egress(sink, 0, debug.ptr(), debug.size(), {}) == 0);
 }
 
 TEST_CASE("egress router: /clockwork/debug is a log line, not a message", "[egress][router]") {
     Sink sink;
     std::vector<std::string> debug;
     const auto m = osc_test::message("/clockwork/debug", "hello from the engine");
-    CHECK(clockwork_route_egress(sink, m.ptr(), m.size(),
+    CHECK(clockwork_route_egress(sink, 0, m.ptr(), m.size(),
                                  [&](const std::string& s) { debug.push_back(s); }) == 0);
     CHECK(sink.log.empty());
     REQUIRE(debug.size() == 1);
     CHECK(debug[0] == "hello from the engine");
     // Without a log to go to, it goes nowhere rather than out as a message.
-    CHECK(clockwork_route_egress(sink, m.ptr(), m.size(), {}) == 0);
+    CHECK(clockwork_route_egress(sink, 0, m.ptr(), m.size(), {}) == 0);
     CHECK(sink.log.empty());
 }

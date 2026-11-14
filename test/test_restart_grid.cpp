@@ -88,7 +88,7 @@ public:
     explicit FixtureThenPeer(ClockworkEngine& e) : mOwn(&e.onReply) {}
     ShmTransport peer;
     void attach() { mPeerIsClient = true; }
-    bool deliver(const uint8_t* d, uint32_t n) override { return mPeerIsClient ? peer.deliver(d, n) : mOwn.deliver(d, n); }
+    bool deliver(const uint8_t* d, uint32_t n, uint32_t token) override { return mPeerIsClient ? peer.deliver(d, n, token) : mOwn.deliver(d, n, token); }
 
 private:
     CallbackTransport mOwn;
@@ -536,7 +536,7 @@ void manyWaiting(Reader reader) {
     // reply ring either way.
     int waiting = 0;
     const auto ping = restart_model::oldAsk();
-    while (waiting < 4000 && cell.engine().ingest(ping.ptr(), ping.size()) == CLOCKWORK_OK) ++waiting;
+    while (waiting < 4000 && cell.engine().ingest(ping.ptr(), ping.size(), 0) == CLOCKWORK_OK) ++waiting;
     REQUIRE(waiting > 500);
 
     const uint32_t before = cell.engine().generation();

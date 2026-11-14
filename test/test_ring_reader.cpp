@@ -14,7 +14,7 @@
  *   1. Stopping the reader does not depend on anyone else waking it.
  *
  *   2. A frame written to a drained ring and followed by one wake is
- *      delivered to the onMessage callback, payload and writer label intact.
+ *      delivered to the onMessage callback, payload and token intact.
  *      An idle reader runs no pass at all, and no wake is lost however the
  *      writes, the wakes and the passes interleave.
  *
@@ -100,10 +100,10 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
     RingReader reader("test-ringreader-drain");
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
-        [&](uint32_t sourceId, const uint8_t* p, uint32_t n, uint32_t) {
+        [&](uint32_t token, const uint8_t* p, uint32_t n, uint32_t) {
             std::lock_guard<std::mutex> lock(rxMutex);
             received.assign(reinterpret_cast<const char*>(p), n);
-            gotSource.store(sourceId, std::memory_order_release);
+            gotSource.store(token, std::memory_order_release);
             gotCount.fetch_add(1, std::memory_order_release);
         },
         RingReader::Metrics{});
@@ -112,10 +112,10 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
     // Arbitrary bytes: the reader never parses a payload, so this only has to
     // be something recognisable on the far side.
     const std::string payload = "hello-reader";
-    const uint32_t kSourceId = 7;
+    const uint32_t kToken = 7;
     REQUIRE(RingBufferWriter::write(
         buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
-        payload.data(), static_cast<uint32_t>(payload.size()), kSourceId));
+        payload.data(), static_cast<uint32_t>(payload.size()), kToken));
 
     // One wake, as a writer gives it: the reader runs a pass and delivers.
     reader.wake();
@@ -124,7 +124,7 @@ TEST_CASE("RingReader delivers a message after its wake word is bumped",
         std::this_thread::yield();
 
     REQUIRE(gotCount.load(std::memory_order_acquire) == 1);
-    REQUIRE(gotSource.load(std::memory_order_acquire) == kSourceId);
+    REQUIRE(gotSource.load(std::memory_order_acquire) == kToken);
     {
         std::lock_guard<std::mutex> lock(rxMutex);
         REQUIRE(received == payload);
@@ -246,9 +246,9 @@ TEST_CASE("RingReader runs a pass on the caller's thread when no thread was star
     RingReader reader("test-ringreader-pass");
     reader.addDrain(
         buffer.data(), kSize, &head, &tail,
-        [&](uint32_t sourceId, const uint8_t* p, uint32_t n, uint32_t) {
+        [&](uint32_t token, const uint8_t* p, uint32_t n, uint32_t) {
             received.assign(reinterpret_cast<const char*>(p), n);
-            gotSource = sourceId;
+            gotSource = token;
             ++gotCount;
             std::this_thread::sleep_for(milliseconds(30));
         },

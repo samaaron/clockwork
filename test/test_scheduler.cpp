@@ -30,8 +30,11 @@
 #include <optional>
 
 #include "scheduler/Scheduler.h"
+#include "scheduler/engine_schedule.h"   // EngineMeta: the Meta clockwork actually schedules with
 
 namespace {
+struct TestMeta { uint32_t v = 0; };
+
 const uint32_t TAG_KEEP  = sched_tag_hash("keep", 4);
 const uint32_t TAG_FLUSH = sched_tag_hash("flushme", 7);
 
@@ -43,22 +46,6 @@ clockwork::Timetag at(int64_t offset) {
     return clockwork::Timetag::fromNtp(uint64_t{3976214400} << 32) + offset;
 }
 constexpr int64_t kFar = int64_t{1} << 50;
-
-// The store carries nothing beside an event's time, tag and bytes, so a case
-// that has to tell events apart gives each a four-byte payload holding a number.
-template <class S>
-bool addNumbered(S& s, clockwork::Timetag when, uint32_t tag, uint32_t number) {
-    uint8_t bytes[4];
-    std::memcpy(bytes, &number, sizeof bytes);
-    return s.add(when, tag, bytes, sizeof bytes);
-}
-template <class E>
-uint32_t numberOf(const E& e) {
-    uint32_t number = 0;
-    REQUIRE(e.size == sizeof number);
-    std::memcpy(&number, e.data, sizeof number);
-    return number;
-}
 
 // A four-byte input whose raw FNV-1a value is exactly 0 — the one case where
 // the "never 0" clamp in sched_tag_hash is observable. Without the clamp this
@@ -113,10 +100,10 @@ TEST_CASE("Scheduler - the shared tag constants are distinct and non-wildcard",
 
 TEST_CASE("Scheduler - a default-tag flush leaves the other tags alone",
           "[scheduler][tag][flush]") {
-    Scheduler<16, 8192> s;
-    REQUIRE(s.add(at(100), SCHED_TAG_DEFAULT, kData, 4));
-    REQUIRE(s.add(at(200), kCallerTag,        kData, 4));
-    REQUIRE(s.add(at(300), SCHED_TAG_SYNTH,   kData, 4));
+    Scheduler<TestMeta, 16, 8192> s;
+    REQUIRE(s.add(at(100), SCHED_TAG_DEFAULT, {}, kData, 4));
+    REQUIRE(s.add(at(200), kCallerTag,        {}, kData, 4));
+    REQUIRE(s.add(at(300), SCHED_TAG_SYNTH,   {}, kData, 4));
 
     s.flush(SCHED_TAG_DEFAULT);
     CHECK(s.size() == 2);
@@ -130,11 +117,11 @@ TEST_CASE("Scheduler - a default-tag flush leaves the other tags alone",
 
 TEST_CASE("Scheduler - pops due events in time order (FIFO for equal times)",
           "[scheduler]") {
-    Scheduler<16, 8192> s;
-    addNumbered(s, at(300), TAG_KEEP, 3);
-    addNumbered(s, at(100), TAG_KEEP, 1);
-    addNumbered(s, at(100), TAG_KEEP, 2);   // same time as 1, added later → after it
-    addNumbered(s, at(200), TAG_KEEP, 4);
+    Scheduler<TestMeta, 16, 8192> s;
+    s.add(at(300), TAG_KEEP, {3}, kData, 4);
+    s.add(at(100), TAG_KEEP, {1}, kData, 4);
+    s.add(at(100), TAG_KEEP, {2}, kData, 4);   // same time as {1}, added later → after it
+    s.add(at(200), TAG_KEEP, {4}, kData, 4);
 
     clockwork::Timetag last = at(-1);
     int order[4]; int n = 0;
@@ -142,7 +129,7 @@ TEST_CASE("Scheduler - pops due events in time order (FIFO for equal times)",
         auto e = s.popDue(at(kFar));
         if (!e.valid()) break;
         CHECK(e.when >= last); last = e.when;
-        order[n++] = static_cast<int>(numberOf(e));
+        order[n++] = static_cast<int>(e.meta->v);
         s.release(e);
     }
     REQUIRE(n == 4);
@@ -153,9 +140,9 @@ TEST_CASE("Scheduler - pops due events in time order (FIFO for equal times)",
 }
 
 TEST_CASE("Scheduler - popDue releases nothing before its timetag", "[scheduler]") {
-    Scheduler<16, 8192> s;
+    Scheduler<TestMeta, 16, 8192> s;
     CHECK(s.nextTime() == std::nullopt);      // empty
-    REQUIRE(addNumbered(s, at(500), TAG_KEEP, 7));
+    REQUIRE(s.add(at(500), TAG_KEEP, {7}, kData, 4));
     CHECK(s.nextTime() == at(500));
 
     CHECK_FALSE(s.popDue(at(499)).valid());    // not yet due
@@ -165,7 +152,7 @@ TEST_CASE("Scheduler - popDue releases nothing before its timetag", "[scheduler]
     REQUIRE(e.valid());
     CHECK(e.when == at(500));
     CHECK(e.tag == TAG_KEEP);
-    CHECK(numberOf(e) == 7u);
+    CHECK(e.meta->v == 7u);
     s.release(e);
     CHECK(s.size() == 0);
     CHECK(s.nextTime() == std::nullopt);
@@ -175,10 +162,10 @@ TEST_CASE("Scheduler - popDue releases nothing before its timetag", "[scheduler]
 
 TEST_CASE("Scheduler - flush cancels only the matching tag; flush(0) clears all",
           "[scheduler][flush]") {
-    Scheduler<16, 8192> s;
-    s.add(at(100), TAG_KEEP, kData, 4);
-    s.add(at(200), TAG_FLUSH, kData, 4);
-    s.add(at(300), TAG_KEEP, kData, 4);
+    Scheduler<TestMeta, 16, 8192> s;
+    s.add(at(100), TAG_KEEP, {}, kData, 4);
+    s.add(at(200), TAG_FLUSH, {}, kData, 4);
+    s.add(at(300), TAG_KEEP, {}, kData, 4);
     REQUIRE(s.size() == 3);
 
     s.flush(TAG_FLUSH);
@@ -189,8 +176,8 @@ TEST_CASE("Scheduler - flush cancels only the matching tag; flush(0) clears all"
     for (;;) { auto e = s.popDue(at(kFar)); if (!e.valid()) break; ++popped; s.release(e); }
     CHECK(popped == 2);
 
-    s.add(at(100), TAG_KEEP, kData, 4);
-    s.add(at(200), TAG_FLUSH, kData, 4);
+    s.add(at(100), TAG_KEEP, {}, kData, 4);
+    s.add(at(200), TAG_FLUSH, {}, kData, 4);
     s.flush(0);                          // wildcard
     CHECK(s.size() == 0);
     CHECK(s.nextTime() == std::nullopt);
@@ -202,27 +189,27 @@ TEST_CASE("Scheduler - flush cancels only the matching tag; flush(0) clears all"
 // and add() would falsely report the pool full.
 TEST_CASE("Scheduler - flush of buried future events does not leak capacity",
           "[scheduler][flush]") {
-    Scheduler<4, 8192> s;
+    Scheduler<TestMeta, 4, 8192> s;
 
     // One early, live event pins the heap top so flushed later events are buried.
-    REQUIRE(s.add(/*when*/ at(10), TAG_KEEP, kData, sizeof kData));
+    REQUIRE(s.add(/*when*/ at(10), TAG_KEEP, {}, kData, sizeof kData));
 
     for (int i = 0; i < 1000; ++i) {
-        REQUIRE(s.add(/*when*/ at(1000 + i), TAG_FLUSH, kData, sizeof kData));
+        REQUIRE(s.add(/*when*/ at(1000 + i), TAG_FLUSH, {}, kData, sizeof kData));
         s.flush(TAG_FLUSH);
         REQUIRE(s.size() == 1);   // only the keeper remains live
     }
 
     // Capacity must still be available — the buried flushes did not leak.
-    REQUIRE(s.add(/*when*/ at(20), TAG_KEEP, kData, sizeof kData));
+    REQUIRE(s.add(/*when*/ at(20), TAG_KEEP, {}, kData, sizeof kData));
     CHECK(s.size() == 2);
 }
 
 TEST_CASE("Scheduler - requestClear is drained on the consumer side",
           "[scheduler][flush]") {
-    Scheduler<16, 8192> s;
-    REQUIRE(s.add(at(100), TAG_KEEP, kData, 8));
-    REQUIRE(s.add(at(200), TAG_FLUSH, kData, 8));
+    Scheduler<TestMeta, 16, 8192> s;
+    REQUIRE(s.add(at(100), TAG_KEEP, {}, kData, 8));
+    REQUIRE(s.add(at(200), TAG_FLUSH, {}, kData, 8));
     CHECK(s.size() == 2);
 
     // Nothing requested yet: the drain is a no-op and leaves the queue intact.
@@ -243,13 +230,13 @@ TEST_CASE("Scheduler - requestClear is drained on the consumer side",
 // ── Refusals ─────────────────────────────────────────────────────────────────
 
 TEST_CASE("Scheduler - a full slot pool refuses further adds", "[scheduler]") {
-    Scheduler<4, 8192> s;   // 4 slots, a pool far larger than needed
+    Scheduler<TestMeta, 4, 8192> s;   // 4 slots, a pool far larger than needed
     const uint8_t one[1] = {0};
-    for (int i = 0; i < 4; ++i) REQUIRE(s.add(at(100 + i), TAG_KEEP, one, sizeof one));
+    for (int i = 0; i < 4; ++i) REQUIRE(s.add(at(100 + i), TAG_KEEP, {}, one, sizeof one));
 
     CHECK(s.full());
     CHECK(s.size() == 4);
-    CHECK_FALSE(s.add(at(200), TAG_KEEP, one, sizeof one));
+    CHECK_FALSE(s.add(at(200), TAG_KEEP, {}, one, sizeof one));
     CHECK(s.size() == 4);   // a refused add changes nothing
 
     // Freeing one slot re-opens exactly one add.
@@ -257,22 +244,22 @@ TEST_CASE("Scheduler - a full slot pool refuses further adds", "[scheduler]") {
     REQUIRE(e.valid());
     s.release(e);
     CHECK_FALSE(s.full());
-    CHECK(s.add(at(200), TAG_KEEP, one, sizeof one));
+    CHECK(s.add(at(200), TAG_KEEP, {}, one, sizeof one));
 }
 
 TEST_CASE("Scheduler - a payload larger than the whole pool is refused outright",
           "[scheduler]") {
-    Scheduler<16, 256> s;   // 256-byte data pool
+    Scheduler<TestMeta, 16, 256> s;   // 256-byte data pool
     CHECK(s.dataCapacity() == 256u);
 
     uint8_t oversize[300] = {};
-    CHECK_FALSE(s.add(at(100), TAG_KEEP, oversize, sizeof oversize));
+    CHECK_FALSE(s.add(at(100), TAG_KEEP, {}, oversize, sizeof oversize));
     CHECK(s.size() == 0);
     CHECK(s.dataUsed() == 0);   // refused before anything was reserved
 
     // Exactly the capacity still fits.
     uint8_t exact[256] = {};
-    CHECK(s.add(at(100), TAG_KEEP, exact, sizeof exact));
+    CHECK(s.add(at(100), TAG_KEEP, {}, exact, sizeof exact));
     CHECK(s.dataUsed() == 256u);
 }
 
@@ -282,33 +269,33 @@ TEST_CASE("Scheduler - a payload larger than the whole pool is refused outright"
 // full() must also treat an add() failure as backpressure, not a silent drop.
 TEST_CASE("Scheduler - data pool fills while slots stay free; full() misses it",
           "[scheduler]") {
-    Scheduler<64, 256> s;   // 64 slots, 256-byte pool
+    Scheduler<TestMeta, 64, 256> s;   // 64 slots, 256-byte pool
     const uint8_t blob[64] = {0};
 
     int added = 0;
-    while (s.add(/*when*/ at(1000 + added), TAG_KEEP, blob, sizeof blob)) ++added;
+    while (s.add(/*when*/ at(1000 + added), TAG_KEEP, {}, blob, sizeof blob)) ++added;
 
     CHECK(added < 64);        // ran out of DATA pool (256/64 = 4 chunks), not slots
     CHECK_FALSE(s.full());    // full() is slot-count only — slots are still free
     const uint8_t tiny[1] = {0};
-    CHECK_FALSE(s.add(at(2000), TAG_KEEP, tiny, sizeof tiny));  // even 1 byte won't fit
+    CHECK_FALSE(s.add(at(2000), TAG_KEEP, {}, tiny, sizeof tiny));  // even 1 byte won't fit
 }
 
 // ── The data pool ────────────────────────────────────────────────────────────
 
 TEST_CASE("Scheduler - data pool reclaims released bytes under continuous use",
           "[scheduler]") {
-    Scheduler<512, 524288> s;
+    Scheduler<TestMeta, 512, 524288> s;
     // Pin the queue at >=1 so the pool never fully drains (the only free path is
     // then compaction).
     uint8_t keeper[64] = {};
-    REQUIRE(s.add(at(kFar), TAG_KEEP, keeper, sizeof keeper));
+    REQUIRE(s.add(at(kFar), TAG_KEEP, {}, keeper, sizeof keeper));
 
     uint8_t busy[152];
     std::memset(busy, 0xAB, sizeof busy);
     int failedAt = -1;
     for (int i = 0; i < 10000; ++i) {
-        if (!s.add(at(i), TAG_KEEP, busy, sizeof busy)) { failedAt = i; break; }
+        if (!s.add(at(i), TAG_KEEP, {}, busy, sizeof busy)) { failedAt = i; break; }
         auto e = s.popDue(at(kFar));   // earliest is busy(i), well before kFar
         REQUIRE(e.valid());
         s.release(e);
@@ -317,21 +304,21 @@ TEST_CASE("Scheduler - data pool reclaims released bytes under continuous use",
 }
 
 TEST_CASE("Scheduler - drained queue resets the data-pool head", "[scheduler]") {
-    Scheduler<16, 8192> s;
-    for (int i = 0; i < 5; ++i) REQUIRE(s.add(at(i), TAG_KEEP, kData, 8));
+    Scheduler<TestMeta, 16, 8192> s;
+    for (int i = 0; i < 5; ++i) REQUIRE(s.add(at(i), TAG_KEEP, {}, kData, 8));
     CHECK(s.dataUsed() > 0);
     while (s.size() > 0) { auto e = s.popDue(at(kFar)); REQUIRE(e.valid()); s.release(e); }
     CHECK(s.dataUsed() == 0);
 }
 
 TEST_CASE("Scheduler - payload bytes survive pool churn intact", "[scheduler]") {
-    Scheduler<16, 8192> s;
+    Scheduler<TestMeta, 16, 8192> s;
     uint8_t keeper[32] = {};
-    REQUIRE(s.add(at(kFar), TAG_KEEP, keeper, sizeof keeper));
+    REQUIRE(s.add(at(kFar), TAG_KEEP, {}, keeper, sizeof keeper));
     for (int i = 0; i < 100; ++i) {
         uint8_t marker[64];
         for (int b = 0; b < 64; ++b) marker[b] = static_cast<uint8_t>((i * 7 + b) & 0xFF);
-        REQUIRE(s.add(at(i), TAG_KEEP, marker, sizeof marker));
+        REQUIRE(s.add(at(i), TAG_KEEP, {}, marker, sizeof marker));
         auto e = s.popDue(at(kFar));
         REQUIRE(e.valid());
         REQUIRE(e.size == sizeof marker);
@@ -342,19 +329,38 @@ TEST_CASE("Scheduler - payload bytes survive pool churn intact", "[scheduler]") 
 
 // ── Guarantees the store's callers rely on ───────────────────────────────────
 //
-// Two guarantees pinned apart from the data-structure cases above: a due
-// event is handed over once, and events fire on the right block with no drift.
+// Three guarantees pinned apart from the data-structure cases above: the
+// caller's token survives to fire time, a due event is handed over once, and
+// events fire on the right block with no drift.
+
+TEST_CASE("Scheduler - the scheduling caller's token survives to fire time",
+          "[scheduler]") {
+    Scheduler<EngineMeta, 16, 8192> es;
+    const uint8_t osc[] = { 0x90, 60, 100 };
+    REQUIRE(es.add(/*when*/ at(1000), SCHED_TAG_DEFAULT, EngineMeta{/*token*/ 4242},
+                   osc, sizeof osc));
+
+    // A scheduled message is answered long after the caller's request returned,
+    // so the token has to be stored with the event rather than read from
+    // whatever is being dispatched when it fires. Without it the reply carries
+    // token 0, and the caller cannot tell which request it answers.
+    auto e = es.popDue(at(2000));
+    REQUIRE(e.valid());
+    REQUIRE(e.meta != nullptr);
+    CHECK(e.meta->token == 4242u);
+    es.release(e);
+}
 
 TEST_CASE("Scheduler - a due event is handed over exactly once",
           "[scheduler][regression]") {
     // popDue must not hand the SAME event back on the next call — which, for
     // a scheduler, is a doubled note rather than a late one.
-    Scheduler<16, 8192> s;
-    REQUIRE(addNumbered(s, at(100), SCHED_TAG_DEFAULT, 7));
+    Scheduler<TestMeta, 16, 8192> s;
+    REQUIRE(s.add(at(100), SCHED_TAG_DEFAULT, {7}, kData, 4));
 
     auto first = s.popDue(at(1000));
     REQUIRE(first.valid());
-    CHECK(numberOf(first) == 7u);
+    CHECK(first.meta->v == 7);
     s.release(first);
 
     // Nothing is left, however many times it is asked.
@@ -369,13 +375,13 @@ TEST_CASE("Scheduler - flush cancels the pending, never the already-fired",
     // arriving between popDue and release must not disturb the event the caller
     // is holding — it is already on its way out, and cancelling it there would
     // be a use-after-free of a payload the caller is still reading.
-    Scheduler<16, 8192> s;
-    REQUIRE(addNumbered(s, at(100), SCHED_TAG_DEFAULT, 1));
-    REQUIRE(addNumbered(s, at(200), SCHED_TAG_DEFAULT, 2));
+    Scheduler<TestMeta, 16, 8192> s;
+    REQUIRE(s.add(at(100), SCHED_TAG_DEFAULT, {1}, kData, 4));
+    REQUIRE(s.add(at(200), SCHED_TAG_DEFAULT, {2}, kData, 4));
 
     auto fired = s.popDue(at(150));          // the first is out and in hand
     REQUIRE(fired.valid());
-    CHECK(numberOf(fired) == 1u);
+    CHECK(fired.meta->v == 1);
 
     s.flush(SCHED_TAG_DEFAULT);          // cancel everything pending
 
@@ -383,11 +389,13 @@ TEST_CASE("Scheduler - flush cancels the pending, never the already-fired",
     // after the flush is not enough — freed-but-untouched bytes still read
     // correctly — so force the store to REUSE the space first. If the flush
     // released this slot, the new payload lands on top of the old one.
+    static const uint8_t kOther[4] = {0xAA, 0xBB, 0xCC, 0xDD};
     for (int i = 0; i < 8; ++i)
-        (void)addNumbered(s, at(300 + i), SCHED_TAG_DEFAULT, 99);
+        (void)s.add(at(300 + i), SCHED_TAG_DEFAULT, {99}, kOther, 4);
 
+    CHECK(fired.meta->v == 1);
     REQUIRE(fired.data != nullptr);
-    CHECK(numberOf(fired) == 1u);
+    CHECK(std::memcmp(fired.data, kData, 4) == 0);
     s.release(fired);
     s.flush(SCHED_TAG_DEFAULT);
 
@@ -401,7 +409,7 @@ TEST_CASE("Scheduler - events fire in the first block at or after their time, "
     // Walks the clock a block at a time instead of asking the store a
     // question: the case that catches a store that is internally consistent
     // and still fires on the wrong block.
-    Scheduler<512, 65536> s;
+    Scheduler<TestMeta, 512, 65536> s;
 
     constexpr int64_t kBlock = 128;
     constexpr int     kN     = 12;
@@ -411,8 +419,8 @@ TEST_CASE("Scheduler - events fire in the first block at or after their time, "
     constexpr int64_t kBase     = kBlock * 3 + 11;
 
     for (int i = 0; i < kN; ++i)
-        REQUIRE(addNumbered(s, at(kBase + i * kInterval), SCHED_TAG_DEFAULT,
-                            static_cast<uint32_t>(i)));
+        REQUIRE(s.add(at(kBase + i * kInterval), SCHED_TAG_DEFAULT,
+                      {static_cast<uint32_t>(i)}, kData, 4));
 
     // Walk one block at a time, recording the block each event fired in.
     std::vector<int64_t> firedAt;
@@ -427,7 +435,7 @@ TEST_CASE("Scheduler - events fire in the first block at or after their time, "
             if (!e.valid()) break;
             ++inThisBlock;
             firedAt.push_back(blockEnd);
-            firedOrder.push_back(numberOf(e));
+            firedOrder.push_back(e.meta->v);
             s.release(e);
         }
         // kInterval > kBlock, so at most one can come due per block. More than

@@ -36,7 +36,7 @@ TEST_CASE("Default Config values are correct", "[config]") {
 TEST_CASE("Engine boots with minimum viable config", "[config]") {
     ClockworkEngine engine;
     bool gotReply = false;
-    engine.onReply = [&](const uint8_t*, uint32_t) { gotReply = true; };
+    engine.onReply = [&](const uint8_t*, uint32_t, uint32_t) { gotReply = true; };
 
     ClockworkEngine::Config cfg;
     cfg.headless    = true;
@@ -64,7 +64,7 @@ TEST_CASE("Engine boots with minimum viable config", "[config]") {
 
 TEST_CASE("A guest config larger than its region refuses init", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless = true;
@@ -85,7 +85,7 @@ TEST_CASE("A guest config larger than its region refuses init", "[config]") {
 
 TEST_CASE("Engine boots with large config values", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -104,7 +104,7 @@ TEST_CASE("Engine boots with large config values", "[config]") {
 
 TEST_CASE("Engine boots at 44100 Hz", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -120,7 +120,7 @@ TEST_CASE("Engine boots at 44100 Hz", "[config]") {
 
 TEST_CASE("Engine boots at 96000 Hz", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -138,7 +138,7 @@ TEST_CASE("Engine boots at 96000 Hz", "[config]") {
 
 TEST_CASE("Engine boots with bufferSize=64", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -154,7 +154,7 @@ TEST_CASE("Engine boots with bufferSize=64", "[config]") {
 
 TEST_CASE("Engine boots with bufferSize=256", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -170,7 +170,7 @@ TEST_CASE("Engine boots with bufferSize=256", "[config]") {
 
 TEST_CASE("Engine boots with bufferSize=512", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless   = true;
@@ -200,7 +200,7 @@ TEST_CASE("headless=true skips audio device", "[config]") {
 
 TEST_CASE("shmSegment=false boots without a segment", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless = true;
@@ -220,7 +220,7 @@ TEST_CASE("shmSegment=false boots without a segment", "[config]") {
 
 TEST_CASE("Engine boots with mono output", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless          = true;
@@ -238,7 +238,7 @@ TEST_CASE("Engine boots with mono output", "[config]") {
 
 TEST_CASE("Engine boots with zero input channels", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless         = true;
@@ -256,7 +256,7 @@ TEST_CASE("Engine boots with zero input channels", "[config]") {
 
 TEST_CASE("Engine boots with small numControlBusChannels", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless              = true;
@@ -274,7 +274,7 @@ TEST_CASE("Engine boots with small numControlBusChannels", "[config]") {
 
 TEST_CASE("Engine boots with small realTimeMemorySize", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless           = true;
@@ -290,7 +290,7 @@ TEST_CASE("Engine boots with small realTimeMemorySize", "[config]") {
 
 TEST_CASE("Engine boots with large realTimeMemorySize", "[config]") {
     ClockworkEngine engine;
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
 
     ClockworkEngine::Config cfg;
     cfg.headless           = true;

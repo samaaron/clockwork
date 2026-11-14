@@ -15,7 +15,8 @@
  * in shared memory (the peer cannot stall the host by stomping it).
  *
  * The host never blocks on peer state: a full reply ring (slow or dead peer)
- * drops the packet and counts it in the plane's rep_dropped. The peer is the client, and what it asked to be told
+ * drops the packet and counts it in the plane's rep_dropped. Each frame
+ * carries the token of the message it answers. The peer is the client, and what it asked to be told
  * is the core's to keep (lanes.h).
  *
  * Binds to the ENGINE'S plane slot (ClockworkEngine::peerPlaneSlot()) rather
@@ -48,11 +49,11 @@ public:
     }
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
-    bool deliver(const uint8_t* data, uint32_t size) override { return writeReply(data, size); }
+    bool deliver(const uint8_t* data, uint32_t size, uint32_t token) override { return writeReply(data, size, token); }
 private:
     // Write one packet into the reply ring; drop when unbound, drop + count
     // (rep_dropped) when full.
-    bool writeReply(const uint8_t* data, uint32_t size);
+    bool writeReply(const uint8_t* data, uint32_t size, uint32_t token);
     // Points at the engine's plane slot; bound (main thread) after the egress
     // drain thread is already running, so the pointer itself is atomic.
     std::atomic<std::atomic<ShmPeerPlaneHeader*>*> mPlaneSlot{nullptr};

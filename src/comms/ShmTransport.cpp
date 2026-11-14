@@ -2,14 +2,14 @@
 // Copyright (c) 2025 Sam Aaron
 /*
  * ShmTransport.cpp — see ShmTransport.h. Reply-ring frames are standard
- * Message-framed OSC (ring/ring.h wire format, sourceId = SHM_PEER_WRITER, no
- * route word): the peer drains them with the stock reader protocol.
+ * Message-framed OSC (ring/ring.h wire format, the header carrying the
+ * token): the peer drains them with the stock reader protocol.
  */
 #include "ShmTransport.h"
 
 #include "RingBufferWriter.h"
 
-bool ShmTransport::writeReply(const uint8_t* data, uint32_t size) {
+bool ShmTransport::writeReply(const uint8_t* data, uint32_t size, uint32_t token) {
     auto* slot = mPlaneSlot.load(std::memory_order_acquire);
     if (!slot) return false;
     ShmPeerPlaneHeader* plane = slot->load(std::memory_order_acquire);
@@ -18,7 +18,7 @@ bool ShmTransport::writeReply(const uint8_t* data, uint32_t size) {
         shm_peer_rep_ring(plane), SHM_PEER_REP_RING_SIZE,
         &plane->rep_head, &plane->rep_tail, &plane->rep_sequence,
         &mRepWriteLock,
-        data, size, SHM_PEER_WRITER);
+        data, size, token);
     if (!ok)
         plane->rep_dropped.fetch_add(1, std::memory_order_relaxed);
     return ok;

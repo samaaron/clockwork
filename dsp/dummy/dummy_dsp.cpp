@@ -1011,17 +1011,17 @@ void dsp_process(struct Dsp* dsp,
 // through dsp_osc, which unwraps a bundle exactly as it unwrapped this one,
 // and every element inherits the same `when`.
 void dsp_osc(struct Dsp* dsp, const uint8_t* bytes, uint32_t len,
-             ClockworkTimetag when, ClockworkTimetag block_time);
+             ClockworkTimetag when, uint32_t token, ClockworkTimetag block_time);
 
 void dispatchBundle(struct Dsp* dsp, const uint8_t* b, uint32_t len,
-                    ClockworkTimetag when, ClockworkTimetag block_time) {
+                    ClockworkTimetag when, uint32_t token, ClockworkTimetag block_time) {
     uint32_t off = 16;                       // "#bundle\0" + the 8-byte timetag
     while (off + 4 <= len) {
         const uint32_t n = (uint32_t(b[off]) << 24) | (uint32_t(b[off + 1]) << 16)
                          | (uint32_t(b[off + 2]) << 8) | uint32_t(b[off + 3]);
         off += 4;
         if (n == 0 || off + n > len) return;  // truncated or lying: stop, don't guess
-        dsp_osc(dsp, b + off, n, when, block_time);
+        dsp_osc(dsp, b + off, n, when, token, block_time);
         off += n;
     }
 }
@@ -1030,11 +1030,12 @@ void dsp_osc(struct Dsp* dsp,
              const uint8_t* bytes,
              uint32_t len,
              ClockworkTimetag when,
+             uint32_t token,
              ClockworkTimetag block_time) {
     auto* d = reinterpret_cast<DummyDsp*>(dsp);
     if (!d || !bytes || len == 0) return;
     if (len >= 16 && std::memcmp(bytes, "#bundle", 8) == 0) {
-        dispatchBundle(dsp, bytes, len, when, block_time);
+        dispatchBundle(dsp, bytes, len, when, token, block_time);
         return;
     }
     // `when` is not ignored any more: /dummy/when below reports it. Everything
@@ -1059,7 +1060,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[128];
             const uint32_t n = writeReplyStrInt(reply, sizeof reply, "/dummy/events",
                                                 d->last_event, d->n_events);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1076,7 +1077,7 @@ void dsp_osc(struct Dsp* dsp,
                                     d->last_asset.channels, d->last_asset.frames,
                                     d->last_asset.rate_milli, d->last_asset.sum };
             const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/asset/last.reply", v, 7);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1110,7 +1111,7 @@ void dsp_osc(struct Dsp* dsp,
         if (d->host.emit_osc) {
             uint8_t reply[64];
             const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/param/declared", d->param_slots, 2);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1123,7 +1124,7 @@ void dsp_osc(struct Dsp* dsp,
         if (d->host.emit_osc) {
             uint8_t reply[64];
             const uint32_t n = writeReplyIntFloat(reply, sizeof reply, "/dummy/param/is", slot, v);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1137,7 +1138,7 @@ void dsp_osc(struct Dsp* dsp,
         if (d->host.emit_osc) {
             uint8_t reply[32];
             const uint32_t n = writeReply(reply, sizeof reply, "/dummy/pong");
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1161,7 +1162,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[64];
             const uint32_t v[2] = { d->reconfigured, d->config.max_output_channels };
             const uint32_t n = writeReplyInts(reply, sizeof reply, "/dummy/reconfigured.reply", v, 2);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1174,7 +1175,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[48];
             const uint32_t n = writeReplyInt64(reply, sizeof reply,
                                                "/dummy/when-was", static_cast<int64_t>(when.ntp));
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1197,7 +1198,7 @@ void dsp_osc(struct Dsp* dsp,
             if (m->streams[i].port == 0) continue;
             uint8_t buf[160];
             const uint32_t n = writeEntry(buf, sizeof buf, m->streams[i]);
-            if (n) d->host.emit_osc(d->host.ctx, buf, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, buf, n);
         }
         return;
     }
@@ -1240,7 +1241,7 @@ void dsp_osc(struct Dsp* dsp,
             const uint32_t v[2] = { n, blobHash(p, n) };
             uint8_t reply[64];
             const uint32_t m = writeReplyInts(reply, sizeof reply, "/dummy/blob-is", v, 2);
-            if (m) d->host.emit_osc(d->host.ctx, reply, m);
+            if (m) d->host.emit_osc(d->host.ctx, token, reply, m);
         }
         return;
     }
@@ -1275,7 +1276,7 @@ void dsp_osc(struct Dsp* dsp,
         const uint32_t v[2] = { read, hash };
         uint8_t reply[80];
         const uint32_t m = writeReplyInts(reply, sizeof reply, "/dummy/assets/is", v, 2);
-        if (m) d->host.emit_osc(d->host.ctx, reply, m);
+        if (m) d->host.emit_osc(d->host.ctx, token, reply, m);
         return;
     }
 
@@ -1302,7 +1303,7 @@ void dsp_osc(struct Dsp* dsp,
         const uint32_t v[3] = { offset, wrote, hash };
         uint8_t reply[80];
         const uint32_t m = writeReplyInts(reply, sizeof reply, "/dummy/blob/at", v, 3);
-        if (m) d->host.emit_osc(d->host.ctx, reply, m);
+        if (m) d->host.emit_osc(d->host.ctx, token, reply, m);
         return;
     }
 
@@ -1331,18 +1332,18 @@ void dsp_osc(struct Dsp* dsp,
             auto* buf = static_cast<uint8_t*>(d->config.memory);
             const uint32_t m = writeReplyBlob(buf, d->config.memory_bytes,
                                               "/dummy/blob-out", seed, want);
-            if (m) accepted = d->host.emit_osc(d->host.ctx, buf, m) ? 1u : 0u;
+            if (m) accepted = d->host.emit_osc(d->host.ctx, token, buf, m) ? 1u : 0u;
         }
         uint8_t reply[64];
         const uint32_t m = writeReplyInt32(reply, sizeof reply,
                                            "/dummy/blob-emitted", accepted);
-        if (m) d->host.emit_osc(d->host.ctx, reply, m);
+        if (m) d->host.emit_osc(d->host.ctx, token, reply, m);
         return;
     }
 
     // The third destination a message can leave by. emit_osc answers a
     // client, send_sink reaches an external endpoint, and this reaches the
-    // host's diagnostic channel — no handle, no reply. A DSP that
+    // host's diagnostic channel — no token, no handle, no reply. A DSP that
     // wants to say something to a human has nowhere else to say it.
     if (addressIs(bytes, len, "/dummy/log")) {
         ArgReader r(bytes, len, padded(static_cast<uint32_t>(std::strlen("/dummy/log"))));
@@ -1373,7 +1374,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/config-is", v, 5);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1385,7 +1386,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[80];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/memory-is", v, 3);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1399,7 +1400,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/lanes-is", v, 4);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1425,7 +1426,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[64];
             const uint32_t n = writeReplyInt32(reply, sizeof reply,
                                                "/dummy/region/persist-gen", gen);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1440,7 +1441,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/tiers-is", v, 5);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1451,7 +1452,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/persist-was", v, 4);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1468,7 +1469,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[80];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/clock-is", v, 3);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1485,7 +1486,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[96];
             const uint32_t n = writeReplyInts(reply, sizeof reply,
                                               "/dummy/region/geometry-is", v, 4);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1507,7 +1508,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[48];
             const uint32_t n = writeReplyInt32(reply, sizeof reply,
                                                "/dummy/sink/opened", sink);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }
@@ -1538,7 +1539,7 @@ void dsp_osc(struct Dsp* dsp,
             uint8_t reply[48];
             const uint32_t n = writeReplyInt32(reply, sizeof reply,
                                                "/dummy/sink/still", d->n_pending);
-            if (n) d->host.emit_osc(d->host.ctx, reply, n);
+            if (n) d->host.emit_osc(d->host.ctx, token, reply, n);
         }
         return;
     }

@@ -44,5 +44,5 @@ public:
     // egress itself (PerformanceMetrics::egress_frames_undelivered,
     // EgressRouter.h) — so what left an egress ring and was heard by nobody
     // is said.
-    virtual bool deliver(const uint8_t* data, uint32_t size) = 0;
+    virtual bool deliver(const uint8_t* data, uint32_t size, uint32_t token) = 0;
 };

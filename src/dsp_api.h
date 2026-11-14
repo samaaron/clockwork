@@ -252,11 +252,14 @@ typedef struct DspHost {
     void* ctx;
 
     /* Send OSC out — a reply, a notification, anything — to the client.
-     * There is one client, and everything sent here reaches it. Nothing is
-     * attached to the bytes: a guest whose client must match an answer to a
-     * request carries an id of its own in the OSC. Callable from the audio
-     * thread. A non-zero return means the frame was queued, never that
-     * anything received it.
+     * There is one client, and everything sent here reaches it. `token` is
+     * the token the message being answered arrived with (dsp_osc), so the
+     * client can tell which of its messages an answer is to; a message nobody
+     * asked for carries 0. Honouring it is the guest's choice: a guest that
+     * always passes 0 works, and its client cannot match answers by token.
+     * Clockwork carries the value and never acts on it. Callable from the
+     * audio thread. A non-zero return means the frame was queued,
+     * never that anything received it.
      *
      * BULK DOES NOT GO HERE: sending copies the payload into the egress ring,
      * so a large reply is a large memcpy in the audio callback. Write it into
@@ -264,7 +267,7 @@ typedef struct DspHost {
      *
      * Returns non-zero if accepted. A full ring DROPS and counts rather than
      * blocking, so a guest that sends bulk here gets a refusal it can see. */
-    int (*emit_osc)(void* ctx, const uint8_t* bytes, uint32_t len);
+    int (*emit_osc)(void* ctx, uint32_t token, const uint8_t* bytes, uint32_t len);
 
     /* Diagnostics. `level` follows syslog severities (3 = error, 6 = info,
      * 7 = debug). Hand it FINISHED TEXT: it formats nothing.
@@ -595,6 +598,10 @@ void dsp_process(struct Dsp* dsp,
  * sub-block placement possible. OSC's "immediately" is kept, and
  * clockwork_timetag_is_immediate says so.
  *
+ * `token` is the number the sender put beside this message, 0 for none. A
+ * guest that passes it to DspHost::emit_osc with each answer to this message
+ * lets the sender match the two; one that answers later keeps it until then.
+ *
  * `block_time` is the timetag of the first frame of THE BLOCK THIS MESSAGE IS
  * FOR — the other half of dsp_process's placement arithmetic. Messages are
  * delivered before dsp_process renders the block they belong to, so a DSP that
@@ -624,6 +631,7 @@ void dsp_osc(struct Dsp* dsp,
              const uint8_t* bytes,
              uint32_t len,
              ClockworkTimetag when,
+             uint32_t token,
              ClockworkTimetag block_time);
 
 
@@ -668,6 +676,7 @@ typedef struct ClockworkAsset {
     uint32_t    struct_bytes;   /* sizeof(ClockworkAsset), for the guest to check */
     uint32_t    id;
     uint32_t    kind;           /* CLOCKWORK_ASSET_* */
+    uint32_t    token;         /* who committed it; opaque to the guest */
     const void* bytes;          /* into the assets area; valid until the guest releases */
     uint32_t    byte_count;
     uint32_t    channels;       /* AUDIO_F32 only, else 0 */

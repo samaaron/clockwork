@@ -124,7 +124,7 @@ struct IdlePeerEngine {
 
     explicit IdlePeerEngine(unsigned port, bool hostDrives = false) {
         engine.onDebug = [](const std::string&) {};
-        engine.onReply = [](const uint8_t*, uint32_t) {};
+        engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
         engine.setTransport(&transport);
         auto cfg = attachConfig(port, true);
         cfg.hostDrivesControl = hostDrives;
@@ -507,7 +507,7 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
     ClockworkEngine engine;
     engine_test::HostControlThread hostControl;   // the host's pass, when the config says the host runs it
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     const auto cfg = attachConfig(kPort, true);
     if (cfg.hostDrivesControl) hostControl.start(engine);
@@ -546,7 +546,7 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
 
     // A command through the plane, and the reply back through it.
     const auto get = osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), int32_t{4343});
-    REQUIRE(clockwork_client_send(peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
+    REQUIRE(clockwork_client_send(peer, get.ptr(), get.size(), 77) == CLOCKWORK_OK);
     bool heard = false;
     ClockworkClientMessage msgs[8];
     REQUIRE(until([&] {
@@ -554,7 +554,7 @@ TEST_CASE("attach: the C client API opens a peer by endpoint, which sends and ta
         for (uint32_t i = 0; i < n; ++i) {
             if (std::strcmp(reinterpret_cast<const char*>(msgs[i].bytes), CLOCKWORK_SYS("clock/tempo.reply")) == 0) {
                 heard = true;
-                CHECK(msgs[i].writer == SHM_PEER_WRITER);   // the label on the reply ring's frames
+                CHECK(msgs[i].token == 77);   // the token the peer sent it with
             }
         }
         return heard;

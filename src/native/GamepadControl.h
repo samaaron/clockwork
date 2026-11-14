@@ -41,6 +41,9 @@ private:
 
     ClockworkGamepad* mGamepad = nullptr;
     OscEgress* mEgress  = nullptr;
+    // Token token held for synchronous emitCb REPLYs during handleGamepadCommand
+    // (the Rust callback carries no call ctx). Async device emits broadcast.
+    uint32_t   mReplyToken = 0;
     // An event dropped on a full IN ring: said eight times.
     clockwork::LogLimit mDroppedLog = clockwork::LogLimit::first(8);
 };

@@ -182,7 +182,7 @@ void TrackVerbs::onParamEdit(void* ctx, ClockworkTrackHandle h, uint32_t id, dou
 
 // ── State pushes ─────────────────────────────────────────────────────────────
 
-void TrackVerbs::sendTracks(const char* address, bool asReply) {
+void TrackVerbs::sendTracks(const char* address, uint32_t replyToken) {
     if (!mEmit) return;
     /*
      * /clockwork/track/list <lane_base:int> <count:int> then per track:
@@ -258,8 +258,8 @@ void TrackVerbs::sendTracks(const char* address, bool asReply) {
     }
     for (uint32_t i = 0; i < n; ++i) s << tracks[i].timeline;
     s << osc::EndMessage;
-    if (asReply) mEmit->reply(reinterpret_cast<const uint8_t*>(s.Data()),
-                              static_cast<uint32_t>(s.Size()));
+    if (replyToken) mEmit->reply(replyToken, reinterpret_cast<const uint8_t*>(s.Data()),
+                                 static_cast<uint32_t>(s.Size()));
     else mEmit->broadcast(reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
 }
@@ -284,7 +284,7 @@ void TrackVerbs::broadcastState(ClockworkTrackId t) {
                      static_cast<uint32_t>(s.Size()));
 }
 
-void TrackVerbs::sendFolders(const char* address, bool asReply) {
+void TrackVerbs::sendFolders(const char* address, uint32_t replyToken) {
     if (!mEmit) return;
     // /clockwork/track/folders <extra_count:int> <extra...:string>
     //                        <platform_count:int> <platform...:string>
@@ -307,15 +307,15 @@ void TrackVerbs::sendFolders(const char* address, bool asReply) {
     s << static_cast<osc::int32>(np);
     for (uint32_t i = 0; i < np; ++i) s << plat[i];
     s << osc::EndMessage;
-    if (asReply) mEmit->reply(reinterpret_cast<const uint8_t*>(s.Data()),
-                              static_cast<uint32_t>(s.Size()));
+    if (replyToken) mEmit->reply(replyToken, reinterpret_cast<const uint8_t*>(s.Data()),
+                                 static_cast<uint32_t>(s.Size()));
     else mEmit->broadcast(reinterpret_cast<const uint8_t*>(s.Data()),
                           static_cast<uint32_t>(s.Size()));
 }
 
-void TrackVerbs::broadcastFolders() { sendFolders(CLOCKWORK_SYS("track/folders"), false); }
+void TrackVerbs::broadcastFolders() { sendFolders(CLOCKWORK_SYS("track/folders"), 0); }
 
-void TrackVerbs::scanAndSendPlugins() {
+void TrackVerbs::scanAndSendPlugins(uint32_t replyToken) {
     if (!mEmit) return;
     // /clockwork/track/plugins <total:int> <offset:int> <count:int>
     //   per plugin: <name:string> <vendor:string> <format:string>
@@ -366,10 +366,10 @@ void TrackVerbs::scanAndSendPlugins() {
         };
         // Reply and broadcast, for the same reason as `list`: the GUI hears
         // broadcasts, a script hears its reply.
-        {
+        if (replyToken) {
             osc::OutboundPacketStream s(buf.data(), buf.size());
             build(CLOCKWORK_SYS("track/plugins.reply"), s);
-            mEmit->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEmit->reply(replyToken, reinterpret_cast<const uint8_t*>(s.Data()),
                          static_cast<uint32_t>(s.Size()));
         }
         osc::OutboundPacketStream s(buf.data(), buf.size());
@@ -398,7 +398,7 @@ void TrackVerbs::broadcastError(const char* verb, const std::string& detail, int
 
 // ── NRT thread ───────────────────────────────────────────────────────────────
 
-bool TrackVerbs::handleControl(const uint8_t* data, uint32_t size) {
+bool TrackVerbs::handleControl(uint32_t token, const uint8_t* data, uint32_t size) {
     if (!mEmit) return false;
     if (size < CLOCKWORK_SYS_LEN("track/") + 4u) return false;
     if (std::memcmp(data, CLOCKWORK_SYS("track/"), CLOCKWORK_SYS_LEN("track/")) != 0) return false;
@@ -412,7 +412,7 @@ bool TrackVerbs::handleControl(const uint8_t* data, uint32_t size) {
         const auto end = msg.ArgumentsEnd();
 
         auto reply = [&](osc::OutboundPacketStream& s) {
-            mEmit->reply(reinterpret_cast<const uint8_t*>(s.Data()),
+            mEmit->reply(token, reinterpret_cast<const uint8_t*>(s.Data()),
                          static_cast<uint32_t>(s.Size()));
         };
         auto log = [&](const std::string& line) { mEmit->debug(line); };
@@ -425,7 +425,7 @@ bool TrackVerbs::handleControl(const uint8_t* data, uint32_t size) {
             // it hears is what the daemon forwards. Asking for the list is how
             // a client that has just arrived catches up, so the answer goes to
             // everyone — the others were already in step and lose nothing.
-            sendTracks(CLOCKWORK_SYS("track/list.reply"), true);
+            sendTracks(CLOCKWORK_SYS("track/list.reply"), token);
             broadcastTracks();
             return true;
         }
@@ -765,12 +765,12 @@ bool TrackVerbs::handleControl(const uint8_t* data, uint32_t size) {
             // thread, so the other verbs and the editor windows wait for it;
             // the tracks keep playing, the audio thread is elsewhere.
             log("[track] scan");
-            scanAndSendPlugins();
+            scanAndSendPlugins(token);
             return true;
         }
         if (std::strcmp(verb, "folders") == 0) {
             // Reply and broadcast, for the same reason as `list`.
-            sendFolders(CLOCKWORK_SYS("track/folders.reply"), true);
+            sendFolders(CLOCKWORK_SYS("track/folders.reply"), token);
             broadcastFolders();
             return true;
         }
@@ -794,7 +794,7 @@ bool TrackVerbs::handleControl(const uint8_t* data, uint32_t size) {
         mEmit->debug("a track verb could not be read, refused");
     }
     clockwork_sys_refuse(data, size, "unknown track verb", mEmit->generation(),
-                   [this](const uint8_t* d, uint32_t n) { mEmit->reply(d, n); });
+                   [this, token](const uint8_t* d, uint32_t n) { mEmit->reply(token, d, n); });
     return true;
 }
 

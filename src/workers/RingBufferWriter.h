@@ -15,7 +15,7 @@
  * corpus) and test/ring_cross.test.mjs (both on a booted engine's rings). A
  * change here is a change there; one made in only one place fails those.
  *
- *  - 16-byte message header: magic(4) + length(4) + sequence(4) + sourceId(4)
+ *  - 16-byte message header: magic(4) + length(4) + sequence(4) + token(4)
  *  - frames NEVER wrap: a frame that doesn't fit before the end of the ring
  *    is preceded by a PADDING_MAGIC marker and restarts at offset 0, so every
  *    frame is contiguous and readers can parse in place
@@ -144,7 +144,7 @@ public:
         std::atomic<int32_t>* write_lock,
         const Reservation&    r,
         uint32_t              payload_bytes,
-        uint32_t              source_id)
+        uint32_t              token)
     {
         const uint32_t total_size   = static_cast<uint32_t>(sizeof(Message)) + payload_bytes;
         const uint32_t aligned_size = (total_size + 3u) & ~3u;
@@ -159,7 +159,7 @@ public:
         hdr.magic    = MESSAGE_MAGIC;
         hdr.length   = total_size;
         hdr.sequence = seq;
-        hdr.sourceId = source_id;
+        hdr.token = token;
         std::memcpy(buffer_start + r.offset, &hdr, sizeof(Message));
 
         // Zero the 0-3 alignment pad bytes (determinism: no stale ring bytes
@@ -230,7 +230,7 @@ public:
         std::atomic<int32_t>* write_lock,
         const RingPart*       parts,
         uint32_t              n_parts,
-        uint32_t              source_id = 0)
+        uint32_t              token = 0)
     {
         uint32_t data_size = 0;
         for (uint32_t i = 0; i < n_parts; ++i) {
@@ -251,7 +251,7 @@ public:
             at += parts[i].size;
         }
         commit(buffer_start, buffer_size, head, sequence, write_lock,
-               r, data_size, source_id);
+               r, data_size, token);
         return true;
     }
 
@@ -265,10 +265,10 @@ public:
         std::atomic<int32_t>* write_lock,
         const void*           data,
         uint32_t              data_size,
-        uint32_t              source_id = 0)
+        uint32_t              token = 0)
     {
         const RingPart part{ data, data_size };
         return write(buffer_start, buffer_size, head, tail, sequence, write_lock,
-                     &part, 1, source_id);
+                     &part, 1, token);
     }
 };

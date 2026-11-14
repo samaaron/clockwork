@@ -100,7 +100,7 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, disconnect prune",
 
     // What the engine sends out goes down the client's connection, framed.
     auto reply = message("/status.reply", 1);
-    REQUIRE(t.deliver(reply.ptr(), reply.size()));
+    REQUIRE(t.deliver(reply.ptr(), reply.size(), 0));
     auto body = readFramed(fd);
     REQUIRE(!body.empty());
     CHECK(parseAddress(body.data(), static_cast<uint32_t>(body.size())) == "/status.reply");
@@ -108,7 +108,7 @@ TEST_CASE("StreamOscTransport/TCP: framed round trip, disconnect prune",
     // The client is its connection: once that has closed there is no
     // client, and a frame reaches no one.
     close(fd);
-    REQUIRE(waitUntil([&] { return !t.deliver(reply.ptr(), reply.size()); }));
+    REQUIRE(waitUntil([&] { return !t.deliver(reply.ptr(), reply.size(), 0); }));
 
     t.stop();
 }
@@ -161,7 +161,7 @@ TEST_CASE("StreamOscTransport/UDS: round trip over an owner-only socket file",
     CHECK(parseAddress(pkt.data(), static_cast<uint32_t>(pkt.size())) == "/g_queryTree");
 
     auto reply = message("/g_queryTree.reply");
-    REQUIRE(t.deliver(reply.ptr(), reply.size()));
+    REQUIRE(t.deliver(reply.ptr(), reply.size(), 0));
     auto body = readFramed(fd);
     REQUIRE(!body.empty());
     CHECK(parseAddress(body.data(), static_cast<uint32_t>(body.size())) == "/g_queryTree.reply");

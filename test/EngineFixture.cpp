@@ -94,8 +94,9 @@ void EngineFixture::init(const ClockworkEngine::Config& cfg, int hostControlStar
     mAudioCanary = !cfg.manualAudioPump && cfg.headless && !cfg.headlessPacer;   // the headless driver, on wall time
     mSampleRate = cfg.sampleRate;
 
-    mEngine.onReply = [this](const uint8_t* data, uint32_t size) {
+    mEngine.onReply = [this](const uint8_t* data, uint32_t size, uint32_t token) {
         OscReply r;
+        r.token = token;
         r.address = osc_test::parseAddress(data, size);
         r.raw.assign(data, data + size);
         {

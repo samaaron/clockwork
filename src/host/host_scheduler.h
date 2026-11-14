@@ -47,6 +47,11 @@
 
 namespace clockwork_host {
 
+// Per-event metadata. The host has no reply path so `token` is unused (always
+// 0), but the field matches EngineMeta so the shared clockwork_fire_due loop reads
+// ev.meta->token uniformly across both schedulers.
+struct HostMeta { uint32_t token = 0; };
+
 class HostScheduler {
 public:
     explicit HostScheduler(ClockworkSysRoutes& routes) : mRoutes(routes) {}
@@ -86,11 +91,12 @@ public:
             if (c.kind == Command::Flush) {
                 mCore.flush(c.tag);
             } else {
-                mCore.add(c.when, c.tag, c.bytes.data(), static_cast<uint32_t>(c.bytes.size()));
+                mCore.add(c.when, c.tag, HostMeta{},
+                          c.bytes.data(), static_cast<uint32_t>(c.bytes.size()));
             }
         }
         clockwork_fire_due(mCore, now, /*blockTime*/ clockwork::Timetag(),
-            [this](const uint8_t* d, uint32_t n, clockwork::Timetag, clockwork::Timetag) {
+            [this](const uint8_t* d, uint32_t n, uint32_t, clockwork::Timetag, clockwork::Timetag) {
                 mRoutes.ingest(d, n, /*callCtx*/ nullptr);
             });
     }
@@ -133,7 +139,7 @@ public:
 private:
     static constexpr int kSlots    = 256;
     static constexpr int kDataPool = kSlots * 1024;
-    using Core = Scheduler<kSlots, kDataPool>;
+    using Core = Scheduler<HostMeta, kSlots, kDataPool>;
 
     struct Command {
         enum Kind { Schedule, Flush } kind;

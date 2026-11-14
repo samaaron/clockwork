@@ -50,17 +50,17 @@ std::vector<uint8_t> fromHex(const std::string& s) {
 
 struct WireOp {
     bool                 isWrite = false;
-    uint32_t             sourceId = 0;
+    uint32_t             token = 0;
     std::vector<uint8_t> payload;
     std::string          expect;     // "ok" | "full"
     uint32_t             drainMax = 0;
 };
 
 struct WireMsg {
-    uint32_t    seq = 0, sourceId = 0;
+    uint32_t    seq = 0, token = 0;
     std::string payloadHex;
     bool operator==(const WireMsg& o) const {
-        return seq == o.seq && sourceId == o.sourceId && payloadHex == o.payloadHex;
+        return seq == o.seq && token == o.token && payloadHex == o.payloadHex;
     }
 };
 
@@ -94,7 +94,7 @@ std::vector<WireCase> loadCorpus() {
             WireOp op;
             op.isWrite = true;
             std::string hex;
-            ls >> op.sourceId >> hex >> op.expect;
+            ls >> op.token >> hex >> op.expect;
             op.payload = fromHex(hex);
             cur.ops.push_back(std::move(op));
         } else if (kw == "drain") {
@@ -103,7 +103,7 @@ std::vector<WireCase> loadCorpus() {
             cur.ops.push_back(std::move(op));
         } else if (kw == "msg") {
             WireMsg m;
-            ls >> m.seq >> m.sourceId >> m.payloadHex;  // payload may be empty
+            ls >> m.seq >> m.token >> m.payloadHex;  // payload may be empty
             cur.msgs.push_back(std::move(m));
         } else if (kw == "head") {
             ls >> cur.head;
@@ -137,8 +137,8 @@ TEST_CASE("ring wire conformance (C++): golden corpus replays byte-identically",
                 bool ok = RingBufferWriter::write(
                     buf.data(), c.size, &head, &tail, &seq, &lock,
                     op.payload.data(), static_cast<uint32_t>(op.payload.size()),
-                    op.sourceId);
-                INFO("write src=" << op.sourceId << " len=" << op.payload.size());
+                    op.token);
+                INFO("write src=" << op.token << " len=" << op.payload.size());
                 CHECK(ok == (op.expect == "ok"));
             } else {
                 clockwork_drain_ring(buf.data(), c.size, &head, &tail, st,

@@ -87,7 +87,7 @@ void StreamOscTransport::onClosed(void* ctx, uint32_t conn) {
 }
 
 // To the client's connection; with none, it reached no one.
-bool StreamOscTransport::deliver(const uint8_t* data, uint32_t size) {
+bool StreamOscTransport::deliver(const uint8_t* data, uint32_t size, uint32_t /*token*/) {
     auto* server = mServer.load(std::memory_order_acquire);
     const uint32_t client = mClient.load(std::memory_order_acquire);
     if (!server || client == 0) return false;

@@ -92,8 +92,8 @@ TEST_CASE("host control: the engine starts no thread, and nothing is answered un
     // thread; neither reaches the transport, because nothing drains.
     const auto ping   = osc_test::message("/dummy/ping");
     const auto notify = osc_test::message(CLOCKWORK_SYS("notify"), int32_t{1});
-    e.engine.ingest(ping.ptr(), ping.size());
-    e.engine.ingest(notify.ptr(), notify.size());
+    e.engine.ingest(ping.ptr(), ping.size(), 7);
+    e.engine.ingest(notify.ptr(), notify.size(), 9);
     e.pump(0.05);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     CHECK(addresses(e).empty());
@@ -182,7 +182,7 @@ TEST_CASE("host control: the audio-thread verbs never wait for the host",
     e.hostControl.stop();
 
     const auto ping = osc_test::message(CLOCKWORK_SYS("ping"), int32_t{77});
-    e.engine.ingest(ping.ptr(), ping.size());
+    e.engine.ingest(ping.ptr(), ping.size(), 3);
     e.pump(0.01);
     REQUIRE(passUntil(e, CLOCKWORK_SYS("pong")));
 }
@@ -199,9 +199,10 @@ TEST_CASE("host control: with the host draining egress too, no engine thread sta
     // The host's pass answers the command; the host's poll takes the answer.
     // The engine's transport sees nothing.
     const auto notify = osc_test::message(CLOCKWORK_SYS("notify"), int32_t{1});
-    fx.engine().ingest(notify.ptr(), notify.size());
+    fx.engine().ingest(notify.ptr(), notify.size(), 9);
 
     bool found = false;
+    uint32_t token = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!found && std::chrono::steady_clock::now() < deadline) {
         fx.pumpBlock();   // pumped: what the pass answers rides the ring the audio thread publishes
@@ -209,12 +210,14 @@ TEST_CASE("host control: with the host draining egress too, no engine thread sta
         const uint32_t n = clockwork_client_poll(c, batch, 64);
         for (uint32_t i = 0; i < n && !found; ++i) {
             if (osc_test::parseAddress(batch[i].bytes, batch[i].length) == CLOCKWORK_SYS("notify.reply")) {
-                found = true;
+                found  = true;
+                token = batch[i].token;
             }
         }
         if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     REQUIRE(found);
+    CHECK(token == 9);
 
     OscReply r;
     CHECK_FALSE(fx.waitForReply(CLOCKWORK_SYS("notify.reply"), r, 200));

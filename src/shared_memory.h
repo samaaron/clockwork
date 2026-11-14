@@ -591,10 +591,11 @@ static_assert(clockwork::kDefaultLayout.in_ring_start % 16 == 0
 static_assert(clockwork::kDefaultLayout.guest_window_start % 16 == 0
               && clockwork::kDefaultLayout.guest_persist_start % 16 == 0, "the guest's regions start 16-aligned");
 
-// Message frame (magic/length/sequence/sourceId) is defined in ring/ring.h.
+// Message frame (magic/length/sequence/token) is defined in ring/ring.h.
 
 // Egress framing: every frame on both egress rings is
-// Message{sourceId = 0} + [osc]. Everything on them is for the one client.
+// Message{token} + [osc]. Everything on them is for the
+// one client.
 
 // Control pointers structure (4-byte aligned for atomics, padded to 56 bytes for 8-byte alignment)
 struct alignas(4) RingCursors {

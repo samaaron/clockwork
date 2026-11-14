@@ -21,7 +21,7 @@ dsp_process(dsp, in, n_in,        the tick — read `frames` from each input
             out, n_out,           channel, write `frames` to each output one
             frames, block_time)
 dsp_osc(dsp, bytes, len,          messages, with the time they mean
-        when, block_time)
+        when, token, block_time)
 dsp_asset(dsp, asset)             a client's bytes — a sample, a wavetable —
                                   bound where they lie, never copied
 ```
@@ -46,7 +46,8 @@ Calls in the other direction go through `DspHost`, fourteen callbacks.
 **Every one may be NULL, so a DSP must check before calling.**
 
 ```
-emit_osc(ctx, bytes, len)         send OSC out: a reply, or a notification
+emit_osc(ctx, token,              send OSC out: a reply, or a notification
+         bytes, len)
 log(ctx, level, text)             diagnostics, syslog severities
 open_sink(ctx, kind,              open a MIDI or OSC destination
           target, capacity)
@@ -90,8 +91,9 @@ Not all callbacks can be called from all threads:
 `emit_osc` and `send_sink` both return non-zero on accept; a full ring or sink
 drops and counts rather than blocking, so a refusal is visible.
 
-`emit_osc` sends OSC out to the client. There is one client, and the call
-takes the bytes and nothing else. It is callable from the audio thread, which makes calls back into
+`emit_osc` sends OSC out to the client. There is one client, so its `token`
+argument decides nothing: it rides with the message, for the client to match
+an answer to the message it answers. It is callable from the audio thread, which makes calls back into
 clockwork during a block part of the contract rather than an exception to it.
 (`send_sink` is the other way out, and reaches MIDI and OSC destinations the
 DSP opened itself rather than clients.)
@@ -151,15 +153,20 @@ Two things a guest is handed it cannot read through those headers today:
 
 ### Replies
 
-A reply is OSC handed to `emit_osc`. A DSP needs no client registry of its
-own: there is one client, and everything a DSP sends reaches it, on every
-host. Clockwork attaches nothing to a message on the way in or on the way
-out, so a client that must match an answer to its request puts an id of its
-own in the request, and the DSP puts it in the answer.
+`dsp_osc` hands over a `token` with each message: a number the sender put
+beside it, or 0. Pass it to `emit_osc` with each answer to that message and
+the client gets it with the answer, and can tell which of its messages it
+answers. An answer made later, after the call has returned, carries the token
+only if the DSP kept it.
+
+Honouring the token is the DSP's choice. A DSP that always passes 0 works;
+its client cannot match answers by token. A DSP needs no client registry of
+its own either way: there is one client, and everything a DSP sends reaches
+it, on every host.
 
 ### Notifications
 
-A message nobody asked for is sent the same way, and goes to the client like
+Pass `token` 0 for a message nobody asked for. It goes to the client like
 any other.
 
 - **It may reach nobody.** With no client there, `emit_osc` still returns
@@ -535,8 +542,8 @@ Only clockwork can draw that line: a DSP cannot tell "restored after a device
 switch" from "an earlier engine in this process left this behind".
 
 The bytes may be torn (death mid-write) or stale (a crashed run), so stamp a
-generation and validate it. scsynth uses the region to remember who
-asked for `/notify`, which the World does not survive.
+generation and validate it. scsynth uses the region to remember that its
+client asked for `/notify`, which the World does not survive.
 
 ### How many in a process
 
@@ -622,8 +629,7 @@ CLI, a browser tab running the same code compiled to WebAssembly.
 
 **The engine's own transports are clients of this.** A command from a socket
 does not enter by a private door: the transport's receiving thread hands the
-message to the host, which gives it to
-`ClockworkEngine::ingest`; that calls `clockwork_client_send`, exactly as an
+message to the host, which gives it to `ClockworkEngine::ingest`; that calls `clockwork_client_send`, exactly as an
 in-process GUI does. One implementation of the ring arithmetic. (A shm peer
 writes a ring of its own, which the control pass writes into the same in
 ring: docs/SEGMENTS.md.)

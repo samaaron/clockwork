@@ -109,16 +109,16 @@ void log(const char* fmt, ...) {
 
 // ── Where the answers go ─────────────────────────────────────────────────────
 // Every reply, broadcast and debug line is one frame on the OUT ring: the
-// OSC.
+// OSC, with its token in the frame's header.
 class RingEmit final : public TrackVerbs::Emit {
 public:
     explicit RingEmit(Header* h, uint8_t* ring) : mHeader(h), mRing(ring) {}
 
-    void reply(const uint8_t* osc, uint32_t len) override {
-        put(osc, len);
+    void reply(uint32_t token, const uint8_t* osc, uint32_t len) override {
+        put(token, osc, len);
     }
     void broadcast(const uint8_t* osc, uint32_t len) override {
-        put(osc, len);
+        put(/*token*/ 0, osc, len);
     }
     // The bridge is its own process and holds no arena: it cannot read the
     // guest instance's generation, so a refusal from here says 0, "none
@@ -131,14 +131,14 @@ public:
     void debug(const std::string& line) override {
         std::array<char, 1024> pkt{};
         const uint32_t n = clockwork::buildDebugOsc(pkt.data(), line.data(), static_cast<uint32_t>(line.size()));
-        put(reinterpret_cast<const uint8_t*>(pkt.data()), n);
+        put(/*token*/ 0, reinterpret_cast<const uint8_t*>(pkt.data()), n);
     }
 
 private:
-    void put(const uint8_t* osc, uint32_t len) {
+    void put(uint32_t token, const uint8_t* osc, uint32_t len) {
         MsgRing& r = mHeader->out;
         if (!RingBufferWriter::write(mRing, clockwork_bridge::RT_OUT_RING_SIZE, &r.head, &r.tail, &r.sequence,
-                                     &r.write_lock, osc, len, 0))
+                                     &r.write_lock, osc, len, token))
             r.dropped.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -302,8 +302,8 @@ void drainControl(Bridge& b) {
     MsgRing& r = b.h->ctl;
     clockwork_drain_ring(ctl_ring(b.seg.ptr), CTL_RING_SIZE, &r.head, &r.tail, st, ClockworkDrainMetrics{},
         CTL_FRAMES_PER_TURN,
-        [&](uint32_t, const uint8_t* payload, uint32_t len, uint32_t) {
-            if (!b.verbs.handleControl(payload, len))
+        [&](uint32_t token, const uint8_t* payload, uint32_t len, uint32_t) {
+            if (!b.verbs.handleControl(token, payload, len))
                 b.emit->debug("the bridge was handed a message that is not a track verb");
             return ClockworkDrainVerdict::Consume;
         });

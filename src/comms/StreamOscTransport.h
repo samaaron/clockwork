@@ -70,7 +70,10 @@ public:
     uint64_t refusedConnections() const;
 
     // ── IOscTransport ──────────────────────────────────────────────────────────
-    bool deliver(const uint8_t* data, uint32_t size) override;
+    // The stream's framing is the bytes alone: a message arrives with no
+    // token and leaves without one. A host that wants its remote client to
+    // use tokens carries them in its own framing.
+    bool deliver(const uint8_t* data, uint32_t size, uint32_t token) override;
 
 private:
     enum class Kind { None, Tcp, Uds, Pipe };

@@ -108,12 +108,12 @@ void RingReader::drainOne(Drain& d) {
     // thread, the wake word and the drain registry.
     clockwork_drain_ring(d.buffer, d.size, d.head, d.tail, d.state, d.metrics,
                   0 /* drain everything available */,
-                  [&d](uint32_t sourceId, const uint8_t* payload,
+                  [&d](uint32_t token, const uint8_t* payload,
                        uint32_t payloadSize, uint32_t sequence) {
                       if (d.onMessageVerdict)
-                          return d.onMessageVerdict(sourceId, payload, payloadSize, sequence);
+                          return d.onMessageVerdict(token, payload, payloadSize, sequence);
                       if (d.onMessage)
-                          d.onMessage(sourceId, payload, payloadSize, sequence);
+                          d.onMessage(token, payload, payloadSize, sequence);
                       return ClockworkDrainVerdict::Consume;
                   });
 }

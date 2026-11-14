@@ -52,7 +52,7 @@ int main(void) {
 
     S(ClockworkAsset);
     F(ClockworkAsset, struct_bytes); F(ClockworkAsset, id); F(ClockworkAsset, kind);
-    F(ClockworkAsset, bytes); F(ClockworkAsset, byte_count);
+    F(ClockworkAsset, token); F(ClockworkAsset, bytes); F(ClockworkAsset, byte_count);
     F(ClockworkAsset, channels); F(ClockworkAsset, frames); F(ClockworkAsset, sample_rate);
 
     S(ClockworkClientInfo);
@@ -63,7 +63,7 @@ int main(void) {
 
     S(ClockworkClientMessage);
     F(ClockworkClientMessage, bytes); F(ClockworkClientMessage, length);
-    F(ClockworkClientMessage, writer); F(ClockworkClientMessage, sequence);
+    F(ClockworkClientMessage, token); F(ClockworkClientMessage, sequence);
 
     S(ClockworkRegion);
     F(ClockworkRegion, base); F(ClockworkRegion, bytes); F(ClockworkRegion, writable);

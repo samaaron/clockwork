@@ -88,7 +88,7 @@ inline void clockwork_ring_give_back(std::atomic<int32_t>* tail,
 }
 
 // Walk one ring, delivering each frame that carries a payload to
-//   onMessage(sourceId, payload, payloadSize, sequence) -> ClockworkDrainVerdict.
+//   onMessage(token, payload, payloadSize, sequence) -> ClockworkDrainVerdict.
 // (A frame whose length is header-only is counted and consumed, not delivered.)
 // Returns the number of frames consumed. maxFrames of 0 means no bound.
 // stopReason (optional) reports why the walk ended.
@@ -227,7 +227,7 @@ inline uint32_t clockwork_drain_ring(uint8_t*              buffer,
         if (metrics.bytes)    metrics.bytes->fetch_add(payloadSize, std::memory_order_relaxed);
 
         if (payloadSize > 0) {
-            ClockworkDrainVerdict verdict = onMessage(hdr.sourceId, payload, payloadSize, hdr.sequence);
+            ClockworkDrainVerdict verdict = onMessage(hdr.token, payload, payloadSize, hdr.sequence);
             if (verdict == ClockworkDrainVerdict::Retain) {
                 // Frame stays at the head of the ring; undo the speculative
                 // counts and skip gap tracking — the next drain call sees it

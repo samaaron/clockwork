@@ -136,8 +136,8 @@ TEST_CASE("shm-peer: command ring commands reach the engine and reply",
     REQUIRE(plane != nullptr);
     shm_peer_attach(plane, 1);
 
-    // The fixture's transport surfaces every reply via onReply, so the peer
-    // command's reply lands in the fixture collector.
+    // The fixture's transport surfaces replies for every token via onReply,
+    // so the peer command's reply lands in the fixture collector.
     REQUIRE(peerWrite(client, osc_test::message(CLOCKWORK_SYS("clock/tempo/get"), 4242)));
 
     OscReply reply;
@@ -154,7 +154,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     engine.init(planeConfig(kPort));
     transport.bindPlaneSlot(engine.peerPlaneSlot());
@@ -191,7 +191,7 @@ TEST_CASE("shm-peer: ShmTransport routes replies into the reply ring",
     REQUIRE(got);
 
     // What the transport is handed goes onto the peer's reply ring.
-    CHECK(transport.deliver(replies[0].data(), static_cast<uint32_t>(replies[0].size())));
+    CHECK(transport.deliver(replies[0].data(), static_cast<uint32_t>(replies[0].size()), 0));
 
     engine.shutdown();
     CHECK_FALSE(transport.ready());  // shutdown nulls the published plane
@@ -206,7 +206,7 @@ TEST_CASE("shm-peer: the next peer on the plane does not inherit what the last o
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     engine.init(planeConfig(kPort));
     transport.bindPlaneSlot(engine.peerPlaneSlot());
@@ -240,7 +240,7 @@ TEST_CASE("shm-peer load: high-volume commands round-trip losslessly through the
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     engine.init(planeConfig(kPort));
     transport.bindPlaneSlot(engine.peerPlaneSlot());
@@ -306,7 +306,7 @@ TEST_CASE("shm-peer: a peer that reads its replies late loses none — the pass 
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     engine.init(planeConfig(kPort));
     transport.bindPlaneSlot(engine.peerPlaneSlot());
@@ -358,7 +358,7 @@ TEST_CASE("shm-peer: answers a full reply ring refuses are counted undelivered, 
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     auto cfg = planeConfig(kPort);
     cfg.hostDrivesControl = true;
@@ -406,7 +406,7 @@ TEST_CASE("shm-peer: a verb behind more guest messages than one pass takes is an
     ShmTransport     transport;
     ClockworkEngine engine;
     engine.onDebug = [](const std::string&) {};
-    engine.onReply = [](const uint8_t*, uint32_t) {};
+    engine.onReply = [](const uint8_t*, uint32_t, uint32_t) {};
     engine.setTransport(&transport);
     engine.init(cfg);
     transport.bindPlaneSlot(engine.peerPlaneSlot());
