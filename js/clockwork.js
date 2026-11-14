@@ -31,7 +31,7 @@ import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
 import { IN_WRITE_LOCK } from "./lib/ring_cursor_offsets.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
-// Timeout waiting for the DSP profile's synced reply from the engine
+// Timeout waiting for the engine's synced reply
 const SYNC_TIMEOUT_MS = 10000;
 // Timeout waiting for AudioWorklet initialization
 const WORKLET_INIT_TIMEOUT_MS = 5000;
@@ -675,10 +675,9 @@ export class Clockwork {
   /**
    * Get metrics as a flat Uint32Array for zero-allocation reading.
    * Returns the same array reference every call — values are updated in-place.
-   * Slots 0-49: SAB/snapshot metrics (slot 50 is the C++ struct's alignment
-   * padding, reused by the first context metric), 50-68: main-thread context
-   * metrics, 69+: metrics the guest declared in its DSP profile.
-   * Use getMetricsSchema().metrics for offset mappings.
+   * The engine's and the page's own metrics come first, and from
+   * GUEST_METRICS_BASE (js/lib/metrics_offsets.js) the ones the guest
+   * declared. Use getMetricsSchema().metrics for offset mappings.
    * @returns {Uint32Array}
    */
   getMetricsArray() {

@@ -71,8 +71,10 @@ inline bool clockwork_sys_claims(const uint8_t* osc, size_t len) noexcept {
 // The audio thread answers a verb inside its block when the verb is about the
 // block: the liveness ping and echo; the ordering barrier (sync) and the
 // clock snapshot, which must be answered where the hand-off to the guest
-// happens; the schedule and its flush; an asset hand-off; an inbound event,
-// which reaches the guest from there; and what plays a hosted track. Every
+// happens; the schedule and its flush; an asset hand-off; the parameter
+// table's verbs; an inbound event, which reaches the guest from there, and
+// the lists of MIDI ports and game controllers that arrive the same way; and
+// what plays a hosted track. Every
 // other verb of clockwork's is CONTROL — notify, devices, the session tempo,
 // a port's subsystems, a track's edits — and is the control pass's, which
 // answers it with no audio block in the loop (docs/RESTARTS.md, "The control

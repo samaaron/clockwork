@@ -1315,6 +1315,14 @@ TEST_CASE("params: a rebuild keeps the table, and the guest's declare finds its 
     CHECK(slotOf(95) == slotMine);
     CHECK(valueOf(1001) == Approx(0.8f));
     CHECK(valueOf(95) == Approx(0.3f));
+
+    // The new instance declares its own again, as a guest does when it is
+    // built: the same slot, and the value it had, not the default.
+    ask(osc_test::message("/dummy/param/declare"), kPanel);
+    CHECK(slotOf(1001) == slotLevel);
+    CHECK(valueOf(1001) == Approx(0.8f));
+    CHECK(slotOf(95) == slotMine);
+    CHECK(valueOf(95) == Approx(0.3f));
 }
 
 // ── what a peer may write ───────────────────────────────────────────────────

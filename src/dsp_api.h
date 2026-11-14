@@ -130,10 +130,9 @@ typedef struct DspConfig {
      * Bulk moves by not being copied. A client writes into `assets` from its own
      * thread and sends a short message saying where; the guest receives an
      * offset rather than a payload. Nothing large crosses the audio thread in
-     * either direction, which matters because every entry point in this header
-     * is called on the audio thread — and on web that is forced, since the
-     * guest exists only inside the AudioWorklet and no off-thread door can
-     * exist.
+     * either direction, which matters because dsp_osc and dsp_asset are called
+     * on the audio thread, and on the web every entry point is: the guest
+     * exists only inside the AudioWorklet and no off-thread door can exist.
      *
      * OFFSETS, NOT POINTERS, in any message naming a position in these. A
      * reader maps the segment wherever the kernel puts it, which is not the
@@ -418,8 +417,8 @@ typedef struct DspHost {
 
 /* ── What the DSP says about itself ─────────────────────────────────────── */
 
-/* Vocabulary as data — the native counterpart of js/lib/dsp_profile.js. The C
-   ABI stays fixed while each DSP declares its own words. */
+/* Vocabulary as data. The C ABI stays fixed while each DSP declares its own
+   words. */
 typedef struct DspInfo {
     const char* name;
     const char* version;

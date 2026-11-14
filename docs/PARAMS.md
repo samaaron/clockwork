@@ -3,11 +3,15 @@
 # Parameters
 
 One directory (`src/params/`), one arena region, four verbs, three calls on the
-guest's host struct, its readers (`rust/clockwork-params`, `js/lib/params.js`,
-`js/lib/params_manager.js`), four metrics, its tests (`test/test_params*.cpp`,
-`test/params*.mjs`, the crate's), its fuzz target (`test/fuzz/fuzz_params.cpp`, with
-its seeds) and this page. Removing the feature is deleting
-those.
+guest's host struct, its readers (`rust/clockwork-params`, `js/lib/params.js`) and
+the conversions they share (`js/lib/params_manager.js`), four metrics, its tests
+(`test/test_params*.cpp`, `test/params*.mjs`, the crate's), its fuzz target
+(`test/fuzz/fuzz_params.cpp`, with its seeds) and this page. Removing the feature
+is deleting those, and what names them elsewhere: the Rust declarations
+(`rust/clockwork-abi/src/params.rs`, `Client::params`), the table's part of a
+copy (`clockwork_client_copy`, `js/lib/copy.js`, the worklet's), its region id
+and the routes that register `param/`, its sizes in `src/memory_profile.h`, and
+the dummy guest's two parameters.
 
 ## Why
 
@@ -47,7 +51,7 @@ it says.
 | `kind` | continuous; stepped, whose steps are the integers in its range; switch, 0 or 1; note, a MIDI note number; choice, an index from 0 into its value names; group, which holds no value |
 | `min`, `max`, `def` | f32 |
 | `unit` | none, percent, decibels, hertz, seconds, beats per minute, semitones, or custom, whose words are in its text. A value is in its unit as it stands: a percent of 50 is 50%, never 0.5, and seconds are seconds |
-| `flags` | automatable; hidden (no host lists or sets it, a panel may show it); read-only (its definer writes it, nobody else); wraps (its range is a circle); meta (moving it may move others) |
+| `flags` | automatable; hidden (a host's bridge neither lists nor sets it, a panel may show it; the table itself treats it as any other); read-only (its definer writes it, nobody else); wraps (its range is a circle); meta (moving it may move others) |
 | `group` | the id of the group it sits in, one of its definer's; 0 for none |
 | `taper` | how a continuous entry sweeps a knob: 0 evenly, -1 logarithmically, or a power law, a position being `((value - min) / (max - min)) ^ taper` |
 | `role` | what a host or a bridge wires to it, at most one of each per table: bypass, tempo, key note, key held; none for most |
@@ -274,7 +278,8 @@ and its `/dummy/param/…` verbs are how the tests drive the three calls.
 
 The same three exist as C functions for a host in the engine's process
 (`clockwork_param_define`, `clockwork_param_value`, `clockwork_param_set`), which
-it calls as `CLOCKWORK_PARAM_DEFINER_HOST`. `clockwork_param_value` is any
+it calls as `CLOCKWORK_PARAM_DEFINER_HOST` (the definer is the caller's to say:
+the table takes whichever of the three it is given). `clockwork_param_value` is any
 thread's. The other two are the ticking thread's: a plugin's render call may set
 a value directly before it renders, and any other thread of the host uses the
 verb, as the client does and as the client. `clockwork_client_core` gives a client in the engine's

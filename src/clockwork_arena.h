@@ -127,8 +127,8 @@ enum ClockworkArenaArea {
     CLOCKWORK_AREA_MALLOC              = 12,  /* what the program's code has taken with malloc and new, to the
                                                  frontier at boot; on the web the engine's memory lies inside it */
     CLOCKWORK_AREA_RUST_HEAP           = 13,  /* outside the arena: what clockwork's Rust code allocates inside a
-                                                 door (a sink's or a port's queues); one block, for
-                                                 the life of the process, that the RT router serves */
+                                                 door (a sink's or a port's queues); one block, the
+                                                 core's for its life, that the RT router serves */
     CLOCKWORK_AREA_ENGINE_MEMORY       = 14,  /* the engine's memory: one block that the guest's two spans are
                                                  carved from. On the web it holds the arena at its start and the
                                                  rust heap too, and lies inside what malloc took; a start-over

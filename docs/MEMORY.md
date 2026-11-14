@@ -528,8 +528,9 @@ Part 4 were taken as recommended, with one change at step 5, noted there.
     test now holds the allocator to the system while an engine runs and
     after it goes.) Two things stay out of the block, each for a reason
     the model states:
-    the arena, which natively is the core's own allocation or a
-    shared-memory segment other processes map, and the guest's memory must
+    the arena, which on a desktop is the core's own allocation or a
+    shared-memory segment other processes map (on a tiered device it is
+    still static storage), and the guest's memory must
     not be in a segment any process can reach; and the router's block, which
     is the core's for its life while the block is a build's — a build whose
     guest wants more than the block holds takes a new one (everything in it

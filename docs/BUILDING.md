@@ -341,8 +341,11 @@ cmake --build build/web --target clockwork_web --parallel 3   # → dist/wasm/my
 
 The JavaScript client and its workers are bundled as `scripts/build-web.sh`
 does in its last section: esbuild over `clockwork/js/clockwork.js` and each
-of `clockwork/js/workers/*.js`. The page names the module with `wasmUrl`
-("A web page", below).
+of `clockwork/js/workers/*.js`. The client imports the MIDI, controller and
+parameter glue from `clockwork/dist/midi/`, `dist/gamepad/` and
+`dist/params/`, which the section before that one builds, or stubs where
+there is no wasm-bindgen (`scripts/build-web-subsystems.sh`): run it first.
+The page names the module with `wasmUrl` ("A web page", below).
 
 ## Options
 

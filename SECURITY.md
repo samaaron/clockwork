@@ -77,9 +77,12 @@ every sample Sonic Pi ships against ffmpeg. Every night, each target runs
 under libFuzzer for two hours; a crasher is sealed to a key only the
 maintainer holds before it leaves the runner, and once fixed joins the corpus.
 The replay, the nightly runs and the SBOM scan are
-`.github/workflows/security.yml`. The sample check and the test suite under
-the sanitizers (ASan with UBSan, and TSan) are jobs in
-`.github/workflows/ci.yml`, and CodeQL is `.github/workflows/codeql.yml`.
+`.github/workflows/security.yml`. The sample check and the C++ test suite
+under the sanitizers (ASan with UBSan, and TSan) are in
+`.github/workflows/ci.yml`: every test binary but the plugin module tests
+(plugin hosting is off in that job), the reference traces for independence
+only, and not the Rust crates' own tests. CodeQL is
+`.github/workflows/codeql.yml`.
 
 ## Scope
 

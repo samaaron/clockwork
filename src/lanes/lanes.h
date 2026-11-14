@@ -391,13 +391,14 @@ void clockwork_set_channel_ceilings(ClockworkCore* core, uint32_t input_channels
  * next dsp_new, like clockwork_set_channel_ceilings. */
 void clockwork_declare_fp_env(ClockworkCore* core, uint32_t env);
 
-/* A floor under the guest's bulk memory (DspConfig::memory_bulk, the span
- * its allocations come from) for the NEXT build.
+/* The host's figure for the guest's bulk memory (DspConfig::memory_bulk,
+ * the span its allocations come from) for the NEXT build.
  *
- * The span is sized before dsp_new as the largest of what the guest
- * declares (DspInfo::memory_bulk_bytes_wanted, dsp_memory_bulk_bytes), the
- * memory profile's default and this. A host that knows its session will
- * allocate more than the guest can foresee says so here. 0 restores the
+ * The span is sized before dsp_new as the larger of what the guest declares
+ * (DspInfo::memory_bulk_bytes_wanted, dsp_memory_bulk_bytes) and this, which
+ * stands in the memory profile's default's place: it may be above the
+ * default or below it. A host that knows its session will allocate more
+ * than the guest can foresee says so here. 0 restores the
  * profile's default (CLOCKWORK_GUEST_MEMORY_BULK_BYTES). A span the system
  * cannot provide fails the build with that reason (clockwork_boot_error),
  * rather than booting a guest that cannot allocate. On a tiered or
