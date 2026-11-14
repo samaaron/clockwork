@@ -947,6 +947,20 @@ uint32_t metricsPartBytes(const ClientImpl* c) {
     return c->L.metrics_bytes + c->L.window_bytes + c->L.metrics_history_bytes;
 }
 
+// A region of the engine's 32-bit words into `to`, each read with an atomic
+// load: the engine writes them as atomics while it runs, so a copy taken
+// meanwhile reads each one whole. What is past the last whole word is
+// copied as it lies.
+void copyWords(uint8_t* to, const uint8_t* from, uint32_t bytes) {
+    const auto* words = reinterpret_cast<const std::atomic<uint32_t>*>(from);
+    const uint32_t whole = bytes / 4u;
+    for (uint32_t i = 0; i < whole; ++i) {
+        const uint32_t v = words[i].load(std::memory_order_relaxed);
+        std::memcpy(to + i * 4u, &v, sizeof v);
+    }
+    std::memcpy(to + whole * 4u, from + whole * 4u, bytes - whole * 4u);
+}
+
 // The parameter table into `to`, as it stood at one generation: the copy again while a define moved the word
 // under it, and, when a define outlasted every try, its word made odd, so no reader takes a torn table for whole.
 void copyParams(const ClientImpl* c, uint8_t* to) {
@@ -1063,10 +1077,14 @@ uint32_t clockwork_client_copy(ClockworkClient* handle, uint32_t parts,
     }
     if (parts & CLOCKWORK_COPY_METRICS) {
         h.metrics_bytes = metricsPartBytes(c);
-        std::memcpy(base + at, c->base + c->L.metrics_offset, c->L.metrics_bytes);
+        // The metrics and their history are the engine's words, written as
+        // it runs: read as clockwork_client_metrics reads them. The window
+        // is the guest's bytes, laid out and written as the guest likes, so
+        // it is copied as it lies, as a reader in place reads it.
+        copyWords(base + at, c->base + c->L.metrics_offset, c->L.metrics_bytes);
         std::memcpy(base + at + c->L.metrics_bytes, c->base + c->L.window_offset, c->L.window_bytes);
-        std::memcpy(base + at + c->L.metrics_bytes + c->L.window_bytes,
-                    c->base + c->L.metrics_history_offset, c->L.metrics_history_bytes);
+        copyWords(base + at + c->L.metrics_bytes + c->L.window_bytes,
+                  c->base + c->L.metrics_history_offset, c->L.metrics_history_bytes);
         std::memset(base + at + h.metrics_bytes, 0, align8(h.metrics_bytes) - h.metrics_bytes);
         at += align8(h.metrics_bytes);
     }

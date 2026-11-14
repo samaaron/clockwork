@@ -564,6 +564,52 @@ TEST_CASE("client abi: a copy holds the parameter table when asked, whole or mar
     clockwork_client_close(c);
 }
 
+// A copy is taken while the engine runs: its audio thread and its control
+// thread go on writing the metrics the copy reads. Under the thread sanitizer
+// this is the case that says the copy reads them as they are written, a word
+// at a time; without it, it says only that a copy can be taken meanwhile.
+TEST_CASE("client abi: a copy is taken while the engine goes on counting", "[client][abi][copy][threads]") {
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(e, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    // The engine kept busy: each sync is answered, and each answer the
+    // control thread takes is counted in the metrics.
+    std::jthread busy([&](const std::stop_token& stop) {
+        for (int id = 1; !stop.stop_requested(); ++id) {
+            const auto sync = osc_test::message(CLOCKWORK_SYS("sync"), id);
+            e.engine.sendOSC(sync.ptr(), sync.size());
+            e.engine.pumpAudioBlock();
+        }
+    });
+
+    const uint32_t parts = CLOCKWORK_COPY_ARENA | CLOCKWORK_COPY_METRICS | CLOCKWORK_COPY_PARAMS;
+    const uint32_t size = clockwork_client_copy_bytes(c, parts, nullptr, 0);
+    REQUIRE(size > sizeof(ClockworkCopyHeader));
+    std::vector<uint8_t> out(size);
+    uint32_t taken = 0;
+    uint32_t tries = 0;
+    // Copies all the while the control thread takes a few hundred answers:
+    // the metric it counts them in is one of those the copy reads.
+    const auto received = [&] {
+        uint32_t words[16] = {};
+        clockwork_client_metrics(c, words, 16);
+        return words[11];   // oscInMessagesReceived (metrics_schema.h)
+    };
+    const uint32_t before = received();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (received() - before < 300 && std::chrono::steady_clock::now() < until) {
+        ++tries;
+        if (clockwork_client_copy(c, parts, nullptr, 0, out.data(), size) == size) ++taken;
+    }
+    busy.request_stop();
+    busy.join();
+    CHECK(received() - before >= 300);
+    CHECK(taken == tries);
+    clockwork_client_close(c);
+}
+
 TEST_CASE("client abi: a copy holds what a reader in place reads", "[client][abi][copy]") {
     // For a reader with no view of the arena (js/lib/copy.js reads it; the
     // node test copy.test.mjs holds it to JavaScript's reads sample for
