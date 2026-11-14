@@ -570,7 +570,14 @@ TEST_CASE("client abi: a copy holds what a reader in place reads", "[client][abi
     // node test copy.test.mjs holds it to JavaScript's reads sample for
     // sample). Here: the parts are the engine's bytes, a tap's window is
     // audio_tap_read's, and what cannot be copied is refused or says so.
-    Engine e;
+    //
+    // The copy is held to the live region byte for byte, so nothing may be
+    // writing the region meanwhile: the control plane is the case's own, run
+    // until what boot said has been taken (taking a frame counts it in the
+    // metrics) and then left alone. Nothing ticks a pumped engine.
+    Engine e([](ClockworkEngine::Config& cfg) { cfg.hostDrivesControl = true; });
+    e.hostControl.stop();
+    for (int i = 0; i < 4; ++i) e.engine.controlPass();
     ClockworkStatus st = CLOCKWORK_E_ARG;
     ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
@@ -618,7 +625,15 @@ TEST_CASE("client abi: a copy holds what a reader in place reads", "[client][abi
     REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_METRICS, &metrics) == CLOCKWORK_OK);
     REQUIRE(clockwork_client_region(c, CLOCKWORK_REGION_WINDOW, &window) == CLOCKWORK_OK);
     REQUIRE(h.metrics_bytes >= metrics.bytes + window.bytes);
-    CHECK(std::memcmp(out.data() + at, metrics.base, metrics.bytes) == 0);
+    {
+        // Which metric word moved, if one did: said with the failure.
+        std::vector<uint8_t> now(static_cast<const uint8_t*>(metrics.base), static_cast<const uint8_t*>(metrics.base) + metrics.bytes);
+        std::string moved;
+        for (uint32_t w = 0; w + 4 <= metrics.bytes; w += 4)
+            if (std::memcmp(out.data() + at + w, now.data() + w, 4) != 0) moved += " " + std::to_string(w / 4);
+        INFO("metric words that differ:" << moved);
+        CHECK(moved.empty());
+    }
     CHECK(std::memcmp(out.data() + at + metrics.bytes, window.base, window.bytes) == 0);
     at += (h.metrics_bytes + 7u) & ~7u;
 
