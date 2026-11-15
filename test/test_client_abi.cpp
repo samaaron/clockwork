@@ -575,11 +575,34 @@ TEST_CASE("client abi: a copy is taken while the engine goes on counting", "[cli
     ClockworkClient* c = openInProcess(e, &st);
     REQUIRE(st == CLOCKWORK_OK);
 
+    const auto received = [&] {
+        uint32_t words[16] = {};
+        clockwork_client_metrics(c, words, 16);
+        return words[11];   // oscInMessagesReceived (metrics_schema.h)
+    };
+    const uint32_t before = received();
+
     // The engine kept busy: each sync is answered, and each answer the
-    // control thread takes is counted in the metrics.
+    // control thread takes is counted in the metrics. The sender stays within
+    // a few syncs of the answers taken: sent as fast as it can go, it gets
+    // ahead of the control thread on a slow machine until the egress ring is
+    // full and answers are dropped, which is not what this case is about.
+    constexpr uint32_t kAhead = 32;
     std::jthread busy([&](const std::stop_token& stop) {
-        for (int id = 1; !stop.stop_requested(); ++id) {
-            const auto sync = osc_test::message(CLOCKWORK_SYS("sync"), id);
+        uint32_t sent = 0;
+        // The answers taken, read from the engine's own counter: the client
+        // handle is the copying thread's (one handle is for one thread).
+        const auto& taken_by_control = e.engine.getMetrics().osc_in_messages_received;
+        while (!stop.stop_requested()) {
+            // Other frames are taken too (what boot said), so the count of
+            // answers taken can be ahead of the syncs sent.
+            const uint32_t taken = taken_by_control.load(std::memory_order_relaxed) - before;
+            if (sent > taken && sent - taken >= kAhead) {
+                e.engine.pumpAudioBlock();   // the audio thread goes on meanwhile
+                std::this_thread::yield();
+                continue;
+            }
+            const auto sync = osc_test::message(CLOCKWORK_SYS("sync"), static_cast<int>(++sent));
             e.engine.sendOSC(sync.ptr(), sync.size());
             e.engine.pumpAudioBlock();
         }
@@ -593,12 +616,6 @@ TEST_CASE("client abi: a copy is taken while the engine goes on counting", "[cli
     uint32_t tries = 0;
     // Copies all the while the control thread takes a few hundred answers:
     // the metric it counts them in is one of those the copy reads.
-    const auto received = [&] {
-        uint32_t words[16] = {};
-        clockwork_client_metrics(c, words, 16);
-        return words[11];   // oscInMessagesReceived (metrics_schema.h)
-    };
-    const uint32_t before = received();
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (received() - before < 300 && std::chrono::steady_clock::now() < until) {
         ++tries;
