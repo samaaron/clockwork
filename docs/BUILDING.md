@@ -362,7 +362,8 @@ The page names the module with `wasmUrl` ("A web page", below).
 | `CLOCKWORK_PLUGINS` | ON | host CLAP and VST3 plugins. Uses installed SDK headers when found (`CLAP_INCLUDE_DIR`, `VST3_PLUGINTERFACES_INCLUDE_DIR`), else fetches the pinned MIT copies. Native only |
 | `CLOCKWORK_NIF` | OFF | the BEAM NIF shared library |
 | `CLOCKWORK_STANDALONE` | ON when top-level | the scheduler host (`clockwork-scheduler-host`), and this tree's suite when `BUILD_TESTS` is on too |
-| `CLOCKWORK_CARGO_OFFLINE` | OFF | build the Rust subsystems with `--offline` (`--locked` is always passed) |
+| `CLOCKWORK_CARGO_OFFLINE` | OFF | build the Rust subsystems with `--offline` |
+| `CLOCKWORK_CARGO_LOCKED` | ON | build the Rust subsystems with `--locked`: `rust/Cargo.lock` is the dependency set. OFF is for a build against a distribution's own crate packages (below) |
 | `CLOCKWORK_RUST` | ON | build the Rust subsystems' umbrella staticlib with cargo. OFF for a Rust embedder (`rust/clockwork-sys`), which takes the subsystem crates itself; the targets that link a binary here — `CLOCKWORK_STANDALONE`, `BUILD_TESTS`, `CLOCKWORK_PLUGINS`, `CLOCKWORK_NIF` — must be OFF with it |
 | `CLOCKWORK_PLUGIN_BRIDGE_DIR` | empty | a directory the engine also searches for the plugin bridge, after "beside its own executable" — for an installed layout that keeps the bridge out of PATH (`/usr/libexec/<pkg>`) |
 | `CLOCKWORK_LINK` | **OFF** | Ableton Link tempo, transport and peers — GPL-2.0-or-later, see below |
@@ -392,7 +393,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 
 | in the tree | distro switch | if there is none, why not |
 |---|---|---|
-| the Rust crates | `CLOCKWORK_CARGO_OFFLINE` with a `cargo vendor` tree, or the archive's `librust-*` packages | |
+| the Rust crates | `CLOCKWORK_CARGO_OFFLINE` with a `cargo vendor` tree, or the archive's `librust-*` packages (below) | |
 | CLAP and VST3 SDKs | `CLOCKWORK_PLUGINS=OFF` | fetched at configure time; no distro packages them |
 | smoothie (`smoothie/`) | — | clockwork's own fork of four JUCE 7.0.12 modules, ISC; there is no packaged JUCE it could build against (JUCE 8 is AGPL and not taken). See `smoothie/README.md` |
 | oscpack (`src/vendor/oscpack`) | — | release 1.1.0 plus three fixes the packaged 1.1.0 lacks (64-bit detection on aarch64, malformed messages refused). See `src/vendor/oscpack/CLOCKWORK-CHANGES.md` |
@@ -405,6 +406,30 @@ beside its own binary first, then in `CLOCKWORK_PLUGIN_BRIDGE_DIR`, then
 gives up (the `CLOCKWORK_PLUGIN_BRIDGE` environment variable overrides both).
 Install it there and the engine in `bin/` and they find each other. CI builds
 this shape as `config (distro)`.
+
+### Against a distribution's own crates
+
+cargo resolves every dependency a workspace names, for every platform, before
+it builds for one. A build that has only the archive's crate packages
+(Debian's `librust-*-dev`) therefore stops on crates it would never compile:
+the Windows, macOS, Android and browser ones. `scripts/linux-manifests.py`
+removes those from a copy of the tree, from the manifests as they are:
+
+```sh
+scripts/linux-manifests.py --drop-member clockwork-guards <copy of the tree>
+rm <copy>/rust/Cargo.lock
+```
+
+`clockwork-guards` is the source checker CI runs, which no build needs. Then
+point cargo at the distribution's crate directory (Debian:
+`/usr/share/cargo/registry`, as a `[source]` replacement for crates.io) and
+configure with `-DCLOCKWORK_CARGO_OFFLINE=ON -DCLOCKWORK_CARGO_LOCKED=OFF`:
+the archive's versions are not the ones in `rust/Cargo.lock`, so cargo
+resolves against what is installed.
+
+Two crates stay in the tree in such a build: midir (above), and
+`external/symphonia-bundle-flac`, the crates.io release with one fix upstream
+has not released yet (`CLOCKWORK-CHANGES.md` there).
 
 ## Building without a device layer
 

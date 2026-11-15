@@ -269,6 +269,11 @@ option(CLOCKWORK_ASIO "Compile JUCE's ASIO backend on Windows (Steinberg SDK, ta
 # including WebAssembly — what a build reads is a property of the source
 # rather than of the machine it was configured on.
 option(CLOCKWORK_CARGO_OFFLINE  "Build the Rust subsystems with --offline (requires pre-vendored crates)" OFF)
+# OFF is for a distribution that builds against its own crate packages
+# (Debian's librust-*-dev): their versions are not the ones in rust/Cargo.lock,
+# so that build removes the lock file and lets cargo resolve against what is
+# installed. scripts/linux-manifests.py prepares the manifests for it.
+option(CLOCKWORK_CARGO_LOCKED   "Build the Rust subsystems with --locked (rust/Cargo.lock is the dependency set)" ON)
 # libsamplerate is vendored unmodified (src/vendor/libsamplerate, 0.2.2, its
 # medium sinc converter: see CLOCKWORK.md there) for the Link Audio input
 # renderer. A distro build can link the packaged one instead — Debian's
@@ -1056,11 +1061,13 @@ endif()
 if(CLOCKWORK_CARGO_OFFLINE)
     list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --offline)
 endif()
-# --locked always: rust/Cargo.lock is committed and is the dependency set that
-# was tested. A Cargo.toml edit that would change it fails here instead of
-# rewriting the lockfile as a side effect of a C++ build, and a distro build
-# gets the reproducibility it requires without asking for it.
-list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --locked)
+# --locked unless a distribution asked otherwise (CLOCKWORK_CARGO_LOCKED):
+# rust/Cargo.lock is committed and is the dependency set that was tested. A
+# Cargo.toml edit that would change it fails here instead of rewriting the
+# lockfile as a side effect of a C++ build.
+if(CLOCKWORK_CARGO_LOCKED)
+    list(APPEND CLOCKWORK_RUST_CARGO_FLAGS --locked)
+endif()
 
 set(CLOCKWORK_RUST_FEATURES)
 if(CLOCKWORK_MIDI)
@@ -1609,7 +1616,10 @@ if(CLOCKWORK_PLUGINS)
         if(CLOCKWORK_CARGO_OFFLINE)
             list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --offline)
         endif()
-        list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --locked ${CLOCKWORK_RUST_TARGET_FLAGS})
+        if(CLOCKWORK_CARGO_LOCKED)
+            list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS --locked)
+        endif()
+        list(APPEND CLOCKWORK_BRIDGE_CARGO_FLAGS ${CLOCKWORK_RUST_TARGET_FLAGS})
         # Built from Clockwork's workspace whoever is embedding: the bridge
         # is clockwork's binary, and an embedder's umbrella has nothing it
         # needs.

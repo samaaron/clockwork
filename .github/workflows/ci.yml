@@ -42,6 +42,8 @@ jobs:
         run: scripts/check-layout.sh
       - name: Check oscpack's types have the wire format's sizes on every target
         run: scripts/check-oscpack-types.sh
+      - name: Check the Linux-only manifests a distribution build resolves
+        run: python3 test/linux_manifests_test.py
 
   # --------------------------------------------------------- globals guard --
   # Every mutable variable with static storage in Clockwork's own code is on
