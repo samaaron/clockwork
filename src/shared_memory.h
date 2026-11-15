@@ -49,7 +49,7 @@ constexpr uint32_t RING_CURSORS_SIZE       = 56;    // Atomic control pointers &
 // once; a bulk payload is the guest's and rides the in ring.
 constexpr uint32_t CONTROL_RING_HEADER_SIZE = 64;
 constexpr uint32_t CONTROL_RING_SIZE        = 64u * 1024u;   // cursors + ring
-constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 76 in use
+constexpr uint32_t METRICS_SIZE       = 320;   // Performance metrics: 80 fields * 4 bytes = 320 bytes (multiple of 8); 77 in use
 constexpr uint32_t GLOBAL_OFFSET_SIZE = 4;     // Global timing offset in milliseconds (int32, atomic) - for multi-system sync (Ableton Link, NTP, etc.)
 constexpr uint32_t CLOCK_STATE_SIZE = 40; // ClockworkClock session state: 3 atomic uint64 + 3 atomic uint32 + 4 padding = 40 bytes
 
@@ -619,6 +619,19 @@ struct alignas(4) RingCursors {
     int32_t _padding;                     // Padding to maintain 8-byte alignment for subsequent Float64
 };
 
+// The bits of PerformanceMetrics::subsystems: what an engine has. The names
+// and their order are the metrics schema's (js/lib/metrics_schema.js,
+// engineSubsystems), from which src/metrics_schema.h carries them to a
+// native reader; test_metrics_shm.cpp holds the two to each other. A bit is
+// never reused.
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_MIDI       = 1u << 0;   // MIDI in and out
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_GAMEPAD    = 1u << 1;   // game controller input
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_OSC        = 1u << 2;   // the OSC cue server and outbound OSC
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_LINK       = 1u << 3;   // Ableton Link: tempo, transport, peers
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_LINK_AUDIO = 1u << 4;   // Link Audio streams
+constexpr uint32_t CLOCKWORK_SUBSYSTEM_SCHEDULER  = 1u << 5;   // the timed-event store
+constexpr uint32_t CLOCKWORK_SUBSYSTEMS_ALL       = (1u << 6) - 1u;
+
 // Performance metrics structure
 // Layout designed for contiguous memcpy operations:
 // - [0-8]   engine (shared C++; wasm_errors is JS-only)
@@ -824,7 +837,12 @@ struct alignas(4) PerformanceMetrics {
     std::atomic<uint32_t> params_generation;         // 73
     std::atomic<uint32_t> param_moves;               // 74
     std::atomic<uint32_t> params_refused;            // 75
-    std::atomic<uint32_t> reserved[4];               // 76-79: room for what comes next, 0
+    // The subsystems this engine has, one CLOCKWORK_SUBSYSTEM_* bit each
+    // (below). Written once at init by init_memory() (audio_processor.cpp)
+    // from what the build includes, and constant for the session: what a
+    // reader checks before it offers the user something the engine cannot do.
+    std::atomic<uint32_t> subsystems;                // 76
+    std::atomic<uint32_t> reserved[3];               // 77-79: room for what comes next, 0
 };
 
 // The session clock — ClockworkClockState, its snapshot and readClockworkClock()
@@ -1412,6 +1430,7 @@ CLOCKWORK_ASSERT_METRIC(params_live,                     72);
 CLOCKWORK_ASSERT_METRIC(params_generation,               73);
 CLOCKWORK_ASSERT_METRIC(param_moves,                     74);
 CLOCKWORK_ASSERT_METRIC(params_refused,                  75);
+CLOCKWORK_ASSERT_METRIC(subsystems,                      76);
 
 // METRICS_SIZE must cover the whole struct and stay a multiple of 8: the arena
 // regions that follow (ClockworkClockState) are 8-byte aligned and read via

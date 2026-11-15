@@ -10,6 +10,9 @@
  * Offsets [0-49] and [53-62] index the PerformanceMetrics struct in
  * src/shared_memory.h; [50-52] and [64+] are context metrics merged by
  * MetricsReader on the JS main thread.
+ * A `flags` field is a set of named things, several true at once: bit N
+ * of the word is `bits[N]`. Like an `enum` it is a state and has no unit;
+ * like a `constant` it is set once and keeps no history.
  * Fields marked `nativeOnly: true` have no web writer (always 0 on WASM);
  * fields marked `webOnly: true` have no native writer (a browser's, or the
  * JS client's own). One layout serves every panel: a row that reads a
@@ -175,6 +178,11 @@ export const METRICS_SCHEMA = {
     paramsGeneration:             { offset: 73, type: 'counter',  unit: 'count', description: 'Times the set of parameters changed' },
     paramMoves:                   { offset: 74, type: 'counter',  unit: 'count', description: "Times a parameter's value moved" },
     paramsRefused:                { offset: 75, type: 'counter',  unit: 'count', description: 'Parameter defines and sets refused' },
+    // What the engine has, set once when it starts: bit N is bits[N]. A reader
+    // checks it before offering something the engine cannot do. In a browser
+    // MIDI and game controller input are the page's, so the client sets
+    // those two bits for the ones it brought up.
+    engineSubsystems:             { offset: 76, type: 'flags',    bits: ['midi', 'gamepad', 'osc', 'link', 'linkAudio', 'scheduler'], description: 'Subsystems the engine has, one bit each' },
   },
 
   // NATIVE_STATS shm segment (native/JUCE backend only; see NATIVE_STAT_* in

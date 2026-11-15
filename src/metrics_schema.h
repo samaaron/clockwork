@@ -105,6 +105,7 @@ inline constexpr FieldInfo kFields[] = {
     { 73, "paramsGeneration", "count", "Times the set of parameters changed" },
     { 74, "paramMoves", "count", "Times a parameter's value moved" },
     { 75, "paramsRefused", "count", "Parameter defines and sets refused" },
+    { 76, "engineSubsystems", "", "Subsystems the engine has, one bit each" },
     { 80, "inBufferCapacity", "bytes", "IN ring buffer capacity" },
     { 81, "outBufferCapacity", "bytes", "OUT ring buffer capacity" },
     { 82, "nrtOutBufferCapacity", "bytes", "NRT-out ring buffer capacity" },
@@ -117,6 +118,19 @@ inline constexpr FieldInfo kFields[] = {
     { 89, "totalFramesDurationMs", "ms", "Chrome only: total audio rendered duration" },
     { 90, "hasPlaybackStats", "bool", "1 if Chrome playbackStats API is available, 0 otherwise" },
 };
+
+// The named bits of each flags metric: flags::<key>::<name> is the bit that
+// name has in the metric's word.
+namespace flags {
+namespace engineSubsystems {
+inline constexpr uint32_t midi = 1u << 0;
+inline constexpr uint32_t gamepad = 1u << 1;
+inline constexpr uint32_t osc = 1u << 2;
+inline constexpr uint32_t link = 1u << 3;
+inline constexpr uint32_t linkAudio = 1u << 4;
+inline constexpr uint32_t scheduler = 1u << 5;
+} // namespace engineSubsystems
+} // namespace flags
 
 struct NativeStatInfo
 {

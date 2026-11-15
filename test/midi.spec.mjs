@@ -292,6 +292,26 @@ test("a gamepad press reaches the client, and rumble reaches the pad", async ({ 
   expect(r.effect.duration).toBe(200);
 });
 
+// engineSubsystems (js/lib/metrics_schema.js) is what a page reads to know
+// what this engine has before it offers the user something. In a browser MIDI
+// and game controller input are the page's own, so their bits are there
+// exactly when the client brought the subsystem up.
+test("the metrics say MIDI and game controller input are there when the page has them, and not when it has not", async ({ page, clockworkConfig }) => {
+  const read = async ({ clockwork }) => {
+    const bits = window.Clockwork.getMetricsSchema().metrics.engineSubsystems.bits;
+    const word = clockwork.getMetrics().engineSubsystems;
+    const has = (name) => (word & (1 << bits.indexOf(name))) !== 0;
+    return { midi: has("midi"), gamepad: has("gamepad"), scheduler: has("scheduler"),
+             midiUp: clockwork.midi !== null, gamepadUp: clockwork.gamepad !== null };
+  };
+  const on = await run(page, clockworkConfig, read);
+  expect(on.midiUp && on.gamepadUp, "the fakes did not bring MIDI and the gamepad up").toBe(true);
+  expect(on).toMatchObject({ midi: true, gamepad: true, scheduler: true });
+
+  const off = await run(page, { ...clockworkConfig, midi: false, gamepad: false }, read);
+  expect(off).toMatchObject({ midi: false, gamepad: false, scheduler: true, midiUp: false, gamepadUp: false });
+});
+
 test("with MIDI off, a MIDI verb is refused by name; an unknown verb always is", async ({ page, clockworkConfig }) => {
   const r = await run(page, { ...clockworkConfig, midi: false, gamepad: false }, async ({ clockwork, waitFor, inbound }) => {
     clockwork.send("/clockwork/midi/ports/list");

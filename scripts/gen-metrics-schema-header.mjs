@@ -35,6 +35,10 @@ export function renderHeader(schema = METRICS_SCHEMA) {
   const compositeLines = composites.map((m) =>
     `    { "${cEscape(m.key)}", "${cEscape(m.description)}" },`);
 
+  const flagsCpp = metrics.filter((m) => m.type === 'flags').map((m) =>
+    `namespace ${m.key} {\n` +
+    m.bits.map((name, i) => `inline constexpr uint32_t ${name} = 1u << ${i};`).join('\n') +
+    `\n} // namespace ${m.key}`).join('\n');
   const fieldLines = metrics.map((m) =>
     `    { ${String(m.offset).padStart(2)}, "${cEscape(m.key)}", "${cEscape(m.unit ?? '')}", "${cEscape(m.description)}" },`);
 
@@ -52,7 +56,7 @@ export function renderHeader(schema = METRICS_SCHEMA) {
   let historyCount = 0;
   for (const m of engineWords) {
     signedWords[m.offset] = Boolean(m.signed);
-    if (m.type !== 'constant') historySlot[m.offset] = historyCount++;
+    if (m.type !== 'constant' && m.type !== 'flags') historySlot[m.offset] = historyCount++;
   }
   const wordTable = (arr, per = 16) => {
     const rows = [];
@@ -93,6 +97,12 @@ struct FieldInfo
 inline constexpr FieldInfo kFields[] = {
 ${fieldLines.join('\n')}
 };
+
+// The named bits of each flags metric: flags::<key>::<name> is the bit that
+// name has in the metric's word.
+namespace flags {
+${flagsCpp}
+} // namespace flags
 
 struct NativeStatInfo
 {
@@ -268,6 +278,11 @@ export function renderRust(schema = METRICS_SCHEMA) {
   const composites = Object.entries(schema.composites)
     .map(([key, def]) => ({ key, ...def }));
 
+  const snake = (name) => name.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+  const flagsRust = metrics.filter((m) => m.type === 'flags').map((m) =>
+    `    pub mod ${snake(m.key)} {\n` +
+    m.bits.map((name, i) => `        pub const ${snake(name).toUpperCase()}: u32 = 1 << ${i};`).join('\n') +
+    `\n    }`).join('\n');
   const fieldLines = metrics.map((m) =>
     `    FieldInfo { offset: ${m.offset}, key: "${rustEscape(m.key)}", unit: "${rustEscape(m.unit ?? '')}", description: "${rustEscape(m.description)}" },`);
   const nativeLines = nativeStats.map((m) =>
@@ -330,6 +345,12 @@ pub struct NativeStatInfo {
 pub struct CompositeInfo {
     pub key: &'static str,
     pub description: &'static str,
+}
+
+/// The named bits of each flags metric: \`flags::<key>::<NAME>\` is the bit
+/// that name has in the metric's word.
+pub mod flags {
+${flagsRust}
 }
 
 /// Every performance metric, in offset order.

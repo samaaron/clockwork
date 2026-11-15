@@ -1258,6 +1258,29 @@ extern "C" {
         metrics->scheduler_capacity.store(0, std::memory_order_relaxed);
         metrics->scheduler_pool_bytes.store(0, std::memory_order_relaxed);
 #endif
+        // What this build includes. In a browser MIDI and game controller
+        // input are the page's (main-thread subsystems), so the client adds
+        // their bits to what it reads here (js/lib/metrics_reader.js).
+        uint32_t subsystems = 0;
+#ifdef CLOCKWORK_MIDI
+        subsystems |= CLOCKWORK_SUBSYSTEM_MIDI;
+#endif
+#ifdef CLOCKWORK_GAMEPAD
+        subsystems |= CLOCKWORK_SUBSYSTEM_GAMEPAD;
+#endif
+#ifdef CLOCKWORK_OSC
+        subsystems |= CLOCKWORK_SUBSYSTEM_OSC;
+#endif
+#ifdef CLOCKWORK_LINK
+        subsystems |= CLOCKWORK_SUBSYSTEM_LINK;
+#ifdef CLOCKWORK_WITH_LINK_AUDIO
+        subsystems |= CLOCKWORK_SUBSYSTEM_LINK_AUDIO;
+#endif
+#endif
+#if CLOCKWORK_SCHEDULER
+        subsystems |= CLOCKWORK_SUBSYSTEM_SCHEDULER;
+#endif
+        metrics->subsystems.store(subsystems, std::memory_order_relaxed);
     }
 
     static inline void update_scheduler_depth_metric(clockwork::CoreState& st, uint32_t depth) {

@@ -131,7 +131,7 @@ export const CLOCK_DRIFT_US = 50;
 // the clock's anchors at 63 included: what the reader copies from the SAB
 // before the context writes its own slots over 51-52 (METRICS_SIZE / 4 in
 // shared_memory.h).
-export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 76 fields in use
+export const SAB_METRICS_WORDS = 80;   // METRICS_SIZE / 4: the engine's block, 77 fields in use
 
 // =============================================================================
 // Context metrics [51-52, 64-67] (written by main thread into merged array only)
@@ -177,6 +177,8 @@ export const PARAMS_LIVE = 72;              // entries in the parameter table
 export const PARAMS_GENERATION = 73;        // times that set changed
 export const PARAM_MOVES = 74;              // times a value moved
 export const PARAMS_REFUSED = 75;           // defines and sets refused
+// 76: which subsystems the engine has, one bit each (metrics_schema.js: engineSubsystems.bits).
+export const SUBSYSTEMS = 76;
 export const CTX_IN_BUFFER_CAPACITY = 80;           // Static from bufferConstants
 export const CTX_OUT_BUFFER_CAPACITY = 81;          // Static from bufferConstants
 export const CTX_NRT_OUT_BUFFER_CAPACITY = 82;        // Static from bufferConstants

@@ -35,7 +35,7 @@ export function historySlots(schema = METRICS_SCHEMA, metricWords = 80) {
     .map(([key, def]) => ({ key, ...def }))
     .filter((m) => m.offset < metricWords && !m.webOnly)
     .sort((a, b) => a.offset - b.offset);
-  for (const m of engine) if (m.type !== 'constant') slots.push({ key: m.key, offset: m.offset, signed: Boolean(m.signed), slot: slots.length });
+  for (const m of engine) if (m.type !== 'constant' && m.type !== 'flags') slots.push({ key: m.key, offset: m.offset, signed: Boolean(m.signed), slot: slots.length });
   return slots;
 }
 

@@ -24,6 +24,19 @@
 #include "shm_segment.hpp"
 #include "shared_memory.h"
 #include "core_state.h"
+#include "metrics_schema.h"
+
+// The engine writes the subsystem bits by shared_memory.h's names; a native
+// reader takes them from the generated schema. One meaning for each bit.
+namespace subsystem_bits = clockwork::metrics_schema::flags::engineSubsystems;
+static_assert(CLOCKWORK_SUBSYSTEM_MIDI       == subsystem_bits::midi);
+static_assert(CLOCKWORK_SUBSYSTEM_GAMEPAD    == subsystem_bits::gamepad);
+static_assert(CLOCKWORK_SUBSYSTEM_OSC        == subsystem_bits::osc);
+static_assert(CLOCKWORK_SUBSYSTEM_LINK       == subsystem_bits::link);
+static_assert(CLOCKWORK_SUBSYSTEM_LINK_AUDIO == subsystem_bits::linkAudio);
+static_assert(CLOCKWORK_SUBSYSTEM_SCHEDULER  == subsystem_bits::scheduler);
+static_assert(CLOCKWORK_SUBSYSTEMS_ALL == (subsystem_bits::midi | subsystem_bits::gamepad | subsystem_bits::osc
+                                           | subsystem_bits::link | subsystem_bits::linkAudio | subsystem_bits::scheduler));
 
 namespace {
 ClockworkEngine::Config metricsShmConfig(unsigned port) {
@@ -141,6 +154,47 @@ TEST_CASE("metrics: a purge starts the buffer peaks over",
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForBlocks(64, 30000));   // several flushes; a bound only a broken engine reaches
     CHECK(fix.engine().getMetrics().in_buffer_peak_bytes.load() < wide.size());
+}
+
+TEST_CASE("metrics: the engine publishes which subsystems it has",
+          "[metrics][subsystems]") {
+    // A reader greys out what an engine cannot do (a build with no game
+    // controller input, say) from this word, before it has sent a message.
+    // So each bit is checked against what the engine DOES with the
+    // subsystem's verbs, not against the build option that wrote it.
+    EngineFixture fix;
+    const uint32_t have = fix.engine().getMetrics().subsystems.load();
+
+    const auto answers = [&](const char* ask, const char* reply) {
+        fix.clearReplies();
+        fix.send(osc_test::message(ask));
+        OscReply r;
+        REQUIRE(fix.pollUntil([&] {
+            for (const auto& got : fix.allReplies())
+                if (got.address == reply || got.address == CLOCKWORK_SYS("error")) { r = got; return true; }
+            return false;
+        }));
+        return r.address == reply;
+    };
+
+    CHECK(((have & CLOCKWORK_SUBSYSTEM_GAMEPAD) != 0)
+          == answers(CLOCKWORK_SYS("gamepad/devices/list"), CLOCKWORK_SYS("gamepad/devices.reply")));
+    CHECK(((have & CLOCKWORK_SUBSYSTEM_MIDI) != 0)
+          == answers(CLOCKWORK_SYS("midi/ports/list"), CLOCKWORK_SYS("midi/ports.reply")));
+    CHECK(((have & CLOCKWORK_SUBSYSTEM_SCHEDULER) != 0)
+          == (fix.engine().getMetrics().scheduler_capacity.load() != 0u));
+#ifdef CLOCKWORK_OSC
+    CHECK((have & CLOCKWORK_SUBSYSTEM_OSC) != 0);
+#else
+    CHECK((have & CLOCKWORK_SUBSYSTEM_OSC) == 0);
+#endif
+#ifdef CLOCKWORK_LINK
+    CHECK((have & CLOCKWORK_SUBSYSTEM_LINK) != 0);
+#else
+    CHECK((have & CLOCKWORK_SUBSYSTEM_LINK) == 0);
+#endif
+    // Nothing but the bits that have a name.
+    CHECK((have & ~CLOCKWORK_SUBSYSTEMS_ALL) == 0u);
 }
 
 TEST_CASE("metrics: the engine publishes how much its scheduler holds",

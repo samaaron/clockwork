@@ -187,6 +187,8 @@ export class MetricsReader {
       paramsGeneration: m[MetricsOffsets.PARAMS_GENERATION],
       paramMoves: m[MetricsOffsets.PARAM_MOVES],
       paramsRefused: m[MetricsOffsets.PARAMS_REFUSED],
+      // which subsystems the engine has (bits named by the schema's engineSubsystems.bits)
+      engineSubsystems: m[MetricsOffsets.SUBSYSTEMS],
       rustHeapUsedBytes: m[MetricsOffsets.RUST_HEAP_USED_BYTES],
       rustHeapFallbacks: m[MetricsOffsets.RUST_HEAP_FALLBACKS],
       // the guest's mallocs (shared C++, at the metrics flush; counted on the web)
@@ -330,6 +332,10 @@ export class MetricsReader {
     } else if (this.#metricsView) {
       arr.set(this.#metricsView);
     }
+
+    // The page's own subsystems (MIDI, game controller input), which the
+    // engine in the worklet cannot know about, beside the ones it wrote.
+    arr[MetricsOffsets.SUBSYSTEMS] |= context.subsystems ?? 0;
 
     // Context slots 46+
     // clockOffsetMs is signed — stored as int32 via DataView

@@ -2764,9 +2764,17 @@ export class Clockwork {
       transportMetrics: this.#osc?.getMetrics(),
       clockOffsetMs: this.#clock?.getClockOffset() ?? 0,
       audioContextState: this.#audioContext?.state || "unknown",
+      subsystems: this.#pageSubsystems(),
       audioHealthPct: this.#audioHealthMonitor?.update() ?? 100,
       playbackStats: this.#capabilities.playbackStats ? this.#audioContext?.playbackStats : null,
     };
+  }
+
+  // The bits of engineSubsystems for what runs on the page rather than in
+  // the worklet: MIDI and game controller input, each while it is up.
+  #pageSubsystems() {
+    const bit = (name) => 1 << METRICS_SCHEMA.metrics.engineSubsystems.bits.indexOf(name);
+    return (this.midi ? bit("midi") : 0) | (this.gamepad ? bit("gamepad") : 0);
   }
 
   #gatherMetrics() {

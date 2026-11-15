@@ -93,13 +93,14 @@ test("every metric declares a description and a type, and every measurement a un
   // audioContextState, mode — report which of a few named things is currently
   // true, and there is no unit in which "suspended" is a quantity. Demanding
   // one would be answered by inventing a word like "state", which is a unit
-  // column that means nothing and reads like one that does.
+  // column that means nothing and reads like one that does. A `flags` metric
+  // is the same kind of thing with several true at once, and names its bits.
   for (const [group, entries] of Object.entries(METRICS_SCHEMA)) {
     if (group === "layout" || group === "composites") continue;
     for (const [name, def] of Object.entries(entries)) {
       assert.ok(def.description, `${group}.${name} has no description`);
       assert.ok(def.type, `${group}.${name} has no type`);
-      if (def.type !== "enum") {
+      if (def.type !== "enum" && def.type !== "flags") {
         assert.ok(def.unit, `${group}.${name} is a ${def.type} and has no unit`);
       }
     }

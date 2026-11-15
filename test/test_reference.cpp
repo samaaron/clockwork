@@ -198,11 +198,12 @@ public:
     // the operating system's wall clock (LinkSession.h,
     // anchorToWallClockIfUnset), not at the engine's own time, so they depend
     // on when the process ran (docs/ENGINES.md, suspect 10). The commit
-    // is the build's, not the engine's behaviour.
+    // and the subsystems are the build's, not the engine's behaviour.
     void finish() {
         for (const auto& f : clockwork::metrics_schema::kFields) {
             if (f.offset >= clockwork::metrics_schema::kMetricWords || std::strcmp(f.key, "clockBeatCenti") == 0 ||
-                std::strcmp(f.key, "clockPhaseCenti") == 0 || std::strcmp(f.key, "clockworkCommit") == 0)
+                std::strcmp(f.key, "clockPhaseCenti") == 0 || std::strcmp(f.key, "clockworkCommit") == 0 ||
+                std::strcmp(f.key, "engineSubsystems") == 0)
                 continue;
             uint32_t word = 0;
             if (mLane.metricWord(f.offset, word)) mTrace << "metric " << f.key << " " << word << "\n";

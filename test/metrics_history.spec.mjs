@@ -4,7 +4,8 @@
  * What every counter and gauge did over the last hour, as a page reads it
  * (getMetricsHistory, metrics_history.js): on both transports, a window of
  * the last second shows the blocks that were rendered in it, a constant has
- * no history, and the keys are the schema's non-constant engine metrics.
+ * no history (nor has a `flags` field, set once as a constant is), and the
+ * keys are the schema's other engine metrics.
  */
 import { test, expect, boot } from "./fixtures.mjs";
 
@@ -22,13 +23,13 @@ test("getMetricsHistory() shows the last second's blocks, on either transport", 
     const h = cw.getMetricsHistory();
     const schema = window.Clockwork.getMetricsSchema();
     const expected = Object.entries(schema.metrics)
-      .filter(([, d]) => d.offset < 80 && !d.webOnly && d.type !== "constant").map(([k]) => k).sort();
+      .filter(([, d]) => d.offset < 80 && !d.webOnly && d.type !== "constant" && d.type !== "flags").map(([k]) => k).sort();
     const got = Object.keys(h).sort();
     const pc = h.engineProcessCount;
     await cw.shutdown();
     return { got, expected, pc, sampleRate: h.audioSampleRate, mode: config.mode };
   }, [clockworkConfig]);
-  expect(r.got, "the metrics with a history are the schema's non-constant engine metrics").toEqual(r.expected);
+  expect(r.got, "the metrics with a history are the schema's engine metrics that change").toEqual(r.expected);
   expect(r.sampleRate, "a constant has no history").toBeUndefined();
   expect(r.pc.s1.covered, "the current second recorded").toBe(1);
   expect(r.pc.s1.delta, `blocks so far this second (${JSON.stringify(r.pc)})`).toBeGreaterThanOrEqual(1);

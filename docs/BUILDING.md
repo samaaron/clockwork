@@ -370,6 +370,16 @@ The page names the module with `wasmUrl` ("A web page", below).
 | `CLOCKWORK_LINK_AUDIO` | **OFF** | Link peer audio in and publish out. Needs `CLOCKWORK_LINK` |
 | `CLOCKWORK_ASIO` | **OFF** | Windows ASIO from the vendored Steinberg SDK, taken under GPLv3 |
 
+What a build ended up with is readable by its clients without a message
+sent: the metric `engineSubsystems` (word 76 of the engine's metrics, in the
+arena and so in the shared-memory segment) has one bit each for MIDI, game
+controller input, OSC, Link, Link Audio and the scheduler, set when the
+engine starts. The bit names are the schema's (`js/lib/metrics_schema.js`;
+`flags::engineSubsystems` in the generated `src/metrics_schema.h`). A client
+reads it before offering the user something this engine cannot do. In a
+browser MIDI and game controller input run on the page, so the JavaScript
+client adds those two bits for the ones it brought up.
+
 ## Two flags bring in third-party code
 
 `CLOCKWORK_LINK` fetches Ableton Link (GPL-2.0-or-later); `CLOCKWORK_ASIO`

@@ -62,6 +62,9 @@ TEST_CASE("token: two messages sent with different tokens are each answered with
     CHECK(tokens == std::vector<uint32_t>{ 100, 200 });
 }
 
+// Game controller input is where a notice is easiest to cause; a build
+// without it has no such notice to deliver.
+#ifdef CLOCKWORK_GAMEPAD
 TEST_CASE("token: a notification answers no message, and is delivered with no token", "[token]") {
     EngineFixture fx;
     // The client asks to be told about controllers, then asks for a refresh.
@@ -79,3 +82,4 @@ TEST_CASE("token: a notification answers no message, and is delivered with no to
     REQUIRE(fx.waitForReply(CLOCKWORK_SYS("gamepad/devices"), notice));
     CHECK(notice.token == 0);
 }
+#endif
