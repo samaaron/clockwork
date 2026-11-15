@@ -115,7 +115,7 @@ void checkTable(const uint8_t* arena) {
 // What params.cpp reaches outside itself: the core's state, with no ports, sinks or heap, and its reply door.
 // The two parts of a core's state defined in core_state.cpp, which would bring the engine with it: the
 // table's verbs touch neither, so here they hold nothing.
-clockwork::Assets::Assets() : slots{}, count(0) {}
+clockwork::Assets::Assets() : table{}, count(0) {}
 void clockwork::Staging::Free::operator()(void*) const {}
 extern "C" const ClockworkPorts* clockwork_core_ports(const ClockworkCore*) { return nullptr; }
 extern "C" const ClockworkSinks* clockwork_core_sinks(const ClockworkCore*) { return nullptr; }
