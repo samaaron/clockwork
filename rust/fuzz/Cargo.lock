@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "alsa"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812947049edcd670a82cd5c73c3661d2e58468577ba8489de58e1a73c04cbd5d"
+checksum = "d3f93573e7ddb15145d27c58c0fa0a452faad9f5452ac17ed4554ea035ea9b71"
 dependencies = [
  "alsa-sys",
  "bitflags",
@@ -25,10 +25,11 @@ dependencies = [
 
 [[package]]
 name = "alsa-sys"
-version = "0.4.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad7569085a265dd3f607ebecce7458eaab2132a84393534c95b18dcbc3f31e04"
+checksum = "f0320138053ef93099f168102c37b46ac0b9c53affc56ef7696633ad5477e2be"
 dependencies = [
+ "cc",
  "libc",
  "pkg-config",
 ]
@@ -118,9 +119,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "clockwork-abi"
+version = "0.1.0"
+
+[[package]]
 name = "clockwork-audio-decode"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "symphonia",
 ]
 
@@ -128,6 +134,7 @@ dependencies = [
 name = "clockwork-comms"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-osc-net",
@@ -136,6 +143,10 @@ dependencies = [
  "socket2",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "clockwork-fence"
+version = "0.1.0"
 
 [[package]]
 name = "clockwork-fuzz"
@@ -156,6 +167,7 @@ name = "clockwork-gamepad"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "clockwork-fence",
  "clockwork-osc",
  "gilrs",
  "objc2",
@@ -167,12 +179,17 @@ dependencies = [
 [[package]]
 name = "clockwork-log"
 version = "0.1.0"
+dependencies = [
+ "clockwork-abi",
+ "clockwork-fence",
+]
 
 [[package]]
 name = "clockwork-midi"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-wait",
@@ -186,11 +203,15 @@ dependencies = [
 [[package]]
 name = "clockwork-osc"
 version = "0.1.0"
+dependencies = [
+ "clockwork-fence",
+]
 
 [[package]]
 name = "clockwork-osc-net"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-log",
  "clockwork-osc",
  "clockwork-wait",
@@ -201,6 +222,7 @@ dependencies = [
 name = "clockwork-schedule"
 version = "0.1.0"
 dependencies = [
+ "clockwork-fence",
  "clockwork-osc",
 ]
 

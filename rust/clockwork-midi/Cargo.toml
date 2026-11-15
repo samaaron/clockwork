@@ -61,7 +61,7 @@ coremidi = "0.9.0"
 core-foundation = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-alsa = ">=0.9.0, <0.12"
+alsa = ">=0.9.0, <0.13"
 # ReadyWait: the device watcher blocks on it until the ALSA sequencer has an
 # announcement or the watcher stops (src/watcher.rs).
 clockwork-wait = { path = "../clockwork-wait" }
