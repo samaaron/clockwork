@@ -23,7 +23,9 @@ other crates rather than taking `librust-midir-dev`.
 - Web MIDI changes for the browser build of the subsystem, and the smaller
   fixes visible in `git diff` against the 0.11.0 crate.
 - **alsa up to 0.12** (`Cargo.toml`: `alsa = ">=0.9.0, <0.13"`), as upstream
-  midir 0.11.1 has it, so a build takes the alsa a distro ships.
+  midir 0.11.1 has it, so a build takes the alsa a distro ships. Clockwork's
+  own lock file stays on 0.11: 0.12 needs an ALSA library with the
+  `snd_ump_*` functions, which Debian bookworm's 1.2.8 lacks.
 
 The crate keeps its upstream name, version and licence, and the
 `[workspace]` table at the top of `Cargo.toml` is clockwork's (the browser
