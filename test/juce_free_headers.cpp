@@ -5,25 +5,8 @@
  * the include path.
  *
  * Clockwork uses JUCE inside, for its devices; a host never sees it. These
- * are the headers a host includes — SuperSonic's list — and this file is built
+ * are the headers a host includes (host_headers.h), and this file is built
  * by a target that cannot see JUCE: a header that starts including it fails
  * this build, rather than quietly handing JUCE to every host.
  */
-#include "smoothie_worklet.h"
-#include "smoothie_devices.h"
-#include "ClockworkEngine.h"
-#include "ClockworkProcessor.h"
-#include "TrackControl.h"
-#include "GuestConfigText.h"
-#include "IOscTransport.h"
-#include "OscBuilder.h"
-#include "clockwork_audio_file.h"
-#include "clockwork_client.h"
-#include "clockwork_product.h"
-#include "clock/clock_math.h"
-#include "dsp_api.h"
-#include "memory_profile.h"
-#include "rt_alloc.h"
-#include "shared_memory.h"
-#include "shm_audio_buffer.hpp"
-#include "shm_segment.hpp"
+#include "host_headers.h"

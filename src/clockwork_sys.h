@@ -73,7 +73,7 @@
 // decided at the END of clockwork's own chain, not at its front.
 template <class Emit>
 void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
-                          uint32_t generation, Emit&& emit) {
+                          uint32_t generation, Emit&& reply) {
     // The address echoed is the frame's, read within `len` only: the frame
     // is a peer's bytes that nothing validated, and one with no NUL in it
     // would otherwise be read to whatever follows it in the ring. At most
@@ -95,7 +95,7 @@ void clockwork_sys_refuse(const uint8_t* data, uint32_t len, const char* reason,
     ps << osc::BeginMessage(CLOCKWORK_SYS("error"))
        << addr.data() << why.data()
        << static_cast<osc::int32>(generation) << osc::EndMessage;
-    emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+    reply(reinterpret_cast<const uint8_t*>(ps.Data()),
          static_cast<uint32_t>(ps.Size()));
 }
 
@@ -169,7 +169,7 @@ enum class ClockworkSysRt {
 // `generation` is the guest instance's, for a refusal to carry: an input,
 // like the clock, for the same reason.
 template <class Emit>
-ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&& emit,
+ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&& reply,
                                        const ClockworkClockState* clock, uint32_t generation) {
     if (!clockwork_sys_claims(data, len)) return ClockworkSysRt::NotClaimed;
 
@@ -190,7 +190,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             ps << osc::BeginMessage(CLOCKWORK_SYS("pong"));
             if (arg != end && arg->IsInt32()) ps << arg->AsInt32Unchecked();
             ps << osc::EndMessage;
-            emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+            reply(reinterpret_cast<const uint8_t*>(ps.Data()),
                  static_cast<uint32_t>(ps.Size()));
             return ClockworkSysRt::Answered;
         }
@@ -207,7 +207,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             ps << osc::BeginMessage(CLOCKWORK_SYS("synced"));
             ps << ((arg != end && arg->IsInt32()) ? arg->AsInt32Unchecked() : 0);
             ps << osc::EndMessage;
-            emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+            reply(reinterpret_cast<const uint8_t*>(ps.Data()),
                  static_cast<uint32_t>(ps.Size()));
             return ClockworkSysRt::Answered;
         }
@@ -239,7 +239,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             // arrives after its caller gave up is still attributable.
             if (arg != end && arg->IsInt32()) ps << arg->AsInt32Unchecked();
             ps << osc::EndMessage;
-            emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+            reply(reinterpret_cast<const uint8_t*>(ps.Data()),
                  static_cast<uint32_t>(ps.Size()));
             return ClockworkSysRt::Answered;
         }
@@ -248,7 +248,7 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
             osc::OutboundPacketStream ps(buf.data(), buf.size());
             ps << osc::BeginMessage(CLOCKWORK_SYS("echo.reply"));
             if (arg == end) {
-                clockwork_sys_refuse(data, len, "echo takes one string or blob", generation, emit);
+                clockwork_sys_refuse(data, len, "echo takes one string or blob", generation, reply);
                 return ClockworkSysRt::Answered;
             }
             if (arg->IsString()) {
@@ -259,16 +259,16 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
                 arg->AsBlobUnchecked(b, n);
                 ps << osc::Blob(b, static_cast<osc::osc_bundle_element_size_t>(n));
             } else {
-                clockwork_sys_refuse(data, len, "echo takes one string or blob", generation, emit);
+                clockwork_sys_refuse(data, len, "echo takes one string or blob", generation, reply);
                 return ClockworkSysRt::Answered;
             }
             ps << osc::EndMessage;
-            emit(reinterpret_cast<const uint8_t*>(ps.Data()),
+            reply(reinterpret_cast<const uint8_t*>(ps.Data()),
                  static_cast<uint32_t>(ps.Size()));
             return ClockworkSysRt::Answered;
         }
     } catch (...) {
-        clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, generation, emit);
+        clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_MALFORMED, generation, reply);
         return ClockworkSysRt::Answered;
     }
 
@@ -284,14 +284,14 @@ ClockworkSysRt handle_clockwork_sys_rt(const uint8_t* data, uint32_t len, Emit&&
 // DSP. `generation` is the guest instance's, for the refusal to carry
 // (clockwork_sys_refuse): an input, like the clock, so this stays pure.
 template <class Emit>
-bool handle_clockwork_sys_osc(const uint8_t* data, uint32_t len, Emit&& emit,
+bool handle_clockwork_sys_osc(const uint8_t* data, uint32_t len, Emit&& reply,
                               const ClockworkClockState* clock, uint32_t generation) {
-    switch (handle_clockwork_sys_rt(data, len, emit, clock, generation)) {
+    switch (handle_clockwork_sys_rt(data, len, reply, clock, generation)) {
         case ClockworkSysRt::NotClaimed:  return false;
         case ClockworkSysRt::Answered:    return true;
         case ClockworkSysRt::UnknownVerb: break;
     }
-    clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_UNKNOWN, generation, emit);
+    clockwork_sys_refuse(data, len, CLOCKWORK_REFUSED_UNKNOWN, generation, reply);
     return true;
 }
 

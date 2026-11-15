@@ -82,7 +82,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     });
     expect!(mine, ClockworkClientMessage { bytes, length, token, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });
-    expect!(mine, ClockworkScopeShape { struct_bytes, slots, slot_bytes, header_bytes, frames, channels });
+    expect!(mine, ClockworkScopeShape { struct_bytes, slot_count, slot_bytes, header_bytes, frames, channels });
     expect!(mine, ClockworkCopyWant { source, slot, frames });
     expect!(mine, ClockworkCopyHeader { magic, version, bytes, generation, arena_bytes, metrics_bytes, windows, params_bytes });
     expect!(mine, ClockworkCopyWindow { source, slot, channels, frames, activations, _reserved, write_position });

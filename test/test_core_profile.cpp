@@ -111,7 +111,7 @@ TEST_CASE("profile: a core laid out from its own says so in its table, and its c
     ClockworkScopeShape shape {};
     shape.struct_bytes = sizeof shape;
     REQUIRE(clockwork_client_scope_shape(client.c, &shape) == CLOCKWORK_OK);
-    CHECK(shape.slots == SCOPE_SLOTS);
+    CHECK(shape.slot_count == SCOPE_SLOTS);
     CHECK(shape.slot_bytes == L.scope_slot_bytes);
     CHECK(shape.header_bytes == SCOPE_HEADER_SIZE);
     CHECK(shape.frames == p.scope_frames);

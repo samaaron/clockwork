@@ -68,7 +68,7 @@ int main(void) {
     S(ClockworkRegion);
     F(ClockworkRegion, base); F(ClockworkRegion, bytes); F(ClockworkRegion, writable);
     S(ClockworkScopeShape);
-    F(ClockworkScopeShape, struct_bytes); F(ClockworkScopeShape, slots); F(ClockworkScopeShape, slot_bytes);
+    F(ClockworkScopeShape, struct_bytes); F(ClockworkScopeShape, slot_count); F(ClockworkScopeShape, slot_bytes);
     F(ClockworkScopeShape, header_bytes); F(ClockworkScopeShape, frames); F(ClockworkScopeShape, channels);
     S(ClockworkCopyWant);
     F(ClockworkCopyWant, source); F(ClockworkCopyWant, slot); F(ClockworkCopyWant, frames);

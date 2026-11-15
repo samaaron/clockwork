@@ -34,7 +34,7 @@ pub type ClockworkSinkHostEmit = Option<
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ClockworkSinkHostEmitter {
-    pub emit: ClockworkSinkHostEmit,
+    pub emit_fn: ClockworkSinkHostEmit,
     pub ctx: *mut c_void,
 }
 

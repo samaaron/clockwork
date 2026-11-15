@@ -892,7 +892,7 @@ ClockworkStatus clockwork_client_scope_shape(ClockworkClient* handle, ClockworkS
     auto* c = reinterpret_cast<ClientImpl*>(handle);
     if (!c || !out || out->struct_bytes < sizeof(ClockworkScopeShape)) return CLOCKWORK_E_ARG;
     out->struct_bytes = sizeof(ClockworkScopeShape);
-    out->slots        = c->L.audio_slot_count;
+    out->slot_count   = c->L.audio_slot_count;
     out->slot_bytes   = c->L.audio_slot_bytes;
     out->header_bytes = c->L.audio_header_bytes;
     out->frames       = c->L.audio_frames;

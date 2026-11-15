@@ -113,7 +113,7 @@ pub struct ClockworkRegion {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClockworkScopeShape {
     pub struct_bytes: u32,
-    pub slots: u32,
+    pub slot_count: u32,
     pub slot_bytes: u32,
     pub header_bytes: u32,
     pub frames: u32,

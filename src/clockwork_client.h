@@ -706,7 +706,7 @@ uint32_t clockwork_client_scope_read(ClockworkClient* c, uint32_t slot, uint32_t
  * `channels`, so a reader built for another engine's are not this one's. */
 typedef struct ClockworkScopeShape {
     uint32_t struct_bytes;   /* sizeof(ClockworkScopeShape), for later fields */
-    uint32_t slots;
+    uint32_t slot_count;
     uint32_t slot_bytes;
     uint32_t header_bytes;
     uint32_t frames;

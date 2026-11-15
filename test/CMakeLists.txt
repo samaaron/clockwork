@@ -36,6 +36,19 @@ target_compile_definitions(clockwork_juce_free_headers PRIVATE
     $<TARGET_PROPERTY:clockwork,INTERFACE_COMPILE_DEFINITIONS>)
 target_compile_features(clockwork_juce_free_headers PRIVATE cxx_std_20)
 
+# The same headers as a Qt program compiles them, with Qt's keywords defined
+# (qt_keyword_headers.cpp): a header that uses one as a name fails this build.
+add_library(clockwork_qt_keyword_headers OBJECT qt_keyword_headers.cpp)
+target_include_directories(clockwork_qt_keyword_headers PRIVATE
+    $<TARGET_PROPERTY:clockwork_juce_free_headers,INCLUDE_DIRECTORIES>)
+target_compile_definitions(clockwork_qt_keyword_headers PRIVATE
+    $<TARGET_PROPERTY:clockwork,INTERFACE_COMPILE_DEFINITIONS>)
+target_compile_features(clockwork_qt_keyword_headers PRIVATE cxx_std_20)
+# A declaration left empty by a blanked name: gcc refuses it, the others warn.
+target_compile_options(clockwork_qt_keyword_headers PRIVATE
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Werror=missing-declarations>
+    $<$<CXX_COMPILER_ID:MSVC>:/we4091>)
+
 add_executable(clockwork_tests
     test_main.cpp
 

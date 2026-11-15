@@ -141,7 +141,7 @@ typedef int (*ClockworkSinkHostEmit)(void* ctx, uint32_t kind, const char* targe
 /* The emitter and the context it is handed back, installed together. The
  * record stays valid until the next install. */
 typedef struct ClockworkSinkHostEmitter {
-    ClockworkSinkHostEmit emit;
+    ClockworkSinkHostEmit emit_fn;
     void*                 ctx;
 } ClockworkSinkHostEmitter;
 void clockwork_sink_set_host_emitter(const ClockworkSinks* sinks, const ClockworkSinkHostEmitter* emitter);

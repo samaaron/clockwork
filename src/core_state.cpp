@@ -71,12 +71,12 @@ static_assert(CLOCKWORK_ASSET_SLOTS > 0 && (CLOCKWORK_ASSET_SLOTS & (CLOCKWORK_A
               "CLOCKWORK_ASSET_SLOTS is a power of two");
 
 Assets::Assets()
-    : slots(new (std::nothrow) Slot[CLOCKWORK_ASSET_SLOTS]()),
-      count(slots ? CLOCKWORK_ASSET_SLOTS : 0) {}
+    : table(new (std::nothrow) Slot[CLOCKWORK_ASSET_SLOTS]()),
+      count(table ? CLOCKWORK_ASSET_SLOTS : 0) {}
 
 Assets::Slot* Assets::lookup(uint32_t id) {
     for (uint32_t i = 0, h = id * 2654435761u; i < count; ++i, ++h) {
-        Slot& s = slots[h & (count - 1)];
+        Slot& s = table[h & (count - 1)];
         if (s.used && s.id == id) return &s;
         if (!s.used) return nullptr;
     }
@@ -85,7 +85,7 @@ Assets::Slot* Assets::lookup(uint32_t id) {
 
 Assets::Slot* Assets::insert(uint32_t id, uint32_t token) {
     for (uint32_t i = 0, h = id * 2654435761u; i < count; ++i, ++h) {
-        Slot& s = slots[h & (count - 1)];
+        Slot& s = table[h & (count - 1)];
         if (!s.used || s.id == kTombstone) {
             s = Slot{};
             s.id = id; s.token = token; s.used = true;

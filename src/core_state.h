@@ -400,11 +400,11 @@ struct Assets {
     // free, or a released asset's; null when the table is full.
     Slot* insert(uint32_t id, uint32_t token);
     static void remove(Slot& s) { s.id = kTombstone; s.token = 0; }
-    Slot* begin() { return slots.get(); }
-    Slot* end() { return slots.get() + count; }
+    Slot* begin() { return table.get(); }
+    Slot* end() { return table.get() + count; }
 
 private:
-    std::unique_ptr<Slot[]> slots;
+    std::unique_ptr<Slot[]> table;
     uint32_t count = 0;
 };
 
