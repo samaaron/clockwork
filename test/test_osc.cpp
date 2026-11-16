@@ -253,14 +253,25 @@ TEST_CASE("OSC cue server rate limit cuts a flood and counts what it dropped", "
     ext.begin("/flood") << static_cast<osc::int32>(1);
     const osc_test::Packet pkt = ext.end();
 
-    // The cue server binds on its recv thread: probe until one lands, let the
-    // probes in flight land too, then start the counts afresh.
+    // The cue server binds on its recv thread: probe until one lands. Probes
+    // sent before it bound are lost, but later ones may still be queued. So
+    // send one /marker message after the probes and wait for its cue: the
+    // socket and the recv thread both keep order, so every probe has been
+    // handled by then and the counts can start from zero.
     OscReply r;
     REQUIRE(fx.pollUntil([&] {
         sender.send("127.0.0.1", cuePort, pkt.ptr(), pkt.size());
         return fx.waitForReply("/external-osc-cue", r, 50);
     }, 4000));
-    fx.waitForBlocks(20);
+    osc_test::Builder mark;
+    mark.begin("/marker") << static_cast<osc::int32>(1);
+    const osc_test::Packet marker = mark.end();
+    sender.send("127.0.0.1", cuePort, marker.ptr(), marker.size());
+    REQUIRE(fx.pollUntil([&] {
+        for (const auto& c : fx.allReplies())   // /external-osc-cue <ip> <port> <address> <args...>
+            if (c.address == "/external-osc-cue" && c.parsed().argString(2) == "/marker") return true;
+        return false;
+    }, 10000));
     fx.clearReplies();
     const uint32_t droppedBefore = m.cues_dropped.load();
 
