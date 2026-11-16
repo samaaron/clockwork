@@ -34,6 +34,7 @@
 #include "clock/TimeSource.h"
 #include "clock/clock_math.h"   // kDriftIirGain
 
+#include <algorithm>
 #include <cmath>
 
 using Catch::Approx;
@@ -178,17 +179,19 @@ TEST_CASE("TimeSource: a residual over the slew bound is taken up at the bound, 
 }
 
 TEST_CASE("TimeSource: an anchor settles on the median of its first readings", "[TimeSource]") {
-    // An anchor is one reading, and where the host reads Date.now() in
-    // render bursts one reading is out by up to a burst. The clock holds the
+    // An anchor is one reading, and a reading can be off: a host whose clock
+    // is coarse or whose thread was scheduled late hands over a time that is
+    // a little wrong, differently each block. The clock holds the anchor's
     // reading for kAnchorSettleBlocks, then moves once to the median of the
-    // readings meanwhile — the burst's middle, within a millisecond of the
-    // truth — and a callback that woke late (one reading far out) is one
-    // vote. It counts as the one anchor, not a second.
+    // readings in that window, and a callback that woke very late (one
+    // reading far out) is one vote. It counts as the one anchor, not a second.
+    // (Blocks that repeat the same reading exactly are a different case,
+    // handled before this and tested under [burst].)
     ClockRig rig;
-    // Readings in bursts of four: the first exact, the next three each a
-    // block stale (the thread read the wall once and rendered four).
-    constexpr double burst[4] = { 0.0, -kDt, -2 * kDt, -3 * kDt };
-    const double medianNoise = -kDt;   // 16 of each: the 33rd smallest is -kDt
+    // Four different errors in rotation, so no two consecutive readings are
+    // equal.
+    constexpr double burst[4] = { 0.0, -0.0004, -0.0009, -0.0013 };
+    const double medianNoise = -0.0004;   // 16 of each: the 33rd smallest is -0.4 ms
     // Anchor on a bad reading, 5 ms behind the truth (a stale reading), after
     // a 1 s stall so the truth is well ahead of the clock's last published
     // time; otherwise the floor (never below the last published time) would
@@ -372,6 +375,70 @@ TEST_CASE("TimeSource: the drift line stays quiet while an anchor settles, and i
     rig.stall(0.006);
     rig.step();
     REQUIRE(rig.ts.driftReports() == 1);
+}
+
+// ── Several blocks rendered for one request, all given the same wall reading ──
+// A host fills a request of N frames by rendering several blocks in a row. It
+// reads the wall clock once and passes that reading with every block. Block i
+// of the request is the audio that plays i blocks later, so its wall time is
+// the reading plus i * block / rate.
+
+namespace {
+// One request of `blocks` blocks: the wall is read for the first and reused.
+// Returns the largest difference between the clock and each block's true time.
+double request(ClockRig& rig, int blocks) {
+    double worst = 0.0, reading = 0.0;
+    for (int i = 0; i < blocks; ++i) {
+        rig.samples += kBlock;
+        if (i == 0) reading = rig.trueWall();
+        const double ntp = rig.reading(reading);
+        worst = std::max(worst, std::abs(ntp - rig.trueWall()));
+    }
+    return worst;
+}
+} // namespace
+
+TEST_CASE("TimeSource: blocks that share one wall reading are each timed from it by the audio "
+          "rendered since", "[TimeSource][burst]") {
+    ClockRig rig;
+    // 16 blocks of 128 frames at 48 kHz: 42.7 ms of audio per request.
+    double worst = 0.0;
+    for (int i = 0; i < 500; ++i) worst = std::max(worst, request(rig, 16));
+    // Every block's time is its true time, not the request's first reading.
+    CHECK(worst < 2e-6);
+    // The last block of a request is 40 ms after the reading it was given.
+    // That is not drift and must not be reported as it.
+    CHECK(rig.ts.driftReports() == 0);
+}
+
+TEST_CASE("TimeSource: a real excursion is still reported when blocks share a reading",
+          "[TimeSource][burst][DriftLog]") {
+    ClockRig rig;
+    for (int i = 0; i < 100; ++i) request(rig, 16);
+    REQUIRE(rig.ts.driftReports() == 0);
+    rig.stall(0.006);       // the wall moves 6 ms with no audio rendered
+    request(rig, 16);
+    CHECK(rig.ts.driftReports() == 1);
+}
+
+TEST_CASE("TimeSource: an anchor made while blocks share readings settles exactly on the wall",
+          "[TimeSource][burst]") {
+    ClockRig rig;
+    // Anchor 5 ms behind the truth, then settle on requests of four blocks.
+    // Each block's corrected reading is exact, so the median is too: the
+    // clock ends on the wall, not a block or two behind it.
+    rig.stall(1.0);
+    rig.anchorOn(rig.trueWall() - 0.005);
+    for (uint32_t i = 0; i < clockwork::kAnchorSettleBlocks / 4 + 4; ++i) request(rig, 4);
+    CHECK(std::abs(rig.ts.now() - rig.trueWall()) < 2e-6);
+}
+
+TEST_CASE("TimeSource: a single block per request is timed exactly as before", "[TimeSource][burst]") {
+    ClockRig rig;
+    double worst = 0.0;
+    for (int i = 0; i < 500; ++i) worst = std::max(worst, request(rig, 1));
+    CHECK(worst < 2e-6);
+    CHECK(rig.ts.driftReports() == 0);
 }
 
 // ── Drift-log rate gate ──────────────────────────────────────────────────────

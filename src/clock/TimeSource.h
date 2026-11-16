@@ -9,7 +9,10 @@
  * passes Date.now(), an embedded host its own — and now() returns the latest
  * value. Everything is scheduled against this clock, so the IIR's pull is
  * bounded (kClockSlewPerBlock, a few µs a block: more than crystals drift
- * by) and what is already scheduled stays where its sender put it. An anchor is
+ * by) and what is already scheduled stays where its sender put it. A host that
+ * renders several blocks for one request passes each the same wall reading;
+ * a block that repeats the previous reading is timed from it by the audio
+ * rendered since, so each block is compared with its own time. An anchor is
  * one reading, out by up to a render burst where the host reads Date.now(),
  * so it settles: the clock holds the reading for kAnchorSettleBlocks, then
  * moves once to the median of the readings meanwhile, and the bound holds it
@@ -182,6 +185,10 @@ private:
     std::atomic<uint64_t> mFreewheelOriginBits{0};
     std::atomic<bool>     mFreewheelAnchored{false};
     // Drift-step reporting state (audio-thread only).
+    // The last distinct wall reading a block was given, and the sample position
+    // of that block (updateAudioThreadNTP). Audio thread only.
+    double                  mWallReading{0.0};
+    double                  mWallReadingSamples{0.0};
     clockwork::DriftLogGate mDriftLogGate;
     double                  mDriftToReport{0.0};
 };

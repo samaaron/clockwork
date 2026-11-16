@@ -61,7 +61,18 @@ double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate
     //   drift     = wallNow - sampleNTP
     //   mBaseNTP += drift * 0.01   (low-pass converge ~1% per call)
     //   result    = mBaseNTP + samplePosition / sampleRate
-    const double wallNow = wall(wallNtp);
+    // A host fills one request with several blocks and passes each the wall
+    // reading it took at the start. A block given the same reading as the one
+    // before is later than it by the audio rendered since, so its wall time is
+    // the reading plus that. Without this the comparison below swings by up to
+    // a request's length within every request (40 ms at 2048 frames).
+    double wallNow = wall(wallNtp);
+    if (wallNow == mWallReading) {
+        wallNow += (samplePosition - mWallReadingSamples) / sampleRate;
+    } else {
+        mWallReading = wallNow;
+        mWallReadingSamples = samplePosition;
+    }
     const double baseNTP = bitsToDouble(mBaseNTPBits.load(std::memory_order_relaxed));
     const double drift = wallNow - (baseNTP + sampleOffsetSec);
 
@@ -123,6 +134,7 @@ double TimeSource::updateAudioThreadNTP(double samplePosition, double sampleRate
 
 void TimeSource::resetAudioThreadTime(double samplePosition, double sampleRate, double wallNtp,
                                       double renderedFrames, double floorNtp) {
+    mWallReading = 0.0;   // the sample count may start again: the next block's reading is a new one
     const double sampleOffsetSec = samplePosition / sampleRate;
     // A freewheel clock from an origin is the frames rendered since it, with
     // no wall clock in it at all: the first start puts frame 0 at the origin,
