@@ -421,6 +421,11 @@ double ClockworkClock::floorRenderNtp(uint32_t outputLatencyFrames) const {
 
 void ClockworkClock::setFreewheelClock(bool enabled, double originNtp) {
     mImpl->timeSource.setFreewheelClock(enabled, originNtp);
+    // A clock kept from an origin has no wall-clock time anywhere in it, the
+    // timeline included. bindStateToShm puts beat 0 at the wall clock's time
+    // (about 4e9 s), which differs on every run and leaves beat arithmetic
+    // only 0.5 us fine at that size; here beat 0 is the origin instead.
+    if (enabled && originNtp != 0.0) mImpl->linkSession.anchorTo(originNtp);
 }
 
 bool ClockworkClock::freewheelClock() const {

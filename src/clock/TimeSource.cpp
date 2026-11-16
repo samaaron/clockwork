@@ -20,7 +20,13 @@ double TimeSource::now() const {
 #if CLOCKWORK_WORKLET_CLOCK
     return bits ? bitsToDouble(bits) : 0.0;
 #else
-    return bits ? bitsToDouble(bits) : wall(wallClockNTP()) + globalOffsetSeconds();
+    if (bits) return bitsToDouble(bits);
+    // Before the first block. A freewheel clock from an origin answers with
+    // the origin: it never reads the wall clock.
+    const uint64_t origin = mFreewheelOriginBits.load(std::memory_order_relaxed);
+    if (mFreewheelClock.load(std::memory_order_relaxed) && origin != 0)
+        return bitsToDouble(origin) + globalOffsetSeconds();
+    return wall(wallClockNTP()) + globalOffsetSeconds();
 #endif
 }
 

@@ -440,14 +440,20 @@ const char* LinkSession::peerName() const {
 
 // ─── Event callbacks (fired on Link's network thread; mirror into SAB) ───────
 
+// Beat 0 at `ntp`, and the (stopped) transport recorded as from then.
+void LinkSession::anchorTo(double ntp) {
+    ClockworkClockState* s = mImpl->clock.state();
+    if (!s) return;
+    s->setOrigin(ntp);
+    s->setTransport(false, ntp);
+}
+
 void LinkSession::anchorToWallClockIfUnset() {
     ClockworkClockState* s = mImpl->clock.state();
     if (!s) return;
     if (clockwork::bitsToDouble(s->beat_origin_ntp.load(std::memory_order_relaxed)) != 0.0)
         return;
-    const double now = wallClockNTP();
-    s->setOrigin(now);
-    s->setTransport(false, now);
+    anchorTo(wallClockNTP());
     // Link's own timeline starts with this clock — beat 0 at construction,
     // which on a real boot is the better part of a second before the bind
     // (the audio device comes up in between). Put its beat 0 at the bind as

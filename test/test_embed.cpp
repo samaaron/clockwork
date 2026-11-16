@@ -1226,6 +1226,54 @@ TEST_CASE("embed: reconfigure does not reset a time_origin_ntp clock to its orig
     clockwork_embed_close(h);
 }
 
+TEST_CASE("embed: with time_origin_ntp set, the timeline starts at the origin and holds no wall-clock time",
+          "[embed][freewheel]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.time_origin_ntp = kOrigin;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(h);
+    render(h, 256);
+    ClockworkClientClock c {};
+    c.struct_bytes = sizeof c;
+    REQUIRE(clockwork_client_clock(clockwork_embed_client(h), &c) == CLOCKWORK_OK);
+    // Beat 0 is at the origin. It used to be at the wall clock's time at
+    // attach (about 4e9), which differs from run to run and leaves the grid's
+    // arithmetic 0.5 us coarse at that magnitude.
+    CHECK(c.beat_origin_ntp == kOrigin);
+    CHECK(c.is_playing_at_ntp == kOrigin);
+    clockwork_embed_close(h);
+}
+
+TEST_CASE("embed: two engines with the same time_origin_ntp given the same host transport have identical grids",
+          "[embed][freewheel][timeline]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.time_origin_ntp = kOrigin;
+    ClockworkStatus st = CLOCKWORK_OK;
+    double origins[2] = { 0.0, 0.0 };
+    for (double& origin : origins) {
+        ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+        REQUIRE(h);
+        double beat = 0.0;
+        const double rate = clockwork_embed_sample_rate(h);
+        for (int buffer = 0; buffer < 200; ++buffer) {
+            REQUIRE(clockwork_embed_tempo(h, 120.0, 0) == CLOCKWORK_OK);
+            REQUIRE(clockwork_embed_meter(h, 4, 4, 0) == CLOCKWORK_OK);
+            REQUIRE(clockwork_embed_playing(h, 1, 0) == CLOCKWORK_OK);
+            REQUIRE(clockwork_embed_beat(h, std::fmod(beat, 4.0), CLOCKWORK_BEAT_REQUEST, 0) == CLOCKWORK_OK);
+            render(h, 512);
+            beat += 512.0 * 120.0 / 60.0 / rate;
+        }
+        ClockworkClientClock c {};
+        c.struct_bytes = sizeof c;
+        REQUIRE(clockwork_client_clock(clockwork_embed_client(h), &c) == CLOCKWORK_OK);
+        origin = c.beat_origin_ntp;
+        clockwork_embed_close(h);
+    }
+    CHECK(origins[0] == origins[1]);
+    CHECK(std::abs(origins[0] - kOrigin) < 4.0);   // within a bar or two of the origin, not at the wall clock's time
+}
+
 TEST_CASE("embed: without time_origin_ntp the clock follows the wall clock", "[embed][freewheel]") {
     Handle e;
     REQUIRE(e.h);

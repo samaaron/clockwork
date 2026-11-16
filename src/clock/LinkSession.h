@@ -78,6 +78,9 @@ public:
     // with the no-Link path; defined in the .cpp, where Impl's clock
     // reference lives.
     void anchorToWallClockIfUnset();
+    // Place beat 0 at `ntp` whatever is there: for a clock that keeps time
+    // from an origin and not from the wall clock (ClockworkClock::setFreewheelClock).
+    void anchorTo(double ntp);
 
     // Stop and join the deferred worker. Idempotent (a no-op once joined), so
     // the host can call it early in teardown and ~LinkSession's own join then
@@ -204,14 +207,20 @@ public:
         if (!s) return;
         if (clockwork::bitsToDouble(s->beat_origin_ntp.load(std::memory_order_relaxed)) != 0.0)
             return;
-        // Beat 0 at now IS the origin — originFor(0, now, bpm) with the beat
+        anchorTo(wallClockNTP());
+    }
+    // Place beat 0 at `ntp` whatever is there: for a clock that keeps time
+    // from an origin and not from the wall clock (ClockworkClock::setFreewheelClock).
+    void anchorTo(double ntp) {
+        ClockworkClockState* s = mClock.state();
+        if (!s) return;
+        // Beat 0 at ntp IS the origin — originFor(0, ntp, bpm) with the beat
         // term dropped, which also avoids 0 * 60 / bpm going NaN before a bpm
         // has been set.
-        const double now = wallClockNTP();
-        s->setOrigin(now);
+        s->setOrigin(ntp);
         // The transport state itself is unchanged (is_playing stays 0,
-        // stopped): what is recorded is WHEN that became true, which is now.
-        s->setTransport(false, now);
+        // stopped): what is recorded is WHEN that became true.
+        s->setTransport(false, ntp);
     }
 
     // A tempo change must not move the beat that is playing — the rule is
