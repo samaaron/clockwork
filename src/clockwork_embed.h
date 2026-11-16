@@ -28,9 +28,11 @@
  * which is the price of any-size buffers and the same on every DAW plugin
  * ever written.
  *
- * Time is the engine's own: the moment of attach as NTP, plus the frames
- * rendered since. A DAW rendering offline at ten times real time gets a
- * clock that runs at the audio's pace, not the wall's.
+ * The engine clock has two modes, chosen at attach with time_origin_ntp.
+ * By default it follows the wall clock, read once per block, which suits a
+ * host playing live. With time_origin_ntp set it is computed from the frame
+ * count only, which suits offline rendering and tests: the timestamps are
+ * the same whether the host renders faster or slower than real time.
  *
  * ── Engines side by side ──────────────────────────────────────────────────
  * Each handle has an engine of its own (a core, clockwork_core.h): its own
@@ -85,6 +87,13 @@ typedef struct ClockworkEmbedConfig {
                                     * `name=value` a line), at most GUEST_CONFIG_SIZE bytes with its
                                     * NUL, else E_ARG; NULL = the guest's own defaults. An option
                                     * the guest refuses is its refusal to start: E_NO_INSTANCE. */
+    double      time_origin_ntp;   /* attach only. 0: the engine clock follows the wall clock.
+                                    * Non-zero: the engine clock is
+                                    *   time_origin_ntp + frames_rendered / sample_rate
+                                    * and the wall clock is not used, so the output is the same at
+                                    * any render speed. Use it for offline rendering and tests.
+                                    * clockwork_embed_reconfigure does not reset it: the clock
+                                    * continues from its current value. */
 } ClockworkEmbedConfig;
 
 /* What a booted engine is actually running on: the driver and device that

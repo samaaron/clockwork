@@ -1147,3 +1147,89 @@ TEST_CASE("embed: a host sweeping its tempo is told of to the clients a few time
     CHECK(heard.tempos.size() < static_cast<size_t>(buffers));
     CHECK(heard.tempos.back() == bpm);
 }
+
+// ── time_origin_ntp: the engine clock computed from the frame count ───────────
+
+namespace {
+// The client's sample clock: the frame the latest block started at, and that
+// frame's NTP time.
+ClockworkClientSampleClock sampleClock(ClockworkEmbed* h) {
+    ClockworkClientSampleClock c {};
+    c.struct_bytes = sizeof c;
+    REQUIRE(clockwork_client_sample_clock(clockwork_embed_client(h), &c) == CLOCKWORK_OK);
+    return c;
+}
+void render(ClockworkEmbed* h, uint32_t frames) {
+    std::vector<float> l(frames), r(frames);
+    float* out[2] = { l.data(), r.data() };
+    REQUIRE(clockwork_embed_render(h, out, 2, nullptr, 0, frames) == frames);
+}
+// A deliberately unrealistic origin. A clock following the wall clock reads
+// about 4e9, so the two cannot be confused.
+constexpr double kOrigin = 1000.0;
+} // namespace
+
+TEST_CASE("embed: with time_origin_ntp set, each block's time is origin + frames / rate",
+          "[embed][freewheel]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.time_origin_ntp = kOrigin;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(h);
+    const double rate = clockwork_embed_sample_rate(h);
+
+    // Render with no pacing, in buffer sizes that are not multiples of the
+    // engine's block. The comparison is exact, not approximate.
+    for (uint32_t frames : { 64u, 100u, 1024u, 7u, 512u }) {
+        render(h, frames);
+        const ClockworkClientSampleClock c = sampleClock(h);
+        CHECK(c.dac_ntp == kOrigin + static_cast<double>(c.engine_frames) / rate);
+    }
+    clockwork_embed_close(h);
+}
+
+TEST_CASE("embed: two engines with the same time_origin_ntp and the same renders have identical clocks", "[embed][freewheel]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.time_origin_ntp = kOrigin;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* a = clockwork_embed_attach(&cfg, &st);
+    ClockworkEmbed* b = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(a);
+    REQUIRE(b);
+    render(a, 960);
+    render(b, 960);
+    CHECK(sampleClock(a).dac_ntp == sampleClock(b).dac_ntp);
+    CHECK(sampleClock(a).engine_frames == sampleClock(b).engine_frames);
+    clockwork_embed_close(a);
+    clockwork_embed_close(b);
+}
+
+TEST_CASE("embed: reconfigure does not reset a time_origin_ntp clock to its origin",
+          "[embed][freewheel]") {
+    ClockworkEmbedConfig cfg = config();
+    cfg.time_origin_ntp = kOrigin;
+    ClockworkStatus st = CLOCKWORK_OK;
+    ClockworkEmbed* h = clockwork_embed_attach(&cfg, &st);
+    REQUIRE(h);
+    const double rate = clockwork_embed_sample_rate(h);
+    render(h, 4800);
+    const ClockworkClientSampleClock before = sampleClock(h);
+    const double end = before.dac_ntp + clockwork_embed_block_size(h) / rate;   // end of the last block rendered
+
+    // A DAW reconfigures a plugin between deactivating and activating it.
+    // The frame count restarts at 0; the clock must continue, not restart.
+    REQUIRE(clockwork_embed_reconfigure(h, &cfg) == CLOCKWORK_OK);
+    render(h, clockwork_embed_block_size(h));
+    const ClockworkClientSampleClock after = sampleClock(h);
+    CHECK(after.engine_frames == 0);
+    CHECK(std::abs(after.dac_ntp - end) < 1e-9);
+    clockwork_embed_close(h);
+}
+
+TEST_CASE("embed: without time_origin_ntp the clock follows the wall clock", "[embed][freewheel]") {
+    Handle e;
+    REQUIRE(e.h);
+    render(e.h, 256);
+    // Any current wall-clock time in NTP seconds is above 3e9.
+    CHECK(sampleClock(e.h).dac_ntp > 3.0e9);
+}

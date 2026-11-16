@@ -54,6 +54,10 @@ pub struct ClockworkEmbedConfig {
     /// The guest's options, as the text it reads (scsynth's: one `name=value`
     /// a line), under `GUEST_CONFIG_SIZE` bytes; null = the guest's defaults.
     pub guest_config: *const c_char,
+    /// attach only. 0: the engine clock follows the wall clock. Non-zero:
+    /// the engine clock is `time_origin_ntp + frames_rendered / sample_rate`
+    /// and the wall clock is not used.
+    pub time_origin_ntp: f64,
 }
 
 /// What a booted engine is running on — the driver and device that opened
@@ -140,6 +144,7 @@ impl ClockworkEmbedConfig {
             assets_bytes: 0,
             returns_bytes: 0,
             guest_config: core::ptr::null(),
+            time_origin_ntp: 0.0,
         }
     }
 }

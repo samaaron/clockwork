@@ -33,6 +33,7 @@ struct ClockworkEmbed {
     uint32_t outHead = 0, outCount = 0;   // rendered, not yet served
     uint32_t inHead = 0,  inCount = 0;    // received, not yet ticked
     uint64_t rendered = 0;   // this host's count of the audio it has rendered: its block time's frames
+    bool fromFrames = false; // frame-count mode: time_origin_ntp was set, so the wall clock is not read
     // What the host has said of its transport (clockwork_embed_tempo and the
     // rest) and the core has not yet been given, one of each kind, its frame
     // in the count `rendered` keeps. Given to the core before the tick whose

@@ -134,6 +134,7 @@ int main(void) {
     F(ClockworkEmbedConfig, max_render_frames); F(ClockworkEmbedConfig, app_name); F(ClockworkEmbedConfig, device);
     F(ClockworkEmbedConfig, profile); F(ClockworkEmbedConfig, flags); F(ClockworkEmbedConfig, driver);
     F(ClockworkEmbedConfig, assets_bytes); F(ClockworkEmbedConfig, returns_bytes); F(ClockworkEmbedConfig, guest_config);
+    F(ClockworkEmbedConfig, time_origin_ntp);
     S(ClockworkProfile);
     F(ClockworkProfile, struct_bytes); F(ClockworkProfile, in_ring_bytes); F(ClockworkProfile, rt_out_ring_bytes);
     F(ClockworkProfile, nrt_out_ring_bytes); F(ClockworkProfile, scope_frames); F(ClockworkProfile, scope_channels);

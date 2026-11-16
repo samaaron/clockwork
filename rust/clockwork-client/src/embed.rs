@@ -88,6 +88,7 @@ pub struct EmbedConfig {
     assets_bytes: u32,
     returns_bytes: u32,
     guest_config: Option<String>,
+    time_origin_ntp: f64,
 }
 
 impl EmbedConfig {
@@ -191,6 +192,15 @@ impl EmbedConfig {
         self
     }
 
+    /// attach only. Sets the engine clock to `ntp + frames_rendered /
+    /// sample_rate` (NTP seconds, non-zero) and stops it using the wall
+    /// clock, so a render gives the same timestamps at any speed. Without
+    /// this the engine clock follows the wall clock.
+    pub fn time_origin_ntp(mut self, ntp: f64) -> Self {
+        self.time_origin_ntp = ntp;
+        self
+    }
+
     fn raw(&self) -> Result<RawConfig> {
         let c = |s: &Option<String>| -> Result<Option<CString>> {
             match s {
@@ -212,6 +222,7 @@ impl EmbedConfig {
         cfg.guest_config = ptr(&strings[3]);
         cfg.assets_bytes = self.assets_bytes;
         cfg.returns_bytes = self.returns_bytes;
+        cfg.time_origin_ntp = self.time_origin_ntp;
         cfg.flags = if self.no_input { CLOCKWORK_EMBED_NO_INPUT } else { 0 };
         let profile = self.profile.map(|p| Box::new(p.0));
         cfg.profile = profile.as_deref().map_or(core::ptr::null(), |p| p as *const ClockworkProfile);

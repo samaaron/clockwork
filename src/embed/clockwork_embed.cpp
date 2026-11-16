@@ -4,6 +4,8 @@
 // The device boot is native/ClockworkEmbedDevice.cpp.
 #include "clockwork_embed_impl.h"
 #include "clock/host_transport.h" // HostWord, hostTempoValid
+#include "clock/ClockworkClock.h" // setFreewheelClock
+#include "core_state.h"           // clock_of
 #include "lanes/lanes.h"
 #include "clockwork_config.h"   // clockwork_log
 #include "memory_profile.h"     // CLOCKWORK_EMBED_ASSETS_BYTES
@@ -97,6 +99,12 @@ bool fit(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
     return true;
 }
 
+// Tell the core that audio is (re)starting, so the next block re-anchors the
+// clock. In frame-count mode the wall-clock arguments are unused: pass 0.
+void audioStarts(ClockworkEmbed* h) {
+    clockwork_audio_starts(h->core, h->fromFrames ? 0.0 : ntpNow(), h->fromFrames ? 0.0 : monoNow());
+}
+
 } // namespace
 
 extern "C" {
@@ -129,6 +137,15 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
         return nullptr;
     }
     initCore(h, config);
+    // Frame-count mode: switch the core's clock to freewheel from the given
+    // origin. Done once, at attach. setFreewheelClock resets the clock to the
+    // origin, so reconfigure must not call it again.
+    if (config->time_origin_ntp != 0.0) {
+        if (ClockworkClock* clock = clockwork::clock_of(core)) {
+            clock->setFreewheelClock(true, config->time_origin_ntp);
+            h->fromFrames = true;
+        }
+    }
     if (!fit(h, config)) {
         clockwork_core_close(core);
         delete h;
@@ -158,7 +175,7 @@ ClockworkEmbed* clockwork_embed_attach(const ClockworkEmbedConfig* config, Clock
     }
     h->ownsClient = true;
     // This host's audio starts now: the next block re-anchors the clock.
-    clockwork_audio_starts(h->core, ntpNow(), monoNow());
+    audioStarts(h);
     fail(status, CLOCKWORK_OK);
     return h;
 }
@@ -175,7 +192,7 @@ ClockworkStatus clockwork_embed_reconfigure(ClockworkEmbed* h, const ClockworkEm
     initCore(h, config);
     if (!fit(h, config)) return CLOCKWORK_E_NOMEM;
     // This host's audio starts again now: the next block re-anchors the clock.
-    clockwork_audio_starts(h->core, ntpNow(), monoNow());
+    audioStarts(h);
     return CLOCKWORK_OK;
 }
 ClockworkStatus clockwork_embed_device(const ClockworkEmbed* h, ClockworkEmbedDevice* out) {
@@ -287,14 +304,16 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
                 h->inHead  = (h->inHead + have) % cap;
                 h->inCount -= have;
             }
-            // Pass this host's frame count and clocks to the tick, which keeps
-            // the clock. Output latency is 0: the host's own buffering is not
-            // the engine's concern.
+            // Give the tick the frame count and, unless in frame-count mode,
+            // the wall and monotonic clocks. Output latency is 0: the host's
+            // own buffering is not the engine's concern.
             ClockworkBlockTime time {};
             time.struct_bytes   = sizeof time;
             time.audio_frames   = h->rendered;
-            time.wall_ntp       = ntpNow();
-            time.monotonic_secs = monoNow();
+            if (!h->fromFrames) {
+                time.wall_ntp       = ntpNow();
+                time.monotonic_secs = monoNow();
+            }
             giveHostWords(h, h->rendered + block);
             const ClockworkTick tick = clockwork_tick(h->core, &time, h->outChannels, h->inChannels);
             h->rendered += block;
