@@ -249,6 +249,12 @@ SwapResult switchWhenFree(Fix& fix, Args&&... args) {
     return whenSwapGateFree([&] { return fix.engine().switchDevice(args...); });
 }
 
+// Default timeout for the fixture's waits. A wait returns as soon as its condition is true, so this only affects a
+// test that is already failing: it stops it hanging forever. It used to be 2 s, which a Debug or sanitizer build on a
+// busy CI runner could use up just booting the engine or switching a device. Tests that check something does NOT
+// happen pass their own shorter timeout instead.
+constexpr int kWaitLimitMs = 30000;
+
 // Booted, and subscribed to the engine's broadcasts as a GUI is: statechange,
 // setup, the device reports. A case that waits for any of those needs this.
 //
@@ -270,7 +276,7 @@ void subscribe(Fix& fix) {
             if (p.argString(1) == "snapshot" || p.argString(0) == "error") return true;
         }
         return false;
-    }, 2000));
+    }));
     fix.clearReplies();
 }
 
@@ -316,14 +322,14 @@ public:
 
     // Wait for a reply whose address is `addr`; it is removed from the
     // collection and written to `out`.
-    bool waitForReply(const std::string& addr, OscReply& out, int timeoutMs = 2000);
+    bool waitForReply(const std::string& addr, OscReply& out, int timeoutMs = kWaitLimitMs);
 
     // Wait until the audio thread has rendered `n` more blocks, or time out.
     // Anchors a read of live state to DSP progress rather than wall clock,
     // which a loaded runner cannot honour.
     // n more blocks rendered: by the driver, within timeoutMs; or, under the
     // manual pump, rendered here and now (the timeout is not used).
-    bool waitForBlocks(uint32_t n, int timeoutMs = 2000);
+    bool waitForBlocks(uint32_t n, int timeoutMs = kWaitLimitMs);
 
     // Poll `pred()` every few ms until true or timeout. In manual-pump mode
     // nothing advances the engine unless this thread does, so each poll
@@ -337,7 +343,7 @@ public:
     // on a loaded machine, where each turn's sleep stretches and the wall
     // clock runs out before the audio does.
     template <typename Pred>
-    bool pollUntil(Pred pred, int timeoutMs = 2000) {
+    bool pollUntil(Pred pred, int timeoutMs = kWaitLimitMs) {
         const auto deadline = std::chrono::steady_clock::now()
                             + std::chrono::milliseconds(timeoutMs);
         uint32_t owed = mManualPump ? blocksOfAudio(timeoutMs) : 0;
