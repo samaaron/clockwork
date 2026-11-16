@@ -79,6 +79,14 @@ public:
     // Passes run so far, by the thread or by pass().
     uint64_t passes() const { return mPasses.load(std::memory_order_relaxed); }
 
+    // True when the thread is blocked in its wait and the wake word has not
+    // changed since the thread read it, so no pass is running or pending.
+    // Stays true until the next wake().
+    bool idle() const {
+        return mWaiting.load(std::memory_order_seq_cst)
+            && mWaitingOn.load(std::memory_order_seq_cst) == mWake->value.load(std::memory_order_seq_cst);
+    }
+
     // Register a ring to drain on each wake. Call all of these before start()
     // (the drain list is fixed once the thread runs).
     void addDrain(uint8_t*              buffer,
@@ -189,6 +197,10 @@ private:
     clockwork::WaitEvent   mWakeEvent = nullptr;
     std::vector<Drain>     mDrains;
     std::atomic<uint64_t>  mPasses{0};
+    // For idle(): the wake word value the thread is waiting on, and whether
+    // it is currently inside that wait.
+    std::atomic<uint32_t>  mWaitingOn{0};
+    std::atomic<bool>      mWaiting{false};
 
     // pause()/resume() handshake. mPauseRequests counts every pause() and
     // resume(), so an odd value is "pause asked" and every ask is a value of

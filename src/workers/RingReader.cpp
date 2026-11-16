@@ -125,7 +125,10 @@ void RingReader::run(const std::stop_token& stop, uint32_t seen) {
     while (!stop.stop_requested()) {
         // Asleep until the word changes: an audio block, a write to a ring
         // this drains (in this process or a peer's), a pause, a stop.
+        mWaitingOn.store(seen, std::memory_order_seq_cst);
+        mWaiting.store(true, std::memory_order_seq_cst);
         clockwork::wait(*mWake, seen, mWakeScope, mWakeEvent);
+        mWaiting.store(false, std::memory_order_seq_cst);
         // Read before the pass: a wake that lands while the pass runs is a
         // change the next wait sees at once, and another pass.
         seen = mWake->value.load(std::memory_order_seq_cst);

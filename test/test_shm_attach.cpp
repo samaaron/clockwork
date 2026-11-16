@@ -582,11 +582,13 @@ TEST_CASE("attach: a peer's command wakes the engine's control pass, with no aud
     REQUIRE(clockwork_client_send(e.peer, get.ptr(), get.size(), 0) == CLOCKWORK_OK);
     CHECK(within([&] { return takeReplies(e.peer, CLOCKWORK_SYS("clock/tempo.reply")) == 1; }, 3000));
 
-    // Quiet: no write, no block, no pass. A 1 ms timer would run a hundred.
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // With no writes and no audio blocks, no pass should run. Wait for the control thread to be idle first:
+    // taking the reply frees ring space, which can wake it for one more pass. A 1 ms timer would run a hundred.
+    REQUIRE(within([&] { return e.engine.controlIdle(); }, 10000));
     const uint64_t settled = e.engine.controlPasses();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     CHECK(e.engine.controlPasses() == settled);
+    CHECK(e.engine.controlIdle());
 }
 
 // The pass holds a peer's commands back while the reply ring lacks room for

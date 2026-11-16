@@ -16,6 +16,7 @@
 #include "shared_memory.h"
 #include "ring/ring.h"
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -64,6 +65,16 @@ bool answeredWithoutAudio(EngineFixture& fix, const char* address, int ms) {
     }
     return false;
 }
+
+// Polls `ok` until it returns true or `ms` of wall time have passed. The time limit only stops a hang.
+bool waitFor(const std::function<bool()>& ok, int ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (!ok()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
 } // namespace
 
 TEST_CASE("Clockwork's own control verbs are answered while no audio block renders; the audio thread's wait for one",
@@ -102,19 +113,17 @@ TEST_CASE("control pass: an idle engine runs no pass, and a block wakes it",
     EngineFixture fix(cfg);
     auto& engine = fix.engine();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Wait for the passes run during boot to finish. After that, with no traffic, no pass should run at all.
+    REQUIRE(waitFor([&] { return engine.controlIdle(); }, 10000));
     const uint64_t idle = engine.controlPasses();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     CHECK(engine.controlPasses() == idle);   // a 1 ms timer would run a hundred
+    CHECK(engine.controlIdle());
 
+    // One audio block should cause exactly one pass. Count once the thread is idle again.
     engine.pumpAudioBlock();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (engine.controlPasses() == idle && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    CHECK(engine.controlPasses() > idle);
-    const uint64_t woken = engine.controlPasses();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CHECK(engine.controlPasses() == woken);
+    REQUIRE(waitFor([&] { return engine.controlPasses() > idle && engine.controlIdle(); }, 10000));
+    CHECK(engine.controlPasses() == idle + 1);
 }
 
 // The device list is available on request: only the unsolicited probe is

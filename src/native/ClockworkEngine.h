@@ -336,6 +336,8 @@ public:
     }
     // Passes the control pass has run, by its thread or by controlPass().
     uint64_t controlPasses() const { return mNrtGateway.passes(); }
+    // True when the control thread is waiting and has no pass running or pending (RingReader::idle).
+    bool controlIdle() const { return mNrtGateway.idle(); }
 
     void sendOSC(const uint8_t* data, uint32_t size);
 
